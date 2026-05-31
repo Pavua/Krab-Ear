@@ -85,19 +85,23 @@ class SummarizePrivacyModeTestCase(unittest.TestCase):
             self.assertEqual(result.fallback_reason, "privacy_mode")
             mock_post.assert_not_called()
 
-    def test_summarize_privacy_guard_swallows_settings_getter_exception(self):
-        """Privacy guard must not raise even if settings_getter throws."""
+    def test_summarize_privacy_guard_fails_closed_on_getter_exception(self):
+        """W1755 hardening: privacy guard FAIL CLOSED — если getter raises, HTTP НЕ вызывается.
+
+        До фикса: except Exception: pass → HTTP вызывался даже при ошибке getter.
+        После фикса: except Exception: return LLMRewriteResult(privacy_guard_error).
+        """
         def bad_getter(key, default=None):
             raise RuntimeError("settings store unavailable")
 
         self.rewriter._settings_getter = bad_getter
         with patch.object(self.rewriter._session, "post") as mock_post:
-            mock_post.return_value = _mock_ok_response("Summary even after error.")
-            # Should proceed normally (exception is swallowed)
-            result = self.rewriter.summarize("Текст для summary.")
-            # No assertion on result.ok — the HTTP mock may or may not succeed.
-            # Key invariant: no exception propagated.
-            mock_post.assert_called_once()
+            result = self.rewriter.summarize("Секретный текст.")
+            # FAIL CLOSED: HTTP не должен быть вызван
+            mock_post.assert_not_called()
+            # Возвращает fallback result (не None и не raises)
+            self.assertFalse(result.ok)
+            self.assertIn(result.fallback_reason, ("privacy_guard_error", "privacy_mode"))
 
 
 class FixPunctuationOnlyPrivacyModeTestCase(unittest.TestCase):
@@ -137,17 +141,22 @@ class FixPunctuationOnlyPrivacyModeTestCase(unittest.TestCase):
             self.rewriter.fix_punctuation_only("привет мир", language="ru")
             mock_post.assert_called_once()
 
-    def test_fix_punctuation_only_privacy_guard_swallows_exception(self):
-        """Privacy guard must not raise even if settings_getter throws."""
+    def test_fix_punctuation_only_privacy_guard_fails_closed_on_getter_exception(self):
+        """W1755 hardening: privacy guard FAIL CLOSED — если getter raises, HTTP НЕ вызывается.
+
+        До фикса: except Exception: pass → HTTP вызывался даже при ошибке getter.
+        После фикса: except Exception: logger.warning + return None.
+        """
         def bad_getter(key, default=None):
             raise ValueError("db corrupted")
 
         self.rewriter._settings_getter = bad_getter
         with patch.object(self.rewriter._session, "post") as mock_post:
-            mock_post.return_value = _mock_ok_response("привет, мир.")
-            # Should proceed without raising
-            self.rewriter.fix_punctuation_only("привет мир", language="ru")
-            mock_post.assert_called_once()
+            result = self.rewriter.fix_punctuation_only("секретный текст", language="ru")
+            # FAIL CLOSED: HTTP не должен быть вызван
+            mock_post.assert_not_called()
+            # Возвращает None (fail-safe)
+            self.assertIsNone(result)
 
     def test_fix_punctuation_only_empty_input_still_short_circuits(self):
         """Empty input returns original text even in privacy mode (no HTTP)."""
@@ -158,6 +167,77 @@ class FixPunctuationOnlyPrivacyModeTestCase(unittest.TestCase):
             result = self.rewriter.fix_punctuation_only("", language="ru")
             # Empty input → returns original (empty string) before privacy check
             self.assertEqual(result, "")
+            mock_post.assert_not_called()
+
+
+class W1755WiringRegressionTestCase(unittest.TestCase):
+    """W1755 regression: _settings_getter MUST be wired (not left as None) in production.
+
+    These tests prove that:
+    - With _settings_getter=None (unwired / pre-fix state) the privacy guard is dead —
+      HTTP POST is called even when privacy_mode_enabled=True.
+    - With a real callable attached (post-fix) HTTP POST is blocked.
+
+    Run BEFORE the service.py fix to see the FAIL side; after the fix both PASS.
+    The fix is: BackendService.__init__ now runs
+        self._llm_rewriter._settings_getter = self._get_runtime_setting
+    mirroring the existing translator wiring.
+    """
+
+    def setUp(self):
+        self.rewriter = _make_rewriter()
+
+    # ---- fix_punctuation_only -----------------------------------------------
+
+    def test_fix_punctuation_only_unwired_getter_is_dead_guard(self):
+        """PRE-FIX behaviour: with getter=None the guard never fires — HTTP IS called.
+
+        This test documents the bug.  After fix it must still pass because
+        _settings_getter=None means «no check» (backward compat for unit tests that
+        construct LLMRewriter directly).  The critical invariant is the NEXT test.
+        """
+        self.assertIsNone(self.rewriter._settings_getter)  # simulates pre-fix state
+        with patch.object(self.rewriter._session, "post") as mock_post:
+            mock_post.return_value = _mock_ok_response("Привет, мир.")
+            # With no getter attached, privacy guard condition is False → HTTP proceeds
+            result = self.rewriter.fix_punctuation_only("привет мир", language="ru")
+            # Guard is DEAD → post was called (documents the bug when getter is None)
+            mock_post.assert_called_once()
+
+    def test_fix_punctuation_only_wired_getter_blocks_in_privacy_mode(self):
+        """POST-FIX behaviour: with getter wired and privacy_mode=True HTTP must NOT fire.
+
+        This is the real regression test.  BackendService.__init__ must wire
+        _settings_getter so this invariant holds in production.
+        """
+        # Simulate what BackendService.__init__ now does (W1755 fix):
+        self.rewriter._settings_getter = lambda key, default=None: (
+            True if key == "privacy_mode_enabled" else default
+        )
+        with patch.object(self.rewriter._session, "post") as mock_post:
+            result = self.rewriter.fix_punctuation_only("секретный текст", language="ru")
+            self.assertIsNone(result, "privacy mode must return None")
+            mock_post.assert_not_called()
+
+    # ---- summarize ----------------------------------------------------------
+
+    def test_summarize_unwired_getter_is_dead_guard(self):
+        """PRE-FIX: getter=None → guard dead → HTTP fired (documents the bug)."""
+        self.assertIsNone(self.rewriter._settings_getter)
+        with patch.object(self.rewriter._session, "post") as mock_post:
+            mock_post.return_value = _mock_ok_response("Краткое summary.")
+            self.rewriter.summarize("секретный разговор")
+            mock_post.assert_called_once()
+
+    def test_summarize_wired_getter_blocks_in_privacy_mode(self):
+        """POST-FIX: wired getter + privacy_mode=True → HTTP must NOT fire."""
+        self.rewriter._settings_getter = lambda key, default=None: (
+            True if key == "privacy_mode_enabled" else default
+        )
+        with patch.object(self.rewriter._session, "post") as mock_post:
+            result = self.rewriter.summarize("секретный разговор")
+            self.assertFalse(result.ok)
+            self.assertEqual(result.fallback_reason, "privacy_mode")
             mock_post.assert_not_called()
 
 

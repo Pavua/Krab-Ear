@@ -945,13 +945,17 @@ class LLMRewriter:
             return text
 
         # W1504 N4: privacy mode blocks all LLM calls including fix_punctuation_only
+        # FAIL CLOSED: если getter падает — возвращаем None (не отправляем транскрипт в LLM).
         try:
             settings_getter = self._settings_getter
             if settings_getter and settings_getter("privacy_mode_enabled", False):
                 logger.debug("fix_punctuation_only: skipped — privacy_mode_enabled")
                 return None
         except Exception:
-            pass
+            logger.warning(
+                "fix_punctuation_only: privacy guard getter raised — failing safe (skipping LLM)",
+            )
+            return None
 
         if not self._circuit.allow_request():
             logger.debug("fix_punctuation_only: circuit open, skip")
@@ -1045,6 +1049,7 @@ class LLMRewriter:
         Контракт: НИКОГДА не raises. Все ошибки — через LLMRewriteResult.ok=False.
         """
         # W1504 N3: privacy mode blocks all LLM calls including summarize
+        # FAIL CLOSED: если getter падает — возвращаем privacy_mode fallback (не отправляем в LLM).
         try:
             settings_getter = self._settings_getter
             if settings_getter and settings_getter("privacy_mode_enabled", False):
@@ -1053,7 +1058,12 @@ class LLMRewriter:
                     ok=False, text=None, fallback_reason="privacy_mode", latency_ms=None
                 )
         except Exception:
-            pass
+            logger.warning(
+                "summarize: privacy guard getter raised — failing safe (skipping LLM)",
+            )
+            return LLMRewriteResult(
+                ok=False, text=None, fallback_reason="privacy_guard_error", latency_ms=None
+            )
 
         cleaned_input = (text or "").strip()
         if not cleaned_input:

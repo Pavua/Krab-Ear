@@ -515,8 +515,15 @@ class AudioEngine:
         return bool(self._settings_get("llm_rewrite_enabled", False))
 
     def _punctuation_pass_allowed(self) -> bool:
-        """Runtime check: включён ли punctuation-only LLM pass."""
+        """Runtime check: включён ли punctuation-only LLM pass.
+
+        W1755 defense-in-depth: mirrors _llm_rewrite_allowed — blocks when privacy_mode_enabled
+        so that even if the LLMRewriter._settings_getter wiring is ever lost again, the engine
+        itself will not invoke fix_punctuation_only() and exfiltrate transcript text to LM Studio.
+        """
         if self._llm_rewriter is None:
+            return False
+        if self._settings_get("privacy_mode_enabled", False):
             return False
         return bool(self._settings_get("stt_punctuation_llm_pass_enabled", False))
 
