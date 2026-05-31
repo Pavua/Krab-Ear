@@ -323,14 +323,30 @@ class SearchAndAnalysisService:
     def handle_get_topic_timeline(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_topic_timeline — таймлайн смен тем разговора из истории транскрибаций.
 
+        Privacy guard (W1728): когда privacy_mode_enabled=True возвращает пустой ответ без
+        доступа к тексту транскрипций (аналогично compare_recordings — W1408 F1 / W1710).
+
         Params:
-            window_size (int): размер скользящего окна (по умолчанию 5).
-            limit       (int): максимальное количество последних записей (0 — все).
+            window_size (int): размер скользящего окна (1..1000, по умолчанию 5).
+            limit       (int): максимальное количество последних записей (0..10000, 0 — все).
         Returns:
             {segments, total_shifts, current_topic}
         """
-        window_size = max(1, int(params.get("window_size", 5) or 5))
-        limit = int(params.get("limit", 100) or 100)
+        # W1728 privacy guard — transcript-derived topics must not leak in privacy mode
+        if self._settings_get("privacy_mode_enabled", False):
+            return {
+                "segments": [],
+                "total_shifts": 0,
+                "current_topic": None,
+                "reason": "privacy_mode_active",
+                "privacy_mode_active": True,
+            }
+
+        # W1728 DoS clamp: window_size unbounded → O(n²) work; cap at 1000
+        window_size = max(1, min(int(params.get("window_size", 5) or 5), 1000))
+        # W1728 DoS clamp: limit unbounded → massive memory allocation; cap at 10000
+        raw_limit = int(params.get("limit", 100) or 100)
+        limit = max(0, min(raw_limit, 10000))
         try:
             with self._store._lock():
                 items = self._store._load_active_items_unlocked()
@@ -353,11 +369,24 @@ class SearchAndAnalysisService:
     def handle_get_recording_insights(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_recording_insights — эвристические инсайты по записям за N дней.
 
+        Privacy guard (W1728): когда privacy_mode_enabled=True возвращает пустой ответ без
+        доступа к тексту транскрипций (инсайты строятся из keyword-анализа транскриптов).
+
         Params:
             days (int): сколько дней анализировать (default 7).
         Returns:
             {insights: [...], count, days}
         """
+        # W1728 privacy guard — insights are derived from transcript text (keyword analysis)
+        if self._settings_get("privacy_mode_enabled", False):
+            days = int(params.get("days", 7))
+            return {
+                "insights": [],
+                "count": 0,
+                "days": days,
+                "reason": "privacy_mode_active",
+                "privacy_mode_active": True,
+            }
         days = int(params.get("days", 7))
         try:
             with self._store._lock():
