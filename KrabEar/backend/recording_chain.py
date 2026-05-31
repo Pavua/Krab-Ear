@@ -187,20 +187,24 @@ class RecordingChainManager:
         """Возвращает список цепочек (краткая форма), отсортированных по дате создания убыванием."""
         # F1 guard: отрицательные значения и превышение разумного лимита недопустимы
         limit = max(0, min(limit, 1000))
+        # BUG3 fix (RC-2 W1726): build result snapshots INSIDE the lock so
+        # concurrent add_to_chain / end_chain cannot mutate the shared dict
+        # objects between list() and the subsequent field reads → torn
+        # item_count / ended_at.
         with self._lock:
-            chains = list(self._data["chains"].values())
+            summaries = [
+                {
+                    "chain_id": c["chain_id"],
+                    "name": c["name"],
+                    "created_at": c["created_at"],
+                    "ended_at": c.get("ended_at"),
+                    "item_count": len(c.get("item_ids", [])),
+                }
+                for c in self._data["chains"].values()
+            ]
 
-        chains.sort(key=lambda c: c.get("created_at", ""), reverse=True)
-        result = []
-        for c in chains[:limit]:
-            result.append({
-                "chain_id": c["chain_id"],
-                "name": c["name"],
-                "created_at": c["created_at"],
-                "ended_at": c.get("ended_at"),
-                "item_count": len(c.get("item_ids", [])),
-            })
-        return result
+        summaries.sort(key=lambda c: c.get("created_at", ""), reverse=True)
+        return summaries[:limit]
 
     def delete_all_chains(self) -> int:
         """Удаляет все цепочки (используется при полной очистке данных / privacy-purge).
@@ -260,7 +264,13 @@ class RecordingChainManager:
         return self.get_chain(chain_id)
 
     def handle_list_chains(self, params: dict[str, Any]) -> dict[str, Any]:
-        limit = int(params.get("limit", 20))
+        # BUG4 fix (W1726): int() raises ValueError on non-numeric input
+        # (e.g. {"limit": "all"}) → 500-level IPC error.  Gracefully fall
+        # back to the default limit instead.
+        try:
+            limit = int(params.get("limit", 20))
+        except (ValueError, TypeError):
+            limit = 20
         return {"chains": self.list_chains(limit=limit)}
 
     def handle_merge_chain_text(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -305,6 +315,14 @@ class RecordingChainManager:
 
         Возвращает True, если были произведены изменения.
         Не бросает исключение, если цепочка не найдена — идемпотентно.
+
+        BUG1 fix (W1726): when new_id is ALREADY present in item_ids before
+        any old_id is encountered, the previous implementation still inserted
+        new_id again at the first old_id position → duplicate entry.
+        Example: ['merged','a','orig1','b'] replacing orig1→merged previously
+        yielded ['merged','a','merged','b'].
+        Fix: only insert new_id if it is not already in new_list at the point
+        of first match, so the final list contains new_id exactly once.
         """
         old_id_set = set(old_ids)
         with self._lock:
@@ -318,7 +336,7 @@ class RecordingChainManager:
             for iid in item_ids:
                 if iid in old_id_set:
                     changed = True
-                    if not inserted:
+                    if not inserted and new_id not in new_list:
                         new_list.append(new_id)
                         inserted = True
                     # остальные вхождения old_ids пропускаем (дедупликация)

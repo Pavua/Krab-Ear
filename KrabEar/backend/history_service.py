@@ -1503,6 +1503,20 @@ class HistoryService:
                     "transcript_versions bulk cleanup failed for %d items", len(deleted_ids), exc_info=True
                 )
 
+        # BUG2 fix (W1726): cascade chain cleanup for bulk-deleted items.
+        # W1664 fixed the single-delete path (handle_delete_history_item) but
+        # missed this bulk path — age-deleted items left phantom item_ids in
+        # recording_chains.json.  Mirror the same pattern used in
+        # handle_delete_history_item.
+        if to_delete and self._recording_chain_mgr is not None:
+            for item in to_delete:
+                try:
+                    self._recording_chain_mgr.remove_item_from_all_chains(item.id)
+                except Exception:
+                    logger.warning(
+                        "recording_chain bulk cleanup failed for item %s", item.id, exc_info=True
+                    )
+
         add_breadcrumb(
             category="history",
             message="cleanup_old_history",
