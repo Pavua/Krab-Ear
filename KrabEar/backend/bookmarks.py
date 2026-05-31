@@ -210,6 +210,10 @@ class BookmarkManager:
             try:
                 active_before = len(self._load_active_unlocked())
             except Exception:
+                logger.warning(
+                    "bookmarks delete_all: count load failed — reporting 0 deleted",
+                    exc_info=True,
+                )
                 active_before = 0
             # Atomic truncate via tmp file (same directory for rename atomicity)
             tmp = self._path.with_suffix(".ndjson.tmp")

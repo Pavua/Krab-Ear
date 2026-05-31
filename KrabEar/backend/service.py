@@ -591,6 +591,9 @@ class BackendService:
         self._history._archive_manager = self._archive_manager
         self._history._bookmarks = self._bookmarks
         self._history._call_session_store = self._call_session_store
+        # W1749: wire error_bus into HistoryService so handle_purge_all_data can push
+        # history.purge_incomplete loud errors when secondary cleanup steps fail.
+        self._history._error_bus = self._error_bus
         self._call_session_service = CallSessionService(
             store=self._call_session_store,
             auto_end=self._call_auto_end,

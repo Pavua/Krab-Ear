@@ -127,6 +127,47 @@ class HistoryService:
             return False
 
     # ------------------------------------------------------------------
+    # Phase B loud-error helper (late-injected _error_bus)
+    # ------------------------------------------------------------------
+
+    def _push_error(
+        self,
+        code: str,
+        message_debug: str,
+        context: "dict[str, Any] | None" = None,
+    ) -> None:
+        """Push a KrabError to the attached ErrorBus, if wired.
+
+        ``_error_bus`` is late-injected by BackendService.__init__ after
+        HistoryService is constructed (same pattern as StateStore, DiskMonitor,
+        StartupDiagnostics).  When not wired the call is a silent no-op so that
+        unit tests that don't need a full BackendService still work.
+        """
+        error_bus = getattr(self, "_error_bus", None)
+        if error_bus is None:
+            return
+        try:
+            from backend.error_bus import KrabError
+            from backend.error_codes import ERROR_REGISTRY
+            from datetime import datetime, timezone
+
+            entry = ERROR_REGISTRY.get(code, {})
+            err = KrabError(
+                severity=entry.get("severity", "error"),
+                component="history",
+                code=code,
+                message_user=entry.get("user_msg_ru", "Ошибка истории"),
+                message_debug=message_debug,
+                timestamp=datetime.now(timezone.utc),
+                context=context or {"data_dir": str(self.store.data_dir)},
+                actionable=entry.get("actionable", False),
+                action_id=entry.get("action_id"),
+            )
+            error_bus.push(err)
+        except Exception:  # noqa: BLE001
+            logger.exception("_push_error failed for code=%s", code)
+
+    # ------------------------------------------------------------------
     # Export path allowlist helper
     # ------------------------------------------------------------------
 
@@ -1494,6 +1535,7 @@ class HistoryService:
             archive_deleted (int): количество удалённых архивных записей (0 если N/A)
             bookmarks_deleted (int): количество удалённых закладок (0 если N/A)
             call_sessions_deleted (int): количество удалённых сессий звонков (0 если N/A)
+            transcripts_deleted (int): количество удалённых .md файлов в transcripts/ (W1749)
             semantic_purged (bool): True если семантический индекс очищен
             complete (bool): True если все вторичные шаги завершились без ошибок
             errors (list[str]): имена шагов, завершившихся с ошибкой (без PII)
@@ -1518,6 +1560,36 @@ class HistoryService:
             history_deleted = len(active)
 
         secondary_errors: list[str] = []
+
+        # --- 1b. W1749 CRITICAL-2: compact history.ndjson to physically erase transcript text.
+        # Tombstoning alone only logically hides items; the cleartext remains in the NDJSON
+        # file on disk.  compact_with_stats() rewrites history.ndjson dropping all tombstoned
+        # rows, so the on-disk file no longer contains any transcript text after this call.
+        try:
+            self.store.compact_with_stats()
+        except Exception:
+            logger.warning("purge_all_data: compact failed — cleartext may remain in history.ndjson", exc_info=True)
+            secondary_errors.append("compact")
+
+        # --- 1c. W1749 CRITICAL-2: delete transcript .md files (TranscriptWriter artefacts).
+        # Each transcription writes a timestamped Markdown file under <data_dir>/transcripts/.
+        # These files contain the full STT text and survive a purge unless explicitly removed.
+        transcripts_deleted = 0
+        try:
+            transcripts_dir = Path(self.store.data_dir) / "transcripts"
+            if transcripts_dir.is_dir():
+                md_files = list(transcripts_dir.glob("*.md"))
+                for md_path in md_files:
+                    try:
+                        md_path.unlink(missing_ok=True)
+                        transcripts_deleted += 1
+                    except OSError:
+                        logger.warning("purge_all_data: could not delete transcript file %s", md_path, exc_info=True)
+                if len(md_files) > transcripts_deleted:
+                    secondary_errors.append("transcripts")
+        except Exception:
+            logger.warning("purge_all_data: transcript directory deletion failed", exc_info=True)
+            secondary_errors.append("transcripts")
 
         # --- 2. Каскадная очистка версий транскрипций ---
         if active and self._transcript_versions is not None:
@@ -1599,6 +1671,7 @@ class HistoryService:
                     "archive_deleted": archive_deleted,
                     "bookmarks_deleted": bookmarks_deleted,
                     "call_sessions_deleted": call_sessions_deleted,
+                    "transcripts_deleted": transcripts_deleted,
                     "secondary_errors": secondary_errors,
                 },
             )
@@ -1615,13 +1688,26 @@ class HistoryService:
                 "archive_deleted": archive_deleted,
                 "bookmarks_deleted": bookmarks_deleted,
                 "call_sessions_deleted": call_sessions_deleted,
+                "transcripts_deleted": transcripts_deleted,
                 "semantic_purged": semantic_purged,
             },
         )
+        # --- W1749 CRITICAL-1: loud error when purge is only partial ---
+        if secondary_errors:
+            self._push_error(
+                code="history.purge_incomplete",
+                message_debug=f"purge_all_data partial failure: {secondary_errors}",
+                context={
+                    "failed_steps": secondary_errors,
+                    "data_dir": str(self.store.data_dir),
+                },
+            )
+
         logger.info(
-            "purge_all_data: history=%d chains=%d archive=%d bookmarks=%d calls=%d "
+            "purge_all_data: history=%d transcripts=%d chains=%d archive=%d bookmarks=%d calls=%d "
             "semantic_purged=%s errors=%s",
             history_deleted,
+            transcripts_deleted,
             chains_deleted,
             archive_deleted,
             bookmarks_deleted,
@@ -1636,6 +1722,7 @@ class HistoryService:
             "archive_deleted": archive_deleted,
             "bookmarks_deleted": bookmarks_deleted,
             "call_sessions_deleted": call_sessions_deleted,
+            "transcripts_deleted": transcripts_deleted,
             "semantic_purged": semantic_purged,
             "complete": len(secondary_errors) == 0,
             "errors": secondary_errors,
