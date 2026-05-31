@@ -10,14 +10,28 @@ Test cases:
 4. test_clear_cache_not_called_when_mlx_unavailable — _HAS_MLX=False → clear_cache NOT called
 5. test_clear_cache_called_once_per_inference — single detect() → exactly 1 clear_cache call
 6. test_clear_cache_called_on_each_inference — N detect() calls → N clear_cache calls
+7. test_clear_cache_not_called_on_cache_hit — cache hit → no inference → no clear_cache
+
+W1757 xdist fix: this file was missed by PR #1560 (wave1752) which fixed 4 sibling
+MLX-stub-family files.  The CI failure mode: an earlier file in the same sequential
+chunk leaves sys.modules["mlx"] / ["mlx.core"] as MagicMock (or poisons core.mlx_lock
+module state).  _run_detect (audio_lang_id.py:320) calls
+  with mlx_inter_process_lock(), mlx_lock():
+When either lock callable raises, the broad except-Exception at line 325 catches it and
+returns None BEFORE reaching _detect_with_mlx → clear_cache never called → assertion
+fails.  Fix: every detect() call controls the FULL MLX surface — sys.modules["mlx"] +
+["mlx.core"], lock context managers, and the mlx_whisper stub — via patch.object on the
+live module object, making each test immune to any leaked predecessor state.
 """
 
 from __future__ import annotations
 
+import contextlib
+import importlib
 import sys
 import os
 import unittest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
@@ -26,7 +40,13 @@ _PROJECT_ROOT = os.path.dirname(_HERE)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from core.audio_lang_id import AudioLanguageID  # noqa: E402
+# ---------------------------------------------------------------------------
+# Module-level: resolve the live core.audio_lang_id module object ONCE.
+# All patches go through patch.object(self._m, ...) so the class-under-test
+# and the patched module globals are guaranteed to be the same object, even if
+# a sibling file ran importlib.reload() and left a stale top-level binding.
+# ---------------------------------------------------------------------------
+import core.audio_lang_id as _audio_lang_id_mod  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +66,13 @@ def _make_mlx_mock(lang: str = "ru") -> MagicMock:
     return mock_mlx
 
 
+def _nullcontext_factory():
+    """Return a callable that returns a no-op context manager."""
+    def _factory(*args, **kwargs):
+        return contextlib.nullcontext()
+    return _factory
+
+
 # ---------------------------------------------------------------------------
 # Test suite
 # ---------------------------------------------------------------------------
@@ -54,28 +81,49 @@ class TestClearCacheCalledAfterLIDInference(unittest.TestCase):
     """mx.clear_cache() is called after LID inference (W63 rule, W1358 F2)."""
 
     def setUp(self):
-        AudioLanguageID._model_cache.clear()
+        # W1757: re-resolve the live module object each setUp so any sibling
+        # reload() cannot leave us holding a stale class binding.
+        self._m = importlib.import_module("core.audio_lang_id")
+        self._AudioLanguageID = self._m.AudioLanguageID
+        self._AudioLanguageID._model_cache.clear()
 
-    def _detect_with_mock_mx(self, mock_mlx, mock_mx_module=None, extra_patches=None):
-        """Run detect() with mocked mlx_whisper and optional mlx.core mock.
+    def _detect_with_mock_mx(self, mock_mlx, mock_mx_module=None):
+        """Run detect() with FULL MLX surface controlled.
 
-        Returns (result, mock_mx) where mock_mx has a clear_cache attribute.
+        W1757: patches sys.modules["mlx"] + ["mlx.core"] to the same mock_mx_module
+        object used for core.audio_lang_id.mx, and neutralises both lock context
+        managers so leaked lock-module state from predecessor tests cannot prevent
+        _detect_with_mlx (and its finally clear_cache) from being reached.
+
+        Returns (result, mock_mx_module).
         """
         if mock_mx_module is None:
             mock_mx_module = MagicMock()
             mock_mx_module.clear_cache = MagicMock()
 
-        patches = {
-            "sys.modules": {"mlx_whisper": mock_mlx},
-        }
-        if extra_patches:
-            patches.update(extra_patches)
+        lid = self._AudioLanguageID()
 
-        lid = AudioLanguageID()
-        with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
-            with patch("core.audio_lang_id._HAS_MLX", True):
-                with patch("core.audio_lang_id.mx", mock_mx_module):
-                    result = lid.detect(_speech(), sample_rate=16000)
+        with patch.dict(
+            "sys.modules",
+            {
+                "mlx_whisper": mock_mlx,
+                "mlx": mock_mx_module,        # W1757: anchor mlx stub
+                "mlx.core": mock_mx_module,   # W1757: same object as mx patch below
+            },
+        ):
+            with patch.object(self._m, "_HAS_MLX", True):
+                with patch.object(self._m, "mx", mock_mx_module):
+                    # W1757: neutralise lock CMs — leaked lock-module state can
+                    # make mlx_lock()/mlx_inter_process_lock() raise, which the
+                    # broad except-Exception in _run_detect catches before
+                    # _detect_with_mlx is entered, preventing clear_cache.
+                    with patch.object(
+                        self._m, "mlx_lock", _nullcontext_factory()
+                    ):
+                        with patch.object(
+                            self._m, "mlx_inter_process_lock", _nullcontext_factory()
+                        ):
+                            result = lid.detect(_speech(), sample_rate=16000)
         return result, mock_mx_module
 
     # ------------------------------------------------------------------
@@ -131,10 +179,10 @@ class TestClearCacheCalledAfterLIDInference(unittest.TestCase):
         mock_mlx = _make_mlx_mock("en")
         mock_mx = MagicMock()
 
-        lid = AudioLanguageID()
+        lid = self._AudioLanguageID()
         with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
-            with patch("core.audio_lang_id._HAS_MLX", False):
-                with patch("core.audio_lang_id.mx", mock_mx):
+            with patch.object(self._m, "_HAS_MLX", False):
+                with patch.object(self._m, "mx", mock_mx):
                     result = lid.detect(_speech(), sample_rate=16000)
 
         mock_mx.clear_cache.assert_not_called()
@@ -159,16 +207,29 @@ class TestClearCacheCalledAfterLIDInference(unittest.TestCase):
     def test_clear_cache_called_on_each_inference(self):
         """Each detect() call without external cache triggers one clear_cache call."""
         mock_mx = MagicMock()
-        lid = AudioLanguageID()
+        lid = self._AudioLanguageID()
 
         n_calls = 3
         for _ in range(n_calls):
-            AudioLanguageID._model_cache.clear()
+            self._AudioLanguageID._model_cache.clear()
             mock_mlx = _make_mlx_mock("ru")
-            with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
-                with patch("core.audio_lang_id._HAS_MLX", True):
-                    with patch("core.audio_lang_id.mx", mock_mx):
-                        lid.detect(_speech(), sample_rate=16000)
+            with patch.dict(
+                "sys.modules",
+                {
+                    "mlx_whisper": mock_mlx,
+                    "mlx": mock_mx,
+                    "mlx.core": mock_mx,
+                },
+            ):
+                with patch.object(self._m, "_HAS_MLX", True):
+                    with patch.object(self._m, "mx", mock_mx):
+                        with patch.object(
+                            self._m, "mlx_lock", _nullcontext_factory()
+                        ):
+                            with patch.object(
+                                self._m, "mlx_inter_process_lock", _nullcontext_factory()
+                            ):
+                                lid.detect(_speech(), sample_rate=16000)
 
         self.assertEqual(mock_mx.clear_cache.call_count, n_calls,
                          f"Expected {n_calls} clear_cache calls for {n_calls} inferences")
@@ -182,13 +243,13 @@ class TestClearCacheCalledAfterLIDInference(unittest.TestCase):
         mock_mlx = _make_mlx_mock("ru")
         mock_mx = MagicMock()
 
-        lid = AudioLanguageID()
+        lid = self._AudioLanguageID()
         # Pre-populate the external cache
         ext_cache = {"audio_lang": "ru"}
 
         with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
-            with patch("core.audio_lang_id._HAS_MLX", True):
-                with patch("core.audio_lang_id.mx", mock_mx):
+            with patch.object(self._m, "_HAS_MLX", True):
+                with patch.object(self._m, "mx", mock_mx):
                     result = lid.detect(_speech(), sample_rate=16000, cache=ext_cache)
 
         self.assertEqual(result, "ru")
