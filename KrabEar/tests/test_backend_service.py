@@ -1764,6 +1764,27 @@ class BackendServiceInitTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         store = StateStore(Path(self.tmp.name) / "data")
+        # W1749: patch sounddevice.rec/wait so test_microphone does not block
+        # on real hardware or hang when two xdist workers call sd.rec()
+        # simultaneously (no microphone available in CI).
+        # Using patch() on the sounddevice module is safe even if the module
+        # is a real install — rec/wait are module-level functions that can
+        # always be replaced for the duration of the test class.
+        # If sounddevice itself is absent (ImportError inside handler), the
+        # handler already catches it gracefully, so the patch is a no-op
+        # in that scenario.
+        import types as _types
+        import unittest.mock as _mock
+        _sd = sys.modules.get("sounddevice")
+        if isinstance(_sd, _types.ModuleType) and hasattr(_sd, "rec"):
+            # Real sounddevice available — patch out the blocking calls.
+            _np_zeros = np.zeros((32000, 1), dtype=np.float32)
+            p_rec = _mock.patch.object(_sd, "rec", return_value=_np_zeros)
+            p_wait = _mock.patch.object(_sd, "wait", return_value=None)
+            p_rec.start()
+            p_wait.start()
+            self.addCleanup(p_rec.stop)
+            self.addCleanup(p_wait.stop)
         self.service = BackendService(
             store=store,
             recorder=FakeRecorder(),

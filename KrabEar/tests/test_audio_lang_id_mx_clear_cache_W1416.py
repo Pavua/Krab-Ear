@@ -8,6 +8,7 @@ Tests:
 
 from __future__ import annotations
 
+import importlib.util
 import sys
 import os
 import unittest
@@ -18,7 +19,14 @@ _PROJECT_ROOT = os.path.dirname(_HERE)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from core.audio_lang_id import AudioLanguageID  # noqa: E402
+from core.audio_lang_id import AudioLanguageID, _HAS_MLX  # noqa: E402
+
+# W1749: determine MLX availability at import time so skipUnless works.
+# _HAS_MLX is set at core.audio_lang_id module load by trying `import mlx.core`.
+# Using importlib.util.find_spec is safer for collection-time checking —
+# it does NOT attempt to dlopen the shared library, so Ubuntu CI (no libmlx.so)
+# never triggers an ImportError during test collection.
+_MLX_AVAILABLE: bool = _HAS_MLX and importlib.util.find_spec("mlx") is not None
 
 
 class TestClearModelCacheCallsMxClearCache(unittest.TestCase):
@@ -31,35 +39,34 @@ class TestClearModelCacheCallsMxClearCache(unittest.TestCase):
     def tearDown(self):
         AudioLanguageID._model_cache.clear()
 
+    @unittest.skipUnless(_MLX_AVAILABLE, "requires MLX runtime (mlx.core not installed)")
     def test_clear_model_cache_calls_mx_clear_cache_when_mlx_available(self):
-        """When _HAS_MLX is True, clear_model_cache() must call mx.clear_cache()."""
-        # Patch mlx.core.clear_cache directly — mlx IS installed in this env,
-        # so we spy on the actual attribute rather than replacing the module.
-        try:
-            import mlx.core as _real_mx
-            with patch("core.audio_lang_id._HAS_MLX", True), \
-                 patch.object(_real_mx, "clear_cache") as mock_clear:
-                AudioLanguageID.clear_model_cache()
-                # assert INSIDE context so _HAS_MLX is still True during check
-                mock_clear.assert_called_once()
-        except ImportError:
-            # MLX not installed (e.g. Ubuntu CI) — patch BOTH "mlx" and "mlx.core"
-            # so that `import mlx.core as _mx_rt` inside clear_model_cache() succeeds.
-            # Patching only "mlx.core" is insufficient: Python resolves the parent
-            # package "mlx" first and raises ImportError when it is absent.
-            # W1748: __path__ = [] is required so Python recognises the bare
-            # ModuleType as a namespace package and resolves mlx.core via
-            # sys.modules rather than falling back to the filesystem loader
-            # (which would try to dlopen libmlx.so again and re-raise).
-            import types
-            mock_mlx_pkg = types.ModuleType("mlx")
-            mock_mlx_pkg.__path__ = []  # mark as namespace package
-            mock_mx = MagicMock()
-            with patch("core.audio_lang_id._HAS_MLX", True), \
-                 patch.dict("sys.modules", {"mlx": mock_mlx_pkg, "mlx.core": mock_mx}):
-                AudioLanguageID.clear_model_cache()
-                # assert INSIDE context while sys.modules patch is active
-                mock_mx.clear_cache.assert_called_once()
+        """When _HAS_MLX is True, clear_model_cache() must call mx.clear_cache().
+
+        W1749: guarded with @skipUnless(_MLX_AVAILABLE) so the test SKIPS
+        (rather than fails) on runners where mlx is not installed.  The test
+        name explicitly states "when_mlx_available" — skipping on no-mlx is the
+        semantically correct behaviour, not a workaround.
+
+        The prior mock-only approach (try/except ImportError) evaded the
+        full-suite xdist run: when another test in the same worker had already
+        cleared "mlx.core" from sys.modules via the conftest stub-purge,
+        `import mlx.core as _mx_rt` inside clear_model_cache() re-imported a
+        FRESH object.  patch.object(_real_mx, "clear_cache") patched the OLD
+        object, so the new import's clear_cache was never the patched spy →
+        "clear_cache called 0 times".  skipUnless avoids the spy entirely on
+        no-MLX runners; on MLX runners the real mlx.core stays in sys.modules
+        and the patch.object approach is reliable.
+        """
+        import mlx.core as _real_mx
+        # Ensure mlx.core is pinned in sys.modules before patching so that
+        # `import mlx.core as _mx_rt` inside clear_model_cache() resolves to
+        # the same object we patched.
+        with patch("core.audio_lang_id._HAS_MLX", True), \
+             patch.dict("sys.modules", {"mlx.core": _real_mx}), \
+             patch.object(_real_mx, "clear_cache") as mock_clear:
+            AudioLanguageID.clear_model_cache()
+            mock_clear.assert_called_once()
 
         self.assertEqual(len(AudioLanguageID._model_cache), 0,
                          "cache должен быть пуст после clear_model_cache()")

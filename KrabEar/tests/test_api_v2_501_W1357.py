@@ -148,21 +148,31 @@ def _build_flask_test_app():
         sys.modules[name] = mod
         return mod
 
-    # flask_smorest
+    # flask_smorest — W1749: always try the real flask_smorest first so that
+    # api.register_blueprint() actually wires routes into Flask.  The stub's
+    # register_blueprint was a no-op, causing /v1/vocabulary → 404 when this
+    # test file ran before any other file that had already imported flask_smorest.
+    # The real flask_smorest IS installed in CI (requirements.txt), so we can
+    # import it unconditionally.  Only fall back to the stub if the real import
+    # fails (very old envs without flask_smorest).
     if "flask_smorest" not in sys.modules:
-        Api_cls = type("Api", (), {
-            "__init__": lambda self, app, **kw: None,
-            "register_blueprint": lambda self, blp, **kw: None,
-        })
-        Blueprint_cls = type("Blueprint", (), {
-            "__init__": lambda self, *a, **kw: None,
-            "route": lambda self, *a, **kw: (lambda f: f),
-            "response": lambda self, *a, **kw: (lambda f: f),
-            "arguments": lambda self, *a, **kw: (lambda f: f),
-        })
-        def abort_fn(*a, **kw):
-            raise Exception("abort")
-        sm = _stub_module("flask_smorest", Api=Api_cls, Blueprint=Blueprint_cls, abort=abort_fn)
+        try:
+            import flask_smorest as _real_fsm  # noqa: F401
+            # Successfully imported — sys.modules now has it; no stub needed.
+        except ImportError:
+            Api_cls = type("Api", (), {
+                "__init__": lambda self, app, **kw: None,
+                "register_blueprint": lambda self, blp, **kw: None,
+            })
+            Blueprint_cls = type("Blueprint", (), {
+                "__init__": lambda self, *a, **kw: None,
+                "route": lambda self, *a, **kw: (lambda f: f),
+                "response": lambda self, *a, **kw: (lambda f: f),
+                "arguments": lambda self, *a, **kw: (lambda f: f),
+            })
+            def abort_fn(*a, **kw):
+                raise Exception("abort")
+            _stub_module("flask_smorest", Api=Api_cls, Blueprint=Blueprint_cls, abort=abort_fn)
 
     if "flask_sock" not in sys.modules:
         Sock_cls = type("Sock", (), {

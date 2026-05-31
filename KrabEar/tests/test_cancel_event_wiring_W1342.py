@@ -76,20 +76,32 @@ class GetCancelEventAPITestCase(unittest.TestCase):
     def test_prune_removes_cancel_event(self) -> None:
         """prune() clears cancel_events to avoid memory leak.
 
-        W1185 added a 2-second grace period (TTL) so cancel events aren't removed
+        W1185 added a grace period (TTL) so cancel events aren't removed
         immediately — workers holding a reference can still see the cancellation.
         After the grace period, a second prune() call removes stale cancel events.
         We simulate the grace period expiry by back-dating the evict_time.
+
+        W1749 FIX: use a large negative value (not 0.0) for the back-dated
+        evict_time to ensure expiry even on fresh CI runners where
+        time.monotonic() < _PRUNE_CANCEL_EVENT_TTL (machine booted < 1 h ago).
+        With 0.0 on such runners: grace_threshold = now - 3600 < 0, and
+        0.0 < negative = False → the cancel event was never removed (CI flake).
+        Using -(_PRUNE_CANCEL_EVENT_TTL * 2) guarantees expiry regardless of
+        system uptime.
         """
+        import backend.job_tracker as _jt_mod
         jid = self.tracker.create_job(1)
         self.tracker.mark_done(jid, items=[], errors=[])
         # First prune: evicts the job, records evict_time = now
         self.tracker.prune(max_age_sec=0)
-        # Simulate grace-period expiry by back-dating evict_time past the TTL
-        import backend.job_tracker as _jt_mod
+        # Simulate grace-period expiry by back-dating evict_time to a value
+        # guaranteed to be older than any possible grace_threshold.
+        # Using -(TTL * 2) rather than 0.0 to handle fresh CI runners where
+        # monotonic() < TTL (grace_threshold = now - TTL < 0, and 0.0 is not < 0).
+        far_past = -(_jt_mod._PRUNE_CANCEL_EVENT_TTL * 2)
         with self.tracker._lock:
             if jid in self.tracker._evict_times:
-                self.tracker._evict_times[jid] = 0.0  # epoch = always expired
+                self.tracker._evict_times[jid] = far_past
         # Second prune: grace period has expired, cancel event should be removed
         self.tracker.prune(max_age_sec=0)
         result = self.tracker.get_cancel_event(jid)
