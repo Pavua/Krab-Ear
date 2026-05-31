@@ -10,6 +10,7 @@ RECAP_TIME_HOUR. При наступлении часа (и если за сег
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import threading
@@ -36,7 +37,7 @@ def _build_html(digest: Any) -> str:  # digest: DailyDigest
     if digest.top_topics:
         tags = "".join(
             f'<span style="display:inline-block;background:#e8f4fd;border-radius:4px;'
-            f'padding:2px 8px;margin:2px;font-size:13px;color:#1565c0;">{t}</span>'
+            f'padding:2px 8px;margin:2px;font-size:13px;color:#1565c0;">{html.escape(t)}</span>'
             for t in digest.top_topics
         )
         topics_html = f"""
@@ -51,7 +52,7 @@ def _build_html(digest: Any) -> str:  # digest: DailyDigest
     if digest.highlights:
         items_html = "".join(
             f'<li style="margin-bottom:10px;line-height:1.5;color:#444;">'
-            f'{h}</li>'
+            f'{html.escape(h)}</li>'
             for h in digest.highlights
         )
         highlights_html = f"""
@@ -65,7 +66,7 @@ def _build_html(digest: Any) -> str:  # digest: DailyDigest
     lang_str = ""
     if digest.languages_used:
         parts = [
-            f"{lang}&nbsp;({cnt})"
+            f"{html.escape(str(lang))}&nbsp;({int(cnt)})"
             for lang, cnt in sorted(digest.languages_used.items(), key=lambda x: -x[1])
         ]
         lang_str = ", ".join(parts)
@@ -77,11 +78,16 @@ def _build_html(digest: Any) -> str:  # digest: DailyDigest
             'Записей за этот день не найдено.</td></tr>'
         )
 
-    html = f"""\
+    safe_date = html.escape(str(digest.date))
+    safe_total_recordings = html.escape(str(digest.total_recordings))
+    safe_total_duration_min = html.escape(str(digest.total_duration_min))
+    safe_total_words = html.escape(str(digest.total_words))
+
+    email_html = f"""\
 <!DOCTYPE html>
 <html lang="ru">
 <head><meta charset="utf-8">
-<title>Krab Ear — дайджест {digest.date}</title>
+<title>Krab Ear — дайджест {safe_date}</title>
 </head>
 <body style="margin:0;padding:0;background:#f5f7fa;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
 <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f7fa;padding:32px 0;">
@@ -98,7 +104,7 @@ def _build_html(digest: Any) -> str:  # digest: DailyDigest
         Krab Ear — Дайджест
       </h1>
       <p style="margin:4px 0 0;color:rgba(255,255,255,0.85);font-size:14px;">
-        {digest.date}
+        {safe_date}
       </p>
     </td>
   </tr>
@@ -109,17 +115,17 @@ def _build_html(digest: Any) -> str:  # digest: DailyDigest
       <table width="100%" cellpadding="0" cellspacing="8">
         <tr>
           <td align="center" style="background:#f0f7ff;border-radius:8px;padding:16px;">
-            <div style="font-size:28px;font-weight:700;color:#1976d2;">{digest.total_recordings}</div>
+            <div style="font-size:28px;font-weight:700;color:#1976d2;">{safe_total_recordings}</div>
             <div style="font-size:12px;color:#666;margin-top:2px;">записей</div>
           </td>
           <td width="8"></td>
           <td align="center" style="background:#f0fff4;border-radius:8px;padding:16px;">
-            <div style="font-size:28px;font-weight:700;color:#388e3c;">{digest.total_duration_min}</div>
+            <div style="font-size:28px;font-weight:700;color:#388e3c;">{safe_total_duration_min}</div>
             <div style="font-size:12px;color:#666;margin-top:2px;">минут</div>
           </td>
           <td width="8"></td>
           <td align="center" style="background:#fff8f0;border-radius:8px;padding:16px;">
-            <div style="font-size:28px;font-weight:700;color:#e65100;">{digest.total_words}</div>
+            <div style="font-size:28px;font-weight:700;color:#e65100;">{safe_total_words}</div>
             <div style="font-size:12px;color:#666;margin-top:2px;">слов</div>
           </td>
         </tr>
@@ -147,7 +153,7 @@ def _build_html(digest: Any) -> str:  # digest: DailyDigest
 </table>
 </body>
 </html>"""
-    return html
+    return email_html
 
 
 # ---------------------------------------------------------------------------

@@ -887,5 +887,188 @@ class Wave140InsightsTestCase(unittest.TestCase):
         self.assertTrue(all(n == lens[0] for n in lens), f"Inconsistent results: {lens}")
 
 
+# ---------------------------------------------------------------------------
+# Wave 1725 security + robustness regression tests
+# ---------------------------------------------------------------------------
+
+class Wave1725SecurityTestCase(unittest.TestCase):
+    """BUG 1 — stored-XSS: source_lang is sanitized before appearing in Insight text."""
+
+    def setUp(self) -> None:
+        self.gen = RecordingInsightsGenerator()
+
+    def _items_with_lang(self, source_lang: str, n_prev: int = 4, n_recent: int = 4) -> list:
+        """Helpers: prev period items all RU, recent period items with given lang."""
+        prev = [_make_item(ts_offset_days=8 + i, source_lang="ru") for i in range(n_prev)]
+        recent = [_make_item(ts_offset_days=i * 0.3, source_lang=source_lang)
+                  for i in range(n_recent)]
+        return prev + recent
+
+    def test_xss_payload_stripped_from_title(self) -> None:
+        """source_lang='<script>alert(1)</script>' must NOT appear in Insight title."""
+        items = self._items_with_lang("<script>alert(1)</script>")
+        insights = self.gen.generate_insights(items, days=7)
+        for ins in insights:
+            self.assertNotIn("<script>", ins.title,
+                             f"XSS payload in title: {ins.title!r}")
+            self.assertNotIn("<script>", ins.description,
+                             f"XSS payload in description: {ins.description!r}")
+
+    def test_xss_payload_stripped_from_description(self) -> None:
+        """Complete-switch scenario: malicious source_lang must not reach description."""
+        # Create items where previous period has no such lang → complete switch path
+        prev = [_make_item(ts_offset_days=8 + i, source_lang="ru") for i in range(4)]
+        recent = [_make_item(ts_offset_days=i * 0.2,
+                             source_lang='"><img src=x onerror=alert(1)>')
+                  for i in range(5)]
+        items = prev + recent
+        insights = self.gen.generate_insights(items, days=7)
+        for ins in insights:
+            self.assertNotIn("<img", ins.title)
+            self.assertNotIn("<img", ins.description)
+            self.assertNotIn("onerror", ins.title)
+            self.assertNotIn("onerror", ins.description)
+
+    def test_valid_lang_code_preserved(self) -> None:
+        """Normal language codes (ru, en, zh-hans) survive sanitization intact."""
+        from backend.recording_insights import _get_source_lang
+        self.assertEqual(_get_source_lang({"source_lang": "ru"}), "ru")
+        self.assertEqual(_get_source_lang({"source_lang": "EN"}), "en")
+        self.assertEqual(_get_source_lang({"source_lang": "zh-hans"}), "zh-hans")
+
+    def test_empty_lang_becomes_unknown(self) -> None:
+        """Empty / whitespace source_lang → 'unknown' sentinel."""
+        from backend.recording_insights import _get_source_lang
+        self.assertEqual(_get_source_lang({"source_lang": ""}), "unknown")
+        self.assertEqual(_get_source_lang({"source_lang": "   "}), "unknown")
+        self.assertEqual(_get_source_lang({}), "unknown")
+
+    def test_all_digits_lang_becomes_unknown(self) -> None:
+        """Purely numeric source_lang → 'unknown'."""
+        from backend.recording_insights import _get_source_lang
+        self.assertEqual(_get_source_lang({"source_lang": "12345"}), "unknown")
+
+    def test_long_lang_truncated(self) -> None:
+        """source_lang longer than 20 letters is truncated."""
+        from backend.recording_insights import _get_source_lang
+        result = _get_source_lang({"source_lang": "a" * 50})
+        self.assertLessEqual(len(result), 20)
+
+
+class Wave1725OverflowTestCase(unittest.TestCase):
+    """BUG 2 — OverflowError: days >= 500_000_000 must not raise."""
+
+    def setUp(self) -> None:
+        self.gen = RecordingInsightsGenerator()
+
+    def _rich_items(self) -> list:
+        """Items that give generate_insights enough data to reach internal timedelta calls."""
+        prev = [_make_item(ts_offset_days=8 + i, source_lang="ru", confidence=0.7)
+                for i in range(4)]
+        recent = [_make_item(ts_offset_days=i * 0.3, source_lang="es", confidence=0.9)
+                  for i in range(4)]
+        return prev + recent
+
+    def test_huge_days_does_not_raise(self) -> None:
+        """days=10^9 must not raise OverflowError."""
+        items = self._rich_items()
+        try:
+            result = self.gen.generate_insights(items, days=10 ** 9)
+        except OverflowError as exc:
+            self.fail(f"OverflowError raised with days=10^9: {exc}")
+        self.assertIsInstance(result, list)
+
+    def test_max_days_constant_clamped(self) -> None:
+        """days is clamped to _MAX_DAYS (36500); timedelta(days=days*2) stays safe."""
+        from backend.recording_insights import RecordingInsightsGenerator
+        gen = RecordingInsightsGenerator()
+        # Verify that _MAX_DAYS * 2 < 999_999_999 (Python timedelta max)
+        self.assertLess(gen._MAX_DAYS * 2, 999_999_999)
+
+    def test_days_zero_handled_as_one(self) -> None:
+        """days=0 is clamped to 1 — should not raise."""
+        items = [_make_item(ts_offset_days=0), _make_item(ts_offset_days=0.01),
+                 _make_item(ts_offset_days=0.02)]
+        try:
+            result = self.gen.generate_insights(items, days=0)
+        except Exception as exc:
+            self.fail(f"Unexpected exception with days=0: {exc}")
+        self.assertIsInstance(result, list)
+
+    def test_days_negative_handled_as_one(self) -> None:
+        """days=-5 is clamped to 1 — should not raise."""
+        items = [_make_item() for _ in range(5)]
+        try:
+            result = self.gen.generate_insights(items, days=-5)
+        except Exception as exc:
+            self.fail(f"Unexpected exception with days=-5: {exc}")
+        self.assertIsInstance(result, list)
+
+    def test_borderline_overflow_value(self) -> None:
+        """days just below the timedelta overflow boundary must not raise."""
+        items = self._rich_items()
+        # 499_999_999 * 2 = 999_999_998 — one below the Python timedelta limit
+        # The clamp kicks in (max 36500), so this should be fine.
+        try:
+            result = self.gen.generate_insights(items, days=499_999_999)
+        except OverflowError as exc:
+            self.fail(f"OverflowError with days=499_999_999: {exc}")
+        self.assertIsInstance(result, list)
+
+
+class Wave1725CompleteSwitchTestCase(unittest.TestCase):
+    """BUG 3 — complete language switch (A→B) must produce a language_shift insight."""
+
+    def setUp(self) -> None:
+        self.gen = RecordingInsightsGenerator()
+
+    def test_complete_switch_ru_to_es_reported(self) -> None:
+        """All-RU previous, all-ES recent → language_shift insight detected."""
+        prev = [_make_item(ts_offset_days=8 + i, source_lang="ru") for i in range(5)]
+        recent = [_make_item(ts_offset_days=i * 0.2, source_lang="es") for i in range(5)]
+        items = prev + recent
+        insights = self.gen.generate_insights(items, days=7)
+        types = [ins.type for ins in insights]
+        self.assertIn("language_shift", types,
+                      "Complete RU→ES switch should produce a language_shift insight")
+
+    def test_complete_switch_insight_has_complete_switch_flag(self) -> None:
+        """language_shift data.complete_switch == True for a full A→B switch."""
+        prev = [_make_item(ts_offset_days=8 + i, source_lang="ru") for i in range(5)]
+        recent = [_make_item(ts_offset_days=i * 0.2, source_lang="es") for i in range(5)]
+        items = prev + recent
+        insights = self.gen.generate_insights(items, days=7)
+        ls = next((i for i in insights if i.type == "language_shift"), None)
+        self.assertIsNotNone(ls, "Expected a language_shift insight")
+        self.assertTrue(ls.data.get("complete_switch", False),
+                        "data.complete_switch should be True for a full switch")
+
+    def test_complete_switch_language_correct(self) -> None:
+        """The reported language in data should be the newly appeared language (es)."""
+        prev = [_make_item(ts_offset_days=8 + i, source_lang="ru") for i in range(5)]
+        recent = [_make_item(ts_offset_days=i * 0.2, source_lang="es") for i in range(5)]
+        items = prev + recent
+        insights = self.gen.generate_insights(items, days=7)
+        ls = next((i for i in insights if i.type == "language_shift"), None)
+        self.assertIsNotNone(ls)
+        self.assertEqual(ls.data["language"], "es")
+
+    def test_partial_shift_still_works(self) -> None:
+        """Non-zero prev usage still triggers gradual shift (original behaviour preserved)."""
+        prev = [_make_item(ts_offset_days=8 + i, source_lang="ru") for i in range(6)]
+        prev += [_make_item(ts_offset_days=8 + i + 0.5, source_lang="es") for i in range(1)]
+        recent = [_make_item(ts_offset_days=i * 0.3, source_lang="ru") for i in range(2)]
+        recent += [_make_item(ts_offset_days=i * 0.3 + 0.1, source_lang="es") for i in range(5)]
+        items = prev + recent
+        insights = self.gen.generate_insights(items, days=7)
+        types = [ins.type for ins in insights]
+        self.assertIn("language_shift", types)
+        ls = next((i for i in insights if i.type == "language_shift"), None)
+        self.assertIsNotNone(ls)
+        # Partial shift should NOT have complete_switch flag
+        self.assertFalse(ls.data.get("complete_switch", False),
+                         "Partial shift should not set complete_switch=True")
+
+
 if __name__ == "__main__":
     unittest.main()

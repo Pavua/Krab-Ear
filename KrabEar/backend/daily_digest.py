@@ -6,15 +6,17 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any
 
-import logging
-
 logger = logging.getLogger("KrabEar.Backend.DailyDigest")
+
+# Whitelist pattern for source_lang: RFC-5646 language tags (e.g. "ru", "es-419", "zh-Hant")
+_LANG_CODE_RE = re.compile(r"^[a-zA-Z]{2,8}(?:-[a-zA-Z0-9]{1,8})*$")
 
 # ---------------------------------------------------------------------------
 # Стоп-слова (RU + ES + EN) — копируем из HistoryService для независимости
@@ -160,7 +162,10 @@ class DailyDigestGenerator:
         languages_used: dict[str, int] = {}
         for item in day_items:
             lang = (getattr(item, "source_lang", "") or "").strip()
-            if lang:
+            # Whitelist: accept only valid RFC-5646 language tags (defense-in-depth against
+            # stored-XSS where source_lang could contain HTML/script payload — primary fix
+            # is html.escape at the HTML sink in recap_scheduler._build_html).
+            if lang and _LANG_CODE_RE.match(lang):
                 languages_used[lang] = languages_used.get(lang, 0) + 1
 
         top_topics = self._extract_top_topics(day_items, top_n=10)
