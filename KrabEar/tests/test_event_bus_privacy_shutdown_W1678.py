@@ -355,8 +355,14 @@ class TestShutdownSentinel(unittest.TestCase):
         sent = bus.broadcast_shutdown_sentinel()
         self.assertEqual(sent, 0)
 
-    def test_broadcast_shutdown_sentinel_skips_full_queues(self):
-        """Full queues are skipped gracefully (not counted in return value)."""
+    def test_broadcast_shutdown_sentinel_drains_and_sends_to_full_queues(self):
+        """Full queues are drained then receive the sentinel (W1716 fix).
+
+        W1716 changed the behavior from "skip full queues" to
+        "drain then send sentinel" so that SSE clients on slow connections
+        still disconnect immediately at shutdown instead of waiting out the
+        15-second poll timeout.
+        """
         from backend.event_bus import _QUEUE_MAXSIZE
         bus = EventBus()
         q = bus.subscribe()
@@ -365,8 +371,12 @@ class TestShutdownSentinel(unittest.TestCase):
             q.put_nowait({"type": f"event_{i}", "ts": "x", "data": {}})
 
         sent = bus.broadcast_shutdown_sentinel()
-        # Full queue should be skipped
-        self.assertEqual(sent, 0)
+        # W1716: full queue is drained first, then sentinel is sent → count = 1
+        self.assertEqual(sent, 1, "W1716: full queue must be drained and then receive sentinel")
+        # The queue should now contain exactly one item — the None sentinel
+        sentinel = q.get_nowait()
+        self.assertIsNone(sentinel, "The item after drain must be the None sentinel")
+        self.assertTrue(q.empty(), "Queue must be empty after draining + sentinel")
 
     # ------------------------------------------------------------------
     # GracefulShutdownHandler integrates broadcast

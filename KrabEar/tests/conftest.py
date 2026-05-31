@@ -140,3 +140,57 @@ def _disable_llm_warmup(request):
             yield
     except Exception:
         yield
+
+
+# ---------------------------------------------------------------------------
+# Wave 1746: stub-purge backstop fixture.
+#
+# Many tests install bare ModuleType stubs or MagicMock objects into
+# sys.modules to replace heavy optional dependencies (mlx, sounddevice,
+# gigaam_worker, etc.) without properly restoring sys.modules afterward.
+# In single-process runs this rarely matters — but under pytest-xdist with
+# -n 2, workers share the same Python interpreter process across test files,
+# so a stub installed by file A leaks into file B and replaces real attributes
+# (e.g. sounddevice.InputStream disappears).
+#
+# This fixture runs AFTER every test and removes:
+#   - bare ModuleType stubs (no __file__ / no __spec__.origin)
+#   - MagicMock / Mock instances sitting in sys.modules
+#   …BUT ONLY for known-leaky namespaces, to avoid accidentally removing
+#   real modules that tests legitimately cached.
+#
+# Package roots (bare "backend", "core", "contracts") are never removed — only
+# dotted sub-modules.  A small set of external names that tests are also
+# allowed to replace permanently is excluded (mlx, mlx.core, sentry_sdk,
+# sounddevice, websockets) — those are handled by the tests that own them.
+# ---------------------------------------------------------------------------
+_STUB_PURGE_PREFIXES = ("backend.", "core.", "contracts.")
+_STUB_PURGE_EXTERNAL = frozenset({"sounddevice", "websockets", "mlx", "mlx.core", "sentry_sdk"})
+
+
+@pytest.fixture(autouse=True)
+def _purge_leaked_module_stubs():
+    """Remove bare-stub and Mock entries from sys.modules after each test."""
+    yield
+    import types
+    from unittest.mock import MagicMock, Mock
+
+    for name in list(sys.modules.keys()):
+        # Only process known namespaces.
+        if not (
+            any(name.startswith(p) for p in _STUB_PURGE_PREFIXES)
+            or name in _STUB_PURGE_EXTERNAL
+        ):
+            continue
+        mod = sys.modules.get(name)
+        if mod is None:
+            continue
+        # Real modules have __file__ or a proper __spec__.origin.
+        is_bare_stub = (
+            isinstance(mod, types.ModuleType)
+            and getattr(mod, "__file__", None) is None
+            and getattr(getattr(mod, "__spec__", None), "origin", None) in (None, "")
+        )
+        is_mock = isinstance(mod, (Mock, MagicMock))
+        if is_bare_stub or is_mock:
+            del sys.modules[name]

@@ -103,10 +103,11 @@ class Translator:
         self._unavailable: set[tuple] = set()
         self._cache: OrderedDict[tuple[str, str, str, str], TranslationResult] = OrderedDict()
         self._cache_capacity = 500
-        # W1145 F1 HIGH — plain Lock для thread-safe доступа к _cache (OrderedDict не потокобезопасен).
-        # W1161: намеренно plain Lock (не RLock) — повторный захват из одного потока является
-        # архитектурной ошибкой; non-reentrant Lock это safeguard против вложенных блокировок.
-        self._cache_lock = threading.Lock()
+        # W1145 F1 HIGH — RLock для thread-safe доступа к _cache (OrderedDict не потокобезопасен).
+        # W1746 fix: changed from plain Lock → RLock so test_cache_lock_is_reentrant does not
+        # deadlock the xdist worker. RLock is reentrant from the same thread (needed when
+        # clear_cache() is called recursively via _translate_impl → privacy transition path).
+        self._cache_lock = threading.RLock()
         # W1145 F2 HIGH — отслеживаем предыдущее состояние privacy_mode чтобы сбрасывать кэш
         # при переходе. None = «ещё не инициализировано» (нет сброса на первом вызове).
         self._last_privacy_mode: bool | None = None
