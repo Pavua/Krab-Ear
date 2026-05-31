@@ -130,9 +130,11 @@ class TestCustomProfileMaxLengthEnforced(unittest.TestCase):
         p = self.mgr.add_custom_profile("mt_float", prompt="Промпт float", max_tokens=150)
         self.assertIsInstance(p.max_tokens, int)
 
-    def test_large_max_tokens_accepted(self):
+    def test_large_max_tokens_clamped_to_ceiling(self):
+        """max_tokens > _MAX_TOKENS_CEILING is clamped, not rejected (DoS guard)."""
+        from backend.summary_profiles import _MAX_TOKENS_CEILING
         p = self.mgr.add_custom_profile("mt_large", prompt="Промпт большой", max_tokens=100_000)
-        self.assertEqual(p.max_tokens, 100_000)
+        self.assertEqual(p.max_tokens, _MAX_TOKENS_CEILING)
 
 
 # ---------------------------------------------------------------------------

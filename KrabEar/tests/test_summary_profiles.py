@@ -368,10 +368,11 @@ class TestSummaryProfileValidation(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.mgr.add_custom_profile("name", "   ", max_tokens=100)
 
-    def test_very_large_max_tokens(self):
-        """Большие значения max_tokens должны быть приняты."""
+    def test_very_large_max_tokens_clamped(self):
+        """max_tokens выше потолка должен быть зажат до _MAX_TOKENS_CEILING (DoS guard)."""
+        from backend.summary_profiles import _MAX_TOKENS_CEILING
         p = self.mgr.add_custom_profile("big", "Prompt.", max_tokens=999999)
-        self.assertEqual(p.max_tokens, 999999)
+        self.assertEqual(p.max_tokens, _MAX_TOKENS_CEILING)
 
     def test_max_tokens_one(self):
         """max_tokens = 1 — минимально допустимое значение."""

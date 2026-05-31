@@ -15,6 +15,17 @@ from typing import Any
 logger = logging.getLogger("KrabEar.Backend.SummaryProfiles")
 
 # ---------------------------------------------------------------------------
+# Security bounds for user-controlled profile fields (BUG 1 + BUG 2)
+# ---------------------------------------------------------------------------
+# These caps prevent prompt-injection (oversized/adversarial content injected
+# into the LLM call) and DoS via unbounded max_tokens.
+_MAX_NAME_LEN: int = 100
+_MAX_DESCRIPTION_LEN: int = 500
+_MAX_PROMPT_LEN: int = 4096   # ~3 KB — generous for real prompts, blocks injection blobs
+_MAX_FORMAT_LEN: int = 500
+_MAX_TOKENS_CEILING: int = 8192  # hard cap; clamp silently (BUG 2)
+
+# ---------------------------------------------------------------------------
 # Модель профиля
 # ---------------------------------------------------------------------------
 
@@ -167,6 +178,11 @@ class SummaryProfileManager:
         name = name.strip()
         if not name:
             raise ValueError("Имя профиля не может быть пустым")
+        # BUG 1: cap name length to prevent oversized keys / injection surface
+        if len(name) > _MAX_NAME_LEN:
+            raise ValueError(
+                f"Имя профиля слишком длинное (максимум {_MAX_NAME_LEN} символов)"
+            )
         if name in _BUILTIN_MAP:
             raise ValueError(
                 f"Имя {name!r} зарезервировано встроенным профилем — выберите другое имя"
@@ -174,15 +190,33 @@ class SummaryProfileManager:
         prompt = prompt.strip()
         if not prompt:
             raise ValueError("Промпт профиля не может быть пустым")
+        # BUG 1: cap prompt length — prevents prompt-injection blobs from flowing
+        # into the LLM call verbatim and blowing context windows.
+        if len(prompt) > _MAX_PROMPT_LEN:
+            raise ValueError(
+                f"Промпт профиля слишком длинный (максимум {_MAX_PROMPT_LEN} символов)"
+            )
+        format_instructions = format_instructions.strip()
+        if len(format_instructions) > _MAX_FORMAT_LEN:
+            raise ValueError(
+                f"format_instructions слишком длинный (максимум {_MAX_FORMAT_LEN} символов)"
+            )
         max_tokens = int(max_tokens)
         if max_tokens < 1:
             raise ValueError("max_tokens должен быть >= 1")
+        # BUG 2: clamp max_tokens — unbounded value causes resource exhaustion
+        if max_tokens > _MAX_TOKENS_CEILING:
+            logger.warning(
+                "SummaryProfileManager: max_tokens %d > ceiling %d — clamped",
+                max_tokens, _MAX_TOKENS_CEILING,
+            )
+            max_tokens = _MAX_TOKENS_CEILING
 
         profile = SummaryProfile(
             name=name,
             system_prompt=prompt,
             max_tokens=max_tokens,
-            format_instructions=format_instructions.strip(),
+            format_instructions=format_instructions,
             builtin=False,
         )
         self._custom[name] = profile
@@ -217,18 +251,54 @@ class SummaryProfileManager:
         try:
             with path.open("r", encoding="utf-8") as fh:
                 data = json.load(fh)
-            for entry in data:
+        except Exception as exc:
+            logger.warning("SummaryProfileManager: не удалось загрузить профили: %s", exc)
+            return
+        loaded = 0
+        skipped = 0
+        for entry in data:
+            # BUG 3: validate every entry on load — the file may be adversarial or
+            # written by an older version that had no length bounds.  Invalid entries
+            # are skipped with a warning; they do NOT crash the manager or bypass
+            # security checks.
+            try:
+                name = str(entry["name"]).strip()
+                prompt = str(entry["system_prompt"]).strip()
+                fmt = str(entry.get("format_instructions", "")).strip()
+                max_tok = int(entry["max_tokens"])
+
+                if not name or len(name) > _MAX_NAME_LEN:
+                    raise ValueError(f"invalid name: {name!r}")
+                if name in _BUILTIN_MAP:
+                    raise ValueError(f"reserved builtin name: {name!r}")
+                if not prompt or len(prompt) > _MAX_PROMPT_LEN:
+                    raise ValueError(f"invalid prompt length: {len(prompt)}")
+                if len(fmt) > _MAX_FORMAT_LEN:
+                    raise ValueError(f"format_instructions too long: {len(fmt)}")
+                if max_tok < 1:
+                    raise ValueError(f"invalid max_tokens: {max_tok}")
+                # Silently clamp max_tokens that exceed ceiling (forward-compat)
+                max_tok = min(max_tok, _MAX_TOKENS_CEILING)
+
                 p = SummaryProfile(
-                    name=entry["name"],
-                    system_prompt=entry["system_prompt"],
-                    max_tokens=int(entry["max_tokens"]),
-                    format_instructions=entry.get("format_instructions", ""),
+                    name=name,
+                    system_prompt=prompt,
+                    max_tokens=max_tok,
+                    format_instructions=fmt,
                     builtin=False,
                 )
                 self._custom[p.name] = p
-            logger.debug("SummaryProfileManager: загружено %d кастомных профилей", len(self._custom))
-        except Exception as exc:
-            logger.warning("SummaryProfileManager: не удалось загрузить профили: %s", exc)
+                loaded += 1
+            except Exception as entry_exc:
+                skipped += 1
+                logger.warning(
+                    "SummaryProfileManager: пропущен некорректный профиль при загрузке: %s",
+                    entry_exc,
+                )
+        logger.debug(
+            "SummaryProfileManager: загружено %d кастомных профилей, пропущено %d",
+            loaded, skipped,
+        )
 
     def _save(self) -> None:
         path = self._profiles_path()
