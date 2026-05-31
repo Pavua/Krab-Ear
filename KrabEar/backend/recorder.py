@@ -39,10 +39,16 @@ class AudioRecorder:
         channels: int = 1,
         on_audio_level: Callable[[float], None] | None = None,
         device: "int | str | None" = None,
+        max_recording_samples: int | None = None,
     ) -> None:
         self.sample_rate = sample_rate
         self.channels = channels
         self.chunk_size = int(self.sample_rate * 0.1)
+        # Максимум семплов до авто-остановки. None → модульная константа MAX_RECORDING_SAMPLES.
+        # Параметр нужен для тестов (tiny cap без выделения ~880 МБ).
+        self._max_recording_samples: int = (
+            max_recording_samples if max_recording_samples is not None else MAX_RECORDING_SAMPLES
+        )
         self._device: "int | str | None" = device
 
         self._lock = threading.Lock()
@@ -226,12 +232,12 @@ class AudioRecorder:
                     _max_duration_exceeded = False
                     with self._lock:
                         chunk_samples = data.reshape(-1).size
-                        if self._chunks_total_samples + chunk_samples > MAX_RECORDING_SAMPLES:
+                        if self._chunks_total_samples + chunk_samples > self._max_recording_samples:
                             self._is_recording = False
                             logger.warning(
                                 "Достигнут лимит длительности записи (%d сек)",
-                                MAX_RECORDING_SAMPLES // self.sample_rate,
-                                extra={"max_samples": MAX_RECORDING_SAMPLES},
+                                self._max_recording_samples // self.sample_rate,
+                                extra={"max_samples": self._max_recording_samples},
                             )
                             _max_duration_exceeded = True
                             # W1670: собрать накопленные чанки в финальный массив и
@@ -288,15 +294,15 @@ class AudioRecorder:
         try:
             from backend.error_bus import KrabError
             from datetime import datetime, timezone
-            max_hours = MAX_RECORDING_SAMPLES // (self.sample_rate * 3600)
+            max_hours = self._max_recording_samples // (self.sample_rate * 3600)
             err = KrabError(
                 severity="warn",
                 component="audio",
                 code="audio.max_duration_reached",
                 message_user=f"Запись превысила максимальную длительность ({max_hours} ч) и была автоматически остановлена",
-                message_debug=f"MAX_RECORDING_SAMPLES={MAX_RECORDING_SAMPLES} exceeded",
+                message_debug=f"MAX_RECORDING_SAMPLES={self._max_recording_samples} exceeded",
                 timestamp=datetime.now(timezone.utc),
-                context={"max_samples": MAX_RECORDING_SAMPLES, "max_hours": max_hours},
+                context={"max_samples": self._max_recording_samples, "max_hours": max_hours},
                 actionable=False,
                 action_id=None,
             )
