@@ -20,6 +20,7 @@ if PROJECT_ROOT not in sys.path:
 import numpy as np
 
 from backend.live_subs_service import LiveSubsService
+from backend.translator import TranslationResult
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -39,8 +40,14 @@ def _make_service(stt_text: str = "hello", translated: str = "привет") -> 
     transcriber = MagicMock()
     transcriber.transcribe.return_value = {"text": stt_text, "language": "en"}
 
-    tr_result = MagicMock()
-    tr_result.translated_text = translated
+    tr_result = TranslationResult(
+        text=translated,
+        status="ok",
+        source_lang="en",
+        target_lang="ru",
+        mode="ru",
+        engine="stub",
+    )
     translator = MagicMock()
     translator.translate.return_value = tr_result
 
@@ -209,6 +216,67 @@ class TestLiveSubsIPCHandlers(unittest.TestCase):
         svc = _make_service()
         result = svc.handle_stop({})
         self.assertEqual(result["status"], "stopped")
+
+
+class TestLiveSubsTranslationAttribute(unittest.TestCase):
+    """Regression W1740 — TranslationResult.text was accessed as .translated_text."""
+
+    def test_translation_flows_through_to_result(self) -> None:
+        """Flush with target_lang set must deliver translated text, NOT None.
+
+        Before the fix: tr.translated_text raised AttributeError on the real
+        TranslationResult dataclass (field is .text, not .translated_text).
+        The except clause swallowed it → translation=None silently every time.
+        """
+        svc = _make_service(stt_text="hello world", translated="привет мир")
+        result = svc.ingest(_pcm_chunk(3.0), 16000, "ru", False)
+        self.assertIsNotNone(result, "flush должен вернуть результат")
+        self.assertEqual(
+            result["translation"],
+            "привет мир",
+            "translation должен содержать переведённый текст, а не None",
+        )
+
+    def test_translation_is_not_none_on_valid_target_lang(self) -> None:
+        """translation в ответе никогда не None при валидном target_lang и тексте."""
+        svc = _make_service(stt_text="test sentence", translated="тестовое предложение")
+        result = svc.ingest(_pcm_chunk(3.0), 16000, "ru", False)
+        self.assertIsNotNone(result)
+        self.assertIsNotNone(
+            result["translation"],
+            "translation не должен быть None когда STT вернул текст и target_lang задан",
+        )
+
+    def test_real_translation_result_attribute_accessible(self) -> None:
+        """TranslationResult.text существует и доступен (контракт dataclass)."""
+        tr = TranslationResult(
+            text="translated value",
+            status="ok",
+            source_lang="en",
+            target_lang="ru",
+            mode="ru",
+            engine="stub",
+        )
+        # .text должен работать
+        self.assertEqual(tr.text, "translated value")
+        # .translated_text НЕ существует в slots=True dataclass
+        with self.assertRaises(AttributeError):
+            _ = tr.translated_text  # type: ignore[attr-defined]
+
+    def test_network_mode_offline_default_passed_to_translator(self) -> None:
+        """translator.translate должен получать network_mode='offline_default', не 'offline'."""
+        svc = _make_service(stt_text="check mode", translated="проверка режима")
+        svc.ingest(_pcm_chunk(3.0), 16000, "ru", False)
+        call_kwargs = svc._translator.translate.call_args
+        self.assertIsNotNone(call_kwargs)
+        network_mode_passed = call_kwargs.kwargs.get(
+            "network_mode", call_kwargs.args[2] if len(call_kwargs.args) > 2 else None
+        )
+        self.assertEqual(
+            network_mode_passed,
+            "offline_default",
+            "network_mode должен быть 'offline_default', не 'offline'",
+        )
 
 
 class TestLiveSubsIsolation(unittest.TestCase):
