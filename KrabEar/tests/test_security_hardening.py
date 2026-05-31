@@ -30,6 +30,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 KRAB_EAR_ROOT = PROJECT_ROOT / "KrabEar"
@@ -370,14 +371,23 @@ class TestWebhookHMACSigned(unittest.TestCase):
                 mgr.register_webhook(url="ftp://evil.example.com/payload", events=[])
 
     def test_list_webhooks_hides_secret(self):
-        """list_webhooks must expose has_secret:True but not the raw secret value."""
+        """list_webhooks must expose has_secret:True but not the raw secret value.
+
+        W1759: patch socket.getaddrinfo в webhook_manager чтобы SSRF guard
+        видел публичный IP для external.example.com и не отклонял регистрацию.
+        Тест проверяет скрытие секрета, а не DNS-поведение.
+        """
+        # 93.184.216.34 — реальный IP example.com (IANA), публичный адрес
+        _public_addr = (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 443))
         with tempfile.TemporaryDirectory() as tmpdir:
-            mgr = WebhookManager(data_dir=tmpdir)
-            mgr.register_webhook(
-                url="https://external.example.com/hook",  # W1707: localhost blocked by SSRF guard; use external URL
-                events=["stt_result"],
-                secret="hidden_secret_value",
-            )
+            with patch("backend.webhook_manager.socket.getaddrinfo",
+                       return_value=[_public_addr]):
+                mgr = WebhookManager(data_dir=tmpdir)
+                mgr.register_webhook(
+                    url="https://external.example.com/hook",
+                    events=["stt_result"],
+                    secret="hidden_secret_value",
+                )
             listed = mgr.list_webhooks()
             self.assertEqual(len(listed), 1)
             entry = listed[0]

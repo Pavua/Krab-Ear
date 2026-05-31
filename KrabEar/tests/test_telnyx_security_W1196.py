@@ -213,17 +213,27 @@ class TestWebhookSsrfGuard(unittest.TestCase):
         mock_post.assert_not_called()
 
     def test_webhook_url_public_https_accepted(self):
-        """A public HTTPS webhook URL passes SSRF check and proceeds to dial."""
+        """A public HTTPS webhook URL passes SSRF check and proceeds to dial.
+
+        W1759: патчим socket.getaddrinfo в webhook_manager чтобы SSRF guard
+        получал публичный IP для hooks.example.com и пропускал URL.
+        Тест проверяет что при безопасном webhook_url вызов dial() доходит до _post().
+        """
+        import socket as _sock
+        # 93.184.216.34 — IP example.com (IANA), публичный адрес
+        _public_addr = (_sock.AF_INET, _sock.SOCK_STREAM, 0, "", ("93.184.216.34", 443))
         adapter = _make_adapter()
-        with patch.object(adapter, "_post", return_value={
-            "ok": True,
-            "data": {"call_leg_id": "leg1", "call_control_id": "ctrl1"},
-            "status": 200,
-        }) as mock_post:
-            result = adapter.dial("+74951234567", webhook_url="https://hooks.example.com/telnyx")
+        with patch("backend.webhook_manager.socket.getaddrinfo",
+                   return_value=[_public_addr]):
+            with patch.object(adapter, "_post", return_value={
+                "ok": True,
+                "data": {"call_leg_id": "leg1", "call_control_id": "ctrl1"},
+                "status": 200,
+            }) as mock_post:
+                result = adapter.dial("+74951234567", webhook_url="https://hooks.example.com/telnyx")
 
         mock_post.assert_called_once()
-        # webhook_url forwarded to Telnyx payload
+        # webhook_url должен быть передан в payload к Telnyx
         payload = mock_post.call_args[0][1]
         self.assertEqual(payload.get("webhook_url"), "https://hooks.example.com/telnyx")
 

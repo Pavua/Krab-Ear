@@ -32,9 +32,11 @@ from backend.twilio_adapter import TwilioAdapter  # noqa: E402
 # ---------------------------------------------------------------------------
 
 def _telnyx(key: str = "tk_test_fake_do_not_use_00000000") -> TelnyxAdapter:
+    # W1759: connection_id должен быть числовой строкой (Telnyx format, W1748).
+    # "conn_test_123" отклоняется новым _is_valid_connection_id — используем "12345678".
     return TelnyxAdapter(
         api_key=key,
-        connection_id="conn_test_123",
+        connection_id="12345678",
         from_number="+15550001111",
     )
 
