@@ -106,6 +106,34 @@ class ArchiveManager:
     # Публичный API
     # ------------------------------------------------------------------
 
+    def clear_all(self) -> int:
+        """Полностью очищает архив (privacy-purge / wipe-all).
+
+        Перезаписывает archive.ndjson пустым файлом под cross-process flock,
+        гарантируя что НИ ОДНОГО транскрипта не остаётся на диске.
+
+        Используется ТОЛЬКО из handle_purge_all_data. Не вызывать из других мест.
+
+        Returns:
+            Количество удалённых архивных записей (до очистки).
+        """
+        with self._lock:
+            archived_before = len(self._read_archive())
+            tmp = self._archive_path.with_suffix(".ndjson.tmp")
+            with self._lock_path.open("a", encoding="utf-8") as lock_f:
+                fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+                try:
+                    try:
+                        # Truncate to empty via atomic tmp-replace
+                        tmp.write_text("", encoding="utf-8")
+                        tmp.replace(self._archive_path)
+                    except Exception:
+                        tmp.unlink(missing_ok=True)
+                        raise
+                finally:
+                    fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+        return archived_before
+
     def archive_items(self, item_ids: list[str], store: Any | None = None) -> ArchiveResult:
         """Перемещает записи из активной истории в архив.
 

@@ -105,6 +105,11 @@ class HistoryService:
         self._summary_profiles = SummaryProfileManager(data_dir=_data_dir)
         # Late-injection: RecordingChainManager для каскадной очистки ghost item_ids (W1253 RC-3).
         self._recording_chain_mgr = None
+        # Late-injection: W1734 — collaborators for full privacy purge.
+        # Wired by BackendService.__init__ after these objects are constructed.
+        self._archive_manager: Any = None    # ArchiveManager — archive.ndjson
+        self._bookmarks: Any = None          # BookmarkManager — bookmarks.ndjson
+        self._call_session_store: Any = None  # CallSessionStore — call_sessions.ndjson
 
     # ------------------------------------------------------------------
     # Privacy helpers
@@ -1469,9 +1474,16 @@ class HistoryService:
         """Полная очистка всех пользовательских данных (privacy-purge / wipe-all).
 
         Удаляет ВСЕ записи истории (без временного порога), а также:
+          - архив записей (archive/archive.ndjson) — W1734 FIX-A
+          - закладки (bookmarks.ndjson) — W1734 FIX-B
+          - сессии звонков (call_sessions.ndjson) — W1734 FIX-B
           - все цепочки записей (recording_chains.json) — W1730
           - семантический индекс (embeddings), если подключён
           - версии транскрипций, если подключён менеджер версий
+
+        **Требует подтверждения (W1734 FIX-D)**: параметр ``confirm`` должен быть
+        равен ``True`` (bool) или строке ``"PURGE_ALL"``. Без него возвращает ошибку
+        ``confirmation_required`` и НЕ удаляет никаких данных.
 
         Каждый дополнительный шаг защищён try/except — ошибка в одном шаге
         не прерывает остальные (privacy-purge должен быть атомарным для истории).
@@ -1479,14 +1491,33 @@ class HistoryService:
         Возвращает:
             history_deleted (int): количество удалённых записей истории
             chains_deleted (int): количество удалённых цепочек (0 если N/A)
+            archive_deleted (int): количество удалённых архивных записей (0 если N/A)
+            bookmarks_deleted (int): количество удалённых закладок (0 если N/A)
+            call_sessions_deleted (int): количество удалённых сессий звонков (0 если N/A)
             semantic_purged (bool): True если семантический индекс очищен
+            complete (bool): True если все вторичные шаги завершились без ошибок
+            errors (list[str]): имена шагов, завершившихся с ошибкой (без PII)
         """
-        # --- 1. Удалить все записи истории ---
+        # --- D. Confirm guard — prevent accidental wipe ---
+        confirm = params.get("confirm")
+        if confirm is not True and confirm != "PURGE_ALL":
+            return {
+                "ok": False,
+                "error": "confirmation_required",
+                "message": (
+                    "purge_all_data requires explicit confirmation. "
+                    "Pass confirm=True or confirm='PURGE_ALL' to proceed."
+                ),
+            }
+
+        # --- 1. Удалить все записи истории (primary — must succeed) ---
         with self.store._lock():
             active = self.store._load_active_items_unlocked()
             for item in active:
                 self.store._append_ndjson(self.store.tombstones_path, {"id": item.id})
             history_deleted = len(active)
+
+        secondary_errors: list[str] = []
 
         # --- 2. Каскадная очистка версий транскрипций ---
         if active and self._transcript_versions is not None:
@@ -1497,6 +1528,7 @@ class HistoryService:
                 logger.warning(
                     "purge_all_data: transcript_versions cleanup failed", exc_info=True
                 )
+                secondary_errors.append("transcript_versions")
 
         # --- 3. W1730: очистить все цепочки записей ---
         chains_deleted = 0
@@ -1507,6 +1539,7 @@ class HistoryService:
                 logger.warning(
                     "purge_all_data: delete_all_chains failed", exc_info=True
                 )
+                secondary_errors.append("chains")
 
         # --- 4. Очистить семантический индекс ---
         semantic_purged = False
@@ -1518,6 +1551,59 @@ class HistoryService:
                 logger.warning(
                     "purge_all_data: semantic_searcher.purge_all failed", exc_info=True
                 )
+                secondary_errors.append("semantic_search")
+
+        # --- 5. W1734 FIX-A: очистить архив (archive.ndjson) ---
+        archive_deleted = 0
+        if self._archive_manager is not None:
+            try:
+                archive_deleted = self._archive_manager.clear_all()
+            except Exception:
+                logger.warning(
+                    "purge_all_data: archive clear_all failed", exc_info=True
+                )
+                secondary_errors.append("archive")
+
+        # --- 6. W1734 FIX-B: очистить закладки (bookmarks.ndjson) ---
+        bookmarks_deleted = 0
+        if self._bookmarks is not None:
+            try:
+                bookmarks_deleted = self._bookmarks.delete_all()
+            except Exception:
+                logger.warning(
+                    "purge_all_data: bookmarks delete_all failed", exc_info=True
+                )
+                secondary_errors.append("bookmarks")
+
+        # --- 7. W1734 FIX-B: очистить сессии звонков (call_sessions.ndjson) ---
+        call_sessions_deleted = 0
+        if self._call_session_store is not None:
+            try:
+                call_sessions_deleted = self._call_session_store.delete_all()
+            except Exception:
+                logger.warning(
+                    "purge_all_data: call_session_store delete_all failed", exc_info=True
+                )
+                secondary_errors.append("call_sessions")
+
+        # --- C. W1734: Audit log entry ---
+        try:
+            from backend.privacy_audit import get_privacy_audit_logger
+            audit = get_privacy_audit_logger()
+            audit.log_event(
+                category="privacy",
+                action="purge_all_data",
+                details={
+                    "history_deleted": history_deleted,
+                    "chains_deleted": chains_deleted,
+                    "archive_deleted": archive_deleted,
+                    "bookmarks_deleted": bookmarks_deleted,
+                    "call_sessions_deleted": call_sessions_deleted,
+                    "secondary_errors": secondary_errors,
+                },
+            )
+        except Exception:
+            logger.warning("purge_all_data: privacy audit log failed", exc_info=True)
 
         add_breadcrumb(
             category="history",
@@ -1526,20 +1612,33 @@ class HistoryService:
             data={
                 "history_deleted": history_deleted,
                 "chains_deleted": chains_deleted,
+                "archive_deleted": archive_deleted,
+                "bookmarks_deleted": bookmarks_deleted,
+                "call_sessions_deleted": call_sessions_deleted,
                 "semantic_purged": semantic_purged,
             },
         )
         logger.info(
-            "purge_all_data: history=%d chains=%d semantic_purged=%s",
+            "purge_all_data: history=%d chains=%d archive=%d bookmarks=%d calls=%d "
+            "semantic_purged=%s errors=%s",
             history_deleted,
             chains_deleted,
+            archive_deleted,
+            bookmarks_deleted,
+            call_sessions_deleted,
             semantic_purged,
+            secondary_errors,
         )
         return {
             "ok": True,
             "history_deleted": history_deleted,
             "chains_deleted": chains_deleted,
+            "archive_deleted": archive_deleted,
+            "bookmarks_deleted": bookmarks_deleted,
+            "call_sessions_deleted": call_sessions_deleted,
             "semantic_purged": semantic_purged,
+            "complete": len(secondary_errors) == 0,
+            "errors": secondary_errors,
         }
 
     def handle_get_storage_info(self, params: dict[str, Any]) -> dict[str, Any]:

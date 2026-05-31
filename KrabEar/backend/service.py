@@ -585,6 +585,12 @@ class BackendService:
         # calls delete_all_chains() — previously only ArchiveManager had this wire.
         self._history._recording_chain_mgr = self._chains
         self._call_session_store = CallSessionStore(data_dir=self.store.data_dir)
+        # W1734: wire archive/bookmarks/call_session_store into HistoryService
+        # so handle_purge_all_data can reach them without a BackendService reference.
+        # _archive_manager is already constructed above; _bookmarks at line ~376.
+        self._history._archive_manager = self._archive_manager
+        self._history._bookmarks = self._bookmarks
+        self._history._call_session_store = self._call_session_store
         self._call_session_service = CallSessionService(
             store=self._call_session_store,
             auto_end=self._call_auto_end,

@@ -195,6 +195,32 @@ class BookmarkManager:
         )
         return len(to_update)
 
+    def delete_all(self) -> int:
+        """Полностью очищает журнал закладок (privacy-purge / wipe-all).
+
+        Перезаписывает bookmarks.ndjson пустым файлом под lock.
+        Не раскрывает никакого пользовательского контента — только item_id'ы.
+
+        Используется ТОЛЬКО из handle_purge_all_data.
+
+        Returns:
+            Количество активных закладок до очистки.
+        """
+        with self._lock:
+            try:
+                active_before = len(self._load_active_unlocked())
+            except Exception:
+                active_before = 0
+            # Atomic truncate via tmp file (same directory for rename atomicity)
+            tmp = self._path.with_suffix(".ndjson.tmp")
+            try:
+                tmp.write_text("", encoding="utf-8")
+                tmp.replace(self._path)
+            except Exception:
+                tmp.unlink(missing_ok=True)
+                raise
+        return active_before
+
     # ------------------------------------------------------------------
     # IPC handlers
     # ------------------------------------------------------------------
