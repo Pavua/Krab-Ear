@@ -17,6 +17,18 @@ import tracemalloc
 import types
 import unittest
 
+import pytest
+
+# GigaAM работает ТОЛЬКО на macOS (требует отдельный .venv_krab_ear_gigaam; пакет gigaam
+# пинит torch<=2.5.1 / onnxruntime<=1.23.x). На Linux CI (Python 3.12, torch-CPU)
+# повторный reimport gigaam_worker + torch-backed импорт stt_gigaam в этих профайлинг-
+# тестах роняет интерпретатор SIGSEGV (re-init C-расширения небезопасен). Фича macOS-only,
+# поэтому гейтим весь файл на darwin (W1755 — был единственный genuine-фейл chunk-2).
+pytestmark = pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="GigaAM worker profiling is macOS-only; segfaults on Linux py3.12 torch-CPU reimport",
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers to reload gigaam_worker with a clean module cache
