@@ -487,5 +487,68 @@ class TestTelegramBridgeHostnameAllowlist(unittest.TestCase):
         self.assertIn("localhost", bridge._base_url)
 
 
+class TestTelegramBridgeNoRedirects(unittest.TestCase):
+    """W1758: allow_redirects=False на обоих HTTP-вызовах — SSRF через redirect защита.
+
+    Allowlist _ALLOWED_HOSTS проверяется только на base_url при конструировании.
+    Без allow_redirects=False сервер может вернуть 302 Location: http://169.254.169.254/...
+    и requests автоматически его откроет, минуя allowlist.
+    Fix: add allow_redirects=False → 3xx возвращает resp.ok=False → _record_failure + RuntimeError.
+    """
+
+    @patch("backend.telegram_bridge.requests.post")
+    def test_send_message_passes_allow_redirects_false(self, mock_post: MagicMock) -> None:
+        """requests.post вызывается с allow_redirects=False."""
+        mock_post.return_value = _make_ok_response()
+        bridge = TelegramBridge()
+        bridge.send_message(text="тест", chat_id=123)
+        call_kwargs = mock_post.call_args[1]
+        self.assertIn("allow_redirects", call_kwargs, "allow_redirects kwarg must be present")
+        self.assertFalse(call_kwargs["allow_redirects"], "allow_redirects must be False")
+
+    @patch("backend.telegram_bridge.requests.get")
+    def test_get_chats_passes_allow_redirects_false(self, mock_get: MagicMock) -> None:
+        """requests.get вызывается с allow_redirects=False."""
+        resp = MagicMock()
+        resp.ok = True
+        resp.status_code = 200
+        resp.json.return_value = {"chats": []}
+        mock_get.return_value = resp
+        bridge = TelegramBridge()
+        bridge.get_chats()
+        call_kwargs = mock_get.call_args[1]
+        self.assertIn("allow_redirects", call_kwargs, "allow_redirects kwarg must be present")
+        self.assertFalse(call_kwargs["allow_redirects"], "allow_redirects must be False")
+
+    @patch("backend.telegram_bridge.requests.post")
+    def test_send_message_302_treated_as_failure(self, mock_post: MagicMock) -> None:
+        """302 (resp.ok=False) вызывает RuntimeError и _record_failure, не следует за Location."""
+        redirect_resp = MagicMock()
+        redirect_resp.ok = False
+        redirect_resp.status_code = 302
+        redirect_resp.text = "Found"
+        redirect_resp.json.side_effect = Exception("no json")
+        mock_post.return_value = redirect_resp
+        bridge = TelegramBridge()
+        with self.assertRaises(RuntimeError):
+            bridge.send_message(text="тест", chat_id=123)
+        # circuit breaker должен зафиксировать ошибку
+        self.assertGreater(bridge._fail_count, 0)
+
+    @patch("backend.telegram_bridge.requests.get")
+    def test_get_chats_302_treated_as_failure(self, mock_get: MagicMock) -> None:
+        """302 на get_chats → RuntimeError, circuit breaker инкрементируется."""
+        redirect_resp = MagicMock()
+        redirect_resp.ok = False
+        redirect_resp.status_code = 302
+        redirect_resp.text = "Found"
+        redirect_resp.json.side_effect = Exception("no json")
+        mock_get.return_value = redirect_resp
+        bridge = TelegramBridge()
+        with self.assertRaises(RuntimeError):
+            bridge.get_chats()
+        self.assertGreater(bridge._fail_count, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

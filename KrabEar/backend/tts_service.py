@@ -31,6 +31,12 @@ logger = logging.getLogger("KrabEar.Backend.TTS")
 _CYRILLIC_THRESHOLD = 0.30  # >30% символов кириллица -> Russian
 _SILERO_VALID_VOICES: frozenset = frozenset({"baya", "kseniya", "xenia", "eugene", "random"})
 _SILERO_MAX_TEXT_LEN = 5000
+# Лимит текста для macOS say — unbounded subprocess.run + 1 MB IPC limit = local DoS.
+# Аналогично Silero: обрезаем перед передачей в say(1).
+_SAY_MAX_TEXT_LEN = 5000
+# Таймауты для subprocess.run в _say_to_wav — блокирует daemon-поток без ограничения.
+_SAY_SUBPROCESS_TIMEOUT = 30   # секунд — достаточно для ~5000 символов на say
+_AFCONVERT_TIMEOUT = 15        # секунд — конвертация AIFF→WAV всегда быстрая
 
 
 def _detect_language(text: str) -> str:
@@ -129,7 +135,21 @@ def _say_to_wav(text: str, voice: str | None = None, rate: int = 185) -> bytes:
     """Синтезирует речь через macOS say и возвращает WAV-байты.
 
     Записывает AIFF через say -o, затем конвертирует afconvert -> WAV PCM.
+
+    Защита от local DoS (W1758):
+    - Текст обрезается до _SAY_MAX_TEXT_LEN перед передачей в say(1).
+    - subprocess.run вызываются с timeout= (_SAY_SUBPROCESS_TIMEOUT / _AFCONVERT_TIMEOUT).
+      При TimeoutExpired процесс убивается, temp-файлы удаляются в finally, возвращаем b"".
     """
+    # Обрезаем текст до лимита — 1 MB IPC cap + unbounded say = local DoS
+    if len(text) > _SAY_MAX_TEXT_LEN:
+        logger.warning(
+            "_say_to_wav: текст обрезан с %d до %d символов (W1758 DoS guard)",
+            len(text),
+            _SAY_MAX_TEXT_LEN,
+        )
+        text = text[:_SAY_MAX_TEXT_LEN]
+
     with tempfile.NamedTemporaryFile(suffix=".aiff", delete=False) as aiff_f:
         aiff_path = aiff_f.name
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as wav_f:
@@ -145,14 +165,29 @@ def _say_to_wav(text: str, voice: str | None = None, rate: int = 185) -> bytes:
         # Without "--", text="--input-file=/etc/passwd" makes say(1) read and
         # synthesize an arbitrary local file (confirmed exploitable, W1739).
         cmd_say.extend(["--", text])
-        subprocess.run(cmd_say, check=False, capture_output=True)
+        try:
+            subprocess.run(cmd_say, check=False, capture_output=True, timeout=_SAY_SUBPROCESS_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "_say_to_wav: say превысил таймаут %ds — прерываем синтез (W1758)",
+                _SAY_SUBPROCESS_TIMEOUT,
+            )
+            return b""
 
         # AIFF -> WAV через встроенный macOS afconvert
-        subprocess.run(
-            ["afconvert", "-f", "WAVE", "-d", "LEF32@22050", aiff_path, wav_path],
-            check=False,
-            capture_output=True,
-        )
+        try:
+            subprocess.run(
+                ["afconvert", "-f", "WAVE", "-d", "LEF32@22050", aiff_path, wav_path],
+                check=False,
+                capture_output=True,
+                timeout=_AFCONVERT_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "_say_to_wav: afconvert превысил таймаут %ds — прерываем конвертацию (W1758)",
+                _AFCONVERT_TIMEOUT,
+            )
+            return b""
 
         if os.path.exists(wav_path) and os.path.getsize(wav_path) > 0:
             with open(wav_path, "rb") as f:
