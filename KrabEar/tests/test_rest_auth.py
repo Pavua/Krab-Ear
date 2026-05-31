@@ -7,6 +7,7 @@
 """
 
 import hmac
+import importlib
 import sys
 import os
 import types
@@ -14,11 +15,41 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------
-# Stub heavy modules before importing rest_server
+# Patch heavy modules before importing rest_server.
+#
+# Strategy (Wave 1744 test-isolation fix):
+#   Import the REAL module first so sys.modules holds the real object — this
+#   prevents bare ModuleType stubs from leaking to later test files in the
+#   same xdist worker.  Then replace only the specific heavy classes/attrs
+#   that rest_server would try to instantiate at module load time.
 # ---------------------------------------------------------------------------
 
-# core.engine stub
-engine_mod = types.ModuleType("core.engine")
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+
+def _ensure_real_or_stub(mod_name: str) -> types.ModuleType:
+    """Return sys.modules[mod_name], importing the real module if needed.
+
+    Falls back to a bare ModuleType stub ONLY when the real import fails
+    (e.g. missing optional C-extension dependency).
+    """
+    if mod_name in sys.modules:
+        return sys.modules[mod_name]
+    try:
+        importlib.import_module(mod_name)
+    except Exception:
+        sys.modules[mod_name] = types.ModuleType(mod_name)
+    return sys.modules[mod_name]
+
+
+# core.engine — import real module, then swap AudioEngine with a lightweight fake
+# so rest_server doesn't construct a real AudioEngine (heavy MLX/GigaAM warmup).
+# We save the original and restore it after rest_server is imported so later
+# test files that import from core.engine still see the real AudioEngine.
+_engine_mod = _ensure_real_or_stub("core.engine")
+_orig_AudioEngine = getattr(_engine_mod, "AudioEngine", None)
 
 
 class _FakeEngine:
@@ -31,17 +62,19 @@ class _FakeEngine:
         pass
 
 
-engine_mod.AudioEngine = _FakeEngine
-sys.modules.setdefault("core.engine", engine_mod)
+_engine_mod.AudioEngine = _FakeEngine  # type: ignore[attr-defined]
 
-# backend.event_bus stub
-event_bus_mod = types.ModuleType("backend.event_bus")
-event_bus_mod.bus = MagicMock()
-event_bus_mod.sse_stream = MagicMock(return_value=iter([]))
-sys.modules.setdefault("backend.event_bus", event_bus_mod)
+# backend.event_bus — real module; ensure bus/sse_stream attrs exist for rest_server.
+_eb = _ensure_real_or_stub("backend.event_bus")
+if not hasattr(_eb, "bus"):
+    _eb.bus = MagicMock()  # type: ignore[attr-defined]
+if not hasattr(_eb, "sse_stream"):
+    _eb.sse_stream = MagicMock(return_value=iter([]))  # type: ignore[attr-defined]
 
-# backend.service stub
-service_mod = types.ModuleType("backend.service")
+# backend.service — real module; swap BackendService so rest_server /v1/readiness
+# doesn't try to reach a live backend socket.
+_service_mod = _ensure_real_or_stub("backend.service")
+_orig_BackendService = getattr(_service_mod, "BackendService", None)
 
 
 class _FakeBackendService:
@@ -50,11 +83,11 @@ class _FakeBackendService:
         return {"overall_ready": True, "components": {}}
 
 
-service_mod.BackendService = _FakeBackendService
-sys.modules.setdefault("backend.service", service_mod)
+_service_mod.BackendService = _FakeBackendService  # type: ignore[attr-defined]
 
-# backend.state_store stub
-state_store_mod = types.ModuleType("backend.state_store")
+# backend.state_store — real module; swap StateStore so no real file I/O on import.
+_state_store_mod = _ensure_real_or_stub("backend.state_store")
+_orig_StateStore = getattr(_state_store_mod, "StateStore", None)
 
 
 class _FakeStateStore:
@@ -71,11 +104,11 @@ class _FakeStateStore:
         pass
 
 
-state_store_mod.StateStore = _FakeStateStore
-sys.modules.setdefault("backend.state_store", state_store_mod)
+_state_store_mod.StateStore = _FakeStateStore  # type: ignore[attr-defined]
 
-# backend.transcriber stub
-transcriber_mod = types.ModuleType("backend.transcriber")
+# backend.transcriber — real module; swap Transcriber so no engine construction.
+_transcriber_mod = _ensure_real_or_stub("backend.transcriber")
+_orig_Transcriber = getattr(_transcriber_mod, "Transcriber", None)
 
 
 class _FakeTranscriber:
@@ -83,11 +116,12 @@ class _FakeTranscriber:
         pass
 
 
-transcriber_mod.Transcriber = _FakeTranscriber
-sys.modules.setdefault("backend.transcriber", transcriber_mod)
+_transcriber_mod.Transcriber = _FakeTranscriber  # type: ignore[attr-defined]
 
-# backend.metrics_collector stub
-metrics_mod = types.ModuleType("backend.metrics_collector")
+# backend.metrics_collector — real module; provide a lightweight fake `metrics`
+# instance so REST endpoints return predictable values in tests.
+_metrics_mod = _ensure_real_or_stub("backend.metrics_collector")
+_orig_metrics = getattr(_metrics_mod, "metrics", None)
 
 
 class _FakeMetrics:
@@ -108,8 +142,7 @@ class _FakeMetrics:
         pass
 
 
-metrics_mod.metrics = _FakeMetrics()
-sys.modules.setdefault("backend.metrics_collector", metrics_mod)
+_metrics_mod.metrics = _FakeMetrics()  # type: ignore[attr-defined]
 
 # flask_smorest stubs (if not installed)
 try:
@@ -200,6 +233,19 @@ from core.config import settings  # noqa: E402 — needed after sys.path patch
 # Patch TEMP_DIR creation so we don't need a real filesystem during import
 with patch("pathlib.Path.mkdir"):
     from backend.rest_server import app, require_api_key  # noqa: E402
+
+# Restore original classes/attrs on the real modules so later test files that
+# import from these modules directly see the real implementations.
+if _orig_AudioEngine is not None:
+    _engine_mod.AudioEngine = _orig_AudioEngine  # type: ignore[attr-defined]
+if _orig_BackendService is not None:
+    _service_mod.BackendService = _orig_BackendService  # type: ignore[attr-defined]
+if _orig_StateStore is not None:
+    _state_store_mod.StateStore = _orig_StateStore  # type: ignore[attr-defined]
+if _orig_Transcriber is not None:
+    _transcriber_mod.Transcriber = _orig_Transcriber  # type: ignore[attr-defined]
+if _orig_metrics is not None:
+    _metrics_mod.metrics = _orig_metrics  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------

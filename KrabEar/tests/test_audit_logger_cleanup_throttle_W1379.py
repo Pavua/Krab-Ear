@@ -25,12 +25,23 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-# Stub out observability to avoid circular imports
+# Ensure backend.observability is the real module (Wave 1744: no bare stub pollution).
+# If for any reason it's genuinely unavailable, fall back to a minimal stub.
+import importlib
 import types
 
-obs_stub = types.ModuleType("backend.observability")
-obs_stub.add_breadcrumb = lambda **kw: None  # type: ignore[attr-defined]
-sys.modules.setdefault("backend.observability", obs_stub)
+if "backend.observability" not in sys.modules:
+    try:
+        importlib.import_module("backend.observability")
+    except Exception:
+        _obs_stub = types.ModuleType("backend.observability")
+        _obs_stub.add_breadcrumb = lambda **kw: None  # type: ignore[attr-defined]
+        sys.modules["backend.observability"] = _obs_stub
+
+# If the real module loaded but lacks add_breadcrumb (shouldn't happen), patch it.
+_obs = sys.modules["backend.observability"]
+if not hasattr(_obs, "add_breadcrumb"):
+    _obs.add_breadcrumb = lambda **kw: None  # type: ignore[attr-defined]
 
 from backend.audit_logger import AuditLogger  # noqa: E402
 
