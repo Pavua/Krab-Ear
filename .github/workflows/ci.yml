@@ -134,15 +134,29 @@ jobs:
               print('All modules imported cleanly (or skipped optional deps).')
           PYEOF
 
-      - name: Run Python tests
+      - name: Run Python tests (chunked — bound peak RSS, reap orphan workers)
         env:
           PYTHONPATH: ${{ github.workspace }}/KrabEar
         timeout-minutes: 90
         run: |
-          python -m pytest KrabEar/tests/ \
-            -v \
-            --tb=short \
-            -n auto
+          # W1737: same chunking as krabear-ci backend-tests — whole-suite OOM-kills
+          # the runner mid-run. 4 fresh-process chunks + orphan-worker reaping.
+          set +e
+          mapfile -t files < <(ls KrabEar/tests/test_*.py | sort)
+          n=${#files[@]}; chunk=$(( (n + 3) / 4 )); rc=0
+          echo "Total test files: $n, chunk size: $chunk"
+          for i in 0 1 2 3; do
+            sub=("${files[@]:$((i*chunk)):$chunk}")
+            [ ${#sub[@]} -eq 0 ] && continue
+            echo "::group::pytest chunk $((i+1))/4 (${#sub[@]} files)"
+            python -m pytest "${sub[@]}" --tb=short -q -n 2 -p no:cacheprovider
+            crc=$?; [ $crc -ne 0 ] && rc=$crc
+            echo "::endgroup::"
+            pkill -9 -f "import sys;ex" 2>/dev/null || true
+            pkill -9 -f "mlx_subprocess" 2>/dev/null || true
+          done
+          echo "Aggregate pytest rc=$rc"
+          exit $rc
 
   swift:
     name: Swift agent build
