@@ -1,17 +1,16 @@
 """Security hardening tests for Krab Ear.
 
 Verifies that the security measures built into the system actually work:
-- Path traversal prevention (InputSanitizer)
-- SQL-injection-like strings don't crash (search safety)
-- XSS strings in text fields are safe (no exceptions; escaping is UI-side)
-- Very long strings (100K chars) truncated by sanitizer
-- Control characters stripped from input
 - Sensitive fields stripped from settings export
 - API key not logged in audit
 - Request signing rejects tampered requests
 - Rate limiting works under burst
 - Webhook HMAC signatures validated
 - Socket created with chmod 600
+
+Note: InputSanitizer (generic path sanitizer) was deleted in W1736 — per-handler
+allowlists now live directly in each handler.  Tests for the old InputSanitizer
+class have been removed alongside the module.
 """
 
 from __future__ import annotations
@@ -19,7 +18,6 @@ from backend.webhook_manager import WebhookManager
 from backend.audit_logger import AuditLogger
 from backend.ipc_throttle import IPCThrottle
 from backend.request_signing import RequestSigner, TIMESTAMP_WINDOW_SEC
-from backend.input_sanitizer import InputSanitizer
 
 import hashlib
 import hmac
@@ -37,173 +35,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 KRAB_EAR_ROOT = PROJECT_ROOT / "KrabEar"
 if str(KRAB_EAR_ROOT) not in sys.path:
     sys.path.insert(0, str(KRAB_EAR_ROOT))
-
-
-# ---------------------------------------------------------------------------
-# 1-3: Path traversal
-# ---------------------------------------------------------------------------
-
-class TestPathTraversalBlocked(unittest.TestCase):
-    """Path traversal attempts must raise ValueError."""
-
-    def setUp(self):
-        self.san = InputSanitizer(allowed_dirs=[str(Path.home()), "/tmp"])
-
-    def test_classic_dotdot_etc_passwd(self):
-        """../../etc/passwd must be rejected."""
-        with self.assertRaises(ValueError):
-            self.san.sanitize_path("/tmp/../../etc/passwd")
-
-    def test_deep_traversal_shadow(self):
-        """Multi-level traversal to /etc/shadow must be rejected."""
-        with self.assertRaises(ValueError):
-            self.san.sanitize_path("/tmp/../../../etc/shadow")
-
-    def test_traversal_in_file_param(self):
-        """Path traversal inside a file_path parameter must be rejected."""
-        params = {"file_path": "/tmp/../../../etc/passwd"}
-        with self.assertRaises(ValueError):
-            self.san.sanitize_params("export_history", params)
-
-    def test_absolute_path_outside_allowed(self):
-        """/etc/hosts is not in allowed dirs — must be rejected."""
-        with self.assertRaises(ValueError):
-            self.san.sanitize_path("/etc/hosts")
-
-    def test_valid_home_path_allowed(self):
-        """A path inside home directory is allowed without exception."""
-        p = str(Path.home() / "Documents" / "note.txt")
-        result = self.san.sanitize_path(p)
-        self.assertTrue(result.startswith(str(Path.home())))
-
-
-# ---------------------------------------------------------------------------
-# 4-5: SQL injection / search safety
-# ---------------------------------------------------------------------------
-
-class TestSQLInjectionStringsAreSafe(unittest.TestCase):
-    """SQL-injection-like strings must pass through sanitizer without crashing."""
-
-    def setUp(self):
-        self.san = InputSanitizer()
-
-    def test_classic_union_select(self):
-        """Classic UNION SELECT string is sanitized safely (no crash)."""
-        evil = "' UNION SELECT * FROM users --"
-        result = self.san.sanitize_string(evil)
-        self.assertIsInstance(result, str)
-
-    def test_stacked_queries(self):
-        """Stacked-query injection string survives sanitization without crashing."""
-        evil = "1; DROP TABLE history; --"
-        result = self.san.sanitize_string(evil)
-        self.assertIsInstance(result, str)
-        self.assertIn("DROP TABLE", result)  # text passes through (not a DB); no crash
-
-    def test_injection_in_search_params(self):
-        """SQL injection string in search query param must not crash sanitize_params."""
-        params = {"query": "' OR '1'='1"}
-        result = self.san.sanitize_params("search_history", params)
-        self.assertIsInstance(result["query"], str)
-
-
-# ---------------------------------------------------------------------------
-# 6: XSS strings in text fields
-# ---------------------------------------------------------------------------
-
-class TestXSSStringsAreSafe(unittest.TestCase):
-    """XSS payloads in text fields must not crash the sanitizer."""
-
-    def setUp(self):
-        self.san = InputSanitizer()
-
-    def test_script_tag_xss(self):
-        """<script>alert('xss')</script> passes through (no crash, control chars stripped)."""
-        xss = "<script>alert('xss')</script>"
-        result = self.san.sanitize_string(xss)
-        self.assertIsInstance(result, str)
-        # No control characters introduced
-        for ch in result:
-            self.assertNotIn(ord(ch), range(0x00, 0x09))
-
-    def test_img_onerror_xss(self):
-        """img onerror payload must not crash the sanitizer."""
-        xss = '<img src=x onerror="alert(1)">'
-        result = self.san.sanitize_string(xss)
-        self.assertIsInstance(result, str)
-
-    def test_javascript_url_xss(self):
-        """javascript: URL in text must survive sanitization without crash."""
-        xss = 'javascript:/*--></title></style></textarea></script><img src=x>'
-        result = self.san.sanitize_string(xss)
-        self.assertIsInstance(result, str)
-
-
-# ---------------------------------------------------------------------------
-# 7: Very long strings truncated
-# ---------------------------------------------------------------------------
-
-class TestLongStringsTruncated(unittest.TestCase):
-    """Strings of 100K characters must be truncated to the configured max_length."""
-
-    def test_100k_string_default_limit(self):
-        """100K character string is truncated to 10_000 chars (default limit)."""
-        big = "A" * 100_000
-        result = InputSanitizer.sanitize_string(big)
-        self.assertEqual(len(result), 10_000)
-
-    def test_100k_in_query_param(self):
-        """100K query param is truncated to 10_000 by sanitize_params."""
-        params = {"query": "x" * 100_000}
-        result = InputSanitizer().sanitize_params("search_history", params)
-        self.assertLessEqual(len(result["query"]), 10_000)
-
-    def test_100k_custom_max_length(self):
-        """Custom max_length=500 truncates 100K string to exactly 500 chars."""
-        big = "Z" * 100_000
-        result = InputSanitizer.sanitize_string(big, max_length=500)
-        self.assertEqual(len(result), 500)
-
-
-# ---------------------------------------------------------------------------
-# 8: Control characters stripped
-# ---------------------------------------------------------------------------
-
-class TestControlCharactersStripped(unittest.TestCase):
-    """Control characters (except \\t, \\n, \\r) must be stripped."""
-
-    def setUp(self):
-        self.san = InputSanitizer()
-
-    def test_null_byte_stripped(self):
-        """\x00 (null byte) must be removed."""
-        result = self.san.sanitize_string("hello\x00world")
-        self.assertNotIn("\x00", result)
-        self.assertEqual(result, "helloworld")
-
-    def test_bell_char_stripped(self):
-        """\x07 (bell) must be removed."""
-        result = self.san.sanitize_string("ring\x07bell")
-        self.assertNotIn("\x07", result)
-
-    def test_escape_char_stripped(self):
-        """\x1b (ESC / ANSI escape) must be removed."""
-        result = self.san.sanitize_string("text\x1b[31mred\x1b[0m")
-        self.assertNotIn("\x1b", result)
-
-    def test_tab_newline_preserved(self):
-        """\t and \n must NOT be stripped (permitted whitespace)."""
-        result = self.san.sanitize_string("line1\nline2\ttab")
-        self.assertIn("\n", result)
-        self.assertIn("\t", result)
-
-    def test_multiple_control_chars_in_params(self):
-        """Multiple control chars in a params dict are all stripped."""
-        params = {"text": "a\x01b\x02c\x03d"}
-        result = self.san.sanitize_params("translate_text", params)
-        for ch in "\x01\x02\x03":
-            self.assertNotIn(ch, result["text"])
-        self.assertEqual(result["text"], "abcd")
 
 
 # ---------------------------------------------------------------------------
