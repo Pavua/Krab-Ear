@@ -824,6 +824,8 @@ class StateStore:
                 self.favorites_path,
                 self.annotations_path,
                 self.text_updates_path,
+                self.action_items_path,
+                self.calendar_links_path,
                 self.settings_path,
             ]
         )
@@ -1010,16 +1012,29 @@ class StateStore:
         _tombstoned_ids = _all_ids - _active_ids
 
         tmp_history = self.history_path.with_suffix(".ndjson.tmp")
+        _history_replaced = False
 
-        with tmp_history.open("w", encoding="utf-8") as fh:
-            for item in active:
-                fh.write(json.dumps(item.to_dict(), ensure_ascii=False) + "\n")
-            fh.flush()
-            # W853 fix 1: fsync before the atomic rename so the data is
-            # guaranteed to be on disk if a crash occurs during replace().
-            os.fsync(fh.fileno())
+        try:
+            with tmp_history.open("w", encoding="utf-8") as fh:
+                for item in active:
+                    fh.write(json.dumps(item.to_dict(), ensure_ascii=False) + "\n")
+                fh.flush()
+                # W853 fix 1: fsync before the atomic rename so the data is
+                # guaranteed to be on disk if a crash occurs during replace().
+                os.fsync(fh.fileno())
 
-        tmp_history.replace(self.history_path)
+            tmp_history.replace(self.history_path)
+            _history_replaced = True
+        finally:
+            # W1715 BUG 3 fix: clean up the tmp file if the atomic replace did
+            # not happen (e.g. json.dumps raised or fsync failed due to disk
+            # full).  After a successful replace() the file is gone, so guard
+            # with .exists() to avoid a spurious unlink error.
+            if not _history_replaced and tmp_history.exists():
+                try:
+                    tmp_history.unlink()
+                except OSError:
+                    pass
 
         # W853 fix 2: truncate each delta journal atomically via tmp-file +
         # fsync + rename.  A plain write_text("") is not atomic — a crash
@@ -1031,6 +1046,34 @@ class StateStore:
         ]:
             _tmp = journal_path.with_suffix(".tmp")
             _tmp.write_text("", encoding="utf-8")
+            with _tmp.open("r+", encoding="utf-8") as _fh:
+                _fh.flush()
+                os.fsync(_fh.fileno())
+            _tmp.replace(journal_path)
+
+        # W1715 BUG 1 fix: rewrite annotations and calendar_links journals
+        # keeping only entries for items that are still active.  Before this
+        # fix both journals were never truncated on compaction, so deleted
+        # items' entries accumulated forever (unbounded growth proportional to
+        # cumulative deletes) and were scanned in full on every IPC read.
+        #
+        # We use a selective-rewrite strategy (matching how annotations and
+        # calendar_links are last-write-wins by id) rather than a plain
+        # truncation: the journals may contain entries for items that are *not*
+        # being deleted in this compaction cycle, so we must keep those.
+        for journal_path, key_field in [
+            (self.annotations_path, "id"),
+            (self.calendar_links_path, "id"),
+        ]:
+            surviving_lines: list[str] = []
+            for payload in self._read_ndjson_unlocked(journal_path):
+                entry_id = str(payload.get(key_field, "")).strip()
+                if entry_id and entry_id in _active_ids:
+                    surviving_lines.append(
+                        json.dumps(payload, ensure_ascii=False) + "\n"
+                    )
+            _tmp = journal_path.with_suffix(".tmp")
+            _tmp.write_text("".join(surviving_lines), encoding="utf-8")
             with _tmp.open("r+", encoding="utf-8") as _fh:
                 _fh.flush()
                 os.fsync(_fh.fileno())
@@ -1145,7 +1188,6 @@ class StateStore:
 
         Returns True если запись с таким id существует, False иначе.
         """
-        import json as _json
         clean_id = (item_id or "").strip()
         if not clean_id:
             return False
@@ -1159,8 +1201,9 @@ class StateStore:
                 "decisions": list(decisions) if decisions is not None else [],
                 "questions": list(questions) if questions is not None else [],
             }
-            with self.action_items_path.open("a", encoding="utf-8") as fh:
-                fh.write(_json.dumps(entry, ensure_ascii=False) + "\n")
+            # W1715 BUG 2 fix: use _append_ndjson so the write is fsynced,
+            # matching every other delta-journal write path.
+            self._append_ndjson(self.action_items_path, entry)
         return True
 
     def update_history_item_text(self, item_id: str, text: str, confidence: float | None = None) -> bool:
@@ -1176,11 +1219,12 @@ class StateStore:
             active_ids = {item.id for item in self._load_active_items_unlocked()}
             if clean_id not in active_ids:
                 return False
-            entry = {"id": clean_id, "text": text}
+            entry: dict[str, Any] = {"id": clean_id, "text": text}
             if confidence is not None:
                 entry["confidence"] = round(float(confidence), 4)
-            with self.text_updates_path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            # W1715 BUG 2 fix: use _append_ndjson so the write is fsynced,
+            # matching every other delta-journal write path.
+            self._append_ndjson(self.text_updates_path, entry)
             return True
 
     def _load_tags_overrides_unlocked(self) -> dict[str, list[str]]:
