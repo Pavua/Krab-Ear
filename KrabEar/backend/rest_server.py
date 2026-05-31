@@ -1097,6 +1097,15 @@ def transcribe_audio():
 
         # F2: Wrap transcription in a thread pool with a wall-clock timeout so a
         # hung decoder cannot occupy a worker forever.
+        #
+        # W1755: Исправление — НЕ использовать контекст-менеджер as _pool как
+        # единственную точку очистки. При TimeoutError вызов with-блока __exit__
+        # запускает shutdown(wait=True) без cancel_futures=True, что блокирует
+        # поток запроса до завершения зависшего воркера (504 задерживается).
+        # Решение: создаём пул явно и на ветке таймаута немедленно вызываем
+        # shutdown(wait=False, cancel_futures=True) перед возвратом 504.
+        # Ветки успеха/ошибки очищаются через finally shutdown(wait=False) —
+        # daemon-поток воркера завершится сам после отработки MLX watchdog.
         start_ts = time.monotonic()
         _transcribe_path = str(temp_path)
         _transcribe_kwargs = dict(
@@ -1106,18 +1115,26 @@ def transcribe_audio():
             extra_vocabulary=full_vocabulary,
             lang_hint=lang_hint,
         )
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+        _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
             _future = _pool.submit(transcriber.transcribe, _transcribe_path, **_transcribe_kwargs)
             try:
                 result = _future.result(timeout=_TRANSCRIBE_TIMEOUT_SEC)
             except concurrent.futures.TimeoutError:
-                _future.cancel()
+                # cancel_futures=True signals the executor not to start pending
+                # work; wait=False lets the request thread return 504 immediately
+                # without blocking on the hung worker.
+                _pool.shutdown(wait=False, cancel_futures=True)
                 logger.error(
                     "Transcription timed out after %ss for %s",
                     _TRANSCRIBE_TIMEOUT_SEC,
                     safe_base,
                 )
                 return jsonify({"error": "Transcription timeout"}), 504
+        finally:
+            # Не блокируем request-поток: daemon-воркер завершится сам когда
+            # внутренний MLX-subprocess watchdog отработает.
+            _pool.shutdown(wait=False)
         elapsed_sec = time.monotonic() - start_ts
 
         text = result.get("text", "")
