@@ -17,6 +17,7 @@ Handlers (8):
 from __future__ import annotations
 
 import logging
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,40 @@ from core.silence_constants import (  # W1333: shared threshold constants  # noq
 )
 
 logger = logging.getLogger("KrabEar.Backend.AudioAnalytics")
+
+
+# ---------------------------------------------------------------------------
+# Path allowlist for audio read handlers (W1736)
+# ---------------------------------------------------------------------------
+# These handlers are read-only, but soundfile/ffmpeg can still exfiltrate
+# content or metadata from sensitive files.  Apply the same allowed-roots
+# policy used by RecordingCoreService.handle_transcribe_paths.
+
+
+def _validate_audio_read_path(p: str, data_dir: Path | None = None) -> Path:
+    """Raise ValueError if *p* resolves outside the audio-read allowlist.
+
+    Allowed roots: data_dir (if provided), home, /tmp, tempdir.
+
+    Returns:
+        The resolved Path (safe to open without re-deriving — avoids TOCTOU).
+    """
+    resolved = Path(p).expanduser().resolve()
+    allowed: list[Path] = [
+        Path.home().resolve(),
+        Path("/tmp").resolve(),
+        Path(tempfile.gettempdir()).resolve(),
+    ]
+    if data_dir is not None:
+        allowed.append(data_dir.resolve())
+
+    if any(resolved == root or resolved.is_relative_to(root) for root in allowed):
+        return resolved
+
+    raise ValueError(
+        f"audio analytics: путь {resolved!s} находится за пределами разрешённых директорий. "
+        f"Разрешённые корни: {[str(r) for r in allowed]}"
+    )
 
 
 class AudioAnalyticsService:
@@ -55,6 +90,9 @@ class AudioAnalyticsService:
         self._audio_fingerprinter = audio_fingerprinter
         self._word_timing_analyzer = word_timing_analyzer
         self._store = store
+        # W1736: resolve data_dir once so _validate_audio_read_path can use it.
+        _data_dir = getattr(store, "data_dir", None)
+        self._data_dir: Path | None = Path(_data_dir).resolve() if _data_dir else None
 
     # ------------------------------------------------------------------
     # Handlers
@@ -75,6 +113,7 @@ class AudioAnalyticsService:
         file_path = params.get("file_path", "")
         if not file_path:
             raise ValueError("Параметр file_path обязателен")
+        _validate_audio_read_path(file_path, self._data_dir)  # W1736
 
         report = analyze_file(file_path)
         return report.to_dict()
@@ -94,6 +133,7 @@ class AudioAnalyticsService:
         file_path = params.get("file_path", "")
         if not file_path:
             raise ValueError("Параметр file_path обязателен")
+        _validate_audio_read_path(file_path, self._data_dir)  # W1736
 
         threshold_db = float(params.get("threshold_db", SILENCE_THRESHOLD_DB))
         return analyze_silence_file(file_path, threshold_db=threshold_db)
@@ -135,6 +175,7 @@ class AudioAnalyticsService:
         path = str(params.get("path", "")).strip()
         if not path:
             raise ValueError("Параметр 'path' обязателен")
+        _validate_audio_read_path(path, self._data_dir)  # W1736
         info = self._audio_converter.get_audio_info(path)
         return {
             "duration": info.duration,
@@ -159,6 +200,7 @@ class AudioAnalyticsService:
         file_path = params.get("file_path", "")
         if not file_path:
             raise ValueError("Параметр file_path обязателен")
+        _validate_audio_read_path(file_path, self._data_dir)  # W1736
 
         num_points = int(params.get("num_points", 200))
         gen = WaveformGenerator()
@@ -186,14 +228,16 @@ class AudioAnalyticsService:
         file_path = params.get("file_path", "")
         if not file_path:
             raise ValueError("Параметр file_path обязателен")
+        resolved = _validate_audio_read_path(file_path, self._data_dir)  # W1736 — returns resolved Path
 
         import soundfile as sf  # lazy import
 
-        path = Path(file_path).expanduser()
-        if not path.exists():
-            raise FileNotFoundError(f"Аудиофайл не найден: {path}")
+        # W1736 Fix 3: read through the SAME resolved path the validator checked
+        # (avoid TOCTOU: expanduser() without resolve() could follow a late symlink swap)
+        if not resolved.exists():
+            raise FileNotFoundError(f"Аудиофайл не найден: {resolved}")
 
-        audio_data, sample_rate = sf.read(str(path), dtype="float32", always_2d=False)
+        audio_data, sample_rate = sf.read(str(resolved), dtype="float32", always_2d=False)
         profiler = NoiseProfiler()
         result = profiler.profile(audio_data, sample_rate)
         return result.to_dict()

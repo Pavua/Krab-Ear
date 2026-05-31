@@ -2846,6 +2846,15 @@ class HistoryService:
             raise RuntimeError("backup_path обязателен")
 
         backup_dir = Path(raw_path).expanduser().resolve()
+
+        # W1736: only restore from data_dir/backups/ — reject arbitrary backup_path.
+        backups_root = Path(self.store.data_dir).resolve() / "backups"
+        if backup_dir != backups_root and not backup_dir.is_relative_to(backups_root):
+            raise RuntimeError(
+                f"restore_history: backup_path {backup_dir!s} находится за пределами "
+                f"разрешённой директории бекапов {backups_root!s}"
+            )
+
         if not backup_dir.exists() or not backup_dir.is_dir():
             raise RuntimeError(f"Папка резервной копии не найдена: {backup_dir}")
 

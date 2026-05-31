@@ -24,6 +24,42 @@ from backend.settings_validator import CURRENT_SCHEMA_VERSION, SettingsValidator
 
 _log = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Path-traversal allowlist for settings export / import (W1736)
+# ---------------------------------------------------------------------------
+# Settings files may only be read from / written to these root directories.
+# The list mirrors history_service._EXPORT_ALLOWED_ROOTS but is intentionally
+# kept local so changes here don't silently widen the history allowlist.
+_SETTINGS_IO_ALLOWED_ROOTS: tuple[str, ...] = (
+    "~/Library/Application Support/KrabEar",
+    "~/.krab_ear_data",
+    "~/Documents",
+    "~/Desktop",
+    "~/Downloads",
+    "/tmp",
+    "/private/tmp",  # macOS: /tmp symlinks to /private/tmp
+)
+
+
+def _validate_settings_path(p: Path, *, operation: str) -> None:
+    """Raise RuntimeError if *p* is outside the settings I/O allowlist.
+
+    Args:
+        p:         Already-resolved (expanduser + resolve) Path to validate.
+        operation: Human-readable label used in the error message ("export" / "import").
+    """
+    for root_str in _SETTINGS_IO_ALLOWED_ROOTS:
+        allowed = Path(root_str).expanduser().resolve()
+        try:
+            p.relative_to(allowed)
+            return  # inside this root → allowed
+        except ValueError:
+            continue
+    raise RuntimeError(
+        f"settings {operation}: путь {p!s} находится за пределами разрешённых директорий. "
+        f"Разрешённые корни: {list(_SETTINGS_IO_ALLOWED_ROOTS)}"
+    )
+
 
 class SettingsService:
     """Управляет чтением, записью и кэшированием пользовательских настроек."""
@@ -490,6 +526,8 @@ class SettingsService:
 
         if params.get("file"):
             out_path = Path(str(params["file"])).expanduser().resolve()
+            # W1736: reject writes to paths outside the settings I/O allowlist.
+            _validate_settings_path(out_path, operation="export")
         else:
             ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             out_path = Path.home() / f"krabear_settings_{ts}.json"
@@ -516,6 +554,8 @@ class SettingsService:
             raise ValueError("Параметр 'file' обязателен для import_settings")
 
         src = Path(str(file_path)).expanduser().resolve()
+        # W1736: reject reads from paths outside the settings I/O allowlist.
+        _validate_settings_path(src, operation="import")
         if not src.exists():
             raise FileNotFoundError(f"Файл настроек не найден: {src}")
 
