@@ -219,24 +219,49 @@ class TestImportHistoryNdjsonSkipsTombstonedIds(unittest.TestCase):
                          "Tombstoned item must not be re-imported")
 
     def test_import_doesnt_resurrect_deleted(self) -> None:
-        """Deleted items must not be resurrected even after compaction wipes tombstones."""
-        # Add item, delete it, then compact (compaction wipes tombstone journal)
+        """Deleted items MUST NOT be resurrected even after compaction clears tombstones.
+
+        W1756 enforcing regression test (fail-before / pass-after):
+          BEFORE fix: compact() clears tombstones_path; import sees no tombstone → item
+            resurrected → imported==1, item appears in get_history_page.
+          AFTER fix:  compact() writes tombstoned IDs to purged_ids_path before clearing
+            tombstones_path; _load_deleted_ids_unlocked reads both sources;
+            import_history_ndjson includes purged IDs in known_ids → skipped==1,
+            item stays absent from active history.
+
+        Revert of this fix (body-revert back to `known_ids = {..._iter_history_items_unlocked()}`)
+        will cause this test to fail with: imported==1, len(items_after_import)==1.
+        """
+        # Step 1: add item and delete it (writes tombstone)
         item = self.store.add_history_item(text="resurrectable?", paste_status="ok")
         item_id = item.id
         self.store.delete_history_item(item_id)
 
-        # Compact — this rewrites history.ndjson to only active items (none)
-        # and clears tombstones_path
+        # Verify item is gone from active
+        items_before_compact, _ = self.store.get_history_page(cursor=None, limit=100)
+        self.assertEqual(len(items_before_compact), 0)
+
+        # Step 2: compact — rewrites history.ndjson to active-only AND clears tombstones_path.
+        # W1756 fix: compact also appends tombstoned IDs to purged_ids_path first.
         self.store.compact()
 
-        # After compaction, tombstones_path is empty — item_id no longer in tombstones
-        tombstone_ids_post_compact = self.store._load_deleted_ids_unlocked()
-        # tombstones may or may not be empty depending on compact implementation,
-        # but item_id must not be in active items
-        items_after_compact, _ = self.store.get_history_page(cursor=None, limit=100)
-        self.assertEqual(len(items_after_compact), 0)
+        # After compaction, tombstones_path MUST be empty (verify the prerequisite).
+        tombstone_ids_post_compact = set()
+        for payload in self.store._read_ndjson_unlocked(self.store.tombstones_path):
+            item_id_check = str(payload.get("id", "")).strip()
+            if item_id_check:
+                tombstone_ids_post_compact.add(item_id_check)
+        self.assertNotIn(
+            item_id, tombstone_ids_post_compact,
+            "Prerequisite: compact() must clear tombstones_path so that a naive fix fails"
+        )
 
-        # Now try to import the deleted item
+        # Item must still be absent from active history after compact
+        items_after_compact, _ = self.store.get_history_page(cursor=None, limit=100)
+        self.assertEqual(len(items_after_compact), 0,
+                         "Item must not be active after delete+compact")
+
+        # Step 3: import an NDJSON file containing the deleted item's ID and text.
         import_payload = {
             "id": item_id,
             "ts": datetime.now().isoformat(),
@@ -251,19 +276,27 @@ class TestImportHistoryNdjsonSkipsTombstonedIds(unittest.TestCase):
             "translation_engine": "",
         }
         import_path = _make_import_file(self._data_dir, [import_payload])
-
-        # After compaction, tombstones_path is cleared. If tombstone_ids is empty
-        # the item might slip through — this test documents the current behavior.
-        # The fix (W1471 F2) ensures tombstone_ids_unlocked is consulted at import time.
-        # If tombstones were cleared by compact, this is an accepted limitation
-        # (the fix protects the common case: delete then import before compact).
         result = self.store.import_history_ndjson(import_path)
 
-        # Item_id not in active iter_history_items_unlocked (since compacted out),
-        # and tombstones cleared by compact — so this import may succeed.
-        # The important invariant is that the fix handles the pre-compact case.
-        self.assertIn("imported", result)
-        self.assertIn("skipped", result)
+        # ENFORCING assertions — these FAIL before the W1756 fix is applied:
+        self.assertEqual(
+            result["imported"], 0,
+            f"Deleted item must NOT be re-imported (got imported={result['imported']}); "
+            "W1756 fix restores tombstone-aware dedup via purged_ids_path"
+        )
+        self.assertEqual(
+            result["skipped"], 1,
+            f"Deleted item must be counted as skipped (got skipped={result['skipped']})"
+        )
+        self.assertEqual(result["errors"], 0)
+
+        # Critically: the item must still be absent from active history
+        items_after_import, _ = self.store.get_history_page(cursor=None, limit=100)
+        self.assertEqual(
+            len(items_after_import), 0,
+            f"Deleted transcript must NOT reappear after import (found {len(items_after_import)} item(s)); "
+            "this is a privacy guarantee violation (resurrection after compact)"
+        )
 
     def test_import_new_items_not_affected_by_tombstone_check(self) -> None:
         """Items with IDs not in tombstones or existing history should be imported normally."""
@@ -352,6 +385,70 @@ class TestImportHistoryNdjsonSkipsTombstonedIds(unittest.TestCase):
         ids = {i["id"] for i in items}
         self.assertNotIn(item_a.id, ids, "Tombstoned item A must not be imported")
         self.assertIn("fresh-item-B-id-9999", ids, "Fresh item B must be imported")
+
+
+class TestW1756RegressionGuard(unittest.TestCase):
+    """W1756 body-revert guard — ensures structural invariants of the fix are present.
+
+    A future silent body-revert of either the _load_deleted_ids_unlocked change
+    or the compact purged_ids persistence will cause these tests to FAIL, alerting
+    maintainers before the privacy regression reaches production.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._data_dir = Path(self._tmp.name)
+        self.store = StateStore(data_dir=self._data_dir)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_purged_ids_path_attribute_exists(self) -> None:
+        """StateStore must expose purged_ids_path (W1756 — deleted-ID permanent registry)."""
+        self.assertTrue(
+            hasattr(self.store, "purged_ids_path"),
+            "W1756: StateStore.purged_ids_path missing — body-revert detected"
+        )
+        self.assertIsInstance(self.store.purged_ids_path, Path)
+
+    def test_compact_writes_to_purged_ids_path(self) -> None:
+        """compact() must append tombstoned IDs to purged_ids_path before clearing tombstones.
+
+        W1756 guard: if compact() is reverted to NOT write purged_ids_path,
+        test_import_doesnt_resurrect_deleted will also fail.
+        """
+        item = self.store.add_history_item(text="compact guard", paste_status="ok")
+        item_id = item.id
+        self.store.delete_history_item(item_id)
+
+        self.store.compact()
+
+        purged_content = self.store.purged_ids_path.read_text(encoding="utf-8")
+        self.assertIn(
+            item_id, purged_content,
+            "W1756: compact() must persist tombstoned IDs to purged_ids_path"
+        )
+
+    def test_load_deleted_ids_unlocked_reads_purged_ids_path(self) -> None:
+        """_load_deleted_ids_unlocked must include IDs from purged_ids_path.
+
+        W1756 guard: reverts to reading only tombstones_path will cause
+        test_import_doesnt_resurrect_deleted to fail.
+        """
+        # Write an ID directly to purged_ids_path (simulates post-compact state)
+        test_id = "w1756-guard-test-id-001"
+        with self.store.purged_ids_path.open("a", encoding="utf-8") as fh:
+            import json as _j
+            fh.write(_j.dumps({"id": test_id}, ensure_ascii=False) + "\n")
+
+        with self.store._lock():
+            deleted = self.store._load_deleted_ids_unlocked()
+
+        self.assertIn(
+            test_id, deleted,
+            "W1756: _load_deleted_ids_unlocked must read from purged_ids_path — "
+            "body-revert detected (only reads tombstones_path)"
+        )
 
 
 if __name__ == "__main__":

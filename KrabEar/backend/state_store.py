@@ -41,6 +41,10 @@ class StateStore:
         self.settings_path = self.data_dir / "settings.json"
         self.history_path = self.data_dir / "history.ndjson"
         self.tombstones_path = self.data_dir / "history_tombstones.ndjson"
+        # W1756: постоянный реестр удалённых id — пережи́вает компактирование.
+        # compact() дописывает сюда tombstone-id перед очисткой tombstones_path,
+        # чтобы import_history_ndjson мог блокировать resurrection даже после compact.
+        self.purged_ids_path = self.data_dir / "history_purged_ids.ndjson"
         self.status_path = self.data_dir / "history_status.ndjson"
         self.tags_path = self.data_dir / "history_tags.ndjson"
         self.favorites_path = self.data_dir / "history_favorites.ndjson"
@@ -55,6 +59,7 @@ class StateStore:
         for path in (
                 self.history_path,
                 self.tombstones_path,
+                self.purged_ids_path,
                 self.status_path,
                 self.tags_path,
                 self.favorites_path,
@@ -557,13 +562,28 @@ class StateStore:
         return True
 
     def import_history_ndjson(self, path: Path) -> dict[str, int]:
-        """Импортирует записи истории из NDJSON без дублей по `id`."""
+        """Импортирует записи истории из NDJSON без дублей по ``id``.
+
+        W1471 F2 (восстановлено в W1756 — тело было silently reverted в 7536be71):
+        Множество пропуска включает как активные id, так и tombstone-id
+        (``_load_deleted_ids_unlocked``), чтобы удалённые записи не могли
+        воскреснуть после компактирования (когда tombstones очищены, а id
+        уже не числится в ``_iter_history_items_unlocked``).
+
+        Exploit sequence без фикса:
+          1. удаляем запись → tombstone записан; строка ещё есть в history.ndjson.
+          2. compact() → history.ndjson перезаписан только активными, tombstones очищены.
+          3. import того же NDJSON → item.id не в known_ids → resurrection.
+        """
         source_path = path.expanduser().resolve()
         if not source_path.exists() or not source_path.is_file():
             raise RuntimeError("Файл импорта не найден")
 
         with self._lock():
-            known_ids = {item.id for item in self._iter_history_items_unlocked()}
+            known_ids = (
+                {item.id for item in self._iter_history_items_unlocked()}
+                | self._load_deleted_ids_unlocked()
+            )
             imported = 0
             skipped = 0
             errors = 0
@@ -1036,6 +1056,16 @@ class StateStore:
                 except OSError:
                     pass
 
+        # W1756: перед очисткой tombstones дописываем удалённые id в постоянный
+        # реестр purged_ids_path, чтобы import_history_ndjson мог блокировать
+        # resurrection даже после compact (tombstones_path очищается ниже).
+        if _tombstoned_ids:
+            try:
+                for _pid in _tombstoned_ids:
+                    self._append_ndjson(self.purged_ids_path, {"id": _pid})
+            except Exception:  # noqa: BLE001 — purge-persist failure must not break compact
+                logger.exception("_compact_unlocked: ошибка записи purged_ids_path")
+
         # W853 fix 2: truncate each delta journal atomically via tmp-file +
         # fsync + rename.  A plain write_text("") is not atomic — a crash
         # between two truncations leaves some journals cleared and others
@@ -1307,12 +1337,19 @@ class StateStore:
         return {k: v for k, v in result.items() if v}
 
     def _load_deleted_ids_unlocked(self) -> set[str]:
-        """Собирает множество удаленных идентификаторов."""
+        """Собирает множество удалённых идентификаторов.
+
+        W1756: читает как живые tombstones (tombstones_path), так и
+        постоянный реестр (purged_ids_path), записанный compact() перед
+        очисткой tombstones.  Гарантирует, что import_history_ndjson
+        не воскрешает записи даже после компактирования.
+        """
         deleted: set[str] = set()
-        for payload in self._read_ndjson_unlocked(self.tombstones_path):
-            item_id = str(payload.get("id", "")).strip()
-            if item_id:
-                deleted.add(item_id)
+        for source_path in (self.tombstones_path, self.purged_ids_path):
+            for payload in self._read_ndjson_unlocked(source_path):
+                item_id = str(payload.get("id", "")).strip()
+                if item_id:
+                    deleted.add(item_id)
         return deleted
 
     def _load_status_overrides_unlocked(self) -> dict[str, str]:
