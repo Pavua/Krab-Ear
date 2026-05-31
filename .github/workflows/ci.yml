@@ -141,6 +141,9 @@ jobs:
         run: |
           # W1737: same chunking as krabear-ci backend-tests — whole-suite OOM-kills
           # the runner mid-run. 4 fresh-process chunks + orphan-worker reaping.
+          # W1754: each chunk runs -p no:xdist (sequential) — under -n 2 orphan daemon
+          # threads blocked clean xdist worker teardown ("node down") and xdist
+          # mis-attributed the dead worker to a random victim test.
           set +e
           mapfile -t files < <(ls KrabEar/tests/test_*.py | sort)
           n=${#files[@]}; chunk=$(( (n + 3) / 4 )); rc=0
@@ -149,7 +152,7 @@ jobs:
             sub=("${files[@]:$((i*chunk)):$chunk}")
             [ ${#sub[@]} -eq 0 ] && continue
             echo "::group::pytest chunk $((i+1))/4 (${#sub[@]} files)"
-            python -m pytest "${sub[@]}" --tb=short -q -n 2 -p no:cacheprovider
+            python -m pytest "${sub[@]}" --tb=short -q -p no:xdist -p no:cacheprovider
             crc=$?; [ $crc -ne 0 ] && rc=$crc
             echo "::endgroup::"
             pkill -9 -f "import sys;ex" 2>/dev/null || true
