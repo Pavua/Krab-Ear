@@ -92,7 +92,7 @@ _BRAND_REPLACEMENTS_RAW: list[tuple[str, str]] = [
     (r"\bЭм\s*Эл\s*Икс\b", "MLX"),
     # Qwen brand mishears (live transcripts: "QN14B", "квен", "к Вен", "Квент", "QN1")
     # Whisper транскрибирует "Qwen" фонетически в РУ как "квен/Квен", в EN sometimes "QN".
-    (r"\bQN\s*\d+B?\b", lambda m: "Qwen " + m.group(0).split("QN")[1].lstrip()),
+    (r"\bQN\s*(\d+B?)\b", r"Qwen \1"),
     (r"\bкВен\b", "Qwen"),
     (r"\bк\s+Вен\b", "Qwen"),
     (r"\bКвент\b", "Qwen"),
