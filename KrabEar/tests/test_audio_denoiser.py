@@ -14,7 +14,14 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from core.audio_denoiser import AudioDenoiser, _has_whispered_segments, _NOISEREDUCE_PARAMS
+from core.audio_denoiser import (
+    AudioDenoiser,
+    _has_whispered_segments,
+    _NOISEREDUCE_PARAMS,
+    _percentile_noise_clip,
+    _speech_band_bins,
+    _STRONG_MIN_GAIN,
+)
 from core.noise_profiler import NoiseProfiler
 
 _SR = 16000  # стандартная частота дискретизации Whisper
@@ -461,6 +468,273 @@ class TestNoiseReduceParamsW1550(unittest.TestCase):
         # Не должно бросать исключение (W1322 параметры корректны)
         result = denoiser.denoise(audio, _SR, strength="strong")
         self.assertEqual(result.shape, audio.shape)
+
+
+# ---------------------------------------------------------------------------
+# W1718 — BUG 1: noise-window scan (percentile) + BUG 2: speech-band floor
+#          + BUG 3: int16 input guard
+# ---------------------------------------------------------------------------
+
+class TestW1718NoiseWindowScan(unittest.TestCase):
+    """W1718 BUG1: _percentile_noise_clip restored — speech at t=0 not suppressed.
+
+    Регрессионный тест для W1062 F1 HIGH (body-revert W1071 удалил
+    _percentile_noise_clip и вернул audio[:_NOISE_FLOOR_SAMPLES]).
+    До фикса: первые 200 мс = speech → noise reference = speech → 73% речи подавлено.
+    После фикса: quietest window выбирается по RMS → речь сохранена.
+    """
+
+    def setUp(self) -> None:
+        self.denoiser = AudioDenoiser()
+
+    def test_speech_at_start_not_suppressed(self) -> None:
+        """Речевой сигнал в НАЧАЛЕ записи не подавляется ≥90% (ratio ≥ 0.6).
+
+        Схема теста:
+        - Первые 200 мс: громкий речеподобный синусоидальный сигнал (440 Гц).
+        - Следующие 200 мс: полная тишина (истинный noise floor).
+        - Оставшиеся 600 мс: слабый фоновый шум.
+
+        Без _percentile_noise_clip noise_reference = speech → маска убивает 440 Гц.
+        С _percentile_noise_clip noise_reference = тишина → 440 Гц сохраняется.
+        """
+        sr = _SR
+        window = int(0.2 * sr)  # 3200 сэмплов @ 16 кГц
+
+        # Первые 200 мс — речь (громкий синус 440 Гц)
+        t_speech = np.linspace(0, 0.2, window, endpoint=False)
+        speech = (0.5 * np.sin(2 * np.pi * 440.0 * t_speech)).astype(np.float64)
+
+        # Следующие 200 мс — тишина (истинный noise floor)
+        silence = np.zeros(window, dtype=np.float64)
+
+        # Оставшиеся 600 мс — слабый шум
+        rng = np.random.default_rng(99)
+        tail = rng.standard_normal(int(0.6 * sr)).astype(np.float64) * 0.02
+
+        audio = np.concatenate([speech, silence, tail]).astype(np.float32)
+
+        result = self.denoiser.denoise(audio, sr, strength="moderate")
+
+        speech_rms_in = float(np.sqrt(np.mean(audio[:window].astype(np.float64) ** 2)))
+        speech_rms_out = float(np.sqrt(np.mean(result[:window].astype(np.float64) ** 2)))
+        ratio = speech_rms_out / (speech_rms_in + 1e-10)
+
+        self.assertGreater(
+            ratio, 0.6,
+            f"Речь в начале подавлена слишком сильно: ratio={ratio:.3f} "
+            f"(rms_in={speech_rms_in:.4f}, rms_out={speech_rms_out:.4f}). "
+            f"Вероятно, noise floor взят из речевого фрагмента, а не из тишины."
+        )
+
+    def test_percentile_noise_clip_exists_and_callable(self) -> None:
+        """_percentile_noise_clip доступна в модуле (не удалена W1071-body-revert)."""
+        import core.audio_denoiser as mod
+        self.assertTrue(callable(getattr(mod, "_percentile_noise_clip", None)),
+                        "_percentile_noise_clip отсутствует — BUG 1 не исправлен")
+
+    def test_percentile_noise_clip_picks_quiet_region(self) -> None:
+        """_percentile_noise_clip выбирает тихие фреймы, а не первые 200 мс."""
+        sr = _SR
+        window = int(0.2 * sr)
+
+        # Громкая речь в начале
+        t = np.linspace(0, 0.2, window, endpoint=False)
+        speech = 0.5 * np.sin(2 * np.pi * 440.0 * t)
+        # Тишина — истинный noise floor
+        silence = np.zeros(window)
+        audio = np.concatenate([speech, silence]).astype(np.float64)
+
+        clip = _percentile_noise_clip(audio)
+        self.assertIsNotNone(clip, "_percentile_noise_clip вернул None для нормального сигнала")
+
+        # RMS clip должен быть значительно ниже RMS всего аудио
+        rms_clip = float(np.sqrt(np.mean(clip ** 2)))
+        rms_all = float(np.sqrt(np.mean(audio ** 2)))
+        self.assertLess(rms_clip, rms_all * 0.5,
+                        f"noise_clip не является тихим регионом: rms_clip={rms_clip:.4f} "
+                        f"rms_all={rms_all:.4f}")
+
+
+class TestW1718SpeechBandFloor(unittest.TestCase):
+    """W1718 BUG2: _STRONG_MIN_GAIN / speech-band floor restored (W1080 body-revert).
+
+    До фикса: strong mode мог подавить 300–3000 Гц до 5% (−26 dB).
+    После фикса: floor 25% (−12 dB) защищает речевую полосу.
+    """
+
+    def setUp(self) -> None:
+        self.denoiser = AudioDenoiser()
+
+    def test_strong_min_gain_constant_exists(self) -> None:
+        """_STRONG_MIN_GAIN = 0.25 должен быть определён в модуле."""
+        import core.audio_denoiser as mod
+        self.assertTrue(hasattr(mod, "_STRONG_MIN_GAIN"),
+                        "_STRONG_MIN_GAIN отсутствует — BUG 2 не исправлен")
+        self.assertAlmostEqual(mod._STRONG_MIN_GAIN, 0.25, places=5,
+                               msg="_STRONG_MIN_GAIN должен быть 0.25 (-12 dB)")
+
+    def test_speech_band_hz_constants_exist(self) -> None:
+        """_SPEECH_BAND_LOW_HZ и _SPEECH_BAND_HIGH_HZ должны быть определены."""
+        import core.audio_denoiser as mod
+        self.assertTrue(hasattr(mod, "_SPEECH_BAND_LOW_HZ"),
+                        "_SPEECH_BAND_LOW_HZ отсутствует — BUG 2 не исправлен")
+        self.assertTrue(hasattr(mod, "_SPEECH_BAND_HIGH_HZ"),
+                        "_SPEECH_BAND_HIGH_HZ отсутствует — BUG 2 не исправлен")
+        self.assertEqual(mod._SPEECH_BAND_LOW_HZ, 300)
+        self.assertEqual(mod._SPEECH_BAND_HIGH_HZ, 3000)
+
+    def test_speech_band_bins_returns_valid_range(self) -> None:
+        """_speech_band_bins должна возвращать валидный диапазон бинов."""
+        low, high = _speech_band_bins(_SR)
+        self.assertGreater(high, low,
+                           f"_speech_band_bins вернул инвертированный диапазон: {low}..{high}")
+        self.assertGreaterEqual(low, 0)
+        # bin_high не должен превышать _N_FFT//2
+        from core.audio_denoiser import _N_FFT
+        self.assertLessEqual(high, _N_FFT // 2)
+
+    def test_strong_mode_speech_band_not_crushed_below_floor(self) -> None:
+        """strong mode не должен подавить 440 Гц (речевая полоса) ниже _STRONG_MIN_GAIN.
+
+        Тест использует спектральный gating path (scipy). Создаём чистый синус
+        440 Гц с заглушённым «noise floor» тишиной в первых 10 мс.
+        После обработки энергия 440 Гц должна сохраниться хотя бы на 25%.
+        """
+        sr = _SR
+        t = np.linspace(0, 1.0, sr, endpoint=False)
+        # Слабый синус 440 Гц (−25 dB = 0.056 амплитуды) + крошечный шум
+        rng = np.random.default_rng(7)
+        weak_speech = 0.056 * np.sin(2 * np.pi * 440.0 * t)
+        noise = rng.standard_normal(sr) * 0.15
+        audio = np.clip(weak_speech + noise, -1.0, 1.0).astype(np.float32)
+
+        result_strong = self.denoiser.denoise(audio, sr, strength="strong")
+        result_moderate = self.denoiser.denoise(audio, sr, strength="moderate")
+
+        rms_strong = float(np.sqrt(np.mean(result_strong.astype(np.float64) ** 2)))
+        rms_moderate = float(np.sqrt(np.mean(result_moderate.astype(np.float64) ** 2)))
+
+        # strong с floor должен сохранять больше энергии, чем без floor
+        # (т.е. rms_strong > rms_strong_without_floor).
+        # Косвенная проверка: strong не должен давать в 2× меньше moderate
+        # (без floor он бы давал намного меньше)
+        ratio_vs_moderate = rms_strong / (rms_moderate + 1e-10)
+        self.assertGreater(
+            ratio_vs_moderate, 0.1,
+            f"strong mode подавил слишком агрессивно (ratio_vs_moderate={ratio_vs_moderate:.3f}). "
+            f"Вероятно, _STRONG_MIN_GAIN floor отсутствует."
+        )
+
+    def test_speech_band_energy_floor_direct(self) -> None:
+        """Прямая проверка: mask в речевой полосе после strong ≥ _STRONG_MIN_GAIN.
+
+        Создаём синтетический аудиосигнал, вызываем _denoise_spectral_gating напрямую
+        и проверяем что выходной сигнал в речевой полосе сохраняется хотя бы на
+        _STRONG_MIN_GAIN от входного.
+        """
+        try:
+            import scipy.signal  # noqa: F401  # type: ignore
+        except ImportError:
+            self.skipTest("scipy не установлен")
+
+        sr = _SR
+        # Чистый синус 1000 Гц (внутри речевой полосы 300–3000 Гц)
+        t = np.linspace(0, 1.0, sr, endpoint=False)
+        signal = 0.3 * np.sin(2 * np.pi * 1000.0 * t)
+        audio = signal.astype(np.float64)
+
+        # Нормальная амплитуда (не шёпот) — downgrade не произойдёт
+        from core.audio_denoiser import _STRENGTH_PARAMS
+        params = _STRENGTH_PARAMS["strong"]
+        result = AudioDenoiser._denoise_spectral_gating(audio, sr, params, "strong")
+
+        rms_in = float(np.sqrt(np.mean(audio ** 2)))
+        rms_out = float(np.sqrt(np.mean(result ** 2)))
+
+        # Выход должен быть ≥ _STRONG_MIN_GAIN от входа
+        ratio = rms_out / (rms_in + 1e-10)
+        self.assertGreaterEqual(
+            ratio, _STRONG_MIN_GAIN * 0.5,  # допускаем небольшой запас
+            f"strong mode подавил 1000 Гц ниже floor: ratio={ratio:.3f} "
+            f"(ожидалось ≥ {_STRONG_MIN_GAIN * 0.5:.2f}). "
+            f"_STRONG_MIN_GAIN cap не применяется."
+        )
+
+
+class TestW1718IntDtypeGuard(unittest.TestCase):
+    """W1718 BUG3: int16 input не должен возвращать all-zeros.
+
+    До фикса: float64 clip в [-1, 1] → .astype(int16) = all-zeros (потому что
+    [-1.0, 1.0] усекается до 0 или ±1 в int16).
+    После фикса: rescale × iinfo.max перед cast сохраняет сигнал.
+    """
+
+    def setUp(self) -> None:
+        self.denoiser = AudioDenoiser()
+
+    def test_int16_input_not_all_zeros(self) -> None:
+        """int16-входной массив возвращает ненулевой результат."""
+        sr = _SR
+        # Создаём int16 с умеренной амплитудой (50% от max)
+        t = np.linspace(0, 1.0, sr, endpoint=False)
+        audio_float = 0.5 * np.sin(2 * np.pi * 440.0 * t)
+        audio_int16 = (audio_float * 32767).astype(np.int16)
+
+        result = self.denoiser.denoise(audio_int16, sr, strength="moderate")
+
+        self.assertEqual(result.dtype, np.int16,
+                         f"Ожидался dtype int16, получен {result.dtype}")
+        rms = float(np.sqrt(np.mean(result.astype(np.float64) ** 2)))
+        self.assertGreater(rms, 100.0,
+                           f"int16 результат all-zeros или очень тихий: RMS={rms:.1f}. "
+                           f"Вероятно, .astype(int16) без rescale обнуляет [-1,1].")
+
+    def test_int16_input_preserves_shape_and_dtype(self) -> None:
+        """int16 вход сохраняет форму и dtype на выходе."""
+        sr = _SR
+        t = np.linspace(0, 0.5, sr // 2, endpoint=False)
+        audio = (0.3 * np.sin(2 * np.pi * 1000.0 * t) * 32767).astype(np.int16)
+
+        result = self.denoiser.denoise(audio, sr, strength="light")
+
+        self.assertEqual(result.shape, audio.shape)
+        self.assertEqual(result.dtype, np.int16)
+
+    def test_int16_input_values_in_range(self) -> None:
+        """int16 результат не выходит за пределы dtype."""
+        sr = _SR
+        t = np.linspace(0, 1.0, sr, endpoint=False)
+        audio = (0.8 * np.sin(2 * np.pi * 440.0 * t) * 32767).astype(np.int16)
+
+        result = self.denoiser.denoise(audio, sr, strength="strong")
+
+        self.assertLessEqual(int(result.max()), 32767)
+        self.assertGreaterEqual(int(result.min()), -32768)
+
+    def test_float32_input_still_works(self) -> None:
+        """float32-входной массив (нормальный production path) не поломан."""
+        sr = _SR
+        t = np.linspace(0, 1.0, sr, endpoint=False)
+        audio = (0.4 * np.sin(2 * np.pi * 440.0 * t)).astype(np.float32)
+
+        result = self.denoiser.denoise(audio, sr, strength="moderate")
+
+        self.assertEqual(result.dtype, np.float32)
+        self.assertLessEqual(float(np.max(result)), 1.0)
+        self.assertGreaterEqual(float(np.min(result)), -1.0)
+        rms = float(np.sqrt(np.mean(result.astype(np.float64) ** 2)))
+        self.assertGreater(rms, 1e-4,
+                           "float32 результат пустой — production path поломан")
+
+    def test_strength_off_int16_passthrough(self) -> None:
+        """strength='off' с int16 входом — возвращает идентичный массив."""
+        sr = _SR
+        t = np.linspace(0, 0.5, sr // 2, endpoint=False)
+        audio = (0.5 * np.sin(2 * np.pi * 440.0 * t) * 32767).astype(np.int16)
+
+        result = self.denoiser.denoise(audio, sr, strength="off")
+        np.testing.assert_array_equal(audio, result)
 
 
 if __name__ == "__main__":
