@@ -110,16 +110,31 @@ class AutoDeduplicator:
     W1567 F1 HIGH fix (wire _text_similarity):
       - check_duplicate now uses _text_similarity (Jaccard hybrid, W1245) as the
         primary tier before delegating to DuplicateDetector.
-      - Tier 1: similarity >= _SIMILARITY_THRESHOLD (0.85) → definite duplicate,
-        DuplicateDetector bypassed.
-      - Tier 2: _JACCARD_LOW (0.7) <= similarity < _SIMILARITY_THRESHOLD → ambiguous,
+      - Tier 1: similarity >= _TIER1_ROUTING_THRESHOLD (0.85) → definite-duplicate
+        candidate; declared as duplicate only when sim >= caller's threshold.
+      - Tier 2: _JACCARD_LOW (0.7) <= similarity < _TIER1_ROUTING_THRESHOLD → ambiguous,
         fall through to DuplicateDetector for SequenceMatcher confirmation.
       - Below _JACCARD_LOW (0.7) → not a duplicate, DuplicateDetector skipped.
       - 60-second time window enforced in tier-1 scan (mirrors DuplicateDetector behaviour).
+
+    W1711 fix (honor caller threshold):
+      - Tier-1 now respects the caller's `threshold` argument.  Previously the hardcoded
+        0.85 class constant was used as the duplicate-decision gate, meaning a pair with
+        sim=0.89 was reported as duplicate even when threshold=0.99.  Now:
+          * sim >= _TIER1_ROUTING_THRESHOLD (0.85) → enters tier-1 candidate pool
+          * is_duplicate=True only when sim >= threshold (the caller's value)
+          * Raising threshold → less aggressive dedup; lowering → more aggressive.
+      - recording_core_service callers now read `auto_dedup_threshold` from runtime
+        settings and forward it to check_duplicate(threshold=...).  Previously callers
+        omitted the argument, leaving the setting completely unwired (data-loss bug).
     """
 
-    # W1567: primary similarity threshold — above this, record is a definite duplicate.
-    _SIMILARITY_THRESHOLD: float = 0.85
+    # W1567: routing boundary — above this Jaccard score the record enters tier-1 as a
+    # definite-duplicate candidate (versus the ambiguous zone [_JACCARD_LOW, 0.85) that
+    # falls through to tier-2 DuplicateDetector).  This constant controls the tier-1/tier-2
+    # routing split, NOT the final duplicate decision — that uses the caller's `threshold`.
+    # W1711: renamed from _SIMILARITY_THRESHOLD to make the intent unambiguous.
+    _TIER1_ROUTING_THRESHOLD: float = 0.85
 
     # 60-second window for tier-1 scan (same as DuplicateDetector.DEFAULT_TIME_WINDOW_SECONDS).
     _TIME_WINDOW_SECONDS: int = 60
@@ -223,9 +238,12 @@ class AutoDeduplicator:
             except (ValueError, AttributeError):
                 new_ts = None
 
-            tier1_match_id: str | None = None
-            tier1_similarity: float = 0.0
-            ambiguous_candidates: list[dict] = []  # 0.7 <= sim < 0.85 → tier-2
+            # W1711: best tier-1 candidate (sim >= _TIER1_ROUTING_THRESHOLD).
+            # We track the highest-similarity item; duplicate is declared only when
+            # sim >= threshold (the caller's value), not the hardcoded routing constant.
+            tier1_best_id: str | None = None
+            tier1_best_sim: float = 0.0
+            ambiguous_candidates: list[dict] = []  # _JACCARD_LOW <= sim < _TIER1_ROUTING_THRESHOLD → tier-2
 
             for candidate in normalized_items:
                 cand_text = str(candidate.get("text") or "").strip()
@@ -247,34 +265,50 @@ class AutoDeduplicator:
 
                 sim = _text_similarity(text, cand_text)
 
-                if sim >= self._SIMILARITY_THRESHOLD:
-                    # Definite duplicate — take the first (most recent) hit
-                    if tier1_match_id is None or sim > tier1_similarity:
-                        tier1_match_id = candidate.get("id")
-                        tier1_similarity = sim
+                if sim >= self._TIER1_ROUTING_THRESHOLD:
+                    # High-similarity candidate — track best; will declare duplicate
+                    # below only if sim also meets the caller's threshold.
+                    if tier1_best_id is None or sim > tier1_best_sim:
+                        tier1_best_id = candidate.get("id")
+                        tier1_best_sim = sim
                 elif sim >= _JACCARD_LOW:
                     # Ambiguous zone — collect for tier-2 DuplicateDetector confirmation
                     ambiguous_candidates.append(candidate)
 
-            if tier1_match_id is not None:
+            # W1711: tier-1 declares a duplicate only when the best candidate's
+            # similarity meets the caller's threshold.  Raising threshold (e.g. 0.99)
+            # means pairs with sim in [0.85, 0.99) are NOT reported as duplicates here
+            # and fall through to tier-2 instead (or are kept entirely).
+            if tier1_best_id is not None and tier1_best_sim >= threshold:
                 # Tier-1 confirmed: report without involving DuplicateDetector
                 with self._lock:
                     self._duplicates_found += 1
                     self._chars_saved += len(text)
 
-                action = "merged" if tier1_similarity >= MERGE_THRESHOLD else "skipped"
+                action = "merged" if tier1_best_sim >= MERGE_THRESHOLD else "skipped"
                 logger.debug(
-                    "Дубликат (tier-1 Jaccard): similarity=%.3f, original_id=%s, action=%s",
-                    tier1_similarity,
-                    tier1_match_id,
+                    "Дубликат (tier-1 Jaccard): similarity=%.3f threshold=%.3f original_id=%s action=%s",
+                    tier1_best_sim,
+                    threshold,
+                    tier1_best_id,
                     action,
                 )
                 return DedupResult(
                     is_duplicate=True,
-                    duplicate_of=tier1_match_id,
-                    similarity=tier1_similarity,
+                    duplicate_of=tier1_best_id,
+                    similarity=tier1_best_sim,
                     action_taken=action,
                 )
+
+            # If tier-1 found a high-similarity candidate but it did not meet the caller's
+            # threshold, add it to ambiguous_candidates so tier-2 can confirm at threshold.
+            if tier1_best_id is not None:
+                # Re-scan to find the actual candidate dict (we only stored the id/sim)
+                for candidate in normalized_items:
+                    if candidate.get("id") == tier1_best_id:
+                        if candidate not in ambiguous_candidates:
+                            ambiguous_candidates.append(candidate)
+                        break
 
             # ------------------------------------------------------------------
             # Tier-2: run DuplicateDetector (SequenceMatcher) on ambiguous
