@@ -425,5 +425,151 @@ class TestHandlesCorruptedStorage(unittest.TestCase):
             self.assertEqual(custom, [])
 
 
+class TestReDoSMitigation(unittest.TestCase):
+    """Wave 1729 — ReDoS mitigation tests.
+
+    Verifies that user-supplied patterns with catastrophic-backtracking
+    constructs are rejected at add_pattern() time (Layer 1 + 2), and that
+    the input-length cap (Layer 3) prevents runaway matching even if an
+    exotic pattern slips through heuristic detection.
+
+    All timing-sensitive assertions use a 2-second threshold which is orders
+    of magnitude above any legitimate match (< 1 ms) but well below the seconds
+    a catastrophic pattern would take on a pathological string.
+    """
+
+    def setUp(self):
+        self.mgr = HallucinationManager()  # in-memory
+
+    # ── Layer 1: pattern length cap ─────────────────────────────────────────
+
+    def test_add_pattern_too_long_is_rejected(self):
+        """A pattern exceeding _MAX_PATTERN_LEN chars must be rejected."""
+        from core.hallucination_manager import _MAX_PATTERN_LEN
+        long_pat = r"a" * (_MAX_PATTERN_LEN + 1)
+        with self.assertRaises(ValueError) as ctx:
+            self.mgr.add_pattern(long_pat)
+        self.assertIn("слишком длинный", str(ctx.exception))
+
+    def test_pattern_exactly_at_max_length_is_accepted(self):
+        """A pattern exactly at the length limit must be accepted (boundary)."""
+        from core.hallucination_manager import _MAX_PATTERN_LEN
+        # Build a safe pattern that is exactly _MAX_PATTERN_LEN chars long.
+        # Pad with literal spaces (no backtracking risk) inside a non-capturing group.
+        base = r"тест граница\s*$"
+        padding = " " * (_MAX_PATTERN_LEN - len(base))
+        pat = base + padding
+        # The pattern itself might not compile cleanly with trailing spaces inside
+        # a raw string — what matters is the length guard, so we just verify no
+        # ValueError for "too long" is raised (syntax errors are a different code path).
+        try:
+            self.mgr.add_pattern(pat)
+        except ValueError as exc:
+            # Only "too long" would be the length guard; syntax errors are OK here.
+            self.assertNotIn("слишком длинный", str(exc))
+
+    # ── Layer 2: catastrophic-backtracking heuristic ─────────────────────────
+
+    def test_nested_plus_quantifier_rejected(self):
+        """(a+)+ — classic exponential backtrack — must be rejected."""
+        with self.assertRaises(ValueError) as ctx:
+            self.mgr.add_pattern(r"(a+)+$")
+        self.assertIn("ReDoS", str(ctx.exception))
+
+    def test_nested_star_quantifier_rejected(self):
+        """(a*)* is equally catastrophic."""
+        with self.assertRaises(ValueError) as ctx:
+            self.mgr.add_pattern(r"(a*)*end")
+        self.assertIn("ReDoS", str(ctx.exception))
+
+    def test_nested_star_plus_quantifier_rejected(self):
+        """(a+)* is catastrophic (star wrapping plus group)."""
+        with self.assertRaises(ValueError) as ctx:
+            self.mgr.add_pattern(r"(a+)*$")
+        self.assertIn("ReDoS", str(ctx.exception))
+
+    def test_dot_star_repeated_group_rejected(self):
+        """(.*a){20} — repeated group with internal repetition — must be rejected."""
+        with self.assertRaises(ValueError) as ctx:
+            self.mgr.add_pattern(r"(.*a){20}$")
+        self.assertIn("ReDoS", str(ctx.exception))
+
+    def test_catastrophic_pattern_not_stored(self):
+        """A rejected catastrophic pattern must not appear in list_patterns()."""
+        try:
+            self.mgr.add_pattern(r"(a+)+$")
+        except ValueError:
+            pass
+        custom = [p for p in self.mgr.list_patterns() if not p["builtin"]]
+        self.assertEqual(custom, [], "Catastrophic pattern must not be stored")
+
+    # ── Layer 3: input-length cap at match time ───────────────────────────────
+
+    def test_check_text_truncates_very_long_input(self):
+        """check_text() must complete fast even on a 1 MB input string.
+
+        This verifies Layer 3 (input-length cap) by running against a large
+        input with all built-in patterns and confirming it returns in well
+        under 2 seconds.
+        """
+        import time
+        # 1 MB of 'a' — would cause catastrophic backtracking on bad patterns
+        huge_text = "a" * (1024 * 1024)
+        start = time.monotonic()
+        result = self.mgr.check_text(huge_text)
+        elapsed = time.monotonic() - start
+        self.assertIsInstance(result, list)
+        self.assertLess(elapsed, 2.0, f"check_text() took {elapsed:.3f}s on large input — Layer 3 cap may be broken")
+
+    def test_strip_hallucinations_truncates_very_long_input(self):
+        """strip_hallucinations() must also complete fast on a 1 MB input."""
+        import time
+        huge_text = "a" * (1024 * 1024)
+        start = time.monotonic()
+        result = self.mgr.strip_hallucinations(huge_text)
+        elapsed = time.monotonic() - start
+        self.assertIsInstance(result, str)
+        self.assertLess(elapsed, 2.0, f"strip_hallucinations() took {elapsed:.3f}s on large input")
+
+    # ── Regression: legitimate patterns still work after mitigation ──────────
+
+    def test_safe_simple_pattern_still_accepted(self):
+        """A simple literal-ish pattern must still be accepted after adding guards."""
+        entry = self.mgr.add_pattern(r"конец эфира[.!?]*\s*$", category="broadcast")
+        self.assertFalse(entry["builtin"])
+
+    def test_safe_pattern_still_matches(self):
+        """After adding the ReDoS guards, normal patterns must still match text."""
+        self.mgr.add_pattern(r"стоп запись[.!?]*\s*$", category="stop")
+        text = "Обсудили всё. Стоп запись."
+        matches = self.mgr.check_text(text)
+        stop_matches = [m for m in matches if m.category == "stop"]
+        self.assertEqual(len(stop_matches), 1)
+
+    def test_builtin_patterns_unaffected(self):
+        """Built-in patterns must still detect YouTube hallucinations after mitigation."""
+        text = "Это важный разговор. Спасибо за просмотр."
+        matches = self.mgr.check_text(text)
+        yt_matches = [m for m in matches if m.category == "youtube"]
+        self.assertGreater(len(yt_matches), 0, "Built-in youtube patterns must still fire")
+
+    def test_strip_hallucinations_still_works_after_mitigation(self):
+        """strip_hallucinations() must strip a normal YouTube hallucination."""
+        text = "Хорошее выступление. Подписывайтесь на канал."
+        result = self.mgr.strip_hallucinations(text)
+        self.assertNotIn("подписывайтесь", result.lower())
+        self.assertIn("Хорошее выступление", result)
+
+    def test_unicode_safe_pattern_accepted(self):
+        """Unicode patterns without quantifier nesting must still be accepted."""
+        entry = self.mgr.add_pattern(r"ありがとう[。.!?]*\s*$", category="ja")
+        self.assertEqual(entry["category"], "ja")
+
+    def test_alternation_without_nesting_accepted(self):
+        """Simple alternation without outer quantifier must be accepted."""
+        entry = self.mgr.add_pattern(r"(?:до встречи|до свидания)[.!?]*\s*$", category="bye")
+        self.assertFalse(entry["builtin"])
+
+
 if __name__ == "__main__":
     unittest.main()
