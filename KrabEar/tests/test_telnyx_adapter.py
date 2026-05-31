@@ -22,7 +22,7 @@ from backend.telnyx_adapter import (  # noqa: E402
 
 def _make_adapter(
     api_key: str = "test_key_abc",
-    connection_id: str = "conn_123",
+    connection_id: str = "123456",  # W1748: Telnyx connection IDs are numeric strings
     from_number: str = "+15550001111",
 ) -> TelnyxAdapter:
     return TelnyxAdapter(

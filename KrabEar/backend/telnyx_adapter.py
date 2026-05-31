@@ -13,6 +13,7 @@ import logging
 import re
 import time
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlencode
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -47,6 +48,11 @@ _E164_RE = re.compile(r"^\+[1-9]\d{1,14}$")
 # Rejects path-traversal payloads like "../../other-resource".
 _CALL_CONTROL_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
+# W1748: connection_id — Telnyx connection IDs are pure numeric strings.
+# Validated before embedding in URL query parameters to prevent query injection.
+# An empty/missing connection_id is also handled — caller skips the filter entirely.
+_CONNECTION_ID_RE = re.compile(r"^\d{1,64}$")
+
 
 def _is_valid_phone(number: str) -> bool:
     """Проверяет формат E.164."""
@@ -56,6 +62,16 @@ def _is_valid_phone(number: str) -> bool:
 def _is_valid_call_control_id(value: str) -> bool:
     """Проверяет call_control_id на допустимые символы (предотвращает path traversal)."""
     return bool(_CALL_CONTROL_ID_RE.match(value or ""))
+
+
+def _is_valid_connection_id(value: str) -> bool:
+    """Проверяет connection_id — должен быть числовой строкой (Telnyx format).
+
+    Пустая строка считается валидной (означает «фильтр не задан»).
+    """
+    if not value:
+        return True  # empty = не применяем фильтр, а не ошибка
+    return bool(_CONNECTION_ID_RE.match(value))
 
 
 def _build_session() -> requests.Session:
@@ -259,6 +275,14 @@ class TelnyxAdapter:
                 "message": f"Номер '{to_number}' не соответствует формату E.164",
             }
 
+        # W1748: validate from_number (E.164) before sending to Telnyx.
+        if self._from_number and not _is_valid_phone(self._from_number):
+            return {
+                "ok": False,
+                "error": "invalid_from_number",
+                "message": f"Номер отправителя '{self._from_number}' не соответствует формату E.164",
+            }
+
         payload: Dict[str, Any] = {
             "to": to_number,
             "from": self._from_number,
@@ -360,9 +384,27 @@ class TelnyxAdapter:
         if not self._configured:
             return self._not_configured_result()
 
+        # W1748: validate connection_id before embedding in URL query string.
+        # An invalid/malicious connection_id (e.g. "123&evil=1") could manipulate
+        # the Telnyx API request. urlencode() would encode it, but we reject non-
+        # numeric values early so the caller gets a clear error, not a confusing 4xx.
+        if self._connection_id and not _is_valid_connection_id(self._connection_id):
+            logger.warning(
+                "Telnyx list_active_calls rejected: invalid connection_id %r",
+                self._connection_id,
+            )
+            return {
+                "ok": False,
+                "error": "invalid_connection_id",
+                "message": "connection_id должен быть числовой строкой (Telnyx format)",
+            }
+
         path = "/calls"
         if self._connection_id:
-            path = f"/calls?filter[connection_id]={self._connection_id}"
+            # Use urlencode for safe query-string construction even though the
+            # value is already validated to be numeric-only above.
+            qs = urlencode({"filter[connection_id]": self._connection_id})
+            path = f"/calls?{qs}"
 
         result = self._get(path)
         if not result["ok"]:
