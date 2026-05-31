@@ -47,8 +47,8 @@ class TestIsSafeExportDir(unittest.TestCase):
 
     def test_export_outside_allowed_root_raises(self) -> None:
         """An absolute path outside every allowed root must be rejected."""
-        # /tmp is not in the allowlist
-        self.assertFalse(_is_safe_export_dir("/tmp/evil_export"))
+        # /etc is clearly outside the allowlist (W1707: /tmp IS allowed per W1432 spec)
+        self.assertFalse(_is_safe_export_dir("/etc/evil_export"))
 
     def test_export_etc_rejected(self) -> None:
         """/etc must be rejected."""
@@ -92,12 +92,15 @@ class TestHandleExportObsidianAllowlist(unittest.TestCase):
         return HistoryService(store=store)
 
     def test_export_obsidian_outside_allowed_root_raises(self) -> None:
-        """handle_export_obsidian must raise ValueError for /tmp path."""
+        """handle_export_obsidian must raise ValueError for paths outside allowed roots.
+
+        W1707: /tmp IS allowed (per W1432); use /var/evil which is clearly outside.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             svc = self._make_svc(Path(tmp) / "data")
             with self.assertRaises(ValueError) as ctx:
-                svc.handle_export_obsidian({"output_dir": "/tmp/evil"})
-            self.assertIn("outside allowed roots", str(ctx.exception))
+                svc.handle_export_obsidian({"output_dir": "/var/evil"})
+            self.assertIn("outside allowed", str(ctx.exception))
 
     def test_export_obsidian_inside_allowed_root_succeeds(self) -> None:
         """handle_export_obsidian must succeed when output_dir is inside ~/Documents."""
@@ -131,12 +134,15 @@ class TestHandleBatchExportAllowlist(unittest.TestCase):
         return HistoryService(store=store)
 
     def test_batch_export_outside_allowed_root_raises(self) -> None:
-        """handle_batch_export must raise ValueError for /tmp path."""
+        """handle_batch_export must raise ValueError for paths outside allowed roots.
+
+        W1707: /tmp IS allowed (per W1432); use /var/evil which is clearly outside.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             svc = self._make_svc(Path(tmp) / "data")
             with self.assertRaises(ValueError) as ctx:
-                svc.handle_batch_export({"output_dir": "/tmp/evil_bundle"})
-            self.assertIn("outside allowed roots", str(ctx.exception))
+                svc.handle_batch_export({"output_dir": "/var/evil_bundle"})
+            self.assertIn("outside allowed", str(ctx.exception))
 
     def test_batch_export_parent_traversal_rejected(self) -> None:
         """handle_batch_export must reject parent traversal in output_dir."""

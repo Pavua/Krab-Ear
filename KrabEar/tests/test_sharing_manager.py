@@ -742,18 +742,18 @@ class Wave98RequiredTestCase(unittest.TestCase):
         found = self._mgr.get_shared(pkg.share_id)
         self.assertIsNotNone(found)
 
-    # test_link_expiration — SharingManager не имеет TTL; тест документирует это
+    # test_link_expiration — W158 added TTL support; manager has default 168h TTL
     def test_link_no_expiration_24h(self) -> None:
-        """SharingManager не имеет 24h TTL — пакет бессрочен."""
+        """W158: default TTL is 168h; бессрочный пакет создаётся с share_no_default_ttl=True."""
+        # W158 added TTL. To create a package without expires_at, use share_no_default_ttl=True
+        mgr_no_ttl = SharingManager(store=self._store, share_no_default_ttl=True)
         self._store.add_fake_item("exp1", "текст без TTL")
-        pkg = self._mgr.prepare_share(["exp1"])
+        pkg = mgr_no_ttl.prepare_share(["exp1"])
         d = pkg.to_dict()
-        # Нет поля expires_at или ttl_sec — бессрочное хранение
-        self.assertNotIn("expires_at", d)
-        self.assertNotIn("ttl_sec", d)
-        self.assertNotIn("expiry", d)
-        # Пакет остаётся доступным (simulate passing time via reload)
-        mgr2 = SharingManager(store=self._store)
+        # With share_no_default_ttl=True, expires_at should be None
+        self.assertIsNone(d.get("expires_at"), "share_no_default_ttl=True should produce no expiry")
+        # Package remains accessible after reload
+        mgr2 = SharingManager(store=self._store, share_no_default_ttl=True)
         self.assertIsNotNone(mgr2.get_shared(pkg.share_id))
 
     def test_link_no_expiration_7d(self) -> None:
@@ -767,15 +767,18 @@ class Wave98RequiredTestCase(unittest.TestCase):
             self.assertIsNotNone(found, "Пакет должен быть доступен без TTL")
             self.assertEqual(found.share_id, pkg.share_id)
 
-    # test_revoke_share_link — нет метода revoke; тест документирует поведение
+    # test_revoke_share_link — W158 added revoke_share; test updated to reflect new API
     def test_revoke_share_link_not_supported(self) -> None:
-        """SharingManager не предоставляет revoke API — нет метода revoke_share."""
+        """W158: SharingManager now has revoke_share API for privacy gap fix."""
         self._store.add_fake_item("rev1", "текст для revoke")
-        self._mgr.prepare_share(["rev1"])
-        # Нет публичного API для отзыва ссылок
-        self.assertFalse(hasattr(self._mgr, "revoke_share"))
-        self.assertFalse(hasattr(self._mgr, "revoke_shared"))
-        self.assertFalse(hasattr(self._mgr, "delete_share"))
+        pkg = self._mgr.prepare_share(["rev1"])
+        # W158: revoke_share was added as part of TTL/privacy gap fix
+        self.assertTrue(hasattr(self._mgr, "revoke_share"), "revoke_share must exist after W158")
+        # Verify it works: package should be revoked and no longer accessible
+        revoked = self._mgr.revoke_share(pkg.share_id)
+        self.assertTrue(revoked, "revoke_share should return True on success")
+        found = self._mgr.get_shared(pkg.share_id)
+        self.assertIsNone(found, "Revoked package must not be accessible")
 
     # test_get_share_package_by_token
     def test_get_share_package_by_token(self) -> None:

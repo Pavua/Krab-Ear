@@ -26,6 +26,7 @@ try:
 
     _mock_store = MagicMock()
     _mock_store.load_vocabulary.return_value = []
+    _mock_store.load_settings.return_value = {}  # W1707: prevent truthy MagicMock from triggering privacy_mode guard (403)
 
     _mock_transcriber = MagicMock()
 

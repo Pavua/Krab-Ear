@@ -209,6 +209,7 @@ class TranscribeLangHintTest(unittest.TestCase):
         self.mock_store.load_vocabulary.return_value = []
         self.mock_store.is_idempotent.return_value = False
         self.mock_store.add_history_item.return_value = MagicMock(id="hist-lang-001")
+        self.mock_store.load_settings.return_value = {}  # W1707: prevent privacy_mode 403
 
         self.mock_transcriber = MagicMock()
         self.mock_transcriber.transcribe.return_value = {
@@ -302,6 +303,7 @@ class AllowedExtensionsTest(unittest.TestCase):
         self.mock_store.load_vocabulary.return_value = []
         self.mock_store.is_idempotent.return_value = False
         self.mock_store.add_history_item.return_value = MagicMock(id="hist-ext-001")
+        self.mock_store.load_settings.return_value = {}  # W1707: prevent truthy MagicMock → privacy_mode 403
 
         self.mock_transcriber = MagicMock()
         self.mock_transcriber.transcribe.return_value = {
@@ -342,7 +344,24 @@ class AllowedExtensionsTest(unittest.TestCase):
         self._p_metrics.stop()
 
     def _post_audio(self, filename):
-        data = {"file": (io.BytesIO(b"fake-audio-data"), filename)}
+        # W1224: _validate_audio_magic_bytes checks first 16 bytes.
+        # Use real magic bytes per extension so validation passes.
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        if ext in ("flac",):
+            magic = b"fLaC" + b"\x00" * 12
+        elif ext in ("ogg", "opus"):
+            magic = b"OggS" + b"\x00" * 12
+        elif ext in ("m4a", "mp4", "aac"):
+            magic = b"\x00\x00\x00\x18ftyp" + b"\x00" * 8  # ftyp at offset 4
+        elif ext in ("wav",):
+            magic = b"RIFF\x00\x00\x00\x00WAVE" + b"\x00" * 4
+        elif ext in ("mp3",):
+            magic = b"ID3" + b"\x00" * 13
+        elif ext in ("webm",):
+            magic = b"\x1A\x45\xDF\xA3" + b"\x00" * 12
+        else:
+            magic = b"fake-audio-data"
+        data = {"file": (io.BytesIO(magic), filename)}
         return self.client.post(
             "/v1/stt/transcribe",
             data=data,
@@ -425,6 +444,7 @@ class TranscribeValidQualityProfileTest(unittest.TestCase):
         self.mock_store.load_vocabulary.return_value = []
         self.mock_store.is_idempotent.return_value = False
         self.mock_store.add_history_item.return_value = MagicMock(id="hist-qp-001")
+        self.mock_store.load_settings.return_value = {}  # W1707: prevent privacy_mode 403
 
         self.mock_transcriber = MagicMock()
         self.mock_transcriber.transcribe.return_value = {

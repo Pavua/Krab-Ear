@@ -166,7 +166,7 @@ class TestSilenceRangesNoneDefault(unittest.TestCase):
         svc = _make_service(self._tmp)
         svc.handle_start_recording({})
         # RSF is disabled by default settings → no filter instance
-        self.assertIsNone(svc._realtime_silence_filter,
+        self.assertIsNone(svc._rsf,
                           "RSF should not be running when disabled")
         svc.handle_stop_recording({})
 
@@ -236,7 +236,7 @@ class TestSilenceRangesPassedToTranscribe(unittest.TestCase):
             svc.handle_start_recording({})
             svc.handle_stop_recording({})
 
-        self.assertIsNone(svc._realtime_silence_filter,
+        self.assertIsNone(svc._rsf,
                           "_realtime_silence_filter must be None after stop")
 
     def test_empty_silence_ranges_passed_as_none(self):

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import time as _time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from backend.observability import add_breadcrumb
@@ -222,7 +222,7 @@ class AnalyticsService:
         """
         active = self._store._load_active_items_with_lock()
 
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         today_iso = now.date().isoformat()
         week_start = (now - timedelta(days=now.weekday())).date().isoformat()
 

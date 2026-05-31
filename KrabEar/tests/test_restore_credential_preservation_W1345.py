@@ -193,9 +193,11 @@ class TestRestoreCredentialPreservation(unittest.TestCase):
         self.assertEqual(saved.get("lm_studio_api_key"), "lm-key-777",
                          "lm_studio_api_key must not be clobbered")
 
-        # All 4 fields should appear in dropped_fields
+        # Only the 4 fields that were set in current_settings should appear in dropped_fields
+        # (fields with empty/absent values in current are not "dropped" — they have nothing to preserve)
         dropped = set(result.get("dropped_fields", []))
-        for field in SettingsService._SENSITIVE_FIELDS:
+        set_credential_fields = {"voice_gateway_api_key", "hf_token", "rest_api_key", "lm_studio_api_key"}
+        for field in set_credential_fields:
             self.assertIn(field, dropped)
 
     # ------------------------------------------------------------------

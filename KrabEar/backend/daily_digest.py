@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 import logging
@@ -118,7 +118,7 @@ class DailyDigestGenerator:
         """
         # Определяем целевую дату
         if date_str is None:
-            date_str = date.today().isoformat()
+            date_str = datetime.now(timezone.utc).date().isoformat()  # UTC to match stored UTC timestamps
 
         # Валидация формата
         try:

@@ -119,9 +119,12 @@ class AudioEngineLLMHookTestCase(unittest.TestCase):
         fake_rewriter.rewrite.return_value = LLMRewriteResult(
             ok=True, text="FINAL", fallback_reason=None, latency_ms=100
         )
+        # llm_rewrite_enabled=True, privacy_mode_enabled=False, all others use default
+        # (W1229 F3: privacy_mode=True would block LLM even if toggle is on)
+        _settings_map = {"llm_rewrite_enabled": True, "privacy_mode_enabled": False}
         engine = self._make_engine_with_rewriter(
             fake_rewriter,
-            lambda k, d: True if isinstance(d, bool) else d,
+            lambda k, d: _settings_map.get(k, d),
         )
 
         result = engine.transcribe(audio_data="fake.wav")

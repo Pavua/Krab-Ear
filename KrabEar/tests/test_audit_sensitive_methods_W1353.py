@@ -42,7 +42,8 @@ class TestSensitiveMethodRedactsParams(unittest.TestCase):
         return entries
 
     def test_sensitive_method_redacts_params(self):
-        """A sensitive method call produces redacted=True with param_count, no params_keys."""
+        """W1696: sensitive method → params_keys=[] (not redacted=True/param_count).
+        Values must not appear in the audit log."""
         self.al.log_request(
             "set_settings",
             {"voice_gateway_api_key": "sk-secret", "hf_token": "hf-abc123"},
@@ -52,16 +53,14 @@ class TestSensitiveMethodRedactsParams(unittest.TestCase):
         entries = self._read_entries()
         self.assertEqual(len(entries), 1)
         entry = entries[0]
-        self.assertTrue(entry.get("redacted"), "set_settings должен быть redacted")
-        self.assertEqual(entry.get("param_count"), 2)
-        self.assertNotIn("params_keys", entry)
+        self.assertEqual(entry.get("params_keys"), [], "set_settings должен иметь params_keys=[]")
         # No secret values in any value
         entry_str = json.dumps(entry)
         self.assertNotIn("sk-secret", entry_str)
         self.assertNotIn("hf-abc123", entry_str)
 
     def test_sensitive_method_translate_text_redacts_text(self):
-        """translate_text (carries full transcript text) must be redacted."""
+        """W1696: translate_text → params_keys=[] (text not logged)."""
         self.al.log_request(
             "translate_text",
             {"text": "personal medical info", "source_lang": "ru", "target_lang": "es"},
@@ -70,12 +69,11 @@ class TestSensitiveMethodRedactsParams(unittest.TestCase):
         )
         entries = self._read_entries()
         entry = entries[0]
-        self.assertTrue(entry.get("redacted"))
-        self.assertEqual(entry.get("param_count"), 3)
+        self.assertEqual(entry.get("params_keys"), [])
         self.assertNotIn("personal medical info", json.dumps(entry))
 
     def test_sensitive_method_send_imessage_redacts_recipient(self):
-        """send_imessage (PII: phone + message text) must be redacted."""
+        """W1696: send_imessage → params_keys=[] (PII not logged)."""
         self.al.log_request(
             "send_imessage",
             {"recipient": "+1234567890", "text": "hello friend"},
@@ -84,11 +82,11 @@ class TestSensitiveMethodRedactsParams(unittest.TestCase):
         )
         entries = self._read_entries()
         entry = entries[0]
-        self.assertTrue(entry.get("redacted"))
+        self.assertEqual(entry.get("params_keys"), [])
         self.assertNotIn("+1234567890", json.dumps(entry))
 
     def test_sensitive_method_transcribe_paths_redacts_paths(self):
-        """transcribe_paths (file paths) must be redacted."""
+        """W1696: transcribe_paths → params_keys=[] (file paths not logged)."""
         self.al.log_request(
             "transcribe_paths",
             {"paths": ["/Users/bob/private/audio.m4a"], "language": "ru"},
@@ -97,11 +95,11 @@ class TestSensitiveMethodRedactsParams(unittest.TestCase):
         )
         entries = self._read_entries()
         entry = entries[0]
-        self.assertTrue(entry.get("redacted"))
+        self.assertEqual(entry.get("params_keys"), [])
         self.assertNotIn("/Users/bob", json.dumps(entry))
 
     def test_sensitive_method_create_calendar_event_redacts_notes(self):
-        """create_calendar_event (personal data: title, notes) must be redacted."""
+        """W1696: create_calendar_event → params_keys=[] (personal data not logged)."""
         self.al.log_request(
             "create_calendar_event",
             {"title": "Doctor appointment", "notes": "confidential", "start_time": "2026-06-01T10:00:00"},
@@ -110,11 +108,11 @@ class TestSensitiveMethodRedactsParams(unittest.TestCase):
         )
         entries = self._read_entries()
         entry = entries[0]
-        self.assertTrue(entry.get("redacted"))
+        self.assertEqual(entry.get("params_keys"), [])
         self.assertNotIn("Doctor appointment", json.dumps(entry))
 
     def test_sensitive_method_live_subs_ingest_redacts_audio(self):
-        """live_subs_ingest (base64 PCM audio chunks) must be redacted."""
+        """W1696: live_subs_ingest → params_keys=[] (audio data not logged)."""
         self.al.log_request(
             "live_subs_ingest",
             {"audio_b64": "AAAA" * 1000, "is_final": False},
@@ -123,11 +121,10 @@ class TestSensitiveMethodRedactsParams(unittest.TestCase):
         )
         entries = self._read_entries()
         entry = entries[0]
-        self.assertTrue(entry.get("redacted"))
-        self.assertEqual(entry.get("param_count"), 2)
+        self.assertEqual(entry.get("params_keys"), [])
 
     def test_sensitive_method_import_settings_redacts_file_path(self):
-        """import_settings carries a file path that may hold secrets."""
+        """W1696: import_settings → params_keys=[] (file path not logged)."""
         self.al.log_request(
             "import_settings",
             {"file": "/home/user/settings_with_api_keys.json"},
@@ -136,10 +133,10 @@ class TestSensitiveMethodRedactsParams(unittest.TestCase):
         )
         entries = self._read_entries()
         entry = entries[0]
-        self.assertTrue(entry.get("redacted"))
+        self.assertEqual(entry.get("params_keys"), [])
 
     def test_sensitive_method_register_webhook_redacts_url(self):
-        """register_webhook URL may contain token in query string."""
+        """W1696: register_webhook → params_keys=[] (URL token not logged)."""
         self.al.log_request(
             "register_webhook",
             {"url": "https://hooks.example.com/api?token=mysecret", "event": "transcription.done"},
@@ -148,11 +145,11 @@ class TestSensitiveMethodRedactsParams(unittest.TestCase):
         )
         entries = self._read_entries()
         entry = entries[0]
-        self.assertTrue(entry.get("redacted"))
+        self.assertEqual(entry.get("params_keys"), [])
         self.assertNotIn("mysecret", json.dumps(entry))
 
     def test_sensitive_method_call_session_create_redacts_phone(self):
-        """call_session_create contains phone number (PII)."""
+        """W1696: call_session_create → params_keys=[] (phone PII not logged)."""
         self.al.log_request(
             "call_session_create",
             {"phone_number": "+79999999999", "provider": "telnyx"},
@@ -161,11 +158,11 @@ class TestSensitiveMethodRedactsParams(unittest.TestCase):
         )
         entries = self._read_entries()
         entry = entries[0]
-        self.assertTrue(entry.get("redacted"))
+        self.assertEqual(entry.get("params_keys"), [])
         self.assertNotIn("+79999999999", json.dumps(entry))
 
     def test_param_count_zero_when_empty_params(self):
-        """Sensitive method with empty params: param_count=0."""
+        """W1696: sensitive method with empty params → params_keys=[]."""
         self.al.log_request(
             "semantic_search",
             {},
@@ -174,11 +171,10 @@ class TestSensitiveMethodRedactsParams(unittest.TestCase):
         )
         entries = self._read_entries()
         entry = entries[0]
-        self.assertTrue(entry.get("redacted"))
-        self.assertEqual(entry.get("param_count"), 0)
+        self.assertEqual(entry.get("params_keys"), [])
 
     def test_all_sensitive_methods_produce_redacted_true(self):
-        """Every method in _SENSITIVE_METHODS produces redacted=True in the log."""
+        """W1696: every method in _SENSITIVE_METHODS produces params_keys=[] in the log."""
         for method in _SENSITIVE_METHODS:
             with self.subTest(method=method):
                 tmpdir2 = tempfile.mkdtemp()
@@ -193,11 +189,11 @@ class TestSensitiveMethodRedactsParams(unittest.TestCase):
                 files = sorted(Path(tmpdir2).glob("audit_*.ndjson"))
                 self.assertTrue(files, f"No audit file created for method {method}")
                 entry = json.loads(files[0].read_text().strip().splitlines()[0])
-                self.assertTrue(
-                    entry.get("redacted"),
-                    f"method '{method}' should be redacted but got: {entry}",
+                self.assertEqual(
+                    entry.get("params_keys"),
+                    [],
+                    f"method '{method}' должен иметь params_keys=[] но: {entry}",
                 )
-                self.assertNotIn("params_keys", entry, f"method '{method}' leaked params_keys")
 
 
 class TestNonSensitiveMethodLogsParamsNormally(unittest.TestCase):

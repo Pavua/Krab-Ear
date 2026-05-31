@@ -888,7 +888,9 @@ class StateStore:
         with self._lock():
             active = self._load_active_items_unlocked()
 
-        now_naive = datetime.now()
+        # Use UTC for today_iso so it matches item.ts (stored as UTC ISO).
+        # Keep as naive (remove tzinfo) so comparison with _parse_ts_to_naive_utc results works.
+        now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
         today_iso = now_naive.date().isoformat()
         last_24h_threshold = now_naive - timedelta(hours=24)
 
@@ -1013,14 +1015,26 @@ class StateStore:
             for item in active:
                 fh.write(json.dumps(item.to_dict(), ensure_ascii=False) + "\n")
             fh.flush()
+            # W853 fix 1: fsync before the atomic rename so the data is
+            # guaranteed to be on disk if a crash occurs during replace().
+            os.fsync(fh.fileno())
 
         tmp_history.replace(self.history_path)
-        self.tombstones_path.write_text("", encoding="utf-8")
-        self.status_path.write_text("", encoding="utf-8")
-        self.tags_path.write_text("", encoding="utf-8")
-        self.favorites_path.write_text("", encoding="utf-8")
-        self.text_updates_path.write_text("", encoding="utf-8")
-        self.action_items_path.write_text("", encoding="utf-8")
+
+        # W853 fix 2: truncate each delta journal atomically via tmp-file +
+        # fsync + rename.  A plain write_text("") is not atomic — a crash
+        # between two truncations leaves some journals cleared and others
+        # intact, producing orphaned overrides on the next load.
+        for journal_path in [
+            self.tombstones_path, self.status_path, self.tags_path,
+            self.favorites_path, self.text_updates_path, self.action_items_path,
+        ]:
+            _tmp = journal_path.with_suffix(".tmp")
+            _tmp.write_text("", encoding="utf-8")
+            with _tmp.open("r+", encoding="utf-8") as _fh:
+                _fh.flush()
+                os.fsync(_fh.fileno())
+            _tmp.replace(journal_path)
 
         # Вызываем хук постобработки, если он подключён (напр. TranscriptVersionManager).
         on_compact = getattr(self, "_on_compact_hook", None)

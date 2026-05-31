@@ -402,9 +402,11 @@ class LLMRewriteToggleTests(unittest.TestCase):
 
     def test_rewriter_present_and_toggle_on_returns_true(self):
         mock_rewriter = MagicMock()
+        # privacy_mode_enabled must be False, llm_rewrite_enabled must be True
+        # (W1229 F3: privacy_mode=True blocks LLM rewrite even if toggle is on)
         engine = _make_engine(
             llm_rewriter=mock_rewriter,
-            settings_get=lambda k, d: True,  # toggle включён
+            settings_get=lambda k, d: {"llm_rewrite_enabled": True, "privacy_mode_enabled": False}.get(k, d),
         )
         self.assertTrue(engine._llm_rewrite_allowed())
 
@@ -414,7 +416,8 @@ class LLMRewriteToggleTests(unittest.TestCase):
 
         def capturing_settings_get(key, default):
             received_keys.append(key)
-            return True
+            # privacy_mode_enabled=False, llm_rewrite_enabled=True so all checks pass
+            return {"llm_rewrite_enabled": True, "privacy_mode_enabled": False}.get(key, default)
 
         mock_rewriter = MagicMock()
         engine = _make_engine(

@@ -368,7 +368,7 @@ class TestTranslateSelectionGlossaryApplied(unittest.TestCase):
         svc.handle_translate_selection({"text": "Конфиденциально", "source_lang": "ru"})
 
         _, kwargs = translator.translate.call_args
-        self.assertEqual(kwargs["network_mode"], "offline_only")
+        self.assertEqual(kwargs["network_mode"], "offline_strict")  # W1175: privacy_mode uses offline_strict
 
 
 if __name__ == "__main__":

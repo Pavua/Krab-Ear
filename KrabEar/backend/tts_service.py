@@ -213,9 +213,20 @@ class TTSService:
             import numpy as np
             raw_voice = voice or settings.TTS_SILERO_VOICE
             if raw_voice not in _SILERO_VALID_VOICES:
+                logger.warning(
+                    "Silero: неизвестный голос %r, использую 'xenia'. Допустимые: %s",
+                    raw_voice,
+                    sorted(_SILERO_VALID_VOICES),
+                )
                 raw_voice = "xenia"
             speaker = raw_voice
+            # W1215 F3: cap text length to avoid OOM / hangs on very long inputs
             if len(text) > _SILERO_MAX_TEXT_LEN:
+                logger.warning(
+                    "Silero: текст обрезан с %d до %d символов (лимит W1215 F3)",
+                    len(text),
+                    _SILERO_MAX_TEXT_LEN,
+                )
                 text = text[:_SILERO_MAX_TEXT_LEN]
             audio_tensor = apply_tts(
                 texts=[text],

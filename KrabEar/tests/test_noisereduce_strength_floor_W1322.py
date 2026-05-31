@@ -77,12 +77,10 @@ class TestNoisereduceStrengthFloor(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_noisereduce_strong_uses_prop_decrease_0_75(self) -> None:
-        """strength='strong' передаёт prop_decrease=0.75 в nr.reduce_noise().
+        """W1550: strong передаёт prop_decrease=0.95 с min_attenuation_db=-12.0 floor.
 
-        До W1322: _STRENGTH_PARAMS["strong"]["prop_decrease"] = 0.95 применялся
-        к noisereduce — 95% атtenuation, нет speech-band floor.
-        После W1322: _NOISEREDUCE_PARAMS["strong"]["prop_decrease"] = 0.75 —
-        минимум 25% оригинального речевого сигнала сохраняется.
+        W1322 originally used 0.75; W1550 restored to 0.95 with explicit floor parameter
+        (min_attenuation_db=-12.0) instead of reduced prop_decrease.
         """
         audio = _make_audio(duration_sec=1.0)
         kwargs = self._call_denoise_with_mock_nr("strong", audio)
@@ -90,8 +88,8 @@ class TestNoisereduceStrengthFloor(unittest.TestCase):
         self.assertIn("prop_decrease", kwargs,
                       "nr.reduce_noise должен получить prop_decrease")
         self.assertAlmostEqual(
-            kwargs["prop_decrease"], 0.75, places=6,
-            msg="strong mode: prop_decrease должен быть 0.75 (speech-band floor W1311 F3)"
+            kwargs["prop_decrease"], 0.95, places=6,
+            msg="strong mode: prop_decrease должен быть 0.95 (W1550: floor via min_attenuation_db)"
         )
 
     # ------------------------------------------------------------------
@@ -99,9 +97,9 @@ class TestNoisereduceStrengthFloor(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_noisereduce_moderate_uses_prop_decrease_0_85(self) -> None:
-        """strength='moderate' передаёт prop_decrease=0.85 в nr.reduce_noise().
+        """W1550: moderate передаёт prop_decrease=0.75.
 
-        moderate оставляет минимум 15% оригинального речевого сигнала.
+        W1322 originally used 0.85; W1550 restored to 0.75.
         """
         audio = _make_audio(duration_sec=1.0)
         kwargs = self._call_denoise_with_mock_nr("moderate", audio)
@@ -109,8 +107,8 @@ class TestNoisereduceStrengthFloor(unittest.TestCase):
         self.assertIn("prop_decrease", kwargs,
                       "nr.reduce_noise должен получить prop_decrease")
         self.assertAlmostEqual(
-            kwargs["prop_decrease"], 0.85, places=6,
-            msg="moderate mode: prop_decrease должен быть 0.85 (speech-band floor W1311 F3)"
+            kwargs["prop_decrease"], 0.75, places=6,
+            msg="moderate mode: prop_decrease должен быть 0.75 (W1550)"
         )
 
     # ------------------------------------------------------------------
@@ -137,29 +135,37 @@ class TestNoisereduceStrengthFloor(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_noisereduce_strong_no_longer_uses_0_95(self) -> None:
-        """Регрессионный тест: strong mode НЕ должен использовать prop_decrease=0.95.
+        """W1550: strong mode USES prop_decrease=0.95 WITH min_attenuation_db=-12.0 floor.
 
-        До W1322 noisereduce получал prop_decrease=0.95 из _STRENGTH_PARAMS,
-        что применяло неограниченное 95% подавление без speech-band floor.
+        W1322 changed from 0.95 to 0.75 (no floor). W1550 restored 0.95 with explicit
+        floor parameter (min_attenuation_db=-12.0).
         """
         audio = _make_audio(duration_sec=1.0)
         kwargs = self._call_denoise_with_mock_nr("strong", audio)
 
         prop_decrease = kwargs.get("prop_decrease", None)
         self.assertIsNotNone(prop_decrease)
-        self.assertNotAlmostEqual(
+        # W1550: 0.95 is now CORRECT (floor enforced via min_attenuation_db=-12.0)
+        self.assertAlmostEqual(
             prop_decrease, 0.95, places=6,
-            msg="strong mode НЕ должен использовать 0.95 (нет speech-band floor)"
+            msg="strong mode uses 0.95 with min_attenuation_db=-12.0 floor (W1550)"
         )
+        # Verify the floor parameter is present
+        self.assertIn("min_attenuation_db", kwargs,
+                      "strong mode must pass min_attenuation_db=-12.0 floor (W1550)")
 
     # ------------------------------------------------------------------
     # test_noisereduce_params_table_values
     # ------------------------------------------------------------------
 
     def test_noisereduce_params_table_has_correct_values(self) -> None:
-        """_NOISEREDUCE_PARAMS содержит корректные значения speech-band floor."""
-        self.assertAlmostEqual(_NOISEREDUCE_PARAMS["strong"]["prop_decrease"], 0.75)
-        self.assertAlmostEqual(_NOISEREDUCE_PARAMS["moderate"]["prop_decrease"], 0.85)
+        """W1550: _NOISEREDUCE_PARAMS values restored from W1538 regression.
+
+        W1322 originally set strong=0.75, moderate=0.85.
+        W1550 restored: strong=0.95 (with min_attenuation_db=-12.0), moderate=0.75, light=0.50.
+        """
+        self.assertAlmostEqual(_NOISEREDUCE_PARAMS["strong"]["prop_decrease"], 0.95)
+        self.assertAlmostEqual(_NOISEREDUCE_PARAMS["moderate"]["prop_decrease"], 0.75)
         self.assertAlmostEqual(_NOISEREDUCE_PARAMS["light"]["prop_decrease"], 0.50)
 
     # ------------------------------------------------------------------
@@ -185,15 +191,22 @@ class TestNoisereduceStrengthFloor(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_noisereduce_passes_stationary_true_for_all_strengths(self) -> None:
-        """nr.reduce_noise всегда вызывается с stationary=True."""
+        """W1550: stationary=True for light/moderate, stationary=False for strong."""
         audio = _make_audio(duration_sec=1.0)
-        for strength in ("light", "moderate", "strong"):
+        for strength in ("light", "moderate"):
             with self.subTest(strength=strength):
                 kwargs = self._call_denoise_with_mock_nr(strength, audio)
                 self.assertTrue(
                     kwargs.get("stationary"),
-                    f"stationary=True должен передаваться для strength={strength!r}"
+                    f"stationary=True для {strength!r} (W1550)"
                 )
+        # strong uses stationary=False (non-stationary noise)
+        with self.subTest(strength="strong"):
+            kwargs = self._call_denoise_with_mock_nr("strong", audio)
+            self.assertFalse(
+                kwargs.get("stationary", True),
+                "stationary=False для strong (W1550: non-stationary noise)"
+            )
 
 
 class TestNoisereduceStrengthFloorDirect(unittest.TestCase):
@@ -204,10 +217,17 @@ class TestNoisereduceStrengthFloorDirect(unittest.TestCase):
         self.audio[:3200] = 0.1  # имитация noise floor
 
     def _call_static(self, strength: str) -> dict[str, Any]:
-        """Вызывает _denoise_noisereduce напрямую через patch."""
-        from core.audio_denoiser import _NOISEREDUCE_PARAMS
+        """Вызывает _denoise_noisereduce напрямую через patch.
 
-        params = _NOISEREDUCE_PARAMS.get(strength, _NOISEREDUCE_PARAMS["moderate"])
+        W1550: passes _NOISEREDUCE_PARAMS as nr_params (not params) to use the
+        W1550 branch (params dict path uses n_std_thresh_stationary key which
+        W1550 params don't have).
+        """
+        from core.audio_denoiser import _NOISEREDUCE_PARAMS, _STRENGTH_PARAMS
+
+        nr_params = _NOISEREDUCE_PARAMS.get(strength, _NOISEREDUCE_PARAMS["moderate"])
+        # spectral gating params (not used in noisereduce path, but required as positional arg)
+        sg_params = _STRENGTH_PARAMS.get(strength, _STRENGTH_PARAMS["moderate"])
         captured: dict[str, Any] = {}
 
         def fake_reduce_noise(**kwargs: Any) -> np.ndarray:
@@ -218,19 +238,19 @@ class TestNoisereduceStrengthFloorDirect(unittest.TestCase):
         fake_nr.reduce_noise = fake_reduce_noise
 
         with patch.dict("sys.modules", {"noisereduce": fake_nr}):
-            AudioDenoiser._denoise_noisereduce(self.audio, _SR, params)
+            AudioDenoiser._denoise_noisereduce(self.audio, _SR, sg_params, nr_params=nr_params)
 
         return captured
 
     def test_direct_strong_prop_decrease(self) -> None:
-        """_denoise_noisereduce прямой вызов — strong → prop_decrease=0.75."""
+        """W1550: strong → prop_decrease=0.95 (floor via min_attenuation_db)."""
         kwargs = self._call_static("strong")
-        self.assertAlmostEqual(kwargs["prop_decrease"], 0.75, places=6)
+        self.assertAlmostEqual(kwargs["prop_decrease"], 0.95, places=6)
 
     def test_direct_moderate_prop_decrease(self) -> None:
-        """_denoise_noisereduce прямой вызов — moderate → prop_decrease=0.85."""
+        """W1550: moderate → prop_decrease=0.75."""
         kwargs = self._call_static("moderate")
-        self.assertAlmostEqual(kwargs["prop_decrease"], 0.85, places=6)
+        self.assertAlmostEqual(kwargs["prop_decrease"], 0.75, places=6)
 
     def test_direct_light_prop_decrease(self) -> None:
         """_denoise_noisereduce прямой вызов — light → prop_decrease=0.50."""

@@ -38,7 +38,7 @@ def _make_item(
     translation_status: str = "not_requested",
     llm_applied: bool = False,
 ):
-    base_date = date.today() - timedelta(days=days_ago)
+    base_date = datetime.now(timezone.utc).date() - timedelta(days=days_ago)  # W1707: UTC to match dashboard
     dt = datetime.combine(base_date, datetime.min.time(), tzinfo=timezone.utc)
     dt = dt.replace(hour=hour, minute=0, second=0, microsecond=0)
 

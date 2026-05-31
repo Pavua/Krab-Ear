@@ -74,10 +74,23 @@ class GetCancelEventAPITestCase(unittest.TestCase):
         self.assertTrue(state["cancel_requested"])
 
     def test_prune_removes_cancel_event(self) -> None:
-        """prune() clears cancel_events to avoid memory leak."""
+        """prune() clears cancel_events to avoid memory leak.
+
+        W1185 added a 2-second grace period (TTL) so cancel events aren't removed
+        immediately — workers holding a reference can still see the cancellation.
+        After the grace period, a second prune() call removes stale cancel events.
+        We simulate the grace period expiry by back-dating the evict_time.
+        """
         jid = self.tracker.create_job(1)
         self.tracker.mark_done(jid, items=[], errors=[])
-        # Force prune with 0 age threshold so the done job gets pruned immediately.
+        # First prune: evicts the job, records evict_time = now
+        self.tracker.prune(max_age_sec=0)
+        # Simulate grace-period expiry by back-dating evict_time past the TTL
+        import backend.job_tracker as _jt_mod
+        with self.tracker._lock:
+            if jid in self.tracker._evict_times:
+                self.tracker._evict_times[jid] = 0.0  # epoch = always expired
+        # Second prune: grace period has expired, cancel event should be removed
         self.tracker.prune(max_age_sec=0)
         result = self.tracker.get_cancel_event(jid)
         self.assertIsNone(result, "prune() must remove cancel event to avoid memory leak")

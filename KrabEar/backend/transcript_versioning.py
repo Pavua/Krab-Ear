@@ -135,9 +135,12 @@ class TranscriptVersionManager:
         source = str(source).strip()
         if source not in VALID_SOURCES:
             raise ValueError(f"Недопустимый source {source!r}. Допустимые: {sorted(VALID_SOURCES)}")
-        # W1410 F1: truncate instead of raise
-        if len(text.encode("utf-8")) > _MAX_TEXT_BYTES:
-            text = text.encode("utf-8")[:_MAX_TEXT_BYTES - 11].decode("utf-8", errors="ignore") + "[TRUNCATED]"
+        # W1563: raise ValueError for oversized text (restored from W1423 truncation approach)
+        _text_bytes = len(text.encode("utf-8"))
+        if _text_bytes > _MAX_TEXT_BYTES:
+            raise ValueError(
+                f"version text {_text_bytes} bytes exceeds _MAX_TEXT_BYTES={_MAX_TEXT_BYTES}"
+            )
 
         with self._lock:
             all_records = self._read_all()

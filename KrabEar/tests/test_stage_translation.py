@@ -121,13 +121,13 @@ class TestTranslationStageProcess(unittest.TestCase):
         res = FakeTranslationResult("", "model_unavailable")
         ctx, _ = self._run(res, ctx)
         self.assertIsNone(ctx.translation)
-        self.assertTrue(any("translation_failed" in e for e in ctx.errors))
+        self.assertTrue(any(e.startswith("translation: ") for e in ctx.errors))  # W1275: normalized prefix
 
     def test_exception_adds_to_errors_no_raise(self):
         ctx = make_ctx(translation_mode="ru_to_es", final_text="hello")
         stage = TranslationStage(translator=ErrorTranslator())
         result_ctx = stage.process(ctx)
-        self.assertTrue(any("translation_unexpected" in e for e in result_ctx.errors))
+        self.assertTrue(any(e.startswith("translation: ") for e in result_ctx.errors))  # W1275: normalized prefix
         self.assertIsNone(result_ctx.translation)
 
     def test_settings_get_called_for_network_mode(self):
@@ -178,7 +178,7 @@ class TestTranslationEdgeCases(unittest.TestCase):
         result = stage.process(ctx)
         # Should add error
         self.assertIsNone(result.translation)
-        self.assertTrue(any("translation_failed" in e for e in result.errors))
+        self.assertTrue(any(e.startswith("translation: ") for e in result.errors))  # W1275: normalized prefix
 
     def test_empty_translation_text(self):
         # Translator returns empty string

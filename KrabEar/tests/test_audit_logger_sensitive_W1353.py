@@ -110,13 +110,16 @@ class TestRegisterWebhookRedactsParams(unittest.TestCase):
                          "register_webhook не должен логировать ключи params (secret!)")
 
     def test_set_webhook_secret_in_sensitive_set(self):
-        """set_webhook_secret находится в _SENSITIVE_METHODS."""
-        self.assertIn("set_webhook_secret", _SENSITIVE_METHODS)
+        """W1696: set_webhook_secret was removed from _SENSITIVE_METHODS (IPC method never wired).
+        register_webhook is still sensitive and covers the URL with potential tokens."""
+        # set_webhook_secret was removed in W1696 (never wired into dispatch table)
+        # Verify the replacement (register_webhook) is still sensitive
+        self.assertIn("register_webhook", _SENSITIVE_METHODS)
 
     def test_set_webhook_secret_redacts_params(self):
-        """set_webhook_secret не логирует secret."""
+        """W1696: use register_webhook (set_webhook_secret not in _SENSITIVE_METHODS)."""
         self.logger.log_request(
-            "set_webhook_secret",
+            "register_webhook",
             {"webhook_id": "wh_abc", "secret": "new_secret_value"},
             {"ok": True, "result": {}},
             1.0,
@@ -155,22 +158,33 @@ class TestGlossaryItemRedactsParams(unittest.TestCase):
 
 
 class TestAdditionalSensitiveMethods(unittest.TestCase):
-    """Дополнительные credential-методы из расширенного списка (W1351 F2)."""
+    """Дополнительные credential-методы из расширенного списка (W1351 F2).
+
+    W1696: set_rest_auth_token, enable_rest_auth, disable_rest_auth,
+    set_signing_secret, configure_request_signing were removed from _SENSITIVE_METHODS
+    because these IPC methods were never wired into the dispatch table (Wave 65 cleanup).
+    Tests updated to check for the remaining sensitive methods.
+    """
 
     def test_set_rest_auth_token_in_sensitive_set(self):
-        self.assertIn("set_rest_auth_token", _SENSITIVE_METHODS)
+        # W1696: set_rest_auth_token removed (IPC method never wired); check set_settings instead
+        self.assertIn("set_settings", _SENSITIVE_METHODS)
 
     def test_enable_rest_auth_in_sensitive_set(self):
-        self.assertIn("enable_rest_auth", _SENSITIVE_METHODS)
+        # W1696: enable_rest_auth removed; check restore_settings_backup instead
+        self.assertIn("restore_settings_backup", _SENSITIVE_METHODS)
 
     def test_disable_rest_auth_in_sensitive_set(self):
-        self.assertIn("disable_rest_auth", _SENSITIVE_METHODS)
+        # W1696: disable_rest_auth removed; check import_settings instead
+        self.assertIn("import_settings", _SENSITIVE_METHODS)
 
     def test_set_signing_secret_in_sensitive_set(self):
-        self.assertIn("set_signing_secret", _SENSITIVE_METHODS)
+        # W1696: set_signing_secret removed; check register_webhook instead
+        self.assertIn("register_webhook", _SENSITIVE_METHODS)
 
     def test_configure_request_signing_in_sensitive_set(self):
-        self.assertIn("configure_request_signing", _SENSITIVE_METHODS)
+        # W1696: configure_request_signing removed; check set_settings instead
+        self.assertIn("set_settings", _SENSITIVE_METHODS)
 
     def test_set_notification_preferences_still_in_sensitive_set(self):
         """Проверяем, что ранее существующие методы не были удалены."""

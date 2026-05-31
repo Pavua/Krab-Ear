@@ -51,7 +51,7 @@ class TestAuditLoggerBasic(unittest.TestCase):
         self.assertFalse(entry["success"])
 
     def test_sensitive_methods_no_params(self):
-        """Для чувствительных методов params redact-ятся (redacted=True, param_count=N)."""
+        """Для чувствительных методов params_keys пуст (W1696: params_keys=[] not redacted=True)."""
         for method in _SENSITIVE_METHODS:
             self.logger.log_request(method, {"password": "secret", "key": "val"}, {"ok": True, "result": {}}, 1.0)
         files = list(Path(self.tmpdir).glob("audit_*.ndjson"))
@@ -59,9 +59,11 @@ class TestAuditLoggerBasic(unittest.TestCase):
             for line in f:
                 entry = json.loads(line)
                 if entry["method"] in _SENSITIVE_METHODS:
-                    self.assertTrue(entry.get("redacted"), f"method={entry['method']} не redacted")
-                    self.assertEqual(entry.get("param_count"), 2)
-                    self.assertNotIn("params_keys", entry)
+                    # W1696: sensitive methods emit params_keys=[] to suppress param-name leakage
+                    # (changed from redacted=True, param_count=N to params_keys=[])
+                    self.assertIn("params_keys", entry, f"method={entry['method']} должен иметь params_keys")
+                    self.assertEqual(entry.get("params_keys"), [], f"method={entry['method']} params_keys должен быть пустым")
+                    self.assertNotIn("redacted", entry, f"method={entry['method']} не должен иметь redacted поле (W1696)")
 
     def test_get_audit_log_returns_entries(self):
         """get_audit_log возвращает все записанные записи."""

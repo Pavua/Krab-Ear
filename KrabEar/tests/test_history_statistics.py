@@ -259,7 +259,8 @@ class TestHistoryStatisticsDateRange(unittest.TestCase):
         from datetime import date
         _add_item(self.svc, text="сегодняшняя запись")
         result = self.svc.handle_get_history_statistics({})
-        today_str = date.today().isoformat()
+        from datetime import datetime, timezone  # noqa: E402
+        today_str = datetime.now(timezone.utc).date().isoformat()  # UTC matches stored UTC timestamps
         # Запись добавлена сегодня, должна попасть в daily_counts
         self.assertIn(today_str, result["daily_counts"])
         self.assertGreaterEqual(result["daily_counts"][today_str], 1)

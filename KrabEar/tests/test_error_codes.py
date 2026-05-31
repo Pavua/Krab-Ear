@@ -139,23 +139,31 @@ class ErrorRegistryShapeTests(unittest.TestCase):
         self.assertTrue(entry["user_msg_ru"])
 
     def test_proc_cmdline_permission_in_registry(self):
-        """system.proc_cmdline_permission must be present as a non-actionable warn."""
+        """system.proc_cmdline_permission must be present as a non-actionable error.
+
+        W1697: restored severity=error (Sequoia KERN_PROCARGS2 blocks psutil.process_iter)
+        and Sequoia-specific user_msg_ru. Previous value was 'warn'; restored to 'error'.
+        """
         self.assertIn("system.proc_cmdline_permission", ERROR_REGISTRY)
         entry = ERROR_REGISTRY["system.proc_cmdline_permission"]
-        self.assertEqual(entry["severity"], "warn")
+        self.assertEqual(entry["severity"], "error")
         self.assertFalse(entry["actionable"])
         self.assertIsNone(entry["action_id"])
         self.assertEqual(entry["dedupe_seconds"], 3600)
         self.assertTrue(entry["user_msg_ru"])
 
     def test_stt_model_cache_miss_in_registry(self):
-        """startup.stt_model_cache_miss must be present as a non-actionable warn."""
+        """startup.stt_model_cache_miss must be present as a non-actionable warn.
+
+        W1697: restored dedupe_seconds=86400 (one toast per startup day, not per hour).
+        Previous value was 3600; restored to 86400.
+        """
         self.assertIn("startup.stt_model_cache_miss", ERROR_REGISTRY)
         entry = ERROR_REGISTRY["startup.stt_model_cache_miss"]
         self.assertEqual(entry["severity"], "warn")
         self.assertFalse(entry["actionable"])
         self.assertIsNone(entry["action_id"])
-        self.assertEqual(entry["dedupe_seconds"], 3600)
+        self.assertEqual(entry["dedupe_seconds"], 86400)
         self.assertTrue(entry["user_msg_ru"])
 
     def test_rewriter_mlx_token_bug_in_registry(self):

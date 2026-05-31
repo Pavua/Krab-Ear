@@ -55,6 +55,10 @@ try:
     _mock_engine = MagicMock()
     _mock_engine.quality_profile = "balanced"
     _mock_engine.normalize_audio = MagicMock()
+    # MagicMock responds True to any hasattr; explicitly remove _unavailable_models
+    # so TestNoModuleLevelAudioEngineLoad.test_no_module_level_audio_engine_load
+    # can verify this is a stub and not a real AudioEngine (which always sets it).
+    del _mock_engine._unavailable_models
 
     _mock_store = MagicMock()
     _mock_store.load_vocabulary.return_value = []

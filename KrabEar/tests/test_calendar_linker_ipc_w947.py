@@ -165,24 +165,37 @@ class TestCalendarLinkerDispatch(unittest.TestCase):
         )
 
     def test_deleted_wave65_handlers_not_reintroduced(self):
-        """Regression: Wave 65 batch 3 deleted these — they must NOT reappear."""
+        """W1030: canonical names restored; _v2 variants must NOT exist.
+
+        W947 introduced _v2 names; W1030 renamed back to canonical
+        _handle_get_calendar_link / _handle_search_by_calendar_event.
+        This test confirms the canonical names exist (not the _v2 variants).
+        """
         service_path = os.path.join(PROJECT_ROOT, "backend", "service.py")
         with open(service_path, encoding="utf-8") as fh:
             source = fh.read()
-        # The _v2 variants use different names; old names must not reappear
-        for deleted in ("def _handle_get_calendar_link\n", "def _handle_search_by_calendar_event\n"):
+        # W1030: _v2 variants must NOT exist (test_ipc_dispatch_invariants guards this)
+        for bad in ("def _handle_get_calendar_link_v2", "def _handle_search_by_calendar_event_v2"):
             self.assertNotIn(
-                deleted,
+                bad,
                 source,
-                f"'{deleted.strip()}' was deleted in Wave 65 batch 3 — "
-                "new _v2 variants use different names and must not share the old def name.",
+                f"'{bad}' _v2 variant must not exist; W1030 renamed to canonical form",
+            )
+        # Canonical names MUST exist
+        for canonical in ("def _handle_get_calendar_link", "def _handle_search_by_calendar_event"):
+            self.assertIn(
+                canonical,
+                source,
+                f"'{canonical}' canonical handler must exist (W1030 renamed from _v2)",
             )
 
     def test_v2_handler_methods_exist_on_service(self):
-        """Confirm _v2 methods are defined (not just mapped)."""
+        """W1030: canonical names exist (not _v2 variants)."""
         self.assertTrue(hasattr(self.svc, "_handle_link_to_calendar_event"))
-        self.assertTrue(hasattr(self.svc, "_handle_get_calendar_link_v2"))
-        self.assertTrue(hasattr(self.svc, "_handle_search_by_calendar_event_v2"))
+        self.assertTrue(hasattr(self.svc, "_handle_get_calendar_link"),
+                        "_handle_get_calendar_link (canonical) must exist")
+        self.assertTrue(hasattr(self.svc, "_handle_search_by_calendar_event"),
+                        "_handle_search_by_calendar_event (canonical) must exist")
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +338,7 @@ class TestGetCalendarLinkV2(unittest.TestCase):
         self.svc, self.store, self.tmp = _make_service_and_store()
 
     def _call(self, params):
-        return self.svc._handle_get_calendar_link_v2(params)
+        return self.svc._handle_get_calendar_link(params)  # W1030: canonical name
 
     def test_missing_item_id_returns_error(self):
         result = self._call({})
@@ -371,7 +384,7 @@ class TestSearchByCalendarEventV2(unittest.TestCase):
         self.svc, self.store, self.tmp = _make_service_and_store()
 
     def _call(self, params):
-        return self.svc._handle_search_by_calendar_event_v2(params)
+        return self.svc._handle_search_by_calendar_event(params)  # W1030: canonical name
 
     def _add_item_with_event(self, event_title: str) -> str:
         item = self.store.add_history_item(text=f"text for {event_title}")

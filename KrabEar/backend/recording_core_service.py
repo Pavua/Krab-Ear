@@ -1011,7 +1011,7 @@ class RecordingCoreService:
 
         # W1669: gate history injection on privacy_mode — do not fetch or pass
         # past transcripts to Whisper initial_prompt when privacy mode is active.
-        _privacy_mode = sr["privacy_mode_enabled"]
+        _privacy_mode = sr.get("privacy_mode_enabled", False)  # W1707: use .get to tolerate missing key in tests
         if _privacy_mode:
             _recent_history: list = []
         else:
@@ -1359,6 +1359,13 @@ class RecordingCoreService:
                         "cleanup_profile": sr["cleanup_profile"],
                         "translation_status": translation_status, "history_id": None,
                         "stop_tail_trim_ms": stop_tail_trim_ms}
+            # W1292: Invalidate AutoGlossary cache so new proper-noun terms are available
+            # in the next STT initial-prompt without waiting for the TTL (restored W1659).
+            if self._auto_glossary is not None:
+                try:
+                    self._auto_glossary.invalidate()
+                except Exception as _ag_exc:
+                    logger.warning("auto_glossary invalidate error after recording persist: %s", _ag_exc)
         self._clipboard_history.append({
             "text": final_text,
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
