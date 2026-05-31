@@ -4,6 +4,14 @@ after mlx_whisper.transcribe() — W63 rule gap fix.
 Run:
     PYTHONPATH=$(pwd)/KrabEar python -m unittest \
         KrabEar/tests/test_whisper_mlx_adapter_clear_cache_W1368.py -v
+
+W1752 xdist fix: importlib.reload() inside patch.dict() leaves the reloaded
+module cached in sys.modules under a state that was valid only while the
+patch.dict context was active.  After context exit the patch is unwound but
+sys.modules["core.pipeline.stt_whisper_mlx_adapter"] still points to the
+reloaded copy, whose module-level globals reference the now-removed fake stubs.
+tearDown removes the reloaded entry so the next test (or file) gets a fresh
+import with a consistent sys.modules state.
 """
 
 from __future__ import annotations
@@ -46,13 +54,32 @@ def _fake_mlx_core_module() -> types.ModuleType:
 class TestClearCacheCalledAfterWhisperMLXAdapterTranscribe(unittest.TestCase):
     """mx.clear_cache() must be called inside mlx_lock() block after transcribe."""
 
+    # W1752: keys installed into sys.modules via importlib.reload() inside
+    # patch.dict() — we evict them in tearDown to prevent state leaks to
+    # sibling test files in the same xdist worker.
+    _RELOAD_MODULE_KEY = "core.pipeline.stt_whisper_mlx_adapter"
+
     def setUp(self):
+        # Record pre-test sys.modules state for the adapter module.
+        self._pre_adapter_mod = sys.modules.get(self._RELOAD_MODULE_KEY)
+
         # Build fake mlx package hierarchy: mlx + mlx.core
         self.fake_mlx_core = _fake_mlx_core_module()
         self.fake_mlx = types.ModuleType("mlx")
         self.fake_mlx.core = self.fake_mlx_core
 
         self.fake_mlx_whisper = _fake_mlx_whisper_module()
+
+    def tearDown(self):
+        # W1752: restore (or evict) the adapter module that was reload()ed
+        # inside the patch.dict() context.  After the context exits the
+        # module's globals still reference the now-unwound fake stubs.
+        # Removing it forces a fresh import next time, preventing cross-file
+        # state pollution in xdist workers.
+        if self._pre_adapter_mod is None:
+            sys.modules.pop(self._RELOAD_MODULE_KEY, None)
+        else:
+            sys.modules[self._RELOAD_MODULE_KEY] = self._pre_adapter_mod
 
     def _patch_imports(self):
         """Context manager that patches sys.modules for mlx and mlx_whisper."""

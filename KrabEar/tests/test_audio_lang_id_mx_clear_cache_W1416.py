@@ -4,6 +4,11 @@ Tests:
 1. test_clear_model_cache_calls_mx_clear_cache_when_mlx_available
 2. test_clear_model_cache_safe_when_mlx_unavailable
 3. test_clear_model_cache_safe_when_mx_clear_cache_raises
+
+W1752 xdist fix: _MLX_AVAILABLE guard wraps find_spec() in try/except ValueError
+so collection-time crashes are prevented when another test file has left a
+MagicMock (no __spec__) in sys.modules["mlx"].  importlib.util.find_spec()
+raises ValueError when the entry in sys.modules has no __spec__ attribute.
 """
 
 from __future__ import annotations
@@ -21,12 +26,31 @@ if _PROJECT_ROOT not in sys.path:
 
 from core.audio_lang_id import AudioLanguageID, _HAS_MLX  # noqa: E402
 
-# W1749: determine MLX availability at import time so skipUnless works.
+# W1749/W1752: determine MLX availability at import time so skipUnless works.
 # _HAS_MLX is set at core.audio_lang_id module load by trying `import mlx.core`.
 # Using importlib.util.find_spec is safer for collection-time checking —
 # it does NOT attempt to dlopen the shared library, so Ubuntu CI (no libmlx.so)
 # never triggers an ImportError during test collection.
-_MLX_AVAILABLE: bool = _HAS_MLX and importlib.util.find_spec("mlx") is not None
+#
+# W1752: wrap find_spec() in try/except ValueError.  When another test file
+# installed sys.modules["mlx"] = MagicMock() and that file was collected first
+# in the same xdist worker, the conftest stub-purge fires *after tests*, not
+# after collection.  find_spec("mlx") raises ValueError: mlx.__spec__ is not set
+# when sys.modules["mlx"] is a MagicMock.  Catching ValueError and treating it
+# as "mlx not available" is the correct behaviour — we cannot use the real MLX
+# in this process state anyway.
+
+
+def _check_mlx_available() -> bool:
+    if not _HAS_MLX:
+        return False
+    try:
+        return importlib.util.find_spec("mlx") is not None
+    except (ValueError, ModuleNotFoundError):
+        return False
+
+
+_MLX_AVAILABLE: bool = _check_mlx_available()
 
 
 class TestClearModelCacheCallsMxClearCache(unittest.TestCase):

@@ -40,6 +40,15 @@ for _p in (_BACKEND_DIR, str(_REPO_ROOT)):
 # ---------------------------------------------------------------------------
 # Stub out heavy optional deps so audio_lang_id can be imported
 # ---------------------------------------------------------------------------
+
+# W1752: record the sys.modules state for stubs we install so tearDownModule
+# can restore them, preventing MagicMock entries from leaking to sibling files
+# in the same xdist worker.
+_PRE_IMPORT_MLX_WHISPER = sys.modules.get("mlx_whisper")
+_PRE_IMPORT_MLX = sys.modules.get("mlx")
+_PRE_IMPORT_MLX_CORE = sys.modules.get("mlx.core")
+
+
 def _register_stub_modules() -> None:
     """Register lightweight stubs for numpy, mlx_whisper and mlx.core."""
     try:
@@ -60,13 +69,42 @@ def _register_stub_modules() -> None:
 _register_stub_modules()
 
 
+def tearDownModule() -> None:
+    """W1752: restore sys.modules for mlx stubs installed at module import time.
+
+    In xdist -n 2 mode workers collect and run multiple test files in the same
+    Python process.  MagicMock entries left in sys.modules["mlx"] / ["mlx.core"]
+    / ["mlx_whisper"] cause importlib.util.find_spec("mlx") to raise ValueError
+    in sibling files that call it at collection time (the MagicMock has no
+    __spec__ attribute).  Restoring to pre-import state prevents the leak.
+
+    Note: conftest._purge_leaked_module_stubs already removes mlx/mlx.core
+    MagicMocks after *each test*, but it runs post-test not post-module.  This
+    tearDownModule runs after the last test in this file completes.
+    """
+    _restore = {
+        "mlx_whisper": _PRE_IMPORT_MLX_WHISPER,
+        "mlx": _PRE_IMPORT_MLX,
+        "mlx.core": _PRE_IMPORT_MLX_CORE,
+    }
+    for key, orig in _restore.items():
+        if orig is None:
+            sys.modules.pop(key, None)
+        else:
+            sys.modules[key] = orig
+    # Also remove the cached core.audio_lang_id so a subsequent reimport
+    # re-executes the module-level `try: import mlx.core as mx` with a clean
+    # sys.modules state.
+    sys.modules.pop("core.audio_lang_id", None)
+
+
 # ---------------------------------------------------------------------------
 # Helper: import a fresh copy of audio_lang_id each test run
 # ---------------------------------------------------------------------------
 def _fresh_audio_lang_id():
     """Force-reimport audio_lang_id to get a fresh class with empty _model_cache.
 
-    W1751: re-ensure the heavy-dep stubs first.  The conftest
+    W1751/W1752: re-ensure the heavy-dep stubs first.  The conftest
     _purge_leaked_module_stubs fixture removes bare mlx / mlx.core stubs after
     every test, so by the time a *later* test in this file calls this helper the
     module-level _register_stub_modules() install may have been purged.  Without
@@ -78,6 +116,9 @@ def _fresh_audio_lang_id():
     for key in list(sys.modules.keys()):
         if "audio_lang_id" in key:
             del sys.modules[key]
+    # Re-establish stubs so audio_lang_id's module-level `import mlx.core as mx`
+    # resolves correctly regardless of what conftest may have purged.
+    _register_stub_modules()
     return importlib.import_module("core.audio_lang_id")
 
 

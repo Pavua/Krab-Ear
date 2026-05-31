@@ -6,6 +6,12 @@ Covers:
   H2b — mx.clear_cache() graceful when ImportError / AttributeError
   H4  — AudioLanguageID._model_cache bounded to 1 entry
   H4b — profile switch evicts old cache entry
+
+W1752 xdist fix: TestAudioLanguageIDCacheBounded.setUp installs mlx_whisper /
+mlx_whisper.load_models stubs via sys.modules.setdefault().  Those stubs
+survive across test runs in the same xdist worker process.  tearDown now
+restores the pre-test sys.modules state for every key the setUp installs,
+preventing MagicMock entries from leaking into sibling test files.
 """
 import sys
 import os
@@ -82,13 +88,20 @@ class TestAudioLanguageIDCacheBounded(unittest.TestCase):
     """AudioLanguageID._model_cache must never hold more than 1 entry."""
 
     def setUp(self):
-        # Provide stub mlx_whisper so AudioLanguageID can be imported
+        # W1752: record pre-test sys.modules state for keys we are about to
+        # install so tearDown can restore them precisely.
+        self._pre_mlx_whisper = sys.modules.get("mlx_whisper")
+        self._pre_mlx_whisper_load = sys.modules.get("mlx_whisper.load_models")
+
+        # Provide stub mlx_whisper so AudioLanguageID can be imported.
+        # Use setdefault only for mlx_whisper — always force our stubs in so
+        # the module-level import inside audio_lang_id.py resolves consistently.
         stub_whisper = types.ModuleType("mlx_whisper")
         stub_load = types.ModuleType("mlx_whisper.load_models")
         stub_load.load_model = MagicMock(side_effect=lambda p: {"model": p})
         stub_whisper.load_models = stub_load
-        sys.modules.setdefault("mlx_whisper", stub_whisper)
-        sys.modules.setdefault("mlx_whisper.load_models", stub_load)
+        sys.modules["mlx_whisper"] = stub_whisper
+        sys.modules["mlx_whisper.load_models"] = stub_load
 
         # Re-import with patched module in place
         import importlib
@@ -98,6 +111,22 @@ class TestAudioLanguageIDCacheBounded(unittest.TestCase):
         self.AudioLanguageID = self.audio_lang_id_mod.AudioLanguageID
         # Reset class-level cache before each test
         self.AudioLanguageID._model_cache.clear()
+
+    def tearDown(self):
+        # W1752: restore sys.modules for every key we installed in setUp so
+        # MagicMock / bare-ModuleType stubs do not outlive this test class
+        # and pollute sibling test files in the same xdist worker.
+        self.AudioLanguageID._model_cache.clear()
+        # Remove the reimported core.audio_lang_id so next file gets a clean slate.
+        sys.modules.pop("core.audio_lang_id", None)
+        for key, orig in (
+            ("mlx_whisper", self._pre_mlx_whisper),
+            ("mlx_whisper.load_models", self._pre_mlx_whisper_load),
+        ):
+            if orig is None:
+                sys.modules.pop(key, None)
+            else:
+                sys.modules[key] = orig
 
     def _inject_model(self, path: str):
         """Simulate cache population via the bounded insertion logic."""
