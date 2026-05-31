@@ -30,28 +30,46 @@ for _p in (_BACKEND_ROOT, _REPO_ROOT):
 # ---------------------------------------------------------------------------
 
 def _install_stubs() -> None:
-    """Insert lightweight stubs for imports used by observability.py."""
+    """Insert lightweight stubs for imports used by observability.py.
+
+    Wave 1744 test-isolation fix: import real modules first; stub only when
+    the real import fails — prevents bare ModuleType leaks across xdist workers.
+    """
+    import importlib
+
     # plistlib is stdlib — no stub needed.
     # subprocess / signal / re / os are stdlib — no stub needed.
 
-    # sentry_sdk is optional; we'll control it per-test via patch.
+    # sentry_sdk is a genuinely optional external package.
     if "sentry_sdk" not in sys.modules:
-        stub = types.ModuleType("sentry_sdk")
-        stub.init = MagicMock()
-        stub.push_scope = MagicMock()
-        stub.capture_exception = MagicMock()
-        stub.capture_message = MagicMock()
-        stub.add_breadcrumb = MagicMock()
-        stub.flush = MagicMock()
-        sys.modules["sentry_sdk"] = stub
+        try:
+            importlib.import_module("sentry_sdk")
+        except Exception:
+            stub = types.ModuleType("sentry_sdk")
+            stub.init = MagicMock()  # type: ignore[attr-defined]
+            stub.push_scope = MagicMock()  # type: ignore[attr-defined]
+            stub.capture_exception = MagicMock()  # type: ignore[attr-defined]
+            stub.capture_message = MagicMock()  # type: ignore[attr-defined]
+            stub.add_breadcrumb = MagicMock()  # type: ignore[attr-defined]
+            stub.flush = MagicMock()  # type: ignore[attr-defined]
+            sys.modules["sentry_sdk"] = stub
 
-    # backend.privacy_audit stub (used inside init_sentry privacy branch).
+    # backend.privacy_audit — import real module; set missing attr if needed.
     if "backend.privacy_audit" not in sys.modules:
-        pa_stub = types.ModuleType("backend.privacy_audit")
-        pa_stub.get_privacy_audit_logger = MagicMock(
+        try:
+            importlib.import_module("backend.privacy_audit")
+        except Exception:
+            pa_stub = types.ModuleType("backend.privacy_audit")
+            pa_stub.get_privacy_audit_logger = MagicMock(  # type: ignore[attr-defined]
+                return_value=MagicMock(log_event=MagicMock())
+            )
+            sys.modules["backend.privacy_audit"] = pa_stub
+
+    _pa = sys.modules["backend.privacy_audit"]
+    if not hasattr(_pa, "get_privacy_audit_logger"):
+        _pa.get_privacy_audit_logger = MagicMock(  # type: ignore[attr-defined]
             return_value=MagicMock(log_event=MagicMock())
         )
-        sys.modules["backend.privacy_audit"] = pa_stub
 
 
 _install_stubs()

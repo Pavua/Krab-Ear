@@ -6,6 +6,7 @@
 - Отключение лимитов через limiter.enabled = False
 """
 
+import importlib
 import sys
 import os
 import types
@@ -20,12 +21,27 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 # ---------------------------------------------------------------------------
-# Stub heavy dependencies BEFORE importing rest_server (same pattern as
-# test_rest_logging.py) — only needed if not yet imported in this process.
+# Patch heavy dependencies BEFORE importing rest_server.
+#
+# Wave 1744 test-isolation fix: import REAL modules first, then replace only
+# the specific heavy classes/attrs — prevents bare stub leaks across xdist.
 # ---------------------------------------------------------------------------
 
-# core.engine stub
-_engine_mod = types.ModuleType("core.engine")
+
+def _ensure_real_or_stub(mod_name: str) -> types.ModuleType:
+    if mod_name in sys.modules:
+        return sys.modules[mod_name]
+    try:
+        importlib.import_module(mod_name)
+    except Exception:
+        sys.modules[mod_name] = types.ModuleType(mod_name)
+    return sys.modules[mod_name]
+
+
+# core.engine — swap AudioEngine so rest_server doesn't do heavy MLX warmup.
+# Save original and restore after rest_server import to avoid polluting later tests.
+_engine_mod = _ensure_real_or_stub("core.engine")
+_orig_AudioEngine = getattr(_engine_mod, "AudioEngine", None)
 
 
 class _FakeEngine:
@@ -38,17 +54,18 @@ class _FakeEngine:
         pass
 
 
-_engine_mod.AudioEngine = _FakeEngine
-sys.modules.setdefault("core.engine", _engine_mod)
+_engine_mod.AudioEngine = _FakeEngine  # type: ignore[attr-defined]
 
-# backend.event_bus stub
-_event_bus_mod = types.ModuleType("backend.event_bus")
-_event_bus_mod.bus = MagicMock()
-_event_bus_mod.sse_stream = MagicMock(return_value=iter([]))
-sys.modules.setdefault("backend.event_bus", _event_bus_mod)
+# backend.event_bus — ensure bus/sse_stream attrs
+_eb = _ensure_real_or_stub("backend.event_bus")
+if not hasattr(_eb, "bus"):
+    _eb.bus = MagicMock()  # type: ignore[attr-defined]
+if not hasattr(_eb, "sse_stream"):
+    _eb.sse_stream = MagicMock(return_value=iter([]))  # type: ignore[attr-defined]
 
-# backend.service stub
-_service_mod = types.ModuleType("backend.service")
+# backend.service — swap BackendService (save original)
+_service_mod = _ensure_real_or_stub("backend.service")
+_orig_BackendService = getattr(_service_mod, "BackendService", None)
 
 
 class _FakeBackendService:
@@ -57,11 +74,11 @@ class _FakeBackendService:
         return {"overall_ready": True, "components": {}}
 
 
-_service_mod.BackendService = _FakeBackendService
-sys.modules.setdefault("backend.service", _service_mod)
+_service_mod.BackendService = _FakeBackendService  # type: ignore[attr-defined]
 
-# backend.state_store stub
-_state_store_mod = types.ModuleType("backend.state_store")
+# backend.state_store — swap StateStore (save original)
+_state_store_mod = _ensure_real_or_stub("backend.state_store")
+_orig_StateStore = getattr(_state_store_mod, "StateStore", None)
 
 
 class _FakeStateStore:
@@ -78,11 +95,11 @@ class _FakeStateStore:
         pass
 
 
-_state_store_mod.StateStore = _FakeStateStore
-sys.modules.setdefault("backend.state_store", _state_store_mod)
+_state_store_mod.StateStore = _FakeStateStore  # type: ignore[attr-defined]
 
-# backend.transcriber stub
-_transcriber_mod = types.ModuleType("backend.transcriber")
+# backend.transcriber — swap Transcriber (save original)
+_transcriber_mod = _ensure_real_or_stub("backend.transcriber")
+_orig_Transcriber = getattr(_transcriber_mod, "Transcriber", None)
 
 
 class _FakeTranscriber:
@@ -90,11 +107,11 @@ class _FakeTranscriber:
         pass
 
 
-_transcriber_mod.Transcriber = _FakeTranscriber
-sys.modules.setdefault("backend.transcriber", _transcriber_mod)
+_transcriber_mod.Transcriber = _FakeTranscriber  # type: ignore[attr-defined]
 
-# backend.metrics_collector stub
-_metrics_mod = types.ModuleType("backend.metrics_collector")
+# backend.metrics_collector — swap metrics instance (save original)
+_metrics_mod = _ensure_real_or_stub("backend.metrics_collector")
+_orig_metrics = getattr(_metrics_mod, "metrics", None)
 
 
 class _FakeMetrics:
@@ -105,8 +122,7 @@ class _FakeMetrics:
         pass
 
 
-_metrics_mod.metrics = _FakeMetrics()
-sys.modules.setdefault("backend.metrics_collector", _metrics_mod)
+_metrics_mod.metrics = _FakeMetrics()  # type: ignore[attr-defined]
 
 # flask_smorest stub (if not installed)
 try:
@@ -178,6 +194,19 @@ with patch("pathlib.Path.mkdir"):
 
 _app = rest_mod.app
 _limiter = rest_mod.limiter
+
+# Restore original classes/attrs on the real modules so later test files that
+# import from these modules directly see the real implementations.
+if _orig_AudioEngine is not None:
+    _engine_mod.AudioEngine = _orig_AudioEngine  # type: ignore[attr-defined]
+if _orig_BackendService is not None:
+    _service_mod.BackendService = _orig_BackendService  # type: ignore[attr-defined]
+if _orig_StateStore is not None:
+    _state_store_mod.StateStore = _orig_StateStore  # type: ignore[attr-defined]
+if _orig_Transcriber is not None:
+    _transcriber_mod.Transcriber = _orig_Transcriber  # type: ignore[attr-defined]
+if _orig_metrics is not None:
+    _metrics_mod.metrics = _orig_metrics  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------

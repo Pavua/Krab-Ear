@@ -602,5 +602,99 @@ class SileroTextLengthCapTestCase(unittest.TestCase):
         mock_logger.warning.assert_called()
 
 
+# ── W1739 security regression: say option-injection via text argument ─────────
+
+
+class SayOptionInjectionRegressionTestCase(unittest.TestCase):
+    """W1739: _say_to_wav must insert '--' before user text so that say(1) never
+    parses the text as command-line options.
+
+    Without the fix, text='--input-file=/etc/passwd' causes say to read and
+    synthesize an arbitrary local file (confirmed exploitable: 55 MB AIFF from
+    /etc/passwd).  The '--' end-of-options sentinel blocks this.
+    """
+
+    def _call_say_to_wav(self, text: str) -> list:
+        """Run _say_to_wav with subprocess.run mocked; return the captured argv."""
+        import backend.tts_service as tts_mod
+
+        captured: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            captured.append(list(cmd))
+            result = MagicMock()
+            result.returncode = 0
+            return result
+
+        # Also mock os.path.exists / os.path.getsize so the WAV branch is taken
+        with patch("backend.tts_service.subprocess.run", side_effect=fake_run), \
+             patch("backend.tts_service.os.path.exists", return_value=True), \
+             patch("backend.tts_service.os.path.getsize", return_value=1024), \
+             patch("builtins.open", unittest.mock.mock_open(read_data=b"RIFF")):
+            try:
+                tts_mod._say_to_wav(text)
+            except Exception:  # noqa: BLE001
+                pass  # WAV read may fail — we only care about the argv
+
+        # First call is 'say', second is 'afconvert'
+        return captured[0] if captured else []
+
+    def test_option_like_text_preceded_by_double_dash(self) -> None:
+        """text='--input-file=/etc/passwd' must appear after '--' in say argv."""
+        malicious_text = "--input-file=/etc/passwd"
+        argv = self._call_say_to_wav(malicious_text)
+
+        self.assertIn("say", argv, "say must be the command")
+        self.assertIn("--", argv, "end-of-options '--' sentinel must be present in argv")
+
+        dash_dash_index = argv.index("--")
+        text_index = argv.index(malicious_text)
+        self.assertGreater(
+            text_index,
+            dash_dash_index,
+            f"text must come AFTER '--': argv={argv}",
+        )
+
+    def test_short_option_like_text_preceded_by_double_dash(self) -> None:
+        """text='-o/tmp/x.aiff' must also appear after '--' in say argv."""
+        malicious_text = "-o/tmp/x.aiff"
+        argv = self._call_say_to_wav(malicious_text)
+
+        self.assertIn("--", argv, "end-of-options '--' sentinel must be present in argv")
+        dash_dash_index = argv.index("--")
+        text_index = argv.index(malicious_text)
+        self.assertGreater(
+            text_index,
+            dash_dash_index,
+            f"text must come AFTER '--': argv={argv}",
+        )
+
+    def test_normal_text_still_preceded_by_double_dash(self) -> None:
+        """Normal text must also be placed after '--' (sentinel always present)."""
+        normal_text = "Hello, this is normal speech"
+        argv = self._call_say_to_wav(normal_text)
+
+        self.assertIn("--", argv, "end-of-options '--' sentinel must always be present")
+        dash_dash_index = argv.index("--")
+        text_index = argv.index(normal_text)
+        self.assertGreater(
+            text_index,
+            dash_dash_index,
+            f"text must come AFTER '--': argv={argv}",
+        )
+
+    def test_double_dash_flag_text_preceded_by_double_dash(self) -> None:
+        """text='--foo' must appear after '--' so say never interprets it as --foo."""
+        malicious_text = "--foo"
+        argv = self._call_say_to_wav(malicious_text)
+
+        self.assertIn("--", argv, "end-of-options '--' sentinel must be present")
+        # Find the *first* '--' (our sentinel) — it must precede the text
+        first_dd = next(i for i, a in enumerate(argv) if a == "--")
+        # The text "--foo" appears after the first "--"
+        self.assertIn(malicious_text, argv[first_dd + 1:],
+                      f"'--foo' must appear after sentinel '--': argv={argv}")
+
+
 if __name__ == "__main__":
     unittest.main()

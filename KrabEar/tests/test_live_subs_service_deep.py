@@ -21,6 +21,7 @@ if PROJECT_ROOT not in sys.path:
 import numpy as np
 
 from backend.live_subs_service import LiveSubsService, _FLUSH_THRESHOLD_SEC
+from backend.translator import TranslationResult
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -47,8 +48,14 @@ def _make_service(
     if translate_raises:
         translator.translate.side_effect = RuntimeError("translation failed")
     else:
-        tr_result = MagicMock()
-        tr_result.translated_text = translated
+        tr_result = TranslationResult(
+            text=translated,
+            status="ok",
+            source_lang="en",
+            target_lang="ru",
+            mode="ru",
+            engine="stub",
+        )
         translator.translate.return_value = tr_result
 
     return LiveSubsService(transcriber=transcriber, translator=translator)

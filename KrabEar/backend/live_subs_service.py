@@ -174,9 +174,9 @@ class LiveSubsService:
                 tr = self._translator.translate(
                     text=text,
                     mode=target_lang,
-                    network_mode="offline",
+                    network_mode="offline_default",
                 )
-                translation = tr.translated_text or None
+                translation = tr.text or None
             except Exception:
                 logger.exception("LiveSubsService: ошибка перевода")
 

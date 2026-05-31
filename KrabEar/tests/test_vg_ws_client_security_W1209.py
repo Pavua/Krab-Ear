@@ -29,6 +29,8 @@ if PROJECT_ROOT not in sys.path:
 
 
 def _install_stubs() -> None:
+    import importlib
+
     for mod_name in (
         "backend.event_bus",
         "contracts.registry",
@@ -36,18 +38,29 @@ def _install_stubs() -> None:
         "backend.error_codes",
         "backend.observability",
     ):
-        if mod_name not in sys.modules:
-            stub = types.ModuleType(mod_name)
-            sys.modules[mod_name] = stub
+        if mod_name in sys.modules:
+            continue
+        try:
+            importlib.import_module(mod_name)  # prefer real module — no pollution
+        except Exception:
+            sys.modules[mod_name] = types.ModuleType(mod_name)  # fallback stub only
 
-    sys.modules["backend.event_bus"].bus = MagicMock()  # type: ignore[attr-defined]
-    sys.modules["contracts.registry"].EVENT_SCHEMA_MAP = {}  # type: ignore[attr-defined]
+    # Set attributes ONLY if the module lacks them (never overwrite real attrs)
+    _eb = sys.modules["backend.event_bus"]
+    if not hasattr(_eb, "bus"):
+        _eb.bus = MagicMock()  # type: ignore[attr-defined]
+    _cr = sys.modules["contracts.registry"]
+    if not hasattr(_cr, "EVENT_SCHEMA_MAP"):
+        _cr.EVENT_SCHEMA_MAP = {}  # type: ignore[attr-defined]
 
-    # websockets stub (no real package needed)
+    # websockets: genuinely optional (not in the project's installed packages)
     if "websockets" not in sys.modules:
-        ws_stub = types.ModuleType("websockets")
-        ws_stub.connect = MagicMock()  # type: ignore[attr-defined]
-        sys.modules["websockets"] = ws_stub
+        try:
+            importlib.import_module("websockets")
+        except Exception:
+            ws_stub = types.ModuleType("websockets")
+            ws_stub.connect = MagicMock()  # type: ignore[attr-defined]
+            sys.modules["websockets"] = ws_stub
 
 
 _install_stubs()

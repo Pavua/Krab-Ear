@@ -39,6 +39,38 @@ except Exception:  # pragma: no cover — defensive
 
 logger = logging.getLogger("KrabEar.Backend.LLMRewriter")
 
+# ---------------------------------------------------------------------------
+# SSRF guard — shared by llm_rewriter, llm_ops_service, and service.py
+# ---------------------------------------------------------------------------
+_ALLOWED_SCHEMES = frozenset({"http", "https"})
+
+
+def _validate_llm_url(url: str) -> str:
+    """Validate that *url* is safe to GET for LLM discovery/health checks.
+
+    Rules (Wave 1741 — SSRF fix):
+    - Scheme MUST be http or https.  file://, gopher://, ftp://, data:, etc.
+      are rejected because urllib3/requests would happily follow them and read
+      local files or make other unexpected network contacts.
+    - localhost / LAN addresses are intentionally ALLOWED — LM Studio runs on
+      127.0.0.1:1234 by default, and users may host it on a LAN box.
+    - Redirects are NOT followed at this level; callers must pass
+      allow_redirects=False to prevent a crafted server from 30x-redirecting
+      to an internal/file target.
+
+    Returns the URL unchanged if valid.
+    Raises ValueError with a descriptive message if the scheme is disallowed.
+    """
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    if scheme not in _ALLOWED_SCHEMES:
+        raise ValueError(
+            f"LLM base URL has disallowed scheme '{scheme}': {url!r}. "
+            f"Only {sorted(_ALLOWED_SCHEMES)} are permitted."
+        )
+    return url
+
 
 class CircuitState(Enum):
     CLOSED = "closed"
@@ -1264,10 +1296,13 @@ class LLMRewriter:
             import re as _re
             _host = _re.sub(r"/v\d+$", "", self._base_url.rstrip("/"))
             _url = f"{_host}/api/v1/models"
+            # Wave 1741: SSRF guard — reject file://, gopher://, etc.
+            _validate_llm_url(_url)
             response = self._session.get(
                 _url,
                 headers=self._lm_studio_get_headers(),
                 timeout=5.0,  # short timeout — /models is fast metadata call
+                allow_redirects=False,  # Wave 1741: no redirect-based SSRF
             )
             if response.status_code != 200:
                 return (False, False)
@@ -1276,7 +1311,15 @@ class LLMRewriter:
             return (True, self._model in ids)
         except (requests.ConnectionError, requests.Timeout, requests.RequestException):
             return (False, False)
-        except (ValueError, KeyError):
+        except ValueError as _ve:
+            # Wave 1741: _validate_llm_url raises ValueError for disallowed schemes;
+            # also covers JSON decode errors (treated as "reachable but bad JSON").
+            _msg = str(_ve)
+            if "disallowed scheme" in _msg:
+                logger.warning("passive_health_check: %s", _msg)
+                return (False, False)
+            return (True, False)  # reachable but bad JSON
+        except KeyError:
             return (True, False)  # reachable but bad JSON
 
     def set_model(self, model: str) -> None:

@@ -23,31 +23,35 @@ if KRABEAR_ROOT not in sys.path:
     sys.path.insert(0, KRABEAR_ROOT)
 
 # ---------------------------------------------------------------------------
-# Minimal stubs so the module loads without mlx_whisper / core.config
+# Minimal setup so the module loads without mlx_whisper / core.config.
+# Wave 1744 test-isolation fix: import real modules first, fall back to a
+# stub only when the real import fails — no bare ModuleType pollution.
 # ---------------------------------------------------------------------------
+import importlib
 import types  # noqa: E402
 
-# Stub core.config
-_config_mod = types.ModuleType("core.config")
-_settings_stub = types.SimpleNamespace(
-    STT_AUDIO_LANG_ID_ENABLED=True,
-    STT_AUDIO_LANG_ID_PREVIEW_SEC=5.0,
-    MODEL_BALANCED="mlx-community/whisper-large-v3-turbo",
-)
-_config_mod.settings = _settings_stub
-sys.modules.setdefault("core.config", _config_mod)
+# core.config — import real module; set missing attrs if needed
+if "core.config" not in sys.modules:
+    try:
+        importlib.import_module("core.config")
+    except Exception:
+        _config_mod = types.ModuleType("core.config")
+        _config_mod.settings = types.SimpleNamespace(  # type: ignore[attr-defined]
+            STT_AUDIO_LANG_ID_ENABLED=True,
+            STT_AUDIO_LANG_ID_PREVIEW_SEC=5.0,
+            MODEL_BALANCED="mlx-community/whisper-large-v3-turbo",
+        )
+        sys.modules["core.config"] = _config_mod
 
-# Stub core.mlx_lock — provide a real threading.RLock-based context manager
-_mlx_lock_mod = types.ModuleType("core.mlx_lock")
-_GLOBAL_MLX_LOCK = threading.RLock()
-
-
-def _mlx_lock():
-    return _GLOBAL_MLX_LOCK
-
-
-_mlx_lock_mod.mlx_lock = _mlx_lock
-sys.modules.setdefault("core.mlx_lock", _mlx_lock_mod)
+# core.mlx_lock — import real module; set missing mlx_lock attr if needed
+if "core.mlx_lock" not in sys.modules:
+    try:
+        importlib.import_module("core.mlx_lock")
+    except Exception:
+        _mlx_lock_mod = types.ModuleType("core.mlx_lock")
+        _GLOBAL_MLX_LOCK_FALLBACK = threading.RLock()
+        _mlx_lock_mod.mlx_lock = lambda: _GLOBAL_MLX_LOCK_FALLBACK  # type: ignore[attr-defined]
+        sys.modules["core.mlx_lock"] = _mlx_lock_mod
 
 import numpy as np  # noqa: E402
 

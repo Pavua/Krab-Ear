@@ -140,7 +140,11 @@ def _say_to_wav(text: str, voice: str | None = None, rate: int = 185) -> bytes:
         if voice:
             safe_voice = voice if re.match(r"^[a-zA-Z0-9 _\-]+$", voice) else "Milena"
             cmd_say.extend(["-v", safe_voice])
-        cmd_say.append(text)
+        # Security: insert end-of-options sentinel so that user-controlled text
+        # starting with "-" or "--" is never parsed as a 'say' option.
+        # Without "--", text="--input-file=/etc/passwd" makes say(1) read and
+        # synthesize an arbitrary local file (confirmed exploitable, W1739).
+        cmd_say.extend(["--", text])
         subprocess.run(cmd_say, check=False, capture_output=True)
 
         # AIFF -> WAV через встроенный macOS afconvert
