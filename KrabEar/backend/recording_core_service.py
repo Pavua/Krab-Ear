@@ -1268,6 +1268,11 @@ class RecordingCoreService:
         # all heavy IO (STT, LLM, translation) runs outside.
         _dedup_enabled = bool(settings.get("auto_dedup_enabled", False))
         _privacy_mode = bool(settings.get("privacy_mode_enabled", False))
+        # W1711: read runtime auto_dedup_threshold so the user-configured value is
+        # forwarded to check_duplicate.  Previously the arg was omitted, leaving the
+        # auto_dedup_threshold setting completely unwired (data-loss bug: sim>=0.85
+        # always dropped even when threshold was 0.99).
+        _dedup_threshold = float(settings.get("auto_dedup_threshold", 0.9))
         if _privacy_mode:
             logger.info("privacy_mode: recording persisted with privacy_mode=True",
                         extra={"duration_sec": round(float(duration_sec), 2)})
@@ -1280,12 +1285,14 @@ class RecordingCoreService:
                         text=display_text or text,
                         timestamp=_ts_now,
                         store=self.store,
+                        threshold=_dedup_threshold,
                     )
                     if _dedup_result.is_duplicate:
                         logger.info(
-                            "AutoDedup: запись пропущена как дубликат original_id=%s similarity=%.3f",
+                            "AutoDedup: запись пропущена как дубликат original_id=%s similarity=%.3f threshold=%.3f",
                             _dedup_result.duplicate_of,
                             _dedup_result.similarity,
+                            _dedup_threshold,
                         )
                         return {
                             "status": "ok",
@@ -1610,6 +1617,8 @@ class RecordingCoreService:
                 # _persist_lock serialises the check + add pair (atomicity, same as W1592).
                 _dedup_enabled = bool(settings.get("auto_dedup_enabled", False))
                 _privacy_mode = bool(settings.get("privacy_mode_enabled", False))
+                # W1711: read runtime threshold — same fix as stop_recording path.
+                _dedup_threshold = float(settings.get("auto_dedup_threshold", 0.9))
                 with self._persist_lock:
                     if self._auto_deduplicator is not None and _dedup_enabled and not _privacy_mode:
                         try:
@@ -1619,13 +1628,15 @@ class RecordingCoreService:
                                 text=display_text or text,
                                 timestamp=_ts_now,
                                 store=self.store,
+                                threshold=_dedup_threshold,
                             )
                             if _dedup_result.is_duplicate:
                                 logger.info(
                                     "transcribe_paths: запись пропущена как дубликат"
-                                    " original_id=%s similarity=%.3f path=%s",
+                                    " original_id=%s similarity=%.3f threshold=%.3f path=%s",
                                     _dedup_result.duplicate_of,
                                     _dedup_result.similarity,
+                                    _dedup_threshold,
                                     audio_path,
                                 )
                                 self._safe_callback(on_file_done, file_index, None, "duplicate")
