@@ -28,6 +28,56 @@ _HISTORY_FILE = Path(__file__).resolve().parents[2] / ".benchmarks" / "history.j
 
 
 # ---------------------------------------------------------------------------
+# W1759 — macOS-only test gating (CI policy, user decision 2026-05-31).
+#
+# Krab Ear is a macOS application. MLX (mlx_whisper / mlx.core) is Apple-Silicon
+# only; GigaAM runs in a separate macOS venv (pins torch<=2.5.1); the real STT
+# adapters (voxtral/parakeet/sensevoice/whisperx) need torch-MPS. On a Linux CI
+# runner these families RE-IMPORT C-extension modules — unsafe, can SIGSEGV the
+# interpreter and corrupt state, poisoning later files in the same chunk — or hang
+# on macOS-only resources. They pass on macOS, and the macOS `CI` workflow runs
+# the FULL suite, so coverage is not lost. On a non-darwin runner we therefore do
+# not COLLECT (import) these files at all. Intentionally NOT gated: pure-logic
+# concurrency tests (test_mlx_lock = RLock, test_mlx_inter_lock = flock) and
+# translator cache tests — they are platform-agnostic and must run on Linux.
+_MACOS_ONLY_TEST_SUBSTRINGS = (
+    "gigaam",
+    "audio_lang_id",
+    "lang_id_hook",
+    "clear_cache_called_after_lid",
+    "mx_clear_cache",
+    "whisper_mlx",
+    "whisperx",
+    "voxtral",
+    "parakeet",
+    "sensevoice",
+    "memory_cleanup",
+    "mlx_subprocess",
+    "mlx_recovery",
+    "mlx_concurrency",
+    "mlx_thread_safety",
+    "mlx_cache_clear",
+    "engine_mlx",
+    "engine_gigaam",
+)
+
+
+def pytest_ignore_collect(collection_path, config):  # noqa: ARG001
+    """Do not collect macOS-only C-extension test families on non-darwin runners.
+
+    Returning True prevents the module from being imported at all (the crash /
+    cross-file contamination happens at import + execution, so an item-level skip
+    is too late). macOS returns None and collects everything.
+    """
+    if sys.platform == "darwin":
+        return None
+    name = getattr(collection_path, "name", str(collection_path))
+    if name.startswith("test_") and any(s in name for s in _MACOS_ONLY_TEST_SUBSTRINGS):
+        return True
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Wave 1751: ANCHOR-RESTORE real heavy external modules BEFORE every test.
 #
 # Root cause of the recurring "module 'sounddevice' has no attribute
