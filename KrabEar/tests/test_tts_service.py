@@ -696,5 +696,169 @@ class SayOptionInjectionRegressionTestCase(unittest.TestCase):
                       f"'--foo' must appear after sentinel '--': argv={argv}")
 
 
+class SaySubprocessTimeoutTestCase(unittest.TestCase):
+    """W1758 MED: _say_to_wav должна передавать timeout= в обе subprocess.run и обрезать текст.
+
+    До фикса: subprocess.run вызывались без timeout= → при входе ~1 MB (IPC cap)
+    say/afconvert висели бесконечно, блокируя daemon-поток (local DoS).
+    Фикс: timeout=_SAY_SUBPROCESS_TIMEOUT / _AFCONVERT_TIMEOUT + text cap _SAY_MAX_TEXT_LEN.
+    """
+
+    def _captured_say_argv(self, text: str) -> tuple[list[list], dict]:
+        """Запускает _say_to_wav с мок subprocess.run; возвращает (список argv, kwargs первого вызова)."""
+        import backend.tts_service as tts_mod
+
+        captured_calls: list[tuple[list, dict]] = []
+
+        def fake_run(cmd, **kwargs):
+            captured_calls.append((list(cmd), kwargs))
+            result = MagicMock()
+            result.returncode = 0
+            return result
+
+        with patch("backend.tts_service.subprocess.run", side_effect=fake_run), \
+             patch("backend.tts_service.os.path.exists", return_value=True), \
+             patch("backend.tts_service.os.path.getsize", return_value=1024), \
+             patch("builtins.open", unittest.mock.mock_open(read_data=b"RIFF")):
+            try:
+                tts_mod._say_to_wav(text)
+            except Exception:  # noqa: BLE001
+                pass
+
+        return captured_calls
+
+    def test_say_subprocess_receives_timeout_kwarg(self) -> None:
+        """say вызов должен получить kwarg timeout=."""
+        calls = self._captured_say_argv("Привет мир")
+        self.assertTrue(len(calls) >= 1, "subprocess.run должен быть вызван хотя бы один раз")
+        # Первый вызов — say
+        say_argv, say_kwargs = calls[0]
+        self.assertIn("say", say_argv, "первый вызов должен быть 'say'")
+        self.assertIn("timeout", say_kwargs, "say subprocess.run должен иметь timeout= kwarg")
+        self.assertIsNotNone(say_kwargs["timeout"])
+        self.assertGreater(say_kwargs["timeout"], 0)
+
+    def test_afconvert_subprocess_receives_timeout_kwarg(self) -> None:
+        """afconvert вызов должен получить kwarg timeout=."""
+        calls = self._captured_say_argv("Hello world")
+        # Второй вызов — afconvert
+        if len(calls) < 2:
+            self.skipTest("afconvert не был вызван (say упал?)")
+        afconvert_argv, afconvert_kwargs = calls[1]
+        self.assertIn("afconvert", afconvert_argv, "второй вызов должен быть 'afconvert'")
+        self.assertIn("timeout", afconvert_kwargs, "afconvert subprocess.run должен иметь timeout= kwarg")
+        self.assertIsNotNone(afconvert_kwargs["timeout"])
+        self.assertGreater(afconvert_kwargs["timeout"], 0)
+
+    def test_say_timeout_expired_returns_empty_bytes(self) -> None:
+        """При TimeoutExpired в say: возвращается b'', temp-файлы чистятся (finally)."""
+        import backend.tts_service as tts_mod
+        import subprocess as real_subprocess
+
+        call_count = [0]
+
+        def fake_run_timeout(cmd, **kwargs):
+            call_count[0] += 1
+            if "say" in cmd:
+                raise real_subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 0))
+            result = MagicMock()
+            result.returncode = 0
+            return result
+
+        with patch("backend.tts_service.subprocess.run", side_effect=fake_run_timeout), \
+             patch("backend.tts_service.os.path.exists", return_value=False), \
+             patch("backend.tts_service.os.unlink", return_value=None):
+            result = tts_mod._say_to_wav("Тест таймаут")
+
+        self.assertEqual(result, b"", "TimeoutExpired в say должен вернуть b''")
+
+    def test_afconvert_timeout_expired_returns_empty_bytes(self) -> None:
+        """При TimeoutExpired в afconvert: возвращается b''."""
+        import backend.tts_service as tts_mod
+        import subprocess as real_subprocess
+
+        def fake_run_afconvert_timeout(cmd, **kwargs):
+            if "afconvert" in cmd:
+                raise real_subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 0))
+            result = MagicMock()
+            result.returncode = 0
+            return result
+
+        with patch("backend.tts_service.subprocess.run", side_effect=fake_run_afconvert_timeout), \
+             patch("backend.tts_service.os.path.exists", return_value=False), \
+             patch("backend.tts_service.os.unlink", return_value=None):
+            result = tts_mod._say_to_wav("Тест afconvert timeout")
+
+        self.assertEqual(result, b"", "TimeoutExpired в afconvert должен вернуть b''")
+
+    def test_say_text_cap_truncates_long_text(self) -> None:
+        """Текст длиннее _SAY_MAX_TEXT_LEN обрезается до лимита перед передачей в say."""
+        import backend.tts_service as tts_mod
+
+        captured_argv: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            captured_argv.append(list(cmd))
+            result = MagicMock()
+            result.returncode = 0
+            return result
+
+        long_text = "а" * (tts_mod._SAY_MAX_TEXT_LEN + 1000)
+
+        with patch("backend.tts_service.subprocess.run", side_effect=fake_run), \
+             patch("backend.tts_service.os.path.exists", return_value=True), \
+             patch("backend.tts_service.os.path.getsize", return_value=1024), \
+             patch("builtins.open", unittest.mock.mock_open(read_data=b"RIFF")):
+            try:
+                tts_mod._say_to_wav(long_text)
+            except Exception:  # noqa: BLE001
+                pass
+
+        self.assertTrue(len(captured_argv) >= 1, "subprocess.run должен быть вызван")
+        say_argv = captured_argv[0]
+        self.assertIn("say", say_argv)
+        # Текст передаётся последним аргументом (после --)
+        double_dash_idx = say_argv.index("--")
+        actual_text = say_argv[double_dash_idx + 1]
+        self.assertLessEqual(
+            len(actual_text),
+            tts_mod._SAY_MAX_TEXT_LEN,
+            f"текст не обрезан: len={len(actual_text)} > {tts_mod._SAY_MAX_TEXT_LEN}",
+        )
+
+    def test_say_text_at_exact_limit_not_truncated(self) -> None:
+        """Текст ровно _SAY_MAX_TEXT_LEN символов НЕ обрезается."""
+        import backend.tts_service as tts_mod
+
+        captured_argv: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            captured_argv.append(list(cmd))
+            result = MagicMock()
+            result.returncode = 0
+            return result
+
+        exact_text = "б" * tts_mod._SAY_MAX_TEXT_LEN
+
+        with patch("backend.tts_service.subprocess.run", side_effect=fake_run), \
+             patch("backend.tts_service.os.path.exists", return_value=True), \
+             patch("backend.tts_service.os.path.getsize", return_value=1024), \
+             patch("builtins.open", unittest.mock.mock_open(read_data=b"RIFF")):
+            try:
+                tts_mod._say_to_wav(exact_text)
+            except Exception:  # noqa: BLE001
+                pass
+
+        self.assertTrue(len(captured_argv) >= 1)
+        say_argv = captured_argv[0]
+        double_dash_idx = say_argv.index("--")
+        actual_text = say_argv[double_dash_idx + 1]
+        self.assertEqual(
+            len(actual_text),
+            tts_mod._SAY_MAX_TEXT_LEN,
+            "текст ровно на лимите не должен обрезаться",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

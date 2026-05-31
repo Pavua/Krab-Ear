@@ -132,7 +132,10 @@ class TelegramBridge:
         url = self._base_url + self.NOTIFY_PATH
 
         try:
-            resp = requests.post(url, json=payload, timeout=self._timeout_sec)
+            # allow_redirects=False: запрещаем следование 3xx-редиректам — allowlist
+            # проверяется только на base_url при конструировании, а Location-заголовок
+            # редиректа может указывать на любой хост (169.254.169.254 и т.д.).
+            resp = requests.post(url, json=payload, timeout=self._timeout_sec, allow_redirects=False)
         except (requests.ConnectionError, requests.Timeout) as exc:
             self._record_failure()
             logger.warning("TelegramBridge: Krab недоступен: %s", exc)
@@ -173,7 +176,9 @@ class TelegramBridge:
         url = self._base_url + self.CHATS_PATH
 
         try:
-            resp = requests.get(url, timeout=self._timeout_sec)
+            # allow_redirects=False: аналогично send_message — Location редиректа
+            # не проходит через _ALLOWED_HOSTS allowlist.
+            resp = requests.get(url, timeout=self._timeout_sec, allow_redirects=False)
         except (requests.ConnectionError, requests.Timeout) as exc:
             self._record_failure()
             logger.warning("TelegramBridge.get_chats: Krab недоступен: %s", exc)
