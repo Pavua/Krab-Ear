@@ -105,6 +105,12 @@ class EventBus:
         Вызывается из GracefulShutdownHandler.shutdown() чтобы SSE/WS-клиенты
         немедленно закрыли соединение вместо ожидания poll-таймаута (до 15 с).
 
+        BUG FIX (W1716): если очередь переполнена (30 Гц audio-level события
+        заполняют её за ~2 с), sentinel ранее молча отбрасывался → подписчик
+        висел до poll-таймаута (15 с) вместо немедленного отключения.
+        Решение: дренируем очередь перед отправкой sentinel — буферизованные
+        события не нужны при завершении, sentinel имеет абсолютный приоритет.
+
         Returns:
             Количество подписчиков, которым был отправлен сигнал.
         """
@@ -112,10 +118,18 @@ class EventBus:
             active = list(self._subscribers)
         sent = 0
         for q in active:
+            # Drain buffered events so the sentinel can always fit.
+            # At shutdown, pending events are irrelevant; fast disconnect is what matters.
+            while not q.empty():
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    break
             try:
                 q.put_nowait(None)
                 sent += 1
             except queue.Full:
+                # Theoretically unreachable after drain, but guard defensively.
                 pass
         if sent:
             logger.debug("EventBus: sentinel разослан %d подписчику(-ам)", sent)
@@ -135,7 +149,19 @@ def sse_stream(bus: EventBus, event_filter: str | None = None) -> Iterator[str]:
     """
     allowed: set[str] | None = None
     if event_filter is not None:
-        allowed = {t.strip() for t in event_filter.split(",") if t.strip()}
+        parsed = {t.strip() for t in event_filter.split(",") if t.strip()}
+        # BUG FIX (W1716): an empty-after-parse filter (e.g. "," or " ") previously
+        # produced an empty set, making the guard `event["type"] not in allowed`
+        # True for every event → silent blackhole, client received only keepalives.
+        # Correct intent: empty/blank filter string = "no filter" (receive all).
+        if parsed:
+            allowed = parsed
+        else:
+            logger.warning(
+                "EventBus sse_stream: пустой event_filter %r — фильтр игнорируется, "
+                "клиент получит все события",
+                event_filter,
+            )
 
     q = bus.subscribe()
     try:
