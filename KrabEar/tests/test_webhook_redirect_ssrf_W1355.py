@@ -149,7 +149,14 @@ class ResponseBodyCapTestCase(unittest.TestCase):
         self.assertEqual(_MAX_RESPONSE_BYTES, 64 * 1024)
 
     def test_post_once_uses_no_redirect_handler(self) -> None:
-        """_post_once builds opener with _NoRedirectHandler (allow_redirects=False)."""
+        """_post_once builds opener with _NoRedirectHandler (allow_redirects=False).
+
+        Gap 4 fix (W1721): _post_once now also passes a _PinnedHTTP[S]Handler to
+        build_opener (to close the TOCTOU DNS-rebinding window).  The test now
+        asserts that at least one of the handlers is a _NoRedirectHandler.
+        """
+        from backend.webhook_manager import _PinnedHTTPHandler
+
         mgr = _make_manager()
         resp_mock = _fake_response(status=200)
 
@@ -159,11 +166,18 @@ class ResponseBodyCapTestCase(unittest.TestCase):
         with patch("backend.webhook_manager.urllib.request.build_opener", return_value=opener_mock) as mock_build:
             mgr._post_once(url="http://example.com/hook", body=b"{}", secret="")
 
-        # Verify build_opener was called with a _NoRedirectHandler instance
+        # Verify build_opener was called with at least the _NoRedirectHandler and
+        # a _PinnedHTTPHandler (IP-pinning, gap 4 fix).
         mock_build.assert_called_once()
         args, _ = mock_build.call_args
-        self.assertEqual(len(args), 1)
-        self.assertIsInstance(args[0], _NoRedirectHandler)
+        # At least 2 handlers: NoRedirect + Pinned
+        self.assertGreaterEqual(len(args), 2,
+                                f"Expected >=2 handlers, got {len(args)}: {args}")
+        handler_types = [type(a).__name__ for a in args]
+        self.assertIn("_NoRedirectHandler", handler_types,
+                      f"_NoRedirectHandler missing from {handler_types}")
+        self.assertIn("_PinnedHTTPHandler", handler_types,
+                      f"_PinnedHTTPHandler missing from {handler_types}")
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +190,7 @@ class PrivacyModeGateTestCase(unittest.TestCase):
     def test_fire_webhook_skipped_in_privacy_mode(self) -> None:
         """When privacy_mode=True, fire_webhook must not start any delivery threads."""
         mgr = _make_manager()
-        mgr.register_webhook("https://hooks.example.com/cb", events=[])
+        mgr.register_webhook("https://hooks.example.com/cb", events=[], allow_local=True)
         mgr.set_privacy_mode(True)
 
         with patch.object(mgr, "_deliver_with_retry") as mock_deliver:
@@ -187,7 +201,7 @@ class PrivacyModeGateTestCase(unittest.TestCase):
     def test_fire_webhook_active_when_privacy_mode_disabled(self) -> None:
         """When privacy_mode=False (default), fire_webhook spawns delivery threads."""
         mgr = _make_manager()
-        mgr.register_webhook("https://hooks.example.com/cb", events=[])
+        mgr.register_webhook("https://hooks.example.com/cb", events=[], allow_local=True)
         # privacy_mode defaults to False
 
         resp_mock = _fake_response(status=200)
@@ -225,7 +239,7 @@ class PrivacyModeGateTestCase(unittest.TestCase):
     def test_fire_webhook_after_disabling_privacy_mode_works(self) -> None:
         """After disabling privacy mode, delivery resumes normally."""
         mgr = _make_manager()
-        mgr.register_webhook("https://hooks.example.com/cb", events=[])
+        mgr.register_webhook("https://hooks.example.com/cb", events=[], allow_local=True)
         mgr.set_privacy_mode(True)
         mgr.set_privacy_mode(False)
 
