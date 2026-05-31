@@ -153,7 +153,7 @@ jobs:
             sub=("${files[@]:$((i*chunk)):$chunk}")
             [ ${#sub[@]} -eq 0 ] && continue
             echo "::group::pytest chunk $((i+1))/$nchunks (${#sub[@]} files)"
-            python -m pytest "${sub[@]}" --tb=short -q -p no:xdist -p no:cacheprovider
+            timeout 600 python -m pytest "${sub[@]}" --tb=short -q -p no:xdist -p no:cacheprovider
             crc=$?
             echo "::endgroup::"
             reap
@@ -165,7 +165,7 @@ jobs:
               # pass in isolation (-> green), genuine per-file failures are reported by filename.
               echo "::warning::chunk $((i+1)) exited $crc — re-running per-file to isolate"
               for f in "${sub[@]}"; do
-                python -m pytest "$f" --tb=short -q -p no:xdist -p no:cacheprovider > /tmp/pf.log 2>&1
+                timeout 150 python -m pytest "$f" --tb=short -q -p no:xdist -p no:cacheprovider > /tmp/pf.log 2>&1
                 fcode=$?
                 if [ $fcode -ne 0 ]; then
                   echo "::error::isolated FAIL($fcode): $f"; tail -20 /tmp/pf.log
