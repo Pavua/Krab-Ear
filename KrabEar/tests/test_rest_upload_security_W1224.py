@@ -286,7 +286,9 @@ class TestTranscribeTimeoutKillsLongRunning(_Base):
         mock_info = MagicMock()
         mock_info.duration = 30.0
 
-        # Replace the ThreadPoolExecutor so future.result() raises TimeoutError
+        # Replace the ThreadPoolExecutor so future.result() raises TimeoutError.
+        # W1755: _FakeExecutor must expose shutdown() since the fixed handler
+        # calls _pool.shutdown(wait=False, cancel_futures=True) explicitly.
         class _FakeExecutor:
             def __enter__(self):
                 return self
@@ -298,6 +300,9 @@ class TestTranscribeTimeoutKillsLongRunning(_Base):
                 fut = _cf.Future()
                 # Don't set result — leave future pending
                 return fut
+
+            def shutdown(self, wait=True, cancel_futures=False):  # noqa: ARG002
+                pass
 
         with patch("soundfile.info", return_value=mock_info), \
                 patch("concurrent.futures.ThreadPoolExecutor", return_value=_FakeExecutor()), \
@@ -314,6 +319,102 @@ class TestTranscribeTimeoutKillsLongRunning(_Base):
         self.assertEqual(resp.status_code, 504)
         body = resp.get_json()
         self.assertIn("timeout", body.get("error", "").lower())
+
+
+# ===========================================================================
+# W1755 — Wall-clock timeout: 504 must arrive BEFORE the hung worker finishes
+# ===========================================================================
+
+@unittest.skipUnless(_REST_AVAILABLE, "REST server dependencies not available")
+class TestTranscribeTimeoutDoesNotBlockOnHungWorker(_Base):
+    """W1755 regression: shutdown(wait=False, cancel_futures=True) on timeout path.
+
+    Before the fix the `with ThreadPoolExecutor as _pool:` context-manager
+    __exit__ called shutdown(wait=True) WITHOUT cancel_futures, so the request
+    thread blocked until the hung decoder returned, even though TimeoutError had
+    already fired.  The 504 was eventually returned but only after the full
+    decode delay — not promptly.
+
+    After the fix the request thread calls
+    _pool.shutdown(wait=False, cancel_futures=True) and returns 504 immediately;
+    the hung worker runs out in its own daemon thread.
+
+    We verify this by:
+    1. Patching _TRANSCRIBE_TIMEOUT_SEC to a tiny value (0.3 s).
+    2. Patching transcriber.transcribe to block for LONG_SLEEP seconds (3 s),
+       much longer than the timeout, using a threading.Event that never fires.
+    3. Measuring wall-clock elapsed for the Flask test-client call.
+    4. Asserting elapsed < LONG_SLEEP - 1 s  (i.e. we did NOT wait for the
+       blocked worker to finish).
+    5. Asserting the response is 504 with the expected JSON body.
+
+    FAIL-BEFORE: with the buggy `with _pool:` pattern, elapsed ≈ LONG_SLEEP.
+    PASS-AFTER:  with the fix, elapsed ≈ timeout (≪ LONG_SLEEP).
+    """
+
+    TIMEOUT_SEC = 0.3    # патчим константу на короткое значение
+    LONG_SLEEP = 3.0     # воркер зависает на столько секунд
+    EPSILON = 1.5        # допуск: ответ должен прийти за timeout + epsilon
+
+    def test_504_arrives_before_hung_worker_finishes(self):
+        """504 returned promptly (< timeout+epsilon), NOT after LONG_SLEEP."""
+        import threading
+        import time as _time
+
+        wav_data = _make_wav_bytes()
+        mock_info = MagicMock()
+        mock_info.duration = 5.0
+
+        # Вечно-блокирующий transcribe — имитирует зависший MLX decoder.
+        _never = threading.Event()
+
+        def _hung_transcribe(*_a, **_kw):
+            # Ждём LONG_SLEEP секунд (или до timeout теста, что наступит раньше)
+            _never.wait(timeout=self.LONG_SLEEP)
+            return {
+                "text": "это никогда не вернётся вовремя",
+                "confidence": 0.5,
+                "duration_ms": 100,
+                "engine": "mlx-whisper",
+                "model": "whisper-small",
+                "language": "ru",
+                "segments": [],
+                "diarization": {},
+            }
+
+        self.transcriber.transcribe.side_effect = _hung_transcribe
+
+        t0 = _time.monotonic()
+        with patch("soundfile.info", return_value=mock_info), \
+                patch.object(_rest_mod, "_TRANSCRIBE_TIMEOUT_SEC", self.TIMEOUT_SEC):
+            resp = self.client.post(
+                "/v1/stt/transcribe",
+                data={"file": (io.BytesIO(wav_data), "hung.wav")},
+                content_type="multipart/form-data",
+            )
+        elapsed = _time.monotonic() - t0
+
+        # Убеждаемся что получили 504 с правильным телом
+        self.assertEqual(resp.status_code, 504,
+                         f"Expected 504, got {resp.status_code} in {elapsed:.3f}s")
+        body = resp.get_json()
+        self.assertIn("timeout", body.get("error", "").lower(),
+                      f"Unexpected body: {body}")
+
+        # КЛЮЧЕВАЯ проверка: ответ пришёл ДО того как воркер завершился.
+        # Без исправления elapsed ≈ LONG_SLEEP (т.к. shutdown(wait=True) блокирует).
+        # С исправлением elapsed ≈ TIMEOUT_SEC (быстрый возврат).
+        max_allowed = self.TIMEOUT_SEC + self.EPSILON
+        self.assertLess(
+            elapsed,
+            max_allowed,
+            f"Request took {elapsed:.3f}s — handler BLOCKED on hung worker "
+            f"(expected < {max_allowed:.3f}s). "
+            f"W1755: shutdown(wait=False, cancel_futures=True) not enforced.",
+        )
+
+        # Unblock the daemon thread so it doesn't leak into subsequent tests.
+        _never.set()
 
 
 # ===========================================================================
