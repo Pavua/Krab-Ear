@@ -7,9 +7,16 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+# Максимальный размер текста (символов), который обрабатывается регулярными выражениями.
+# Часовая запись в норме <100 KB; backstop 500 KB защищает от DoS независимо от паттерна.
+_MAX_ANONYMIZE_LEN = 500_000
 
 
 # ── ИНН checksum helpers ─────────────────────────────────────────────────────
@@ -223,10 +230,20 @@ _BUILTIN_RULES_RAW: list[tuple[str, str, str]] = [
         r"(?!\d)",
         "[ТЕЛЕФОН]",
     ),
-    # Email-адреса
+    # Email-адреса (W1758 — ReDoS-safe переписка).
+    #
+    # Старый паттерн:  [a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}
+    # Проблема: домен [a-zA-Z0-9.\-]+ и TLD \.[a-zA-Z]{2,} пересекаются по
+    # символам (буквы + точка), что порождает катастрофическое backtracking:
+    # `x@aaaa....` → O(2^n) итераций движка.
+    #
+    # Новый паттерн строит домен из атомарных меток без точек:
+    #   (?:[a-zA-Z0-9\-]{1,63}\.)+  — каждая метка не содержит '.' →
+    #   между группой меток и TLD нет пересечения → линейный O(n) обход.
+    # RFC-ограничения: local ≤64 символа, метка ≤63 символа, TLD ≤24 символа.
     (
         "email",
-        r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",
+        r"[a-zA-Z0-9._%+\-]{1,64}@(?:[a-zA-Z0-9\-]{1,63}\.)+[a-zA-Z]{2,24}",
         "[EMAIL]",
     ),
     # Номера банковских карт: 16 цифр (с пробелами/дефисами или без)
@@ -320,12 +337,31 @@ class TextAnonymizer:
             rules — список имён правил для применения. Если None, применяются все правила.
 
         Возвращает AnonymizeResult с анонимизированным текстом, списком замен и их числом.
+
+        Защита от DoS (W1758):
+            Если len(text) > _MAX_ANONYMIZE_LEN, регулярки применяются только к
+            первым _MAX_ANONYMIZE_LEN символам; хвост присоединяется без изменений.
+            Факт обрезки логируется структурно (без текста транскрипции).
         """
         if not text:
             return AnonymizeResult(
                 anonymized_text=text,
                 redactions=[],
                 redaction_count=0,
+            )
+
+        # ── Backstop: ограничиваем скан при аномально длинном входе ────────
+        scan_text = text
+        tail = ""
+        if len(text) > _MAX_ANONYMIZE_LEN:
+            scan_text = text[:_MAX_ANONYMIZE_LEN]
+            tail = text[_MAX_ANONYMIZE_LEN:]
+            logger.warning(
+                "anonymize: входной текст обрезан для сканирования",
+                extra={
+                    "original_len": len(text),
+                    "scan_len": _MAX_ANONYMIZE_LEN,
+                },
             )
 
         all_rules = self._rules + self._custom_rules
@@ -340,7 +376,7 @@ class TextAnonymizer:
         # Собираем все совпадения со смещениями (в оригинальном тексте)
         matches: list[tuple[int, int, str, str, str]] = []  # (start, end, original, replacement, category)
         for name, pattern, replacement in selected_rules:
-            for m in pattern.finditer(text):
+            for m in pattern.finditer(scan_text):
                 if name == "credit_card":
                     # Validate via Luhn checksum — skip non-card 16-digit sequences
                     digits = re.sub(r"[\s\-]", "", m.group(0))
@@ -366,7 +402,7 @@ class TextAnonymizer:
 
         if not matches:
             return AnonymizeResult(
-                anonymized_text=text,
+                anonymized_text=scan_text + tail,
                 redactions=[],
                 redaction_count=0,
             )
@@ -388,7 +424,7 @@ class TextAnonymizer:
         parts: list[str] = []
         cursor = 0
         for start, end, original, replacement, category in non_overlapping:
-            parts.append(text[cursor:start])
+            parts.append(scan_text[cursor:start])
             parts.append(replacement)
             redactions.append(Redaction(
                 original=original,
@@ -397,7 +433,9 @@ class TextAnonymizer:
                 position=start,
             ))
             cursor = end
-        parts.append(text[cursor:])
+        parts.append(scan_text[cursor:])
+        if tail:
+            parts.append(tail)
 
         anonymized = "".join(parts)
         return AnonymizeResult(
