@@ -302,9 +302,30 @@ class TestTranscribeRejectsInvalidFormat(_Base):
 # 6. GET /v1/events SSE stream → text/event-stream
 # ===========================================================================
 
+def _fake_sse_stream(*args, **kwargs):
+    """Finite SSE generator for tests — returns one keepalive then exits.
+
+    W1746: the real sse_stream() blocks for ≥15 s per iteration (poll timeout)
+    and never terminates without an external shutdown signal.  Replacing it with
+    this one-shot stub lets SSE endpoint tests verify headers/status without
+    hanging the xdist worker.
+    """
+    yield ": keepalive\n\n"
+
+
 @unittest.skipUnless(_REST_AVAILABLE, "REST server dependencies not available")
 class TestSSEEventStreamEndpoint(_Base):
     """GET /v1/events opens an SSE stream with correct content-type."""
+
+    def setUp(self):
+        super().setUp()
+        # Patch sse_stream to a finite stub — see _fake_sse_stream docstring.
+        self._p_sse = patch("backend.rest_server.sse_stream", side_effect=_fake_sse_stream)
+        self._p_sse.start()
+
+    def tearDown(self):
+        self._p_sse.stop()
+        super().tearDown()
 
     def test_sse_event_stream_endpoint(self):
         resp = self.client.get("/v1/events")

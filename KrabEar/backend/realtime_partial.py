@@ -73,6 +73,7 @@ class RealtimePartialTranscriber:
         self._stop_event = threading.Event()
         self._stop_requested: bool = False
         self._thread: threading.Thread | None = None
+        self._thread_lock = threading.Lock()  # W1746: protect _thread access
         self._session_id: str = ""
         self._sample_rate: int = 16000
 
@@ -83,7 +84,9 @@ class RealtimePartialTranscriber:
     @property
     def is_running(self) -> bool:
         """True если фоновый поток запущен и не остановлен."""
-        return self._thread is not None and self._thread.is_alive()
+        with self._thread_lock:
+            t = self._thread
+        return t is not None and t.is_alive()
 
     def start(self, session_id: str, sample_rate: int = 16000) -> None:
         """Запустить поток частичной транскрибации.
@@ -107,12 +110,14 @@ class RealtimePartialTranscriber:
         self._sample_rate = sample_rate
         self._stop_event.clear()
         self._stop_requested = False
-        self._thread = threading.Thread(
+        new_thread = threading.Thread(
             target=self._worker,
             name="RealtimePartialTranscriber",
             daemon=True,
         )
-        self._thread.start()
+        with self._thread_lock:
+            self._thread = new_thread
+        new_thread.start()
         logger.debug(
             "RealtimePartialTranscriber запущен: session=%s interval=%.1fs buffer=%.1fs",
             session_id,
@@ -132,16 +137,19 @@ class RealtimePartialTranscriber:
         """
         self._stop_requested = True
         self._stop_event.set()
-        if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=timeout_sec)
-            if self._thread.is_alive():
+        with self._thread_lock:
+            thread_to_join = self._thread
+        if thread_to_join is not None and thread_to_join.is_alive():
+            thread_to_join.join(timeout=timeout_sec)
+            if thread_to_join.is_alive():
                 logger.warning(
                     "realtime_partial worker did not stop within 30s"
                     " — daemon thread may emit stale partials"
                     " (session=%s)",
                     self._session_id,
                 )
-        self._thread = None
+        with self._thread_lock:
+            self._thread = None
         logger.debug("RealtimePartialTranscriber остановлен: session=%s", self._session_id)
 
     # ------------------------------------------------------------------

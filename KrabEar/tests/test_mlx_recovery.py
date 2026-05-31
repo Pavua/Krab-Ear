@@ -52,53 +52,57 @@ class TestMLXWatchdogSuccess(unittest.TestCase):
 
 
 class TestMLXWatchdogTimeout(unittest.TestCase):
-    """Тест 2: таймаут выбрасывает MLXTimeoutError."""
+    """Тест 2: таймаут выбрасывает MLXTimeoutError.
+
+    W1746 NOTE: MLXWatchdog.run_with_timeout() does an *unbounded* join() after
+    the timeout fires (W1358 GPU-race guard).  Tests must therefore use
+    ``time.sleep(N)`` instead of ``barrier.wait(60)`` + ``barrier.set()`` in a
+    finally block: the unbounded join prevents the finally from running until the
+    thread finishes, which requires barrier.set(), which never runs — deadlock.
+    Using a short sleep (e.g. 0.2 s) that outlasts the test timeout (0.05–0.1 s)
+    lets the daemon thread finish on its own so the unbounded join returns cleanly.
+    """
 
     def setUp(self) -> None:
         self.watchdog = MLXWatchdog()
 
     def test_timeout_raises_mlx_timeout_error(self) -> None:
         """fn() зависает навсегда — ожидаем MLXTimeoutError за короткий таймаут."""
-        barrier = threading.Event()
+        import time as _time
 
         def hanging_fn():
-            barrier.wait(timeout=60)  # зависаем ожидая события
+            _time.sleep(0.2)  # outlasts 0.1s timeout; finishes on its own
 
         with self.assertRaises(MLXTimeoutError) as ctx:
             self.watchdog.run_with_timeout(fn=hanging_fn, timeout_sec=0.1, model_name="slow-model")
 
-        barrier.set()  # отпустить поток после теста
         exc = ctx.exception
         self.assertAlmostEqual(exc.timeout_sec, 0.1, delta=0.05)
         self.assertEqual(exc.model_name, "slow-model")
 
     def test_timeout_increments_crashes_count(self) -> None:
-        barrier = threading.Event()
+        import time as _time
 
         def hanging_fn():
-            barrier.wait(timeout=60)
+            _time.sleep(0.2)  # outlasts 0.05s timeout
 
         try:
             self.watchdog.run_with_timeout(fn=hanging_fn, timeout_sec=0.05, model_name="m")
         except MLXTimeoutError:
             pass
-        finally:
-            barrier.set()
 
         self.assertEqual(self.watchdog.crashes_count, 1)
 
     def test_timeout_error_message_contains_model_name(self) -> None:
-        barrier = threading.Event()
+        import time as _time
 
         def hanging():
-            barrier.wait(timeout=60)
+            _time.sleep(0.2)  # outlasts 0.05s timeout
 
         try:
             self.watchdog.run_with_timeout(fn=hanging, timeout_sec=0.05, model_name="whisper-large")
         except MLXTimeoutError as exc:
             self.assertIn("whisper-large", str(exc))
-        finally:
-            barrier.set()
 
 
 class TestMLXWatchdogExceptionPassthrough(unittest.TestCase):
@@ -143,38 +147,38 @@ class TestMLXWatchdogMultipleTimeouts(unittest.TestCase):
         self.watchdog = MLXWatchdog()
 
     def test_multiple_timeouts_counted_correctly(self) -> None:
-        barriers = []
+        # W1746: use a very short sleep (0.2s) instead of a barrier that requires
+        # external signaling. The unbounded thread.join() in run_with_timeout would
+        # deadlock waiting for barrier.set() that only runs in the finally block
+        # AFTER run_with_timeout returns — circular dependency.
+        # With sleep(0.2), the daemon thread finishes on its own after ~0.2s, the
+        # unbounded join completes, and MLXTimeoutError is raised cleanly.
+        import time as _time
+
         for _ in range(3):
-            barrier = threading.Event()
-            barriers.append(barrier)
             try:
-                b = barrier
+                def short_hang():
+                    _time.sleep(0.2)  # outlasts the 0.05s timeout, releases naturally
 
-                def hanging(_b=b):
-                    _b.wait(timeout=60)
-
-                self.watchdog.run_with_timeout(fn=hanging, timeout_sec=0.05, model_name="m")
+                self.watchdog.run_with_timeout(fn=short_hang, timeout_sec=0.05, model_name="m")
             except MLXTimeoutError:
                 pass
-            finally:
-                barrier.set()
 
         self.assertEqual(self.watchdog.crashes_count, 3)
         self.assertEqual(self.watchdog.total_calls, 3)
 
     def test_recovery_after_timeout_succeeds(self) -> None:
         """После таймаута следующий успешный вызов проходит нормально."""
-        barrier = threading.Event()
+        import time as _time
 
-        def hanging():
-            barrier.wait(timeout=60)
+        # W1746: use short sleep instead of barrier — see test_multiple_timeouts_counted_correctly
+        def short_hang():
+            _time.sleep(0.2)  # outlasts 0.05s timeout, finishes on its own
 
         try:
-            self.watchdog.run_with_timeout(fn=hanging, timeout_sec=0.05, model_name="m")
+            self.watchdog.run_with_timeout(fn=short_hang, timeout_sec=0.05, model_name="m")
         except MLXTimeoutError:
             pass
-        finally:
-            barrier.set()
 
         # Следующий вызов должен успешно вернуть результат
         result = self.watchdog.run_with_timeout(fn=lambda: "recovered", timeout_sec=5.0)
@@ -203,17 +207,16 @@ class TestMLXWatchdogStats(unittest.TestCase):
         self.assertGreaterEqual(stats["avg_response_time_sec"], 0.0)
 
     def test_get_stats_after_timeout(self) -> None:
-        barrier = threading.Event()
+        import time as _time
 
-        def hanging():
-            barrier.wait(timeout=60)
+        # W1746: use short sleep instead of barrier — see TestMLXWatchdogTimeout docstring
+        def short_hang():
+            _time.sleep(0.2)
 
         try:
-            self.watchdog.run_with_timeout(fn=hanging, timeout_sec=0.05, model_name="m")
+            self.watchdog.run_with_timeout(fn=short_hang, timeout_sec=0.05, model_name="m")
         except MLXTimeoutError:
             pass
-        finally:
-            barrier.set()
 
         stats = self.watchdog.get_stats()
         self.assertEqual(stats["crashes_count"], 1)
@@ -255,20 +258,19 @@ class TestMLXWatchdogSentryIntegration(unittest.TestCase):
 
     def test_sentry_notified_on_timeout(self) -> None:
         """_notify_sentry_timeout вызывается при таймауте."""
-        barrier = threading.Event()
+        import time as _time
 
-        def hanging():
-            barrier.wait(timeout=60)
+        # W1746: use short sleep instead of barrier — see TestMLXWatchdogTimeout docstring
+        def short_hang():
+            _time.sleep(0.2)
 
         with patch(
             "core.mlx_subprocess._notify_sentry_timeout"
         ) as mock_notify:
             try:
-                self.watchdog.run_with_timeout(fn=hanging, timeout_sec=0.05, model_name="test-sentry-model")
+                self.watchdog.run_with_timeout(fn=short_hang, timeout_sec=0.05, model_name="test-sentry-model")
             except MLXTimeoutError:
                 pass
-            finally:
-                barrier.set()
 
         mock_notify.assert_called_once()
         call_args = mock_notify.call_args

@@ -545,7 +545,23 @@ class STTRepetitionLoopIntegrationTests(unittest.TestCase):
             transcriber=transcriber,
             translator=_FakeTranslator(),
         )
-        self.addCleanup(service.close)
+
+        def _full_cleanup():
+            """W1746: comprehensive shutdown so xdist worker exits cleanly."""
+            service.close()
+            # Stop disk monitor daemon thread (not handled by close())
+            dm = getattr(service, "_disk_monitor", None)
+            if dm is not None:
+                try:
+                    dm.stop()
+                except Exception:
+                    pass
+            # Stop export scheduler daemon thread (close() does this, but re-set for safety)
+            stop_ev = getattr(service, "_export_scheduler_stop", None)
+            if stop_ev is not None:
+                stop_ev.set()
+
+        self.addCleanup(_full_cleanup)
         return service
 
     def _call(self, service, method: str, params: dict | None = None) -> dict:

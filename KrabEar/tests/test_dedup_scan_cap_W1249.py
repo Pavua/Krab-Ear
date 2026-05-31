@@ -58,14 +58,28 @@ class MockStore:
 
 
 class TestRunDedupScanCap(unittest.TestCase):
-    """Test that run_deduplication respects the _MAX_DEDUP_SCAN limit."""
+    """Test that run_deduplication respects the _MAX_DEDUP_SCAN limit.
+
+    W1746 performance note: find_duplicates() is O(n²) via SequenceMatcher —
+    1000 items takes ~25 s, 1500 items ~78 s.  These scan-cap tests only verify
+    *how many items were loaded*, not whether duplicate detection worked, so we
+    mock _detector.find_duplicates to return [] immediately.  This keeps the
+    tests fast (< 0.1 s) without losing coverage of the scan-cap logic.
+    """
+
+    def _make_fast_deduplicator(self) -> "AutoDeduplicator":
+        """Return an AutoDeduplicator whose inner detector is a no-op mock."""
+        deduplicator = AutoDeduplicator()
+        deduplicator._detector = MagicMock()
+        deduplicator._detector.find_duplicates.return_value = []
+        return deduplicator
 
     def test_run_dedup_caps_scan_at_1000_items(self) -> None:
         """run_deduplication with >1000 items scans only _MAX_DEDUP_SCAN items."""
         # Create 1500 items — more than the cap of 1000
         items = _make_items(1500)
         store = MockStore(items)
-        deduplicator = AutoDeduplicator()
+        deduplicator = self._make_fast_deduplicator()
 
         result = deduplicator.run_deduplication(store=store, threshold=DEFAULT_DEDUP_THRESHOLD)
 
@@ -81,7 +95,7 @@ class TestRunDedupScanCap(unittest.TestCase):
         """run_deduplication with <=1000 items scans all of them, capped=False."""
         items = _make_items(50)
         store = MockStore(items)
-        deduplicator = AutoDeduplicator()
+        deduplicator = self._make_fast_deduplicator()
 
         result = deduplicator.run_deduplication(store=store, threshold=DEFAULT_DEDUP_THRESHOLD)
 
@@ -92,7 +106,7 @@ class TestRunDedupScanCap(unittest.TestCase):
         """run_deduplication with exactly _MAX_DEDUP_SCAN items scans all."""
         items = _make_items(_MAX_DEDUP_SCAN)
         store = MockStore(items)
-        deduplicator = AutoDeduplicator()
+        deduplicator = self._make_fast_deduplicator()
 
         result = deduplicator.run_deduplication(store=store, threshold=DEFAULT_DEDUP_THRESHOLD)
 
