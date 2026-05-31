@@ -115,9 +115,18 @@ def _get_confidence(item: Any) -> float | None:
 
 
 def _get_source_lang(item: Any) -> str:
-    """Возвращает source_lang элемента истории."""
+    """Возвращает source_lang элемента истории.
+
+    Sanitizes the value against stored-XSS injection: only letters and hyphens
+    are allowed (e.g. "ru", "en", "zh-hans").  Anything outside ``[a-zA-Z\\-]``
+    is stripped; the result is truncated to 20 chars.  Unrecognisable values
+    become "unknown".
+    """
     val = getattr(item, "source_lang", "") if not isinstance(item, dict) else item.get("source_lang", "")
-    return (val or "").strip().lower()
+    raw = (val or "").strip().lower()
+    # Keep only safe chars: letters and hyphens — reject HTML/script injection
+    sanitized = re.sub(r"[^a-z\-]", "", raw)[:20]
+    return sanitized if sanitized else "unknown"
 
 
 def _get_text(item: Any) -> str:
@@ -186,16 +195,25 @@ class RecordingInsightsGenerator:
     # больших корпусах — миллионы строк до Counter.update неприемлемы).
     _MAX_TOPIC_TOKENS = 1000
 
+    # Maximum allowed value for the `days` analysis window.
+    # days*2 is passed to timedelta(); Python's max is 999_999_999 days, so any
+    # value ≥ 500_000_000 would overflow.  100 years is a practical upper bound.
+    _MAX_DAYS = 36500  # 100 years
+
     def generate_insights(self, items: list, days: int = 7) -> list[Insight]:
         """Генерирует список инсайтов за последние N дней.
 
         Args:
             items: список объектов истории (HistoryItem или dict).
-            days: окно анализа в днях.
+            days: окно анализа в днях.  Clamped to [1, _MAX_DAYS] to prevent
+                  OverflowError when computing timedelta(days=days*2) internally.
 
         Returns:
             Список ``Insight`` — пустой если данных недостаточно.
         """
+        # Clamp to prevent OverflowError: timedelta max is 999_999_999 days,
+        # so days*2 with days >= 500_000_000 would raise OverflowError.
+        days = max(1, min(int(days), self._MAX_DAYS))
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         recent = [
             item for item in items
@@ -338,6 +356,11 @@ class RecordingInsightsGenerator:
         if not prev_freq or not recent_freq:
             return None
 
+        # Threshold for a "significant" new language in a complete switch scenario.
+        # A language with ≥ 20% share in recent is considered dominant enough to
+        # report even when it was 100% absent (prev==0) in the previous period.
+        _COMPLETE_SWITCH_THRESHOLD = 0.20
+
         # Находим язык с наибольшим ростом
         best_lang = None
         best_change_pct = 0.0
@@ -345,6 +368,14 @@ class RecordingInsightsGenerator:
             prev = prev_freq.get(lang, 0.0)
             recent = recent_freq[lang]
             if prev == 0.0:
+                # Complete switch: language was absent before, now present above threshold.
+                # Use 10_000% as a sentinel representing +∞ growth so it wins the
+                # comparison against any gradual shift.
+                if recent >= _COMPLETE_SWITCH_THRESHOLD:
+                    change_pct = 10_000.0
+                    if abs(change_pct) > abs(best_change_pct):
+                        best_change_pct = change_pct
+                        best_lang = lang
                 continue
             change_pct = ((recent - prev) / prev) * 100.0
             if abs(change_pct) > abs(best_change_pct):
@@ -355,18 +386,36 @@ class RecordingInsightsGenerator:
         if best_lang is None or abs(best_change_pct) < 10.0:
             return None
 
-        direction = "выросло" if best_change_pct > 0 else "снизилось"
-        lang_display = best_lang.upper()
-        abs_pct = abs(round(best_change_pct, 0))
-        title = f"Использование {lang_display} {direction} на {abs_pct:.0f}% за неделю"
-        description = (
-            f"За последние {days} дней доля {lang_display} в записях "
-            f"{direction} с {prev_freq.get(best_lang, 0.0) * 100:.0f}% "
-            f"до {recent_freq[best_lang] * 100:.0f}%."
+        # Build human-readable change description
+        is_complete_switch = best_change_pct >= 10_000.0
+        if is_complete_switch:
+            direction = "появилось"
+            abs_pct = round(recent_freq[best_lang] * 100.0, 0)
+            lang_display = best_lang.upper()
+            title = f"Новый язык: {lang_display} появился в записях ({abs_pct:.0f}%)"
+            description = (
+                f"За последние {days} дней {lang_display} появился в записях, "
+                f"хотя в предыдущем периоде отсутствовал полностью "
+                f"(сейчас: {recent_freq[best_lang] * 100:.0f}%)."
+            )
+            conf = min(1.0, round(recent_freq[best_lang] * 1.5, 2))
+        else:
+            direction = "выросло" if best_change_pct > 0 else "снизилось"
+            lang_display = best_lang.upper()
+            abs_pct = abs(round(best_change_pct, 0))
+            title = f"Использование {lang_display} {direction} на {abs_pct:.0f}% за неделю"
+            description = (
+                f"За последние {days} дней доля {lang_display} в записях "
+                f"{direction} с {prev_freq.get(best_lang, 0.0) * 100:.0f}% "
+                f"до {recent_freq[best_lang] * 100:.0f}%."
+            )
+            conf = min(1.0, round(abs(best_change_pct) / 100.0 * 1.5, 2))
+
+        # For complete switches the sentinel 10_000.0 is replaced with None in data
+        # to avoid confusing callers; the boolean flag "complete_switch" conveys the event.
+        data_change_pct: float | None = (
+            None if is_complete_switch else round(best_change_pct, 1)
         )
-
-        conf = min(1.0, round(abs(best_change_pct) / 100.0 * 1.5, 2))
-
         return Insight(
             type="language_shift",
             title=title,
@@ -374,9 +423,10 @@ class RecordingInsightsGenerator:
             confidence=conf,
             data={
                 "language": best_lang,
-                "change_pct": round(best_change_pct, 1),
+                "change_pct": data_change_pct,
                 "prev_ratio": round(prev_freq.get(best_lang, 0.0), 3),
                 "recent_ratio": round(recent_freq.get(best_lang, 0.0), 3),
+                "complete_switch": is_complete_switch,
             },
         )
 
