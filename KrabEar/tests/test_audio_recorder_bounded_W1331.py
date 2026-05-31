@@ -133,13 +133,19 @@ class TestChunksCappedAt4Hours(unittest.TestCase):
                          "_is_recording must be False after cap")
 
     def test_worker_stops_when_cap_exceeded(self):
-        """End-to-end: _worker loop breaks when MAX_RECORDING_SAMPLES exceeded."""
-        sample_rate = 16000
-        recorder = AudioRecorder(sample_rate=sample_rate)
+        """End-to-end: _worker loop breaks when the recording-sample cap is exceeded.
 
-        chunk_size = recorder.chunk_size  # 1600 samples
-        # We'll emit exactly enough chunks to exceed the cap
-        chunks_to_fill = MAX_RECORDING_SAMPLES // chunk_size + 2
+        W1753: используем крошечный cap (2 сек = 32 000 семплов) вместо глобального
+        MAX_RECORDING_SAMPLES (4 ч ≈ 880 МБ). Это тестирует тот же код-путь в _worker
+        (строка ``if _chunks_total_samples + chunk_samples > self._max_recording_samples``),
+        но выделяет ~200 КБ вместо ~880 МБ — безопасно для CI-воркеров с ограниченной RAM.
+        """
+        sample_rate = 16000
+        # Tiny cap: 2 seconds at 16 kHz = 32 000 samples (~200 KB total allocation)
+        tiny_cap = sample_rate * 2  # 32 000 samples
+        recorder = AudioRecorder(sample_rate=sample_rate, max_recording_samples=tiny_cap)
+
+        chunk_size = recorder.chunk_size  # 1600 samples per chunk
 
         call_count = [0]
 
@@ -153,7 +159,6 @@ class TestChunksCappedAt4Hours(unittest.TestCase):
         mock_stream.__exit__ = MagicMock(return_value=False)
         mock_stream.read = fake_read
 
-        import sounddevice as _sd_module  # noqa: F401 – may be None stub
         with patch('backend.recorder.sd') as mock_sd:
             mock_sd.InputStream.return_value = mock_stream
             recorder._stop_event.clear()
@@ -163,7 +168,7 @@ class TestChunksCappedAt4Hours(unittest.TestCase):
                 recorder._chunks = []
                 recorder._chunks_total_samples = 0
 
-            # Run _worker in a thread; it should stop itself
+            # Run _worker in a thread; it should stop itself after tiny_cap is exceeded
             t = threading.Thread(target=recorder._worker, daemon=True)
             t.start()
             t.join(timeout=5.0)
@@ -171,10 +176,10 @@ class TestChunksCappedAt4Hours(unittest.TestCase):
         self.assertFalse(t.is_alive(), "Worker thread must have stopped")
         self.assertFalse(recorder._is_recording,
                          "_is_recording must be False after cap stop")
-        # Should have stopped before consuming all generated chunks
+        # Should have stopped at or below the (tiny) cap
         self.assertLessEqual(
             recorder._chunks_total_samples,
-            MAX_RECORDING_SAMPLES,
+            tiny_cap,
             "Must not exceed cap",
         )
 
