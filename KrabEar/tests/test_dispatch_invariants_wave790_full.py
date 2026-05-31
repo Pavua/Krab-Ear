@@ -302,6 +302,8 @@ _EXPECTED = {
     "probe_llm_http": "svc._handle_probe_llm_http",
     "replace_word_in_last_transcript": "svc._llm_ops_svc.handle_replace_word_in_last_transcript",
     "score_transcription": "svc._handle_score_transcription",
+    # W1734: purge_all_data — destructive privacy wipe (archive + bookmarks + call_sessions + chains)
+    "purge_all_data": "svc._history.handle_purge_all_data",
 }
 
 

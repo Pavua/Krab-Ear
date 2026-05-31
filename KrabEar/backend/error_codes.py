@@ -203,6 +203,21 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "dedupe_seconds": 10,
     },
 
+    # W1749: purge_all_data partial failure — one or more secondary cleanup steps
+    # (compact, transcript .md deletion, chains, archive, bookmarks, call_sessions,
+    #  semantic_search) raised an exception.  The primary history tombstone step still
+    #  completed, but some data may remain on disk.  Toast so the user knows and can
+    #  manually inspect the data directory.  Severity=error (not critical) because
+    #  the main history store is cleared; secondary residue is typically low-sensitivity.
+    "history.purge_incomplete": {
+        "user_msg_ru": "Очистка данных завершена частично — некоторые файлы могут остаться на диске. Проверьте каталог данных.",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "error",
+        "dedupe_seconds": 30,
+    },
+
     # ── Layer: vocabulary ────────────────────────────────────────
     "vocabulary.load_fail": {
         "user_msg_ru": "Не загрузился словарь — STT работает без bias",

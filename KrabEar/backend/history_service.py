@@ -105,6 +105,11 @@ class HistoryService:
         self._summary_profiles = SummaryProfileManager(data_dir=_data_dir)
         # Late-injection: RecordingChainManager для каскадной очистки ghost item_ids (W1253 RC-3).
         self._recording_chain_mgr = None
+        # Late-injection: W1734 — collaborators for full privacy purge.
+        # Wired by BackendService.__init__ after these objects are constructed.
+        self._archive_manager: Any = None    # ArchiveManager — archive.ndjson
+        self._bookmarks: Any = None          # BookmarkManager — bookmarks.ndjson
+        self._call_session_store: Any = None  # CallSessionStore — call_sessions.ndjson
 
     # ------------------------------------------------------------------
     # Privacy helpers
@@ -120,6 +125,47 @@ class HistoryService:
             return bool(settings.get("privacy_mode_enabled", False))
         except Exception:  # noqa: BLE001
             return False
+
+    # ------------------------------------------------------------------
+    # Phase B loud-error helper (late-injected _error_bus)
+    # ------------------------------------------------------------------
+
+    def _push_error(
+        self,
+        code: str,
+        message_debug: str,
+        context: "dict[str, Any] | None" = None,
+    ) -> None:
+        """Push a KrabError to the attached ErrorBus, if wired.
+
+        ``_error_bus`` is late-injected by BackendService.__init__ after
+        HistoryService is constructed (same pattern as StateStore, DiskMonitor,
+        StartupDiagnostics).  When not wired the call is a silent no-op so that
+        unit tests that don't need a full BackendService still work.
+        """
+        error_bus = getattr(self, "_error_bus", None)
+        if error_bus is None:
+            return
+        try:
+            from backend.error_bus import KrabError
+            from backend.error_codes import ERROR_REGISTRY
+            from datetime import datetime, timezone
+
+            entry = ERROR_REGISTRY.get(code, {})
+            err = KrabError(
+                severity=entry.get("severity", "error"),
+                component="history",
+                code=code,
+                message_user=entry.get("user_msg_ru", "Ошибка истории"),
+                message_debug=message_debug,
+                timestamp=datetime.now(timezone.utc),
+                context=context or {"data_dir": str(self.store.data_dir)},
+                actionable=entry.get("actionable", False),
+                action_id=entry.get("action_id"),
+            )
+            error_bus.push(err)
+        except Exception:  # noqa: BLE001
+            logger.exception("_push_error failed for code=%s", code)
 
     # ------------------------------------------------------------------
     # Export path allowlist helper
@@ -1464,6 +1510,223 @@ class HistoryService:
             data={"deleted_count": len(to_delete), "remaining": remaining, "older_than_days": older_than_days},
         )
         return {"deleted_count": len(to_delete), "remaining": remaining}
+
+    def handle_purge_all_data(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Полная очистка всех пользовательских данных (privacy-purge / wipe-all).
+
+        Удаляет ВСЕ записи истории (без временного порога), а также:
+          - архив записей (archive/archive.ndjson) — W1734 FIX-A
+          - закладки (bookmarks.ndjson) — W1734 FIX-B
+          - сессии звонков (call_sessions.ndjson) — W1734 FIX-B
+          - все цепочки записей (recording_chains.json) — W1730
+          - семантический индекс (embeddings), если подключён
+          - версии транскрипций, если подключён менеджер версий
+
+        **Требует подтверждения (W1734 FIX-D)**: параметр ``confirm`` должен быть
+        равен ``True`` (bool) или строке ``"PURGE_ALL"``. Без него возвращает ошибку
+        ``confirmation_required`` и НЕ удаляет никаких данных.
+
+        Каждый дополнительный шаг защищён try/except — ошибка в одном шаге
+        не прерывает остальные (privacy-purge должен быть атомарным для истории).
+
+        Возвращает:
+            history_deleted (int): количество удалённых записей истории
+            chains_deleted (int): количество удалённых цепочек (0 если N/A)
+            archive_deleted (int): количество удалённых архивных записей (0 если N/A)
+            bookmarks_deleted (int): количество удалённых закладок (0 если N/A)
+            call_sessions_deleted (int): количество удалённых сессий звонков (0 если N/A)
+            transcripts_deleted (int): количество удалённых .md файлов в transcripts/ (W1749)
+            semantic_purged (bool): True если семантический индекс очищен
+            complete (bool): True если все вторичные шаги завершились без ошибок
+            errors (list[str]): имена шагов, завершившихся с ошибкой (без PII)
+        """
+        # --- D. Confirm guard — prevent accidental wipe ---
+        confirm = params.get("confirm")
+        if confirm is not True and confirm != "PURGE_ALL":
+            return {
+                "ok": False,
+                "error": "confirmation_required",
+                "message": (
+                    "purge_all_data requires explicit confirmation. "
+                    "Pass confirm=True or confirm='PURGE_ALL' to proceed."
+                ),
+            }
+
+        # --- 1. Удалить все записи истории (primary — must succeed) ---
+        with self.store._lock():
+            active = self.store._load_active_items_unlocked()
+            for item in active:
+                self.store._append_ndjson(self.store.tombstones_path, {"id": item.id})
+            history_deleted = len(active)
+
+        secondary_errors: list[str] = []
+
+        # --- 1b. W1749 CRITICAL-2: compact history.ndjson to physically erase transcript text.
+        # Tombstoning alone only logically hides items; the cleartext remains in the NDJSON
+        # file on disk.  compact_with_stats() rewrites history.ndjson dropping all tombstoned
+        # rows, so the on-disk file no longer contains any transcript text after this call.
+        try:
+            self.store.compact_with_stats()
+        except Exception:
+            logger.warning("purge_all_data: compact failed — cleartext may remain in history.ndjson", exc_info=True)
+            secondary_errors.append("compact")
+
+        # --- 1c. W1749 CRITICAL-2: delete transcript .md files (TranscriptWriter artefacts).
+        # Each transcription writes a timestamped Markdown file under <data_dir>/transcripts/.
+        # These files contain the full STT text and survive a purge unless explicitly removed.
+        transcripts_deleted = 0
+        try:
+            transcripts_dir = Path(self.store.data_dir) / "transcripts"
+            if transcripts_dir.is_dir():
+                md_files = list(transcripts_dir.glob("*.md"))
+                for md_path in md_files:
+                    try:
+                        md_path.unlink(missing_ok=True)
+                        transcripts_deleted += 1
+                    except OSError:
+                        logger.warning("purge_all_data: could not delete transcript file %s", md_path, exc_info=True)
+                if len(md_files) > transcripts_deleted:
+                    secondary_errors.append("transcripts")
+        except Exception:
+            logger.warning("purge_all_data: transcript directory deletion failed", exc_info=True)
+            secondary_errors.append("transcripts")
+
+        # --- 2. Каскадная очистка версий транскрипций ---
+        if active and self._transcript_versions is not None:
+            deleted_ids = [item.id for item in active]
+            try:
+                self._transcript_versions.cleanup_for_ids(deleted_ids)
+            except Exception:
+                logger.warning(
+                    "purge_all_data: transcript_versions cleanup failed", exc_info=True
+                )
+                secondary_errors.append("transcript_versions")
+
+        # --- 3. W1730: очистить все цепочки записей ---
+        chains_deleted = 0
+        if self._recording_chain_mgr is not None:
+            try:
+                chains_deleted = self._recording_chain_mgr.delete_all_chains()
+            except Exception:
+                logger.warning(
+                    "purge_all_data: delete_all_chains failed", exc_info=True
+                )
+                secondary_errors.append("chains")
+
+        # --- 4. Очистить семантический индекс ---
+        semantic_purged = False
+        if self._semantic_searcher is not None:
+            try:
+                self._semantic_searcher.purge_all()
+                semantic_purged = True
+            except Exception:
+                logger.warning(
+                    "purge_all_data: semantic_searcher.purge_all failed", exc_info=True
+                )
+                secondary_errors.append("semantic_search")
+
+        # --- 5. W1734 FIX-A: очистить архив (archive.ndjson) ---
+        archive_deleted = 0
+        if self._archive_manager is not None:
+            try:
+                archive_deleted = self._archive_manager.clear_all()
+            except Exception:
+                logger.warning(
+                    "purge_all_data: archive clear_all failed", exc_info=True
+                )
+                secondary_errors.append("archive")
+
+        # --- 6. W1734 FIX-B: очистить закладки (bookmarks.ndjson) ---
+        bookmarks_deleted = 0
+        if self._bookmarks is not None:
+            try:
+                bookmarks_deleted = self._bookmarks.delete_all()
+            except Exception:
+                logger.warning(
+                    "purge_all_data: bookmarks delete_all failed", exc_info=True
+                )
+                secondary_errors.append("bookmarks")
+
+        # --- 7. W1734 FIX-B: очистить сессии звонков (call_sessions.ndjson) ---
+        call_sessions_deleted = 0
+        if self._call_session_store is not None:
+            try:
+                call_sessions_deleted = self._call_session_store.delete_all()
+            except Exception:
+                logger.warning(
+                    "purge_all_data: call_session_store delete_all failed", exc_info=True
+                )
+                secondary_errors.append("call_sessions")
+
+        # --- C. W1734: Audit log entry ---
+        try:
+            from backend.privacy_audit import get_privacy_audit_logger
+            audit = get_privacy_audit_logger()
+            audit.log_event(
+                category="privacy",
+                action="purge_all_data",
+                details={
+                    "history_deleted": history_deleted,
+                    "chains_deleted": chains_deleted,
+                    "archive_deleted": archive_deleted,
+                    "bookmarks_deleted": bookmarks_deleted,
+                    "call_sessions_deleted": call_sessions_deleted,
+                    "transcripts_deleted": transcripts_deleted,
+                    "secondary_errors": secondary_errors,
+                },
+            )
+        except Exception:
+            logger.warning("purge_all_data: privacy audit log failed", exc_info=True)
+
+        add_breadcrumb(
+            category="history",
+            message="purge_all_data",
+            level="info",
+            data={
+                "history_deleted": history_deleted,
+                "chains_deleted": chains_deleted,
+                "archive_deleted": archive_deleted,
+                "bookmarks_deleted": bookmarks_deleted,
+                "call_sessions_deleted": call_sessions_deleted,
+                "transcripts_deleted": transcripts_deleted,
+                "semantic_purged": semantic_purged,
+            },
+        )
+        # --- W1749 CRITICAL-1: loud error when purge is only partial ---
+        if secondary_errors:
+            self._push_error(
+                code="history.purge_incomplete",
+                message_debug=f"purge_all_data partial failure: {secondary_errors}",
+                context={
+                    "failed_steps": secondary_errors,
+                    "data_dir": str(self.store.data_dir),
+                },
+            )
+
+        logger.info(
+            "purge_all_data: history=%d transcripts=%d chains=%d archive=%d bookmarks=%d calls=%d "
+            "semantic_purged=%s errors=%s",
+            history_deleted,
+            transcripts_deleted,
+            chains_deleted,
+            archive_deleted,
+            bookmarks_deleted,
+            call_sessions_deleted,
+            semantic_purged,
+            secondary_errors,
+        )
+        return {
+            "ok": True,
+            "history_deleted": history_deleted,
+            "chains_deleted": chains_deleted,
+            "archive_deleted": archive_deleted,
+            "bookmarks_deleted": bookmarks_deleted,
+            "call_sessions_deleted": call_sessions_deleted,
+            "transcripts_deleted": transcripts_deleted,
+            "semantic_purged": semantic_purged,
+            "complete": len(secondary_errors) == 0,
+            "errors": secondary_errors,
+        }
 
     def handle_get_storage_info(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает информацию о размере файлов данных Krab Ear.

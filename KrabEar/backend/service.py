@@ -602,7 +602,20 @@ class BackendService:
         # W1687 F7 MED: wire recording chain manager so archived items are
         # removed from their chains (ghost references prevented).
         self._archive_manager._recording_chain_mgr = self._chains
+        # W1730: wire recording chain manager into HistoryService so that
+        # delete_history_item cascades ghost-ref removal AND purge_all_data
+        # calls delete_all_chains() — previously only ArchiveManager had this wire.
+        self._history._recording_chain_mgr = self._chains
         self._call_session_store = CallSessionStore(data_dir=self.store.data_dir)
+        # W1734: wire archive/bookmarks/call_session_store into HistoryService
+        # so handle_purge_all_data can reach them without a BackendService reference.
+        # _archive_manager is already constructed above; _bookmarks at line ~376.
+        self._history._archive_manager = self._archive_manager
+        self._history._bookmarks = self._bookmarks
+        self._history._call_session_store = self._call_session_store
+        # W1749: wire error_bus into HistoryService so handle_purge_all_data can push
+        # history.purge_incomplete loud errors when secondary cleanup steps fail.
+        self._history._error_bus = self._error_bus
         self._call_session_service = CallSessionService(
             store=self._call_session_store,
             auto_end=self._call_auto_end,
@@ -1342,6 +1355,7 @@ class BackendService:
             "repaste_item": self._history.handle_repaste_item,
             "get_clipboard_history": self._history.handle_get_clipboard_history,  # история буфера обмена: последние N вставленных транскрипций
             "cleanup_old_history": self._history.handle_cleanup_old_history,  # удаляет записи старше N дней
+            "purge_all_data": self._history.handle_purge_all_data,  # W1730: полная очистка всех данных (история + цепочки + embeddings)
             "get_storage_info": self._history.handle_get_storage_info,  # размер файлов данных
             "get_transcripts_path": self._history.handle_get_transcripts_path,  # путь к папке транскриптов
             "backup_history": self._history.handle_backup_history,  # создаёт timestamped-резервную копию истории

@@ -237,6 +237,29 @@ class CallSessionStore:
             })
         return session
 
+    def delete_all(self) -> int:
+        """Полностью очищает хранилище сессий (privacy-purge / wipe-all).
+
+        Перезаписывает call_sessions.ndjson пустым файлом под flock.
+        Звонки содержат номера телефонов и временны́е метки — обязательно
+        удалять при full privacy-purge.
+
+        Используется ТОЛЬКО из handle_purge_all_data.
+
+        Returns:
+            Количество активных сессий до очистки.
+        """
+        with self._lock():
+            sessions_before = len(self._load_all_unlocked())
+            tmp = self.sessions_path.with_suffix(".ndjson.tmp")
+            try:
+                tmp.write_text("", encoding="utf-8")
+                tmp.replace(self.sessions_path)
+            except Exception:
+                tmp.unlink(missing_ok=True)
+                raise
+        return sessions_before
+
     def delete(self, session_id: str) -> bool:
         """Мягкое удаление сессии через tombstone. Возвращает True если сессия была."""
         sid = session_id.strip()
