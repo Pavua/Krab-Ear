@@ -64,7 +64,17 @@ _register_stub_modules()
 # Helper: import a fresh copy of audio_lang_id each test run
 # ---------------------------------------------------------------------------
 def _fresh_audio_lang_id():
-    """Force-reimport audio_lang_id to get a fresh class with empty _model_cache."""
+    """Force-reimport audio_lang_id to get a fresh class with empty _model_cache.
+
+    W1751: re-ensure the heavy-dep stubs first.  The conftest
+    _purge_leaked_module_stubs fixture removes bare mlx / mlx.core stubs after
+    every test, so by the time a *later* test in this file calls this helper the
+    module-level _register_stub_modules() install may have been purged.  Without
+    re-installing, the reimport of core.audio_lang_id would try the real mlx
+    (unavailable / unsafe under xdist) and fail.  Re-registering makes this
+    helper self-sufficient regardless of cross-test purge timing.
+    """
+    _register_stub_modules()
     for key in list(sys.modules.keys()):
         if "audio_lang_id" in key:
             del sys.modules[key]

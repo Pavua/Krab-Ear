@@ -11,6 +11,8 @@ from __future__ import annotations
 import numpy  # noqa: F401,E402
 import numpy.exceptions  # noqa: F401,E402
 
+import importlib
+import importlib.util
 import json
 import platform
 import re
@@ -23,6 +25,112 @@ import pytest
 
 _BENCH_RE = re.compile(r"\[BENCH\]\s+(.+?):\s+([\d.]+)s")
 _HISTORY_FILE = Path(__file__).resolve().parents[2] / ".benchmarks" / "history.jsonl"
+
+
+# ---------------------------------------------------------------------------
+# Wave 1751: ANCHOR-RESTORE real heavy external modules BEFORE every test.
+#
+# Root cause of the recurring "module 'sounddevice' has no attribute
+# 'InputStream'" / BackendService-collaborator-None / xdist-worker-crash class
+# of failures:
+#
+#   1. A test file (e.g. test_pipeline_v2_gate_W1275.py) installs a *bare*
+#      types.ModuleType stub for "sounddevice" (no InputStream) into
+#      sys.modules at MODULE-IMPORT (collection) time — before any test runs.
+#   2. backend.recorder does `import sounddevice as sd` at module top-level and
+#      caches that reference in its OWN module global `sd`.  If backend.recorder
+#      is (re)imported while the bare stub is in sys.modules, `backend.recorder.sd`
+#      is now permanently the bare stub — restoring sys.modules["sounddevice"]
+#      alone does NOT fix it (the stale module global still points at the stub).
+#   3. Any later test that calls `sd.InputStream(...)` (recorder capture loop,
+#      BackendService.test_microphone, etc.) raises AttributeError inside a
+#      background thread → the test fails *or* the whole xdist worker crashes
+#      ("node down: Not properly terminated"), cascading to every other test
+#      on that worker (the BackendService "unexpectedly None" symptoms).
+#
+# The existing _purge_leaked_module_stubs runs AFTER each test (on yield), so a
+# victim that runs *before* the polluter's teardown still sees the stub.
+#
+# Fix: capture the REAL heavy modules once at session import, then BEFORE every
+# test (before yield) guarantee the real module is back in sys.modules *and*
+# re-point any already-imported module global that aliased it (backend.recorder.sd
+# and friends).  Tests that legitimately stub these in their OWN setUp still
+# work — setUp runs AFTER this fixture's before-phase.
+# ---------------------------------------------------------------------------
+
+# External modules whose *real* implementation must be present before each test.
+# Only modules that are actually installed in the environment are anchored; a
+# missing module is simply skipped (its absence is the correct state).
+#
+# IMPORTANT: only anchor modules that are (a) SAFE to keep loaded and (b) subject
+# to the module-global stale-binding poison (a top-level `import X as y` in a
+# source module that a later test calls).  sounddevice qualifies: backend.recorder
+# caches `import sounddevice as sd` and the hardware calls are neutralized
+# separately (_neutralize_sounddevice_hardware), so a real sounddevice is safe.
+#
+# mlx / mlx.core / mlx_whisper are deliberately NOT anchored: MLX is not
+# thread/process-safe (concurrent GPU access SIGSEGVs — see CLAUDE.md "MLX
+# thread-safety"), so force-loading the *real* MLX into sys.modules before every
+# test could trigger a real GPU init / crash under pytest-xdist.  MLX tests stub
+# mlx in their own setUp, and the after-each _purge_leaked_module_stubs already
+# cleans up mlx / mlx.core stubs.
+_ANCHOR_EXTERNAL_NAMES = (
+    "sounddevice",
+    "soundfile",
+)
+
+# Modules that bind a heavy external at *module top-level* into their own global
+# namespace (alias -> external module name).  When we restore the real external
+# we must also re-point these stale globals, otherwise they keep the leaked stub.
+# Format: {already_imported_module_name: {global_attr: external_module_name}}
+_ANCHOR_REBIND_GLOBALS = {
+    "backend.recorder": {"sd": "sounddevice"},
+}
+
+
+def _capture_real_modules() -> dict:
+    """Import and cache the real heavy external modules (those that exist)."""
+    real: dict = {}
+    for name in _ANCHOR_EXTERNAL_NAMES:
+        existing = sys.modules.get(name)
+        # If something already imported the real module, trust it only when it
+        # is NOT a bare stub / mock (real modules have a __file__ or spec origin).
+        if existing is not None and _looks_real(existing):
+            real[name] = existing
+            continue
+        try:
+            if importlib.util.find_spec(name) is None:
+                continue
+        except Exception:
+            continue
+        try:
+            real[name] = importlib.import_module(name)
+        except Exception:
+            # Native lib (e.g. PortAudio) genuinely unavailable — leave unset so
+            # the anchor simply never forces this module.  The real source code
+            # already guards `import sounddevice` with try/except.
+            pass
+    return real
+
+
+def _looks_real(mod: object) -> bool:
+    """Heuristic: a real module has __file__ or a non-empty __spec__.origin."""
+    import types as _t
+    from unittest.mock import Mock as _Mock, MagicMock as _MagicMock
+
+    if isinstance(mod, (_Mock, _MagicMock)):
+        return False
+    if not isinstance(mod, _t.ModuleType):
+        return False
+    if getattr(mod, "__file__", None):
+        return True
+    origin = getattr(getattr(mod, "__spec__", None), "origin", None)
+    return bool(origin) and origin not in ("namespace",)
+
+
+# Captured once at conftest import (before the bulk of test collection installs
+# any stubs — conftest is imported very early by pytest).
+_REAL_MODULES: dict = _capture_real_modules()
 
 
 def _git_commit() -> str:
@@ -239,6 +347,109 @@ def _reset_error_bus_singleton():
 # ---------------------------------------------------------------------------
 _STUB_PURGE_PREFIXES = ("backend.", "core.", "contracts.")
 _STUB_PURGE_EXTERNAL = frozenset({"websockets", "mlx", "mlx.core", "sentry_sdk"})
+
+
+@pytest.fixture(autouse=True)
+def _anchor_real_heavy_modules():
+    """Restore real heavy external modules in sys.modules BEFORE every test.
+
+    Wave 1751 systemic backstop.  See the long comment near _REAL_MODULES.
+
+    Runs in the *before* phase (before yield), so it executes before each test's
+    own setUp.  For every heavy external whose real implementation we captured at
+    session start, if a stub has leaked into sys.modules we put the real module
+    back, and we re-point any stale module global that aliased it at top-level
+    import time (e.g. backend.recorder.sd).
+
+    This defeats cross-file stub leaks regardless of pytest-xdist test ordering:
+    the real module is guaranteed present before the test body runs, so
+    `patch("sounddevice.InputStream", ...)` and `sd.InputStream(...)` both resolve
+    against the real module.  Tests that intentionally stub these modules in their
+    own setUp/with-block still work — their stub is installed after this fixture's
+    before-phase and is cleaned up by _purge_leaked_module_stubs after the test.
+    """
+    if _REAL_MODULES:
+        for name, real_mod in _REAL_MODULES.items():
+            current = sys.modules.get(name)
+            if current is not real_mod:
+                sys.modules[name] = real_mod
+        # Re-point stale module globals that cached a now-replaced external.
+        for owner_name, attr_map in _ANCHOR_REBIND_GLOBALS.items():
+            owner = sys.modules.get(owner_name)
+            if owner is None:
+                continue
+            for attr, ext_name in attr_map.items():
+                real_ext = _REAL_MODULES.get(ext_name)
+                if real_ext is None:
+                    continue
+                # Only rebind if the owner currently holds a non-real reference
+                # (a leaked stub).  Never clobber a deliberate per-test patch:
+                # this runs before setUp, so any current value is either the real
+                # module (no-op) or a leaked stub (must fix).
+                if getattr(owner, attr, None) is not real_ext:
+                    setattr(owner, attr, real_ext)
+    yield
+
+
+# Hardware-level sounddevice functions that block on / probe real PortAudio.
+# No unit test should ever exercise these against real hardware: under
+# pytest-xdist with concurrent workers on a headless macOS runner, real
+# sd.rec()/sd.query_devices()/sd.InputStream() can hang or segfault the worker
+# ("node down: Not properly terminated"), cascading to unrelated tests on the
+# same worker.  Several test files invoke the IPC methods that reach these
+# (test_dispatch_complete.py, BackendServiceInitTestCase, etc.) without
+# patching them — so we neutralize them once, centrally, for every test.
+_SD_HARDWARE_NEUTRALIZE = ("rec", "wait", "query_devices", "InputStream", "play")
+
+
+@pytest.fixture(autouse=True)
+def _neutralize_sounddevice_hardware():
+    """Patch real sounddevice hardware calls to safe no-ops for every test.
+
+    Wave 1751.  Runs after _anchor_real_heavy_modules (so the *real* sounddevice
+    module is in place) and wraps the test, restoring the originals afterward.
+
+    A test that needs specific device data simply patches sd.query_devices (or
+    the service's _list_audio_inputs) itself — that patch nests on top of this
+    one and is restored independently.  If a test replaces the whole sounddevice
+    module with its own stub, this fixture's patches sit on the real module
+    object and are harmless.
+    """
+    import types as _t
+    from unittest.mock import patch as _patch, MagicMock as _MagicMock
+
+    real_sd = (_REAL_MODULES.get("sounddevice")
+               if _REAL_MODULES else None)
+    # Only neutralize a genuine, real sounddevice module.
+    if real_sd is None or not isinstance(real_sd, _t.ModuleType):
+        yield
+        return
+
+    import numpy as _np
+
+    _patchers = []
+    try:
+        for _attr in _SD_HARDWARE_NEUTRALIZE:
+            if not hasattr(real_sd, _attr):
+                continue
+            if _attr == "rec":
+                ret = _np.zeros((1, 1), dtype=_np.float32)
+                p = _patch.object(real_sd, _attr, return_value=ret)
+            elif _attr == "query_devices":
+                p = _patch.object(real_sd, _attr, return_value=[])
+            elif _attr == "InputStream":
+                p = _patch.object(real_sd, _attr, return_value=_MagicMock())
+            else:  # wait / play
+                p = _patch.object(real_sd, _attr, return_value=None)
+            p.start()
+            _patchers.append(p)
+        yield
+    finally:
+        for p in reversed(_patchers):
+            try:
+                p.stop()
+            except Exception:
+                pass
 
 
 @pytest.fixture(autouse=True)

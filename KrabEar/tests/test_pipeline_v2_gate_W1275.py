@@ -26,7 +26,20 @@ if _PROJECT_ROOT not in sys.path:
 # Helpers: stub out heavy deps before any import
 # ---------------------------------------------------------------------------
 
+# W1751: track every sys.modules entry this module installs so tearDownModule
+# can restore the original.  Installing a *bare* ModuleType stub for a heavy
+# external (e.g. "sounddevice" without InputStream) and leaving it in sys.modules
+# is the root cause of the cross-file stub-leak failure class: backend.recorder
+# caches `import sounddevice as sd` at module-import, so a leaked bare stub
+# permanently poisons backend.recorder.sd for every later test in the same xdist
+# worker.  We now (a) prefer the REAL module whenever it is importable — the norm
+# in CI via requirements.txt — and only fall back to a bare stub when the real
+# import genuinely fails, and (b) restore sys.modules in tearDownModule.
+_INSTALLED_STUBS: dict = {}
+
+
 def _stub_module(name: str, parent: str | None = None) -> types.ModuleType:
+    _INSTALLED_STUBS.setdefault(name, sys.modules.get(name))
     mod = types.ModuleType(name)
     sys.modules[name] = mod
     if parent and parent in sys.modules:
@@ -36,7 +49,12 @@ def _stub_module(name: str, parent: str | None = None) -> types.ModuleType:
 
 
 def _ensure_stubs() -> None:
-    """Stub out all heavy optional modules so pipeline imports work."""
+    """Make heavy optional modules importable for the pipeline imports.
+
+    Prefer the real module; only stub when the real import is unavailable.
+    """
+    import importlib
+
     for m in [
         "mlx", "mlx.core", "mlx_whisper",
         "numpy", "numpy.core",
@@ -47,16 +65,41 @@ def _ensure_stubs() -> None:
         "pyannote",
         "pyannote.audio",
     ]:
-        if m not in sys.modules:
-            _stub_module(m)
+        if m in sys.modules:
+            continue
+        # Try the real module first — keeps backend.recorder.sd (and every other
+        # `import X` global) pointing at a real implementation in CI.
+        try:
+            importlib.import_module(m)
+            continue
+        except Exception:
+            pass
+        # Real module unavailable in this environment — install a bare stub that
+        # tearDownModule will remove so it never leaks to another test file.
+        _stub_module(m)
 
-    # numpy needs a special stub (used in StageCache.compute_hash)
-    if not hasattr(sys.modules.get("numpy"), "ndarray"):
-        np_stub = sys.modules["numpy"]
-        np_stub.ndarray = type("ndarray", (), {})  # type: ignore[attr-defined]
+    # numpy needs a special stub attribute (used in StageCache.compute_hash) only
+    # when numpy itself is a bare stub (i.e. real numpy was unavailable).
+    _np = sys.modules.get("numpy")
+    if _np is not None and not hasattr(_np, "ndarray"):
+        _np.ndarray = type("ndarray", (), {})  # type: ignore[attr-defined]
 
 
 _ensure_stubs()
+
+
+def tearDownModule() -> None:  # noqa: N802 (pytest/unittest hook name)
+    """Restore sys.modules entries this module installed (W1751).
+
+    Removes any bare stub we put in place so a heavy-external stub can never
+    survive this file's teardown and poison another test file's import cache.
+    """
+    for name, original in _INSTALLED_STUBS.items():
+        if original is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = original
+    _INSTALLED_STUBS.clear()
 
 
 # ---------------------------------------------------------------------------

@@ -1777,14 +1777,25 @@ class BackendServiceInitTestCase(unittest.TestCase):
         import unittest.mock as _mock
         _sd = sys.modules.get("sounddevice")
         if isinstance(_sd, _types.ModuleType) and hasattr(_sd, "rec"):
-            # Real sounddevice available — patch out the blocking calls.
+            # Real sounddevice available — patch out ALL blocking / hardware
+            # calls reachable from the IPC methods this test class exercises.
+            # W1751: test_dispatch_table_has_all_methods probes "test_microphone"
+            # (sd.rec/sd.wait) AND "get_audio_devices"/"list_audio_inputs"
+            # (sd.query_devices).  Real PortAudio device enumeration under
+            # concurrent pytest-xdist workers on a headless macOS runner can
+            # crash the worker ("node down: Not properly terminated").  Patching
+            # query_devices/InputStream too keeps the worker stable.
             _np_zeros = np.zeros((32000, 1), dtype=np.float32)
-            p_rec = _mock.patch.object(_sd, "rec", return_value=_np_zeros)
-            p_wait = _mock.patch.object(_sd, "wait", return_value=None)
-            p_rec.start()
-            p_wait.start()
-            self.addCleanup(p_rec.stop)
-            self.addCleanup(p_wait.stop)
+            for _attr, _kw in (
+                ("rec", {"return_value": _np_zeros}),
+                ("wait", {"return_value": None}),
+                ("query_devices", {"return_value": []}),
+                ("InputStream", {"return_value": _mock.MagicMock()}),
+            ):
+                if hasattr(_sd, _attr):
+                    _p = _mock.patch.object(_sd, _attr, **_kw)
+                    _p.start()
+                    self.addCleanup(_p.stop)
         self.service = BackendService(
             store=store,
             recorder=FakeRecorder(),
