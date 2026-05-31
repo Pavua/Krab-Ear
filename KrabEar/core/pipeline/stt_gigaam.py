@@ -45,6 +45,34 @@ logger = logging.getLogger("KrabEar.GigaAM")
 # Gigaam требует 16 кГц моно PCM
 _REQUIRED_SAMPLE_RATE = 16000
 
+
+def _resolve_ffmpeg_dir() -> str | None:
+    """Return the directory containing ffmpeg, or None if it cannot be found.
+
+    Used to inject ffmpeg's directory into the GigaAM worker subprocess PATH so
+    that the gigaam library's internal bare ``ffmpeg`` call succeeds even when the
+    parent process was launched by launchd with a minimal PATH
+    (``/usr/bin:/bin:/usr/sbin:/sbin``) that lacks ``/opt/homebrew/bin``.
+
+    Resolution order — same as engine._find_ffmpeg_path():
+    1. ``shutil.which("ffmpeg")`` — respects the current process PATH.
+    2. ``/opt/homebrew/bin/ffmpeg`` — Homebrew on Apple Silicon.
+    3. ``/usr/local/bin/ffmpeg`` — Homebrew on Intel / other installs.
+
+    Never raises.
+    """
+    try:
+        result = shutil.which("ffmpeg")
+        if result:
+            return os.path.dirname(os.path.abspath(result))
+        for candidate in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"):
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return os.path.dirname(candidate)
+    except Exception:
+        pass
+    return None
+
+
 # Модели, поддерживаемые адаптером
 _VALID_MODES = frozenset({"rnnt", "ctc", "v2_rnnt", "v2_ctc", "v1_rnnt", "v1_ctc"})
 
@@ -563,6 +591,26 @@ class _GigaAMSubprocessSession:
         # subprocess environment to prevent macOS from logging the warning
         # "can't turn off malloc stack logging because it was not enabled".
         _env = os.environ.copy()
+
+        # Wave 1742: ffmpeg PATH injection — launchd launches the REST server with a
+        # minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin) that does NOT include
+        # /opt/homebrew/bin.  When gigaam library internally calls bare ``ffmpeg``
+        # (for audio decode) the child process inherits that minimal PATH and raises
+        # FileNotFoundError, producing "STTRouter.warmup_gigaam: ошибка warmup" (103×)
+        # and ultimately "Все доступные STT-движки вышли из строя" (48×).
+        # Fix: resolve the ffmpeg directory in the parent (which may have a richer
+        # PATH, or we hard-check /opt/homebrew/bin) and PREPEND it to the child PATH.
+        _ffmpeg_dir = _resolve_ffmpeg_dir()
+        if _ffmpeg_dir:
+            _current_path = _env.get("PATH", "")
+            # Prepend only if not already present to avoid PATH bloat.
+            if _ffmpeg_dir not in _current_path.split(os.pathsep):
+                _env["PATH"] = _ffmpeg_dir + os.pathsep + _current_path
+                logger.debug(
+                    "_GigaAMSubprocessSession: prepended ffmpeg dir to subprocess PATH: %s",
+                    _ffmpeg_dir,
+                )
+
         if "MALLOC_STACK_LOGGING" in _env:
             _env.pop("MALLOC_STACK_LOGGING")
             _error_bus = getattr(self, "_error_bus", None)

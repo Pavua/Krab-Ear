@@ -542,5 +542,207 @@ class TestGigaAMWorkerTimeoutPushesError(unittest.TestCase):
                       f"Unexpected error code: {getattr(pushed_obj, 'code', None)}")
 
 
+# ---------------------------------------------------------------------------
+# Wave 1742 — GigaAM worker subprocess PATH must include ffmpeg directory
+# Regression guard for launchd minimal-PATH bug:
+#   REST server starts with PATH=/usr/bin:/bin:/usr/sbin:/sbin
+#   → gigaam internal bare-ffmpeg call → FileNotFoundError
+#   → STTRouter.warmup_gigaam ошибка warmup (103×) → все движки вышли из строя (48×)
+# ---------------------------------------------------------------------------
+
+class TestGigaAMSubprocessFfmpegPath(unittest.TestCase):
+    """W1742: GigaAM worker subprocess must receive a PATH that includes ffmpeg dir."""
+
+    def _capture_popen_env(self) -> dict:
+        """Start a session under minimal launchd PATH, capture the env passed to Popen."""
+        from core.pipeline.stt_gigaam import _GigaAMSubprocessSession
+
+        captured_env: dict = {}
+
+        def fake_popen_factory(*args, **kwargs):
+            captured_env.update(kwargs.get("env") or {})
+            return _FakePopen([_ok_load_response()])
+
+        # Simulate launchd minimal PATH — no /opt/homebrew/bin, no ffmpeg in PATH.
+        minimal_path = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+        with patch.dict(os.environ, {"PATH": minimal_path}, clear=False):
+            with patch("core.pipeline.stt_gigaam.subprocess.Popen",
+                       side_effect=fake_popen_factory):
+                sess = _GigaAMSubprocessSession(
+                    "/fake/py", "/fake/w.py", "rnnt", "cpu"
+                )
+                sess.start()
+
+        return captured_env
+
+    def test_ffmpeg_dir_injected_when_only_homebrew_path_exists(self):
+        """If /opt/homebrew/bin/ffmpeg exists, its dir must appear in worker PATH."""
+        from core.pipeline.stt_gigaam import _GigaAMSubprocessSession
+
+        captured_env: dict = {}
+
+        def fake_popen_factory(*args, **kwargs):
+            captured_env.update(kwargs.get("env") or {})
+            return _FakePopen([_ok_load_response()])
+
+        def mock_resolve_ffmpeg_dir():
+            return "/opt/homebrew/bin"
+
+        minimal_path = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+        with patch("core.pipeline.stt_gigaam._resolve_ffmpeg_dir",
+                   side_effect=mock_resolve_ffmpeg_dir):
+            with patch.dict(os.environ, {"PATH": minimal_path}, clear=False):
+                with patch("core.pipeline.stt_gigaam.subprocess.Popen",
+                           side_effect=fake_popen_factory):
+                    sess = _GigaAMSubprocessSession(
+                        "/fake/py", "/fake/w.py", "rnnt", "cpu"
+                    )
+                    sess.start()
+
+        worker_path_dirs = captured_env.get("PATH", "").split(os.pathsep)
+        self.assertIn(
+            "/opt/homebrew/bin",
+            worker_path_dirs,
+            f"Worker PATH must contain /opt/homebrew/bin; got: {captured_env.get('PATH')!r}",
+        )
+
+    def test_ffmpeg_dir_prepended_before_minimal_path(self):
+        """ffmpeg dir must appear BEFORE the existing minimal PATH entries (prepend, not append)."""
+        from core.pipeline.stt_gigaam import _GigaAMSubprocessSession
+
+        captured_env: dict = {}
+
+        def fake_popen_factory(*args, **kwargs):
+            captured_env.update(kwargs.get("env") or {})
+            return _FakePopen([_ok_load_response()])
+
+        def mock_resolve():
+            return "/opt/homebrew/bin"
+
+        minimal_path = "/usr/bin:/bin"
+
+        with patch("core.pipeline.stt_gigaam._resolve_ffmpeg_dir", side_effect=mock_resolve):
+            with patch.dict(os.environ, {"PATH": minimal_path}, clear=False):
+                with patch("core.pipeline.stt_gigaam.subprocess.Popen",
+                           side_effect=fake_popen_factory):
+                    sess = _GigaAMSubprocessSession(
+                        "/fake/py", "/fake/w.py", "rnnt", "cpu"
+                    )
+                    sess.start()
+
+        worker_path = captured_env.get("PATH", "")
+        # /opt/homebrew/bin must come BEFORE /usr/bin
+        idx_homebrew = worker_path.find("/opt/homebrew/bin")
+        idx_usr_bin = worker_path.find("/usr/bin")
+        self.assertGreater(idx_usr_bin, -1, "PATH must contain /usr/bin")
+        self.assertGreater(idx_homebrew, -1, "PATH must contain /opt/homebrew/bin")
+        self.assertLess(
+            idx_homebrew, idx_usr_bin,
+            f"ffmpeg dir must precede /usr/bin in PATH; got: {worker_path!r}",
+        )
+
+    def test_no_duplication_when_ffmpeg_already_in_path(self):
+        """If ffmpeg dir is already in PATH, it must NOT be duplicated."""
+        from core.pipeline.stt_gigaam import _GigaAMSubprocessSession
+
+        captured_env: dict = {}
+
+        def fake_popen_factory(*args, **kwargs):
+            captured_env.update(kwargs.get("env") or {})
+            return _FakePopen([_ok_load_response()])
+
+        def mock_resolve():
+            return "/opt/homebrew/bin"
+
+        # PATH already includes /opt/homebrew/bin.
+        existing_path = "/opt/homebrew/bin:/usr/bin:/bin"
+
+        with patch("core.pipeline.stt_gigaam._resolve_ffmpeg_dir", side_effect=mock_resolve):
+            with patch.dict(os.environ, {"PATH": existing_path}, clear=False):
+                with patch("core.pipeline.stt_gigaam.subprocess.Popen",
+                           side_effect=fake_popen_factory):
+                    sess = _GigaAMSubprocessSession(
+                        "/fake/py", "/fake/w.py", "rnnt", "cpu"
+                    )
+                    sess.start()
+
+        worker_path = captured_env.get("PATH", "")
+        count = worker_path.split(os.pathsep).count("/opt/homebrew/bin")
+        self.assertEqual(
+            count, 1,
+            f"/opt/homebrew/bin should appear exactly once in PATH; got: {worker_path!r}",
+        )
+
+    def test_path_not_clobbered_when_ffmpeg_not_found(self):
+        """If ffmpeg cannot be resolved, the existing PATH must be passed through unchanged."""
+        from core.pipeline.stt_gigaam import _GigaAMSubprocessSession
+
+        captured_env: dict = {}
+
+        def fake_popen_factory(*args, **kwargs):
+            captured_env.update(kwargs.get("env") or {})
+            return _FakePopen([_ok_load_response()])
+
+        def mock_resolve_none():
+            return None
+
+        original_path = "/usr/bin:/bin"
+
+        with patch("core.pipeline.stt_gigaam._resolve_ffmpeg_dir",
+                   side_effect=mock_resolve_none):
+            with patch.dict(os.environ, {"PATH": original_path}, clear=False):
+                with patch("core.pipeline.stt_gigaam.subprocess.Popen",
+                           side_effect=fake_popen_factory):
+                    sess = _GigaAMSubprocessSession(
+                        "/fake/py", "/fake/w.py", "rnnt", "cpu"
+                    )
+                    sess.start()
+
+        # PATH should still be set (from os.environ.copy()) but not modified.
+        self.assertEqual(
+            captured_env.get("PATH"), original_path,
+            "When ffmpeg dir is None, PATH must be preserved as-is",
+        )
+
+
+class TestResolveFfmpegDir(unittest.TestCase):
+    """Unit tests for the _resolve_ffmpeg_dir() helper."""
+
+    def test_returns_directory_when_shutil_which_finds_ffmpeg(self):
+        """If shutil.which finds ffmpeg, returns its directory."""
+        from core.pipeline.stt_gigaam import _resolve_ffmpeg_dir
+        with patch("core.pipeline.stt_gigaam.shutil.which",
+                   return_value="/opt/homebrew/bin/ffmpeg"):
+            result = _resolve_ffmpeg_dir()
+        self.assertEqual(result, "/opt/homebrew/bin")
+
+    def test_falls_back_to_homebrew_when_which_returns_none(self):
+        """Falls back to /opt/homebrew/bin when shutil.which returns None."""
+        from core.pipeline.stt_gigaam import _resolve_ffmpeg_dir
+        with patch("core.pipeline.stt_gigaam.shutil.which", return_value=None):
+            with patch("core.pipeline.stt_gigaam.os.path.isfile", return_value=True):
+                with patch("core.pipeline.stt_gigaam.os.access", return_value=True):
+                    result = _resolve_ffmpeg_dir()
+        self.assertEqual(result, "/opt/homebrew/bin")
+
+    def test_returns_none_when_ffmpeg_not_found_anywhere(self):
+        """Returns None when ffmpeg is not in PATH or any candidate path."""
+        from core.pipeline.stt_gigaam import _resolve_ffmpeg_dir
+        with patch("core.pipeline.stt_gigaam.shutil.which", return_value=None):
+            with patch("core.pipeline.stt_gigaam.os.path.isfile", return_value=False):
+                result = _resolve_ffmpeg_dir()
+        self.assertIsNone(result)
+
+    def test_never_raises(self):
+        """_resolve_ffmpeg_dir() must never raise, even if shutil.which blows up."""
+        from core.pipeline.stt_gigaam import _resolve_ffmpeg_dir
+        with patch("core.pipeline.stt_gigaam.shutil.which",
+                   side_effect=RuntimeError("unexpected")):
+            result = _resolve_ffmpeg_dir()
+        self.assertIsNone(result)
+
+
 if __name__ == "__main__":
     unittest.main()
