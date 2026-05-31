@@ -216,12 +216,23 @@ class TestCORSSettingsIntegration(unittest.TestCase):
     """Тест что CORS_ORIGINS читается из settings."""
 
     def test_settings_has_cors_origins(self):
-        """Settings должны иметь атрибут CORS_ORIGINS со значением по умолчанию '*'."""
-        from core.config import settings
-        self.assertTrue(hasattr(settings, "CORS_ORIGINS"))
-        self.assertIsInstance(settings.CORS_ORIGINS, str)
-        # Дефолт должен быть '*'
-        self.assertEqual(settings.CORS_ORIGINS, "*")
+        """Settings должны иметь атрибут CORS_ORIGINS со значением по умолчанию '*'.
+
+        W1707: Test creates a fresh Settings() without env vars to check the class
+        default. Using the singleton directly is fragile because test_cors_origins_env_override
+        may import core.config for the first time INSIDE patch.dict context (if the module
+        is not yet imported), causing the singleton to be created with the patched env var.
+        """
+        import os
+        from core.config import Settings
+        # Create a fresh instance with no KRAB_EAR_CORS_ORIGINS env var
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("KRAB_EAR_CORS_ORIGINS", None)
+            s = Settings()
+        self.assertTrue(hasattr(s, "CORS_ORIGINS"))
+        self.assertIsInstance(s.CORS_ORIGINS, str)
+        # Default must be '*'
+        self.assertEqual(s.CORS_ORIGINS, "*")
 
     def test_cors_origins_env_override(self):
         """KRAB_EAR_CORS_ORIGINS env var должен переопределять значение."""

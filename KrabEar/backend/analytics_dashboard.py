@@ -10,7 +10,7 @@ import logging
 import threading
 import time
 from collections import Counter
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -73,7 +73,7 @@ class AnalyticsDashboard:
     def _build_dashboard(self, store: Any, days: int) -> dict[str, Any]:
         """Единственный проход по истории — собирает все метрики."""
         now = datetime.now(timezone.utc)
-        today_str = date.today().isoformat()
+        today_str = now.date().isoformat()  # UTC date matches UTC timestamps in history items
         cutoff = now - timedelta(days=days)
 
         # Загружаем активные записи за один вызов
@@ -315,7 +315,7 @@ def _calc_streak(active: list[Any]) -> int:
         if dt:
             active_dates.add(dt.date().isoformat())
     streak = 0
-    today = date.today()
+    today = datetime.now(timezone.utc).date()  # UTC date matches UTC timestamps in active_dates
     for i in range(len(active_dates) + 1):
         d = (today - timedelta(days=i)).isoformat()
         if d in active_dates:

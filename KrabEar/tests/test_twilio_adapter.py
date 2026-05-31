@@ -435,8 +435,10 @@ class ConcurrentDialTestCase(unittest.TestCase):
 
     # 36 — base_url включает account_sid
     def test_base_url_contains_account_sid(self) -> None:
-        adapter = _make_adapter(account_sid="ACtest999")
-        self.assertIn("ACtest999", adapter._base_url())
+        # W1707: account_sid must match AC + 32 hex format (W1203 validation)
+        valid_sid = "AC" + "0" * 32
+        adapter = _make_adapter(account_sid=valid_sid)
+        self.assertIn(valid_sid, adapter._base_url())
 
 
 if __name__ == "__main__":

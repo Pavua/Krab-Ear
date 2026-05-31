@@ -38,10 +38,11 @@ def _make_item(
 ):
     """Создаёт fake-элемент истории с заданными параметрами.
 
-    Использует локальное время (date.today()) для консистентности с _build_dashboard().
+    Использует UTC (datetime.now(timezone.utc)) для консистентности с _build_dashboard()
+    (W1707: _build_dashboard now uses UTC to match stored UTC timestamps).
     """
-    # Use date.today() + timedelta to stay in local timezone (matches _build_dashboard)
-    base_date = date.today() - timedelta(days=days_ago)
+    # Use UTC date to match _build_dashboard's today_str (also UTC now)
+    base_date = datetime.now(timezone.utc).date() - timedelta(days=days_ago)
     dt = datetime.combine(base_date, datetime.min.time(), tzinfo=timezone.utc)
     dt = dt.replace(hour=hour, minute=0, second=0, microsecond=0)
 

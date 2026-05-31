@@ -4,7 +4,7 @@ from __future__ import annotations
 from backend.state_store import StateStore
 from backend.daily_digest import DailyDigestGenerator, DailyDigest
 
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, Mock
 import sys
@@ -38,7 +38,7 @@ class DailyDigestTestCase(unittest.TestCase):
     def test_generate_digest_defaults_to_today(self) -> None:
         """generate_digest без date_str использует сегодняшнюю дату."""
         digest = self.gen.generate_digest(store=None)
-        self.assertEqual(digest.date, date.today().isoformat())
+        self.assertEqual(digest.date, datetime.now(timezone.utc).date().isoformat())
 
     def test_invalid_date_raises_value_error(self) -> None:
         """Неверный формат даты вызывает ValueError."""
@@ -56,7 +56,7 @@ class DailyDigestTestCase(unittest.TestCase):
 
     def test_digest_aggregates_today_items(self) -> None:
         """Дайджест включает записи только за указанный день."""
-        today = date.today().isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
         self.store.add_history_item(text="первая запись сегодня", paste_status="ok")
         self.store.add_history_item(text="вторая запись сегодня", paste_status="ok")
 
@@ -72,7 +72,7 @@ class DailyDigestTestCase(unittest.TestCase):
 
     def test_digest_top_topics_is_list(self) -> None:
         """top_topics содержит список ключевых слов дня."""
-        today = date.today().isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
         self.store.add_history_item(
             text="привет привет привет мир", paste_status="ok"
         )
@@ -85,7 +85,7 @@ class DailyDigestTestCase(unittest.TestCase):
 
     def test_digest_multiple_items_calculates_duration(self) -> None:
         """Дайджест корректно агрегирует duration из нескольких items."""
-        today = date.today().isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
 
         self.store.add_history_item(text="первая запись", audio_duration_sec=60.0)
         self.store.add_history_item(text="вторая запись", audio_duration_sec=120.0)
@@ -124,7 +124,7 @@ class DailyDigestTestCase(unittest.TestCase):
 
     def test_digest_languages_aggregation(self) -> None:
         """Дайджест агрегирует языки из всех записей за день."""
-        today = date.today().isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
 
         mock_store = Mock()
 
@@ -157,7 +157,7 @@ class DailyDigestTestCase(unittest.TestCase):
 
     def test_digest_highlights_sorted_by_confidence(self) -> None:
         """Highlights сортируются по confidence (убывание), затем по длине."""
-        today = date.today().isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
 
         mock_store = Mock()
 
@@ -191,7 +191,7 @@ class DailyDigestTestCase(unittest.TestCase):
 
     def test_digest_highlights_truncate_long_text(self) -> None:
         """Highlights обрезаются до 200 символов с многоточием."""
-        today = date.today().isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
 
         long_text = "очень длинный текст " * 30  # > 200 chars
 
@@ -213,7 +213,7 @@ class DailyDigestTestCase(unittest.TestCase):
 
     def test_digest_markdown_contains_statistics(self) -> None:
         """Markdown-отчёт содержит сводку, темы и фрагменты."""
-        today = date.today().isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
 
         mock_store = Mock()
 
@@ -276,13 +276,13 @@ class DailyDigestServiceIntegrationTestCase(unittest.TestCase):
             {"id": "2", "method": "generate_daily_digest", "params": {}}
         )
         self.assertTrue(resp["ok"])
-        self.assertEqual(resp["result"]["date"], date.today().isoformat())
+        self.assertEqual(resp["result"]["date"], datetime.now(timezone.utc).date().isoformat())
 
 
 def _make_mock_store(items, today=None):
     """Вспомогательная функция: mock-store, возвращающий items."""
     if today is None:
-        today = date.today().isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
 
     for item in items:
         if not hasattr(item, 'ts') or not item.ts:
@@ -303,7 +303,7 @@ def _make_item(text, ts=None, lang="ru", confidence=0.90, duration=60.0):
     """Фабрика тестовых items."""
     item = Mock()
     item.text = text
-    item.ts = ts or f"{date.today().isoformat()}T10:00:00"
+    item.ts = ts or f"{datetime.now(timezone.utc).date().isoformat()}T10:00:00"
     item.source_lang = lang
     item.confidence = confidence
     item.audio_duration_sec = duration
@@ -315,7 +315,7 @@ class DailyDigestDirectItemsTestCase(unittest.TestCase):
 
     def setUp(self):
         self.gen = DailyDigestGenerator()
-        self.today = date.today().isoformat()
+        self.today = datetime.now(timezone.utc).date().isoformat()
 
     def test_empty_items_returns_graceful_empty_digest(self):
         """Пустой список items возвращает пустой дайджест без исключений."""

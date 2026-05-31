@@ -41,6 +41,7 @@ try:
     _mock_store.load_vocabulary.return_value = []
     _mock_store.is_idempotent.return_value = False
     _mock_store.add_history_item.return_value = MagicMock(id="hist-W1224-001")
+    _mock_store.load_settings.return_value = {}  # W1707: prevent truthy MagicMock → privacy_mode 403
 
     _mock_transcriber = MagicMock()
     _mock_transcriber.transcribe.return_value = {
@@ -126,6 +127,7 @@ class _Base(unittest.TestCase):
         self.store.load_vocabulary.return_value = []
         self.store.is_idempotent.return_value = False
         self.store.add_history_item.return_value = MagicMock(id="hist-base-W1224")
+        self.store.load_settings.return_value = {}  # W1707: prevent truthy MagicMock → privacy_mode 403
 
         self.transcriber = MagicMock()
         self.transcriber.transcribe.return_value = {
@@ -323,7 +325,11 @@ class TestPrivacyModeSkipsHistoryPersistViaRest(_Base):
     """F3: When privacy_mode_enabled=True, store.add_history_item() is NOT called."""
 
     def test_privacy_mode_skips_history_persist_via_rest(self):
-        """privacy_mode_enabled=True → no history written, transcript still returned."""
+        """privacy_mode_enabled=True → returns 403 {"ok": false, "skipped": "privacy_mode"}.
+
+        W1212: privacy_mode=True blocks the entire transcription endpoint with 403,
+        not just history persistence (more conservative security posture).
+        """
         wav_data = _make_wav_bytes()
         mock_info = MagicMock()
         mock_info.duration = 5.0
@@ -336,14 +342,13 @@ class TestPrivacyModeSkipsHistoryPersistViaRest(_Base):
                 content_type="multipart/form-data",
             )
 
-        self.assertEqual(resp.status_code, 200)
+        # W1212: privacy_mode returns 403, not 200
+        self.assertEqual(resp.status_code, 403)
         body = resp.get_json()
-        # Transcript text must still be present
-        self.assertIn("text", body)
-        # But history must NOT have been persisted
+        self.assertIn("skipped", body)
+        self.assertEqual(body.get("skipped"), "privacy_mode")
+        # History must NOT have been persisted
         self.store.add_history_item.assert_not_called()
-        # history_id must be empty string
-        self.assertEqual(body.get("history_id"), "")
 
     def test_privacy_mode_disabled_persists_history(self):
         """privacy_mode_enabled=False → store.add_history_item() IS called."""

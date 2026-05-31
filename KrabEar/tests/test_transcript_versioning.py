@@ -534,23 +534,25 @@ class TestTranscriptVersioningW1410(unittest.TestCase):
         self.assertEqual(versions, [])
 
     def test_save_version_truncates_too_large_text(self) -> None:
-        """save_version обрезает текст, превышающий _MAX_TEXT_BYTES (1 МБ)."""
+        """W1563: save_version raises ValueError for text exceeding _MAX_TEXT_BYTES.
+
+        W1410 originally expected truncation with [TRUNCATED] suffix.
+        W1563 changed to ValueError (explicit reject) for security/consistency.
+        """
         from backend.transcript_versioning import _MAX_TEXT_BYTES
 
-        # Генерируем строку чуть больше 1 МБ в UTF-8 (ASCII символы = 1 байт каждый)
+        # Генерируем строку чуть больше лимита
         large_text = "A" * (_MAX_TEXT_BYTES + 500)
-        result = self.manager.save_version("item_big", large_text, "manual")
 
-        self.assertIsNotNone(result)
-        # Текст должен быть обрезан и содержать суффикс
-        self.assertIn("[TRUNCATED]", result["text"])
-        # Результирующий текст должен быть меньше или равен исходному
-        self.assertLessEqual(len(result["text"].encode("utf-8")), _MAX_TEXT_BYTES + 100)
+        # W1563: save_version raises ValueError for oversized text
+        with self.assertRaises(ValueError) as ctx:
+            self.manager.save_version("item_big", large_text, "manual")
 
-        # Убеждаемся, что запись персистируется
+        self.assertIn("_MAX_TEXT_BYTES", str(ctx.exception))
+
+        # Nothing should have been persisted
         versions = self.manager.get_versions("item_big")
-        self.assertEqual(len(versions), 1)
-        self.assertIn("[TRUNCATED]", versions[0]["text"])
+        self.assertEqual(len(versions), 0)
 
     def test_revert_persists_reverted_from_field(self) -> None:
         """revert_to_version включает reverted_from в сохранённую NDJSON-запись."""

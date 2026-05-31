@@ -22,6 +22,11 @@ from typing import Any
 
 import numpy as np
 
+from core.silence_constants import (  # W1333: shared threshold constants  # noqa: F401
+    SILENCE_THRESHOLD_DB,
+    SILENCE_THRESHOLD_AMP,
+)
+
 logger = logging.getLogger("KrabEar.Backend.AudioAnalytics")
 
 
@@ -90,7 +95,7 @@ class AudioAnalyticsService:
         if not file_path:
             raise ValueError("Параметр file_path обязателен")
 
-        threshold_db = float(params.get("threshold_db", -40.0))
+        threshold_db = float(params.get("threshold_db", SILENCE_THRESHOLD_DB))
         return analyze_silence_file(file_path, threshold_db=threshold_db)
 
     def handle_analyze_quality_trends(self, params: dict[str, Any]) -> dict[str, Any]:

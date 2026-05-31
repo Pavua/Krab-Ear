@@ -39,6 +39,8 @@ _EXPORT_ALLOWED_ROOTS: tuple[str, ...] = (
     "~/Documents",
     "~/Desktop",
     "~/Downloads",
+    "/tmp",            # W1432: allowed for scripts/tests; restored W1707
+    "/private/tmp",    # macOS: /tmp symlinks to /private/tmp
 )
 
 
@@ -187,6 +189,12 @@ class HistoryService:
             translation_status=str(params.get("translation_status", "not_requested")).strip() or "not_requested",
             translation_engine=str(params.get("translation_engine", "")).strip(),
         )
+        # W1292: invalidate auto-glossary cache after new recording added (restored W1659)
+        if self._auto_glossary is not None:
+            try:
+                self._auto_glossary.invalidate()
+            except Exception as _ag_exc:
+                logger.warning("auto_glossary invalidate error after add_history_item: %s", _ag_exc)
         return item.to_dict()
 
     def handle_get_history_page(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2260,11 +2268,14 @@ class HistoryService:
 
         # --- Сохраняем ---
         if output_dir_param:
-            if not _is_safe_export_dir(output_dir_param):
+            # W1707: use _resolve_export_dir (includes data_dir + /tmp) instead of
+            # _is_safe_export_dir (module-level, doesn't know data_dir).
+            resolved = self._resolve_export_dir(output_dir_param)
+            if resolved is None:
                 raise ValueError(
                     f"output_dir outside allowed roots: {output_dir_param!r}"
                 )
-            out_dir = Path(output_dir_param).expanduser().resolve()
+            out_dir = resolved
         else:
             out_dir = Path(self.store.data_dir) / "transcripts"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -2774,11 +2785,14 @@ class HistoryService:
         # Создаём директорию бандла
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         if output_dir_param:
-            if not _is_safe_export_dir(output_dir_param):
+            # W1707: use _resolve_export_dir (includes data_dir + /tmp) instead of
+            # _is_safe_export_dir (module-level, doesn't know data_dir).
+            resolved = self._resolve_export_dir(output_dir_param)
+            if resolved is None:
                 raise ValueError(
                     f"output_dir outside allowed roots: {output_dir_param!r}"
                 )
-            base_dir = Path(output_dir_param).expanduser().resolve()
+            base_dir = resolved
         else:
             base_dir = Path(self.store.data_dir) / "exports"
         bundle_dir = base_dir / f"export_{timestamp_str}"

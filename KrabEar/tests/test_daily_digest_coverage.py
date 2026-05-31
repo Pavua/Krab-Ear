@@ -9,7 +9,7 @@ import json
 import sys
 import unittest
 from dataclasses import asdict
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -35,7 +35,7 @@ def _item(text, ts=None, lang="ru", confidence=0.90, duration=60.0):
     """Создаёт тестовый item с заданными полями."""
     obj = Mock()
     obj.text = text
-    obj.ts = ts or f"{date.today().isoformat()}T10:00:00"
+    obj.ts = ts or f"{datetime.now(timezone.utc).date().isoformat()}T10:00:00+00:00"  # W1707: UTC
     obj.source_lang = lang
     obj.confidence = confidence
     obj.audio_duration_sec = duration
@@ -51,7 +51,7 @@ class DailyDigestCoverageTestCase(unittest.TestCase):
 
     def setUp(self):
         self.gen = DailyDigestGenerator()
-        self.today = date.today().isoformat()
+        self.today = datetime.now(timezone.utc).date().isoformat()  # W1707: UTC to match DailyDigestGenerator
 
     # 1 -------------------------------------------------------------------
     def test_generate_digest_for_specific_date(self):

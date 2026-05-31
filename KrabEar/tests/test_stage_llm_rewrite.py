@@ -115,7 +115,7 @@ class TestLLMRewriteStageProcess(unittest.TestCase):
         result = stage.process(ctx)
         self.assertFalse(result.llm_applied)
         self.assertEqual(result.rewritten_text, "текст")
-        self.assertTrue(any("llm_rewrite_unexpected" in e for e in result.errors))
+        self.assertTrue(any(e.startswith("llm_rewrite: ") for e in result.errors))  # W1275: normalized prefix
 
     def test_process_does_not_raise(self):
         """process() НИКОГДА не raises — contract проверка."""

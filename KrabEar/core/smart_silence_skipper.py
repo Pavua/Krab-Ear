@@ -15,7 +15,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from core.silence_detector import SilenceDetector, SILENCE_THRESHOLD_DB_PRESERVE_WHISPER
+from core.silence_detector import SilenceDetector
+from core.silence_constants import SILENCE_THRESHOLD_DB_PRESERVE_WHISPER  # W1333: shared threshold constant
 
 logger = logging.getLogger("KrabEar.SmartSilenceSkipper")
 

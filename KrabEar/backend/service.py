@@ -135,7 +135,7 @@ from backend.bulk_reprocess import BulkReprocessor
 from backend.privacy_audit import get_privacy_audit_logger
 
 import argparse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 import os
@@ -1471,8 +1471,8 @@ class BackendService:
             "create_calendar_event": self._apple_integration_svc.handle_create_calendar_event,  # создать событие в Apple Calendar через osascript
             # --- CalendarLinker — auto-link transcriptions to Calendar.app events (W942 MEDIUM-1) ---
             "link_to_calendar_event": self._handle_link_to_calendar_event,  # явно связать запись с текущим событием Calendar
-            "get_calendar_link": self._handle_get_calendar_link,  # получить привязанное событие Calendar для записи
-            "search_by_calendar_event": self._handle_search_by_calendar_event,  # поиск записей по названию события Calendar
+            "get_calendar_link": self._handle_get_calendar_link,  # получить сохранённую ссылку на событие Calendar для записи (W1030: canonical)
+            "search_by_calendar_event": self._handle_search_by_calendar_event,  # поиск записей по названию события Calendar (W1030: canonical)
             # --- iMessage integration (Phase D.4) ---
             "send_imessage": self._apple_integration_svc.handle_send_imessage,  # отправить сообщение через iMessage/SMS через osascript
             "list_telegram_chats": self._apple_integration_svc.handle_list_telegram_chats,  # получить список доступных чатов Telegram через main Krab userbot
@@ -2501,7 +2501,7 @@ class BackendService:
         """
         active = self.store._load_active_items_with_lock()
 
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         today_iso = now.date().isoformat()
         week_start = (now - timedelta(days=now.weekday())).date().isoformat()
 
@@ -3295,6 +3295,8 @@ class BackendService:
                 "overall_sentiment": 0.0,
                 "mood_trend": "stable",
                 "sentiment_distribution": {"positive": 0, "negative": 0, "neutral": 0},
+                "most_positive_day": {},  # W1369: schema parity with to_dict()
+                "most_negative_day": {},  # W1369: schema parity with to_dict()
                 "reason": "privacy_mode_active",
                 "privacy_mode_active": True,
             }
@@ -3723,6 +3725,9 @@ end tell'''
 
         Returns:
           {"ok": bool, "calendar_event": dict | None}
+
+        Note: W947 introduced this as _handle_get_calendar_link_v2; W1030 renamed
+        to canonical form _handle_get_calendar_link.
         """
         item_id = str(params.get("history_item_id", "")).strip()
         if not item_id:
@@ -3745,6 +3750,9 @@ end tell'''
 
         Returns:
           {"ok": bool, "results": [{"item_id": str, "calendar_event": dict}, ...]}
+
+        Note: W947 introduced this as _handle_search_by_calendar_event_v2; W1030 renamed
+        to canonical form _handle_search_by_calendar_event.
         """
         event_title = str(params.get("event_title", ""))
         try:
@@ -4130,6 +4138,8 @@ end tell'''
 
     def _handle_get_smart_vocabulary_suggestions(self, params: dict) -> dict:
         """IPC: get_smart_vocabulary_suggestions — предложения для словаря STT."""
+        if self._get_runtime_setting("privacy_mode_enabled", False):
+            return {"ok": True, "suggestions": [], "reason": "privacy_mode_active"}  # W973 F4
         scan_limit = max(10, min(int(params.get("scan_limit", 100) or 100), 500))
         min_frequency = max(1, int(params.get("min_frequency", 2) or 2))
         top_k = max(5, min(int(params.get("top_k", 30) or 30), 100))

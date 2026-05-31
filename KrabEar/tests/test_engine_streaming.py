@@ -71,6 +71,8 @@ class TestTranscribeChunkedBasic(unittest.TestCase):
                             mock_settings.SENSEVOICE_EMOTION_TO_HISTORY = False
                             mock_settings.MAX_AUDIO_MB = 1000
                             mock_settings.SMART_SILENCE_SKIP_ENABLED = False
+                            mock_settings.PIPELINE_V2 = False
+                            mock_settings.PIPELINE_V2_ENABLED = False  # W1707: explicit False (MagicMock attr is truthy)
                             result = self.engine.transcribe(audio)
                 # fallback должен вызываться ровно 1 раз (single-pass)
                 self.assertEqual(mock_fb.call_count, 1)

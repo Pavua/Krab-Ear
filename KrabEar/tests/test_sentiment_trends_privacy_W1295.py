@@ -46,8 +46,12 @@ def _make_backend_service(privacy_enabled: bool):
             self._sentiment_trends = _FakeSentimentTrends()
             self._privacy = privacy_enabled
             self.store = MagicMock()
-            self.store._lock.return_value.__enter__ = MagicMock(return_value=None)
-            self.store._lock.return_value.__exit__ = MagicMock(return_value=False)
+            # W1707: Python 3.14 MagicMock._lock is the real internal RLock.
+            # Explicitly set _lock to a context-manager MagicMock.
+            _lock_ctx = MagicMock()
+            _lock_ctx.return_value.__enter__ = MagicMock(return_value=None)
+            _lock_ctx.return_value.__exit__ = MagicMock(return_value=False)
+            self.store._lock = _lock_ctx
             self.store._load_active_items_unlocked.return_value = []
 
         def _get_runtime_setting(self, key: str, default=None):

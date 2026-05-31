@@ -32,7 +32,7 @@ logger = logging.getLogger("backend.job_tracker")
 # того, как основная запись удалена из _jobs при prune().
 # Даёт воркеру возможность заметить отмену и завершить итерацию.
 # W1182 F2 — zombie MLX worker fix.
-_PRUNE_CANCEL_EVENT_TTL: float = 2.0
+_PRUNE_CANCEL_EVENT_TTL: float = 3600.0  # W1542: 1-hour grace period for zombie-worker safety
 
 
 class JobTracker:
@@ -43,6 +43,8 @@ class JobTracker:
         self._cancel_events: dict[str, threading.Event] = {}
         # Время eviction для отслеживания grace-period cleanup (W1182 F2).
         self._evict_times: dict[str, float] = {}
+        # W1542: monotonic timestamp when cancel() was called per job_id
+        self._cancel_events_ts: dict[str, float] = {}
         self._lock = threading.Lock()
 
     def create_job(self, total_files: int) -> str:
@@ -152,6 +154,7 @@ class JobTracker:
                 return False
             job["cancel_requested"] = True
             event = self._cancel_events.get(job_id)
+            self._cancel_events_ts[job_id] = time.monotonic()  # W1542: record when cancel was set
         # Устанавливаем event вне блокировки — Event.set() потокобезопасен.
         if event is not None:
             event.set()
@@ -237,5 +240,6 @@ class JobTracker:
             for jid in expired_events:
                 self._cancel_events.pop(jid, None)
                 self._evict_times.pop(jid, None)
+                self._cancel_events_ts.pop(jid, None)  # W1542: clean up timestamp too
 
         return len(stale)

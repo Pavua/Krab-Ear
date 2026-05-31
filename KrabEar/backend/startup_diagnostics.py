@@ -297,9 +297,10 @@ class StartupDiagnostics:
                     details={"path": str(data_dir)},
                 )
             except FileNotFoundError:
-                # Транзиентная гонка: директория ещё не создана. Одна попытка повтора.
-                time.sleep(0.05)
+                # Транзиентная гонка или первый запуск: директория ещё не создана.
+                # W122: создаём директорию и повторяем попытку (восстановлено в W1707).
                 try:
+                    data_dir.mkdir(parents=True, exist_ok=True)
                     _try_write()
                 except Exception as exc2:
                     return CheckResult(

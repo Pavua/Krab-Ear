@@ -1252,8 +1252,14 @@ def v2_not_implemented(p):
     Unauthenticated callers receive 401; excessive callers receive 429.
     """
     response = jsonify({
-        "error": "API v2 not yet implemented",
-        "supported_versions": ["v1"],
+        "error": "V2 API not yet implemented",  # W1357: restored uppercase V2 for test contract
+        "message": (
+            "APIVersion.V2 is declared as supported but no V2 routes have "
+            "been released.  Use /v1/* routes until V2 ships."
+        ),
+        "planned_routes": _V2_PLANNED_ROUTES,
+        "use_instead": "/v1/",
+        "supported_versions": ["v1"],  # W1684: keep for compatibility
     })
     response.status_code = 501
     response.headers["X-API-Version"] = "v2"

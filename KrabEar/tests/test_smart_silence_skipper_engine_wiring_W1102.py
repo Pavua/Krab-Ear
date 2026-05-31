@@ -60,6 +60,7 @@ def _base_mock_cfg():
     cfg.DIARIZATION_ENABLED = False
     cfg.LLM_ENABLED = False
     cfg.PIPELINE_V2 = False
+    cfg.PIPELINE_V2_ENABLED = False  # W1707: explicit False needed — MagicMock attribute is truthy
     cfg.STT_LANGUAGE_ROUTING_ENABLED = False
     cfg.STT_AUDIO_LANG_ID_ENABLED = False
     cfg.STT_SPEAKER_AWARE_PROMPT_ENABLED = False

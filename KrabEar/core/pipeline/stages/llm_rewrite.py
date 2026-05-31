@@ -51,7 +51,7 @@ class LLMRewriteStage:
             # Защита на случай непредвиденной ошибки (контракт rewrite — never raises,
             # но мы всё равно ловим для robustness pipeline'а)
             logger.error("LLMRewriteStage unexpected error: %s", exc)
-            ctx.errors.append(f"llm_rewrite: {exc}")
+            ctx.errors.append(f"llm_rewrite: {exc}")  # W1275: normalized prefix
             ctx.rewritten_text = text_in
             ctx.llm_applied = False
             return ctx

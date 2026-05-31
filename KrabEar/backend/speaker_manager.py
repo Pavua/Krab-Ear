@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -404,11 +405,22 @@ class SpeakerManager:
         emb_raw = params.get("embedding")
         if not isinstance(emb_raw, list) or len(emb_raw) == 0:
             raise ValueError("Параметр embedding обязателен (list[float])")
-        # W1236: DoS guard — проверяем до создания np.array
+        # W1236: DoS guard — check length before creating np.array
         if len(emb_raw) > _MAX_EMBEDDING_FLOATS:
             raise ValueError(
-                f"embedding length {len(emb_raw)} exceeds _MAX_EMBEDDING_FLOATS={_MAX_EMBEDDING_FLOATS}"
+                f"Embedding слишком длинный: {len(emb_raw)} элементов "
+                f"(_MAX_EMBEDDING_FLOATS={_MAX_EMBEDDING_FLOATS})"
             )
+        # W1236: validate each element is a finite numeric value (rejects NaN, Inf, str, bool, None)
+        for i, x in enumerate(emb_raw):
+            if not isinstance(x, (int, float)) or isinstance(x, bool):
+                raise ValueError(
+                    f"Embedding[{i}] не является числом: {type(x).__name__}"
+                )
+            if not math.isfinite(x):
+                raise ValueError(
+                    f"Embedding[{i}] содержит не конечное значение: {x}"
+                )
         sid = self.register_speaker(name, np.array(emb_raw, dtype=np.float32))
         return {"speaker_id": sid, "name": name}
 

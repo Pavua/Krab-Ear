@@ -233,7 +233,8 @@ class TranscribeSuccessTest(_TranscribeBase):
         self.assertIn("engine", result)
 
     def test_transcribe_mp3_extension_accepted(self):
-        data = {"file": (io.BytesIO(b"fake-mp3-data"), "recording.mp3")}
+        # W1224: _validate_audio_magic_bytes checks first 16 bytes — use real MP3 magic (ID3)
+        data = {"file": (io.BytesIO(b"ID3\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"), "recording.mp3")}
         resp = self.client.post(
             "/v1/stt/transcribe",
             data=data,

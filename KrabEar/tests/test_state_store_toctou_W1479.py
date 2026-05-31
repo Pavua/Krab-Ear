@@ -188,7 +188,7 @@ class TestImportHistoryNdjsonSkipsTombstonedIds(unittest.TestCase):
         self.assertEqual(len(items_before), 0)
 
         # Verify tombstone exists
-        tombstone_ids = self.store._load_tombstone_ids_unlocked()
+        tombstone_ids = self.store._load_deleted_ids_unlocked()
         self.assertIn(item_id, tombstone_ids)
 
         # Build import file that contains the deleted item
@@ -230,7 +230,7 @@ class TestImportHistoryNdjsonSkipsTombstonedIds(unittest.TestCase):
         self.store.compact()
 
         # After compaction, tombstones_path is empty — item_id no longer in tombstones
-        tombstone_ids_post_compact = self.store._load_tombstone_ids_unlocked()
+        tombstone_ids_post_compact = self.store._load_deleted_ids_unlocked()
         # tombstones may or may not be empty depending on compact implementation,
         # but item_id must not be in active items
         items_after_compact, _ = self.store.get_history_page(cursor=None, limit=100)
@@ -292,14 +292,14 @@ class TestImportHistoryNdjsonSkipsTombstonedIds(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["id"], "brand-new-id-xyz-12345")
 
-    def test_load_tombstone_ids_unlocked_returns_deleted_ids(self) -> None:
-        """_load_tombstone_ids_unlocked must return the same set as _load_deleted_ids_unlocked."""
+    def test_load_deleted_ids_unlocked_returns_deleted_ids(self) -> None:
+        """_load_deleted_ids_unlocked must return the same set as _load_deleted_ids_unlocked."""
         item = self.store.add_history_item(text="tombstone test", paste_status="ok")
         self.store.delete_history_item(item.id)
 
         with self.store._lock():
             deleted_ids = self.store._load_deleted_ids_unlocked()
-            tombstone_ids = self.store._load_tombstone_ids_unlocked()
+            tombstone_ids = self.store._load_deleted_ids_unlocked()
 
         self.assertEqual(deleted_ids, tombstone_ids)
         self.assertIn(item.id, tombstone_ids)

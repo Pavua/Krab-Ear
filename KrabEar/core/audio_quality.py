@@ -10,11 +10,11 @@ import logging
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from core.silence_constants import SILENCE_THRESHOLD_AMP  # W1333: shared threshold constants
 from typing import Optional
 
 import numpy as np
-
-from core.silence_detector import SILENCE_THRESHOLD_AMP
 
 logger = logging.getLogger("KrabEar.AudioQuality")
 

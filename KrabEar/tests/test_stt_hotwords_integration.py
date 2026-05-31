@@ -83,6 +83,10 @@ class CapturingTranscriber:
         lang_hint=None,
         history_context=None,
         stt_hotwords=None,
+        settings=None,  # W1707: accept settings kwarg added by recording_core_service
+        diarize=None,
+        silence_ranges=None,
+        **kwargs,
     ) -> str:
         self.counter += 1
         self.calls.append(
