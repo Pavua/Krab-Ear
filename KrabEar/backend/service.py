@@ -2624,6 +2624,7 @@ class BackendService:
         try:
             import re as _re
             import requests as _requests
+            from backend.llm_rewriter import _validate_llm_url
             cached = self._settings_svc.cached_settings()
             base_url = str(cached.get("llm_base_url", "http://127.0.0.1:1234/v1")).rstrip("/")
             api_key = str(cached.get("llm_api_key", ""))
@@ -2634,10 +2635,14 @@ class BackendService:
             # в LM Studio. /api/v1/models — корректный endpoint. Same pattern as PR #396
             # для llm_rewriter.py:1064 (passive_health_check).
             _host = _re.sub(r"/v\d+$", "", base_url)
+            _url = f"{_host}/api/v1/models"
+            # Wave 1741: SSRF guard — reject file://, gopher://, etc.
+            _validate_llm_url(_url)
             resp = _requests.get(
-                f"{_host}/api/v1/models",
+                _url,
                 headers=headers,
                 timeout=3,
+                allow_redirects=False,  # Wave 1741: no redirect-based SSRF
             )
             if resp.status_code != 200:
                 return {"models": [], "error": f"http_{resp.status_code}"}
