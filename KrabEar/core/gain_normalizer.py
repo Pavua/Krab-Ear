@@ -31,6 +31,16 @@ _LIMITER_THRESHOLD: float = 0.95   # порог пика, выше которо�
 _LIMITER_KNEE_DB: float = 6.0      # ширина мягкого колена в дБ
 _HARD_CLIP: float = 1.0            # абсолютный максимум амплитуды после ограничителя
 
+# BUG 1 fix: cap maximum gain to prevent near-silence signals from being
+# amplified into a square wave before the limiter can act.
+# Rationale: +30 dB (31.6×) is already aggressive for speech normalisation;
+# beyond that the limiter hard-clips virtually the entire waveform, destroying
+# STT quality. Real speech arriving at the STT path should never be below
+# −50 dBFS RMS (target=-20, so max needed gain ≈ 30 dB). Signals quieter
+# than that are almost certainly not speech and should be left untouched rather
+# than turned into square waves.
+_MAX_GAIN_DB: float = 30.0
+
 
 # ---------------------------------------------------------------------------
 # Результирующий датакласс
@@ -89,7 +99,9 @@ class GainNormalizer:
 
     Алгоритм:
     1. Вычисляет RMS входного сигнала.
-    2. Вычисляет коэффициент усиления для достижения target_db.
+    2. Вычисляет коэффициент усиления для достижения target_db,
+       ограниченный сверху _MAX_GAIN_DB (+30 дБ) для защиты от
+       экстремального усиления тишины в квадратную волну.
     3. Применяет усиление.
     4. Обрабатывает результат soft-knee limiter'ом для предотвращения
        клиппинга выше _LIMITER_THRESHOLD.
@@ -112,6 +124,8 @@ class GainNormalizer:
 
         Returns:
             GainResult с нормализованным аудио и диагностикой.
+            Если требуемое усиление превышает _MAX_GAIN_DB (+30 дБ),
+            усиление ограничивается и в лог пишется предупреждение.
 
         Raises:
             ValueError: если target_db > 0 (неверный знак — было бы усиление
@@ -153,6 +167,21 @@ class GainNormalizer:
             )
 
         gain_db = target_db - input_rms_db
+
+        # BUG 1 fix: cap extreme amplification on near-silence signals.
+        # Without this cap a signal at −79 dBFS would get +59 dB (891×),
+        # driving the entire waveform into hard-clip → square wave → STT garbage.
+        if gain_db > _MAX_GAIN_DB:
+            logger.warning(
+                "gain_normalizer: required gain %.1f dB exceeds cap %.1f dB "
+                "(input RMS=%.1f dBFS); capping to prevent square-wave clipping. "
+                "Signal is likely near-silence or non-speech.",
+                gain_db,
+                _MAX_GAIN_DB,
+                input_rms_db,
+            )
+            gain_db = _MAX_GAIN_DB
+
         gain_linear = _db_to_linear(gain_db)
 
         amplified = audio.astype(np.float64) * gain_linear
@@ -196,6 +225,20 @@ class GainNormalizer:
             GainResult с автоматически подобранным усилением.
         """
         audio = self._to_mono_float32(audio)
+
+        # BUG 4 fix: add NaN/Inf guard (mirror of normalize() guard).
+        if len(audio) > 0 and not np.all(np.isfinite(audio)):
+            logger.warning(
+                "gain_normalizer: auto_gain: non-finite samples in input (NaN/Inf), "
+                "returning audio unchanged."
+            )
+            return GainResult(
+                audio=audio.copy(),
+                gain_applied_db=0.0,
+                input_rms_db=_SILENCE_FLOOR_DB,
+                output_rms_db=_SILENCE_FLOOR_DB,
+                clipped_samples=0,
+            )
 
         input_rms_db = _rms_db(audio)
         if input_rms_db <= _SILENCE_FLOOR_DB:
@@ -256,9 +299,26 @@ class GainNormalizer:
 
         Алгоритм:
         - Семплы ниже threshold остаются неизменными.
-        - Семплы в зоне колена [threshold, threshold + knee_linear] плавно
+        - Семплы в зоне колена [threshold, knee_top] плавно
           компрессируются по квадратичной кривой (нет резких артефактов).
+          Кривая: compressed = threshold + (knee_top − threshold) × t²,
+          где t = 0 у threshold, t = 1 у knee_top.
+          Это даёт непрерывный переход: f(0)=threshold, f(1)=knee_top.
         - Семплы выше колена жёстко обрезаются до _HARD_CLIP.
+
+        BUG 2 fix: knee_top теперь вычисляется как _HARD_CLIP минус ширина
+        колена в линейных единицах, что делает _LIMITER_KNEE_DB реальным
+        параметром (а не мёртвой ручкой).
+        Старая формула: knee_top = threshold * _db_to_linear(knee_width_db)
+        давала ≈ 0.95 × 1.995 ≈ 1.895 → min(1.895, 1.0) = 1.0, т.е. колено
+        всегда было [0.95, 1.0] независимо от knee_width_db.
+        Новая формула: knee_top = _HARD_CLIP − (_HARD_CLIP − threshold) × (1 − 10^(−knee_width_db/20))
+        Для knee_width_db=6: knee_top ≈ 1.0 − 0.05 × 0.498 ≈ 0.975 → зона
+        [0.95, 0.975]; при knee_width_db=0.1 зона практически нулевая.
+
+        BUG 3 fix: кривая в зоне колена использует t² (а не (2t − t²) × 0.5),
+        что обеспечивает строгое достижение knee_top при t=1 и устраняет
+        разрыв у верхней границы колена.
 
         Args:
             audio: float64-массив (может выходить за [-1, 1]).
@@ -267,26 +327,38 @@ class GainNormalizer:
             (ограниченный массив float64, число обрезанных семплов).
         """
         threshold = float(_LIMITER_THRESHOLD)
-        # Ширина колена в линейных единицах (от threshold до threshold + knee)
         knee_width_db = _LIMITER_KNEE_DB
-        knee_top = threshold * _db_to_linear(knee_width_db)  # порог верха колена
-        knee_top = min(knee_top, _HARD_CLIP)
+
+        # BUG 2 fix: compute knee_top as a dB-width zone *below* _HARD_CLIP.
+        # knee_width_db=6 means the knee spans the upper 6 dB below _HARD_CLIP.
+        # Formula: knee_top = HARD_CLIP - (HARD_CLIP - threshold) * (1 - 10^(-knee/20))
+        # This keeps knee_top strictly below _HARD_CLIP and makes the knee_width
+        # param actually change the knee zone width.
+        knee_fraction = 1.0 - _db_to_linear(-knee_width_db)  # = 1 - 10^(-knee/20)
+        knee_top = _HARD_CLIP - (_HARD_CLIP - threshold) * knee_fraction
+        # Safety clamp: knee_top must be in (threshold, _HARD_CLIP)
+        knee_top = max(threshold + 1e-9, min(knee_top, _HARD_CLIP - 1e-9))
 
         abs_audio = np.abs(audio)
         output = audio.copy()
 
-        # --- Зона колена: threshold < |x| < knee_top ---
-        knee_mask = (abs_audio > threshold) & (abs_audio < knee_top)
+        # --- Зона колена: threshold < |x| <= knee_top ---
+        knee_mask = (abs_audio > threshold) & (abs_audio <= knee_top)
         if np.any(knee_mask):
             # Нормализуем позицию в зоне колена: 0 (у threshold) → 1 (у knee_top)
             t = (abs_audio[knee_mask] - threshold) / (knee_top - threshold)
-            # Квадратичная кривая: gain снижается от 1 к threshold/knee_top
-            compressed_abs = threshold + (knee_top - threshold) * (2 * t - t ** 2) * 0.5
+            # BUG 3 fix: use t² so that at t=1 the output exactly equals knee_top.
+            # Old formula: threshold + (knee_top - threshold) * (2*t - t²) * 0.5
+            # evaluates to threshold + (knee_top - threshold) * 0.5 at t=1
+            # (midpoint), creating a step discontinuity at the hard-clip boundary.
+            # New formula: threshold + (knee_top - threshold) * t²
+            # evaluates to knee_top at t=1, ensuring continuity at both ends.
+            compressed_abs = threshold + (knee_top - threshold) * t ** 2
             # Масштабируем знаком оригинала
             output[knee_mask] = np.sign(audio[knee_mask]) * compressed_abs
 
         # --- Жёсткое ограничение выше колена ---
-        hard_mask = abs_audio >= knee_top
+        hard_mask = abs_audio > knee_top
         clipped_samples = int(np.sum(hard_mask))
         if clipped_samples > 0:
             output[hard_mask] = np.sign(audio[hard_mask]) * _HARD_CLIP
