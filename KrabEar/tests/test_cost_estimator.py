@@ -400,53 +400,46 @@ class TestEstimateBatchCostDispatched(unittest.TestCase):
 
     def test_estimate_batch_cost_dispatched(self):
         """BackendService dispatch table должен содержать 'estimate_batch_cost'."""
-        import importlib
         import types
-
-        # Минимальный stub для импорта BackendService без реальных зависимостей
-        stubs = {
-            "sounddevice": types.ModuleType("sounddevice"),
-            "mlx_whisper": types.ModuleType("mlx_whisper"),
-            "pyannote": types.ModuleType("pyannote"),
-            "pyannote.audio": types.ModuleType("pyannote.audio"),
-        }
-
         import sys as _sys
-        added = []
-        for name, mod in stubs.items():
+        from unittest.mock import patch
+
+        # Минимальный stub для импорта BackendService без реальных зависимостей.
+        # Используем patch.dict чтобы автоматически восстановить sys.modules после
+        # теста и не «заражать» test_recorder.py / test_realtime_partial.py
+        # голым stub без InputStream (W1745 sounddevice leak fix).
+        stubs_to_add = {}
+        stub_names = ["sounddevice", "mlx_whisper", "pyannote", "pyannote.audio"]
+        for name in stub_names:
             if name not in _sys.modules:
-                _sys.modules[name] = mod
-                added.append(name)
+                stubs_to_add[name] = types.ModuleType(name)
 
-        try:
-            from backend.service import BackendService  # noqa: PLC0415
+        with patch.dict("sys.modules", stubs_to_add):
+            try:
+                from backend.service import BackendService  # noqa: PLC0415
 
-            # Проверяем через inspect, что метод _handle_estimate_batch_cost существует
-            self.assertTrue(
-                hasattr(BackendService, "_handle_estimate_batch_cost"),
-                "BackendService должен иметь метод _handle_estimate_batch_cost",
-            )
-        except Exception:
-            # Если импорт не удался (нет зависимостей в окружении) — проверяем
-            # через прямое чтение dispatch-таблицы из AST (дымовая проверка).
-            import ast
-            import pathlib
+                # Проверяем через inspect, что метод _handle_estimate_batch_cost существует
+                self.assertTrue(
+                    hasattr(BackendService, "_handle_estimate_batch_cost"),
+                    "BackendService должен иметь метод _handle_estimate_batch_cost",
+                )
+            except Exception:
+                # Если импорт не удался (нет зависимостей в окружении) — проверяем
+                # через прямое чтение dispatch-таблицы из AST (дымовая проверка).
+                import pathlib
 
-            svc_path = pathlib.Path(__file__).resolve().parent.parent / "backend" / "service.py"
-            source = svc_path.read_text(encoding="utf-8")
-            self.assertIn(
-                '"estimate_batch_cost"',
-                source,
-                "Dispatch entry 'estimate_batch_cost' отсутствует в service.py",
-            )
-            self.assertIn(
-                "_handle_estimate_batch_cost",
-                source,
-                "Handler _handle_estimate_batch_cost отсутствует в service.py",
-            )
-        finally:
-            for name in added:
-                _sys.modules.pop(name, None)
+                svc_path = pathlib.Path(__file__).resolve().parent.parent / "backend" / "service.py"
+                source = svc_path.read_text(encoding="utf-8")
+                self.assertIn(
+                    '"estimate_batch_cost"',
+                    source,
+                    "Dispatch entry 'estimate_batch_cost' отсутствует в service.py",
+                )
+                self.assertIn(
+                    "_handle_estimate_batch_cost",
+                    source,
+                    "Handler _handle_estimate_batch_cost отсутствует в service.py",
+                )
 
 
 if __name__ == "__main__":

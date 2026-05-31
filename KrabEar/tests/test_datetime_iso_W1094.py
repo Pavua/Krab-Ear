@@ -28,9 +28,14 @@ class TestDefaultOutputIsISO8601(unittest.TestCase):
     """Default normalizer must emit ISO-8601 dates."""
 
     def setUp(self) -> None:
-        # Ensure module default is iso8601 (not mutated by other tests).
+        # Save original so tearDown can restore it — prevents leaking "iso8601"
+        # into test_datetime_normalizer.py which expects the "european" default.
+        self._orig_fmt = dn_module.DATETIME_OUTPUT_FORMAT
         dn_module.DATETIME_OUTPUT_FORMAT = "iso8601"
         self.norm = DateTimeNormalizer()
+
+    def tearDown(self) -> None:
+        dn_module.DATETIME_OUTPUT_FORMAT = self._orig_fmt
 
     # --- Russian ---
 
@@ -128,8 +133,14 @@ class TestLexicographicSortWorksISO8601(unittest.TestCase):
     """ISO-8601 full dates must sort lexicographically == chronologically."""
 
     def setUp(self) -> None:
+        # Save original so tearDown can restore it — prevents leaking "iso8601"
+        # into test_datetime_normalizer.py which expects the "european" default.
+        self._orig_fmt = dn_module.DATETIME_OUTPUT_FORMAT
         dn_module.DATETIME_OUTPUT_FORMAT = "iso8601"
         self.norm = DateTimeNormalizer()
+
+    def tearDown(self) -> None:
+        dn_module.DATETIME_OUTPUT_FORMAT = self._orig_fmt
 
     def test_dates_sort_chronologically(self) -> None:
         inputs = [

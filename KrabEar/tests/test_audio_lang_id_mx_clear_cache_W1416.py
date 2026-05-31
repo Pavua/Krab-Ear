@@ -35,7 +35,6 @@ class TestClearModelCacheCallsMxClearCache(unittest.TestCase):
         """When _HAS_MLX is True, clear_model_cache() must call mx.clear_cache()."""
         # Patch mlx.core.clear_cache directly — mlx IS installed in this env,
         # so we spy on the actual attribute rather than replacing the module.
-        import importlib
         try:
             import mlx.core as _real_mx
             with patch("core.audio_lang_id._HAS_MLX", True), \
@@ -43,10 +42,15 @@ class TestClearModelCacheCallsMxClearCache(unittest.TestCase):
                 AudioLanguageID.clear_model_cache()
             mock_clear.assert_called_once()
         except ImportError:
-            # MLX not installed — patch via sys.modules
+            # MLX not installed (e.g. Ubuntu CI) — patch BOTH "mlx" and "mlx.core"
+            # so that `import mlx.core as _mx_rt` inside clear_model_cache() succeeds.
+            # Patching only "mlx.core" is insufficient: Python resolves the parent
+            # package "mlx" first and raises ImportError when it is absent.
+            import types
+            mock_mlx_pkg = types.ModuleType("mlx")
             mock_mx = MagicMock()
             with patch("core.audio_lang_id._HAS_MLX", True), \
-                 patch.dict("sys.modules", {"mlx.core": mock_mx}):
+                 patch.dict("sys.modules", {"mlx": mock_mlx_pkg, "mlx.core": mock_mx}):
                 AudioLanguageID.clear_model_cache()
             mock_mx.clear_cache.assert_called_once()
 
@@ -90,11 +94,15 @@ class TestClearModelCacheSafeWhenMxClearCacheRaises(unittest.TestCase):
 
     def test_clear_model_cache_safe_when_mx_clear_cache_raises(self):
         """If mx.clear_cache() raises, clear_model_cache() must not propagate."""
+        import types
+        mock_mlx_pkg = types.ModuleType("mlx")
         mock_mx = MagicMock()
         mock_mx.clear_cache.side_effect = RuntimeError("Metal error")
 
+        # Patch BOTH "mlx" and "mlx.core" so the runtime `import mlx.core` inside
+        # clear_model_cache() resolves on Ubuntu where mlx is not installed.
         with patch("core.audio_lang_id._HAS_MLX", True):
-            with patch.dict("sys.modules", {"mlx.core": mock_mx}):
+            with patch.dict("sys.modules", {"mlx": mock_mlx_pkg, "mlx.core": mock_mx}):
                 # Must not raise even though mx.clear_cache() does.
                 AudioLanguageID.clear_model_cache()
 
