@@ -123,6 +123,17 @@ class SentimentTrendsPrivacyModeTestCase(unittest.TestCase):
 # F4 — Local timezone date bucketing tests
 # ---------------------------------------------------------------------------
 
+def _system_utcoffset_seconds() -> float:
+    """Return the local system timezone UTC offset in seconds (0 = UTC)."""
+    import time
+    return -time.timezone  # time.timezone = seconds WEST of UTC; negate for offset
+
+
+@unittest.skipIf(
+    _system_utcoffset_seconds() == 0,
+    "W1748: local timezone is UTC — test requires UTC+N (N>0) to distinguish "
+    "UTC date from local date bucketing; skip on CI runners with UTC clock",
+)
 class SentimentTrendsLocalDateTestCase(unittest.TestCase):
     """W1289 F4: дата записи определяется в локальном, а не UTC часовом поясе."""
 

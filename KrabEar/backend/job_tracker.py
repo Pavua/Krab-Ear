@@ -206,7 +206,9 @@ class JobTracker:
                 status = job.get("status")
                 if status in terminal:
                     finished_at = job.get("finished_at") or 0.0
-                    if (now - finished_at) > max_age_sec:
+                    # W1748: use >= so max_age_sec=0 evicts jobs that finished
+                    # at exactly the same monotonic timestamp (common in tests).
+                    if (now - finished_at) >= max_age_sec:
                         stale.append(jid)
                 elif (
                     status == "running"
