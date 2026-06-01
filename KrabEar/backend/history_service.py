@@ -110,6 +110,10 @@ class HistoryService:
         self._archive_manager: Any = None    # ArchiveManager — archive.ndjson
         self._bookmarks: Any = None          # BookmarkManager — bookmarks.ndjson
         self._call_session_store: Any = None  # CallSessionStore — call_sessions.ndjson
+        # W1765: _speaker_manager (строка ~91) и _playback_tracker (строка ~100)
+        # используются для privacy-purge биометрики (speaker_fingerprints.json /
+        # speaker_aliases.json) и статистики воспроизведения (playback_stats.json).
+        # Оба поля уже существуют; service.py заполняет их late-inject после __init__.
 
     # ------------------------------------------------------------------
     # Privacy helpers
@@ -1745,6 +1749,29 @@ class HistoryService:
                     "purge_all_data: call_session_store delete_all failed", exc_info=True
                 )
                 secondary_errors.append("call_sessions")
+
+        # --- 8. W1765: очистить биометрику спикеров (speaker_fingerprints.json + speaker_aliases.json) ---
+        # Критично для GDPR: 512-мерные голосовые отпечатки — биометрические ПДн;
+        # псевдонимы — реальные имена людей. Оба файла должны исчезать при privacy-wipe.
+        if self._speaker_manager is not None:
+            try:
+                self._speaker_manager.clear_all()
+            except Exception:
+                logger.warning(
+                    "purge_all_data: speaker_manager.clear_all failed", exc_info=True
+                )
+                secondary_errors.append("speaker_fingerprints")
+
+        # --- 9. W1765: очистить статистику воспроизведения (playback_stats.json) ---
+        # play_count / total_listened_sec / last_played — косвенные ПДн (паттерн пользования).
+        if self._playback_tracker is not None:
+            try:
+                self._playback_tracker.clear_all()
+            except Exception:
+                logger.warning(
+                    "purge_all_data: playback_tracker.clear_all failed", exc_info=True
+                )
+                secondary_errors.append("playback")
 
         # --- C. W1734: Audit log entry ---
         try:

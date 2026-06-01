@@ -361,6 +361,31 @@ class SpeakerManager:
         with self._lock:
             return {k: list(v) for k, v in self._fingerprints.items()}
 
+    def clear_all(self) -> None:
+        """W1765: полная очистка всех биометрических данных для privacy-purge.
+
+        Удаляет из памяти и с диска:
+          - speaker_fingerprints.json (512-мерные голосовые отпечатки — биометрия)
+          - speaker_aliases.json (SPEAKER_XX → реальные имена людей — ПДн)
+
+        Атомарность: выполняется под self._lock. Если unlink не удаётся —
+        исключение всплывает наружу, чтобы handle_purge_all_data мог
+        зарегистрировать шаг в secondary_errors (best-effort pattern).
+        """
+        with self._lock:
+            # Очищаем in-memory дикты
+            self._aliases.clear()
+            self._fingerprints.clear()
+            self._auto_speaker_counter = 0
+            # Удаляем файлы с диска (missing_ok=True — не ошибка, если файла нет)
+            if self._path is not None:
+                self._path.unlink(missing_ok=True)
+            if self._fingerprints_path is not None:
+                self._fingerprints_path.unlink(missing_ok=True)
+        _log.info(
+            "clear_all: speaker_aliases.json + speaker_fingerprints.json удалены (privacy-purge)"
+        )
+
     def resolve_speaker_for_segment(
         self, local_speaker_id: str, embedding: np.ndarray,
         threshold: float = 0.75, *, auto_register: bool = True

@@ -618,6 +618,11 @@ class BackendService:
         # W1749: wire error_bus into HistoryService so handle_purge_all_data can push
         # history.purge_incomplete loud errors when secondary cleanup steps fail.
         self._history._error_bus = self._error_bus
+        # W1765: wire speaker_manager + playback_tracker into HistoryService so
+        # handle_purge_all_data can call clear_all() on both (privacy-purge gap fix).
+        # _speaker_manager already wired above (строка ~594) for alias resolution;
+        # здесь явно подтверждаем, что оба поля заполнены для purge.
+        self._history._playback_tracker = self._playback_tracker
         self._call_session_service = CallSessionService(
             store=self._call_session_store,
             auto_end=self._call_auto_end,
