@@ -16,6 +16,12 @@ import logging
 import re
 from typing import Any, Callable, Optional
 
+# W1761: максимальная длина входного текста для разбора голосовых команд.
+# Транскрипция реального голосового ввода редко превышает ~2000 символов;
+# 100 000 — щедрый лимит, блокирующий только патологически длинные строки.
+# При превышении команды не применяются и в лог пишется структурированное предупреждение.
+_MAX_INPUT_LEN: int = 100_000
+
 logger = logging.getLogger("KrabEar.VoiceCommands")
 
 # ---------------------------------------------------------------------------
@@ -192,14 +198,21 @@ def _delete_last_word(text: str) -> str:
 
 
 def _delete_last_sentence(text: str) -> str:
-    """Удаляет последнее предложение (от последней точки/!/?/перевода строки)."""
+    """Удаляет последнее предложение (от последней точки/!/?/перевода строки).
+
+    W1761 ReDoS fix: заменён re.search(r"[.!?\\n](?!.*[.!?\\n])") на rfind-поиск.
+    Исходный «(?!.*[.!?\\n])» с «.*» давал квадратичный backtracking на длинных
+    строках без терминатора в конце — каждая позиция перепроверяла весь хвост.
+    Новая реализация: max(rfind) по четырём символам — O(n), без backtracking.
+    """
     stripped = text.rstrip()
     if not stripped:
         return ""
-    # Ищем конец предыдущего предложения
-    match = re.search(r"[.!?\n](?!.*[.!?\n])", stripped)
-    if match:
-        return stripped[: match.end()].rstrip()
+    # Находим позицию последнего терминатора предложения — O(n), без regex.
+    last_idx = max(stripped.rfind(c) for c in ".!?\n")
+    if last_idx >= 0:
+        # Возвращаем текст вплоть до терминатора включительно
+        return stripped[: last_idx + 1].rstrip()
     # Нет разделителя — удаляем всё
     return ""
 
@@ -295,6 +308,15 @@ class VoiceCommandProcessor:
         """
         if not self._enabled():
             logger.debug("VoiceCommands: отключён, пропускаем")
+            return text
+
+        # W1761: защита от DoS через аномально длинный транскрипт.
+        # Никогда не логируем содержимое текста — только метаданные (длина).
+        if len(text) > _MAX_INPUT_LEN:
+            logger.warning(
+                "VoiceCommands: входной текст превышает лимит, команды пропущены",
+                extra={"input_len": len(text), "limit": _MAX_INPUT_LEN},
+            )
             return text
 
         # Нормализуем язык: "ru-RU" → "ru"

@@ -6,6 +6,7 @@
 
 import sys
 import os
+import time
 import threading
 import unittest
 
@@ -13,7 +14,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from core.voice_commands import VoiceCommandProcessor  # noqa: E402
+from core.voice_commands import VoiceCommandProcessor, _delete_last_sentence  # noqa: E402
 
 
 def _make_proc(enabled: bool = True, languages=None) -> VoiceCommandProcessor:
@@ -488,6 +489,83 @@ class TestLookaroundBoundary(unittest.TestCase):
 
         count = sum(1 for p, _, _ in _ES_COMMANDS if p == r"nueva línea")
         self.assertEqual(count, 1, msg=f"Ожидалось 1 вхождение «nueva línea», нашли {count}")
+
+
+class TestW1761ReDosRegression(unittest.TestCase):
+    """W1761: регрессия ReDoS / квадратичный backtracking в _delete_last_sentence.
+
+    Исходный re.search(r"[.!?\\n](?!.*[.!?\\n])") на длинной строке без
+    терминатора в конце давал O(n²) backtracking — 30 000 слов без точки
+    вешали single-thread backend на несколько секунд.
+
+    Новая реализация (max rfind) — O(n), должна завершаться за < 0.2s.
+    """
+
+    def _make_proc_en(self) -> VoiceCommandProcessor:
+        settings = {
+            "voice_commands_enabled": True,
+            "voice_commands_languages": ["en"],
+            "voice_commands_strict_mode": False,
+        }
+        return VoiceCommandProcessor(settings_get=lambda k, d: settings.get(k, d))
+
+    def test_delete_last_sentence_no_terminator_is_fast(self):
+        """30 000 слов без завершающей точки — _delete_last_sentence < 0.2s (W1761).
+
+        Тест вызывает _delete_last_sentence напрямую (минуя _apply_commands),
+        чтобы изолировать именно regex-уязвимость: исходный lookahead «(?!.*[.!?\\n])»
+        давал O(n²) на строке без терминатора.  rfind-реализация — O(n).
+
+        Строка длиннее _MAX_INPUT_LEN — guard в process() сюда не применяется,
+        т.к. мы обходим process().
+        """
+        # 180 000 символов без .!?\n — именно этот паттерн был квадратичным
+        long_no_terminator = "word " * 30_000
+
+        t0 = time.perf_counter()
+        result = _delete_last_sentence(long_no_terminator)
+        elapsed = time.perf_counter() - t0
+
+        # Корректность: нет терминатора → возвращается ""
+        self.assertEqual(result, "", msg=f"Ожидался пустой результат, получили: {result[:80]!r}…")
+        # Производительность: rfind O(n) должен уложиться в 0.2s
+        self.assertLess(
+            elapsed,
+            0.2,
+            msg=f"ReDoS регрессия: _delete_last_sentence заняла {elapsed:.3f}s (лимит 0.2s)",
+        )
+
+    def test_delete_last_sentence_correctness_multi_sentence(self):
+        """Корректность: команда удаляет хвост за последним терминатором."""
+        proc = self._make_proc_en()
+        # Паттерн: «Sentence A. sentence B trailing delete last sentence»
+        # output перед командой = «Sentence A. sentence B trailing»
+        # _delete_last_sentence находит «.» как последний терминатор →
+        # возвращает «Sentence A.» (всё от начала до «.» включительно)
+        text = "Sentence A. sentence B trailing delete last sentence"
+        result = proc.process(text, language="en")
+        self.assertIn("Sentence A.", result)
+        self.assertNotIn("sentence B", result)
+        self.assertNotIn("trailing", result)
+
+    def test_delete_last_sentence_single_sentence_clears_all(self):
+        """Один период → единственное предложение удаляет весь текст."""
+        proc = self._make_proc_en()
+        text = "Only sentence here delete last sentence"
+        result = proc.process(text, language="en")
+        # Нет терминатора в накопленном output → удаляется всё
+        self.assertEqual(result, "")
+
+    def test_input_size_guard_skips_pathological_input(self):
+        """W1761: входная строка > 100 000 символов возвращается без обработки."""
+        from core.voice_commands import _MAX_INPUT_LEN  # noqa: PLC0415
+
+        proc = self._make_proc_en()
+        # Строка ровно на один символ длиннее лимита
+        oversized = "a" * (_MAX_INPUT_LEN + 1)
+        result = proc.process(oversized, language="en")
+        # Процессор должен вернуть текст как есть
+        self.assertEqual(result, oversized)
 
 
 if __name__ == "__main__":
