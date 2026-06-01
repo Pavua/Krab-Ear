@@ -16,6 +16,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from backend.models import DEFAULT_SETTINGS
 from backend.observability import add_breadcrumb
@@ -172,6 +173,41 @@ class SettingsService:
             _log.warning("settings: hot-reload failed: %s", exc)
         self._fire_after_save_hooks(old_settings, new_settings)
 
+    def _maybe_disable_sentry_for_privacy(
+        self, old_settings: dict[str, Any], new_settings: dict[str, Any]
+    ) -> None:
+        """W1763 MED 2: централизованный kill-switch Sentry при включении privacy-режима.
+
+        Вызывается из ВСЕХ путей изменения настроек, которые могут изменить
+        privacy_mode_enabled (set_settings, import_settings, restore_settings_backup).
+        Если privacy_mode_enabled переключается True→True (уже было True — ничего не делаем).
+        Если False→True — сбрасываем Sentry SDK, чтобы телеметрия замолчала немедленно.
+
+        Метод идемпотентен: повторный вызов с теми же значениями — no-op.
+        """
+        old_privacy = bool(old_settings.get("privacy_mode_enabled", False))
+        new_privacy = bool(new_settings.get("privacy_mode_enabled", False))
+        if new_privacy and not old_privacy:
+            # Privacy mode только что включился — отключаем Sentry.
+            try:
+                import backend.observability as _obs  # noqa: PLC0415
+                if _obs._sentry_initialized:
+                    try:
+                        import sentry_sdk as _sdk  # noqa: PLC0415
+                        _sdk.flush(timeout=2)
+                        _sdk.init(dsn=None)  # type: ignore[call-overload]
+                    except Exception:  # noqa: BLE001
+                        pass
+                    _obs._sentry_initialized = False
+                    _log.info(
+                        "_maybe_disable_sentry_for_privacy: Sentry отключён — privacy_mode_enabled=True",
+                        extra={"trigger": "privacy_mode_flip"},
+                    )
+            except Exception as exc:  # noqa: BLE001
+                _log.warning(
+                    "_maybe_disable_sentry_for_privacy: ошибка отключения Sentry: %s", exc
+                )
+
     # ------------------------------------------------------------------
     # W1457: migration helper
     # ------------------------------------------------------------------
@@ -306,7 +342,18 @@ class SettingsService:
         settings["call_auto_summary"] = self._coerce_bool(settings.get("call_auto_summary", True), default=True)
         settings["history_focus_mode"] = self._coerce_bool(settings.get("history_focus_mode", True), default=True)
         _gw_url = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()
-        if not (_gw_url.startswith("http://localhost") or _gw_url.startswith("http://127.0.0.1") or _gw_url.startswith("https://")):
+        # W1763 MED 1: точная проверка хоста через urlparse предотвращает sibling-prefix bypass.
+        # Старый startswith("http://localhost") пропускал http://localhost.evil.com/ и
+        # http://127.0.0.1.evil.com/ — они проходили проверку, но резолвились на атакующий сервер.
+        # Теперь проверяем только схему и точный hostname после парсинга.
+        _gw_parsed = urlparse(_gw_url)
+        _gw_scheme = _gw_parsed.scheme
+        _gw_hostname = (_gw_parsed.hostname or "").lower()
+        _localhost_hostnames = {"localhost", "127.0.0.1", "::1"}
+        if not (
+            (_gw_scheme == "http" and _gw_hostname in _localhost_hostnames)
+            or _gw_scheme == "https"
+        ):
             raise ValueError(f"Voice Gateway URL must be localhost or HTTPS: {_gw_url}")
         settings["voice_gateway_url"] = _gw_url
         settings["voice_gateway_api_key"] = str(settings.get("voice_gateway_api_key", "")).strip()
@@ -406,23 +453,9 @@ class SettingsService:
                 "key_count": len(params),
             },
         )
-        # W1199 (W1193 F1 HIGH): runtime privacy-mode Sentry disable.
-        # When privacy_mode_enabled flips True via IPC, flush pending Sentry
-        # events and re-init SDK with dsn=None to fully silence telemetry.
-        if params.get("privacy_mode_enabled") is True and not old_settings.get("privacy_mode_enabled"):
-            try:
-                import backend.observability as _obs  # noqa: PLC0415
-                if _obs._sentry_initialized:
-                    try:
-                        import sentry_sdk as _sdk  # noqa: PLC0415
-                        _sdk.flush(timeout=2)
-                        _sdk.init(dsn=None)  # type: ignore[call-overload]
-                    except Exception:  # noqa: BLE001
-                        pass
-                    _obs._sentry_initialized = False
-                    _log.info("set_settings: Sentry disabled — privacy_mode_enabled=True")
-            except Exception as exc:  # noqa: BLE001
-                _log.warning("set_settings: failed to disable Sentry for privacy mode: %s", exc)
+        # W1763 MED 2: централизованный kill-switch Sentry (вынесен в _maybe_disable_sentry_for_privacy).
+        # Покрывает set_settings, import_settings, restore_settings_backup одним методом.
+        self._maybe_disable_sentry_for_privacy(old_settings, settings)
         # W1341/W1436: hot-reload pydantic settings then fire hooks (single point of truth).
         self._reload_and_fire_hooks(old_settings, settings)
         return result
@@ -610,6 +643,8 @@ class SettingsService:
 
             _log.info("import_settings: imported=%d skipped=%d errors=%d from %s",
                       imported, skipped, len(errors), src)
+            # W1763 MED 2: kill-switch Sentry если импорт включает privacy_mode_enabled=True.
+            self._maybe_disable_sentry_for_privacy(old_settings, merged)
             # W1308/W1341/W1436: reload pydantic settings and fire hooks
             self._reload_and_fire_hooks(old_settings, merged)
             return {"imported": imported, "skipped": skipped, "errors": errors}
@@ -716,6 +751,8 @@ class SettingsService:
             self.invalidate_cache()
 
             _log.info("handle_restore_settings_backup: restored from %s", backup_id)
+            # W1763 MED 2: kill-switch Sentry если восстановленный бэкап включает privacy_mode_enabled=True.
+            self._maybe_disable_sentry_for_privacy(old_settings, restored)
             # W1308/W1341/W1436: reload pydantic settings and fire hooks
             self._reload_and_fire_hooks(old_settings, restored)
             result: dict = {"restored_settings": restored, "backup_id": backup_id}
