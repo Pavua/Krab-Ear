@@ -229,7 +229,6 @@ Decorative-architecture guard: `scripts/audit_decorative_wiring.py --strict` run
 - **`backend/timeline_export.py`** — `TimelineExporter`: export recording timeline as SVG, JSON, or iCalendar (`.ics`) file.
 - **`backend/transcript_writer.py`** — `TranscriptWriter`: write each transcription to a timestamped Obsidian-compatible Markdown file in the transcripts directory.
 - **`backend/tts_service.py`** — `TTSService`: dual-engine TTS (Silero RU primary, Kokoro EN fallback, macOS `say` last resort) with language auto-detection.
-- **`backend/vg_ws_client.py`** — `VGWebSocketClient`: WebSocket client to the Voice Gateway `/v1/sessions/{id}/stream` endpoint for real-time conversation streaming.
 
 #### Additional core modules:
 - **`core/audio_denoiser.py`** — `AudioDenoiser`: adaptive spectral-gating noise reduction with configurable strength levels (`off/light/moderate/strong`) before STT.
