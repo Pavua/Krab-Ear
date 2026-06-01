@@ -303,20 +303,23 @@ class TestMigrateV1ToV2(unittest.TestCase):
 
 
 class TestIpcHandlers(unittest.TestCase):
-    """Тесты IPC-обработчиков DataMigrator."""
+    """Тесты IPC-обработчиков DataMigrator (W1761: data_dir из запроса игнорируется)."""
 
     def setUp(self) -> None:
         self._tmpdir = Path(tempfile.mkdtemp())
-        self._migrator = DataMigrator()
+        # W1761: DataMigrator инициализируется с data_dir (единственно допустимый путь)
+        self._migrator = DataMigrator(data_dir=self._tmpdir)
 
-    def test_handle_check_migration_no_dir_raises(self) -> None:
-        """handle_check_migration без data_dir → ValueError."""
-        with self.assertRaises(ValueError):
-            self._migrator.handle_check_migration({})
+    def test_handle_check_migration_no_configured_dir_raises(self) -> None:
+        """handle_check_migration без data_dir в конструкторе → RuntimeError."""
+        migrator_no_dir = DataMigrator()
+        with self.assertRaises(RuntimeError):
+            migrator_no_dir.handle_check_migration({})
 
     def test_handle_check_migration_returns_expected_keys(self) -> None:
-        """handle_check_migration возвращает нужные поля."""
-        result = self._migrator.handle_check_migration({"data_dir": str(self._tmpdir)})
+        """handle_check_migration возвращает нужные поля (data_dir из params игнорируется)."""
+        # Передаём в params иной путь — он должен быть проигнорирован
+        result = self._migrator.handle_check_migration({"data_dir": "/tmp/evil_krab_migrate_test"})
         self.assertIn("migration_needed", result)
         self.assertIn("current_version", result)
         self.assertIn("target_version", result)
@@ -327,18 +330,20 @@ class TestIpcHandlers(unittest.TestCase):
         """handle_check_migration распознаёт v1-данные как требующие миграции."""
         history_path = self._tmpdir / "history.ndjson"
         _write_ndjson(history_path, [_make_v1_item()])
-        result = self._migrator.handle_check_migration({"data_dir": str(self._tmpdir)})
+        # data_dir из params игнорируется — мигратор читает из self._tmpdir
+        result = self._migrator.handle_check_migration({"data_dir": "/tmp/evil_krab_migrate_test"})
         self.assertTrue(result["migration_needed"])
         self.assertEqual(result["current_version"], "1.0")
 
-    def test_handle_run_migration_no_dir_raises(self) -> None:
-        """handle_run_migration без data_dir → ValueError."""
-        with self.assertRaises(ValueError):
-            self._migrator.handle_run_migration({})
+    def test_handle_run_migration_no_configured_dir_raises(self) -> None:
+        """handle_run_migration без data_dir в конструкторе → RuntimeError."""
+        migrator_no_dir = DataMigrator()
+        with self.assertRaises(RuntimeError):
+            migrator_no_dir.handle_run_migration({})
 
     def test_handle_run_migration_returns_expected_keys(self) -> None:
-        """handle_run_migration возвращает нужные поля."""
-        result = self._migrator.handle_run_migration({"data_dir": str(self._tmpdir)})
+        """handle_run_migration возвращает нужные поля (data_dir из params игнорируется)."""
+        result = self._migrator.handle_run_migration({"data_dir": "/tmp/evil_krab_migrate_test"})
         self.assertIn("from_version", result)
         self.assertIn("to_version", result)
         self.assertIn("items_migrated", result)
@@ -346,11 +351,12 @@ class TestIpcHandlers(unittest.TestCase):
         self.assertIn("backup_path", result)
 
     def test_handle_run_migration_executes_migration(self) -> None:
-        """handle_run_migration применяет миграцию к v1-данным."""
+        """handle_run_migration применяет миграцию к v1-данным в сконфигурированной директории."""
         history_path = self._tmpdir / "history.ndjson"
         _write_ndjson(history_path, [_make_v1_item("i1"), _make_v1_item("i2")])
 
-        result = self._migrator.handle_run_migration({"data_dir": str(self._tmpdir)})
+        # data_dir из params — произвольный путь, игнорируется
+        result = self._migrator.handle_run_migration({"data_dir": "/tmp/evil_krab_migrate_test"})
         self.assertEqual(result["from_version"], "1.0")
         self.assertEqual(result["to_version"], "2.0")
         self.assertEqual(result["items_migrated"], 2)
@@ -358,10 +364,42 @@ class TestIpcHandlers(unittest.TestCase):
     def test_handle_run_migration_invalid_version_raises(self) -> None:
         """handle_run_migration с неподдерживаемой версией → ошибка."""
         with self.assertRaises(ValueError):
-            self._migrator.handle_run_migration({
-                "data_dir": str(self._tmpdir),
-                "target_version": "99.0",
-            })
+            self._migrator.handle_run_migration({"target_version": "99.0"})
+
+    def test_handle_run_migration_does_not_write_to_arbitrary_path(self) -> None:
+        """W1761 regression: run_migration с data_dir='/tmp/evil_krab_migrate_test' НЕ пишет туда.
+
+        Вектор: злонамеренный локальный IPC-клиент передаёт data_dir за пределами
+        директории данных приложения. После фикса W1761 этот путь игнорируется —
+        мигратор работает только с закреплённым self._data_dir.
+        """
+        evil_dir = Path("/tmp/evil_krab_migrate_test")
+        if evil_dir.exists():
+            import shutil as _shutil
+            _shutil.rmtree(evil_dir)
+
+        history_path = self._tmpdir / "history.ndjson"
+        _write_ndjson(history_path, [_make_v1_item("sec1")])
+
+        # Запрос с произвольным data_dir
+        result = self._migrator.handle_run_migration({"data_dir": str(evil_dir)})
+
+        # Evil dir не должна быть создана
+        self.assertFalse(
+            evil_dir.exists(),
+            "Уязвимость W1761: run_migration записал файлы в произвольную директорию",
+        )
+
+        # Миграция должна была отработать на сконфигурированном self._tmpdir
+        self.assertEqual(result["from_version"], "1.0")
+        self.assertEqual(result["to_version"], "2.0")
+        # backup_path должен быть внутри self._tmpdir (resolve убирает symlink /tmp→/private/tmp)
+        resolved_backup = Path(result["backup_path"]).resolve()
+        resolved_tmpdir = self._tmpdir.resolve()
+        self.assertTrue(
+            resolved_backup.is_relative_to(resolved_tmpdir),
+            f"backup_path {resolved_backup} должен быть внутри {resolved_tmpdir}",
+        )
 
 
 class TestRollbackMigration(unittest.TestCase):
@@ -429,6 +467,8 @@ class TestInvalidVersionHandling(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = Path(tempfile.mkdtemp())
         self._migrator = DataMigrator()
+        # W1761: отдельный мигратор с data_dir для IPC-вызовов
+        self._migrator_with_dir = DataMigrator(data_dir=self._tmpdir)
 
     def test_handles_invalid_target_version_string(self) -> None:
         """Migrate с неизвестной строкой версии (не '2.0') → ValueError."""
@@ -451,7 +491,8 @@ class TestInvalidVersionHandling(unittest.TestCase):
         history_path = self._tmpdir / "history.ndjson"
         # Записи без text не считаются v1 (нет tags), при этом нет text-поля
         history_path.write_text('{"id": "x", "ts": "2024-01-01"}\n', encoding="utf-8")
-        result = self._migrator.handle_check_migration({"data_dir": str(self._tmpdir)})
+        # W1761: используем мигратор с data_dir; params-путь игнорируется
+        result = self._migrator_with_dir.handle_check_migration({})
         # Должен вернуть dict без исключения
         self.assertIn("migration_needed", result)
         self.assertIn("current_version", result)
@@ -603,13 +644,14 @@ class TestUnicodeDataPreserved(unittest.TestCase):
 
 
 class DataMigratorRollbackIPCTestCase(unittest.TestCase):
-    """Тесты IPC-обёртки handle_rollback_migration (W1026 F3)."""
+    """Тесты IPC-обёртки handle_rollback_migration (W1026 F3, W1761)."""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self._tmpdir = Path(self._tmp.name)
-        self._migrator = DataMigrator()
+        # W1761: инициализируем с data_dir, чтобы IPC-обработчики использовали его
+        self._migrator = DataMigrator(data_dir=self._tmpdir)
 
     def _make_v1_history(self) -> None:
         history_path = self._tmpdir / "history.ndjson"
@@ -621,12 +663,12 @@ class DataMigratorRollbackIPCTestCase(unittest.TestCase):
         result = self._migrator.migrate(self._tmpdir)
         backup_path = result.backup_path
 
-        # Simulate corrupted history after migration
+        # Симулируем повреждённую историю после миграции
         corrupt_line = json.dumps({"id": "bad", "text": "corrupted"})
         (self._tmpdir / "history.ndjson").write_text(corrupt_line + "\n", encoding="utf-8")
 
+        # data_dir в params игнорируется (W1761); backup_path должен быть внутри backups/
         rollback_result = self._migrator.handle_rollback_migration({
-            "data_dir": str(self._tmpdir),
             "backup_path": backup_path,
         })
 
@@ -634,22 +676,23 @@ class DataMigratorRollbackIPCTestCase(unittest.TestCase):
         self.assertIn("history.ndjson", rollback_result["restored_files"])
         self.assertEqual(rollback_result["backup_path"], backup_path)
 
-    def test_handle_rollback_migration_missing_data_dir_raises(self) -> None:
-        """handle_rollback_migration требует data_dir."""
-        with self.assertRaises(ValueError):
-            self._migrator.handle_rollback_migration({"backup_path": "/some/path"})
-
     def test_handle_rollback_migration_missing_backup_path_raises(self) -> None:
         """handle_rollback_migration требует backup_path."""
         with self.assertRaises(ValueError):
-            self._migrator.handle_rollback_migration({"data_dir": str(self._tmpdir)})
+            self._migrator.handle_rollback_migration({})
 
     def test_handle_rollback_migration_invalid_backup_path_raises(self) -> None:
-        """handle_rollback_migration выбрасывает ValueError при несуществующем backup."""
-        with self.assertRaises(ValueError):
+        """handle_rollback_migration выбрасывает (ValueError/RuntimeError) при несуществующем backup."""
+        with self.assertRaises((ValueError, RuntimeError)):
             self._migrator.handle_rollback_migration({
-                "data_dir": str(self._tmpdir),
-                "backup_path": "/nonexistent/backup/dir",
+                "backup_path": str(self._tmpdir / "backups" / "nonexistent_backup"),
+            })
+
+    def test_handle_rollback_migration_traversal_outside_backups_raises(self) -> None:
+        """W1761: backup_path за пределами <data_dir>/backups/ → RuntimeError."""
+        with self.assertRaises(RuntimeError):
+            self._migrator.handle_rollback_migration({
+                "backup_path": "/tmp/evil_krab_rollback_test",
             })
 
 
