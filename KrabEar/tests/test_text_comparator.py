@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 from backend.state_store import StateStore
-from core.text_comparator import TextComparator, ComparisonResult
+from core.text_comparator import (
+    MAX_COMPARE_WORDS,
+    MAX_PHRASE_SIZE,
+    TextComparator,
+    ComparisonResult,
+)
 
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -172,6 +178,111 @@ class TextComparatorIPCTestCase(unittest.TestCase):
             })
             self.assertTrue(resp["ok"])
             self.assertIn("similarity", resp["result"])
+
+
+class TextComparatorDoSGuardTestCase(unittest.TestCase):
+    """Тесты защиты от DoS (wave1765) — O(n²) → линейная сложность."""
+
+    def setUp(self) -> None:
+        self.comparator = TextComparator()
+
+    # ------------------------------------------------------------------
+    # Производительность — fail-before, pass-after
+    # ------------------------------------------------------------------
+
+    def test_long_text_completes_quickly(self) -> None:
+        """50 000 слов завершаются менее чем за 0.5 с (DoS guard активен).
+
+        До фикса: O(n²) фраз для n=50000 → миллиарды итераций, ОЗУ не хватает.
+        После фикса: входной текст усекается до MAX_COMPARE_WORDS,
+        n-граммы ограничены MAX_PHRASE_SIZE → линейное время.
+        """
+        # Генерируем два «документа» по 50 000 слов
+        long_text_1 = " ".join(f"слово{i}" for i in range(50_000))
+        long_text_2 = " ".join(f"слово{i}" for i in range(25_000, 75_000))
+
+        t0 = time.perf_counter()
+        result = self.comparator.compare_texts(long_text_1, long_text_2)
+        elapsed = time.perf_counter() - t0
+
+        self.assertIsInstance(result, ComparisonResult)
+        self.assertLess(elapsed, 0.5, f"compare_texts на 50k-словных текстах занял {elapsed:.3f}s (лимит 0.5s)")
+
+    def test_long_text_phrase_count_bounded(self) -> None:
+        """Число извлечённых фраз ограничено — не превышает MAX_COMPARE_WORDS × MAX_PHRASE_SIZE."""
+        # Используем 10 000 уникальных слов — существенно больше MAX_COMPARE_WORDS
+        long_text = " ".join(f"w{i}" for i in range(10_000))
+        phrases = self.comparator._extract_phrases(long_text.lower().split()[:MAX_COMPARE_WORDS])
+
+        # После усечения до MAX_COMPARE_WORDS слов с n-граммами до MAX_PHRASE_SIZE
+        # теоретический максимум: (MAX_COMPARE_WORDS - MIN + 1) * (MAX_PHRASE_SIZE - MIN + 1)
+        # на практике значительно меньше; важна конечность
+        max_possible = MAX_COMPARE_WORDS * MAX_PHRASE_SIZE
+        self.assertLessEqual(
+            len(phrases),
+            max_possible,
+            f"Число фраз {len(phrases)} превышает ожидаемый лимит {max_possible}",
+        )
+
+    def test_input_truncated_to_max_compare_words(self) -> None:
+        """_safe_split усекает входной текст до MAX_COMPARE_WORDS слов."""
+        oversized = " ".join(f"x{i}" for i in range(MAX_COMPARE_WORDS + 500))
+        words = TextComparator._safe_split(oversized)
+        self.assertEqual(len(words), MAX_COMPARE_WORDS)
+
+    def test_short_input_not_truncated(self) -> None:
+        """_safe_split не изменяет короткий текст."""
+        text = "раз два три четыре пять"
+        words = TextComparator._safe_split(text)
+        self.assertEqual(words, text.lower().split())
+
+    def test_phrase_size_capped_at_max_phrase_size(self) -> None:
+        """_extract_phrases генерирует n-граммы не длиннее MAX_PHRASE_SIZE слов."""
+        # 200 слов — достаточно для проверки максимального размера n-граммы
+        words = [f"w{i}" for i in range(200)]
+        phrases = self.comparator._extract_phrases(words)
+        for phrase in phrases:
+            word_count = len(phrase.split())
+            self.assertLessEqual(
+                word_count,
+                MAX_PHRASE_SIZE,
+                f"Фраза из {word_count} слов превышает MAX_PHRASE_SIZE={MAX_PHRASE_SIZE}: {phrase!r}",
+            )
+
+    # ------------------------------------------------------------------
+    # Корректность для коротких текстов — не должна измениться
+    # ------------------------------------------------------------------
+
+    def test_normal_shared_phrases_detected(self) -> None:
+        """Общие фразы из 3+ слов обнаруживаются в коротких текстах."""
+        t1 = "машинное обучение это хорошо сегодня"
+        t2 = "машинное обучение это плохо завтра"
+        result = self.comparator.compare_texts(t1, t2)
+
+        # «машинное обучение это» — трёхсловная общая фраза
+        self.assertIn("машинное обучение это", result.common_phrases)
+
+    def test_normal_unique_phrases_detected(self) -> None:
+        """Уникальные фразы корректно распределяются между unique_to_1 и unique_to_2."""
+        t1 = "раз два три четыре"
+        t2 = "раз два три пять"
+        result = self.comparator.compare_texts(t1, t2)
+
+        # «два три четыре» есть только в t1
+        self.assertIn("два три четыре", result.unique_to_1)
+        # «два три пять» есть только в t2
+        self.assertIn("два три пять", result.unique_to_2)
+
+    def test_similarity_preserved_for_identical_short_text(self) -> None:
+        """similarity == 1.0 для двух одинаковых коротких текстов."""
+        text = "привет мир это тест"
+        result = self.comparator.compare_texts(text, text)
+        self.assertAlmostEqual(result.similarity, 1.0, places=2)
+
+    def test_word_count_diff_preserved(self) -> None:
+        """word_count_diff корректен после введения _safe_split."""
+        result = self.comparator.compare_texts("один два три", "один два")
+        self.assertEqual(result.word_count_diff, 1)
 
 
 if __name__ == "__main__":

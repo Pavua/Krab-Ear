@@ -2,16 +2,41 @@
 
 Compares two texts or two history items by ID, producing a rich ComparisonResult
 with similarity score, common phrases, unique fragments, and a human-readable summary.
+
+DoS guard (wave1765): _extract_phrases ранее перебирала ВСЕ n-граммы от MIN до len(words),
+что давало O(n²) фраз и O(n³) символов — один длинный запрос через IPC exhausted RAM/CPU.
+Защита: входной текст усекается до MAX_COMPARE_WORDS, а размер n-грамм ограничен
+MAX_PHRASE_SIZE. Итоговая сложность — O(n × MAX_PHRASE_SIZE), то есть линейная.
 """
 
 from __future__ import annotations
 
 import difflib
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List
 
 if TYPE_CHECKING:
     from backend.state_store import StateStore
+
+logger = logging.getLogger(__name__)
+
+# --------------------------------------------------------------------------
+# Защитные константы — DoS guard
+# --------------------------------------------------------------------------
+
+# Максимальное число слов, подаваемых на анализ фраз.
+# 5000 слов ≈ ~10 страниц; больше не нужно для задач similarity.
+MAX_COMPARE_WORDS: int = 5_000
+
+# Максимальный размер n-граммы (слов). 10-словные шинглы отлично покрывают
+# сходство; полные длинные фразы не нужны.
+MAX_PHRASE_SIZE: int = 10
+
+# Жёсткий backstop: не более этого числа фраз в множестве на один текст.
+# При MAX_COMPARE_WORDS=5000 и MAX_PHRASE_SIZE=10 теоретический максимум
+# ~8 × MAX_COMPARE_WORDS = 40 000 — этот backstop служит дополнительной защитой.
+MAX_PHRASES: int = 50_000
 
 
 @dataclass
@@ -33,6 +58,10 @@ class TextComparator:
 
     Uses difflib.SequenceMatcher for similarity and sliding-window phrase extraction
     to find common / unique 3+-word phrases.
+
+    Входные тексты усекаются до MAX_COMPARE_WORDS слов, а n-граммы — до MAX_PHRASE_SIZE
+    слов, чтобы обеспечить линейную по памяти/времени сложность для любых входных данных
+    из IPC.
     """
 
     MIN_PHRASE_WORDS: int = 3
@@ -73,13 +102,15 @@ class TextComparator:
 
         Returns:
             ComparisonResult с полным анализом.
+
+        Входные тексты усекаются до MAX_COMPARE_WORDS слов (DoS guard).
         """
         t1 = (text1 or "").strip()
         t2 = (text2 or "").strip()
 
         similarity = self._similarity(t1, t2)
-        words1 = t1.lower().split()
-        words2 = t2.lower().split()
+        words1 = self._safe_split(t1)
+        words2 = self._safe_split(t2)
 
         phrases1 = self._extract_phrases(words1)
         phrases2 = self._extract_phrases(words2)
@@ -107,6 +138,24 @@ class TextComparator:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _safe_split(text: str) -> List[str]:
+        """Разбить текст на слова, усекая до MAX_COMPARE_WORDS.
+
+        Усечение логируется на уровне warning, чтобы отследить чрезмерно длинные
+        входы через IPC (потенциальный индикатор злоупотребления).
+        """
+        words = text.lower().split()
+        if len(words) > MAX_COMPARE_WORDS:
+            logger.warning(
+                "compare_texts: входной текст усечён с %d до %d слов (DoS guard)",
+                len(words),
+                MAX_COMPARE_WORDS,
+                extra={"original_word_count": len(words), "cap": MAX_COMPARE_WORDS},
+            )
+            words = words[:MAX_COMPARE_WORDS]
+        return words
+
+    @staticmethod
     def _similarity(a: str, b: str) -> float:
         """Character-level similarity ratio, rounded to 4 decimal places."""
         if not a and not b:
@@ -114,13 +163,26 @@ class TextComparator:
         return round(difflib.SequenceMatcher(None, a, b).ratio(), 4)
 
     def _extract_phrases(self, words: List[str]) -> set:
-        """Return all contiguous n-grams (n >= MIN_PHRASE_WORDS) as joined strings."""
+        """Вернуть множество n-грамм (n в диапазоне [MIN_PHRASE_WORDS, MAX_PHRASE_SIZE]).
+
+        Ограничение сверху MAX_PHRASE_SIZE делает сложность O(n × MAX_PHRASE_SIZE)
+        вместо прежнего O(n²). Жёсткий backstop MAX_PHRASES обеспечивает дополнительную
+        защиту от непредвиденных крайних случаев.
+        """
         phrases: set = set()
         n = len(words)
-        for size in range(self.MIN_PHRASE_WORDS, n + 1):
+        max_size = min(MAX_PHRASE_SIZE, n)
+        for size in range(self.MIN_PHRASE_WORDS, max_size + 1):
             for start in range(n - size + 1):
-                phrase = " ".join(words[start:start + size])
-                phrases.add(phrase)
+                phrases.add(" ".join(words[start:start + size]))
+                # Backstop: не выделять бесконечно много фраз
+                if len(phrases) >= MAX_PHRASES:
+                    logger.warning(
+                        "compare_texts: достигнут лимит фраз %d (MAX_PHRASES)",
+                        MAX_PHRASES,
+                        extra={"phrase_cap": MAX_PHRASES},
+                    )
+                    return phrases
         return phrases
 
     @staticmethod
