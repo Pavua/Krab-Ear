@@ -5,7 +5,10 @@ into the osascript source text with incomplete escaping (only `"` and `\n`,
 never the backslash itself first), allowing malicious transcript-derived data
 to break out of the AppleScript string literal and inject arbitrary code.
 
-Post-fix: values are passed as SEPARATE osascript argv items, not interpolated.
+Post-fix (W1747): values are passed as SEPARATE osascript argv items, not interpolated.
+Post-fix (W1764): «--» end-of-options separator inserted before positional args so that
+osascript getopt(3) does not treat a leading-dash recipient like «-e» as a second flag.
+Argv layout: [osascript, -e, <script>, --, to, subject, plain_body]  (7 elements).
 """
 from __future__ import annotations
 
@@ -54,7 +57,17 @@ def _call_and_capture(sender: EmailSender, to: str, subject: str,
 
 class TestArgvBasedPassing(unittest.TestCase):
     """After the fix, to/subject/body must be separate argv elements, not
-    baked into the script text."""
+    baked into the script text.
+
+    W1764 argv layout:
+        cmd[0] == "osascript"
+        cmd[1] == "-e"
+        cmd[2] == script_text
+        cmd[3] == "--"   ← end-of-options separator (W1764)
+        cmd[4] == to
+        cmd[5] == subject
+        cmd[6] == plain_body
+    """
 
     def test_to_is_separate_argv_element(self):
         """The recipient address must appear as a standalone element in the
@@ -62,25 +75,25 @@ class TestArgvBasedPassing(unittest.TestCase):
         addr = "recipient@example.com"
         cmd = _call_and_capture(_mail_sender(), to=addr,
                                 subject="Hello", body_html="<p>body</p>")
-        # cmd[0] == "osascript", cmd[1] == "-e", cmd[2] == script_text,
-        # cmd[3] == to, cmd[4] == subject, cmd[5] == plain_body
-        self.assertGreaterEqual(len(cmd), 6, "Expected at least 6 argv elements")
-        self.assertEqual(cmd[3], addr, "to must be the 4th argv element (index 3)")
+        # W1764: «--» at index 3; to at index 4
+        self.assertGreaterEqual(len(cmd), 7, "Expected at least 7 argv elements (W1764 adds «--»)")
+        self.assertEqual(cmd[3], "--", "cmd[3] must be «--» end-of-options separator (W1764)")
+        self.assertEqual(cmd[4], addr, "to must be the 5th argv element (index 4)")
 
     def test_subject_is_separate_argv_element(self):
-        """Subject must be the 5th argv element (index 4), not interpolated."""
+        """Subject must be the 6th argv element (index 5), not interpolated."""
         subj = "Daily digest"
         cmd = _call_and_capture(_mail_sender(), to="r@x.com",
                                 subject=subj, body_html="<p>hi</p>")
-        self.assertEqual(cmd[4], subj)
+        self.assertEqual(cmd[5], subj)
 
     def test_body_is_separate_argv_element(self):
-        """Plain-text body must be the 6th argv element (index 5)."""
+        """Plain-text body must be the 7th argv element (index 6)."""
         body_html = "<p>Transcription result</p>"
         cmd = _call_and_capture(_mail_sender(), to="r@x.com",
                                 subject="S", body_html=body_html)
         # plain_body after _strip_html
-        self.assertEqual(cmd[5], "Transcription result")
+        self.assertEqual(cmd[6], "Transcription result")
 
 
 # ---------------------------------------------------------------------------
@@ -112,12 +125,16 @@ class TestInjectionPayloadsAreSafe(unittest.TestCase):
                                          subject: str = "S",
                                          body_html: str = "<p>ok</p>") -> None:
         """Helper: run send(), check that `value` lands in argv[field_idx] verbatim
-        and does NOT appear as a substring of the script text (argv[2])."""
-        if field_idx == 3:
+        and does NOT appear as a substring of the script text (argv[2]).
+
+        W1764 argv layout: [osascript, -e, script, --, to, subject, plain_body]
+        field_idx=4 → to, field_idx=5 → subject, field_idx=6 → plain_body.
+        """
+        if field_idx == 4:
             to = value
-        elif field_idx == 4:
-            subject = value
         elif field_idx == 5:
+            subject = value
+        elif field_idx == 6:
             body_html = f"<p>{value}</p>"
 
         cmd = _call_and_capture(_mail_sender(), to=to, subject=subject,
@@ -128,7 +145,7 @@ class TestInjectionPayloadsAreSafe(unittest.TestCase):
         # The injected payload must not appear literally in the script text
         # (some chars like newlines may be normalised by _strip_html for body,
         # but the key injection patterns must not be in the script).
-        if field_idx != 5:
+        if field_idx != 6:
             # For to/subject there is no transformation; exact match.
             self.assertEqual(argv_value, value,
                              f"argv[{field_idx}] must equal the raw value")
@@ -162,7 +179,8 @@ class TestInjectionPayloadsAreSafe(unittest.TestCase):
             _mail_sender(), to="r@x.com", subject=self.BARE_BACKSLASH,
             body_html="<p>ok</p>",
         )
-        self.assertEqual(cmd[4], self.BARE_BACKSLASH)
+        # W1764: subject is at index 5
+        self.assertEqual(cmd[5], self.BARE_BACKSLASH)
 
     def test_newline_in_subject_passed_verbatim(self):
         """Real newline in subject is passed as-is in argv (no script breakout)."""
@@ -170,7 +188,8 @@ class TestInjectionPayloadsAreSafe(unittest.TestCase):
             _mail_sender(), to="r@x.com", subject=self.REAL_NEWLINE_IN_SUBJECT,
             body_html="<p>ok</p>",
         )
-        self.assertEqual(cmd[4], self.REAL_NEWLINE_IN_SUBJECT)
+        # W1764: subject is at index 5
+        self.assertEqual(cmd[5], self.REAL_NEWLINE_IN_SUBJECT)
         # The script text itself must not have the newline-terminated payload
         script_text = cmd[2]
         self.assertNotIn("Line two", script_text)
@@ -178,7 +197,7 @@ class TestInjectionPayloadsAreSafe(unittest.TestCase):
     def test_applescript_injection_in_body(self):
         """Classic AppleScript injection via body cannot alter script structure."""
         self._assert_value_in_argv_not_script(
-            field_idx=5, value=self.APPLESCRIPT_INJECTION_BODY,
+            field_idx=6, value=self.APPLESCRIPT_INJECTION_BODY,
             body_html=f"<p>{self.APPLESCRIPT_INJECTION_BODY}</p>",
         )
 
@@ -191,8 +210,8 @@ class TestInjectionPayloadsAreSafe(unittest.TestCase):
         )
         script_text = cmd[2]
         self.assertNotIn('do shell script "open /tmp/evil"', script_text)
-        # Subject value is passed verbatim as argv element
-        self.assertEqual(cmd[4], self.APPLESCRIPT_INJECTION_SUBJECT)
+        # Subject value is passed verbatim as argv element (W1764: index 5)
+        self.assertEqual(cmd[5], self.APPLESCRIPT_INJECTION_SUBJECT)
 
     def test_double_quote_in_to_passed_verbatim(self):
         """Double-quote in recipient address must not break script text."""
@@ -200,7 +219,8 @@ class TestInjectionPayloadsAreSafe(unittest.TestCase):
             _mail_sender(), to=self.DOUBLE_QUOTE_IN_TO,
             subject="S", body_html="<p>ok</p>",
         )
-        self.assertEqual(cmd[3], self.DOUBLE_QUOTE_IN_TO)
+        # W1764: to is at index 4 (after «--» separator at index 3)
+        self.assertEqual(cmd[4], self.DOUBLE_QUOTE_IN_TO)
         script_text = cmd[2]
         # The double-quote address must not appear inside the script source
         self.assertNotIn(self.DOUBLE_QUOTE_IN_TO, script_text)
@@ -265,14 +285,18 @@ class TestScriptTextIsStatic(unittest.TestCase):
         self.assertIn("item 2 of argv", script_text)
         self.assertIn("item 3 of argv", script_text)
 
-    def test_cmd_length_is_exactly_six(self):
-        """subprocess argv must be exactly: osascript -e <script> <to> <subject> <body>."""
+    def test_cmd_length_is_exactly_seven(self):
+        """subprocess argv must be exactly: osascript -e <script> -- <to> <subject> <body>.
+
+        W1764 added the «--» separator, raising the count from 6 to 7.
+        """
         cmd = _call_and_capture(_mail_sender(), to="r@x.com",
                                 subject="Hello", body_html="<p>World</p>")
-        self.assertEqual(len(cmd), 6,
-                         f"Expected 6 argv elements, got {len(cmd)}: {cmd!r}")
+        self.assertEqual(len(cmd), 7,
+                         f"Expected 7 argv elements (W1764: includes «--»), got {len(cmd)}: {cmd!r}")
         self.assertEqual(cmd[0], "osascript")
         self.assertEqual(cmd[1], "-e")
+        self.assertEqual(cmd[3], "--", "cmd[3] must be «--» end-of-options separator")
 
 
 # ---------------------------------------------------------------------------
@@ -315,11 +339,180 @@ class TestPreFixInterpolationWouldBreak(unittest.TestCase):
             subject=malicious_subject,
             body_html="<p>ok</p>",
         )
-        # The raw value is in argv[4], untouched
-        self.assertEqual(cmd[4], malicious_subject)
+        # W1764: subject is at argv[5] (after «--» at [3] and to at [4])
+        self.assertEqual(cmd[5], malicious_subject)
         # The script text does NOT contain the raw value
         script_text = cmd[2]
         self.assertNotIn(malicious_subject, script_text)
+
+
+# ---------------------------------------------------------------------------
+# W1764.1: osascript «--» separator placement
+# ---------------------------------------------------------------------------
+
+class TestW1764OsascriptEndOfOptions(unittest.TestCase):
+    """W1764 MED: «--» separator must appear between the -e flag and positional args
+    so that osascript getopt(3) stops option-parsing before user-supplied values.
+
+    Primary defense: email validation in send() rejects leading-dash values.
+    Belt-and-suspenders: «--» ensures that even if a leading-dash value were
+    somehow passed to _send_via_mail_app directly, getopt would not consume it
+    as a flag.  These tests verify the «--» is structurally present.
+    """
+
+    def test_double_dash_separator_present(self):
+        """«--» must be at argv[3] (immediately after script text)."""
+        cmd = _call_and_capture(_mail_sender(), to="r@x.com",
+                                subject="Hello", body_html="<p>ok</p>")
+        self.assertEqual(cmd[3], "--",
+                         f"Expected «--» at argv[3], got {cmd[3]!r}. "
+                         "Missing separator allows leading-dash values to be parsed as flags.")
+
+    def test_separator_position_invariant_across_inputs(self):
+        """«--» must be at index 3 regardless of the subject/body content."""
+        for subj in ("Normal subject", "Subject with -dashes", "Краб дайджест"):
+            cmd = _call_and_capture(_mail_sender(), to="a@b.co",
+                                    subject=subj, body_html="<p>ok</p>")
+            self.assertEqual(cmd[3], "--",
+                             f"«--» must be at argv[3] for subject={subj!r}")
+
+    def test_double_dash_enables_leading_dash_subject_to_pass_through(self):
+        """Subject starting with «-» must land at argv[5] untouched (not parsed as flag).
+
+        Without «--», a subject like «-autoclose» would be consumed by osascript
+        getopt before on-run-argv receives it.  Belt-and-suspenders test.
+        """
+        dash_subject = "-autoclose reminder"
+        cmd = _call_and_capture(_mail_sender(), to="a@b.co",
+                                subject=dash_subject, body_html="<p>ok</p>")
+        self.assertEqual(cmd[3], "--")
+        self.assertEqual(cmd[5], dash_subject,
+                         "Subject starting with «-» must be at argv[5] as data")
+
+    def test_positional_order_after_separator(self):
+        """After «--»: argv[4]=to, argv[5]=subject, argv[6]=plain_body (7 elements total)."""
+        cmd = _call_and_capture(_mail_sender(), to="a@b.co",
+                                subject="Subj", body_html="<p>Body</p>")
+        self.assertEqual(len(cmd), 7)
+        self.assertEqual(cmd[4], "a@b.co")
+        self.assertEqual(cmd[5], "Subj")
+        self.assertEqual(cmd[6], "Body")
+
+
+# ---------------------------------------------------------------------------
+# W1764.2: email address validation in send()
+# ---------------------------------------------------------------------------
+
+class TestW1764EmailValidation(unittest.TestCase):
+    """W1764 MED belt-and-suspenders: send() must validate «to» before reaching
+    osascript or smtplib — rejects leading-dash addresses and malformed values."""
+
+    # ---------- invalid addresses that must raise ValueError ---------------
+
+    def test_leading_dash_e_rejected(self):
+        """to=«-e» is rejected with ValueError before osascript is called."""
+        sender = EmailSender(backend_name="mail_app")
+        with self.assertRaises(ValueError, msg="to=«-e» must raise ValueError"):
+            with patch("subprocess.run") as mock_run:
+                sender.send(to="-e", subject="S", body_html="<p>ok</p>")
+                mock_run.assert_not_called()
+
+    def test_leading_dash_l_rejected(self):
+        """to=«-l» is rejected with ValueError (osascript language flag)."""
+        sender = EmailSender(backend_name="mail_app")
+        with self.assertRaises(ValueError):
+            sender.send(to="-l", subject="S", body_html="<p>ok</p>")
+
+    def test_no_at_sign_rejected(self):
+        """to without @ is rejected."""
+        sender = EmailSender(backend_name="smtp", smtp_host="h", use_keychain=False)
+        with self.assertRaises(ValueError):
+            sender.send(to="notanemail", subject="S", body_html="<p>ok</p>")
+
+    def test_whitespace_in_to_rejected(self):
+        """to with embedded whitespace is rejected."""
+        sender = EmailSender(backend_name="smtp", smtp_host="h", use_keychain=False)
+        with self.assertRaises(ValueError):
+            sender.send(to="user @example.com", subject="S", body_html="<p>ok</p>")
+
+    def test_no_dot_in_domain_rejected(self):
+        """to without a dot in domain (e.g. «a@b») is rejected."""
+        sender = EmailSender(backend_name="smtp", smtp_host="h", use_keychain=False)
+        with self.assertRaises(ValueError):
+            sender.send(to="a@b", subject="S", body_html="<p>ok</p>")
+
+    def test_empty_to_rejected(self):
+        """Empty «to» is still rejected (pre-existing check, unchanged)."""
+        sender = EmailSender(backend_name="smtp", smtp_host="h", use_keychain=False)
+        with self.assertRaises(ValueError):
+            sender.send(to="", subject="S", body_html="<p>ok</p>")
+
+    # ---------- valid addresses that must NOT raise -------------------
+
+    def test_valid_email_passes_validation(self):
+        """Plain valid address a@b.co must not raise ValueError."""
+        sender = EmailSender(backend_name="mail_app")
+        fake_proc = MagicMock()
+        fake_proc.returncode = 0
+        fake_proc.stderr = ""
+        with patch("subprocess.run", return_value=fake_proc):
+            # Must not raise
+            sender.send(to="a@b.co", subject="S", body_html="<p>ok</p>")
+
+    def test_plus_addressing_passes(self):
+        """user+tag@example.com must pass validation."""
+        sender = EmailSender(backend_name="mail_app")
+        fake_proc = MagicMock()
+        fake_proc.returncode = 0
+        fake_proc.stderr = ""
+        with patch("subprocess.run", return_value=fake_proc):
+            sender.send(to="user+tag@example.com", subject="S", body_html="<p>ok</p>")
+
+    def test_subdomain_passes(self):
+        """user@mail.example.co.uk must pass validation."""
+        sender = EmailSender(backend_name="mail_app")
+        fake_proc = MagicMock()
+        fake_proc.returncode = 0
+        fake_proc.stderr = ""
+        with patch("subprocess.run", return_value=fake_proc):
+            sender.send(to="user@mail.example.co.uk", subject="S", body_html="<p>ok</p>")
+
+
+# ---------------------------------------------------------------------------
+# W1764.3: ReDoS protection in _strip_html
+# ---------------------------------------------------------------------------
+
+class TestW1764StripHtmlReDoSProtection(unittest.TestCase):
+    """W1764 LOW: _strip_html must not hang on hostile input with many unclosed «<»."""
+
+    def test_strip_html_hostile_input_completes_quickly(self):
+        """500 000 consecutive «<» characters must complete in under 0.3 seconds."""
+        import time
+        hostile = "<" * 500_000
+        t0 = time.monotonic()
+        result = EmailSender._strip_html(hostile)
+        elapsed = time.monotonic() - t0
+        self.assertLess(elapsed, 0.3,
+                        f"_strip_html took {elapsed:.3f}s on hostile input — ReDoS not fixed")
+        # Result must be a string (truncated, stripped, possibly empty)
+        self.assertIsInstance(result, str)
+
+    def test_strip_html_truncates_oversized_body(self):
+        """Input longer than _STRIP_HTML_MAX_BYTES is truncated before regex."""
+        from backend.email_sender import _STRIP_HTML_MAX_BYTES
+        oversized = "a" * (_STRIP_HTML_MAX_BYTES + 10_000)
+        result = EmailSender._strip_html(oversized)
+        # Result must not be longer than the limit (no tags to strip, so result ≤ limit)
+        self.assertLessEqual(len(result), _STRIP_HTML_MAX_BYTES)
+
+    def test_strip_html_normal_input_unchanged_by_cap(self):
+        """Normal HTML under the cap is processed correctly."""
+        html = "<h1>Title</h1><p>Body <b>text</b></p>"
+        result = EmailSender._strip_html(html)
+        self.assertIn("Title", result)
+        self.assertIn("Body", result)
+        self.assertIn("text", result)
+        self.assertNotIn("<", result)
 
 
 if __name__ == "__main__":

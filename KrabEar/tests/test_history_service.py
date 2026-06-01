@@ -310,10 +310,10 @@ class HistoryServiceTestCase(unittest.TestCase):
             if isinstance(v, str):
                 self.assertNotIn("export breadcrumb test", v)
 
-
     # ------------------------------------------------------------------
     # W1762 — handle_delete_history_item erases transcript .md file
     # ------------------------------------------------------------------
+
     def test_delete_erases_transcript_md(self) -> None:
         """W1762: удаление записи стирает связанный .md файл транскрипта.
 
