@@ -240,20 +240,97 @@ class SharingManager:
             return SharePackage(**entry)
 
     def revoke_share(self, token: str) -> bool:
-        """Отзывает пакет по share_id (токену).
+        """Отзывает пакет по share_id (токену) и УДАЛЯЕТ файлы с диска.
 
         После отзыва get_shared возвращает None для этого токена.
+        Очистка файла производится ДО обновления индекса — если удаление
+        не удалось, метод бросает исключение и НЕ помечает запись как отозванную
+        (честный репорт ошибки, а не молчаливый privacy провал).
 
         Returns:
-            True если пакет существовал и был отозван, False если не найден.
+            True если пакет существовал и был успешно отозван, False если не найден.
+
+        Raises:
+            RuntimeError: если файл на диске не удалось удалить.
         """
         with self._lock:
             entry = self._find_share_by_token_constant_time(token)
             if entry is None:
                 return False
-            self._index[entry["share_id"]]["is_revoked"] = True
+            share_id = entry["share_id"]
+
+            # W1762 HIGH FIX: удаляем файл(ы) пакета с диска перед обновлением индекса.
+            # Если удаление не удалось — сообщаем громко, не помечаем как отозванный.
+            filename = entry.get("filename", "")
+            if filename:
+                file_path = self._shares_dir / filename
+                try:
+                    file_path.unlink(missing_ok=True)
+                except Exception as exc:
+                    # Частичный сбой: файл существует, но удалить не удалось.
+                    # НЕ помечаем как отозванный — открытый текст остаётся на диске.
+                    logger.error(
+                        "revoke_share: не удалось удалить файл пакета %s (share_id=%s): %s",
+                        file_path,
+                        share_id,
+                        exc,
+                    )
+                    raise RuntimeError(
+                        f"Не удалось удалить файл пакета '{file_path}' при отзыве "
+                        f"share_id={share_id!r}: {exc}"
+                    ) from exc
+
+            self._index[share_id]["is_revoked"] = True
             self._save_index()
             return True
+
+    def purge_all(self) -> dict[str, int]:
+        """Удаляет ВСЕ файлы пакетов с диска и очищает индекс.
+
+        Предназначен для privacy-purge (например, «удалить всё»).
+        Частичные ошибки удаления логируются как предупреждения, но операция
+        продолжается — в итоге возвращается статистика.
+
+        Returns:
+            dict с ключами:
+                "deleted"  — количество успешно удалённых файлов,
+                "errors"   — количество файлов, которые не удалось удалить,
+                "cleared"  — 1 если индекс очищен, 0 при ошибке сохранения индекса.
+        """
+        with self._lock:
+            deleted = 0
+            errors = 0
+            for entry in list(self._index.values()):
+                filename = entry.get("filename", "")
+                if not filename:
+                    continue
+                file_path = self._shares_dir / filename
+                try:
+                    file_path.unlink(missing_ok=True)
+                    deleted += 1
+                except Exception as exc:
+                    errors += 1
+                    logger.warning(
+                        "purge_all: не удалось удалить файл пакета %s: %s",
+                        file_path,
+                        exc,
+                    )
+
+            self._index.clear()
+            cleared = 0
+            try:
+                self._save_index()
+                cleared = 1
+            except Exception as exc:
+                logger.error("purge_all: не удалось сохранить пустой индекс: %s", exc)
+
+            logger.info(
+                "purge_all: удалено файлов=%d ошибок=%d индекс_очищен=%s",
+                deleted,
+                errors,
+                bool(cleared),
+            )
+            return {"deleted": deleted, "errors": errors, "cleared": cleared}
 
     def get_share_package_by_token(self, token: str) -> SharePackage | None:
         """Alias для get_shared (более явное именование для токен-ориентированного API)."""
@@ -419,14 +496,39 @@ class SharingManager:
         return "\n\n".join(parts)
 
     def _persist_package(self, package: SharePackage) -> None:
-        """Сохраняет пакет на диск и обновляет индекс."""
-        # Сохраняем текстовый файл пакета
+        """Сохраняет пакет на диск и обновляет индекс.
+
+        W1762 MED FIX: гарантирует консистентность «файл ↔ индекс».
+        Алгоритм:
+        1. Записываем файл на диск (вне лока — медленная IO).
+        2. Если запись завершилась с ошибкой — удаляем частичный файл
+           и перебрасываем исключение. В индекс ничего не попадает.
+        3. Только после успешной записи — берём лок и добавляем запись в индекс.
+        Таким образом никогда не возникает «orphan file без index entry».
+        """
         file_path = self._shares_dir / package.filename
         try:
             file_path.write_text(package.content, encoding="utf-8")
         except Exception as exc:
-            logger.error("Не удалось сохранить файл пакета %s: %s", file_path, exc)
+            logger.error(
+                "Не удалось сохранить файл пакета %s: %s",
+                file_path,
+                exc,
+            )
+            # Зачищаем частичный файл, чтобы не оставлять orphan на диске
+            try:
+                file_path.unlink(missing_ok=True)
+            except Exception as cleanup_exc:
+                logger.warning(
+                    "Не удалось удалить частичный файл %s после ошибки записи: %s",
+                    file_path,
+                    cleanup_exc,
+                )
+            raise RuntimeError(
+                f"Не удалось записать файл пакета '{file_path}': {exc}"
+            ) from exc
 
+        # Запись прошла успешно — регистрируем в индексе
         with self._lock:
             self._index[package.share_id] = package.to_dict()
             self._save_index()
