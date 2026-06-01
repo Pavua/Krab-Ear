@@ -1043,5 +1043,195 @@ class TestPrivacyModeHistoryContext(unittest.TestCase):
         self.assertEqual(result["transcribe_payload"]["text"], "result")
 
 
+# ---------------------------------------------------------------------------
+# Wave 1762: path-traversal security tests
+# ---------------------------------------------------------------------------
+
+class TestIsPathAllowed(unittest.TestCase):
+    """Проверка _is_path_allowed: boundary-safe containment без sibling-prefix bypass."""
+
+    def test_exact_root_is_allowed(self):
+        root = Path("/tmp/krab_test_root")
+        self.assertTrue(RecordingCoreService._is_path_allowed(root, [root]))
+
+    def test_file_inside_root_is_allowed(self):
+        root = Path("/tmp/krab_test_root")
+        child = root / "sub" / "file.wav"
+        self.assertTrue(RecordingCoreService._is_path_allowed(child, [root]))
+
+    def test_sibling_prefix_bypass_rejected(self):
+        """/private/tmpEVIL/x.wav не должен проходить через корень /private/tmp."""
+        tmp_root = Path("/private/tmp")
+        evil_path = Path("/private/tmpEVIL/x.wav")
+        self.assertFalse(RecordingCoreService._is_path_allowed(evil_path, [tmp_root]))
+
+    def test_home_sibling_bypass_rejected(self):
+        """/Users/<user>-attacker/x.wav не проходит через корень home()."""
+        home = Path.home()
+        sibling = Path(str(home) + "-attacker") / "x.wav"
+        self.assertFalse(RecordingCoreService._is_path_allowed(sibling, [home]))
+
+    def test_path_outside_all_roots_rejected(self):
+        roots = [Path("/tmp"), Path("/private/tmp")]
+        self.assertFalse(RecordingCoreService._is_path_allowed(Path("/etc/passwd"), roots))
+
+    def test_multiple_roots_first_match_sufficient(self):
+        root_a = Path("/tmp/a")
+        root_b = Path("/tmp/b")
+        self.assertTrue(RecordingCoreService._is_path_allowed(root_a / "x.wav", [root_a, root_b]))
+        self.assertTrue(RecordingCoreService._is_path_allowed(root_b / "x.wav", [root_a, root_b]))
+
+
+class TestPathTraversalSecurity(unittest.TestCase):
+    """Интеграционные тесты: sibling-prefix bypass и symlink escape блокируются."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    # ------------------------------------------------------------------
+    # (a) Sibling-prefix bypass
+    # ------------------------------------------------------------------
+
+    def test_sibling_prefix_path_rejected_by_helper(self):
+        """Проверка через _is_path_allowed: sibling-prefix bypass невозможен.
+
+        Конкретный сценарий: allowed root = /private/tmp, атакующий путь = /private/tmpEVIL/x.wav.
+        Старый startswith('/private/tmp') пропускал его; is_relative_to — нет.
+        """
+        # Используем реальный resolved /tmp для macOS
+        tmp_root = Path("/tmp").resolve()  # /private/tmp на macOS
+        evil_path = Path(str(tmp_root) + "EVIL") / "secret.wav"
+        self.assertFalse(
+            RecordingCoreService._is_path_allowed(evil_path, [tmp_root]),
+            f"sibling-prefix {evil_path} не должен проходить через корень {tmp_root}",
+        )
+
+    def test_sibling_prefix_path_rejected_via_collect(self):
+        """_collect_audio_paths с allowed_roots отклоняет файл-сиблинг."""
+        import os
+        import shutil
+        # Создаём два tmpdir: один — allowed_root, второй — sibling (EVIL)
+        allowed_dir = Path(tempfile.mkdtemp(prefix="krab_allowed_"))
+        sibling_dir = Path(str(allowed_dir) + "EVIL")
+        os.makedirs(sibling_dir, exist_ok=True)
+        try:
+            evil_wav = sibling_dir / "secret.wav"
+            evil_wav.touch()
+            allowed_roots = [allowed_dir.resolve()]
+            result = RecordingCoreService._collect_audio_paths(
+                [str(evil_wav)],
+                allowed_roots=allowed_roots,
+            )
+            self.assertNotIn(
+                str(evil_wav.resolve()),
+                result,
+                "sibling-prefix путь не должен попасть в results _collect_audio_paths",
+            )
+        finally:
+            shutil.rmtree(allowed_dir, ignore_errors=True)
+            shutil.rmtree(sibling_dir, ignore_errors=True)
+
+    def test_home_sibling_prefix_path_rejected_in_core(self):
+        """/Users/<user>-x/y.wav не проходит через _transcribe_paths_core."""
+        svc = _make_service(self._tmp)
+        home = Path.home()
+        sibling_name = home.name + "-x"
+        sibling_path = home.parent / sibling_name / "secret.wav"
+        result = svc._transcribe_paths_core({"paths": [str(sibling_path)]})
+        errors = result.get("errors", [])
+        items = result.get("items", [])
+        self.assertEqual(len(items), 0, "sibling-prefix путь не должен транскрибироваться")
+        self.assertTrue(len(errors) > 0, "ожидается ошибка для sibling-prefix пути")
+
+    # ------------------------------------------------------------------
+    # (b) Post-validation symlink escape
+    # ------------------------------------------------------------------
+
+    def test_symlink_inside_allowed_dir_pointing_outside_is_rejected(self):
+        """Симлинк внутри разрешённой директории, ведущий за её пределы, должен быть отклонён."""
+        import os
+        import shutil
+
+        outside_dir = tempfile.mkdtemp(prefix="krab_outside_")
+        outside_file = Path(outside_dir) / "secret.wav"
+        outside_file.touch()
+
+        allowed_dir = Path(self._tmp)
+        symlink_path = allowed_dir / "evil_link.wav"
+        os.symlink(str(outside_file), str(symlink_path))
+
+        try:
+            allowed_roots = [allowed_dir.resolve()]
+            result = RecordingCoreService._collect_audio_paths(
+                [str(allowed_dir)],
+                allowed_roots=allowed_roots,
+            )
+            # Симлинк ведёт за пределы allowed_dir — не должен попасть в результат
+            self.assertNotIn(
+                str(outside_file.resolve()),
+                result,
+                "symlink, ведущий за пределы разрешённой директории, не должен быть включён",
+            )
+        finally:
+            shutil.rmtree(outside_dir, ignore_errors=True)
+
+    # ------------------------------------------------------------------
+    # (c) Легитимный путь внутри data_dir/tmp всё ещё принимается
+    # ------------------------------------------------------------------
+
+    def test_legitimate_path_inside_data_dir_accepted(self):
+        """Файл внутри data_dir проходит через allowlist и возвращается в results."""
+        svc = _make_service(self._tmp)
+        wav_path = Path(self._tmp) / "real_audio.wav"
+        wav_path.touch()
+        result = svc.handle_preview_transcribe_paths({"paths": [str(wav_path)]})
+        self.assertEqual(result.get("audio_count", 0), 1, "легитимный файл должен приниматься")
+        self.assertEqual(result.get("input_count", 0), 1)
+
+    def test_legitimate_path_inside_tmp_accepted(self):
+        """Файл внутри системного tempdir() принимается (tmp входит в allowed_roots)."""
+        import os
+        svc = _make_service(self._tmp)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            tmp_wav = f.name
+        try:
+            result = svc.handle_preview_transcribe_paths({"paths": [tmp_wav]})
+            self.assertEqual(result.get("audio_count", 0), 1, "файл в tmp должен приниматься")
+        finally:
+            try:
+                os.unlink(tmp_wav)
+            except OSError:
+                pass
+
+    # ------------------------------------------------------------------
+    # (d) Async: отклонённые пути видны в errors через get_transcribe_progress
+    # ------------------------------------------------------------------
+
+    def test_async_rejected_paths_appear_in_job_errors(self):
+        """Пути за пределами allowlist попадают в errors асинхронного job'а."""
+        import time as _time
+        svc = _make_service(self._tmp)
+        result = svc.handle_transcribe_paths_async({"paths": ["/etc/passwd"]})
+        job_id = result["job_id"]
+
+        # Ошибки записываются синхронно до старта воркера — sleep нужен лишь на случай гонки
+        _time.sleep(0.05)
+
+        progress = svc.handle_get_transcribe_progress({"job_id": job_id})
+        errors = progress.get("errors", [])
+        self.assertTrue(
+            len(errors) > 0,
+            "отклонённый путь /etc/passwd должен быть виден в errors job'а",
+        )
+        self.assertTrue(
+            any("Path outside allowed" in e for e in errors),
+            f"ожидается 'Path outside allowed' в errors, получено: {errors}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
