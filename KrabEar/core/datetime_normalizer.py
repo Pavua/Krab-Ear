@@ -419,13 +419,33 @@ class DateTimeNormalizer:
         day_ordinals_sorted = sorted(_RU_DAY_ORDINALS.keys(), key=len, reverse=True)
         day_ordinals_pat = "|".join(re.escape(d) for d in day_ordinals_sorted)
 
-        # Год: «две тысячи двадцать шестого года» или «2026 года»
+        # Год: «две тысячи двадцать шестого года», «двух тысяч...», «2026 года»
+        #
+        # Исправление W1764 (два независимых дефекта):
+        #
+        # Дефект 1: старый «двух?\s+тысяч(?:и|ного)?» не матчил «две тысячи»
+        #   (самую частую разговорную форму) → год не захватывался, группа 3
+        #   оставалась пустой, а outer-group «(?:\s+(year_pat)?» поглощала
+        #   пробел после месяца → замена «23.05» склеивалась с «две тысячи...»
+        #   без пробела (corruption).
+        #
+        # Дефект 2: trailing «?» внутри year_words_pat делал весь паттерн
+        #   опциональным (__) → «(?:\s+(year_words_pat?))?» матчила «\s+ + ""»,
+        #   поглощая пробел с пустым захватом.  Итог: даже когда год не матчился
+        #   (например, «тысячи пятого года»), trailing пробел съедался и
+        #   corruption случалась снова.
+        #
+        # Исправление: (a) permissive capture (до 4 слов после «тысяч*»),
+        # строгий парсинг делает _parse_year_ru; (b) year_words_pat теперь
+        # NON-OPTIONAL (без финального «?») — outer «(?:\s+...)?» либо матчит
+        # целиком, либо не матчит ничего, trailing пробел не теряется.
         year_words_pat = (
             r"(?:"
-            r"двух?\s+тысяч(?:и|ного)?\s+(?:\w+\s+)*?\w+ого\s+года?"
-            r"|тысяча\s+\w+\s+\w+\s+года?"
-            r"|\d{4}\s+года?"
-            r")?"
+            r"дв(?:е|ух?)\s+тысяч\w*(?:\s+\w+){0,3}(?:\s+года?)?"
+            r"|тысяча\s+\w+(?:\s+\w+){0,3}(?:\s+года?)?"
+            r"|\d{4}(?:\s+года?)?"
+            r")"
+            # Без финального ? — non-optional; outer group делает его optional.
         )
 
         full_pat = (
@@ -449,6 +469,11 @@ class DateTimeNormalizer:
             year = self._parse_year_ru(year_part)
             if year:
                 return self._fmt_date(day, month, year)
+            # Fail-safe (W1764): если год захвачен regex, но _parse_year_ru
+            # вернул None — возвращаем оригинальный текст без изменений.
+            # Лучше не трогать, чем склеить дату с нераспознанными словами.
+            if year_part:
+                return m.group(0)
             return self._fmt_date(day, month)
 
         text = re.sub(full_pat, _repl_date, text, flags=re.IGNORECASE)
@@ -488,9 +513,10 @@ class DateTimeNormalizer:
 
         yt = year_text.lower()
 
-        # «две тысячи двадцать шестого года»
+        # «две тысячи двадцать шестого года» / «двух тысяч двадцать шестого»
+        # W1764: дв(?:е|ух?) охватывает обе формы родительного падежа.
         base_match = re.match(
-            r"две\s+тысячи\s*(.*?)(?:\s+года?)?$", yt
+            r"дв(?:е|ух?)\s+тысяч(?:и|ного|)?\s*(.*?)(?:\s+года?)?$", yt
         )
         if base_match:
             rest = base_match.group(1).strip()
