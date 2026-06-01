@@ -210,17 +210,25 @@ class RealtimePartialTranscriber:
             last_transcribed_duration = duration_sec
             error_count = 0  # сбрасываем счётчик при успехе
 
-            # Privacy guard (re-read every iteration for mid-recording toggle support)
+            # Privacy guard (re-read every iteration for mid-recording toggle support).
+            # FAIL CLOSED: если privacy_getter бросает исключение — считаем privacy ON
+            # и подавляем emit.  Частичный транскрипт НЕ должен утекать, когда
+            # состояние приватности неизвестно.
             if self._privacy_getter is not None:
                 try:
-                    if self._privacy_getter():
-                        logger.debug(
-                            "RealtimePartialTranscriber: emit пропущен — privacy_mode активен (session=%s)",
-                            self._session_id,
-                        )
-                        continue
+                    privacy_on = self._privacy_getter()
                 except Exception as exc:
-                    logger.debug("privacy_getter упал (session=%s): %s", self._session_id, exc)
+                    logger.warning(
+                        "realtime privacy getter raised — failing safe (suppressing partial)",
+                        extra={"error": type(exc).__name__, "session_id": self._session_id},
+                    )
+                    continue  # fail closed — emit подавлен
+                if privacy_on:
+                    logger.debug(
+                        "RealtimePartialTranscriber: emit пропущен — privacy_mode активен (session=%s)",
+                        self._session_id,
+                    )
+                    continue
 
             try:
                 self._event_bus.emit(
