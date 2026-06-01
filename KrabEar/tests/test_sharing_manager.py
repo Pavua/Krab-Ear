@@ -981,5 +981,235 @@ class CapsW1546TestCase(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# W1762 — regression guard: revoke erases files, purge_all clears all, no orphans
+# ---------------------------------------------------------------------------
+
+class W1762RevokeErasesFilesTestCase(unittest.TestCase):
+    """W1762 HIGH: revoke_share должен удалять файлы пакета с диска.
+
+    До фикса revoke только флипал is_revoked=True в индексе, не трогая
+    физические файлы — открытый текст оставался на диске бессрочно.
+    """
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._store = FakeStore(data_dir=self._tmpdir)
+        self._mgr = SharingManager(store=self._store)
+        self._store.add_fake_item("r1", "секретный текст для revoke")
+
+    def test_revoke_deletes_share_file_from_disk(self) -> None:
+        """После revoke_share файл пакета НЕ должен существовать на диске."""
+        pkg = self._mgr.prepare_share(["r1"])
+        file_path = Path(self._tmpdir) / "shares" / pkg.filename
+        # Убеждаемся, что файл создан
+        self.assertTrue(file_path.exists(), "файл пакета должен существовать до revoke")
+
+        revoked = self._mgr.revoke_share(pkg.share_id)
+
+        self.assertTrue(revoked, "revoke_share должен вернуть True")
+        self.assertFalse(
+            file_path.exists(),
+            "файл пакета НЕ должен существовать на диске после revoke_share",
+        )
+
+    def test_revoke_marks_is_revoked_in_index(self) -> None:
+        """После revoke_share запись в индексе должна быть помечена is_revoked=True."""
+        pkg = self._mgr.prepare_share(["r1"])
+        self._mgr.revoke_share(pkg.share_id)
+        # get_shared должен вернуть None (отозвано)
+        found = self._mgr.get_shared(pkg.share_id)
+        self.assertIsNone(found, "отозванный пакет не должен быть доступен через get_shared")
+
+    def test_revoke_all_formats_deleted(self) -> None:
+        """revoke_share удаляет файл для каждого из поддерживаемых форматов."""
+        for fmt in ("markdown", "text", "json"):
+            with self.subTest(format=fmt):
+                tmpdir = tempfile.mkdtemp()
+                store = FakeStore(data_dir=tmpdir)
+                store.add_fake_item("rf1", f"текст {fmt}")
+                mgr = SharingManager(store=store)
+                pkg = mgr.prepare_share(["rf1"], format=fmt)
+                file_path = Path(tmpdir) / "shares" / pkg.filename
+                self.assertTrue(file_path.exists())
+                mgr.revoke_share(pkg.share_id)
+                self.assertFalse(
+                    file_path.exists(),
+                    f"файл формата {fmt} должен быть удалён после revoke",
+                )
+
+    def test_revoke_unknown_token_returns_false(self) -> None:
+        """revoke_share с несуществующим токеном должен вернуть False, не бросать."""
+        result = self._mgr.revoke_share("DEADBEEF")
+        self.assertFalse(result)
+
+    def test_revoke_failure_to_delete_raises_and_leaves_not_revoked(self) -> None:
+        """Если удаление файла не удалось — revoke_share должен бросить RuntimeError
+        и НЕ помечать запись как отозванную (открытый текст на диске = не revoked)."""
+        from unittest.mock import patch
+
+        pkg = self._mgr.prepare_share(["r1"])
+        share_id = pkg.share_id
+
+        # Имитируем ошибку удаления файла
+        with patch("pathlib.Path.unlink", side_effect=OSError("permission denied")):
+            with self.assertRaises(RuntimeError, msg="revoke_share должен бросить при ошибке удаления"):
+                self._mgr.revoke_share(share_id)
+
+        # Запись должна оставаться НЕ отозванной
+        found = self._mgr.get_shared(share_id)
+        self.assertIsNotNone(
+            found,
+            "пакет не должен быть помечен revoked если файл не удалось удалить",
+        )
+
+
+class W1762PurgeAllTestCase(unittest.TestCase):
+    """W1762 HIGH: purge_all удаляет ВСЕ файлы пакетов + очищает индекс."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._store = FakeStore(data_dir=self._tmpdir)
+        self._mgr = SharingManager(store=self._store)
+        for i in range(3):
+            self._store.add_fake_item(f"p{i}", f"текст пакета {i}")
+
+    def test_purge_all_deletes_all_share_files(self) -> None:
+        """purge_all должен удалить все файлы пакетов с диска."""
+        pkgs = []
+        for i in range(3):
+            pkg = self._mgr.prepare_share([f"p{i}"])
+            pkgs.append(pkg)
+
+        # Убеждаемся, что файлы существуют
+        for pkg in pkgs:
+            fp = Path(self._tmpdir) / "shares" / pkg.filename
+            self.assertTrue(fp.exists(), f"файл {pkg.filename} должен существовать")
+
+        result = self._mgr.purge_all()
+
+        self.assertEqual(result["deleted"], 3, "purge_all должен удалить 3 файла")
+        self.assertEqual(result["errors"], 0, "ошибок удаления быть не должно")
+        self.assertEqual(result["cleared"], 1, "индекс должен быть очищен")
+
+        for pkg in pkgs:
+            fp = Path(self._tmpdir) / "shares" / pkg.filename
+            self.assertFalse(fp.exists(), f"файл {pkg.filename} НЕ должен существовать после purge_all")
+
+    def test_purge_all_empties_index(self) -> None:
+        """После purge_all list_shared должен вернуть пустой список."""
+        for i in range(3):
+            self._mgr.prepare_share([f"p{i}"])
+
+        self._mgr.purge_all()
+
+        shares = self._mgr.list_shared(include_expired=True, include_revoked=True)
+        self.assertEqual(shares, [], "после purge_all индекс должен быть пустым")
+
+    def test_purge_all_index_persisted_empty(self) -> None:
+        """После purge_all индекс должен быть сохранён пустым на диск."""
+        for i in range(3):
+            self._mgr.prepare_share([f"p{i}"])
+
+        self._mgr.purge_all()
+
+        # Перезагружаем менеджер — должен быть пустой индекс
+        mgr2 = SharingManager(store=self._store)
+        shares = mgr2.list_shared(include_expired=True, include_revoked=True)
+        self.assertEqual(shares, [], "после перезагрузки индекс должен оставаться пустым")
+
+    def test_purge_all_on_empty_manager_returns_zero_deleted(self) -> None:
+        """purge_all на пустом менеджере не должен бросать исключений."""
+        result = self._mgr.purge_all()
+        self.assertEqual(result["deleted"], 0)
+        self.assertEqual(result["errors"], 0)
+        self.assertEqual(result["cleared"], 1)
+
+    def test_purge_all_mixed_formats(self) -> None:
+        """purge_all удаляет файлы всех форматов."""
+        for fmt in ("markdown", "text", "json"):
+            item_id = f"fmt_{fmt}"
+            self._store.add_fake_item(item_id, f"текст {fmt}")
+            self._mgr.prepare_share([item_id], format=fmt)
+
+        shares_dir = Path(self._tmpdir) / "shares"
+        files_before = [f for f in shares_dir.iterdir() if f.suffix != ".json" or f.name != "shares_index.json"]
+        self.assertGreater(len(files_before), 0)
+
+        result = self._mgr.purge_all()
+        self.assertGreater(result["deleted"], 0)
+
+        # Только индекс остаётся (пустой)
+        files_after = [
+            f for f in shares_dir.iterdir()
+            if f.name != "shares_index.json"
+        ]
+        self.assertEqual(files_after, [], "все файлы пакетов должны быть удалены")
+
+
+class W1762NoPersistOrphanTestCase(unittest.TestCase):
+    """W1762 MED: _persist_package не должен оставлять orphan-файл без index entry."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._store = FakeStore(data_dir=self._tmpdir)
+        self._mgr = SharingManager(store=self._store)
+        self._store.add_fake_item("o1", "текст для orphan теста")
+
+    def test_persist_failure_leaves_no_orphan_file(self) -> None:
+        """Если write_text выбрасывает исключение, orphan-файл должен быть зачищен,
+        и запись НЕ должна попасть в индекс."""
+        from unittest.mock import patch
+
+        shares_dir = Path(self._tmpdir) / "shares"
+
+        # Перехватываем write_text только при первом вызове (для файла пакета)
+        original_write = Path.write_text
+        call_count = [0]
+
+        def failing_write(self_path, *args, **kwargs):  # type: ignore[override]
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # Создаём частичный файл, затем бросаем ошибку
+                self_path.write_bytes(b"partial content")
+                raise OSError("симулированная ошибка записи")
+            return original_write(self_path, *args, **kwargs)
+
+        with patch.object(Path, "write_text", failing_write):
+            with self.assertRaises(RuntimeError):
+                self._mgr.prepare_share(["o1"])
+
+        # Orphan-файл должен быть удалён
+        share_files = [f for f in shares_dir.iterdir() if f.name != "shares_index.json"]
+        self.assertEqual(
+            share_files, [],
+            f"orphan-файлов быть не должно, найдено: {share_files}",
+        )
+
+        # Индекс должен оставаться пустым
+        shares = self._mgr.list_shared(include_expired=True, include_revoked=True)
+        self.assertEqual(shares, [], "после ошибки записи запись не должна попасть в индекс")
+
+    def test_persist_failure_does_not_register_in_index(self) -> None:
+        """При ошибке write_text share_id НЕ должен появляться в индексе."""
+        from unittest.mock import patch
+
+        with patch.object(Path, "write_text", side_effect=OSError("disk full")):
+            with self.assertRaises(RuntimeError):
+                self._mgr.prepare_share(["o1"])
+
+        # Убеждаемся, что в индексе ничего нет
+        shares = self._mgr.list_shared(include_expired=True, include_revoked=True)
+        self.assertEqual(len(shares), 0, "индекс должен быть пустым после ошибки записи")
+
+    def test_successful_persist_registers_in_index(self) -> None:
+        """Успешная запись должна по-прежнему добавлять запись в индекс."""
+        pkg = self._mgr.prepare_share(["o1"])
+        found = self._mgr.get_shared(pkg.share_id)
+        self.assertIsNotNone(found)
+        file_path = Path(self._tmpdir) / "shares" / pkg.filename
+        self.assertTrue(file_path.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
