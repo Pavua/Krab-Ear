@@ -468,5 +468,94 @@ class TestPunctuationFixerW1374DottedAbbrev(unittest.TestCase):
         self.assertNotIn("example. com", result, f"example. com недопустимо: {result!r}")
 
 
+class TestPunctuationFixerW1763ReDoSSafety(unittest.TestCase):
+    """W1763 — ReDoS-безопасность: _SPACE_BEFORE_PUNCT_RE на враждебном вводе.
+
+    Первопричина: _SPACE_BEFORE_PUNCT_RE = re.compile(r'\\s+([,.:;!?»])')
+    при использовании re.sub над длинной строкой из пробелов БЕЗ знака препинания
+    в конце вызывал квадратичный откат движка CPython re (near-miss scenario):
+    движок пробует все длины \\s+ в каждой позиции → O(n^2) на 50 000 символов
+    занимал 27–35 с на Python 3.14.
+
+    Исправление (W1763):
+    1. Предварительная нормализация пробельных символов через _ALL_WS_RE (без
+       capture-группы → O(n)), сводящая все серии к одному пробелу.
+    2. _SPACE_BEFORE_PUNCT_RE изменён с r'\\s+([,.:;!?»])' на r' ([,.:;!?»])'
+       (одиночный литеральный пробел — без квантификатора, нет backtracking).
+    3. Backstop длины _MAX_INPUT_LEN = 100 000 символов в fix().
+    """
+
+    def setUp(self):
+        self.fixer = PunctuationFixer()
+
+    def test_hostile_whitespace_no_punct_completes_fast(self):
+        """50 000 пробелов без знака препинания — near-miss ReDoS — должно завершаться < 0.2 с."""
+        import time
+        hostile = " " * 50_000
+        start = time.perf_counter()
+        result = self.fixer.fix(hostile, language="ru")
+        elapsed = time.perf_counter() - start
+        self.assertLess(
+            elapsed, 0.2,
+            f"fix() на враждебном вводе заняло {elapsed:.3f}s (лимит 0.2s) — ReDoS не исправлен",
+        )
+        # Результат должен быть строкой (пустой или '.')
+        self.assertIsInstance(result, str)
+
+    def test_mixed_whitespace_types_no_punct_completes_fast(self):
+        """Смесь пробелов, табуляций, переводов строк (60 000 символов) без punct — < 0.2 с."""
+        import time
+        hostile = (" \t\n\r" * 15_000)  # 60 000 символов белого пространства
+        start = time.perf_counter()
+        result = self.fixer.fix(hostile, language="ru")
+        elapsed = time.perf_counter() - start
+        self.assertLess(
+            elapsed, 0.2,
+            f"fix() на смешанном пробельном вводе заняло {elapsed:.3f}s — ReDoS не исправлен",
+        )
+        self.assertIsInstance(result, str)
+
+    def test_spaces_then_comma_correct_semantics(self):
+        """50 000 пробелов + запятая — запятая должна сохраниться, пробелы убраны."""
+        hostile = " " * 50_000 + ","
+        result = self.fixer.fix(hostile, language="ru")
+        # Запятая выжила, пробелы перед ней убраны
+        self.assertIn(",", result, f"Запятая должна сохраниться в результате: {result[:50]!r}")
+        self.assertNotIn("  ", result, "Двойных пробелов не должно быть")
+
+    def test_backstop_truncates_oversized_input(self):
+        """Ввод длиннее _MAX_INPUT_LEN = 100 000 символов обрезается, не зависает."""
+        import time
+        from core.punctuation_fixer import _MAX_INPUT_LEN
+        huge = "Слово " * ((_MAX_INPUT_LEN // 6) + 5_000)  # ~110 000+ символов
+        self.assertGreater(len(huge), _MAX_INPUT_LEN, "Входной текст должен превышать backstop")
+        start = time.perf_counter()
+        result = self.fixer.fix(huge, language="ru")
+        elapsed = time.perf_counter() - start
+        self.assertLess(
+            elapsed, 2.0,
+            f"fix() на сверхбольшом вводе заняло {elapsed:.3f}s (лимит 2.0s)",
+        )
+        self.assertIsInstance(result, str)
+        # Результат не должен быть длиннее backstop + небольшой запас (точка)
+        self.assertLessEqual(len(result), _MAX_INPUT_LEN + 10)
+
+    def test_normal_punctuation_still_correct_after_fix(self):
+        """Нормальный текст должен обрабатываться корректно после W1763."""
+        cases = [
+            ("Привет , как дела.", "ru", "Привет,"),
+            ("Слово   .точки", "ru", "Слово."),   # пробелы перед точкой убраны
+            ("Раз,два,три", "ru", ", "),
+            ("cómo estás?", "es", "¿"),
+            ("hello world", "en", "Hello"),
+        ]
+        for text, lang, expected in cases:
+            result = self.fixer.fix(text, language=lang)
+            self.assertIn(
+                expected, result,
+                f"[{lang}] {text!r} → {result!r} — ожидалось {expected!r}",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

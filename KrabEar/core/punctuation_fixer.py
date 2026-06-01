@@ -10,10 +10,27 @@ from typing import List
 
 logger = logging.getLogger("KrabEar.PunctuationFixer")
 
+# ── Константы безопасности ────────────────────────────────────────────────────
+
+# Максимальная длина входного текста в символах.
+# STT-транскрипты Krab Ear < 2 КБ; 100 000 — щедрый запас для импортированных файлов.
+# Backstop защищает от ReDoS-атак через патологически длинный ввод.
+_MAX_INPUT_LEN: int = 100_000
+
 # ── Precompiled patterns ────────────────────────────────────────────────────
 
-# Пробел перед знаками препинания (,.:;!?)
-_SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([,.:;!?»])")
+# W1763 (ReDoS-fix): нормализация всех пробельных символов в единственный пробел.
+# Используется ВМЕСТО _MULTI_SPACE_RE в pipeline fix() — O(n), без capture-группы,
+# движок CPython не выполняет backtracking на near-miss.
+# После этого шага все пробельные серии (включая табуляцию и переводы строки)
+# сводятся к одному пробелу — это безопасно для STT-транскриптов.
+_ALL_WS_RE = re.compile(r"\s+")
+
+# W1763 (ReDoS-fix): после нормализации пробелов перед знаком препинания
+# может быть только ровно один пробел — убираем его простым O(n) паттерном
+# без квантификатора (нет backtracking при near-miss).
+# Замена: \s+([,.:;!?»]) → ' ([,.:;!?»])'.  Семантика идентична.
+_SPACE_BEFORE_PUNCT_RE = re.compile(r" ([,.:;!?»])")
 
 # Отсутствие пробела после знаков препинания (,.:;!? — но не декимальные дроби и не «)
 # W1376: включаем двоеточие (:), исключая протокол URL (://)
@@ -27,7 +44,8 @@ _NO_SPACE_AFTER_PERIOD_RE = re.compile(r"(?<=[^\s])(\.)([А-ЯA-ZЁ])")
 # character BEFORE the period to be a word character (not already a digit).
 _NO_SPACE_AFTER_SENT_LOWER_ES_RE = re.compile(r"([.!?])([a-záéíóúüñ¿¡])", re.IGNORECASE)
 
-# Множественные пробелы
+# Множественные пробелы — используется только в get_fixes_applied() для детектирования.
+# В pipeline fix() заменён на _ALL_WS_RE (см. W1763 выше).
 _MULTI_SPACE_RE = re.compile(r"  +")
 
 # Конец строки без точки (последний символ не знак)
@@ -122,10 +140,23 @@ class PunctuationFixer:
         if not text or not text.strip():
             return text
 
+        # W1763: backstop длины — защита от ReDoS через патологически длинный ввод.
+        # Обрезаем до _MAX_INPUT_LEN перед любыми regex-операциями.
+        if len(text) > _MAX_INPUT_LEN:
+            logger.warning(
+                "Входной текст обрезан до _MAX_INPUT_LEN символов (W1763 backstop)",
+                extra={"original_len": len(text), "max_len": _MAX_INPUT_LEN},
+            )
+            text = text[:_MAX_INPUT_LEN]
+
         result = text
 
-        # Общие правила (применяются для всех языков)
-        result = _MULTI_SPACE_RE.sub(" ", result)
+        # W1763 (ReDoS-fix): нормализация ВСЕХ пробельных символов в один пробел.
+        # Заменяет _MULTI_SPACE_RE.sub(" ", ...) — более широкая нормализация (табы, \n).
+        # _ALL_WS_RE не имеет capture-группы → O(n), нет backtracking при near-miss.
+        # После этого шага _SPACE_BEFORE_PUNCT_RE (без \s+) гарантированно O(n).
+        result = _ALL_WS_RE.sub(" ", result)
+
         # W1348: add-space-after FIRST, then remove-space-before — so newly
         # inserted spaces before punct (e.g. «стоп».) get cleaned up correctly.
         result = _NO_SPACE_AFTER_PUNCT_RU_RE.sub(r"\1 \2", result)   # add space after ,;!?»:
