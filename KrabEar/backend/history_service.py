@@ -416,15 +416,84 @@ class HistoryService:
 
         return {"items": results, "next_cursor": next_cursor}
 
+    # ------------------------------------------------------------------
+    # Вспомогательные методы: работа с .md файлами транскриптов
+    # ------------------------------------------------------------------
+
+    def _transcript_md_candidates(self, item_ts: str) -> list[Path]:
+        """Возвращает список кандидатов .md файлов для записи с заданным ts.
+
+        TranscriptWriter формирует имена файлов по схеме:
+          {date_str}-Транскрибация.md
+          {date_str}-Транскрибация-{time_str}.md
+          {date_str}-Транскрибация-{time_str}-N.md
+
+        Где date_str = YYYY-MM-DD, time_str = HHMMSS из item.ts.
+        Метод возвращает только файлы, в имени которых содержится time_str —
+        это минимизирует риск стереть соседний файл того же дня при нескольких
+        записях.  Если time_str недоступен (невалидный ts) — возвращает пустой
+        список (безопасный fallback: лучше не удалить, чем удалить лишнее).
+        """
+        if not item_ts:
+            return []
+        transcripts_dir = Path(self.store.data_dir) / "transcripts"
+        if not transcripts_dir.is_dir():
+            return []
+        try:
+            dt = datetime.fromisoformat(item_ts)
+            date_str = dt.strftime("%Y-%m-%d")
+            time_str = dt.strftime("%H%M%S")
+        except (ValueError, TypeError):
+            return []
+        # Glob по date_str + time_str — не задевает соседние записи того же дня
+        pattern = f"{date_str}-*{time_str}*.md"
+        return list(transcripts_dir.glob(pattern))
+
+    def _erase_transcript_md(self, item_ts: str, item_id: str) -> None:
+        """Стирает .md файлы транскрипта, связанные с записью.
+
+        W1762: приватная операция — ошибка стирания выводится как WARNING,
+        но не прерывает удаление записи (tombstone уже записан).
+        В лог попадает только имя файла (без содержимого/PII).
+        """
+        candidates = self._transcript_md_candidates(item_ts)
+        for md_path in candidates:
+            try:
+                md_path.unlink(missing_ok=True)
+                logger.info(
+                    "W1762: transcript .md удалён при удалении записи: file=%s item_id=%s",
+                    md_path.name, item_id,
+                )
+            except OSError:
+                logger.warning(
+                    "W1762: не удалось стереть transcript .md: file=%s item_id=%s",
+                    md_path.name, item_id, exc_info=True,
+                )
+
     def handle_delete_history_item(self, params: dict[str, Any]) -> dict[str, Any]:
         import time as _time
         item_id = str(params.get("id", "")).strip()
         if not item_id:
             raise ValueError("id обязателен для удаления")
         _t0 = _time.monotonic()
+
+        # W1762: получаем ts записи ДО tombstone — нужен для поиска .md файла.
+        # Загружаем только под коротким lock'ом, чтобы не держать его при удалении.
+        item_ts: str = ""
+        with self.store._lock():
+            active = self.store._load_active_items_unlocked()
+        for _item in active:
+            if _item.id == item_id:
+                item_ts = _item.ts
+                break
+
         ok = self.store.delete_history_item(item_id)
         if not ok:
             raise ValueError(f"Запись не найдена: {item_id}")
+
+        # W1762: стираем .md файл транскрипта (privacy gap — файл пережил tombstone).
+        self._erase_transcript_md(item_ts, item_id)
+
         # Удаляем эмбеддинг из семантического индекса, если он подключён (W1426 F2).
         if self._semantic_searcher is not None:
             try:
@@ -1516,6 +1585,11 @@ class HistoryService:
                     logger.warning(
                         "recording_chain bulk cleanup failed for item %s", item.id, exc_info=True
                     )
+
+        # W1762: стираем .md файлы транскриптов для каждой удалённой записи.
+        # Зеркалирует логику single-delete (handle_delete_history_item).
+        for item in to_delete:
+            self._erase_transcript_md(item.ts, item.id)
 
         add_breadcrumb(
             category="history",
