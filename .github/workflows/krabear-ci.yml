@@ -69,7 +69,7 @@ jobs:
       - name: Run backend/unit tests (chunked — bound peak RSS, reap orphan workers)
         env:
           PYTHONPATH: ${{ github.workspace }}/KrabEar
-        timeout-minutes: 90
+        timeout-minutes: 120
         run: |
           # W1737: whole-suite (even -n 2) grows RSS monotonically and OOM-kills the
           # ubuntu runner ~54% in (orphan MLX/GigaAM subprocess workers accumulate),
@@ -80,8 +80,9 @@ jobs:
           # terminated") and xdist mis-attributed the dead worker to a random test.
           set +e
           mapfile -t files < <(ls KrabEar/tests/test_*.py | sort)
-          n=${#files[@]}; nchunks=16; chunk=$(( (n + nchunks - 1) / nchunks )); rc=0; failed=""
+          n=${#files[@]}; nchunks=16; chunk=$(( (n + nchunks - 1) / nchunks )); rc=0
           echo "Total test files: $n, chunks: $nchunks, chunk size: $chunk"
+          : > /tmp/pf_failed.txt
           reap() { pkill -9 -f "import sys;ex" 2>/dev/null || true; pkill -9 -f "mlx_subprocess" 2>/dev/null || true; pkill -9 -f "gigaam_worker" 2>/dev/null || true; }
           for i in $(seq 0 $((nchunks - 1))); do
             sub=("${files[@]:$((i*chunk)):$chunk}")
@@ -92,24 +93,25 @@ jobs:
             echo "::endgroup::"
             reap
             if [ $crc -ne 0 ]; then
-              # W1755: a chunk exit!=0 can be a SIGSEGV (exit 139) from cross-file C-extension
-              # contamination (an MLX/GigaAM/torch stub test poisons a LATER file's numpy/torch
-              # state -> the whole chunk process dies, masking the culprit and failing 162 innocent
-              # files). Re-run this chunk one file per fresh process: contamination-induced crashes
-              # pass in isolation (-> green), genuine per-file failures are reported by filename.
-              echo "::warning::chunk $((i+1)) exited $crc — re-running per-file to isolate"
-              for f in "${sub[@]}"; do
-                timeout 150 python -m pytest "$f" --tb=short -q -p no:xdist -p no:cacheprovider > /tmp/pf.log 2>&1
-                fcode=$?
-                if [ $fcode -ne 0 ]; then
-                  echo "::error::isolated FAIL($fcode): $f"; tail -20 /tmp/pf.log
-                  rc=$fcode; failed="$failed $f($fcode)"
-                fi
-                reap
-              done
+              # W1755/W1760: a chunk exit!=0 is usually a SIGSEGV (139) from cross-file C-ext
+              # contamination (one test poisons a later file's torch/numpy state -> the whole chunk
+              # process dies, masking the culprit). Re-run this chunk one file per FRESH process,
+              # 4 in PARALLEL (xargs -P4): contamination crashes pass in isolation (-> green),
+              # genuine per-file failures are recorded by filename. Each file is wall-clock bounded
+              # (timeout 90) so a hung test cannot stall the job toward the 120-min limit.
+              echo "::warning::chunk $((i+1)) exited $crc — per-file isolate (parallel -P4)"
+              printf '%s\n' "${sub[@]}" | xargs -P 4 -I {} bash -c '
+                timeout 90 python -m pytest "$1" --tb=line -q -p no:xdist -p no:cacheprovider >/dev/null 2>&1 \
+                  || { echo "::error::isolated FAIL($?): $1"; echo "$1" >> /tmp/pf_failed.txt; }
+              ' _ {}
+              reap
             fi
           done
-          echo "Aggregate rc=$rc; failed files:$failed"
+          if [ -s /tmp/pf_failed.txt ]; then
+            rc=1
+            echo "=== genuinely-failing files (per-file isolated) ==="; sort -u /tmp/pf_failed.txt
+          fi
+          echo "Aggregate rc=$rc"
           exit $rc
 
       - name: Audit orphan imports in service.py
