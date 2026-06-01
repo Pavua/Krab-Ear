@@ -49,6 +49,12 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any
 
+# Импортируем общий ReDoS-safe хелпер (Wave 1735).
+# Используем его вместо дублирования логики — hallucination_manager остаётся
+# основным consumer пользовательских паттернов, а core.safe_regex предоставляет
+# переиспользуемую защиту для любых других мест в кодовой базе.
+from core.safe_regex import compile_safe as _compile_safe, run_with_timeout as _run_with_timeout  # noqa: E402
+
 logger = logging.getLogger("KrabEar.Core.HallucinationManager")
 
 # ── ReDoS-mitigation constants ───────────────────────────────────────────────
@@ -414,15 +420,26 @@ class HallucinationManager:
         """Перекомпилирует список регексов из builtin + custom паттернов."""
         compiled = []
         for item in self._builtin:
+            # Встроенные паттерны доверенные — компилируем напрямую.
             try:
                 compiled.append((item["pattern"], re.compile(item["pattern"]), item["category"], True))
             except re.error as exc:
                 logger.warning("Невалидный встроенный паттерн '%s': %s", item["pattern"], exc)
         for item in self._custom:
+            # Пользовательские паттерны — через _compile_safe (ReDoS-защита, Wave 1735).
             try:
-                compiled.append((item["pattern"], re.compile(item["pattern"]), item["category"], False))
-            except re.error as exc:
-                logger.warning("Невалидный пользовательский паттерн '%s': %s", item["pattern"], exc)
+                compiled.append((
+                    item["pattern"],
+                    _compile_safe(item["pattern"], max_pattern_len=_MAX_PATTERN_LEN),
+                    item["category"],
+                    False,
+                ))
+            except (re.error, ValueError) as exc:
+                logger.warning(
+                    "Пользовательский паттерн отклонён при перекомпиляции: %s",
+                    exc,
+                    extra={"pattern_len": len(item["pattern"])},
+                )
         self._compiled = compiled
 
     # ── Публичный API ────────────────────────────────────────────────────────
@@ -453,18 +470,14 @@ class HallucinationManager:
         if not pattern:
             raise ValueError("Паттерн не может быть пустым")
 
-        # ── ReDoS mitigation layer 1: pattern length cap ──────────────────────
-        if len(pattern) > _MAX_PATTERN_LEN:
-            raise ValueError(
-                f"Паттерн слишком длинный ({len(pattern)} символов, максимум {_MAX_PATTERN_LEN})"
-            )
-
-        # ── ReDoS mitigation layer 2: catastrophic-backtracking heuristic ─────
-        _reject_catastrophic_pattern(pattern)
-
-        # Валидация regex (syntax check — after safety guards so we fail fast)
+        # ── ReDoS mitigation layers 1+2 (Wave 1729/1730/1735): делегируем в
+        #    core.safe_regex.compile_safe — длина + структурный сканер +
+        #    синтаксическая проверка в одном вызове.
         try:
-            re.compile(pattern)
+            _compile_safe(pattern, max_pattern_len=_MAX_PATTERN_LEN)
+        except ValueError:
+            # Пробрасываем ValueError напрямую (уже содержит описание причины).
+            raise
         except re.error as exc:
             raise ValueError(f"Невалидное регулярное выражение: {exc}") from exc
 
@@ -548,8 +561,13 @@ class HallucinationManager:
         with self._lock:
             compiled_snapshot = list(self._compiled)
 
-        for pat_str, compiled_re, category, _ in compiled_snapshot:
-            m = compiled_re.search(lowered)
+        for pat_str, compiled_re, category, is_builtin in compiled_snapshot:
+            # Встроенные паттерны доверенные — прямой вызов без таймаута.
+            # Пользовательские — через run_with_timeout (Wave 1735).
+            if is_builtin:
+                m = compiled_re.search(lowered)
+            else:
+                m = _run_with_timeout(compiled_re, lowered, timeout_sec=1.0)
             if m:
                 matches.append(HallucinationMatch(
                     pattern=pat_str,
@@ -587,8 +605,12 @@ class HallucinationManager:
         with self._lock:
             compiled_snapshot = list(self._compiled)
 
-        for _, compiled_re, _, _ in compiled_snapshot:
-            m = compiled_re.search(lowered)
+        for _, compiled_re, _, is_builtin in compiled_snapshot:
+            # Встроенные — прямой вызов; пользовательские — с таймаутом (Wave 1735).
+            if is_builtin:
+                m = compiled_re.search(lowered)
+            else:
+                m = _run_with_timeout(compiled_re, lowered, timeout_sec=1.0)
             if not m:
                 continue
             if m.start() <= 0:
