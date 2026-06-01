@@ -23,6 +23,15 @@ logger = logging.getLogger("KrabEar.Backend.EmailSender")
 # Имя ключа в macOS Keychain для пароля SMTP
 _KEYCHAIN_SERVICE = "KrabEar SMTP password"
 
+# Максимальный размер HTML-тела перед стриппингом (защита от ReDoS на <[^>]+>).
+# 200 000 символов ≈ 200 KB — достаточно для любого реального дайджеста.
+_STRIP_HTML_MAX_BYTES = 200_000
+
+# Минимальный regex для валидации email-адреса получателя (W1764).
+# Отклоняет пустую строку, адреса начинающиеся с «-» (флаги osascript),
+# пробельные символы и addr без «@» + домена с точкой.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
 
 def _get_smtp_password_from_keychain(account: str) -> str:
     """Читает пароль SMTP из macOS Keychain через security(1).
@@ -152,10 +161,20 @@ class EmailSender:
                 генерируется заглушка.
 
         Raises:
+            ValueError: Если адрес получателя невалиден (пуст, содержит пробелы,
+                начинается с «-», нет «@» или домена с точкой).
             RuntimeError: Если отправка не удалась.
         """
         if not to:
             raise ValueError("Адрес получателя не указан")
+        # W1764: валидация получателя перед передачей в osascript/smtplib.
+        # Отклоняем любые значения начинающиеся с «-» (osascript FLAG injection),
+        # содержащие пробелы или не соответствующие минимальному email-шаблону.
+        if not _EMAIL_RE.match(to):
+            raise ValueError(
+                f"Невалидный адрес получателя: {to!r}. "
+                "Ожидается формат user@domain.tld (без пробелов и ведущего «-»)."
+            )
         if not subject:
             raise ValueError("Тема письма не указана")
 
@@ -255,6 +274,12 @@ class EmailSender:
         Безопасность: to/subject/body передаются как argv-аргументы osascript,
         а не интерполируются в текст скрипта, что предотвращает AppleScript-инъекцию
         через transcript-derived данные (W1747).
+
+        W1764: добавлен разделитель «--» между флагами osascript и позиционными
+        аргументами — osascript(1) использует getopt(3) и трактует любой токен
+        начинающийся с «-» как флаг ПОКА не встретит «--». Без разделителя
+        значение to="-e" превратилось бы во второй флаг -e (второй скрипт),
+        а subject интерпретировался бы как AppleScript-код → silent DoS.
         """
         # Mail.app принимает plain-text; конвертируем HTML в текст для простоты
         plain_body = self._strip_html(body_html)
@@ -278,8 +303,11 @@ class EmailSender:
         ''')
 
         try:
+            # «--» завершает флаги osascript; всё после — позиционные argv-аргументы
+            # скрипта (on run argv). Без «--» значение вида «-e» поглощалось бы
+            # getopt как второй флаг -e, а subject стал бы вторым скриптом (W1764).
             result = subprocess.run(
-                ["osascript", "-e", script, to, subject, plain_body],
+                ["osascript", "-e", script, "--", to, subject, plain_body],
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -301,9 +329,29 @@ class EmailSender:
 
     @staticmethod
     def _strip_html(html: str) -> str:
-        """Грубо удаляет HTML-теги для получения plain-text fallback."""
+        """Грубо удаляет HTML-теги для получения plain-text fallback.
+
+        W1764 (ReDoS): паттерн <[^>]+> имеет квадратичную сложность на входе
+        с множеством «<» без закрывающего «>» (58s на 1 MB в тесте).
+
+        Двухуровневая защита:
+        1. Обрезаем вход до _STRIP_HTML_MAX_BYTES.
+        2. Ограничиваем длину захватываемого тега до 2000 символов
+           (<[^>]{0,2000}>): ни один реальный HTML-тег не длиннее нескольких
+           сотен символов; это исключает квадратичное backtracking на «<<<<...».
+        """
+        if len(html) > _STRIP_HTML_MAX_BYTES:
+            logger.warning(
+                "HTML-тело письма обрезано до %d символов перед strip_html (было %d)",
+                _STRIP_HTML_MAX_BYTES, len(html),
+                extra={"event": "email.strip_html.truncated",
+                       "original_len": len(html), "limit": _STRIP_HTML_MAX_BYTES},
+            )
+            html = html[:_STRIP_HTML_MAX_BYTES]
         text = re.sub(r"<br\s*/?>", "\n", html, flags=re.IGNORECASE)
-        text = re.sub(r"<[^>]+>", "", text)
+        # Bounded quantifier {0,2000} предотвращает O(n²) backtracking на
+        # последовательностях «<» без закрывающего «>» (W1764 ReDoS).
+        text = re.sub(r"<[^>]{0,2000}>", "", text)
         # Убираем множественные пробелы/строки
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
