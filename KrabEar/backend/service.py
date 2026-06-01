@@ -595,7 +595,11 @@ class BackendService:
         self._playback_tracker = PlaybackTracker(data_dir=self.store.data_dir)
         self._recording_comparison = RecordingComparison()
         self._smart_vocabulary = SmartVocabularyBuilder()
-        self._metadata_enricher = MetadataEnricher()
+        # W1765 MED: wire settings_provider so privacy_mode_enabled suppresses topic
+        # enrichment at runtime.  MetadataEnricher expects Callable[[], dict] (zero-arg →
+        # returns full settings dict), so wire _cached_settings — same pattern used by
+        # ObsidianSyncManager and other consumers of the settings dict.
+        self._metadata_enricher = MetadataEnricher(settings_provider=self._cached_settings)
         self._timeline_exporter = TimelineExporter()
         self._timeline_view = TimelineViewGenerator()
         self._auto_deduplicator = AutoDeduplicator(settings_provider=self._get_runtime_setting)

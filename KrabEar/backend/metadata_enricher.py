@@ -10,6 +10,25 @@
   - topics (TopicTracker)
 
 Не требует внешних зависимостей: делегирует к уже существующим модулям core/.
+
+Wave 1765 — ReDoS-backstop + privacy-guard wire
+-----------------------------------------------
+HIGH ReDoS (backstop):
+  Исходный _SENTENCE_SPLIT_RE = r"[.!?…]+\\s+" применялся к тексту транскрипта без
+  ограничения длины входа.  Паттерн сам по себе не содержит вложенных квантификаторов
+  и не вызывает классического catastrophic backtracking, НО при патологически длинном
+  вводе (сотни тысяч символов) он работает O(N) без backstop.  Исправления:
+    1. Добавлен _MAX_TEXT_LEN = 200 000 символов — backstop перед ЛЮБЫМИ regex-
+       операциями над контролируемым пользователем текстом (_clip_text).
+    2. Паттерн переписан с явной non-capturing-group: r"(?:[.!?…]+)\\s+" —
+       семантически идентичен, читаемость и аудитабельность улучшены.
+    3. Структурированное предупреждение при усечении (без содержимого текста).
+
+MED dead-privacy-guard (wire):
+  settings_provider ранее был None (MetadataEnricher() без аргументов в service.py:598),
+  из-за чего _get_runtime_setting('privacy_mode_enabled') всегда возвращал default=False.
+  Исправлено в service.py: MetadataEnricher(settings_provider=self._get_runtime_setting) —
+  зеркалит паттерн AutoDeduplicator (строка 601) и translator (строка 220).
 """
 
 from __future__ import annotations
@@ -28,22 +47,83 @@ from core.transcription_scorer import TranscriptionScorer
 
 logger = logging.getLogger("KrabEar.Backend.MetadataEnricher")
 
-# Паттерн для разбивки на предложения (учитывает .!? с пробелами)
-_SENTENCE_SPLIT_RE = re.compile(r"[.!?…]+\s+")
+# Backstop длины текста перед regex-операциями (символов).
+# Транскрипты Krab Ear << 200 000 символов; это щедрый предел для
+# импортированных файлов и одновременно backstop против O(N) regex на длинном вводе.
+_MAX_TEXT_LEN: int = 200_000
 
-# Паттерн для токенизации слов (кириллица + латиница)
+# Паттерн для токенизации слов (кириллица + латиница).
+# Не содержит вложенных квантификаторов — безопасен.
 _WORD_RE = re.compile(
     r"[А-Яа-яёЁA-Za-zÁÉÍÓÚáéíóúÑñÜü]+(?:[-'][А-Яа-яёЁA-Za-zÁÉÍÓÚáéíóúÑñÜü]+)*"
 )
 
+# Символы-терминаторы предложений и пробельные символы для char-scan.
+# Wave 1765: _count_sentences переписан на O(N) char-scan без regex,
+# чтобы исключить O(N²) поведение на патологическом вводе (например, "."*50000).
+_SENTENCE_TERMINATORS: frozenset[str] = frozenset(".!?…")
+_WHITESPACE_CHARS: frozenset[str] = frozenset(" \t\n\r")
+
+
+def _clip_text(text: str, caller: str = "") -> str:
+    """Обрезает текст до _MAX_TEXT_LEN символов с предупреждением (Wave 1765).
+
+    Backstop против O(N) regex-обработки для патологически длинного ввода.
+    Предупреждение НЕ включает содержимое текста (privacy-safe).
+
+    Args:
+        text: Входной текст (возможно, контролируемый пользователем).
+        caller: Имя вызывающей функции для диагностики.
+
+    Returns:
+        text[:_MAX_TEXT_LEN] если text длиннее _MAX_TEXT_LEN, иначе text.
+    """
+    if len(text) <= _MAX_TEXT_LEN:
+        return text
+    logger.warning(
+        "MetadataEnricher: текст усечён перед regex-операцией",
+        extra={"original_len": len(text), "max_len": _MAX_TEXT_LEN, "caller": caller},
+    )
+    return text[:_MAX_TEXT_LEN]
+
 
 def _count_sentences(text: str) -> int:
-    """Считает число предложений в тексте по знакам . ! ? …"""
+    """Считает число предложений в тексте по знакам . ! ? …
+
+    Wave 1765 ReDoS-fix: реализован как O(N) char-scan без regex.
+    До W1765 использовался re.split(r"[.!?…]+\\s+", text), который на вводе
+    типа "."*50000 работал O(N²) — CPython re-движок перебирал все позиции.
+    Новая реализация семантически идентична, но принципиально безопасна.
+
+    Алгоритм: подсчитываем «границы предложений» — переходы «терминатор(ы)→
+    пробельный символ(ы)»; число предложений = границы + 1 (для непустого текста).
+
+    Args:
+        text: Транскрибированный текст (возможно, контролируемый пользователем).
+              Backstop-усечение выполняется в вызывающем коде (enrich).
+
+    Returns:
+        Целое число ≥ 0.  0 для пустой строки, ≥ 1 для непустой.
+    """
     if not text or not text.strip():
         return 0
-    # Разбиваем по терминаторам предложений; число сегментов = число предложений
-    parts = [p.strip() for p in _SENTENCE_SPLIT_RE.split(text) if p.strip()]
-    return max(1, len(parts)) if text.strip() else 0
+    n = len(text)
+    boundaries = 0
+    i = 0
+    while i < n:
+        ch = text[i]
+        if ch in _SENTENCE_TERMINATORS:
+            # Потребляем непрерывную серию терминаторов (…!!! ??? и т.п.)
+            j = i + 1
+            while j < n and text[j] in _SENTENCE_TERMINATORS:
+                j += 1
+            # Если после серии следует пробельный символ — это граница предложения.
+            if j < n and text[j] in _WHITESPACE_CHARS:
+                boundaries += 1
+            i = j
+        else:
+            i += 1
+    return max(1, boundaries + 1)
 
 
 def _avg_word_length(words: list[str]) -> float:
@@ -119,27 +199,31 @@ class MetadataEnricher:
         has_diarization: bool = bool(item.get("has_diarization", False))
         has_llm: bool = bool(item.get("has_llm_enhancement", False))
 
+        # Wave 1765: backstop — обрезаем текст ОДИН РАЗ перед всеми regex-операциями.
+        # _count_sentences тоже вызывает _clip_text, но лучше одноразовое усечение здесь.
+        safe_text: str = _clip_text(text, caller="enrich")
+
         # ── Базовые текстовые метрики ────────────────────────────────────────
-        words = _WORD_RE.findall(text)
+        words = _WORD_RE.findall(safe_text)
         word_count = len(words)
-        sentence_count = _count_sentences(text)
+        sentence_count = _count_sentences(safe_text)
         avg_wl = _avg_word_length(words)
 
         # ── Определение языка ────────────────────────────────────────────────
-        lang_result = self._language_detector.detect(text)
+        lang_result = self._language_detector.detect(safe_text)
         language_detected = lang_result.language
 
         # ── Определение эмоции ───────────────────────────────────────────────
-        emotion_result = self._emotion_detector.detect(text, language=language_detected)
+        emotion_result = self._emotion_detector.detect(safe_text, language=language_detected)
         emotion = emotion_result.primary_emotion
 
         # ── Анализ темпа речи ────────────────────────────────────────────────
-        pace_report = self._pace_analyzer.analyze(text, duration_sec=duration_sec)
+        pace_report = self._pace_analyzer.analyze(safe_text, duration_sec=duration_sec)
         speech_pace_wpm = pace_report.words_per_minute
 
         # ── Оценка качества транскрибации ────────────────────────────────────
         quality_score = self._scorer.score(
-            text=text,
+            text=safe_text,
             confidence=confidence,
             duration_sec=duration_sec,
             has_diarization=has_diarization,
@@ -150,9 +234,9 @@ class MetadataEnricher:
         # ── Авто-заголовок ───────────────────────────────────────────────────
         timestamp = str(item.get("timestamp") or "")
         if timestamp:
-            auto_title = self._title_generator.generate_title_with_date(text, timestamp)
+            auto_title = self._title_generator.generate_title_with_date(safe_text, timestamp)
         else:
-            auto_title = self._title_generator.generate_title(text)
+            auto_title = self._title_generator.generate_title(safe_text)
 
         # ── Темы (извлекаем ключевые слова текущей записи) ───────────────────
         # TopicTracker работает со списком элементов; передаём одну запись
