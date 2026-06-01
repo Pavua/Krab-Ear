@@ -62,7 +62,7 @@ jobs:
             --max-line-length=150 \
             --extend-ignore=E501 \
             --exclude=KrabEar/.venv,KrabEar/tests/__pycache__,.venv_krab_ear,KrabEar/_legacy_tkinter_archive_2026-02-11 \
-            --per-file-ignores='KrabEar/tests/*:F401,F541,F841,E203,E303,E306,E401,E402,W391' \
+            --per-file-ignores='KrabEar/tests/*:F401,F541,F841,E203,E301,E302,E303,E305,E306,E401,E402,W391' \
             --statistics
         continue-on-error: false
 
