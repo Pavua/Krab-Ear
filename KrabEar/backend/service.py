@@ -555,7 +555,9 @@ class BackendService:
         self._emotion_detector = EmotionDetector()
         self._sentiment_trends = SentimentTrendAnalyzer(detector=self._emotion_detector)
         self._topic_tracker = TopicTracker()
-        self._data_migrator = DataMigrator()
+        # W1761: передаём data_dir, чтобы IPC-обработчики игнорировали
+        # произвольный путь из запроса (path-write уязвимость).
+        self._data_migrator = DataMigrator(data_dir=self.store.data_dir)
         # W1034: auto-migrate history schema at startup
         try:
             if self._data_migrator.check_migration_needed(self.store.data_dir):

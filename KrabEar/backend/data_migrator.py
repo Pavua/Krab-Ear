@@ -97,7 +97,28 @@ def _load_active_items(data_dir: Path) -> list[dict[str, Any]]:
 
 
 class DataMigrator:
-    """Мигратор данных Krab Ear между версиями формата истории."""
+    """Мигратор данных Krab Ear между версиями формата истории.
+
+    Принимает ``data_dir`` при инициализации — это единственная разрешённая
+    директория для IPC-обработчиков (``handle_run_migration``,
+    ``handle_check_migration``, ``handle_rollback_migration``).
+
+    Параметр ``data_dir`` из входящего IPC-запроса ИГНОРИРУЕТСЯ: принимать
+    произвольный путь от клиента позволяло бы записывать/бэкапить файлы за
+    пределами данных приложения (path-write уязвимость, W1761).
+
+    Внутренние методы (``migrate``, ``get_schema_version`` и т.д.) по-прежнему
+    принимают ``data_dir: Path`` как аргумент — это необходимо для юнит-тестов
+    и startup-миграции в ``BackendService.__init__``, которые передают явный путь.
+    """
+
+    def __init__(self, data_dir: Path | None = None) -> None:
+        # Закреплённый путь к данным; None = не задан (legacy-режим без IPC)
+        self._data_dir: Path | None = Path(data_dir).resolve() if data_dir is not None else None
+
+    # ------------------------------------------------------------------
+    # Публичные методы (принимают data_dir явным аргументом)
+    # ------------------------------------------------------------------
 
     def get_schema_version(self, data_dir: Path) -> str:
         """Определяет текущую версию схемы данных в указанной директории.
@@ -216,20 +237,30 @@ class DataMigrator:
     # IPC handlers
     # ------------------------------------------------------------------
 
+    def _require_configured_data_dir(self) -> Path:
+        """Возвращает закреплённый data_dir или бросает RuntimeError.
+
+        Используется IPC-обработчиками вместо принятия пути от клиента:
+        произвольный path из IPC-запроса открывал бы path-write уязвимость
+        (запись/бэкап файлов вне директории данных приложения).
+        """
+        if self._data_dir is None:
+            raise RuntimeError(
+                "DataMigrator не инициализирован с data_dir. "
+                "IPC-обработчики работают только с закреплённой директорией данных."
+            )
+        return self._data_dir
+
     def handle_check_migration(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC-обработчик check_migration.
 
-        Params:
-            data_dir (str): путь к директории данных.
+        Параметр ``data_dir`` из params игнорируется (безопасность W1761):
+        обработчик использует только директорию, заданную при инициализации.
 
         Returns:
             migration_needed (bool), current_version (str), target_version (str), plan (list[str])
         """
-        raw_dir = str(params.get("data_dir", "")).strip()
-        if not raw_dir:
-            raise ValueError("Параметр data_dir обязателен")
-
-        data_dir = Path(raw_dir)
+        data_dir = self._require_configured_data_dir()
         needed = self.check_migration_needed(data_dir)
         current = self.get_schema_version(data_dir)
         plan = self.get_migration_plan(data_dir)
@@ -244,19 +275,18 @@ class DataMigrator:
     def handle_run_migration(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC-обработчик run_migration.
 
+        Параметр ``data_dir`` из params игнорируется (безопасность W1761):
+        обработчик использует только директорию, заданную при инициализации.
+
         Params:
-            data_dir (str): путь к директории данных.
             target_version (str, optional): целевая версия (default "2.0").
 
         Returns:
             from_version, to_version, items_migrated, items_skipped, backup_path
         """
-        raw_dir = str(params.get("data_dir", "")).strip()
-        if not raw_dir:
-            raise ValueError("Параметр data_dir обязателен")
-
+        data_dir = self._require_configured_data_dir()
         target = str(params.get("target_version", LATEST_VERSION)).strip() or LATEST_VERSION
-        result = self.migrate(Path(raw_dir), target_version=target)
+        result = self.migrate(data_dir, target_version=target)
 
         return {
             "from_version": result.from_version,
@@ -271,22 +301,34 @@ class DataMigrator:
 
         Восстанавливает данные из резервной копии, созданной при миграции.
 
+        Параметр ``data_dir`` из params игнорируется (безопасность W1761):
+        обработчик использует только директорию, заданную при инициализации.
+        ``backup_path`` должен находиться внутри ``<data_dir>/backups/`` —
+        иначе бросает RuntimeError (защита от traversal через backup_path).
+
         Params:
-            data_dir (str): путь к директории данных.
             backup_path (str): путь к директории резервной копии (из MigrationResult.backup_path).
 
         Returns:
             restored_files (list[str]), backup_path (str)
         """
-        raw_dir = str(params.get("data_dir", "")).strip()
-        if not raw_dir:
-            raise ValueError("Параметр data_dir обязателен")
+        data_dir = self._require_configured_data_dir()
 
         backup_path = str(params.get("backup_path", "")).strip()
         if not backup_path:
             raise ValueError("Параметр backup_path обязателен")
 
-        return self.rollback_migration(Path(raw_dir), backup_path)
+        # Защита от path traversal через backup_path: разрешаем только пути
+        # внутри <data_dir>/backups/ (директория, куда _create_backup пишет).
+        resolved_backup = Path(backup_path).expanduser().resolve()
+        backups_root = (data_dir / "backups").resolve()
+        if resolved_backup != backups_root and not resolved_backup.is_relative_to(backups_root):
+            raise RuntimeError(
+                f"rollback_migration: backup_path {resolved_backup!s} "
+                f"находится за пределами разрешённой директории {backups_root!s}"
+            )
+
+        return self.rollback_migration(data_dir, backup_path)
 
     def rollback_migration(self, data_dir: Path, backup_path: str) -> dict[str, Any]:
         """Откатывает последнюю миграцию, восстанавливая файлы из резервной копии.
