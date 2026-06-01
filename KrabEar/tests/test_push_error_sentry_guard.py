@@ -250,6 +250,7 @@ class TestPerModuleHelpersAllGuarded(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self._verify_sentry_guard(_make_vocabulary_store_stub(Path(tmp)))
 
+
 class TestNoErrorBusNoSentry(unittest.TestCase):
     """When _error_bus is None (not injected), _push_error returns early — no Sentry."""
 
