@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any, List, Optional
@@ -208,6 +210,26 @@ class SemanticSearcher:
             logger.warning("semantic_search: ошибка поиска: %s", exc)
             return []
 
+    def reset_model_error(self) -> dict:
+        """Сбрасывает зафиксированную ошибку загрузки модели, позволяя повторную попытку.
+
+        Очищает ``_model_error`` и ``_model``/``_model_loaded``, так что следующий
+        вызов ``_get_model()`` попытается загрузить модель заново.  Полезно после
+        временных сбоев (сеть, HuggingFace недоступен, недостаточно RAM и т.п.).
+
+        Returns:
+            {"reset": True, "previous_error": str|None}
+        """
+        with self._model_lock:
+            previous = self._model_error
+            self._model_error = None
+            self._model = None
+            self._model_loaded = False
+        logger.info(
+            "semantic_search: сброс ошибки модели, предыдущая: %s", previous or "—"
+        )
+        return {"reset": True, "previous_error": previous}
+
     def purge_all(self) -> None:
         """Полностью очищает in-memory индекс и удаляет файлы embeddings с диска.
 
@@ -323,6 +345,16 @@ class SemanticSearcher:
                 embeddings = np.load(str(self._embeddings_path))
                 with open(self._index_path, encoding="utf-8") as f:
                     index = json.load(f)
+                # W884 E2: защита от частичной записи — нарушение согласованности
+                # между .npy и .json (краш между двумя сохранениями).
+                if embeddings.shape[0] != len(index):
+                    logger.error(
+                        "semantic_search: несоответствие размеров при загрузке с диска "
+                        "(embeddings=%d, index=%d) — пропускаем загрузку, сброс к пустому индексу",
+                        embeddings.shape[0],
+                        len(index),
+                    )
+                    return
                 with self._index_lock:
                     self._embeddings = embeddings
                     self._index = index
@@ -334,13 +366,58 @@ class SemanticSearcher:
             logger.warning("semantic_search: не удалось загрузить embeddings с диска: %s", exc)
 
     def _save_locked(self) -> None:
-        """Сохраняет embeddings и индекс на диск. Должен вызываться под _index_lock."""
+        """Сохраняет embeddings и индекс на диск атомарно. Должен вызываться под _index_lock.
+
+        Использует запись во временные файлы + ``os.replace`` чтобы избежать
+        ситуации, при которой краш между двумя сохранениями оставляет .npy и
+        .json в рассогласованном состоянии (W884 E2 / wave901 fix).
+
+        Важно: ``np.save`` автоматически добавляет расширение ``.npy`` если
+        его нет, поэтому временный файл называется ``*.tmp.npy`` — numpy сохранит
+        в него, а мы делаем ``os.replace(tmp + ".npy", dst)``.
+        """
         try:
             import numpy as np
+            dir_str = str(self._data_dir)
+            # Атомарная запись .npy — временный файл в той же директории,
+            # затем os.replace (атомарная замена на POSIX).
+            # np.save добавляет ".npy" к пути если его нет → tmp_npy_base + ".npy"
+            # является реальным путём куда numpy запишет данные.
             if self._embeddings is not None:
-                np.save(str(self._embeddings_path), self._embeddings)
-            with open(self._index_path, "w", encoding="utf-8") as f:
-                json.dump(self._index, f, ensure_ascii=False)
+                fd, tmp_npy_base = tempfile.mkstemp(dir=dir_str, suffix=".tmp")
+                actual_tmp_npy = tmp_npy_base + ".npy"
+                try:
+                    os.close(fd)
+                    np.save(tmp_npy_base, self._embeddings)  # → tmp_npy_base + ".npy"
+                    os.replace(actual_tmp_npy, str(self._embeddings_path))
+                except Exception:
+                    for p in (tmp_npy_base, actual_tmp_npy):
+                        try:
+                            os.unlink(p)
+                        except OSError:
+                            pass
+                    raise
+                finally:
+                    # mkstemp создаёт tmp_npy_base без содержимого; np.save пишет
+                    # в tmp_npy_base + ".npy". Удаляем пустой tmp_npy_base если остался.
+                    try:
+                        if os.path.exists(tmp_npy_base):
+                            os.unlink(tmp_npy_base)
+                    except OSError:
+                        pass
+            # Атомарная запись .json
+            fd, tmp_json = tempfile.mkstemp(dir=dir_str, suffix=".json.tmp")
+            try:
+                os.close(fd)
+                with open(tmp_json, "w", encoding="utf-8") as f:
+                    json.dump(self._index, f, ensure_ascii=False)
+                os.replace(tmp_json, str(self._index_path))
+            except Exception:
+                try:
+                    os.unlink(tmp_json)
+                except OSError:
+                    pass
+                raise
         except Exception as exc:
             logger.warning("semantic_search: не удалось сохранить embeddings: %s", exc)
 
