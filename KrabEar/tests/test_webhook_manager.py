@@ -360,13 +360,15 @@ class WebhookManagerIPCTestCase(unittest.TestCase):
         self._tmpdir = tempfile.mkdtemp()
         self._mgr = _make_manager(self._tmpdir)
 
-    # 23 — handle_register_webhook возвращает webhook_id
+    # 23 — handle_register_webhook возвращает webhook_id (публичный URL)
     def test_ipc_register(self) -> None:
+        # Используем публичный домен — SSRF guard блокирует localhost/private.
+        # webhook_allow_local=True намеренно передаётся, но игнорируется (wave1763 fix).
         result = self._mgr.handle_register_webhook({
-            "url": "https://ipc.test/hook",
+            "url": "https://example.com/hook",
             "events": ["stt.final"],
             "secret": "s3cr3t",
-            "webhook_allow_local": True,
+            "webhook_allow_local": True,  # игнорируется IPC-обработчиком
         })
         self.assertIn("webhook_id", result)
         self.assertIsInstance(result["webhook_id"], str)
@@ -393,6 +395,75 @@ class WebhookManagerIPCTestCase(unittest.TestCase):
     def test_ipc_unregister_missing_id_raises(self) -> None:
         with self.assertRaises(RuntimeError):
             self._mgr.handle_unregister_webhook({})
+
+
+class WebhookManagerSSRFBypassFixTestCase(unittest.TestCase):
+    """Регрессионные тесты wave1763 MED SSRF-bypass: webhook_allow_local из IPC игнорируется.
+
+    Злоумышленник не может обойти SSRF-защиту передав webhook_allow_local=True
+    в теле IPC-запроса — handle_register_webhook всегда использует allow_local=False.
+    """
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._mgr = _make_manager(self._tmpdir)
+
+    # 28a — localhost URL + webhook_allow_local=True → SSRF guard не обходится, ValueError
+    def test_ipc_allow_local_true_does_not_bypass_ssrf_for_localhost(self) -> None:
+        """Передача webhook_allow_local=True НЕ снимает SSRF-защиту для localhost.
+
+        До исправления allow_local передавался вербально из params, и этот вызов
+        регистрировал webhook на 127.0.0.1, обходя всю защиту (MED SSRF-bypass).
+        После исправления — ValueError от SSRF guard.
+        """
+        with self.assertRaises(ValueError):
+            self._mgr.handle_register_webhook({
+                "url": "http://127.0.0.1:8080/admin",
+                "events": [],
+                "webhook_allow_local": True,  # должен быть проигнорирован
+            })
+
+    # 28b — RFC1918 URL + webhook_allow_local=True → SSRF guard не обходится
+    def test_ipc_allow_local_true_does_not_bypass_ssrf_for_private_ip(self) -> None:
+        """Передача webhook_allow_local=True не снимает защиту для RFC1918."""
+        with self.assertRaises(ValueError):
+            self._mgr.handle_register_webhook({
+                "url": "http://192.168.1.1/hook",
+                "events": ["stt.final"],
+                "webhook_allow_local": True,
+            })
+
+    # 28c — cloud metadata IP + webhook_allow_local=True → SSRF guard не обходится
+    def test_ipc_allow_local_true_does_not_bypass_ssrf_for_metadata_ip(self) -> None:
+        """Передача webhook_allow_local=True не снимает защиту для cloud metadata."""
+        with self.assertRaises(ValueError):
+            self._mgr.handle_register_webhook({
+                "url": "http://169.254.169.254/latest/meta-data/",
+                "events": [],
+                "webhook_allow_local": True,
+            })
+
+    # 28d — нормальный публичный HTTPS webhook регистрируется успешно (не регрессия)
+    def test_ipc_public_https_webhook_still_registers(self) -> None:
+        """Легитимный публичный webhook регистрируется без проблем."""
+        result = self._mgr.handle_register_webhook({
+            "url": "https://example.com/webhook",
+            "events": ["stt.final"],
+            "secret": "abc",
+        })
+        self.assertIn("webhook_id", result)
+        self.assertIsInstance(result["webhook_id"], str)
+        self.assertTrue(len(result["webhook_id"]) > 0)
+
+    # 28e — webhook_allow_local=False явно тоже работает как ожидается
+    def test_ipc_allow_local_false_explicit_still_blocks_localhost(self) -> None:
+        """Явное allow_local=False (и дефолтный False) также блокирует localhost."""
+        with self.assertRaises(ValueError):
+            self._mgr.handle_register_webhook({
+                "url": "http://localhost/hook",
+                "events": [],
+                "webhook_allow_local": False,
+            })
 
 
 class WebhookManagerFireOnEventTypeTestCase(unittest.TestCase):

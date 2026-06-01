@@ -466,7 +466,9 @@ class WebhookManager:
             events: список типов событий для фильтрации; [] = все события.
             secret: секрет для HMAC-SHA256; "" = без подписи.
             allow_local: отключить SSRF-проверку (только для dev/self-hosted окружений).
-                         Соответствует настройке ``webhook_allow_local`` в settings.
+                         Только для программного вызова из доверенного Python-кода.
+                         IPC-обработчик handle_register_webhook всегда передаёт False
+                         (wave1763 MED SSRF-bypass fix).
 
         Returns:
             webhook_id (UUID4 строка).
@@ -617,16 +619,26 @@ class WebhookManager:
     # ------------------------------------------------------------------
 
     def handle_register_webhook(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: register_webhook."""
+        """IPC: register_webhook.
+
+        Безопасность: параметр ``webhook_allow_local`` намеренно игнорируется.
+        SSRF-защита (localhost / RFC1918 / cloud-metadata) ВСЕГДА активна для
+        webhook-ов, зарегистрированных через IPC, — allow_local нельзя отключить
+        через тело запроса (MED SSRF-bypass, wave1763).
+
+        Для регистрации webhook на локальный self-hosted сервис вызовите
+        register_webhook() напрямую из Python-кода с явным allow_local=True.
+        """
         url = str(params.get("url", "")).strip()
         events = params.get("events", [])
         if not isinstance(events, list):
             raise RuntimeError("events должен быть списком строк")
         events = [str(e) for e in events]
         secret = str(params.get("secret", ""))
-        # webhook_allow_local: opt-in для dev-окружений с самохостинговыми сервисами
-        allow_local: bool = bool(params.get("webhook_allow_local", False))
-        webhook_id = self.register_webhook(url=url, events=events, secret=secret, allow_local=allow_local)
+        # Исправление SSRF (wave1763 MED): allow_local НЕ читается из IPC-параметров.
+        # Недоверенный IPC-клиент не может обойти SSRF-защиту, передав
+        # webhook_allow_local=True в теле запроса. Всегда False.
+        webhook_id = self.register_webhook(url=url, events=events, secret=secret, allow_local=False)
         return {"webhook_id": webhook_id}
 
     def handle_unregister_webhook(self, params: dict[str, Any]) -> dict[str, Any]:
