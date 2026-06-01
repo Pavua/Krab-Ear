@@ -19,6 +19,7 @@ if PROJECT_ROOT not in sys.path:
 from backend.transcription_queue import (
     TranscriptionQueue,
     TranscriptionJob,
+    QueueFullError,
     STATUS_PENDING,
     STATUS_PROCESSING,
     STATUS_COMPLETED,
@@ -28,6 +29,7 @@ from backend.transcription_queue import (
     TERMINAL_MAX_COUNT,
     TERMINAL_RETENTION_SECONDS,
     RESULT_MAX_BYTES,
+    _MAX_PENDING,
 )
 
 
@@ -968,6 +970,207 @@ class TestTranscriptionQueueResultSizeGuardW1722(unittest.TestCase):
             "truncated", stored,
             "Borderline result (exactly at limit) must NOT be truncated",
         )
+
+
+class TestTranscriptionQueuePendingCapW1762(unittest.TestCase):
+    """W1762 — BUG 3: enqueue() must reject jobs once _MAX_PENDING is reached.
+
+    process_next() has no production consumer, so without this cap any local
+    process spamming enqueue_transcription exhausts RAM unboundedly.
+    """
+
+    # Используем маленький кастомный лимит чтобы не создавать 1000 заданий в тесте.
+    _SMALL_CAP = 5
+
+    def _make_queue_at_cap(self) -> TranscriptionQueue:
+        """Создаёт очередь, заполненную ровно до _SMALL_CAP pending-заданий."""
+        q = TranscriptionQueue()
+        # Временно переопределяем модульный лимит через monkey-patch.
+        import backend.transcription_queue as tq_mod
+        original = tq_mod._MAX_PENDING
+        tq_mod._MAX_PENDING = self._SMALL_CAP
+        try:
+            for i in range(self._SMALL_CAP):
+                q.enqueue(f"/tmp/audio_{i}.mp3")
+        finally:
+            tq_mod._MAX_PENDING = original
+        return q, original
+
+    # ------------------------------------------------------------------
+    # enqueue() layer
+    # ------------------------------------------------------------------
+
+    def test_enqueue_up_to_cap_succeeds(self):
+        """Все enqueue() до лимита должны успешно создавать задания."""
+        import backend.transcription_queue as tq_mod
+        original = tq_mod._MAX_PENDING
+        tq_mod._MAX_PENDING = self._SMALL_CAP
+        try:
+            q = TranscriptionQueue()
+            jids = []
+            for i in range(self._SMALL_CAP):
+                jid = q.enqueue(f"/tmp/audio_{i}.mp3")
+                jids.append(jid)
+            self.assertEqual(len(jids), self._SMALL_CAP)
+            stats = q.get_queue_stats()
+            self.assertEqual(stats["pending"], self._SMALL_CAP)
+        finally:
+            tq_mod._MAX_PENDING = original
+
+    def test_enqueue_beyond_cap_raises_queue_full_error(self):
+        """Следующий enqueue() после достижения лимита поднимает QueueFullError."""
+        import backend.transcription_queue as tq_mod
+        original = tq_mod._MAX_PENDING
+        tq_mod._MAX_PENDING = self._SMALL_CAP
+        try:
+            q = TranscriptionQueue()
+            for i in range(self._SMALL_CAP):
+                q.enqueue(f"/tmp/audio_{i}.mp3")
+            with self.assertRaises(QueueFullError):
+                q.enqueue("/tmp/overflow.mp3")
+        finally:
+            tq_mod._MAX_PENDING = original
+
+    def test_pending_count_does_not_exceed_cap_after_overflow_attempt(self):
+        """После отклонения pending-счётчик не превышает лимит."""
+        import backend.transcription_queue as tq_mod
+        original = tq_mod._MAX_PENDING
+        tq_mod._MAX_PENDING = self._SMALL_CAP
+        try:
+            q = TranscriptionQueue()
+            for i in range(self._SMALL_CAP):
+                q.enqueue(f"/tmp/audio_{i}.mp3")
+            # Пробуем добавить ещё — должно быть отклонено.
+            try:
+                q.enqueue("/tmp/overflow.mp3")
+            except QueueFullError:
+                pass
+            stats = q.get_queue_stats()
+            self.assertEqual(
+                stats["pending"],
+                self._SMALL_CAP,
+                f"Pending count must not exceed cap after reject, got {stats['pending']}",
+            )
+        finally:
+            tq_mod._MAX_PENDING = original
+
+    def test_processing_jobs_count_toward_cap(self):
+        """processing-задания учитываются в счётчике активных (cap — pending+processing)."""
+        import backend.transcription_queue as tq_mod
+        original = tq_mod._MAX_PENDING
+        tq_mod._MAX_PENDING = self._SMALL_CAP
+        try:
+            q = TranscriptionQueue()
+            # Заполняем до _SMALL_CAP pending
+            for i in range(self._SMALL_CAP):
+                q.enqueue(f"/tmp/audio_{i}.mp3")
+            # Переводим одно задание в processing
+            q.process_next()
+            # Должен отказать: pending=SMALL_CAP-1 + processing=1 = SMALL_CAP
+            with self.assertRaises(QueueFullError):
+                q.enqueue("/tmp/overflow.mp3")
+        finally:
+            tq_mod._MAX_PENDING = original
+
+    def test_terminal_jobs_do_not_count_toward_cap(self):
+        """Завершённые/отменённые задания не входят в счётчик активных."""
+        import backend.transcription_queue as tq_mod
+        original = tq_mod._MAX_PENDING
+        tq_mod._MAX_PENDING = self._SMALL_CAP
+        try:
+            q = TranscriptionQueue()
+            # Добавляем и завершаем _SMALL_CAP заданий
+            for i in range(self._SMALL_CAP):
+                jid = q.enqueue(f"/tmp/audio_{i}.mp3")
+                q.mark_completed(jid)
+            # Теперь все активные = 0; добавление нового должно пройти
+            new_jid = q.enqueue("/tmp/new.mp3")
+            self.assertIsNotNone(new_jid)
+            status = q.get_status(new_jid)
+            self.assertEqual(status["status"], STATUS_PENDING)
+        finally:
+            tq_mod._MAX_PENDING = original
+
+    # ------------------------------------------------------------------
+    # handle_enqueue() IPC layer
+    # ------------------------------------------------------------------
+
+    def test_handle_enqueue_returns_queue_full_dict_when_at_cap(self):
+        """handle_enqueue() возвращает {"ok": False, "error": "queue_full"} без raise."""
+        import backend.transcription_queue as tq_mod
+        original = tq_mod._MAX_PENDING
+        tq_mod._MAX_PENDING = self._SMALL_CAP
+        try:
+            q = TranscriptionQueue()
+            for i in range(self._SMALL_CAP):
+                q.enqueue(f"/tmp/audio_{i}.mp3")
+            result = q.handle_enqueue({"file_path": "/tmp/overflow.mp3"})
+            self.assertFalse(
+                result.get("ok", True),
+                f"handle_enqueue должен вернуть ok=False при переполнении, получено: {result}",
+            )
+            self.assertEqual(
+                result.get("error"),
+                "queue_full",
+                f"Поле error должно быть 'queue_full', получено: {result}",
+            )
+        finally:
+            tq_mod._MAX_PENDING = original
+
+    def test_handle_enqueue_does_not_raise_on_queue_full(self):
+        """handle_enqueue() не бросает исключение при переполнении — возвращает dict."""
+        import backend.transcription_queue as tq_mod
+        original = tq_mod._MAX_PENDING
+        tq_mod._MAX_PENDING = self._SMALL_CAP
+        try:
+            q = TranscriptionQueue()
+            for i in range(self._SMALL_CAP):
+                q.enqueue(f"/tmp/audio_{i}.mp3")
+            # Не должно бросить ничего
+            try:
+                result = q.handle_enqueue({"file_path": "/tmp/overflow.mp3"})
+            except Exception as exc:
+                self.fail(f"handle_enqueue не должен бросать исключение при queue_full, получено: {exc}")
+            self.assertIsInstance(result, dict)
+        finally:
+            tq_mod._MAX_PENDING = original
+
+    def test_handle_enqueue_succeeds_on_normal_flow(self):
+        """handle_enqueue() возвращает job_id когда очередь не переполнена."""
+        q = TranscriptionQueue()
+        result = q.handle_enqueue({"file_path": "/tmp/audio.mp3", "priority": 3})
+        self.assertIn("job_id", result)
+        self.assertIsNotNone(result["job_id"])
+        # Убеждаемся, что задание действительно создано
+        status = q.get_status(result["job_id"])
+        self.assertEqual(status["status"], STATUS_PENDING)
+
+    def test_handle_enqueue_process_flow_still_works(self):
+        """Нормальный цикл enqueue → process → complete продолжает работать."""
+        q = TranscriptionQueue()
+        result = q.handle_enqueue({"file_path": "/tmp/audio.mp3"})
+        self.assertIn("job_id", result)
+        jid = result["job_id"]
+
+        # Извлекаем задание
+        job = q.process_next()
+        self.assertIsNotNone(job)
+        self.assertEqual(job["job_id"], jid)
+        self.assertEqual(job["status"], STATUS_PROCESSING)
+
+        # Завершаем
+        ok = q.mark_completed(jid, result={"text": "привет мир"})
+        self.assertTrue(ok)
+        status = q.get_status(jid)
+        self.assertEqual(status["status"], STATUS_COMPLETED)
+
+    def test_default_max_pending_constant_is_reasonable(self):
+        """_MAX_PENDING должен быть положительным целым числом."""
+        self.assertIsInstance(_MAX_PENDING, int)
+        self.assertGreater(_MAX_PENDING, 0)
+        # Разумный диапазон: от 10 до 100 000
+        self.assertGreaterEqual(_MAX_PENDING, 10)
+        self.assertLessEqual(_MAX_PENDING, 100_000)
 
 
 if __name__ == "__main__":

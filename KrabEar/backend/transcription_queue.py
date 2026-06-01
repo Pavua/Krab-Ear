@@ -29,6 +29,14 @@
 #            JSON-serialised size exceeds RESULT_MAX_BYTES (512 KiB) are truncated to a
 #            stub {"truncated": True, "original_bytes": N} to prevent a single large
 #            transcription result from pinning megabytes of RAM per job.
+#   BUG 3 (W1762) — enqueue() had no cap on pending+processing jobs, enabling an
+#            unbounded-growth DoS from any caller reachable via the IPC socket.
+#            Since process_next() has no production consumer the list would grow without
+#            limit.  Fix: reject enqueue requests once _MAX_PENDING active
+#            (pending+processing) jobs already exist, returning {"ok": False,
+#            "error": "queue_full"} from handle_enqueue.  The cap is enforced inside
+#            enqueue() via QueueFullError so the guard is also exercisable by unit tests
+#            that bypass the IPC handler.
 """
 
 from __future__ import annotations
@@ -65,6 +73,21 @@ TERMINAL_MAX_COUNT: int = 100
 # Result size guard (BUG 2 fix)
 # JSON-encoded result bytes above this threshold are replaced with a stub.
 RESULT_MAX_BYTES: int = 512 * 1024  # 512 KiB
+
+# Pending/processing job cap (BUG 3 fix, W1762)
+# Maximum number of active (pending+processing) jobs allowed in the queue at once.
+# Requests beyond this limit are rejected by enqueue() / handle_enqueue() to prevent
+# unbounded memory growth when process_next() has no live consumer.
+_MAX_PENDING: int = 1000
+
+
+class QueueFullError(Exception):
+    """Очередь достигла лимита активных заданий (_MAX_PENDING).
+
+    Поднимается в enqueue() когда количество pending+processing заданий
+    достигает _MAX_PENDING.  handle_enqueue() перехватывает это исключение
+    и возвращает {"ok": False, "error": "queue_full"} без raise.
+    """
 
 
 class TranscriptionJob:
@@ -293,9 +316,30 @@ class TranscriptionQueue:
 
         Returns:
             job_id: Уникальный идентификатор задания.
+
+        Raises:
+            QueueFullError: если количество активных (pending+processing) заданий
+                достигло _MAX_PENDING.  Caller должен сообщить об ошибке — не добавлять
+                задание в очередь — чтобы не допустить неограниченного роста памяти.
         """
+        # BUG 3 guard (W1762): считаем активные задания ДО создания нового объекта,
+        # чтобы проверка и вставка выполнялись атомарно под локом.
         job = TranscriptionJob(file_path=file_path, priority=priority, label=label)
         with self._lock:
+            active_count = sum(
+                1 for j in self._jobs.values()
+                if j.status in (STATUS_PENDING, STATUS_PROCESSING)
+            )
+            if active_count >= _MAX_PENDING:
+                logger.warning(
+                    "TranscriptionQueue: очередь переполнена — отклонено задание "
+                    "file=%r (активных=%d лимит=%d)",
+                    file_path, active_count, _MAX_PENDING,
+                    extra={"event": "queue_full", "active": active_count, "limit": _MAX_PENDING},
+                )
+                raise QueueFullError(
+                    f"Очередь заданий переполнена: {active_count}/{_MAX_PENDING} активных заданий"
+                )
             self._jobs[job.job_id] = job
             self._save()
         logger.debug("Задание поставлено в очередь: job_id=%s file=%r priority=%d", job.job_id, file_path, priority)
@@ -470,7 +514,14 @@ class TranscriptionQueue:
     # ------------------------------------------------------------------
 
     def handle_enqueue(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: enqueue_transcription — добавить файл в очередь."""
+        """IPC: enqueue_transcription — добавить файл в очередь.
+
+        Возвращает {"job_id": str} при успехе.
+        Возвращает {"ok": False, "error": "queue_full"} если очередь переполнена
+        (_MAX_PENDING активных заданий) — без raise, чтобы IPC-слой мог
+        сериализовать ответ клиенту.
+        Поднимает ValueError при некорректных параметрах.
+        """
         file_path = str(params.get("file_path", "")).strip()
         if not file_path:
             raise ValueError("Параметр file_path обязателен")
@@ -479,7 +530,12 @@ class TranscriptionQueue:
         except (TypeError, ValueError):
             raise ValueError(f"priority должен быть целым числом от {PRIORITY_MIN} до {PRIORITY_MAX}")
         label = str(params.get("label", ""))
-        job_id = self.enqueue(file_path=file_path, priority=priority, label=label)
+        try:
+            job_id = self.enqueue(file_path=file_path, priority=priority, label=label)
+        except QueueFullError:
+            # Возвращаем структурированную ошибку — не бросаем исключение,
+            # чтобы IPC-диспетчер мог сериализовать ответ и отправить клиенту.
+            return {"ok": False, "error": "queue_full"}
         return {"job_id": job_id}
 
     def handle_cancel(self, params: dict[str, Any]) -> dict[str, Any]:
