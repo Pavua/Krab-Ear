@@ -386,17 +386,27 @@ class RecordingCoreService:
             for r in (self.store.data_dir, Path.home(), Path("/tmp"), Path(tempfile.gettempdir()))
         ]
         selected: list[str] = []
+        # Пути за пределами разрешённых корней фиксируются в rejected_errors
+        # и будут видны через get_transcribe_progress (поле errors).
+        rejected_errors: list[str] = []
         for p in selected_raw:
             resolved = Path(p).expanduser().resolve()
-            if any(str(resolved).startswith(str(root)) for root in allowed_roots):
+            if self._is_path_allowed(resolved, allowed_roots):
                 selected.append(str(resolved))
+            else:
+                msg = f"Path outside allowed directories: {resolved}"
+                rejected_errors.append(msg)
+                logger.warning("transcribe_paths_async: %s", msg)
         try:
-            audio_paths = self._collect_audio_paths(selected) if selected else []
+            audio_paths = self._collect_audio_paths(selected, allowed_roots=allowed_roots) if selected else []
         except Exception:
             audio_paths = []
         total_files = len(audio_paths)
 
         job_id = self._job_tracker.create_job(total_files=total_files)
+        # Сразу фиксируем отклонённые пути в errors задачи — видны через get_transcribe_progress.
+        if rejected_errors:
+            self._job_tracker.update(job_id, errors=list(rejected_errors))
         job_params = dict(params)
         # W1342: получаем Event сразу после создания задачи — пока он точно существует.
         # Если впоследствии задача будет вытеснена prune(), get_cancel_event() вернёт None
@@ -496,13 +506,16 @@ class RecordingCoreService:
                     on_file_done=_on_file_done,
                 )
                 state = self._job_tracker.get(job_id) or {}
+                # Объединяем ошибки из ядра с ранее зафиксированными rejected_errors.
+                core_errors = list(result.get("errors") or [])
+                all_errors = rejected_errors + core_errors
                 if state.get("cancel_requested"):
                     _emit_status("idle", stage="", progress=1.0)
                     self._job_tracker.update(
                         job_id,
                         status="cancelled",
                         items=list(result.get("items") or []),
-                        errors=list(result.get("errors") or []),
+                        errors=all_errors,
                         processed=len(result.get("items") or []),
                         current_stage="idle",
                         finished_at=time.monotonic(),
@@ -512,7 +525,7 @@ class RecordingCoreService:
                     self._job_tracker.mark_done(
                         job_id,
                         items=list(result.get("items") or []),
-                        errors=list(result.get("errors") or []),
+                        errors=all_errors,
                     )
             except Exception as exc:
                 logger.exception("Async transcribe job %s упал", job_id)
@@ -585,11 +598,11 @@ class RecordingCoreService:
         selected: list[str] = []
         for p in selected_raw:
             resolved = Path(p).expanduser().resolve()
-            if any(str(resolved).startswith(str(root)) for root in allowed_roots):
+            if self._is_path_allowed(resolved, allowed_roots):
                 selected.append(str(resolved))
             else:
                 return {"items": [], "processed": 0, "errors": [f"Path outside allowed directories: {resolved}"]}
-        audio_paths = self._collect_audio_paths(selected)
+        audio_paths = self._collect_audio_paths(selected, allowed_roots=allowed_roots)
         sample_limit = int(params.get("sample_limit", 5) or 5)
         safe_sample_limit = max(1, min(sample_limit, 50))
         by_ext: dict[str, int] = {}
@@ -1542,11 +1555,11 @@ class RecordingCoreService:
         selected: list[str] = []
         for p in selected_raw:
             resolved = Path(p).expanduser().resolve()
-            if any(str(resolved).startswith(str(root)) for root in allowed_roots):
+            if self._is_path_allowed(resolved, allowed_roots):
                 selected.append(str(resolved))
             else:
                 return {"items": [], "processed": 0, "errors": [f"Path outside allowed directories: {resolved}"]}
-        audio_paths = self._collect_audio_paths(selected)
+        audio_paths = self._collect_audio_paths(selected, allowed_roots=allowed_roots)
         if not audio_paths:
             return {"items": [], "processed": 0, "errors": ["Не найдено аудиофайлов для транскрибации"]}
 
@@ -1804,7 +1817,31 @@ class RecordingCoreService:
                 logger.exception("Callback %s упал с аргументами %s", fn, args[:1])
 
     @staticmethod
-    def _collect_audio_paths(paths: list[str]) -> list[str]:
+    def _is_path_allowed(resolved: Path, allowed_roots: list[Path]) -> bool:
+        """Проверка принадлежности пути к разрешённым корням (без уязвимости sibling-prefix).
+
+        Использует ``Path.is_relative_to`` (Python 3.9+) вместо ``startswith``,
+        что предотвращает обход вида '/private/tmpEVIL/x.wav' → '/private/tmp'.
+        """
+        return any(
+            resolved == root or resolved.is_relative_to(root)
+            for root in allowed_roots
+        )
+
+    @staticmethod
+    def _collect_audio_paths(
+        paths: list[str],
+        allowed_roots: list[Path] | None = None,
+    ) -> list[str]:
+        """Собирает аудиофайлы из списка путей/директорий.
+
+        Args:
+            paths: список абсолютных путей (файлы или директории).
+            allowed_roots: если передан — каждый файл после ``resolve()`` повторно
+                проверяется через ``_is_path_allowed``.  Это закрывает вектор
+                post-validation symlink escape: symlink внутри разрешённой директории
+                может вести за её пределы, и rglob вернёт реальный путь снаружи.
+        """
         audio_ext = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".mp4", ".m4b", ".aif", ".aiff"}
         result: list[str] = []
         for raw in paths:
@@ -1813,14 +1850,33 @@ class RecordingCoreService:
                 continue
             if path.is_file():
                 if path.suffix.lower() in audio_ext:
-                    result.append(str(path.resolve()))
+                    resolved_file = path.resolve()
+                    if allowed_roots is not None and not RecordingCoreService._is_path_allowed(
+                        resolved_file, allowed_roots
+                    ):
+                        logger.warning(
+                            "transcribe_paths: файл за пределами разрешённых корней (симлинк?) — пропущен: %s",
+                            resolved_file,
+                        )
+                        continue
+                    result.append(str(resolved_file))
                 continue
             if path.is_dir():
                 candidates = sorted(
                     (c for c in path.rglob("*") if c.is_file() and c.suffix.lower() in audio_ext),
                     key=lambda c: str(c),
                 )
-                result.extend(str(c.resolve()) for c in candidates)
+                for c in candidates:
+                    resolved_c = c.resolve()
+                    if allowed_roots is not None and not RecordingCoreService._is_path_allowed(
+                        resolved_c, allowed_roots
+                    ):
+                        logger.warning(
+                            "transcribe_paths: файл за пределами разрешённых корней (симлинк?) — пропущен: %s",
+                            resolved_c,
+                        )
+                        continue
+                    result.append(str(resolved_c))
         unique: list[str] = []
         seen: set[str] = set()
         for item in result:
