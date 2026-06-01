@@ -3184,18 +3184,9 @@ class AudioEngine:
         prepared_audio_path, should_cleanup = self._prepare_audio_for_diarization(audio_path)
         try:
             diarization = pipeline(prepared_audio_path)
-        except Exception as e:
-            # --- Krab's Black Box ---
-            import traceback
-            error_log_path = "/tmp/krab_ear_diarization_error.log"
-            logging.error(f"FATAL: Unhandled exception in diarization pipeline. Writing details to {error_log_path}")
-            with open(error_log_path, "w") as f:
-                f.write("A critical error occurred in the pyannote.audio pipeline block.\\n")
-                f.write(f"Exception Type: {type(e).__name__}\\n")
-                f.write(f"Exception Args: {e}\\n\\n")
-                f.write("--- Traceback ---\\n")
-                traceback.print_exc(file=f)
-            raise e
+        except Exception:
+            logger.exception("FATAL: Unhandled exception in diarization pipeline")
+            raise
         finally:
             if should_cleanup:
                 Path(prepared_audio_path).unlink(missing_ok=True)
@@ -3370,5 +3361,5 @@ class AudioEngine:
             if not _re.match(r'^[a-zA-Z0-9 _-]+$', voice):
                 voice = "Milena"  # безопасный fallback
             cmd.extend(["-v", voice])
-        cmd.append(text)
+        cmd.extend(["--", text])
         subprocess.run(cmd, check=False)

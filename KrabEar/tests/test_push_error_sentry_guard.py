@@ -46,14 +46,6 @@ def _make_vocabulary_store_stub(tmp_path: Path) -> object:
     return obj
 
 
-def _make_vg_ws_client_stub() -> object:
-    from backend.vg_ws_client import VGWebSocketClient
-    obj = VGWebSocketClient.__new__(VGWebSocketClient)
-    obj.session_id = "sess-1"
-    obj.ws_url = "ws://localhost/stream"
-    return obj
-
-
 def _make_llm_rewriter_stub() -> object:
     from backend.llm_rewriter import LLMRewriter
     obj = LLMRewriter.__new__(LLMRewriter)
@@ -257,10 +249,6 @@ class TestPerModuleHelpersAllGuarded(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             self._verify_sentry_guard(_make_vocabulary_store_stub(Path(tmp)))
-
-    def test_vg_ws_client_guarded(self):
-        self._verify_sentry_guard(_make_vg_ws_client_stub())
-
 
 class TestNoErrorBusNoSentry(unittest.TestCase):
     """When _error_bus is None (not injected), _push_error returns early — no Sentry."""

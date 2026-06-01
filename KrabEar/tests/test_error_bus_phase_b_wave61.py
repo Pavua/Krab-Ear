@@ -47,7 +47,12 @@ def _make_error_bus() -> tuple[ErrorBus, list[KrabError]]:
 # ---------------------------------------------------------------------------
 
 class VGWReconnectTests(unittest.TestCase):
-    """vgw.reconnect fires when VGWebSocketClient loses connection."""
+    """vgw.reconnect error code registry tests.
+
+    NOTE: VGWebSocketClient (vg_ws_client.py) was removed as dead code in
+    Wave 1760 — it had zero production callers. Registry and error-code tests
+    are preserved; call-site instantiation tests are removed.
+    """
 
     def test_code_in_registry(self):
         self.assertIn("vgw.reconnect", ERROR_REGISTRY)
@@ -56,36 +61,6 @@ class VGWReconnectTests(unittest.TestCase):
         self.assertFalse(entry["actionable"])
         self.assertIsNone(entry["action_id"])
         self.assertEqual(entry["dedupe_seconds"], 120)
-
-    def test_push_error_helper_fires(self):
-        """VGWebSocketClient._push_error sends vgw.reconnect with correct component."""
-        from backend.vg_ws_client import VGWebSocketClient
-
-        client = VGWebSocketClient.__new__(VGWebSocketClient)
-        client.session_id = "vs_test123"
-        client.ws_url = "ws://localhost:8090/v1/sessions/vs_test123/stream"
-
-        bus, captured = _make_error_bus()
-        client._error_bus = bus
-
-        client._push_error("vgw.reconnect", "ConnectionRefusedError: reconnect in 1s")
-
-        self.assertEqual(len(captured), 1)
-        err = captured[0]
-        self.assertEqual(err.code, "vgw.reconnect")
-        self.assertEqual(err.component, "vgw")
-        self.assertEqual(err.severity, "warn")
-        self.assertIn("переподключаемся", err.message_user)
-
-    def test_push_error_no_bus_does_not_raise(self):
-        """_push_error is silent when _error_bus is not injected."""
-        from backend.vg_ws_client import VGWebSocketClient
-
-        client = VGWebSocketClient.__new__(VGWebSocketClient)
-        client.session_id = "vs_noop"
-        client.ws_url = "ws://localhost:8090/v1/sessions/vs_noop/stream"
-        # No _error_bus set — should be a no-op
-        client._push_error("vgw.reconnect", "test")  # must not raise
 
 
 # ---------------------------------------------------------------------------
