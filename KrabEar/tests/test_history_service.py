@@ -311,5 +311,87 @@ class HistoryServiceTestCase(unittest.TestCase):
                 self.assertNotIn("export breadcrumb test", v)
 
 
+    # ------------------------------------------------------------------
+    # W1762 — handle_delete_history_item erases transcript .md file
+    # ------------------------------------------------------------------
+
+    def test_delete_erases_transcript_md(self) -> None:
+        """W1762: удаление записи стирает связанный .md файл транскрипта.
+
+        1. Создаём запись в store.
+        2. Создаём .md файл в transcripts/ с именем, соответствующим item.ts
+           (схема TranscriptWriter: {date}-Транскрибация-{HHMMSS}.md).
+        3. Вызываем handle_delete_history_item.
+        4. Проверяем: .md файл исчез, запись удалена из активной истории.
+        """
+        from datetime import datetime, timezone
+
+        item = self.store.add_history_item(text="приватный текст", paste_status="ok")
+
+        # Создаём transcripts/ и .md файл с именем по схеме TranscriptWriter
+        transcripts_dir = Path(self.tmp.name) / "data" / "transcripts"
+        transcripts_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            dt = datetime.fromisoformat(item.ts)
+            date_str = dt.strftime("%Y-%m-%d")
+            time_str = dt.strftime("%H%M%S")
+        except (ValueError, TypeError):
+            self.skipTest("item.ts не парсится как ISO datetime")
+
+        md_name = f"{date_str}-Транскрибация-{time_str}.md"
+        md_path = transcripts_dir / md_name
+        md_path.write_text("# Транскрибация\n\nприватный текст\n", encoding="utf-8")
+        self.assertTrue(md_path.exists(), "тестовый .md файл должен существовать перед удалением")
+
+        # Удаляем запись через IPC-обработчик
+        result = self.svc.handle_delete_history_item({"id": item.id})
+        self.assertEqual(result, {"deleted": True})
+
+        # .md файл должен быть стёрт
+        self.assertFalse(
+            md_path.exists(),
+            f"W1762: transcript .md файл должен быть удалён после handle_delete_history_item, но {md_path.name} ещё существует",
+        )
+
+        # Запись не должна появляться в активной истории
+        page = self.svc.handle_get_history_page({"limit": 50})
+        ids = [i["id"] for i in page["items"]]
+        self.assertNotIn(item.id, ids)
+
+    def test_delete_no_md_file_does_not_raise(self) -> None:
+        """W1762: если .md файл отсутствует — handle_delete_history_item не падает."""
+        item = self.store.add_history_item(text="без .md файла", paste_status="ok")
+        # transcripts/ не создаём — папка отсутствует
+        result = self.svc.handle_delete_history_item({"id": item.id})
+        self.assertEqual(result, {"deleted": True})
+
+    def test_delete_does_not_erase_neighbour_md_files(self) -> None:
+        """W1762: удаление одной записи не стирает .md файлы других записей того же дня."""
+        from datetime import datetime, timezone
+
+        item_a = self.store.add_history_item(text="запись А", paste_status="ok")
+        item_b = self.store.add_history_item(text="запись Б", paste_status="ok")
+
+        transcripts_dir = Path(self.tmp.name) / "data" / "transcripts"
+        transcripts_dir.mkdir(parents=True, exist_ok=True)
+
+        def _md_name(ts: str) -> str:
+            dt = datetime.fromisoformat(ts)
+            return f"{dt.strftime('%Y-%m-%d')}-Транскрибация-{dt.strftime('%H%M%S')}.md"
+
+        md_a = transcripts_dir / _md_name(item_a.ts)
+        md_b = transcripts_dir / _md_name(item_b.ts)
+        md_a.write_text("текст А", encoding="utf-8")
+        md_b.write_text("текст Б", encoding="utf-8")
+
+        # Удаляем только item_a
+        self.svc.handle_delete_history_item({"id": item_a.id})
+
+        self.assertFalse(md_a.exists(), "md файл удалённой записи должен исчезнуть")
+        # Файл item_b должен остаться нетронутым (если ts отличается)
+        if item_a.ts != item_b.ts:
+            self.assertTrue(md_b.exists(), "md файл соседней записи не должен быть затронут")
+
+
 if __name__ == "__main__":
     unittest.main()
