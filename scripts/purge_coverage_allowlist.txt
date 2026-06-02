@@ -16,6 +16,22 @@ settings.json            # app config; the PII field (translation_glossary) IS r
 feature_flags.json       # runtime experimental on/off flags — no user content
 config_presets.json      # built-in + custom settings presets — no transcription content
 
+# --- W1770: text-processing / paste preferences (user app config, not transcript content) ---
+# These persist user *rules and preferences* for how transcripts are processed/pasted.
+# They contain no transcript text and no transcript-derived names; like settings.json,
+# they are app configuration that should survive a "purge transcription data" wipe.
+abbreviations.json          # W1770: user abbreviation → expansion rules (text-processing prefs); no transcript content
+hallucination_patterns.json # W1770: user-defined regex hallucination filters (text-processing prefs); no transcript content
+normalization_profiles.json # W1770: named text-normalization profiles (clean/formal/telegram/...); app config, no transcript content
+paste_formatters.json       # W1770: custom paste-format rules per target app; app config, no transcript content
+paste_app_memory.json       # W1770: bundle_id → paste-profile preference map; UI preference, no transcript content
+summary_profiles.json       # W1770: LLM summarization style profiles (prompt/format prefs); app config, no transcript content
+templates.json              # W1770: user text-insertion templates with {variable} placeholders; app config, no transcript content
+
+# --- W1770: runtime / extensibility artefacts (not user PII) --------------
+shutdown_info.json       # W1770: last-shutdown metadata (pid, timestamp, reason) for diagnostics; no user content
+plugins/                 # W1770: installed plugin code + plugin.json manifests (extensibility), not transcript data
+
 # --- Compliance / security infrastructure ---------------------------------
 privacy_audit.key        # AES key for the compliance audit log (privacy_audit.log is the W957 trail); deleting it would corrupt the audit record. The log itself is home-rooted, not under the configurable data dir, so it is not discovered.
 

@@ -638,6 +638,24 @@ class BackendService:
         self._history._vocabulary_store = self.vocabulary
         self._history._settings_svc = self._settings_svc
         self._history._settings_backup = self._settings_svc._backup
+        # W1770: wire transcript_versions into HistoryService — ИСПРАВЛЕНИЕ ЛАТЕНТНОГО БАГА.
+        # handle_purge_all_data уже вызывает self._transcript_versions.cleanup_for_ids(...),
+        # но поле НИКОГДА не заполнялось из service.py (оставалось None из конструктора →
+        # каскадная очистка версий была мёртвой). Версии содержат полный текст транскрипций
+        # (transcript_versions.ndjson), поэтому без этого wire они переживали privacy-purge.
+        # Дополнительно вешаем _on_compact_hook как fallback: при компактировании StateStore
+        # (которое purge вызывает после tombstone всех записей) хук удаляет версии для
+        # item_id-ов, исчезнувших из активной истории — подчищает осиротевшие версии
+        # ранее удалённых записей, не попавших в снимок active текущего purge.
+        self._history._transcript_versions = self._transcript_versioning
+        if getattr(self.store, "_on_compact_hook", None) is None:
+            self.store._on_compact_hook = self._transcript_versioning.purge_orphaned_versions
+        # W1770: wire collection_manager + session_tracker into HistoryService so
+        # handle_purge_all_data can erase free-text collection names (collections.json,
+        # added in #1613) and device/timing usage-pattern metadata (sessions.ndjson,
+        # added in #1605). Both expose dedicated purge methods that also clear in-memory state.
+        self._history._collection_manager = self._collections
+        self._history._session_tracker = self._session_tracker
         self._call_session_service = CallSessionService(
             store=self._call_session_store,
             auto_end=self._call_auto_end,
