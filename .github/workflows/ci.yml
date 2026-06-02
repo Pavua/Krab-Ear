@@ -254,3 +254,32 @@ jobs:
         # Strict mode: exits non-zero when any HIGH or MED finding is present.
         # No user-controlled input is used in this step — no injection risk.
         run: python3 scripts/audit_decorative_wiring.py --strict
+
+  privacy-purge-coverage-guard:
+    name: Privacy-purge coverage guard (W1768)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check every persisted PII store is wiped by purge or allowlisted (W1768)
+        # Ensures handle_purge_all_data covers every file-backed store that holds user
+        # data (history, transcripts, sessions, etc.). Found 28 uncovered gaps in W1768;
+        # all fixed before this gate was enforced. Exits non-zero if any gap is found.
+        # No user-controlled input is used in this step — no injection risk.
+        run: python3 scripts/audit_purge_coverage.py --fail-on-found
+
+  dead-extracted-module-guard:
+    name: Dead extracted-module guard (W1768)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check no dead extracted modules or dead cross-file duplicates (W1768)
+        # Detects modules that were "extracted" but have no production importer (e.g. the
+        # W797 ipc_dispatch / service_logging drift — deleted in W1769 after this guard
+        # exposed them). Also catches cross-file duplicate symbols where the inline copy
+        # shadows the extracted one. Exits non-zero if any dead module or duplicate found.
+        # No user-controlled input is used in this step — no injection risk.
+        run: python3 scripts/audit_dead_extracted_modules.py --fail-on-found

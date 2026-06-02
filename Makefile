@@ -1,4 +1,4 @@
-.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release reset-tcc clean-worktree-builds audit-orphans audit-handlers audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-all dispatch-tests service-loc
+.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release reset-tcc clean-worktree-builds audit-orphans audit-handlers audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-all dispatch-tests service-loc
 
 VENV = .venv_krab_ear
 PYTHON = $(VENV)/bin/python
@@ -119,12 +119,20 @@ audit-wiring:
 # Detects decorative extractions (W746/W797 class): a module/symbol "extracted"
 # but production still uses an inline copy (e.g. ipc_dispatch.build_dispatch_table
 # dead while service.py uses its own inline handlers dict; IPCServer duplicated).
-# Pass ARGS=--fail-on-found to gate locally; ARGS=--json for machine output.
+# Strict (--fail-on-found) enforced in CI since W1774; pass ARGS=--json for machine output.
 audit-dead-modules:
-	python3 scripts/audit_dead_extracted_modules.py $(ARGS)
+	python3 scripts/audit_dead_extracted_modules.py --fail-on-found $(ARGS)
+
+# Audit privacy-purge coverage (W1768 guard).
+# Ensures handle_purge_all_data covers every file-backed store that holds user data,
+# or the store is explicitly allowlisted. Found 28 uncovered gaps in W1768; all fixed
+# before this gate was enforced. Strict (--fail-on-found) enforced in CI since W1774.
+# Pass ARGS=--json for machine-readable output.
+audit-purge-coverage:
+	python3 scripts/audit_purge_coverage.py --fail-on-found $(ARGS)
 
 # Run all static audit checks (CI parity — runs same checks as CI guard jobs).
-audit-all: audit-orphans audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules
+audit-all: audit-orphans audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage
 	@echo "All audit checks passed."
 
 # Print current service.py line count (quick monolith size gauge).

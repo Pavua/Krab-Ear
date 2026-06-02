@@ -56,7 +56,7 @@ jobs:
           pip install numpy pytest-xdist pytest-cov flake8
 
       - name: Lint (flake8)
-        # W784: mirrors flake8 config from ci.yml — max-line-length=150, relaxed test ignores
+        # W784: mirrors flake8 config from ci.yml -- max-line-length=150, relaxed test ignores
         run: |
           flake8 KrabEar/ \
             --max-line-length=150 \
@@ -66,7 +66,7 @@ jobs:
             --statistics
         continue-on-error: false
 
-      - name: Run backend/unit tests (chunked — bound peak RSS, reap orphan workers)
+      - name: Run backend/unit tests (chunked -- bound peak RSS, reap orphan workers)
         env:
           PYTHONPATH: ${{ github.workspace }}/KrabEar
         timeout-minutes: 120
@@ -75,7 +75,7 @@ jobs:
           # ubuntu runner ~54% in (orphan MLX/GigaAM subprocess workers accumulate),
           # so the run never reaches the summary. Run in 4 chunks: each is a fresh
           # process (memory released between), and we reap orphan workers between chunks.
-          # W1754: each chunk runs -p no:xdist (sequential) — under -n 2 orphan daemon
+          # W1754: each chunk runs -p no:xdist (sequential) -- under -n 2 orphan daemon
           # threads blocked clean xdist worker teardown ("node down: Not properly
           # terminated") and xdist mis-attributed the dead worker to a random test.
           set +e
@@ -99,7 +99,7 @@ jobs:
               # 4 in PARALLEL (xargs -P4): contamination crashes pass in isolation (-> green),
               # genuine per-file failures are recorded by filename. Each file is wall-clock bounded
               # (timeout 90) so a hung test cannot stall the job toward the 120-min limit.
-              echo "::warning::chunk $((i+1)) exited $crc — per-file isolate (parallel -P4)"
+              echo "::warning::chunk $((i+1)) exited $crc -- per-file isolate (parallel -P4)"
               printf '%s\n' "${sub[@]}" | xargs -P 4 -I {} bash -c '
                 timeout 90 python -m pytest "$1" --tb=line -q -p no:xdist -p no:cacheprovider >/dev/null 2>&1 \
                   || { echo "::error::isolated FAIL($?): $1"; echo "$1" >> /tmp/pf_failed.txt; }
@@ -116,6 +116,21 @@ jobs:
 
       - name: Audit orphan imports in service.py
         run: python3 scripts/audit_orphan_imports.py
+
+      - name: Privacy-purge coverage guard (W1768)
+        # Ensures handle_purge_all_data covers every file-backed store that holds user
+        # data (history, transcripts, sessions, etc.). Found 28 uncovered gaps in W1768;
+        # all fixed before this gate was enforced. Exits non-zero if any gap is found.
+        # No user-controlled input is used in this step -- no injection risk.
+        run: python3 scripts/audit_purge_coverage.py --fail-on-found
+
+      - name: Dead extracted-module guard (W1768)
+        # Detects modules that were "extracted" but have no production importer (e.g. the
+        # W797 ipc_dispatch / service_logging drift -- deleted in W1769 after this guard
+        # exposed them). Also catches cross-file duplicate symbols where the inline copy
+        # shadows the extracted one. Exits non-zero if any dead module or duplicate found.
+        # No user-controlled input is used in this step -- no injection risk.
+        run: python3 scripts/audit_dead_extracted_modules.py --fail-on-found
 
       - name: Compare benchmark history (regression gate)
         env:
