@@ -1,0 +1,31 @@
+# audit_dead_extracted_modules_allowlist.txt — W1768 guard allowlist
+#
+# Формат записей (по одной на строку, "#" — комментарий):
+#   module:<relpath>            — модуль целиком разрешён как «dead» (не флагается)
+#   dup:<symbol>@<relpath>      — символ@извлечённый-модуль разрешён как «dead dup»
+#
+# Будь КОНСЕРВАТИВЕН. Сюда попадают ТОЛЬКО заведомо-намеренные случаи:
+# pre-existing, покрытое тестами scaffolding, ещё не подключённое в живой
+# production-путь, и НЕ являющееся decorative-extraction регрессией класса
+# W746/W797. Записи ниже подтверждены: каждый модуль имеет dedicated-тесты и
+# ноль production-импортёров по дизайну (будущее использование).
+#
+# НЕ добавляй сюда W797-находки (ipc_dispatch.py, service_logging.py,
+# glossary_service.py, IPCServer/configure_logging dead-dups) — это и есть
+# баг, который страж обязан ловить.
+
+# --- Phase 3 (Call Automation) телефония: фабрика провайдера ещё не вызвана
+#     из живого пути; интерфейс + тесты готовы (test_call_provider_factory.py).
+module:KrabEar/backend/call_provider_factory.py
+
+# --- Voice Assistant multimodal client — экспериментальный, под фичефлагом;
+#     покрыт test_va_multimodal.py, не подключён в production-пайплайн.
+module:KrabEar/backend/va_multimodal.py
+
+# --- Phase 4 STT router factory — будущая точка сборки STTRouter; покрыта
+#     test_stage_pipeline_stt_router_factory.py, ещё не в живом пути.
+module:KrabEar/core/pipeline/stt_router_factory.py
+
+# --- Общая retry-утилита (RetryConfig/RetryStrategy) — библиотечный helper,
+#     покрыт test_retry_strategy.py; пока не вызывается из production-кода.
+module:KrabEar/core/retry_strategy.py
