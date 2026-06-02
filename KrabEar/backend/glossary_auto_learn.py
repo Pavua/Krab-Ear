@@ -11,11 +11,24 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("KrabEar.Backend.GlossaryAutoLearn")
+
+# ── Ограничения глоссария (W1772) ──────────────────────────────────────────────
+# Зеркало констант TranslationService.MAX_GLOSSARY_ENTRIES / MAX_TERM_BYTES.
+# Обновлять синхронно при изменении translation_service.py.
+MAX_GLOSSARY_ENTRIES: int = 500   # макс. число пар в translation_glossary
+MAX_TERM_BYTES: int = 200         # макс. длина source/target в байтах UTF-8
+
+# Мьютекс для сериализации read-modify-write глоссария внутри модуля (W1772).
+# Best-effort: предотвращает TOCTOU при конкурентных вызовах apply_glossary_suggestions
+# в пределах одного процесса.  Полный фикс требует инъекции SettingsService._save_lock
+# (deferred: нужно изменить service.py — другой агент владеет им).
+_apply_lock: threading.Lock = threading.Lock()
 
 # ── Медицинские ключевые слова ─────────────────────────────────────────────────
 # Используются для эвристики: если хотя бы одно из них встречается в тексте
@@ -335,33 +348,83 @@ class GlossaryAutoLearnService:
             if s.get("source_term") and s.get("target_term")
         }
 
-        settings = self._cached_settings()
-        glossary: Dict[str, str] = dict(settings.get("translation_glossary") or {})
+        # W1772: best-effort сериализация read-modify-write в пределах процесса.
+        # Предотвращает TOCTOU lost-update при конкурентных вызовах apply_glossary_suggestions.
+        # Полный fix требует инъекции SettingsService._save_lock в __init__
+        # (deferred: service.py владеет другой агент).
+        with _apply_lock:
+            settings = self._cached_settings()
+            glossary: Dict[str, str] = dict(settings.get("translation_glossary") or {})
+            existing_lower: frozenset = frozenset(k.lower() for k in glossary)
 
-        applied = 0
-        skipped = 0
-        for sid in selected_ids:
-            sid_lo = sid.lower()
-            target = term_map.get(sid_lo)
-            if not target:
-                skipped += 1
-                continue
-            if sid_lo in {k.lower() for k in glossary}:
-                skipped += 1
-                continue
-            glossary[sid_lo] = target
-            applied += 1
+            applied = 0
+            skipped = 0
+            for sid in selected_ids:
+                sid_lo = sid.lower()
+                target = term_map.get(sid_lo)
+                if not target:
+                    skipped += 1
+                    continue
+                if sid_lo in existing_lower:
+                    skipped += 1
+                    continue
 
-        if applied > 0:
-            settings["translation_glossary"] = glossary
-            try:
-                saved = self._store.save_settings(settings)
-                self._invalidate_settings_cache()
-                total = len(saved.get("translation_glossary") or glossary)
-            except Exception as exc:
-                logger.error("apply_glossary_suggestions: save error: %s", exc)
+                # W1772 Fix 1: проверка лимита числа записей
+                if len(glossary) >= MAX_GLOSSARY_ENTRIES:
+                    logger.warning(
+                        "apply_glossary_suggestions: entry limit reached, skipping term",
+                        extra={
+                            "term": sid_lo,
+                            "glossary_size": len(glossary),
+                            "limit": MAX_GLOSSARY_ENTRIES,
+                        },
+                    )
+                    skipped += 1
+                    continue
+
+                # W1772 Fix 1: проверка длины термина в байтах
+                src_bytes = len(sid_lo.encode("utf-8"))
+                tgt_bytes = len(target.encode("utf-8"))
+                if src_bytes > MAX_TERM_BYTES:
+                    logger.warning(
+                        "apply_glossary_suggestions: source term too long, skipping",
+                        extra={
+                            "term": sid_lo,
+                            "bytes": src_bytes,
+                            "limit": MAX_TERM_BYTES,
+                        },
+                    )
+                    skipped += 1
+                    continue
+                if tgt_bytes > MAX_TERM_BYTES:
+                    logger.warning(
+                        "apply_glossary_suggestions: target term too long, skipping",
+                        extra={
+                            "term": sid_lo,
+                            "target_bytes": tgt_bytes,
+                            "limit": MAX_TERM_BYTES,
+                        },
+                    )
+                    skipped += 1
+                    continue
+
+                glossary[sid_lo] = target
+                existing_lower = existing_lower | {sid_lo}
+                applied += 1
+
+            if applied > 0:
+                settings["translation_glossary"] = glossary
+                try:
+                    saved = self._store.save_settings(settings)
+                    self._invalidate_settings_cache()
+                    total = len(saved.get("translation_glossary") or glossary)
+                except Exception as exc:
+                    logger.error(
+                        "apply_glossary_suggestions: save error: %s", exc,
+                        extra={"applied": applied},
+                    )
+                    total = len(glossary)
+            else:
                 total = len(glossary)
-        else:
-            total = len(glossary)
 
         return {"applied": applied, "skipped": skipped, "total_glossary": total}
