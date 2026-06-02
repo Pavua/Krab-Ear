@@ -159,6 +159,25 @@ if str(PROJECT_ROOT) not in sys.path:
 logger = logging.getLogger("KrabEar.Backend.Service")
 
 
+# wave1775: which EventBus events are forwarded to registered webhooks.
+# Kept deliberately narrow — only genuinely-meaningful, low-frequency lifecycle
+# events, NEVER high-frequency ones (recording.audio_level @ ~30 Hz,
+# stt.partial, realtime.partial_transcript) which would flood external endpoints.
+# To forward more events: add the type string here AND scrub any new PII fields
+# in BackendService._webhook_safe_payload().
+_WEBHOOK_FORWARDED_EVENTS: frozenset[str] = frozenset({
+    "stt.final",                # транскрибация завершена (EventType.STT_FINAL)
+    "translation.completed",    # перевод завершён (EventType.TRANSLATION_COMPLETED)
+})
+
+# Payload keys that carry user content (transcript / translation text) and must be
+# stripped before a webhook payload leaves the device.  Webhook consumers receive
+# only metadata (history_id, duration, language, confidence, …) by default.
+_WEBHOOK_PII_KEYS: frozenset[str] = frozenset({
+    "text", "translated_text", "source_text", "original_text", "segments",
+})
+
+
 class BackendService:
     """Бизнес-логика сервиса: запись, транскрибация, история и настройки."""
 
@@ -528,6 +547,49 @@ class BackendService:
         # get_event_log / get_event_stats / replay_events always return empty.
         event_bus._event_replay = self._event_replay
         self._webhook_manager = WebhookManager(data_dir=self.store.data_dir)
+        # wave1775: wire fire_webhook into the EventBus so REGISTERED webhooks actually
+        # FIRE.  Before this, register/list/unregister IPC handlers were wired but
+        # fire_webhook had ZERO production callers — users could register a webhook but
+        # nothing ever delivered to it (shipped-but-dead feature).
+        #
+        # Design:
+        #  - We register a single listener (_forward_event_to_webhooks) on the global bus.
+        #    The bus invokes it inline inside emit() for every event; fire_webhook returns
+        #    immediately (it submits to its own bounded ThreadPoolExecutor + retry path),
+        #    so the hot recording/STT thread is never blocked on network I/O.
+        #  - The forwarder only forwards genuinely-meaningful lifecycle events
+        #    (_WEBHOOK_FORWARDED_EVENTS) and strips transcript/translation text so the
+        #    default payload is PII-safe metadata only (history_id, duration, language,
+        #    confidence).  fire_webhook still applies per-webhook event filtering + the
+        #    SSRF-pinned, retrying delivery path.
+        #  - Privacy: WebhookManager has its own privacy gate (set_privacy_mode); we sync
+        #    it below from privacy_mode_enabled at startup and on every settings save.
+        #    Note STT_FINAL is additionally suppressed at its emit site in privacy mode
+        #    (recording_core_service), so this is defence-in-depth.
+        # Extension point: to forward more events, add their type strings to
+        # _WEBHOOK_FORWARDED_EVENTS and extend _webhook_safe_payload() to scrub any new
+        # PII fields they carry.
+        try:
+            event_bus.add_listener(self._forward_event_to_webhooks)
+        except Exception:
+            logger.exception("wave1775: failed to wire webhook EventBus listener")
+        # Sync the webhook privacy gate with the current persisted setting at startup,
+        # then keep it in sync via an after_save hook (mirrors _on_privacy_mode_off).
+        try:
+            self._webhook_manager.set_privacy_mode(
+                bool(self._get_runtime_setting("privacy_mode_enabled", False))
+            )
+        except Exception:
+            logger.exception("wave1775: failed to set initial webhook privacy_mode")
+
+        def _on_privacy_mode_webhooks(old: dict, new: dict) -> None:
+            old_privacy = bool(old.get("privacy_mode_enabled", False))
+            new_privacy = bool(new.get("privacy_mode_enabled", False))
+            if old_privacy != new_privacy:
+                # Suppress (or resume) webhook delivery to match privacy mode.
+                self._webhook_manager.set_privacy_mode(new_privacy)
+        self._settings_svc.register_after_save_hook(_on_privacy_mode_webhooks)
+
         self._sharing = SharingManager(store=self.store)
         self._merger = RecordingMerger()
         self._transcript_versioning = TranscriptVersionManager(data_dir=self.store.data_dir)
@@ -1041,6 +1103,49 @@ class BackendService:
             return self._cached_settings().get(key, default)
         except Exception:
             return default
+
+    @staticmethod
+    def _webhook_safe_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает PII-безопасную копию payload для отправки во внешний webhook.
+
+        Удаляет ключи с пользовательским контентом (текст транскрипта/перевода,
+        сегменты) — webhook-получатель по умолчанию видит только метаданные
+        (history_id, duration_sec, language, confidence и т.п.).  Это намеренно
+        консервативно: webhook-и уходят на внешние URL, поэтому транскрипт не
+        должен покидать устройство без явного opt-in (на сегодня opt-in нет —
+        расширяемая точка задокументирована у _WEBHOOK_FORWARDED_EVENTS).
+        """
+        if not isinstance(payload, dict):
+            return {}
+        return {k: v for k, v in payload.items() if k not in _WEBHOOK_PII_KEYS}
+
+    def _forward_event_to_webhooks(self, event_type: str, payload: dict[str, Any]) -> None:
+        """EventBus-листенер: доставляет lifecycle-события зарегистрированным webhook-ам.
+
+        Вызывается inline внутри EventBus.emit() для КАЖДОГО события (см.
+        EventBus.add_listener), поэтому:
+          - быстро отсеивает нерелевантные/высокочастотные события по allowlist;
+          - строит PII-безопасный payload (без текста транскрипта/перевода);
+          - вызывает fire_webhook, который возвращается немедленно (доставка идёт
+            в собственном bounded ThreadPoolExecutor + retry внутри WebhookManager),
+            так что горячий STT-поток не блокируется на сетевом I/O.
+
+        Privacy/SSRF/фильтрация по типу события на стороне WebhookManager:
+          - privacy_mode gate (set_privacy_mode, синхронизируется в __init__);
+          - per-webhook event filter (пустой список = все события);
+          - SSRF-pinned + retrying delivery path.
+        Исключения проглатываются — сбой доставки webhook не должен ломать pipeline
+        (EventBus.emit тоже оборачивает листенеры в try/except как доп. страховку).
+        """
+        if event_type not in _WEBHOOK_FORWARDED_EVENTS:
+            return
+        try:
+            safe_payload = self._webhook_safe_payload(payload)
+            self._webhook_manager.fire_webhook(event_type, safe_payload)
+        except Exception:
+            logger.warning(
+                "wave1775: webhook forward failed for event %s", event_type, exc_info=True
+            )
 
     def _trigger_auto_extract_action_items(
         self, item_id: str, text: str, language: str, duration_sec: float

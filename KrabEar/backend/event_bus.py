@@ -18,7 +18,7 @@ import logging
 import queue
 import threading
 from datetime import datetime, timezone
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from contracts.registry import EventType
 from pydantic import BaseModel
@@ -40,6 +40,15 @@ class EventBus:
         # Late-injected EventReplayManager — set after both objects are constructed.
         # When not None, every emitted event is also recorded in the replay ring buffer.
         self._event_replay: Any | None = None
+        # Synchronous push-listeners — registered via add_listener().  Unlike SSE
+        # subscribers (pull-based queues), listeners are server-side callbacks invoked
+        # inline inside emit() with (event_type, payload).  Used to forward lifecycle
+        # events to side-channels such as webhook delivery (WebhookManager.fire_webhook).
+        # The listener itself must be non-blocking (or dispatch its own work to a thread);
+        # emit() runs on the emitting thread (e.g. the STT pipeline), so a slow listener
+        # would stall that thread.  WebhookManager.fire_webhook already returns immediately
+        # (it submits to a bounded ThreadPoolExecutor), so it is safe to call inline.
+        self._listeners: list[Callable[[str, dict[str, Any]], None]] = []
 
     def subscribe(self) -> queue.Queue[dict[str, Any] | None]:
         """Регистрирует нового подписчика и возвращает его очередь.
@@ -61,6 +70,26 @@ class EventBus:
             except ValueError:
                 pass
         logger.debug("EventBus: подписчик отключён, осталось %d", len(self._subscribers))
+
+    def add_listener(self, callback: Callable[[str, dict[str, Any]], None]) -> None:
+        """Регистрирует синхронный server-side листенер событий.
+
+        Листенер вызывается внутри emit() с (event_type, payload) для КАЖДОГО
+        события. В отличие от SSE-подписчиков (pull-очереди), это push-callback на
+        стороне backend — используется, например, для доставки lifecycle-событий
+        во внешние webhook-и (WebhookManager.fire_webhook).
+
+        ВАЖНО: callback ДОЛЖЕН быть неблокирующим. emit() выполняется в потоке,
+        который публикует событие (например, STT-pipeline), поэтому медленный
+        листенер застопорит этот поток. WebhookManager.fire_webhook возвращает
+        управление немедленно (отправляет в ThreadPoolExecutor), поэтому безопасен.
+
+        Исключения внутри листенера логируются и проглатываются — один сбойный
+        листенер не должен ломать доставку события остальным подписчикам.
+        """
+        with self._lock:
+            self._listeners.append(callback)
+        logger.debug("EventBus: зарегистрирован листенер, всего %d", len(self._listeners))
 
     def emit(self, event_type: str, payload: dict[str, Any]) -> None:
         """Публикует событие всем активным подписчикам.
@@ -90,6 +119,17 @@ class EventBus:
                 self._event_replay.record_event(event_type, payload, ts=event["ts"])
             except Exception:
                 logger.warning("EventBus: не удалось записать событие %s в EventReplayManager", event_type, exc_info=True)
+        # Synchronous push-listeners (e.g. webhook forwarder).  Snapshot under the lock
+        # so a concurrent add_listener() during iteration can't mutate the list.
+        # Each listener is called defensively — a raising listener must not break the
+        # others or the pipeline that emitted the event.
+        with self._lock:
+            listeners = list(self._listeners)
+        for listener in listeners:
+            try:
+                listener(event_type, payload)
+            except Exception:
+                logger.warning("EventBus: листенер бросил исключение на событии %s", event_type, exc_info=True)
 
     def emit_typed(self, event_type: EventType, payload: BaseModel) -> None:
         """Типизированный emit — валидирует payload через Pydantic модель."""
