@@ -224,6 +224,21 @@ class PlaybackTracker:
 
         return result[:limit]
 
+    def clear_all(self) -> None:
+        """W1765: полная очистка всей статистики воспроизведения для privacy-purge.
+
+        Удаляет из памяти и с диска playback_stats.json (счётчики воспроизведения /
+        суммарное время прослушивания — косвенные ПДн, раскрывают паттерны).
+
+        Атомарность: выполняется под self._lock. При ошибке unlink исключение
+        всплывает наружу — handle_purge_all_data зарегистрирует шаг в secondary_errors.
+        """
+        with self._lock:
+            self._stats.clear()
+            if self._path is not None:
+                self._path.unlink(missing_ok=True)
+        _log.info("clear_all: playback_stats.json удалён (privacy-purge)")
+
     def remove_stats(self, item_id: str) -> bool:
         """Удаляет статистику воспроизведения для указанной записи.
 
