@@ -631,6 +631,12 @@ class BackendService:
         # W1766 #10 (MED): wire obsidian_sync into HistoryService so
         # handle_purge_all_data can delete synced .md files from the vault.
         self._history._obsidian_sync = self._obsidian_sync
+        # W1767: wire translation_cache, vocabulary, settings_svc + settings_backup
+        # into HistoryService so handle_purge_all_data can erase all PII-bearing artefacts.
+        self._history._translation_cache = self._translation_cache
+        self._history._vocabulary_store = self.vocabulary
+        self._history._settings_svc = self._settings_svc
+        self._history._settings_backup = self._settings_svc._backup
         self._call_session_service = CallSessionService(
             store=self._call_session_store,
             auto_end=self._call_auto_end,

@@ -118,6 +118,12 @@ class HistoryService:
         # W1766: Obsidian vault содержит полные транскрипции и переживает purge без wire.
         self._webhook_manager: Any = None   # WebhookManager — webhooks.json
         self._obsidian_sync: Any = None     # ObsidianSyncManager — vault .md files
+        # W1767: новые collaborators для privacy-purge.
+        # Все поля заполняются late-inject из BackendService.__init__.
+        self._translation_cache: Any = None  # TranslationCache — translation_cache.json
+        self._vocabulary_store: Any = None   # VocabularyStore — vocabulary.json
+        self._settings_svc: Any = None       # SettingsService — для invalidate_cache()
+        self._settings_backup: Any = None    # SettingsBackup — settings_backups/
 
     # ------------------------------------------------------------------
     # Privacy helpers
@@ -1805,6 +1811,104 @@ class HistoryService:
                     "purge_all_data: obsidian_sync.purge_all_synced_files failed", exc_info=True
                 )
                 secondary_errors.append("obsidian")
+
+        # --- 12. W1767 #2 (HIGH): удалить migration backups (<data_dir>/backups/) ---
+        # DataMigrator._create_backup() копирует history.ndjson и settings.json в
+        # <data_dir>/backups/migration_backup_<ts>/.  Полные снапшоты истории
+        # сохраняются там бессрочно и переживают purge без этого шага.
+        try:
+            import shutil as _shutil
+            _backups_dir = Path(self.store.data_dir) / "backups"
+            if _backups_dir.is_dir():
+                _backup_count = sum(1 for _ in _backups_dir.iterdir() if _.is_dir())
+                _shutil.rmtree(_backups_dir, ignore_errors=True)
+                logger.info(
+                    "purge_all_data: удалено %d migration backup директорий из %s",
+                    _backup_count,
+                    _backups_dir,
+                )
+        except Exception:
+            logger.warning("purge_all_data: удаление backups/ не удалось", exc_info=True)
+            secondary_errors.append("backups")
+
+        # --- 13. W1767 #3 (HIGH): удалить shares/ и shares_index.json ---
+        # SharingManager сохраняет полный текст транскрипций в <data_dir>/shares/
+        # и индекс в <data_dir>/shares/shares_index.json.  Пакеты содержат STT-текст
+        # и переживают purge без этого шага.
+        try:
+            import shutil as _shutil
+            _shares_dir = Path(self.store.data_dir) / "shares"
+            if _shares_dir.is_dir():
+                _shutil.rmtree(_shares_dir, ignore_errors=True)
+                logger.info("purge_all_data: удалена директория shares/")
+        except Exception:
+            logger.warning("purge_all_data: удаление shares/ не удалось", exc_info=True)
+            secondary_errors.append("shares")
+
+        # --- 14. W1767 #7 (MED): очистить translation_cache.json ---
+        # TranslationCache хранит хэш→переведённый_текст (LRU до 5000 записей).
+        # Переводы транскрипций содержат PII и переживают purge без этого шага.
+        # clear() захватывает _lock, очищает OrderedDict + записывает пустой JSON,
+        # затем удаляет файл; атомарно через tmp→replace.
+        if self._translation_cache is not None:
+            try:
+                self._translation_cache.clear()
+                # После clear() файл translation_cache.json содержит пустой {}.
+                # Физически удаляем его тоже, чтобы не оставлять даже пустой артефакт.
+                _cache_path = Path(self.store.data_dir) / "translation_cache.json"
+                _cache_path.unlink(missing_ok=True)
+                logger.info("purge_all_data: translation_cache.json очищен и удалён")
+            except Exception:
+                logger.warning("purge_all_data: очистка translation_cache не удалась", exc_info=True)
+                secondary_errors.append("translation_cache")
+
+        # --- 15. W1767 #8 (MED): сбросить glossary в settings.json ---
+        # translation_glossary хранится в settings.json как {"source": "target", ...}.
+        # Словари могут содержать имена собственных и другие ПДн.
+        # Используем store.save_settings для атомарной перезаписи файла.
+        try:
+            _current_settings = self.store.load_settings()
+            if _current_settings.get("translation_glossary"):
+                _current_settings["translation_glossary"] = {}
+                self.store.save_settings(_current_settings)
+                # Инвалидируем TTL-кэш настроек, если доступен
+                if self._settings_svc is not None:
+                    try:
+                        self._settings_svc.invalidate_cache()
+                    except Exception:
+                        pass  # invalidate failure не блокирует purge
+                logger.info("purge_all_data: translation_glossary сброшен в settings.json")
+        except Exception:
+            logger.warning("purge_all_data: сброс translation_glossary не удался", exc_info=True)
+            secondary_errors.append("translation_glossary")
+
+        # --- 16. W1767 #9 (MED): очистить vocabulary.json ---
+        # VocabularyStore хранит пользовательский словарь STT (слова для Whisper hotword bias).
+        # Словарь может содержать имена, термины и другие ПДн пользователя.
+        # clear_all() захватывает _lock и удаляет vocabulary.json с диска.
+        if self._vocabulary_store is not None:
+            try:
+                self._vocabulary_store.clear_all()
+                logger.info("purge_all_data: vocabulary.json удалён")
+            except Exception:
+                logger.warning("purge_all_data: очистка vocabulary_store не удалась", exc_info=True)
+                secondary_errors.append("vocabulary")
+
+        # --- 17. W1767 #10 (MED): удалить settings_backups/ ---
+        # SettingsBackup сохраняет rolling-снапшоты settings.json в
+        # ~/Library/Application Support/KrabEar/settings_backups/ (или KRAB_EAR_SETTINGS_BACKUP_DIR).
+        # Бэкапы могут содержать glossary и другие настройки с PII.
+        # Путь читается из SettingsBackup.get_backup_dir() — уважает env override.
+        if self._settings_backup is not None:
+            try:
+                import shutil as _shutil
+                _sb_dir = self._settings_backup.get_backup_dir()
+                if _sb_dir is not None and Path(_sb_dir).is_dir():
+                    _shutil.rmtree(Path(_sb_dir), ignore_errors=True)
+                    logger.info("purge_all_data: settings_backups/ удалён: %s", _sb_dir)
+            except Exception:
+                logger.warning("purge_all_data: удаление settings_backups/ не удалось", exc_info=True)
+                secondary_errors.append("settings_backups")
 
         # --- C. W1734: Audit log entry ---
         try:
