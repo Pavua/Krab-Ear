@@ -16,6 +16,7 @@ from backend.observability import add_breadcrumb
 from core.language_detector import LanguageDetector
 
 if TYPE_CHECKING:
+    from backend.settings_service import SettingsService
     from backend.state_store import StateStore
     from backend.translator import Translator
     from backend.vocabulary_store import VocabularyStore
@@ -76,12 +77,16 @@ class TranslationService:
         cached_settings: Callable[[], dict[str, Any]],
         invalidate_settings_cache: Callable[[], None],
         vocabulary_store: "VocabularyStore | None" = None,
+        settings_svc: "SettingsService | None" = None,
     ) -> None:
         self.translator = translator
         self.store = store
         self._cached_settings = cached_settings
         self._invalidate_settings_cache = invalidate_settings_cache
         self._vocabulary_store = vocabulary_store
+        # W1767: инъекция SettingsService для атомарного read-modify-write глоссария
+        # через _save_lock, предотвращающая TOCTOU lost-update.
+        self._settings_svc: "SettingsService | None" = settings_svc
         self._lang_detector = LanguageDetector()
 
     def handle_translate_text(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -245,12 +250,35 @@ class TranslationService:
             "latency_ms": latency_ms,
         }
 
-    def handle_set_translation_glossary_item(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Добавляет/обновляет одну пару глоссария перевода."""
-        source = str(params.get("source", "")).strip()
-        target = str(params.get("target", "")).strip()
-        if not source or not target:
-            raise RuntimeError("source и target обязательны")
+    # ------------------------------------------------------------------
+    # W1767: атомарный read-modify-write глоссария через _save_lock
+    # ------------------------------------------------------------------
+
+    def _locked_set_glossary_item(self, source: str, target: str) -> int:
+        """Атомарно добавляет/обновляет пару глоссария под _save_lock SettingsService.
+
+        Если _settings_svc инжектирован — операция выполняется под его RLock
+        (разделяемым со всеми записями настроек), что предотвращает TOCTOU
+        lost-update при конкурентных вызовах set_settings / set_translation_glossary_item.
+
+        Fallback (без settings_svc): прежнее поведение через store.save_settings.
+        Возвращает итоговый размер глоссария.
+        """
+        if self._settings_svc is not None:
+            # Атомарный путь: вся операция read→merge→write под одним lock
+            with self._settings_svc._save_lock:
+                current = self._settings_svc.cached_settings()
+                glossary = dict(current.get("translation_glossary", {}) or {})
+                glossary[source] = target
+                # Обновляем через locked-путь SettingsService напрямую
+                result = self._settings_svc._handle_set_settings_locked(
+                    {"translation_glossary": glossary}
+                )
+                saved_glossary = result.get("translation_glossary", glossary)
+                if isinstance(saved_glossary, dict):
+                    return len(saved_glossary)
+                return len(glossary)
+        # Fallback: прежнее поведение (без lock-защиты)
         settings = self._cached_settings()
         glossary = settings.get("translation_glossary", {})
         if not isinstance(glossary, dict):
@@ -259,7 +287,49 @@ class TranslationService:
         settings["translation_glossary"] = glossary
         saved = self.store.save_settings(settings)
         self._invalidate_settings_cache()
-        glossary_count = len(saved.get("translation_glossary", {}))
+        return len(saved.get("translation_glossary", {}))
+
+    def _locked_remove_glossary_item(self, source: str) -> int:
+        """Атомарно удаляет пару глоссария под _save_lock SettingsService.
+
+        Аналогичная защита от TOCTOU что и _locked_set_glossary_item.
+        Возвращает итоговый размер глоссария.
+        """
+        if self._settings_svc is not None:
+            with self._settings_svc._save_lock:
+                current = self._settings_svc.cached_settings()
+                glossary = dict(current.get("translation_glossary", {}) or {})
+                glossary.pop(source, None)
+                result = self._settings_svc._handle_set_settings_locked(
+                    {"translation_glossary": glossary}
+                )
+                saved_glossary = result.get("translation_glossary", glossary)
+                if isinstance(saved_glossary, dict):
+                    return len(saved_glossary)
+                return len(glossary)
+        # Fallback: прежнее поведение (без lock-защиты)
+        settings = self._cached_settings()
+        glossary = settings.get("translation_glossary", {})
+        if not isinstance(glossary, dict):
+            glossary = {}
+        glossary.pop(source, None)
+        settings["translation_glossary"] = glossary
+        saved = self.store.save_settings(settings)
+        self._invalidate_settings_cache()
+        return len(saved.get("translation_glossary", {}))
+
+    def handle_set_translation_glossary_item(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Добавляет/обновляет одну пару глоссария перевода.
+
+        W1767: запись выполняется через _locked_set_glossary_item, которая
+        удерживает SettingsService._save_lock на всё время read-modify-write,
+        исключая TOCTOU lost-update при конкурентных записях настроек.
+        """
+        source = str(params.get("source", "")).strip()
+        target = str(params.get("target", "")).strip()
+        if not source or not target:
+            raise RuntimeError("source и target обязательны")
+        glossary_count = self._locked_set_glossary_item(source, target)
         add_breadcrumb(
             category="translation",
             message="set_translation_glossary_item",
@@ -273,19 +343,16 @@ class TranslationService:
         return {"updated": True, "count": glossary_count}
 
     def handle_remove_translation_glossary_item(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Удаляет одну пару из глоссария перевода."""
+        """Удаляет одну пару из глоссария перевода.
+
+        W1767: запись выполняется через _locked_remove_glossary_item под
+        SettingsService._save_lock — атомарный read-modify-write.
+        """
         source = str(params.get("source", "")).strip()
         if not source:
             raise RuntimeError("source обязателен")
-        settings = self._cached_settings()
-        glossary = settings.get("translation_glossary", {})
-        if not isinstance(glossary, dict):
-            glossary = {}
-        glossary.pop(source, None)
-        settings["translation_glossary"] = glossary
-        saved = self.store.save_settings(settings)
-        self._invalidate_settings_cache()
-        return {"removed": True, "count": len(saved.get("translation_glossary", {}))}
+        glossary_count = self._locked_remove_glossary_item(source)
+        return {"removed": True, "count": glossary_count}
 
     def handle_get_glossary_suggestions(self, params: dict[str, Any]) -> dict[str, Any]:
         """Анализирует историю переводов и предлагает пары source→target для глоссария.

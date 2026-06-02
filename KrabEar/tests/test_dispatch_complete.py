@@ -877,29 +877,27 @@ class TestAudioUtilsGroup(_DispatchBase):
 class TestTranscriptionQueueGroup(_DispatchBase):
     """Очередь транскрипции.
 
-    W924/W949: TranscriptionQueue IPC handlers removed from dispatch (dead code).
-    process_next() was never called in production; handlers are skipped until a
-    daemon worker thread is wired (see transcription_queue.py module docstring).
+    W1767: Обработчики снова зарегистрированы в dispatch (ipc_dispatch.py строки 233-236).
+    process_next() не вызывается фоновым потоком, но IPC-методы живы и тестируются.
     """
 
-    @unittest.skip("W949: TranscriptionQueue removed from dispatch (dead code — W924)")
     def test_list_transcription_queue(self):
         self.assert_dispatch("list_transcription_queue", ok_required=True)
 
-    @unittest.skip("W949: TranscriptionQueue removed from dispatch (dead code — W924)")
     def test_enqueue_transcription(self):
+        # file_path обязателен; /nonexistent.wav допустимый путь — enqueue его поставит
         self.assert_dispatch("enqueue_transcription", {
-            "path": "/nonexistent.wav",
+            "file_path": "/nonexistent.wav",
             "priority": 5,
-        })
+        }, ok_required=True)
 
-    @unittest.skip("W949: TranscriptionQueue removed from dispatch (dead code — W924)")
     def test_cancel_transcription(self):
-        self.assert_dispatch("cancel_transcription", {"job_id": "fake"})
+        # job_id "fake" не существует — cancelled=False, но ok=True (graceful)
+        self.assert_dispatch("cancel_transcription", {"job_id": "fake"}, ok_required=True)
 
-    @unittest.skip("W949: TranscriptionQueue removed from dispatch (dead code — W924)")
     def test_get_queue_status(self):
-        self.assert_dispatch("get_queue_status", {"job_id": "fake"})
+        # job_id "fake" не существует — возвращает {"error": "not_found"}, ok=True
+        self.assert_dispatch("get_queue_status", {"job_id": "fake"}, ok_required=True)
 
 
 # ===========================================================================
@@ -1340,8 +1338,10 @@ class TestMethodCountSummary(_DispatchBase):
         "get_learning_stats",
         "get_analytics_dashboard", "get_topic_timeline",
         "list_config_presets", "apply_config_preset", "create_config_preset",
-        # W949: enqueue_transcription, cancel_transcription, get_queue_status,
-        # list_transcription_queue removed — TranscriptionQueue is dead code (W924).
+        # W1767: enqueue_transcription, cancel_transcription, get_queue_status,
+        # list_transcription_queue — TranscriptionQueue снова live в dispatch.
+        "enqueue_transcription", "cancel_transcription",
+        "get_queue_status", "list_transcription_queue",
         "detect_emotion",
         "estimate_recording_cost", "get_daily_cost_summary",
         "check_migration", "run_migration",
