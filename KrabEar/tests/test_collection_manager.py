@@ -383,5 +383,157 @@ class CollectionManagerAtomicSaveTestCase(unittest.TestCase):
         self.assertEqual(col["item_count"], 1)
 
 
+class CollectionManagerSaveFailurePropagatesTestCase(unittest.TestCase):
+    """FINDING 1 (MED W1769): сбой записи на диск НЕ должен возвращать ложный успех.
+
+    Раньше _save() проглатывал любое исключение записи и возвращался нормально,
+    из-за чего мутирующие методы возвращали {ok/deleted: true}, хотя ничего не
+    записывалось. Теперь _save() пробрасывает исключение, а мутирующие методы
+    дают ему распространиться → IPC-обработчик вернёт error-конверт (ok:false).
+
+    Паттерн fail-before/pass-after: патчим атомарную запись (os.replace) так,
+    чтобы она бросала OSError, и проверяем, что метод теперь поднимает исключение,
+    а НЕ возвращает успех.
+    """
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._store = FakeStore(data_dir=self._tmpdir)
+        self._mgr = CollectionManager(store=self._store)
+
+    def test_create_collection_raises_on_save_failure(self) -> None:
+        from unittest import mock
+
+        with mock.patch(
+            "backend.collection_manager.os.replace",
+            side_effect=OSError(28, "No space left on device"),
+        ):
+            with self.assertRaises(OSError):
+                self._mgr.create_collection("СбойДиска")
+
+    def test_delete_collection_raises_on_save_failure(self) -> None:
+        from unittest import mock
+
+        self._mgr.create_collection("ДляУдаления")
+        with mock.patch(
+            "backend.collection_manager.os.replace",
+            side_effect=OSError(13, "Permission denied"),
+        ):
+            with self.assertRaises(OSError):
+                self._mgr.delete_collection("ДляУдаления")
+
+    def test_add_to_collection_raises_on_save_failure(self) -> None:
+        from unittest import mock
+
+        self._mgr.create_collection("ДляДобавления")
+        self._store.add_fake_item("item-1", "текст")
+        with mock.patch(
+            "backend.collection_manager.os.replace",
+            side_effect=OSError(30, "Read-only file system"),
+        ):
+            with self.assertRaises(OSError):
+                self._mgr.add_to_collection("ДляДобавления", "item-1")
+
+    def test_remove_from_collection_raises_on_save_failure(self) -> None:
+        from unittest import mock
+
+        self._mgr.create_collection("ДляСнятия")
+        self._store.add_fake_item("item-2", "текст")
+        self._mgr.add_to_collection("ДляСнятия", "item-2")
+        with mock.patch(
+            "backend.collection_manager.os.replace",
+            side_effect=OSError(28, "No space left on device"),
+        ):
+            with self.assertRaises(OSError):
+                self._mgr.remove_from_collection("ДляСнятия", "item-2")
+
+    def test_rename_collection_raises_on_save_failure(self) -> None:
+        from unittest import mock
+
+        self._mgr.create_collection("СтароеИмя")
+        with mock.patch(
+            "backend.collection_manager.os.replace",
+            side_effect=OSError(13, "Permission denied"),
+        ):
+            with self.assertRaises(OSError):
+                self._mgr.rename_collection("СтароеИмя", "НовоеИмя")
+
+    def test_save_failure_logs_without_pii(self) -> None:
+        """_save() при сбое логирует тип ошибки, но НЕ имя/описание коллекции."""
+        import logging
+        from unittest import mock
+
+        with mock.patch(
+            "backend.collection_manager.os.replace",
+            side_effect=OSError(28, "No space left on device"),
+        ):
+            with self.assertLogs(
+                "KrabEar.Backend.CollectionManager", level=logging.ERROR
+            ) as cm:
+                with self.assertRaises(OSError):
+                    self._mgr.create_collection("СекретноеИмя", "секретное описание")
+
+        joined = "\n".join(cm.output)
+        # Имя/описание (free-text PII) не должны утечь в лог.
+        self.assertNotIn("СекретноеИмя", joined)
+        self.assertNotIn("секретное описание", joined)
+
+
+class CollectionManagerPurgeAllTestCase(unittest.TestCase):
+    """FINDING 2 (MED W1769): purge_all() стирает collections.json + .tmp и память."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._store = FakeStore(data_dir=self._tmpdir)
+        self._mgr = CollectionManager(store=self._store)
+
+    def test_purge_all_removes_file_and_clears_memory(self) -> None:
+        self._mgr.create_collection("Работа", "конфиденциальное описание")
+        self._store.add_fake_item("h1", "текст")
+        self._mgr.add_to_collection("Работа", "h1")
+
+        col_path = Path(self._tmpdir) / "collections.json"
+        self.assertTrue(col_path.exists(), "Файл должен существовать до purge_all")
+
+        self._mgr.purge_all()
+
+        # Файл удалён с диска.
+        self.assertFalse(col_path.exists(), "collections.json должен быть удалён")
+        # In-memory состояние пустое.
+        self.assertEqual(self._mgr.list_collections(), [])
+        # Свежий менеджер не видит коллекций (PII не переживает purge).
+        mgr2 = CollectionManager(store=self._store)
+        self.assertEqual(mgr2.list_collections(), [])
+
+    def test_purge_all_removes_tmp_sibling(self) -> None:
+        """purge_all() удаляет осиротевший .tmp-файл от прерванной записи."""
+        self._mgr.create_collection("ЕстьЧтоУдалять")
+        tmp_path = (Path(self._tmpdir) / "collections.json").with_suffix(
+            ".json.tmp"
+        )
+        # Эмулируем .tmp, оставшийся от прерванной атомарной записи.
+        tmp_path.write_text("{}", encoding="utf-8")
+        self.assertTrue(tmp_path.exists())
+
+        self._mgr.purge_all()
+
+        self.assertFalse(tmp_path.exists(), ".tmp-сосед должен быть удалён")
+
+    def test_purge_all_idempotent_second_call_noop(self) -> None:
+        """Повторный purge_all() при отсутствии файлов не бросает исключений."""
+        self._mgr.create_collection("Разово")
+        self._mgr.purge_all()
+        # Второй вызов на уже пустом состоянии/отсутствующем файле — no-op.
+        self._mgr.purge_all()
+        self.assertEqual(self._mgr.list_collections(), [])
+
+    def test_purge_all_on_fresh_manager_no_file(self) -> None:
+        """purge_all() на менеджере без единой записи (файла нет) — no-op."""
+        col_path = Path(self._tmpdir) / "collections.json"
+        self.assertFalse(col_path.exists())
+        self._mgr.purge_all()  # не должно бросать
+        self.assertEqual(self._mgr.list_collections(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

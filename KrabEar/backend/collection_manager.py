@@ -68,6 +68,15 @@ class CollectionManager:
 
         Запись через временный файл рядом с целевым предотвращает повреждение
         collections.json при сбое в середине записи.
+
+        FINDING 1 (MED W1769 — silent failure): раньше любое исключение записи
+        (диск полон / EACCES / read-only FS) проглатывалось — метод логировал
+        ошибку и возвращался нормально. Из-за этого create/delete/add/remove/rename
+        мутировали состояние в памяти, «успешно» возвращали {ok/deleted: true},
+        но НИЧЕГО не писалось на диск → ложный успех; после рестарта изменение
+        терялось (удалённая коллекция возвращалась). Теперь исключение логируется
+        (структурно, без PII — только тип ошибки) и пробрасывается дальше, чтобы
+        вызвавший IPC-метод вернул error-конверт (ok:false), а не ok:true.
         """
         try:
             self._data_dir.mkdir(parents=True, exist_ok=True)
@@ -80,7 +89,45 @@ class CollectionManager:
                 os.fsync(fh.fileno())
             os.replace(tmp, self._collections_path)
         except Exception as exc:
-            logger.error("Не удалось сохранить коллекции: %s", exc)
+            # Структурный лог без PII: пишем только тип исключения, никогда —
+            # имена/описания коллекций (free-text PII) или item_ids.
+            logger.error(
+                "Не удалось сохранить коллекции (изменение НЕ записано на диск)",
+                extra={"error": type(exc).__name__},
+            )
+            # Пробрасываем, чтобы мутирующие методы не вернули ложный успех.
+            raise
+
+    def purge_all(self) -> None:
+        """Полная очистка всех коллекций (privacy-wipe).
+
+        FINDING 2 (MED W1769 — purge-gap): collections.json хранит
+        пользовательские имена и описания коллекций (free-text PII) вместе со
+        ссылками на item_ids истории и переживал purge_all_data. Метод закрывает
+        этот пробел:
+          1. Захватывает _lock.
+          2. Сбрасывает in-memory реестр в пустое состояние.
+          3. Удаляет collections.json с диска (missing_ok=True).
+          4. Удаляет .tmp-сосед (мог остаться от прерванной атомарной записи).
+
+        Гарантирует отсутствие PII после возврата. Идемпотентен: повторный вызов
+        при отсутствии файлов не бросает исключений.
+        """
+        with self._lock:
+            self._data = {"collections": {}}
+            tmp_path = self._collections_path.with_suffix(
+                self._collections_path.suffix + ".tmp"
+            )
+            for path in (self._collections_path, tmp_path):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as exc:
+                    # Структурный лог без PII — только тип ошибки.
+                    logger.warning(
+                        "CollectionManager.purge_all: не удалось удалить файл",
+                        extra={"error": type(exc).__name__},
+                    )
+            logger.info("CollectionManager: коллекции очищены (purge_all)")
 
     # ------------------------------------------------------------------
     # Публичный API
