@@ -640,5 +640,135 @@ class TestW1136Fixes(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# TestW1769SampleTimeAnchor — wall-clock vs sample-count drift
+# ---------------------------------------------------------------------------
+class _DriftRecorder:
+    """Стаб-рекордер, в котором wall-clock РАСХОДИТСЯ с числом семплов.
+
+    Имитирует реальный ``AudioRecorder``: ``snapshot_audio`` отдаёт хвост
+    буфера (семплы) + НАСТЕННОЕ время записи (``time.monotonic()`` дрейф),
+    а ``_chunks_total_samples`` — истинное число буферизованных семплов.
+
+    Сценарий: процессинг-стол / задержка / потеря аудио-кадров → wall-clock
+    ушёл вперёд относительно реально записанных семплов.
+    """
+
+    def __init__(
+        self,
+        audio: np.ndarray,
+        wallclock_duration_sec: float,
+        sample_rate: int = SAMPLE_RATE,
+    ):
+        self._audio = audio
+        self.sample_rate = sample_rate
+        self.is_recording: bool = True
+        # Истинное число буферизованных семплов (как O(1)-счётчик рекордера).
+        self._chunks_total_samples = int(audio.size)
+        # Настенное время — намеренно БОЛЬШЕ, чем audio.size / sr (дрейф вперёд).
+        self._wallclock_duration_sec = float(wallclock_duration_sec)
+
+    def snapshot_audio(self, max_duration_sec: float):
+        n = min(len(self._audio), int(max_duration_sec * self.sample_rate))
+        window = self._audio[-n:] if n > 0 else np.zeros(0, dtype=np.float32)
+        # Возвращаем ИМЕННО wall-clock duration (а не len/sr) — здесь и кроется
+        # рассинхрон, который ломал прежний якорь окна.
+        return window, self._wallclock_duration_sec
+
+
+class TestW1769SampleTimeAnchor(unittest.TestCase):
+    """W1769 — диапазоны тишины якорятся к семпл-времени, не к wall-clock.
+
+    Регрессия: ``_check_once`` строил ``window_start_sec`` из ``total_duration``
+    (настенные часы), но ``detect_silence`` даёт смещения в семпл-времени, а
+    ``zero_silence_ranges`` обнуляет по индексу семплов. При дрейфе настенных
+    часов вперёд относительно числа буферизованных семплов диапазоны уезжали
+    и обнуляли РЕАЛЬНУЮ речь (или промахивались мимо тишины).
+    """
+
+    # Раскладка буфера: [тишина 0–10с) + [речь 10–20с). Окно = весь буфер.
+    # При дрейфе wall-clock=25с прежний якорь = 25-20 = 5с → диапазон [5,15],
+    # что обнуляет семплы [80000,240000] → первые 5с РЕЧИ (160000..240000)!
+    def _build_silence_then_speech(self):
+        silence = _make_silence(10.0)
+        speech = _make_speech(10.0)
+        return np.concatenate([silence, speech]).astype(np.float32)
+
+    def test_drift_does_not_zero_real_speech(self):
+        """fail-before/pass-after: дрейф wall-clock НЕ обнуляет реальную речь."""
+        buffer = self._build_silence_then_speech()  # 20с, 320000 семплов
+        speech_start = int(10.0 * SAMPLE_RATE)  # 160000
+
+        # Wall-clock ушёл на 5с вперёд относительно реально записанных семплов.
+        recorder = _DriftRecorder(buffer, wallclock_duration_sec=25.0)
+        settings = {
+            "realtime_silence_filter_enabled": True,
+            "rt_silence_check_sec": 60.0,  # без авто-тика — зовём вручную
+            "rt_silence_window_sec": 20.0,  # окно = весь буфер
+            "rt_silence_max_sec": 4.0,
+        }
+        rsf = RealtimeSilenceFilter(recorder, settings)
+        rsf._check_once()
+        ranges = rsf.get_silence_ranges()
+
+        self.assertGreater(len(ranges), 0, "Тишина 10с должна быть обнаружена")
+
+        # Применяем маску к ИТОГОВОМУ буферу (как делает engine.transcribe).
+        masked = zero_silence_ranges(buffer, ranges, sample_rate=SAMPLE_RATE)
+
+        # Главное утверждение: НАЧАЛО речи (10–13с) сохранено. Прежний баг давал
+        # диапазон ≈[5,15] и обнулял семплы [80000,240000] → первые ~5с РЕЧИ
+        # (160000..240000) уничтожались. ``np.max`` по всему хвосту это пропускал
+        # (вторая половина речи выживала), поэтому проверяем ИМЕННО начало речи.
+        early_speech = masked[speech_start:speech_start + int(3.0 * SAMPLE_RATE)]
+        self.assertGreater(
+            float(np.max(np.abs(early_speech))),
+            0.1,
+            "НАЧАЛО реальной речи (10–13с) не должно обнуляться при дрейфе wall-clock",
+        )
+        # Вся речь целиком тоже не должна быть обнулена в среднем (sanity).
+        speech_after = masked[speech_start:]
+        nonzero_ratio = float(np.count_nonzero(speech_after)) / float(speech_after.size)
+        self.assertGreater(
+            nonzero_ratio, 0.95,
+            "Подавляющее большинство семплов речи должно сохраниться",
+        )
+        # И тишина (0–10с) действительно подавлена (поведение сохранено).
+        silence_after = masked[:speech_start]
+        self.assertTrue(
+            np.all(silence_after == 0),
+            "Диапазон тишины должен быть обнулён (suppression сохранён)",
+        )
+        # Диапазоны должны лежать в области тишины [0,10], а не уезжать в речь [5,15].
+        for s, e in ranges:
+            self.assertLess(
+                e, 10.0 + 0.05,
+                f"end={e} должен оставаться в зоне тишины [0,10], а не залезать в речь",
+            )
+
+    def test_aligned_case_still_suppresses_silence(self):
+        """Контроль: при совпадении wall-clock и семплов тишина подавляется."""
+        buffer = self._build_silence_then_speech()  # тишина[0,10)+речь[10,20)
+        speech_start = int(10.0 * SAMPLE_RATE)
+
+        # Aligned: wall-clock == len(audio)/sr == 20.0.
+        recorder = _DriftRecorder(buffer, wallclock_duration_sec=20.0)
+        settings = {
+            "realtime_silence_filter_enabled": True,
+            "rt_silence_check_sec": 60.0,
+            "rt_silence_window_sec": 20.0,
+            "rt_silence_max_sec": 4.0,
+        }
+        rsf = RealtimeSilenceFilter(recorder, settings)
+        rsf._check_once()
+        ranges = rsf.get_silence_ranges()
+
+        self.assertGreater(len(ranges), 0, "Тишина должна быть обнаружена")
+        masked = zero_silence_ranges(buffer, ranges, sample_rate=SAMPLE_RATE)
+        # Тишина обнулена, речь сохранена.
+        self.assertTrue(np.all(masked[:speech_start] == 0))
+        self.assertGreater(float(np.max(np.abs(masked[speech_start:]))), 0.1)
+
+
 if __name__ == "__main__":
     unittest.main()
