@@ -438,41 +438,16 @@ class TestWave117DuplicateDetector(unittest.TestCase):
         self.assertTrue(self.det.is_duplicate("hello world", "hello world"))
 
 
-class TransitiveGroupingTestCase(unittest.TestCase):
-    """W1004 F1 — union-find транзитивная группировка.
+class NonTransitiveGroupingTestCase(unittest.TestCase):
+    """W1004 F1 — Центроидная группировка (отказ от union-find).
 
-    Если A≈B и B≈C, но A≉C, то все три должны оказаться в одной группе.
-    Наивный алгоритм пропускает C, потому что B уже назначен в группу A
-    до того как C начинает итерацию.
+    Группировка происходит строго вокруг лидера (первого элемента кластера),
+    чтобы избежать транзитивного дрейфа (когда A≈B и B≈C приводит к ошибочному A≈C).
     """
 
     def setUp(self) -> None:
         self.det = DuplicateDetector()
         self.base_ts = 1_700_000_000.0
-
-    def test_transitive_grouping_A_B_C_all_in_one_group(self) -> None:
-        """A≈B и B≈C → {A, B, C} в одной группе (транзитивность через union-find)."""
-        # A — исходное длинное предложение
-        text_a = "Это длинная транскрипция для проверки транзитивного объединения групп"
-        # B — почти идентично A (одно слово отличается в конце)
-        text_b = "Это длинная транскрипция для проверки транзитивного объединения группы"
-        # C — почти идентично B, но немного отличается от A
-        text_c = "Это длинная транскрипция для проверки транзитивного объединения группе"
-
-        items = [
-            {"text": text_a, "ts": self.base_ts},
-            {"text": text_b, "ts": self.base_ts + 5},
-            {"text": text_c, "ts": self.base_ts + 10},
-        ]
-
-        groups = self.det.find_duplicates(items, similarity_threshold=0.9)
-
-        # Все три элемента должны быть в одной группе
-        self.assertEqual(len(groups), 1, f"Ожидалась 1 группа, получено: {len(groups)}")
-        self.assertEqual(
-            len(groups[0].items), 3,
-            f"Группа должна содержать 3 элемента, содержит: {len(groups[0].items)}"
-        )
 
     def test_non_transitive_items_form_separate_groups(self) -> None:
         """Несвязанные пары образуют отдельные группы, не сливаются."""
@@ -493,19 +468,33 @@ class TransitiveGroupingTestCase(unittest.TestCase):
         sizes = sorted(len(g.items) for g in groups)
         self.assertEqual(sizes, [2, 2])
 
-    def test_single_chain_A_B_C_D_all_merged(self) -> None:
-        """Цепочка A≈B≈C≈D → все четыре в одной группе."""
-        base = "Транскрипция заседания совета директоров компании на тему стратегии"
+    def test_transitive_drift_prevented(self) -> None:
+        """Дрейф предотвращается: если A≈B, но A≉C, то C не добавляется в группу A.
+        Даже если B≈C.
+        """
+        # A, B, C где A≈B, B≈C, но A≉C
+        text_a = "alpha beta gamma delta epsilon"
+        text_b = "beta gamma delta epsilon zeta"
+        text_c = "gamma delta epsilon zeta eta theta"
+        
         items = [
-            {"text": base, "ts": self.base_ts},
-            {"text": base + ".", "ts": self.base_ts + 5},
-            {"text": base + "..", "ts": self.base_ts + 10},
-            {"text": base + "...", "ts": self.base_ts + 15},
+            {"text": text_a, "ts": self.base_ts},
+            {"text": text_b, "ts": self.base_ts + 5},
+            {"text": text_c, "ts": self.base_ts + 10},
         ]
-
-        groups = self.det.find_duplicates(items, similarity_threshold=0.9)
+        
+        # Jaccard thresholds:
+        # A and B share 4 words, total 6 words => 4/6 = 0.66
+        # A and C share 3 words, total 7 words => 3/7 = 0.42
+        groups = self.det.find_duplicates(items, similarity_threshold=0.6)
+        
+        # A matches B, so {A, B} form group 1
+        # B is already used, so C forms a group... but C has no matches.
+        # Thus, only 1 group of 2 items is expected.
         self.assertEqual(len(groups), 1)
-        self.assertEqual(len(groups[0].items), 4)
+        self.assertEqual(len(groups[0].items), 2)
+        self.assertEqual(groups[0].items[0]["text"], text_a)
+        self.assertEqual(groups[0].items[1]["text"], text_b)
 
 
 if __name__ == "__main__":
