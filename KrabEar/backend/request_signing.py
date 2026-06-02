@@ -3,7 +3,8 @@
 Обеспечивает защиту IPC от несанкционированного доступа через HMAC-SHA256:
 - Каждый запрос содержит nonce (случайный идентификатор) и timestamp.
 - Повторные запросы (replay attacks) отклоняются через скользящее окно nonce'ов.
-- Хранилище nonce'ов ограничено 1000 последними значениями (oldest-first eviction).
+- Хранилище nonce'ов очищает устаревшие nonce по времени (старше TIMESTAMP_WINDOW_SEC);
+  MAX_NONCES=1000 — защита от OOM при переполнении (oldest-first eviction).
 
 Использование::
 
@@ -19,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import secrets
 import threading
 import time
@@ -146,14 +148,12 @@ class RequestSigner:
             params: Словарь параметров.
             signature: HMAC-SHA256 hex-строка из запроса.
             secret: Общий секрет в виде hex-строки.
-            timestamp: Unix-время из запроса. Если None — проверка времени пропускается.
-            nonce: Nonce из запроса. Если None — проверка уникальности пропускается.
+            timestamp: Unix-время из запроса. None — немедленно возвращает False (bypass protection).
+            nonce: Nonce из запроса. None — немедленно возвращает False (bypass protection).
 
         Returns:
             True если запрос прошёл все проверки, False иначе.
         """
-        import math
-        
         # 0. Защита от байпаса и type-based атак
         if timestamp is None or nonce is None or not signature:
             return False
