@@ -86,6 +86,18 @@ class BrokenPipeOnSendallTestCase(unittest.TestCase):
     def setUp(self):
         self.ipc = _make_ipc_server()
 
+    def _run_handle(self, conn) -> None:
+        """Вызывает _handle_connection как это делает serve_forever.
+
+        W1768: production IPCServer (теперь закалённый класс из ipc_server.py)
+        перед запуском обработчика занимает слот BoundedSemaphore, а
+        _handle_connection освобождает его в finally. Тест-вызовы напрямую
+        обязаны сначала занять слот, иначе release() кинет
+        "Semaphore released too many times".
+        """
+        self.ipc._conn_semaphore.acquire(blocking=False)
+        self.ipc._handle_connection(conn)
+
     # ------------------------------------------------------------------
     # 1. BrokenPipeError on the normal-response sendall path
     # ------------------------------------------------------------------
@@ -101,7 +113,7 @@ class BrokenPipeOnSendallTestCase(unittest.TestCase):
 
         # Must not raise
         try:
-            self.ipc._handle_connection(server_sock)
+            self._run_handle(server_sock)
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
             self.fail(
                 f"_handle_connection raised {type(exc).__name__} instead of "
@@ -129,6 +141,9 @@ class BrokenPipeOnSendallTestCase(unittest.TestCase):
             def __init__(self, sock: socket.socket) -> None:
                 self._sock = sock
 
+            def settimeout(self, t) -> None:
+                self._sock.settimeout(t)
+
             def recv(self, n: int) -> bytes:
                 return self._sock.recv(n)
 
@@ -143,7 +158,7 @@ class BrokenPipeOnSendallTestCase(unittest.TestCase):
 
         wrapped = _ResetSocket(server_sock)
         try:
-            self.ipc._handle_connection(wrapped)  # type: ignore[arg-type]
+            self._run_handle(wrapped)  # type: ignore[arg-type]
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
             self.fail(
                 f"_handle_connection raised {type(exc).__name__} instead of "
@@ -168,6 +183,9 @@ class BrokenPipeOnSendallTestCase(unittest.TestCase):
             def __init__(self, sock: socket.socket) -> None:
                 self._sock = sock
 
+            def settimeout(self, t) -> None:
+                self._sock.settimeout(t)
+
             def recv(self, n: int) -> bytes:
                 return self._sock.recv(n)
 
@@ -182,7 +200,7 @@ class BrokenPipeOnSendallTestCase(unittest.TestCase):
 
         wrapped = _EpipeSocket(server_sock)
         try:
-            self.ipc._handle_connection(wrapped)  # type: ignore[arg-type]
+            self._run_handle(wrapped)  # type: ignore[arg-type]
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
             self.fail(
                 f"_handle_connection raised {type(exc).__name__}: {exc}"
@@ -201,7 +219,7 @@ class BrokenPipeOnSendallTestCase(unittest.TestCase):
         client_sock.close()
 
         try:
-            self.ipc._handle_connection(server_sock)
+            self._run_handle(server_sock)
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
             self.fail(
                 f"_handle_connection raised {type(exc).__name__} on invalid-json "
@@ -221,7 +239,7 @@ class BrokenPipeOnSendallTestCase(unittest.TestCase):
         client_sock.sendall(req.encode())
         client_sock.shutdown(socket.SHUT_WR)  # EOF — not full close
 
-        self.ipc._handle_connection(server_sock)
+        self._run_handle(server_sock)
 
         client_sock.settimeout(1.0)
         buf = b""

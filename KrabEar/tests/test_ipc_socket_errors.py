@@ -305,6 +305,11 @@ class IPCHandleConnectionTestCase(unittest.TestCase):
         client_sock.sendall(b"THIS IS NOT JSON\n")
         client_sock.shutdown(socket.SHUT_WR)
 
+        # W1768: closed dup'd inline IPCServer → production class теперь
+        # закалённый (ipc_server.py). _handle_connection освобождает слот
+        # BoundedSemaphore в finally, поэтому слот надо занять заранее
+        # (как делает serve_forever перед запуском обработчика).
+        ipc._conn_semaphore.acquire(blocking=False)
         # Run _handle_connection synchronously — it reads from server_sock
         ipc._handle_connection(server_sock)
 
@@ -332,6 +337,8 @@ class IPCHandleConnectionTestCase(unittest.TestCase):
         client_sock.sendall(req.encode())
         client_sock.shutdown(socket.SHUT_WR)
 
+        # W1768: занимаем слот семафора перед обработчиком (см. invalid_json-тест).
+        ipc._conn_semaphore.acquire(blocking=False)
         ipc._handle_connection(server_sock)
 
         client_sock.settimeout(1.0)
