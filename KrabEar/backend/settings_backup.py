@@ -40,6 +40,13 @@ SENSITIVE_FIELDS: frozenset[str] = frozenset({
     "twilio_auth_token",
     "sentry_dsn",
     "stt_gigaam_hf_token",
+    # Wave 20 additions — MED credential leak: llm_api_key is sent as
+    # Authorization: Bearer <key> in service.py + llm_ops_service.py;
+    # smtp_password is a cleartext SMTP credential; ipc_signing_secret is
+    # the HMAC-SHA256 shared secret for IPC request authentication.
+    "llm_api_key",
+    "smtp_password",
+    "ipc_signing_secret",
 })
 # Legacy alias kept for any internal references within this module.
 _SENSITIVE = SENSITIVE_FIELDS
@@ -85,18 +92,43 @@ class SettingsBackup:
     ) -> str:
         """Сохраняет снимок настроек, обрезает лишние файлы, возвращает backup_id.
 
-        backup_id = имя файла без `.json` (напр. `20240425T123456Z_auto`).
+        backup_id = имя файла без `.json`
+        (напр. `20240425T123456_789012Z_auto`; microsecond precision prevents
+        same-second same-reason collisions).
+
+        Директория создаётся с правами 0o700, файл — 0o600:
+        credentials-bearing backups не должны быть world-readable.
         """
-        self._dir.mkdir(parents=True, exist_ok=True)
+        self._dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Force perms on the dir even if it pre-existed with wider bits.
+        try:
+            os.chmod(self._dir, 0o700)
+        except OSError:
+            pass  # best-effort; no reason to abort the backup
 
         reason_safe = reason.replace(" ", "_")[:40]
-        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        # Microsecond precision ("%f" = 6 digits) prevents silent overwrites
+        # when two backups are requested within the same second with the same
+        # reason (e.g. rapid concurrent set_settings calls).
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
         backup_id = f"{ts}_{reason_safe}"
         out_path = self._dir / f"{backup_id}.json"
 
         safe = {k: v for k, v in settings.items() if k not in _SENSITIVE}
-        with out_path.open("w", encoding="utf-8") as fh:
-            json.dump(safe, fh, ensure_ascii=False, indent=2)
+        # Write to a .tmp sidecar then rename for atomicity, then lock down perms.
+        tmp_path = out_path.with_suffix(".tmp")
+        try:
+            fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(safe, fh, ensure_ascii=False, indent=2)
+            tmp_path.rename(out_path)
+        except Exception:
+            # Clean up orphaned .tmp on failure; re-raise so callers know.
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
         _log.info(
             "settings_backup: created %s (%d keys)",
@@ -193,13 +225,21 @@ class SettingsBackup:
         """Парсит метаданные файла бэкапа без полной загрузки содержимого."""
         backup_id = path.stem  # filename without .json
 
-        # Формат: {ts}_{reason}  (ts всегда 16 символов: YYYYMMDDTHHMMSSz)
-        _TS_LEN = 16
-        if len(backup_id) > _TS_LEN + 1:
-            ts_str = backup_id[:_TS_LEN]
-            reason = backup_id[_TS_LEN + 1:]
+        # New format (Wave 20): {ts}_{reason}
+        # where ts = YYYYMMDDTHHMMSSµµµµµµZ (23 chars, e.g. 20240425T123456_789012Z).
+        # Legacy format:          YYYYMMDDTHHMMSSz    (16 chars).
+        # We detect by checking for the underscore-after-seconds pattern.
+        _TS_LEN_NEW = 23  # YYYYMMDDTHHMMSSµµµµµµZ (e.g. 20240425T123456_789012Z)
+        _TS_LEN_OLD = 16  # YYYYMMDDTHHMMSSz        (e.g. 20240425T123456Z)
+        # Choose whichever ts length fits; fall back to old length for legacy files.
+        if len(backup_id) > _TS_LEN_NEW and backup_id[_TS_LEN_NEW] == "_":
+            ts_str = backup_id[:_TS_LEN_NEW]
+            reason = backup_id[_TS_LEN_NEW + 1:]
+        elif len(backup_id) > _TS_LEN_OLD and backup_id[_TS_LEN_OLD] == "_":
+            ts_str = backup_id[:_TS_LEN_OLD]
+            reason = backup_id[_TS_LEN_OLD + 1:]
         else:
-            ts_str = backup_id[:_TS_LEN] if len(backup_id) >= _TS_LEN else backup_id
+            ts_str = backup_id[:_TS_LEN_OLD] if len(backup_id) >= _TS_LEN_OLD else backup_id
             reason = "unknown"
 
         # Размер файла
