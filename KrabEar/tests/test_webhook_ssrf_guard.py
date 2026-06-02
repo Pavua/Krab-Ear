@@ -187,14 +187,18 @@ class SSRFGuardRegisterTestCase(unittest.TestCase):
         )
         self.assertIsInstance(wid, str)
 
-    # 25 — handle_register_webhook с webhook_allow_local=True позволяет localhost через IPC
+    # 25 — handle_register_webhook игнорирует webhook_allow_local=True (wave1763 SSRF fix):
+    #       IPC-обработчик намеренно всегда передаёт allow_local=False независимо от параметра.
     def test_ipc_allow_local_override(self) -> None:
-        result = self._mgr.handle_register_webhook({
-            "url": "http://127.0.0.1:5005/internal",
-            "events": [],
-            "webhook_allow_local": True,
-        })
-        self.assertIn("webhook_id", result)
+        # wave1763: webhook_allow_local in IPC params is intentionally ignored to prevent SSRF.
+        # handle_register_webhook always calls register_webhook(allow_local=False).
+        with self.assertRaises(ValueError) as ctx:
+            self._mgr.handle_register_webhook({
+                "url": "http://127.0.0.1:5005/internal",
+                "events": [],
+                "webhook_allow_local": True,
+            })
+        self.assertIn("SSRF", str(ctx.exception))
 
     # 26 — handle_register_webhook без allow_local отклоняет 10.x
     def test_ipc_blocks_private_by_default(self) -> None:

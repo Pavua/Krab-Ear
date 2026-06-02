@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
@@ -130,6 +131,8 @@ class TestHistoryDeleteCallsRemoveItem(unittest.TestCase):
         store = MagicMock()
         store.delete_history_item.return_value = True
         store.data_dir = None
+        _lock_obj = threading.RLock()
+        store._lock = MagicMock(return_value=_lock_obj)
         return store
 
     def _make_service(self, semantic_searcher=None):
@@ -188,6 +191,8 @@ class TestHistoryDeleteCallsRemoveItem(unittest.TestCase):
         from backend.history_service import HistoryService
         store = MagicMock()
         store.data_dir = None
+        _lock_obj = threading.RLock()
+        store._lock = MagicMock(return_value=_lock_obj)
         mock_searcher = MagicMock()
 
         # Must not raise TypeError
@@ -217,6 +222,8 @@ class TestDeleteActuallyRemovesFromIndex(unittest.TestCase):
         store = MagicMock()
         store.delete_history_item.return_value = True
         store.data_dir = None
+        _lock_obj = threading.RLock()
+        store._lock = MagicMock(return_value=_lock_obj)
         return store
 
     def _make_history_svc(self, item_id: str):

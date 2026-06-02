@@ -219,6 +219,8 @@ class TestRemoveStats(unittest.TestCase):
         mock_store = MagicMock()
         mock_store.delete_history_item.return_value = True
         mock_store.data_dir = Path(tempfile.mkdtemp())
+        _lock_obj = threading.RLock()
+        mock_store._lock = MagicMock(return_value=_lock_obj)
 
         # Fake PlaybackTracker with spy on remove_stats.
         mock_tracker = MagicMock(spec=PlaybackTracker)
@@ -238,6 +240,8 @@ class TestRemoveStats(unittest.TestCase):
         mock_store = MagicMock()
         mock_store.delete_history_item.return_value = True
         mock_store.data_dir = Path(tempfile.mkdtemp())
+        _lock_obj2 = threading.RLock()
+        mock_store._lock = MagicMock(return_value=_lock_obj2)
 
         svc = HistoryService(store=mock_store)  # no playback_tracker
         result = svc.handle_delete_history_item({"id": "some_id"})

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -153,6 +154,8 @@ class TestDeleteHistoryItemRemovesFromSemanticIndex(unittest.TestCase):
         """Returns a MagicMock store that reports item_id as deletable."""
         store = MagicMock()
         store.delete_history_item.return_value = True
+        _lock_obj = threading.RLock()
+        store._lock = MagicMock(return_value=_lock_obj)
         return store
 
     def test_delete_history_item_removes_from_semantic_index(self):
@@ -174,6 +177,8 @@ class TestDeleteHistoryItemRemovesFromSemanticIndex(unittest.TestCase):
         item_id = "item-x"
         store = MagicMock()
         store.delete_history_item.return_value = True
+        _lock_obj = threading.RLock()
+        store._lock = MagicMock(return_value=_lock_obj)
 
         svc = HistoryService(store=store, semantic_searcher=None)
         result = svc.handle_delete_history_item({"id": item_id})
@@ -184,6 +189,8 @@ class TestDeleteHistoryItemRemovesFromSemanticIndex(unittest.TestCase):
         item_id = "item-y"
         store = MagicMock()
         store.delete_history_item.return_value = True
+        _lock_obj = threading.RLock()
+        store._lock = MagicMock(return_value=_lock_obj)
         mock_searcher = MagicMock()
         mock_searcher.remove.side_effect = RuntimeError("index corruption")
 
@@ -197,6 +204,8 @@ class TestDeleteHistoryItemRemovesFromSemanticIndex(unittest.TestCase):
         item_id = "item-missing"
         store = MagicMock()
         store.delete_history_item.return_value = False
+        _lock_obj = threading.RLock()
+        store._lock = MagicMock(return_value=_lock_obj)
         mock_searcher = MagicMock()
 
         svc = HistoryService(store=store, semantic_searcher=mock_searcher)
@@ -215,6 +224,8 @@ class TestDeleteHistoryItemRemovesFromSemanticIndex(unittest.TestCase):
 
         store = MagicMock()
         store.delete_history_item.return_value = True
+        _lock_obj = threading.RLock()
+        store._lock = MagicMock(return_value=_lock_obj)
 
         svc = HistoryService(store=store, semantic_searcher=searcher)
         svc.handle_delete_history_item({"id": "item-to-delete"})
