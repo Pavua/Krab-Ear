@@ -32,17 +32,29 @@ except ImportError:
         "que", "del", "los", "las", "por", "con", "una", "uno",
     ])
 
+# ── Константы ────────────────────────────────────────────────────────────────
+
+# Максимальная длина текста для анализа (защита от ReDoS на длинных токенах)
+MAX_NOTABLE_TEXT_LEN = 8000
+# Токены длиннее этого порога пропускаются перед применением _RE_TECH
+_MAX_TECH_TOKEN_LEN = 64
+
 # ── Regex-паттерны для извлечения заметных слов ─────────────────────────────
 
 # Аббревиатуры (2+ заглавных букв)
 _RE_ABBREV = re.compile(r"\b([A-ZА-Я]{2,})\b")
 # CamelCase
 _RE_CAMEL = re.compile(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b")
-# Технические термины с цифрами (GPT-4, iPhone13, MLX)
+# Технические термины с цифрами (GPT-4o, iPhone13, Python3, qwen3, mlx4bit).
+# ВАЖНО: применять только к отдельным коротким токенам (≤_MAX_TECH_TOKEN_LEN),
+# иначе второй вариант [A-Za-z0-9\-]*[0-9]+[A-Za-z]+ создаёт квадратичный ReDoS
+# из-за пересечения char-класса префикса с [0-9]+ (MED, wave-18).
 _RE_TECH = re.compile(
     r"\b([A-Za-zА-Яа-я]+[0-9]+[A-Za-zА-Яа-я0-9\-]*"
     r"|[A-Za-zА-Яа-я0-9\-]*[0-9]+[A-Za-zА-Яа-я]+)\b"
 )
+# Разбивка на пробельные токены для безопасного применения _RE_TECH
+_RE_WHITESPACE = re.compile(r"\s+")
 # Заглавные слова в середине предложения (не первое слово)
 _RE_CAP_MID = re.compile(r"(?<=[.!?\s])([А-ЯA-Z][А-Яа-яa-z]{2,})\b")
 # Длинные слова (7+ символов) не из стоп-списка — вероятно предметная лексика
@@ -70,6 +82,9 @@ def _extract_notable_words(text: str) -> List[str]:
     if not text or not text.strip():
         return []
 
+    # Защита от ReDoS: ограничиваем длину входа (wave-18)
+    text = text[:MAX_NOTABLE_TEXT_LEN]
+
     seen: set[str] = set()
     results: List[str] = []
 
@@ -88,8 +103,13 @@ def _extract_notable_words(text: str) -> List[str]:
     for m in _RE_CAMEL.finditer(text):
         _add(m.group(1))
 
-    for m in _RE_TECH.finditer(text):
-        _add(m.group(1))
+    # _RE_TECH содержит квадратично-опасный вариант при длинных токенах.
+    # Применяем только к коротким токенам (≤_MAX_TECH_TOKEN_LEN) — safe O(n).
+    for token in _RE_WHITESPACE.split(text):
+        if len(token) > _MAX_TECH_TOKEN_LEN:
+            continue
+        for m in _RE_TECH.finditer(token):
+            _add(m.group(1))
 
     # Заглавные слова не в начале предложения
     for sent in _RE_SENT_SPLIT.split(text):
