@@ -122,6 +122,27 @@ class StateStore:
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
+    def reset_search_caches(self) -> None:
+        """Сбрасывает все in-memory поисковые кэши (privacy-purge / wipe-all).
+
+        ``handle_purge_all_data`` тромбонит + компактит NDJSON на диске, но это
+        НЕ затрагивает RAM-резидентные слепки cleartext-текста, которые StateStore
+        держит для ускорения поиска:
+          - ``_search_index`` (SearchIndex._texts) — полный текст ВСЕХ записей,
+            построенный на fast-path ``search_history``;
+          - ``_recent_search_index`` (+ signature) — последние ~4000 «стогов»
+            (HistoryItem + конкатенированный текст) для быстрого поиска.
+        Без этого сброса полный cleartext истории переживает purge в памяти и
+        вновь раскрывается через ``search_history`` до следующего рестарта.
+
+        Берёт ``_lock`` (тот же файловый замок, что и build-путь индекса) —
+        сериализация против параллельной перестройки кэшей во время purge.
+        """
+        with self._lock():
+            self._search_index.clear()
+            self._recent_search_index = []
+            self._recent_search_index_signature = None
+
     def load_settings(self) -> dict[str, Any]:
         """Читает настройки и дополняет их дефолтами."""
         with self._lock():

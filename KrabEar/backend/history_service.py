@@ -132,6 +132,10 @@ class HistoryService:
         self._template_manager: Any = None    # TemplateManager — templates.json (free-text PII)
         self._event_replay: Any = None        # EventReplayManager — event_replay.ndjson + ring
         self._live_subs_service: Any = None   # LiveSubsService — in-memory PCM buffer (raw voice)
+        # Wave-18: ContextMemory — RAM-only deque последних 50 сырых транскриптов
+        # (полный PII, re-exposable через get_context_memory IPC). Файлового
+        # артефакта нет, поэтому очищается ТОЛЬКО через late-injected clear().
+        self._context_memory: Any = None      # ContextMemory — in-memory transcript deque (raw PII)
 
     # ------------------------------------------------------------------
     # Privacy helpers
@@ -2245,6 +2249,51 @@ class HistoryService:
             except Exception:
                 logger.warning("purge_all_data: live_subs_service.reset() не удался", exc_info=True)
                 secondary_errors.append("live_subs")
+
+        # --- 33. Wave-18 GAP-2: сбросить in-memory поисковые кэши StateStore ---
+        # store.compact_with_stats() (шаг 1b) усекает history.ndjson на ДИСКЕ, но
+        # StateStore держит RAM-слепки cleartext-текста ради ускорения поиска:
+        #   _search_index (SearchIndex._texts) — полный текст ВСЕХ записей;
+        #   _recent_search_index (+ signature) — последние ~4000 «стогов».
+        # Без сброса полный текст истории переживает purge в памяти и снова
+        # раскрывается через search_history до рестарта. reset_search_caches()
+        # берёт store._lock и очищает оба кэша (#W18).
+        # hasattr-guard: production StateStore всегда реализует метод; минимальные
+        # тестовые fake-store (без поисковых кэшей) корректно пропускаются, не
+        # засоряя secondary_errors (зеркалит is-not-None-guard остальных шагов).
+        if hasattr(self.store, "reset_search_caches"):
+            try:
+                self.store.reset_search_caches()
+                logger.info("purge_all_data: in-memory поисковые кэши StateStore сброшены")
+            except Exception:
+                logger.warning("purge_all_data: store.reset_search_caches() не удался", exc_info=True)
+                secondary_errors.append("search_caches")
+
+        # --- 34. Wave-18 GAP-1: очистить контекстную память STT (ContextMemory) ---
+        # ContextMemory._texts — RAM-only deque последних 50 СЫРЫХ транскриптов
+        # (полный PII), re-exposable через get_context_memory IPC. Файлового
+        # артефакта нет, поэтому только in-memory clear() гарантирует, что
+        # накопленный текст стёрт при wipe-all.
+        if self._context_memory is not None:
+            try:
+                self._context_memory.clear()
+                logger.info("purge_all_data: ContextMemory очищена (deque транскриптов)")
+            except Exception:
+                logger.warning("purge_all_data: context_memory.clear() не удался", exc_info=True)
+                secondary_errors.append("context_memory")
+
+        # --- 35. Wave-18 GAP-1: очистить in-memory историю буфера обмена ---
+        # _clipboard_history — последние ~20 вставленных транскрипций (полный PII),
+        # re-exposable через get_clipboard_history / repaste_item IPC. Это общий
+        # список (передан по ссылке из BackendService), поэтому очищаем in-place
+        # (.clear()), а не переприсваиваем — чтобы все владельцы ссылки увидели
+        # опустошение.
+        try:
+            self._clipboard_history.clear()
+            logger.info("purge_all_data: история буфера обмена очищена")
+        except Exception:
+            logger.warning("purge_all_data: очистка clipboard_history не удалась", exc_info=True)
+            secondary_errors.append("clipboard_history")
 
         # --- C. W1734: Audit log entry ---
         try:
