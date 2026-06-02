@@ -153,8 +153,14 @@ class TestBackupAndQuarantineOnRepair(unittest.TestCase):
         self.assertTrue(backup.exists())
         self.assertEqual(backup.read_bytes(), original_content)
 
-    def test_tombstones_backup_created_on_orphaned_tombstones(self) -> None:
-        """repair() creates a backup of tombstones before removing orphans."""
+    def test_tombstones_not_modified_by_repair(self) -> None:
+        """W1776 fix: repair() must not touch the tombstones file at all.
+
+        The old check incorrectly treated tombstones for deleted items as
+        'orphaned' and created backup/quarantine artefacts before erasing them.
+        After the fix the check is disabled: repair() produces no backup_paths
+        and the tombstones file is left intact.
+        """
         _write_ndjson(self.data_dir / "history.ndjson", [
             {"id": "real", "ts": "2025-01-01T10:00:00", "text": "x"},
         ])
@@ -163,15 +169,18 @@ class TestBackupAndQuarantineOnRepair(unittest.TestCase):
         original = ts_path.read_bytes()
 
         report = self.checker.check_integrity(self.data_dir)
+        self.assertEqual(report.orphaned_tombstones, 0)
         result = self.checker.repair(self.data_dir, report)
 
-        self.assertTrue(result.backup_paths)
-        backup = Path(result.backup_paths[0])
-        self.assertTrue(backup.exists())
-        self.assertEqual(backup.read_bytes(), original)
+        # No backup should be created for tombstones (the check is disabled).
+        tombstone_backups = [p for p in result.backup_paths
+                             if "tombstone" in p]
+        self.assertEqual(tombstone_backups, [])
+        # Tombstones file must be unchanged.
+        self.assertEqual(ts_path.read_bytes(), original)
 
-    def test_orphaned_tombstone_quarantine_contains_ghost(self) -> None:
-        """Orphaned tombstone entries go to quarantine, not the void."""
+    def test_tombstones_for_deleted_items_preserved_after_repair(self) -> None:
+        """W1776 fix: tombstone entries for deleted items survive repair() intact."""
         _write_ndjson(self.data_dir / "history.ndjson", [
             {"id": "real", "ts": "2025-01-01T10:00:00", "text": "x"},
         ])
@@ -182,9 +191,13 @@ class TestBackupAndQuarantineOnRepair(unittest.TestCase):
         report = self.checker.check_integrity(self.data_dir)
         result = self.checker.repair(self.data_dir, report)
 
-        self.assertTrue(result.quarantine_paths)
-        q_content = Path(result.quarantine_paths[0]).read_text(encoding="utf-8")
-        self.assertIn("ghost_id", q_content)
+        # No quarantine paths should be created (no tombstones are removed).
+        tombstone_quarantines = [p for p in result.quarantine_paths
+                                 if "tombstone" in p]
+        self.assertEqual(tombstone_quarantines, [])
+        # ghost_id tombstone must still be present.
+        ts_content = (self.data_dir / "history_tombstones.ndjson").read_text(encoding="utf-8")
+        self.assertIn("ghost_id", ts_content)
 
 
 class TestCyrillicNotCorrupted(unittest.TestCase):

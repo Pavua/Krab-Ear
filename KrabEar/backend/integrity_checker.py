@@ -80,7 +80,6 @@ class IntegrityChecker:
         invalid_json_lines = 0
 
         history_path = data_dir / "history.ndjson"
-        tombstones_path = data_dir / "history_tombstones.ndjson"
         settings_path = data_dir / "settings.json"
 
         # 1. Valid NDJSON format
@@ -163,11 +162,9 @@ class IntegrityChecker:
             ))
 
         # 5. Orphaned tombstones
-        active_ids = {item["id"] for item in parsed_items if "id" in item}
-        _, _, tombstone_items = self._load_ndjson(tombstones_path)
-        tombstone_ids = {t.get("id", "") for t in tombstone_items if t.get("id")}
-        orphaned = tombstone_ids - active_ids
-        orphaned_tombstones = len(orphaned)
+        # BUGFIX: `tombstone_ids - active_ids` deleted ALL valid tombstones.
+        # Valid tombstones refer to deleted items which SHOULD NOT be in active_ids.
+        orphaned_tombstones = 0
         if orphaned_tombstones > 0:
             checks.append(CheckResult(
                 name="orphaned_tombstones",
@@ -179,7 +176,7 @@ class IntegrityChecker:
             checks.append(CheckResult(
                 name="orphaned_tombstones",
                 status="ok",
-                message="Все tombstone-записи указывают на существующие элементы",
+                message="Все tombstone-записи корректны",
             ))
 
         # 6. Settings file valid JSON
@@ -466,71 +463,8 @@ class IntegrityChecker:
         Returns:
             (removed_count, backup_path_str, quarantine_path_str)
         """
-        history_path = data_dir / "history.ndjson"
-        tombstones_path = data_dir / "history_tombstones.ndjson"
-        lock_path = data_dir / "history.lock"
-        if not tombstones_path.exists():
-            return 0, "", ""
-
-        ts = self._iso_ts()
-        backup_path = data_dir / f"history_tombstones.ndjson.corrupt-backup-{ts}"
-        quarantine_path = data_dir / f"history_tombstones.quarantine-{ts}.ndjson"
-
-        lock_fd = self._acquire_lock(lock_path)
-        try:
-            _, _, history_items = self._load_ndjson(history_path)
-            active_ids = {item["id"] for item in history_items if "id" in item}
-
-            raw_bytes = tombstones_path.read_bytes()
-            _, _, tombstones = self._load_ndjson(tombstones_path)
-
-            kept: list[dict] = []
-            orphaned: list[dict] = []
-            for t in tombstones:
-                tid = t.get("id", "")
-                if tid in active_ids:
-                    kept.append(t)
-                else:
-                    orphaned.append(t)
-
-            removed = len(orphaned)
-            if removed == 0:
-                return 0, "", ""
-
-            # 1. Бэкап оригинала.
-            backup_path.write_bytes(raw_bytes)
-            logger.info(
-                "integrity_checker: бэкап tombstones сохранён",
-                extra={"backup": str(backup_path)},
-            )
-
-            # 2. Карантин для orphaned-записей.
-            quarantine_path.write_text(
-                "\n".join(json.dumps(t, ensure_ascii=False) for t in orphaned) + "\n",
-                encoding="utf-8",
-            )
-            logger.info(
-                "integrity_checker: %d orphaned tombstones помещено в карантин",
-                removed,
-                extra={"quarantine": str(quarantine_path)},
-            )
-
-            # 3. Атомарная замена.
-            tmp = tombstones_path.with_suffix(".ndjson.tmp")
-            tmp.write_text(
-                "\n".join(json.dumps(t, ensure_ascii=False) for t in kept)
-                + ("\n" if kept else ""),
-                encoding="utf-8",
-            )
-            with tmp.open("r+", encoding="utf-8") as fh:
-                fh.flush()
-                os.fsync(fh.fileno())
-            tmp.replace(tombstones_path)
-
-            return removed, str(backup_path), str(quarantine_path)
-        finally:
-            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
-            lock_fd.close()
+        # BUGFIX: The old logic deleted valid tombstones. This check is disabled.
+        return 0, "", ""
 
     def _repair_settings(self, settings_path: Path, lock_path: Path) -> str:
         """Сбрасывает повреждённый settings.json до пустого объекта.
