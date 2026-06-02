@@ -37,6 +37,15 @@
 #            "error": "queue_full"} from handle_enqueue.  The cap is enforced inside
 #            enqueue() via QueueFullError so the guard is also exercisable by unit tests
 #            that bypass the IPC handler.
+#   BUG 4 (W21 — MED memory-DoS) — enqueue() capped job COUNT but not per-field
+#            byte size.  A local IPC client calling enqueue_transcription with a ~1 MiB
+#            file_path (the IPC framing ceiling) and 1000 pending jobs pins ~1 GB of RAM
+#            that never drains because pending jobs are exempt from terminal eviction and
+#            process_next() has no production consumer.  Fix: TranscriptionJob.__init__
+#            rejects file_path longer than FILE_PATH_MAX_BYTES (4096, mirrors Linux
+#            PATH_MAX) or label longer than LABEL_MAX_CHARS (256) by raising ValueError
+#            before any memory is committed.  The check fires before the BUG-3 count
+#            check because TranscriptionJob is constructed before the lock in enqueue().
 """
 
 from __future__ import annotations
@@ -80,6 +89,15 @@ RESULT_MAX_BYTES: int = 512 * 1024  # 512 KiB
 # unbounded memory growth when process_next() has no live consumer.
 _MAX_PENDING: int = 1000
 
+# Per-field byte caps (BUG 4 fix, W21 — MED memory-DoS)
+# Even with _MAX_PENDING=1000 a caller can pin ~1 GB by filling each slot with a
+# 1 MiB file_path (the IPC framing ceiling).  Capping at POSIX PATH_MAX keeps the
+# worst-case queue memory budget to ~4 MB for paths + negligible label overhead.
+# Limits mirror PATH_MAX (~1024 on Darwin/Linux; we use 4096 for safety headroom
+# matching Linux's actual kernel limit) and a generous but finite label cap.
+FILE_PATH_MAX_BYTES: int = 4096   # bytes (encodes UTF-8; mirrors Linux PATH_MAX)
+LABEL_MAX_CHARS: int = 256        # characters (labels are metadata, not file paths)
+
 
 class QueueFullError(Exception):
     """Очередь достигла лимита активных заданий (_MAX_PENDING).
@@ -101,6 +119,19 @@ class TranscriptionJob:
     ) -> None:
         if not file_path or not file_path.strip():
             raise ValueError("file_path не может быть пустым")
+        # BUG 4 guard (W21 — MED memory-DoS): reject oversized fields before
+        # storing them.  A 1 MiB file_path × 1000 pending jobs = ~1 GB pinned
+        # RAM that never drains because process_next() has no live consumer.
+        fp_bytes = len(file_path.encode("utf-8"))
+        if fp_bytes > FILE_PATH_MAX_BYTES:
+            raise ValueError(
+                f"file_path слишком длинный: {fp_bytes} байт (лимит {FILE_PATH_MAX_BYTES})"
+            )
+        label_str = label or ""
+        if len(label_str) > LABEL_MAX_CHARS:
+            raise ValueError(
+                f"label слишком длинная: {len(label_str)} символов (лимит {LABEL_MAX_CHARS})"
+            )
         if not (PRIORITY_MIN <= priority <= PRIORITY_MAX):
             raise ValueError(
                 f"priority должен быть от {PRIORITY_MIN} до {PRIORITY_MAX}, получено {priority}"
