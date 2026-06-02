@@ -164,3 +164,15 @@ class VocabularyStore:
             current = [w for w in self.load() if w not in remove_set]
             self.save(current)
             return current
+
+    def clear_all(self) -> None:
+        """Полная очистка словаря: удаляет vocabulary.json с диска.
+
+        Используется в privacy-purge (W1767). Потокобезопасно.
+        Идемпотентен — не бросает исключений если файл уже отсутствует.
+        """
+        with self._lock:
+            try:
+                self.path.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("VocabularyStore.clear_all: не удалось удалить vocabulary.json: %s", exc)
