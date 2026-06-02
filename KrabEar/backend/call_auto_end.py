@@ -1,7 +1,22 @@
 """Комбайнер правил автоматического завершения звонка (Phase 3 step 2/4).
 
-Объединяет: max_duration, silence probe, operator-silence-after-interruption.
+Объединяет: max_duration, cost, operator-silence-after-interruption и
+time-window silence (по скалярному `silence_duration_sec`).
 Возвращает should_end + reason через handle_check_auto_end.
+
+ВАЖНО (W1775 — honesty de-decoration):
+    Этот класс — *advisory* проверка по уже посчитанным скалярам/таймерам.
+    Он НЕ инспектирует аудио. Решение о тишине здесь принимается ИСКЛЮЧИТЕЛЬНО
+    по длине временно́го окна `silence_duration_sec` (которое считает вызывающая
+    сторона), а не по анализу PCM. Подтверждение тишины по реальному аудио
+    (RMS/энергетический анализ через `CallSilenceProbe.check_silence`) — это
+    отдельная ответственность, которая принадлежит вызывающей стороне (Swift-агент
+    или будущий audio-pipeline). Раньше здесь хранилось декоративное поле
+    `self._silence_probe`, которое НИКОГДА не вызывалось, а reason назывался
+    `silence_confirmed` и лог писал "SILENCE_PROBE … → probe" — это создавало
+    ложный сигнал "тишина подтверждена пробой", хотя аудио не проверялось. Поле
+    и вводящие в заблуждение имена убраны; reason переименован в честный
+    `silence_window_elapsed`.
 """
 
 from __future__ import annotations
@@ -11,7 +26,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from backend.call_cost_estimator import CallCostEstimator
-from backend.call_silence_probe import CallSilenceProbe
 
 logger = logging.getLogger("KrabEar.Backend.CallAutoEnd")
 
@@ -25,9 +39,15 @@ OPERATOR_SILENT_AFTER_INTERRUPTION_SEC: float = 15.0  # 15 сек → end
 
 # Ключи reason
 REASON_MAX_DURATION = "max_duration"
-REASON_SILENCE_CONFIRMED = "silence_confirmed"
+# W1775: честное имя — это срабатывание по истечению временно́го окна тишины
+# (скаляр `silence_duration_sec`), а НЕ подтверждение тишины анализом аудио.
+REASON_SILENCE_WINDOW_ELAPSED = "silence_window_elapsed"
 REASON_OPERATOR_SILENT = "operator_silent_after_interruption"
 REASON_COST_LIMIT = "cost_limit"
+
+# Backward-compat alias (deprecated): прежнее вводящее в заблуждение имя.
+# Указывает на новый честный value, чтобы внешние импортёры не падали.
+REASON_SILENCE_CONFIRMED = REASON_SILENCE_WINDOW_ELAPSED
 
 
 @dataclass
@@ -52,14 +72,16 @@ class CallAutoEnd:
     def __init__(
         self,
         cost_estimator: CallCostEstimator | None = None,
-        silence_probe: CallSilenceProbe | None = None,
         max_duration_sec: int = MAX_DURATION_DEFAULT_SEC,
         silence_trigger_sec: float = SILENCE_PROBE_TRIGGER_SEC,
         operator_silent_sec: float = OPERATOR_SILENT_AFTER_INTERRUPTION_SEC,
         cost_warn_threshold_usd: float = 5.0,
     ) -> None:
         self._cost_estimator = cost_estimator or CallCostEstimator()
-        self._silence_probe = silence_probe or CallSilenceProbe()
+        # NB (W1775): здесь раньше хранилось `self._silence_probe`, которое НИКОГДА
+        # не вызывалось — декоративное поле. Аудио-инспекция не выполняется этим
+        # классом; реальное подтверждение тишины по PCM (CallSilenceProbe) — это
+        # ответственность вызывающей стороны. Поле удалено.
         self.max_duration_sec = max_duration_sec
         self.silence_trigger_sec = silence_trigger_sec
         self.operator_silent_sec = operator_silent_sec
@@ -92,7 +114,12 @@ class CallAutoEnd:
         silence_duration_sec: float,
         after_interruption: bool,
     ) -> AutoEndResult | None:
-        """Правила 2 и 3: тишина (probe или после прерывания)."""
+        """Правила 2 и 3: тишина по временно́му окну (после прерывания / общая).
+
+        NB (W1775): обе ветки — advisory-проверки по скаляру `silence_duration_sec`
+        (длина окна тишины, посчитанная вызывающей стороной). Аудио здесь НЕ
+        инспектируется — никакого probe по PCM не выполняется.
+        """
         if after_interruption and silence_duration_sec >= self.operator_silent_sec:
             logger.info(
                 "Правило OPERATOR_SILENT: %.0f сек тишины после прерывания",
@@ -108,12 +135,14 @@ class CallAutoEnd:
             )
         if silence_duration_sec >= self.silence_trigger_sec:
             logger.info(
-                "Правило SILENCE_PROBE: %.0f сек тишины → probe",
+                "Правило SILENCE_WINDOW: окно тишины %.0f сек >= %.0f сек "
+                "(advisory по таймеру, аудио не проверялось)",
                 silence_duration_sec,
+                self.silence_trigger_sec,
             )
             return AutoEndResult(
                 should_end=True,
-                reason=REASON_SILENCE_CONFIRMED,
+                reason=REASON_SILENCE_WINDOW_ELAPSED,
                 details={
                     "silence_duration_sec": silence_duration_sec,
                     "trigger_threshold_sec": self.silence_trigger_sec,
@@ -168,7 +197,8 @@ class CallAutoEnd:
     ) -> AutoEndResult:
         """Оценивает все правила и возвращает первое срабатывание.
 
-        Порядок проверки: max_duration → cost → operator_silent → silence_probe.
+        Порядок проверки:
+        max_duration → cost → operator_silent → silence_window (по таймеру).
 
         Args:
             current_duration_sec: общая длительность звонка в секундах.
@@ -200,6 +230,13 @@ class CallAutoEnd:
 
     def handle_check_auto_end(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: call_check_auto_end — проверить правила для сессии.
+
+        Advisory (W1775): решение принимается по уже посчитанным скалярам
+        (`duration_sec`, `silence_sec`, `provider`/`destination_country`).
+        Аудио НЕ инспектируется — `silence_sec` приходит от вызывающей стороны.
+        Capability сохранена: Swift-агент может вызывать этот метод как
+        advisory-подсказку, а реальное подтверждение тишины по PCM остаётся
+        ответственностью вызывающей стороны.
 
         Params:
             session_id (str): идентификатор сессии (логирование).

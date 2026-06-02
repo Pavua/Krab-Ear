@@ -1,6 +1,10 @@
 """Unit tests — CallSessionService (6 IPC handlers).
 
-Tests each handler directly against mocked store + auto_end collaborators.
+Tests each handler directly against a mocked store collaborator.
+
+NB (W1775): the dead ``auto_end`` collaborator was removed from
+``CallSessionService.__init__`` (assigned-and-never-read), so the factory now
+constructs the service with ``store`` only and returns a ``(svc, store)`` tuple.
 """
 
 from __future__ import annotations
@@ -53,11 +57,10 @@ def _make_session(
     return s
 
 
-def _make_service() -> tuple[CallSessionService, MagicMock, MagicMock]:
+def _make_service() -> tuple[CallSessionService, MagicMock]:
     store = MagicMock()
-    auto_end = MagicMock()
-    svc = CallSessionService(store=store, auto_end=auto_end)
-    return svc, store, auto_end
+    svc = CallSessionService(store=store)
+    return svc, store
 
 
 # ---------------------------------------------------------------------------
@@ -66,7 +69,7 @@ def _make_service() -> tuple[CallSessionService, MagicMock, MagicMock]:
 
 class TestCallSessionCreate(unittest.TestCase):
     def test_create_ok(self) -> None:
-        svc, store, _ = _make_service()
+        svc, store = _make_service()
         sess = _make_session(session_id="s1", status="idle", created_at="2026-05-18T10:00:00")
         store.create.return_value = sess
 
@@ -78,17 +81,17 @@ class TestCallSessionCreate(unittest.TestCase):
         self.assertEqual(result["created_at"], "2026-05-18T10:00:00")
 
     def test_create_missing_phone(self) -> None:
-        svc, _, _ = _make_service()
+        svc, _ = _make_service()
         with self.assertRaises(ValueError, msg="phone required"):
             svc.handle_call_session_create({"goal_text": "goal"})
 
     def test_create_empty_phone(self) -> None:
-        svc, _, _ = _make_service()
+        svc, _ = _make_service()
         with self.assertRaises(ValueError):
             svc.handle_call_session_create({"phone": "   ", "goal_text": "goal"})
 
     def test_create_missing_goal(self) -> None:
-        svc, _, _ = _make_service()
+        svc, _ = _make_service()
         with self.assertRaises(ValueError, msg="goal_text required"):
             svc.handle_call_session_create({"phone": "+1234"})
 
@@ -99,7 +102,7 @@ class TestCallSessionCreate(unittest.TestCase):
 
 class TestCallSessionGet(unittest.TestCase):
     def test_get_existing_session(self) -> None:
-        svc, store, _ = _make_service()
+        svc, store = _make_service()
         sess = _make_session(session_id="s1")
         store.get.return_value = sess
 
@@ -109,14 +112,14 @@ class TestCallSessionGet(unittest.TestCase):
         self.assertIn("id", result)
 
     def test_get_not_found_raises(self) -> None:
-        svc, store, _ = _make_service()
+        svc, store = _make_service()
         store.get.return_value = None
 
         with self.assertRaises(KeyError):
             svc.handle_call_session_get({"id": "nonexistent"})
 
     def test_get_missing_id_raises(self) -> None:
-        svc, _, _ = _make_service()
+        svc, _ = _make_service()
         with self.assertRaises(ValueError):
             svc.handle_call_session_get({})
 
@@ -127,7 +130,7 @@ class TestCallSessionGet(unittest.TestCase):
 
 class TestCallSessionList(unittest.TestCase):
     def test_list_default_params(self) -> None:
-        svc, store, _ = _make_service()
+        svc, store = _make_service()
         store.list_sessions.return_value = [{"id": "s1"}, {"id": "s2"}]
 
         result = svc.handle_call_session_list({})
@@ -137,7 +140,7 @@ class TestCallSessionList(unittest.TestCase):
         self.assertEqual(len(result["sessions"]), 2)
 
     def test_list_with_status_filter(self) -> None:
-        svc, store, _ = _make_service()
+        svc, store = _make_service()
         store.list_sessions.return_value = [{"id": "s3"}]
 
         result = svc.handle_call_session_list({"limit": 10, "status_filter": "completed"})
@@ -146,7 +149,7 @@ class TestCallSessionList(unittest.TestCase):
         self.assertEqual(result["total"], 1)
 
     def test_list_limit_clamped(self) -> None:
-        svc, store, _ = _make_service()
+        svc, store = _make_service()
         store.list_sessions.return_value = []
 
         svc.handle_call_session_list({"limit": 9999})
@@ -161,7 +164,7 @@ class TestCallSessionList(unittest.TestCase):
 
 class TestCallSessionUpdateStatus(unittest.TestCase):
     def test_update_status_ok(self) -> None:
-        svc, store, _ = _make_service()
+        svc, store = _make_service()
         sess = _make_session(session_id="s1", status="dialing")
         store.update_status.return_value = sess
 
@@ -172,18 +175,18 @@ class TestCallSessionUpdateStatus(unittest.TestCase):
         self.assertEqual(result["status"], "dialing")
 
     def test_update_status_missing_id(self) -> None:
-        svc, _, _ = _make_service()
+        svc, _ = _make_service()
         with self.assertRaises(ValueError):
             svc.handle_call_session_update_status({"status": "dialing"})
 
     def test_update_status_missing_status(self) -> None:
-        svc, _, _ = _make_service()
+        svc, _ = _make_service()
         with self.assertRaises(ValueError):
             svc.handle_call_session_update_status({"id": "s1"})
 
     def test_update_status_invalid_transition_propagates(self) -> None:
         """Если store.update_status бросает ValueError — он пробрасывается наружу."""
-        svc, store, _ = _make_service()
+        svc, store = _make_service()
         store.update_status.side_effect = ValueError("Недопустимый переход")
 
         with self.assertRaises(ValueError, msg="invalid transition should propagate"):
@@ -196,7 +199,7 @@ class TestCallSessionUpdateStatus(unittest.TestCase):
 
 class TestCallSessionAddTranscript(unittest.TestCase):
     def test_add_transcript_ok(self) -> None:
-        svc, store, _ = _make_service()
+        svc, store = _make_service()
         entry1 = MagicMock()
         entry2 = MagicMock()
         sess = _make_session(session_id="s1", transcript_history=[entry1, entry2])
@@ -213,7 +216,7 @@ class TestCallSessionAddTranscript(unittest.TestCase):
         self.assertEqual(result["transcript_count"], 2)
 
     def test_add_transcript_with_ts(self) -> None:
-        svc, store, _ = _make_service()
+        svc, store = _make_service()
         sess = _make_session(transcript_history=[MagicMock()])
         store.add_transcript.return_value = sess
 
@@ -226,17 +229,17 @@ class TestCallSessionAddTranscript(unittest.TestCase):
         )
 
     def test_add_transcript_missing_id(self) -> None:
-        svc, _, _ = _make_service()
+        svc, _ = _make_service()
         with self.assertRaises(ValueError):
             svc.handle_call_session_add_transcript({"speaker": "agent", "text": "Hi"})
 
     def test_add_transcript_empty_text(self) -> None:
-        svc, _, _ = _make_service()
+        svc, _ = _make_service()
         with self.assertRaises(ValueError):
             svc.handle_call_session_add_transcript({"id": "s1", "speaker": "agent", "text": ""})
 
     def test_add_transcript_not_found_propagates(self) -> None:
-        svc, store, _ = _make_service()
+        svc, store = _make_service()
         store.add_transcript.side_effect = KeyError("Сессия не найдена")
 
         with self.assertRaises(KeyError):
@@ -251,7 +254,7 @@ class TestCallSessionAddTranscript(unittest.TestCase):
 
 class TestCallSessionEnd(unittest.TestCase):
     def test_end_completed(self) -> None:
-        svc, store, _ = _make_service()
+        svc, store = _make_service()
         sess = _make_session(
             session_id="s1", status="completed",
             duration_sec=120.0, cost_usd=0.05, end_reason="completed"
@@ -267,7 +270,7 @@ class TestCallSessionEnd(unittest.TestCase):
         self.assertEqual(result["duration_sec"], 120.0)
 
     def test_end_failed(self) -> None:
-        svc, store, _ = _make_service()
+        svc, store = _make_service()
         sess = _make_session(
             session_id="s1", status="failed",
             duration_sec=30.0, cost_usd=0.01, end_reason="no_answer"
@@ -285,12 +288,12 @@ class TestCallSessionEnd(unittest.TestCase):
         self.assertEqual(result["end_reason"], "no_answer")
 
     def test_end_missing_id(self) -> None:
-        svc, _, _ = _make_service()
+        svc, _ = _make_service()
         with self.assertRaises(ValueError):
             svc.handle_call_session_end({})
 
     def test_end_not_found_propagates(self) -> None:
-        svc, store, _ = _make_service()
+        svc, store = _make_service()
         store.mark_completed.side_effect = KeyError("Сессия не найдена")
 
         with self.assertRaises(KeyError):

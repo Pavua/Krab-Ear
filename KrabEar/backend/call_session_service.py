@@ -5,8 +5,13 @@
 
 Связи модуля:
 1) CallSessionStore: NDJSON-backed хранилище сессий.
-2) CallAutoEnd: логика автоматического завершения (тишина / превышение лимита).
-3) BackendService: делегирует IPC-обработчики через handle_request.
+2) BackendService: делегирует IPC-обработчики через handle_request.
+
+NB (W1775): прежде конструктор принимал `auto_end: CallAutoEnd`, но это поле
+(`self._auto_end`) НИКОГДА не читалось — assigned-and-never-read. Логика
+автоматического завершения вызывается напрямую из BackendService через
+`call_check_auto_end` → `self._call_auto_end.handle_check_auto_end`, а не через
+эту сессионную службу. Мёртвый параметр/поле удалены.
 """
 
 from __future__ import annotations
@@ -23,14 +28,16 @@ logger = logging.getLogger("KrabEar.Backend.CallSession")
 class CallSessionService:
     """Обработчики IPC для управления звонковыми сессиями."""
 
-    def __init__(self, store: Any, auto_end: Any) -> None:
+    def __init__(self, store: Any) -> None:
         """
         Args:
-            store:    CallSessionStore — NDJSON-хранилище сессий.
-            auto_end: CallAutoEnd     — логика автоматического завершения.
+            store: CallSessionStore — NDJSON-хранилище сессий.
+
+        NB (W1775): параметр `auto_end` удалён — он сохранялся в `self._auto_end`,
+        но нигде не читался (assigned-and-never-read). Auto-end вызывается напрямую
+        из BackendService (`call_check_auto_end`), а не отсюда.
         """
         self._store = store
-        self._auto_end = auto_end
 
     # ------------------------------------------------------------------ #
     # CRUD handlers                                                        #
