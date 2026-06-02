@@ -61,13 +61,17 @@ class TestTranslationCacheInstantiated(unittest.TestCase):
         )
 
     def test_clear_translation_cache_handler_registered_in_dispatch(self):
-        """ipc_dispatch.py должен регистрировать 'clear_translation_cache'."""
-        path = Path(__file__).resolve().parents[1] / "backend" / "ipc_dispatch.py"
-        src = path.read_text(encoding="utf-8")
+        """service.py::_build_dispatch_table должен регистрировать 'clear_translation_cache'.
+
+        W1769: диспетчеризация консолидирована инлайн в service.py (единственный
+        источник истины); ipc_dispatch.py удалён.
+        """
+        src = self._read_service_py()
         self.assertIn(
             '"clear_translation_cache"',
             src,
-            "'clear_translation_cache' должен быть зарегистрирован в ipc_dispatch.py",
+            "'clear_translation_cache' должен быть зарегистрирован в service.py "
+            "(_build_dispatch_table)",
         )
 
     def test_handle_clear_translation_cache_method_defined(self):

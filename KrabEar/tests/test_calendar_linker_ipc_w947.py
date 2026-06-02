@@ -97,37 +97,14 @@ def _make_service_and_store():
 
 
 def _capture_dispatch_table(svc):
-    """Capture the inline handlers dict from handle_request via frame inspection.
+    """Return the live dispatch table of a constructed BackendService.
 
-    The BackendService builds its dispatch dict *inside* handle_request at each
-    call. We hook sys.settrace to capture the local 'handlers' variable.
+    W1769: the dispatch table is built ONCE in ``__init__`` and cached as
+    ``svc._dispatch_table`` (single source of truth in service.py). Previously
+    this used a ``settrace`` frame hook to grab the inline ``handlers`` local
+    from ``handle_request`` — no longer needed.
     """
-    import sys as _sys
-    captured = {}
-    original = svc.handle_request
-
-    def capturing(payload):
-        frame_ref = []
-
-        def tracer(frame, event, arg):
-            if event == "call" and frame.f_code is original.__func__.__code__:
-                frame_ref.append(frame)
-            return tracer
-
-        old = _sys.gettrace()
-        _sys.settrace(tracer)
-        try:
-            result = original(payload)
-        finally:
-            _sys.settrace(old)
-        if frame_ref:
-            captured.update(frame_ref[0].f_locals.get("handlers", {}))
-        return result
-
-    svc.handle_request = capturing
-    svc.handle_request({"id": "probe", "method": "__w947_probe__", "params": {}})
-    svc.handle_request = original
-    return captured
+    return dict(svc._dispatch_table)
 
 
 def _req(svc, method, params=None):

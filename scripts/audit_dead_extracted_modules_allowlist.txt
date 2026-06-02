@@ -10,9 +10,12 @@
 # W746/W797. Записи ниже подтверждены: каждый модуль имеет dedicated-тесты и
 # ноль production-импортёров по дизайну (будущее использование).
 #
-# НЕ добавляй сюда W797-находки (ipc_dispatch.py, service_logging.py,
-# glossary_service.py, IPCServer/configure_logging dead-dups) — это и есть
-# баг, который страж обязан ловить.
+# НЕ добавляй сюда W797-находки (glossary_service.py и подобные decorative-
+# extraction регрессии) — это и есть баг, который страж обязан ловить.
+# W1769: ipc_dispatch.py и service_logging.py УДАЛЕНЫ (диспетчеризация и
+# логирование консолидированы инлайн в service.py); IPCServer/configure_logging
+# dead-dups устранены (#1601 + W1769) — их больше нет в дереве, поэтому в
+# allowlist они не нужны и не должны попадать.
 
 # --- Phase 3 (Call Automation) телефония: фабрика провайдера ещё не вызвана
 #     из живого пути; интерфейс + тесты готовы (test_call_provider_factory.py).

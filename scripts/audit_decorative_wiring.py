@@ -121,7 +121,7 @@ CONFIRMED_BUGS: list[dict[str, Any]] = [
         "field": "(entire class -- orphaned extraction)",
         "issue": (
             "HealthCheckService (backend/health_check_service.py) is never imported "
-            "or instantiated in service.py or ipc_dispatch.py. The extraction is "
+            "or instantiated in service.py. The extraction is "
             "decorative: ping, get_diagnostics, health_check, probe_llm_http, "
             "get_startup_diagnostics, check_integrity, handshake remain as inline "
             "methods in BackendService (~300 LOC overlap). MetricsCollector parameter "
@@ -135,7 +135,7 @@ CONFIRMED_BUGS: list[dict[str, Any]] = [
         "_orphan_symbol": "HealthCheckService",
         "_orphan_files": [
             "backend/service.py",
-            "backend/ipc_dispatch.py",
+            # W1769: backend/ipc_dispatch.py removed (dispatch consolidated inline).
         ],
     },
     # -------------------------------------------------------------------

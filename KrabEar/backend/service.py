@@ -845,6 +845,13 @@ class BackendService:
             except Exception:
                 logger.exception("STT hotwords: ошибка авто-сида")
 
+        # Таблица диспетчеризации IPC: строится ОДИН раз в конце __init__, после
+        # того как все сервисы-коллабораторы (self._<svc>) уже сконструированы.
+        # handle_request делает O(1) lookup по self._dispatch_table (W1769).
+        self._dispatch_table: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = (
+            self._build_dispatch_table()
+        )
+
     def _init_llm_rewriter(self):
         """Создаёт LLMRewriter если settings.LLM_ENABLED. Возвращает None иначе."""
         if not settings.LLM_ENABLED:
@@ -1287,15 +1294,18 @@ class BackendService:
             parsed = coerce(default)
         return max(min_value, min(parsed, max_value))
 
-    def handle_request(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Обрабатывает один JSON-запрос и возвращает JSON-ответ."""
-        request_id = payload.get("id")
-        method = str(payload.get("method", "")).strip()
-        params = payload.get("params", {})
-        if not isinstance(params, dict):
-            return self._error(request_id, "invalid_params", "Параметр params должен быть объектом")
+    def _build_dispatch_table(self) -> dict[str, Callable[[dict[str, Any]], dict[str, Any]]]:
+        """Строит таблицу диспетчеризации IPC-методов {method: handler}.
 
-        handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
+        Вызывается ОДИН раз в конце ``__init__`` и кэшируется в
+        ``self._dispatch_table`` (O(1) lookup, без перестройки на каждый запрос).
+        Все записи — bound-методы или лямбды, захватывающие ``self``; сервисы
+        стабильны после ``__init__``, поэтому перестройка не требуется.
+
+        ВНИМАНИЕ (W957 SECURITY): ``clear_privacy_audit_log`` сюда НЕ добавляется —
+        уничтожение compliance audit trail через неавторизованный IPC запрещено.
+        """
+        return {
             "ping": self._handle_ping,  # VERIFIED: called from Swift (BackendSupervisor)
             "start_recording": self._handle_start_recording,  # VERIFIED: called from Swift (main)
             "stop_recording": self._handle_stop_recording,  # VERIFIED: called from Swift (main)
@@ -1511,6 +1521,7 @@ class BackendService:
             "get_daily_cost_summary": self._handle_get_daily_cost_summary,  # сводка вычислительных расходов за сегодня
             "check_migration": self._data_migrator.handle_check_migration,  # проверка необходимости миграции данных
             "run_migration": self._data_migrator.handle_run_migration,  # выполнение миграции данных между версиями
+            "rollback_migration": self._data_migrator.handle_rollback_migration,  # откат последней миграции из резервной копии (#1592)
             "expand_abbreviations": self._text_processing_svc.handle_expand_abbreviations,  # раскрытие аббревиатур в тексте транскрипции
             "add_abbreviation": self._text_processing_svc.handle_add_abbreviation,  # добавить пользовательскую аббревиатуру
             "remove_abbreviation": self._text_processing_svc.handle_remove_abbreviation,  # удалить аббревиатуру
@@ -1671,7 +1682,19 @@ class BackendService:
             "refresh_auto_glossary": self._handle_refresh_auto_glossary,  # W1104: принудительно пересчитывает auto-glossary
         }
 
-        handler = handlers.get(method)
+    def handle_request(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Обрабатывает один JSON-запрос и возвращает JSON-ответ.
+
+        Таблица диспетчеризации строится один раз в ``__init__``
+        (``self._dispatch_table``) — здесь только O(1) lookup, без перестройки.
+        """
+        request_id = payload.get("id")
+        method = str(payload.get("method", "")).strip()
+        params = payload.get("params", {})
+        if not isinstance(params, dict):
+            return self._error(request_id, "invalid_params", "Параметр params должен быть объектом")
+
+        handler = self._dispatch_table.get(method)
         if handler is None:
             return self._error(request_id, "unknown_method", f"Неизвестный метод: {method}")
 

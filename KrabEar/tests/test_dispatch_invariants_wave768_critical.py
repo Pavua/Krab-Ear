@@ -39,8 +39,10 @@ if KRAB_EAR_ROOT not in sys.path:
     sys.path.insert(0, KRAB_EAR_ROOT)
 
 SERVICE_PY = os.path.join(KRAB_EAR_ROOT, "backend", "service.py")
-# W828: dispatch table moved to ipc_dispatch.py
-IPC_DISPATCH_PY = os.path.join(KRAB_EAR_ROOT, "backend", "ipc_dispatch.py")
+# W1769: dispatch table consolidated inline in service.py
+# (BackendService._build_dispatch_table — single source of truth); ipc_dispatch.py removed.
+# RHS values below keep the historical ``svc.`` prefix; _dispatch_rhs() normalizes
+# the live ``self.`` prefix → ``svc.`` so these assertions remain stable.
 
 # The exact dispatch-table RHS values expected for each critical method.
 # Format: either "svc._handle_X" (local) or "svc._svc.handle_X" (delegated).
@@ -81,15 +83,16 @@ def _read_source() -> str:
 
 
 def _read_dispatch_source() -> str:
-    """Read ipc_dispatch.py source (W828: dispatch table moved here)."""
-    with open(IPC_DISPATCH_PY, encoding="utf-8") as f:
+    """Read service.py source (W1769: dispatch table is the inline dict in
+    BackendService._build_dispatch_table)."""
+    with open(SERVICE_PY, encoding="utf-8") as f:
         return f.read()
 
 
 def _dispatch_block(src: str) -> str:
     """Return the dispatch table source.
 
-    W828: dispatch table moved to ipc_dispatch.py; src IS the dispatch table.
+    W1769: dispatch table is inline in service.py; src IS the dispatch table.
     """
     return src
 
@@ -99,12 +102,16 @@ def _all_dispatch_keys(block: str) -> set:
 
 
 def _dispatch_rhs(block: str, key: str) -> Optional[str]:
-    """Return the RHS (``svc.…``) for *key* in the dispatch block, or None.
+    """Return the RHS for *key*, normalized to the historical ``svc.`` prefix.
 
-    W828: dispatch table uses ``svc.`` prefix (was ``self.`` in service.py).
+    W1769: the live dispatch dict (service.py) uses ``self.`` prefix; we read it
+    and rewrite ``self.`` → ``svc.`` so the ``_EXPECTED`` literals (kept as
+    ``svc.…`` for continuity) keep matching.
     """
-    m = re.search(r'"' + re.escape(key) + r'"\s*:\s*(svc\.[^\s,#\n]+)', block)
-    return m.group(1) if m else None
+    m = re.search(r'"' + re.escape(key) + r'"\s*:\s*(self\.[^\s,#\n]+)', block)
+    if m is None:
+        return None
+    return m.group(1).replace("self.", "svc.", 1)
 
 
 class TestWave768CriticalDispatchInvariants(unittest.TestCase):

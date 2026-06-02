@@ -6,9 +6,10 @@ service — no STT, no LLM, no network.
 
 Budget: <5 ms per individual dispatch call on any CI runner.
 
-The lookup-table build happens inside handle_request on every call (dict
-literal rebuild each time), so these benchmarks catch regressions in dict
-allocation cost + method-lookup + handler execution combined.
+W1769: the dispatch table is now built ONCE in BackendService.__init__
+(cached as self._dispatch_table); handle_request performs an O(1) dict lookup —
+no per-call rebuild.  These benchmarks catch regressions in method-lookup +
+handler execution.
 
 Usage::
 

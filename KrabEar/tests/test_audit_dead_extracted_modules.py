@@ -13,7 +13,10 @@
   - allowlist (module:/dup:) подавляет находки.
 
 Плюс smoke-прогон на РЕАЛЬНОМ репозитории: проверяет, что страж находит
-известные W797-находки (ipc_dispatch.py / service_logging.py / IPCServer dup).
+оставшуюся W797-находку (glossary_service.py — отдельный follow-up) и НЕ
+флагает уже исправленные модули. W1769: ipc_dispatch.py / service_logging.py
+УДАЛЕНЫ (диспетчеризация и логирование консолидированы инлайн в service.py);
+IPCServer-дубликат устранён в #1601 — все три больше не флагаются.
 """
 
 from __future__ import annotations
@@ -305,7 +308,7 @@ class AllowlistTests(unittest.TestCase):
 
 class RealRepoSmokeTests(unittest.TestCase):
     """Подтверждает, что страж ловит реальные W797-decorative-extraction
-    находки в текущем дереве."""
+    находки в текущем дереве и НЕ флагает уже исправленные модули."""
 
     @classmethod
     def setUpClass(cls):
@@ -316,23 +319,32 @@ class RealRepoSmokeTests(unittest.TestCase):
             (f["symbol"], Path(f["extracted_module"]).name) for f in cls.dead_dups
         }
 
-    def test_ipc_dispatch_flagged_dead(self):
-        # build_dispatch_table не импортируется production — мёртвый модуль.
-        self.assertIn("ipc_dispatch.py", self.dead_mod_names)
+    def test_glossary_service_flagged_dead(self):
+        # glossary_service.py пока не импортируется production — мёртвый модуль
+        # (отдельный follow-up). Подтверждает, что страж всё ещё работает.
+        self.assertIn("glossary_service.py", self.dead_mod_names)
 
-    def test_service_logging_flagged_dead(self):
-        self.assertIn("service_logging.py", self.dead_mod_names)
+    def test_ipc_dispatch_not_flagged_after_deletion(self):
+        # W1769: ipc_dispatch.py УДАЛЁН — диспетчеризация консолидирована инлайн
+        # в service.py (_build_dispatch_table). Модуля больше нет → не флагается.
+        self.assertNotIn("ipc_dispatch.py", self.dead_mod_names)
 
-    def test_ipcserver_dup_flagged(self):
-        # IPCServer определён И в ipc_server.py, И инлайн в service.py;
-        # production использует инлайн-копию.
-        self.assertIn(("IPCServer", "ipc_server.py"), self.dead_dup_keys)
+    def test_service_logging_not_flagged_after_deletion(self):
+        # W1769: service_logging.py УДАЛЁН — configure_logging/JsonFormatter
+        # остаются инлайн в service.py (живая копия). Модуля нет → не флагается.
+        self.assertNotIn("service_logging.py", self.dead_mod_names)
 
-    def test_configure_logging_dup_flagged(self):
-        self.assertIn(("configure_logging", "service_logging.py"), self.dead_dup_keys)
+    def test_configure_logging_dup_resolved(self):
+        # W1769: дубликат configure_logging устранён (извлечённая копия удалена).
+        self.assertNotIn(("configure_logging", "service_logging.py"), self.dead_dup_keys)
+
+    def test_ipcserver_dup_resolved(self):
+        # #1601 (W1767): IPCServer-инлайн-дубликат удалён из service.py; каноничный
+        # класс живёт в ipc_server.py и импортируется. Больше не дубликат.
+        self.assertNotIn(("IPCServer", "ipc_server.py"), self.dead_dup_keys)
 
     def test_findings_are_nonempty(self):
-        # Sanity: страж вообще что-то нашёл (иначе сломан).
+        # Sanity: страж вообще что-то нашёл (glossary_service остаётся) — иначе сломан.
         self.assertGreater(len(self.dead_modules) + len(self.dead_dups), 0)
 
 

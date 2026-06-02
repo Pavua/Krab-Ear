@@ -22,6 +22,69 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
+def _build_minimal_backend_service():
+    """Конструирует РЕАЛЬНУЮ BackendService с лёгкими фейками для проверки
+    ЖИВОЙ таблицы диспетчеризации (W1769).
+
+    Использует тот же приём, что и test_dispatch_complete: рекордер/транскрайбер/
+    транслятор подменяются фейками через конструктор; тяжёлые ML-модели не грузятся
+    (AudioEngine не инстанцируется без вызова транскрипции).
+    """
+    import tempfile
+    import numpy as np
+    from backend.state_store import StateStore
+    from backend.service import BackendService
+    from backend.translator import TranslationResult
+
+    class _FakeRecorder:
+        is_recording = False
+        sample_rate = 16000
+
+        def start(self):
+            self.is_recording = True
+            return True
+
+        def stop(self, timeout_sec=3.0, trim_tail_ms=0):
+            if not self.is_recording:
+                return None
+            self.is_recording = False
+            return np.zeros(16000, dtype=np.float32), 1.0
+
+    class _FakeEngine:
+        _last_llm_diff = None
+        _llm_rewriter = None
+        quality_profile = "balanced"
+        current_model = "fake-model"
+
+        def _resolve_diarization_device(self) -> str:
+            return "cpu"
+
+    class _FakeTranscriber:
+        def __init__(self):
+            self.engine = _FakeEngine()
+
+        def transcribe(self, *a, **kw):
+            return "fake"
+
+    class _FakeTranslator:
+        last_mode = "off"
+
+        def translate(self, text, mode, network_mode, translation_style="neutral", glossary=None):
+            return TranslationResult(
+                text="", status="not_requested", source_lang="",
+                target_lang="", mode=mode, engine="fake",
+            )
+
+    tmp = tempfile.mkdtemp()
+    store = StateStore(Path(tmp) / "data")
+    return BackendService(
+        store=store,
+        recorder=_FakeRecorder(),
+        transcriber=_FakeTranscriber(),
+        translator=_FakeTranslator(),
+    )
+
+
 def _write_ndjson(path: Path, items: list[dict]) -> None:
     """Вспомогательная функция: записывает список объектов в NDJSON-файл."""
     lines = [json.dumps(item, ensure_ascii=False) for item in items]
@@ -716,9 +779,15 @@ class TestWave1767Hardening(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_rollback_migration_in_dispatch_table(self) -> None:
-        """#11: build_dispatch_table содержит 'rollback_migration' и вызов его
-        диспетчеризует handle_rollback_migration DataMigrator'а."""
-        from backend.ipc_dispatch import build_dispatch_table
+        """#11: ЖИВАЯ BackendService._dispatch_table содержит 'rollback_migration'
+        и вызов его диспетчеризует handle_rollback_migration DataMigrator'а.
+
+        W1769: диспетчеризация консолидирована инлайн в service.py — единственный
+        источник истины (ipc_dispatch.py удалён). Раньше rollback_migration был
+        зарегистрирован ТОЛЬКО в мёртвом ipc_dispatch.py, т.е. недостижим в
+        production; теперь он в живой таблице.
+        """
+        svc = _build_minimal_backend_service()
 
         class _FakeDataMigrator:
             called_with: dict | None = None
@@ -733,31 +802,33 @@ class TestWave1767Hardening(unittest.TestCase):
             def handle_run_migration(self, params: dict) -> dict:
                 return {}
 
-        class _MinimalService:
-            """Минимальный stub BackendService с нужными атрибутами для build_dispatch_table."""
-
-        # build_dispatch_table обращается к множеству атрибутов svc.* — создаём
-        # только те, что необходимы; остальные подставляем через Mock, чтобы
-        # избежать импорта тяжёлых зависимостей.
-        from unittest.mock import MagicMock
-        svc = MagicMock()
         fake_migrator = _FakeDataMigrator()
         svc._data_migrator = fake_migrator
+        # Таблица строится в __init__ из self._data_migrator; пересобираем после
+        # подмены на фейк, чтобы проверить именно ЖИВУЮ логику построения.
+        svc._dispatch_table = svc._build_dispatch_table()
 
-        table = build_dispatch_table(svc)
-
-        # Ключ обязан присутствовать
-        self.assertIn("rollback_migration", table, (
-            "#11: 'rollback_migration' не найден в dispatch table; "
-            "добавьте запись в ipc_dispatch.py"
+        # Ключ обязан присутствовать в ЖИВОЙ таблице
+        self.assertIn("rollback_migration", svc._dispatch_table, (
+            "#11: 'rollback_migration' не найден в BackendService._dispatch_table; "
+            "добавьте запись в service.py::_build_dispatch_table"
         ))
 
-        # Вызов диспетчеризует именно handle_rollback_migration
+        # Вызов через ЖИВУЮ таблицу диспетчеризует именно handle_rollback_migration
         params = {"backup_path": "/stub/backup"}
-        result = table["rollback_migration"](params)
+        result = svc._dispatch_table["rollback_migration"](params)
         self.assertEqual(fake_migrator.called_with, params,
                          "#11: dispatch table не вызвал handle_rollback_migration")
         self.assertIn("restored_files", result)
+
+        # И через публичный handle_request — полный путь диспетчеризации
+        fake_migrator.called_with = None
+        resp = svc.handle_request({
+            "id": "rb1", "method": "rollback_migration",
+            "params": {"backup_path": "/stub/backup2"},
+        })
+        self.assertTrue(resp.get("ok"), f"rollback_migration вернул ошибку: {resp}")
+        self.assertEqual(fake_migrator.called_with, {"backup_path": "/stub/backup2"})
 
     # ------------------------------------------------------------------
     # #12: tmp-файл удаляется при исключении в write/replace
