@@ -424,5 +424,60 @@ class TestSessionTrackerGetActiveSessionW1501(unittest.TestCase):
                 self.assertIn("audio_device", val)
 
 
+class TestSessionTrackerClearAllW1768(unittest.TestCase):
+    """W1768 — clear_all() privacy-purge тесты."""
+
+    def test_clear_all_removes_file_and_deque(self):
+        """persist пары сессий → файл существует + deque непуст → clear_all →
+        файл удалён + deque пуст + active=None."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tracker = SessionTracker(data_dir=tmpdir)
+            for i in range(2):
+                tracker.start_session(audio_device=f"Mic-{i}")
+                tracker.end_session({"duration_sec": float(i + 1), "paste_status": "ok"})
+
+            sessions_file = Path(tmpdir) / "sessions.ndjson"
+            # Предусловие: файл существует и буфер заполнен
+            self.assertTrue(sessions_file.exists())
+            self.assertEqual(len(tracker.get_sessions(limit=100)), 2)
+
+            tracker.clear_all()
+
+            # Постусловие: файл стёрт, буфер пуст, активная сессия None
+            self.assertFalse(sessions_file.exists())
+            self.assertEqual(tracker.get_sessions(limit=100), [])
+            self.assertIsNone(tracker.get_active_session())
+            self.assertEqual(tracker.get_session_stats()["total_sessions"], 0)
+
+    def test_clear_all_resets_active_session(self):
+        """clear_all сбрасывает незавершённую активную сессию."""
+        tracker = SessionTracker()
+        tracker.start_session(audio_device="PendingMic")
+        self.assertIsNotNone(tracker.get_active_session())
+        tracker.clear_all()
+        self.assertIsNone(tracker.get_active_session())
+
+    def test_clear_all_idempotent_no_crash(self):
+        """Повторный вызов clear_all — no-op, не падает на отсутствующем файле."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tracker = SessionTracker(data_dir=tmpdir)
+            tracker.start_session()
+            tracker.end_session({"duration_sec": 1.0})
+            tracker.clear_all()
+            # Второй вызов на уже удалённом файле и пустом буфере
+            tracker.clear_all()
+            self.assertEqual(tracker.get_sessions(limit=100), [])
+            self.assertIsNone(tracker.get_active_session())
+
+    def test_clear_all_without_data_dir(self):
+        """clear_all без data_dir (file=None) не падает."""
+        tracker = SessionTracker(data_dir=None)
+        tracker.start_session()
+        tracker.end_session({"duration_sec": 1.0})
+        tracker.clear_all()
+        self.assertEqual(tracker.get_sessions(limit=100), [])
+        self.assertIsNone(tracker.get_active_session())
+
+
 if __name__ == "__main__":
     unittest.main()

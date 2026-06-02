@@ -185,6 +185,24 @@ class SessionTracker:
         with self._lock:
             return dict(self._active_session) if self._active_session else None
 
+    def clear_all(self) -> None:
+        """W1768: полная очистка всех метаданных сессий для privacy-purge.
+
+        Удаляет из памяти скользящий буфер сессий, сбрасывает активную сессию
+        и стирает с диска sessions.ndjson (имя устройства + время начала/конца +
+        режим использования — косвенные ПДн, раскрывают паттерны записи).
+
+        Идемпотентно: повторный вызов на отсутствующем файле — no-op (никогда не
+        бросает на missing file). Выполняется под self._lock для атомарности —
+        handle_purge_all_data зарегистрирует шаг в secondary_errors при ошибке.
+        """
+        with self._lock:
+            self._sessions.clear()
+            self._active_session = None
+            if self._sessions_file is not None:
+                self._sessions_file.unlink(missing_ok=True)
+        logger.info("clear_all: sessions.ndjson удалён (privacy-purge)")
+
     # ------------------------------------------------------------------
     # Персистентность
     # ------------------------------------------------------------------
