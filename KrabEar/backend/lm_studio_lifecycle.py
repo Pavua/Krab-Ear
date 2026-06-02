@@ -27,7 +27,7 @@ import subprocess
 import threading
 import urllib.error
 import urllib.request
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 logger = logging.getLogger("KrabEar.LMStudioLifecycle")
 
@@ -38,15 +38,79 @@ _CLI_TIMEOUT_SEC = 2.0
 # Safety cap: model IDs longer than this are rejected before any network call.
 _MODEL_ID_MAX_LEN = 256
 
+# ---------------------------------------------------------------------------
+# SSRF guard (Wave 1768) — mirrors _validate_llm_url() in llm_rewriter.py.
+#
+# base_url приходит из settings.llm_base_url, а settings_validator его НЕ
+# валидирует. Локальный процесс мог бы выставить
+#   set_settings {"llm_base_url": "file:///etc/passwd"}
+# и следующий start/stop_recording дёрнул бы load/unload с этим URL. Дефолтный
+# urllib opener включает FileHandler + HTTPRedirectHandler, поэтому открылись бы
+# и `file://`, и `302 → file://`. Защита двухслойная:
+#   1. Явный allowlist схемы (http/https) до любого сетевого вызова.
+#   2. Кастомный opener БЕЗ FileHandler/FTPHandler + redirect-handler, который
+#      повторно валидирует схему на каждом 30x — так блокируются и редиректы в
+#      file://. localhost/LAN адреса разрешены намеренно (LM Studio 127.0.0.1).
+# ---------------------------------------------------------------------------
+_ALLOWED_SCHEMES = frozenset({"http", "https"})
+
+
+def _scheme_allowed(base_url: str) -> bool:
+    """True если схема base_url входит в allowlist (http/https)."""
+    return urlparse(base_url).scheme.lower() in _ALLOWED_SCHEMES
+
+
+class _SchemeCheckingRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """HTTPRedirectHandler, отклоняющий 30x-редиректы на запрещённую схему.
+
+    Защищает от `302 → file:///etc/passwd`: даже если сервер ответит редиректом
+    на file://, urllib попытается построить Request с этой схемой, а opener
+    (см. ниже) не имеет FileHandler — но мы блокируем ещё раньше, явной ошибкой.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urlparse(newurl).scheme.lower() not in _ALLOWED_SCHEMES:
+            raise urllib.error.HTTPError(
+                newurl, code,
+                f"redirect to disallowed scheme blocked: {newurl!r}",
+                headers, fp,
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _build_safe_opener() -> urllib.request.OpenerDirector:
+    """Opener только с HTTP(S) + scheme-checking redirect handler.
+
+    Намеренно НЕ содержит FileHandler/FTPHandler/DataHandler, поэтому
+    file://, ftp://, data:// не обрабатываются вовсе (в т.ч. через редирект).
+    """
+    opener = urllib.request.OpenerDirector()
+    opener.add_handler(urllib.request.HTTPHandler())
+    opener.add_handler(urllib.request.HTTPSHandler())
+    opener.add_handler(_SchemeCheckingRedirectHandler())
+    opener.add_handler(urllib.request.HTTPErrorProcessor())
+    return opener
+
+
+# Один разделяемый opener — потокобезопасен для конкурентных open().
+_SAFE_OPENER = _build_safe_opener()
+
 
 def _try_rest_unload(base_url: str, model_id: str) -> bool:
     """LM Studio REST: POST /api/v0/models/{model}/unload. Returns True on 2xx."""
+    # SSRF guard (Wave 1768): отклоняем file://, ftp://, data:// и пр. до сети.
+    if not _scheme_allowed(base_url):
+        logger.warning(
+            "LM Studio: refusing unload — base_url scheme not in %s: %r",
+            sorted(_ALLOWED_SCHEMES), base_url,
+        )
+        return False
     # base_url типа "http://localhost:1234/v1" — отбрасываем "/v1"
     api_root = base_url.rstrip("/").removesuffix("/v1")
     url = f"{api_root}/api/v0/models/{quote(model_id, safe='')}/unload"
     try:
         req = urllib.request.Request(url, method="POST")
-        with urllib.request.urlopen(req, timeout=_REST_TIMEOUT_SEC) as resp:
+        with _SAFE_OPENER.open(req, timeout=_REST_TIMEOUT_SEC) as resp:
             return 200 <= resp.status < 300
     except urllib.error.HTTPError as e:
         if e.code in (404, 405):
@@ -60,6 +124,13 @@ def _try_rest_unload(base_url: str, model_id: str) -> bool:
 
 def _try_rest_load(base_url: str, model_id: str) -> bool:
     """LM Studio REST: POST /api/v0/models/load. Returns True on 2xx."""
+    # SSRF guard (Wave 1768): отклоняем file://, ftp://, data:// и пр. до сети.
+    if not _scheme_allowed(base_url):
+        logger.warning(
+            "LM Studio: refusing load — base_url scheme not in %s: %r",
+            sorted(_ALLOWED_SCHEMES), base_url,
+        )
+        return False
     api_root = base_url.rstrip("/").removesuffix("/v1")
     url = f"{api_root}/api/v0/models/load"
     try:
@@ -68,7 +139,7 @@ def _try_rest_load(base_url: str, model_id: str) -> bool:
             url, data=body, method="POST",
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(req, timeout=_REST_TIMEOUT_SEC) as resp:
+        with _SAFE_OPENER.open(req, timeout=_REST_TIMEOUT_SEC) as resp:
             return 200 <= resp.status < 300
     except urllib.error.HTTPError as e:
         if e.code in (404, 405):
