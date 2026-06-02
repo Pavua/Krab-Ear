@@ -14,7 +14,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -106,17 +106,38 @@ class TestVersionCapDropsOldest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# F2: cascade delete — delete_history_item
+# Shared fake lock helper (used by F2 test classes below)
 # ---------------------------------------------------------------------------
 
-def _make_fake_store(item_id: str, ts: str | None = None):
-    """Создаёт минимальный stub StateStore для тестов HistoryService."""
-    item = SimpleNamespace(id=item_id, ts=ts or datetime.now(timezone.utc).isoformat())
-    store = MagicMock()
-    store.delete_history_item.return_value = True
-    store.data_dir = Path("/tmp")
-    return store, item
+class FakeLock:
+    """Контекстный менеджер — stub для store._lock()."""
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        pass
+
+
+def _make_store_mock(data_dir: Path) -> MagicMock:
+    """Возвращает MagicMock store с корректным _lock (callable → context manager).
+
+    В Python 3.14 MagicMock._lock является реальным RLock (внутренний lock самого
+    MagicMock), а не автоматически мокированным атрибутом. Поэтому необходимо явно
+    переопределить _lock как callable, возвращающий контекстный менеджер, —
+    согласно контракту StateStore._lock() (метод с @contextmanager).
+    """
+    store = MagicMock()
+    store.data_dir = data_dir
+    store.delete_history_item.return_value = True
+    store._lock = MagicMock(return_value=FakeLock())
+    store._load_active_items_unlocked.return_value = []
+    return store
+
+
+# ---------------------------------------------------------------------------
+# F2: cascade delete — delete_history_item
+# ---------------------------------------------------------------------------
 
 class TestDeleteHistoryItemCascadesVersions(unittest.TestCase):
     """F2 HIGH: delete_history_item вызывает cascade delete версий."""
@@ -124,9 +145,7 @@ class TestDeleteHistoryItemCascadesVersions(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.versions_mgr = TranscriptVersionManager(self.temp_dir.name)
-        self.store = MagicMock()
-        self.store.delete_history_item.return_value = True
-        self.store.data_dir = Path(self.temp_dir.name)
+        self.store = _make_store_mock(Path(self.temp_dir.name))
         self.history_svc = HistoryService(
             store=self.store,
             transcript_versions=self.versions_mgr,
@@ -179,9 +198,7 @@ class TestDeleteHistoryItemCascadesVersions(unittest.TestCase):
 
     def test_delete_without_versions_manager_skips_cascade(self) -> None:
         """Если _transcript_versions is None — cascade пропускается без ошибки."""
-        store = MagicMock()
-        store.delete_history_item.return_value = True
-        store.data_dir = Path(self.temp_dir.name)
+        store = _make_store_mock(Path(self.temp_dir.name))
         svc = HistoryService(store=store, transcript_versions=None)
         result = svc.handle_delete_history_item({"id": "some_item"})
         self.assertTrue(result.get("deleted"))
@@ -190,16 +207,6 @@ class TestDeleteHistoryItemCascadesVersions(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # F2: cascade delete — cleanup_old_history
 # ---------------------------------------------------------------------------
-
-class FakeLock:
-    """Контекстный менеджер — stub для store._lock()."""
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        pass
-
 
 class TestCleanupOldHistoryCascadesVersions(unittest.TestCase):
     """F2 HIGH: cleanup_old_history вызывает bulk cascade delete версий."""
