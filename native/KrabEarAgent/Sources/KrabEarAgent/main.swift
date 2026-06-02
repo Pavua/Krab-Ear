@@ -170,29 +170,8 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        // Phase C C.6.2: Kill orphan native/runtime/KrabEarAgent processes.
-        // These are legacy dev binaries — the .app bundle path is canonical.
-        // Must run AFTER acquireFileLock so we hold the lock before eliminating orphans.
-        let projectRootURL = URL(fileURLWithPath: options.projectRoot)
-        let killedOrphans = killOrphanRuntimeProcesses(projectRoot: projectRootURL, logger: logger)
-        if killedOrphans > 0 {
-            logger.warn("Phase C C.6.2: Killed \(killedOrphans) orphan native/runtime/KrabEarAgent process(es)")
-        } else {
-            logger.info("Phase C C.6.2: No orphan native/runtime/KrabEarAgent processes found")
-        }
-
-        // Phase C C.6: Cleanup worktree shadow .app bundles из LaunchServices DB.
-        // Выполняется до основного UI setup, чтобы LaunchServices не открывала shadow copy.
-        cleanupWorktreeShadows(projectRoot: projectRootURL, logger: logger)
-
-        // Single-instance guard: убиваем orphan-дубликаты KrabEarAgent
-        // (например, устаревший native/runtime/KrabEarAgent --launched-by-launchd).
-        let killed = killOtherAgentInstances()
-        if killed > 0 {
-            logger.warn("Single-instance guard: убито дубликатов KrabEarAgent: \(killed)")
-        } else {
-            logger.info("Single-instance guard: дубликаты не обнаружены")
-        }
+        // Phase C C.6.2 and single-instance cleanup are moved to background task
+        // to avoid blocking applicationDidFinishLaunching with synchronous Process executions.
 
         // Sentry / GlitchTip telemetry — no-op если DSN не задан в settings
         let sentryDsn = UserDefaults.standard.string(forKey: "KrabEar_SentryDSN") ?? ""
@@ -205,7 +184,6 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         BackendToast.shared.prewarmPanel()
 
         logger.info("Старт агента. projectRoot=\(options.projectRoot), launchedByLaunchd=\(options.launchedByLaunchd)")
-        logger.info("BackendSupervisor режим: \(backendSupervisor.supervisionMode == .passive ? "passive (launchd Variant B)" : "active (standalone)")")
         notificationService.requestAuthorizationIfNeeded()
         DistributedNotificationCenter.default().addObserver(
             self,
@@ -224,8 +202,29 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         // на холодном старте Whisper/pyannote (Sentry KRAB-EAR-AGENT-4 AppHang).
         // applicationDidFinishLaunching возвращается сразу, NSApp.run цикл не блокируется,
         // оставшийся setup (UI, hotkey, history panel) выполняется по готовности backend.
+        let projectRootURL = URL(fileURLWithPath: options.projectRoot)
         Task.detached { [weak self] in
             guard let self else { return }
+            
+            // Execute synchronous Process cleanups off the main thread
+            let killedOrphans = killOrphanRuntimeProcesses(projectRoot: projectRootURL, logger: self.logger)
+            if killedOrphans > 0 {
+                self.logger.warn("Phase C C.6.2: Killed \(killedOrphans) orphan native/runtime/KrabEarAgent process(es)")
+            } else {
+                self.logger.info("Phase C C.6.2: No orphan native/runtime/KrabEarAgent processes found")
+            }
+            
+            cleanupWorktreeShadows(projectRoot: projectRootURL, logger: self.logger)
+            
+            let killed = killOtherAgentInstances()
+            if killed > 0 {
+                self.logger.warn("Single-instance guard: убито дубликатов KrabEarAgent: \(killed)")
+            } else {
+                self.logger.info("Single-instance guard: дубликаты не обнаружены")
+            }
+            
+            self.logger.info("BackendSupervisor режим: \(self.backendSupervisor.supervisionMode == .passive ? "passive (launchd Variant B)" : "active (standalone)")")
+
             // Wave 656: log IPC connect attempt.
             AgentRecoveryLogger.shared.logStage("ipc_connect_attempt")
             do {

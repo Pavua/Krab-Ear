@@ -84,7 +84,12 @@ final class IPCRealSocketProvider: IPCSocketProviding, @unchecked Sendable {
                 if errno == EAGAIN || errno == EWOULDBLOCK { throw IPCError.timeout }
                 throw IPCError.readFailed
             }
-            if count == 0 { break }
+            if count == 0 {
+                if responseData.isEmpty || !responseData.contains(UInt8(ascii: "\n")) {
+                    throw IPCError.invalidResponse
+                }
+                break
+            }
             responseData.append(contentsOf: chunk[0..<count])
             if chunk[0..<count].contains(UInt8(ascii: "\n")) { break }
         }
@@ -446,6 +451,9 @@ final class IPCClient: @unchecked Sendable {
                 throw IPCError.readFailed
             }
             if count == 0 {
+                if responseData.isEmpty || !responseData.contains(UInt8(ascii: "\n")) {
+                    throw IPCError.invalidResponse
+                }
                 break
             }
             responseData.append(contentsOf: chunk[0..<count])
