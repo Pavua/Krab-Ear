@@ -339,7 +339,7 @@ class AbbreviationExpander:
         with self._lock:
             if lang not in self._abbrevs:
                 self._abbrevs[lang] = {}
-            
+
             if len(self._abbrevs[lang]) >= self.MAX_DICT_SIZE and abbr not in self._abbrevs[lang]:
                 logger.warning("Превышен лимит количества аббревиатур (%d) для %s", self.MAX_DICT_SIZE, lang)
                 return

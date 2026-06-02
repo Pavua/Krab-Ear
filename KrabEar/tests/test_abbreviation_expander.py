@@ -518,5 +518,110 @@ class TestW1068MultiSenseAbbreviationsRemoved(unittest.TestCase):
         self.assertNotIn("обл.", result)
 
 
+class TestSecurityLimits(unittest.TestCase):
+    """Regression tests for security hardening: length and dict-size limits (wave-A)."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.expander = AbbreviationExpander(data_dir=Path(self.tmp_dir))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_abbr_too_long_is_silently_rejected(self):
+        """add_abbreviation silently rejects abbr longer than MAX_ABBR_LENGTH."""
+        long_abbr = "а." * (AbbreviationExpander.MAX_ABBR_LENGTH + 1)  # 102 chars
+        self.expander.add_abbreviation(long_abbr, "расшифровка", language="ru")
+        items = self.expander.list_abbreviations(language="ru")
+        abbrs = [i["abbr"] for i in items]
+        self.assertNotIn(long_abbr, abbrs)
+
+    def test_expansion_too_long_is_silently_rejected(self):
+        """add_abbreviation silently rejects expansion longer than MAX_EXPANSION_LENGTH."""
+        long_expansion = "слово " * (AbbreviationExpander.MAX_EXPANSION_LENGTH + 1)
+        self.expander.add_abbreviation("кр.", long_expansion, language="ru")
+        items = self.expander.list_abbreviations(language="ru")
+        user_items = [i for i in items if not i["builtin"]]
+        self.assertFalse(
+            any(i["abbr"] == "кр." for i in user_items),
+            "Overly long expansion should not be stored",
+        )
+
+    def test_abbr_at_exact_limit_is_accepted(self):
+        """add_abbreviation accepts abbr exactly MAX_ABBR_LENGTH chars long."""
+        # MAX_ABBR_LENGTH chars using ASCII-safe abbreviation letters
+        exact_abbr = "a" * AbbreviationExpander.MAX_ABBR_LENGTH
+        self.expander.add_abbreviation(exact_abbr, "test expansion", language="ru")
+        items = self.expander.list_abbreviations(language="ru")
+        abbrs = [i["abbr"] for i in items]
+        self.assertIn(exact_abbr, abbrs)
+
+    def test_expansion_at_exact_limit_is_accepted(self):
+        """add_abbreviation accepts expansion exactly MAX_EXPANSION_LENGTH chars long."""
+        exact_expansion = "a" * AbbreviationExpander.MAX_EXPANSION_LENGTH
+        self.expander.add_abbreviation("tst.", exact_expansion, language="en")
+        items = self.expander.list_abbreviations(language="en")
+        self.assertTrue(any(i["abbr"] == "tst." for i in items))
+
+    def test_dict_size_limit_blocks_new_entries(self):
+        """add_abbreviation rejects new entries once MAX_DICT_SIZE is reached."""
+        expander = AbbreviationExpander(data_dir=None)
+        limit = AbbreviationExpander.MAX_DICT_SIZE
+        # Exhaust the dict with synthetic custom abbreviations.
+        # Use 'xx' prefix to avoid colliding with builtins.
+        # Count how many builtins already exist for 'ru'.
+        current_count = len([
+            i for i in expander.list_abbreviations("ru")
+        ])
+        slots_needed = limit - current_count
+        for i in range(slots_needed):
+            expander.add_abbreviation(f"x{i:04d}.", f"расш{i}", "ru")
+
+        # One more attempt — should be silently dropped.
+        expander.add_abbreviation("overflow.", "не должно добавиться", "ru")
+        items = expander.list_abbreviations("ru")
+        self.assertFalse(any(i["abbr"] == "overflow." for i in items))
+        # Dict must not exceed the limit.
+        self.assertLessEqual(len(items), limit)
+
+    def test_dict_size_limit_allows_update_of_existing_entry(self):
+        """add_abbreviation allows UPDATING an existing abbreviation even when the dict is full."""
+        expander = AbbreviationExpander(data_dir=None)
+        limit = AbbreviationExpander.MAX_DICT_SIZE
+        current_count = len(expander.list_abbreviations("ru"))
+        slots_needed = limit - current_count
+        for i in range(slots_needed):
+            expander.add_abbreviation(f"y{i:04d}.", f"расш{i}", "ru")
+
+        # т.е. is already a builtin — updating it must succeed even when full.
+        expander.add_abbreviation("т.е.", "то есть (обновлено)", "ru")
+        items = expander.list_abbreviations("ru")
+        updated = next((i for i in items if i["abbr"] == "т.е."), None)
+        self.assertIsNotNone(updated)
+        self.assertEqual(updated["expansion"], "то есть (обновлено)")
+
+    def test_load_custom_skips_oversized_entries(self):
+        """_load_custom silently skips entries with abbr or expansion exceeding limits."""
+        json_path = Path(self.tmp_dir) / "abbreviations.json"
+        long_abbr = "x" * (AbbreviationExpander.MAX_ABBR_LENGTH + 1)
+        long_exp = "y" * (AbbreviationExpander.MAX_EXPANSION_LENGTH + 1)
+        data = {
+            "ru": {
+                long_abbr: {"expansion": "нормально", "flags": ""},
+                "норм.": {"expansion": long_exp, "flags": ""},
+                "ок.": {"expansion": "нормальная запись", "flags": ""},
+            }
+        }
+        json_path.write_text(json.dumps(data), encoding="utf-8")
+        expander = AbbreviationExpander(data_dir=Path(self.tmp_dir))
+        items = expander.list_abbreviations("ru")
+        abbrs = [i["abbr"] for i in items]
+        self.assertNotIn(long_abbr, abbrs)
+        self.assertNotIn("норм.", abbrs)
+        # The valid entry must be loaded.
+        self.assertIn("ок.", abbrs)
+
+
 if __name__ == "__main__":
     unittest.main()
