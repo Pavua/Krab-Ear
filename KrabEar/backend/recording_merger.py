@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger("KrabEar.Backend.RecordingMerger")
 
@@ -21,21 +21,34 @@ class RecordingMerger:
     Конструктор не требует store — он передаётся явно в каждый метод,
     чтобы упростить тестирование и следовать паттерну других сервисов.
 
-    Атрибут ``recording_chain_mgr`` — поздняя инъекция (late-injection):
-    инициализируется None, устанавливается из BackendService после создания
-    обоих объектов, чтобы избежать циклической зависимости при конструировании.
-    Когда установлен, merge_items автоматически обновляет цепочки при
-    ``delete_originals=True`` (W1278 RC-A MED fix, wave1282).
+    Поздние инъекции (late-injection) из BackendService после конструирования
+    всех зависимых объектов (избегаем циклической зависимости):
+
+    * ``cascade_delete_fn`` (wave1776 HIGH 1) — каноническая cascade-функция
+      ``HistoryService.cascade_delete_artifacts(item_id, item_ts)``: выполняет ВСЕ
+      шаги удаления КРОМE самого tombstone'а (его merge пишет атомарно сам):
+      стирание .md-транскрипта (W1762, privacy gap) + удаление эмбеддинга +
+      ghost-ссылки в цепочках + playback-статистика + версии транскрипта.
+      ``item_ts`` захватывается ПОКА оригинал ещё активен (после tombstone'а его
+      ts не найти → .md erase молча пропустится).  Если None — fallback на прямой
+      ``store.delete_history_item`` + локальный semantic-каскад (standalone/тесты).
+    * ``_semantic_searcher`` — нужен для индексации НОВОЙ объединённой записи
+      (это не delete-cascade, а самостоятельная потребность merged item).
+      В fallback-режиме также удаляет эмбеддинги оригиналов.
+    * ``recording_chain_mgr`` — merge-специфичная ЗАМЕНА (replace) оригиналов на
+      merged item_id в цепочках.  Каноническое удаление лишь УДАЛЯЕТ ghost-ссылки;
+      замена сохраняет членство merged-записи в цепочке (W1278 RC-A / W1282).
     """
 
     def __init__(
         self,
-        transcript_versioner: Any | None = None,
         semantic_searcher: Any | None = None,
     ) -> None:
-        self._transcript_versioner = transcript_versioner
         self._semantic_searcher = semantic_searcher
+        # Late-injection: см. docstring класса.
         self.recording_chain_mgr: Any | None = None
+        # wave1776 HIGH 1: каноническая cascade-функция (item_id, item_ts) -> None.
+        self.cascade_delete_fn: Callable[[str, str], None] | None = None
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -59,100 +72,193 @@ class RecordingMerger:
 
         Возвращает словарь новой записи.
         Генерирует ValueError при < 2 записях или если часть ID не найдена.
+
+        wave1776 MED 5 (атомарность): для реального StateStore запись merged-записи
+        и tombstone'ы всех удаляемых оригиналов выполняются под одним
+        ``store._lock()`` через *unlocked*-внутренности (lock — flock на отдельном
+        fd, НЕ реентрантен, поэтому вложенные публичные методы взяли бы его второй
+        раз → deadlock).  Богатые delete-каскады (.md/semantic/versions/chains)
+        выполняются ПОСЛЕ освобождения lock'а — это best-effort шаги, не входящие
+        в атомарный инвариант «merged записан И оригиналы tombstoned».
         """
         items = self._load_items(item_ids, store)
+
+        # wave1776 MED 4: защищённые (is_protected) оригиналы никогда не удаляются.
+        protected_set = {
+            item.id for item in items if getattr(item, "is_protected", False)
+        }
+        protected_ids = [item.id for item in items if item.id in protected_set]
+        deletable = [item for item in items if item.id not in protected_set]
+        deletable_ids = [item.id for item in deletable]
+        # ts захватываем ПОКА оригиналы ещё активны — нужно для .md erase после
+        # tombstone'а (после него _load_active_items_unlocked их уже не вернёт).
+        ts_by_id = {item.id: getattr(item, "ts", "") for item in deletable}
+
         merged_data = self._build_merged_data(items, separator)
 
-        new_item = store.add_history_item(
-            text=merged_data["text"],
-            paste_status="merged",
-            source_text=merged_data["source_text"],
-            translated_text=merged_data["translated_text"],
-            translation_mode=merged_data["translation_mode"],
-            source_lang=merged_data["source_lang"],
-            target_lang=merged_data["target_lang"],
-            translation_status=merged_data["translation_status"],
-            diarization=merged_data["diarization"],
-            audio_duration_sec=merged_data["audio_duration_sec"],
-            confidence=merged_data["confidence"],
-            tags=merged_data["tags"],
-        )
+        if self._supports_atomic_write(store):
+            new_item = self._atomic_create_and_tombstone(
+                deletable_ids, merged_data, store, delete_originals
+            )
+        else:
+            # Fallback для fake-store в тестах: без единого lock'а.
+            new_item = store.add_history_item(**self._merged_kwargs(merged_data))
 
+        # Индексация НОВОЙ объединённой записи в семантическом поиске.
         if self._semantic_searcher is not None:
             try:
                 self._semantic_searcher.index_item(new_item.id, new_item.text)
             except Exception:
                 logger.warning("semantic_searcher.index_item failed for %s", new_item.id, exc_info=True)
 
+        deleted_ids: list[str] = []
         if delete_originals:
-            original_ids = [item.id for item in items]
-
-            # W1282: capture chain memberships BEFORE deletion
-            chain_membership: dict[str, list[str]] = {}
-            if self.recording_chain_mgr is not None:
-                try:
-                    chain_membership = self.recording_chain_mgr.find_chains_containing(
-                        original_ids
-                    )
-                except Exception:
-                    logger.exception(
-                        "merge_items: не удалось получить цепочки для %s — пропускаем обновление",
-                        original_ids,
-                    )
-
-            deleted_ids: list[str] = []
-            for item in items:
-                if store.delete_history_item(item.id):
-                    deleted_ids.append(item.id)
-                    if self._semantic_searcher is not None:
-                        try:
-                            self._semantic_searcher.remove_item(item.id)
-                        except Exception:
-                            logger.warning("semantic_searcher.remove_item failed for %s", item.id, exc_info=True)
-                    # W1254 F1: purge version cascade on merge-delete
-                    if self._transcript_versioner is not None:
-                        try:
-                            self._transcript_versioner.purge_versions_for_item(item.id)
-                        except Exception:
-                            logger.exception(
-                                "merge_items: не удалось удалить версии для id=%s", item.id
-                            )
-
-            # W1282: replace originals with merged item in each chain
-            if chain_membership and self.recording_chain_mgr is not None:
-                for chain_id, matched_ids in chain_membership.items():
-                    try:
-                        changed = self.recording_chain_mgr.replace_items_in_chain(
-                            chain_id, matched_ids, new_item.id
-                        )
-                        if changed:
-                            logger.info(
-                                "Цепочка %s: заменены %s → %s",
-                                chain_id, matched_ids, new_item.id,
-                            )
-                    except Exception:
-                        logger.exception(
-                            "merge_items: не удалось обновить цепочку %s — ghost refs остаются",
-                            chain_id,
-                        )
-
+            deleted_ids = self._run_delete_cascades(
+                deletable_ids, ts_by_id, new_item, store
+            )
             logger.info(
-                "Объединено %d записей → %s; удалено %d оригиналов",
-                len(items),
-                new_item.id,
-                len(deleted_ids),
+                "Объединено %d записей → %s; удалено %d оригиналов; пропущено защищённых %d",
+                len(items), new_item.id, len(deleted_ids), len(protected_ids),
             )
         else:
             logger.info(
                 "Объединено %d записей → %s; оригиналы сохранены",
-                len(items),
-                new_item.id,
+                len(items), new_item.id,
             )
 
         result = new_item.to_dict()
         result["merged_from"] = [i.id for i in items]
         result["deleted_originals"] = delete_originals
+        result["deleted_ids"] = deleted_ids
+        result["skipped_protected_ids"] = list(protected_ids)
         return result
+
+    # ------------------------------------------------------------------
+    # Atomicity (wave1776 MED 5)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _supports_atomic_write(store: Any) -> bool:
+        """True если store — реальный StateStore с unlocked-внутренностями."""
+        return all(
+            callable(getattr(store, attr, None))
+            for attr in ("_lock", "_append_ndjson")
+        ) and all(
+            getattr(store, attr, None) is not None
+            for attr in ("history_path", "tombstones_path")
+        )
+
+    def _atomic_create_and_tombstone(
+        self,
+        deletable_ids: list[str],
+        merged_data: dict[str, Any],
+        store: Any,
+        delete_originals: bool,
+    ) -> Any:
+        """Под одним ``store._lock()``: append merged + tombstone оригиналов.
+
+        Возвращает ``new_item``.  Использует unlocked-append, чтобы не брать flock
+        второй раз (он не реентрантен → иначе deadlock в одном процессе).
+        """
+        from backend.models import HistoryItem
+
+        new_item = HistoryItem.create(**self._merged_kwargs(merged_data))
+
+        with store._lock():
+            store._append_ndjson(store.history_path, new_item.to_dict())
+            if delete_originals:
+                for oid in deletable_ids:
+                    store._append_ndjson(store.tombstones_path, {"id": oid})
+
+        return new_item
+
+    def _run_delete_cascades(
+        self,
+        deletable_ids: list[str],
+        ts_by_id: dict[str, str],
+        new_item: Any,
+        store: Any,
+    ) -> list[str]:
+        """Выполняет богатые delete-каскады для оригиналов (вне lock'а).
+
+        Chain-replace (orig→merged) выполняется ПЕРВЫМ — каноническое удаление
+        лишь УДАЛЯЕТ ghost-ссылки, поэтому замену нужно сделать до него (W1282).
+        ``ts_by_id`` несёт ts оригиналов, захваченный ДО tombstone'а — нужен для
+        стирания .md (после tombstone'а ts уже не найти).
+        """
+        if not deletable_ids:
+            return []
+
+        # wave1776: заменяем оригиналы на merged item_id в цепочках ДО удаления.
+        if self.recording_chain_mgr is not None:
+            chain_membership: dict[str, list[str]] = {}
+            try:
+                chain_membership = self.recording_chain_mgr.find_chains_containing(
+                    deletable_ids
+                )
+            except Exception:
+                logger.exception(
+                    "merge_items: не удалось получить цепочки для %s — пропускаем обновление",
+                    deletable_ids,
+                )
+            for chain_id, matched_ids in chain_membership.items():
+                try:
+                    changed = self.recording_chain_mgr.replace_items_in_chain(
+                        chain_id, matched_ids, new_item.id
+                    )
+                    if changed:
+                        logger.info(
+                            "Цепочка %s: заменены %s → %s",
+                            chain_id, matched_ids, new_item.id,
+                        )
+                except Exception:
+                    logger.exception(
+                        "merge_items: не удалось обновить цепочку %s — ghost refs остаются",
+                        chain_id,
+                    )
+
+        deleted_ids: list[str] = []
+        for oid in deletable_ids:
+            if self._delete_one(oid, ts_by_id.get(oid, ""), store):
+                deleted_ids.append(oid)
+        return deleted_ids
+
+    def _delete_one(self, item_id: str, item_ts: str, store: Any) -> bool:
+        """Запускает delete-каскады для одного оригинала.
+
+        wave1776 HIGH 1: при подключённом ``cascade_delete_fn`` tombstone уже
+        записан (атомарным append'ом / fallback'ом ниже) — каноническая
+        ``cascade_delete_artifacts`` доделывает .md erase (privacy gap), удаление
+        эмбеддинга, версий, playback и ghost-refs (по захваченному ts).
+        Если cascade_delete_fn None — fallback: прямой tombstone + semantic remove.
+        """
+        if self.cascade_delete_fn is not None:
+            # Гарантируем tombstone (для fake-store без атомарного append'а).
+            if not self._supports_atomic_write(store):
+                store.delete_history_item(item_id)
+            try:
+                self.cascade_delete_fn(item_id, item_ts)
+            except Exception:
+                logger.exception(
+                    "merge_items: каскадное удаление не удалось для id=%s", item_id
+                )
+                return False
+            return True
+
+        # Fallback (standalone/тесты): прямой tombstone + semantic remove.
+        if self._supports_atomic_write(store):
+            # tombstone уже записан атомарной секцией; не дублируем.
+            ok = True
+        else:
+            ok = store.delete_history_item(item_id)
+        if not ok:
+            return False
+        if self._semantic_searcher is not None:
+            try:
+                self._semantic_searcher.remove_item(item_id)
+            except Exception:
+                logger.warning("semantic_searcher.remove_item failed for %s", item_id, exc_info=True)
+        return True
 
     def preview_merge(
         self,
@@ -242,6 +348,31 @@ class RecordingMerger:
         items.sort(key=lambda i: i.ts)
         return items
 
+    @staticmethod
+    def _merged_kwargs(merged_data: dict[str, Any]) -> dict[str, Any]:
+        """Преобразует merged_data в kwargs для add_history_item / HistoryItem.create."""
+        return {
+            "text": merged_data["text"],
+            "paste_status": "merged",
+            "source_text": merged_data["source_text"],
+            "translated_text": merged_data["translated_text"],
+            "translation_mode": merged_data["translation_mode"],
+            "source_lang": merged_data["source_lang"],
+            "target_lang": merged_data["target_lang"],
+            "translation_status": merged_data["translation_status"],
+            "diarization": merged_data["diarization"],
+            "audio_duration_sec": merged_data["audio_duration_sec"],
+            "confidence": merged_data["confidence"],
+            "tags": merged_data["tags"],
+            # wave1776 MED 3: ранее молча терялись.
+            "favorite": merged_data["favorite"],
+            "is_protected": merged_data["is_protected"],
+            "privacy_mode": merged_data["privacy_mode"],
+            "audio_path": merged_data["audio_path"],
+            "word_timestamps": merged_data["word_timestamps"],
+            "speaker_turns": merged_data["speaker_turns"],
+        }
+
     def _build_merged_data(self, items: list[Any], separator: str) -> dict[str, Any]:
         """Вычисляет агрегированные поля для новой объединённой записи."""
         # --- Текст с временны́ми метками ---
@@ -296,6 +427,32 @@ class RecordingMerger:
             "not_requested",
         )
 
+        # --- wave1776 MED 3: ранее молча терялись ---
+        # is_protected / privacy_mode / favorite: OR-агрегация (True если хотя бы у
+        # одного источника True).  Для protected/privacy это fail-safe: объединение
+        # не должно понижать защиту/приватность.
+        merged_favorite = any(bool(getattr(i, "favorite", False)) for i in items)
+        merged_is_protected = any(bool(getattr(i, "is_protected", False)) for i in items)
+        merged_privacy_mode = any(bool(getattr(i, "privacy_mode", False)) for i in items)
+
+        # word_timestamps / speaker_turns: конкатенация в хронологическом порядке.
+        merged_word_timestamps: list = []
+        merged_speaker_turns: list = []
+        for item in items:
+            wt = getattr(item, "word_timestamps", None)
+            if isinstance(wt, list):
+                merged_word_timestamps.extend(wt)
+            st = getattr(item, "speaker_turns", None)
+            if isinstance(st, list):
+                merged_speaker_turns.extend(st)
+
+        # audio_path: первый непустой путь — нельзя слить несколько файлов в один,
+        # поэтому сохраняем первый осмысленный для воспроизведения/повторов.
+        merged_audio_path = next(
+            (str(getattr(i, "audio_path", "")) for i in items if str(getattr(i, "audio_path", "")).strip()),
+            "",
+        )
+
         return {
             "text": merged_text,
             "source_text": merged_source,
@@ -308,6 +465,12 @@ class RecordingMerger:
             "source_lang": source_lang,
             "target_lang": target_lang,
             "translation_status": translation_status,
+            "favorite": merged_favorite,
+            "is_protected": merged_is_protected,
+            "privacy_mode": merged_privacy_mode,
+            "word_timestamps": merged_word_timestamps or None,
+            "speaker_turns": merged_speaker_turns or None,
+            "audio_path": merged_audio_path,
         }
 
     @staticmethod
