@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from collections import Counter
 from datetime import datetime, timezone
@@ -58,7 +59,7 @@ class SearchHistoryManager:
             raw = self._path.read_text(encoding="utf-8")
             data = json.loads(raw)
             if isinstance(data, dict) and isinstance(data.get("entries"), list):
-                self._entries = data["entries"]
+                self._entries = data["entries"][-_MAX_ENTRIES:]
         except Exception as exc:
             logger.warning("Не удалось загрузить историю поиска: %s", exc)
 
@@ -68,10 +69,12 @@ class SearchHistoryManager:
             return
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._path.write_text(
-                json.dumps({"entries": self._entries}, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            tmp_path = self._path.with_suffix(".json.tmp")
+            with tmp_path.open("w", encoding="utf-8") as fh:
+                json.dump({"entries": self._entries}, fh, ensure_ascii=False, indent=2)
+                fh.flush()
+                os.fsync(fh.fileno())
+            tmp_path.replace(self._path)
         except Exception as exc:
             logger.error("Не удалось сохранить историю поиска: %s", exc)
 
@@ -89,6 +92,9 @@ class SearchHistoryManager:
         query = query.strip()
         if not query:
             return
+        if len(query) > 1000:
+            query = query[:1000]
+
         entry: dict[str, Any] = {
             "query": query,
             "results_count": int(results_count),
@@ -137,7 +143,11 @@ class SearchHistoryManager:
         """Очищает всю историю поисковых запросов."""
         with self._lock:
             self._entries.clear()
-            self._save()
+            if self._path and self._path.exists():
+                try:
+                    self._path.unlink(missing_ok=True)
+                except Exception as exc:
+                    logger.warning("Не удалось удалить %s: %s", self._path, exc)
 
     # ------------------------------------------------------------------
     # IPC-обработчики
