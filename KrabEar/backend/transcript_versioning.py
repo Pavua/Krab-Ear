@@ -9,6 +9,7 @@ from __future__ import annotations
 import difflib
 import json
 import logging
+import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -75,9 +76,34 @@ class TranscriptVersionManager:
             fh.write(line)
 
     def _rewrite_all(self, records: list[dict[str, Any]]) -> None:
-        """Перезаписывает весь файл NDJSON (используется для применения cap/удаления)."""
+        """Перезаписывает весь файл NDJSON (используется для применения cap/удаления).
+
+        W1770 data-integrity fix: запись идёт АТОМАРНО через tmp-файл + fsync +
+        os.replace, как в StateStore._compact_unlocked. Плоский write_text/open('w')
+        не атомарен — крах посреди перезаписи усекал/повреждал ВСЮ историю версий.
+        Паттерн: пишем в {path}.tmp, flush+fsync (данные гарантированно на диске),
+        затем os.replace(tmp, path) (атомарная подмена inode). При любой ошибке —
+        удаляем tmp и пробрасываем исключение, оригинальный файл остаётся целым.
+        """
         content = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
-        self._versions_path.write_text(content, encoding="utf-8")
+        tmp_path = self._versions_path.with_suffix(".ndjson.tmp")
+        _replaced = False
+        try:
+            with tmp_path.open("w", encoding="utf-8") as fh:
+                fh.write(content)
+                fh.flush()
+                # fsync до rename — гарантия, что данные на диске при крахе в момент replace
+                os.fsync(fh.fileno())
+            os.replace(tmp_path, self._versions_path)
+            _replaced = True
+        finally:
+            # Если атомарная подмена не состоялась (ошибка записи/fsync), убираем tmp,
+            # чтобы не оставлять мусор. После успешного replace tmp уже исчез — guard на exists.
+            if not _replaced:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def _enforce_version_cap(self, item_id: str, all_records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """F1: если количество версий для item_id превышает MAX_VERSIONS_PER_ITEM,
@@ -342,6 +368,31 @@ class TranscriptVersionManager:
                 )
         return deleted
 
+    def clear_all(self) -> int:
+        """Полностью очищает хранилище версий (privacy-purge / wipe-all).
+
+        Безусловно усекает transcript_versions.ndjson до пустого файла под
+        _lock — НИ ОДНОЙ версии (включая версии уже удалённых orphan-записей)
+        не остаётся на диске. Используется ТОЛЬКО из handle_purge_all_data:
+        в отличие от cleanup_for_ids(current_ids), который оставляет версии
+        записей, чьи item_id уже исчезли из истории, clear_all() — корректный
+        безусловный privacy-wipe.
+
+        Запись атомарна (tmp+fsync+replace через _rewrite_all). Идемпотентен.
+
+        Returns:
+            Количество удалённых версий (до очистки).
+        """
+        with self._lock:
+            removed = len(self._read_all())
+            if removed > 0:
+                self._rewrite_all([])
+                logger.info(
+                    "clear_all: transcript_versions.ndjson очищен (privacy-purge), удалено %d версий",
+                    removed,
+                )
+        return removed
+
     # ------------------------------------------------------------------
     # IPC-обработчики
     # ------------------------------------------------------------------
@@ -410,9 +461,10 @@ class TranscriptVersionManager:
             purged = len(all_records) - len(kept)
             if purged > 0:
                 try:
-                    with self._versions_path.open("w", encoding="utf-8") as fh:
-                        for r in kept:
-                            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+                    # W1770: атомарная перезапись (tmp+fsync+replace) через _rewrite_all,
+                    # вместо прежнего не-атомарного open('w') — крах посреди записи
+                    # больше не повреждает всю историю версий.
+                    self._rewrite_all(kept)
                     logger.info(
                         "purge_orphaned_versions: удалено %d версий для tombstone-записей",
                         purged,
