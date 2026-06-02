@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 from typing import Any, Callable, TYPE_CHECKING
 
@@ -136,16 +137,33 @@ class AppleIntegrationService:
 
         return {"chats": chats}
 
-    # ── AppleScript string escaping (W944 / W1052) ──────────────────────────
+    # ── AppleScript string escaping (W944 / W1052 / W1765) ─────────────────────
 
     @staticmethod
     def _escape_as_str(s: str) -> str:
-        """Escape *s* for safe embedding inside an AppleScript double-quoted string.
+        """Экранирует *s* для безопасного встраивания в AppleScript-строку в двойных кавычках.
 
-        Must double backslashes FIRST, then escape double-quotes — incorrect order
-        would double-escape already-escaped characters.
+        Порядок операций критичен:
+          1. Заменяем \\r, \\n, \\x00 пробелом — символы конца строки разрывают
+             AppleScript-инструкцию и позволяют инъекцию произвольных команд
+             (W942 HIGH-1 / W1765 MED-1: регрессия отсутствовала в сервисе).
+          2. Удваиваем обратные слэши ДО экранирования кавычек — иначе слэш
+             перед кавычкой превратится в \\\\" (двойное экранирование).
+          3. Экранируем двойные кавычки как \\".
+
+        Защита от нестроковых входных данных: приводим через str() чтобы не
+        пропустить несанированное значение при numeric/None-параметре.
+
+        W1765: добавлена обработка \\r/\\n/\\x00 — слабое место относительно
+        BackendService._escape_as_str (re.sub), теперь поведение идентично.
         """
-        return str(s).replace("\\", "\\\\").replace('"', '\\"')
+        if not isinstance(s, str):
+            s = str(s)
+        # W1765 MED-1: экранируем переносы строк и NUL (могут прервать AppleScript-инструкцию)
+        s = re.sub(r'[\r\n\x00]', ' ', s)
+        s = s.replace('\\', '\\\\')  # обратный слэш ПЕРВЫМ — иначе \\" → дублирование
+        s = s.replace('"', '\\"')
+        return s
 
     # ── Apple Notes integration (Phase D.4) ─────────────────────────────────
 
