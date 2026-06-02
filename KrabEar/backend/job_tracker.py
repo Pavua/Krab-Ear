@@ -171,6 +171,30 @@ class JobTracker:
         with self._lock:
             return self._cancel_events.get(job_id)
 
+    def clear(self) -> int:
+        """Очищает ВСЕ задачи из реестра (используется при privacy-purge).
+
+        Сбрасывает _jobs, _cancel_events, _evict_times и _cancel_events_ts под
+        единым блокировкой, так что в памяти не остаётся ни одного job-объекта,
+        несущего транскрипционный текст (items[].text, errors).
+
+        Перед удалением устанавливает cancel_event для каждой активной задачи —
+        воркеры, ожидающие на event.wait(), получат сигнал завершения.
+
+        Returns:
+            Количество удалённых записей.
+        """
+        with self._lock:
+            # Сигнализируем всем живым воркерам об отмене ДО удаления записей.
+            for jid, event in self._cancel_events.items():
+                event.set()
+            count = len(self._jobs)
+            self._jobs.clear()
+            self._cancel_events.clear()
+            self._evict_times.clear()
+            self._cancel_events_ts.clear()
+        return count
+
     def prune(
         self,
         max_age_sec: float = 3600,

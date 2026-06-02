@@ -868,6 +868,10 @@ class BackendService:
         # W1776: late-inject _bookmarks so phase_e can rebind live-recording bookmarks.
         # _bookmarks is created earlier in __init__ (line ~396).
         self._recording_core_svc._bookmarks = self._bookmarks
+        # Wave-22: wire RecordingCoreService._job_tracker into HistoryService so
+        # handle_purge_all_data can call clear() — terminal jobs hold transcript
+        # text in items[].text (full PII) and survive privacy-purge without this wire.
+        self._history._job_tracker = self._recording_core_svc._job_tracker
         self._calendar_linker = CalendarLinker(
             cache_minutes=int(settings.CALENDAR_LINK_CACHE_MIN)
         )
