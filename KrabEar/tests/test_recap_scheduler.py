@@ -773,5 +773,167 @@ class TestW933RuntimeSettingsProvider(unittest.TestCase):
             self.assertEqual(sched.recap_email_to, "fallback@example.com")
 
 
+# ---------------------------------------------------------------------------
+# Тест 10 (Wave 1768): privacy-mode gate — дайджест НЕ уходит при privacy mode
+# ---------------------------------------------------------------------------
+
+class TestWave1768RecapPrivacyGate(unittest.TestCase):
+    """Wave 1768 — режим конфиденциальности запрещает email-egress дайджеста.
+
+    Дайджест формируется из текста транскрипций. Sibling export_scheduler.py
+    уже соблюдает privacy_mode_enabled (F4); recap_scheduler.py не соблюдал —
+    транскрипции утекали через email даже в privacy mode. Гейт добавлен в
+    send_recap() (единственный chokepoint: и scheduler-loop, и прямой IPC).
+    """
+
+    def _make_scheduler_with_provider(
+        self,
+        tmpdir: Path,
+        provider_dict: Optional[dict] = None,
+    ):
+        """Создаёт RecapScheduler с settings_provider (mutable dict by ref)."""
+        sender = MagicMock(spec=EmailSender)
+        store = MagicMock()
+        digest_gen = MagicMock()
+        digest_gen.generate_digest.return_value = _make_fake_digest()
+
+        live_settings: dict = provider_dict if provider_dict is not None else {}
+
+        sched = RecapScheduler(
+            email_sender=sender,
+            digest_generator=digest_gen,
+            store=store,
+            data_dir=tmpdir,
+            recap_email_to="test@example.com",
+            recap_time_hour=20,
+            enabled=True,
+            check_interval_sec=1,
+            settings_provider=lambda: live_settings,
+        )
+        return sched, sender, digest_gen, live_settings
+
+    def test_privacy_mode_blocks_send(self):
+        """privacy_mode_enabled=True → email НЕ отправляется (fail-before)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            live_settings = {
+                "recap_enabled": True,
+                "recap_time_hour": 20,
+                "recap_email_to": "test@example.com",
+                "privacy_mode_enabled": True,
+            }
+            sched, sender, digest_gen, _ = self._make_scheduler_with_provider(
+                tmpdir, provider_dict=live_settings
+            )
+
+            result = sched.send_recap("2026-04-25")
+
+            # Никакого egress: ни генерации дайджеста, ни отправки письма
+            sender.send.assert_not_called()
+            digest_gen.generate_digest.assert_not_called()
+            self.assertFalse(result["sent"])
+            self.assertEqual(result["reason"], "privacy_mode_active")
+            self.assertIsNone(result["error"])
+
+    def test_privacy_mode_does_not_touch_state(self):
+        """В privacy mode state не записывается — нет tentative/last_sent маркеров."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            live_settings = {
+                "recap_enabled": True,
+                "recap_time_hour": 20,
+                "recap_email_to": "test@example.com",
+                "privacy_mode_enabled": True,
+            }
+            sched, _, _, _ = self._make_scheduler_with_provider(
+                tmpdir, provider_dict=live_settings
+            )
+
+            sched.send_recap("2026-04-25")
+
+            state = sched._load_state()
+            self.assertIsNone(state.get("last_sent_date"))
+            self.assertIsNone(state.get("_sending_date"))
+
+    def test_privacy_off_still_sends(self):
+        """privacy_mode_enabled=False + due recap → письмо ОТПРАВЛЯЕТСЯ (pass-after)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            live_settings = {
+                "recap_enabled": True,
+                "recap_time_hour": 20,
+                "recap_email_to": "test@example.com",
+                "privacy_mode_enabled": False,
+            }
+            sched, sender, _, _ = self._make_scheduler_with_provider(
+                tmpdir, provider_dict=live_settings
+            )
+
+            result = sched.send_recap("2026-04-25")
+
+            self.assertTrue(result["sent"])
+            sender.send.assert_called_once()
+            self.assertEqual(sender.send.call_args.kwargs["to"], "test@example.com")
+
+    def test_privacy_key_absent_still_sends(self):
+        """Отсутствие ключа privacy_mode_enabled трактуется как False → отправка идёт."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            live_settings = {
+                "recap_enabled": True,
+                "recap_time_hour": 20,
+                "recap_email_to": "test@example.com",
+                # privacy_mode_enabled намеренно отсутствует
+            }
+            sched, sender, _, _ = self._make_scheduler_with_provider(
+                tmpdir, provider_dict=live_settings
+            )
+
+            result = sched.send_recap("2026-04-25")
+
+            self.assertTrue(result["sent"])
+            sender.send.assert_called_once()
+
+    def test_no_provider_still_sends(self):
+        """Без settings_provider gate не блокирует (обратная совместимость)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            # _make_scheduler не передаёт settings_provider
+            sched, sender, _ = _make_scheduler(tmpdir)
+            result = sched.send_recap("2026-04-25")
+            self.assertTrue(result["sent"])
+            sender.send.assert_called_once()
+
+    def test_privacy_mode_blocks_scheduler_loop_path(self):
+        """Even когда _should_send=True, loop-вызов send_recap не отправляет в privacy mode.
+
+        Воспроизводит точный путь scheduler-цикла: _refresh_settings() →
+        _should_send() (True) → send_recap() (должен забейлить по privacy).
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            now_20 = datetime(2026, 4, 25, 20, 0, 0)
+            live_settings = {
+                "recap_enabled": True,
+                "recap_time_hour": 20,
+                "recap_email_to": "test@example.com",
+                "privacy_mode_enabled": True,
+            }
+            sched, sender, _, _ = self._make_scheduler_with_provider(
+                tmpdir, provider_dict=live_settings
+            )
+            sched._clock_fn = lambda: now_20
+
+            sched._refresh_settings()
+            # _should_send не знает про privacy — он True (enabled+hour+email+не отправлено)
+            self.assertTrue(sched._should_send(now_20))
+
+            # Но реальное действие цикла — send_recap — блокируется privacy-гейтом
+            result = sched.send_recap()
+            self.assertFalse(result["sent"])
+            self.assertEqual(result["reason"], "privacy_mode_active")
+            sender.send.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
