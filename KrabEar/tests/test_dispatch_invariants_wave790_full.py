@@ -307,6 +307,10 @@ _EXPECTED = {
     "score_transcription": "svc._handle_score_transcription",
     # W1734: purge_all_data — destructive privacy wipe (archive + bookmarks + call_sessions + chains)
     "purge_all_data": "svc._history.handle_purge_all_data",
+    # W1773: three handlers stranded in the deleted dead ipc_dispatch.py, now wired.
+    # get_never_played uses a lambda (presence-only assertion in per-handler test below).
+    "rename_collection": "svc._collections.handle_rename_collection",
+    "semantic_search_reset": "svc._search_and_analysis_svc.handle_semantic_search_reset",
 }
 
 
@@ -1758,6 +1762,28 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
         """'score_transcription' must be in dispatch table mapping to svc._handle_score_transcription."""
         self.assertIn("score_transcription", self.keys)
         self.assertEqual(_dispatch_rhs(self.block, "score_transcription"), "svc._handle_score_transcription")
+
+    # ------------------------------------------------------------------
+    # W1773: three previously stranded handlers now wired
+    # ------------------------------------------------------------------
+
+    def test_get_never_played_dispatch_entry(self):
+        """W1773: 'get_never_played' must be present in dispatch table (lambda-based RHS — store= injection)."""
+        # Uses a lambda wrapper to pass store=self.store, so only presence is asserted.
+        self.assertIn("get_never_played", self.keys)
+
+    def test_rename_collection_dispatch_entry(self):
+        """W1773: 'rename_collection' must be in dispatch table mapping to svc._collections.handle_rename_collection."""
+        self.assertIn("rename_collection", self.keys)
+        self.assertEqual(_dispatch_rhs(self.block, "rename_collection"), "svc._collections.handle_rename_collection")
+
+    def test_semantic_search_reset_dispatch_entry(self):
+        """W1773: 'semantic_search_reset' must be in dispatch table mapping to svc._search_and_analysis_svc.handle_semantic_search_reset."""
+        self.assertIn("semantic_search_reset", self.keys)
+        self.assertEqual(
+            _dispatch_rhs(self.block, "semantic_search_reset"),
+            "svc._search_and_analysis_svc.handle_semantic_search_reset",
+        )
 
 
 if __name__ == "__main__":
