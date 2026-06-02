@@ -128,7 +128,7 @@ class FuzzySearcher:
                     continue
                 checked_starts.add(start)
 
-                window = text[start : start + q_len]
+                window = text[start:start + q_len]
                 ratio = difflib.SequenceMatcher(None, query, window).ratio()
                 if ratio > best:
                     best = ratio
