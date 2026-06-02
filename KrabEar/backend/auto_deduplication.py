@@ -77,6 +77,25 @@ def _text_similarity(a: str, b: str) -> float:
     return jaccard
 
 
+def _parse_ts_for_sort(item: dict) -> float:
+    """W1776 MED: parse a history item's timestamp to a sortable Unix float.
+
+    Used by run_deduplication to order a duplicate group chronologically so the
+    EARLIEST record can be picked as the original (deterministic by timestamp,
+    not by page position).  Missing/empty/unparseable ts → 0.0 (sorts as oldest),
+    consistent with the _MISSING_TS_PLACEHOLDER normalization.
+    """
+    ts = item.get("ts")
+    if ts is None or ts == "":
+        return 0.0
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+    except (ValueError, AttributeError, TypeError):
+        return 0.0
+
+
 @dataclass
 class DedupResult:
     """Результат проверки одной записи на дублирование."""
@@ -243,6 +262,7 @@ class AutoDeduplicator:
             # sim >= threshold (the caller's value), not the hardcoded routing constant.
             tier1_best_id: str | None = None
             tier1_best_sim: float = 0.0
+            tier1_best_text: str = ""
             ambiguous_candidates: list[dict] = []  # _JACCARD_LOW <= sim < _TIER1_ROUTING_THRESHOLD → tier-2
 
             for candidate in normalized_items:
@@ -271,23 +291,51 @@ class AutoDeduplicator:
                     if tier1_best_id is None or sim > tier1_best_sim:
                         tier1_best_id = candidate.get("id")
                         tier1_best_sim = sim
+                        tier1_best_text = cand_text
                 elif sim >= _JACCARD_LOW:
                     # Ambiguous zone — collect for tier-2 DuplicateDetector confirmation
                     ambiguous_candidates.append(candidate)
 
-            # W1711: tier-1 declares a duplicate only when the best candidate's
-            # similarity meets the caller's threshold.  Raising threshold (e.g. 0.99)
-            # means pairs with sim in [0.85, 0.99) are NOT reported as duplicates here
-            # and fall through to tier-2 instead (or are kept entirely).
+            # W1776 HIGH DATA-LOSS fix: the tier-1 score is Jaccard over lowercased
+            # WORD SETS — it is order- AND multiplicity-insensitive.  Two DISTINCT
+            # recordings that happen to share the same bag of words score 1.0:
+            #   'собака укусила человека' vs 'человека укусила собака' → 1.0
+            #   'купи хлеб молоко яйца'   vs 'купи яйца молоко хлеб'   → 1.0
+            # Short-circuiting to is_duplicate=True on such a pair caused the recording
+            # to be silently dropped (recording_core_service early-returns on
+            # is_duplicate=True → never persisted, no .md, no tombstone = irreversible
+            # data loss of a DISTINCT recording).
+            #
+            # Fix: Jaccard now serves ONLY as a cheap candidate PRE-filter.  The final
+            # tier-1 duplicate decision must be confirmed by an ORDER-SENSITIVE
+            # difflib.SequenceMatcher ratio meeting the caller's threshold.  When the
+            # Jaccard pre-filter passes but SequenceMatcher does not, we do NOT declare
+            # a duplicate here — the candidate falls through to tier-2 (DuplicateDetector,
+            # which itself uses SequenceMatcher) for a final, order-sensitive verdict.
+            tier1_confirmed = False
             if tier1_best_id is not None and tier1_best_sim >= threshold:
-                # Tier-1 confirmed: report without involving DuplicateDetector
+                # Order-sensitive confirmation: never short-circuit to duplicate when
+                # the SequenceMatcher ratio is below the caller's threshold.  This is
+                # what blocks pure word-order swaps (Jaccard 1.0, SequenceMatcher low).
+                sm_ratio = SequenceMatcher(
+                    None, text.lower(), tier1_best_text.lower()
+                ).ratio()
+                if sm_ratio >= threshold:
+                    tier1_confirmed = True
+
+            if tier1_confirmed:
+                # Tier-1 confirmed (Jaccard pre-filter + SequenceMatcher ≥ threshold):
+                # report without re-running the full DuplicateDetector scan.  We surface
+                # the Jaccard score as `similarity` (the established tier-1 contract);
+                # only the duplicate DECISION is now order-sensitive.
                 with self._lock:
                     self._duplicates_found += 1
                     self._chars_saved += len(text)
 
                 action = "merged" if tier1_best_sim >= MERGE_THRESHOLD else "skipped"
                 logger.debug(
-                    "Дубликат (tier-1 Jaccard): similarity=%.3f threshold=%.3f original_id=%s action=%s",
+                    "Дубликат (tier-1 Jaccard+SequenceMatcher confirm): jaccard=%.3f "
+                    "threshold=%.3f original_id=%s action=%s",
                     tier1_best_sim,
                     threshold,
                     tier1_best_id,
@@ -300,8 +348,12 @@ class AutoDeduplicator:
                     action_taken=action,
                 )
 
-            # If tier-1 found a high-similarity candidate but it did not meet the caller's
-            # threshold, add it to ambiguous_candidates so tier-2 can confirm at threshold.
+            # If tier-1 found a high-Jaccard candidate but it was NOT confirmed as a
+            # duplicate above (either Jaccard < threshold, or the order-sensitive
+            # SequenceMatcher ratio fell below threshold — e.g. a pure word-order swap),
+            # add it to ambiguous_candidates so tier-2 makes the final SequenceMatcher
+            # decision at the caller's threshold.  This guarantees an order-swapped,
+            # distinct recording is never declared a duplicate.
             if tier1_best_id is not None:
                 # Re-scan to find the actual candidate dict (we only stored the id/sim)
                 for candidate in normalized_items:
@@ -455,9 +507,17 @@ class AutoDeduplicator:
         for group in groups:
             if not group.items:
                 continue
-            # Первый элемент считаем оригиналом (самый старый по позиции в странице)
-            original_id = group.items[0].get("id", "")
-            duplicate_ids = [item.get("id", "") for item in group.items[1:]]
+            # W1776 MED fix: pick the original DETERMINISTICALLY by timestamp, NOT by
+            # page position.  get_history_page returns items newest-first, so the old
+            # `group.items[0]` picked the NEWEST record as the "original" and de-indexed
+            # the OLDER, true-original record — the inverse of intended behaviour.
+            # Sort the group by parsed ts ascending and treat the EARLIEST as the
+            # original; everything later is a duplicate.  Records with an unparseable
+            # or missing ts sort as oldest (epoch 0) — consistent with the
+            # _MISSING_TS_PLACEHOLDER normalization applied above.
+            ordered = sorted(group.items, key=_parse_ts_for_sort)
+            original_id = ordered[0].get("id", "")
+            duplicate_ids = [item.get("id", "") for item in ordered[1:]]
             duplicates_list.append({
                 "original_id": original_id,
                 "duplicate_ids": duplicate_ids,
