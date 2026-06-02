@@ -70,6 +70,89 @@ class TranslationService:
         "uk": "en_to_ru",  # украинский → русский как наиболее близкий
     }
 
+    # ── W1768: лимиты глоссария (защита от unbounded-growth DoS) ────────
+    # Глоссарий применяется в Translator._apply_glossary одним re.sub на запись
+    # за КАЖДЫЙ перевод → O(N) regex на translate(). Локальный процесс мог бы
+    # добавить неограниченно много записей (по одной через set_translation_glossary_item
+    # либо тысячами одним import_glossary_csv), раздув settings.json и стоимость
+    # 5s-TTL re-parse. Ограничиваем число записей и длину термина/значения.
+    MAX_GLOSSARY_ENTRIES = 500          # макс. число пар в translation_glossary
+    MAX_TERM_BYTES = 200                # макс. длина source/target в байтах UTF-8
+
+    @classmethod
+    def _check_term_caps(cls, source: str, target: str) -> str | None:
+        """Проверяет длину одной пары глоссария по MAX_TERM_BYTES.
+
+        Длина считается в байтах UTF-8 (кириллица/испанский — многобайтовые),
+        чтобы лимит был детерминирован независимо от языка.
+        Возвращает текст ошибки при нарушении, иначе None.
+        """
+        src_bytes = len(source.encode("utf-8"))
+        tgt_bytes = len(target.encode("utf-8"))
+        if src_bytes > cls.MAX_TERM_BYTES:
+            return (
+                f"glossary term 'source' too long: {src_bytes} bytes "
+                f"(max {cls.MAX_TERM_BYTES})"
+            )
+        if tgt_bytes > cls.MAX_TERM_BYTES:
+            return (
+                f"glossary term 'target' too long: {tgt_bytes} bytes "
+                f"(max {cls.MAX_TERM_BYTES})"
+            )
+        return None
+
+    @classmethod
+    def _check_entry_cap(cls, current_size: int, is_new_key: bool) -> str | None:
+        """Проверяет лимит числа записей MAX_GLOSSARY_ENTRIES.
+
+        Обновление существующего ключа (is_new_key=False) не увеличивает размер
+        и разрешено даже на пределе. Новая запись отклоняется, если глоссарий
+        уже достиг лимита.
+        Возвращает текст ошибки при нарушении, иначе None.
+        """
+        if is_new_key and current_size >= cls.MAX_GLOSSARY_ENTRIES:
+            return (
+                f"glossary entry limit reached: {current_size} "
+                f"(max {cls.MAX_GLOSSARY_ENTRIES})"
+            )
+        return None
+
+    @classmethod
+    def enforce_glossary_caps(
+        cls,
+        current: dict[str, str],
+        additions: dict[str, str],
+    ) -> tuple[dict[str, str], list[str], str | None]:
+        """Применяет лимиты глоссария к пакету новых пар (для bulk-импорта).
+
+        Переиспользуется логикой массового добавления (import_glossary_csv):
+        - отбрасывает пары, у которых source/target превышает MAX_TERM_BYTES;
+        - добавляет пары пока итоговый размер не достигнет MAX_GLOSSARY_ENTRIES,
+          после чего прекращает и фиксирует ошибку переполнения.
+
+        Возвращает (merged, rejected_sources, error):
+          merged          — current + принятые пары (в пределах лимитов);
+          rejected_sources — source-ключи, отклонённые по длине или из-за cap;
+          error           — текст ошибки переполнения (или None, если всё влезло).
+        """
+        merged: dict[str, str] = dict(current)
+        rejected: list[str] = []
+        overflow_error: str | None = None
+        for source, target in additions.items():
+            # Лимит длины — пропускаем такую пару, но импорт продолжаем
+            if cls._check_term_caps(source, target) is not None:
+                rejected.append(source)
+                continue
+            is_new_key = source not in merged
+            cap_error = cls._check_entry_cap(len(merged), is_new_key)
+            if cap_error is not None:
+                # Достигнут предел числа записей — дальше не добавляем
+                rejected.append(source)
+                overflow_error = cap_error
+                continue
+            merged[source] = target
+        return merged, rejected, overflow_error
+
     def __init__(
         self,
         translator: "Translator",
@@ -324,11 +407,49 @@ class TranslationService:
         W1767: запись выполняется через _locked_set_glossary_item, которая
         удерживает SettingsService._save_lock на всё время read-modify-write,
         исключая TOCTOU lost-update при конкурентных записях настроек.
+
+        W1768: перед записью применяются лимиты MAX_TERM_BYTES (длина термина)
+        и MAX_GLOSSARY_ENTRIES (число пар). Защита от unbounded-growth DoS:
+        локальный процесс не может раздуть глоссарий неограниченно. Обновление
+        уже существующего ключа разрешено даже на пределе (размер не растёт);
+        нарушение лимита возвращает структурную ошибку и НЕ персистится.
         """
         source = str(params.get("source", "")).strip()
         target = str(params.get("target", "")).strip()
         if not source or not target:
             raise RuntimeError("source и target обязательны")
+
+        # W1768: лимит длины термина/значения (байты UTF-8)
+        term_error = self._check_term_caps(source, target)
+        if term_error is not None:
+            add_breadcrumb(
+                category="translation",
+                message="set_translation_glossary_item_rejected",
+                level="warning",
+                data={"reason": "term_too_long", "error": term_error},
+            )
+            return {"updated": False, "error": term_error}
+
+        # W1768: лимит числа записей. Читаем текущий глоссарий, чтобы понять,
+        # будет ли это НОВЫЙ ключ (рост размера) или обновление существующего.
+        current_glossary = self._cached_settings().get("translation_glossary", {}) or {}
+        if not isinstance(current_glossary, dict):
+            current_glossary = {}
+        is_new_key = source not in current_glossary
+        cap_error = self._check_entry_cap(len(current_glossary), is_new_key)
+        if cap_error is not None:
+            add_breadcrumb(
+                category="translation",
+                message="set_translation_glossary_item_rejected",
+                level="warning",
+                data={
+                    "reason": "entry_limit",
+                    "error": cap_error,
+                    "glossary_size": len(current_glossary),
+                },
+            )
+            return {"updated": False, "error": cap_error}
+
         glossary_count = self._locked_set_glossary_item(source, target)
         add_breadcrumb(
             category="translation",
