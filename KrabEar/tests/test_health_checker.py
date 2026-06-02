@@ -46,25 +46,39 @@ class FakeLLMRewriter:
         }
 
 
+class FakeEngine:
+    """Фейк AudioEngine для тестов.
+
+    Не имеет ``_whisper_model`` — как и реальный движок, который хранит
+    веса внутри mlx_whisper, а не на ``self``. ``_unavailable_models`` —
+    реальный сигнал движка для сбоев модели.
+    """
+
+    def __init__(
+        self,
+        current_model: str | None = "mlx-community/whisper-small-mlx",
+        unavailable_models: dict | None = None,
+    ) -> None:
+        self.current_model = current_model
+        self.quality_profile = "balanced"
+        # Реальный сигнал движка для упавших моделей (dict {model_id: timestamp})
+        self._unavailable_models: dict = unavailable_models or {}
+        # NOTE: _whisper_model намеренно отсутствует — как и в реальном AudioEngine.
+        # Проверка getattr(engine, "_whisper_model", None) всегда вернёт None.
+
+
 class FakeTranscriber:
     """Фейк Transcriber для тестов."""
 
     def __init__(
         self,
         current_model: str | None = "mlx-community/whisper-small-mlx",
-        cached: bool = True,
+        unavailable_models: dict | None = None,
     ) -> None:
-        self.engine = FakeEngine(current_model=current_model, cached=cached)
-
-
-class FakeEngine:
-    def __init__(self, current_model: str | None, cached: bool) -> None:
-        self.current_model = current_model
-        self.quality_profile = "balanced"
-        if cached:
-            self._whisper_model = object()
-        else:
-            self._whisper_model = None
+        self.engine = FakeEngine(
+            current_model=current_model,
+            unavailable_models=unavailable_models,
+        )
 
 
 class TestHealthCheckerBasic(unittest.TestCase):
@@ -105,69 +119,260 @@ class TestHealthCheckerBasic(unittest.TestCase):
 
 
 class TestSttModelCheck(unittest.TestCase):
-    """Тесты проверки STT-модели."""
+    """Тесты проверки STT-модели.
+
+    Центральная задача этого блока — подтвердить, что исправление
+    wave1776 устраняет ложно-здоровый сигнал:
+
+    * OLD (broken): ``_whisper_model`` никогда не существует → ``cached``
+      всегда ``False``; ``current_model`` всегда не-None →
+      ветка ``warming_up`` мёртвый код; HealthChecker всегда докладывал ``ok``.
+    * NEW (fixed): используем реальные сигналы движка — mlx_whisper
+      импортируемость и ``_unavailable_models``.
+    """
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
         self.store = FakeStore(data_dir=self.tmpdir)
 
-    def test_stt_ok_with_transcriber(self) -> None:
-        checker = HealthChecker(store=self.store, transcriber=FakeTranscriber(cached=True))
+    # ------------------------------------------------------------------
+    # Базовые случаи
+    # ------------------------------------------------------------------
+
+    def test_stt_ok_with_transcriber_and_mlx_available(self) -> None:
+        """mlx_whisper доступен + модель не упала → status 'ok'."""
+        checker = HealthChecker(store=self.store, transcriber=FakeTranscriber())
         result = checker._check_stt_model()
         self.assertEqual(result["status"], "ok")
         self.assertIsNotNone(result["model"])
-        self.assertTrue(result["cached"])
-
-    def test_stt_ok_not_cached(self) -> None:
-        checker = HealthChecker(store=self.store, transcriber=FakeTranscriber(cached=False))
-        result = checker._check_stt_model()
-        self.assertEqual(result["status"], "ok")
-        self.assertFalse(result["cached"])
+        # 'cached' field больше не возвращается (был ложным)
+        self.assertNotIn("cached", result)
 
     def test_stt_unavailable_without_transcriber(self) -> None:
         checker = HealthChecker(store=self.store, transcriber=None)
         result = checker._check_stt_model()
         self.assertEqual(result["status"], "unavailable")
 
+    def test_stt_unavailable_when_engine_none(self) -> None:
+        """Transcriber без engine → unavailable."""
+        transcriber = MagicMock()
+        del transcriber.engine  # AttributeError при getattr
+        transcriber.engine = None
+        checker = HealthChecker(store=self.store, transcriber=transcriber)
+        result = checker._check_stt_model()
+        self.assertEqual(result["status"], "unavailable")
+
     def test_stt_handles_exception_gracefully(self) -> None:
+        """Исключение внутри проверки не пробрасывается — возвращает error-статус."""
         bad_transcriber = MagicMock()
-        bad_transcriber.engine.current_model = None
-        # Вызываем AttributeError при обращении к _whisper_model
-        type(bad_transcriber.engine)._whisper_model = property(
+        # Вызываем исключение при обращении к .engine.current_model
+        type(bad_transcriber.engine).current_model = property(
             lambda self: (_ for _ in ()).throw(RuntimeError("boom"))
         )
         checker = HealthChecker(store=self.store, transcriber=bad_transcriber)
         result = checker._check_stt_model()
-        # Должен вернуть статус без исключения
         self.assertIn("status", result)
+        self.assertIn(result["status"], ("error", "unavailable"))
 
-    # W963 / W953-F1: warming_up cases ----------------------------------------
+    # ------------------------------------------------------------------
+    # wave1776 fix: реальный сигнал 2 — _unavailable_models
+    # ------------------------------------------------------------------
 
-    def test_health_check_reports_warming_up_pre_stt_load(self) -> None:
-        """W953 F1: engine.current_model=None + not cached → status 'warming_up', not 'ok'."""
-        transcriber = FakeTranscriber(current_model=None, cached=False)
+    def test_wave1776_stt_unavailable_when_model_in_unavailable_set(self) -> None:
+        """FAIL-BEFORE / PASS-AFTER.
+
+        Если ``engine._unavailable_models`` содержит текущую модель,
+        STT деградировал. Старый код возвращал ``ok`` (проверял только
+        ``current_model`` и несуществующий ``_whisper_model``).
+        """
+        model_name = "mlx-community/whisper-small-mlx"
+        transcriber = FakeTranscriber(
+            current_model=model_name,
+            unavailable_models={model_name: time.monotonic()},
+        )
         checker = HealthChecker(store=self.store, transcriber=transcriber)
         result = checker._check_stt_model()
-        self.assertEqual(result["status"], "warming_up",
-                         "Must not report 'ok' when STT model is not loaded yet")
-        self.assertIsNone(result["model"])
-        self.assertFalse(result["cached"])
-
-    def test_health_check_warming_up_yields_degraded_overall(self) -> None:
-        """W953 F1: warming_up STT → overall status must be 'degraded', not 'healthy'."""
-        transcriber = FakeTranscriber(current_model=None, cached=False)
-        checker = HealthChecker(
-            store=self.store,
-            transcriber=transcriber,
-            llm_rewriter=FakeLLMRewriter(circuit_state="closed"),
+        self.assertEqual(
+            result["status"],
+            "unavailable",
+            "Must report 'unavailable' when model is in engine._unavailable_models; "
+            "old code falsely reported 'ok' by ignoring this real signal",
         )
-        result = checker.check_all()
-        self.assertEqual(result["checks"]["stt_model"]["status"], "warming_up")
-        self.assertEqual(result["status"], "degraded",
-                         "warming_up in any subsystem must surface as 'degraded' overall")
+        self.assertEqual(result["model"], model_name)
 
-    def test_aggregate_status_warming_up_gives_degraded(self) -> None:
-        """_aggregate_status treats 'warming_up' same as 'warning' → degraded."""
+    def test_wave1776_stt_ok_when_unavailable_models_empty(self) -> None:
+        """mlx_whisper доступен + _unavailable_models пуст → 'ok'."""
+        transcriber = FakeTranscriber(
+            current_model="mlx-community/whisper-small-mlx",
+            unavailable_models={},
+        )
+        checker = HealthChecker(store=self.store, transcriber=transcriber)
+        result = checker._check_stt_model()
+        self.assertEqual(result["status"], "ok")
+
+    def test_wave1776_stt_ok_when_different_model_is_unavailable(self) -> None:
+        """Другая модель упала, но текущая нет → 'ok'."""
+        transcriber = FakeTranscriber(
+            current_model="mlx-community/whisper-small-mlx",
+            unavailable_models={"mlx-community/whisper-large-mlx": time.monotonic()},
+        )
+        checker = HealthChecker(store=self.store, transcriber=transcriber)
+        result = checker._check_stt_model()
+        self.assertEqual(result["status"], "ok")
+
+    # ------------------------------------------------------------------
+    # wave1776 fix: реальный сигнал 1 — mlx_whisper импортируемость
+    # ------------------------------------------------------------------
+
+    def test_wave1776_stt_unavailable_when_mlx_whisper_not_importable(self) -> None:
+        """FAIL-BEFORE / PASS-AFTER.
+
+        Если mlx_whisper не импортируется (Linux CI, ARM без Metal),
+        STT физически не может работать. Старый код не проверял это и
+        докладывал ``ok`` при любом ``current_model``.
+        """
+        transcriber = FakeTranscriber(current_model="mlx-community/whisper-small-mlx")
+        checker = HealthChecker(store=self.store, transcriber=transcriber)
+
+        # Симулируем недоступность mlx_whisper
+        import importlib
+        original_import = importlib.import_module
+
+        def fake_import(name: str, *args, **kwargs):
+            if name == "mlx_whisper":
+                raise ImportError("mlx_whisper not available on this platform")
+            return original_import(name, *args, **kwargs)
+
+        with patch("importlib.import_module", side_effect=fake_import):
+            result = checker._check_stt_model()
+
+        self.assertEqual(
+            result["status"],
+            "unavailable",
+            "Must report 'unavailable' when mlx_whisper is not importable; "
+            "old code falsely reported 'ok' by never checking platform availability",
+        )
+
+    def test_wave1776_stt_unavailable_when_mlx_whisper_module_is_none(self) -> None:
+        """mlx_whisper импортируется как None (как engine.py делает на non-Apple) → unavailable."""
+        transcriber = FakeTranscriber(current_model="mlx-community/whisper-small-mlx")
+        checker = HealthChecker(store=self.store, transcriber=transcriber)
+
+        # Симулируем возврат None-модуля
+        import importlib
+        original_import = importlib.import_module
+
+        def fake_import_none(name: str, *args, **kwargs):
+            if name == "mlx_whisper":
+                return None
+            return original_import(name, *args, **kwargs)
+
+        with patch("importlib.import_module", side_effect=fake_import_none):
+            result = checker._check_stt_model()
+
+        self.assertEqual(result["status"], "unavailable")
+
+    # ------------------------------------------------------------------
+    # Deprecated: старые тесты на _whisper_model / warming_up удалены
+    # (те тесты описывали мёртвый код, а не реальное поведение)
+    # ------------------------------------------------------------------
+
+    def test_no_cached_field_in_response(self) -> None:
+        """Поле 'cached' больше не возвращается — оно было основано на
+        несуществующем атрибуте и всегда было False (вводило в заблуждение).
+        """
+        checker = HealthChecker(store=self.store, transcriber=FakeTranscriber())
+        result = checker._check_stt_model()
+        self.assertNotIn(
+            "cached",
+            result,
+            "Field 'cached' must be absent: it was based on engine._whisper_model "
+            "which never exists; always returned False regardless of real warm state",
+        )
+
+    def test_no_warming_up_status_returned(self) -> None:
+        """'warming_up' статус больше не возвращается.
+
+        Это был мёртвый код: зависел от cached=True И current_model=None
+        одновременно, что теоретически невозможно после AudioEngine.__init__.
+        """
+        transcriber = FakeTranscriber(current_model=None)
+        checker = HealthChecker(store=self.store, transcriber=transcriber)
+
+        # Mock mlx_whisper as available so we reach the unavailable-models check
+        import importlib
+        original_import = importlib.import_module
+
+        def always_mlx_available(name: str, *args, **kwargs):
+            if name == "mlx_whisper":
+                return object()  # truthy, not None
+            return original_import(name, *args, **kwargs)
+
+        with patch("importlib.import_module", side_effect=always_mlx_available):
+            result = checker._check_stt_model()
+
+        self.assertNotEqual(
+            result["status"],
+            "warming_up",
+            "'warming_up' must not be returned; it was dead code based on "
+            "engine._whisper_model which never exists",
+        )
+
+    def test_stt_ok_when_current_model_set(self) -> None:
+        """current_model задан + mlx_whisper доступен + не упал → 'ok'."""
+        transcriber = FakeTranscriber(current_model="mlx-community/whisper-small-mlx")
+        checker = HealthChecker(store=self.store, transcriber=transcriber)
+        result = checker._check_stt_model()
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["model"], "mlx-community/whisper-small-mlx")
+
+
+class TestAggregateStatusWithUnavailable(unittest.TestCase):
+    """Тесты агрегации: новый статус 'unavailable' для критических подсистем."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.store = FakeStore(data_dir=self.tmpdir)
+        self.checker = HealthChecker(store=self.store)
+
+    def test_unhealthy_when_stt_unavailable(self) -> None:
+        """wave1776: stt_model=unavailable → unhealthy (критическая подсистема)."""
+        checks = {
+            "stt_model": {"status": "unavailable"},
+            "llm": {"status": "ok"},
+            "disk_space": {"status": "ok"},
+            "history_store": {"status": "ok"},
+            "audio_devices": {"status": "ok"},
+        }
+        self.assertEqual(self.checker._aggregate_status(checks), "unhealthy")
+
+    def test_unhealthy_when_history_unavailable(self) -> None:
+        """history_store=unavailable → unhealthy."""
+        checks = {
+            "stt_model": {"status": "ok"},
+            "llm": {"status": "ok"},
+            "disk_space": {"status": "ok"},
+            "history_store": {"status": "unavailable"},
+            "audio_devices": {"status": "ok"},
+        }
+        self.assertEqual(self.checker._aggregate_status(checks), "unhealthy")
+
+    def test_healthy_when_llm_unavailable_non_critical(self) -> None:
+        """llm=unavailable — не критичная подсистема → healthy (если остальное ok)."""
+        checks = {
+            "stt_model": {"status": "ok"},
+            "llm": {"status": "unavailable"},
+            "disk_space": {"status": "ok"},
+            "history_store": {"status": "ok"},
+            "audio_devices": {"status": "ok"},
+        }
+        # llm unavailable не degrade → healthy (audio_devices may add degraded in CI)
+        result = self.checker._aggregate_status(checks)
+        self.assertIn(result, ("healthy", "degraded"))
+        self.assertNotEqual(result, "unhealthy")
+
+    def test_warming_up_no_longer_degrades(self) -> None:
+        """'warming_up' убран из статусов деградации — он был мёртвым кодом."""
         checks = {
             "stt_model": {"status": "warming_up"},
             "llm": {"status": "ok"},
@@ -175,22 +380,10 @@ class TestSttModelCheck(unittest.TestCase):
             "history_store": {"status": "ok"},
             "audio_devices": {"status": "ok"},
         }
-        checker = HealthChecker(store=self.store)
-        self.assertEqual(checker._aggregate_status(checks), "degraded")
-
-    def test_stt_ok_when_current_model_set_and_cached(self) -> None:
-        """Loaded + cached → still 'ok' (regression guard)."""
-        transcriber = FakeTranscriber(current_model="mlx-community/whisper-small-mlx", cached=True)
-        checker = HealthChecker(store=self.store, transcriber=transcriber)
-        result = checker._check_stt_model()
-        self.assertEqual(result["status"], "ok")
-
-    def test_stt_ok_when_current_model_set_not_cached(self) -> None:
-        """Loaded but evicted from cache → still 'ok' (model IS known)."""
-        transcriber = FakeTranscriber(current_model="mlx-community/whisper-small-mlx", cached=False)
-        checker = HealthChecker(store=self.store, transcriber=transcriber)
-        result = checker._check_stt_model()
-        self.assertEqual(result["status"], "ok")
+        # 'warming_up' больше не является особым статусом; агрегатор не знает
+        # о нём → попадает в "else" → healthy
+        result = self.checker._aggregate_status(checks)
+        self.assertEqual(result, "healthy")
 
 
 class TestLLMCheck(unittest.TestCase):
@@ -374,7 +567,7 @@ class TestFullCheckAllIntegration(unittest.TestCase):
     def test_check_all_healthy_with_good_dependencies(self) -> None:
         checker = HealthChecker(
             store=self.store,
-            transcriber=FakeTranscriber(cached=True),
+            transcriber=FakeTranscriber(),
             llm_rewriter=FakeLLMRewriter(circuit_state="closed"),
             start_time=time.monotonic() - 60.0,
         )
@@ -409,6 +602,26 @@ class TestFullCheckAllIntegration(unittest.TestCase):
         for name, check in result["checks"].items():
             self.assertIn("status", check, f"Check '{name}' missing 'status' key")
 
+    def test_check_all_unhealthy_when_stt_model_unavailable(self) -> None:
+        """wave1776: упавшая STT-модель → check_all() unhealthy."""
+        model_name = "mlx-community/whisper-small-mlx"
+        transcriber = FakeTranscriber(
+            current_model=model_name,
+            unavailable_models={model_name: time.monotonic()},
+        )
+        checker = HealthChecker(
+            store=self.store,
+            transcriber=transcriber,
+            llm_rewriter=FakeLLMRewriter(circuit_state="closed"),
+        )
+        result = checker.check_all()
+        self.assertEqual(result["checks"]["stt_model"]["status"], "unavailable")
+        self.assertEqual(
+            result["status"],
+            "unhealthy",
+            "Unavailable STT (critical subsystem) must surface as unhealthy",
+        )
+
 
 class TestHealthCheckerRequiredChecks(unittest.TestCase):
     """Верификация наличия конкретных проверок подсистем."""
@@ -421,7 +634,7 @@ class TestHealthCheckerRequiredChecks(unittest.TestCase):
         """Все подсистемы OK → overall healthy (или degraded из-за audio в CI)."""
         checker = HealthChecker(
             store=self.store,
-            transcriber=FakeTranscriber(cached=True),
+            transcriber=FakeTranscriber(),
             llm_rewriter=FakeLLMRewriter(circuit_state="closed"),
         )
         result = checker.check_all()
