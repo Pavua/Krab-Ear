@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 import shutil
 import threading
 from datetime import datetime, timezone
@@ -79,10 +80,19 @@ class AutoBackupManager:
         return {"last_backup_ts": None, "backup_count": 0}
 
     def _save_meta(self, meta: dict) -> None:
-        self.backups_dir.mkdir(parents=True, exist_ok=True)
+        self.backups_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Ensure the dir itself is restricted even if it already existed.
+        try:
+            os.chmod(self.backups_dir, 0o700)
+        except OSError:
+            pass
         self._meta_path.write_text(
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        try:
+            os.chmod(self._meta_path, 0o600)
+        except OSError:
+            pass
 
     def _list_auto_backups(self) -> list[Path]:
         """Возвращает список папок авто-бэкапов, отсортированных по имени (старые → новые)."""
@@ -133,7 +143,12 @@ class AutoBackupManager:
         """Выполняет резервное копирование и возвращает метаданные."""
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         backup_dir = self.backups_dir / f"auto_backup_{ts}"
-        backup_dir.mkdir(parents=True, exist_ok=True)
+        # Create with restricted permissions so PII is not world-readable.
+        backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            os.chmod(backup_dir, 0o700)
+        except OSError:
+            pass
 
         # Файлы истории/статуса копируются verbatim; settings.json — только после редакции.
         plain_files = [
@@ -159,6 +174,10 @@ class AutoBackupManager:
                 if Path(src).exists():
                     dst = backup_dir / Path(src).name
                     shutil.copy2(src, dst)
+                    try:
+                        os.chmod(dst, 0o600)
+                    except OSError:
+                        pass
                     total_bytes += dst.stat().st_size
                     copied_files.append(Path(src).name)
 
@@ -176,6 +195,10 @@ class AutoBackupManager:
                     safe = {}
                 dst = backup_dir / settings_src.name
                 dst.write_text(json.dumps(safe, ensure_ascii=False, indent=2), encoding="utf-8")
+                try:
+                    os.chmod(dst, 0o600)
+                except OSError:
+                    pass
                 total_bytes += dst.stat().st_size
                 copied_files.append(settings_src.name)
 
@@ -193,9 +216,14 @@ class AutoBackupManager:
             "files": copied_files,
             "auto": True,
         }
-        (backup_dir / "backup_meta.json").write_text(
+        meta_file = backup_dir / "backup_meta.json"
+        meta_file.write_text(
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        try:
+            os.chmod(meta_file, 0o600)
+        except OSError:
+            pass
 
         size_mb = round(total_bytes / (1024 * 1024), 3)
         logger.info(
