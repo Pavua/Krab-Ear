@@ -1055,9 +1055,12 @@ def transcribe_audio():
         safe_base = os.path.splitext(safe_base)[0] + original_ext
 
     temp_path = TEMP_DIR / f"{uuid.uuid4().hex[:12]}_{safe_base}"
-    file.save(str(temp_path))
 
     try:
+        # F3 (W1766): file.save перемещён ВНУТРЬ try, чтобы finally-блок гарантированно
+        # удалял частичный файл при ошибках записи (ENOSPC и т.п.).
+        file.save(str(temp_path))
+
         # F1: Validate magic bytes before handing the file to any decoder.
         with open(str(temp_path), "rb") as _fh:
             _header = _fh.read(16)
