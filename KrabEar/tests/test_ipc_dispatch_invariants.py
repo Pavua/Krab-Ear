@@ -68,10 +68,9 @@ EXTRACTED_SERVICE_NON_DISPATCH: dict[str, frozenset] = {
         "handle_check_integrity",
         "handle_repair_data",
     }),
-    # CollectionManager has rename_collection not yet wired
-    "CollectionManager": frozenset({
-        "handle_rename_collection",
-    }),
+    # W1773: CollectionManager.handle_rename_collection теперь подключён в живую
+    # dispatch table ("rename_collection") — ранее осиротевший после удаления
+    # мёртвого ipc_dispatch.py (W1769). Запись удалена из non-dispatch allowlist.
     # CallAssistService has internal/template methods not yet exposed as IPC endpoints.
     # These were pre-existing orphans before W828 (never registered in dispatch table).
     "CallAssistService": frozenset({

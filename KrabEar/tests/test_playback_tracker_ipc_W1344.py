@@ -113,20 +113,16 @@ class TestGetNeverPlayedViaIPC(unittest.TestCase):
         result = self.tracker.handle_get_never_played({}, store=store)
         self.assertEqual(len(result["items"]), 10)
 
-    def test_get_never_played_handler_exists_but_not_yet_wired(self):
-        """W1769: 'get_never_played' — известный decorative-extraction gap.
+    def test_get_never_played_wired_into_live_dispatch(self):
+        """W1773: 'get_never_played' подключён в живую dispatch table.
 
         Ранее этот ключ был зарегистрирован ТОЛЬКО в мёртвом backend/ipc_dispatch.py
-        (никогда не достижим в production), а живой инлайн-словарь его не содержал.
-        ipc_dispatch.py удалён (W1769) и диспетчеризация консолидирована в
-        service.py::_build_dispatch_table — единственный источник истины.
-
-        Реальный обработчик ``PlaybackTracker.handle_get_never_played`` существует
-        и покрыт behavior-тестами выше, но пока НЕ подключён в живую таблицу.
-        Подключение трёх осиротевших обработчиков (get_never_played,
-        rename_collection, semantic_search_reset) — отдельный follow-up, как и
-        glossary_service.py. Этот тест фиксирует ТЕКУЩУЮ production-реальность,
-        а не фикцию мёртвого модуля.
+        (никогда не достижим в production); после удаления того модуля (W1769)
+        обработчик остался осиротевшим — реальный, покрытый тестами, но недостижимый.
+        W1773 подключил три осиротевших обработчика (get_never_played,
+        rename_collection, semantic_search_reset) в единственный источник истины
+        service.py::_build_dispatch_table. Этот тест фиксирует НОВУЮ
+        production-реальность: ключ присутствует в живой таблице.
         """
         # Capability присутствует на классе.
         self.assertTrue(
@@ -134,14 +130,13 @@ class TestGetNeverPlayedViaIPC(unittest.TestCase):
             "PlaybackTracker.handle_get_never_played должен существовать",
         )
 
-        # Но в ЖИВОЙ таблице диспетчеризации его (пока) нет — production-реальность.
+        # W1773: теперь ключ ЕСТЬ в живой таблице диспетчеризации.
         import inspect
         from backend.service import BackendService
         source = inspect.getsource(BackendService._build_dispatch_table)
-        self.assertNotIn(
+        self.assertIn(
             '"get_never_played"', source,
-            "W1769: 'get_never_played' пока НЕ в живой dispatch table "
-            "(decorative gap, follow-up). Если он подключён — обнови этот тест.",
+            "W1773: 'get_never_played' должен быть подключён в живую dispatch table.",
         )
 
 

@@ -218,5 +218,59 @@ class TestBuildDispatchTableBasics(unittest.TestCase):
         )
 
 
+
+
+class TestW1773StrandedHandlersWired(unittest.TestCase):
+    """W1773: verify the three previously stranded handlers are now live in
+    the real dispatch table built by BackendService.__init__.
+
+    These handlers existed and had passing behavior tests, but were only
+    registered in the deleted dead ipc_dispatch.py — never reachable in
+    production.  W1773 adds them to the inline _build_dispatch_table dict.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.svc = _build_minimal_backend_service()
+        cls.table = cls.svc._dispatch_table
+
+    def test_get_never_played_in_live_table(self):
+        """'get_never_played' must be present in the live dispatch table and callable."""
+        self.assertIn(
+            "get_never_played", self.table,
+            "W1773: 'get_never_played' stranded handler was not wired",
+        )
+        self.assertTrue(callable(self.table["get_never_played"]))
+
+    def test_rename_collection_in_live_table(self):
+        """'rename_collection' must route to CollectionManager.handle_rename_collection."""
+        self.assertIn(
+            "rename_collection", self.table,
+            "W1773: 'rename_collection' stranded handler was not wired",
+        )
+        handler = self.table["rename_collection"]
+        self.assertTrue(callable(handler))
+        # Bound methods are re-created on every attribute access, so use __func__ + __self__
+        # to assert both the underlying function and the bound instance match.
+        from backend.collection_manager import CollectionManager
+        self.assertIsInstance(self.svc._collections, CollectionManager)
+        self.assertIs(handler.__self__, self.svc._collections)
+        self.assertIs(handler.__func__, CollectionManager.handle_rename_collection)
+
+    def test_semantic_search_reset_in_live_table(self):
+        """'semantic_search_reset' must route to SearchAndAnalysisService.handle_semantic_search_reset."""
+        self.assertIn(
+            "semantic_search_reset", self.table,
+            "W1773: 'semantic_search_reset' stranded handler was not wired",
+        )
+        handler = self.table["semantic_search_reset"]
+        self.assertTrue(callable(handler))
+        # Same bound-method identity pattern as above.
+        from backend.search_and_analysis_service import SearchAndAnalysisService
+        self.assertIsInstance(self.svc._search_and_analysis_svc, SearchAndAnalysisService)
+        self.assertIs(handler.__self__, self.svc._search_and_analysis_svc)
+        self.assertIs(handler.__func__, SearchAndAnalysisService.handle_semantic_search_reset)
+
+
 if __name__ == "__main__":
     unittest.main()

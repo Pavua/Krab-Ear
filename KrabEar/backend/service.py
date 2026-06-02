@@ -1481,6 +1481,7 @@ class BackendService:
             "list_collections": self._collections.handle_list_collections,  # список всех коллекций
             "add_to_collection": self._collections.handle_add_to_collection,  # добавить запись истории в коллекцию
             "remove_from_collection": self._collections.handle_remove_from_collection,  # удалить запись из коллекции
+            "rename_collection": self._collections.handle_rename_collection,  # W1773: переименовать коллекцию (old_name → new_name)
             "list_normalization_profiles": self._handle_list_normalization_profiles,  # список профилей нормализации текста
             "add_normalization_profile": self._handle_add_normalization_profile,  # добавить пользовательский профиль нормализации
             "remove_normalization_profile": self._handle_remove_normalization_profile,  # удалить пользовательский профиль нормализации
@@ -1565,6 +1566,8 @@ class BackendService:
             # статистика воспроизведения одной записи: play_count, total_listened_sec, last_played
             "get_playback_stats": self._playback_tracker.handle_get_playback_stats,
             "get_most_replayed": self._playback_tracker.handle_get_most_replayed,  # топ N наиболее часто воспроизводимых записей
+            # W1773: записи истории, ни разу не воспроизводившиеся (нужен store для пересечения с активной историей)
+            "get_never_played": lambda p: self._playback_tracker.handle_get_never_played(p, store=self.store),
             # прогнать текст через настраиваемый конвейер пост-обработки (пробелы, пунктуация, сущности, аббревиатуры, анонимизация)
             "post_process_text": self._text_processing_svc.handle_post_process_text,
             "list_post_process_steps": self._text_processing_svc.handle_list_post_process_steps,  # список доступных шагов пост-обработки текста
@@ -1682,6 +1685,8 @@ class BackendService:
             "semantic_search": self._search_and_analysis_svc.handle_semantic_search,  # семантический поиск по истории через embeddings
             "semantic_search_status": self._search_and_analysis_svc.handle_semantic_search_status,  # статус семантического поиска: модель, индекс
             "semantic_search_reindex": self._search_and_analysis_svc.handle_semantic_search_reindex,  # переиндексировать всю историю
+            # W1773: сброс зафиксированной ошибки загрузки SentenceTransformer (без него semantic_search молча мёртв)
+            "semantic_search_reset": self._search_and_analysis_svc.handle_semantic_search_reset,
             # --- LM Studio model discovery ---
             "list_llm_models": self._llm_ops_svc.handle_list_llm_models,  # список моделей из LM Studio /v1/models (для dropdown в GUI)
             # --- Quick word replacement (Cmd+Shift+R) ---
