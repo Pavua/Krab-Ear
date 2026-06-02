@@ -71,41 +71,78 @@ class HealthChecker:
     # ------------------------------------------------------------------
 
     def _check_stt_model(self) -> dict[str, Any]:
-        """Проверяет доступность STT-модели."""
+        """Проверяет доступность STT-модели.
+
+        Использует только реальные сигналы движка:
+
+        1. mlx_whisper импортируемость — если модуль недоступен, STT физически
+           не может работать на этой платформе (→ ``unavailable``).
+        2. ``engine._unavailable_models`` — dict {model_id: timestamp}, который
+           AudioEngine заполняет при неудачах. Если текущая модель там есть,
+           STT деградировал (→ ``unavailable``).
+        3. ``engine.current_model`` — имя текущей настроенной модели.
+
+        Предыдущая реализация опиралась на ``engine._whisper_model`` (атрибут,
+        которого никогда не существует: MLX хранит веса внутренне и не
+        экспонирует Python-хэндл). Следствие: ``cached`` всегда был ``False``,
+        а ``current_model`` всегда не-None после ``AudioEngine.__init__`` —
+        ветка ``warming_up`` никогда не достигалась, и HealthChecker
+        докладывал ``ok`` независимо от реального состояния прогрева.
+        Исправлено: ложно-здоровая ветка удалена, добавлены реальные сигналы.
+
+        Ограничение: GPU warm-state (загружены ли веса в Metal-память)
+        не наблюдаем из Python без изменений движка. HealthChecker честно
+        сообщает ``ok`` при доступной и не-упавшей модели; первый вызов
+        может быть холодным — это приемлемо и задокументировано.
+        """
         try:
             if self._transcriber is None:
-                return {"status": "unavailable", "model": None, "cached": False}
+                return {"status": "unavailable", "model": None}
 
             engine = getattr(self._transcriber, "engine", None)
             if engine is None:
-                return {"status": "unavailable", "model": None, "cached": False}
+                return {"status": "unavailable", "model": None}
 
             current_model = getattr(engine, "current_model", None)
-            # Проверяем, загружена ли модель в память (кэшировано)
-            cached = getattr(engine, "_whisper_model", None) is not None
+
+            # Реальный сигнал 1: mlx_whisper недоступен на этой платформе.
+            # AudioEngine импортирует mlx_whisper на уровне модуля и ставит
+            # его в None при сбое. Проверяем через importlib — если импорт
+            # падает, STT физически невозможен.
+            import importlib
+            try:
+                mlx_mod = importlib.import_module("mlx_whisper")
+                mlx_available = mlx_mod is not None
+            except Exception:
+                mlx_available = False
+
+            if not mlx_available:
+                return {
+                    "status": "unavailable",
+                    "model": current_model,
+                    "detail": "mlx_whisper not importable on this platform",
+                }
+
+            # Реальный сигнал 2: текущая модель помечена упавшей движком.
+            # engine._unavailable_models хранит метки времени сбоев с TTL ~5 min.
+            unavailable_models: dict = getattr(engine, "_unavailable_models", {})
+            if current_model and current_model in unavailable_models:
+                return {
+                    "status": "unavailable",
+                    "model": current_model,
+                    "detail": "model marked unavailable after failure",
+                }
 
             if current_model:
-                return {"status": "ok", "model": current_model, "cached": cached}
-            else:
-                # current_model is None означает, что MLX ещё не прогрел модель.
-                # Если при этом модель не кэширована — это состояние cold-start warming_up,
-                # а не "ok". Возвращаем специальный статус, чтобы не давать
-                # ложно-здоровый сигнал до завершения инициализации STT.
-                if not cached:
-                    return {"status": "warming_up", "model": None, "cached": False}
-                # cached=True но current_model=None — редкий переходный случай;
-                # берём имя модели из конфига как hint.
-                try:
-                    from core.config import settings
-                    model_name = settings.MODEL_BALANCED
-                except Exception as exc:
-                    logger.debug("Не удалось прочитать MODEL_BALANCED из config: %s", exc)
-                    model_name = "unknown"
-                return {"status": "ok", "model": model_name, "cached": True}
+                return {"status": "ok", "model": current_model}
+
+            # current_model is None — не должно возникать после AudioEngine.__init__,
+            # но защищаемся на случай stub/fake движка.
+            return {"status": "unavailable", "model": None, "detail": "current_model not set"}
 
         except Exception as exc:
             logger.warning("stt_model health check failed: %s", exc)
-            return {"status": "error", "model": None, "cached": False, "error": str(exc)}
+            return {"status": "error", "model": None, "error": str(exc)}
 
     def _check_llm(self) -> dict[str, Any]:
         """Проверяет состояние LLM-перезаписчика."""
@@ -199,20 +236,25 @@ class HealthChecker:
     def _aggregate_status(self, checks: dict[str, dict[str, Any]]) -> str:
         """Вычисляет общий статус по результатам всех проверок.
 
-        - "unhealthy" если критическая подсистема (stt_model, history_store) недоступна/ошибка
-        - "degraded" если любая проверка имеет статус warning/circuit_open
+        - "unhealthy" если критическая подсистема (stt_model, history_store)
+          недоступна (``unavailable``) или в ошибке (``error``/``critical``)
+        - "degraded" если любая проверка имеет статус warning/circuit_open/error/critical
         - "healthy" в остальных случаях
+
+        Ранее список деградированных статусов включал ``warming_up`` — статус,
+        который был мёртвым кодом в ``_check_stt_model`` (удалён вместе с
+        исправлением ложно-здоровой STT-проверки). Убран отсюда тоже.
         """
         critical_checks = {"stt_model", "history_store"}
 
         for name, result in checks.items():
             status = result.get("status", "ok")
-            if status in ("error", "critical") and name in critical_checks:
+            if status in ("error", "critical", "unavailable") and name in critical_checks:
                 return "unhealthy"
 
         for result in checks.values():
             status = result.get("status", "ok")
-            if status in ("warning", "circuit_open", "error", "critical", "warming_up"):
+            if status in ("warning", "circuit_open", "error", "critical"):
                 return "degraded"
 
         return "healthy"
