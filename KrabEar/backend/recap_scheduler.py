@@ -325,6 +325,23 @@ class RecapScheduler:
         now = self._clock_fn()
         date_str = target_date or now.date().isoformat()
 
+        # --- Privacy gate: режим конфиденциальности запрещает egress ---
+        # Дайджест формируется из текста транскрипций, поэтому при активном
+        # privacy_mode_enabled письмо НЕ отправляется (mirror export_scheduler F4).
+        # _current_settings() безопасен: при отсутствии провайдера или ошибке
+        # возвращает {}, и privacy_mode_enabled трактуется как False.
+        if self._current_settings().get("privacy_mode_enabled", False):
+            logger.info(
+                "recap_scheduler: пропуск отправки дайджеста (privacy mode активен)",
+                extra={"date": date_str, "reason": "privacy_mode_active"},
+            )
+            return {
+                "sent": False,
+                "date": date_str,
+                "error": None,
+                "reason": "privacy_mode_active",
+            }
+
         # --- Фаза 1: атомарно зарезервировать отправку ---
         with self._lock:
             state = self._load_state()
