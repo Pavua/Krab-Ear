@@ -13,12 +13,15 @@
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 import tempfile
 import threading
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -590,6 +593,144 @@ class TestTranscriptVersioningW1410(unittest.TestCase):
         self.assertEqual(newest["version_num"], 3)
         self.assertIn("reverted_from", newest)
         self.assertEqual(newest["reverted_from"], 1)
+
+
+class TestTranscriptVersioningAtomicRewriteW1770(unittest.TestCase):
+    """W1770: атомарность перезаписи NDJSON (data-integrity)."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.manager = TranscriptVersionManager(self.temp_dir.name)
+        self.versions_path = Path(self.temp_dir.name) / "transcript_versions.ndjson"
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def _read_records(self) -> list[dict]:
+        records = []
+        for line in self.versions_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+        return records
+
+    def test_crash_mid_rewrite_keeps_original_file_intact(self) -> None:
+        """Краш в момент перезаписи (os.replace бросает) не повреждает исходный файл.
+
+        Fail-before/pass-after: старый не-атомарный write_text усекал файл ДО записи
+        нового содержимого → при краше история версий пропадала. Новый атомарный
+        путь (tmp+fsync+replace) пишет во временный файл и падает на replace —
+        оригинальный transcript_versions.ndjson остаётся целым и полностью читаемым.
+        """
+        # Готовим устойчивое состояние: 2 записи у разных item_id.
+        self.manager.save_version("keep_me", "Текст, который должен выжить", "stt_raw")
+        self.manager.save_version("drop_me", "Версия для удаления", "manual")
+
+        original_bytes = self.versions_path.read_bytes()
+        original_records = self._read_records()
+        self.assertEqual(len(original_records), 2)
+
+        # delete_versions_for("drop_me") внутри вызывает _rewrite_all → os.replace.
+        # Патчим os.replace в модуле, чтобы симулировать краш ровно в момент подмены.
+        with patch(
+            "backend.transcript_versioning.os.replace",
+            side_effect=OSError("simulated crash during atomic replace"),
+        ):
+            with self.assertRaises(OSError):
+                self.manager.delete_versions_for("drop_me")
+
+        # Главная проверка: исходный файл НЕ усечён и НЕ повреждён.
+        self.assertTrue(self.versions_path.exists())
+        self.assertEqual(
+            self.versions_path.read_bytes(),
+            original_bytes,
+            "После краша на os.replace оригинальный NDJSON должен остаться байт-в-байт целым",
+        )
+        # И он по-прежнему валиден: обе версии читаются.
+        recovered = self._read_records()
+        self.assertEqual(len(recovered), 2)
+        ids = {r["item_id"] for r in recovered}
+        self.assertEqual(ids, {"keep_me", "drop_me"})
+
+        # tmp-мусор после неудачного replace убран finally-блоком.
+        tmp_path = self.versions_path.with_suffix(".ndjson.tmp")
+        self.assertFalse(tmp_path.exists(), "tmp-файл должен быть удалён после неудачного replace")
+
+    def test_atomic_rewrite_uses_tmp_then_replace(self) -> None:
+        """Перезапись действительно идёт через .ndjson.tmp + os.replace (не write_text)."""
+        self.manager.save_version("item_x", "Версия 1", "stt_raw")
+        self.manager.save_version("item_y", "Версия 2", "manual")
+
+        seen_replace = {"called": False, "src": None, "dst": None}
+        real_replace = os.replace
+
+        def _spy_replace(src, dst, *a, **kw):
+            seen_replace["called"] = True
+            seen_replace["src"] = str(src)
+            seen_replace["dst"] = str(dst)
+            return real_replace(src, dst, *a, **kw)
+
+        with patch("backend.transcript_versioning.os.replace", side_effect=_spy_replace):
+            self.manager.delete_versions_for("item_x")
+
+        self.assertTrue(seen_replace["called"], "Перезапись должна вызывать os.replace")
+        self.assertTrue(seen_replace["src"].endswith(".ndjson.tmp"))
+        self.assertTrue(seen_replace["dst"].endswith("transcript_versions.ndjson"))
+        # Удаление состоялось: остаётся только item_y.
+        remaining = {r["item_id"] for r in self._read_records()}
+        self.assertEqual(remaining, {"item_y"})
+
+
+class TestTranscriptVersioningClearAllW1770(unittest.TestCase):
+    """W1770: публичный clear_all() — безусловный privacy-wipe всего хранилища."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.manager = TranscriptVersionManager(self.temp_dir.name)
+        self.versions_path = Path(self.temp_dir.name) / "transcript_versions.ndjson"
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_clear_all_empties_entire_store(self) -> None:
+        """clear_all() удаляет ВСЕ версии (включая orphan-записи) и возвращает их число."""
+        self.manager.save_version("item_a", "A1", "stt_raw")
+        self.manager.save_version("item_a", "A2", "manual")
+        self.manager.save_version("item_b", "B1", "import")
+        # Версия orphan-записи (item_b удалён из истории, но версии ещё на диске).
+        self.assertEqual(len(self.manager.get_versions("item_a")), 2)
+
+        removed = self.manager.clear_all()
+
+        self.assertEqual(removed, 3)
+        # Файл пуст (никаких строк), но существует.
+        self.assertTrue(self.versions_path.exists())
+        self.assertEqual(self.versions_path.read_text(encoding="utf-8"), "")
+        self.assertEqual(self.manager.get_versions("item_a"), [])
+        self.assertEqual(self.manager.get_versions("item_b"), [])
+
+    def test_clear_all_idempotent_on_empty_store(self) -> None:
+        """Повторный clear_all() на пустом хранилище — no-op, без исключений, возвращает 0."""
+        self.assertEqual(self.manager.clear_all(), 0)
+        self.manager.save_version("item_a", "A1", "stt_raw")
+        self.assertEqual(self.manager.clear_all(), 1)
+        self.assertEqual(self.manager.clear_all(), 0)
+
+    def test_add_get_still_works_after_clear_all(self) -> None:
+        """После clear_all() обычный цикл save/get версий продолжает работать."""
+        self.manager.save_version("item_a", "Старое", "stt_raw")
+        self.manager.clear_all()
+
+        result = self.manager.save_version("item_a", "Новое после очистки", "manual")
+        # Нумерация версий начинается заново с 1 (файл пуст).
+        self.assertEqual(result["version_num"], 1)
+        self.assertEqual(result["text"], "Новое после очистки")
+
+        versions = self.manager.get_versions("item_a")
+        self.assertEqual(len(versions), 1)
+        self.assertEqual(versions[0]["text"], "Новое после очистки")
+        fetched = self.manager.get_version("item_a", 1)
+        self.assertEqual(fetched["source"], "manual")
 
 
 if __name__ == "__main__":
