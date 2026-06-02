@@ -11,6 +11,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -729,6 +730,161 @@ class ArchiveManagerW1047MetadataTestCase(unittest.TestCase):
         self.assertEqual(restored_id, "collide-id-1-restored")
         # Оригинальный текст и прочие поля должны быть сохранены
         self.assertEqual(self._store._raw_restored[0]["text"], rich["text"])
+
+
+class ArchiveManagerAtomicW1768TestCase(unittest.TestCase):
+    """W1768 — archive_items выполняет read-modify-delete под единым store._lock().
+
+    Раньше read (`get_history_item_by_id`) и delete (`delete_history_item`) были
+    отдельными locked-операциями: конкурентная запись/`compact()` между ними могла
+    потерять или продублировать записи (TOCTOU data-loss).  Эти тесты используют
+    НАСТОЯЩИЙ StateStore (не FakeStore), чтобы проверить атомарный путь:
+    блокировка удерживается на весь цикл, запись корректно перемещается, и
+    конкурентная дозапись во время архивирования не теряет данные.
+    """
+
+    def setUp(self) -> None:
+        from backend.state_store import StateStore
+
+        self._tmpdir = tempfile.mkdtemp()
+        self._store = StateStore(Path(self._tmpdir))
+        self._mgr = ArchiveManager(store=self._store)
+
+    def test_archive_moves_item_with_real_store(self) -> None:
+        """С настоящим StateStore запись уходит из active и появляется в архиве."""
+        item = self._store.add_history_item(text="Переместить в архив")
+        result = self._mgr.archive_items(item_ids=[item.id])
+
+        self.assertEqual(result.archived_count, 1)
+        # Удалена из активной истории (tombstone).
+        active_ids = {i.id for i in self._store._load_active_items_with_lock()}
+        self.assertNotIn(item.id, active_ids)
+        self.assertIsNone(self._store.get_history_item_by_id(item.id))
+        # Записана в архив с полем archived_at.
+        archived = self._mgr.list_archived()
+        ids = {a["id"] for a in archived}
+        self.assertIn(item.id, ids)
+        self.assertTrue(all("archived_at" in a for a in archived if a["id"] == item.id))
+
+    def test_archive_writes_tombstone_not_lost_after_reload(self) -> None:
+        """После архивирования запись не воскресает при повторном чтении store."""
+        item = self._store.add_history_item(text="Не воскрешать")
+        self._mgr.archive_items(item_ids=[item.id])
+
+        # Эмулируем «перезапуск»: новый StateStore на тот же data_dir.
+        from backend.state_store import StateStore
+
+        store2 = StateStore(Path(self._tmpdir))
+        active_ids = {i.id for i in store2._load_active_items_with_lock()}
+        self.assertNotIn(item.id, active_ids)
+
+    def test_archive_acquires_store_lock_around_operation(self) -> None:
+        """archive_items захватывает store._lock() вокруг read-modify-delete (спай).
+
+        Гарантирует, что весь цикл идёт под единой fcntl.flock, а не как
+        раздельные locked-операции get/delete.
+        """
+        item = self._store.add_history_item(text="Под локом")
+
+        real_lock = self._store._lock
+        lock_calls: list[str] = []
+
+        def spy_lock():
+            lock_calls.append("enter")
+            return real_lock()
+
+        with patch.object(self._store, "_lock", side_effect=spy_lock):
+            self._mgr.archive_items(item_ids=[item.id])
+
+        # store._lock() должен быть захвачен ровно один раз для всей операции
+        # (один снимок active + дозапись archive + tombstone), а не дважды
+        # (отдельно на чтение и на удаление).
+        self.assertEqual(
+            lock_calls.count("enter"),
+            1,
+            "store._lock() должен удерживаться единожды вокруг всего archive_items",
+        )
+
+    def test_archive_uses_unlocked_internals_no_public_relock(self) -> None:
+        """Под store._lock() НЕ вызываются публичные get/delete (иначе deadlock).
+
+        fcntl.flock не реентрантна: повторный LOCK_EX из того же процесса
+        заблокировался бы навсегда.  Поэтому атомарный путь обязан использовать
+        `_load_active_items_unlocked` + `_append_ndjson(tombstones_path, …)`,
+        а не `get_history_item_by_id` / `delete_history_item`.
+        """
+        item = self._store.add_history_item(text="Без реентрантного лока")
+
+        with patch.object(
+            self._store,
+            "delete_history_item",
+            side_effect=AssertionError("delete_history_item не должен вызываться под store._lock()"),
+        ), patch.object(
+            self._store,
+            "get_history_item_by_id",
+            side_effect=AssertionError("get_history_item_by_id не должен вызываться под store._lock()"),
+        ):
+            result = self._mgr.archive_items(item_ids=[item.id])
+
+        self.assertEqual(result.archived_count, 1)
+        # Tombstone всё равно записан напрямую через _append_ndjson.
+        active_ids = {i.id for i in self._store._load_active_items_with_lock()}
+        self.assertNotIn(item.id, active_ids)
+
+    def test_concurrent_append_during_archive_not_lost(self) -> None:
+        """Конкурентная дозапись во время архивирования не теряет запись.
+
+        Пока archive_items держит store._lock(), параллельный add_history_item
+        блокируется до релиза.  Проверяем, что после обеих операций:
+          - архивируемая запись ушла из active и попала в архив;
+          - конкурентно добавленная запись присутствует в active (не потеряна).
+        """
+        import threading
+
+        target = self._store.add_history_item(text="Архивируемая")
+
+        # Барьер: archive_items начнёт удерживать store._lock(), а конкурентный
+        # writer попытается записать ровно в этот момент.
+        archive_holding_lock = threading.Event()
+        release_archive = threading.Event()
+
+        real_lock = self._store._lock
+        from contextlib import contextmanager
+
+        @contextmanager
+        def gated_lock():
+            with real_lock():
+                archive_holding_lock.set()
+                # Удерживаем лок, пока writer-поток не попробует записать.
+                release_archive.wait(timeout=5)
+                yield
+
+        concurrent_item_id: dict[str, str] = {}
+
+        def writer() -> None:
+            # Ждём, пока archive захватит лок, затем пробуем конкурентную запись.
+            archive_holding_lock.wait(timeout=5)
+            release_archive.set()
+            new_item = self._store.add_history_item(text="Конкурентная запись")
+            concurrent_item_id["id"] = new_item.id
+
+        t = threading.Thread(target=writer, name="concurrent-writer")
+        t.start()
+        with patch.object(self._store, "_lock", side_effect=gated_lock):
+            result = self._mgr.archive_items(item_ids=[target.id])
+        t.join(timeout=5)
+
+        self.assertEqual(result.archived_count, 1)
+
+        active_ids = {i.id for i in self._store._load_active_items_with_lock()}
+        # Архивируемая запись ушла из active.
+        self.assertNotIn(target.id, active_ids)
+        # Конкурентно добавленная запись НЕ потеряна.
+        self.assertIn("id", concurrent_item_id, "writer-поток не успел добавить запись")
+        self.assertIn(concurrent_item_id["id"], active_ids)
+        # Архивируемая запись попала в архив.
+        archived_ids = {a["id"] for a in self._mgr.list_archived()}
+        self.assertIn(target.id, archived_ids)
 
 
 if __name__ == "__main__":
