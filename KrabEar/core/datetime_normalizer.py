@@ -522,13 +522,18 @@ class DateTimeNormalizer:
             rest = base_match.group(1).strip()
             decade = 0
             ones = 0
+            # W1772: используем точное совпадение токенов вместо substring 'in'.
+            # Проблема: 'десятого' является подстрокой 'пятидесятого', 'шестидесятого',
+            # 'семидесятого', 'восьмидесятого' — substring 'in' матчил неправильный ключ
+            # и портил 1950-1980 / 2050-2080 (все давали 10 вместо 50/60/70/80).
+            rest_tokens = set(rest.split())
             for dk, dv in _RU_YEAR_DECADES.items():
-                if dk in rest:
+                if dk in rest_tokens:
                     decade = dv
-                    rest = rest.replace(dk, "").strip()
+                    rest_tokens.discard(dk)
                     break
             for ok, ov in _RU_YEAR_ONES_ORDINAL.items():
-                if ok in rest:
+                if ok in rest_tokens:
                     ones = ov
                     break
             return 2000 + decade + ones
@@ -547,13 +552,15 @@ class DateTimeNormalizer:
             rest = base_match2.group(2).strip()
             decade = 0
             ones = 0
+            # W1772: токен-граничный lookup — аналогично ветке 2000+.
+            rest_tokens = set(rest.split())
             for dk, dv in _RU_YEAR_DECADES.items():
-                if dk in rest:
+                if dk in rest_tokens:
                     decade = dv
-                    rest = rest.replace(dk, "").strip()
+                    rest_tokens.discard(dk)
                     break
             for ok, ov in _RU_YEAR_ONES_ORDINAL.items():
-                if ok in rest:
+                if ok in rest_tokens:
                     ones = ov
                     break
             return base_year + decade + ones
