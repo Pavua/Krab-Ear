@@ -197,22 +197,25 @@ class TestOrphanTombstoneGranular(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmpdir.cleanup()
 
-    def test_single_orphan(self) -> None:
+    def test_tombstone_for_deleted_item_is_valid(self) -> None:
+        """W1776 fix: tombstone for a non-active ID is VALID, not orphaned."""
         _write_ndjson(self.data_dir / "history.ndjson", [
             {"id": "real", "ts": "2025-01-01T10:00:00", "text": "x"},
         ])
+        # "ghost" was deleted earlier — its tombstone is correct and must not be flagged.
         _write_tombstones(self.data_dir / "history_tombstones.ndjson", ["ghost"])
         report = self.checker.check_integrity(self.data_dir)
-        self.assertEqual(report.orphaned_tombstones, 1)
+        self.assertEqual(report.orphaned_tombstones, 0)
 
-    def test_all_tombstones_orphaned(self) -> None:
+    def test_multiple_tombstones_for_deleted_items_are_valid(self) -> None:
+        """W1776 fix: multiple tombstones for deleted items are all valid."""
         _write_ndjson(self.data_dir / "history.ndjson", [
             {"id": "real", "ts": "2025-01-01T10:00:00", "text": "x"},
         ])
         _write_tombstones(self.data_dir / "history_tombstones.ndjson",
-                          ["ghost1", "ghost2", "ghost3"])
+                          ["deleted1", "deleted2", "deleted3"])
         report = self.checker.check_integrity(self.data_dir)
-        self.assertEqual(report.orphaned_tombstones, 3)
+        self.assertEqual(report.orphaned_tombstones, 0)
 
     def test_tombstone_for_existing_id_not_orphan(self) -> None:
         _write_ndjson(self.data_dir / "history.ndjson", [
@@ -222,22 +225,25 @@ class TestOrphanTombstoneGranular(unittest.TestCase):
         report = self.checker.check_integrity(self.data_dir)
         self.assertEqual(report.orphaned_tombstones, 0)
 
-    def test_mixed_orphan_and_valid_tombstones(self) -> None:
+    def test_mixed_tombstones_all_valid(self) -> None:
+        """W1776 fix: tombstones for both active and deleted IDs are all valid."""
         _write_ndjson(self.data_dir / "history.ndjson", [
             {"id": "a", "ts": "2025-01-01T10:00:00", "text": "x"},
             {"id": "b", "ts": "2025-01-02T10:00:00", "text": "y"},
         ])
+        # "a" is active but tombstoned (pending delete); "ghost1"/"ghost2" already deleted.
         _write_tombstones(self.data_dir / "history_tombstones.ndjson",
-                          ["a", "ghost1", "ghost2"])  # 1 valid, 2 orphans
+                          ["a", "ghost1", "ghost2"])
         report = self.checker.check_integrity(self.data_dir)
-        self.assertEqual(report.orphaned_tombstones, 2)
+        self.assertEqual(report.orphaned_tombstones, 0)
 
-    def test_repair_orphan_tombstones_leaves_valid(self) -> None:
-        """After repair, valid tombstones remain, orphans are removed."""
+    def test_repair_preserves_all_tombstones(self) -> None:
+        """W1776 fix: repair() must not delete tombstones for deleted items."""
         _write_ndjson(self.data_dir / "history.ndjson", [
             {"id": "real", "ts": "2025-01-01T10:00:00", "text": "x"},
         ])
         ts_path = self.data_dir / "history_tombstones.ndjson"
+        # "real" active+tombstoned; "ghost1"/"ghost2" already deleted — all must survive.
         _write_tombstones(ts_path, ["real", "ghost1", "ghost2"])
         report = self.checker.check_integrity(self.data_dir)
         self.checker.repair(self.data_dir, report)
@@ -249,17 +255,18 @@ class TestOrphanTombstoneGranular(unittest.TestCase):
         ]
         remaining_ids = {t.get("id") for t in remaining}
         self.assertIn("real", remaining_ids)
-        self.assertNotIn("ghost1", remaining_ids)
-        self.assertNotIn("ghost2", remaining_ids)
+        self.assertIn("ghost1", remaining_ids)
+        self.assertIn("ghost2", remaining_ids)
 
-    def test_orphan_tombstone_is_auto_fixable(self) -> None:
+    def test_orphaned_tombstones_check_is_always_ok(self) -> None:
+        """W1776 fix: orphaned_tombstones check always reports status='ok'."""
         _write_ndjson(self.data_dir / "history.ndjson", [
             {"id": "real", "ts": "2025-01-01T10:00:00", "text": "x"},
         ])
-        _write_tombstones(self.data_dir / "history_tombstones.ndjson", ["ghost"])
+        _write_tombstones(self.data_dir / "history_tombstones.ndjson", ["deleted"])
         report = self.checker.check_integrity(self.data_dir)
         ot = next(c for c in report.checks if c.name == "orphaned_tombstones")
-        self.assertTrue(ot.auto_fixable)
+        self.assertEqual(ot.status, "ok")
 
 
 # ---------------------------------------------------------------------------
@@ -629,15 +636,19 @@ class TestRepairResultDetails(unittest.TestCase):
         combined = "\n".join(result.details)
         self.assertIn("valid_ndjson", combined)
 
-    def test_details_contain_orphaned_tombstones_entry(self) -> None:
+    def test_details_no_orphaned_tombstones_entry_when_check_disabled(self) -> None:
+        """W1776 fix: repair() emits no orphaned_tombstones detail (check always ok)."""
         _write_ndjson(self.data_dir / "history.ndjson", [
             {"id": "real", "ts": "2025-01-01T10:00:00", "text": "x"},
         ])
         _write_tombstones(self.data_dir / "history_tombstones.ndjson", ["ghost"])
         report = self.checker.check_integrity(self.data_dir)
+        # orphaned_tombstones check is always "ok" → no auto_fixable entry → no detail line.
+        self.assertEqual(report.orphaned_tombstones, 0)
         result = self.checker.repair(self.data_dir, report)
+        # repair() should not emit an orphaned_tombstones fix detail
         combined = "\n".join(result.details)
-        self.assertIn("orphaned_tombstones", combined)
+        self.assertNotIn("orphaned_tombstones: перемещено", combined)
 
     def test_details_contain_settings_json_entry(self) -> None:
         (self.data_dir / "settings.json").write_text("BAD", encoding="utf-8")
