@@ -513,6 +513,32 @@ class HistoryService:
         if not ok:
             raise ValueError(f"Запись не найдена: {item_id}")
 
+        # Все каскады, кроме самого tombstone (.md erase, semantic, chains, playback,
+        # versions).  Вынесено в cascade_delete_artifacts, чтобы RecordingMerger мог
+        # переиспользовать тот же путь после собственного атомарного tombstone'а
+        # (wave1776 HIGH 1) — DRY: один источник истины для каскадного удаления.
+        self.cascade_delete_artifacts(item_id, item_ts)
+
+        add_breadcrumb(
+            category="history",
+            message="delete_history_item",
+            data={"ok": True, "duration_ms": round((_time.monotonic() - _t0) * 1000)},
+        )
+        return {"deleted": True}
+
+    def cascade_delete_artifacts(self, item_id: str, item_ts: str) -> None:
+        """Выполняет ВСЕ каскады удаления, КРОМE tombstone'а самой записи.
+
+        Tombstone должен быть записан вызывающей стороной ДО этого вызова
+        (handle_delete_history_item или RecordingMerger атомарным append'ом).
+        ``item_ts`` обязателен и должен быть захвачен ПОКА запись ещё активна —
+        после tombstone'а её ts уже не найти через _load_active_items_unlocked,
+        и стирание .md (privacy gap) будет молча пропущено.
+
+        Покрывает: .md-транскрипт (W1762), эмбеддинг семантического поиска
+        (W1426 F2), ghost-ссылки в цепочках (W1253 RC-3), playback-статистику
+        (W1343), версии транскрипта (W1045 F2).  Каждый шаг отказоустойчив.
+        """
         # W1762: стираем .md файл транскрипта (privacy gap — файл пережил tombstone).
         self._erase_transcript_md(item_ts, item_id)
 
@@ -538,12 +564,6 @@ class HistoryService:
                 logger.warning(
                     "transcript_versions cascade delete failed for %s", item_id, exc_info=True
                 )
-        add_breadcrumb(
-            category="history",
-            message="delete_history_item",
-            data={"ok": True, "duration_ms": round((_time.monotonic() - _t0) * 1000)},
-        )
-        return {"deleted": True}
 
     def handle_compact_history(self, params: dict[str, Any]) -> dict[str, Any]:
         stats = self.store.compact_with_stats()

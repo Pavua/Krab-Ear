@@ -204,13 +204,22 @@ class TestArchivePurgeFailDoesNotBreakDelete(unittest.TestCase):
 
 
 class TestMergeItemsPurgesVersions(unittest.TestCase):
-    """merge_items с delete_originals=True должен чистить версии оригиналов."""
+    """wave1776 HIGH 1: merge с delete_originals=True чистит версии оригиналов
+    ЧЕРЕЗ канонический delete-cascade (cascade_delete_fn), а не через собственный
+    transcript_versioner мерджера (тот удалён как декоративная delete-каскад-
+    коллаборация — каноническая handle_delete_history_item уже чистит версии).
+    """
 
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.store = FakeMergeStore()
         self.versioner = TranscriptVersionManager(self.temp_dir.name)
-        self.merger = RecordingMerger(transcript_versioner=self.versioner)
+        self.merger = RecordingMerger()
+        # Канонический cascade-хвост (без tombstone — его делает merge/fallback):
+        # эмулирует HistoryService.cascade_delete_artifacts, чистящую версии.
+        def _canonical_cascade(iid: str, item_ts: str) -> None:
+            self.versioner.purge_versions_for_item(iid)
+        self.merger.cascade_delete_fn = _canonical_cascade
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -240,36 +249,44 @@ class TestMergeItemsPurgesVersions(unittest.TestCase):
         self.assertEqual(len(self.versioner.get_versions("b1")), 1)
         self.assertEqual(len(self.versioner.get_versions("b2")), 1)
 
-    def test_merge_without_versioner_no_error(self) -> None:
-        """RecordingMerger без versioner работает нормально."""
+    def test_merge_without_cascade_fn_no_error(self) -> None:
+        """RecordingMerger без cascade_delete_fn работает (fallback на прямой tombstone)."""
         self.store.add_fake_item("c1", "T1")
         self.store.add_fake_item("c2", "T2")
-        merger_no_ver = RecordingMerger()
+        merger_no_fn = RecordingMerger()
         # Should not raise
-        result = merger_no_ver.merge_items(["c1", "c2"], self.store, delete_originals=True)
+        result = merger_no_fn.merge_items(["c1", "c2"], self.store, delete_originals=True)
         self.assertIn("merged_from", result)
+        self.assertIn("c1", self.store._deleted)
+        self.assertIn("c2", self.store._deleted)
 
 
 class TestMergePurgeFailDoesNotBreakDelete(unittest.TestCase):
-    """Ошибка purge не должна прерывать слияние."""
+    """Ошибка в каноническом delete-cascade не должна прерывать слияние."""
 
     def setUp(self) -> None:
         self.store = FakeMergeStore()
-        self.bad_versioner = MagicMock()
-        self.bad_versioner.purge_versions_for_item.side_effect = RuntimeError("io error")
-        self.merger = RecordingMerger(transcript_versioner=self.bad_versioner)
+        self.merger = RecordingMerger()
+
+        def _raising_cascade(iid: str, item_ts: str) -> None:
+            # Эмулирует исключение внутри канонического cascade (purge версий и т.п.)
+            raise RuntimeError("io error")
+        self.merger.cascade_delete_fn = _raising_cascade
 
     def test_purge_fail_does_not_break_merge(self) -> None:
-        """RuntimeError в purge не должен прерывать merge_items."""
+        """RuntimeError в delete-cascade не должен прерывать merge_items."""
         self.store.add_fake_item("d1", "T1")
         self.store.add_fake_item("d2", "T2")
 
-        # Should not raise
+        # Should not raise — merged item всё равно создан.
         result = self.merger.merge_items(["d1", "d2"], self.store, delete_originals=True)
 
+        self.assertIn("merged_from", result)
+        self.assertEqual(len(self.store._added), 1)
+        # tombstone оригиналов записан (fallback), но cascade упал → не в deleted_ids.
         self.assertIn("d1", self.store._deleted)
         self.assertIn("d2", self.store._deleted)
-        self.assertIn("merged_from", result)
+        self.assertEqual(result["deleted_ids"], [])
 
 
 # ---------------------------------------------------------------------------

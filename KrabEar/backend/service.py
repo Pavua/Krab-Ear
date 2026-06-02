@@ -775,6 +775,19 @@ class BackendService:
         # W1687 F8 MED: wire semantic_searcher into ArchiveManager so that
         # archive/unarchive operations remove or re-index embeddings respectively.
         self._archive_manager._semantic_searcher = self._semantic_searcher
+        # wave1776: late-inject RecordingMerger collaborators (previously bare → None).
+        #  HIGH 1: cascade_delete_fn routes each source delete through the canonical
+        #    HistoryService cascade tail (.md erase W1762 + semantic remove + chain
+        #    ghost-ref removal + playback + transcript versions) — closes the
+        #    .md-transcript privacy gap that merge's direct tombstone left behind.
+        #    merge writes the tombstone itself (atomically) and passes the source ts
+        #    captured BEFORE tombstone so the .md glob still resolves.
+        #  HIGH 2: _semantic_searcher indexes the MERGED item (genuine need, not a
+        #    delete-cascade); recording_chain_mgr REPLACES originals with the merged
+        #    id in chains (merge-specific — canonical delete only REMOVES ghost refs).
+        self._merger._semantic_searcher = self._semantic_searcher
+        self._merger.recording_chain_mgr = self._chains
+        self._merger.cascade_delete_fn = self._history.cascade_delete_artifacts
         # Late-inject AutoGlossaryBuilder into HistoryService so that
         # add_history_item immediately invalidates the glossary cache (W1288 F1).
         self._history._auto_glossary = self._auto_glossary
