@@ -12,6 +12,8 @@ import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any
+from xml.sax.saxutils import escape as _xml_sax_escape
+from xml.sax.saxutils import quoteattr as _xml_sax_quoteattr
 
 # ---------------------------------------------------------------------------
 # Цветовая палитра для языков и блоков
@@ -385,27 +387,49 @@ class TimelineExporter:
             f"</svg>"
         )
 
+    # Карта дополнительных сущностей для кавычек (escape() сам по себе
+    # экранирует только &, <, >; кавычки добавляем явно для контекста атрибутов).
+    _XML_ESCAPE_ENTITIES = {'"': "&quot;", "'": "&#39;"}
+
     @staticmethod
     def _xml_escape(text: str) -> str:
-        """Экранирует символы XML."""
-        return (
-            text.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace('"', "&quot;")
-            .replace("'", "&#39;")
-        )
+        """Экранирует пользовательский текст для встраивания в SVG/XML.
+
+        Использует канонический ``xml.sax.saxutils.escape`` (надёжнее ручной
+        цепочки ``replace``): экранирует ``&``, ``<``, ``>`` плюс ``"`` и ``'``
+        через карту сущностей — безопасно как для содержимого элементов
+        (``<text>``/``<title>``), так и для значений атрибутов.
+        """
+        return _xml_sax_escape(str(text), TimelineExporter._XML_ESCAPE_ENTITIES)
+
+    @staticmethod
+    def _xml_attr(text: str) -> str:
+        """Экранирует и заключает в кавычки пользовательскую строку для XML-атрибута.
+
+        Возвращает значение УЖЕ В КАВЫЧКАХ (``quoteattr`` сам выбирает безопасные
+        кавычки). Использовать там, где пользовательский текст попадает в значение
+        атрибута SVG/XML.
+        """
+        return _xml_sax_quoteattr(str(text))
 
     @staticmethod
     def _ical_escape(text: str) -> str:
-        """Экранирует символы для iCalendar TEXT-значений (RFC 5545 §3.3.11)."""
-        return (
-            text.replace("\\", "\\\\")
-            .replace(";", "\\;")
-            .replace(",", "\\,")
-            .replace("\n", "\\n")
-            .replace("\r", "")
-        )
+        """Экранирует пользовательский текст для iCalendar TEXT-значений (RFC 5545 §3.3.11).
+
+        Защищает от инъекции новых iCal-свойств/строк:
+          - обратный слэш ``\\`` → ``\\\\`` (первым, чтобы не двойного-экранировать ниже);
+          - ``;`` → ``\\;`` и ``,`` → ``\\,`` (разделители параметров/значений);
+          - ЛЮБОЙ перевод строки (CRLF, LF, либо ОДИНОЧНЫЙ CR) → литеральное ``\\n``.
+            Голый CR раньше молча отбрасывался — теперь нормализуется, чтобы ни
+            при каких условиях в значение свойства не попал сырой перевод строки.
+        """
+        escaped = str(text).replace("\\", "\\\\")
+        escaped = escaped.replace(";", "\\;").replace(",", "\\,")
+        # Нормализуем все варианты перевода строки в литеральное "\n":
+        # сначала CRLF/CR → LF, затем LF → "\n" (порядок исключает двойные "\n").
+        escaped = escaped.replace("\r\n", "\n").replace("\r", "\n")
+        escaped = escaped.replace("\n", "\\n")
+        return escaped
 
     @staticmethod
     def _short_label(ts: str) -> str:
