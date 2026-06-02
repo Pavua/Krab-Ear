@@ -11,13 +11,19 @@
 - Dry-run: планирует, что будет сделано, без реальных изменений.
 - Hard limit 1000 записей за один запуск.
 - Skip: записи младше 1 часа, записи без аудиофайла, защищённые записи.
+- Size cap (W21 MED-1): sf.info() gate rejects files whose frames×channels exceed
+  MAX_AUDIO_FRAMES before any RAM allocation — prevents OOM on 1000-item batches.
+- Path containment (W21 MED-2): audio_path resolved through allowlist (home / /tmp /
+  tempdir / data_dir) before sf.read; paths outside allowlist are skipped+logged.
 """
 from __future__ import annotations
 
 import logging
 import os
+import tempfile
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
@@ -32,6 +38,43 @@ logger = logging.getLogger("KrabEar.Backend.BulkReprocess")
 HARD_LIMIT = 1000
 # Записи моложе этого порога пропускаются (секунды).
 MIN_AGE_SEC = 3600  # 1 час
+
+# ---------------------------------------------------------------------------
+# W21 MED-1: size cap — reject files whose frames×channels exceed this value
+# before any sf.read RAM allocation.  At float32 (4 bytes) this is ~400 MB
+# for a single read; the transient resampling copy is ~2× that.  Mirrors the
+# cap used by core/waveform_generator.py (_MAX_FILE_FRAMES = 100_000_000).
+# ---------------------------------------------------------------------------
+MAX_AUDIO_FRAMES: int = 100_000_000  # ~34 min mono 48 kHz, ~17 min stereo 48 kHz
+
+
+# ---------------------------------------------------------------------------
+# W21 MED-2: path containment — mirrors audio_analytics_service._validate_audio_read_path
+# ---------------------------------------------------------------------------
+
+def _validate_audio_read_path(p: str, data_dir: Path | None = None) -> Path:
+    """Raise ValueError if *p* resolves outside the audio-read allowlist.
+
+    Allowed roots: home, /tmp, tempdir, data_dir (if provided).
+
+    Returns the resolved Path (TOCTOU-safe: caller uses this resolved Path).
+    """
+    resolved = Path(p).expanduser().resolve()
+    allowed: list[Path] = [
+        Path.home().resolve(),
+        Path("/tmp").resolve(),
+        Path(tempfile.gettempdir()).resolve(),
+    ]
+    if data_dir is not None:
+        allowed.append(data_dir.resolve())
+
+    if any(resolved == root or resolved.is_relative_to(root) for root in allowed):
+        return resolved
+
+    raise ValueError(
+        f"bulk_reprocess: путь {resolved!s} находится за пределами разрешённых директорий. "
+        f"Разрешённые корни: {[str(r) for r in allowed]}"
+    )
 
 
 class BulkReprocessor:
@@ -61,6 +104,9 @@ class BulkReprocessor:
         self.batch_size = max(1, int(batch_size))
         self._cancel_event = threading.Event()
         self._is_recording_fn = is_recording_fn
+        # W21: resolve data_dir once for path-containment checks.
+        _data_dir = getattr(store, "data_dir", None)
+        self._data_dir: Path | None = Path(_data_dir).resolve() if _data_dir else None
         # Защита от параллельных запусков. BackendService держит ОДИН общий singleton
         # self._bulk_reprocessor (service.py:530), а IPC — thread-per-connection, причём
         # bulk_reprocess_start НЕ в HEAVY_METHODS (light-лимит 120/мин). Два клиента могли
@@ -114,10 +160,30 @@ class BulkReprocessor:
             return float("inf")
 
     def _load_audio(self, audio_path: str) -> Any:
-        """Загружает аудиофайл в массив numpy для передачи в transcriber."""
+        """Загружает аудиофайл в массив numpy для передачи в transcriber.
+
+        Guards (W21):
+        - MED-2 (path containment): resolves audio_path through the allowlist
+          before any I/O; raises ValueError for paths outside home/tmp/data_dir.
+        - MED-1 (size cap): checks sf.info() frames×channels before sf.read;
+          raises RuntimeError for files exceeding MAX_AUDIO_FRAMES to prevent OOM.
+        """
         try:
             import soundfile as sf  # type: ignore
-            data, sample_rate = sf.read(audio_path, dtype="float32", always_2d=False)
+
+            # W21 MED-2: path containment — resolve and check allowlist before I/O.
+            resolved_path = _validate_audio_read_path(audio_path, self._data_dir)
+
+            # W21 MED-1: size cap — probe metadata without loading audio into RAM.
+            info = sf.info(str(resolved_path))
+            total_frames = info.frames * info.channels
+            if total_frames > MAX_AUDIO_FRAMES:
+                raise RuntimeError(
+                    f"bulk_reprocess: аудиофайл слишком большой для загрузки в RAM "
+                    f"({total_frames} frames×ch > лимит {MAX_AUDIO_FRAMES}): {resolved_path!s}"
+                )
+
+            data, sample_rate = sf.read(str(resolved_path), dtype="float32", always_2d=False)
             # Whisper ожидает моно-float32.
             if data.ndim > 1:
                 data = data.mean(axis=1)
@@ -131,6 +197,9 @@ class BulkReprocessor:
                     data,
                 )
             return data
+        except (ValueError, RuntimeError):
+            # Re-raise containment/size errors directly so the caller can skip+log.
+            raise
         except Exception as exc:
             raise RuntimeError(f"Не удалось загрузить аудио {audio_path!r}: {exc}") from exc
 
