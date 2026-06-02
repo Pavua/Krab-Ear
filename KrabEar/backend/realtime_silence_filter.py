@@ -125,10 +125,37 @@ class RealtimeSilenceFilter:
         if audio_window.size == 0 or total_duration < 1.0:
             return
 
-        window_start_sec = max(0.0, total_duration - self._window_sec)
+        # W1769 FIX (correctness): диапазоны тишины ДОЛЖНЫ быть в "семпл-времени"
+        # относительно итогового аудиобуфера, т.к. их потом потребляет
+        # ``zero_silence_ranges`` через ``int(sec * sample_rate)`` — обнуление по
+        # ИНДЕКСУ СЕМПЛОВ. Прежний код якорил окно к ``total_duration`` (wall-clock:
+        # ``time.monotonic() - started_at``), а внутри окна ``detect_silence`` даёт
+        # смещения в семпл-времени. При расхождении настенных часов и реально
+        # буферизованного числа семплов (стол/задержка/потеря аудио-кадров) якорь
+        # уезжал вперёд → обнуление попадало на РЕАЛЬНУЮ речь (или мимо тишины).
+        #
+        # Корректный якорь — хвост буфера в семплах: окно ``audio_window`` это
+        # последние ``audio_window.size`` семплов записи, поэтому
+        # ``window_start_sample = total_recorded_samples - audio_window.size``.
+        # total_recorded_samples берём из O(1)-счётчика рекордера (семпл-время —
+        # ИСТИНА). Wall-clock — только фоллбэк, когда счётчик недоступен (стаб без
+        # ``_chunks_total_samples``): при дрейфе wall-clock ЗАВЫШАЕТ число семплов,
+        # поэтому участвовать в ``max()`` он НЕ должен.
+        # ES: anclamos las franjas en tiempo-de-muestra (contador real), no en reloj.
+        total_samples = int(getattr(self._recorder, "_chunks_total_samples", 0) or 0)
+        if total_samples <= 0:
+            total_samples = int(total_duration * sample_rate)
+        # Окно — подмножество буфера, поэтому суммарных семплов не может быть
+        # меньше размера окна (защита от рассинхрона счётчика и снимка).
+        total_samples = max(total_samples, audio_window.size)
+
+        window_start_sample = max(0, total_samples - audio_window.size)
+        window_start_sec = window_start_sample / sample_rate
 
         # Skip already-analyzed prefix: compute how far into the current window
         # we have already scanned and trim the audio array accordingly.
+        # Курсор ``_checked_up_to_sec`` тоже в семпл-времени (см. advance ниже),
+        # поэтому вся арифметика префикса остаётся в одних единицах (семплы).
         with self._lock:
             checked_up_to = self._checked_up_to_sec
 
@@ -152,8 +179,11 @@ class RealtimeSilenceFilter:
             return
 
         # Advance cursor only after confirming significant silence (W1330 fix).
+        # W1769: курсор продвигаем в СЕМПЛ-ВРЕМЕНИ (конец буфера), а не по wall-clock,
+        # чтобы префикс-скип на следующем тике совпадал с якорем окна (семплы).
+        analyzed_up_to_sec = window_start_sec + audio_window.size / sample_rate
         with self._lock:
-            self._checked_up_to_sec = total_duration
+            self._checked_up_to_sec = analyzed_up_to_sec
 
         new_ranges: list[tuple[float, float]] = []
         for region in silence_regions:
