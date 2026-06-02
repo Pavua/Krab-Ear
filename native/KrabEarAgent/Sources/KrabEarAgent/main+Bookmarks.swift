@@ -65,11 +65,11 @@ extension AgentAppDelegate {
             }
 
             log.info("Закладка создана в \(offsetSec)s (session: \(sessionId))")
-            await MainActor.run {
-                // formatOffsetSec is a static method on @MainActor-isolated class,
-                // so call it from within MainActor.run where it is safe.
-                let offsetFormatted = AgentAppDelegate.formatOffsetSec(offsetSec)
-                self?.showTemporaryBookmarkMessage(offsetFormatted)
+            if let self = self {
+                await MainActor.run {
+                    let offsetFormatted = AgentAppDelegate.formatOffsetSec(offsetSec)
+                    self.showTemporaryBookmarkMessage(offsetFormatted)
+                }
             }
         }
     }

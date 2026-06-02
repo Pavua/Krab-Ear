@@ -52,7 +52,9 @@ extension AgentAppDelegate {
                 let result = response["result"] as? [String: Any],
                 let profile = result["profile"] as? String
             else { return }
-            self?.storeCachedPasteProfile(profile, for: bundleId)
+            DispatchQueue.main.async { [weak self] in
+                self?.storeCachedPasteProfile(profile, for: bundleId)
+            }
         }
         return nil
     }
@@ -61,10 +63,13 @@ extension AgentAppDelegate {
     /// Вызывается когда пользователь вручную выбирает профиль вставки.
     func recordPasteProfileForApp(bundleId: String, profile: String) {
         guard !bundleId.isEmpty, !profile.isEmpty else { return }
-        _ = try? ipcClient.call(
-            method: "record_paste_app_profile",
-            params: ["bundle_id": bundleId, "profile": profile]
-        )
+        let client = ipcClient
+        DispatchQueue.global(qos: .utility).async {
+            _ = try? client.call(
+                method: "record_paste_app_profile",
+                params: ["bundle_id": bundleId, "profile": profile]
+            )
+        }
         logger.info("PasteAppMemory: записан профиль bundle=\(bundleId) → profile=\(profile)")
     }
 
