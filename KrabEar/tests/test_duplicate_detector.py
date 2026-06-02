@@ -438,41 +438,16 @@ class TestWave117DuplicateDetector(unittest.TestCase):
         self.assertTrue(self.det.is_duplicate("hello world", "hello world"))
 
 
-class TransitiveGroupingTestCase(unittest.TestCase):
-    """W1004 F1 — union-find транзитивная группировка.
+class NonTransitiveGroupingTestCase(unittest.TestCase):
+    """W1004 F1 — Центроидная группировка (отказ от union-find).
 
-    Если A≈B и B≈C, но A≉C, то все три должны оказаться в одной группе.
-    Наивный алгоритм пропускает C, потому что B уже назначен в группу A
-    до того как C начинает итерацию.
+    Группировка происходит строго вокруг лидера (первого элемента кластера),
+    чтобы избежать транзитивного дрейфа (когда A≈B и B≈C приводит к ошибочному A≈C).
     """
 
     def setUp(self) -> None:
         self.det = DuplicateDetector()
         self.base_ts = 1_700_000_000.0
-
-    def test_transitive_grouping_A_B_C_all_in_one_group(self) -> None:
-        """A≈B и B≈C → {A, B, C} в одной группе (транзитивность через union-find)."""
-        # A — исходное длинное предложение
-        text_a = "Это длинная транскрипция для проверки транзитивного объединения групп"
-        # B — почти идентично A (одно слово отличается в конце)
-        text_b = "Это длинная транскрипция для проверки транзитивного объединения группы"
-        # C — почти идентично B, но немного отличается от A
-        text_c = "Это длинная транскрипция для проверки транзитивного объединения группе"
-
-        items = [
-            {"text": text_a, "ts": self.base_ts},
-            {"text": text_b, "ts": self.base_ts + 5},
-            {"text": text_c, "ts": self.base_ts + 10},
-        ]
-
-        groups = self.det.find_duplicates(items, similarity_threshold=0.9)
-
-        # Все три элемента должны быть в одной группе
-        self.assertEqual(len(groups), 1, f"Ожидалась 1 группа, получено: {len(groups)}")
-        self.assertEqual(
-            len(groups[0].items), 3,
-            f"Группа должна содержать 3 элемента, содержит: {len(groups[0].items)}"
-        )
 
     def test_non_transitive_items_form_separate_groups(self) -> None:
         """Несвязанные пары образуют отдельные группы, не сливаются."""
@@ -493,19 +468,162 @@ class TransitiveGroupingTestCase(unittest.TestCase):
         sizes = sorted(len(g.items) for g in groups)
         self.assertEqual(sizes, [2, 2])
 
-    def test_single_chain_A_B_C_D_all_merged(self) -> None:
-        """Цепочка A≈B≈C≈D → все четыре в одной группе."""
-        base = "Транскрипция заседания совета директоров компании на тему стратегии"
+    def test_transitive_drift_prevented(self) -> None:
+        """Дрейф предотвращается: если A≈B, но A≉C, то C не добавляется в группу A.
+        Даже если B≈C.
+        """
+        # A, B, C где A≈B, B≈C, но A≉C
+        text_a = "alpha beta gamma delta epsilon"
+        text_b = "beta gamma delta epsilon zeta"
+        text_c = "gamma delta epsilon zeta eta theta"
+
         items = [
-            {"text": base, "ts": self.base_ts},
-            {"text": base + ".", "ts": self.base_ts + 5},
-            {"text": base + "..", "ts": self.base_ts + 10},
-            {"text": base + "...", "ts": self.base_ts + 15},
+            {"text": text_a, "ts": self.base_ts},
+            {"text": text_b, "ts": self.base_ts + 5},
+            {"text": text_c, "ts": self.base_ts + 10},
         ]
 
-        groups = self.det.find_duplicates(items, similarity_threshold=0.9)
+        # Jaccard thresholds:
+        # A and B share 4 words, total 6 words => 4/6 = 0.66
+        # A and C share 3 words, total 7 words => 3/7 = 0.42
+        groups = self.det.find_duplicates(items, similarity_threshold=0.6)
+
+        # A matches B, so {A, B} form group 1
+        # B is already used, so C forms a group... but C has no matches.
+        # Thus, only 1 group of 2 items is expected.
         self.assertEqual(len(groups), 1)
-        self.assertEqual(len(groups[0].items), 4)
+        self.assertEqual(len(groups[0].items), 2)
+        self.assertEqual(groups[0].items[0]["text"], text_a)
+        self.assertEqual(groups[0].items[1]["text"], text_b)
+
+
+
+class TestDuplicateDetectorGeminiWaveA(unittest.TestCase):
+    """Wave-A Gemini fixes — ReDoS guard (calculate_similarity) + centroid clustering."""
+
+    def setUp(self) -> None:
+        self.det = DuplicateDetector()
+
+    # ------------------------------------------------------------------
+    # calculate_similarity — new public API
+    # ------------------------------------------------------------------
+    def test_calculate_similarity_identical(self) -> None:
+        """Identical strings give similarity 1.0."""
+        self.assertAlmostEqual(
+            DuplicateDetector.calculate_similarity("hello", "hello"), 1.0
+        )
+
+    def test_calculate_similarity_empty_first(self) -> None:
+        """Empty first string gives 0.0."""
+        self.assertEqual(DuplicateDetector.calculate_similarity("", "hello"), 0.0)
+
+    def test_calculate_similarity_empty_second(self) -> None:
+        """Empty second string gives 0.0."""
+        self.assertEqual(DuplicateDetector.calculate_similarity("hello", ""), 0.0)
+
+    def test_calculate_similarity_both_empty(self) -> None:
+        """Both empty gives 0.0 (never a duplicate)."""
+        self.assertEqual(DuplicateDetector.calculate_similarity("", ""), 0.0)
+
+    def test_calculate_similarity_whitespace_only(self) -> None:
+        """Whitespace-only strings give 0.0 after strip."""
+        self.assertEqual(DuplicateDetector.calculate_similarity("   ", "   "), 0.0)
+
+    def test_calculate_similarity_range(self) -> None:
+        """Result is in [0.0, 1.0]."""
+        score = DuplicateDetector.calculate_similarity("foo bar", "baz qux")
+        self.assertGreaterEqual(score, 0.0)
+        self.assertLessEqual(score, 1.0)
+
+    def test_calculate_similarity_order_sensitive(self) -> None:
+        """SequenceMatcher is order-sensitive: word-order swap reduces similarity.
+
+        This is the key invariant auto_deduplication tier-2 relies on to avoid
+        false-merge of recordings that share all words but in different order.
+        """
+        original = "alpha beta gamma delta"
+        swapped = "delta gamma beta alpha"
+        score = DuplicateDetector.calculate_similarity(original, swapped)
+        # Pure word-order swap should produce significantly less than 1.0
+        self.assertLess(score, 0.9, f"Word-order swap should not be ≥0.9, got {score}")
+
+    # ------------------------------------------------------------------
+    # ReDoS guard: 2000-char cap
+    # ------------------------------------------------------------------
+    def test_redos_guard_long_inputs_do_not_hang(self) -> None:
+        """calculate_similarity with very long strings completes quickly (<1 s)."""
+        import time
+        long1 = "a " * 5000  # 10000 chars — way above 2000 cap
+        long2 = "a " * 4999 + "b "
+        start = time.monotonic()
+        score = DuplicateDetector.calculate_similarity(long1, long2)
+        elapsed = time.monotonic() - start
+        self.assertLess(elapsed, 1.0, f"Should complete in <1 s, took {elapsed:.3f}s")
+        self.assertGreater(score, 0.0)
+
+    def test_redos_guard_truncates_to_2000_chars(self) -> None:
+        """Texts > 2000 chars are capped; only the first 2000 chars are compared."""
+        # Two texts that differ only AFTER position 2000
+        prefix = "x" * 2000
+        score_same = DuplicateDetector.calculate_similarity(
+            prefix + "AAAA", prefix + "BBBB"
+        )
+        # Since everything past 2000 is truncated, both look identical
+        self.assertAlmostEqual(score_same, 1.0, places=3)
+
+    def test_redos_guard_preserves_accuracy_under_limit(self) -> None:
+        """Texts under 2000 chars are not affected by the cap."""
+        text1 = "Привет мир"
+        text2 = "Привет мира"
+        score = DuplicateDetector.calculate_similarity(text1, text2)
+        self.assertGreater(score, 0.8)
+
+    # ------------------------------------------------------------------
+    # Centroid clustering: order-sensitivity in find_duplicates (tier-2 contract)
+    # ------------------------------------------------------------------
+    def test_find_duplicates_leader_based_not_transitive(self) -> None:
+        """find_duplicates only matches against the group LEADER, not most-recent member.
+
+        Items B and C are similar, but C is only similar to B (not to A).
+        With centroid algorithm C must NOT join A's group.
+        """
+        base_ts = 1_700_000_000.0
+        # A and B are near-identical (will form a group)
+        text_a = "The quick brown fox jumps over the lazy dog near the river"
+        text_b = "The quick brown fox jumps over the lazy dog near the stream"
+        # C is similar to B but not to A
+        text_c = "A lazy dog jumps over a quick fox near the stream in the forest"
+
+        sim_ab = DuplicateDetector.calculate_similarity(text_a, text_b)
+        sim_ac = DuplicateDetector.calculate_similarity(text_a, text_c)
+        # Verify our test setup is valid
+        self.assertGreater(sim_ab, 0.8, "A and B must be similar for valid test")
+        # If sim_ac happens to be >= threshold, skip (texts happen to be too similar)
+        threshold = 0.85
+        if sim_ac >= threshold:
+            self.skipTest(f"A and C are too similar ({sim_ac:.3f}), test setup invalid")
+
+        items = [
+            {"text": text_a, "ts": base_ts},
+            {"text": text_b, "ts": base_ts + 5},
+            {"text": text_c, "ts": base_ts + 10},
+        ]
+        groups = self.det.find_duplicates(items, similarity_threshold=threshold)
+
+        # C must not be in A's group (centroid check: A vs C fails)
+        self.assertEqual(len(groups), 1)
+        group_texts = {item["text"] for item in groups[0].items}
+        self.assertNotIn(text_c, group_texts, "C must not be pulled into A's group")
+
+    def test_calculate_similarity_symmetric(self) -> None:
+        """similarity(A, B) == similarity(B, A) (SequenceMatcher is symmetric)."""
+        t1 = "Transcription of a board meeting"
+        t2 = "Transcription of a quarterly board meeting"
+        self.assertAlmostEqual(
+            DuplicateDetector.calculate_similarity(t1, t2),
+            DuplicateDetector.calculate_similarity(t2, t1),
+            places=10,
+        )
 
 
 if __name__ == "__main__":
