@@ -36,6 +36,29 @@ import re
 from typing import Dict, Literal, Optional
 
 # ---------------------------------------------------------------------------
+# Максимальное количество дней в каждом месяце (1-based, february = 29 для
+# лояльного поведения при неизвестном годе — за leap-year решение отвечает
+# вызывающий код).
+# ---------------------------------------------------------------------------
+_MAX_DAYS_PER_MONTH = (0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+
+
+def _valid_date(day: int, month: int) -> bool:
+    """Возвращает True, если day/month в допустимых пределах.
+
+    February трактуется как 29 дней (leap-year-lenient).
+    """
+    if not (1 <= month <= 12):
+        return False
+    return 1 <= day <= _MAX_DAYS_PER_MONTH[month]
+
+
+def _valid_time(hour: int, minute: int) -> bool:
+    """Возвращает True, если hour/minute в допустимых пределах (0-23 / 0-59)."""
+    return 0 <= hour <= 23 and 0 <= minute <= 59
+
+
+# ---------------------------------------------------------------------------
 # Формат вывода дат.  Значение по умолчанию — European (DD.MM.YYYY).
 # Установите "iso8601" для YYYY-MM-DD поведения.
 # ---------------------------------------------------------------------------
@@ -272,19 +295,21 @@ class DateTimeNormalizer:
 
     Поддерживаемые языки: ``ru``, ``es``, ``en``.
 
-    По умолчанию использует ISO-8601 (``YYYY-MM-DD``) для вывода дат.
-    Для обратной совместимости передайте ``output_format="european"``.
+    По умолчанию использует европейский формат (``DD.MM.YYYY`` / ``DD.MM``)
+    для вывода дат (соответствует модульной константе
+    :data:`DATETIME_OUTPUT_FORMAT` = ``"european"``).
+    Для ISO-8601 (``YYYY-MM-DD``) передайте ``output_format="iso8601"``.
 
     Примеры::
 
         d = DateTimeNormalizer()
-        d.normalize("третье ноября", "ru")                              # → "11-03"
+        d.normalize("третье ноября", "ru")                              # → "03.11"
         d.normalize("девять часов утра", "ru")                          # → "09:00"
         d.normalize("пятнадцатого января две тысячи двадцать шестого", "ru")
-        # → "2026-01-15"
+        # → "15.01.2026"
 
-        d_legacy = DateTimeNormalizer(output_format="european")
-        d_legacy.normalize("третье ноября", "ru")                       # → "03.11"
+        d_iso = DateTimeNormalizer(output_format="iso8601")
+        d_iso.normalize("третье ноября", "ru")                          # → "11-03"
     """
 
     def __init__(
@@ -294,7 +319,7 @@ class DateTimeNormalizer:
         """Инициализирует нормализатор.
 
         Args:
-            output_format: ``"iso8601"`` (default) или ``"european"``.
+            output_format: ``"european"`` (default) или ``"iso8601"``.
                            Если ``None`` — берётся из модульной константы
                            :data:`DATETIME_OUTPUT_FORMAT`.
         """
@@ -400,6 +425,8 @@ class DateTimeNormalizer:
             if marker_key:
                 hour = _apply_time_marker(hour, marker_key)
 
+            if not _valid_time(hour, minute):
+                return m.group(0)
             return f"{hour:02d}:{minute:02d}"
 
         return re.sub(full_pat, _repl_time, text, flags=re.IGNORECASE)
@@ -465,6 +492,8 @@ class DateTimeNormalizer:
             month = _RU_MONTHS.get(month_str)
             if month is None:
                 return m.group(0)
+            if not _valid_date(day, month):
+                return m.group(0)
 
             year = self._parse_year_ru(year_part)
             if year:
@@ -489,10 +518,10 @@ class DateTimeNormalizer:
             day = int(m.group(1))
             month_str = m.group(2).lower()
             year_str = m.group(3) or ""
-            if not (1 <= day <= 31):
-                return m.group(0)
             month = _RU_MONTHS.get(month_str)
             if month is None:
+                return m.group(0)
+            if not _valid_date(day, month):
                 return m.group(0)
             if year_str:
                 return self._fmt_date(day, month, int(year_str))
@@ -632,6 +661,8 @@ class DateTimeNormalizer:
             if marker_key:
                 hour = _apply_time_marker(hour, marker_key)
 
+            if not _valid_time(hour, minute):
+                return m.group(0)
             return f"{hour:02d}:{minute:02d}"
 
         def _repl_alas_time(m: re.Match) -> str:
@@ -660,6 +691,8 @@ class DateTimeNormalizer:
             if marker_key:
                 hour = _apply_time_marker(hour, marker_key)
 
+            if not _valid_time(hour, minute):
+                return m.group(0)
             return f"{hour:02d}:{minute:02d}"
 
         text = re.sub(word_hour_pat, _repl_word_time, text, flags=re.IGNORECASE)
@@ -693,10 +726,10 @@ class DateTimeNormalizer:
                     day = int(day_str)
                 except ValueError:
                     return m.group(0)
-            if not (1 <= day <= 31):
-                return m.group(0)
             month = _ES_MONTHS.get(month_str)
             if month is None:
+                return m.group(0)
+            if not _valid_date(day, month):
                 return m.group(0)
 
             if year_str:
@@ -775,6 +808,8 @@ class DateTimeNormalizer:
             if marker_key:
                 hour = _apply_time_marker(hour, marker_key)
 
+            if not _valid_time(hour, minute):
+                return m.group(0)
             return f"{hour:02d}:{minute:02d}"
 
         def _repl_digit_time(m: re.Match) -> str:
@@ -803,6 +838,8 @@ class DateTimeNormalizer:
             if marker_key:
                 hour = _apply_time_marker(hour, marker_key)
 
+            if not _valid_time(hour, minute):
+                return m.group(0)
             return f"{hour:02d}:{minute:02d}"
 
         text = re.sub(word_hour_pat, _repl_word_time, text, flags=re.IGNORECASE)
@@ -835,6 +872,8 @@ class DateTimeNormalizer:
             month = _EN_MONTHS.get(month_str)
             if month is None:
                 return m.group(0)
+            if not _valid_date(day, month):
+                return m.group(0)
             if year_str:
                 return self._fmt_date(day, month, int(year_str))
             return self._fmt_date(day, month)
@@ -852,10 +891,10 @@ class DateTimeNormalizer:
             month_str = m.group(1).strip().lower()
             day = int(m.group(2))
             year_str = m.group(3) or ""
-            if not (1 <= day <= 31):
-                return m.group(0)
             month = _EN_MONTHS.get(month_str)
             if month is None:
+                return m.group(0)
+            if not _valid_date(day, month):
                 return m.group(0)
             if year_str:
                 return self._fmt_date(day, month, int(year_str))
