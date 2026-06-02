@@ -26,12 +26,34 @@ MLX_TRANSCRIBE_TIMEOUT_SEC — watchdog логирует событие, реп�
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import threading
 import time
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Hard-kill timeout for the unbounded-join guard (wave-20 MED fix).
+# ---------------------------------------------------------------------------
+# After the initial timed join() reveals a hung thread we wait at most this
+# many seconds for the daemon to finish before giving up and propagating
+# MLXTimeoutError anyway.  This bounds the worst-case stall to a finite
+# window instead of holding the backend indefinitely.
+#
+# Tradeoff: if the daemon thread hasn't exited by the hard-kill deadline, the
+# mlx_lock held by the caller IS released while the daemon may still be
+# touching the MLX GPU.  That reintroduces a narrow SIGSEGV race window, but
+# it's strictly better than an infinite backend stall — BackendSupervisor's
+# HealthMonitor would not be able to distinguish a hung watchdog from a hung
+# backend and would SIGTERM/SIGKILL the entire process anyway after its own
+# 2-fail-ping timeout.  So bounding the join to 120 s caps the worst case.
+#
+# Override via env: KRAB_EAR_MLX_HANG_HARD_KILL_SEC=<float>
+MLX_HANG_HARD_KILL_SEC: float = float(
+    os.environ.get("KRAB_EAR_MLX_HANG_HARD_KILL_SEC", "120.0")
+)
 
 
 class MLXTimeoutError(RuntimeError):
@@ -121,13 +143,23 @@ class MLXWatchdog:
         daemon thread then accesses the MLX GPU concurrently with the next caller
         that acquires the lock → SIGSEGV (same class of bug as PR #71).
 
-        Fix: after the initial timed join reveals a live thread, perform an
-        *unbounded* join() — block until the daemon fully completes — BEFORE
-        raising MLXTimeoutError.  This keeps the mlx_lock held throughout the
-        daemon's lifetime, eliminating the race.  The trade-off is an additional
-        backend stall (the thread may be stuck indefinitely), but BackendSupervisor
-        will SIGTERM → respawn the process if that occurs.  This is safer than a
-        concurrent GPU corruption that causes a silent SIGSEGV mid-inference.
+        Fix (W1358 race-guard): after the initial timed join reveals a live thread,
+        perform a *bounded* join(timeout=MLX_HANG_HARD_KILL_SEC) — wait up to
+        MLX_HANG_HARD_KILL_SEC seconds for the daemon to finish — BEFORE raising
+        MLXTimeoutError.  This keeps the mlx_lock held as long as the daemon is
+        still running (up to the hard-kill bound), eliminating the race for
+        normally-recovering hangs.  The trade-off on a truly stuck GPU:
+
+        - If the daemon exits within MLX_HANG_HARD_KILL_SEC: full race safety,
+          MLXTimeoutError is then propagated cleanly.
+        - If the daemon is STILL alive after MLX_HANG_HARD_KILL_SEC (wave-20 MED fix):
+          we give up waiting, log an error, and propagate MLXTimeoutError.  The
+          daemon may still be touching the MLX GPU without the lock held — narrow
+          SIGSEGV race window.  However, this is strictly better than an infinite
+          backend stall: BackendSupervisor's HealthMonitor would SIGTERM/SIGKILL
+          the process anyway after its own ping-failure timeout.
+
+        Override the hard-kill window via env: KRAB_EAR_MLX_HANG_HARD_KILL_SEC=<sec>.
         """
         with self._lock:
             self.total_calls += 1
@@ -166,15 +198,34 @@ class MLXWatchdog:
             )
             _notify_sentry_timeout(model_name, elapsed, self.crashes_count)
             _push_watchdog_hang(model_name, elapsed, self.crashes_count)
-            # Unbounded wait: держим caller-thread (и mlx_lock) до завершения
-            # daemon thread.  BackendSupervisor (HealthMonitor) убьёт процесс
-            # если бэкенд не отвечает на ping слишком долго.
-            thread.join()
-            logger.warning(
-                "[MLXWatchdog] daemon thread finally completed after stall "
-                "(model=%s). Propagating MLXTimeoutError.",
-                model_name,
-            )
+            # Bounded wait: держим caller-thread (и mlx_lock) пока daemon thread
+            # не завершится ИЛИ пока не истечёт MLX_HANG_HARD_KILL_SEC.
+            # Ограниченное ожидание (wave-20 MED fix): ранее join() был
+            # unbounded — бэкенд мог висеть вечно если Metal GPU полностью зависал.
+            # Теперь join ограничен MLX_HANG_HARD_KILL_SEC (default 120s).
+            thread.join(timeout=MLX_HANG_HARD_KILL_SEC)
+            if thread.is_alive():
+                # Daemon thread не завершился за hard-kill timeout.
+                # Мы вынуждены выйти и освободить mlx_lock — это означает, что
+                # daemon thread продолжает работать с MLX GPU без блокировки
+                # (узкое SIGSEGV-окно), но это строго лучше, чем бесконечный
+                # стол бэкенда.  BackendSupervisor (HealthMonitor) убьёт процесс
+                # через SIGTERM/SIGKILL если ping не отвечает.
+                logger.error(
+                    "[MLXWatchdog] daemon thread STILL ALIVE after hard-kill timeout "
+                    "(%.1fs). Releasing mlx_lock and propagating MLXTimeoutError "
+                    "— narrow SIGSEGV race window possible (model=%s, crashes=%d). "
+                    "BackendSupervisor should terminate the process.",
+                    MLX_HANG_HARD_KILL_SEC,
+                    model_name,
+                    self.crashes_count,
+                )
+            else:
+                logger.warning(
+                    "[MLXWatchdog] daemon thread completed within hard-kill window "
+                    "(model=%s). Propagating MLXTimeoutError.",
+                    model_name,
+                )
             raise MLXTimeoutError(timeout_sec=timeout_sec, model_name=model_name)
 
         # Поток завершился — проверяем результат
