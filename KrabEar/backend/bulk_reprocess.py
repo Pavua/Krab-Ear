@@ -61,13 +61,42 @@ class BulkReprocessor:
         self.batch_size = max(1, int(batch_size))
         self._cancel_event = threading.Event()
         self._is_recording_fn = is_recording_fn
+        # Защита от параллельных запусков. BackendService держит ОДИН общий singleton
+        # self._bulk_reprocessor (service.py:530), а IPC — thread-per-connection, причём
+        # bulk_reprocess_start НЕ в HEAVY_METHODS (light-лимит 120/мин). Два клиента могли
+        # запустить два reprocess()-цикла по ОДНОМУ набору кандидатов: (a) дубль MLX
+        # транскрибаций + гонка last-writer-wins на update_history_item_text для одного id;
+        # (b) сломанная отмена — re-entry второго запуска вызывал _reset_cancel()/clear() и
+        # стирал pending cancel первого, либо один cancel() обрывал ОБА. Non-blocking acquire
+        # _run_lock гарантирует ровно один активный цикл; второй вызов сразу возвращает error
+        # без старта второго цикла, не трогая cancel-флаг активного запуска.
+        self._run_lock = threading.Lock()
 
     def cancel(self) -> None:
         """Запрашивает отмену текущего запуска (проверяется между записями)."""
         self._cancel_event.set()
 
+    def is_running(self) -> bool:
+        """True, если в данный момент идёт reprocess()-цикл (без побочных эффектов)."""
+        # Неблокирующая проба _run_lock: если получили — цикла нет, сразу отпускаем.
+        if self._run_lock.acquire(blocking=False):
+            self._run_lock.release()
+            return False
+        return True
+
     def _reset_cancel(self) -> None:
-        """Сбрасывает флаг отмены перед новым запуском."""
+        """Сбрасывает флаг отмены перед новым запуском.
+
+        Безопасность отмены: сброс разрешён ТОЛЬКО когда нет активного цикла (т.е. _run_lock
+        свободен). Иначе re-entry-попытка второго клиента могла бы стереть pending cancel для
+        уже идущего запуска (исходный баг). Владелец активного цикла сбрасывает cancel сам,
+        напрямую через _cancel_event.clear() под удерживаемым _run_lock в reprocess(), минуя
+        этот публичный метод.
+        """
+        if self.is_running():
+            # Цикл уже идёт (lock держит активный владелец) — не трогаем cancel.
+            logger.debug("Bulk reprocess: _reset_cancel пропущен — цикл активен.")
+            return
         self._cancel_event.clear()
 
     # ------------------------------------------------------------------
@@ -165,7 +194,46 @@ class BulkReprocessor:
         if self._is_recording_fn is not None and self._is_recording_fn():
             raise RuntimeError("bulk_reprocess refused: active recording in progress")
 
-        self._reset_cancel()
+        # Guard: ровно один активный цикл на общий singleton (см. __init__).
+        # Non-blocking acquire — второй параллельный вызов сразу возвращает error без старта
+        # второго цикла и БЕЗ сброса cancel-флага активного запуска (иначе re-entry стёр бы
+        # pending cancel или один cancel оборвал бы оба прохода).
+        if not self._run_lock.acquire(blocking=False):
+            logger.warning("Bulk reprocess: запуск отклонён — цикл уже выполняется.")
+            return {
+                "error": "bulk_reprocess already running",
+                "total": 0,
+                "reprocessed": 0,
+                "skipped": 0,
+                "errors": [],
+                "cancelled": False,
+            }
+        try:
+            return self._run_locked(
+                only_low_confidence=only_low_confidence,
+                threshold=threshold,
+                dry_run=dry_run,
+                task_id=task_id,
+            )
+        finally:
+            self._run_lock.release()
+
+    def _run_locked(
+        self,
+        *,
+        only_low_confidence: bool,
+        threshold: float,
+        dry_run: bool,
+        task_id: str,
+    ) -> dict[str, Any]:
+        """Тело перетранскрибирования. Вызывается ТОЛЬКО под удерживаемым _run_lock.
+
+        Контракт отмены: cancel-флаг сбрасывается здесь напрямую (clear()), потому что мы —
+        единственный активный владелец цикла (lock держим). Публичный _reset_cancel() при этом
+        для других потоков становится no-op (см. его docstring), поэтому re-entry не сотрёт
+        cancel, запрошенный для этого прохода.
+        """
+        self._cancel_event.clear()
         errors: list[str] = []
         reprocessed = 0
         skipped = 0
