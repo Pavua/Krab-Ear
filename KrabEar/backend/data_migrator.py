@@ -333,6 +333,10 @@ class DataMigrator:
     def rollback_migration(self, data_dir: Path, backup_path: str) -> dict[str, Any]:
         """Откатывает последнюю миграцию, восстанавливая файлы из резервной копии.
 
+        Удерживает POSIX flock(LOCK_EX) на history.lock на всё время восстановления,
+        чтобы исключить гонку с параллельными append-операциями StateStore (тот же
+        паттерн, что в _migrate_v1_to_v2).
+
         Args:
             data_dir: путь к директории данных Krab Ear.
             backup_path: путь к резервной копии (из MigrationResult.backup_path).
@@ -348,15 +352,21 @@ class DataMigrator:
             raise ValueError(f"Директория резервной копии не найдена: {backup_path!r}")
 
         data_dir = Path(data_dir)
+        lock_path = data_dir / "history.lock"
         restored: list[str] = []
 
-        for src in backup_dir.iterdir():
-            if src.name == "migration_meta.json":
-                continue
-            dest = data_dir / src.name
-            shutil.copy2(src, dest)
-            restored.append(src.name)
-            logger.info("Откат: восстановлен файл %s", src.name)
+        with open(lock_path, "a+") as lock_fh:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+            try:
+                for src in backup_dir.iterdir():
+                    if src.name == "migration_meta.json":
+                        continue
+                    dest = data_dir / src.name
+                    shutil.copy2(src, dest)
+                    restored.append(src.name)
+                    logger.info("Откат: восстановлен файл %s", src.name)
+            finally:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
 
         logger.info("Откат миграции завершён: восстановлено %d файлов из %s", len(restored), backup_dir)
         return {"restored_files": restored, "backup_path": str(backup_dir)}
@@ -383,6 +393,11 @@ class DataMigrator:
             "history_tags.ndjson",
             "history_favorites.ndjson",
             "history_annotations.ndjson",
+            # text_updates: правки текста через replace_word / save_transcript_version
+            "history_text_updates.ndjson",
+            # purged_ids: tombstone-метки полной очистки (purge_all_data) — потеря
+            # этого файла при откате воскрешает удалённые записи
+            "history_purged_ids.ndjson",
             "settings.json",
         ]
 
@@ -451,13 +466,19 @@ class DataMigrator:
             else:
                 skipped += 1
 
-        # Атомарная запись через tmp-файл
+        # Атомарная запись через tmp-файл.
+        # try/finally гарантирует удаление tmp-файла при любом исключении между
+        # write и replace, чтобы осиротевший *.migration_tmp не оставался на диске.
         tmp_path = history_path.with_suffix(".ndjson.migration_tmp")
         content = "\n".join(updated_lines)
         if content and not content.endswith("\n"):
             content += "\n"
-        tmp_path.write_text(content, encoding="utf-8")
-        tmp_path.replace(history_path)
+        try:
+            tmp_path.write_text(content, encoding="utf-8")
+            tmp_path.replace(history_path)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
 
         logger.info(
             "Миграция v1.0→v2.0 завершена: обновлено %d записей, пропущено %d",

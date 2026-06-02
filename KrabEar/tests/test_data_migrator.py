@@ -15,6 +15,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -694,6 +695,189 @@ class DataMigratorRollbackIPCTestCase(unittest.TestCase):
             self._migrator.handle_rollback_migration({
                 "backup_path": "/tmp/evil_krab_rollback_test",
             })
+
+
+class TestWave1767Hardening(unittest.TestCase):
+    """Тесты четырёх MED-исправлений Wave 1767 (hardening data_migrator).
+
+    #11 — rollback_migration wired в dispatch table
+    #12 — tmp-файл удаляется при исключении между write и replace
+    #13 — rollback_migration удерживает history.lock при восстановлении
+    #14 — _create_backup копирует history_text_updates.ndjson + history_purged_ids.ndjson
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._tmpdir = Path(self._tmp.name)
+
+    # ------------------------------------------------------------------
+    # #11: rollback_migration доступен через dispatch table
+    # ------------------------------------------------------------------
+
+    def test_rollback_migration_in_dispatch_table(self) -> None:
+        """#11: build_dispatch_table содержит 'rollback_migration' и вызов его
+        диспетчеризует handle_rollback_migration DataMigrator'а."""
+        from backend.ipc_dispatch import build_dispatch_table
+
+        class _FakeDataMigrator:
+            called_with: dict | None = None
+
+            def handle_rollback_migration(self, params: dict) -> dict:
+                self.called_with = params
+                return {"restored_files": [], "backup_path": "stub"}
+
+            def handle_check_migration(self, params: dict) -> dict:
+                return {}
+
+            def handle_run_migration(self, params: dict) -> dict:
+                return {}
+
+        class _MinimalService:
+            """Минимальный stub BackendService с нужными атрибутами для build_dispatch_table."""
+
+        # build_dispatch_table обращается к множеству атрибутов svc.* — создаём
+        # только те, что необходимы; остальные подставляем через Mock, чтобы
+        # избежать импорта тяжёлых зависимостей.
+        from unittest.mock import MagicMock
+        svc = MagicMock()
+        fake_migrator = _FakeDataMigrator()
+        svc._data_migrator = fake_migrator
+
+        table = build_dispatch_table(svc)
+
+        # Ключ обязан присутствовать
+        self.assertIn("rollback_migration", table, (
+            "#11: 'rollback_migration' не найден в dispatch table; "
+            "добавьте запись в ipc_dispatch.py"
+        ))
+
+        # Вызов диспетчеризует именно handle_rollback_migration
+        params = {"backup_path": "/stub/backup"}
+        result = table["rollback_migration"](params)
+        self.assertEqual(fake_migrator.called_with, params,
+                         "#11: dispatch table не вызвал handle_rollback_migration")
+        self.assertIn("restored_files", result)
+
+    # ------------------------------------------------------------------
+    # #12: tmp-файл удаляется при исключении в write/replace
+    # ------------------------------------------------------------------
+
+    def test_tmp_file_removed_on_write_exception(self) -> None:
+        """#12: если replace() бросает исключение, history.ndjson.migration_tmp
+        не остаётся на диске."""
+        history_path = self._tmpdir / "history.ndjson"
+        _write_ndjson(history_path, [_make_v1_item("id1")])
+
+        migrator = DataMigrator()
+
+        # Патчим Path.replace чтобы симулировать сбой после write
+        original_replace = Path.replace
+
+        def _fail_replace(self_path, target):
+            # Заменяем только вызовы для migration_tmp пути
+            if "migration_tmp" in str(self_path):
+                raise OSError("симуляция сбоя atomic replace")
+            return original_replace(self_path, target)
+
+        with patch.object(Path, "replace", _fail_replace):
+            with self.assertRaises(OSError):
+                migrator.migrate(self._tmpdir)
+
+        # После исключения tmp-файл не должен существовать
+        tmp_path = history_path.with_suffix(".ndjson.migration_tmp")
+        self.assertFalse(
+            tmp_path.exists(),
+            "#12: tmp-файл migration_tmp остался на диске после исключения"
+        )
+
+    # ------------------------------------------------------------------
+    # #13: rollback_migration удерживает history.lock
+    # ------------------------------------------------------------------
+
+    def test_rollback_acquires_history_lock(self) -> None:
+        """#13: rollback_migration захватывает history.lock (flock LOCK_EX) вокруг
+        операций восстановления файлов."""
+        import fcntl as _fcntl
+
+        # Создаём history и backup для отката
+        history_path = self._tmpdir / "history.ndjson"
+        _write_ndjson(history_path, [_make_v1_item("id1")])
+        migrator = DataMigrator()
+        result = migrator.migrate(self._tmpdir)
+
+        flock_calls: list[int] = []
+        original_flock = _fcntl.flock
+
+        def _spy_flock(fd, op):
+            flock_calls.append(op)
+            return original_flock(fd, op)
+
+        with patch.object(_fcntl, "flock", side_effect=_spy_flock):
+            migrator.rollback_migration(self._tmpdir, result.backup_path)
+
+        # Должны быть LOCK_EX и LOCK_UN
+        self.assertIn(_fcntl.LOCK_EX, flock_calls,
+                      "#13: rollback_migration не захватывает LOCK_EX на history.lock")
+        self.assertIn(_fcntl.LOCK_UN, flock_calls,
+                      "#13: rollback_migration не снимает LOCK_UN после восстановления")
+
+    # ------------------------------------------------------------------
+    # #14: _create_backup включает history_text_updates и history_purged_ids
+    # ------------------------------------------------------------------
+
+    def test_backup_includes_text_updates_and_purged_ids(self) -> None:
+        """#14: _create_backup копирует history_text_updates.ndjson и
+        history_purged_ids.ndjson когда они существуют."""
+        # Создаём оба companion-файла
+        (self._tmpdir / "history_text_updates.ndjson").write_text(
+            '{"id": "u1", "text": "обновлённый текст"}\n', encoding="utf-8"
+        )
+        (self._tmpdir / "history_purged_ids.ndjson").write_text(
+            '{"id": "p1"}\n', encoding="utf-8"
+        )
+
+        migrator = DataMigrator()
+        backup_path = migrator._create_backup(self._tmpdir)
+        backup_dir = Path(backup_path)
+
+        self.assertTrue(
+            (backup_dir / "history_text_updates.ndjson").exists(),
+            "#14: _create_backup не скопировал history_text_updates.ndjson"
+        )
+        self.assertTrue(
+            (backup_dir / "history_purged_ids.ndjson").exists(),
+            "#14: _create_backup не скопировал history_purged_ids.ndjson"
+        )
+
+        # Содержимое должно совпадать
+        self.assertEqual(
+            (backup_dir / "history_text_updates.ndjson").read_text(encoding="utf-8"),
+            '{"id": "u1", "text": "обновлённый текст"}\n',
+        )
+        self.assertEqual(
+            (backup_dir / "history_purged_ids.ndjson").read_text(encoding="utf-8"),
+            '{"id": "p1"}\n',
+        )
+
+    def test_backup_skips_missing_companion_files(self) -> None:
+        """#14: _create_backup не падает если companion-файлы отсутствуют."""
+        # Убеждаемся, что companion-файлов нет
+        for fname in ("history_text_updates.ndjson", "history_purged_ids.ndjson"):
+            p = self._tmpdir / fname
+            if p.exists():
+                p.unlink()
+
+        migrator = DataMigrator()
+        # Не должно бросать исключение
+        backup_path = migrator._create_backup(self._tmpdir)
+        backup_dir = Path(backup_path)
+
+        # Файлы отсутствуют в backup — но backup_dir создан без ошибок
+        self.assertFalse((backup_dir / "history_text_updates.ndjson").exists())
+        self.assertFalse((backup_dir / "history_purged_ids.ndjson").exists())
+        # meta-файл при этом есть
+        self.assertTrue((backup_dir / "migration_meta.json").exists())
 
 
 class _StubEngine:
