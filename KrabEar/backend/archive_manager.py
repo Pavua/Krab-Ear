@@ -134,8 +134,63 @@ class ArchiveManager:
                     fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
         return archived_before
 
+    def _store_supports_atomic_archive(self, store: Any) -> bool:
+        """Проверяет, что store предоставляет unlocked-API StateStore для атомарного пути.
+
+        Реальный StateStore выставляет `_lock()` (fcntl.flock, сериализующий ВСЕ
+        записи истории), `_load_active_items_unlocked()`, статический `_append_ndjson`
+        и `tombstones_path`.  Тестовые двойники (FakeStore) их не имеют — для них
+        используется устаревший per-item fallback через публичный API.
+        """
+        return (
+            hasattr(store, "_lock")
+            and hasattr(store, "_load_active_items_unlocked")
+            and hasattr(store, "_append_ndjson")
+            and hasattr(store, "tombstones_path")
+        )
+
+    def _archive_side_effects(self, clean_id: str) -> None:
+        """Побочные эффекты после удаления записи из активной истории.
+
+        Каскадная очистка версий транскрипта, semantic-индекса и цепочек записей.
+        Любая ошибка здесь не должна прерывать архивирование (data-loss было бы
+        хуже, чем рассинхрон вторичных индексов) — поэтому всё в try/except.
+        """
+        if self._transcript_versioner is not None:
+            try:
+                self._transcript_versioner.purge_versions_for_item(clean_id)
+            except Exception:
+                logger.exception("archive_items: версии id=%s", clean_id)
+        if self._semantic_searcher is not None:
+            try:
+                self._semantic_searcher.remove_item(clean_id)
+            except Exception as exc:
+                logger.warning(
+                    "archive_items: не удалось удалить %s из semantic index: %s",
+                    clean_id, exc,
+                )
+        # Каскадное удаление ghost item_id из цепочек (W1253 RC-3).
+        if self._recording_chain_mgr is not None:
+            self._recording_chain_mgr.remove_item_from_all_chains(clean_id)
+
     def archive_items(self, item_ids: list[str], store: Any | None = None) -> ArchiveResult:
         """Перемещает записи из активной истории в архив.
+
+        W1768 (data-loss race fix): чтение активной записи, дозапись в архив и
+        tombstone-удаление выполняются под ОДНИМ захватом `store._lock()` —
+        той же межпроцессной fcntl.flock, что сериализует все записи/компактирование
+        истории.  Раньше read (`get_history_item_by_id`) и delete
+        (`delete_history_item`) были отдельными locked-операциями: конкурентная
+        запись или `compact()` между ними могла потерять или продублировать записи
+        (TOCTOU).  Архив дописывается ВНУТРИ этого lock через `_append_ndjson` —
+        если он упадёт, tombstone не пишется и запись остаётся в активной истории
+        (fail-safe: дублирование лучше потери).
+
+        Внимание: `store._lock()` — fcntl.flock и НЕ реентрантна (повторный
+        `LOCK_EX` на втором file-description из этого же процесса заблокируется
+        навсегда).  Поэтому внутри lock используются ТОЛЬКО `_unlocked`-внутренности
+        StateStore, а не публичные `get_history_item_by_id` / `delete_history_item`,
+        которые сами захватывают `_lock()`.
 
         Args:
             item_ids: Список ID записей для архивирования.
@@ -153,37 +208,54 @@ class ArchiveManager:
             )
 
         archived_count = 0
+        # self._lock сериализует архивные операции (archive/unarchive/list) внутри процесса.
         with self._lock:
-            for item_id in item_ids:
-                clean_id = str(item_id).strip()
-                if not clean_id:
-                    continue
-                item = _store.get_history_item_by_id(clean_id)
-                if item is None:
-                    logger.debug("archive_items: запись не найдена id=%s", clean_id)
-                    continue
-                item_dict = item.to_dict() if hasattr(item, "to_dict") else item
-                item_dict = dict(item_dict)
-                item_dict["archived_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-                self._append_ndjson(self._archive_path, item_dict)
-                _store.delete_history_item(clean_id)
-                archived_count += 1
-                if self._transcript_versioner is not None:
-                    try:
-                        self._transcript_versioner.purge_versions_for_item(clean_id)
-                    except Exception:
-                        logger.exception("archive_items: версии id=%s", clean_id)
-                if self._semantic_searcher is not None:
-                    try:
-                        self._semantic_searcher.remove_item(clean_id)
-                    except Exception as exc:
-                        logger.warning(
-                            "archive_items: не удалось удалить %s из semantic index: %s",
-                            clean_id, exc,
-                        )
-                # Каскадное удаление ghost item_id из цепочек (W1253 RC-3).
-                if self._recording_chain_mgr is not None:
-                    self._recording_chain_mgr.remove_item_from_all_chains(clean_id)
+            if self._store_supports_atomic_archive(_store):
+                # Атомарный путь: весь read-modify-delete под единым store._lock()
+                # (межпроцессная fcntl.flock). Снимок активных записей берётся один
+                # раз, чтобы конкурентный compact() не вклинился между чтениями.
+                with _store._lock():
+                    active_by_id = {
+                        item.id: item
+                        for item in _store._load_active_items_unlocked()
+                    }
+                    for item_id in item_ids:
+                        clean_id = str(item_id).strip()
+                        if not clean_id:
+                            continue
+                        item = active_by_id.get(clean_id)
+                        if item is None:
+                            logger.debug("archive_items: запись не найдена id=%s", clean_id)
+                            continue
+                        item_dict = item.to_dict() if hasattr(item, "to_dict") else item
+                        item_dict = dict(item_dict)
+                        item_dict["archived_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                        # Сначала дозапись в архив (отдельный sibling-flock на архивном
+                        # файле — другой файл, конфликта с store._lock нет). Только если
+                        # архивная запись прошла — пишем tombstone (фиксируем удаление).
+                        self._append_ndjson(self._archive_path, item_dict)
+                        _store._append_ndjson(_store.tombstones_path, {"id": clean_id})
+                        archived_count += 1
+                        # Снимаем из снимка, чтобы повторный id в item_ids не дублировался.
+                        active_by_id.pop(clean_id, None)
+                        self._archive_side_effects(clean_id)
+            else:
+                # Fallback для тестовых двойников без unlocked-API StateStore.
+                for item_id in item_ids:
+                    clean_id = str(item_id).strip()
+                    if not clean_id:
+                        continue
+                    item = _store.get_history_item_by_id(clean_id)
+                    if item is None:
+                        logger.debug("archive_items: запись не найдена id=%s", clean_id)
+                        continue
+                    item_dict = item.to_dict() if hasattr(item, "to_dict") else item
+                    item_dict = dict(item_dict)
+                    item_dict["archived_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                    self._append_ndjson(self._archive_path, item_dict)
+                    _store.delete_history_item(clean_id)
+                    archived_count += 1
+                    self._archive_side_effects(clean_id)
 
         size_bytes = self._archive_path.stat().st_size if self._archive_path.exists() else 0
         return ArchiveResult(
