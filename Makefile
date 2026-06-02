@@ -1,4 +1,4 @@
-.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release reset-tcc clean-worktree-builds audit-orphans audit-handlers audit-duplicate-defs audit-cherry-pick audit-wiring audit-all dispatch-tests service-loc
+.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release reset-tcc clean-worktree-builds audit-orphans audit-handlers audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-all dispatch-tests service-loc
 
 VENV = .venv_krab_ear
 PYTHON = $(VENV)/bin/python
@@ -115,8 +115,16 @@ audit-cherry-pick:
 audit-wiring:
 	python3 scripts/audit_decorative_wiring.py $(ARGS)
 
+# Audit dead extracted modules + dead cross-file duplicates (W1768 guard).
+# Detects decorative extractions (W746/W797 class): a module/symbol "extracted"
+# but production still uses an inline copy (e.g. ipc_dispatch.build_dispatch_table
+# dead while service.py uses its own inline handlers dict; IPCServer duplicated).
+# Pass ARGS=--fail-on-found to gate locally; ARGS=--json for machine output.
+audit-dead-modules:
+	python3 scripts/audit_dead_extracted_modules.py $(ARGS)
+
 # Run all static audit checks (CI parity — runs same checks as CI guard jobs).
-audit-all: audit-orphans audit-duplicate-defs audit-cherry-pick audit-wiring
+audit-all: audit-orphans audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules
 	@echo "All audit checks passed."
 
 # Print current service.py line count (quick monolith size gauge).
