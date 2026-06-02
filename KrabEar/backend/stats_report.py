@@ -107,8 +107,8 @@ _FORMULA_LEAD_CHARS: frozenset = frozenset({"=", "+", "-", "@"})
 def _md_cell(value: Any) -> str:
     """Нейтрализует пользовательский текст перед вставкой в ячейку Markdown.
 
-    Защищает от трёх векторов инъекции в отчёте (теги, имена коллекций, метки
-    спикеров, заголовки):
+    Защищает от четырёх векторов инъекции в отчёте (теги, имена коллекций,
+    метки спикеров, заголовки):
 
     1. Слом Markdown-таблицы: ``|`` экранируется как ``\\|``.
     2. Слом структуры строки / вставка лишних строк: CR/LF (и прочие
@@ -117,6 +117,9 @@ def _md_cell(value: Any) -> str:
        ``= + - @`` (после необязательных пробелов), перед ней ставится
        апостроф ``'`` — нейтральный префикс, который Excel/Numbers/Calc не
        интерпретируют как формулу.
+    4. Слом inline code span: обратный апостроф (U+0060) заменяется на
+       MODIFIER LETTER GRAVE ACCENT (U+02CB), чтобы бэктик в значении
+       не закрывал обёртывающий `...` span и не вставлял сырой Markdown/HTML.
 
     Args:
         value: Любое значение пользовательского происхождения.
@@ -129,6 +132,9 @@ def _md_cell(value: Any) -> str:
     s = re.sub(r"[\r\n\x0b\x0c]+", " ", s)
     # Экранируем разделитель таблицы.
     s = s.replace("|", "\\|")
+    # Нейтрализуем бэктик: заменяем на визуально близкий MODIFIER LETTER GRAVE (U+02CB).
+    # Это defence-in-depth для любого кода, оборачивающего _md_cell(...) в `...`.
+    s = s.replace("`", "ˋ")
     # Нейтрализуем формульную инъекцию: смотрим на первый непробельный символ.
     stripped = s.lstrip()
     if stripped and stripped[0] in _FORMULA_LEAD_CHARS:
@@ -375,6 +381,14 @@ class StatsReportGenerator:
         for lang, count in lang_counter.most_common():
             if lang == "unknown":
                 continue
+            # Валидируем lang как ISO-639-ish токен перед вставкой внутрь fenced
+            # code block.  Значение source_lang поступает из NDJSON-истории без
+            # дополнительной санитизации: вредоносная строка вида "\n```\n## X"
+            # закрыла бы fence и инжектировала заголовок/HTML (MED, wave-19).
+            if not re.fullmatch(r"[A-Za-z]{2,8}(-[A-Za-z0-9]+)?", lang):
+                lang = "unknown"
+            if lang == "unknown":
+                continue
             pct = count / total * 100
             bar = _ascii_bar(count, max_count, width=15)
             lines.append(f"{lang:>8} | {bar:<15} | {count:4d} ({pct:.1f}%)")
@@ -531,7 +545,9 @@ class StatsReportGenerator:
             for tag, count in tag_counter.most_common(10):
                 # Тег задаётся пользователем: экранируем разделители/переводы строк
                 # и нейтрализуем формульный префикс перед вставкой в Markdown.
-                lines.append(f"- `{_md_cell(tag)}` — {count}")
+                # Не оборачиваем в `...` — бэктик в теге закрыл бы code span
+                # и позволил бы вставить сырой Markdown/HTML (MED injection, wave-19).
+                lines.append(f"- {_md_cell(tag)} — {count}")
             lines.append("")
         else:
             lines.append("_Теги не использовались._")
