@@ -1157,30 +1157,33 @@ class W1762NoPersistOrphanTestCase(unittest.TestCase):
         self._store.add_fake_item("o1", "текст для orphan теста")
 
     def test_persist_failure_leaves_no_orphan_file(self) -> None:
-        """Если write_text выбрасывает исключение, orphan-файл должен быть зачищен,
-        и запись НЕ должна попасть в индекс."""
+        """Если os.open выбрасывает исключение, orphan-файл должен быть зачищен,
+        и запись НЕ должна попасть в индекс.
+
+        W1767: _persist_package теперь использует os.open(mode=0o600) вместо
+        Path.write_text, поэтому мок переведён на os.open.
+        """
+        import os as _os
         from unittest.mock import patch
 
         shares_dir = Path(self._tmpdir) / "shares"
-
-        # Перехватываем write_text только при первом вызове (для файла пакета)
-        original_write = Path.write_text
+        original_os_open = _os.open
         call_count = [0]
 
-        def failing_write(self_path, *args, **kwargs):  # type: ignore[override]
+        def failing_open(path, flags, mode=0o777, **kwargs):
             call_count[0] += 1
             if call_count[0] == 1:
                 # Создаём частичный файл, затем бросаем ошибку
-                self_path.write_bytes(b"partial content")
+                Path(path).write_bytes(b"partial content")
                 raise OSError("симулированная ошибка записи")
-            return original_write(self_path, *args, **kwargs)
+            return original_os_open(path, flags, mode, **kwargs)
 
-        with patch.object(Path, "write_text", failing_write):
+        with patch("backend.sharing_manager.os.open", side_effect=failing_open):
             with self.assertRaises(RuntimeError):
                 self._mgr.prepare_share(["o1"])
 
         # Orphan-файл должен быть удалён
-        share_files = [f for f in shares_dir.iterdir() if f.name != "shares_index.json"]
+        share_files = [f for f in shares_dir.iterdir() if f.name not in ("shares_index.json", "shares_index.tmp")]
         self.assertEqual(
             share_files, [],
             f"orphan-файлов быть не должно, найдено: {share_files}",
@@ -1191,10 +1194,14 @@ class W1762NoPersistOrphanTestCase(unittest.TestCase):
         self.assertEqual(shares, [], "после ошибки записи запись не должна попасть в индекс")
 
     def test_persist_failure_does_not_register_in_index(self) -> None:
-        """При ошибке write_text share_id НЕ должен появляться в индексе."""
+        """При ошибке os.open share_id НЕ должен появляться в индексе.
+
+        W1767: _persist_package теперь использует os.open(mode=0o600) вместо
+        Path.write_text, поэтому мок переведён на os.open.
+        """
         from unittest.mock import patch
 
-        with patch.object(Path, "write_text", side_effect=OSError("disk full")):
+        with patch("backend.sharing_manager.os.open", side_effect=OSError("disk full")):
             with self.assertRaises(RuntimeError):
                 self._mgr.prepare_share(["o1"])
 
