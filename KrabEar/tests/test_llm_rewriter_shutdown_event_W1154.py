@@ -151,7 +151,10 @@ class TestLLMRewriterShutdownEventBehavior(unittest.TestCase):
 
         # Stub observability
         obs = sys.modules.get("backend.observability", types.ModuleType("backend.observability"))
-        obs.add_breadcrumb = lambda **kw: None
+        # add_breadcrumb signature: (category, message, level=..., data=...)
+        # Use *a, **kw to accept both positional and keyword args regardless of
+        # how the caller passes them (guards against future positional call-sites).
+        obs.add_breadcrumb = lambda *a, **kw: None
         obs.capture_exception = lambda *a, **kw: None
         sys.modules["backend.observability"] = obs
 
