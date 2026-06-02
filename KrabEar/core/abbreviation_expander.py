@@ -182,6 +182,10 @@ class AbbreviationExpander:
         # → "глава врач"  (осторожно: семантически некорректно в контексте!)
     """
 
+    MAX_ABBR_LENGTH = 50
+    MAX_EXPANSION_LENGTH = 200
+    MAX_DICT_SIZE = 500
+
     def __init__(
         self,
         data_dir: Path | None = None,
@@ -327,10 +331,19 @@ class AbbreviationExpander:
             language: Код языка.
             flags: Дополнительные флаги (например, "no_after_digit").
         """
+        if len(abbr) > self.MAX_ABBR_LENGTH or len(expansion) > self.MAX_EXPANSION_LENGTH:
+            logger.warning("Аббревиатура или расширение слишком длинные, пропущено")
+            return
+
         lang = language.lower()
         with self._lock:
             if lang not in self._abbrevs:
                 self._abbrevs[lang] = {}
+            
+            if len(self._abbrevs[lang]) >= self.MAX_DICT_SIZE and abbr not in self._abbrevs[lang]:
+                logger.warning("Превышен лимит количества аббревиатур (%d) для %s", self.MAX_DICT_SIZE, lang)
+                return
+
             self._abbrevs[lang][abbr] = {
                 "expansion": expansion,
                 "flags": flags,
@@ -427,11 +440,17 @@ class AbbreviationExpander:
                 if lang not in self._abbrevs:
                     self._abbrevs[lang] = {}
                 for abbr, entry in entries.items():
+                    expansion = entry.get("expansion", "")
+                    if len(abbr) > self.MAX_ABBR_LENGTH or len(expansion) > self.MAX_EXPANSION_LENGTH:
+                        continue
+                    if len(self._abbrevs[lang]) >= self.MAX_DICT_SIZE and abbr not in self._abbrevs[lang]:
+                        continue
+
                     # Пользовательские записи перезаписывают встроенные;
                     # пользовательские записи никогда не помечаются как
                     # ambiguous — пользователь выбрал расширение явно.
                     self._abbrevs[lang][abbr] = {
-                        "expansion": entry.get("expansion", ""),
+                        "expansion": expansion,
                         "flags": entry.get("flags", ""),
                         "builtin": False,
                         "ambiguous": False,
