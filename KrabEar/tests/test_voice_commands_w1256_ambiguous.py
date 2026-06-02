@@ -240,13 +240,24 @@ class TestCompoundFormsStillWorkRuEsEn(unittest.TestCase):
         result = self.proc.process("раз точка с запятой два", language="ru")
         self.assertEqual(result, "раз; два")
 
-    def test_ru_novy_abzac(self):
-        result = self.proc.process("первый абзац новый абзац второй", language="ru")
-        self.assertEqual(result, "первый абзац\n\nвторой")
+    def test_ru_novy_abzac_gated_in_strict(self):
+        """W1776: «новый абзац» — ходовая фраза, в строгом режиме НЕ вставляет \\n\\n.
 
-    def test_ru_novaya_stroka(self):
+        Раньше «мы сделали новый абзац сегодня» молча превращалось в
+        «мы сделали\\n\\nсегодня». Теперь strict-режим оставляет текст как есть.
+        Команда по-прежнему доступна в lenient-режиме.
+        """
+        result = self.proc.process("первый абзац новый абзац второй", language="ru")
+        self.assertEqual(result, "первый абзац новый абзац второй")
+        lenient = _make_lenient_proc().process("первый абзац новый абзац второй", language="ru")
+        self.assertEqual(lenient, "первый абзац\n\nвторой")
+
+    def test_ru_novaya_stroka_gated_in_strict(self):
+        """W1776: «новая строка» — ходовая фраза, в строгом режиме НЕ вставляет \\n."""
         result = self.proc.process("строка один новая строка строка два", language="ru")
-        self.assertEqual(result, "строка один\nстрока два")
+        self.assertEqual(result, "строка один новая строка строка два")
+        lenient = _make_lenient_proc().process("строка один новая строка строка два", language="ru")
+        self.assertEqual(lenient, "строка один\nстрока два")
 
     def test_ru_bolshaya_bukva(self):
         result = self.proc.process("привет большая буква мир", language="ru")
@@ -266,9 +277,12 @@ class TestCompoundFormsStillWorkRuEsEn(unittest.TestCase):
         result = self.proc.process("uno punto y coma dos", language="es")
         self.assertEqual(result, "uno; dos")
 
-    def test_es_punto_y_aparte(self):
+    def test_es_punto_y_aparte_gated_in_strict(self):
+        """W1776: «punto y aparte» — обычный оборот, в строгом режиме НЕ вставляет \\n\\n."""
         result = self.proc.process("primer párrafo punto y aparte segundo", language="es")
-        self.assertEqual(result, "primer párrafo\n\nsegundo")
+        self.assertEqual(result, "primer párrafo punto y aparte segundo")
+        lenient = _make_lenient_proc().process("primer párrafo punto y aparte segundo", language="es")
+        self.assertEqual(lenient, "primer párrafo\n\nsegundo")
 
     def test_es_signo_de_exclamacion(self):
         result = self.proc.process("genial signo de exclamación", language="es")
@@ -278,9 +292,13 @@ class TestCompoundFormsStillWorkRuEsEn(unittest.TestCase):
         result = self.proc.process("cómo estás signo de interrogación", language="es")
         self.assertEqual(result, "cómo estás?")
 
-    def test_es_nueva_linea(self):
+    def test_es_nueva_linea_gated_in_strict(self):
+        """W1776: «nueva línea» — ходовая фраза («una nueva línea de productos»),
+        в строгом режиме НЕ вставляет \\n."""
         result = self.proc.process("primera línea nueva línea segunda línea", language="es")
-        self.assertEqual(result, "primera línea\nsegunda línea")
+        self.assertEqual(result, "primera línea nueva línea segunda línea")
+        lenient = _make_lenient_proc().process("primera línea nueva línea segunda línea", language="es")
+        self.assertEqual(lenient, "primera línea\nsegunda línea")
 
     # EN
     def test_en_question_mark(self):
@@ -299,13 +317,25 @@ class TestCompoundFormsStillWorkRuEsEn(unittest.TestCase):
         result = self.proc.process("one semicolon two", language="en")
         self.assertEqual(result, "one; two")
 
-    def test_en_new_paragraph(self):
-        result = self.proc.process("intro new paragraph body", language="en")
-        self.assertEqual(result, "intro\n\nbody")
+    def test_en_new_paragraph_gated_in_strict(self):
+        """W1776: «new paragraph» — ходовая фраза, в строгом режиме НЕ вставляет \\n\\n.
 
-    def test_en_new_line(self):
+        Production damage: «we made a new paragraph today» → «we made a\\n\\ntoday».
+        """
+        result = self.proc.process("intro new paragraph body", language="en")
+        self.assertEqual(result, "intro new paragraph body")
+        lenient = _make_lenient_proc().process("intro new paragraph body", language="en")
+        self.assertEqual(lenient, "intro\n\nbody")
+
+    def test_en_new_line_gated_in_strict(self):
+        """W1776: «new line» — ходовая фраза, в строгом режиме НЕ вставляет \\n.
+
+        Production damage: «a new line of code» → «a\\nof code».
+        """
         result = self.proc.process("first line new line second line", language="en")
-        self.assertEqual(result, "first line\nsecond line")
+        self.assertEqual(result, "first line new line second line")
+        lenient = _make_lenient_proc().process("first line new line second line", language="en")
+        self.assertEqual(lenient, "first line\nsecond line")
 
     def test_en_full_stop(self):
         result = self.proc.process("finished full stop", language="en")

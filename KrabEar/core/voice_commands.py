@@ -35,20 +35,39 @@ _VOICE_COMMANDS_STRICT_MODE: bool = True
 
 # Set of ambiguous command patterns (raw pattern strings) that are gated by strict mode.
 # These words/phrases have common non-command meanings and caused production damage
-# (W1251 F1+F2 HIGH). In strict mode these patterns are silently skipped; only
-# unambiguous forms (e.g. «вопросительный знак», «full stop») are recognised.
+# (W1251 F1+F2 HIGH, W1776 corruption sweep). In strict mode these patterns are silently
+# skipped; only unambiguous forms (e.g. «вопросительный знак», «full stop») are recognised.
+#
+# Rule of thumb (W1776): if a trigger word/phrase is also a perfectly ordinary noun/verb
+# in everyday RU/ES/EN speech, it MUST be gated here — `process()` runs on EVERY STT
+# transcript by default, so an un-gated homonym silently mutates real dictation.
+# Multi-word phrases are compared via their lowercased raw pattern (e.g. "new line").
 _AMBIGUOUS_SINGLE_WORD_PATTERNS: frozenset = frozenset({
-    # RU — однословные
-    "вопрос",    # question (→ не «?» в строгом режиме)
-    "точка",     # point/dot (→ не «.» в строгом режиме)
-    # ES — однословные / двухсловные омонимы
-    "coma",      # медицинская кома (→ не «,»)
-    "punto",     # точка/пойнт (→ не «.»)
-    "dos puntos",  # «два пункта» / «двоеточие» (амбигуено)
-    # EN — однословные
-    "period",    # медицинский/финансовый период (→ не «.»)
-    "colon",     # анатомический термин (→ не «:»)
-    "tab",       # UI-термин (browser tab, keyboard tab) (→ не «\t»)
+    # --- RU ---
+    "вопрос",        # question (→ не «?»)
+    "точка",         # point/dot (→ не «.»)
+    "тире",          # тире/чёрточка — обычное слово (→ не « — »)  [W1776]
+    "пробел",        # пробел/промежуток — обычное слово (→ не « »)  [W1776]
+    "восклицание",   # восклицание — обычное слово (→ не «!»)  [W1776]
+    "табуляция",     # табуляция — обычный термин (→ не «\t»)  [W1776]
+    "новая строка",  # «новая строка» — ходовая фраза (→ не «\n»)  [W1776]
+    "новый абзац",   # «новый абзац» — ходовая фраза (→ не «\n\n»)  [W1776]
+    # --- ES ---
+    "coma",          # медицинская кома (→ не «,»)
+    "punto",         # точка/пойнт (→ не «.»)
+    "dos puntos",    # «два пункта» / «двоеточие» (→ не «:»)
+    "espacio",       # espacio/пространство — обычное слово (→ не « »)  [W1776]
+    "guión largo",   # «guión largo» — описательная фраза (→ не « — »)  [W1776]
+    "punto y aparte",  # «punto y aparte» — обычный оборот (→ не «\n\n»)  [W1776]
+    "tabulación",    # tabulación — обычный термин (→ не «\t»)  [W1776]
+    "nueva línea",   # «nueva línea» — ходовая фраза (→ не «\n»)  [W1776]
+    # --- EN ---
+    "period",        # медицинский/финансовый период (→ не «.»)
+    "colon",         # анатомический термин (→ не «:»)
+    "tab",           # UI-термин (browser tab, keyboard tab) (→ не «\t»)
+    "dash",          # dash/чёрточка — обычное слово (→ не «-»)  [W1776]
+    "new line",      # «new line» — ходовая фраза (→ не «\n»)  [W1776]
+    "new paragraph",  # «new paragraph» — ходовая фраза (→ не «\n\n»)  [W1776]
 })
 
 # ---------------------------------------------------------------------------
@@ -204,6 +223,11 @@ def _delete_last_sentence(text: str) -> str:
     Исходный «(?!.*[.!?\\n])» с «.*» давал квадратичный backtracking на длинных
     строках без терминатора в конце — каждая позиция перепроверяла весь хвост.
     Новая реализация: max(rfind) по четырём символам — O(n), без backtracking.
+
+    W1776 HIGH 2: когда терминатор предложения отсутствует (одно-предложенный
+    транскрипт — обычный случай), функция РАНЬШЕ возвращала "" и стирала весь
+    текст. Это молча уничтожало реальную диктовку при «удалить последнее
+    предложение». Теперь no-op: возвращаем входной текст БЕЗ изменений.
     """
     stripped = text.rstrip()
     if not stripped:
@@ -213,20 +237,27 @@ def _delete_last_sentence(text: str) -> str:
     if last_idx >= 0:
         # Возвращаем текст вплоть до терминатора включительно
         return stripped[: last_idx + 1].rstrip()
-    # Нет разделителя — удаляем всё
-    return ""
+    # W1776: нет разделителя — НЕ стираем весь текст; no-op (возвращаем как есть).
+    return text
 
 
 def _delete_last_paragraph(text: str) -> str:
-    """Удаляет последний абзац (от последнего двойного перевода строки)."""
+    """Удаляет последний абзац (от последнего двойного перевода строки).
+
+    W1776 HIGH 2: при отсутствии двойного перевода строки (single-paragraph —
+    самый частый случай) функция РАНЬШЕ делала rfind('\\n\\n') == -1 → возвращала
+    "" → СТИРАЛА ВЕСЬ ТРАНСКРИПТ. Это молча уничтожало реальную диктовку при
+    «удалить последний абзац» / «delete last paragraph». Теперь no-op: возвращаем
+    входной текст БЕЗ изменений, когда удалять нечего.
+    """
     stripped = text.rstrip()
     if not stripped:
         return ""
     idx = stripped.rfind("\n\n")
     if idx >= 0:
         return stripped[:idx].rstrip()
-    # Нет абзацев — удаляем всё
-    return ""
+    # W1776: нет границы абзаца — НЕ стираем весь текст; no-op (возвращаем как есть).
+    return text
 
 
 _DELETE_HANDLERS = {
@@ -410,8 +441,10 @@ class VoiceCommandProcessor:
                     # Пропускаем пробел(ы) после команды
                     while pos < length and text[pos] == " ":
                         pos += 1
-                    # Добавляем один пробел перед следующим словом
-                    if pos < length:
+                    # W1776 MED 3: добавляем разделяющий пробел только если уже есть
+                    # накопленный вывод — иначе команда в самом начале строки давала
+                    # ведущий пробел-артефакт.
+                    if pos < length and any(output):
                         output.append(" ")
 
                 elif action == "delete_last":
@@ -421,7 +454,8 @@ class VoiceCommandProcessor:
                     pos = matched_end
                     while pos < length and text[pos] == " ":
                         pos += 1
-                    if pos < length:
+                    # W1776 MED 3: разделяющий пробел только при непустом выводе.
+                    if pos < length and any(output):
                         output.append(" ")
 
                 break  # нашли первый подходящий паттерн — применили
@@ -451,4 +485,10 @@ class VoiceCommandProcessor:
                 "accumulated text preserved as-is"
             )
 
-        return "".join(output)
+        # W1776 MED 3: убираем артефактные ведущие/замыкающие пробелы.
+        # Источники: (1) команда первым токеном давала ведущий пробел;
+        # (2) delete-команда (включая no-op HIGH 2) могла оставить замыкающий
+        # пробел из «съеденной» команды в конце строки. Внутренние разделители
+        # (\n, \t, пробелы между словами) не затрагиваются — strip() работает
+        # только по краям результата.
+        return "".join(output).strip()
