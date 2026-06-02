@@ -114,6 +114,10 @@ class HistoryService:
         # используются для privacy-purge биометрики (speaker_fingerprints.json /
         # speaker_aliases.json) и статистики воспроизведения (playback_stats.json).
         # Оба поля уже существуют; service.py заполняет их late-inject после __init__.
+        # W1766: webhooks.json хранит HMAC-секреты и переживает purge без этого wire.
+        # W1766: Obsidian vault содержит полные транскрипции и переживает purge без wire.
+        self._webhook_manager: Any = None   # WebhookManager — webhooks.json
+        self._obsidian_sync: Any = None     # ObsidianSyncManager — vault .md files
 
     # ------------------------------------------------------------------
     # Privacy helpers
@@ -1666,11 +1670,14 @@ class HistoryService:
         # --- 1c. W1749 CRITICAL-2: delete transcript .md files (TranscriptWriter artefacts).
         # Each transcription writes a timestamped Markdown file under <data_dir>/transcripts/.
         # These files contain the full STT text and survive a purge unless explicitly removed.
+        # W1766 #9 (MED): also remove *.md.tmp — TranscriptWriter writes via atomic
+        # rename (*.md.tmp → *.md); an in-flight temp file survives a purge that only
+        # globs *.md.  Adding *.md.tmp here closes that gap.
         transcripts_deleted = 0
         try:
             transcripts_dir = Path(self.store.data_dir) / "transcripts"
             if transcripts_dir.is_dir():
-                md_files = list(transcripts_dir.glob("*.md"))
+                md_files = list(transcripts_dir.glob("*.md")) + list(transcripts_dir.glob("*.md.tmp"))
                 for md_path in md_files:
                     try:
                         md_path.unlink(missing_ok=True)
@@ -1773,6 +1780,32 @@ class HistoryService:
                 )
                 secondary_errors.append("playback")
 
+        # --- 10. W1766 #7 (MED): очистить webhooks.json (HMAC-секреты) ---
+        # webhooks.json хранит signing-секреты в открытом виде (0600) и переживает purge.
+        # purge_all() захватывает _lock, очищает in-memory реестр + статистику,
+        # перезаписывает файл пустым объектом и удаляет его с диска.
+        if self._webhook_manager is not None:
+            try:
+                self._webhook_manager.purge_all()
+            except Exception:
+                logger.warning(
+                    "purge_all_data: webhook_manager.purge_all failed", exc_info=True
+                )
+                secondary_errors.append("webhooks")
+
+        # --- 11. W1766 #10 (MED): очистить Obsidian vault (.md файлы транскрипций) ---
+        # Синхронизированные .md содержат полный STT-текст и выживают без этого шага.
+        # purge_all_synced_files() — no-op если vault не настроен (безопасно).
+        obsidian_deleted = 0
+        if self._obsidian_sync is not None:
+            try:
+                obsidian_deleted = self._obsidian_sync.purge_all_synced_files()
+            except Exception:
+                logger.warning(
+                    "purge_all_data: obsidian_sync.purge_all_synced_files failed", exc_info=True
+                )
+                secondary_errors.append("obsidian")
+
         # --- C. W1734: Audit log entry ---
         try:
             from backend.privacy_audit import get_privacy_audit_logger
@@ -1787,6 +1820,7 @@ class HistoryService:
                     "bookmarks_deleted": bookmarks_deleted,
                     "call_sessions_deleted": call_sessions_deleted,
                     "transcripts_deleted": transcripts_deleted,
+                    "obsidian_deleted": obsidian_deleted,
                     "secondary_errors": secondary_errors,
                 },
             )
@@ -1804,6 +1838,7 @@ class HistoryService:
                 "bookmarks_deleted": bookmarks_deleted,
                 "call_sessions_deleted": call_sessions_deleted,
                 "transcripts_deleted": transcripts_deleted,
+                "obsidian_deleted": obsidian_deleted,
                 "semantic_purged": semantic_purged,
             },
         )
@@ -1820,13 +1855,14 @@ class HistoryService:
 
         logger.info(
             "purge_all_data: history=%d transcripts=%d chains=%d archive=%d bookmarks=%d calls=%d "
-            "semantic_purged=%s errors=%s",
+            "obsidian=%d semantic_purged=%s errors=%s",
             history_deleted,
             transcripts_deleted,
             chains_deleted,
             archive_deleted,
             bookmarks_deleted,
             call_sessions_deleted,
+            obsidian_deleted,
             semantic_purged,
             secondary_errors,
         )
@@ -1838,6 +1874,7 @@ class HistoryService:
             "bookmarks_deleted": bookmarks_deleted,
             "call_sessions_deleted": call_sessions_deleted,
             "transcripts_deleted": transcripts_deleted,
+            "obsidian_deleted": obsidian_deleted,
             "semantic_purged": semantic_purged,
             "complete": len(secondary_errors) == 0,
             "errors": secondary_errors,

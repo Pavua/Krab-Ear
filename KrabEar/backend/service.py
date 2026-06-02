@@ -33,7 +33,6 @@ from core.emotion_detector import EmotionDetector
 from core.transcription_scorer import TranscriptionScorer
 from core.topic_tracker import TopicTracker
 from core.text_postprocessor import TextPostProcessor
-from core.text_anonymizer import TextAnonymizer
 from backend.data_migrator import DataMigrator
 from backend.config_presets_library import ConfigPresetsLibrary
 from core.paste_formatter import PasteFormatter
@@ -549,7 +548,6 @@ class BackendService:
             data_dir=self.store.data_dir,
             enabled=settings.PASTE_APP_MEMORY_ENABLED,
         )
-        self._text_anonymizer = TextAnonymizer()
         self._text_postprocessor = TextPostProcessor()
         self._transcription_queue = TranscriptionQueue()
         self._emotion_detector = EmotionDetector()
@@ -627,6 +625,12 @@ class BackendService:
         # _speaker_manager already wired above (строка ~594) for alias resolution;
         # здесь явно подтверждаем, что оба поля заполнены для purge.
         self._history._playback_tracker = self._playback_tracker
+        # W1766 #7 (MED): wire webhook_manager into HistoryService so
+        # handle_purge_all_data can call purge_all() to erase HMAC secrets.
+        self._history._webhook_manager = self._webhook_manager
+        # W1766 #10 (MED): wire obsidian_sync into HistoryService so
+        # handle_purge_all_data can delete synced .md files from the vault.
+        self._history._obsidian_sync = self._obsidian_sync
         self._call_session_service = CallSessionService(
             store=self._call_session_store,
             auto_end=self._call_auto_end,
