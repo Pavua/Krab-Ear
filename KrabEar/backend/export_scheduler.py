@@ -536,31 +536,3 @@ class ExportScheduler:
         # Новейшие — первыми
         result.sort(key=lambda x: x.get("ts", ""), reverse=True)
         return result
-
-    def purge_all(self) -> None:
-        """Удаляет все файлы экспорта и очищает расписание (privacy purge)."""
-        with self._lock:
-            schedule = self._load_schedule()
-            data_dir_resolved = self.data_dir.resolve()
-
-            # 1. Удаляем все файлы из истории экспортов
-            for entry in schedule.get("exports", []):
-                p = Path(entry.get("path", ""))
-                try:
-                    if p.resolve().is_relative_to(data_dir_resolved) and p.exists():
-                        p.unlink()
-                except Exception:
-                    pass
-
-            # 2. Также удаляем все файлы в директории exports_dir (orphan files)
-            try:
-                if self.exports_dir.exists() and self.exports_dir.resolve().is_relative_to(data_dir_resolved):
-                    for f in self.exports_dir.iterdir():
-                        if f.is_file():
-                            f.unlink(missing_ok=True)
-            except Exception:
-                pass
-
-            schedule["exports"] = []
-            schedule["last_export_ts"] = None
-            self._save_schedule(schedule)
