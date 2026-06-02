@@ -249,6 +249,34 @@ class SettingsValidator:
                         cleaned[k.strip()] = v.strip()
                 fixed["text_templates"] = cleaned
 
+        # stt_hotwords должен быть list[str] непустых строк.
+        # W1768: import_settings/restore_settings_backup вызывают только validate(),
+        # минуя нормализацию из set_settings.  Без этой проверки крафтнутый
+        # stt_hotwords=[null, 123, {"k": "v"}] из /tmp/payload.json проходил насквозь,
+        # а затем recording_core_service.py (`_w.strip()`) и transcript_context.py
+        # (`w.strip()`) падали с AttributeError на не-строковых элементах →
+        # тихий крах потока транскрипции.  Приводим к list, отбрасываем не-строки
+        # (со структурированным warning), стрипаем и оставляем только непустые.
+        if "stt_hotwords" in fixed:
+            hw = fixed["stt_hotwords"]
+            if not isinstance(hw, list):
+                warnings.append(
+                    f"'stt_hotwords': ожидается list, получен {type(hw).__name__}, исправлено на []"
+                )
+                fixed["stt_hotwords"] = []
+            else:
+                cleaned_hw: list[str] = []
+                for item in hw:
+                    if not isinstance(item, str):
+                        warnings.append(
+                            f"'stt_hotwords': элемент {item!r} не строка, пропущено"
+                        )
+                        continue
+                    stripped = item.strip()
+                    if stripped:
+                        cleaned_hw.append(stripped)
+                fixed["stt_hotwords"] = cleaned_hw
+
         # voice_gateway_url: должен быть localhost/loopback (HTTP или HTTPS) или внешний HTTPS.
         # W850: старая проверка по строковому префиксу пропускала IPv6-loopback формы
         # (http://[::1], http://[::ffff:127.0.0.1] и т.д.).  Теперь используем urlparse +

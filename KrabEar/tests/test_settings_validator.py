@@ -208,6 +208,27 @@ class TestValidateSpecialFields(unittest.TestCase):
         self.assertIn("key", result.fixed["text_templates"])
         self.assertEqual(result.fixed["text_templates"]["key"], "value")
 
+    def test_stt_hotwords_drops_non_str_and_strips(self):
+        # W1768: крафтнутый stt_hotwords с не-строковыми элементами не должен
+        # просачиваться через validate() (import_settings/restore_settings_backup),
+        # иначе `_w.strip()` в recording_core_service / transcript_context падает
+        # с AttributeError и тихо рушит поток транскрипции.
+        result = self.v.validate({"stt_hotwords": [None, 123, {}, "ok ", " good"]})
+        self.assertTrue(result.valid)
+        # Не-строки отброшены; строки застрипаны; пустые удалены.
+        self.assertEqual(result.fixed["stt_hotwords"], ["ok", "good"])
+
+    def test_stt_hotwords_valid_list_passes_unchanged(self):
+        result = self.v.validate({"stt_hotwords": ["Краб", "GigaAM"]})
+        self.assertTrue(result.valid)
+        self.assertEqual(result.fixed["stt_hotwords"], ["Краб", "GigaAM"])
+        self.assertEqual(result.warnings, [])
+
+    def test_stt_hotwords_invalid_type_becomes_empty(self):
+        result = self.v.validate({"stt_hotwords": "not a list"})
+        self.assertTrue(result.valid)
+        self.assertEqual(result.fixed["stt_hotwords"], [])
+
     def test_voice_gateway_url_valid_localhost(self):
         result = self.v.validate({"voice_gateway_url": "http://127.0.0.1:8090"})
         self.assertTrue(result.valid)
