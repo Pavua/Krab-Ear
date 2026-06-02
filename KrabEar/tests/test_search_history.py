@@ -329,5 +329,107 @@ class TestSearchHistoryWave146(unittest.TestCase):
         self.assertEqual(total, 90)
 
 
+
+class TestSearchHistoryGeminiWaveA(unittest.TestCase):
+    """Wave-A Gemini fixes — unbounded growth, injection, atomicity, purge."""
+
+    # ------------------------------------------------------------------
+    # 1) query length cap at 1000 chars (injection / OOM guard)
+    # ------------------------------------------------------------------
+    def test_query_truncated_at_1000_chars(self):
+        """record_search truncates queries longer than 1000 chars."""
+        mgr = SearchHistoryManager()
+        long_query = "x" * 2000
+        mgr.record_search(long_query)
+        entry = mgr.get_recent_searches(limit=1)[0]
+        self.assertEqual(len(entry["query"]), 1000)
+        self.assertEqual(entry["query"], "x" * 1000)
+
+    def test_query_exactly_1000_chars_not_truncated(self):
+        """A 1000-char query is stored as-is."""
+        mgr = SearchHistoryManager()
+        exact = "a" * 1000
+        mgr.record_search(exact)
+        entry = mgr.get_recent_searches(limit=1)[0]
+        self.assertEqual(len(entry["query"]), 1000)
+
+    def test_query_injection_chars_stored_safely(self):
+        """Shell metacharacters and JSON-special chars survive round-trip."""
+        mgr = SearchHistoryManager()
+        injection = '"; DROP TABLE entries; -- <script>alert(1)</script>'
+        mgr.record_search(injection)
+        entry = mgr.get_recent_searches(limit=1)[0]
+        self.assertEqual(entry["query"], injection)
+
+    # ------------------------------------------------------------------
+    # 2) atomic write via tmp file (power-loss safety)
+    # ------------------------------------------------------------------
+    def test_atomic_write_no_partial_file(self):
+        """_save() writes via .json.tmp then renames; tmp file is not left behind."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SearchHistoryManager(data_dir=tmpdir)
+            mgr.record_search("atomicity test")
+
+            tmp_path = mgr._path.with_suffix(".json.tmp")
+            self.assertFalse(
+                tmp_path.exists(),
+                "Temporary .json.tmp file must be renamed away after save",
+            )
+            self.assertTrue(mgr._path.exists())
+            data = json.loads(mgr._path.read_text(encoding="utf-8"))
+            self.assertIn("entries", data)
+
+    # ------------------------------------------------------------------
+    # 3) clear_search_history deletes the file (purge contract)
+    # ------------------------------------------------------------------
+    def test_clear_deletes_file_not_rewrites_empty(self):
+        """clear_search_history() removes the JSON file entirely."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SearchHistoryManager(data_dir=tmpdir)
+            mgr.record_search("будет удалён")
+            self.assertTrue(mgr._path.exists())
+
+            mgr.clear_search_history()
+            self.assertFalse(
+                mgr._path.exists(),
+                "clear_search_history() must delete the file",
+            )
+
+    def test_clear_no_file_no_error(self):
+        """clear_search_history() is safe when no file exists yet."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SearchHistoryManager(data_dir=tmpdir)
+            self.assertFalse(mgr._path.exists())
+            mgr.clear_search_history()
+            self.assertEqual(mgr.get_recent_searches(), [])
+
+    def test_clear_without_data_dir_no_error(self):
+        """clear_search_history() with data_dir=None does not raise."""
+        mgr = SearchHistoryManager()
+        mgr.record_search("один")
+        mgr.clear_search_history()
+        self.assertEqual(mgr.get_recent_searches(), [])
+
+    # ------------------------------------------------------------------
+    # 4) _load() cap: loading an oversized file trims to _MAX_ENTRIES
+    # ------------------------------------------------------------------
+    def test_load_caps_entries_from_oversized_file(self):
+        """_load() applies [-_MAX_ENTRIES:] so an oversized file is capped on read."""
+        from backend.search_history import _MAX_ENTRIES
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "search_history.json"
+            oversized = [
+                {"query": f"q{i}", "results_count": 0, "ts": "2026-01-01T00:00:00+00:00"}
+                for i in range(_MAX_ENTRIES + 100)
+            ]
+            path.write_text(
+                json.dumps({"entries": oversized}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            mgr = SearchHistoryManager(data_dir=tmpdir)
+            self.assertEqual(len(mgr._entries), _MAX_ENTRIES)
+            self.assertEqual(mgr._entries[-1]["query"], f"q{_MAX_ENTRIES + 99}")
+
+
 if __name__ == "__main__":
     unittest.main()
