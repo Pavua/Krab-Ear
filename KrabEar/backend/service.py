@@ -426,6 +426,7 @@ class BackendService:
             cached_settings=self._cached_settings,
             invalidate_settings_cache=self._invalidate_settings_cache,
             vocabulary_store=self.vocabulary,
+            settings_svc=self._settings_svc,  # W1767: атомарный glossary RMW под _save_lock
         )
         self._glossary_auto_learn = GlossaryAutoLearnService(
             store=self.store,

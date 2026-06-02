@@ -6,18 +6,17 @@
 Статусы заданий: pending → processing → completed / failed / cancelled
 Приоритеты: 1 (наивысший) — 10 (наинизший). При равном приоритете — FIFO по времени постановки.
 
-# DEAD CODE — not wired in production as of v2.0.5 (W924/W949 fix, 2026-05-26).
+# LIVE — обработчики подключены в ipc_dispatch.py (W1767 re-activation, 2026-06-02).
 #
-# Root cause: process_next() was never called from service.py or any background thread.
-# Jobs enqueued via the IPC handlers accumulated in `pending` indefinitely without being
-# processed. The 4 IPC dispatch entries (enqueue_transcription, cancel_transcription,
-# get_queue_status, list_transcription_queue) have been removed from BackendService.
+# 4 IPC handler'а (enqueue_transcription, cancel_transcription, get_queue_status,
+# list_transcription_queue) снова зарегистрированы в BackendService._dispatch_table
+# через svc._transcription_queue (см. backend/ipc_dispatch.py строки 233-236).
 #
-# Actual batch transcription is handled by transcribe_paths_async + JobTracker.
-#
-# Unit tests remain in KrabEar/tests/test_transcription_queue.py for future resurrection.
-# To re-activate: add a daemon worker thread in BackendService that polls process_next()
-# and dispatches via _transcribe_paths_core, then restore the 4 IPC entries.
+# ВАЖНО: process_next() по-прежнему НЕ вызывается никаким фоновым потоком.
+# Задания ставятся в очередь и висят в статусе pending, пока внешний клиент
+# не вызовет process_next() вручную или не будет поднят daemon-воркер.
+# Для активации обработки: добавить daemon-поток в BackendService, который
+# поллит process_next() и диспатчит через _transcribe_paths_core.
 #
 # Memory-leak fixes (W1722):
 #   BUG 1 — _jobs grew without bound: terminal-state jobs (completed/failed/cancelled)
