@@ -18,6 +18,15 @@ logger = logging.getLogger(__name__)
 # Часовая запись в норме <100 KB; backstop 500 KB защищает от DoS независимо от паттерна.
 _MAX_ANONYMIZE_LEN = 500_000
 
+# Запас для устранения утечки PII на границе обрезки (wave1766).
+# Токен PII, начинающийся до _MAX_ANONYMIZE_LEN и выходящий за её пределы,
+# попадает в «хвост» без редактирования, если сканируется только text[:_MAX_ANONYMIZE_LEN].
+# Расширяем окно сканирования на _MAX_PII_LEN символов, чтобы любой токен,
+# пересекающий исходную границу, был полностью виден регулярным выражениям.
+# 64 символа покрывают самый длинный реалистичный PII-токен (IBAN ~34 симв.,
+# международный телефон ~20 симв., email ~54 симв. с учётом TLD).
+_MAX_PII_LEN = 64
+
 
 # ── ИНН checksum helpers ─────────────────────────────────────────────────────
 
@@ -351,16 +360,21 @@ class TextAnonymizer:
             )
 
         # ── Backstop: ограничиваем скан при аномально длинном входе ────────
+        # wave1766: расширяем окно сканирования на _MAX_PII_LEN символов за
+        # исходную границу, чтобы PII-токены, пересекающие _MAX_ANONYMIZE_LEN,
+        # полностью попадали в поле зрения регулярных выражений.
+        # Хвост присоединяется только начиная с реальной границы расширенного окна.
         scan_text = text
         tail = ""
         if len(text) > _MAX_ANONYMIZE_LEN:
-            scan_text = text[:_MAX_ANONYMIZE_LEN]
-            tail = text[_MAX_ANONYMIZE_LEN:]
+            extended_end = _MAX_ANONYMIZE_LEN + _MAX_PII_LEN
+            scan_text = text[:extended_end]
+            tail = text[extended_end:]
             logger.warning(
                 "anonymize: входной текст обрезан для сканирования",
                 extra={
                     "original_len": len(text),
-                    "scan_len": _MAX_ANONYMIZE_LEN,
+                    "scan_len": extended_end,
                 },
             )
 
