@@ -47,7 +47,14 @@ tell application "Calendar"
             end repeat
         end try
     end repeat
-    return resultLines
+    -- Emit one record per line so the Python parser can split by newlines.
+    -- Without setting text item delimiters, AppleScript renders a list as a
+    -- single comma-space-joined line, which corrupts the last field of every
+    -- record except the very last one when there are multiple events.
+    set text item delimiters to linefeed
+    set resultText to resultLines as text
+    set text item delimiters to ""
+    return resultText
 end tell
 """
 
