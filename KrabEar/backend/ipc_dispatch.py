@@ -239,6 +239,7 @@ def build_dispatch_table(
         "get_daily_cost_summary": svc._handle_get_daily_cost_summary,  # сводка вычислительных расходов за сегодня
         "check_migration": svc._data_migrator.handle_check_migration,  # проверка необходимости миграции данных
         "run_migration": svc._data_migrator.handle_run_migration,  # выполнение миграции данных между версиями
+        "rollback_migration": svc._data_migrator.handle_rollback_migration,  # откат последней миграции из резервной копии
         "expand_abbreviations": svc._text_processing_svc.handle_expand_abbreviations,  # раскрытие аббревиатур в тексте транскрипции
         "remove_abbreviation": svc._text_processing_svc.handle_remove_abbreviation,  # удалить аббревиатуру
         "list_abbreviations": svc._text_processing_svc.handle_list_abbreviations,  # список аббревиатур для языка
