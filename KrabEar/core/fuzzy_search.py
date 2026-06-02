@@ -46,13 +46,23 @@ class FuzzySearcher:
 
         results: list[FuzzyMatch] = []
 
-        for idx, text in enumerate(texts):
+        # Защита от memory-bomb: обрабатываем не более 5000 последних текстов
+        MAX_TEXTS = 5000
+        processed = 0
+
+        for idx in range(len(texts) - 1, -1, -1):
+            if processed >= MAX_TEXTS:
+                break
+
+            text = texts[idx]
             if not text:
                 continue
+
             # Оптимизация: пропускаем слишком короткие тексты
             if len(text) < min_text_len:
                 continue
 
+            processed += 1
             score = self._score(query_lower, text.lower())
             if score >= threshold:
                 results.append(FuzzyMatch(index=idx, score=score, matched_text=text))
@@ -66,40 +76,63 @@ class FuzzySearcher:
 
     def _score(self, query: str, text: str) -> float:
         """Вычислить максимальный score между полным и частичным совпадением."""
+        if query == text:
+            return 1.0
+        if query in text:
+            return 1.0
+
+        # Защита от ReDoS O(N*M)
+        query = query[:2000]
+        text = text[:2000]
+
         # Полное совпадение всего текста с запросом
         full_score = difflib.SequenceMatcher(None, query, text).ratio()
+        if full_score >= 0.99:
+            return full_score
 
-        # Частичный матчинг: скользящее окно по тексту размером len(query)
+        # Частичный матчинг: умное скользящее окно
         partial_score = self._partial_ratio(query, text)
 
         return max(full_score, partial_score)
 
     def _partial_ratio(self, query: str, text: str) -> float:
-        """Лучшее совпадение query с подстрокой text длиной ~len(query)."""
+        """Лучшее совпадение query с подстрокой text, используя якоря."""
         q_len = len(query)
         t_len = len(text)
 
         if q_len == 0 or t_len == 0:
             return 0.0
 
-        # Если запрос длиннее текста — сравниваем целиком
         if q_len >= t_len:
             return difflib.SequenceMatcher(None, query, text).ratio()
 
         best = 0.0
-        # Скользящее окно: шаг 1, но для длинных текстов можно шагать крупнее
-        step = max(1, (t_len - q_len) // 20)
-        positions = list(range(0, t_len - q_len + 1, step))
-        # Всегда включаем последнюю позицию
-        if (t_len - q_len) not in positions:
-            positions.append(t_len - q_len)
+        # Ищем общие блоки, чтобы использовать их как якоря для окон
+        blocks = difflib.SequenceMatcher(None, query, text).get_matching_blocks()
 
-        for i in positions:
-            window = text[i: i + q_len]
-            ratio = difflib.SequenceMatcher(None, query, window).ratio()
-            if ratio > best:
-                best = ratio
-            if best == 1.0:
-                break
+        checked_starts = set()
+
+        for block in blocks:
+            if block.size == 0:
+                continue
+
+            # Ожидаемое начало окна в text, чтобы block.a и block.b совпали
+            expected_start = block.b - block.a
+
+            # Проверяем само окно и небольшие смещения (для вставок/удалений до совпадения)
+            for offset in (-2, -1, 0, 1, 2):
+                start = expected_start + offset
+                start = max(0, min(start, t_len - q_len))
+
+                if start in checked_starts:
+                    continue
+                checked_starts.add(start)
+
+                window = text[start : start + q_len]
+                ratio = difflib.SequenceMatcher(None, query, window).ratio()
+                if ratio > best:
+                    best = ratio
+                if best >= 0.99:
+                    return best
 
         return best
