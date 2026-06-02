@@ -1,0 +1,26 @@
+# purge_coverage_allowlist.txt — INTENTIONAL survivors of privacy-purge (W1768)
+#
+# One store id per line (filename, "subdir/", or "prefix_*.ext" glob family).
+# A trailing "# reason" comment is required for every entry.  Anything NOT
+# listed here that the discovery scanner finds and that handle_purge_all_data
+# does not wipe is reported as a GAP by scripts/audit_purge_coverage.py.
+#
+# Policy (be conservative): only list stores that are demonstrably NOT user PII
+# / transcription-derived content — app configuration, compliance trail, model
+# caches, security keys whose deletion would corrupt the audit log, and ID-only
+# resurrection registries.  When in doubt, leave it OFF this list so the guard
+# treats it as a GAP (the safe direction).
+
+# --- App configuration (no transcription content) -------------------------
+settings.json            # app config; the PII field (translation_glossary) IS reset by purge step 15
+feature_flags.json       # runtime experimental on/off flags — no user content
+config_presets.json      # built-in + custom settings presets — no transcription content
+
+# --- Compliance / security infrastructure ---------------------------------
+privacy_audit.key        # AES key for the compliance audit log (privacy_audit.log is the W957 trail); deleting it would corrupt the audit record. The log itself is home-rooted, not under the configurable data dir, so it is not discovered.
+
+# --- ID-only resurrection registry (no PII) -------------------------------
+history_purged_ids.ndjson  # W1756: append-only list of deleted item IDs (no text) to block re-import resurrection; intentionally retained across purge
+
+# --- Model caches (downloaded artefacts, not user data) -------------------
+wake_word_models/        # openWakeWord ML model files downloaded from the hub; not user content
