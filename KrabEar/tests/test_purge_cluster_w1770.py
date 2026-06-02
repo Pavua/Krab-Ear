@@ -39,6 +39,9 @@ from backend.history_service import HistoryService            # noqa: E402
 from backend.transcript_versioning import TranscriptVersionManager  # noqa: E402
 from backend.collection_manager import CollectionManager      # noqa: E402
 from backend.session_tracker import SessionTracker            # noqa: E402
+from backend.template_manager import TemplateManager          # noqa: E402
+from backend.event_replay import EventReplayManager           # noqa: E402
+from backend.live_subs_service import LiveSubsService         # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -472,6 +475,233 @@ class BackendServiceW1770WiringTestCase(unittest.TestCase):
             "_history._session_tracker должен указывать на _session_tracker",
         )
         self.assertIsNotNone(svc._history._session_tracker)
+
+
+# ---------------------------------------------------------------------------
+# W1771 supplement — gaps the W1770 cluster missed + guard blind-spot
+# ---------------------------------------------------------------------------
+
+class _FakeBuffer:
+    """Минимальный stand-in для LiveSubsService с in-memory PCM-буфером."""
+
+    def __init__(self) -> None:
+        # «сырой голос» — имитируем накопленный PCM (любой непустой объект).
+        self._buffer = [b"\x00\x01" * 16000]
+        self._buffer_samples = 16000
+
+    def reset(self) -> None:
+        self._buffer = []
+        self._buffer_samples = 0
+
+
+class PurgeW1771GapTestCase(unittest.TestCase):
+    """W1771: report_*.html и сиблинг-экспорты, templates.json, безусловный
+    clear версий, in-memory clear-хуки (event_replay/live_subs)."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._dir = Path(self._tmpdir)
+
+    def test_export_report_html_removed(self) -> None:
+        """GAP-1: report_*.html (самый PII-плотный экспорт) удаляется из transcripts/."""
+        tdir = self._dir / "transcripts"
+        tdir.mkdir(parents=True, exist_ok=True)
+        report = tdir / "report_20260602_101010.html"
+        report.write_text("<html><body>ПОЛНЫЙ СЕКРЕТНЫЙ ТРАНСКРИПТ</body></html>", encoding="utf-8")
+        store = FakeStore(data_dir=self._tmpdir)
+        result = HistoryService(store=store).handle_purge_all_data({"confirm": True})
+        self.assertTrue(result.get("ok"), result)
+        self.assertFalse(report.exists(), "report_*.html должен быть удалён")
+
+    def test_all_sibling_export_extensions_removed(self) -> None:
+        """GAP-1: *.html, *.srt, *.json, *.csv (и *.md) — все экспортные расширения удаляются."""
+        tdir = self._dir / "transcripts"
+        tdir.mkdir(parents=True, exist_ok=True)
+        files = {
+            "report_x.html": "<html>СЕКРЕТ-HTML</html>",
+            "srt_x.srt": "1\n00:00:00,000 --> 00:00:01,000\nСЕКРЕТ-SRT\n",
+            "export_x.json": '{"text": "СЕКРЕТ-JSON"}',
+            "export_x.csv": "text\nСЕКРЕТ-CSV\n",
+            "export_x.md": "# СЕКРЕТ-MD",
+            "report_x.html.tmp": "<html>СЕКРЕТ-TMP</html>",  # in-flight temp тоже
+        }
+        for name, content in files.items():
+            (tdir / name).write_text(content, encoding="utf-8")
+        store = FakeStore(data_dir=self._tmpdir)
+        result = HistoryService(store=store).handle_purge_all_data({"confirm": True})
+        self.assertTrue(result.get("ok"), result)
+        survivors = [p.name for p in tdir.iterdir() if p.is_file()]
+        self.assertEqual(survivors, [], f"экспортные артефакты пережили purge: {survivors}")
+        # ни один секрет-токен не остался на диске
+        for f in self._dir.rglob("*"):
+            if f.is_file():
+                content = f.read_text(encoding="utf-8", errors="replace")
+                for token in ("СЕКРЕТ-HTML", "СЕКРЕТ-SRT", "СЕКРЕТ-JSON", "СЕКРЕТ-CSV", "СЕКРЕТ-MD", "СЕКРЕТ-TMP"):
+                    self.assertNotIn(token, content, f"{token} найден в {f}")
+
+    def test_templates_json_purged_via_collaborator(self) -> None:
+        """GAP-2: templates.json (free-text PII) удаляется через TemplateManager.purge_all()."""
+        tmgr = TemplateManager(data_dir=self._tmpdir)
+        tmgr.add_template(
+            name="my_sig",
+            text="С уважением, Павел Ронгфа, +7 999 123-45-67",  # реальное имя + телефон
+            category="email",
+        )
+        templates_path = self._dir / "templates.json"
+        self.assertTrue(templates_path.exists(), "templates.json должен существовать до purge")
+
+        store = FakeStore(data_dir=self._tmpdir)
+        svc = HistoryService(store=store)
+        svc._template_manager = tmgr
+        result = svc.handle_purge_all_data({"confirm": True})
+
+        self.assertTrue(result.get("ok"), result)
+        self.assertFalse(templates_path.exists(), "templates.json должен быть удалён")
+        # пользовательский шаблон исчез (builtin остаются)
+        names = {t["name"] for t in tmgr.get_templates()}
+        self.assertNotIn("my_sig", names)
+        # PII не осталась на диске
+        for f in self._dir.rglob("*"):
+            if f.is_file():
+                content = f.read_text(encoding="utf-8", errors="replace")
+                self.assertNotIn("+7 999 123-45-67", content, f"телефон найден в {f}")
+
+    def test_template_manager_purge_all_idempotent(self) -> None:
+        """TemplateManager.purge_all() идемпотентен и возвращает existed-флаг."""
+        tmgr = TemplateManager(data_dir=self._tmpdir)
+        tmgr.add_template(name="t", text="text", category="general")
+        self.assertTrue(tmgr.purge_all(), "первый purge_all → True (файл был)")
+        self.assertFalse(tmgr.purge_all(), "второй purge_all → False (файла нет)")
+
+    def test_event_replay_cleared_via_collaborator(self) -> None:
+        """GAP-3: event_replay усекается через clear() (файл + in-memory кольцо)."""
+        replay_path = self._dir / "event_replay.ndjson"
+        replay = EventReplayManager(persist_path=replay_path)
+        replay.record_event("stt.result", {"text": "СЕКРЕТНАЯ ТРАНСКРИПЦИЯ В RING"})
+        # файл содержит cleartext до purge
+        self.assertIn("СЕКРЕТНАЯ", replay_path.read_text(encoding="utf-8"))
+
+        store = FakeStore(data_dir=self._tmpdir)
+        svc = HistoryService(store=store)
+        svc._event_replay = replay
+        result = svc.handle_purge_all_data({"confirm": True})
+
+        self.assertTrue(result.get("ok"), result)
+        # файл усечён до пустого (дескриптор остаётся валидным)
+        self.assertEqual(replay_path.read_text(encoding="utf-8"), "", "event_replay.ndjson должен быть пуст")
+        # in-memory кольцо очищено
+        self.assertEqual(replay.get_events(), [])
+
+    def test_live_subs_buffer_reset_via_collaborator(self) -> None:
+        """GAP-3: live_subs in-memory PCM-буфер (сырой голос) сбрасывается через reset()."""
+        buf = _FakeBuffer()
+        self.assertTrue(buf._buffer, "буфер должен быть непуст до purge")
+
+        store = FakeStore(data_dir=self._tmpdir)
+        svc = HistoryService(store=store)
+        svc._live_subs_service = buf
+        result = svc.handle_purge_all_data({"confirm": True})
+
+        self.assertTrue(result.get("ok"), result)
+        self.assertEqual(buf._buffer, [], "PCM-буфер должен быть очищен")
+        self.assertEqual(buf._buffer_samples, 0)
+
+    def test_transcript_versions_unconditional_clear_removes_orphans(self) -> None:
+        """GAP-3: clear_all() БЕЗУСЛОВНО стирает версии, включая orphan (записи,
+        которых нет в active) — раньше cleanup_for_ids(active_ids) их оставлял."""
+        tvm = TranscriptVersionManager(data_dir=self._tmpdir)
+        # версия orphan-записи: её item_id НЕ будет в active store
+        tvm.save_version("orphan-deleted-long-ago", "ORPHAN ПРИВАТНЫЙ ТЕКСТ", source="manual")
+        # версия активной записи
+        tvm.save_version("active-1", "ACTIVE ПРИВАТНЫЙ ТЕКСТ", source="stt_raw")
+        versions_path = self._dir / "transcript_versions.ndjson"
+        self.assertTrue(tvm.get_versions("orphan-deleted-long-ago"))
+
+        store = FakeStore(data_dir=self._tmpdir)
+        store.add_item("active-1")  # только active-1 в истории; orphan отсутствует
+        svc = HistoryService(store=store)
+        svc._transcript_versions = tvm
+        result = svc.handle_purge_all_data({"confirm": True})
+
+        self.assertTrue(result.get("ok"), result)
+        # ОБЕ версии стёрты (включая orphan, который cleanup_for_ids бы пропустил)
+        self.assertEqual(tvm.get_versions("orphan-deleted-long-ago"), [], "orphan-версия должна быть стёрта")
+        self.assertEqual(tvm.get_versions("active-1"), [])
+        content = versions_path.read_text(encoding="utf-8") if versions_path.exists() else ""
+        self.assertNotIn("ORPHAN ПРИВАТНЫЙ ТЕКСТ", content, "orphan cleartext остался на диске")
+        self.assertNotIn("ACTIVE ПРИВАТНЫЙ ТЕКСТ", content)
+
+    def test_collaborator_clear_error_does_not_abort_purge(self) -> None:
+        """Ошибка clear-хука коллаборатора не прерывает purge истории."""
+
+        class ErrorReplay:
+            def clear(self) -> None:
+                raise PermissionError("нет прав")
+
+        store = FakeStore(data_dir=self._tmpdir)
+        store.add_item("item-x")
+        svc = HistoryService(store=store)
+        svc._event_replay = ErrorReplay()
+        result = svc.handle_purge_all_data({"confirm": True})
+        self.assertEqual(result["history_deleted"], 1)
+        self.assertFalse(result["complete"])
+        self.assertIn("event_replay", result["errors"])
+
+    def test_w1771_e2e_all_new_artifacts_gone(self) -> None:
+        """W1771 E2E: посеять report_*.html + templates.json + event_replay +
+        live_subs + transcript_versions, один purge — всё PII исчезло."""
+        d = self._dir
+        tdir = d / "transcripts"
+        tdir.mkdir(parents=True, exist_ok=True)
+        (tdir / "report_e2e.html").write_text("<html>E2E-HTML-СЕКРЕТ</html>", encoding="utf-8")
+        (tdir / "srt_e2e.srt").write_text("E2E-SRT-СЕКРЕТ", encoding="utf-8")
+
+        tmgr = TemplateManager(data_dir=self._tmpdir)
+        tmgr.add_template(name="sig", text="E2E-ШАБЛОН-СЕКРЕТ +7 000", category="email")
+
+        replay_path = d / "event_replay.ndjson"
+        replay = EventReplayManager(persist_path=replay_path)
+        replay.record_event("translation.result", {"text": "E2E-REPLAY-СЕКРЕТ"})
+
+        buf = _FakeBuffer()
+
+        tvm = TranscriptVersionManager(data_dir=self._tmpdir)
+        tvm.save_version("orphan-x", "E2E-VERSION-СЕКРЕТ", source="manual")
+
+        store = FakeStore(data_dir=self._tmpdir)
+        svc = HistoryService(store=store)
+        svc._template_manager = tmgr
+        svc._event_replay = replay
+        svc._live_subs_service = buf
+        svc._transcript_versions = tvm
+
+        result = svc.handle_purge_all_data({"confirm": True})
+        self.assertTrue(result.get("ok"), result)
+        self.assertTrue(result.get("complete"), f"purge должен быть полным: {result.get('errors')}")
+
+        # файлы исчезли
+        self.assertFalse((tdir / "report_e2e.html").exists(), "report_*.html должен быть удалён")
+        self.assertFalse((tdir / "srt_e2e.srt").exists(), "srt_*.srt должен быть удалён")
+        self.assertFalse((d / "templates.json").exists(), "templates.json должен быть удалён")
+        # event_replay усечён, in-memory очищено
+        self.assertEqual(replay_path.read_text(encoding="utf-8"), "")
+        self.assertEqual(replay.get_events(), [])
+        self.assertEqual(buf._buffer, [])
+        self.assertEqual(tvm.get_versions("orphan-x"), [])
+
+        # ни один E2E-секрет не остался на диске
+        secrets = [
+            "E2E-HTML-СЕКРЕТ", "E2E-SRT-СЕКРЕТ", "E2E-ШАБЛОН-СЕКРЕТ",
+            "E2E-REPLAY-СЕКРЕТ", "E2E-VERSION-СЕКРЕТ",
+        ]
+        for f in d.rglob("*"):
+            if f.is_file():
+                try:
+                    content = f.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                for token in secrets:
+                    self.assertNotIn(token, content, f"PII-секрет '{token}' найден в {f} после purge")
 
 
 if __name__ == "__main__":

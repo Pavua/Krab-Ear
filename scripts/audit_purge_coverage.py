@@ -94,8 +94,12 @@ PURGE_METHOD_NAMES: frozenset[str] = frozenset(
 )
 
 # File extensions that mark a persisted data artifact.
+# W1771 GAP-1b: html + srt added — export handlers write report_*.html / srt_*.srt
+# under transcripts/, the most PII-dense artefacts.  No plain-literal data-dir file
+# uses these extensions, so they only ever surface via the per-extension (f-string /
+# glob) sibling-extension detection — adding them here lets that path recognise them.
 PERSIST_EXTENSIONS: frozenset[str] = frozenset(
-    {"json", "ndjson", "txt", "npy", "key", "csv"}
+    {"json", "ndjson", "txt", "npy", "key", "csv", "html", "srt"}
 )
 
 # Filenames that the discovery scanner must never treat as a real store even if
@@ -362,6 +366,86 @@ def _resolve_rhs_name(node: ast.AST, consts: dict[str, str]) -> str | None:
     return None
 
 
+def _trailing_extension(node: ast.AST, consts: dict[str, str]) -> str | None:
+    """Return the persisted-file extension of a filename expression that is NOT
+    a plain literal/constant — i.e. an **f-string** such as
+    ``f"report_{ts}.html"`` or a concat ``"srt_" + id + ".srt"``.
+
+    W1771 GAP-1b (sibling-extension detection): export handlers build their
+    filenames dynamically (``transcripts_dir / f"report_{ts}.html"``), so the
+    literal-only resolver never sees them and the containing directory was
+    wrongly credited as fully covered off a single ``*.md`` sweep.  This helper
+    extracts just the trailing ``.ext`` from the dynamic name so the discovery
+    can record a per-extension store (``transcripts/*.html``) that the purge
+    must independently clear.
+
+    Returns the bare extension (``"html"``) when the expression ends in a string
+    literal carrying a ``.<persist-ext>`` suffix, else None.  A plain literal /
+    constant returns None on purpose (handled by ``_resolve_rhs_name``).
+    """
+    if _resolve_rhs_name(node, consts) is not None:
+        return None  # plain literal/const — not our job
+
+    tail: str | None = None
+    if isinstance(node, ast.JoinedStr):
+        # f-string: inspect the last formatted/literal part for a ".ext" tail.
+        for part in reversed(node.values):
+            lit = _const_str(part)
+            if lit:
+                tail = lit
+                break
+            # A FormattedValue at the very end (``f"{x}"``) has no static suffix.
+            break
+    elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        # "prefix_" + var + ".srt"  → walk down to the right-most literal.
+        right = node.right
+        tail = _const_str(right)
+
+    if not tail:
+        return None
+    ext_match = re.search(r"\.([a-z0-9]+)$", tail)
+    if ext_match is None:
+        return None
+    ext = ext_match.group(1)
+    if ext not in PERSIST_EXTENSIONS and ext not in {"md", "html"}:
+        return None
+    return ext
+
+
+def collect_fstring_ext_vars(scope: ast.AST, consts: dict[str, str]) -> dict[str, str]:
+    """Map local variable names to the persisted extension of the f-string /
+    concat they are assigned within ``scope``: ``filename = f"report_{ts}.html"``
+    → ``{"filename": "html"}``.
+
+    Export handlers split the write across two statements::
+
+        filename = f"report_{ts}.html"     # dynamic name → captured here
+        file_path = transcripts_dir / filename   # use site sees only ``filename``
+
+    so the inline ``_trailing_extension`` at the ``/`` use site misses it.  This
+    captures the extension by variable name.  **Scope matters**: the SAME local
+    name (``filename``) is reused across handlers for different extensions
+    (``.md`` / ``.srt`` / ``.html`` / ``.json``), so this MUST be called
+    per-function (not module-wide) or the first assignment would mask the rest.
+    """
+    ext_vars: dict[str, str] = {}
+    for node in ast.walk(scope):
+        target: ast.AST | None = None
+        value: ast.AST | None = None
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            value = node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            target = node.target
+            value = node.value
+        if not isinstance(target, ast.Name) or value is None:
+            continue
+        ext = _trailing_extension(value, consts)
+        if ext is not None:
+            ext_vars.setdefault(target.id, ext)
+    return ext_vars
+
+
 def _record_glob(
     found: dict[str, StoreRef],
     module: str,
@@ -410,6 +494,44 @@ def discover_stores_in_module(path: Path) -> list[StoreRef]:
             store_id = _qualify(subpath, name)
         found.setdefault(store_id, StoreRef(store_id, module, f"{rel}:{lineno}"))
 
+    def _record_ext_family(subpath: str, ext: str, lineno: int) -> None:
+        """Record a per-extension store ``<subdir>/*.ext`` for a directory that
+        receives dynamically-named files of extension ``ext`` (W1771 GAP-1b).
+
+        Modelled as a glob-family store id so coverage demands the purge sweep
+        that extension explicitly (or wipe the whole dir).  Dir-rooted files
+        (subpath == "") would collide with real top-level stores, so a bare
+        ``*.ext`` at data-dir root is skipped (no such PII pattern in this repo)."""
+        subpath = subpath.strip("/")
+        if not subpath:
+            return
+        store_id = f"{subpath}/*.{ext}"
+        found.setdefault(store_id, StoreRef(store_id, module, f"{rel}:{lineno}"))
+
+    # (a'') Per-function pre-pass for the two-statement dynamic-export pattern:
+    #   filename = f"report_{ts}.html"           (local, function-scoped)
+    #   file_path = transcripts_dir / filename   (dir-rooted use site)
+    # Resolved per-function because the SAME local name (``filename``) is reused
+    # across handlers for different extensions — a module-wide map would collapse
+    # them onto the first one seen.
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        fn_ext_vars = collect_fstring_ext_vars(fn, consts)
+        if not fn_ext_vars:
+            continue
+        for node in ast.walk(fn):
+            if not (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)):
+                continue
+            if not resolver.is_data_dir_rooted(node):
+                continue
+            if _resolve_rhs_name(node.right, consts) is not None:
+                continue  # plain literal/const handled in main loop below
+            rname = _name_of(node.right)
+            ext = fn_ext_vars.get(rname) if rname else None
+            if ext is not None:
+                _record_ext_family(resolver.base_subpath(node), ext, node.lineno)
+
     for node in ast.walk(tree):
         # (a) base_dir / "name"  OR  base_dir / _CONST  (base may be a subdir)
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
@@ -422,6 +544,13 @@ def discover_stores_in_module(path: Path) -> list[StoreRef]:
                         is_dir="." not in rhs,
                         subpath=resolver.base_subpath(node),
                     )
+                else:
+                    # (a') base_dir / f"prefix_{x}.ext"  (inline dynamic name).
+                    ext = _trailing_extension(node.right, consts)
+                    if ext is not None:
+                        _record_ext_family(
+                            resolver.base_subpath(node), ext, node.lineno
+                        )
 
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
             attr = node.func.attr
@@ -554,6 +683,80 @@ def _collect_removed_names_in_function(
     return removed
 
 
+def _dir_extension_coverage(
+    func: ast.FunctionDef, resolver: "_DataDirBaseResolver", consts: dict[str, str]
+) -> set[str]:
+    """W1771 GAP-1b: per-extension + wipe-all coverage for data-dir subdirectories.
+
+    A directory store (``transcripts/``) holds dynamically-named export files of
+    several extensions (``*.md``, ``*.html``, ``*.srt`` ...).  Merely *naming* the
+    directory inside the purge (``transcripts_dir = data_dir / "transcripts"``)
+    must NOT credit every extension as cleared — only the extensions the purge
+    actually sweeps are covered.  This returns, for each data-dir-rooted dir the
+    purge touches:
+
+      - ``<subdir>/*.ext``  for each explicit ``<dir>.glob("*.ext")`` sweep, and
+      - ``<subdir>/*``       (a wipe-all marker) when the purge removes the dir
+        wholesale — ``shutil.rmtree(<dir>)`` or a full ``<dir>.iterdir()`` /
+        ``<dir>.glob("*")`` enumeration that unlinks every entry.
+
+    ``_is_covered`` then credits a discovered ``<subdir>/*.ext`` store iff that
+    exact extension is swept, or the dir carries the ``<subdir>/*`` wipe-all mark.
+    """
+    covered: set[str] = set()
+
+    def _subpath_of(node: ast.AST) -> str | None:
+        """Subpath under data_dir for a dir expression / dir local-var name."""
+        name = _name_of(node)
+        if name is not None and name in resolver._dir_roots:
+            return resolver.attr_subpath(name)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            if resolver.is_data_dir_rooted(node):
+                rhs = _resolve_rhs_name(node.right, consts)
+                base_sub = resolver.base_subpath(node)
+                if rhs is not None and "." not in rhs:
+                    seg = rhs.rstrip("/")
+                    return f"{base_sub}/{seg}".strip("/") if base_sub else seg
+                return base_sub
+        return None
+
+    for node in ast.walk(func):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        attr = node.func.attr
+        recv = node.func.value
+
+        # <dir>.glob("...") — per-extension sweep OR wipe-all ("*").
+        if attr == "glob" and node.args:
+            pattern = _const_str(node.args[0])
+            if pattern is None:
+                continue
+            sub = _subpath_of(recv)
+            if not sub:
+                continue
+            if pattern == "*":
+                covered.add(f"{sub}/*")
+            else:
+                m = re.search(r"\*\.([a-z0-9]+)$", pattern)
+                if m:
+                    covered.add(f"{sub}/*.{m.group(1)}")
+
+        # <dir>.iterdir() — full enumeration ⇒ every entry removed (wipe-all).
+        elif attr == "iterdir":
+            sub = _subpath_of(recv)
+            if sub:
+                covered.add(f"{sub}/*")
+
+        # shutil.rmtree(<dir>) — directory removed wholesale (wipe-all).
+        elif attr == "rmtree":
+            for arg in node.args:
+                sub = _subpath_of(arg)
+                if sub:
+                    covered.add(f"{sub}/*")
+
+    return covered
+
+
 # --- collaborator resolution: attr -> module_stem --------------------------
 def _build_service_collaborator_map() -> dict[str, str]:
     """Parse ``service.py`` and return ``{collaborator_attr: module_stem}``.
@@ -638,8 +841,14 @@ def _save_method_targets(
     A "clear-then-save" purge (e.g. ``recording_chain.delete_all_chains`` resets
     ``self._data = {...}`` then calls ``self._save()``) empties the on-disk store
     without ever naming the file inside the purge method itself.  We detect the
-    file by parsing the save method for the path attribute it writes via
-    ``X.replace(self._path)`` / ``open(self._path, "w")`` / ``self._path.write_text``.
+    file by parsing the save method for the path attribute it writes via:
+      - ``tmp.replace(self._path)``        (Path.replace — dest is ``args[0]``)
+      - ``os.replace(tmp, self._path)``    (os.replace — dest is ``args[1]``;
+        W1771 GAP-3: ``transcript_versioning._rewrite_all`` uses exactly this, so
+        ``clear_all`` left ``transcript_versions.ndjson`` looking uncovered)
+      - ``open(self._path, "w")`` / ``self._path.write_text(...)``
+    To stay robust to either ``replace`` form, ALL of {receiver, args} are
+    considered and whichever resolves to a known store attr is credited.
     """
     targets: dict[str, str] = {}
     for node in ast.walk(tree):
@@ -648,21 +857,24 @@ def _save_method_targets(
         if not re.match(r"_(save|persist|write|flush|rewrite|dump)", node.name):
             continue
         for sub in ast.walk(node):
-            attr = None
-            if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute):
-                if sub.func.attr in {"replace", "write_text", "write_bytes"}:
-                    # X.replace(self._path) -> arg is the store path
-                    # self._path.write_text(...) -> receiver is the store path
-                    cand = (
-                        sub.args[0]
-                        if sub.func.attr == "replace" and sub.args
-                        else sub.func.value
-                    )
-                    attr = _name_of(cand)
-                elif sub.func.attr == "open" and sub.args:
-                    attr = _name_of(sub.func.value)
-            if attr in module_attrs:
-                targets.setdefault(node.name, _canonicalize(module_attrs[attr]))
+            if not (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)):
+                continue
+            cands: list[ast.AST] = []
+            if sub.func.attr == "replace":
+                # Path.replace(dest): receiver=tmp, dest=args[0].
+                # os.replace(src, dest): dest=args[1].  Consider every operand and
+                # credit whichever names a known store path attribute.
+                cands.extend(sub.args)
+                cands.append(sub.func.value)
+            elif sub.func.attr in {"write_text", "write_bytes"}:
+                cands.append(sub.func.value)  # self._path.write_text(...)
+            elif sub.func.attr == "open" and sub.args:
+                cands.append(sub.func.value)  # self._path.open("w")
+            for cand in cands:
+                attr = _name_of(cand)
+                if attr in module_attrs:
+                    targets.setdefault(node.name, _canonicalize(module_attrs[attr]))
+                    break
     return targets
 
 
@@ -730,6 +942,11 @@ def extract_purge_coverage() -> set[str]:
     # (a) direct file/dir operations inside handle_purge_all_data itself.
     covered |= _collect_removed_names_in_function(purge_fn, hs_consts, hs_attrs)
 
+    # (a') W1771 GAP-1b: per-extension + wipe-all coverage for data-dir subdirs
+    # (e.g. transcripts/*.html swept explicitly, or shares/ rmtree'd wholesale).
+    hs_resolver = _DataDirBaseResolver(hs_tree, hs_consts)
+    covered |= _dir_extension_coverage(purge_fn, hs_resolver, hs_consts)
+
     # (b) collaborator purge calls -> parse each collaborator's purge methods.
     attr_to_module = _build_service_collaborator_map()
     for attr in _collaborator_purge_calls(purge_fn):
@@ -743,7 +960,9 @@ def extract_purge_coverage() -> set[str]:
     # (c) state_store compaction (history.ndjson + sidecar journals).
     covered |= _state_store_compaction_coverage()
 
-    return {_canonicalize(c) for c in covered}
+    # Canonicalise filename ids (strip .tmp) but preserve the ``*.ext`` / ``*``
+    # extension-family markers verbatim (they carry no temp suffix).
+    return {c if c.endswith("*") or "/*." in c else _canonicalize(c) for c in covered}
 
 
 # ---------------------------------------------------------------------------
@@ -775,6 +994,13 @@ def _is_covered(
 ) -> bool:
     """A discovered store is covered if any of the following hold:
 
+      0. **W1771 sibling-extension rule (checked first for ``<subdir>/*.ext``):**
+         a per-extension family store is covered ONLY by an explicit extension
+         sweep (``<subdir>/*.ext`` in pool) or a confirmed whole-dir wipe
+         (``<subdir>/*`` in pool — rmtree / full iterdir).  It is deliberately
+         NOT credited by the generic directory-prefix rule (3): merely *naming*
+         ``transcripts/`` while sweeping only ``*.md`` must leave ``*.html`` etc.
+         visible as a gap.  Allowlisting a ``<subdir>/*.ext`` id still works.
       1. Exact id match in covered/allowlist (``archive.ndjson``).
       2. Basename match — a collaborator that clears ``archive.ndjson`` clears it
          regardless of the subdir it lives in, so ``archive/archive.ndjson`` is
@@ -786,6 +1012,14 @@ def _is_covered(
          content ``archive/archive.ndjson`` is cleared by ``clear_all``).
     """
     pool = covered | allowlisted
+    # (0) sibling-extension family store ``<subdir>/*.ext``.
+    if "/*." in store_id:
+        if store_id in pool:
+            return True
+        subdir = store_id.rsplit("/", 1)[0]
+        if f"{subdir}/*" in pool:  # whole-dir wipe covers every extension
+            return True
+        return False
     if store_id in pool:
         return True
     bn = _basename(store_id)
