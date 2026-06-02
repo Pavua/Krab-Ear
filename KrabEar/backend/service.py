@@ -848,6 +848,9 @@ class BackendService:
             last_stt_engine_ref=self._last_stt_engine_ref,
             auto_deduplicator=self._auto_deduplicator,
         )
+        # W1776: late-inject _bookmarks so phase_e can rebind live-recording bookmarks.
+        # _bookmarks is created earlier in __init__ (line ~396).
+        self._recording_core_svc._bookmarks = self._bookmarks
         self._calendar_linker = CalendarLinker(
             cache_minutes=int(settings.CALENDAR_LINK_CACHE_MIN)
         )

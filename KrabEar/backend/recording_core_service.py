@@ -93,6 +93,10 @@ class RecordingCoreService:
         # Wired by BackendService after init (same pattern as llm_rewriter._error_bus).
         self._error_bus: Any = None
 
+        # W1776: late-inject BookmarkManager so phase_e can rebind live-recording
+        # bookmarks from the temp session_tracker UUID to the final HistoryItem id.
+        self._bookmarks: Any = None
+
         # Serializes history persistence in phase_e to prevent double-write races
         self._persist_lock = threading.Lock()
 
@@ -292,6 +296,7 @@ class RecordingCoreService:
         duration_sec = phase_a["duration_sec"]
         stop_tail_trim_ms = phase_a["stop_tail_trim_ms"]
         _rt_session_id = phase_a["rt_session_id"]
+        _bookmark_session_id = phase_a["bookmark_session_id"]
         sr = phase_a["sr"]
 
         # Phase B: audio quality guards (silence + background)
@@ -331,6 +336,7 @@ class RecordingCoreService:
             silence_guard_enabled=sr["silence_guard_enabled"],
             background_guard_rejected=background_guard_rejected,
             rt_session_id=_rt_session_id,
+            bookmark_session_id=_bookmark_session_id,
             settings=settings,
         )
 
@@ -850,6 +856,16 @@ class RecordingCoreService:
         """Stop preview worker, stop realtime partial, stop recorder."""
         self._stop_preview_worker()
         rt_session_id = self._rt_session_id
+
+        # W1776: capture bookmark_session_id (the session_tracker UUID that the Swift
+        # client reads via get_recording_state and passes to add_bookmark) BEFORE the
+        # recorder stops — _active_session is still valid here; end_session() will clear
+        # it later in phase_e.  Falls back to "__live__" when no active session exists
+        # (e.g. privacy_mode or testing without session_tracker.start_session).
+        _active = getattr(self._session_tracker, "_active_session", None)
+        bookmark_session_id: str = (
+            (_active.get("session_id") or "__live__") if _active else "__live__"
+        )
         if self._rt_partial is not None:
             try:
                 self._rt_partial.stop()
@@ -928,6 +944,7 @@ class RecordingCoreService:
             "duration_sec": duration_sec,
             "stop_tail_trim_ms": stop_tail_trim_ms,
             "rt_session_id": rt_session_id,
+            "bookmark_session_id": bookmark_session_id,
             "sr": sr,
         }
 
@@ -1264,6 +1281,7 @@ class RecordingCoreService:
         background_guard_rejected: bool,
         rt_session_id: str | None,
         settings: dict[str, Any],
+        bookmark_session_id: str | None = None,
     ) -> dict[str, Any]:
         """Persist history item, update side-caches, build final result dict."""
         text = phase_d["text"]
@@ -1393,6 +1411,23 @@ class RecordingCoreService:
                     self._auto_glossary.invalidate()
                 except Exception as _ag_exc:
                     logger.warning("auto_glossary invalidate error after recording persist: %s", _ag_exc)
+
+            # W1776: rebind live-recording bookmarks from the temp session_tracker UUID
+            # (used during recording) to the final HistoryItem id.  update_session_id is
+            # a no-op when bookmark_session_id is None/empty or no matching bookmarks exist.
+            if self._bookmarks is not None and bookmark_session_id:
+                try:
+                    _rebind_count = self._bookmarks.update_session_id(
+                        bookmark_session_id, item.id
+                    )
+                    if _rebind_count:
+                        logger.info(
+                            "W1776: %d bookmark(s) rebound %s → %s",
+                            _rebind_count, bookmark_session_id, item.id,
+                        )
+                except Exception as _bm_exc:
+                    logger.warning("W1776: bookmark rebind error: %s", _bm_exc)
+
         self._clipboard_history.append({
             "text": final_text,
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
