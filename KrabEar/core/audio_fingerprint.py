@@ -37,7 +37,7 @@ class AudioFingerprinter:
 
     # ── Публичный API ────────────────────────────────────────────────────────
 
-    def fingerprint(self, audio: np.ndarray, sample_rate: int) -> str:
+    def fingerprint(self, audio: np.ndarray, sample_rate: int) -> str | None:
         """Генерирует компактный SHA-256 хеш из аудио-признаков.
 
         Args:
@@ -47,13 +47,17 @@ class AudioFingerprinter:
                          спектральных частот).
 
         Returns:
-            Строка SHA-256 hex-дайджеста длиной 64 символа.
+            Строка SHA-256 hex-дайджеста длиной 64 символа, или None если аудио
+            содержит NaN/Inf значения (не поддаётся надёжному фингерпринтингу,
+            не должно быть засчитано как дубликат).
         """
         mono = self._to_mono_float32(audio)
+        if mono is None:
+            return None
         features = self._extract_features(mono, sample_rate)
         return self._hash_features(features)
 
-    def equals(self, fp1: str, fp2: str) -> bool:
+    def equals(self, fp1: str | None, fp2: str | None) -> bool:
         """Проверяет точное совпадение двух фингерпринтов.
 
         SHA-256 — криптографический хеш. Лавинный эффект делает расстояние
@@ -124,8 +128,14 @@ class AudioFingerprinter:
     # ── Внутренние методы ────────────────────────────────────────────────────
 
     @staticmethod
-    def _to_mono_float32(audio: np.ndarray) -> np.ndarray:
-        """Приводит аудио к форме (N,) float32 с нормализацией амплитуды."""
+    def _to_mono_float32(audio: np.ndarray) -> np.ndarray | None:
+        """Приводит аудио к форме (N,) float32 с нормализацией амплитуды.
+
+        Returns:
+            Нормализованный массив float32 или None если аудио содержит
+            NaN/Inf значения (вызывающий должен вернуть None fingerprint,
+            чтобы не допустить ложных совпадений дубликатов).
+        """
         arr = np.asarray(audio, dtype=np.float32)
         if arr.ndim == 0:
             return np.zeros(1, dtype=np.float32)
@@ -138,6 +148,17 @@ class AudioFingerprinter:
         elif arr.ndim > 2:
             arr = arr.reshape(-1)
 
+        # Пустой массив после reshape — возвращаем безопасный дефолт (1 тихий сэмпл).
+        # np.max на массиве нулевой длины бросает ValueError — защищаем здесь.
+        if arr.size == 0:
+            return np.zeros(1, dtype=np.float32)
+
+        # Проверка на NaN/Inf ДО нормализации — такие данные нельзя надёжно
+        # хешировать (любые NaN-данные дают те же признаки, что и тишина,
+        # что ведёт к ложным дубликатам).
+        if not np.all(np.isfinite(arr)):
+            return None
+
         # Нормализация по максимальной амплитуде для инвариантности к громкости
         peak = np.max(np.abs(arr))
         if peak > 1e-7:
@@ -149,6 +170,11 @@ class AudioFingerprinter:
 
         Возвращает список из 4 float-значений.
         """
+        # sample_rate=0 вызывает ZeroDivisionError в rfftfreq(d=1.0/sr).
+        # Используем max(sr, 1) чтобы получить безопасный (хотя неточный)
+        # результат вместо краша; при sr=0 все частоты будут 0 Гц.
+        safe_sr = max(int(sample_rate), 1)
+
         n = len(mono)
         if n < self._window_size:
             # Дополняем нулями, чтобы иметь хотя бы один фрейм
@@ -159,7 +185,7 @@ class AudioFingerprinter:
         spectral_centroids: list[float] = []
         zcr_values: list[float] = []
 
-        freqs = np.fft.rfftfreq(self._window_size, d=1.0 / sample_rate)
+        freqs = np.fft.rfftfreq(self._window_size, d=1.0 / safe_sr)
 
         for i in range(num_frames):
             frame = mono[i * self._window_size: (i + 1) * self._window_size]
