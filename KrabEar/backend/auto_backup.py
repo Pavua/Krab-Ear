@@ -7,13 +7,14 @@ AutoBackupManager выполняет резервное копирование �
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import shutil
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, ContextManager
 
 from backend.settings_backup import SENSITIVE_FIELDS as _SENSITIVE_FIELDS
 
@@ -109,6 +110,25 @@ class AutoBackupManager:
                 logger.warning("Не удалось удалить авто-бэкап %s: %s", d, exc)
         return len(to_delete)
 
+    def _store_lock(self) -> ContextManager[Any]:
+        """Возвращает контекст-менеджер file-lock'а StateStore.
+
+        W1768: снимок истории обязан быть атомарным относительно append-ов и
+        компактирования — берём тот же fcntl.flock, что сериализует все записи
+        истории (StateStore._lock). У реального StateStore это всегда вызываемый
+        @contextmanager-метод. Если же store._lock не вызываемый (например,
+        облегчённый тестовый фейк без настоящего lock) — деградируем к нулевому
+        контексту, чтобы не падать; в проде эта ветка недостижима.
+        """
+        lock_factory = getattr(self.store, "_lock", None)
+        if callable(lock_factory):
+            return lock_factory()
+        logger.debug(
+            "auto_backup: store._lock недоступен/не вызываем — снимок без file-lock "
+            "(ожидаемо только в тестах с фейковым store)"
+        )
+        return contextlib.nullcontext()
+
     def _do_backup(self) -> dict:
         """Выполняет резервное копирование и возвращает метаданные."""
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -124,30 +144,42 @@ class AutoBackupManager:
 
         total_bytes = 0
         copied_files = []
-        for src in plain_files:
-            if Path(src).exists():
-                dst = backup_dir / Path(src).name
-                shutil.copy2(src, dst)
+        # W1768: снимок истории должен быть АТОМАРНЫМ относительно append-ов и
+        # компактирования. StateStore сериализует ВСЕ записи истории через
+        # fcntl-flock (state_store._lock). Без удержания этого lock компактирование,
+        # попавшее МЕЖДУ copy2() отдельных файлов, спарит pre-compact history.ndjson
+        # с post-compact tombstones (или наоборот) → при восстановлении воскресшие
+        # либо потерянные записи (integrity/privacy-регрессия).
+        # ВАЖНО: flock НЕ реентрантен (каждый _lock() открывает свой fd →
+        # повторный LOCK_EX из того же процесса заблокируется навсегда). Поэтому
+        # внутри блока — только plain shutil.copy2 / чтение settings.json: никаких
+        # методов store, которые сами берут lock (count_active_items и т.п.).
+        with self._store_lock():
+            for src in plain_files:
+                if Path(src).exists():
+                    dst = backup_dir / Path(src).name
+                    shutil.copy2(src, dst)
+                    total_bytes += dst.stat().st_size
+                    copied_files.append(Path(src).name)
+
+            # settings.json — редактируем чувствительные поля перед записью (W897 AB-2).
+            settings_src = Path(self.store.settings_path)
+            if settings_src.exists():
+                try:
+                    raw = json.loads(settings_src.read_text(encoding="utf-8"))
+                    if isinstance(raw, dict):
+                        safe = {k: v for k, v in raw.items() if k not in _SENSITIVE_FIELDS}
+                    else:
+                        safe = raw  # неожиданный формат — копируем как есть
+                except Exception as exc:
+                    logger.warning("auto_backup: не удалось прочитать settings.json для редакции: %s", exc)
+                    safe = {}
+                dst = backup_dir / settings_src.name
+                dst.write_text(json.dumps(safe, ensure_ascii=False, indent=2), encoding="utf-8")
                 total_bytes += dst.stat().st_size
-                copied_files.append(Path(src).name)
+                copied_files.append(settings_src.name)
 
-        # settings.json — редактируем чувствительные поля перед записью (W897 AB-2).
-        settings_src = Path(self.store.settings_path)
-        if settings_src.exists():
-            try:
-                raw = json.loads(settings_src.read_text(encoding="utf-8"))
-                if isinstance(raw, dict):
-                    safe = {k: v for k, v in raw.items() if k not in _SENSITIVE_FIELDS}
-                else:
-                    safe = raw  # неожиданный формат — копируем как есть
-            except Exception as exc:
-                logger.warning("auto_backup: не удалось прочитать settings.json для редакции: %s", exc)
-                safe = {}
-            dst = backup_dir / settings_src.name
-            dst.write_text(json.dumps(safe, ensure_ascii=False, indent=2), encoding="utf-8")
-            total_bytes += dst.stat().st_size
-            copied_files.append(settings_src.name)
-
+        # count_active_items() сам берёт store._lock — поэтому ТОЛЬКО вне блока выше.
         entries = 0
         try:
             entries = self.store.count_active_items()
