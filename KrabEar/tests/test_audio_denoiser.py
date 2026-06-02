@@ -737,5 +737,329 @@ class TestW1718IntDtypeGuard(unittest.TestCase):
         np.testing.assert_array_equal(audio, result)
 
 
+# ---------------------------------------------------------------------------
+# W1769 — F1: короткий noise clip (< _N_FFT) не должен крашить STFT
+#          F2: длинное аудио обрабатывается окнами с ограниченным peak memory
+# ---------------------------------------------------------------------------
+
+from core.audio_denoiser import (  # noqa: E402
+    _pad_noise_clip,
+    _N_FFT,
+    _RMS_FRAME_SIZE,
+    _MAX_DENOISE_WINDOW_SEC,
+    _DENOISE_OVERLAP_SEC,
+)
+
+
+def _make_short_clip_audio() -> np.ndarray:
+    """Аудио, которое ПРОХОДИТ guard len>=_N_FFT*2, но даёт noise_clip < _N_FFT.
+
+    Большая часть сигнала громкая, а первые 2 фрейма (≈320 сэмплов) почти тихие —
+    они и попадут в 10-й перцентиль RMS как noise reference. Конкатенация этих
+    немногих тихих фреймов короче _N_FFT (512), что раньше крашило stft.
+    """
+    rng = np.random.default_rng(0)
+    n = 1500  # > _N_FFT * 2 == 1024 → проходит guard
+    audio = (rng.standard_normal(n) * 0.3).astype(np.float64)
+    audio[: 2 * _RMS_FRAME_SIZE] *= 0.001  # 2 почти-тихих фрейма
+    return audio.astype(np.float32)
+
+
+class TestW1769ShortNoiseClipNoCrash(unittest.TestCase):
+    """W1769 F1: короткий noise clip (< _N_FFT) не должен бросать ValueError.
+
+    Регрессия: scipy.signal.stft с nperseg=_N_FFT на входе короче _N_FFT
+    авто-урезает nperseg до длины входа, но noverlap=_N_FFT-_HOP остаётся
+    прежним → 'noverlap must be less than nperseg'. Это краш в дефолтном
+    production-бэкенде (spectral gating, noisereduce обычно отсутствует).
+    """
+
+    def setUp(self) -> None:
+        self.denoiser = AudioDenoiser()
+
+    def test_old_code_would_raise_on_short_clip_stft(self) -> None:
+        """FAIL-BEFORE проверка: «сырой» stft на коротком клипе действительно крашит.
+
+        Документирует исходную причину сбоя — то, что фикс предотвращает.
+        Прямой вызов scipy воспроизводит ValueError, который раньше всплывал
+        наружу из _denoise_spectral_gating.
+        """
+        try:
+            from scipy.signal import stft  # type: ignore
+        except ImportError:
+            self.skipTest("scipy не установлен")
+
+        short_clip = np.random.default_rng(0).standard_normal(160).astype(np.float64)
+        self.assertLess(len(short_clip), _N_FFT)
+        with self.assertRaises(ValueError):
+            # Это ИМЕННО то, что делал старый код (без _pad_noise_clip).
+            stft(short_clip, fs=_SR, nperseg=_N_FFT, noverlap=_N_FFT - (_N_FFT // 4))
+
+    def test_denoise_short_noise_clip_does_not_raise(self) -> None:
+        """PASS-AFTER: denoise() с аудио, дающим короткий noise_clip, не крашит."""
+        audio = _make_short_clip_audio()
+        # До фикса здесь поднимался ValueError. После — обычный результат.
+        result = self.denoiser.denoise(audio, _SR, strength="moderate")
+        self.assertEqual(result.shape, audio.shape)
+        self.assertTrue(np.all(np.isfinite(result)),
+                        "результат содержит NaN/inf после деноизинга короткого клипа")
+
+    def test_denoise_short_noise_clip_all_strengths(self) -> None:
+        """Все уровни силы переживают короткий noise clip без исключений."""
+        audio = _make_short_clip_audio()
+        for strength in ("light", "moderate", "strong"):
+            with self.subTest(strength=strength):
+                result = self.denoiser.denoise(audio, _SR, strength=strength)  # type: ignore[arg-type]
+                self.assertEqual(result.shape, audio.shape)
+                self.assertTrue(np.all(np.isfinite(result)))
+
+    def test_spectral_gating_direct_short_clip_via_pad(self) -> None:
+        """_denoise_spectral_gating напрямую не крашит, когда noise_clip < _N_FFT.
+
+        Строим сигнал так, что _percentile_noise_clip вернёт < _N_FFT сэмплов,
+        и проверяем, что бэкенд (через _pad_noise_clip) проходит без ValueError.
+        """
+        try:
+            import scipy.signal  # noqa: F401  # type: ignore
+        except ImportError:
+            self.skipTest("scipy не установлен")
+
+        from core.audio_denoiser import _STRENGTH_PARAMS, _percentile_noise_clip
+        audio = _make_short_clip_audio().astype(np.float64)
+        clip = _percentile_noise_clip(audio)
+        self.assertIsNotNone(clip)
+        self.assertLess(len(clip), _N_FFT,
+                        "тест-фикстура должна давать noise_clip короче _N_FFT")
+        # Не должно бросать — раньше падало на stft(noise_clip, ...)
+        out = AudioDenoiser._denoise_spectral_gating(
+            audio, _SR, _STRENGTH_PARAMS["moderate"], "moderate"
+        )
+        self.assertEqual(len(out), len(audio))
+        self.assertTrue(np.all(np.isfinite(out)))
+
+
+class TestW1769PadNoiseClip(unittest.TestCase):
+    """W1769 F1: _pad_noise_clip дополняет короткий клип до ≥ _N_FFT."""
+
+    def test_pad_short_clip_to_n_fft(self) -> None:
+        """Клип короче _N_FFT расширяется минимум до _N_FFT."""
+        clip = np.random.default_rng(1).standard_normal(160).astype(np.float64)
+        padded = _pad_noise_clip(clip)
+        self.assertGreaterEqual(len(padded), _N_FFT)
+        self.assertTrue(np.all(np.isfinite(padded)))
+
+    def test_pad_preserves_long_clip(self) -> None:
+        """Клип уже ≥ _N_FFT возвращается без изменений (тот же объект)."""
+        clip = np.random.default_rng(2).standard_normal(1000).astype(np.float64)
+        padded = _pad_noise_clip(clip)
+        self.assertIs(padded, clip)
+
+    def test_pad_edge_lengths(self) -> None:
+        """Вырожденные длины (0, 1, 2) обрабатываются без исключений."""
+        for ln in (0, 1, 2, 3):
+            with self.subTest(length=ln):
+                clip = (np.random.default_rng(ln).standard_normal(ln).astype(np.float64)
+                        if ln > 0 else np.array([], dtype=np.float64))
+                padded = _pad_noise_clip(clip)
+                self.assertGreaterEqual(len(padded), _N_FFT)
+                self.assertTrue(np.all(np.isfinite(padded)))
+
+    def test_pad_exactly_n_fft_unchanged(self) -> None:
+        """Клип длиной ровно _N_FFT не дополняется."""
+        clip = np.ones(_N_FFT, dtype=np.float64)
+        padded = _pad_noise_clip(clip)
+        self.assertEqual(len(padded), _N_FFT)
+
+
+class TestW1769LongAudioWindowing(unittest.TestCase):
+    """W1769 F2: длинное аудио обрабатывается окнами с ограниченным peak memory."""
+
+    def setUp(self) -> None:
+        self.denoiser = AudioDenoiser()
+
+    def test_long_audio_completes_and_length_matches(self) -> None:
+        """≈10-минутное аудио (> окна) обрабатывается, длина выхода = длине входа."""
+        sr = _SR
+        n = sr * 60 * 10  # 10 минут
+        t = np.linspace(0, 60 * 10, n, endpoint=False)
+        rng = np.random.default_rng(3)
+        audio = (0.3 * np.sin(2 * np.pi * 300.0 * t)
+                 + 0.05 * rng.standard_normal(n)).astype(np.float32)
+
+        result = self.denoiser.denoise(audio, sr, strength="moderate")
+
+        self.assertEqual(len(result), n,
+                         "длина выхода должна точно совпадать с длиной входа")
+        self.assertEqual(result.dtype, np.float32)
+        self.assertTrue(np.all(np.isfinite(result)),
+                        "оконная обработка не должна давать NaN/inf")
+
+    def test_long_audio_processed_via_windows_not_full_stft(self) -> None:
+        """Длинное аудио идёт через _denoise_windowed (а не один полный STFT).
+
+        Мокаем _denoise_windowed и проверяем, что для аудио длиннее окна
+        вызывается именно оконный путь.
+        """
+        from unittest import mock
+
+        sr = _SR
+        window_samples = int(_MAX_DENOISE_WINDOW_SEC * sr)
+        n = window_samples + sr * 5  # гарантированно длиннее окна
+        audio = (np.random.default_rng(4).standard_normal(n) * 0.1).astype(np.float32)
+
+        with mock.patch.object(
+            self.denoiser, "_denoise_windowed",
+            wraps=self.denoiser._denoise_windowed,
+        ) as spy:
+            self.denoiser.denoise(audio, sr, strength="moderate")
+            self.assertTrue(spy.called,
+                            "_denoise_windowed должен вызываться для аудио длиннее окна")
+
+    def test_short_audio_uses_direct_path_not_windowed(self) -> None:
+        """Аудио ≤ окна НЕ должно идти через оконный путь (overhead не нужен)."""
+        from unittest import mock
+
+        sr = _SR
+        audio = _make_noisy_audio(duration_sec=2.0, snr_target_db=5.0)  # << окна
+        with mock.patch.object(self.denoiser, "_denoise_windowed") as spy:
+            self.denoiser.denoise(audio, sr, strength="moderate")
+            self.assertFalse(spy.called,
+                             "короткое аудио не должно вызывать _denoise_windowed")
+
+    def test_windowed_peak_memory_bounded_vs_full_stft(self) -> None:
+        """Оконный peak memory существенно ниже полного STFT того же сигнала.
+
+        Сравниваем tracemalloc-пик _denoise_windowed против полного
+        _denoise_spectral_gating на одном входе. Окно фиксированного размера
+        → пик не растёт квадратично с длительностью.
+        """
+        try:
+            import scipy.signal  # noqa: F401  # type: ignore
+        except ImportError:
+            self.skipTest("scipy не установлен")
+
+        import tracemalloc
+        from core.audio_denoiser import _STRENGTH_PARAMS
+
+        sr = _SR
+        n = sr * 60 * 8  # 8 минут — достаточно, чтобы полный STFT был дорогим
+        t = np.linspace(0, 60 * 8, n, endpoint=False)
+        mono = (0.3 * np.sin(2 * np.pi * 300.0 * t)
+                + 0.05 * np.random.default_rng(5).standard_normal(n)).astype(np.float64)
+        params = _STRENGTH_PARAMS["moderate"]
+
+        tracemalloc.start()
+        _ = self.denoiser._denoise_spectral_gating(mono, sr, params, "moderate")
+        _, peak_full = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+
+        tracemalloc.start()
+        out = self.denoiser._denoise_windowed(
+            mono, sr, params, "moderate", None,
+            window_samples=int(_MAX_DENOISE_WINDOW_SEC * sr),
+        )
+        _, peak_win = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+
+        self.assertEqual(len(out), n)
+        # Оконный пик должен быть заметно меньше полного STFT (ожидаем ≥40% экономии).
+        self.assertLess(
+            peak_win, peak_full * 0.6,
+            f"оконный peak {peak_win/1e6:.0f} MB не ниже 60% полного "
+            f"{peak_full/1e6:.0f} MB — bounded-memory регрессия",
+        )
+
+    def test_windowed_output_seam_free_on_clean_tone(self) -> None:
+        """Чистый тон через несколько окон не имеет шва на стыке.
+
+        Линейный кросс-фейд даёт partition-of-unity (веса = 1.0), поэтому
+        sample-to-sample разница не должна иметь резких всплесков на границах
+        окон. Проверяем, что max |diff| соответствует гладкому синусу.
+        """
+        sr = _SR
+        dur = 150.0  # 2.5 мин → 3 окна по 60 с
+        t = np.linspace(0, dur, int(sr * dur), endpoint=False)
+        tone = (0.3 * np.sin(2 * np.pi * 440.0 * t)).astype(np.float32)
+
+        result = self.denoiser.denoise(tone, sr, strength="moderate")
+
+        diffs = np.abs(np.diff(result.astype(np.float64)))
+        # Теоретический шаг чистого синуса 440 Гц при 16 кГц ≈ 0.052.
+        # Шов дал бы скачок в разы больше — допускаем щедрый запас 0.2.
+        self.assertLess(
+            float(diffs.max()), 0.2,
+            "обнаружен резкий скачок на стыке окон (шов overlap-add)",
+        )
+        self.assertTrue(np.all(np.isfinite(result)))
+
+    def test_overlap_constant_sane(self) -> None:
+        """Константы окна согласованы: перекрытие меньше окна."""
+        self.assertGreater(_MAX_DENOISE_WINDOW_SEC, _DENOISE_OVERLAP_SEC)
+        self.assertGreater(_DENOISE_OVERLAP_SEC, 0.0)
+
+
+class TestW1769QualityPreservedNormalClip(unittest.TestCase):
+    """W1769: нормальный 5–10 с клип деноизится идентично прямому бэкенду.
+
+    Аудио короче окна не должно затрагиваться оконной логикой — результат
+    обязан быть бит-в-бит равен прежнему прямому пути.
+    """
+
+    def setUp(self) -> None:
+        self.denoiser = AudioDenoiser()
+
+    def _direct_backend_reference(
+        self, audio: np.ndarray, strength: str
+    ) -> np.ndarray:
+        """Воспроизводит внутренний прямой путь denoise() для сравнения."""
+        from core.audio_denoiser import _STRENGTH_PARAMS, _NOISEREDUCE_PARAMS
+        mono = audio.astype(np.float64)
+        params = _STRENGTH_PARAMS.get(strength, _STRENGTH_PARAMS["moderate"])
+        nr_params = _NOISEREDUCE_PARAMS.get(strength)
+        out = self.denoiser._apply_backend(mono, _SR, params, strength, nr_params)
+        out = np.clip(out, -1.0, 1.0)
+        return out.astype(audio.dtype)
+
+    def test_normal_clip_identical_to_direct_backend(self) -> None:
+        """5 с клип: публичный denoise() == прямой бэкенд (квалити не изменилось)."""
+        rng = np.random.default_rng(6)
+        t = np.linspace(0, 5.0, _SR * 5, endpoint=False)
+        clip = np.clip(
+            0.4 * np.sin(2 * np.pi * 440.0 * t) + 0.1 * rng.standard_normal(_SR * 5),
+            -1.0, 1.0,
+        ).astype(np.float32)
+
+        public = self.denoiser.denoise(clip, _SR, strength="moderate")
+        direct = self._direct_backend_reference(clip, "moderate")
+
+        np.testing.assert_array_equal(
+            public, direct,
+            "нормальный клип должен деноизиться идентично прямому бэкенду "
+            "(оконная логика не должна его затрагивать)",
+        )
+
+    def test_normal_clip_10s_identical_strong(self) -> None:
+        """10 с клип на strength='strong' тоже идентичен прямому бэкенду."""
+        rng = np.random.default_rng(7)
+        t = np.linspace(0, 10.0, _SR * 10, endpoint=False)
+        clip = np.clip(
+            0.4 * np.sin(2 * np.pi * 440.0 * t) + 0.1 * rng.standard_normal(_SR * 10),
+            -1.0, 1.0,
+        ).astype(np.float32)
+
+        public = self.denoiser.denoise(clip, _SR, strength="strong")
+        direct = self._direct_backend_reference(clip, "strong")
+
+        np.testing.assert_array_equal(public, direct)
+
+    def test_normal_clip_still_reduces_noise(self) -> None:
+        """Sanity: нормальный клип всё ещё реально подавляет шум (RMS падает)."""
+        audio = _make_noisy_audio(duration_sec=8.0, snr_target_db=3.0)
+        result = self.denoiser.denoise(audio, _SR, strength="moderate")
+        rms_in = float(np.sqrt(np.mean(audio.astype(np.float64) ** 2)))
+        rms_out = float(np.sqrt(np.mean(result.astype(np.float64) ** 2)))
+        self.assertLess(rms_out, rms_in)
+
+
 if __name__ == "__main__":
     unittest.main()
