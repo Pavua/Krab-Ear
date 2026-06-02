@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from collections import defaultdict, deque
 from datetime import datetime, timezone
@@ -21,6 +22,17 @@ from typing import Any, Callable, Optional
 logger = logging.getLogger("KrabEar.Backend.EventReplay")
 
 _MAX_BUFFER_SIZE = 10_000
+
+# Жёсткий байтовый предел файла персистенции.
+# W829 truncate-on-restart ограничивает рост только МЕЖДУ перезапусками; внутри
+# одной длительной сессии (launchd backend живёт сутками) record_event делает
+# append на каждое событие, и файл растёт без границ, хотя in-memory кольцо
+# ограничено 10 000 записей. Когда размер файла превышает этот предел, файл
+# атомарно пересобирается из текущего кольцевого буфера (последние ~10 000
+# событий) — так файл отслеживает кольцо, а не растёт вечно. 8 МБ заведомо
+# больше, чем 2× содержимое полного кольца, поэтому пересборка случается редко
+# и общий путь (append) остаётся быстрым.
+_MAX_FILE_BYTES = 8 * 1024 * 1024
 
 
 def _utc_now_iso() -> str:
@@ -53,12 +65,18 @@ class EventReplayManager:
         persist_path: Path | str | None = None,
         max_buffer: int = _MAX_BUFFER_SIZE,
         settings_provider: Optional[Callable[[], dict]] = None,
+        max_file_bytes: int = _MAX_FILE_BYTES,
     ) -> None:
         self._lock = threading.Lock()
         self._buffer: deque[dict[str, Any]] = deque(maxlen=max_buffer)
         self._seq: int = 0  # монотонный счётчик для восстановления порядка
         self._persist_path: Path | None = Path(persist_path) if persist_path else None
         self._settings_provider = settings_provider
+        # Байтовый предел файла; при превышении — атомарная пересборка из кольца.
+        self._max_file_bytes: int = max(1, int(max_file_bytes))
+        # Счётчик байт, записанных в текущий открытый файл (дешевле, чем stat()
+        # на каждое событие): мы всегда дописываем в конец, поэтому ведём учёт сами.
+        self._file_bytes: int = 0
         self._file_handle = None
 
         if self._persist_path:
@@ -68,6 +86,7 @@ class EventReplayManager:
             # уже ограничивает их до 10 000. Режим "a" приводил к неограниченному
             # росту (~14 МБ/день, ~5 ГБ/год). W829 CRIT-1.
             self._file_handle = self._persist_path.open("w", encoding="utf-8")
+            self._file_bytes = 0
             logger.info("EventReplayManager: персистенция в %s (truncate на старте)", self._persist_path)
 
     # ------------------------------------------------------------------
@@ -117,11 +136,65 @@ class EventReplayManager:
             entry["seq"] = self._seq
             self._buffer.append(entry)
             if self._file_handle is not None:
+                line = json.dumps(entry, ensure_ascii=False) + "\n"
                 try:
-                    self._file_handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                    self._file_handle.write(line)
                     self._file_handle.flush()
+                    # Учёт по фактическим UTF-8 байтам (кириллица многобайтовая).
+                    self._file_bytes += len(line.encode("utf-8"))
                 except OSError as exc:
                     logger.warning("EventReplayManager: ошибка записи в файл: %s", exc)
+                # Файл перерос предел — атомарно пересобираем его из кольцевого
+                # буфера, чтобы он не рос без границ внутри одной сессии (W1770).
+                if self._file_bytes > self._max_file_bytes:
+                    self._compact_file_to_buffer_locked()
+
+    def _compact_file_to_buffer_locked(self) -> None:
+        """Пересобирает файл персистенции из текущего кольцевого буфера.
+
+        Вызывать ТОЛЬКО при удержании ``self._lock``. Пишет все события кольца
+        во временный файл и атомарно (tmp + ``os.replace``) заменяет им основной
+        файл, после чего переоткрывает дескриптор в режиме "a" (append) и
+        обновляет счётчик байт. Так файл отслеживает кольцо (~10 000 событий) и
+        не растёт без границ внутри одной длительной сессии (W829 ограничивал
+        рост только между перезапусками). Best-effort: при ошибке ввода-вывода
+        пишет warning и оставляет текущий дескриптор без изменений.
+        """
+        if self._persist_path is None or self._file_handle is None:
+            return
+        tmp_path = self._persist_path.with_name(self._persist_path.name + ".tmp")
+        try:
+            written = 0
+            with tmp_path.open("w", encoding="utf-8") as tmp:
+                for item in self._buffer:
+                    line = json.dumps(item, ensure_ascii=False) + "\n"
+                    tmp.write(line)
+                    written += len(line.encode("utf-8"))
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            # Закрываем старый дескриптор перед атомарной заменой.
+            try:
+                self._file_handle.close()
+            except OSError:
+                pass
+            os.replace(tmp_path, self._persist_path)
+            # Переоткрываем в append: дальнейшие события дописываются в конец
+            # пересобранного файла.
+            self._file_handle = self._persist_path.open("a", encoding="utf-8")
+            self._file_bytes = written
+            logger.info(
+                "EventReplayManager: файл пересобран из кольца (events=%d, bytes=%d)",
+                len(self._buffer),
+                written,
+            )
+        except OSError as exc:
+            logger.warning("EventReplayManager: ошибка пересборки файла: %s", exc)
+            # Подчищаем временный файл, если он остался.
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
 
     def get_events(
         self,
@@ -219,13 +292,35 @@ class EventReplayManager:
         }
 
     def clear(self) -> None:
-        """Очищает буфер событий и усекает файл персистенции (если задан)."""
+        """Очищает кольцевой буфер и усекает файл персистенции (если задан).
+
+        Используется для privacy-purge: файл event_replay.ndjson содержит
+        cleartext-текст транскрипций, поэтому при полной очистке данных его надо
+        обнулить вместе с in-memory кольцом. Координатор (handle_purge_all_data)
+        вызывает этот метод — здесь только сама очистка.
+
+        Усекается ИМЕННО открытый дескриптор (seek(0) + truncate(0)), а не
+        отдельный fd: запись идёт в режиме "w"/"a", у дескриптора своё смещение,
+        и truncate через сторонний open() оставил бы «дыру» — последующие
+        события легли бы за нулями. Файл на диске сохраняется (не удаляется),
+        содержимое обнуляется.
+        """
         with self._lock:
             self._buffer.clear()
-            if self._persist_path is not None:
+            if self._file_handle is not None:
+                try:
+                    self._file_handle.seek(0)
+                    self._file_handle.truncate(0)
+                    self._file_handle.flush()
+                    self._file_bytes = 0
+                except OSError:
+                    logger.warning("event_replay: failed to truncate open persist handle on clear")
+            elif self._persist_path is not None:
+                # Дескриптор закрыт (например, после close()) — усекаем файл напрямую.
                 try:
                     self._persist_path.write_text("", encoding="utf-8")
-                except Exception:
+                    self._file_bytes = 0
+                except OSError:
                     logger.warning("event_replay: failed to truncate persist file on clear")
 
     def close(self) -> None:
@@ -237,6 +332,7 @@ class EventReplayManager:
                 except OSError:
                     pass
                 self._file_handle = None
+            self._file_bytes = 0
 
     # ------------------------------------------------------------------
     # IPC-обработчики (совместимы с паттерном handle_* в BackendService)
