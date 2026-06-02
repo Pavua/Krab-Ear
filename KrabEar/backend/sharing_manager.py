@@ -13,6 +13,7 @@ import hmac
 import json
 import logging
 import math
+import os
 import secrets
 import string
 import threading
@@ -78,7 +79,14 @@ class SharingManager:
         self._index: dict[str, dict[str, Any]] = {}
         self._default_share_ttl_hours = default_share_ttl_hours
         self._share_no_default_ttl = share_no_default_ttl
+        # W1767 #16: директория shares/ должна быть 0o700 (только владелец).
+        # parents=True создаёт промежуточные директории с дефолтными правами;
+        # окончательный chmod применяется явно.
         self._shares_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(self._shares_dir, 0o700)
+        except Exception as exc:
+            logger.warning("Не удалось установить права 0o700 на %s: %s", self._shares_dir, exc)
         self._load_index()
 
     # ------------------------------------------------------------------
@@ -97,10 +105,18 @@ class SharingManager:
             logger.warning("Не удалось загрузить индекс shares: %s", exc)
 
     def _save_index(self) -> None:
-        """Сохраняет индекс пакетов атомарно."""
+        """Сохраняет индекс пакетов атомарно с правами 0o600 (W1767 #16)."""
         try:
             tmp = self._index_path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self._index, ensure_ascii=False, indent=2), encoding="utf-8")
+            # Открываем через os.open с O_CREAT|O_WRONLY|O_TRUNC и mode=0o600,
+            # чтобы файл с первой записи имел правильные права (не 0o644).
+            fd = os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(json.dumps(self._index, ensure_ascii=False, indent=2))
+            except Exception:
+                # fdopen берёт владение fd; при исключении файл уже закрыт
+                raise
             tmp.replace(self._index_path)
         except Exception as exc:
             logger.error("Не удалось сохранить индекс shares: %s", exc)
@@ -172,21 +188,27 @@ class SharingManager:
         items = self._fetch_items(item_ids)
         content = self._render(items, fmt, include_translation)
 
-        share_id = self._unique_share_id()
         ext = {"markdown": "md", "text": "txt", "json": "json"}[fmt]
-        filename = f"krabear_share_{share_id}.{ext}"
         created_at = datetime.now(tz=timezone.utc).isoformat()
         size_bytes = len(content.encode("utf-8"))
 
-        package = SharePackage(
-            share_id=share_id,
-            content=content,
-            filename=filename,
-            size_bytes=size_bytes,
-            created_at=created_at,
-            expires_at=expires_at,
-            is_revoked=False,
-        )
+        # W1767 #17 (TOCTOU): генерируем share_id и резервируем его в индексе
+        # под одним локом, чтобы параллельные вызовы не могли выбрать один ID.
+        with self._lock:
+            share_id = self._unique_share_id_locked()
+            filename = f"krabear_share_{share_id}.{ext}"
+            package = SharePackage(
+                share_id=share_id,
+                content=content,
+                filename=filename,
+                size_bytes=size_bytes,
+                created_at=created_at,
+                expires_at=expires_at,
+                is_revoked=False,
+            )
+            # Резервируем слот в индексе немедленно — _persist_package обновит его
+            # повторно после записи файла, но слот уже «занят».
+            self._index[share_id] = {"share_id": share_id, "_reserved": True}
 
         self._persist_package(package)
         return package
@@ -200,12 +222,15 @@ class SharingManager:
         with self._lock:
             result = []
             for entry in self._index.values():
+                # W1767 #17: пропускаем временные «reserved» placeholders
+                if entry.get("_reserved"):
+                    continue
                 if not include_revoked and entry.get("is_revoked", False):
                     continue
                 expires_at = entry.get("expires_at")
                 if not include_expired and expires_at is not None and now > expires_at:
                     continue
-                result.append({k: v for k, v in entry.items() if k != "content"})
+                result.append({k: v for k, v in entry.items() if k not in ("content", "_reserved")})
             result.sort(key=lambda x: x.get("created_at", ""), reverse=True)
             return result
 
@@ -230,6 +255,9 @@ class SharingManager:
             entry = self._find_share_by_token_constant_time(share_id)
             if entry is None:
                 return None
+            # W1767 #17: пропускаем временный «reserved» placeholder (запись ещё записывается)
+            if entry.get("_reserved"):
+                return None
             # Проверяем отзыв
             if entry.get("is_revoked", False):
                 return None
@@ -237,7 +265,9 @@ class SharingManager:
             expires_at = entry.get("expires_at")
             if expires_at is not None and now > expires_at:
                 return None
-            return SharePackage(**entry)
+            # Фильтруем служебные поля, чтобы SharePackage(**entry) не упал
+            pkg_fields = {k: v for k, v in entry.items() if k != "_reserved"}
+            return SharePackage(**pkg_fields)
 
     def revoke_share(self, token: str) -> bool:
         """Отзывает пакет по share_id (токену) и УДАЛЯЕТ файлы с диска.
@@ -281,6 +311,12 @@ class SharingManager:
                     ) from exc
 
             self._index[share_id]["is_revoked"] = True
+            # W1767 #15: удаляем чувствительные текстовые поля из записи индекса
+            # после отзыва, чтобы транскрипция не оставалась в shares_index.json.
+            # Метаданные (share_id, filename, created_at, expires_at) сохраняются
+            # как tombstone для аудита.
+            for _sensitive_field in ("content", "text", "translated_text"):
+                self._index[share_id].pop(_sensitive_field, None)
             self._save_index()
             return True
 
@@ -507,8 +543,15 @@ class SharingManager:
         Таким образом никогда не возникает «orphan file без index entry».
         """
         file_path = self._shares_dir / package.filename
+        # W1767 #16: записываем файл пакета с правами 0o600 через os.open,
+        # чтобы другие процессы на том же хосте не могли прочитать транскрипцию.
         try:
-            file_path.write_text(package.content, encoding="utf-8")
+            fd = os.open(str(file_path), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(package.content)
+            except Exception:
+                raise
         except Exception as exc:
             logger.error(
                 "Не удалось сохранить файл пакета %s: %s",
@@ -524,17 +567,41 @@ class SharingManager:
                     file_path,
                     cleanup_exc,
                 )
+            # W1767 #17: освобождаем зарезервированный слот в индексе, чтобы
+            # после ошибки записи в индексе не оставался placeholder.
+            with self._lock:
+                self._index.pop(package.share_id, None)
+                self._save_index()
             raise RuntimeError(
                 f"Не удалось записать файл пакета '{file_path}': {exc}"
             ) from exc
 
-        # Запись прошла успешно — регистрируем в индексе
+        # W1767 #17 (TOCTOU): регистрируем в индексе под тем же локом, который
+        # был захвачен при генерации share_id в prepare_share → check-then-write атомарен.
+        # Запись прошла успешно — добавляем в индекс.
         with self._lock:
             self._index[package.share_id] = package.to_dict()
             self._save_index()
 
+    def _unique_share_id_locked(self) -> str:
+        """Генерирует share_id, отсутствующий в индексе. ДОЛЖЕН вызываться под self._lock.
+
+        W1767 #17: вся проверка «id не занят» и последующая вставка в индекс выполняются
+        в одной критической секции, что устраняет TOCTOU при параллельных prepare_share.
+        """
+        for _ in range(20):
+            sid = self.generate_share_id()
+            if sid not in self._index:
+                return sid
+        # Крайне маловероятно, но добавляем timestamp-суффикс для надёжности
+        return self.generate_share_id() + str(int(datetime.now().timestamp()))[-4:]
+
     def _unique_share_id(self) -> str:
-        """Генерирует share_id, гарантированно отсутствующий в индексе."""
+        """Генерирует share_id, гарантированно отсутствующий в индексе.
+
+        Устаревший helper без лока — оставлен для обратной совместимости.
+        Новый код должен использовать _unique_share_id_locked() под self._lock.
+        """
         for _ in range(20):
             sid = self.generate_share_id()
             if sid not in self._index:
