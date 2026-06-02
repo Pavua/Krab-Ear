@@ -4044,10 +4044,9 @@ end tell'''
             saved = False
 
         logger.info(
-            "link_to_calendar_event: %s → «%s»",
+            "link_to_calendar_event: %s → event found",
             item_id,
-            event.get("title"),
-            extra={"item_id": item_id, "event_title": event.get("title"), "saved": saved},
+            extra={"item_id": item_id, "found": True, "saved": saved},
         )
         return {"ok": True, "calendar_event": event, "skipped": False, "reason": None}
 
@@ -4555,7 +4554,13 @@ end tell'''
             Path("/tmp").resolve(),
             Path(tempfile.gettempdir()).resolve(),
         ]
-        if not any(str(resolved).startswith(str(root)) for root in allowed_roots):
+        for root in allowed_roots:
+            try:
+                resolved.relative_to(root)
+                break
+            except ValueError:
+                continue
+        else:
             raise ValueError(
                 f"output_dir вне разрешённых директорий: {resolved}"
             )
