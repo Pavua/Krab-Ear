@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
 import time
 from datetime import datetime, timezone
@@ -819,5 +820,9 @@ class SettingsService:
         try:
             parsed = coerce(value)
         except (TypeError, ValueError):
+            parsed = coerce(default)
+        # Reject non-finite floats (NaN / ±Inf) — max/min propagates NaN unchanged
+        # because all comparisons with NaN return False.
+        if isinstance(parsed, float) and not math.isfinite(parsed):
             parsed = coerce(default)
         return max(min_value, min(parsed, max_value))
