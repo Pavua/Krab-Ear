@@ -113,7 +113,6 @@ from backend.ipc_throttle import IPCThrottle
 from backend.ipc_server import IPCServer
 from backend.export_scheduler import ExportScheduler
 from backend.call_cost_estimator import CallCostEstimator
-from backend.call_silence_probe import CallSilenceProbe
 from backend.call_auto_end import CallAutoEnd
 from backend.shutdown_handler import GracefulShutdownHandler
 from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
@@ -409,10 +408,15 @@ class BackendService:
             start_preview_fn=lambda qp: self._recording_core_svc.start_preview_worker(qp),
         )
         self._call_cost_estimator = CallCostEstimator()
-        self._call_silence_probe = CallSilenceProbe()
+        # NB (W1775): CallAutoEnd — advisory-проверка по таймеру/скалярам, она НЕ
+        # инспектирует аудио, поэтому больше НЕ принимает silence_probe (декоративное
+        # поле было удалено). Прежний `self._call_silence_probe` существовал ТОЛЬКО
+        # ради этого удалённого аргумента и нигде больше не читался — поэтому он
+        # тоже убран, чтобы не плодить новое декоративное поле. CallSilenceProbe
+        # (анализ PCM) остаётся как отдельный класс и может быть подключён, когда
+        # появится реальный потребитель аудио-подтверждения тишины.
         self._call_auto_end = CallAutoEnd(
             cost_estimator=self._call_cost_estimator,
-            silence_probe=self._call_silence_probe,
         )
         self._tts = TTSService()
         self._live_subs = LiveSubsService(
@@ -666,7 +670,6 @@ class BackendService:
         self._history._live_subs_service = self._live_subs
         self._call_session_service = CallSessionService(
             store=self._call_session_store,
-            auto_end=self._call_auto_end,
         )
         self._audio_analytics_svc = AudioAnalyticsService(
             audio_converter=self._audio_converter,

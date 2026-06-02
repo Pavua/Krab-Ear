@@ -32,3 +32,13 @@ module:KrabEar/core/pipeline/stt_router_factory.py
 # --- Общая retry-утилита (RetryConfig/RetryStrategy) — библиотечный helper,
 #     покрыт test_retry_strategy.py; пока не вызывается из production-кода.
 module:KrabEar/core/retry_strategy.py
+
+# --- W1775: CallSilenceProbe — РЕАЛЬНЫЙ аудио-анализ тишины (RMS по PCM + TTS
+#     probe), покрыт test_call_silence_probe.py. Раньше он импортировался в
+#     service.py ТОЛЬКО ради декоративного аргумента CallAutoEnd(silence_probe=…),
+#     который никогда не вызывался (assigned-and-never-read) — этот мёртвый импорт
+#     удалён при honesty de-decoration. Сам класс — НЕ decorative-регрессия: это
+#     намеренно сохранённая аудио-capability для будущего реального подтверждения
+#     тишины (Swift-агент / audio-pipeline). Production-импортёров пока ноль по
+#     дизайну, поэтому allowlist.
+module:KrabEar/backend/call_silence_probe.py

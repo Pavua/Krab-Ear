@@ -17,18 +17,19 @@ from backend.call_auto_end import (  # noqa: E402
     SILENCE_PROBE_TRIGGER_SEC,
     OPERATOR_SILENT_AFTER_INTERRUPTION_SEC,
     REASON_MAX_DURATION,
-    REASON_SILENCE_CONFIRMED,
+    REASON_SILENCE_WINDOW_ELAPSED,
+    REASON_SILENCE_CONFIRMED,  # deprecated alias kept for back-compat
     REASON_OPERATOR_SILENT,
     REASON_COST_LIMIT,
 )
 from backend.call_cost_estimator import CallCostEstimator  # noqa: E402
-from backend.call_silence_probe import CallSilenceProbe  # noqa: E402
 
 
 def _make_auto_end(**kwargs) -> CallAutoEnd:
+    # W1775: CallAutoEnd no longer takes a (decorative) silence_probe — it is an
+    # advisory time-window check that never inspects audio.
     return CallAutoEnd(
         cost_estimator=CallCostEstimator(),
-        silence_probe=CallSilenceProbe(),
         **kwargs,
     )
 
@@ -68,7 +69,7 @@ class TestSilenceRule(unittest.TestCase):
             silence_duration_sec=SILENCE_PROBE_TRIGGER_SEC,
         )
         self.assertTrue(result.should_end)
-        self.assertEqual(result.reason, REASON_SILENCE_CONFIRMED)
+        self.assertEqual(result.reason, REASON_SILENCE_WINDOW_ELAPSED)
 
     def test_silence_below_trigger_no_end(self) -> None:
         ae = _make_auto_end()
@@ -88,16 +89,16 @@ class TestSilenceRule(unittest.TestCase):
         self.assertTrue(result.should_end)
         self.assertEqual(result.reason, REASON_OPERATOR_SILENT)
 
-    def test_operator_silent_without_interruption_uses_probe_rule(self) -> None:
+    def test_operator_silent_without_interruption_uses_window_rule(self) -> None:
         ae = _make_auto_end()
-        # 15 сек тишины но НЕ после прерывания → probe trigger (>= 10 сек)
+        # 15 сек тишины но НЕ после прерывания → silence-window trigger (>= 10 сек)
         result = ae.evaluate(
             current_duration_sec=100,
             silence_duration_sec=15.0,
             after_interruption=False,
         )
         self.assertTrue(result.should_end)
-        self.assertEqual(result.reason, REASON_SILENCE_CONFIRMED)
+        self.assertEqual(result.reason, REASON_SILENCE_WINDOW_ELAPSED)
 
 
 class TestCostRule(unittest.TestCase):
@@ -218,7 +219,9 @@ class TestHandleCheckAutoEnd(unittest.TestCase):
             },
         })
         self.assertTrue(result["result"]["should_end"])
-        self.assertEqual(result["result"]["reason"], REASON_SILENCE_CONFIRMED)
+        self.assertEqual(
+            result["result"]["reason"], REASON_SILENCE_WINDOW_ELAPSED
+        )
 
 
 class TestWave185Requirements(unittest.TestCase):
@@ -240,14 +243,26 @@ class TestWave185Requirements(unittest.TestCase):
         self.assertEqual(result.reason, REASON_MAX_DURATION)
 
     def test_silence_triggers_end(self) -> None:
-        """10+ seconds of silence triggers SILENCE_CONFIRMED end reason."""
+        """10+ seconds of silence triggers the silence-window end reason."""
         ae = _make_auto_end()
         result = ae.evaluate(
             current_duration_sec=120,
             silence_duration_sec=SILENCE_PROBE_TRIGGER_SEC,
         )
         self.assertTrue(result.should_end)
-        self.assertEqual(result.reason, REASON_SILENCE_CONFIRMED)
+        self.assertEqual(result.reason, REASON_SILENCE_WINDOW_ELAPSED)
+
+    def test_silence_reason_is_honest_window_value(self) -> None:
+        """W1775: reason value reflects time-window elapse, not audio probe."""
+        ae = _make_auto_end()
+        result = ae.evaluate(
+            current_duration_sec=120,
+            silence_duration_sec=SILENCE_PROBE_TRIGGER_SEC,
+        )
+        self.assertEqual(result.reason, "silence_window_elapsed")
+        # Deprecated alias still resolves to the same honest value.
+        self.assertEqual(REASON_SILENCE_CONFIRMED, "silence_window_elapsed")
+        self.assertEqual(REASON_SILENCE_CONFIRMED, REASON_SILENCE_WINDOW_ELAPSED)
 
     def test_active_call_not_auto_ended_early(self) -> None:
         """Active call with short duration and no silence/cost is not ended."""
