@@ -216,12 +216,15 @@ class TestCORSSettingsIntegration(unittest.TestCase):
     """Тест что CORS_ORIGINS читается из settings."""
 
     def test_settings_has_cors_origins(self):
-        """Settings должны иметь атрибут CORS_ORIGINS со значением по умолчанию '*'.
+        """Settings должны иметь атрибут CORS_ORIGINS со значением по умолчанию localhost-allowlist.
 
         W1707: Test creates a fresh Settings() without env vars to check the class
         default. Using the singleton directly is fragile because test_cors_origins_env_override
         may import core.config for the first time INSIDE patch.dict context (if the module
         is not yet imported), causing the singleton to be created with the patched env var.
+
+        wave-21 MED fix: default changed from "*" to "http://127.0.0.1,http://localhost"
+        to prevent cross-origin transcript exfiltration via EventSource/fetch.
         """
         import os
         from core.config import Settings
@@ -231,8 +234,11 @@ class TestCORSSettingsIntegration(unittest.TestCase):
             s = Settings()
         self.assertTrue(hasattr(s, "CORS_ORIGINS"))
         self.assertIsInstance(s.CORS_ORIGINS, str)
-        # Default must be '*'
-        self.assertEqual(s.CORS_ORIGINS, "*")
+        # Default must be localhost allowlist (NOT "*") — wave-21 MED fix
+        self.assertNotEqual(s.CORS_ORIGINS, "*",
+                            "CORS_ORIGINS default must not be '*' — transcript exfiltration risk")
+        self.assertIn("127.0.0.1", s.CORS_ORIGINS,
+                      "CORS_ORIGINS default must include 127.0.0.1 for localhost clients")
 
     def test_cors_origins_env_override(self):
         """KRAB_EAR_CORS_ORIGINS env var должен переопределять значение."""

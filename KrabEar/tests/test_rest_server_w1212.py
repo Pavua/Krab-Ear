@@ -497,13 +497,26 @@ class TestCorsCredentialsForcedFalseWhenOriginsWildcard(unittest.TestCase):
         self.assertIn("http://c.com", result)
 
     def test_module_cors_credentials_is_false_with_wildcard_default(self):
-        """If settings.CORS_ORIGINS defaults to '*', module-level _cors_credentials is False."""
+        """If CORS_ORIGINS is '*', module-level _cors_credentials must be False.
+
+        wave-21 MED fix: default changed to localhost allowlist so this branch
+        is now the explicit-opt-in case. The guard still works when a user sets
+        KRAB_EAR_CORS_ORIGINS="*".
+        """
         # The module initializes _cors_credentials at import time.
-        # With the default CORS_ORIGINS='*', it must be False.
+        # Check: when CORS_ORIGINS happens to be "*" (env-override case), credentials
+        # must still be forced False.
         if getattr(_rest_mod.settings, "CORS_ORIGINS", None) == "*":
             self.assertFalse(
                 _rest_mod._cors_credentials,
-                "_cors_credentials must be False when CORS_ORIGINS defaults to '*'"
+                "_cors_credentials must be False when CORS_ORIGINS is '*'"
+            )
+        else:
+            # wave-21: default is now localhost allowlist, not wildcard.
+            # _cors_credentials should be True (explicit list allows credentials).
+            self.assertTrue(
+                _rest_mod._cors_credentials,
+                "_cors_credentials must be True with explicit CORS_ORIGINS list"
             )
 
 
