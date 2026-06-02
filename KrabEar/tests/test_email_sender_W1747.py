@@ -486,13 +486,23 @@ class TestW1764StripHtmlReDoSProtection(unittest.TestCase):
     """W1764 LOW: _strip_html must not hang on hostile input with many unclosed «<»."""
 
     def test_strip_html_hostile_input_completes_quickly(self):
-        """500 000 consecutive «<» characters must complete in under 0.3 seconds."""
+        """500 000 consecutive «<» characters must complete quickly.
+
+        The ReDoS fix (W1764) uses a bounded quantifier <[^>]{0,2000}> and
+        truncates input to _STRIP_HTML_MAX_BYTES=200 000 chars first, making
+        the algorithm O(n) rather than O(n²).
+
+        Threshold is 1.5 s (was 0.3 s): a genuine O(n²) ReDoS on 500 000 chars
+        takes tens of seconds, so 1.5 s still catches regressions while
+        tolerating variance on slower CI runners (Ubuntu shared runners have
+        seen >0.4 s for this workload under load).
+        """
         import time
         hostile = "<" * 500_000
         t0 = time.monotonic()
         result = EmailSender._strip_html(hostile)
         elapsed = time.monotonic() - t0
-        self.assertLess(elapsed, 0.3,
+        self.assertLess(elapsed, 1.5,
                         f"_strip_html took {elapsed:.3f}s on hostile input — ReDoS not fixed")
         # Result must be a string (truncated, stripped, possibly empty)
         self.assertIsInstance(result, str)

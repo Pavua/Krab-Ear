@@ -450,17 +450,24 @@ class TestCalendarIPCDispatchWiringW1030(unittest.TestCase):
             )
 
     def test_dispatch_keys_in_dispatch_block(self):
-        """All 3 dispatch keys must appear inside the handlers dict block (not just comments)."""
-        import re
+        """All 3 dispatch keys must appear inside _build_dispatch_table (not just comments).
+
+        W1769 reverted the W797 decorative split: dispatch is now built by
+        BackendService._build_dispatch_table() (single source of truth).
+        The old 'handlers: dict[str, Callable' local variable in handle_request
+        no longer exists; we search the _build_dispatch_table body instead.
+        """
         source = self._read_service_source()
-        start = source.index("handlers: dict[str, Callable")
-        end = source.index("\n        handler = handlers.get(method)")
+        # Anchor: start of _build_dispatch_table method body (after the def line)
+        start = source.index("def _build_dispatch_table(")
+        # Anchor: the closing brace of the returned dict is just before handle_request
+        end = source.index("def handle_request(", start)
         dispatch_block = source[start:end]
         for key in self.REQUIRED_IPC_KEYS:
             self.assertIn(
                 f'"{key}"',
                 dispatch_block,
-                f'"{key}" not in dispatch block — W1030 regression!',
+                f'"{key}" not in _build_dispatch_table — W1030 regression!',
             )
 
 
