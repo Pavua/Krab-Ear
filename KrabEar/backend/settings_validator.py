@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import ipaddress
+import math
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
@@ -191,6 +192,16 @@ class SettingsValidator:
             except (TypeError, ValueError):
                 warnings.append(
                     f"'{key}': не удалось преобразовать {val!r} в {coerce.__name__}, "
+                    f"исправлено на {default}"
+                )
+                fixed[key] = default
+                continue
+            # Reject non-finite floats (NaN / ±Inf) before range comparison — NaN bypasses
+            # `< min_v or > max_v` silently (both comparisons return False for NaN) and
+            # would persist as an invalid JSON value that breaks strict parsers / Swift JSONDecoder.
+            if isinstance(parsed, float) and not math.isfinite(parsed):
+                warnings.append(
+                    f"'{key}': значение {parsed} не является конечным числом, "
                     f"исправлено на {default}"
                 )
                 fixed[key] = default
