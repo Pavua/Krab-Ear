@@ -1608,6 +1608,31 @@ class HistoryService:
                         "recording_chain bulk cleanup failed for item %s", item.id, exc_info=True
                     )
 
+        # W1773: cascade semantic-search embedding removal for bulk-deleted items.
+        # The single-delete path (handle_delete_history_item) already calls
+        # self._semantic_searcher.remove_item; mirror the same pattern here so
+        # age-deleted transcripts don't leave orphan embedding rows in
+        # embeddings.npy.
+        if to_delete and self._semantic_searcher is not None:
+            for item in to_delete:
+                try:
+                    self._semantic_searcher.remove_item(item.id)
+                except Exception:
+                    logger.warning(
+                        "semantic_search bulk cleanup failed for item %s", item.id, exc_info=True
+                    )
+
+        # W1773: cascade playback-stats removal for bulk-deleted items.
+        # Mirror handle_delete_history_item (F4 W1343 cascade).
+        if to_delete and self._playback_tracker is not None:
+            for item in to_delete:
+                try:
+                    self._playback_tracker.remove_stats(item.id)
+                except Exception:
+                    logger.warning(
+                        "playback_tracker bulk cleanup failed for item %s", item.id, exc_info=True
+                    )
+
         # W1762: стираем .md файлы транскриптов для каждой удалённой записи.
         # Зеркалирует логику single-delete (handle_delete_history_item).
         for item in to_delete:

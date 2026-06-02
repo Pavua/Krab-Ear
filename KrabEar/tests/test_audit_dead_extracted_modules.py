@@ -12,11 +12,11 @@
     модуль от статуса DEAD;
   - allowlist (module:/dup:) подавляет находки.
 
-Плюс smoke-прогон на РЕАЛЬНОМ репозитории: проверяет, что страж находит
-оставшуюся W797-находку (glossary_service.py — отдельный follow-up) и НЕ
+Плюс smoke-прогон на РЕАЛЬНОМ репозитории: проверяет, что страж НЕ
 флагает уже исправленные модули. W1769: ipc_dispatch.py / service_logging.py
 УДАЛЕНЫ (диспетчеризация и логирование консолидированы инлайн в service.py);
-IPCServer-дубликат устранён в #1601 — все три больше не флагаются.
+IPCServer-дубликат устранён в #1601. W1773: glossary_service.py УДАЛЁН
+(последний dead module) — репо достиг нулевого dead-module состояния.
 """
 
 from __future__ import annotations
@@ -314,15 +314,30 @@ class RealRepoSmokeTests(unittest.TestCase):
     def setUpClass(cls):
         cls.repo_root = Path(PROJECT_ROOT)
         cls.dead_modules, cls.dead_dups = audit.run_audit(cls.repo_root)
-        cls.dead_mod_names = {Path(f["module"]).name for f in cls.dead_modules}
+        # Load allowlist so we can separate intentional dead modules from surprises.
+        allow_path = cls.repo_root / "scripts" / "audit_dead_extracted_modules_allowlist.txt"
+        cls.allowed_modules, cls.allowed_dups = audit.load_allowlist(allow_path)
+
+        def _relpath(p: str) -> str:
+            try:
+                return str(Path(p).resolve().relative_to(cls.repo_root.resolve()))
+            except ValueError:
+                return p
+
+        # non-allowlisted = real unexpected dead modules
+        cls.unexpected_dead_modules = [
+            f for f in cls.dead_modules
+            if _relpath(f["module"]) not in cls.allowed_modules
+        ]
+        cls.dead_mod_names = {Path(f["module"]).name for f in cls.unexpected_dead_modules}
         cls.dead_dup_keys = {
             (f["symbol"], Path(f["extracted_module"]).name) for f in cls.dead_dups
         }
 
-    def test_glossary_service_flagged_dead(self):
-        # glossary_service.py пока не импортируется production — мёртвый модуль
-        # (отдельный follow-up). Подтверждает, что страж всё ещё работает.
-        self.assertIn("glossary_service.py", self.dead_mod_names)
+    def test_glossary_service_not_flagged_after_deletion(self):
+        # W1773: glossary_service.py УДАЛЁН — последний dead module устранён.
+        # Страж должен сообщать 0 dead modules (чистое состояние).
+        self.assertNotIn("glossary_service.py", self.dead_mod_names)
 
     def test_ipc_dispatch_not_flagged_after_deletion(self):
         # W1769: ipc_dispatch.py УДАЛЁН — диспетчеризация консолидирована инлайн
@@ -343,9 +358,14 @@ class RealRepoSmokeTests(unittest.TestCase):
         # класс живёт в ipc_server.py и импортируется. Больше не дубликат.
         self.assertNotIn(("IPCServer", "ipc_server.py"), self.dead_dup_keys)
 
-    def test_findings_are_nonempty(self):
-        # Sanity: страж вообще что-то нашёл (glossary_service остаётся) — иначе сломан.
-        self.assertGreater(len(self.dead_modules) + len(self.dead_dups), 0)
+    def test_zero_dead_modules_after_glossary_deletion(self):
+        # W1773: glossary_service.py удалён — репо достиг нулевого dead-module состояния.
+        # Страж должен сообщать 0 non-allowlisted dead modules + 0 dead dups.
+        self.assertEqual(len(self.unexpected_dead_modules), 0,
+                         f"Ожидается 0 dead modules (кроме allowlist), найдено: "
+                         f"{[f['module'] for f in self.unexpected_dead_modules]}")
+        self.assertEqual(len(self.dead_dups), 0,
+                         f"Ожидается 0 dead dups, найдено: {self.dead_dups}")
 
 
 if __name__ == "__main__":
