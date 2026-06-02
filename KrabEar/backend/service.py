@@ -773,7 +773,12 @@ class BackendService:
             data_dir=self.store.data_dir,
             model_name=settings.SEMANTIC_SEARCH_MODEL,
             enabled=settings.SEMANTIC_SEARCH_ENABLED,
+            # wave-22 LOW: cap index growth (FIFO eviction); 0/<=0 = unbounded.
+            max_items=getattr(settings, "SEMANTIC_SEARCH_MAX_ITEMS", 0),
         )
+        # wave-22 LOW: surface _save_locked persistence failures via ErrorBus
+        # (late-injected, same pattern as HistoryService._error_bus above).
+        self._semantic_searcher._error_bus = self._error_bus
         # Wire semantic_searcher into HistoryService so deletes remove embeddings (W1426 F2).
         self._history._semantic_searcher = self._semantic_searcher
         # W1687 F8 MED: wire semantic_searcher into ArchiveManager so that

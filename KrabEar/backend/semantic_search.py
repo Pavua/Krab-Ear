@@ -31,10 +31,16 @@ class SemanticSearcher:
         data_dir: Path,
         model_name: str = "intfloat/multilingual-e5-base",
         enabled: bool = False,
+        max_items: int = 0,
     ) -> None:
         self._data_dir = Path(data_dir)
         self._model_name = model_name
         self._enabled = enabled
+        # wave-22 LOW: cap on indexed rows (FIFO eviction). <=0 → unbounded.
+        try:
+            self._max_items = int(max_items)
+        except (TypeError, ValueError):
+            self._max_items = 0
 
         self._model: Any = None
         self._model_lock = threading.Lock()
@@ -45,6 +51,18 @@ class SemanticSearcher:
         self._embeddings: Any = None  # np.ndarray shape (N, D)
         self._index: list[str] = []  # id at position i → row i
         self._index_lock = threading.Lock()
+
+        # wave-22 MED: monotonic purge counter. Incremented under _index_lock in
+        # purge_all(). index_item/index_all capture this BEFORE the (slow) encode;
+        # after re-acquiring the lock they ABORT the re-add if it changed — a purge
+        # that straddled the encode becomes a hard barrier so a cleartext-derived
+        # embedding of a just-purged transcript can never be re-persisted.
+        self._purge_epoch = 0
+
+        # wave-22 LOW: optional ErrorBus, late-injected by BackendService (same
+        # pattern as HistoryService._error_bus). When None, error surfacing is a
+        # silent no-op (warning still logged).
+        self._error_bus: Any = None
 
         self._embeddings_path = self._data_dir / "embeddings.npy"
         self._index_path = self._data_dir / "embeddings_index.json"
@@ -93,9 +111,25 @@ class SemanticSearcher:
 
         try:
             import numpy as np
+            # wave-22 MED: snapshot purge epoch BEFORE the slow encode. If a
+            # purge_all() runs while we are encoding, the epoch will differ and we
+            # must NOT re-add this (now-purged) cleartext-derived embedding.
+            with self._index_lock:
+                epoch_before = self._purge_epoch
             embedding = self._encode(model, text)  # shape (D,)
 
             with self._index_lock:
+                if self._purge_epoch != epoch_before:
+                    # A purge happened during the encode → hard barrier. Do NOT
+                    # mutate _embeddings/_index and do NOT call _save_locked()
+                    # (otherwise embeddings.npy/embeddings_index.json would be
+                    # re-created with data the user just purged).
+                    logger.info(
+                        "semantic_search: индексация %s отменена — "
+                        "во время encode произошла очистка (purge barrier)",
+                        item_id,
+                    )
+                    return False
                 if item_id in self._index:
                     row = self._index.index(item_id)
                     self._embeddings[row] = embedding
@@ -105,6 +139,7 @@ class SemanticSearcher:
                     else:
                         self._embeddings = np.vstack([self._embeddings, embedding[np.newaxis, :]])
                     self._index.append(item_id)
+                self._evict_over_cap_locked()
                 self._save_locked()
             return True
         except Exception as exc:
@@ -124,10 +159,13 @@ class SemanticSearcher:
         if model is None:
             return {"indexed": 0, "skipped": len(items), "errors": 0, "reason": self._model_error or "model_unavailable"}
 
-        if force:
-            with self._index_lock:
+        with self._index_lock:
+            if force:
                 self._embeddings = None
                 self._index = []
+            # wave-22 MED: snapshot purge epoch BEFORE the slow batch encode so a
+            # concurrent purge_all() acts as a hard barrier (see index_item).
+            epoch_before = self._purge_epoch
 
         indexed = 0
         skipped = 0
@@ -156,6 +194,15 @@ class SemanticSearcher:
                 try:
                     batch_embeddings = self._encode_batch(model, texts_to_encode)
                     with self._index_lock:
+                        if self._purge_epoch != epoch_before:
+                            # Purge straddled the batch encode → abort, persist
+                            # nothing (the purge already cleared the files).
+                            logger.info(
+                                "semantic_search: batch-индексация отменена — "
+                                "во время encode произошла очистка (purge barrier)"
+                            )
+                            return {"indexed": 0, "skipped": skipped,
+                                    "errors": 0, "reason": "purged_during_encode"}
                         for _i, (eid, emb) in enumerate(zip(ids_to_encode, batch_embeddings)):
                             if eid in self._index:
                                 row = self._index.index(eid)
@@ -166,6 +213,7 @@ class SemanticSearcher:
                                 else:
                                     self._embeddings = np.vstack([self._embeddings, emb[np.newaxis, :]])
                                 self._index.append(eid)
+                        self._evict_over_cap_locked()
                         self._save_locked()
                     indexed = len(ids_to_encode)
                 except Exception as exc:
@@ -240,6 +288,10 @@ class SemanticSearcher:
         with self._index_lock:
             self._embeddings = None
             self._index = []
+            # wave-22 MED: bump epoch so any embedding computed BEFORE this purge
+            # (by an in-flight index_item/index_all whose encode is still running)
+            # is refused at its post-encode re-lock instead of being re-persisted.
+            self._purge_epoch += 1
         try:
             if self._embeddings_path.exists():
                 self._embeddings_path.unlink()
@@ -337,6 +389,66 @@ class SemanticSearcher:
         normalized = matrix / norms
         return normalized @ q
 
+    def _evict_over_cap_locked(self) -> None:
+        """Drop oldest rows so the index never exceeds ``self._max_items``.
+
+        Must be called under ``_index_lock``. FIFO / most-recent-N eviction:
+        ``_index`` preserves insertion order, so the first rows are the oldest.
+        No-op when ``_max_items <= 0`` (unbounded) or the index is within cap.
+        """
+        cap = self._max_items
+        if cap <= 0:
+            return
+        n = len(self._index)
+        if n <= cap:
+            return
+        drop = n - cap
+        # Keep the most recent `cap` rows (drop the oldest `drop`). Pure slicing —
+        # no numpy symbol needed; _embeddings is already an ndarray (or None).
+        self._index = self._index[drop:]
+        if self._embeddings is not None:
+            if self._embeddings.shape[0] <= drop:
+                self._embeddings = None
+                self._index = []
+            else:
+                self._embeddings = self._embeddings[drop:]
+        logger.info(
+            "semantic_search: вытеснено %d старых строк (cap=%d, было=%d)",
+            drop, cap, n,
+        )
+
+    def _push_error(self, code: str, message_debug: str) -> None:
+        """Surface a persistence error via the attached ErrorBus, if wired.
+
+        ``_error_bus`` is late-injected by ``BackendService.__init__`` (same
+        pattern as ``HistoryService._error_bus``).  No-op when not wired so that
+        unit tests without a full BackendService still work.  The caller is
+        expected to also log a warning — this only adds the loud-error surface.
+        """
+        error_bus = getattr(self, "_error_bus", None)
+        if error_bus is None:
+            return
+        try:
+            from backend.error_bus import KrabError
+            from backend.error_codes import ERROR_REGISTRY
+            from datetime import datetime, timezone
+
+            entry = ERROR_REGISTRY.get(code, {})
+            err = KrabError(
+                severity=entry.get("severity", "error"),
+                component="history",
+                code=code,
+                message_user=entry.get("user_msg_ru", "Ошибка истории"),
+                message_debug=message_debug,
+                timestamp=datetime.now(timezone.utc),
+                context={"data_dir": str(self._data_dir)},
+                actionable=entry.get("actionable", False),
+                action_id=entry.get("action_id"),
+            )
+            error_bus.push(err)
+        except Exception:  # noqa: BLE001
+            logger.exception("semantic_search: _push_error failed for code=%s", code)
+
     def _load_from_disk(self) -> None:
         """Загружает embeddings и индекс с диска (вызывается после загрузки модели)."""
         try:
@@ -420,6 +532,14 @@ class SemanticSearcher:
                 raise
         except Exception as exc:
             logger.warning("semantic_search: не удалось сохранить embeddings: %s", exc)
+            # wave-22 LOW: persistence failure was previously swallowed (warning
+            # only) while index_item still reported success — the on-disk index
+            # silently diverged from memory. Surface it as a loud disk/history
+            # error so the user knows the embeddings index is not being persisted.
+            self._push_error(
+                "history.write_fail",
+                f"semantic_search _save_locked failed: {exc}",
+            )
 
     # W1172: alias for backward compat
     remove = remove_item
