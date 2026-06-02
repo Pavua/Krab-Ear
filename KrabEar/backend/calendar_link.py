@@ -194,5 +194,6 @@ class CalendarLinker:
         if best is None:
             return None
         best.pop("_start_epoch", None)
-        logger.info("CalendarLinker: событие «%s»", best.get("title"))
+        logger.info("CalendarLinker: событие найдено")
+        logger.debug("CalendarLinker: событие title=%s", best.get("title"))
         return best
