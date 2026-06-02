@@ -63,6 +63,19 @@ class RecordingChainManager:
                 logger.warning("Не удалось загрузить %s, начинаем с чистого листа", self._chains_path)
 
     def _save(self) -> None:
+        """Атомарно записывает цепочки на диск.
+
+        ВАЖНО (RC-4 W1769): при ошибке записи исключение ПРОПАГИРУЕТСЯ наружу,
+        а не глотается.  Раньше bare-`except` логировал и возвращался нормально,
+        из-за чего:
+          (a) мутирующие операции рапортовали успех, хотя на диск ничего не легло
+              (ложный успех, теряется при перезапуске backend);
+          (b) privacy-purge (delete_all_chains) сообщал об успешной очистке, в то
+              время как файл recording_chains.json с открытыми именами цепочек
+              (потенциально PII) оставался на диске.
+        Теперь вызывающие (handle_* / delete_all_chains) могут отреагировать на
+        сбой.  Путь успешной атомарной записи не изменён.
+        """
         try:
             self._chains_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = self._chains_path.with_suffix(".tmp")
@@ -71,6 +84,7 @@ class RecordingChainManager:
             tmp_path.replace(self._chains_path)
         except Exception:
             logger.exception("Не удалось сохранить %s", self._chains_path)
+            raise
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -209,13 +223,22 @@ class RecordingChainManager:
     def delete_all_chains(self) -> int:
         """Удаляет все цепочки (используется при полной очистке данных / privacy-purge).
 
+        ВАЖНО (RC-4 W1769): privacy-purge.  Если _save() не смог переписать файл
+        на диск (disk full / read-only / permission), исключение ПРОПАГИРУЕТСЯ
+        наружу — НЕ глотается.  Иначе recording_chains.json с открытыми именами
+        цепочек (потенциально PII) пережил бы «успешную» очистку.  Вызывающий
+        (HistoryService.handle_purge_all_data) ловит исключение и добавляет шаг
+        "chains" в secondary_errors, так что пользователь видит частичный сбой
+        вместо ложного «очищено».  Лог об успехе пишется ТОЛЬКО после того, как
+        _save() реально завершился.
+
         Returns:
             int: количество удалённых цепочек.
         """
         with self._lock:
             count = len(self._data["chains"])
             self._data = {"chains": {}}
-            self._save()
+            self._save()  # пробрасывает OSError → privacy-purge surfaces failure
         logger.info("delete_all_chains: удалено %d цепочек", count)
         return count
 
@@ -237,7 +260,13 @@ class RecordingChainManager:
         name = str(params.get("name", "")).strip()
         if not name:
             raise ValueError("Параметр 'name' обязателен")
-        chain_id = self.start_chain(name)
+        # RC-4 W1769: persistence failure → error envelope вместо ложного успеха.
+        # Имя цепочки (PII) НЕ логируем — только сам факт сбоя записи.
+        try:
+            chain_id = self.start_chain(name)
+        except OSError as exc:
+            logger.error("start_chain: не удалось сохранить цепочку: %s", exc)
+            return {"ok": False, "error": f"persist_failed: {exc}"}
         return {"chain_id": chain_id}
 
     def handle_add_to_chain(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -247,14 +276,24 @@ class RecordingChainManager:
             raise ValueError("Параметр 'chain_id' обязателен")
         if not item_id:
             raise ValueError("Параметр 'item_id' обязателен")
-        self.add_to_chain(chain_id, item_id)
+        # RC-4 W1769: persistence failure → error envelope вместо ложного успеха.
+        try:
+            self.add_to_chain(chain_id, item_id)
+        except OSError as exc:
+            logger.error("add_to_chain: не удалось сохранить цепочку: %s", exc)
+            return {"ok": False, "error": f"persist_failed: {exc}"}
         return {"ok": True}
 
     def handle_end_chain(self, params: dict[str, Any]) -> dict[str, Any]:
         chain_id = str(params.get("chain_id", "")).strip()
         if not chain_id:
             raise ValueError("Параметр 'chain_id' обязателен")
-        self.end_chain(chain_id)
+        # RC-4 W1769: persistence failure → error envelope вместо ложного успеха.
+        try:
+            self.end_chain(chain_id)
+        except OSError as exc:
+            logger.error("end_chain: не удалось сохранить цепочку: %s", exc)
+            return {"ok": False, "error": f"persist_failed: {exc}"}
         return {"ok": True}
 
     def handle_get_chain(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -287,7 +326,14 @@ class RecordingChainManager:
             raise ValueError("Параметр 'chain_id' обязателен")
         if not item_id:
             raise ValueError("Параметр 'item_id' обязателен")
-        removed = self.unlink_recording_from_chain(chain_id, item_id)
+        # RC-4 W1769: persistence failure → error envelope вместо ложного успеха.
+        try:
+            removed = self.unlink_recording_from_chain(chain_id, item_id)
+        except OSError as exc:
+            logger.error(
+                "unlink_recording_from_chain: не удалось сохранить цепочку: %s", exc
+            )
+            return {"ok": False, "error": f"persist_failed: {exc}"}
         return {"ok": True, "removed": removed}
 
     # ------------------------------------------------------------------
