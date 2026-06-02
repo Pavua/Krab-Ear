@@ -67,6 +67,7 @@ MEDIUM_METHODS: Set[str] = {
     "translate_text",           # перевод текста
     "get_glossary_suggestions",  # предложения для глоссария
     "get_vocabulary_suggestions",
+    "get_smart_vocabulary_suggestions",  # W1769: regex-извлечение слов по всей истории (ReDoS-чувствительный)
     "get_event_log",            # лог событий
     "get_event_stats",          # статистика событий
     "replay_events",            # воспроизведение событий

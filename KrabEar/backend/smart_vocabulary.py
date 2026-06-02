@@ -54,12 +54,24 @@ _COMMON_STOP_WORDS: frozenset = frozenset([
 # Порог confidence ниже которого запись считается «ненадёжной»
 _LOW_CONFIDENCE_THRESHOLD = 0.65
 
+# W1769: максимальная длина текста одного элемента истории, передаваемого в
+# regex-извлечение слов. Защита от ReDoS/DoS на огромных входных строках —
+# отсекаем до прогона finditer. 8000 символов покрывает любые легитимные
+# транскрипты (обычно < 2 КБ) с запасом.
+_MAX_REGEX_TEXT_LEN = 8000
+
 # Regex для слов (поддержка кириллицы и латиницы)
 _RE_WORD = re.compile(r"[А-Яа-яA-Za-zÁÉÍÓÚáéíóúÑñÜü]{3,}")
 _RE_CAMEL_CASE = re.compile(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b")
+# Технические термины с цифрами (GPT-4, iPhone13, H2O, qwen3, 3B).
+# W1769 ReDoS-fix: вторая ветка раньше была `[A-Za-zА-Яа-я0-9\-]*[0-9]+[A-Za-zА-Яа-я]+`
+# — класс `[...0-9\-]*` непосредственно перед `[0-9]+` создавал перекрывающуюся
+# жадную группу → O(n²) backtracking на чисто-цифровом токене (250k цифр ≈ 230 c CPU).
+# Переписано так, чтобы после серии цифр требовалась обязательная буква (без
+# ведущего перекрытия по `[0-9]`). Поведение на реальных токенах не изменилось.
 _RE_TECH_WITH_DIGITS = re.compile(
     r"\b([A-Za-zА-Яа-я]+[0-9]+[A-Za-zА-Яа-я0-9\-]*"
-    r"|[A-Za-zА-Яа-я0-9\-]*[0-9]+[A-Za-zА-Яа-я]+)\b"
+    r"|[A-Za-zА-Яа-я]*[0-9]+[A-Za-zА-Яа-я][A-Za-zА-Яа-я0-9\-]*)\b"
 )
 _RE_ABBREV = re.compile(r"\b([A-ZА-Я]{2,})\b")
 _RE_CAPITALIZED_MID = re.compile(
@@ -261,6 +273,11 @@ class SmartVocabularyBuilder:
             raw_text = str(item.get("source_text", "") or item.get("text", "") or "")
             if not raw_text.strip():
                 continue
+            # W1769 defense-in-depth: ограничиваем длину текста до запуска regex.
+            # Транскрипты Krab Ear < 2 КБ; 8000 символов — щедрый запас. Без этой
+            # отсечки злоумышленник через add_history_item мог инжектить гигантскую
+            # серию цифр и заставить regex-проход блокировать IPC-поток (DoS).
+            raw_text = raw_text[:_MAX_REGEX_TEXT_LEN]
             item_conf = float(item.get("confidence", 1.0) or 1.0)
 
             # Proper nouns
