@@ -124,6 +124,9 @@ class HistoryService:
         self._vocabulary_store: Any = None   # VocabularyStore — vocabulary.json
         self._settings_svc: Any = None       # SettingsService — для invalidate_cache()
         self._settings_backup: Any = None    # SettingsBackup — settings_backups/
+        # W1770: новые collaborators для privacy-purge (late-inject из BackendService).
+        self._collection_manager: Any = None  # CollectionManager — collections.json (#1613)
+        self._session_tracker: Any = None     # SessionTracker — sessions.ndjson (#1605)
 
     # ------------------------------------------------------------------
     # Privacy helpers
@@ -1909,6 +1912,220 @@ class HistoryService:
             except Exception:
                 logger.warning("purge_all_data: удаление settings_backups/ не удалось", exc_info=True)
                 secondary_errors.append("settings_backups")
+
+        # ==================================================================
+        # W1770: закрытие оставшихся privacy-purge пробелов (audit_purge_coverage).
+        # Каждый шаг защищён собственным try/except → secondary_errors.append(...).
+        # Прямой rmtree/unlink для файловых/директорных хранилищ; вызов метода
+        # коллаборатора только там, где надо также очистить in-memory состояние.
+        # ==================================================================
+        # Резолв data_dir защищён: повреждённый store.data_dir (напр. не-строка)
+        # не должен ронять весь purge — прямые файловые шаги пропускаются, но
+        # collaborator-методы (знают свои пути сами) всё равно отрабатывают ниже.
+        _data_dir: Path | None
+        try:
+            _data_dir = Path(self.store.data_dir)
+        except Exception:
+            logger.warning("purge_all_data: некорректный data_dir — прямые файловые шаги пропущены", exc_info=True)
+            secondary_errors.append("data_dir")
+            _data_dir = None
+
+        # --- 18. W1770: удалить сырое аудио (audio/) ---
+        # AudioRecorder/конвейер сохраняют сырые WAV/PCM записей под <data_dir>/audio/.
+        # Сырое аудио — это голос пользователя (биометрия) и должно исчезать при wipe.
+        try:
+            import shutil as _shutil
+            _audio_dir = _data_dir / "audio"
+            if _audio_dir.is_dir():
+                _shutil.rmtree(_audio_dir, ignore_errors=True)
+                logger.info("purge_all_data: удалена директория audio/")
+        except Exception:
+            logger.warning("purge_all_data: удаление audio/ не удалось", exc_info=True)
+            secondary_errors.append("audio")
+
+        # --- 19. W1770: удалить сорванные записи (failed_recordings/) ---
+        # При сбое транскрибации сырое аудио откладывается в <data_dir>/failed_recordings/.
+        # Тот же класс данных, что и audio/ — голос пользователя.
+        try:
+            import shutil as _shutil
+            _failed_dir = _data_dir / "failed_recordings"
+            if _failed_dir.is_dir():
+                _shutil.rmtree(_failed_dir, ignore_errors=True)
+                logger.info("purge_all_data: удалена директория failed_recordings/")
+        except Exception:
+            logger.warning("purge_all_data: удаление failed_recordings/ не удалось", exc_info=True)
+            secondary_errors.append("failed_recordings")
+
+        # --- 20. W1770: удалить экспортированные транскрипции (exports/, auto_exports/, timeline/) ---
+        # ExportScheduler/история пишут экспортированные транскрипции (SRT/CSV/MD/JSON/HTML)
+        # и таймлайн-экспорты под эти директории. Все содержат полный STT-текст.
+        # Имена директорий заданы литералами явно (а не циклом по переменной), чтобы
+        # статический guard audit_purge_coverage мог их зачесть как покрытые.
+        try:
+            import shutil as _shutil
+            if (_data_dir / "exports").is_dir():
+                _shutil.rmtree(_data_dir / "exports", ignore_errors=True)
+                logger.info("purge_all_data: удалена директория exports/")
+        except Exception:
+            logger.warning("purge_all_data: удаление exports/ не удалось", exc_info=True)
+            secondary_errors.append("exports")
+        try:
+            import shutil as _shutil
+            if (_data_dir / "auto_exports").is_dir():
+                _shutil.rmtree(_data_dir / "auto_exports", ignore_errors=True)
+                logger.info("purge_all_data: удалена директория auto_exports/")
+        except Exception:
+            logger.warning("purge_all_data: удаление auto_exports/ не удалось", exc_info=True)
+            secondary_errors.append("auto_exports")
+        try:
+            import shutil as _shutil
+            if (_data_dir / "timeline").is_dir():
+                _shutil.rmtree(_data_dir / "timeline", ignore_errors=True)
+                logger.info("purge_all_data: удалена директория timeline/")
+        except Exception:
+            logger.warning("purge_all_data: удаление timeline/ не удалось", exc_info=True)
+            secondary_errors.append("timeline")
+
+        # --- 21. W1770: удалить расписание экспорта (export_schedule.json) ---
+        # ExportScheduler хранит конфигурацию авто-экспорта (включая output-пути,
+        # привязанные к выгрузке PII-истории). Стираем вместе с экспортами.
+        try:
+            (_data_dir / "export_schedule.json").unlink(missing_ok=True)
+        except Exception:
+            logger.warning("purge_all_data: удаление export_schedule.json не удалось", exc_info=True)
+            secondary_errors.append("export_schedule")
+
+        # --- 22. W1770: очистить метаданные сессий (sessions.ndjson) через SessionTracker ---
+        # SessionTracker.clear_all() (#1605) сбрасывает in-memory буфер + активную сессию
+        # и удаляет sessions.ndjson (имя устройства, время старта/конца, режим —
+        # косвенные ПДн, раскрывают паттерны записи). Дополнительно явный unlink файла
+        # под data_dir — гарантирует физическое удаление и зачёт статическим guard-ом.
+        if self._session_tracker is not None:
+            try:
+                self._session_tracker.clear_all()
+                logger.info("purge_all_data: sessions.ndjson очищен")
+            except Exception:
+                logger.warning("purge_all_data: session_tracker.clear_all не удался", exc_info=True)
+                secondary_errors.append("sessions")
+        if _data_dir is not None:
+            try:
+                (_data_dir / "sessions.ndjson").unlink(missing_ok=True)
+            except Exception:
+                logger.warning("purge_all_data: удаление sessions.ndjson не удалось", exc_info=True)
+                secondary_errors.append("sessions")
+
+        # --- 23. W1770: очистить коллекции (collections.json) через CollectionManager ---
+        # CollectionManager.purge_all() (#1613) сбрасывает in-memory реестр и удаляет
+        # collections.json — пользовательские имена/описания коллекций (free-text PII)
+        # вместе со ссылками на item_id истории. Дополнительно явный unlink файла под
+        # data_dir — гарантирует физическое удаление и зачёт статическим guard-ом.
+        if self._collection_manager is not None:
+            try:
+                self._collection_manager.purge_all()
+                logger.info("purge_all_data: collections.json очищен")
+            except Exception:
+                logger.warning("purge_all_data: collection_manager.purge_all не удался", exc_info=True)
+                secondary_errors.append("collections")
+        if _data_dir is not None:
+            try:
+                (_data_dir / "collections.json").unlink(missing_ok=True)
+            except Exception:
+                logger.warning("purge_all_data: удаление collections.json не удалось", exc_info=True)
+                secondary_errors.append("collections")
+
+        # --- 24. W1770: удалить журнал воспроизведения событий (event_replay.ndjson) ---
+        # EventReplayManager сохраняет полные payload-ы событий (включая транскрипт-текст
+        # в STT/translation событиях) для replay. Переживают purge без этого шага.
+        try:
+            (_data_dir / "event_replay.ndjson").unlink(missing_ok=True)
+            (_data_dir / "event_replay.ndjson.tmp").unlink(missing_ok=True)
+        except Exception:
+            logger.warning("purge_all_data: удаление event_replay.ndjson не удалось", exc_info=True)
+            secondary_errors.append("event_replay")
+
+        # --- 25. W1770: удалить аудит-трейл IPC (audit_*.ndjson) ---
+        # AuditLogger пишет ежедневный NDJSON со списком IPC-вызовов и временными
+        # метками. Значения параметров не пишутся (sensitive методы redact-ятся), но
+        # сам трейл «что/когда вызывал пользователь» — косвенные usage-pattern ПДн.
+        # Compliance-журнал privacy_audit.log (home-rooted) НЕ трогаем — это легальный
+        # след самого purge.
+        try:
+            _audit_count = 0
+            for _audit_path in _data_dir.glob("audit_*.ndjson"):
+                try:
+                    _audit_path.unlink(missing_ok=True)
+                    _audit_count += 1
+                except OSError:
+                    logger.warning("purge_all_data: не удалось удалить %s", _audit_path, exc_info=True)
+                    secondary_errors.append("audit_logs")
+            if _audit_count:
+                logger.info("purge_all_data: удалено %d audit_*.ndjson файлов", _audit_count)
+        except Exception:
+            logger.warning("purge_all_data: удаление audit_*.ndjson не удалось", exc_info=True)
+            secondary_errors.append("audit_logs")
+
+        # --- 26. W1770: удалить авто-глоссарий (auto_glossary.json) ---
+        # AutoGlossary кэширует имена собственные и термины, извлечённые ИЗ истории
+        # транскрипций (transcript-derived). Это PII пользователя.
+        try:
+            (_data_dir / "auto_glossary.json").unlink(missing_ok=True)
+        except Exception:
+            logger.warning("purge_all_data: удаление auto_glossary.json не удалось", exc_info=True)
+            secondary_errors.append("auto_glossary")
+
+        # --- 27. W1770: удалить историю поиска (search_history.json) ---
+        # SearchHistoryManager хранит последние поисковые запросы пользователя —
+        # это введённый пользователем текст (PII).
+        try:
+            (_data_dir / "search_history.json").unlink(missing_ok=True)
+        except Exception:
+            logger.warning("purge_all_data: удаление search_history.json не удалось", exc_info=True)
+            secondary_errors.append("search_history")
+
+        # --- 28. W1770: удалить пользовательские горячие слова и legacy-словарь ---
+        # hotwords.json — заданные пользователем триггер-слова (имена/термины);
+        # vocabulary.txt — legacy STT-словарь (имена/термины). Оба содержат PII.
+        try:
+            (_data_dir / "hotwords.json").unlink(missing_ok=True)
+        except Exception:
+            logger.warning("purge_all_data: удаление hotwords.json не удалось", exc_info=True)
+            secondary_errors.append("hotwords")
+        try:
+            (_data_dir / "vocabulary.txt").unlink(missing_ok=True)
+        except Exception:
+            logger.warning("purge_all_data: удаление vocabulary.txt не удалось", exc_info=True)
+            secondary_errors.append("vocabulary_txt")
+
+        # --- 29. W1770: удалить usage/recap/scheduler-стейты (usage-pattern ПДн) ---
+        # usage_stats.json — ежедневная статистика (кол-во записей/длительность/слова);
+        # recap_state.json — дата последней отправки дайджеста; scheduled_recordings.json —
+        # будущие запланированные записи. Все раскрывают паттерны пользования.
+        # Имена заданы литералами явно (а не циклом), чтобы статический guard их зачёл.
+        try:
+            (_data_dir / "usage_stats.json").unlink(missing_ok=True)
+        except Exception:
+            logger.warning("purge_all_data: удаление usage_stats.json не удалось", exc_info=True)
+            secondary_errors.append("usage_stats")
+        try:
+            (_data_dir / "recap_state.json").unlink(missing_ok=True)
+        except Exception:
+            logger.warning("purge_all_data: удаление recap_state.json не удалось", exc_info=True)
+            secondary_errors.append("recap_state")
+        try:
+            (_data_dir / "scheduled_recordings.json").unlink(missing_ok=True)
+        except Exception:
+            logger.warning("purge_all_data: удаление scheduled_recordings.json не удалось", exc_info=True)
+            secondary_errors.append("scheduled_recordings")
+
+        # --- 30. W1770: удалить REST Bearer-токены (api_tokens.json) — СЕКРЕТЫ ---
+        # RestAuth хранит SHA-256 хэши Bearer-токенов для REST API (порт 5005).
+        # Это аутентификационные секреты и обязаны исчезать при privacy-wipe.
+        try:
+            (_data_dir / "api_tokens.json").unlink(missing_ok=True)
+            logger.info("purge_all_data: api_tokens.json удалён (REST secrets)")
+        except Exception:
+            logger.warning("purge_all_data: удаление api_tokens.json не удалось", exc_info=True)
+            secondary_errors.append("api_tokens")
 
         # --- C. W1734: Audit log entry ---
         try:
