@@ -8,7 +8,7 @@
 """
 
 from __future__ import annotations
-from backend.stats_report import StatsReportGenerator, _ascii_bar, _tokenize
+from backend.stats_report import StatsReportGenerator, _ascii_bar, _md_cell, _tokenize
 
 import contextlib
 import fcntl
@@ -713,6 +713,175 @@ class TestWave122RequiredNames(unittest.TestCase):
         import re as _re
         h2_sections = _re.findall(r"^## \d+\.", result, _re.MULTILINE)
         self.assertEqual(len(h2_sections), 8, f"Ожидалось 8 секций ##, найдено {len(h2_sections)}")
+
+
+# ---------------------------------------------------------------------------
+# Тест 10 (Wave 1770): _md_cell — экранирование пользовательского контента
+# ---------------------------------------------------------------------------
+
+class TestMdCellHelper(unittest.TestCase):
+    """Модульные тесты хелпера _md_cell (экранирование ячеек Markdown)."""
+
+    def test_escapes_pipe(self) -> None:
+        self.assertNotIn("|", _md_cell("a|b").replace("\\|", ""))
+        self.assertEqual(_md_cell("a|b"), "a\\|b")
+
+    def test_collapses_newlines(self) -> None:
+        out = _md_cell("line1\nline2\r\nline3")
+        self.assertNotIn("\n", out)
+        self.assertNotIn("\r", out)
+        self.assertEqual(out, "line1 line2 line3")
+
+    def test_neutralizes_leading_equals(self) -> None:
+        out = _md_cell("=SUM(1+1)")
+        # Ячейка больше не начинается с '=' → spreadsheet не трактует как формулу.
+        self.assertFalse(out.startswith("="))
+        self.assertEqual(out, "'=SUM(1+1)")
+
+    def test_neutralizes_all_formula_leads(self) -> None:
+        for lead in ("=", "+", "-", "@"):
+            out = _md_cell(f"{lead}cmd")
+            self.assertTrue(out.startswith("'"), f"Ведущий '{lead}' не нейтрализован")
+
+    def test_neutralizes_formula_lead_after_whitespace(self) -> None:
+        # Пробел/таб перед формульным символом не должен «прятать» инъекцию.
+        out = _md_cell("   =1+1")
+        self.assertTrue(out.startswith("'"))
+
+    def test_plain_text_unchanged(self) -> None:
+        self.assertEqual(_md_cell("meeting"), "meeting")
+        self.assertEqual(_md_cell("Работа"), "Работа")
+
+    def test_none_is_empty(self) -> None:
+        self.assertEqual(_md_cell(None), "")
+
+
+# ---------------------------------------------------------------------------
+# Тест 11 (Wave 1770): инъекция в теги / коллекции / спикеров нейтрализована
+# ---------------------------------------------------------------------------
+
+class TestInjectionNeutralized(unittest.TestCase):
+    """Пользовательский контент не ломает Markdown и не несёт активных формул."""
+
+    _MALICIOUS = "=SUM(A1:A9)|evil\nNEWLINE"
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._gen = StatsReportGenerator()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _assert_no_active_injection(self, result: str, marker: str) -> None:
+        """Проверяет, что вредоносный контент попал в отчёт уже нейтрализованным.
+
+        Берём каждую строку отчёта, содержащую маркер инъекции, и убеждаемся,
+        что в ней нет «сырой» формульной ячейки и нет неэкранированного '|'
+        от полезной нагрузки (сырой перенос строки тоже исчезает — payload
+        целиком на одной строке).
+        """
+        # Перенос строки из payload схлопнут → маркер и хвост на одной строке.
+        self.assertIn(marker, result)
+        self.assertIn("NEWLINE", result)
+        offending = [
+            ln for ln in result.splitlines()
+            if marker in ln and "NEWLINE" in ln
+        ]
+        self.assertTrue(
+            offending,
+            "payload должен целиком оставаться на одной строке (CR/LF схлопнут)",
+        )
+        for ln in offending:
+            # Сырой '|' от payload отсутствует: между marker и 'evil' стоит '\|'.
+            self.assertIn(f"{marker}\\|evil", ln)
+            # Формульный ведущий символ нейтрализован апострофом.
+            self.assertIn(f"'{marker}", ln)
+
+    def test_tag_injection_neutralized(self) -> None:
+        items = [
+            _make_item("Запись", ts=_ts_days_ago(1), tags=[self._MALICIOUS]),
+        ]
+        store = FakeStore(Path(self._tmp.name) / "tags", items=items)
+        result = self._gen.generate_report(store, days=30)
+        self._assert_no_active_injection(result, "=SUM(A1:A9)")
+
+    def test_speaker_injection_neutralized(self) -> None:
+        diar = {
+            "segments": [
+                {"speaker": self._MALICIOUS, "start": 0.0, "end": 12.0},
+            ]
+        }
+        items = [
+            _make_item("Запись", ts=_ts_days_ago(1), diarization=diar),
+        ]
+        store = FakeStore(Path(self._tmp.name) / "spk", items=items)
+        result = self._gen.generate_report(store, days=30)
+        self._assert_no_active_injection(result, "=SUM(A1:A9)")
+
+    def test_collection_injection_neutralized(self) -> None:
+        items = [_make_item("Запись", ts=_ts_days_ago(1))]
+        data_dir = Path(self._tmp.name) / "coll"
+        store = FakeStore(data_dir, items=items)
+        coll_data = {
+            "collections": {
+                self._MALICIOUS: {
+                    "name": self._MALICIOUS,
+                    "item_ids": ["id1", "id2"],
+                },
+            }
+        }
+        (data_dir / "collections.json").write_text(
+            json.dumps(coll_data, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        result = self._gen.generate_report(store, days=30)
+        self._assert_no_active_injection(result, "=SUM(A1:A9)")
+
+
+# ---------------------------------------------------------------------------
+# Тест 12 (Wave 1770): days клампится (защита от DoS по памяти/CPU)
+# ---------------------------------------------------------------------------
+
+class TestDaysClamp(unittest.TestCase):
+    """Огромный/битый days не приводит к DoS — клампится к [1, 3650]."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        items = [_make_item("Запись", ts=_ts_days_ago(1))]
+        self._store = FakeStore(Path(self._tmp.name), items=items)
+        self._gen = StatsReportGenerator()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_huge_days_clamped_and_fast(self) -> None:
+        import time as _time
+        start = _time.perf_counter()
+        result = self._gen.generate_report(self._store, days=10_000_000)
+        elapsed = _time.perf_counter() - start
+        self.assertIsInstance(result, str)
+        # Заголовок отражает кламп до 3650 дней (не 10 млн).
+        self.assertIn("последние 3650 дней", result)
+        self.assertNotIn("10000000", result)
+        # Должно отрабатывать быстро — без построения многомиллионного списка дат.
+        self.assertLess(elapsed, 2.0, f"generate_report занял {elapsed:.3f}s (>2s)")
+
+    def test_days_lower_bound(self) -> None:
+        result = self._gen.generate_report(self._store, days=0)
+        self.assertIn("последние 1 дней", result)
+
+    def test_days_negative_clamped_to_one(self) -> None:
+        result = self._gen.generate_report(self._store, days=-50)
+        self.assertIn("последние 1 дней", result)
+
+    def test_non_int_days_defaults(self) -> None:
+        # Нечисловой ввод деградирует к значению по умолчанию (30), без исключения.
+        result = self._gen.generate_report(self._store, days="not-a-number")
+        self.assertIn("последние 30 дней", result)
+
+    def test_normal_days_unchanged(self) -> None:
+        result = self._gen.generate_report(self._store, days=30)
+        self.assertIn("последние 30 дней", result)
 
 
 if __name__ == "__main__":

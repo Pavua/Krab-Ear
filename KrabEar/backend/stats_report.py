@@ -99,6 +99,43 @@ def _ascii_bar(value: float, max_value: float, width: int = _ASCII_BAR_WIDTH) ->
     return _ASCII_BAR_CHARS * filled
 
 
+# Ведущие символы, провоцирующие формульную инъекцию при открытии .md в Excel/
+# Numbers/LibreOffice Calc (ячейка трактуется как формула).
+_FORMULA_LEAD_CHARS: frozenset = frozenset({"=", "+", "-", "@"})
+
+
+def _md_cell(value: Any) -> str:
+    """Нейтрализует пользовательский текст перед вставкой в ячейку Markdown.
+
+    Защищает от трёх векторов инъекции в отчёте (теги, имена коллекций, метки
+    спикеров, заголовки):
+
+    1. Слом Markdown-таблицы: ``|`` экранируется как ``\\|``.
+    2. Слом структуры строки / вставка лишних строк: CR/LF (и прочие
+       управляющие переводы) сворачиваются в один пробел.
+    3. Формульная инъекция (CSV/spreadsheet): если ячейка начинается с
+       ``= + - @`` (после необязательных пробелов), перед ней ставится
+       апостроф ``'`` — нейтральный префикс, который Excel/Numbers/Calc не
+       интерпретируют как формулу.
+
+    Args:
+        value: Любое значение пользовательского происхождения.
+
+    Returns:
+        Безопасная для вставки в Markdown-ячейку строка.
+    """
+    s = "" if value is None else str(value)
+    # CR/LF и прочие управляющие переводы строк → один пробел (схлопываем серии).
+    s = re.sub(r"[\r\n\x0b\x0c]+", " ", s)
+    # Экранируем разделитель таблицы.
+    s = s.replace("|", "\\|")
+    # Нейтрализуем формульную инъекцию: смотрим на первый непробельный символ.
+    stripped = s.lstrip()
+    if stripped and stripped[0] in _FORMULA_LEAD_CHARS:
+        s = "'" + s
+    return s
+
+
 # ---------------------------------------------------------------------------
 # Основной класс
 # ---------------------------------------------------------------------------
@@ -117,7 +154,15 @@ class StatsReportGenerator:
         Returns:
             Многострочная строка Markdown.
         """
-        days = max(1, int(days))
+        # Ограничиваем глубину анализа: верхняя граница 3650 дней (10 лет)
+        # защищает от DoS — огромный ``days`` строил бы многомиллионный список
+        # дат (память/CPU) и мог вызвать OverflowError в timedelta/strftime.
+        # Нечисловой/битый ввод деградирует к значению по умолчанию (30).
+        try:
+            days = int(days)
+        except (TypeError, ValueError, OverflowError):
+            days = 30
+        days = max(1, min(days, 3650))
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
         # Загружаем активные записи
@@ -459,7 +504,9 @@ class StatsReportGenerator:
             dur_min = dur_sec / 60.0
             pct = dur_sec / total_dur * 100 if total_dur > 0 else 0
             turns = speaker_turns[speaker]
-            lines.append(f"| {speaker} | {dur_min:.1f} | {pct:.1f}% | {turns} |")
+            # Метка спикера — пользовательского/диаризационного происхождения,
+            # экранируем перед вставкой в Markdown-таблицу.
+            lines.append(f"| {_md_cell(speaker)} | {dur_min:.1f} | {pct:.1f}% | {turns} |")
         lines.append("")
         return "\n".join(lines)
 
@@ -482,7 +529,9 @@ class StatsReportGenerator:
             lines.append("**Топ тегов:**")
             lines.append("")
             for tag, count in tag_counter.most_common(10):
-                lines.append(f"- `{tag}` — {count}")
+                # Тег задаётся пользователем: экранируем разделители/переводы строк
+                # и нейтрализуем формульный префикс перед вставкой в Markdown.
+                lines.append(f"- `{_md_cell(tag)}` — {count}")
             lines.append("")
         else:
             lines.append("_Теги не использовались._")
@@ -502,7 +551,10 @@ class StatsReportGenerator:
                     lines.append("|----------|---------|")
                     for cname, cdata in colls.items():
                         item_count = len(cdata.get("item_ids", []))
-                        lines.append(f"| {cname} | {item_count} |")
+                        # Имя коллекции задаётся пользователем: экранируем перед
+                        # вставкой в Markdown-таблицу (защита от слома таблицы /
+                        # формульной инъекции в .md, открытом как таблица).
+                        lines.append(f"| {_md_cell(cname)} | {item_count} |")
                     lines.append("")
             except Exception:
                 pass
