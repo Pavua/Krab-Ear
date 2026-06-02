@@ -291,23 +291,32 @@ class TestUnicodeSubjectBody(unittest.TestCase):
 class TestConcurrentSend(unittest.TestCase):
     """Multiple threads sending simultaneously must not race or raise unexpectedly."""
 
-    def test_concurrent_send(self):
-        """10 concurrent send() calls each from their own thread must all succeed."""
+    @patch("smtplib.SMTP")
+    def test_concurrent_send(self, MockSMTP):
+        """10 concurrent send() calls each from their own thread must all succeed.
+
+        Note: patch("smtplib.SMTP") is applied at the test level (not per-thread) to
+        avoid the unittest.mock thread-safety issue where concurrent per-thread patches
+        race on the global smtplib module dict. Each worker gets its own mock_server but
+        shares the outer MockSMTP patch that is already active for the entire test.
+        """
         errors: list[Exception] = []
         lock = threading.Lock()
 
+        def _configure_mock():
+            mock_server = MagicMock()
+            MockSMTP.return_value.__enter__ = MagicMock(return_value=mock_server)
+            MockSMTP.return_value.__exit__ = MagicMock(return_value=False)
+
         def _worker(tid: int) -> None:
             sender = _make_smtp_sender(user=f"u{tid}@example.com", password="pw")
-            mock_server = MagicMock()
+            _configure_mock()
             try:
-                with patch("smtplib.SMTP") as MockSMTP:
-                    MockSMTP.return_value.__enter__ = MagicMock(return_value=mock_server)
-                    MockSMTP.return_value.__exit__ = MagicMock(return_value=False)
-                    sender.send(
-                        to=f"r{tid}@example.com",
-                        subject=f"Thread {tid} subject",
-                        body_html=f"<p>Thread {tid} body</p>",
-                    )
+                sender.send(
+                    to=f"r{tid}@example.com",
+                    subject=f"Thread {tid} subject",
+                    body_html=f"<p>Thread {tid} body</p>",
+                )
             except Exception as exc:
                 with lock:
                     errors.append(exc)
