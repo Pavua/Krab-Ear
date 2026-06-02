@@ -3,6 +3,7 @@
 from __future__ import annotations
 from backend.model_cache_manager import ModelCacheManager, ModelInfo
 
+import os
 import sys
 import tempfile
 import unittest
@@ -449,6 +450,98 @@ class TestModelCacheManagerCorruptedCacheEntry(unittest.TestCase):
         ghost = self.cache_dir / "ghost"
         result = ModelCacheManager._folder_size_mb(ghost)
         self.assertEqual(result, 0.0)
+
+
+def _make_hf_blob_snapshot_dir(
+    cache_dir: Path,
+    model_name: str,
+    blob_bytes: int = 1000,
+) -> Path:
+    """Создаёт реалистичную структуру кэша HuggingFace Hub.
+
+    Один blob под ``models--*/blobs/<sha>`` и относительный SYMLINK на него
+    из ``models--*/snapshots/<rev>/<file>`` — именно так HF хранит файлы:
+    содержимое лежит один раз, snapshot ссылается на blob симлинком.
+    """
+    folder_name = "models--" + model_name.replace("/", "--")
+    model_dir = cache_dir / folder_name
+    blobs_dir = model_dir / "blobs"
+    snap_dir = model_dir / "snapshots" / "abc123"
+    blobs_dir.mkdir(parents=True, exist_ok=True)
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    # Реальный blob с содержимым
+    blob = blobs_dir / "deadbeef"
+    blob.write_bytes(b"\x00" * blob_bytes)
+    # Относительный симлинк snapshot → blob (как делает huggingface_hub)
+    link = snap_dir / "model.safetensors"
+    rel_target = os.path.relpath(blob, snap_dir)
+    os.symlink(rel_target, link)
+    return model_dir
+
+
+class TestModelCacheManagerSymlinkDoubleCount(unittest.TestCase):
+    """Регрессия: HF snapshot-симлинки не должны удваивать размер blob.
+
+    Баг (model_cache_manager.py:_folder_size_mb): ``os.walk`` перечисляет
+    snapshot-симлинк как файл, а ``fpath.stat()`` следует по симлинку →
+    один blob суммируется дважды (≈2× завышение). Затрагивает
+    list_cached_models / get_cache_info / get_cache_size (IPC) → GUI
+    показывает размер кэша вдвое больше реального.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.cache_dir = Path(self.tmp)
+        self.mgr = ModelCacheManager(cache_dir=self.cache_dir)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_folder_size_counts_blob_once_not_via_symlink(self):
+        """Blob + snapshot-симлинк на него считаются один раз (≈1000 B, не 2000)."""
+        model_dir = _make_hf_blob_snapshot_dir(self.cache_dir, "openai/whisper-small", blob_bytes=1000)
+        # Проверяем, что фикстура действительно создала симлинк
+        link = model_dir / "snapshots" / "abc123" / "model.safetensors"
+        if not os.path.islink(link):
+            self.skipTest("symlinks not supported on this filesystem")
+        size_mb = ModelCacheManager._folder_size_mb(model_dir)
+        size_bytes = size_mb * 1024 * 1024
+        # blob = 1000 B; симлинк не должен добавить ещё 1000 B.
+        # Допускаем небольшую погрешность (метаданные ФС, имя симлинка как файл — 0 B).
+        self.assertAlmostEqual(size_bytes, 1000, delta=200)
+        self.assertLess(size_bytes, 1500, "Симлинк удвоил размер blob (~2×)")
+
+    def test_get_cache_size_counts_blob_once(self):
+        """get_cache_size (байты, IPC) не удваивает blob из-за snapshot-симлинка."""
+        model_dir = _make_hf_blob_snapshot_dir(self.cache_dir, "test/model", blob_bytes=4096)
+        link = model_dir / "snapshots" / "abc123" / "model.safetensors"
+        if not os.path.islink(link):
+            self.skipTest("symlinks not supported on this filesystem")
+        size = self.mgr.get_cache_size()
+        # Ровно один blob (4096 B), а не два (8192 B).
+        self.assertLess(size, 6000, "get_cache_size удвоил blob через симлинк")
+        self.assertGreaterEqual(size, 4000)
+
+    def test_list_cached_models_size_counts_blob_once(self):
+        """list_cached_models.size_mb не удваивает blob из-за snapshot-симлинка."""
+        model_dir = _make_hf_blob_snapshot_dir(self.cache_dir, "org/repo", blob_bytes=1024 * 1024)
+        link = model_dir / "snapshots" / "abc123" / "model.safetensors"
+        if not os.path.islink(link):
+            self.skipTest("symlinks not supported on this filesystem")
+        models = self.mgr.list_cached_models()
+        self.assertEqual(len(models), 1)
+        # 1 MB blob, не 2 MB.
+        self.assertAlmostEqual(models[0].size_mb, 1.0, delta=0.2)
+
+    def test_real_files_only_dir_unchanged(self):
+        """Папка только с реальными файлами (без симлинков) считается как раньше."""
+        _make_model_dir(self.cache_dir, "plain/model", size_bytes=2048)
+        model_dir = self.cache_dir / "models--plain--model"
+        size_mb = ModelCacheManager._folder_size_mb(model_dir)
+        size_bytes = size_mb * 1024 * 1024
+        # Реальный файл 2048 B учитывается полностью.
+        self.assertAlmostEqual(size_bytes, 2048, delta=100)
 
 
 class TestModelCacheManagerConcurrentEviction(unittest.TestCase):

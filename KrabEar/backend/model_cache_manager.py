@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import stat
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -179,14 +180,27 @@ class ModelCacheManager:
 
     @staticmethod
     def _folder_size_mb(path: Path) -> float:
-        """Рекурсивно подсчитывает размер папки в МБ."""
+        """Рекурсивно подсчитывает размер папки в МБ.
+
+        Симлинки пропускаются: кэш HuggingFace Hub хранит каждый blob один раз
+        под ``models--*/blobs/<sha>`` и ссылается на него из
+        ``models--*/snapshots/<rev>/<file>`` относительным симлинком. Если
+        следовать симлинку (``stat()`` по умолчанию), один и тот же blob
+        суммируется дважды (≈2× завышение размера). Считаем только реальные
+        файлы (``follow_symlinks=False`` + ``followlinks=False``), чтобы каждый
+        blob учитывался ровно один раз.
+        """
         total = 0
         try:
-            for root, _dirs, files in os.walk(path):
+            for root, _dirs, files in os.walk(path, followlinks=False):
                 for fname in files:
                     fpath = Path(root) / fname
                     try:
-                        total += fpath.stat().st_size
+                        st = fpath.stat(follow_symlinks=False)
+                        # Пропускаем симлинки (snapshot → blob): blob уже посчитан напрямую.
+                        if not stat.S_ISREG(st.st_mode):
+                            continue
+                        total += st.st_size
                     except OSError:
                         pass
         except OSError:
