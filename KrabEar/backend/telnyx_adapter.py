@@ -21,6 +21,8 @@ from urllib3.util.retry import Retry
 
 # F3 (W1195): SSRF guard — reuse WebhookManager's validated URL checker.
 from backend.webhook_manager import _is_safe_webhook_url  # noqa: PLC2701
+# F8 (W1766): маскировка номера телефона в логах — предотвращает утечку PII.
+from backend.observability import mask_phone
 
 logger = logging.getLogger("KrabEar.Backend.TelnyxAdapter")
 
@@ -272,7 +274,8 @@ class TelnyxAdapter:
             return {
                 "ok": False,
                 "error": "invalid_phone_number",
-                "message": f"Номер '{to_number}' не соответствует формату E.164",
+                # F8 (W1766): маскируем номер в сообщении — значение видно в логах вызывающего кода.
+                "message": f"Номер '{mask_phone(to_number)}' не соответствует формату E.164",
             }
 
         # W1748: validate from_number (E.164) before sending to Telnyx.
@@ -280,7 +283,8 @@ class TelnyxAdapter:
             return {
                 "ok": False,
                 "error": "invalid_from_number",
-                "message": f"Номер отправителя '{self._from_number}' не соответствует формату E.164",
+                # F8 (W1766): маскируем номер отправителя в сообщении.
+                "message": f"Номер отправителя '{mask_phone(self._from_number)}' не соответствует формату E.164",
             }
 
         payload: Dict[str, Any] = {
@@ -311,7 +315,7 @@ class TelnyxAdapter:
         call_id = data.get("call_leg_id") or data.get("id", "")
         ctrl_id = data.get("call_control_id", "")
 
-        logger.info("Telnyx call initiated: call_id=%s to=%s", call_id, to_number)
+        logger.info("Telnyx call initiated: call_id=%s to=%s", call_id, mask_phone(to_number))
         return {
             "ok": True,
             "call_id": call_id,

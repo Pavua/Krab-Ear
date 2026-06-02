@@ -6,10 +6,10 @@ Raw token is returned once at creation time and never persisted.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import secrets
-import stat
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -63,7 +63,9 @@ class RestAuth:
         token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
         with self._lock:
             for entry in self._tokens:
-                if entry.get("token_hash") == token_hash:
+                # Защита от timing-oracle: constant-time сравнение хэшей.
+                stored = entry.get("token_hash") or ""
+                if hmac.compare_digest(stored, token_hash):
                     entry["last_used"] = datetime.now(timezone.utc).isoformat()
                     self._save(self._tokens)
                     return self._public_meta(entry)
@@ -83,10 +85,20 @@ class RestAuth:
         return []
 
     def _save(self, tokens: list[dict]) -> None:
-        """Atomically write tokens file with 0600 permissions."""
+        """Atomically write tokens file with 0600 permissions.
+
+        Используем os.open с флагом O_CREAT и режимом 0o600, чтобы файл
+        создавался сразу с нужными правами — без window с 0644 (umask-based),
+        которую давал plain open().
+        Если запись или os.replace упали — удаляем tmp, чтобы не оставлять мусор.
+        """
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_suffix(".tmp")
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(tokens, fh, indent=2, ensure_ascii=False)
-        os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
-        os.replace(tmp, self._path)
+        try:
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(tokens, fh, indent=2, ensure_ascii=False)
+            os.replace(tmp, self._path)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise

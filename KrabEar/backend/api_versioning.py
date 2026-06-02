@@ -6,11 +6,15 @@ response header injection, deprecation signalling, and version metadata.
 
 from __future__ import annotations
 
+import logging
+import re
 from enum import Enum
 
 from flask import request, Response
 
 from KrabEar.__version__ import __version__ as APP_VERSION
+
+logger = logging.getLogger("KrabEar.Backend.APIVersioning")
 
 
 class APIVersion(Enum):
@@ -92,8 +96,7 @@ def _extract_raw_version_hint(req=None) -> str | None:
             return None  # known version — not an unknown request
 
     # Check for any /vX/ pattern in path that didn't match a supported version
-    import re as _re
-    m = _re.match(r"^/(v\d+)", path)
+    m = re.match(r"^/(v\d+)", path)
     if m:
         return m.group(1)
 
@@ -103,7 +106,7 @@ def _extract_raw_version_hint(req=None) -> str | None:
         if f"vnd.krabear.{version.value}" in accept:
             return None  # known version
 
-    m = _re.search(r"vnd\.krabear\.(v\d+)", accept)
+    m = re.search(r"vnd\.krabear\.(v\d+)", accept)
     if m:
         return m.group(1)
 
@@ -146,11 +149,22 @@ def api_version_header():
             # F4: warn when client asked for a version we don't know about.
             raw_hint = _extract_raw_version_hint()
             if raw_hint is not None:
+                # Защита от CRLF-инъекции: удалить \r и \n из hint перед вставкой в заголовок.
+                # Flask URL-декодирует query params, поэтому %0d%0a → \r\n без доп. шагов.
+                # Werkzeug поднимает ValueError при попытке записать заголовок с newline.
+                sanitized_hint = re.sub(r"[\r\n]", "", raw_hint)
+                if sanitized_hint != raw_hint:
+                    logger.warning(
+                        "api_version_header: CRLF-символы удалены из hint",
+                        extra={"raw_hint_len": len(raw_hint)},
+                    )
                 response.headers["X-API-Version-Warning"] = (
-                    f"unknown_version_requested_{raw_hint}"
+                    f"unknown_version_requested_{sanitized_hint}"
                 )
-        except RuntimeError:
-            # Outside of a request context (e.g. tests that call directly).
+        except (RuntimeError, ValueError):
+            # RuntimeError — вне request-контекста (например, прямой тест).
+            # ValueError — Werkzeug отклонил заголовок (не должно случаться после sanitize,
+            # но оборачиваем на случай граничных значений).
             response.headers["X-API-Version"] = DEFAULT_VERSION.value
         return response
 
