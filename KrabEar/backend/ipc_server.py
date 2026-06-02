@@ -27,6 +27,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("KrabEar.Backend.Service")
 
+# W1767 #1 (HIGH): slow-loris / thread exhaustion guard.
+# Принятый коннект без этого таймаута паркует handler-поток навсегда.
+IPC_CONN_RECV_TIMEOUT_SEC: float = 30.0
+
+# W1767 #1 (HIGH): максимальное число одновременных handler-потоков.
+# При исчерпании новый коннект немедленно закрывается (structured warning).
+_IPC_MAX_CONNECTIONS: int = 64
+
+# Размер чанка для сборки потокового сообщения (W1767 #4 MED).
+_IPC_RECV_CHUNK: int = 4096
+
 
 class IPCServer:
     """Unix socket сервер, который проксирует запросы в BackendService."""
@@ -35,6 +46,8 @@ class IPCServer:
         self.socket_path = socket_path
         self.service = service
         self._stop_event = threading.Event()
+        # W1767 #1 (HIGH): semaphore ограничивает число параллельных коннектов.
+        self._conn_semaphore = threading.BoundedSemaphore(_IPC_MAX_CONNECTIONS)
 
     def stop(self) -> None:
         """Останавливает accept loop."""
@@ -46,25 +59,25 @@ class IPCServer:
         if self.socket_path.exists():
             self.socket_path.unlink()
 
-        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        # Wave 58 LOW-2 closure (Wave 47 B2 audit): tighten umask BEFORE bind so the
-        # socket is created with owner-only perms from the start. Combined with the
-        # explicit `os.chmod()` below this eliminates the TOCTOU window where a
-        # concurrent process could open the socket during creation (umask of 0o022
-        # would have initial perms 0o755). `listen()` is not called yet, so no
-        # accept() can happen even in the theoretical window, but defense-in-depth
-        # is cheap here.
+        # W1767 #5 (MED): сокет создаём ВНУТРИ try/finally — bind() failure
+        # (EADDRINUSE, нет прав) больше не утечёт файловый дескриптор.
+        # Ранее `server = socket.socket(...)` стоял ДО первого try, поэтому
+        # OSError при bind() оставляла fd открытым.
+        # Wave 58 LOW-2: umask сужаем ДО bind(), чтобы сокет сразу создавался
+        # с owner-only правами (umask 0o022 → нач. perms 0o755 → race window).
         _old_umask = os.umask(0o077)
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            server.bind(str(self.socket_path))
-        finally:
-            os.umask(_old_umask)
-        os.chmod(str(self.socket_path), IPC_SOCKET_PERMISSIONS)
-        server.listen(IPC_SOCKET_BACKLOG)
-        server.settimeout(IPC_SOCKET_TIMEOUT_SEC)
+            try:
+                server.bind(str(self.socket_path))
+            finally:
+                # Восстанавливаем umask сразу после bind — не задерживаем.
+                os.umask(_old_umask)
+            os.chmod(str(self.socket_path), IPC_SOCKET_PERMISSIONS)
+            server.listen(IPC_SOCKET_BACKLOG)
+            server.settimeout(IPC_SOCKET_TIMEOUT_SEC)
 
-        logger.info("IPC сервер запущен на %s", self.socket_path)
-        try:
+            logger.info("IPC сервер запущен на %s", self.socket_path)
             while not self._stop_event.is_set():
                 try:
                     conn, _ = server.accept()
@@ -74,6 +87,18 @@ class IPCServer:
                     if self._stop_event.is_set():
                         break
                     raise
+
+                # W1767 #1 (HIGH): проверяем лимит коннектов.
+                # BoundedSemaphore.acquire(blocking=False) — не блокирует;
+                # при лимите закрываем коннект без запуска потока.
+                if not self._conn_semaphore.acquire(blocking=False):
+                    logger.warning(
+                        "IPC: лимит %d коннектов исчерпан — новый коннект отклонён",
+                        _IPC_MAX_CONNECTIONS,
+                        extra={"conn_limit": _IPC_MAX_CONNECTIONS},
+                    )
+                    conn.close()
+                    continue
 
                 # PR #14: thread-per-connection. Без этого длинный STT-запрос
                 # блокирует accept-loop и другие IPC-клиенты не могут опрашивать
@@ -95,53 +120,117 @@ class IPCServer:
 
         Выполняется в отдельном потоке на коннект. Socket закрываем здесь же
         через `with conn:` — вызывающая сторона (accept-loop) не trackает.
+
+        W1767 #1: семафор освобождается в finally-блоке независимо от исхода.
+        W1767 #4: recv заменён на цикл до '\\n' с защитой от memory-DoS.
         """
-        with conn:
-            try:
-                raw = conn.recv(IPC_MAX_MESSAGE_BYTES)
-                if not raw:
+        try:
+            # W1767 #1 (HIGH): принятый коннект получает явный recv-таймаут.
+            # Без этого peer, который подключился но молчит, навсегда паркует
+            # данный handler-поток; semaphore slot не будет освобождён.
+            conn.settimeout(IPC_CONN_RECV_TIMEOUT_SEC)
+
+            with conn:
+                try:
+                    # W1767 #4 (MED): читаем до '\n' накопительным циклом.
+                    # POSIX stream НЕ гарантирует целое сообщение за один recv().
+                    # Большие payload (live_subs_ingest ~42 KB, transcribe_paths)
+                    # могут прийти фрагментами → json.loads кидал бы JSONDecodeError.
+                    raw = self._recv_until_newline(conn)
+                    if not raw:
+                        return
+                    text = raw.decode("utf-8").strip()
+                    payload = json.loads(text)
+                    if not isinstance(payload, dict):
+                        raise ValueError("payload должен быть JSON-объектом")
+                except socket.timeout:
+                    # W1767 #1 (HIGH): slow-loris guard — тихо закрываем коннект.
+                    logger.debug(
+                        "IPC: коннект закрыт по recv-таймауту (%ss) — slow-loris guard",
+                        IPC_CONN_RECV_TIMEOUT_SEC,
+                    )
                     return
-                text = raw.decode("utf-8").strip()
-                payload = json.loads(text)
-                if not isinstance(payload, dict):
-                    raise ValueError("payload должен быть JSON-объектом")
-            except Exception as exc:
-                response = {
-                    "id": None,
-                    "ok": False,
-                    "error": {"code": "invalid_json", "message": str(exc)},
-                }
+                except Exception as exc:
+                    response = {
+                        "id": None,
+                        "ok": False,
+                        "error": {"code": "invalid_json", "message": str(exc)},
+                    }
+                    try:
+                        conn.sendall((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
+                    except (BrokenPipeError, ConnectionResetError, OSError) as send_exc:
+                        # Swift client disconnected before response sent — normal during
+                        # crash/quit mid-call.  Log at debug, not error.
+                        logger.debug(
+                            "IPC client disconnected before invalid_json response: %s", send_exc
+                        )
+                    except Exception:
+                        logger.exception("Ошибка отправки invalid_json-ответа")
+                    return
+
+                try:
+                    response = self.service.handle_request(payload)
+                except Exception as exc:
+                    logger.exception("Непойманная ошибка в handle_request")
+                    response = {
+                        "id": payload.get("id"),
+                        "ok": False,
+                        "error": {"code": "internal_error", "message": str(exc)},
+                    }
                 try:
                     conn.sendall((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
                 except (BrokenPipeError, ConnectionResetError, OSError) as exc:
-                    # Swift client disconnected before response sent — normal during
-                    # crash/quit mid-call.  Log at debug, not error.
+                    # Swift client disconnected before response sent — common when the
+                    # agent crashes or quits mid-call.  Log at debug, not error.
                     logger.debug(
-                        "IPC client disconnected before invalid_json response: %s", exc
+                        "IPC client disconnected before response: %s", exc
                     )
                 except Exception:
-                    logger.exception("Ошибка отправки invalid_json-ответа")
-                return
+                    logger.exception("Ошибка отправки ответа клиенту")
+        finally:
+            # W1767 #1 (HIGH): освобождаем семафор в любом случае,
+            # в том числе при socket.timeout (slow-loris guard).
+            self._conn_semaphore.release()
 
-            try:
-                response = self.service.handle_request(payload)
-            except Exception as exc:
-                logger.exception("Непойманная ошибка в handle_request")
-                response = {
-                    "id": payload.get("id"),
-                    "ok": False,
-                    "error": {"code": "internal_error", "message": str(exc)},
-                }
-            try:
-                conn.sendall((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
-            except (BrokenPipeError, ConnectionResetError, OSError) as exc:
-                # Swift client disconnected before response sent — common when the
-                # agent crashes or quits mid-call.  Log at debug, not error.
-                logger.debug(
-                    "IPC client disconnected before response: %s", exc
+    # ------------------------------------------------------------------
+    # W1767 #4 (MED): вспомогательный метод сборки потокового сообщения
+    # ------------------------------------------------------------------
+
+    def _recv_until_newline(self, conn: socket.socket) -> bytes:
+        """Читает байты из коннекта до появления символа '\\n'.
+
+        Собирает чанки по ``_IPC_RECV_CHUNK`` байт; прерывается как только
+        буфер содержит '\\n'.  Возвращает содержимое ДО первого '\\n'.
+
+        Защита от memory-DoS: если накоплено > ``IPC_MAX_MESSAGE_BYTES`` байт
+        до символа '\\n' — закрывает коннект и бросает ``ValueError``.
+        Это предотвращает ситуацию, когда злоумышленник шлёт гигантский поток
+        без новой строки.
+
+        :raises ValueError: превышен лимит IPC_MAX_MESSAGE_BYTES.
+        :raises socket.timeout: recv истёк (slow-loris guard).
+        """
+        buf = b""
+        while True:
+            chunk = conn.recv(_IPC_RECV_CHUNK)
+            if not chunk:
+                # Пир закрыл коннект без сообщения.
+                return b""
+            buf += chunk
+            if b"\n" in buf:
+                # Берём только первое сообщение (до первой '\n').
+                line, _ = buf.split(b"\n", 1)
+                return line
+            if len(buf) > IPC_MAX_MESSAGE_BYTES:
+                # W1767 #4 (MED): memory-DoS guard — сброс коннекта.
+                logger.warning(
+                    "IPC: сообщение превысило лимит %d байт — коннект закрыт",
+                    IPC_MAX_MESSAGE_BYTES,
+                    extra={"limit_bytes": IPC_MAX_MESSAGE_BYTES},
                 )
-            except Exception:
-                logger.exception("Ошибка отправки ответа клиенту")
+                raise ValueError(
+                    f"IPC message exceeded {IPC_MAX_MESSAGE_BYTES} bytes without newline"
+                )
 
 
 def default_data_dir() -> Path:
