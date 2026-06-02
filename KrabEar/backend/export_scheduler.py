@@ -130,9 +130,16 @@ class ExportScheduler:
         exports: list[dict] = schedule.get("exports", [])
 
         # Удаляем записи с несуществующими файлами
+        # Удаляем записи с несуществующими файлами и проверяем path traversal
         valid_exports = []
+        data_dir_resolved = self.data_dir.resolve()
         for entry in exports:
             p = Path(entry.get("path", ""))
+            try:
+                if not p.resolve().is_relative_to(data_dir_resolved):
+                    continue
+            except Exception:
+                continue
             if p.exists():
                 valid_exports.append(entry)
             else:
@@ -143,8 +150,10 @@ class ExportScheduler:
         for entry in to_remove:
             p = Path(entry.get("path", ""))
             try:
-                p.unlink(missing_ok=True)
-                logger.info("Удалён старый авто-экспорт: %s", p)
+                # Еще раз проверим перед удалением (защита от race conditions/symlinks)
+                if p.resolve().is_relative_to(data_dir_resolved):
+                    p.unlink(missing_ok=True)
+                    logger.info("Удалён старый авто-экспорт: %s", p)
             except Exception as exc:
                 logger.warning("Не удалось удалить авто-экспорт %s: %s", p, exc)
 
@@ -419,6 +428,7 @@ class ExportScheduler:
                         "export_scheduler: не удалось получить настройки для проверки privacy mode: %s",
                         exc,
                     )
+                    return {"exported": False, "reason": "privacy_mode_error"}
 
             interval_hours = int(schedule.get("interval_hours", 24))
             last_ts_str: str | None = schedule.get("last_export_ts")
@@ -512,8 +522,14 @@ class ExportScheduler:
             schedule = self._load_schedule()
 
         result = []
+        data_dir_resolved = self.data_dir.resolve()
         for entry in schedule.get("exports", []):
             p = Path(entry.get("path", ""))
+            try:
+                if not p.resolve().is_relative_to(data_dir_resolved):
+                    continue
+            except Exception:
+                continue
             if p.exists():
                 result.append(dict(entry))
 
