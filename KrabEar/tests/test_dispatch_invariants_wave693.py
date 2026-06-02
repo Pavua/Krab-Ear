@@ -23,8 +23,8 @@ if KRAB_EAR_ROOT not in sys.path:
     sys.path.insert(0, KRAB_EAR_ROOT)
 
 SERVICE_PY = os.path.join(KRAB_EAR_ROOT, "backend", "service.py")
-# W828: dispatch table moved to ipc_dispatch.py
-IPC_DISPATCH_PY = os.path.join(KRAB_EAR_ROOT, "backend", "ipc_dispatch.py")
+# W1769: dispatch table consolidated inline in service.py
+# (BackendService._build_dispatch_table — single source of truth); ipc_dispatch.py removed.
 
 _WAVE693_HANDLERS = frozenset(
     {
@@ -38,23 +38,25 @@ _WAVE693_HANDLERS = frozenset(
 
 
 def _read_dispatch_keys() -> set[str]:
-    """Return all IPC method keys from ipc_dispatch.py dispatch dict.
+    """Return all IPC method keys from the service.py dispatch dict.
 
-    W828: dispatch table moved from service.py to backend/ipc_dispatch.py.
+    W1769: dispatch table is the inline dict inside
+    BackendService._build_dispatch_table (service.py).
     """
-    with open(IPC_DISPATCH_PY, encoding="utf-8") as f:
+    with open(SERVICE_PY, encoding="utf-8") as f:
         src = f.read()
     return set(re.findall(r'"([a-z][a-z0-9_]*)"\s*:', src))
 
 
 def _read_dispatch_impl_map() -> dict[str, str]:
-    """Return {ipc_key: _handle_method_name} from dispatch block.
+    """Return {ipc_key: _handle_method_name} for entries mapped to a LOCAL
+    BackendService ``self._handle_*`` method (delegated entries handled separately).
 
-    W828: dispatch table moved from service.py to backend/ipc_dispatch.py.
+    W1769: dispatch dict uses ``self.`` prefix in service.py.
     """
-    with open(IPC_DISPATCH_PY, encoding="utf-8") as f:
+    with open(SERVICE_PY, encoding="utf-8") as f:
         src = f.read()
-    return dict(re.findall(r'"([a-z][a-z0-9_]*)"\s*:\s*svc\.(\_handle_\w+)', src))
+    return dict(re.findall(r'"([a-z][a-z0-9_]*)"\s*:\s*self\.(\_handle_\w+)', src))
 
 
 class TestWave693DispatchInvariants(unittest.TestCase):
@@ -90,16 +92,27 @@ class TestWave693DispatchInvariants(unittest.TestCase):
         )
 
     # ------------------------------------------------------------------
-    # Test 3 — extract_action_items maps to _handle_extract_action_items
+    # Test 3 — extract_action_items delegated to SearchAndAnalysisService (W757)
     # ------------------------------------------------------------------
     def test_extract_action_items_maps_to_correct_impl(self):
-        """'extract_action_items' must resolve to _handle_extract_action_items."""
-        impl = self.impl_map.get("extract_action_items")
-        self.assertEqual(
-            impl,
-            "_handle_extract_action_items",
-            f"'extract_action_items' maps to {impl!r}; expected '_handle_extract_action_items'",
+        """'extract_action_items' must delegate to SearchAndAnalysisService (W757).
+
+        W757 extracted this handler out of BackendService into
+        SearchAndAnalysisService; the dispatch entry now points to
+        self._search_and_analysis_svc.handle_extract_action_items (NOT a local
+        _handle_ stub). The drifted dead ipc_dispatch.py still pointed at the old
+        _handle_extract_action_items — W1769 removed that fiction.
+        """
+        with open(SERVICE_PY, encoding="utf-8") as f:
+            block = f.read()
+        self.assertIn(
+            "_search_and_analysis_svc.handle_extract_action_items",
+            block,
+            "'extract_action_items' should delegate to "
+            "_search_and_analysis_svc.handle_extract_action_items (W757)",
         )
+        # И ключ присутствует
+        self.assertIn("extract_action_items", self.dispatch_keys)
 
     # ------------------------------------------------------------------
     # Test 4 — get_last_llm_diff is delegated to LLMOpsService (W783)
@@ -110,8 +123,8 @@ class TestWave693DispatchInvariants(unittest.TestCase):
         W783 extracted this handler out of BackendService into LLMOpsService.
         The dispatch entry now points to self._llm_ops_svc.handle_get_last_llm_diff.
         """
-        # W828: dispatch table is now in ipc_dispatch.py
-        with open(IPC_DISPATCH_PY, encoding="utf-8") as f:
+        # W1769: dispatch table is now inline in service.py (_build_dispatch_table)
+        with open(SERVICE_PY, encoding="utf-8") as f:
             block = f.read()
         # Verify the method appears in the dispatch block (key present)
         self.assertIn(

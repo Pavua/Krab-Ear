@@ -877,8 +877,8 @@ class TestAudioUtilsGroup(_DispatchBase):
 class TestTranscriptionQueueGroup(_DispatchBase):
     """Очередь транскрипции.
 
-    W1767: Обработчики снова зарегистрированы в dispatch (ipc_dispatch.py строки 233-236).
-    process_next() не вызывается фоновым потоком, но IPC-методы живы и тестируются.
+    W1767: Обработчики снова зарегистрированы в dispatch (service.py::_build_dispatch_table,
+    W1769 consolidation). process_next() не вызывается фоновым потоком, но IPC-методы живы и тестируются.
     """
 
     def test_list_transcription_queue(self):

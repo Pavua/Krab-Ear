@@ -1,8 +1,9 @@
 """Тесты W1344: IPC-обёртка get_never_played и атомарная запись PlaybackTracker.
 
 Проверяет:
-- W1336 F2 MED: handle_get_never_played теперь присутствует в dispatch table
-  и корректно возвращает записи, ни разу не воспроизведённые.
+- W1336 F2 MED: handle_get_never_played корректно возвращает записи, ни разу не
+  воспроизведённые. W1769: ключ get_never_played НЕ в живой dispatch table
+  (decorative gap, был только в удалённом ipc_dispatch.py) — отдельный follow-up.
 - W1336 F5 LOW: _save() использует атомарный паттерн tmp+fsync+rename.
 """
 
@@ -112,19 +113,35 @@ class TestGetNeverPlayedViaIPC(unittest.TestCase):
         result = self.tracker.handle_get_never_played({}, store=store)
         self.assertEqual(len(result["items"]), 10)
 
-    def test_get_never_played_in_dispatch_table(self):
-        """'get_never_played' must be present in ipc_dispatch build_dispatch_table."""
-        from backend.ipc_dispatch import build_dispatch_table
+    def test_get_never_played_handler_exists_but_not_yet_wired(self):
+        """W1769: 'get_never_played' — известный decorative-extraction gap.
 
-        # Build a minimal fake BackendService with required attributes
-        fake_svc = MagicMock()
-        fake_svc._playback_tracker = PlaybackTracker()
+        Ранее этот ключ был зарегистрирован ТОЛЬКО в мёртвом backend/ipc_dispatch.py
+        (никогда не достижим в production), а живой инлайн-словарь его не содержал.
+        ipc_dispatch.py удалён (W1769) и диспетчеризация консолидирована в
+        service.py::_build_dispatch_table — единственный источник истины.
 
-        table = build_dispatch_table(fake_svc)
-        self.assertIn(
-            "get_never_played",
-            table,
-            "'get_never_played' must be registered in the IPC dispatch table",
+        Реальный обработчик ``PlaybackTracker.handle_get_never_played`` существует
+        и покрыт behavior-тестами выше, но пока НЕ подключён в живую таблицу.
+        Подключение трёх осиротевших обработчиков (get_never_played,
+        rename_collection, semantic_search_reset) — отдельный follow-up, как и
+        glossary_service.py. Этот тест фиксирует ТЕКУЩУЮ production-реальность,
+        а не фикцию мёртвого модуля.
+        """
+        # Capability присутствует на классе.
+        self.assertTrue(
+            hasattr(PlaybackTracker, "handle_get_never_played"),
+            "PlaybackTracker.handle_get_never_played должен существовать",
+        )
+
+        # Но в ЖИВОЙ таблице диспетчеризации его (пока) нет — production-реальность.
+        import inspect
+        from backend.service import BackendService
+        source = inspect.getsource(BackendService._build_dispatch_table)
+        self.assertNotIn(
+            '"get_never_played"', source,
+            "W1769: 'get_never_played' пока НЕ в живой dispatch table "
+            "(decorative gap, follow-up). Если он подключён — обнови этот тест.",
         )
 
 

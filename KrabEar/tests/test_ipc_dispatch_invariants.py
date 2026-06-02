@@ -83,44 +83,14 @@ EXTRACTED_SERVICE_NON_DISPATCH: dict[str, frozenset] = {
 
 
 def _build_dispatch_table(service_instance):
-    """Call handle_request with a sentinel method to force table construction,
-    then fish out the handlers dict via inspection of the source code approach.
+    """Return the live dispatch table of a constructed BackendService.
 
-    Since the handlers dict is built *inline* inside handle_request, we use a
-    different approach: patch handle_request to capture the local ``handlers``
-    variable using a frame hook.
+    W1769: the table is built ONCE in ``__init__`` and cached as
+    ``service_instance._dispatch_table`` (single source of truth). Previously
+    this helper used a ``settrace`` frame hook to fish the inline ``handlers``
+    local out of ``handle_request`` — no longer needed.
     """
-    captured = {}
-
-    original = service_instance.handle_request
-
-    def capturing_handle_request(payload):
-        import sys as _sys
-        # We call the original and intercept via settrace on a fresh call
-        frame_ref = []
-
-        def tracer(frame, event, arg):
-            if event == "call" and frame.f_code is original.__func__.__code__:
-                frame_ref.append(frame)
-            return tracer
-
-        old_trace = _sys.gettrace()
-        _sys.settrace(tracer)
-        try:
-            result = original(payload)
-        finally:
-            _sys.settrace(old_trace)
-
-        if frame_ref:
-            local_handlers = frame_ref[0].f_locals.get("handlers", {})
-            captured.update(local_handlers)
-        return result
-
-    service_instance.handle_request = capturing_handle_request
-    # Trigger with a dummy unknown method (fast path — just needs table built)
-    service_instance.handle_request({"id": "test", "method": "__invariant_probe__", "params": {}})
-    service_instance.handle_request = original
-    return captured
+    return dict(service_instance._dispatch_table)
 
 
 def _get_backend_service_class():
@@ -226,11 +196,12 @@ class TestIPCDispatchInvariants(unittest.TestCase):
 
     @classmethod
     def _extract_dispatch_table(cls):
-        """Extract the handlers dict by parsing service.py source.
+        """Extract the dispatch keys by parsing service.py source.
 
-        The live dispatch table is the inline ``handlers`` dict inside
-        ``BackendService.handle_request`` (12-space indented keys).
-        ipc_dispatch.py is kept for historical reference only.
+        W1769: the live dispatch table is the inline dict inside
+        ``BackendService._build_dispatch_table`` (12-space indented keys), built
+        once in ``__init__`` and cached as ``self._dispatch_table``. The drifted
+        dead ``ipc_dispatch.py`` was deleted.
         """
         import re
 
@@ -238,7 +209,7 @@ class TestIPCDispatchInvariants(unittest.TestCase):
         with open(service_path, encoding="utf-8") as f:
             source = f.read()
 
-        # The handlers dict is defined inside handle_request (12-space indent).
+        # The dispatch dict is defined inside _build_dispatch_table (12-space indent).
         # Keys look like: «            "method_name": self._handle_...»
         method_names = re.findall(r'^            "([a-z][a-z0-9_]*)"\s*:', source, re.MULTILINE)
         return set(method_names)

@@ -6,11 +6,12 @@
 Статусы заданий: pending → processing → completed / failed / cancelled
 Приоритеты: 1 (наивысший) — 10 (наинизший). При равном приоритете — FIFO по времени постановки.
 
-# LIVE — обработчики подключены в ipc_dispatch.py (W1767 re-activation, 2026-06-02).
+# LIVE — обработчики подключены в BackendService._dispatch_table (W1767 re-activation,
+# 2026-06-02; W1769 consolidation — единственный источник истины в service.py).
 #
 # 4 IPC handler'а (enqueue_transcription, cancel_transcription, get_queue_status,
-# list_transcription_queue) снова зарегистрированы в BackendService._dispatch_table
-# через svc._transcription_queue (см. backend/ipc_dispatch.py строки 233-236).
+# list_transcription_queue) зарегистрированы в BackendService._dispatch_table
+# через self._transcription_queue (см. backend/service.py::_build_dispatch_table).
 #
 # ВАЖНО: process_next() по-прежнему НЕ вызывается никаким фоновым потоком.
 # Задания ставятся в очередь и висят в статусе pending, пока внешний клиент

@@ -674,14 +674,18 @@ class PurgeAllDataWiringTestCase(unittest.TestCase):
         )
 
     def test_purge_all_data_in_ipc_dispatch(self) -> None:
-        """purge_all_data must be present in ipc_dispatch.build_dispatch_table."""
-        from backend import ipc_dispatch
+        """purge_all_data must be present in BackendService._build_dispatch_table.
+
+        W1769: dispatch table consolidated inline in service.py (single source of
+        truth); ipc_dispatch.py removed.
+        """
+        from backend.service import BackendService
         import inspect
-        source = inspect.getsource(ipc_dispatch.build_dispatch_table)
+        source = inspect.getsource(BackendService._build_dispatch_table)
         self.assertIn(
             '"purge_all_data"',
             source,
-            "purge_all_data must be registered in ipc_dispatch.build_dispatch_table",
+            "purge_all_data must be registered in BackendService._build_dispatch_table",
         )
 
     def test_purge_all_data_handler_exists_on_history_service(self) -> None:

@@ -1,22 +1,27 @@
-"""Unit tests for backend.ipc_dispatch.build_dispatch_table (W887).
+"""Unit tests for the LIVE IPC dispatch table (W887 → W1769).
+
+W1769: dispatch table consolidated inline in ``backend/service.py`` as
+``BackendService._build_dispatch_table`` (built once in ``__init__``, cached as
+``self._dispatch_table``).  ``backend/ipc_dispatch.py`` (the drifted dead copy)
+has been DELETED.  These tests now assert against the REAL runtime table.
 
 Covers:
-- Table is non-empty dict with all-callable values
+- Table is a non-empty dict with all-callable values
 - Known anchor keys are present
 - All values are callable
-- Lambda entries (late-injection patterns) are callable when sub-svc has None attr
-- Table keys are all strings (no typos)
-- Returns a fresh dict each call (no shared-state mutation)
-- build_dispatch_table is importable without heavy deps
-- Subset of documented method names is present
+- All keys are plain strings
+- Lambda entries (late-injection patterns) are callable
+- _build_dispatch_table() returns a fresh dict each call
+- Building with a None sub-service raises AttributeError (documents the contract)
+- No duplicate keys in the service.py dispatch dict source
 """
 
 from __future__ import annotations
 
-import sys
 import os
+import sys
+import tempfile
 import unittest
-from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------
 # Path setup — same pattern as other KrabEar test files
@@ -26,145 +31,67 @@ KRAB_EAR_ROOT = os.path.join(PROJECT_ROOT, "KrabEar")
 if KRAB_EAR_ROOT not in sys.path:
     sys.path.insert(0, KRAB_EAR_ROOT)
 
+
 # ---------------------------------------------------------------------------
-# Helper: build a minimal stub "svc" object that satisfies every attribute
-# accessed by build_dispatch_table without importing BackendService.
+# Helper: construct a REAL BackendService with light fakes (no heavy ML load).
+# Same proven pattern as test_dispatch_complete — recorder/transcriber/translator
+# are fakes injected via the constructor; AudioEngine is never instantiated
+# because no transcription is performed.
 # ---------------------------------------------------------------------------
 
-_SVC_ATTRS = [
-    # extracted sub-services
-    "_call_assist", "_history", "_translation", "_settings_svc",
-    "_glossary_auto_learn", "_glossary_svc", "_paste_app_memory",
-    "_collections", "_chains", "_recording_scheduler", "_error_reporter",
-    "_event_replay", "_config_presets", "_transcription_queue",
-    "_data_migrator", "_sharing", "_transcript_versioning",
-    "_paste_formatter", "_merger", "_obsidian_sync", "_playback_tracker",
-    "_speaker_manager", "_live_subs", "_plugin_manager", "_feature_flags",
-    "_hotword_detector", "_model_cache_manager", "_oww_adapter", "_tts",
-    "_bookmarks", "_call_cost_estimator", "_template_manager",
-    "_webhook_manager", "_auto_backup", "_export_scheduler",
-    "_search_history", "_archive_manager", "_metadata_enricher",
-    "_recording_core_svc", "_analytics_svc", "_audio_analytics_svc",
-    "_stt_mgmt_svc", "_llm_ops_svc", "_text_processing_svc",
-    "_call_session_service",
-    # store (used by merger lambdas)
-    "store",
-]
+def _build_minimal_backend_service():
+    import numpy as np
+    from backend.state_store import StateStore
+    from backend.service import BackendService
+    from backend.translator import TranslationResult
 
-# Private _handle_* methods directly referenced as svc._handle_* in ipc_dispatch.py.
-# Generated from: grep "svc._handle_" ipc_dispatch.py | sed "s/.*svc\.\(_handle_[a-z_]*\).*/\1/" | sort -u
-_HANDLE_METHODS = [
-    "_handle_batch",
-    "_handle_batch_extract_action_items",
-    "_handle_cancel_transcribe_job",
-    "_handle_check_duplicate",
-    "_handle_check_integrity",
-    "_handle_clear_privacy_audit_log",
-    "_handle_clear_recent_errors",
-    "_handle_clear_translation_cache",
-    "_handle_clear_unavailable_models",
-    "_handle_compare_periods",
-    "_handle_compare_recordings",
-    "_handle_configure_auto_export",
-    "_handle_create_apple_note",
-    "_handle_create_apple_reminder",
-    "_handle_create_calendar_event",
-    "_handle_estimate_recording_cost",
-    "_handle_extract_action_items",
-    "_handle_extract_terms",
-    "_handle_generate_auto_title",
-    "_handle_generate_daily_digest",
-    "_handle_generate_mini_stats_report",
-    "_handle_generate_stats_report",
-    "_handle_get_activity_calendar",
-    "_handle_get_analytics_dashboard",
-    "_handle_get_audio_devices",
-    "_handle_get_auto_glossary",
-    "_handle_get_context_memory",
-    "_handle_get_daily_cost_summary",
-    "_handle_get_dedup_stats",
-    "_handle_get_diagnostics",
-    "_handle_get_keyword_cloud",
-    "_handle_get_learning_stats",
-    "_handle_get_memory_stats",
-    "_handle_get_metrics_dashboard",
-    "_handle_get_never_played",
-    "_handle_get_pending_action_items",
-    "_handle_get_privacy_audit_log",
-    "_handle_get_recording_insights",
-    "_handle_get_recording_state",
-    "_handle_get_sentiment_trends",
-    "_handle_get_shutdown_status",
-    "_handle_get_smart_vocabulary_suggestions",
-    "_handle_get_startup_diagnostics",
-    "_handle_get_system_info",
-    "_handle_get_throttle_stats",
-    "_handle_get_timeline_view",
-    "_handle_get_topic_timeline",
-    "_handle_get_transcribe_progress",
-    "_handle_get_usage_stats",
-    "_handle_handle_error_action",
-    "_handle_handshake",
-    "_handle_health_check",
-    "_handle_list_audio_inputs",
-    "_handle_list_normalization_profiles",
-    "_handle_list_recent_errors",
-    "_handle_list_telegram_chats",
-    "_handle_ping",
-    "_handle_preview_transcribe_paths",
-    "_handle_probe_llm_http",
-    "_handle_refresh_auto_glossary",
-    "_handle_repair_integrity",
-    "_handle_report_hotkey_conflict",
-    "_handle_report_paste_failure",
-    "_handle_report_reconnect",
-    "_handle_run_deduplication",
-    "_handle_score_transcription",
-    "_handle_semantic_search",
-    "_handle_semantic_search_reindex",
-    "_handle_semantic_search_reset",
-    "_handle_semantic_search_status",
-    "_handle_send_diagnostics_to_sentry",
-    "_handle_send_imessage",
-    "_handle_send_to_telegram",
-    "_handle_start_recording",
-    "_handle_stop_recording",
-    "_handle_test_microphone",
-    "_handle_transcribe_paths",
-    "_handle_transcribe_paths_async",
-    "_handle_warmup_rewriter",
-]
+    class _FakeRecorder:
+        is_recording = False
+        sample_rate = 16000
 
+        def start(self):
+            self.is_recording = True
+            return True
 
-def _make_stub_svc() -> MagicMock:
-    """Return a MagicMock that has all svc.* attributes set to MagicMocks."""
-    svc = MagicMock(spec=object)
-    for attr in _SVC_ATTRS:
-        setattr(svc, attr, MagicMock())
-    for method in _HANDLE_METHODS:
-        setattr(svc, method, MagicMock())
-    # store needs a data_dir for merger lambdas
-    svc.store = MagicMock()
-    svc.store.data_dir = "/tmp/test_dispatch"
-    return svc
+        def stop(self, timeout_sec=3.0, trim_tail_ms=0):
+            if not self.is_recording:
+                return None
+            self.is_recording = False
+            return np.zeros(16000, dtype=np.float32), 1.0
 
+    class _FakeEngine:
+        _last_llm_diff = None
+        _llm_rewriter = None
+        quality_profile = "balanced"
+        current_model = "fake-model"
 
-def _import_build_dispatch_table():
-    """Import build_dispatch_table with heavy dependencies stubbed out."""
-    heavy = [
-        "mlx_whisper", "mlx", "mlx.core", "mlx.nn",
-        "torch", "torchaudio", "pyannote", "pyannote.audio",
-        "sounddevice", "soundfile", "sentry_sdk",
-        "transformers", "psutil",
-    ]
-    mocks = {m: MagicMock() for m in heavy}
-    with patch.dict("sys.modules", mocks):
-        from backend.ipc_dispatch import build_dispatch_table  # noqa: PLC0415
-    return build_dispatch_table
+        def _resolve_diarization_device(self) -> str:
+            return "cpu"
 
+    class _FakeTranscriber:
+        def __init__(self):
+            self.engine = _FakeEngine()
 
-# Module-level reference so tests can call it without self-binding issues
-_BUILD_DISPATCH_TABLE = _import_build_dispatch_table()
+        def transcribe(self, *a, **kw):
+            return "fake"
+
+    class _FakeTranslator:
+        last_mode = "off"
+
+        def translate(self, text, mode, network_mode, translation_style="neutral", glossary=None):
+            return TranslationResult(
+                text="", status="not_requested", source_lang="",
+                target_lang="", mode=mode, engine="fake",
+            )
+
+    tmp = tempfile.mkdtemp()
+    store = StateStore(__import__("pathlib").Path(tmp) / "data")
+    return BackendService(
+        store=store,
+        recorder=_FakeRecorder(),
+        transcriber=_FakeTranscriber(),
+        translator=_FakeTranslator(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -172,16 +99,16 @@ _BUILD_DISPATCH_TABLE = _import_build_dispatch_table()
 # ---------------------------------------------------------------------------
 
 class TestBuildDispatchTableBasics(unittest.TestCase):
-    """Basic structural tests for build_dispatch_table."""
+    """Structural tests for the LIVE BackendService._dispatch_table."""
 
     @classmethod
     def setUpClass(cls):
-        cls.svc = _make_stub_svc()
-        cls.table = _BUILD_DISPATCH_TABLE(cls.svc)
+        cls.svc = _build_minimal_backend_service()
+        cls.table = cls.svc._dispatch_table
 
     # --- Test 1 ---
     def test_returns_non_empty_dict(self):
-        """build_dispatch_table must return a non-empty dict."""
+        """_dispatch_table must be a non-empty dict."""
         self.assertIsInstance(self.table, dict)
         self.assertGreater(
             len(self.table), 200,
@@ -191,13 +118,8 @@ class TestBuildDispatchTableBasics(unittest.TestCase):
     # --- Test 2 ---
     def test_all_values_are_callable(self):
         """Every value in the dispatch table must be callable (no None, no string)."""
-        non_callable = [
-            k for k, v in self.table.items() if not callable(v)
-        ]
-        self.assertEqual(
-            non_callable, [],
-            f"Non-callable entries found: {non_callable}",
-        )
+        non_callable = [k for k, v in self.table.items() if not callable(v)]
+        self.assertEqual(non_callable, [], f"Non-callable entries found: {non_callable}")
 
     # --- Test 3 ---
     def test_all_keys_are_strings(self):
@@ -220,12 +142,11 @@ class TestBuildDispatchTableBasics(unittest.TestCase):
             "handshake",
             "batch",
             "live_subs_ingest",
+            # W1769: rollback_migration now LIVE (was only in the dead ipc_dispatch.py)
+            "rollback_migration",
         ]
         missing = [m for m in anchor_methods if m not in self.table]
-        self.assertEqual(
-            missing, [],
-            f"Anchor keys missing from dispatch table: {missing}",
-        )
+        self.assertEqual(missing, [], f"Anchor keys missing from dispatch table: {missing}")
 
     # --- Test 5 ---
     def test_lambda_entries_are_callable(self):
@@ -244,63 +165,51 @@ class TestBuildDispatchTableBasics(unittest.TestCase):
 
     # --- Test 6 ---
     def test_fresh_dict_each_call(self):
-        """Two successive calls must return independent dicts (no shared reference)."""
-        svc2 = _make_stub_svc()
-        table2 = _BUILD_DISPATCH_TABLE(svc2)
+        """Two successive _build_dispatch_table() calls return independent dicts."""
+        table2 = self.svc._build_dispatch_table()
         self.assertIsNot(
             self.table, table2,
-            "build_dispatch_table returned the same dict object on two calls",
+            "_build_dispatch_table returned the same dict object on two calls",
         )
 
     # --- Test 7 ---
-    def test_none_sub_svc_attr_does_not_raise_during_build(self):
-        """build_dispatch_table must not raise AttributeError if a sub-svc attr is None.
+    def test_none_sub_svc_attr_raises_during_build(self):
+        """_build_dispatch_table must raise AttributeError if a sub-svc attr is None.
 
-        The function only *reads* svc.attr at build time for bound-method lookups.
-        When the attr is None, accessing None.handle_xxx raises AttributeError.
-        This test documents that behaviour: the table build IS expected to raise if
-        a required sub-svc is None, and we verify the exact exception type.
-        (If the implementation changes to guard None attrs, this test must be updated.)
+        The method reads svc._<svc>.handle_xxx at build time for bound-method
+        lookups; when a required sub-service is None, accessing None.handle_xxx
+        raises AttributeError.  This documents the contract (sub-services are
+        constructed before the table is built).
         """
-        broken_svc = _make_stub_svc()
-        broken_svc._history = None   # will cause AttributeError on .handle_get_history_page
-
+        svc2 = _build_minimal_backend_service()
+        svc2._history = None  # will cause AttributeError on .handle_get_history_page
         with self.assertRaises(AttributeError):
-            _BUILD_DISPATCH_TABLE(broken_svc)
+            svc2._build_dispatch_table()
 
     # --- Test 8 ---
     def test_no_duplicate_keys(self):
-        """The resulting dict must have exactly as many entries as unique method names.
+        """The dispatch dict source in service.py must have no duplicate keys.
 
-        Python dicts silently overwrite duplicate keys; a count mismatch would indicate
-        a duplicate registration that shadows an earlier handler.
-
-        We cross-check against the raw source to count unique top-level dispatch keys.
-        Note: the regex must only capture keys at the top-level dict indentation (8 spaces),
-        not dict literals embedded in lambda bodies (e.g. ``{"exports": ...}``).
+        Python dicts silently overwrite duplicate keys; a count mismatch would
+        indicate a duplicate registration that shadows an earlier handler.
+        W1769: the dict literal lives inside BackendService._build_dispatch_table
+        (8-space indentation for top-level dict entries).
         """
+        import inspect
         import re
+        from backend.service import BackendService
 
-        dispatch_path = os.path.join(KRAB_EAR_ROOT, "backend", "ipc_dispatch.py")
-        with open(dispatch_path, encoding="utf-8") as f:
-            source = f.read()
-
-        # Match only lines that look like top-level dict entries:
-        # exactly 8 spaces of indentation, then a quoted snake_case key, then ":"
-        keys_in_source = re.findall(
-            r'^        "([a-z][a-z0-9_]*)"\s*:',
-            source,
-            re.MULTILINE,
-        )
+        source = inspect.getsource(BackendService._build_dispatch_table)
+        # Top-level dict entries are indented 12 spaces inside the method's
+        # ``return {`` block (method body 8 + dict 4).  Lambda-body dict literals
+        # (e.g. {"exports": ...}) are deeper/inline on the same line, so anchoring
+        # to start-of-line + exactly 12 spaces avoids false positives.
+        keys_in_source = re.findall(r'^            "([a-z][a-z0-9_]*)"\s*:', source, re.MULTILINE)
         unique_keys_in_source = set(keys_in_source)
-        # If there are duplicates in source, len(keys_in_source) > len(unique_keys_in_source)
-        duplicates = [
-            k for k in unique_keys_in_source
-            if keys_in_source.count(k) > 1
-        ]
+        duplicates = [k for k in unique_keys_in_source if keys_in_source.count(k) > 1]
         self.assertEqual(
             duplicates, [],
-            f"Duplicate keys found in ipc_dispatch.py source: {duplicates}",
+            f"Duplicate keys found in service.py dispatch dict source: {duplicates}",
         )
         # And the built table must contain all unique source keys
         self.assertEqual(

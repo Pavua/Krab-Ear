@@ -132,14 +132,31 @@ class TestPrivacyAuditClear(unittest.TestCase):
         провал = compliance audit trail снова уязвим.
 
         Метод проверяет, что строка `"clear_privacy_audit_log": self._handle_...`
-        отсутствует в source-коде handle_request (шаблон dict-key registration).
-        Комментарии с именем метода допустимы — проверяется именно dict-key pattern.
+        отсутствует в source-коде таблицы диспетчеризации (шаблон dict-key
+        registration). W1769: таблица консолидирована в
+        BackendService._build_dispatch_table (единственный источник истины);
+        проверяем И его, И handle_request на всякий случай. Комментарии с именем
+        метода допустимы — проверяется именно dict-key pattern.
         """
         from backend.service import BackendService
         import re
         import inspect
 
-        source = inspect.getsource(BackendService.handle_request)
+        # W1769: dispatch dict живёт в _build_dispatch_table; handle_request
+        # включаем для defence-in-depth (если паттерн вернётся куда угодно).
+        source = (
+            inspect.getsource(BackendService._build_dispatch_table)
+            + "\n"
+            + inspect.getsource(BackendService.handle_request)
+        )
+
+        # Sanity: убеждаемся, что мы реально читаем таблицу (anchor-ключ есть),
+        # иначе gate бессмысленно «зелёный» из-за пустого/неверного source.
+        self.assertIn(
+            '"get_privacy_audit_log"', source,
+            "Sanity: source таблицы диспетчеризации не содержит ожидаемый anchor-ключ "
+            "'get_privacy_audit_log' — тест читает не тот метод (W1769 регрессия).",
+        )
 
         # Ищем паттерн dict-key registration: "clear_privacy_audit_log": <callable>
         # Комментарии не вызывают false positives — они не содержат ": self._handle" рядом

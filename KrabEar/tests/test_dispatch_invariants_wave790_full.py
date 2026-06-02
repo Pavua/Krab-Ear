@@ -1,18 +1,17 @@
 """Dispatch invariant tests — Wave 790 (full coverage).
 
-Covers all 255 IPC handler keys NOT yet asserted by the earlier
-W654 / W693 / W768 test files.  Every test is a pure source-grep — no runtime
-import of service.py is required.
-
-After this file, combined coverage spans all 281 real dispatch keys
-in ``BackendService.handle_request``.
+Covers a large set of IPC handler keys NOT yet asserted by the earlier
+W654 / W693 / W768 test files.  Every test is a pure source-grep over the live
+dispatch dict in ``service.py`` — no runtime import is required.
 
 W801 update: removed 8 confirmed-dead handler tests per W786 audit.
-W875 update: added 11 previously uncovered keys found in ipc_dispatch.py
-(add_history_item, check_integrity, compare_periods, export_glossary_csv,
-extract_action_items, get_activity_calendar, get_last_llm_diff,
-get_stt_routing_decision, probe_llm_http, replace_word_in_last_transcript,
-score_transcription). Combined coverage now spans all 286 dispatch keys.
+W875 update: added 11 previously uncovered keys.
+W1769 update: dispatch table consolidated inline in
+``BackendService._build_dispatch_table`` (single source of truth); the drifted
+dead ``backend/ipc_dispatch.py`` was DELETED. This file now reads service.py;
+30 _EXPECTED entries were corrected to post-extraction delegate targets;
+``clear_privacy_audit_log`` is asserted ABSENT (W957); the bogus ``exports``
+regex artifact was removed.
 """
 
 import os
@@ -27,8 +26,8 @@ if KRAB_EAR_ROOT not in sys.path:
     sys.path.insert(0, KRAB_EAR_ROOT)
 
 SERVICE_PY = os.path.join(KRAB_EAR_ROOT, "backend", "service.py")
-# W828: dispatch table moved to ipc_dispatch.py
-IPC_DISPATCH_PY = os.path.join(KRAB_EAR_ROOT, "backend", "ipc_dispatch.py")
+# W1769: dispatch table consolidated inline in service.py
+# (BackendService._build_dispatch_table — single source of truth); ipc_dispatch.py removed.
 
 # ---------------------------------------------------------------------------
 # Expected dispatch-table entries (key -> RHS self.<svc>.handle_<method>).
@@ -54,7 +53,7 @@ _EXPECTED = {
     "backup_history": "svc._history.handle_backup_history",
     "batch": "svc._handle_batch",
     "batch_export": "svc._history.handle_batch_export",
-    "batch_extract_action_items": "svc._handle_batch_extract_action_items",
+    "batch_extract_action_items": "svc._search_and_analysis_svc.handle_batch_extract_action_items",
     "call_assist_cost_estimate": "svc._call_assist.handle_cost_estimate",
     "call_assist_diagnostics": "svc._call_assist.handle_diagnostics",
     "call_assist_quick_phrase": "svc._call_assist.handle_quick_phrase",
@@ -80,17 +79,19 @@ _EXPECTED = {
     "check_hotwords": "svc._hotword_detector.handle_check_hotwords",
     "check_migration": "svc._data_migrator.handle_check_migration",
     "cleanup_old_history": "svc._history.handle_cleanup_old_history",
-    "clear_privacy_audit_log": "svc._handle_clear_privacy_audit_log",
+    # W957/W1769: clear_privacy_audit_log INTENTIONALLY NOT in dispatch table
+    # (compliance audit trail must not be destroyable via unauthenticated IPC).
+    # Asserted ABSENT below — see test_clear_privacy_audit_log_dispatch_entry.
     "clear_recent_errors": "svc._handle_clear_recent_errors",
     "clear_search_history": "svc._search_history.handle_clear_search_history",
     "compact_history": "svc._history.handle_compact_history",
-    "compare_recordings": "svc._handle_compare_recordings",
+    "compare_recordings": "svc._search_and_analysis_svc.handle_compare_recordings",
     "compare_texts": "svc._text_processing_svc.handle_compare_texts",
     "configure_auto_export": "svc._handle_configure_auto_export",
     "configure_obsidian_sync": "svc._obsidian_sync.handle_configure",
-    "create_apple_note": "svc._handle_create_apple_note",
-    "create_apple_reminder": "svc._handle_create_apple_reminder",
-    "create_calendar_event": "svc._handle_create_calendar_event",
+    "create_apple_note": "svc._apple_integration_svc.handle_create_apple_note",
+    "create_apple_reminder": "svc._apple_integration_svc.handle_create_apple_reminder",
+    "create_calendar_event": "svc._apple_integration_svc.handle_create_calendar_event",
     "create_collection": "svc._collections.handle_create_collection",
     "create_config_preset": "svc._config_presets.handle_create_config_preset",
     "create_manual_settings_backup": "svc._settings_svc.handle_create_manual_settings_backup",
@@ -109,18 +110,20 @@ _EXPECTED = {
     "export_html_report": "svc._history.handle_export_html_report",
     "export_obsidian": "svc._history.handle_export_obsidian",
     "export_settings": "svc._settings_svc.handle_export_settings",
-    "exports": "svc._export_scheduler.list_exports(",
-    "extract_terms": "svc._handle_extract_terms",
+    # NOTE: "exports" was NOT a real dispatch key — it was a regex artifact from the
+    # list_auto_exports lambda body ({"exports": svc._export_scheduler.list_exports()}).
+    # W1769 removed it from _EXPECTED and its per-handler test.
+    "extract_terms": "svc._text_scoring_svc.handle_extract_terms",
     "filter_by_confidence": "svc._history.handle_filter_by_confidence",
     "find_duplicates": "svc._history.handle_find_duplicates",
     "format_for_paste": "svc._paste_formatter.handle_format_for_paste",
     "fuzzy_search": "svc._history.handle_fuzzy_search",
-    "generate_auto_title": "svc._handle_generate_auto_title",
+    "generate_auto_title": "svc._text_scoring_svc.handle_generate_auto_title",
     "generate_daily_digest": "svc._handle_generate_daily_digest",
     "generate_html_report": "svc._history.handle_export_html_report",
-    "generate_mini_stats_report": "svc._handle_generate_mini_stats_report",
-    "generate_stats_report": "svc._handle_generate_stats_report",
-    "get_analytics_dashboard": "svc._handle_get_analytics_dashboard",
+    "generate_mini_stats_report": "svc._search_and_analysis_svc.handle_generate_mini_stats_report",
+    "generate_stats_report": "svc._search_and_analysis_svc.handle_generate_stats_report",
+    "get_analytics_dashboard": "svc._analytics_svc.handle_get_analytics_dashboard",
     "get_annotation": "svc._history.handle_get_annotation",
     "get_archive_stats": "svc._archive_manager.handle_get_archive_stats",
     "get_audio_devices": "svc._handle_get_audio_devices",
@@ -146,7 +149,7 @@ _EXPECTED = {
     "get_history_statistics": "svc._history.handle_get_history_statistics",
     "get_history_stats": "svc._history.handle_get_history_stats",
     "get_hotwords": "svc._hotword_detector.handle_get_hotwords",
-    "get_keyword_cloud": "svc._handle_get_keyword_cloud",
+    "get_keyword_cloud": "svc._analytics_svc.handle_get_keyword_cloud",
     "get_learning_stats": "svc._handle_get_learning_stats",
     "get_memory_stats": "svc._handle_get_memory_stats",
     "get_model_cache_info": "svc._model_cache_manager.handle_get_model_cache_info",
@@ -154,16 +157,16 @@ _EXPECTED = {
     "get_notification_preferences": "svc._settings_svc.handle_get_notification_preferences",
     "get_obsidian_sync_status": "svc._obsidian_sync.handle_get_status",
     "get_paste_profile_for_app": "svc._paste_app_memory.handle_get_paste_profile_for_app",
-    "get_pending_action_items": "svc._handle_get_pending_action_items",
+    "get_pending_action_items": "svc._search_and_analysis_svc.handle_get_pending_action_items",
     "get_playback_stats": "svc._playback_tracker.handle_get_playback_stats",
     "get_plugin_info": "svc._plugin_manager.handle_get_plugin_info",
     "get_popular_searches": "svc._search_history.handle_get_popular_searches",
     "get_privacy_audit_log": "svc._handle_get_privacy_audit_log",
     "get_queue_status": "svc._transcription_queue.handle_get_status",
     "get_recent_searches": "svc._search_history.handle_get_recent_searches",
-    "get_recording_insights": "svc._handle_get_recording_insights",
-    "get_recording_stats": "svc._analytics_svc.handle_get_recording_stats",
-    "get_sentiment_trends": "svc._handle_get_sentiment_trends",
+    "get_recording_insights": "svc._search_and_analysis_svc.handle_get_recording_insights",
+    "get_recording_stats": "svc._handle_get_recording_stats",
+    "get_sentiment_trends": "svc._analytics_svc.handle_get_sentiment_trends",
     "get_shared": "svc._sharing.handle_get_shared",
     "get_shutdown_status": "svc._handle_get_shutdown_status",
     "get_smart_vocabulary_suggestions": "svc._handle_get_smart_vocabulary_suggestions",
@@ -174,8 +177,8 @@ _EXPECTED = {
     "get_tags": "svc._history.handle_get_tags",
     "get_templates": "svc._template_manager.handle_get_templates",
     "get_throttle_stats": "svc._handle_get_throttle_stats",
-    "get_timeline_view": "svc._handle_get_timeline_view",
-    "get_topic_timeline": "svc._handle_get_topic_timeline",
+    "get_timeline_view": "svc._analytics_svc.handle_get_timeline_view",
+    "get_topic_timeline": "svc._search_and_analysis_svc.handle_get_topic_timeline",
     "get_transcribe_progress": "svc._handle_get_transcribe_progress",
     "get_transcript_versions": "svc._transcript_versioning.handle_get_transcript_versions",
     "get_transcripts_path": "svc._history.handle_get_transcripts_path",
@@ -184,7 +187,7 @@ _EXPECTED = {
     "get_waveform": "svc._audio_analytics_svc.handle_get_waveform",
     "handle_error_action": "svc._handle_handle_error_action",
     "health_check": "svc._handle_health_check",
-    "import_glossary_csv": "svc._glossary_svc.handle_import_glossary_csv",
+    "import_glossary_csv": "svc._handle_import_glossary_csv",
     "import_history_ndjson": "svc._history.handle_import_history_ndjson",
     "import_settings": "svc._settings_svc.handle_import_settings",
     "is_favorite": "svc._history.handle_is_favorite",
@@ -213,7 +216,7 @@ _EXPECTED = {
     "list_settings_backups": "svc._settings_svc.handle_list_settings_backups",
     "list_shared": "svc._sharing.handle_list_shared",
     "list_summary_profiles": "svc._history.handle_list_summary_profiles",
-    "list_telegram_chats": "svc._handle_list_telegram_chats",
+    "list_telegram_chats": "svc._apple_integration_svc.handle_list_telegram_chats",
     "list_transcription_queue": "svc._transcription_queue.handle_list_queue",
     "list_webhooks": "svc._webhook_manager.handle_list_webhooks",
     "live_subs_ingest": "svc._live_subs.handle_ingest",
@@ -256,16 +259,16 @@ _EXPECTED = {
     "search_by_tag": "svc._history.handle_search_by_tag",
     "search_with_highlights": "svc._history.handle_search_with_highlights",
     "select_model": "svc._stt_mgmt_svc.handle_select_model",
-    "semantic_search": "svc._handle_semantic_search",
-    "semantic_search_reindex": "svc._handle_semantic_search_reindex",
-    "semantic_search_status": "svc._handle_semantic_search_status",
+    "semantic_search": "svc._search_and_analysis_svc.handle_semantic_search",
+    "semantic_search_reindex": "svc._search_and_analysis_svc.handle_semantic_search_reindex",
+    "semantic_search_status": "svc._search_and_analysis_svc.handle_semantic_search_status",
     "send_diagnostics_to_sentry": "svc._handle_send_diagnostics_to_sentry",
-    "send_imessage": "svc._handle_send_imessage",
-    "send_to_telegram": "svc._handle_send_to_telegram",
+    "send_imessage": "svc._apple_integration_svc.handle_send_imessage",
+    "send_to_telegram": "svc._apple_integration_svc.handle_send_to_telegram",
     "set_annotation": "svc._history.handle_set_annotation",
     "set_feature_flag": "svc._feature_flags.handle_set_feature_flag",
     "set_notification_preferences": "svc._settings_svc.handle_set_notification_preferences",
-    "set_paste_status": "svc._recording_core_svc.handle_set_paste_status",
+    "set_paste_status": "svc._handle_set_paste_status",
     "set_speaker_alias": "svc._speaker_manager.handle_set_speaker_alias",
     "set_translation_glossary_item": "svc._translation.handle_set_translation_glossary_item",
     "start_call_assist": "svc._call_assist.handle_start",
@@ -287,16 +290,16 @@ _EXPECTED = {
     "wake_word_start": "svc._oww_adapter.handle_wake_word_start",
     "wake_word_status": "svc._oww_adapter.handle_wake_word_status",
     "wake_word_stop": "svc._oww_adapter.handle_wake_word_stop",
-    "warmup_rewriter": "svc._handle_warmup_rewriter",
+    "warmup_rewriter": "svc._text_scoring_svc.handle_warmup_rewriter",
     "warmup_stt": "svc._stt_mgmt_svc.handle_warmup_stt",
     "word_frequency_analysis": "svc._history.handle_word_frequency_analysis",
-    # W875: 11 keys present in ipc_dispatch.py but previously uncovered
+    # W875: 11 previously uncovered keys (W1769: source is now service.py)
     "add_history_item": "svc._history.handle_add_history_item",
     "check_integrity": "svc._handle_check_integrity",
-    "compare_periods": "svc._handle_compare_periods",
-    "export_glossary_csv": "svc._glossary_svc.handle_export_glossary_csv",
-    "extract_action_items": "svc._handle_extract_action_items",
-    "get_activity_calendar": "svc._handle_get_activity_calendar",
+    "compare_periods": "svc._analytics_svc.handle_compare_periods",
+    "export_glossary_csv": "svc._handle_export_glossary_csv",
+    "extract_action_items": "svc._search_and_analysis_svc.handle_extract_action_items",
+    "get_activity_calendar": "svc._analytics_svc.handle_get_activity_calendar",
     "get_last_llm_diff": "svc._llm_ops_svc.handle_get_last_llm_diff",
     "get_stt_routing_decision": "svc._stt_mgmt_svc.handle_get_stt_routing_decision",
     "probe_llm_http": "svc._handle_probe_llm_http",
@@ -314,16 +317,18 @@ def _read_source():
 
 
 def _read_dispatch_source():
-    """Read ipc_dispatch.py source (W828: dispatch table moved here)."""
-    with open(IPC_DISPATCH_PY, encoding="utf-8") as f:
+    """Read service.py source (W1769: dispatch table is the inline dict in
+    BackendService._build_dispatch_table — single source of truth)."""
+    with open(SERVICE_PY, encoding="utf-8") as f:
         return f.read()
 
 
 def _dispatch_block(src):
-    """Return the full text of ipc_dispatch.py (the entire file IS the dispatch table).
+    """Return the full service.py text (it contains the inline dispatch dict).
 
-    W828: dispatch table moved from service.py inline dict to ipc_dispatch.py.
-    References use ``svc.`` instead of ``self.``.
+    W1769: dispatch table consolidated inline in service.py; ipc_dispatch.py removed.
+    The live dict uses the ``self.`` prefix; _dispatch_rhs() normalizes it to the
+    historical ``svc.`` prefix used by _EXPECTED.
     """
     return src
 
@@ -333,18 +338,20 @@ def _all_dispatch_keys(block):
 
 
 def _dispatch_rhs(block, key):
-    """Return the RHS (svc...) for key in the dispatch block, or None.
+    """Return the RHS for *key*, normalized to the historical ``svc.`` prefix.
 
-    W828: dispatch table uses ``svc.`` prefix instead of ``self.``.
+    W1769: the live dispatch dict (service.py) uses ``self.``; we read it and
+    rewrite ``self.`` → ``svc.`` so the ``svc.…`` literals in _EXPECTED / the
+    per-handler tests keep matching without a 260-line churn.
     """
     # Use non-raw string to avoid literal newline in character class
     newline = "\n"
-    # Try svc. prefix first (W828 ipc_dispatch.py), then self. for legacy compat
-    for prefix in ("svc.", "self."):
+    # Live dict uses self.; accept svc. too for defence-in-depth.
+    for prefix in ("self.", "svc."):
         pattern = '"' + re.escape(key) + r'"\s*:\s*(' + re.escape(prefix) + r'[^\s,#' + newline + r']+)'
         m = re.search(pattern, block)
         if m is not None:
-            return m.group(1).rstrip("}),")
+            return m.group(1).rstrip("}),").replace("self.", "svc.", 1)
     return None
 
 
@@ -355,8 +362,12 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
     BackendService.handle_request dispatch table now has at least one
     source-grep assertion.
 
-    W828: dispatch table source is now ipc_dispatch.py; ``self.`` → ``svc.`` prefix.
-    W875: added 11 previously uncovered keys; _EXPECTED now spans all 286 entries.
+    W1769: dispatch table source consolidated inline in service.py
+    (BackendService._build_dispatch_table — single source of truth; ipc_dispatch.py
+    deleted). _dispatch_rhs() normalizes the live ``self.`` prefix → ``svc.`` so the
+    historical _EXPECTED literals keep matching. 30 _EXPECTED entries were corrected
+    to the post-extraction delegate targets (the dead ipc_dispatch.py had drifted to
+    pre-extraction ``_handle_*``); clear_privacy_audit_log asserted ABSENT (W957).
     """
 
     @classmethod
@@ -495,7 +506,7 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
     def test_batch_extract_action_items_dispatch_entry(self):
         """'batch_extract_action_items' must be in dispatch table mapping to self._handle_batch_extract_action_items."""
         self.assertIn("batch_extract_action_items", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "batch_extract_action_items"), "svc._handle_batch_extract_action_items")
+        self.assertEqual(_dispatch_rhs(self.block, "batch_extract_action_items"), "svc._search_and_analysis_svc.handle_batch_extract_action_items")
 
     def test_call_assist_cost_estimate_dispatch_entry(self):
         """'call_assist_cost_estimate' must be in dispatch table mapping to self._call_assist.handle_cost_estimate."""
@@ -623,9 +634,22 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
         self.assertEqual(_dispatch_rhs(self.block, "cleanup_old_history"), "svc._history.handle_cleanup_old_history")
 
     def test_clear_privacy_audit_log_dispatch_entry(self):
-        """'clear_privacy_audit_log' must be in dispatch table mapping to self._handle_clear_privacy_audit_log."""
-        self.assertIn("clear_privacy_audit_log", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "clear_privacy_audit_log"), "svc._handle_clear_privacy_audit_log")
+        """W957/W1769 SECURITY: 'clear_privacy_audit_log' must NOT be in the dispatch table.
+
+        Compliance audit trail must not be destroyable via unauthenticated IPC
+        (W952 CRITICAL F-1). The drifted dead ipc_dispatch.py DID register it
+        (security regression hidden by the dead module) — W1769 deleted that file
+        and this test now asserts the live table correctly OMITS the key.
+        Mirrors test_privacy_audit_clear.py::test_clear_not_in_ipc_dispatch.
+        """
+        self.assertNotIn(
+            "clear_privacy_audit_log", self.keys,
+            "SECURITY (W957): 'clear_privacy_audit_log' must NOT be a dispatch key.",
+        )
+        self.assertIsNone(
+            _dispatch_rhs(self.block, "clear_privacy_audit_log"),
+            "SECURITY (W957): 'clear_privacy_audit_log' must have no dispatch mapping.",
+        )
 
     def test_clear_recent_errors_dispatch_entry(self):
         """'clear_recent_errors' must be in dispatch table mapping to self._handle_clear_recent_errors."""
@@ -645,7 +669,7 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
     def test_compare_recordings_dispatch_entry(self):
         """'compare_recordings' must be in dispatch table mapping to self._handle_compare_recordings."""
         self.assertIn("compare_recordings", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "compare_recordings"), "svc._handle_compare_recordings")
+        self.assertEqual(_dispatch_rhs(self.block, "compare_recordings"), "svc._search_and_analysis_svc.handle_compare_recordings")
 
     def test_compare_texts_dispatch_entry(self):
         """'compare_texts' must be in dispatch table mapping to self._text_processing_svc.handle_compare_texts."""
@@ -665,17 +689,17 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
     def test_create_apple_note_dispatch_entry(self):
         """'create_apple_note' must be in dispatch table mapping to self._handle_create_apple_note."""
         self.assertIn("create_apple_note", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "create_apple_note"), "svc._handle_create_apple_note")
+        self.assertEqual(_dispatch_rhs(self.block, "create_apple_note"), "svc._apple_integration_svc.handle_create_apple_note")
 
     def test_create_apple_reminder_dispatch_entry(self):
         """'create_apple_reminder' must be in dispatch table mapping to self._handle_create_apple_reminder."""
         self.assertIn("create_apple_reminder", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "create_apple_reminder"), "svc._handle_create_apple_reminder")
+        self.assertEqual(_dispatch_rhs(self.block, "create_apple_reminder"), "svc._apple_integration_svc.handle_create_apple_reminder")
 
     def test_create_calendar_event_dispatch_entry(self):
         """'create_calendar_event' must be in dispatch table mapping to self._handle_create_calendar_event."""
         self.assertIn("create_calendar_event", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "create_calendar_event"), "svc._handle_create_calendar_event")
+        self.assertEqual(_dispatch_rhs(self.block, "create_calendar_event"), "svc._apple_integration_svc.handle_create_calendar_event")
 
     def test_create_collection_dispatch_entry(self):
         """'create_collection' must be in dispatch table mapping to self._collections.handle_create_collection."""
@@ -767,15 +791,13 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
         self.assertIn("export_settings", self.keys)
         self.assertEqual(_dispatch_rhs(self.block, "export_settings"), "svc._settings_svc.handle_export_settings")
 
-    def test_exports_dispatch_entry(self):
-        """'exports' must be in dispatch table mapping to self._export_scheduler.list_exports(."""
-        self.assertIn("exports", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "exports"), "svc._export_scheduler.list_exports(")
+    # W1769: removed test_exports_dispatch_entry — "exports" was never a real
+    # dispatch key (regex artifact from the list_auto_exports lambda body).
 
     def test_extract_terms_dispatch_entry(self):
         """'extract_terms' must be in dispatch table mapping to self._handle_extract_terms."""
         self.assertIn("extract_terms", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "extract_terms"), "svc._handle_extract_terms")
+        self.assertEqual(_dispatch_rhs(self.block, "extract_terms"), "svc._text_scoring_svc.handle_extract_terms")
 
     def test_filter_by_confidence_dispatch_entry(self):
         """'filter_by_confidence' must be in dispatch table mapping to self._history.handle_filter_by_confidence."""
@@ -800,7 +822,7 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
     def test_generate_auto_title_dispatch_entry(self):
         """'generate_auto_title' must be in dispatch table mapping to self._handle_generate_auto_title."""
         self.assertIn("generate_auto_title", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "generate_auto_title"), "svc._handle_generate_auto_title")
+        self.assertEqual(_dispatch_rhs(self.block, "generate_auto_title"), "svc._text_scoring_svc.handle_generate_auto_title")
 
     def test_generate_daily_digest_dispatch_entry(self):
         """'generate_daily_digest' must be in dispatch table mapping to self._handle_generate_daily_digest."""
@@ -815,17 +837,17 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
     def test_generate_mini_stats_report_dispatch_entry(self):
         """'generate_mini_stats_report' must be in dispatch table mapping to self._handle_generate_mini_stats_report."""
         self.assertIn("generate_mini_stats_report", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "generate_mini_stats_report"), "svc._handle_generate_mini_stats_report")
+        self.assertEqual(_dispatch_rhs(self.block, "generate_mini_stats_report"), "svc._search_and_analysis_svc.handle_generate_mini_stats_report")
 
     def test_generate_stats_report_dispatch_entry(self):
         """'generate_stats_report' must be in dispatch table mapping to self._handle_generate_stats_report."""
         self.assertIn("generate_stats_report", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "generate_stats_report"), "svc._handle_generate_stats_report")
+        self.assertEqual(_dispatch_rhs(self.block, "generate_stats_report"), "svc._search_and_analysis_svc.handle_generate_stats_report")
 
     def test_get_analytics_dashboard_dispatch_entry(self):
         """'get_analytics_dashboard' must be in dispatch table mapping to self._handle_get_analytics_dashboard."""
         self.assertIn("get_analytics_dashboard", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "get_analytics_dashboard"), "svc._handle_get_analytics_dashboard")
+        self.assertEqual(_dispatch_rhs(self.block, "get_analytics_dashboard"), "svc._analytics_svc.handle_get_analytics_dashboard")
 
     def test_get_annotation_dispatch_entry(self):
         """'get_annotation' must be in dispatch table mapping to self._history.handle_get_annotation."""
@@ -955,7 +977,7 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
     def test_get_keyword_cloud_dispatch_entry(self):
         """'get_keyword_cloud' must be in dispatch table mapping to self._handle_get_keyword_cloud."""
         self.assertIn("get_keyword_cloud", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "get_keyword_cloud"), "svc._handle_get_keyword_cloud")
+        self.assertEqual(_dispatch_rhs(self.block, "get_keyword_cloud"), "svc._analytics_svc.handle_get_keyword_cloud")
 
     def test_get_learning_stats_dispatch_entry(self):
         """'get_learning_stats' must be in dispatch table mapping to self._handle_get_learning_stats."""
@@ -995,7 +1017,7 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
     def test_get_pending_action_items_dispatch_entry(self):
         """'get_pending_action_items' must be in dispatch table mapping to self._handle_get_pending_action_items."""
         self.assertIn("get_pending_action_items", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "get_pending_action_items"), "svc._handle_get_pending_action_items")
+        self.assertEqual(_dispatch_rhs(self.block, "get_pending_action_items"), "svc._search_and_analysis_svc.handle_get_pending_action_items")
 
     def test_get_playback_stats_dispatch_entry(self):
         """'get_playback_stats' must be in dispatch table mapping to self._playback_tracker.handle_get_playback_stats."""
@@ -1030,17 +1052,17 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
     def test_get_recording_insights_dispatch_entry(self):
         """'get_recording_insights' must be in dispatch table mapping to self._handle_get_recording_insights."""
         self.assertIn("get_recording_insights", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "get_recording_insights"), "svc._handle_get_recording_insights")
+        self.assertEqual(_dispatch_rhs(self.block, "get_recording_insights"), "svc._search_and_analysis_svc.handle_get_recording_insights")
 
     def test_get_recording_stats_dispatch_entry(self):
         """'get_recording_stats' must be in dispatch table mapping to self._analytics_svc.handle_get_recording_stats."""
         self.assertIn("get_recording_stats", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "get_recording_stats"), "svc._analytics_svc.handle_get_recording_stats")
+        self.assertEqual(_dispatch_rhs(self.block, "get_recording_stats"), "svc._handle_get_recording_stats")
 
     def test_get_sentiment_trends_dispatch_entry(self):
         """'get_sentiment_trends' must be in dispatch table mapping to self._handle_get_sentiment_trends."""
         self.assertIn("get_sentiment_trends", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "get_sentiment_trends"), "svc._handle_get_sentiment_trends")
+        self.assertEqual(_dispatch_rhs(self.block, "get_sentiment_trends"), "svc._analytics_svc.handle_get_sentiment_trends")
 
     def test_get_shared_dispatch_entry(self):
         """'get_shared' must be in dispatch table mapping to self._sharing.handle_get_shared."""
@@ -1095,12 +1117,12 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
     def test_get_timeline_view_dispatch_entry(self):
         """'get_timeline_view' must be in dispatch table mapping to self._handle_get_timeline_view."""
         self.assertIn("get_timeline_view", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "get_timeline_view"), "svc._handle_get_timeline_view")
+        self.assertEqual(_dispatch_rhs(self.block, "get_timeline_view"), "svc._analytics_svc.handle_get_timeline_view")
 
     def test_get_topic_timeline_dispatch_entry(self):
         """'get_topic_timeline' must be in dispatch table mapping to self._handle_get_topic_timeline."""
         self.assertIn("get_topic_timeline", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "get_topic_timeline"), "svc._handle_get_topic_timeline")
+        self.assertEqual(_dispatch_rhs(self.block, "get_topic_timeline"), "svc._search_and_analysis_svc.handle_get_topic_timeline")
 
     def test_get_transcribe_progress_dispatch_entry(self):
         """'get_transcribe_progress' must be in dispatch table mapping to self._handle_get_transcribe_progress."""
@@ -1145,7 +1167,7 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
     def test_import_glossary_csv_dispatch_entry(self):
         """'import_glossary_csv' must be in dispatch table mapping to self._glossary_svc.handle_import_glossary_csv."""
         self.assertIn("import_glossary_csv", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "import_glossary_csv"), "svc._glossary_svc.handle_import_glossary_csv")
+        self.assertEqual(_dispatch_rhs(self.block, "import_glossary_csv"), "svc._handle_import_glossary_csv")
 
     def test_import_history_ndjson_dispatch_entry(self):
         """'import_history_ndjson' must be in dispatch table mapping to self._history.handle_import_history_ndjson."""
@@ -1293,7 +1315,7 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
     def test_list_telegram_chats_dispatch_entry(self):
         """'list_telegram_chats' must be in dispatch table mapping to self._handle_list_telegram_chats."""
         self.assertIn("list_telegram_chats", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "list_telegram_chats"), "svc._handle_list_telegram_chats")
+        self.assertEqual(_dispatch_rhs(self.block, "list_telegram_chats"), "svc._apple_integration_svc.handle_list_telegram_chats")
 
     def test_list_transcription_queue_dispatch_entry(self):
         """'list_transcription_queue' must be in dispatch table mapping to self._transcription_queue.handle_list_queue."""
@@ -1508,17 +1530,17 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
     def test_semantic_search_dispatch_entry(self):
         """'semantic_search' must be in dispatch table mapping to self._handle_semantic_search."""
         self.assertIn("semantic_search", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "semantic_search"), "svc._handle_semantic_search")
+        self.assertEqual(_dispatch_rhs(self.block, "semantic_search"), "svc._search_and_analysis_svc.handle_semantic_search")
 
     def test_semantic_search_reindex_dispatch_entry(self):
         """'semantic_search_reindex' must be in dispatch table mapping to self._handle_semantic_search_reindex."""
         self.assertIn("semantic_search_reindex", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "semantic_search_reindex"), "svc._handle_semantic_search_reindex")
+        self.assertEqual(_dispatch_rhs(self.block, "semantic_search_reindex"), "svc._search_and_analysis_svc.handle_semantic_search_reindex")
 
     def test_semantic_search_status_dispatch_entry(self):
         """'semantic_search_status' must be in dispatch table mapping to self._handle_semantic_search_status."""
         self.assertIn("semantic_search_status", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "semantic_search_status"), "svc._handle_semantic_search_status")
+        self.assertEqual(_dispatch_rhs(self.block, "semantic_search_status"), "svc._search_and_analysis_svc.handle_semantic_search_status")
 
     def test_send_diagnostics_to_sentry_dispatch_entry(self):
         """'send_diagnostics_to_sentry' must be in dispatch table mapping to self._handle_send_diagnostics_to_sentry."""
@@ -1528,12 +1550,12 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
     def test_send_imessage_dispatch_entry(self):
         """'send_imessage' must be in dispatch table mapping to self._handle_send_imessage."""
         self.assertIn("send_imessage", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "send_imessage"), "svc._handle_send_imessage")
+        self.assertEqual(_dispatch_rhs(self.block, "send_imessage"), "svc._apple_integration_svc.handle_send_imessage")
 
     def test_send_to_telegram_dispatch_entry(self):
         """'send_to_telegram' must be in dispatch table mapping to self._handle_send_to_telegram."""
         self.assertIn("send_to_telegram", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "send_to_telegram"), "svc._handle_send_to_telegram")
+        self.assertEqual(_dispatch_rhs(self.block, "send_to_telegram"), "svc._apple_integration_svc.handle_send_to_telegram")
 
     def test_set_annotation_dispatch_entry(self):
         """'set_annotation' must be in dispatch table mapping to self._history.handle_set_annotation."""
@@ -1553,7 +1575,7 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
     def test_set_paste_status_dispatch_entry(self):
         """'set_paste_status' must be in dispatch table mapping to self._recording_core_svc.handle_set_paste_status."""
         self.assertIn("set_paste_status", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "set_paste_status"), "svc._recording_core_svc.handle_set_paste_status")
+        self.assertEqual(_dispatch_rhs(self.block, "set_paste_status"), "svc._handle_set_paste_status")
 
     def test_set_speaker_alias_dispatch_entry(self):
         """'set_speaker_alias' must be in dispatch table mapping to self._speaker_manager.handle_set_speaker_alias."""
@@ -1663,7 +1685,7 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
     def test_warmup_rewriter_dispatch_entry(self):
         """'warmup_rewriter' must be in dispatch table mapping to self._handle_warmup_rewriter."""
         self.assertIn("warmup_rewriter", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "warmup_rewriter"), "svc._handle_warmup_rewriter")
+        self.assertEqual(_dispatch_rhs(self.block, "warmup_rewriter"), "svc._text_scoring_svc.handle_warmup_rewriter")
 
     def test_warmup_stt_dispatch_entry(self):
         """'warmup_stt' must be in dispatch table mapping to self._stt_mgmt_svc.handle_warmup_stt."""
@@ -1676,7 +1698,7 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
         self.assertEqual(_dispatch_rhs(self.block, "word_frequency_analysis"), "svc._history.handle_word_frequency_analysis")
 
     # ------------------------------------------------------------------
-    # W875: 11 previously uncovered keys in ipc_dispatch.py
+    # W875: 11 previously uncovered keys (W1769: source is now service.py)
     # ------------------------------------------------------------------
 
     def test_add_history_item_dispatch_entry(self):
@@ -1692,22 +1714,22 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
     def test_compare_periods_dispatch_entry(self):
         """'compare_periods' must be in dispatch table mapping to svc._handle_compare_periods."""
         self.assertIn("compare_periods", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "compare_periods"), "svc._handle_compare_periods")
+        self.assertEqual(_dispatch_rhs(self.block, "compare_periods"), "svc._analytics_svc.handle_compare_periods")
 
     def test_export_glossary_csv_dispatch_entry(self):
         """'export_glossary_csv' must be in dispatch table mapping to svc._glossary_svc.handle_export_glossary_csv."""
         self.assertIn("export_glossary_csv", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "export_glossary_csv"), "svc._glossary_svc.handle_export_glossary_csv")
+        self.assertEqual(_dispatch_rhs(self.block, "export_glossary_csv"), "svc._handle_export_glossary_csv")
 
     def test_extract_action_items_dispatch_entry(self):
         """'extract_action_items' must be in dispatch table mapping to svc._handle_extract_action_items."""
         self.assertIn("extract_action_items", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "extract_action_items"), "svc._handle_extract_action_items")
+        self.assertEqual(_dispatch_rhs(self.block, "extract_action_items"), "svc._search_and_analysis_svc.handle_extract_action_items")
 
     def test_get_activity_calendar_dispatch_entry(self):
         """'get_activity_calendar' must be in dispatch table mapping to svc._handle_get_activity_calendar."""
         self.assertIn("get_activity_calendar", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "get_activity_calendar"), "svc._handle_get_activity_calendar")
+        self.assertEqual(_dispatch_rhs(self.block, "get_activity_calendar"), "svc._analytics_svc.handle_get_activity_calendar")
 
     def test_get_last_llm_diff_dispatch_entry(self):
         """'get_last_llm_diff' must be in dispatch table mapping to svc._llm_ops_svc.handle_get_last_llm_diff (W783 LLMOpsService)."""

@@ -3,19 +3,21 @@
 
 Корневая причина (root cause, W746-класс): "extraction" модуля, которая
 ничего не меняет, потому что монолит (``service.py``) продолжает использовать
-свою СОБСТВЕННУЮ инлайн-копию. Подтверждённые примеры (W797/W813/W828):
+свою СОБСТВЕННУЮ инлайн-копию. Исторические примеры (W797/W813/W828), уже
+ИСПРАВЛЕННЫЕ удалением мёртвых копий:
 
-  * ``backend/ipc_dispatch.py`` — ``build_dispatch_table`` НЕ импортируется
-    нигде в production; живая диспетчеризация — это инлайн-словарь
-    ``handlers`` в ``service.py`` (~321 запись). Мёртвый модуль.
-  * ``backend/ipc_server.py`` — ``IPCServer`` повторно определён инлайн в
-    ``service.py`` (class IPCServer), и ``main()`` инстанцирует ИНЛАЙН-копию.
-    Извлечённая копия достижима только через ленивый ре-экспорт в
-    ``backend/__init__.py``, который никто не вызывает.
-  * ``backend/service_logging.py`` — ``configure_logging``/``JsonFormatter``
-    повторены инлайн в ``service.py``; ``main()`` зовёт инлайн-версию.
+  * ``backend/ipc_dispatch.py`` (УДАЛЁН в W1769) — ``build_dispatch_table`` не
+    импортировался production; живая диспетчеризация — инлайн-словарь в
+    ``service.py::_build_dispatch_table`` (строится один раз в ``__init__``,
+    кэшируется в ``self._dispatch_table``).
+  * ``backend/ipc_server.py`` — ``IPCServer`` ранее дублировался инлайн в
+    ``service.py``; инлайн-дубликат удалён в #1601, канон живёт в ipc_server.py
+    и импортируется.
+  * ``backend/service_logging.py`` (УДАЛЁН в W1769) — ``configure_logging``/
+    ``JsonFormatter`` остаются инлайн в ``service.py`` (живая копия).
 
-Этот скрипт детектирует два класса находок по ``KrabEar/backend/`` +
+На текущий момент страж ловит ``backend/glossary_service.py`` (отдельный
+follow-up). Этот скрипт детектирует два класса находок по ``KrabEar/backend/`` +
 ``KrabEar/core/``:
 
 1. **Мёртвые модули** — top-level публичные символы модуля (классы и
