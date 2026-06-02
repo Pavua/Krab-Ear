@@ -496,13 +496,13 @@ class NumberNormalizer:
         )
         unit_words = list(_RU_UNIT_WORDS.keys())
 
-        # Строим паттерн: одно или несколько числительных слов подряд
+        # Строим паттерн: одно или несколько числительных слов подряд (до 20, чтобы избежать ReDoS и ValueError limit)
         word_pat = "|".join(re.escape(w) for w in num_words + ["и"])
-        num_seq_pat = rf"(?<!\w)(?:(?:{word_pat})(?:\s+(?:{word_pat}))*)(?!\w)"
+        num_seq_pat = rf"(?<!\w)(?:(?:{word_pat})(?:\s+(?:{word_pat})){{0,20}})(?!\w)"
 
         # Единицы
         unit_pat = "|".join(re.escape(u) for u in sorted(unit_words, key=len, reverse=True))
-        full_pat = rf"(минус\s+)?({num_seq_pat})(?:\s+({unit_pat}))?"
+        full_pat = rf"(минус\s+)?({num_seq_pat})(?:\s+({unit_pat})(?!\w))?"
 
         def _repl(m: re.Match) -> str:
             neg_prefix = m.group(1)
@@ -547,9 +547,9 @@ class NumberNormalizer:
         unit_words = list(_ES_UNIT_WORDS.keys())
 
         word_pat = "|".join(re.escape(w) for w in num_words + ["y"])
-        num_seq_pat = rf"(?<!\w)(?:(?:{word_pat})(?:\s+(?:{word_pat}))*)(?!\w)"
+        num_seq_pat = rf"(?<!\w)(?:(?:{word_pat})(?:\s+(?:{word_pat})){{0,20}})(?!\w)"
         unit_pat = "|".join(re.escape(u) for u in sorted(unit_words, key=len, reverse=True))
-        full_pat = rf"(menos\s+)?({num_seq_pat})(?:\s+({unit_pat}))?"
+        full_pat = rf"(menos\s+)?({num_seq_pat})(?:\s+({unit_pat})(?!\w))?"
 
         def _repl(m: re.Match) -> str:
             neg_prefix = m.group(1)
@@ -594,9 +594,9 @@ class NumberNormalizer:
         unit_words = list(_EN_UNIT_WORDS.keys())
 
         word_pat = "|".join(re.escape(w) for w in num_words + ["and"])
-        num_seq_pat = rf"(?<!\w)(?:(?:{word_pat})(?:[\s-]+(?:{word_pat}))*)(?!\w)"
+        num_seq_pat = rf"(?<!\w)(?:(?:{word_pat})(?:[\s-]+(?:{word_pat})){{0,20}})(?!\w)"
         unit_pat = "|".join(re.escape(u) for u in sorted(unit_words, key=len, reverse=True))
-        full_pat = rf"(minus\s+|negative\s+)?({num_seq_pat})(?:\s+({unit_pat}))?"
+        full_pat = rf"(minus\s+|negative\s+)?({num_seq_pat})(?:\s+({unit_pat})(?!\w))?"
 
         def _repl(m: re.Match) -> str:
             neg_prefix = m.group(1)
