@@ -209,12 +209,11 @@ class TestNonceEviction(unittest.TestCase):
 
         self.assertEqual(self.signer.nonce_count(), MAX_NONCES)
 
-        # Добавляем ещё один — first_nonce должен быть вытеснен
+        # Добавляем ещё один — first_nonce должен быть вытеснен (т.к. MAX_NONCES превышен)
         self.signer._register_nonce_for_test("overflow_nonce")
         self.assertEqual(self.signer.nonce_count(), MAX_NONCES)
 
-        # first_nonce больше не в хранилище → повторная регистрация не упадёт
-        # (проверяем через verify_request без timestamp — если nonce не в сете, проходит)
+        # first_nonce больше не в хранилище (хоть это и создаёт риск replay, это поведение OOM protection)
         self.assertNotIn(first_nonce, self.signer._nonce_set)
 
     # ------------------------------------------------------------------
@@ -272,35 +271,12 @@ class TestRoundTrip(unittest.TestCase):
         self.assertFalse(ok)
 
     # ------------------------------------------------------------------
-    # 15. verify без timestamp и nonce (упрощённый/legacy режим)
+    # 15. Упрощённый режим (verify без timestamp) удалён ради безопасности.
     # ------------------------------------------------------------------
-    def test_verify_without_timestamp_and_nonce(self) -> None:
-        """Без timestamp и nonce верифицируется только HMAC."""
-        fixed_ts = time.time()
-        fixed_nonce = "fixed_nonce_test"
-        signed = self.signer.sign_request(
-            "ping", {}, self.secret,
-            timestamp=fixed_ts, nonce=fixed_nonce,
-        )
-        # Вычисляем подпись вручную — signature привязана к конкретным ts/nonce
-        # Поэтому verify без ts/nonce (ts=0, nonce="") должен вернуть False
-        ok_no_ts_nonce = self.signer.verify_request(
-            signed.method, signed.params, signed.signature, self.secret,
-        )
-        self.assertFalse(ok_no_ts_nonce)
-
-    def test_verify_without_timestamp_nonce_correct_sig(self) -> None:
-        """Подпись, вычисленная с ts=0/nonce='', принимается без ts/nonce."""
-        signed_zero = self.signer.sign_request(
-            "ping", {}, self.secret,
-            timestamp=0.0, nonce="",
-        )
-        ok = self.signer.verify_request(
-            signed_zero.method, signed_zero.params,
-            signed_zero.signature, self.secret,
-            # timestamp=None и nonce=None → verify использует 0.0 и ""
-        )
-        self.assertTrue(ok)
+    def test_verify_without_timestamp_and_nonce_rejected(self) -> None:
+        """Без timestamp и nonce verify_request немедленно возвращает False (защита от bypass)."""
+        ok = self.signer.verify_request("ping", {}, "dummy_signature", self.secret, timestamp=None, nonce=None)
+        self.assertFalse(ok)
 
 
 class TestEmptyPayloadEdgeCases(unittest.TestCase):
@@ -586,7 +562,8 @@ class TestWave1733NonceFloodResistance(unittest.TestCase):
 def _register_nonce_for_test(self: RequestSigner, nonce: str) -> None:
     """Публичный хелпер для юнит-тестов: регистрирует nonce напрямую."""
     with self._lock:
-        self._register_nonce(nonce)
+        import time
+        self._register_nonce(nonce, time.time())
 
 
 RequestSigner._register_nonce_for_test = _register_nonce_for_test  # type: ignore[attr-defined]
