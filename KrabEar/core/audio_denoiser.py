@@ -58,6 +58,18 @@ _HOP = _N_FFT // 4
 # Размер фрейма для RMS-анализа при выборе тихих фреймов (10 мс @ 16 кГц)
 _RMS_FRAME_SIZE = 160
 
+# W1769 F2: ограничение длины аудио, обрабатываемого за один STFT-проход.
+# Полный STFT 4-часовой записи аллоцирует многогигабайтную complex128-матрицу
+# (≈308 МБ на 10 мин → ≈7.4 ГБ на 4 ч только для одного массива, плюс копии
+# sig_amp/sig_phase/mask). Если аудио длиннее окна — обрабатываем перекрывающимися
+# окнами с overlap-add (см. _denoise_windowed), что даёт постоянный peak memory.
+_MAX_DENOISE_WINDOW_SEC = 60.0
+
+# W1769 F2: длина перекрытия между соседними окнами (overlap-add cross-fade).
+# Линейный кросс-фейд в зоне перекрытия даёт partition-of-unity (веса = 1.0),
+# поэтому шва на стыке не слышно. 1 с при 16 кГц = 16000 сэмплов.
+_DENOISE_OVERLAP_SEC = 1.0
+
 # Минимальная доля тихих фреймов при строгом сравнении (<) — если меньше, fallback
 _MIN_QUIET_FRACTION = 0.05
 
@@ -147,6 +159,53 @@ def _percentile_noise_clip(
     return frames[quiet_mask].ravel()
 
 
+def _pad_noise_clip(noise_clip: np.ndarray) -> np.ndarray:
+    """Дополняет noise clip до ≥ ``_N_FFT`` сэмплов перед STFT.
+
+    W1769 F1 (crash fix): ``_percentile_noise_clip`` может вернуть очень короткий
+    клип (например, один тихий 10-мс фрейм = 160 сэмплов), даже если всё аудио
+    проходит guard ``len(mono) >= _N_FFT * 2``. ``scipy.signal.stft`` с
+    ``nperseg=_N_FFT`` на таком входе авто-урезает ``nperseg`` до длины клипа, но
+    ``noverlap`` остаётся ``_N_FFT - _HOP`` → ``ValueError: noverlap must be less
+    than nperseg``. Это краш в дефолтном production-бэкенде (spectral gating).
+
+    Решение: если клип короче ``_N_FFT`` — расширяем его ``mode="reflect"`` до
+    минимум ``_N_FFT`` сэмплов. Зеркальное отражение сохраняет спектральные
+    характеристики шума лучше, чем нули. ``reflect`` требует длину ≥ 2, поэтому
+    для совсем вырожденных клипов (0–1 сэмпл) используем ``edge``-паддинг.
+
+    Args:
+        noise_clip: 1-D float64 массив тихих фреймов (noise reference).
+
+    Returns:
+        Массив длиной ≥ ``_N_FFT`` сэмплов. Если вход уже достаточно длинный —
+        возвращается без изменений.
+    """
+    n = len(noise_clip)
+    if n >= _N_FFT:
+        return noise_clip
+
+    pad_total = _N_FFT - n
+    if n >= 2:
+        # 'reflect' зеркалит без повтора крайнего сэмпла. Когда добавить нужно
+        # больше, чем (n - 1) сэмплов (pad_total >= n), берём 'symmetric' —
+        # он надёжно отражает многократно во всех версиях numpy.
+        mode = "reflect" if pad_total < n else "symmetric"
+        pad_left = pad_total // 2
+        pad_right = pad_total - pad_left
+        padded = np.pad(noise_clip, (pad_left, pad_right), mode=mode)
+    else:
+        # 0 или 1 сэмпл — отражение неприменимо, заполняем крайним значением
+        fill = float(noise_clip[0]) if n == 1 else 0.0
+        padded = np.full(_N_FFT, fill, dtype=np.float64)
+
+    logger.debug(
+        "[Denoiser] noise clip дополнен %d → %d сэмплов перед STFT (W1769 F1)",
+        n, len(padded),
+    )
+    return padded
+
+
 def _speech_band_bins(sample_rate: int) -> tuple[int, int]:
     """Возвращает индексы FFT-бинов для речевой полосы 300–3000 Гц.
 
@@ -209,6 +268,11 @@ class AudioDenoiser:
     W1062 F2 fix: при обнаружении шёпотной амплитуды режим ``strong``
     автоматически понижается до ``moderate``, чтобы не подавить речь.
     W1062 F4 fix: многоканальный вход логирует предупреждение о потере каналов.
+    W1769 F1 fix: короткий noise clip (< _N_FFT) дополняется перед STFT, иначе
+    scipy урезает nperseg, но noverlap остаётся прежним → ValueError (краш).
+    W1769 F2 fix: длинное аудио (> _MAX_DENOISE_WINDOW_SEC) обрабатывается
+    перекрывающимися окнами с overlap-add — peak memory ограничен размером окна
+    (полный STFT 4-часовой записи аллоцирует многогигабайтную complex-матрицу).
     """
 
     def __init__(self) -> None:
@@ -290,10 +354,19 @@ class AudioDenoiser:
         params = _STRENGTH_PARAMS.get(effective_strength, _STRENGTH_PARAMS["moderate"])
         nr_params = _NOISEREDUCE_PARAMS.get(effective_strength)
 
-        if self._has_noisereduce:
-            denoised = self._denoise_noisereduce(mono, sample_rate, params, nr_params=nr_params)
+        # W1769 F2: для длинного аудио обрабатываем перекрывающимися окнами,
+        # чтобы peak memory оставался ограниченным (полный STFT 4-часовой записи
+        # = многогигабайтная complex-матрица). Короткое аудио идёт прямым путём.
+        window_samples = int(_MAX_DENOISE_WINDOW_SEC * sample_rate)
+        if len(mono) > window_samples:
+            denoised = self._denoise_windowed(
+                mono, sample_rate, params, effective_strength, nr_params,
+                window_samples=window_samples,
+            )
         else:
-            denoised = self._denoise_spectral_gating(mono, sample_rate, params, effective_strength)
+            denoised = self._apply_backend(
+                mono, sample_rate, params, effective_strength, nr_params
+            )
 
         # Клипуем в [-1, 1]
         denoised = np.clip(denoised, -1.0, 1.0)
@@ -308,6 +381,124 @@ class AudioDenoiser:
             denoised = denoised.astype(orig_dtype)
 
         return denoised
+
+    # ------------------------------------------------------------------
+    # Диспетчер бэкенда + оконная обработка (W1769 F2)
+    # ------------------------------------------------------------------
+
+    def _apply_backend(
+        self,
+        mono: np.ndarray,
+        sample_rate: int,
+        params: dict,
+        effective_strength: str,
+        nr_params: dict | None,
+    ) -> np.ndarray:
+        """Выбирает и применяет активный бэкенд деноизинга к одному сегменту.
+
+        Единая точка диспетчеризации (noisereduce vs spectral gating),
+        переиспользуемая прямым путём и каждым окном в ``_denoise_windowed``.
+        Возвращает float64-массив той же длины, что и ``mono``.
+        """
+        if self._has_noisereduce:
+            return self._denoise_noisereduce(
+                mono, sample_rate, params, nr_params=nr_params
+            )
+        return self._denoise_spectral_gating(
+            mono, sample_rate, params, effective_strength
+        )
+
+    def _denoise_windowed(
+        self,
+        mono: np.ndarray,
+        sample_rate: int,
+        params: dict,
+        effective_strength: str,
+        nr_params: dict | None,
+        window_samples: int,
+    ) -> np.ndarray:
+        """Обрабатывает длинное аудио перекрывающимися окнами с overlap-add.
+
+        W1769 F2 (bounded memory): полный STFT длинной записи (часы) аллоцирует
+        многогигабайтную complex-матрицу. Здесь мы режем сигнал на окна ≤
+        ``window_samples`` сэмплов с перекрытием ``_DENOISE_OVERLAP_SEC`` и
+        применяем бэкенд к каждому окну отдельно — peak memory ограничен размером
+        одного окна независимо от полной длительности.
+
+        Швы устраняются линейным кросс-фейдом в зоне перекрытия: нарастающий и
+        спадающий ramp'ы соседних окон в сумме дают 1.0 (partition of unity),
+        поэтому артефактов на стыке не слышно. Длина выхода точно равна длине входа.
+
+        Args:
+            mono: 1-D float64 аудиосигнал (уже моно, в [-1, 1]).
+            sample_rate: частота дискретизации в Гц.
+            params: параметры spectral gating для текущего уровня силы.
+            effective_strength: эффективный уровень (после strong→moderate downgrade).
+            nr_params: параметры noisereduce-бэкенда (или None).
+            window_samples: максимальная длина окна в сэмплах (> 0).
+
+        Returns:
+            float64-массив длиной ``len(mono)`` с применённым деноизингом.
+        """
+        n = len(mono)
+        overlap = int(_DENOISE_OVERLAP_SEC * sample_rate)
+        # Перекрытие не может превышать половину окна (иначе шаг ≤ 0).
+        overlap = max(0, min(overlap, window_samples // 2))
+        step = window_samples - overlap
+        if step <= 0:
+            # Защита от вырожденной конфигурации — обрабатываем целиком.
+            return self._apply_backend(
+                mono, sample_rate, params, effective_strength, nr_params
+            )
+
+        out = np.zeros(n, dtype=np.float64)
+        weight = np.zeros(n, dtype=np.float64)
+
+        n_windows = 0
+        start = 0
+        while start < n:
+            end = min(start + window_samples, n)
+            segment = mono[start:end]
+            seg_len = end - start
+
+            # Сегмент короче _N_FFT*2 backend пропустит (вернёт как есть) —
+            # это нормально, кросс-фейд всё равно корректно его вошьёт.
+            processed = self._apply_backend(
+                segment, sample_rate, params, effective_strength, nr_params
+            )
+            processed = np.asarray(processed, dtype=np.float64)
+            # Бэкенд гарантирует совпадение длины, но подстрахуемся.
+            if len(processed) != seg_len:
+                processed = np.resize(processed, seg_len)
+
+            # Веса окна: 1.0 в середине, линейный ramp в зонах перекрытия.
+            w = np.ones(seg_len, dtype=np.float64)
+            ramp = min(overlap, seg_len // 2)
+            if ramp > 0:
+                fade = np.linspace(0.0, 1.0, ramp, endpoint=False)
+                if start > 0:               # нарастание слева (кроме первого окна)
+                    w[:ramp] = fade
+                if end < n:                 # спад справа (кроме последнего окна)
+                    w[-ramp:] = fade[::-1]
+
+            out[start:end] += processed * w
+            weight[start:end] += w
+            n_windows += 1
+
+            if end >= n:
+                break
+            start += step
+
+        # Нормализуем по накопленным весам (защита от деления на ноль).
+        weight[weight == 0.0] = 1.0
+        result = out / weight
+
+        logger.debug(
+            "[Denoiser] оконная обработка W1769 F2: %d сэмплов → %d окон "
+            "(окно=%d, перекрытие=%d) — peak memory ограничен",
+            n, n_windows, window_samples, overlap,
+        )
+        return result
 
     # ------------------------------------------------------------------
     # noisereduce backend
@@ -343,6 +534,10 @@ class AudioDenoiser:
                 "[Denoiser] noisereduce: ноль тихих фреймов — denoising пропущен (uniform audio)"
             )
             return audio
+
+        # W1769 F1: noisereduce тоже строит STFT по y_noise; короткий клип (< _N_FFT)
+        # вызывает аналогичный сбой. Дополняем до безопасной длины (тот же guard).
+        noise_clip = _pad_noise_clip(noise_clip)
 
         if nr_params is not None:
             # W1322: используем _NOISEREDUCE_PARAMS (включая min_attenuation_db для strong)
@@ -410,6 +605,10 @@ class AudioDenoiser:
                 "[Denoiser] spectral_gating: ноль тихих фреймов — denoising пропущен (uniform audio)"
             )
             return audio
+
+        # W1769 F1: гарантируем noise_clip длиной ≥ _N_FFT перед STFT, иначе
+        # scipy урезает nperseg, но noverlap остаётся прежним → ValueError (краш).
+        noise_clip = _pad_noise_clip(noise_clip)
 
         _, _, noise_stft = stft(noise_clip, fs=sample_rate, nperseg=_N_FFT, noverlap=_N_FFT - _HOP)
         noise_amp = np.abs(noise_stft)
