@@ -712,5 +712,134 @@ class TestW1444LimitValidationAndClearTruncate(unittest.TestCase):
             mgr.close()
 
 
+class TestW1770FileBoundedAndClear(unittest.TestCase):
+    """W1770 — файл event_replay.ndjson не растёт без границ внутри сессии,
+    clear() обнуляет и файл, и кольцо, replay работает после пересборки.
+
+    FINDING: record_event делал append на каждое событие; W829 truncate-on-restart
+    ограничивал рост только МЕЖДУ перезапусками, а внутри длительной сессии
+    (launchd backend живёт сутками) файл рос неограниченно. FIX: байтовый предел
+    + атомарная пересборка из кольцевого буфера.
+    """
+
+    def test_file_bounded_when_many_events_past_cap(self):
+        """Запись событий сильно сверх предела держит файл ограниченным по размеру,
+        и в нём остаются САМЫЕ СВЕЖИЕ события. Старый код (без предела) рос бы
+        линейно по числу событий.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "events.ndjson"
+            # Кольцо мало (20) — полный дамп кольца (~2.6 КБ) заведомо влезает в
+            # cap=6000 байт. Без предела 500 событий дали бы ~66 КБ.
+            cap = 6000
+            mgr = EventReplayManager(persist_path=path, max_buffer=20, max_file_bytes=cap)
+            try:
+                total = 500
+                for i in range(total):
+                    mgr.record_event("ev", {"i": i, "pad": "x" * 40})
+                mgr._file_handle.flush()
+
+                size = path.stat().st_size
+                # Файл ограничен предложенным пределом (а НЕ ~total*line_bytes).
+                self.assertLessEqual(
+                    size, cap,
+                    f"file grew past cap: {size} > {cap} (unbounded-growth regression)",
+                )
+
+                # Файл всё ещё содержит самые свежие события (последний i=499).
+                lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln]
+                self.assertTrue(lines, "persist file unexpectedly empty after compaction")
+                parsed = [json.loads(ln) for ln in lines]
+                last_is = [e["data"]["i"] for e in parsed]
+                self.assertIn(total - 1, last_is, "most-recent event missing from bounded file")
+                # И самые старые события вытеснены (i=0 не должен оставаться).
+                self.assertNotIn(0, last_is, "oldest event should have been evicted")
+            finally:
+                mgr.close()
+
+    def test_clear_empties_file_and_ring(self):
+        """clear() обнуляет и файл на диске, и in-memory кольцо; последующая запись
+        ложится в начало файла (без «дыры» от устаревшего смещения дескриптора).
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "events.ndjson"
+            mgr = EventReplayManager(persist_path=path, max_buffer=50)
+            try:
+                for i in range(20):
+                    mgr.record_event("secret", {"text": f"cleartext-{i}"})
+                self.assertGreater(path.stat().st_size, 0)
+                self.assertEqual(mgr.get_event_stats()["total_events"], 20)
+
+                mgr.clear()
+
+                # Кольцо пусто.
+                self.assertEqual(mgr.get_event_stats()["total_events"], 0)
+                # Файл обнулён (но существует — purge усекает, не удаляет).
+                self.assertTrue(path.exists())
+                self.assertEqual(path.read_text(encoding="utf-8"), "")
+
+                # Регрессия dangling-offset: запись после clear ложится с offset 0,
+                # т.е. файл = ровно одна строка, без NUL-«дыры» впереди.
+                mgr.record_event("after_clear", {"x": 1})
+                mgr._file_handle.flush()
+                content = path.read_text(encoding="utf-8")
+                self.assertNotIn("\x00", content, "sparse NUL hole after clear (dangling offset)")
+                lines = [ln for ln in content.splitlines() if ln]
+                self.assertEqual(len(lines), 1)
+                self.assertEqual(json.loads(lines[0])["type"], "after_clear")
+            finally:
+                mgr.close()
+
+    def test_replay_and_get_event_log_work_after_compaction(self):
+        """replay_events / handle_get_event_log корректны после того, как файл был
+        пересобран из кольца (компакция не ломает чтение из in-memory буфера).
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "events.ndjson"
+            cap = 4000
+            mgr = EventReplayManager(persist_path=path, max_buffer=20, max_file_bytes=cap)
+            try:
+                # Достаточно событий, чтобы пройти cap минимум раз → compaction.
+                for i in range(300):
+                    mgr.record_event("ev", {"i": i, "pad": "y" * 40})
+
+                # Компакция действительно произошла: файл ограничен.
+                self.assertLessEqual(path.stat().st_size, cap)
+
+                # replay_events широким диапазоном возвращает текущее кольцо (20).
+                events = mgr.replay_events("2000-01-01T00:00:00+00:00", "2100-01-01T00:00:00+00:00")
+                self.assertEqual(len(events), 20)
+                seqs = [e["seq"] for e in events]
+                self.assertEqual(seqs, sorted(seqs))
+                # Свежайшее событие на месте.
+                self.assertIn(299, [e["data"]["i"] for e in events])
+
+                # handle_get_event_log тоже работает и не падает.
+                res = mgr.handle_get_event_log({"limit": 100})
+                self.assertIn("events", res)
+                self.assertEqual(res["count"], 20)
+
+                # Статистика согласована с кольцом.
+                self.assertEqual(mgr.get_event_stats()["total_events"], 20)
+            finally:
+                mgr.close()
+
+    def test_default_cap_does_not_compact_in_normal_use(self):
+        """С дефолтным пределом (8 МБ) обычная сессия не вызывает пересборку:
+        несколько событий просто дописываются, файл = их число строк.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "events.ndjson"
+            mgr = EventReplayManager(persist_path=path, max_buffer=100)
+            try:
+                for i in range(10):
+                    mgr.record_event("ev", {"i": i})
+                mgr._file_handle.flush()
+                lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln]
+                self.assertEqual(len(lines), 10)
+            finally:
+                mgr.close()
+
+
 if __name__ == "__main__":
     unittest.main()
