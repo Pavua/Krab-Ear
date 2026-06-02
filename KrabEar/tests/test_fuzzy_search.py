@@ -427,5 +427,61 @@ class FuzzySearcherWave111Tests(unittest.TestCase):
         self.assertEqual(errors, [], f"Concurrent FuzzySearch raised: {errors}")
 
 
+class FuzzySearcherSecurityTests(unittest.TestCase):
+    """Regression tests for security hardening (memory-bomb + ReDoS guards)."""
+
+    def setUp(self) -> None:
+        self.searcher = FuzzySearcher()
+
+    # ------------------------------------------------------------------
+    # Memory-bomb guard: only last MAX_TEXTS (5000) texts are processed
+    # ------------------------------------------------------------------
+    def test_memory_bomb_guard_processes_at_most_5000_texts(self) -> None:
+        """search() must not process more than 5000 texts even for larger inputs."""
+        # Build 6000 texts; only the last 5000 should be processed.
+        # The first 1000 entries are unique sentinel strings that should be skipped.
+        texts = [f"sentinel_entry_{i}" for i in range(1000)]
+        texts += [f"normal text entry {i}" for i in range(5000)]
+        results = self.searcher.search("normal text entry", texts, threshold=0.7)
+        # Sentinels (indices 0-999) must never appear — they are beyond the 5000 cap
+        sentinel_indices = {r.index for r in results if r.index < 1000}
+        self.assertEqual(
+            sentinel_indices, set(),
+            "Memory-bomb guard failed: sentinel entries before the 5000 cap were processed"
+        )
+
+    def test_memory_bomb_guard_total_results_bounded(self) -> None:
+        """With 6000 identical texts, processed count <= 5000."""
+        texts = ["hello world"] * 6000
+        results = self.searcher.search("hello world", texts, threshold=0.9)
+        # At most 5000 texts processed, so at most 5000 results
+        self.assertLessEqual(len(results), 5000)
+
+    # ------------------------------------------------------------------
+    # ReDoS guard: query and text are clamped to 2000 chars before SequenceMatcher
+    # ------------------------------------------------------------------
+    def test_redos_guard_very_long_query_does_not_hang(self) -> None:
+        """A query longer than 2000 chars must complete quickly (no O(N^2) hang)."""
+        import time
+        long_query = "a" * 10_000
+        texts = ["a" * 10_000, "short text", "hello world"]
+        t0 = time.monotonic()
+        results = self.searcher.search(long_query, texts, threshold=0.0)
+        elapsed = time.monotonic() - t0
+        # Must complete in <2 s even on slow CI hardware
+        self.assertLess(elapsed, 2.0, f"ReDoS guard failed: search took {elapsed:.3f}s")
+        self.assertIsInstance(results, list)
+
+    def test_redos_guard_very_long_text_does_not_hang(self) -> None:
+        """Texts longer than 2000 chars are truncated internally; no hang."""
+        import time
+        texts = ["b" * 50_000]
+        t0 = time.monotonic()
+        results = self.searcher.search("b" * 50, texts, threshold=0.0)
+        elapsed = time.monotonic() - t0
+        self.assertLess(elapsed, 2.0, f"ReDoS guard (long text) took {elapsed:.3f}s")
+        self.assertIsInstance(results, list)
+
+
 if __name__ == "__main__":
     unittest.main()
