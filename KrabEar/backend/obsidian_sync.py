@@ -198,12 +198,29 @@ class ObsidianSyncManager:
         Вызывает ValueError если vault_path не существует, не является
         директорией, или folder выходит за пределы vault (path-traversal,
         W1768 — UnsafeFolderError, подкласс ValueError).
+
+        SECURITY NOTE (LOW, confused-deputy): vault_path should always be a
+        user-confirmed location.  Krab Ear will write transcript_*.md files
+        there on every sync.  Callers must ensure the path was explicitly
+        chosen by the user (e.g. via a file-chooser dialog), not derived from
+        untrusted IPC input.  An audit WARNING is emitted here so every
+        vault-path change is visible in the log.
         """
         p = Path(vault_path).expanduser().resolve()
         if not p.exists():
             raise ValueError(f"Vault path не существует: {vault_path!r}")
         if not p.is_dir():
             raise ValueError(f"Vault path должен быть директорией: {vault_path!r}")
+
+        # W19 (LOW, confused-deputy audit): log every vault_path change so the
+        # write target is auditable.  This is intentionally a WARNING so it
+        # surfaces in default log configs and can be cross-checked by the user.
+        logger.warning(
+            "ObsidianSync: vault_path настроен/изменён → %s (folder=%r). "
+            "Убедитесь, что этот путь подтверждён пользователем.",
+            p,
+            folder.strip() or _DEFAULT_FOLDER,
+        )
 
         folder = folder.strip() or _DEFAULT_FOLDER
 
@@ -547,9 +564,16 @@ class ObsidianSyncManager:
            как конфиг, не как PII).
 
         Возвращает:
-            int — количество удалённых файлов.
+            int — количество успешно удалённых файлов.
 
-        Никогда не бросает: все ошибки файловой системы логируются как warning.
+        W19 (LOW, privacy silent-failure): если хотя бы один .md не удалось
+        удалить, после завершения цикла (все попытки выполнены) бросает
+        OSError с перечнем путей. Вызывающая сторона (handle_purge_all_data в
+        history_service.py) оборачивает вызов в try/except и записывает
+        "obsidian" в secondary_errors — таким образом частичный сбой
+        не остаётся незамеченным, а PII-файлы не теряются молча.
+        Failure путь-traversal (ValueError из _validate_and_resolve_folder)
+        по-прежнему не бросает — это безопасный no-op.
         """
         with self._lock:
             vault_path = self._vault_path
@@ -561,8 +585,7 @@ class ObsidianSyncManager:
 
         # W1768 (MED, path-traversal): повторно проверяем тот же инвариант перед
         # удалением — folder перезагружается из state-файла и не является
-        # доверенным. Если он выходит за пределы vault — безопасный no-op (purge
-        # никогда не бросает по контракту).
+        # доверенным. Если он выходит за пределы vault — безопасный no-op.
         try:
             target_dir = _validate_and_resolve_folder(vault_path, folder)
         except ValueError as exc:
@@ -575,6 +598,7 @@ class ObsidianSyncManager:
             return 0
 
         deleted = 0
+        failed_paths: list[str] = []
 
         if target_dir.is_dir():
             for md_path in list(target_dir.glob("*.md")):
@@ -582,12 +606,17 @@ class ObsidianSyncManager:
                     md_path.unlink(missing_ok=True)
                     deleted += 1
                 except OSError as exc:
+                    # W19 (LOW, privacy silent-failure): log each failure at
+                    # WARNING so the path is visible, then collect for the
+                    # raise below — we continue the loop to delete as many
+                    # files as possible before surfacing the aggregate error.
                     logger.warning(
                         "ObsidianSyncManager.purge_all_synced_files: "
                         "не удалось удалить %s: %s",
                         md_path,
                         exc,
                     )
+                    failed_paths.append(str(md_path))
 
         # Сбрасываем timestamp синхронизации (последняя синхронизация больше
         # не актуальна — vault очищен). Vault/folder сохраняем как конфигурацию.
@@ -596,10 +625,22 @@ class ObsidianSyncManager:
             self._save_state()
 
         logger.info(
-            "ObsidianSyncManager.purge_all_synced_files: удалено %d .md файлов из %s",
+            "ObsidianSyncManager.purge_all_synced_files: удалено %d .md файлов из %s"
+            " (сбоев удаления: %d)",
             deleted,
             target_dir,
+            len(failed_paths),
         )
+
+        # W19 (LOW): raise AFTER the loop and after resetting state so the
+        # caller (history_service.handle_purge_all_data) records "obsidian"
+        # in secondary_errors and the partial failure is visible.
+        if failed_paths:
+            raise OSError(
+                f"purge_all_synced_files: не удалось удалить {len(failed_paths)} .md файл(ов): "
+                + ", ".join(failed_paths)
+            )
+
         return deleted
 
     def _sanitize_loaded_folder(self, folder: str) -> str:
