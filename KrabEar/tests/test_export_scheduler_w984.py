@@ -216,8 +216,12 @@ class TestExportSkipsInPrivacyMode(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertIn("path", result)
 
-    def test_export_proceeds_when_settings_provider_raises(self):
-        """If settings_provider raises, export should proceed (fail-open)."""
+    def test_export_skipped_when_settings_provider_raises(self):
+        """If settings_provider raises, export FAIL-CLOSES: privacy mode cannot be
+        verified, so the export is skipped (reason=privacy_mode_error) rather than
+        risk leaking private data. This is the secure default introduced with the
+        privacy gate (Gemini #1641). This test previously asserted fail-OPEN — that
+        was the insecure pre-#1641 behavior and is now stale (caught by ubuntu CI)."""
         def bad_provider():
             raise RuntimeError("settings unavailable")
 
@@ -227,10 +231,12 @@ class TestExportSkipsInPrivacyMode(unittest.TestCase):
         )
         sched.configure(fmt="json", enabled=True)
 
-        # Should not raise; should proceed with export
+        # Must not raise; must fail-closed (export skipped, no 'path').
         result = sched.check_and_export(self.store)
         self.assertIsNotNone(result)
-        self.assertIn("path", result)
+        self.assertFalse(result.get("exported"))
+        self.assertEqual(result.get("reason"), "privacy_mode_error")
+        self.assertNotIn("path", result)
 
     def test_privacy_mode_checked_dynamically(self):
         """Privacy mode check uses the current value from settings_provider each call."""
