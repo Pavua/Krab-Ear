@@ -73,8 +73,8 @@ class RequestSigner:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        # deque используем как очередь для O(1) eviction: popleft() при переполнении.
-        self._seen_nonces: Deque[str] = deque()
+        # deque используем как очередь для O(1) eviction (содержит (timestamp, nonce))
+        self._seen_nonces: Deque[tuple[float, str]] = deque()
         self._nonce_set: Set[str] = set()
 
     # ------------------------------------------------------------------
@@ -152,27 +152,33 @@ class RequestSigner:
         Returns:
             True если запрос прошёл все проверки, False иначе.
         """
+        import math
+        
+        # 0. Защита от байпаса и type-based атак
+        if timestamp is None or nonce is None or not signature:
+            return False
+        if not isinstance(signature, str) or not isinstance(nonce, str):
+            return False
+        if not isinstance(timestamp, (int, float)) or math.isnan(timestamp) or math.isinf(timestamp):
+            return False
+
         # 1. Проверка временно́го окна (быстрый отсев устаревших запросов)
-        if timestamp is not None:
-            now = time.time()
-            if abs(now - timestamp) > TIMESTAMP_WINDOW_SEC:
-                return False
+        now = time.time()
+        if abs(now - timestamp) > TIMESTAMP_WINDOW_SEC:
+            return False
 
         # 2. Вычисляем ожидаемую подпись и сравниваем constant-time.
         #    Хранилище nonce'ов НЕ трогаем до подтверждения подписи.
-        ts = timestamp if timestamp is not None else 0.0
-        nc = nonce if nonce is not None else ""
-        expected = self._compute_signature(method, params, secret, ts, nc)
+        expected = self._compute_signature(method, params, secret, timestamp, nonce)
         if not hmac.compare_digest(expected, signature):
             return False
 
         # 3. Подпись верна — теперь проверяем и регистрируем nonce (replay protection).
         #    Держим lock только на check-and-register, не во время хэширования.
-        if nonce is not None:
-            with self._lock:
-                if nonce in self._nonce_set:
-                    return False  # replay attack
-                self._register_nonce(nonce)
+        with self._lock:
+            if nonce in self._nonce_set:
+                return False  # replay attack
+            self._register_nonce(nonce, now)
 
         return True
 
@@ -211,16 +217,23 @@ class RequestSigner:
         key = secret.encode("utf-8")
         return hmac.new(key, message, hashlib.sha256).hexdigest()
 
-    def _register_nonce(self, nonce: str) -> None:
+    def _register_nonce(self, nonce: str, current_time: float) -> None:
         """Регистрирует nonce. Вызывать под self._lock.
 
-        При превышении MAX_NONCES удаляет самый старый (popleft из deque).
+        Удаляет все nonce, которые старше TIMESTAMP_WINDOW_SEC,
+        чтобы предотвратить replay attack при вытеснении и предотвратить OOM.
         """
-        if len(self._seen_nonces) >= MAX_NONCES:
-            oldest = self._seen_nonces.popleft()
-            self._nonce_set.discard(oldest)
+        # Вытесняем устаревшие nonce
+        while self._seen_nonces and self._seen_nonces[0][0] < current_time - TIMESTAMP_WINDOW_SEC:
+            _, oldest_nonce = self._seen_nonces.popleft()
+            self._nonce_set.discard(oldest_nonce)
 
-        self._seen_nonces.append(nonce)
+        # Ограничение на крайний случай, если слишком много запросов в окне (OOM protection)
+        if len(self._seen_nonces) >= MAX_NONCES:
+            _, oldest_nonce = self._seen_nonces.popleft()
+            self._nonce_set.discard(oldest_nonce)
+
+        self._seen_nonces.append((current_time, nonce))
         self._nonce_set.add(nonce)
 
     def clear_nonces(self) -> None:
