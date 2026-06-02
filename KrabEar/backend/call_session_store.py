@@ -2,6 +2,17 @@
 
 Использует append-only NDJSON с tombstone-удалением, аналогично StateStore.
 Файл: <data_dir>/call_sessions.ndjson
+
+Wave 1772 — компактирование (исправление unbounded-growth + O(N²)):
+  Каждый вызов add_transcript/update_status/mark_completed/mark_failed
+  дописывал одну дельта-строку, но replay при get() перечитывал ВСЕ строки
+  файла. Для K-реплик одного звонка это O(K²) парсов JSON. Исправление:
+  - compact() переписывает файл атомарно (tmp + replace под flock), сохраняя
+    только последнее свёрнутое состояние каждой активной сессии (1 строка/сессия).
+  - maybe_compact() проверяет _COMPACT_LINE_THRESHOLD и запускает compact().
+  - mark_completed/mark_failed вызывают maybe_compact() после финального append.
+  - _apply_delta: cost_usd теперь присваивается (=), а не суммируется (+=).
+    В дельте mark_completed/mark_failed всегда пишется итоговая стоимость звонка.
 """
 
 from __future__ import annotations
@@ -26,6 +37,12 @@ from backend.call_session import (
 
 logger = logging.getLogger("KrabEar.Backend.CallSessionStore")
 
+# Порог числа строк в call_sessions.ndjson, при превышении которого
+# maybe_compact() запускает компактирование.
+# Одна активная сессия с ~200 репликами порождает ~202 строк; порог 500 даёт
+# ~2 параллельных звонка с большим транскриптом до первого компактирования.
+_COMPACT_LINE_THRESHOLD = 500
+
 
 class CallSessionStore:
     """Персистентное хранилище CallSession в append-only NDJSON.
@@ -33,6 +50,12 @@ class CallSessionStore:
     Паттерн tombstone: удаление пишет ``{"id": "...", "_deleted": true}``.
     Обновления статуса пишутся как отдельные дельта-записи с ``_update: true``.
     При get/list последнее состояние собирается через replay всех дельт.
+
+    Компактирование (Wave 1772):
+      compact() перезаписывает файл атомарно: только по одной «закрытой» строке
+      на каждую активную сессию.  Вызывается автоматически после завершения
+      звонка (mark_completed/mark_failed) при превышении порога числа строк,
+      а также явно через IPC-метод call_session_compact.
     """
 
     def __init__(self, data_dir: Path) -> None:
@@ -167,6 +190,9 @@ class CallSessionStore:
     ) -> CallSession:
         """Переводит сессию в COMPLETED, вычисляет длительность и стоимость.
 
+        После успешного завершения проверяет порог строк и запускает
+        компактирование при необходимости (Wave 1772).
+
         Raises:
             KeyError: сессия не найдена.
             ValueError: переход недопустим.
@@ -196,6 +222,9 @@ class CallSessionStore:
                 "cost_usd": session.cost_usd,
                 "duration_sec": session.duration_sec,
             })
+            # Компактирование под тем же flock: файл уже открыт монопольно.
+            self._maybe_compact_unlocked()
+
         return session
 
     def mark_failed(
@@ -205,6 +234,9 @@ class CallSessionStore:
         cost_usd: float = 0.0,
     ) -> CallSession:
         """Переводит сессию в FAILED.
+
+        После записи дельты проверяет порог строк и запускает компактирование
+        при необходимости (Wave 1772).
 
         Raises:
             KeyError: сессия не найдена.
@@ -235,6 +267,9 @@ class CallSessionStore:
                 "cost_usd": session.cost_usd,
                 "duration_sec": session.duration_sec,
             })
+            # Компактирование под тем же flock: файл уже открыт монопольно.
+            self._maybe_compact_unlocked()
+
         return session
 
     def delete_all(self) -> int:
@@ -271,6 +306,93 @@ class CallSessionStore:
                 return False
             self._append({"id": sid, "_deleted": True})
         return True
+
+    # ------------------------------------------------------------------
+    # Compaction (Wave 1772)
+    # ------------------------------------------------------------------
+
+    def compact(self) -> dict[str, int]:
+        """Компактирует call_sessions.ndjson атомарно под flock.
+
+        Сворачивает все дельты: оставляет по одной строке (полное состояние)
+        на каждую активную (не удалённую) сессию.  Tombstone'ы и промежуточные
+        дельта-записи удаляются.
+
+        Returns:
+            {"lines_before": int, "lines_after": int, "sessions_kept": int}
+        """
+        with self._lock():
+            return self._compact_unlocked()
+
+    def maybe_compact(self) -> bool:
+        """Запускает compact() если число строк превышает порог.
+
+        Returns:
+            True если компактирование было выполнено.
+        """
+        with self._lock():
+            return self._maybe_compact_unlocked()
+
+    def _maybe_compact_unlocked(self) -> bool:
+        """Проверяет порог и запускает _compact_unlocked() при необходимости.
+
+        Вызывается внутри уже захваченного flock — повторный захват не нужен.
+        """
+        lines = self._count_lines_unlocked()
+        if lines <= _COMPACT_LINE_THRESHOLD:
+            return False
+        self._compact_unlocked()
+        return True
+
+    def _compact_unlocked(self) -> dict[str, int]:
+        """Компактирование под уже захваченным flock.
+
+        Алгоритм:
+          1. Считаем текущее число строк (для статистики).
+          2. Загружаем все активные сессии (_load_all_unlocked): каждая уже
+             содержит применённые дельты — это «закрытое» состояние.
+          3. Пишем по одной полной строке на сессию в tmp-файл.
+          4. Атомарно заменяем оригинальный файл через os.replace (POSIX-атомарно).
+
+        Безопасность:
+          - tmp-файл создаётся рядом с оригиналом (тот же каталог → тот же том).
+          - При исключении tmp убирается, оригинал не тронут.
+          - fsync перед replace гарантирует запись на диск.
+        """
+        lines_before = self._count_lines_unlocked()
+        active = self._load_all_unlocked()
+
+        tmp = self.sessions_path.with_suffix(".ndjson.tmp")
+        replaced = False
+        try:
+            with tmp.open("w", encoding="utf-8") as fh:
+                for session in active:
+                    fh.write(json.dumps(session.to_dict(), ensure_ascii=False) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            tmp.replace(self.sessions_path)
+            replaced = True
+        finally:
+            if not replaced and tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+
+        lines_after = len(active)
+        logger.info(
+            "call_session_store compact",
+            extra={
+                "lines_before": lines_before,
+                "lines_after": lines_after,
+                "sessions_kept": len(active),
+            },
+        )
+        return {
+            "lines_before": lines_before,
+            "lines_after": lines_after,
+            "sessions_kept": len(active),
+        }
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -332,7 +454,12 @@ class CallSessionStore:
 
     @staticmethod
     def _apply_delta(session: CallSession, delta: dict[str, Any]) -> None:
-        """Применяет дельта-запись к объекту сессии in-place."""
+        """Применяет дельта-запись к объекту сессии in-place.
+
+        Wave 1772: cost_usd теперь присваивается (=), а не суммируется (+=).
+        В дельтах mark_completed/mark_failed пишется итоговая стоимость звонка —
+        накапливать её повторно при replay означало бы удвоение за каждую дельту.
+        """
         if "status" in delta:
             session.status = str(delta["status"])
         if "started_at" in delta:
@@ -343,7 +470,8 @@ class CallSessionStore:
             session.end_reason = delta["end_reason"]
         if "cost_usd" in delta:
             try:
-                session.cost_usd += float(delta["cost_usd"])
+                # Итоговая стоимость — присваивание, не накопление.
+                session.cost_usd = float(delta["cost_usd"])
             except (TypeError, ValueError):
                 pass
         if "duration_sec" in delta:
@@ -364,6 +492,17 @@ class CallSessionStore:
                 payload = safe_json_loads(raw)
                 if isinstance(payload, dict):
                     yield payload
+
+    def _count_lines_unlocked(self) -> int:
+        """Подсчитывает непустые строки файла без парсинга JSON."""
+        if not self.sessions_path.exists():
+            return 0
+        count = 0
+        with self.sessions_path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                if line.strip():
+                    count += 1
+        return count
 
     def _append(self, payload: dict[str, Any]) -> None:
         """Атомарный append JSON-строки с fsync."""
