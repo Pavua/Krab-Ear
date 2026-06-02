@@ -71,6 +71,78 @@ logger = logging.getLogger("KrabEar.Backend.ObsidianSync")
 _SYNC_STATE_FILE = "obsidian_sync.json"
 _DEFAULT_FOLDER = "Transcriptions"
 
+# W1768 (MED, path-traversal): разрешённый шаблон для имени папки внутри vault.
+# Только буквы/цифры/подчёркивания (\w), дефис, пробел и слэш — чтобы поддержать
+# вложенные подпапки (например "Krab Ear/Транскрипции"), но запретить любые
+# спецсимволы, абсолютные пути и обход через "..".
+_SAFE_FOLDER_PATTERN = re.compile(r"[\w\- /]+", re.UNICODE)
+
+
+class UnsafeFolderError(ValueError):
+    """Имя папки выходит за пределы Obsidian vault (path-traversal попытка).
+
+    W1768 (MED): отдельный подкласс ValueError, чтобы вызывающая сторона при
+    необходимости могла отличить traversal-отказ от прочих ошибок конфигурации,
+    сохраняя при этом обратную совместимость (по-прежнему ловится как ValueError).
+    """
+
+
+def _validate_and_resolve_folder(vault_path: Path, folder: str) -> Path:
+    """Проверить *folder* и вернуть безопасный resolved target_dir внутри *vault_path*.
+
+    W1768 (MED, path-traversal): ``Path(vault) / folder`` сам по себе НЕ защищает
+    от выхода за пределы vault — pathlib позволяет абсолютному RHS заменить базу
+    (``Path('/vault') / '/etc'`` → ``/etc``), а ``..`` поднимается вверх по дереву.
+    Незащищённый путь приводил к тому, что ``configure()``/``sync()`` создавали и
+    писали .md в произвольную директорию (например ``/private/etc/cron.d``).
+
+    Защита (raise ДО любого mkdir/write):
+    1. Пустой folder → ValueError.
+    2. Абсолютный folder (``/etc``, ``C:\\...``) → UnsafeFolderError.
+    3. Любой компонент пути равен ``..`` → UnsafeFolderError.
+    4. Folder не соответствует безопасному шаблону ``[\\w\\- /]+`` → UnsafeFolderError.
+    5. ``(vault / folder).resolve()`` выходит за пределы ``vault.resolve()``
+       (проверяется через ``Path.relative_to``) → UnsafeFolderError.
+
+    Возвращает resolved ``target_dir`` (Path), гарантированно внутри vault.
+    """
+    if not folder or not folder.strip():
+        raise ValueError("Параметр folder не может быть пустым")
+
+    folder = folder.strip()
+
+    # (2) Абсолютный путь недопустим: иначе он заменил бы базу vault целиком.
+    if Path(folder).is_absolute():
+        raise UnsafeFolderError(
+            f"folder не должен быть абсолютным путём: {folder!r}"
+        )
+
+    # (3) Явный запрет на родительский компонент ".." в любой части пути.
+    parts = Path(folder).parts
+    if ".." in parts:
+        raise UnsafeFolderError(
+            f"folder не должен содержать '..' (path-traversal): {folder!r}"
+        )
+
+    # (4) Whitelist допустимых символов (буквы/цифры/_/-/пробел/слэш).
+    if _SAFE_FOLDER_PATTERN.fullmatch(folder) is None:
+        raise UnsafeFolderError(
+            f"folder содержит недопустимые символы: {folder!r}"
+        )
+
+    # (5) Финальная проверка контейнмента по resolved-путям (ловит символьные
+    # ссылки и любые остаточные способы выхода за пределы vault).
+    vault_resolved = vault_path.resolve()
+    target_dir = (vault_resolved / folder).resolve()
+    try:
+        target_dir.relative_to(vault_resolved)
+    except ValueError:
+        raise UnsafeFolderError(
+            f"folder выходит за пределы vault: {folder!r} → {target_dir}"
+        )
+
+    return target_dir
+
 
 @dataclass
 class SyncResult:
@@ -123,7 +195,9 @@ class ObsidianSyncManager:
         Создаёт папку folder внутри vault, если её нет.
 
         Возвращает dict с vault_path, folder, folder_full_path.
-        Вызывает ValueError если vault_path не существует или не является директорией.
+        Вызывает ValueError если vault_path не существует, не является
+        директорией, или folder выходит за пределы vault (path-traversal,
+        W1768 — UnsafeFolderError, подкласс ValueError).
         """
         p = Path(vault_path).expanduser().resolve()
         if not p.exists():
@@ -133,9 +207,13 @@ class ObsidianSyncManager:
 
         folder = folder.strip() or _DEFAULT_FOLDER
 
+        # W1768 (MED, path-traversal): валидируем folder ДО любого mkdir/write.
+        # Бросает UnsafeFolderError (ValueError) если folder абсолютный, содержит
+        # ".." или иным образом выходит за пределы vault — директория НЕ создаётся.
+        target_dir = _validate_and_resolve_folder(p, folder)
+
         with self._lock:
             # Validate target dir BEFORE committing _vault_path (W603 fix).
-            target_dir = p / folder
             target_dir.mkdir(parents=True, exist_ok=True)
 
             self._vault_path = p
@@ -178,7 +256,11 @@ class ObsidianSyncManager:
         import time as _time
 
         result = SyncResult()
-        target_dir = vault_path / folder
+        # W1768 (MED, path-traversal): _folder перезагружается из obsidian_sync.json
+        # при рестарте (_load_state), поэтому НЕ доверяем ему и повторно проверяем
+        # ТОТ ЖЕ инвариант контейнмента перед mkdir/write. Если состояние было
+        # подделано (folder='../../etc'), sync() откажет вместо записи вне vault.
+        target_dir = _validate_and_resolve_folder(vault_path, folder)
         target_dir.mkdir(parents=True, exist_ok=True)
 
         if self._event_bus is not None:
@@ -477,7 +559,21 @@ class ObsidianSyncManager:
             logger.debug("ObsidianSyncManager.purge_all_synced_files: vault не настроен, no-op")
             return 0
 
-        target_dir = vault_path / folder
+        # W1768 (MED, path-traversal): повторно проверяем тот же инвариант перед
+        # удалением — folder перезагружается из state-файла и не является
+        # доверенным. Если он выходит за пределы vault — безопасный no-op (purge
+        # никогда не бросает по контракту).
+        try:
+            target_dir = _validate_and_resolve_folder(vault_path, folder)
+        except ValueError as exc:
+            logger.warning(
+                "ObsidianSyncManager.purge_all_synced_files: "
+                "небезопасный folder %r, purge пропущен: %s",
+                folder,
+                exc,
+            )
+            return 0
+
         deleted = 0
 
         if target_dir.is_dir():
@@ -506,6 +602,29 @@ class ObsidianSyncManager:
         )
         return deleted
 
+    def _sanitize_loaded_folder(self, folder: str) -> str:
+        """Вернуть безопасный folder из persisted state или _DEFAULT_FOLDER.
+
+        W1768 (MED): folder, загруженный из obsidian_sync.json, мог быть подделан.
+        Если он не проходит проверку контейнмента относительно текущего vault
+        (или vault ещё не известен и folder сам по себе небезопасен) — логируем
+        предупреждение и возвращаем _DEFAULT_FOLDER, чтобы sync() позже не записал
+        файлы вне vault.
+        """
+        try:
+            base = self._vault_path if self._vault_path is not None else Path(".")
+            _validate_and_resolve_folder(base, folder)
+            return folder.strip() or _DEFAULT_FOLDER
+        except ValueError as exc:
+            logger.warning(
+                "ObsidianSync: небезопасный folder %r в state-файле, "
+                "откат к %r: %s",
+                folder,
+                _DEFAULT_FOLDER,
+                exc,
+            )
+            return _DEFAULT_FOLDER
+
     def _load_state(self) -> None:
         """Загрузить состояние из JSON-файла."""
         if self._state_path is None or not self._state_path.exists():
@@ -517,7 +636,12 @@ class ObsidianSyncManager:
                 p = Path(vault_path_str)
                 if p.exists() and p.is_dir():
                     self._vault_path = p
-            self._folder = str(raw.get("folder", _DEFAULT_FOLDER))
+            # W1768 (MED, path-traversal): folder из state-файла может быть подделан
+            # (например внешним процессом). Валидируем при загрузке: если он выходит
+            # за пределы vault (или vault ещё не настроен и folder сам по себе
+            # небезопасен) — откатываемся к безопасному значению по умолчанию.
+            loaded_folder = str(raw.get("folder", _DEFAULT_FOLDER))
+            self._folder = self._sanitize_loaded_folder(loaded_folder)
             self._last_sync_ts = raw.get("last_sync_ts")
         except Exception as exc:
             logger.warning("Не удалось загрузить состояние ObsidianSync: %s", exc)
