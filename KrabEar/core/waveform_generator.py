@@ -9,12 +9,30 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 
 logger = logging.getLogger("KrabEar.Core.WaveformGenerator")
+
+# ---------------------------------------------------------------------------
+# DoS guard constants (W18)
+# ---------------------------------------------------------------------------
+# Upper bound on num_points that callers may request.  Values above this
+# threshold trigger a linear CPU loop of length num_points and an
+# np.linspace allocation of the same size — both scale linearly with the
+# value, making unbounded input a straightforward CPU/memory DoS vector.
+_MAX_NUM_POINTS: int = 100_000
+
+# Maximum total sample *frames* (samples × channels) that
+# generate_from_file will load into RAM.  At float32 (4 bytes) this is
+# ~400 MB for a single read; the transient peak (abs + mean copies) is
+# ~3×, so we cap well below the point at which the 36 GB machine OOM-kills
+# the backend.  3 h / 48 kHz / stereo ≈ 1_036_800_000 frames — far above
+# this cap, so the gate fires before any allocation.
+_MAX_FILE_FRAMES: int = 100_000_000  # ~34 min mono 48 kHz, ~17 min stereo
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +93,10 @@ class WaveformGenerator:
         """
         if num_points < 1:
             raise ValueError(f"num_points должен быть >= 1, получено: {num_points}")
+        if num_points > _MAX_NUM_POINTS:
+            raise ValueError(
+                f"num_points превышает допустимый максимум {_MAX_NUM_POINTS}: получено {num_points}"
+            )
         if sample_rate <= 0:
             raise ValueError(f"sample_rate должен быть > 0, получено: {sample_rate}")
 
@@ -126,9 +148,59 @@ class WaveformGenerator:
         if not file_path.exists():
             raise FileNotFoundError(f"Аудиофайл не найден: {path}")
 
+        # W18: gate on file size *before* loading.  Use soundfile.info() when
+        # available (O(1) header read, no PCM allocation).  Fall back to a raw
+        # byte-count check (float32 = 4 bytes/sample) as a secondary guard so
+        # we never load a file whose decompressed PCM exceeds _MAX_FILE_FRAMES.
         try:
             import soundfile as sf
+            try:
+                info = sf.info(str(file_path))
+                total_frames = info.frames * info.channels
+                if total_frames > _MAX_FILE_FRAMES:
+                    logger.warning(
+                        "generate_from_file: файл превышает лимит (%d > %d frames×ch), "
+                        "waveform не загружается",
+                        total_frames,
+                        _MAX_FILE_FRAMES,
+                        extra={"path": str(file_path)},
+                    )
+                    return WaveformData(
+                        points=[],
+                        duration_sec=0.0,
+                        sample_rate=0,
+                        peak_amplitude=0.0,
+                        rms_amplitude=0.0,
+                    )
+            except Exception:
+                # soundfile.info() failed (e.g. MP3 probe unsupported) — fall
+                # back to a conservative byte-level heuristic.  At float32
+                # (4 bytes/sample) a raw PCM file of _MAX_FILE_FRAMES frames
+                # would be 4×_MAX_FILE_FRAMES bytes.  Compressed formats are
+                # smaller on disk, so we use 2× overhead as a safety margin.
+                try:
+                    file_bytes = os.path.getsize(str(file_path))
+                    byte_budget = _MAX_FILE_FRAMES * 4 * 2  # float32, 2× overhead
+                    if file_bytes > byte_budget:
+                        logger.warning(
+                            "generate_from_file: размер файла %d байт превышает бюджет %d байт",
+                            file_bytes,
+                            byte_budget,
+                            extra={"path": str(file_path)},
+                        )
+                        return WaveformData(
+                            points=[],
+                            duration_sec=0.0,
+                            sample_rate=0,
+                            peak_amplitude=0.0,
+                            rms_amplitude=0.0,
+                        )
+                except OSError:
+                    pass  # If we can't stat, proceed; read will fail if truly huge
+
             data, sample_rate = sf.read(str(file_path), always_2d=False, dtype="float32")
+        except (FileNotFoundError, RuntimeError):
+            raise
         except Exception as exc:
             raise RuntimeError(f"Не удалось прочитать аудиофайл {path}: {exc}") from exc
 

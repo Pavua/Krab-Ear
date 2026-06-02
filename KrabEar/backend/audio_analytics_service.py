@@ -202,7 +202,10 @@ class AudioAnalyticsService:
             raise ValueError("Параметр file_path обязателен")
         _validate_audio_read_path(file_path, self._data_dir)  # W1736
 
-        num_points = int(params.get("num_points", 200))
+        # W18: clamp num_points to prevent CPU/memory DoS via huge values
+        # (e.g. 10_000_000 → ~80 MB + ~9 s blocking the IPC thread).
+        # Valid GUI range is 1–2000; defence-in-depth also lives in WaveformGenerator.
+        num_points = max(1, min(int(params.get("num_points", 200)), 2000))
         gen = WaveformGenerator()
         wf = gen.generate_from_file(file_path, num_points=num_points)
         return {
