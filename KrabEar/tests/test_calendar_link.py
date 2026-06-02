@@ -65,6 +65,61 @@ class TestParseOsascriptOutput(unittest.TestCase):
         events = _parse_osascript_output(raw)
         self.assertEqual(len(events), 2)
 
+    def test_multi_event_linefeed_format_all_fields_correct(self):
+        """W1776: AppleScript now uses 'set text item delimiters to linefeed' so each
+        event arrives on its own line.  The parser must extract ALL events with intact
+        calendar_name fields — not just the first one and not with a corrupted last field.
+
+        Old behaviour (before fix): AppleScript returned a comma-space-joined single
+        line, e.g.
+            "Meeting A|||...|||Cal1, Meeting B|||...|||Cal2"
+        which caused split("|||", maxsplit=4) to put "Cal1, Meeting B|||...|||Cal2"
+        into parts[4] — corrupting calendar_name of the first event and losing the
+        second event entirely.
+        """
+        epoch_a = SAMPLE_EPOCH_START
+        epoch_b = SAMPLE_EPOCH_START + 600
+        epoch_end = SAMPLE_EPOCH_END
+        # New format: each record on its own line (linefeed-delimited from AppleScript)
+        raw_linefeed = (
+            f"Stand-up|||{epoch_a}|||{epoch_end}|||Room 1|||Work\n"
+            f"Team Sync|||{epoch_b}|||{epoch_end}|||Online|||Personal\n"
+        )
+        events = _parse_osascript_output(raw_linefeed)
+        self.assertEqual(len(events), 2, "Both events must be parsed")
+        titles = {e["title"] for e in events}
+        self.assertIn("Stand-up", titles)
+        self.assertIn("Team Sync", titles)
+        cal_names = {e["calendar_name"] for e in events}
+        self.assertIn("Work", cal_names, "calendar_name must not be corrupted for first event")
+        self.assertIn("Personal", cal_names, "calendar_name must be present for second event")
+
+    def test_old_comma_space_format_corrupts_calendar_name(self):
+        """Regression guard: the old AppleScript default list rendering
+        (comma-space-joined, no text item delimiters) produces a single line
+        whose last field contains trailing garbage — confirming why the fix is needed.
+
+        This test documents the pre-fix breakage: if the raw output is a single
+        comma-space-joined line (old AppleScript behaviour), only one event is
+        parsed and the calendar_name of that event is corrupted with the rest of
+        the second event's record.
+        """
+        epoch_a = SAMPLE_EPOCH_START
+        epoch_b = SAMPLE_EPOCH_START + 600
+        epoch_end = SAMPLE_EPOCH_END
+        # Old AppleScript output: AppleScript default list → comma-space joined, single line
+        raw_old = (
+            f"Stand-up|||{epoch_a}|||{epoch_end}|||Room 1|||Work, "
+            f"Team Sync|||{epoch_b}|||{epoch_end}|||Online|||Personal"
+        )
+        events = _parse_osascript_output(raw_old)
+        # Old format: one line → at most one event parsed
+        self.assertLessEqual(len(events), 1, "Old format produces at most 1 event")
+        if events:
+            # The calendar_name of that one event is corrupted — contains the second record
+            cal_name = events[0]["calendar_name"]
+            self.assertIn(",", cal_name, "Old format corrupts calendar_name (contains comma garbage)")
+
     def test_empty_location_and_calendar(self):
         raw = f"Quick|||{SAMPLE_EPOCH_START}|||{SAMPLE_EPOCH_END}||||||\n"  # 6 pipes = empty loc + empty cal
         events = _parse_osascript_output(raw)
@@ -120,6 +175,41 @@ class TestFindActiveEventMultiple(_DarwinPatchedTestCase):
             result = linker.find_active_event(at_time=datetime(2024, 4, 25, 10, 0))
         self.assertIsNotNone(result)
         self.assertEqual(result["title"], "Meeting A")
+
+    def test_multi_event_linefeed_calendar_name_not_corrupted(self):
+        """W1776: when osascript emits linefeed-delimited records (post-fix),
+        find_active_event must return the earliest event with an intact
+        calendar_name — not a value corrupted with the subsequent event's record.
+
+        Before the fix the AppleScript used 'return resultLines' without setting
+        text item delimiters, which caused osascript to emit a single comma-space-
+        joined line. With two events:
+          "Stand-up|||...|||Work, Team Sync|||...|||Personal"
+        split("|||", maxsplit=4)[4] yielded "Work, Team Sync|||...|||Personal"
+        as calendar_name — a corruption. The fix makes AppleScript emit:
+          "Stand-up|||...|Work\nTeam Sync|||...|||Personal"
+        so each record is parsed independently with clean field values.
+        """
+        epoch_a = SAMPLE_EPOCH_START          # earliest → should be selected
+        epoch_b = SAMPLE_EPOCH_START + 600
+        epoch_end = SAMPLE_EPOCH_END
+        # New format: linefeed-delimited (post-fix AppleScript output)
+        raw_linefeed = (
+            f"Stand-up|||{epoch_a}|||{epoch_end}|||Room 1|||Work\n"
+            f"Team Sync|||{epoch_b}|||{epoch_end}|||Online|||Personal\n"
+        )
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = raw_linefeed
+        mock_proc.stderr = ""
+        with patch("backend.calendar_link.subprocess.run", return_value=mock_proc):
+            linker = CalendarLinker(cache_minutes=5)
+            result = linker.find_active_event(at_time=datetime(2024, 4, 25, 10, 0))
+        self.assertIsNotNone(result)
+        self.assertEqual(result["title"], "Stand-up")
+        # calendar_name must be exactly "Work" — not "Work, Team Sync|||..." garbage
+        self.assertEqual(result["calendar_name"], "Work",
+                         "calendar_name must not be corrupted with subsequent event data")
 
 
 class TestFindActiveEventPermissionDenied(unittest.TestCase):
