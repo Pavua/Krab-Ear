@@ -58,12 +58,22 @@ app.after_request(api_version_header())
 
 # ---------------------------------------------------------------------------
 # CORS — разрешает кросс-доменные запросы из браузера.
-# Список origins берётся из KRAB_EAR_CORS_ORIGINS (по умолчанию "*").
+# Список origins берётся из KRAB_EAR_CORS_ORIGINS.
+#
+# Default (wave-21 MED fix): "http://127.0.0.1,http://localhost" — явный
+# allowlist, закрывающий transcript-exfiltration через любую вкладку браузера.
+#
+# Атака: браузер на http://evil.test открывает EventSource("http://127.0.0.1:5005/v1/events")
+# → при CORS_ORIGINS="*" сервер отвечал ACAO:* → браузер читал SSE-поток с
+# живыми транскриптами (simple GET, без credentials, localhost bind не спасает).
 #
 # F2 MED fix (W1207): when origins == "*", force supports_credentials=False.
 # Combining wildcard origin + supports_credentials=True allows any browser
 # tab on the same machine to make credentialed cross-origin fetches (cookies,
 # auth headers), which defeats the localhost-only binding security posture.
+#
+# wave-21 MED fix: добавлен _is_origin_allowed() + @_block_cross_origin_reads
+# для transcript-bearing эндпоинтов (/v1/events, /ws/events, /v1/vocabulary).
 # ---------------------------------------------------------------------------
 
 
@@ -94,6 +104,77 @@ CORS(
     expose_headers=["X-Request-ID", "Retry-After"],
     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
 )
+
+
+# ---------------------------------------------------------------------------
+# Origin-gate for transcript-bearing routes (wave-21 MED fix)
+#
+# flask-cors emits ACAO:* when CORS_ORIGINS="*", which allows any page in the
+# user's browser to call new EventSource("http://127.0.0.1:5005/v1/events")
+# and read live transcripts (simple GET — no preflight, no credentials needed).
+# The localhost bind does NOT defend against this because the browser itself
+# is running on the same machine.
+#
+# Guard: if CORS_ORIGINS is literally "*" (misconfigured / explicit opt-in),
+# we still check the Origin header on routes that expose transcript data.
+# When Origin is present and is NOT in the effective allow-list we return 403.
+# Requests without an Origin header (e.g. curl, native clients) are unaffected.
+# ---------------------------------------------------------------------------
+
+def _is_origin_allowed(origin: str) -> bool:
+    """Return True when *origin* is permitted by the effective CORS config.
+
+    An absent or empty *origin* is always allowed (non-browser callers).
+    When CORS_ORIGINS is the literal "*" we still check a fixed localhost
+    set so that no browser page can silently read transcript streams.
+    """
+    if not origin:
+        return True
+    # Normalize: strip trailing slash so http://localhost/ == http://localhost
+    origin = origin.rstrip("/")
+
+    allowed = _cors_origins
+    if allowed == "*":
+        # Wildcard — only permit actual localhost variants.
+        _localhost_set = {
+            "http://127.0.0.1",
+            "http://localhost",
+            "https://127.0.0.1",
+            "https://localhost",
+        }
+        # Also allow port variants of localhost (e.g. http://localhost:3000)
+        _localhost_prefixes = (
+            "http://127.0.0.1:",
+            "http://localhost:",
+            "https://127.0.0.1:",
+            "https://localhost:",
+        )
+        return (
+            origin in _localhost_set
+            or any(origin.startswith(p) for p in _localhost_prefixes)
+        )
+    # Explicit list — match exactly.
+    return origin in allowed
+
+
+def _block_cross_origin_reads(f):
+    """Decorator: reject cross-origin requests to transcript-bearing routes.
+
+    When a browser sends an Origin header that is NOT in the allowlist, return
+    403 so no transcript data leaks via simple-GET (EventSource / fetch).
+    Requests without Origin (curl, Swift client, local process) pass through.
+    """
+    @functools.wraps(f)
+    def _wrapper(*args, **kwargs):
+        origin = request.headers.get("Origin", "")
+        if origin and not _is_origin_allowed(origin):
+            logger.warning(
+                "Blocked cross-origin transcript read from Origin=%r path=%s",
+                origin, request.path,
+            )
+            return jsonify({"error": "cross-origin access denied"}), 403
+        return f(*args, **kwargs)
+    return _wrapper
 
 # ---------------------------------------------------------------------------
 # Rate limiting — flask-limiter с in-memory хранилищем.
@@ -965,6 +1046,7 @@ MAX_WORD_LENGTH = 100
 @v1_blp.route("/vocabulary", methods=["GET"])
 @v1_blp.response(200, VocabularyResponseSchema)
 @require_api_key
+@_block_cross_origin_reads
 def get_vocabulary():
     """Return the current persistent user vocabulary."""
     return {"words": store.load_vocabulary()}
@@ -1188,6 +1270,7 @@ def transcribe_audio():
 
 @v1_blp.route("/events", methods=["GET"])
 @require_api_key
+@_block_cross_origin_reads
 def events_stream():
     """Subscribe to real-time STT pipeline events via Server-Sent Events (SSE).
 
@@ -1412,7 +1495,20 @@ def ws_events(ws):
         Server → Client: {"type": "ping"} каждые 30 секунд (heartbeat)
         Client → Server: любые входящие данные игнорируются
         Server → Client: {"error": "unauthorized", "code": 4401} + close on auth failure
+        Server → Client: {"error": "cross-origin access denied"} + close on Origin check failure
     """
+    # wave-21: Origin gate — block cross-origin browser tabs from reading transcripts.
+    origin = request.headers.get("Origin", "")
+    if origin and not _is_origin_allowed(origin):
+        logger.warning(
+            "Blocked cross-origin WS transcript read from Origin=%r", origin
+        )
+        try:
+            ws.send(json.dumps({"error": "cross-origin access denied", "code": 4403}))
+            ws.close(message=b"cross-origin access denied")
+        except Exception:
+            pass
+        return
     if not _ws_check_auth(ws):
         return
     raw_types = request.args.get("types", "")

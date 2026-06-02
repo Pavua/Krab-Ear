@@ -184,9 +184,12 @@ class Settings(BaseSettings):
     # False = rate limiting полностью отключён (удобно для тестов и локальной разработки).
     RATE_LIMIT_ENABLED: bool = True
 
-    # CORS: список разрешённых Origins через запятую. "*" — разрешить всё (локальная разработка).
+    # CORS: список разрешённых Origins через запятую.
+    # По умолчанию — явный localhost-allowlist (wave-21 MED fix: wildcard "*" позволял
+    # любой странице читать транскрипты через EventSource/fetch с localhost:5005).
+    # Чтобы разрешить все origins (локальная разработка): KRAB_EAR_CORS_ORIGINS="*"
     # Пример: "http://localhost:3000,https://app.example.com"
-    CORS_ORIGINS: str = "*"
+    CORS_ORIGINS: str = "http://127.0.0.1,http://localhost"
 
     # --- Адаптивное шумоподавление (Adaptive Denoising) ---
     # При STT_DENOISE_ENABLED=True: перед транскрибацией оцениваем SNR аудио через
