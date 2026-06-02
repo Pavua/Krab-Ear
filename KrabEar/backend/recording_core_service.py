@@ -220,10 +220,17 @@ class RecordingCoreService:
                 _settings_svc = self._settings_svc
 
                 def _privacy_getter() -> bool:
+                    # FAIL CLOSED (W1768): если cached_settings() бросает исключение,
+                    # состояние приватности неизвестно → считаем privacy ON и возвращаем
+                    # True (emit подавляется в RealtimePartialTranscriber). Возврат False
+                    # здесь был fail-OPEN: частичный транскрипт мог утечь, пока реальное
+                    # состояние privacy_mode неизвестно. Нормальный путь по-прежнему
+                    # возвращает реальный флаг — на безопасный режим переключает только
+                    # исключение.
                     try:
                         return bool(_settings_svc.cached_settings().get("privacy_mode_enabled", False))
                     except Exception:
-                        return False
+                        return True
 
                 try:
                     self._rt_partial = RealtimePartialTranscriber(
