@@ -730,6 +730,10 @@ class BackendService:
         # that a file-only purge would never touch.
         self._history._event_replay = self._event_replay
         self._history._live_subs_service = self._live_subs
+        # Wave-18 GAP-1: wire context_memory into HistoryService so handle_purge_all_data
+        # can clear ContextMemory._texts — a RAM-only deque of the last 50 raw transcript
+        # strings (full PII, re-exposable via get_context_memory IPC) with no file artefact.
+        self._history._context_memory = self._context_memory
         self._call_session_service = CallSessionService(
             store=self._call_session_store,
         )
