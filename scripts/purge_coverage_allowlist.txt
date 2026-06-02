@@ -26,7 +26,10 @@ normalization_profiles.json # W1770: named text-normalization profiles (clean/fo
 paste_formatters.json       # W1770: custom paste-format rules per target app; app config, no transcript content
 paste_app_memory.json       # W1770: bundle_id → paste-profile preference map; UI preference, no transcript content
 summary_profiles.json       # W1770: LLM summarization style profiles (prompt/format prefs); app config, no transcript content
-templates.json              # W1770: user text-insertion templates with {variable} placeholders; app config, no transcript content
+# W1771 GAP-2: templates.json was WRONGLY allowlisted by W1770 — TemplateManager stores
+# free-text `text` with NO filter (email signatures with real names/phones, greetings
+# wrapping real names around {name}). That is PII, so it now goes to PURGE via
+# TemplateManager.purge_all() (wired in handle_purge_all_data); removed from this list.
 
 # --- W1770: runtime / extensibility artefacts (not user PII) --------------
 shutdown_info.json       # W1770: last-shutdown metadata (pid, timestamp, reason) for diagnostics; no user content

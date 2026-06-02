@@ -161,6 +161,31 @@ class TemplateManager:
             _log.debug("Шаблон %r удалён", name)
             return True
 
+    def purge_all(self) -> bool:
+        """Полностью удаляет ВСЕ пользовательские шаблоны (privacy-purge / wipe-all).
+
+        W1771 GAP-2: пользовательские шаблоны хранят свободный текст ``text``
+        без какой-либо фильтрации — email-подписи с реальными именами/телефонами,
+        приветствия с {name}-плейсхолдерами вокруг настоящих имён. Это PII, и
+        templates.json обязан исчезать при полной очистке данных (ранее файл был
+        ошибочно в allowlist как «app config»). Встроенные (builtin) шаблоны при
+        этом не теряются — они зашиты в коде и снова появятся при следующем
+        ``_load()``; на диске удаляется только пользовательский слой.
+
+        Удаляет файл templates.json под ``_lock`` (in-memory-кэша у менеджера нет —
+        он читает с диска при каждом обращении, так что отдельно «очищать RAM»
+        не требуется). Вызывается ТОЛЬКО из handle_purge_all_data. Идемпотентен.
+
+        Returns:
+            True если файл существовал и был удалён, False если его не было.
+        """
+        with self._lock:
+            existed = self._file.exists()
+            self._file.unlink(missing_ok=True)
+            if existed:
+                _log.info("purge_all: templates.json удалён (privacy-purge)")
+            return existed
+
     def apply_template(
         self,
         name: str,

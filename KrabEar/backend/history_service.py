@@ -127,6 +127,11 @@ class HistoryService:
         # W1770: новые collaborators для privacy-purge (late-inject из BackendService).
         self._collection_manager: Any = None  # CollectionManager — collections.json (#1613)
         self._session_tracker: Any = None     # SessionTracker — sessions.ndjson (#1605)
+        # W1771: collaborators с in-memory clear-хуками для privacy-purge.
+        # Все поля заполняются late-inject из BackendService.__init__.
+        self._template_manager: Any = None    # TemplateManager — templates.json (free-text PII)
+        self._event_replay: Any = None        # EventReplayManager — event_replay.ndjson + ring
+        self._live_subs_service: Any = None   # LiveSubsService — in-memory PCM buffer (raw voice)
 
     # ------------------------------------------------------------------
     # Privacy helpers
@@ -1676,37 +1681,59 @@ class HistoryService:
             logger.warning("purge_all_data: compact failed — cleartext may remain in history.ndjson", exc_info=True)
             secondary_errors.append("compact")
 
-        # --- 1c. W1749 CRITICAL-2: delete transcript .md files (TranscriptWriter artefacts).
-        # Each transcription writes a timestamped Markdown file under <data_dir>/transcripts/.
-        # These files contain the full STT text and survive a purge unless explicitly removed.
-        # W1766 #9 (MED): also remove *.md.tmp — TranscriptWriter writes via atomic
-        # rename (*.md.tmp → *.md); an in-flight temp file survives a purge that only
-        # globs *.md.  Adding *.md.tmp here closes that gap.
+        # --- 1c. W1749 CRITICAL-2 / W1771 GAP-1: delete ALL export artefacts in transcripts/.
+        # Each transcription writes a timestamped Markdown file under <data_dir>/transcripts/
+        # (TranscriptWriter), but the export handlers ALSO write sibling files there with
+        # different extensions, each carrying the FULL cleartext transcript:
+        #   *.md   / *.md.tmp  — TranscriptWriter Markdown (+ in-flight atomic-rename temp)
+        #   *.html             — handle_export_html_report(save_to_file=True)  ← most PII-dense
+        #   *.srt              — handle_export_history_srt(save_to_file=True)
+        #   *.json             — handle_export_history(format=json, save_to_file=True)
+        #   *.csv              — handle_export_history_csv(save_to_file=True)
+        # W1766 #9 (MED) closed only the *.md.tmp gap; W1771 GAP-1 broadens the sweep to
+        # every export extension (the prior *.md-only glob left report_*.html etc. behind).
+        # Каждое расширение перечислено явным glob-литералом (видны статическому guard-у
+        # audit_purge_coverage как покрытые — sibling-extension detection), затем
+        # объединяются с общим обходом каталога — гарантия, что ни один файл (включая
+        # будущие/неучтённые расширения) не переживёт purge.
         transcripts_deleted = 0
         try:
             transcripts_dir = Path(self.store.data_dir) / "transcripts"
             if transcripts_dir.is_dir():
-                md_files = list(transcripts_dir.glob("*.md")) + list(transcripts_dir.glob("*.md.tmp"))
-                for md_path in md_files:
+                # Явные glob-семейства экспортных артефактов (покрывают каждое расширение
+                # явно для статического guard-а) + полный обход каталога (страховка).
+                export_files = set(transcripts_dir.glob("*.md"))
+                export_files |= set(transcripts_dir.glob("*.md.tmp"))
+                export_files |= set(transcripts_dir.glob("*.html"))
+                export_files |= set(transcripts_dir.glob("*.srt"))
+                export_files |= set(transcripts_dir.glob("*.json"))
+                export_files |= set(transcripts_dir.glob("*.csv"))
+                export_files |= {p for p in transcripts_dir.iterdir() if p.is_file()}
+                for export_path in export_files:
                     try:
-                        md_path.unlink(missing_ok=True)
+                        export_path.unlink(missing_ok=True)
                         transcripts_deleted += 1
                     except OSError:
-                        logger.warning("purge_all_data: could not delete transcript file %s", md_path, exc_info=True)
-                if len(md_files) > transcripts_deleted:
+                        logger.warning("purge_all_data: could not delete transcript file %s", export_path, exc_info=True)
+                if len(export_files) > transcripts_deleted:
                     secondary_errors.append("transcripts")
         except Exception:
             logger.warning("purge_all_data: transcript directory deletion failed", exc_info=True)
             secondary_errors.append("transcripts")
 
-        # --- 2. Каскадная очистка версий транскрипций ---
-        if active and self._transcript_versions is not None:
-            deleted_ids = [item.id for item in active]
+        # --- 2. W1771 GAP-3: БЕЗУСЛОВНАЯ очистка версий транскрипций (true wipe).
+        # Раньше здесь был cleanup_for_ids(current_active_ids) — он стирал версии
+        # только тех записей, что попали в текущий снимок active. Версии уже
+        # удалённых ранее (orphan) записей при этом ПЕРЕЖИВАЛИ purge, хотя
+        # transcript_versions.ndjson содержит полный cleartext-текст всех версий.
+        # clear_all() безусловно усекает весь NDJSON — ни одной версии (включая
+        # orphan) не остаётся. Не зависит от наличия active-записей.
+        if self._transcript_versions is not None:
             try:
-                self._transcript_versions.cleanup_for_ids(deleted_ids)
+                self._transcript_versions.clear_all()
             except Exception:
                 logger.warning(
-                    "purge_all_data: transcript_versions cleanup failed", exc_info=True
+                    "purge_all_data: transcript_versions clear_all failed", exc_info=True
                 )
                 secondary_errors.append("transcript_versions")
 
@@ -2033,15 +2060,30 @@ class HistoryService:
                 logger.warning("purge_all_data: удаление collections.json не удалось", exc_info=True)
                 secondary_errors.append("collections")
 
-        # --- 24. W1770: удалить журнал воспроизведения событий (event_replay.ndjson) ---
+        # --- 24. W1771 GAP-3: очистить журнал воспроизведения событий (event_replay.ndjson) ---
         # EventReplayManager сохраняет полные payload-ы событий (включая транскрипт-текст
-        # в STT/translation событиях) для replay. Переживают purge без этого шага.
-        try:
-            (_data_dir / "event_replay.ndjson").unlink(missing_ok=True)
-            (_data_dir / "event_replay.ndjson.tmp").unlink(missing_ok=True)
-        except Exception:
-            logger.warning("purge_all_data: удаление event_replay.ndjson не удалось", exc_info=True)
-            secondary_errors.append("event_replay")
+        # в STT/translation событиях) для replay — и на диске (event_replay.ndjson), и
+        # в in-memory кольцевом буфере. Раньше здесь был прямой unlink файла, но это
+        # оставляло cleartext в RAM-кольце И ломало открытый файловый дескриптор
+        # (запись идёт в режиме "w"/"a"). clear() усекает файл ИМЕННО через открытый
+        # дескриптор (seek(0)+truncate(0)) И очищает кольцо — корректный privacy-wipe.
+        if self._event_replay is not None:
+            try:
+                self._event_replay.clear()
+                logger.info("purge_all_data: event_replay очищен (файл усечён + ring)")
+            except Exception:
+                logger.warning("purge_all_data: event_replay.clear() не удался", exc_info=True)
+                secondary_errors.append("event_replay")
+        # Подчищаем возможный compaction-temp (.tmp) — отдельный путь, дескриптором
+        # не управляется; и сам .ndjson, если коллаборатор не подключён (fallback).
+        if _data_dir is not None:
+            try:
+                (_data_dir / "event_replay.ndjson.tmp").unlink(missing_ok=True)
+                if self._event_replay is None:
+                    (_data_dir / "event_replay.ndjson").unlink(missing_ok=True)
+            except Exception:
+                logger.warning("purge_all_data: удаление event_replay.ndjson.tmp не удалось", exc_info=True)
+                secondary_errors.append("event_replay")
 
         # --- 25. W1770: удалить аудит-трейл IPC (audit_*.ndjson) ---
         # AuditLogger пишет ежедневный NDJSON со списком IPC-вызовов и временными
@@ -2126,6 +2168,38 @@ class HistoryService:
         except Exception:
             logger.warning("purge_all_data: удаление api_tokens.json не удалось", exc_info=True)
             secondary_errors.append("api_tokens")
+
+        # --- 31. W1771 GAP-2: удалить пользовательские шаблоны (templates.json) ---
+        # TemplateManager хранит свободный текст `text` без фильтрации — email-подписи
+        # с реальными именами/телефонами, приветствия вокруг настоящих имён. Это PII
+        # (ранее templates.json был ошибочно в allowlist как «app config»).
+        # purge_all() удаляет файл под _lock; builtin-шаблоны зашиты в коде и не теряются.
+        # Дополнительный явный unlink под data_dir — fallback + зачёт статическим guard-ом.
+        if self._template_manager is not None:
+            try:
+                self._template_manager.purge_all()
+                logger.info("purge_all_data: templates.json очищен")
+            except Exception:
+                logger.warning("purge_all_data: template_manager.purge_all не удался", exc_info=True)
+                secondary_errors.append("templates")
+        if _data_dir is not None:
+            try:
+                (_data_dir / "templates.json").unlink(missing_ok=True)
+            except Exception:
+                logger.warning("purge_all_data: удаление templates.json не удалось", exc_info=True)
+                secondary_errors.append("templates")
+
+        # --- 32. W1771 GAP-3: сбросить in-memory буфер live-субтитров (raw voice) ---
+        # LiveSubsService накапливает base64 PCM 16 kHz system-audio в RAM до flush.
+        # Это сырой голос (биометрия); файлового артефакта нет, поэтому только in-memory
+        # reset() (без flush/STT/EventBus) гарантирует, что накопленное аудио стёрто.
+        if self._live_subs_service is not None:
+            try:
+                self._live_subs_service.reset()
+                logger.info("purge_all_data: live_subs PCM-буфер сброшен")
+            except Exception:
+                logger.warning("purge_all_data: live_subs_service.reset() не удался", exc_info=True)
+                secondary_errors.append("live_subs")
 
         # --- C. W1734: Audit log entry ---
         try:

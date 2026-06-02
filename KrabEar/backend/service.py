@@ -656,6 +656,14 @@ class BackendService:
         # added in #1605). Both expose dedicated purge methods that also clear in-memory state.
         self._history._collection_manager = self._collections
         self._history._session_tracker = self._session_tracker
+        # W1771 GAP-3: wire event_replay + live_subs into HistoryService so
+        # handle_purge_all_data can call the proper in-memory clear hooks (not just a
+        # raw file unlink). event_replay.clear() truncates event_replay.ndjson AND
+        # empties the ring buffer (which holds cleartext STT/translation payloads);
+        # live_subs.reset() drops the accumulated system-audio PCM buffer (raw voice)
+        # that a file-only purge would never touch.
+        self._history._event_replay = self._event_replay
+        self._history._live_subs_service = self._live_subs
         self._call_session_service = CallSessionService(
             store=self._call_session_store,
             auto_end=self._call_auto_end,
@@ -668,6 +676,10 @@ class BackendService:
             store=self.store,
         )
         self._template_manager = TemplateManager(data_dir=self.store.data_dir)
+        # W1771 GAP-2: wire template_manager into HistoryService so handle_purge_all_data
+        # can call purge_all() — templates.json stores free-text `text` (email signatures
+        # with real names/phones) and is PII (was wrongly allowlisted by W1770).
+        self._history._template_manager = self._template_manager
         self._feature_flags = FeatureFlags(data_dir=self.store.data_dir)
         # W979 F4: late-inject feature_flags into LLMRewriter so set_feature_flag IPC
         # changes are reflected immediately during rewrite() without a restart.

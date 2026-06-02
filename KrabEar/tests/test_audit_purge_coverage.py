@@ -176,6 +176,154 @@ class TestDiscovery(_FixtureMixin):
         self.assertNotIn("transcripts/*.md", ids)
 
 
+class TestSiblingExtensionDetection(_FixtureMixin):
+    """W1771 GAP-1b — per-extension store families written into a subdir via
+    dynamic (f-string) filenames must each surface as a distinct store, so a
+    purge that sweeps only *some* extensions leaves the rest visible as gaps."""
+
+    def test_inline_fstring_export_extension_is_discovered(self):
+        mod = self._write_module(
+            """
+            from pathlib import Path
+
+            class Exporter:
+                def __init__(self, data_dir):
+                    self._data_dir = Path(data_dir)
+                    self._reports = self._data_dir / "transcripts"
+
+                def export_html(self, ts):
+                    (self._reports / f"report_{ts}.html").write_text("x")
+            """
+        )
+        ids = {r.store_id for r in self.guard.discover_stores_in_module(mod)}
+        self.assertIn("transcripts/*.html", ids)
+
+    def test_two_statement_fstring_export_extension_is_discovered(self):
+        # The real export handlers split name + use across two statements, and
+        # reuse the SAME local name (`filename`) for different extensions.
+        mod = self._write_module(
+            """
+            from pathlib import Path
+
+            class Exporter:
+                def __init__(self, data_dir):
+                    self._data_dir = Path(data_dir)
+                    self._reports = self._data_dir / "transcripts"
+
+                def export_srt(self, ts):
+                    filename = f"srt_{ts}.srt"
+                    path = self._reports / filename
+                    path.write_text("x")
+
+                def export_json(self, ts):
+                    filename = f"export_{ts}.json"
+                    path = self._reports / filename
+                    path.write_text("x")
+            """
+        )
+        ids = {r.store_id for r in self.guard.discover_stores_in_module(mod)}
+        # Per-function scoping: BOTH extensions surface (not collapsed onto one).
+        self.assertIn("transcripts/*.srt", ids)
+        self.assertIn("transcripts/*.json", ids)
+
+    def test_extension_family_not_covered_by_mere_dir_reference(self):
+        # Rule 0: naming the directory (transcripts/ in covered) must NOT credit
+        # a per-extension family — only an explicit *.ext sweep or whole-dir wipe.
+        self.assertFalse(
+            self.guard._is_covered(
+                "transcripts/*.html",
+                covered={"transcripts/"},
+                allowlisted=set(),
+            )
+        )
+
+    def test_extension_family_covered_by_explicit_glob(self):
+        self.assertTrue(
+            self.guard._is_covered(
+                "transcripts/*.html",
+                covered={"transcripts/*.html"},
+                allowlisted=set(),
+            )
+        )
+
+    def test_extension_family_covered_by_wholedir_wipe_marker(self):
+        # A whole-dir wipe (rmtree / full iterdir → "transcripts/*") covers every
+        # extension in that directory.
+        self.assertTrue(
+            self.guard._is_covered(
+                "transcripts/*.srt",
+                covered={"transcripts/*"},
+                allowlisted=set(),
+            )
+        )
+
+    def test_extension_family_can_be_allowlisted(self):
+        self.assertTrue(
+            self.guard._is_covered(
+                "transcripts/*.html",
+                covered=set(),
+                allowlisted={"transcripts/*.html"},
+            )
+        )
+
+    def test_dir_extension_coverage_credits_explicit_glob_and_iterdir(self):
+        # _dir_extension_coverage must read explicit *.ext globs AND the wipe-all
+        # signal from a full iterdir() enumeration of a data-dir subdir.
+        mod = self._write_module(
+            """
+            from pathlib import Path
+
+            def purge(self):
+                d = Path(self.store.data_dir) / "transcripts"
+                list(d.glob("*.html"))
+                list(d.glob("*.srt"))
+                for p in d.iterdir():
+                    p.unlink()
+            """
+        )
+        tree = self.guard._parse(mod)
+        consts = self.guard.collect_string_constants(tree)
+        resolver = self.guard._DataDirBaseResolver(tree, consts)
+        fn = self.guard._find_function(tree, "purge")
+        cov = self.guard._dir_extension_coverage(fn, resolver, consts)
+        self.assertIn("transcripts/*.html", cov)
+        self.assertIn("transcripts/*.srt", cov)
+        self.assertIn("transcripts/*", cov)  # iterdir() → whole-dir wipe marker
+
+    def test_os_replace_two_arg_save_target_is_credited(self):
+        # W1771 GAP-3: clear-then-save where the save uses os.replace(tmp, dest)
+        # (not Path.replace(dest)).  The destination is args[1]; the guard must
+        # credit the destination store, else clear_all() looks uncovered.
+        mod = self._write_module(
+            """
+            import os
+            from pathlib import Path
+
+            _VERSIONS_FILE = "versions.ndjson"
+
+            class Versions:
+                def __init__(self, data_dir):
+                    self._data_dir = Path(data_dir)
+                    self._path = self._data_dir / _VERSIONS_FILE
+
+                def _rewrite_all(self, records):
+                    tmp = self._path.with_suffix(".ndjson.tmp")
+                    with tmp.open("w") as fh:
+                        fh.write("")
+                    os.replace(tmp, self._path)
+
+                def clear_all(self):
+                    self._rewrite_all([])
+            """
+        )
+        tree = self.guard._parse(mod)
+        consts = self.guard.collect_string_constants(tree)
+        module_attrs = self.guard._module_attr_filenames(tree, consts)
+        targets = self.guard._save_method_targets(tree, module_attrs)
+        # _rewrite_all must resolve to the destination store (args[1]), not tmp.
+        self.assertEqual(targets.get("_rewrite_all"), "versions.ndjson")
+
+
 class TestCoverageMatching(_FixtureMixin):
     """Step 2/3 — gap classification via _is_covered()."""
 
@@ -294,8 +442,46 @@ class TestRealRepo(_FixtureMixin):
             "vocabulary.json",
             "webhooks.json",
             "embeddings.npy",
+            # W1771: transcript_versions.ndjson now covered via clear_all() +
+            # the os.replace(tmp, dest) save-target fix.
+            "transcript_versions.ndjson",
         ):
             self.assertNotIn(covered_id, gap_ids, f"{covered_id} should be covered")
+
+    def test_w1771_report_html_sibling_extension_is_seen_and_covered(self):
+        # The guard must SEE report_*.html as a distinct per-extension store
+        # (sibling-extension detection) and confirm the purge sweeps it.
+        ids = set(self.result.discovered.keys())
+        self.assertIn("transcripts/*.html", ids, "report_*.html must be discovered")
+        gap_ids = {ref.store_id for ref in self.result.gaps}
+        for ext_store in (
+            "transcripts/*.html",
+            "transcripts/*.srt",
+            "transcripts/*.json",
+            "transcripts/*.csv",
+            "transcripts/*.md",
+        ):
+            self.assertIn(ext_store, ids, f"{ext_store} must be discovered")
+            self.assertNotIn(ext_store, gap_ids, f"{ext_store} must be covered")
+
+    def test_w1771_templates_json_no_longer_allowlisted_and_covered(self):
+        # templates.json moved from allowlist → purge (free-text PII).
+        self.assertNotIn(
+            "templates.json", self.result.allowlisted,
+            "templates.json must be removed from the allowlist",
+        )
+        gap_ids = {ref.store_id for ref in self.result.gaps}
+        self.assertNotIn(
+            "templates.json", gap_ids,
+            "templates.json must be covered by the purge (not a gap)",
+        )
+
+    def test_w1771_zero_gaps_overall(self):
+        # The whole point: --fail-on-found is green.
+        self.assertEqual(
+            self.result.gaps, [],
+            f"unexpected purge-coverage gaps: {[g.store_id for g in self.result.gaps]}",
+        )
 
     def test_allowlist_entries_are_not_gaps(self):
         gap_ids = {ref.store_id for ref in self.result.gaps}
