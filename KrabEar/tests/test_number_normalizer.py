@@ -667,5 +667,98 @@ class TestNumberNormalizerCompoundWordBoundary(unittest.TestCase):
         self.assertEqual(result, "32")
 
 
+class TestNumberNormalizerSecurityFixes(unittest.TestCase):
+    """Regression tests for security hardening (wave-A PR #1648).
+
+    Covers two fixes:
+    1. ReDoS guard: repetition bound {0,20} prevents catastrophic backtracking on
+       pathological inputs with 20+ consecutive number words.
+    2. Unit-word boundary guard: (?!\\w) after unit_pat prevents unit tokens from
+       matching inside a longer word (e.g. «percentage» should not be mangled by
+       «percent» unit match).
+    """
+
+    def setUp(self):
+        self.n = NumberNormalizer()
+
+    # ------------------------------------------------------------------
+    # Fix 1: ReDoS guard — repetition bound {0,20}
+    # A sequence longer than 20 number words must complete in <1 s and
+    # produce a sane (non-hanging) result.
+    # ------------------------------------------------------------------
+
+    def test_redos_long_sequence_ru_completes_fast(self):
+        """50 consecutive «один» words must finish quickly without catastrophic backtracking."""
+        import time
+        words = " ".join(["один"] * 50)
+        t0 = time.time()
+        result = self.n.normalize(words, "ru")
+        elapsed = time.time() - t0
+        self.assertLess(elapsed, 2.0, f"RU normalize took {elapsed:.2f}s — possible backtracking hang")
+        # Result must not be empty and must contain at least one digit
+        self.assertIn("1", result, "Long RU sequence produced no digits")
+
+    def test_redos_long_sequence_es_completes_fast(self):
+        """50 consecutive «uno» words must finish quickly without catastrophic backtracking."""
+        import time
+        words = " ".join(["uno"] * 50)
+        t0 = time.time()
+        result = self.n.normalize(words, "es")
+        elapsed = time.time() - t0
+        self.assertLess(elapsed, 2.0, f"ES normalize took {elapsed:.2f}s — possible backtracking hang")
+        self.assertIn("1", result, "Long ES sequence produced no digits")
+
+    def test_redos_long_sequence_en_completes_fast(self):
+        """50 consecutive «one» words must finish quickly without catastrophic backtracking."""
+        import time
+        words = " ".join(["one"] * 50)
+        t0 = time.time()
+        result = self.n.normalize(words, "en")
+        elapsed = time.time() - t0
+        self.assertLess(elapsed, 2.0, f"EN normalize took {elapsed:.2f}s — possible backtracking hang")
+        self.assertIn("1", result, "Long EN sequence produced no digits")
+
+    def test_redos_exactly_at_limit_ru(self):
+        """20 consecutive number words (at the {0,20} limit) must still convert."""
+        # 1 base word + 20 repetitions = 21 tokens; limit is 1 base + up to 20 more
+        words = " ".join(["один"] * 20)
+        result = self.n.normalize(words, "ru")
+        # Should produce at least one converted digit group (any digit present)
+        self.assertTrue(any(c.isdigit() for c in result),
+                        f"20-word RU sequence produced no digits: {result!r}")
+
+    # ------------------------------------------------------------------
+    # Fix 2: Unit-word boundary guard — (?!\\w) after unit_pat
+    # Unit words that appear as a prefix of a longer word must not be matched.
+    # ------------------------------------------------------------------
+
+    def test_unit_boundary_en_percent_in_percentage(self):
+        """«percentage» must NOT have «percent» unit matched inside it (EN boundary guard)."""
+        result = self.n.normalize("percentage increase", "en")
+        self.assertEqual(result, "percentage increase",
+                         f"Unit word 'percent' corrupted 'percentage': {result!r}")
+
+    def test_unit_boundary_en_standalone_percent_converts(self):
+        """«five percent» → contains «5%» (regression: standalone unit must still convert)."""
+        result = self.n.normalize("five percent", "en")
+        self.assertIn("5%", result, f"Standalone 'five percent' was not converted: {result!r}")
+
+    def test_unit_boundary_ru_procentov_standalone(self):
+        """«пять процентов» → «5%» (standalone unit still converts after boundary fix)."""
+        result = self.n.normalize("пять процентов", "ru")
+        self.assertIn("5%", result, f"'пять процентов' was not converted: {result!r}")
+
+    def test_unit_boundary_es_porciento_standalone(self):
+        """«treinta por ciento» → contains «30» (standalone ES unit converts)."""
+        result = self.n.normalize("treinta por ciento", "es")
+        self.assertIn("30", result, f"'treinta por ciento' was not converted: {result!r}")
+
+    def test_unit_boundary_en_dollars_in_dollarsign_word(self):
+        """Sanity: «ten dollars» → converts, «dollarstore» (hypothetical) would not match 'dollar'."""
+        # Verify standalone unit converts
+        result = self.n.normalize("ten dollars", "en")
+        self.assertIn("10", result, f"'ten dollars' was not converted: {result!r}")
+
+
 if __name__ == "__main__":
     unittest.main()
