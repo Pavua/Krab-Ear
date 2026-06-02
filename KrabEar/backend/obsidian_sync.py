@@ -447,6 +447,65 @@ class ObsidianSyncManager:
     # Персистентность состояния
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Privacy purge
+    # ------------------------------------------------------------------
+
+    def purge_all_synced_files(self) -> int:
+        """Удалить все .md файлы, синхронизированные с Obsidian vault (privacy-wipe).
+
+        #10 (MED W1766): файлы транскрипций в Obsidian vault содержат полный
+        текст STT-записей и переживают стандартный privacy-purge истории.
+
+        Алгоритм:
+        1. Если vault не настроен (_vault_path is None) — no-op (возвращает 0).
+        2. Удаляет все *.md файлы в vault_path/folder (target_dir).
+        3. Сбрасывает _last_sync_ts и сохраняет состояние (obsidian_sync.json
+           перезаписывается — last_sync_ts=null, vault_path и folder сохраняются
+           как конфиг, не как PII).
+
+        Возвращает:
+            int — количество удалённых файлов.
+
+        Никогда не бросает: все ошибки файловой системы логируются как warning.
+        """
+        with self._lock:
+            vault_path = self._vault_path
+            folder = self._folder
+
+        if vault_path is None:
+            logger.debug("ObsidianSyncManager.purge_all_synced_files: vault не настроен, no-op")
+            return 0
+
+        target_dir = vault_path / folder
+        deleted = 0
+
+        if target_dir.is_dir():
+            for md_path in list(target_dir.glob("*.md")):
+                try:
+                    md_path.unlink(missing_ok=True)
+                    deleted += 1
+                except OSError as exc:
+                    logger.warning(
+                        "ObsidianSyncManager.purge_all_synced_files: "
+                        "не удалось удалить %s: %s",
+                        md_path,
+                        exc,
+                    )
+
+        # Сбрасываем timestamp синхронизации (последняя синхронизация больше
+        # не актуальна — vault очищен). Vault/folder сохраняем как конфигурацию.
+        with self._lock:
+            self._last_sync_ts = None
+            self._save_state()
+
+        logger.info(
+            "ObsidianSyncManager.purge_all_synced_files: удалено %d .md файлов из %s",
+            deleted,
+            target_dir,
+        )
+        return deleted
+
     def _load_state(self) -> None:
         """Загрузить состояние из JSON-файла."""
         if self._state_path is None or not self._state_path.exists():

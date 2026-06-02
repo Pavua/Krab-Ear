@@ -793,3 +793,33 @@ class WebhookManager:
             s["failures"] = s.get("failures", 0) + 1
             s["last_status"] = status
             s["last_ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    # ------------------------------------------------------------------
+    # Privacy purge
+    # ------------------------------------------------------------------
+
+    def purge_all(self) -> None:
+        """Полная очистка всех webhook-ов и секретов (privacy-wipe).
+
+        #7 (MED W1766): webhooks.json хранит HMAC-секреты в открытом виде.
+        Метод:
+        1. Захватывает _lock.
+        2. Очищает in-memory реестр и статистику.
+        3. Вызывает _save() — записывает пустой JSON-объект в webhooks.json.
+        4. Удаляет webhooks.json с диска (missing_ok=True).
+
+        Гарантирует отсутствие plaintext секретов после возврата.
+        Идемпотентен: повторный вызов при отсутствии файла не бросает исключений.
+        """
+        with self._lock:
+            self._webhooks.clear()
+            self._stats.clear()
+            # Перезаписываем файл пустым объектом (атомарно через tmp + rename),
+            # затем сразу удаляем — так не остаётся окна, где файл непустой.
+            self._save()
+            try:
+                self._webhooks_path.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("WebhookManager.purge_all: не удалось удалить %s: %s",
+                               self._webhooks_path, exc)
+        logger.info("WebhookManager.purge_all: реестр и секреты очищены")
