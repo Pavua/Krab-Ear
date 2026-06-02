@@ -526,8 +526,13 @@ class TestW1761ReDosRegression(unittest.TestCase):
         result = _delete_last_sentence(long_no_terminator)
         elapsed = time.perf_counter() - t0
 
-        # Корректность: нет терминатора → возвращается ""
-        self.assertEqual(result, "", msg=f"Ожидался пустой результат, получили: {result[:80]!r}…")
+        # W1776 HIGH 2: нет терминатора → no-op (возвращаем текст БЕЗ изменений),
+        # а НЕ "" — раньше это молча стирало весь транскрипт.
+        self.assertEqual(
+            result,
+            long_no_terminator,
+            msg=f"Ожидался неизменённый текст (no-op), получили: {result[:80]!r}…",
+        )
         # Производительность: rfind O(n) должен уложиться в 0.2s
         self.assertLess(
             elapsed,
@@ -548,13 +553,19 @@ class TestW1761ReDosRegression(unittest.TestCase):
         self.assertNotIn("sentence B", result)
         self.assertNotIn("trailing", result)
 
-    def test_delete_last_sentence_single_sentence_clears_all(self):
-        """Один период → единственное предложение удаляет весь текст."""
+    def test_delete_last_sentence_single_sentence_is_noop(self):
+        """W1776 HIGH 2: единственное предложение без терминатора → NO-OP.
+
+        Раньше «delete last sentence» на single-sentence тексте стирало весь
+        транскрипт (`rfind` не находил терминатор → возвращался ""). Теперь
+        накопленный текст сохраняется без изменений — стирать нечего.
+        """
         proc = self._make_proc_en()
         text = "Only sentence here delete last sentence"
         result = proc.process(text, language="en")
-        # Нет терминатора в накопленном output → удаляется всё
-        self.assertEqual(result, "")
+        # Нет терминатора в накопленном output → текст сохраняется (no-op),
+        # а НЕ стирается. Команда «съедена», но накопленный текст остаётся.
+        self.assertEqual(result, "Only sentence here")
 
     def test_input_size_guard_skips_pathological_input(self):
         """W1761: входная строка > 100 000 символов возвращается без обработки."""

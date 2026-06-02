@@ -50,8 +50,14 @@ class TestEsNuevaLineaNoDuplicate(unittest.TestCase):
         )
 
     def test_es_nueva_linea_inserts_newline(self):
-        """'nueva línea' command still works correctly after dedup."""
+        """'nueva línea' command still works correctly after dedup.
+
+        W1776: «nueva línea» теперь gated в строгом режиме (омоним с обычной
+        фразой). Команда по-прежнему доступна в lenient-режиме — здесь и
+        проверяем, что после dedup срабатывает РОВНО один раз (а не дважды).
+        """
         proc = _make_proc()
+        proc.set_voice_commands_strict_mode(False)
         result = proc.process("primera línea nueva línea segunda línea", language="es")
         self.assertEqual(result, "primera línea\nsegunda línea")
 
