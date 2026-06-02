@@ -387,12 +387,19 @@ class PrivacyAuditLogger:
 
         W974/W1533: сбрасывает _last_hash, чтобы после clear() новые записи
         начинали свежую цепочку (prev_hash=None).
+
+        W1768: весь body выполняется под self._log_lock — тем же замком, что
+        держит log_event(). Без него clear() мутировал _last_hash и удалял файл
+        конкурентно с log_event() → порча HMAC хеш-цепочки / interleaved writes
+        (MED data race). clear() НЕ вызывает log_event(), поэтому non-reentrant
+        threading.Lock не приводит к deadlock.
         """
-        try:
-            self._log_path.unlink(missing_ok=True)
-            self._last_hash = None
-        except Exception:
-            logger.exception("PrivacyAuditLogger: ошибка удаления лога")
+        with self._log_lock:
+            try:
+                self._log_path.unlink(missing_ok=True)
+                self._last_hash = None
+            except Exception:
+                logger.exception("PrivacyAuditLogger: ошибка удаления лога")
 
 
 # Удобная точка доступа к singleton
