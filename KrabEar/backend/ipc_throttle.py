@@ -57,6 +57,11 @@ HEAVY_METHODS: Set[str] = {
     # пропускная способность ограничена GPU, а не IPC. Переводим в heavy-bucket.
     "transcribe_paths",         # синхронная транскрибация файлов (MLX STT + file I/O)
     "transcribe_paths_async",   # асинхронная транскрибация файлов (тот же pipeline)
+    # wave-32 LOW: synthesize_speech запускает полный CPU-heavy ML inference
+    # (Silero torch + Kokoro neural pipeline) или subprocess macOS say.
+    # В light-bucket (120/min) злоумышленник мог бы спамить синтез без ограничений.
+    # Переводим в heavy-bucket (≤5/min) — паритет с transcribe_paths.
+    "synthesize_speech",        # TTS синтез: Silero / Kokoro / macOS say inference
 }
 
 MEDIUM_METHODS: Set[str] = {
