@@ -228,7 +228,24 @@ class AnalyticsService:
         return result
 
     def handle_get_activity_calendar(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает GitHub-style activity calendar данные за последние N месяцев."""
+        """Возвращает GitHub-style activity calendar данные за последние N месяцев.
+
+        Privacy gate (wave-25 A1): когда privacy_mode_enabled=True возвращает пустой
+        ответ БЕЗ обращения к истории транскрипций. Схема ключей совпадает с
+        ``ActivityCalendar.to_dict`` чтобы Swift-декодер не падал.
+        """
+        if self._settings_get("privacy_mode_enabled", False):
+            return {
+                "ok": True,
+                "days": [],
+                "weeks": [],
+                "current_streak": 0,
+                "longest_streak": 0,
+                "total_days": 0,
+                "total_recordings": 0,
+                "months_covered": 0,
+                "reason": "privacy_mode_active",
+            }
         months = int(params.get("months", 12))
         months = max(1, min(months, 24))
         include_svg = bool(params.get("include_svg", False))

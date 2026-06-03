@@ -14,7 +14,7 @@ import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Optional
 
 _log = logging.getLogger("KrabEar.Backend.PlaybackTracker")
 
@@ -39,10 +39,14 @@ class PlaybackTracker:
         self,
         data_dir: str | Path | None = None,
         privacy_mode_enabled: bool = False,
+        privacy_mode_fn: Optional[Callable[[], bool]] = None,
     ) -> None:
         self._lock = threading.Lock()
         self._stats: dict[str, dict[str, Any]] = {}
         self._privacy_mode_enabled: bool = privacy_mode_enabled
+        # wave-25 A3 (a): callable → runtime privacy lookup overrides static bool.
+        # When set, _privacy_mode_fn() is checked first; static flag is fallback.
+        self._privacy_mode_fn: Optional[Callable[[], bool]] = privacy_mode_fn
         if data_dir is not None:
             self._path: Path | None = Path(data_dir) / _PLAYBACK_FILE
             self._load()
@@ -108,28 +112,45 @@ class PlaybackTracker:
         """
         self._privacy_mode_enabled = bool(enabled)
 
-    def record_playback(self, item_id: str, duration_listened_sec: float = 0.0) -> None:
+    def _is_privacy_mode(self) -> bool:
+        """Возвращает True если privacy_mode активен.
+
+        Приоритет: callable (runtime) → static bool (конструктор / set_privacy_mode).
+        """
+        if self._privacy_mode_fn is not None:
+            return bool(self._privacy_mode_fn())
+        return self._privacy_mode_enabled
+
+    def record_playback(self, item_id: str, duration_listened_sec: float = 0.0) -> dict[str, Any]:
         """Регистрирует событие воспроизведения записи.
 
         Args:
             item_id: идентификатор записи истории.
             duration_listened_sec: сколько секунд прослушано в этот раз (≥ 0).
 
+        Returns:
+            dict с текущей статистикой, либо {"ok": True, "reason": "privacy_mode_active"}
+            если privacy_mode активен (no-op, не сохраняет на диск).
+
         Note:
-            Если privacy_mode_enabled=True — вызов игнорируется полностью
+            Если privacy_mode включён — вызов игнорируется полностью
             (событие не записывается и не сохраняется на диск).
         """
         item_id = str(item_id).strip()
         if not item_id:
             raise ValueError("item_id не может быть пустым")
-        # F3: privacy gate — skip recording entirely when privacy mode is on.
-        if self._privacy_mode_enabled:
+        # wave-25 A3 (b): privacy gate — skip recording entirely when privacy mode is on.
+        if self._is_privacy_mode():
             _log.debug("record_playback: пропуск (privacy_mode=True) для item_id=%r", item_id)
-            return
+            return {"ok": True, "reason": "privacy_mode_active"}
         duration = max(0.0, float(duration_listened_sec))
         now_iso = datetime.now(timezone.utc).isoformat()
 
         with self._lock:
+            # wave-25 A3 (c): DoS cap — prevent unbounded key growth from attacker-controlled item_ids.
+            if item_id not in self._stats and len(self._stats) >= 10_000:
+                _log.warning("record_playback: tracker_full (cap=10_000), item_id=%r ignored", item_id)
+                return {"ok": False, "reason": "tracker_full"}
             entry = self._stats.setdefault(
                 item_id,
                 {"play_count": 0, "total_listened_sec": 0.0, "last_played": None},
@@ -138,6 +159,7 @@ class PlaybackTracker:
             entry["total_listened_sec"] = float(entry.get("total_listened_sec", 0.0)) + duration
             entry["last_played"] = now_iso
             self._save()
+        return self.get_playback_stats(item_id)
 
     def get_playback_stats(self, item_id: str) -> dict[str, Any]:
         """Возвращает статистику воспроизведения для указанной записи.
@@ -271,8 +293,8 @@ class PlaybackTracker:
         if not item_id:
             raise ValueError("Параметр item_id обязателен")
         duration = float(params.get("duration_listened_sec", 0.0))
-        self.record_playback(item_id, duration_listened_sec=duration)
-        return self.get_playback_stats(item_id)
+        # record_playback now returns the result dict directly (privacy no-op / tracker_full / stats)
+        return self.record_playback(item_id, duration_listened_sec=duration)
 
     def handle_get_playback_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_playback_stats — статистика воспроизведения записи."""

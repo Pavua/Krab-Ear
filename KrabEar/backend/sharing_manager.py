@@ -70,6 +70,7 @@ class SharingManager:
         store: Any,
         default_share_ttl_hours: int = DEFAULT_SHARE_TTL_HOURS,
         share_no_default_ttl: bool = False,
+        privacy_mode_fn: Optional[Any] = None,
     ) -> None:
         self._store = store
         self._data_dir = Path(getattr(store, "data_dir", "."))
@@ -79,6 +80,10 @@ class SharingManager:
         self._index: dict[str, dict[str, Any]] = {}
         self._default_share_ttl_hours = default_share_ttl_hours
         self._share_no_default_ttl = share_no_default_ttl
+        # wave-25 A2: callable returning bool — checked at IPC boundary in handle_prepare_share.
+        # None → guard disabled (privacy_mode treated as False).
+        from typing import Callable as _Callable
+        self._privacy_mode_fn: Optional[_Callable[[], bool]] = privacy_mode_fn
         # W1767 #16: директория shares/ должна быть 0o700 (только владелец).
         # parents=True создаёт промежуточные директории с дефолтными правами;
         # окончательный chmod применяется явно.
@@ -377,7 +382,18 @@ class SharingManager:
     # ------------------------------------------------------------------
 
     def handle_prepare_share(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: подготовить пакет для шаринга."""
+        """IPC: подготовить пакет для шаринга.
+
+        Privacy gate (wave-25 A2): когда privacy_mode_enabled=True — шаринг
+        отключён; транскрипция НЕ записывается на диск.
+        """
+        # wave-25 A2: privacy gate — sharing disabled in privacy mode
+        if self._privacy_mode_fn is not None and self._privacy_mode_fn():
+            return {
+                "ok": False,
+                "reason": "privacy_mode_active",
+                "error": "Sharing disabled in privacy mode",
+            }
         item_ids = params.get("item_ids")
         if not isinstance(item_ids, list) or not item_ids:
             raise RuntimeError("Параметр 'item_ids' должен быть непустым списком")
