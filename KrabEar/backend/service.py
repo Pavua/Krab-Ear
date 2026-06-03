@@ -624,7 +624,7 @@ class BackendService:
         # step and keeps serving data via get_shared/list_shared.
         self._history._sharing_manager = self._sharing
         self._merger = RecordingMerger(privacy_mode_fn=lambda: self._get_runtime_setting('privacy_mode_enabled', False))
-        self._transcript_versioning = TranscriptVersionManager(data_dir=self.store.data_dir)
+        self._transcript_versioning = TranscriptVersionManager(data_dir=self.store.data_dir, settings_fn=self._cached_settings)
         # BulkReprocessor — массовое перетранскрибирование истории (W1037 F4 / W1044 re-wire)
         # wave-25 HIGH: wire is_recording_fn so the anti-SIGSEGV guard is live.  Without it the
         # guard was dead (always False) and a bulk MLX reprocess could start mid-recording →
