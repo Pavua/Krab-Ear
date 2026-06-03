@@ -265,6 +265,12 @@ class SemanticSearcher:
         вызов ``_get_model()`` попытается загрузить модель заново.  Полезно после
         временных сбоев (сеть, HuggingFace недоступен, недостаточно RAM и т.п.).
 
+        NOTE (D3 — wave-31): этот метод сбрасывает ТОЛЬКО ошибку загрузки модели и
+        состояние модели.  Он НЕ очищает in-memory индекс embeddings (_embeddings /
+        _index) и НЕ удаляет файлы с диска.  Это намеренное поведение: пользователь
+        хочет повторить загрузку модели, не теряя уже индексированные данные.
+        Для полной очистки индекса используйте purge_all().
+
         Returns:
             {"reset": True, "previous_error": str|None}
         """
@@ -284,14 +290,26 @@ class SemanticSearcher:
         Вызывается при purge_history для защиты PII — гарантирует, что
         embeddings.npy и embeddings_index.json не содержат личных данных
         после общей очистки истории.
+
+        NOTE (D1 — wave-31): epoch bump выполняется ПЕРВЫМ под локом, до очистки
+        памяти и удаления файлов.  Это устраняет resurrection race:
+        _load_from_disk() вызывается lazily внутри _get_model() — если загрузка
+        модели начинается ПОСЛЕ удаления файлов (step 2) но ДО прежнего bump
+        (step 3), _load_from_disk читала бы пустые/отсутствующие файлы под
+        СТАРЫМ epoch и могла бы переписать пустой индекс.  Теперь bump происходит
+        на step 0: любая _load_from_disk или _save_locked, захватывающая _index_lock
+        после этой точки, видит увеличенный epoch и обязана прекратить персистирование
+        (паттерн из index_item / index_all).
         """
         with self._index_lock:
+            # wave-31 D1: bump epoch FIRST — acts as a hard barrier for any
+            # concurrent _load_from_disk / index_item / index_all that is still
+            # in progress.  Must happen before the memory clear and before the
+            # disk deletion so the epoch is already visible under lock when any
+            # racing writer next acquires _index_lock.
+            self._purge_epoch += 1
             self._embeddings = None
             self._index = []
-            # wave-22 MED: bump epoch so any embedding computed BEFORE this purge
-            # (by an in-flight index_item/index_all whose encode is still running)
-            # is refused at its post-encode re-lock instead of being re-persisted.
-            self._purge_epoch += 1
         try:
             if self._embeddings_path.exists():
                 self._embeddings_path.unlink()
