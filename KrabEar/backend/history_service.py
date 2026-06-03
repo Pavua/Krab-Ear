@@ -637,6 +637,18 @@ class HistoryService:
 
     def handle_get_history_overview(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает обзорный срез истории для панели управления."""
+        # wave-39 MED: today_count/last_24h_count/source_langs/today_text_chars reveal usage patterns.
+        # Gate mirrors get_history_statistics (wave-38) and get_recording_stats (wave-37).
+        if self._is_privacy_mode():
+            return {
+                "active_count": 0, "paste_ok": 0, "paste_failed": 0,
+                "translated_ok": 0, "translated_error": 0, "no_translation": 0,
+                "today_count": 0, "last_24h_count": 0,
+                "diarization_count": 0, "llm_applied_count": 0,
+                "total_text_chars": 0, "today_text_chars": 0,
+                "source_langs": [], "target_langs": [],
+                "reason": "privacy_mode_active",
+            }
         return self.store.get_history_overview()
 
     def handle_search_by_speaker(self, params: dict[str, Any]) -> dict[str, Any]:
