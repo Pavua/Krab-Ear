@@ -148,6 +148,16 @@ jobs:
         # No user-controlled input is used in this step -- no injection risk.
         run: python3 scripts/audit_dispatch_test_targets.py --fail-on-found
 
+      - name: In-memory privacy-purge coverage guard
+        env:
+          PYTHONPATH: ${{ github.workspace }}/KrabEar
+        # Curated registry of in-RAM PII collaborators (context_memory, clipboard_history,
+        # StateStore search caches, JobTracker, SemanticSearcher) that MUST be cleared by
+        # handle_purge_all_data. Enforced since wave-30 (#1717); 0 gaps at enforcement point.
+        # Adding a new in-RAM PII collaborator to the registry fails this gate until the
+        # matching clear-call is wired — prevents silent purge regressions.
+        run: python3 scripts/audit_inmemory_purge_coverage.py --fail-on-found
+
 
       - name: Compare benchmark history (regression gate)
         env:
