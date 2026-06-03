@@ -3653,6 +3653,15 @@ class BackendService:
         Returns:
             dict: total, reprocessed, skipped, errors, cancelled.
         """
+        # wave-36 MED: privacy gate must live HERE in the IPC dispatcher, not only in
+        # BulkReprocessor.reprocess() — the reprocessor gate is conditional on `settings`
+        # being passed (wave-35 added it as an optional kwarg).  The IPC path
+        # (_handle_bulk_reprocess_start → self._bulk_reprocessor.reprocess()) never passes
+        # `settings`, so the inner gate is dead on the production IPC path.  Always gate
+        # at the IPC boundary first (matches the "privacy gate = IPC boundary" pattern).
+        if self._get_runtime_setting("privacy_mode_enabled", False):
+            return {"ok": False, "reason": "privacy_mode_active",
+                    "total": 0, "reprocessed": 0, "skipped": 0, "errors": [], "cancelled": False}
         only_low_confidence = bool(params.get("only_low_confidence", True))
         try:
             threshold = float(params.get("threshold", 0.7))

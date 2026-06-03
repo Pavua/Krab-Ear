@@ -62,12 +62,23 @@ class _HandlerHarness:
     body — no copy, no drift, no full-service bootstrap.
     """
 
-    def __init__(self):
+    def __init__(self, privacy_mode: bool = False):
         self.store = MagicMock()
         self._semantic_searcher = MagicMock()
         self._bulk_reprocessor = MagicMock()
         self._auto_deduplicator = MagicMock()
         self._usage_tracker = MagicMock()
+        self._settings_data: dict = {"privacy_mode_enabled": privacy_mode}
+
+    def _cached_settings(self) -> dict:
+        return self._settings_data
+
+    def _get_runtime_setting(self, key: str, default):
+        """Mirror BackendService._get_runtime_setting for tests that bind real handlers."""
+        try:
+            return self._cached_settings().get(key, default)
+        except Exception:
+            return default
 
     # Bind real handlers as methods.
     def handle_bulk_reprocess_start(self, params):
