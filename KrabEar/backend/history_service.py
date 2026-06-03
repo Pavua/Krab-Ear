@@ -958,6 +958,12 @@ class HistoryService:
             total_items (int): количество экспортированных записей
             path (str|None): путь к файлу, если save_to_file=True
         """
+        # Privacy mode gate (wave-36, HIGH B1): this export writes the FULL transcript
+        # corpus to the IPC response (and optionally to a file on disk). Privacy mode
+        # means no transcript data leaves the store — even to a local file.
+        if self._is_privacy_mode():
+            return {"content": "", "total_items": 0, "path": None, "reason": "privacy_mode_active"}
+
         import time as _time
         _t0 = _time.monotonic()
         limit = max(1, min(int(params.get("limit", 500) or 500), 5000))
@@ -1171,6 +1177,11 @@ class HistoryService:
             entries (int): количество экспортированных записей
             chars (int): размер результата в символах
         """
+        # Privacy mode gate (wave-36, HIGH B1): writes the full transcript corpus to
+        # the IPC response / clipboard — withhold entirely while privacy is active.
+        if self._is_privacy_mode():
+            return {"ok": False, "entries": 0, "chars": 0, "reason": "privacy_mode_active"}
+
         limit = max(1, min(int(params.get("limit", 500) or 500), 5000))
         from_ts = params.get("from_ts")
         from_ts_str = None if from_ts is None else str(from_ts)
@@ -1370,6 +1381,11 @@ class HistoryService:
             chars (int): размер JSON в символах
             path (str|None): путь к файлу, если save_to_file=True
         """
+        # Privacy mode gate (wave-36, HIGH B1): structured JSON export carries the full
+        # transcript corpus to the IPC response / clipboard / file — withhold in privacy.
+        if self._is_privacy_mode():
+            return {"ok": False, "entries": 0, "chars": 0, "path": None, "reason": "privacy_mode_active"}
+
         import json as _json
         import subprocess
 
@@ -1522,6 +1538,11 @@ class HistoryService:
 
     def handle_export_history_csv(self, params: dict[str, Any]) -> dict[str, Any]:
         """Экспорт истории в CSV формат."""
+        # Privacy mode gate (wave-36, HIGH B1): CSV export writes the full transcript
+        # corpus to the IPC response / clipboard / file — withhold in privacy mode.
+        if self._is_privacy_mode():
+            return {"ok": False, "entries": 0, "file": None, "reason": "privacy_mode_active"}
+
         import csv
         import io
         import subprocess
@@ -1820,6 +1841,21 @@ class HistoryService:
         except Exception:
             logger.warning("purge_all_data: compact failed — cleartext may remain in history.ndjson", exc_info=True)
             secondary_errors.append("compact")
+
+        # --- 1b-2. wave-36 (MED B3): physically delete history_calendar_links.ndjson.
+        # CalendarLinker stores {item_id → Calendar.app event title/id} in this StateStore
+        # sidecar journal.  compact_with_stats() (step 1b) only *selectively rewrites* it,
+        # keeping entries whose id is still active — but (a) it is wrapped in try/except above
+        # so a failed compaction leaves the FULL journal on disk, and (b) even on success the
+        # file itself survives (truncated content, not removed).  Event titles are user PII
+        # (meeting names around real people).  An explicit unlink guarantees the journal is
+        # gone after a privacy-wipe regardless of compaction outcome.  state_store.__init__
+        # re-touches an empty file on next start, so the store stays consistent.
+        try:
+            (Path(self.store.data_dir) / "history_calendar_links.ndjson").unlink(missing_ok=True)
+        except Exception:
+            logger.warning("purge_all_data: удаление history_calendar_links.ndjson не удалось", exc_info=True)
+            secondary_errors.append("calendar_links")
 
         # --- 1c. W1749 CRITICAL-2 / W1771 GAP-1: delete ALL export artefacts in transcripts/.
         # Each transcription writes a timestamped Markdown file under <data_dir>/transcripts/
@@ -3825,6 +3861,11 @@ class HistoryService:
             errors (dict[str, str]): {format: error_message} для неудачных форматов
             total_entries (int): количество записей в экспорте
         """
+        # Privacy mode gate (wave-36, HIGH B1): batch export writes the full transcript
+        # corpus to a bundle directory in several formats — withhold in privacy mode.
+        if self._is_privacy_mode():
+            return {"dir": None, "files": {}, "errors": {}, "total_entries": 0, "reason": "privacy_mode_active"}
+
         all_formats = {"srt", "csv", "markdown", "obsidian"}
         formats_raw = params.get("formats")
         if formats_raw is None:
@@ -4100,6 +4141,11 @@ class HistoryService:
             chars (int): размер HTML в символах
             path (str|None): путь к сохранённому файлу, если save_to_file=True
         """
+        # Privacy mode gate (wave-36, HIGH B1): the HTML report embeds the full transcript
+        # corpus (most PII-dense export) — withhold in privacy mode (response + file).
+        if self._is_privacy_mode():
+            return {"ok": False, "html": "", "entries": 0, "chars": 0, "path": None, "reason": "privacy_mode_active"}
+
         from backend.html_report import HTMLReportGenerator
 
         title = str(params.get("title", "Krab Ear Report")).strip() or "Krab Ear Report"

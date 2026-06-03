@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import threading
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -43,16 +44,34 @@ class TranscriptVersionManager:
     }
     """
 
-    def __init__(self, data_dir: Path | str) -> None:
+    def __init__(
+        self,
+        data_dir: Path | str,
+        settings_fn: Callable[[], dict[str, Any]] | None = None,
+    ) -> None:
         self._data_dir = Path(data_dir)
         self._versions_path = self._data_dir / _VERSIONS_FILE
         self._lock = threading.Lock()
+        # wave-36 (HIGH B2): optional settings provider so read handlers can honour
+        # privacy mode. Returns the full settings dict; None → privacy gate is a no-op
+        # (preserves backward compatibility for the data-dir-only constructor in tests).
+        self._settings_fn = settings_fn
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self._versions_path.touch(exist_ok=True)
 
     # ------------------------------------------------------------------
     # Внутренние хелперы
     # ------------------------------------------------------------------
+
+    def _is_privacy_mode(self) -> bool:
+        """True если privacy_mode_enabled активен (через settings_fn, если подключён)."""
+        if self._settings_fn is None:
+            return False
+        try:
+            settings = self._settings_fn()
+            return bool(settings.get("privacy_mode_enabled", False))
+        except Exception:  # noqa: BLE001
+            return False
 
     def _read_all(self) -> list[dict[str, Any]]:
         """Читает все версии из NDJSON."""
@@ -421,6 +440,11 @@ class TranscriptVersionManager:
         item_id = str(params.get("item_id", "")).strip()
         if not item_id:
             raise ValueError("Параметр item_id обязателен")
+        # Privacy mode gate (wave-36, HIGH B2): returns the FULL edit history of a
+        # transcript's text (every saved version is cleartext PII). Withhold while
+        # privacy mode is active — schema-parity empty response.
+        if self._is_privacy_mode():
+            return {"item_id": item_id, "versions": [], "total": 0, "reason": "privacy_mode_active"}
         versions = self.get_versions(item_id)
         return {"item_id": item_id, "versions": versions, "total": len(versions)}
 
