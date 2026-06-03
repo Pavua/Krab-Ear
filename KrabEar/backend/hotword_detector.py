@@ -10,7 +10,6 @@ import json
 import logging
 import os
 import re
-import tempfile
 import threading
 from dataclasses import dataclass, asdict
 from pathlib import Path
