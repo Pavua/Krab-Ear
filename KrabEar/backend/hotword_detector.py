@@ -190,3 +190,17 @@ class HotwordDetector:
             "matches": [asdict(m) for m in matches],
             "count": len(matches),
         }
+
+    def clear(self) -> None:
+        """Очищает все горячие слова из памяти (in-memory purge gap, wave-26).
+
+        Используется при ``purge_all_data`` — disk-файл уже удалён HistoryService;
+        этот метод очищает живые in-memory коллекции ``_hotwords`` и ``_patterns``,
+        чтобы горячие слова не выжили до перезапуска процесса.
+
+        Потокобезопасно: использует тот же ``self._lock``, что и остальные методы.
+        """
+        with self._lock:
+            self._hotwords.clear()
+            self._patterns.clear()
+        logger.debug("HotwordDetector.clear(): in-memory hotwords wiped (privacy purge)")
