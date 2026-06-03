@@ -257,12 +257,16 @@ class TestIPCHandlers(unittest.TestCase):
         self.assertEqual(result["counts_by_type"]["stt.final"], 3)
 
     def test_handle_replay_events_missing_params(self):
-        with self.assertRaises(ValueError):
-            self.mgr.handle_replay_events({})
+        # Missing params default to epoch=0 and now, which is a >7-day window
+        # — handler returns {"ok": False, "reason": "time window too large"}.
+        result = self.mgr.handle_replay_events({})
+        self.assertFalse(result.get("ok", True))
+        self.assertIn("reason", result)
 
     def test_handle_replay_events_valid(self):
-        from_ts = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat(timespec="seconds")
-        to_ts = (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat(timespec="seconds")
+        import time as _time
+        from_ts = _time.time() - 5
+        to_ts = _time.time() + 5
         result = self.mgr.handle_replay_events({"from_ts": from_ts, "to_ts": to_ts})
         self.assertGreaterEqual(result["count"], 4)
 

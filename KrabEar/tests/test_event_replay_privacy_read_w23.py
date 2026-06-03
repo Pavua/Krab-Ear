@@ -135,14 +135,16 @@ class TestReadPathRedactionOnRuntimePrivacyFlip(unittest.TestCase):
             mgr.close()
 
     def test_handle_replay_events_redacts_after_privacy_flip(self):
+        import time as _time
         privacy = _MutablePrivacy(enabled=False)
         mgr = EventReplayManager(max_buffer=100, settings_provider=privacy)
         try:
             self._record_cleartext(mgr)
             privacy.enabled = True
 
+            # Use numeric Unix epoch timestamps within the 7-day window cap.
             result = mgr.handle_replay_events(
-                {"from_ts": "2000-01-01T00:00:00+00:00", "to_ts": "2100-01-01T00:00:00+00:00"}
+                {"from_ts": _time.time() - 86400, "to_ts": _time.time() + 86400}
             )
             self.assertEqual(result["count"], 3)
             self.assertFalse(_has_cleartext(result["events"], self.SECRETS))

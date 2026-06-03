@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import threading
+import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +34,14 @@ _MAX_BUFFER_SIZE = 10_000
 # больше, чем 2× содержимое полного кольца, поэтому пересборка случается редко
 # и общий путь (append) остаётся быстрым.
 _MAX_FILE_BYTES = 8 * 1024 * 1024
+
+# Максимальное количество событий, возвращаемых replay_events за один вызов.
+# Защита от DoS: клиент не может получить все 10 000 событий разом через IPC.
+_MAX_REPLAY_EVENTS = 10_000
+
+# Максимальный временной диапазон (секунды) для handle_replay_events.
+# from_ts=0, to_ts=now мог бы вернуть всю историю, поэтому ограничиваем 7 днями.
+_MAX_REPLAY_WINDOW_SEC = 86_400 * 7  # 7 суток
 
 
 def _utc_now_iso() -> str:
@@ -276,6 +285,10 @@ class EventReplayManager:
         Args:
             from_ts: начало диапазона (включительно), ISO 8601.
             to_ts: конец диапазона (включительно), ISO 8601.
+
+        Возвращает не более _MAX_REPLAY_EVENTS записей; если буфер содержит больше
+        совпадающих событий, список усекается и в последний элемент добавляется
+        маркер ``{"truncated": True}``.
         """
         from_dt = _parse_ts(from_ts)
         to_dt = _parse_ts(to_ts)
@@ -295,6 +308,16 @@ class EventReplayManager:
 
         # Сортируем по seq для гарантированного порядка
         results.sort(key=lambda e: e.get("seq", 0))
+
+        # Защита от DoS: не возвращаем более _MAX_REPLAY_EVENTS событий.
+        if len(results) > _MAX_REPLAY_EVENTS:
+            logger.warning(
+                "EventReplayManager.replay_events: результат обрезан до %d событий (было %d)",
+                _MAX_REPLAY_EVENTS,
+                len(results),
+            )
+            results = results[:_MAX_REPLAY_EVENTS]
+
         return results
 
     def get_event_stats(self) -> dict[str, Any]:
@@ -403,13 +426,36 @@ class EventReplayManager:
         return self.get_event_stats()
 
     def handle_replay_events(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC-обработчик replay_events."""
-        from_ts = params.get("from_ts")
-        to_ts = params.get("to_ts")
-        if not from_ts or not to_ts:
-            raise ValueError("Параметры from_ts и to_ts обязательны")
-        events = self.replay_events(from_ts, to_ts)
-        return {"events": events, "count": len(events)}
+        """IPC-обработчик replay_events.
+
+        Принимает числовые Unix-эпох timestamps (float/int). Валидирует:
+        - from_ts <= to_ts
+        - временное окно не превышает _MAX_REPLAY_WINDOW_SEC (7 суток)
+
+        Если from_ts или to_ts не переданы, используются разумные значения
+        по умолчанию (0 и текущее время соответственно), что всё равно
+        будет отклонено guard'ом ширины окна.
+        """
+        try:
+            from_ts_num = float(params.get("from_ts", 0))
+            to_ts_num = float(params.get("to_ts", time.time()))
+        except (TypeError, ValueError):
+            return {"ok": False, "reason": "from_ts and to_ts must be numeric (Unix epoch)"}
+
+        if from_ts_num > to_ts_num:
+            return {"ok": False, "reason": "from_ts must be <= to_ts"}
+
+        window = to_ts_num - from_ts_num
+        if window > _MAX_REPLAY_WINDOW_SEC:
+            return {"ok": False, "reason": "time window too large (max 7 days)"}
+
+        # Конвертируем числовые timestamps в ISO 8601 для replay_events.
+        from_iso = datetime.fromtimestamp(from_ts_num, tz=timezone.utc).isoformat(timespec="seconds")
+        to_iso = datetime.fromtimestamp(to_ts_num, tz=timezone.utc).isoformat(timespec="seconds")
+
+        events = self.replay_events(from_iso, to_iso)
+        truncated = len(events) == _MAX_REPLAY_EVENTS
+        return {"events": events, "count": len(events), "truncated": truncated}
 
 
 # Глобальный синглтон — создаётся без персистенции; BackendService может
