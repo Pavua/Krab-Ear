@@ -357,6 +357,10 @@ class SearchAndAnalysisService:
                 "audio_duration_sec": item.audio_duration_sec,
             })
 
+        # wave-40 MED: clamp to prevent DoS via huge pending list (mirrors MAX_BATCH_ACTION_ITEMS=20)
+        MAX_PENDING_RESULTS = 1000
+        if len(pending) > MAX_PENDING_RESULTS:
+            pending = pending[:MAX_PENDING_RESULTS]
         return {"pending": pending, "count": len(pending)}
 
     def trigger_auto_extract_action_items(
