@@ -326,7 +326,14 @@ class AnalyticsService:
 
         Сканирует всю активную историю и агрегирует метаданные.
         Extracted from BackendService W773.
+
+        NOTE (wave-39): dispatch routes to service.py::_handle_get_recording_stats (gated wave-37),
+        NOT to this method. This copy is DEAD but kept for extraction symmetry. If dispatch is
+        ever re-pointed here, the privacy gate below must be preserved.
         """
+        # wave-39 defence-in-depth: prevent silent gate drop if dispatch is re-pointed here.
+        if self._settings_get("privacy_mode_enabled", False):
+            return {"ok": False, "reason": "privacy_mode_active"}
         active = self._store._load_active_items_with_lock()
 
         now = datetime.now(timezone.utc)
