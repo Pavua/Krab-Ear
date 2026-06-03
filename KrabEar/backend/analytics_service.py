@@ -224,7 +224,21 @@ class AnalyticsService:
           - limit: int — макс. записей для анализа (по умолчанию 500, макс. 5000).
           - include_heatmap: bool — включить activity heatmap (по умолчанию False).
           - heatmap_days: int — горизонт heatmap в днях (по умолчанию 30).
+
+        Privacy gate (wave-27/28): когда privacy_mode_enabled=True возвращает пустой
+        timeline без обращения к истории транскрипций. Схема ключей совпадает с
+        нормальным ответом чтобы Swift-декодер не падал. Аналогично sibling-методам
+        (handle_get_sentiment_trends, handle_get_keyword_cloud, handle_get_activity_calendar,
+        handle_get_analytics_dashboard).
         """
+        if self._settings_get("privacy_mode_enabled", False):
+            return {
+                "ok": True,
+                "timeline": [],
+                "total_segments": 0,
+                "reason": "privacy_mode_active",
+            }
+
         group_by = str(params.get("group_by", "day")).strip()
         limit = max(1, min(int(params.get("limit", 500)), 5000))
         include_heatmap = bool(params.get("include_heatmap", False))

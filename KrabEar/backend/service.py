@@ -3232,7 +3232,20 @@ class BackendService:
             max_words (int): максимальное кол-во контекстных слов (по умолчанию 20).
             last_n (int): кол-во последних транскрибаций для тем (по умолчанию 10).
             clear (bool): если true — очищает память перед возвратом результата.
+
+        Privacy gate (wave-27/28): когда privacy_mode_enabled=True подавляет фактические
+        слова и темы (производные от транскрипций), но возвращает size чтобы
+        вызывающий код видел, что память не пуста.
         """
+        if self._cached_settings().get("privacy_mode_enabled"):
+            return {
+                "context_words": [],
+                "recent_topics": [],
+                "size": self._context_memory.size(),
+                "window_size": 50,
+                "privacy_mode": True,
+            }
+
         if params.get("clear"):
             self._context_memory.clear()
             return {"cleared": True, "context_words": [], "recent_topics": [], "size": 0}
