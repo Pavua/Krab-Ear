@@ -791,6 +791,22 @@ class AudioEngine:
 
         start_time = time.time()
 
+        # --- MAX_AUDIO_MB guard (MED wave-26 DoS fix) ---
+        # Must run BEFORE pipeline_v2 early-return so that oversized files are
+        # rejected on both the pipeline_v2 path and the legacy path.  The legacy
+        # path repeats the same check at step 3 (defence-in-depth).
+        if isinstance(audio_data, (str, Path)) and os.path.exists(str(audio_data)):
+            _early_size_mb = os.path.getsize(str(audio_data)) / _BYTES_PER_MB
+            _max_mb = self._settings_get("max_audio_mb", 1000)
+            try:
+                _max_mb = float(_max_mb)
+            except (TypeError, ValueError):
+                _max_mb = 1000
+            if _early_size_mb > _max_mb:
+                raise ValueError(
+                    f"Файл слишком большой: {_early_size_mb:.1f}MB > {_max_mb}MB"
+                )
+
         # --- pipeline_v2 opt-in gate (W1263 F1) ---
         _pipeline_v2_enabled = False
         try:

@@ -31,13 +31,26 @@ def _mock_rewriter(ok=True, text="Исправленный текст", fallback
     return rewriter
 
 
+def _settings_enabled(key, default=None):
+    """settings_get stub: llm_rewrite ON, privacy mode OFF — the normal 'all go' fixture.
+
+    Using 'lambda k, d=None: True' was incorrect once the privacy_mode_enabled check
+    was added: it would return True for privacy_mode_enabled too, blocking the stage.
+    This explicit stub returns the correct per-key values.
+    """
+    return {
+        "privacy_mode_enabled": False,
+        "llm_rewrite_enabled": True,
+    }.get(key, True if default is None else default)
+
+
 class TestLLMRewriteStageInit(unittest.TestCase):
     def test_name_is_llm_rewrite(self):
         stage = LLMRewriteStage(rewriter=None)
         self.assertEqual(stage.name, "llm_rewrite")
 
     def test_should_run_false_when_no_rewriter(self):
-        stage = LLMRewriteStage(rewriter=None, settings_get=lambda k, d=None: True)
+        stage = LLMRewriteStage(rewriter=None, settings_get=_settings_enabled)
         ctx = _make_ctx()
         self.assertFalse(stage.should_run(ctx))
 
@@ -52,20 +65,20 @@ class TestLLMRewriteStageShouldRun(unittest.TestCase):
     def test_should_run_false_when_circuit_open(self):
         rewriter = _mock_rewriter()
         rewriter._circuit.state = "open"
-        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=_settings_enabled)
         ctx = _make_ctx()
         self.assertFalse(stage.should_run(ctx))
 
     def test_should_run_true_when_all_conditions_met(self):
         rewriter = _mock_rewriter()
-        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=_settings_enabled)
         ctx = _make_ctx()
         self.assertTrue(stage.should_run(ctx))
 
     def test_should_run_true_when_circuit_half_open(self):
         rewriter = _mock_rewriter()
         rewriter._circuit.state = "half_open"
-        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=_settings_enabled)
         ctx = _make_ctx()
         self.assertTrue(stage.should_run(ctx))
 
@@ -73,7 +86,7 @@ class TestLLMRewriteStageShouldRun(unittest.TestCase):
 class TestLLMRewriteStageProcess(unittest.TestCase):
     def test_process_ok_sets_rewritten_text_and_final_text(self):
         rewriter = _mock_rewriter(ok=True, text="Исправленный текст", latency=55)
-        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=_settings_enabled)
         ctx = _make_ctx(cleaned_text="привет мир")
         result = stage.process(ctx)
         self.assertTrue(result.llm_applied)
@@ -83,7 +96,7 @@ class TestLLMRewriteStageProcess(unittest.TestCase):
 
     def test_process_ok_false_keeps_original_in_rewritten(self):
         rewriter = _mock_rewriter(ok=False, text=None, fallback="circuit_open", latency=None)
-        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=_settings_enabled)
         ctx = _make_ctx(cleaned_text="оригинал")
         result = stage.process(ctx)
         self.assertFalse(result.llm_applied)
@@ -92,14 +105,14 @@ class TestLLMRewriteStageProcess(unittest.TestCase):
 
     def test_process_uses_cleaned_text_over_raw(self):
         rewriter = _mock_rewriter(ok=True, text="результат")
-        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=_settings_enabled)
         ctx = _make_ctx(cleaned_text="cleaned", raw_text="raw")
         stage.process(ctx)
         rewriter.rewrite.assert_called_once_with("cleaned")
 
     def test_process_falls_back_to_raw_when_cleaned_empty(self):
         rewriter = _mock_rewriter(ok=True, text="из raw")
-        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=_settings_enabled)
         ctx = _make_ctx(cleaned_text="", raw_text="raw текст")
         stage.process(ctx)
         rewriter.rewrite.assert_called_once_with("raw текст")
@@ -110,7 +123,7 @@ class TestLLMRewriteStageProcess(unittest.TestCase):
         circuit = MagicMock()
         circuit.state = "closed"
         rewriter._circuit = circuit
-        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=_settings_enabled)
         ctx = _make_ctx(cleaned_text="текст")
         result = stage.process(ctx)
         self.assertFalse(result.llm_applied)
@@ -122,7 +135,7 @@ class TestLLMRewriteStageProcess(unittest.TestCase):
         rewriter = MagicMock()
         rewriter.rewrite.side_effect = Exception("boom")
         rewriter._circuit = MagicMock(state="closed")
-        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=_settings_enabled)
         ctx = _make_ctx()
         try:
             stage.process(ctx)
@@ -131,7 +144,7 @@ class TestLLMRewriteStageProcess(unittest.TestCase):
 
     def test_process_latency_recorded_on_failure(self):
         rewriter = _mock_rewriter(ok=False, text=None, fallback="timeout", latency=100)
-        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=_settings_enabled)
         ctx = _make_ctx()
         result = stage.process(ctx)
         self.assertEqual(result.llm_latency_ms, 100)
@@ -153,7 +166,7 @@ class TestLLMRewriteNoCircuitAttr(unittest.TestCase):
         rewriter.rewrite.return_value = LLMRewriteResult(
             ok=True, text="ok", fallback_reason=None, latency_ms=10
         )
-        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=_settings_enabled)
         ctx = PipelineContext(audio_input=None)
         ctx.cleaned_text = "текст"
         # circuit is None → condition `circuit is not None` is False → no block
@@ -165,7 +178,7 @@ class TestLLMRewriteNoCircuitAttr(unittest.TestCase):
         rewriter.rewrite.return_value = LLMRewriteResult(
             ok=True, text="результат", fallback_reason=None, latency_ms=20
         )
-        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=_settings_enabled)
         ctx = _make_ctx(cleaned_text="входной текст")
         result = stage.process(ctx)
         self.assertTrue(result.llm_applied)
@@ -178,7 +191,7 @@ class TestLLMRewriteLatencyEdge(unittest.TestCase):
     def test_process_ok_with_latency_none(self):
         """When result.latency_ms is None, logger uses 'or 0' — no crash."""
         rewriter = _mock_rewriter(ok=True, text="текст", latency=None)
-        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=_settings_enabled)
         ctx = _make_ctx(cleaned_text="входной")
         result = stage.process(ctx)
         self.assertTrue(result.llm_applied)
@@ -187,7 +200,7 @@ class TestLLMRewriteLatencyEdge(unittest.TestCase):
     def test_process_ok_result_text_empty_string_falls_back_to_input(self):
         """result.ok=True but result.text='' → 'or text_in' selects text_in."""
         rewriter = _mock_rewriter(ok=True, text="", latency=5)
-        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=_settings_enabled)
         ctx = _make_ctx(cleaned_text="оригинал")
         result = stage.process(ctx)
         # result.text="" is falsy → text_in="оригинал" selected
@@ -205,6 +218,9 @@ class TestLLMRewriteSettingsKey(unittest.TestCase):
 
         def capturing_settings(key, default=None):
             calls.append(key)
+            # Return False for privacy_mode so we reach the llm_rewrite_enabled check
+            if key == "privacy_mode_enabled":
+                return False
             return True
         stage = LLMRewriteStage(rewriter=rewriter, settings_get=capturing_settings)
         ctx = _make_ctx()
@@ -215,7 +231,7 @@ class TestLLMRewriteSettingsKey(unittest.TestCase):
         """circuit.state != 'open' (e.g. 'degraded') → should_run returns True."""
         rewriter = _mock_rewriter()
         rewriter._circuit.state = "degraded"  # some non-standard state
-        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=_settings_enabled)
         ctx = _make_ctx()
         # Only "open" blocks; any other string allows
         self.assertTrue(stage.should_run(ctx))
@@ -229,7 +245,7 @@ class TestLLMRewriteIntegrationWithExecutor(unittest.TestCase):
         from core.pipeline.executor import PipelineExecutor
 
         rewriter = _mock_rewriter(ok=True, text="финальный текст", latency=30)
-        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=_settings_enabled)
         executor = PipelineExecutor([stage])
         ctx = PipelineContext(audio_input=None)
         ctx.cleaned_text = "исходный текст"
@@ -264,7 +280,7 @@ class TestLLMRewriteEdgeCases(unittest.TestCase):
     def test_circuit_breaker_open_skips_rewrite(self):
         rewriter = _mock_rewriter()
         rewriter._circuit.state = "open"
-        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=_settings_enabled)
         ctx = _make_ctx(cleaned_text="текст")
         stage.process(ctx)
         # Circuit open → should_run returns False
@@ -273,7 +289,7 @@ class TestLLMRewriteEdgeCases(unittest.TestCase):
     def test_circuit_breaker_half_open_allows_retry(self):
         rewriter = _mock_rewriter()
         rewriter._circuit.state = "half_open"
-        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=_settings_enabled)
         ctx = _make_ctx(cleaned_text="текст")
         # should_run True in half_open
         self.assertTrue(stage.should_run(ctx))
@@ -281,7 +297,7 @@ class TestLLMRewriteEdgeCases(unittest.TestCase):
     def test_max_tokens_exceeded(self):
         # Simulate rewriter hitting max tokens limit
         rewriter = _mock_rewriter(ok=False, fallback="max_tokens_exceeded", latency=100)
-        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=_settings_enabled)
         ctx = _make_ctx(cleaned_text="очень очень очень очень очень очень длинный текст " * 100)
         result = stage.process(ctx)
         self.assertFalse(result.llm_applied)
@@ -289,7 +305,7 @@ class TestLLMRewriteEdgeCases(unittest.TestCase):
 
     def test_empty_cleaned_text_fallback_to_raw(self):
         rewriter = _mock_rewriter(ok=True, text="из raw")
-        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=_settings_enabled)
         ctx = _make_ctx(cleaned_text="", raw_text="raw текст для переписи")
         stage.process(ctx)
         # Should call rewriter with raw_text
@@ -297,7 +313,7 @@ class TestLLMRewriteEdgeCases(unittest.TestCase):
 
     def test_both_cleaned_and_raw_empty(self):
         rewriter = _mock_rewriter(ok=True, text="default")
-        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=_settings_enabled)
         ctx = _make_ctx(cleaned_text="", raw_text="")
         stage.process(ctx)
         # Should still call with empty string
@@ -305,7 +321,7 @@ class TestLLMRewriteEdgeCases(unittest.TestCase):
 
     def test_timeout_during_rewrite(self):
         rewriter = _mock_rewriter(ok=False, fallback="timeout", latency=5000)
-        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=_settings_enabled)
         ctx = _make_ctx(cleaned_text="текст")
         result = stage.process(ctx)
         self.assertFalse(result.llm_applied)
@@ -314,7 +330,7 @@ class TestLLMRewriteEdgeCases(unittest.TestCase):
 
     def test_very_short_input_text(self):
         rewriter = _mock_rewriter(ok=True, text="a")
-        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=_settings_enabled)
         ctx = _make_ctx(cleaned_text="a")
         result = stage.process(ctx)
         self.assertTrue(result.llm_applied)
@@ -322,7 +338,7 @@ class TestLLMRewriteEdgeCases(unittest.TestCase):
     def test_rewriter_returns_none_text(self):
         # Rewriter returns ok=True but text=None (edge case)
         rewriter = _mock_rewriter(ok=True, text=None)
-        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=_settings_enabled)
         ctx = _make_ctx(cleaned_text="оригинал")
         result = stage.process(ctx)
         # Should handle gracefully
