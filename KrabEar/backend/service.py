@@ -610,7 +610,10 @@ class BackendService:
                 self._webhook_manager.set_privacy_mode(new_privacy)
         self._settings_svc.register_after_save_hook(_on_privacy_mode_webhooks)
 
-        self._sharing = SharingManager(store=self.store)
+        self._sharing = SharingManager(
+            store=self.store,
+            privacy_mode_fn=lambda: self._get_runtime_setting("privacy_mode_enabled", False),
+        )
         self._merger = RecordingMerger()
         self._transcript_versioning = TranscriptVersionManager(data_dir=self.store.data_dir)
         # BulkReprocessor — массовое перетранскрибирование истории (W1037 F4 / W1044 re-wire)
@@ -677,7 +680,10 @@ class BackendService:
         self._speaker_manager = SpeakerManager(data_dir=self.store.data_dir)
         # Wire speaker_manager into HistoryService for name resolution during exports
         self._history._speaker_manager = self._speaker_manager
-        self._playback_tracker = PlaybackTracker(data_dir=self.store.data_dir)
+        self._playback_tracker = PlaybackTracker(
+            data_dir=self.store.data_dir,
+            privacy_mode_fn=lambda: self._get_runtime_setting("privacy_mode_enabled", False),
+        )
         self._recording_comparison = RecordingComparison()
         self._smart_vocabulary = SmartVocabularyBuilder()
         # W1765 MED: wire settings_provider so privacy_mode_enabled suppresses topic
