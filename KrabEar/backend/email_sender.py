@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import re
 import smtplib
+import ssl
 import subprocess
 import textwrap
 from email.mime.multipart import MIMEMultipart
@@ -116,6 +117,7 @@ class EmailSender:
         smtp_use_ssl: bool = False,
         smtp_from: str = "",
         use_keychain: bool = True,
+        smtp_tls_insecure: bool = False,
     ) -> None:
         """
         Args:
@@ -129,6 +131,12 @@ class EmailSender:
             smtp_use_ssl: Использовать SMTP_SSL (порт 465).
             smtp_from: Адрес From. Если пуст — используется smtp_user.
             use_keychain: Искать пароль в macOS Keychain если smtp_password пуст.
+            smtp_tls_insecure: Явный opt-out из верификации TLS-сертификата
+                (CERT_NONE + check_hostname=False). По умолчанию False — все
+                соединения используют ssl.create_default_context() (CERT_REQUIRED
+                + проверка hostname через системный trust store). Устанавливайте
+                True ТОЛЬКО для локальных тестовых серверов без реального TLS;
+                никогда не включайте в production — открывает MITM-уязвимость.
         """
         self.backend_name = backend_name
         self.smtp_host = smtp_host
@@ -139,6 +147,7 @@ class EmailSender:
         self.smtp_use_ssl = smtp_use_ssl
         self.smtp_from = smtp_from or smtp_user
         self.use_keychain = use_keychain
+        self.smtp_tls_insecure = smtp_tls_insecure
 
     # ------------------------------------------------------------------
     # Public API
@@ -233,16 +242,31 @@ class EmailSender:
         msg.attach(MIMEText(body_text, "plain", "utf-8"))
         msg.attach(MIMEText(body_html, "html", "utf-8"))
 
+        # Build TLS context: default = CERT_REQUIRED + check_hostname via system trust store.
+        # Opt-out (smtp_tls_insecure=True) disables verification — local test servers only;
+        # never enable in production (MITM risk: captures login password + email body).
+        if self.smtp_tls_insecure:
+            logger.warning(
+                "SMTP TLS cert verification DISABLED (smtp_tls_insecure=True) — "
+                "MITM risk; do NOT use in production",
+                extra={"event": "email.tls.insecure_mode", "host": self.smtp_host},
+            )
+            ssl_ctx: ssl.SSLContext = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE
+        else:
+            ssl_ctx = ssl.create_default_context()  # CERT_REQUIRED + check_hostname=True
+
         try:
             if self.smtp_use_ssl:
-                with smtplib.SMTP_SSL(self.smtp_host, self.smtp_port) as server:
+                with smtplib.SMTP_SSL(self.smtp_host, self.smtp_port, context=ssl_ctx) as server:
                     if self.smtp_user and password:
                         server.login(self.smtp_user, password)
                     server.sendmail(self.smtp_from, [to], msg.as_string())
             else:
                 with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
                     if self.smtp_use_tls:
-                        server.starttls()
+                        server.starttls(context=ssl_ctx)
                     if self.smtp_user and password:
                         server.login(self.smtp_user, password)
                     server.sendmail(self.smtp_from, [to], msg.as_string())
@@ -377,4 +401,5 @@ class EmailSender:
             smtp_password=getattr(cfg, "SMTP_PASSWORD", ""),
             smtp_use_tls=bool(getattr(cfg, "SMTP_USE_TLS", True)),
             smtp_use_ssl=bool(getattr(cfg, "SMTP_USE_SSL", False)),
+            smtp_tls_insecure=bool(getattr(cfg, "SMTP_TLS_INSECURE", False)),
         )
