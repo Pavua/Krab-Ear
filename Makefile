@@ -161,13 +161,13 @@ audit-dispatch-test-targets:
 # StateStore search caches, JobTracker, semantic purge-epoch) is cleared by
 # handle_purge_all_data — else stale PII survives a purge in memory until restart.
 # Curated registry: adding a new in-RAM PII collaborator there forces the purge
-# wiring. REPORT-ONLY (NOT in audit-all / CI yet): pass ARGS=--fail-on-found to
-# gate, ARGS=--json for machine output, ARGS=--selftest for the known-bad/good check.
+# wiring. Strict (--fail-on-found) enforced in CI since wave-30 (#1717, 0 gaps).
+# Pass ARGS=--json for machine output, ARGS=--selftest for the known-bad/good check.
 audit-inmemory-purge-coverage:
-	python3 scripts/audit_inmemory_purge_coverage.py $(ARGS)
+	python3 scripts/audit_inmemory_purge_coverage.py --fail-on-found $(ARGS)
 
 # Run all static audit checks (CI parity — runs same checks as CI guard jobs).
-audit-all: audit-orphans audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-path-containment audit-dispatch-test-targets
+audit-all: audit-orphans audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-path-containment audit-dispatch-test-targets audit-inmemory-purge-coverage
 	@echo "All audit checks passed."
 
 # Reproduce the ubuntu krab-ear-ci env LOCALLY (Python 3.12, mlx ABSENT) and run
