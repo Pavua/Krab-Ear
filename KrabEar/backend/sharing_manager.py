@@ -289,7 +289,14 @@ class SharingManager:
         return found
 
     def get_shared(self, share_id: str) -> SharePackage | None:
-        """Возвращает SharePackage по ID, или None если не найден / истёк / отозван."""
+        """Возвращает SharePackage по ID, или None если не найден / истёк / отозван.
+
+        NOTE: privacy_mode is NOT enforced here — it is enforced at the IPC boundary
+        (handle_get_shared / handle_prepare_share via _privacy_gate()). Direct callers
+        of this method bypass privacy mode. There are currently no non-IPC callers
+        (verified wave-33/37: only handle_* wrappers call prepare_share/get_shared directly).
+        If a new internal caller is added, it MUST check privacy_mode_fn() before calling.
+        """
         now = time.time()
         with self._lock:
             entry = self._find_share_by_token_constant_time(share_id)
