@@ -36,6 +36,54 @@ _EMBEDDING_DIM = 512
 # W1236: жёсткий лимит размера embedding (~16 KB при float32) для защиты от DoS.
 _MAX_EMBEDDING_FLOATS = 4096  # ~16 KB per embedding, hard cap to prevent DoS via huge list
 
+# wave-27 B3: DoS guard — максимальное число зарегистрированных спикеров.
+MAX_SPEAKERS = 10_000
+
+# wave-27 B1/B2: ограничения псевдонима для защиты от Markdown/CSV injection.
+_ALIAS_MAX_LEN = 100
+# Символы, опасные в Markdown-таблицах (|), ссылках ([, ], (, )) и CSV formula injection (=, +, -, @).
+# Символы < > " ' & также опасны при экспорте в HTML/XML-контекст — снимаем их тоже.
+_ALIAS_FORBIDDEN_CHARS = frozenset('|[]()<>=+"\'&')
+_ALIAS_FORMULA_STARTERS = frozenset('=+-@')
+
+
+def _sanitize_alias(name: str) -> str:
+    """Нормализует псевдоним спикера для безопасного хранения.
+
+    Правила (wave-27 B1/B2):
+    - Обрезает ведущие и завершающие пробелы.
+    - Удаляет символы CR (\\r) и LF (\\n) — CRLF injection guard.
+    - Проверяет, что в имени нет символов опасных для Markdown и CSV (`| [ ] ( ) < > = + - @ " ' &`).
+    - Проверяет, что псевдоним не начинается с символов CSV formula injection (= + - @).
+    - Ограничивает длину до _ALIAS_MAX_LEN символов.
+
+    Поднимает ValueError если имя не проходит проверку.
+    Возвращает очищенное имя.
+    """
+    name = name.strip()
+    # CRLF injection — убираем полностью
+    if '\r' in name or '\n' in name:
+        raise ValueError(
+            "Псевдоним спикера не должен содержать символы CR/LF (\\r, \\n)"
+        )
+    # Длина
+    if len(name) > _ALIAS_MAX_LEN:
+        raise ValueError(
+            f"Псевдоним спикера слишком длинный: {len(name)} символов (максимум {_ALIAS_MAX_LEN})"
+        )
+    # Запрещённые символы
+    bad = _ALIAS_FORBIDDEN_CHARS.intersection(name)
+    if bad:
+        raise ValueError(
+            f"Псевдоним спикера содержит недопустимые символы: {sorted(bad)!r}"
+        )
+    # CSV formula injection — первый символ
+    if name and name[0] in _ALIAS_FORMULA_STARTERS:
+        raise ValueError(
+            f"Псевдоним спикера не должен начинаться с символа CSV formula injection: {name[0]!r}"
+        )
+    return name
+
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     """Возвращает косинусное сходство двух 1-D векторов в диапазоне [-1, 1]."""
@@ -138,9 +186,15 @@ class SpeakerManager:
             _log.warning("Не удалось сохранить фингерпринты спикеров: %s", exc)
 
     def set_alias(self, speaker_id: str, name: str) -> None:
-        """Назначает псевдоним спикеру. Пустое имя — удаляет псевдоним."""
+        """Назначает псевдоним спикеру. Пустое имя — удаляет псевдоним.
+
+        wave-27 B1/B2: псевдоним санируется через _sanitize_alias() перед сохранением —
+        проверяются CRLF, длина, запрещённые символы (Markdown/CSV injection guard).
+        """
         speaker_id = speaker_id.strip()
         name = name.strip()
+        if name:
+            name = _sanitize_alias(name)
         with self._lock:
             if name:
                 self._aliases[speaker_id] = name
@@ -314,7 +368,12 @@ class SpeakerManager:
         return best_id if best_score >= threshold else None
 
     def register_speaker(self, name: str, embedding: np.ndarray) -> str:
-        """Регистрирует нового спикера. Returns новый speaker_id."""
+        """Регистрирует нового спикера. Returns новый speaker_id.
+
+        wave-27 B3: поднимает ValueError если количество зарегистрированных спикеров
+        достигло MAX_SPEAKERS (DoS guard — предотвращает неограниченный рост файла + fsync на каждой мутации).
+        wave-27 B1: name санируется через _sanitize_alias() перед сохранением.
+        """
         if embedding is None:
             raise ValueError("embedding не может быть None")
         # W1236: проверяем длину embedding до сохранения (DoS guard)
@@ -324,10 +383,18 @@ class SpeakerManager:
                 f"embedding length {len(flat)} exceeds _MAX_EMBEDDING_FLOATS={_MAX_EMBEDDING_FLOATS}"
             )
         with self._lock:
+            # wave-27 B3: cap on number of speakers
+            if len(self._fingerprints) >= MAX_SPEAKERS:
+                raise ValueError(
+                    f"Достигнут лимит спикеров: {MAX_SPEAKERS}. "
+                    "Удалите неиспользуемые профили через delete_speaker_fingerprint."
+                )
             speaker_id = f"Speaker_{self._auto_speaker_counter}"
             self._auto_speaker_counter += 1
             name = name.strip()
             if name:
+                # wave-27 B1: sanitize alias at write time
+                name = _sanitize_alias(name)
                 self._aliases[speaker_id] = name
             self._fingerprints[speaker_id] = embedding.flatten().tolist()
             self._save()
