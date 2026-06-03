@@ -210,9 +210,13 @@ class TestSpeakerManagerEdgeCases(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_create_profile_with_lang_hint(self):
-        """Псевдоним может кодировать язык: 'Паша (RU)'."""
-        self.mgr.set_alias("SPEAKER_00", "Паша (RU)")
-        self.assertEqual(self.mgr.get_alias("SPEAKER_00"), "Паша (RU)")
+        """Псевдоним без запрещённых символов сохраняется корректно.
+
+        wave-27: скобки ( ) запрещены как потенциально опасные в Markdown-ссылках.
+        Используем безопасный вариант 'Паша RU'.
+        """
+        self.mgr.set_alias("SPEAKER_00", "Паша RU")
+        self.assertEqual(self.mgr.get_alias("SPEAKER_00"), "Паша RU")
 
     # ------------------------------------------------------------------
     # Rename: exists vs not-exists
