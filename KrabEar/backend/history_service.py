@@ -765,6 +765,9 @@ class HistoryService:
         Params: id (str)
         Returns: {"id": ..., "tags": [...]}
         """
+        # wave-40 LOW: tag names can be sensitive. Gate for consistency with handle_search_by_tag.
+        if self._is_privacy_mode():
+            return {"id": params.get("id", ""), "tags": [], "reason": "privacy_mode_active"}
         item_id = str(params.get("id", "")).strip()
         if not item_id:
             raise RuntimeError("id обязателен")
@@ -807,6 +810,10 @@ class HistoryService:
 
         Returns: {"tags": [{"tag": "...", "count": N}, ...]}
         """
+        # wave-40 MED: user tag names can be sensitive (e.g. "doctor visit", "secret project").
+        # Aggregate frequency + corpus reveals usage patterns. Gate mirrors search_by_tag (line 784).
+        if self._is_privacy_mode():
+            return {"tags": [], "reason": "privacy_mode_active"}
         with self.store._lock():
             active = self.store._load_active_items_unlocked()
 
