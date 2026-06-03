@@ -14,7 +14,7 @@ import threading
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger("KrabEar.Backend.SearchHistory")
 
@@ -38,9 +38,21 @@ class SearchHistoryManager:
     }
     """
 
-    def __init__(self, data_dir: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        data_dir: str | Path | None = None,
+        settings_fn: Optional[Callable[[str, Any], Any]] = None,
+    ) -> None:
+        """
+        Args:
+            data_dir:    Директория данных для персистентности (опционально).
+            settings_fn: callable(key, default) → Any — runtime settings lookup
+                         для privacy_mode_enabled guard (wave-35 C3).
+                         Если не передан — privacy gate отключён.
+        """
         self._lock = threading.Lock()
         self._entries: list[dict[str, Any]] = []
+        self._settings_get: Callable[[str, Any], Any] = settings_fn or (lambda k, d: d)
         if data_dir is not None:
             self._path: Path | None = Path(data_dir) / _SEARCH_HISTORY_FILE
             self._load()
@@ -154,12 +166,27 @@ class SearchHistoryManager:
     # ------------------------------------------------------------------
 
     def handle_get_recent_searches(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: get_recent_searches — последние поисковые запросы."""
+        """IPC: get_recent_searches — последние поисковые запросы.
+
+        Privacy guard (wave-35 C3): когда privacy_mode_enabled=True возвращает
+        пустой список — история поисковых запросов раскрывает пользовательскую
+        активность поиска в privacy mode.
+        """
+        # wave-35 C3: privacy gate — search queries reveal user activity
+        if self._settings_get("privacy_mode_enabled", False):
+            return {"searches": [], "reason": "privacy_mode_active"}
         limit = int(params.get("limit", 20))
         return {"searches": self.get_recent_searches(limit=limit)}
 
     def handle_get_popular_searches(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: get_popular_searches — самые частые запросы."""
+        """IPC: get_popular_searches — самые частые запросы.
+
+        Privacy guard (wave-35 C3): когда privacy_mode_enabled=True возвращает
+        пустой список — популярные запросы раскрывают паттерны активности поиска.
+        """
+        # wave-35 C3: privacy gate — popular queries reveal user search patterns
+        if self._settings_get("privacy_mode_enabled", False):
+            return {"searches": [], "reason": "privacy_mode_active"}
         limit = int(params.get("limit", 10))
         return {"searches": self.get_popular_searches(limit=limit)}
 

@@ -711,7 +711,10 @@ class BackendService:
         self._timeline_exporter = TimelineExporter()
         self._timeline_view = TimelineViewGenerator()
         self._auto_deduplicator = AutoDeduplicator(settings_provider=self._get_runtime_setting)
-        self._search_history = SearchHistoryManager(data_dir=self.store.data_dir)
+        self._search_history = SearchHistoryManager(
+            data_dir=self.store.data_dir,
+            settings_fn=self._get_runtime_setting,
+        )
         self._archive_manager = ArchiveManager(store=self.store)
         # W1687 F7 MED: wire recording chain manager so archived items are
         # removed from their chains (ghost references prevented).
@@ -787,6 +790,7 @@ class BackendService:
             audio_fingerprinter=self._audio_fingerprinter,
             word_timing_analyzer=self._word_timing_analyzer,
             store=self.store,
+            settings_get=self._get_runtime_setting,
         )
         self._template_manager = TemplateManager(data_dir=self.store.data_dir)
         # W1771 GAP-2: wire template_manager into HistoryService so handle_purge_all_data

@@ -76,6 +76,7 @@ class AudioAnalyticsService:
         audio_fingerprinter: Any,
         word_timing_analyzer: Any,
         store: Any,
+        settings_get: Any = None,
     ) -> None:
         """
         Args:
@@ -84,12 +85,16 @@ class AudioAnalyticsService:
             audio_fingerprinter: AudioFingerprinter   — фингерпринт/сравнение.
             word_timing_analyzer: WordTimingAnalyzer  — ритм речи.
             store:               StateStore           — доступ к истории (для trends).
+            settings_get:        callable(key, default) → Any — runtime settings lookup
+                                 (передаётся как BackendService._get_runtime_setting).
+                                 Используется для privacy_mode_enabled guard.
         """
         self._audio_converter = audio_converter
         self._quality_trends = quality_trends
         self._audio_fingerprinter = audio_fingerprinter
         self._word_timing_analyzer = word_timing_analyzer
         self._store = store
+        self._settings_get = settings_get or (lambda k, d: d)
         # W1736: resolve data_dir once so _validate_audio_read_path can use it.
         _data_dir = getattr(store, "data_dir", None)
         self._data_dir: Path | None = Path(_data_dir).resolve() if _data_dir else None
@@ -146,7 +151,17 @@ class AudioAnalyticsService:
         return analyze_silence_file(file_path, threshold_db=threshold_db)
 
     def handle_analyze_quality_trends(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Анализирует тренды качества распознавания за последние N дней."""
+        """Анализирует тренды качества распознавания за последние N дней.
+
+        Privacy guard (wave-35 C1): когда privacy_mode_enabled=True возвращает
+        {'ok': False, 'reason': 'privacy_mode_active'} — тренды раскрывают паттерны
+        записей (дни/время активности, качество) без доступа к тексту.
+        """
+        # wave-35 C1: privacy gate — quality trends reveal recording patterns
+        # (active days, confidence levels) derived from history; must be blocked.
+        if self._settings_get("privacy_mode_enabled", False):
+            return {"ok": False, "reason": "privacy_mode_active"}
+
         days = int(params.get("days", 30))
         try:
             with self._store._lock():
