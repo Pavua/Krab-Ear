@@ -18,6 +18,10 @@ logger = logging.getLogger("KrabEar.Backend.Bookmarks")
 # 10 000 active entries ~ 6 MB in the worst case (256-char notes).
 MAX_BOOKMARKS = 10_000
 
+# LOW DoS cap (wave-36): per-note length cap to bound NDJSON growth.
+# A single malicious note could write arbitrarily large bytes per bookmark.
+MAX_NOTE_LEN = 2000
+
 # Compact when tombstones exceed this fraction of total NDJSON lines.
 _COMPACT_TOMBSTONE_RATIO = 0.5
 
@@ -164,11 +168,19 @@ class BookmarkManager:
                 )
                 return {"ok": False, "reason": "limit_exceeded"}
 
+            clean_note = str(note).strip()
+            # D2 (wave-36 LOW): per-note length cap — a single oversized note
+            # could write an unbounded number of bytes into bookmarks.ndjson.
+            if len(clean_note) > MAX_NOTE_LEN:
+                clean_note = clean_note[:MAX_NOTE_LEN]
+                logger.warning(
+                    "bookmarks: заметка обрезана до %d символов", MAX_NOTE_LEN
+                )
             bookmark: dict[str, Any] = {
                 "id": str(uuid.uuid4()),
                 "session_id": str(session_id).strip() or "__live__",
                 "offset_sec": round(float(offset_sec), 3),
-                "note": str(note).strip(),
+                "note": clean_note,
                 "ts": datetime.now().isoformat(timespec="seconds"),
                 "deleted": False,
             }

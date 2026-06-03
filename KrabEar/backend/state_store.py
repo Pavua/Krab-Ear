@@ -693,6 +693,11 @@ class StateStore:
 
                 self._append_ndjson(self.history_path, item.to_dict())
                 known_ids.add(item.id)
+                # D1 (wave-36 LOW): keep in-memory id set consistent with items
+                # added via import so that subsequent set_paste_status calls on
+                # imported ids don't get a false-negative from the O(1) check.
+                if self._active_ids is not None:
+                    self._active_ids.add(item.id)
                 imported += 1
 
         return {"imported": imported, "skipped": skipped, "errors": errors}
