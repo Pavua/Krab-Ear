@@ -1,4 +1,4 @@
-.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release reset-tcc clean-worktree-builds audit-orphans audit-handlers audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-path-containment audit-dispatch-test-targets audit-all pre-merge-check dispatch-tests service-loc
+.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release reset-tcc clean-worktree-builds audit-orphans audit-handlers audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-inmemory-purge-coverage audit-path-containment audit-dispatch-test-targets audit-all pre-merge-check dispatch-tests service-loc
 
 VENV = .venv_krab_ear
 PYTHON = $(VENV)/bin/python
@@ -154,6 +154,17 @@ audit-path-containment:
 # machine output, ARGS=--selftest for the known-bad/good check.
 audit-dispatch-test-targets:
 	python3 scripts/audit_dispatch_test_targets.py --fail-on-found $(ARGS)
+
+# Audit in-memory (in-RAM) privacy-purge coverage (curated-registry guard).
+# Companion to audit-purge-coverage (disk-backed stores): asserts every in-RAM
+# PII collaborator in the REGISTRY (context_memory deque, clipboard history,
+# StateStore search caches, JobTracker, semantic purge-epoch) is cleared by
+# handle_purge_all_data — else stale PII survives a purge in memory until restart.
+# Curated registry: adding a new in-RAM PII collaborator there forces the purge
+# wiring. REPORT-ONLY (NOT in audit-all / CI yet): pass ARGS=--fail-on-found to
+# gate, ARGS=--json for machine output, ARGS=--selftest for the known-bad/good check.
+audit-inmemory-purge-coverage:
+	python3 scripts/audit_inmemory_purge_coverage.py $(ARGS)
 
 # Run all static audit checks (CI parity — runs same checks as CI guard jobs).
 audit-all: audit-orphans audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-path-containment audit-dispatch-test-targets
