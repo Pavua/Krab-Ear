@@ -540,12 +540,32 @@ class BackendService:
             persist_path=self.store.data_dir / "event_replay.ndjson",
             settings_provider=self._settings_svc.cached_settings,
         )
-        # W1687 F2 HIGH: wire settings_provider so privacy-mode redaction
-        # in get_event_log / replay_events is honoured at runtime.
+        # W1687 F2 HIGH / W23 MED: wire settings_provider so privacy-mode redaction
+        # in get_event_log / replay_events / get_event_stats is honoured at runtime.
+        # W23 made this TRUE on the READ path too: get_events/replay_events/
+        # get_event_stats now redact payloads whenever privacy_mode is active,
+        # so cleartext recorded before privacy was enabled is never returned cleartext.
         # W1677 F1 HIGH: wire late-injection so EventBus.emit() actually records
         # to the replay ring-buffer. Without this, _event_replay stays None and
         # get_event_log / get_event_stats / replay_events always return empty.
         event_bus._event_replay = self._event_replay
+        # W23 MED (defense-in-depth): when privacy_mode flips OFF->ON at runtime,
+        # WIPE the existing cleartext ring buffer + event_replay.ndjson immediately.
+        # Read-path redaction (above) already prevents leaks WHILE privacy is on; this
+        # hook additionally destroys the pre-privacy cleartext so it can never resurface
+        # if privacy is later toggled back OFF. Mirrors _on_privacy_mode_webhooks.
+
+        def _on_privacy_mode_wipe_event_replay(old: dict, new: dict) -> None:
+            old_privacy = bool(old.get("privacy_mode_enabled", False))
+            new_privacy = bool(new.get("privacy_mode_enabled", False))
+            if not old_privacy and new_privacy:
+                try:
+                    self._event_replay.clear()
+                except Exception:
+                    logger.exception(
+                        "wave23: failed to wipe event_replay on privacy_mode enable"
+                    )
+        self._settings_svc.register_after_save_hook(_on_privacy_mode_wipe_event_replay)
         self._webhook_manager = WebhookManager(data_dir=self.store.data_dir)
         # wave1775: wire fire_webhook into the EventBus so REGISTERED webhooks actually
         # FIRE.  Before this, register/list/unregister IPC handlers were wired but
