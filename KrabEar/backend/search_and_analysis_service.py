@@ -325,11 +325,20 @@ class SearchAndAnalysisService:
     def handle_get_pending_action_items(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_pending_action_items — items у которых action_items=None.
 
+        Privacy guard (wave-35 C2): когда privacy_mode_enabled=True возвращает
+        пустой список без доступа к текстам транскрипций — text_preview поля
+        (100 chars) утекают содержимое транскрипта в privacy mode.
+
         Params:
             min_duration_sec — минимальная длительность аудио (float, опционально).
         Returns:
             {"pending": [...], "count": int}
         """
+        # wave-35 C2: privacy gate — text_preview exposes transcript content
+        if self._settings_get("privacy_mode_enabled", False):
+            return {"ok": True, "items": [], "pending": [], "count": 0,
+                    "reason": "privacy_mode_active"}
+
         min_duration = float(params.get("min_duration_sec", 0.0))
 
         with self._store._lock():
