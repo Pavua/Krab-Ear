@@ -33,6 +33,21 @@ _MAX_COMBINED_TERMS: int = 250
 # При 250 многословных терминах один раздел Glossary может превысить лимит в 3×.
 _MAX_PROMPT_CHARS: int = 560
 
+# W23 MED: per-item character cap before joining.  A single planted item cannot
+# fill the whole _MAX_PROMPT_CHARS budget.  We take only the LAST N chars of
+# each item text (tail bias = most recent words, consistent with the word-tail
+# slicing done on the joined combined string below).
+_MAX_ITEM_CHARS: int = 200
+
+# W23 MED: strip leading imperative/markup prefixes from the Previous-transcript
+# section to reduce prompt-injection blast radius.  Matched case-insensitively
+# at the start of each item contribution and at the start of the joined block.
+_INJECTION_PREFIX_RE = re.compile(
+    r"^(?:SYSTEM|IGNORE\s+(?:ABOVE|PREVIOUS)|USER|ASSISTANT|PROMPT|INSTRUCTION|CONTEXT)"
+    r"\s*:\s*",
+    re.IGNORECASE,
+)
+
 # W873-4 MEDIUM: Whisper BPE limit is 224 tokens for initial_prompt.
 # Cyrillic words tokenize at ~2.5–3 BPE tokens each (morphologically rich,
 # multi-character grapheme clusters), while Latin words average ~1.5 tokens.
@@ -167,11 +182,30 @@ def build_initial_prompt(
             continue
 
         if raw_ts:
-            age = now - _iso_to_epoch(raw_ts)
+            # W23 LOW: clamp age to >=0 so future-dated items are treated as
+            # age=0 (included) rather than receiving a large negative age that
+            # could bypass the staleness horizon in unexpected ways.
+            age = max(0.0, now - _iso_to_epoch(raw_ts))
             if age > max_age_seconds:
                 continue
 
-        texts.append(raw_text)
+        # W23 MED: per-item character cap — take only the last _MAX_ITEM_CHARS
+        # characters so a single planted item cannot dominate the whole prompt.
+        item_text = raw_text
+        if len(item_text) > _MAX_ITEM_CHARS:
+            item_text = item_text[-_MAX_ITEM_CHARS:]
+            # Re-align to word boundary: drop a possible partial leading word.
+            space_pos = item_text.find(" ")
+            if 0 < space_pos < _MAX_ITEM_CHARS // 2:
+                item_text = item_text[space_pos + 1:]
+
+        # W23 MED: strip obvious imperative/markup prefix tokens that a planted
+        # item might use to steer Whisper (e.g. "SYSTEM: ignore above").
+        item_text = _INJECTION_PREFIX_RE.sub("", item_text).strip()
+        if not item_text:
+            continue
+
+        texts.append(item_text)
 
     combined = _ITEM_SEP.join(texts).strip()
     if combined:
