@@ -2836,7 +2836,29 @@ class BackendService:
         """Возвращает кумулятивную статистику записей: длительность, языки, LLM, диаризация.
 
         Сканирует всю активную историю через store и агрегирует метаданные.
+
+        Privacy gate (wave-37): когда privacy_mode_enabled=True возвращает пустой
+        ответ — агрегированная активность записей раскрывает паттерны использования
+        в режиме приватности. Схема ключей совпадает с нормальным ответом.
         """
+        if self._get_runtime_setting("privacy_mode_enabled", False):
+            return {
+                "ok": False,
+                "reason": "privacy_mode_active",
+                "total_count": 0,
+                "total_duration_sec": 0.0,
+                "today_count": 0,
+                "today_duration_sec": 0.0,
+                "week_count": 0,
+                "week_duration_sec": 0.0,
+                "avg_duration_sec": 0.0,
+                "most_used_lang": "",
+                "lang_distribution": [],
+                "llm_applied_count": 0,
+                "llm_correction_rate": 0.0,
+                "diarization_used_count": 0,
+                "diarization_usage_rate": 0.0,
+            }
         active = self.store._load_active_items_with_lock()
 
         now = datetime.now(timezone.utc)

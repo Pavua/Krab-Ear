@@ -137,7 +137,31 @@ class AnalyticsService:
         return self._sentiment_trends.to_dict(report)
 
     def handle_compare_periods(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Сравнивает статистику двух временных периодов."""
+        """Сравнивает статистику двух временных периодов.
+
+        Privacy gate (wave-37): когда privacy_mode_enabled=True возвращает пустой
+        ответ — статистика по периодам раскрывает паттерны активности записей
+        в режиме приватности. Схема ключей совпадает с нормальным ответом.
+        """
+        if self._settings_get("privacy_mode_enabled", False):
+            empty_period = {
+                "recordings": 0,
+                "duration_sec": 0.0,
+                "words": 0,
+                "avg_confidence": 0.0,
+                "languages": {},
+            }
+            return {
+                "ok": False,
+                "reason": "privacy_mode_active",
+                "period1": empty_period,
+                "period2": empty_period,
+                "recordings_change_pct": 0.0,
+                "duration_change_pct": 0.0,
+                "confidence_change": 0.0,
+                "new_languages": [],
+                "summary": "",
+            }
         from backend.period_comparison import compare_periods as _compare_periods_fn
 
         p1_start = params.get("period1_start")
