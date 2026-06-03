@@ -3195,6 +3195,8 @@ class BackendService:
 
     def _handle_generate_daily_digest(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует ежедневный дайджест транскрипций за указанную дату."""
+        if self._get_runtime_setting('privacy_mode_enabled', False):
+            return {'ok': False, 'reason': 'privacy_mode_active'}
         date_str = params.get("date")  # None → today
         digest = self._daily_digest.generate_digest(date_str=date_str, store=self.store)
         return {

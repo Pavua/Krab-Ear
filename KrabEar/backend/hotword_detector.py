@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import tempfile
 import threading
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -63,10 +65,12 @@ class HotwordDetector:
     def _save(self) -> None:
         try:
             entries = list(self._hotwords.values())
-            self._path.write_text(
+            tmp = self._path.with_suffix('.json.tmp')
+            tmp.write_text(
                 json.dumps(entries, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            os.replace(str(tmp), str(self._path))
         except Exception:
             logger.exception("Не удалось сохранить hotwords.json")
 
