@@ -347,7 +347,9 @@ class TestObsidianSyncIpcHandlers(unittest.TestCase):
     """Тесты IPC-обработчиков handle_configure / handle_sync / handle_get_status."""
 
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
+        # wave-32: handle_configure() enforces vault_path must be under $HOME;
+        # create temp dirs under home so these tests still exercise the IPC path.
+        self.tmp = tempfile.TemporaryDirectory(dir=Path.home())
         self.addCleanup(self.tmp.cleanup)
         self.data_dir = Path(self.tmp.name) / "data"
         self.data_dir.mkdir(parents=True)

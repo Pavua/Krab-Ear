@@ -62,6 +62,10 @@ HEAVY_METHODS: Set[str] = {
     # В light-bucket (120/min) злоумышленник мог бы спамить синтез без ограничений.
     # Переводим в heavy-bucket (≤5/min) — паритет с transcribe_paths.
     "synthesize_speech",        # TTS синтез: Silero / Kokoro / macOS say inference
+    # wave-32 MED DoS: run_obsidian_sync итерирует ВСЮ историю и пишет .md файлы
+    # без ограничения размера — без throttle повторный вызов раздувает диск и блокирует I/O.
+    # MAX_SYNC_ITEMS=10_000 cap + heavy-bucket (≤5/min) предотвращают disk-fill атаку.
+    "run_obsidian_sync",        # синхронизация транскрипций с Obsidian vault (file I/O)
 }
 
 MEDIUM_METHODS: Set[str] = {
