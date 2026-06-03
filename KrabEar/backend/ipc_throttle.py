@@ -49,6 +49,11 @@ HEAVY_METHODS: Set[str] = {
     # (до 1000 записей) прямо на IPC reader-треде → блокирует ВЕСЬ IPC на минуты.
     # Переводим в heavy-bucket (≤5/min — фактически ≤2/min с учётом cooldown).
     "bulk_reprocess_start",     # массовое перетранскрибирование истории
+    # wave-27 MED: transcribe_paths / transcribe_paths_async запускают полный
+    # MLX STT pipeline + file I/O на каждый путь. Аналогично bulk_reprocess_start —
+    # пропускная способность ограничена GPU, а не IPC. Переводим в heavy-bucket.
+    "transcribe_paths",         # синхронная транскрибация файлов (MLX STT + file I/O)
+    "transcribe_paths_async",   # асинхронная транскрибация файлов (тот же pipeline)
 }
 
 MEDIUM_METHODS: Set[str] = {
