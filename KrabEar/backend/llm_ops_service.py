@@ -95,7 +95,15 @@ class LLMOpsService:
             return {"models": [], "recommended_models": [], "error": str(exc)}
 
     def handle_get_last_llm_diff(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает последний word-level diff от LLM rewriter'а."""
+        """Возвращает последний word-level diff от LLM rewriter'а.
+
+        Privacy gate (wave-29): если privacy_mode_enabled → diff не возвращается.
+        diff.words_added/words_removed содержат текст транскрипции — утечка PII.
+        """
+        cached = self._settings_svc.cached_settings() if self._settings_svc is not None else {}
+        if cached.get("privacy_mode_enabled"):
+            return {"ok": True, "diff": None, "reason": "privacy_mode_active"}
+
         engine = self._transcriber.engine
         diff = getattr(engine, '_last_llm_diff', None)
         if diff is None:
@@ -120,6 +128,9 @@ class LLMOpsService:
     ) -> dict[str, Any]:
         """Заменяет слово в последней (или указанной) записи истории без перезаписи.
 
+        Privacy gate (wave-29): если privacy_mode_enabled → отказ без чтения истории.
+        new_text в ответе содержит текст транскрипции — утечка PII в privacy mode.
+
         Параметры:
           - old_word: str — слово для замены (не пустое).
           - new_word: str — новое слово (не пустое).
@@ -129,11 +140,16 @@ class LLMOpsService:
             {"ok": bool, "replaced_count": int, "history_id": str | None, "new_text": str | None}
 
         Ошибки (ok=False):
+          - "privacy_mode_active" — privacy mode включён, операция запрещена.
           - "missing_words"      — old_word или new_word пусты.
           - "no_recent_history"  — история пуста и history_id не указан.
           - "item_not_found"     — запись с history_id не найдена.
           - "word_not_found"     — слово не найдено в тексте (с учётом границ слова).
         """
+        cached = self._settings_svc.cached_settings() if self._settings_svc is not None else {}
+        if cached.get("privacy_mode_enabled"):
+            return {"ok": False, "reason": "privacy_mode_active"}
+
         old = str(params.get("old_word", "")).strip()
         new = str(params.get("new_word", "")).strip()
         if not old or not new:
