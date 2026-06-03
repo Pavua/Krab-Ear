@@ -57,6 +57,10 @@ _MAX_RESPONSE_BYTES = 64 * 1024  # 64 KB cap on response body (F2 fix)
 # BUG 4 fix: bounded delivery pool — prevents unbounded thread creation on event bursts.
 _DELIVERY_MAX_WORKERS = 4
 
+# MED DoS cap (wave-28): unlimited webhooks → fire() calls all of them on every event.
+# 100 webhooks × 3 retry attempts × up to 10 s each = bounded CPU/thread cost.
+MAX_WEBHOOKS = 100
+
 # ---------------------------------------------------------------------------
 # SSRF guard
 # ---------------------------------------------------------------------------
@@ -483,17 +487,25 @@ class WebhookManager:
         if not safe:
             raise ValueError(f"URL отклонён защитой SSRF ({reason}): {url!r}")
 
-        webhook_id = str(uuid.uuid4())
-        entry: dict[str, Any] = {
-            "url": url,
-            "events": list(events),
-            "secret": secret,
-            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "enabled": True,
-            # Persist allow_local so fire_webhook can pass it to _deliver_with_retry
-            "allow_local": allow_local,
-        }
+        # MED DoS cap (wave-28): reject if already at MAX_WEBHOOKS.
+        # fire() iterates all webhooks on every event — unbounded registration is a
+        # CPU/thread DoS.  SSRF guard (allow_local=False IPC enforcement) still holds.
         with self._lock:
+            if len(self._webhooks) >= MAX_WEBHOOKS:
+                raise ValueError(
+                    f"webhook_limit_reached: максимум {MAX_WEBHOOKS} webhook-ов"
+                )
+
+            webhook_id = str(uuid.uuid4())
+            entry: dict[str, Any] = {
+                "url": url,
+                "events": list(events),
+                "secret": secret,
+                "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "enabled": True,
+                # Persist allow_local so fire_webhook can pass it to _deliver_with_retry
+                "allow_local": allow_local,
+            }
             self._webhooks[webhook_id] = entry
             self._save()
 
@@ -638,7 +650,14 @@ class WebhookManager:
         # Исправление SSRF (wave1763 MED): allow_local НЕ читается из IPC-параметров.
         # Недоверенный IPC-клиент не может обойти SSRF-защиту, передав
         # webhook_allow_local=True в теле запроса. Всегда False.
-        webhook_id = self.register_webhook(url=url, events=events, secret=secret, allow_local=False)
+        try:
+            webhook_id = self.register_webhook(url=url, events=events, secret=secret, allow_local=False)
+        except ValueError as exc:
+            # MED DoS cap (wave-28): limit reached → structured error response.
+            msg = str(exc)
+            if "webhook_limit_reached" in msg:
+                return {"ok": False, "reason": "webhook_limit_reached"}
+            raise
         return {"webhook_id": webhook_id}
 
     def handle_unregister_webhook(self, params: dict[str, Any]) -> dict[str, Any]:
