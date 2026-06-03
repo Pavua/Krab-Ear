@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 from datetime import datetime
@@ -219,15 +220,28 @@ class PasteFormatter:
             _log.warning("Не удалось загрузить кастомные форматтеры: %s", exc)
 
     def _save(self) -> None:
-        """Сохраняет кастомные форматтеры в файл."""
+        """Сохраняет кастомные форматтеры в файл атомарно.
+
+        W24 (LOW, data-loss): direct write_text truncates the file first; a
+        crash or disk-full mid-write would corrupt paste_formatters.json, and
+        the next _load() would silently return an empty dict, discarding all
+        custom formatters.  Atomic pattern: write → fsync → os.replace (rename).
+        """
         if self._path is None:
             return
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._path.write_text(
-                json.dumps(self._custom, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            content = json.dumps(self._custom, ensure_ascii=False, indent=2)
+            tmp = self._path.with_suffix(".json.tmp")
+            try:
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    fh.write(content)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp, self._path)
+            except Exception:
+                tmp.unlink(missing_ok=True)
+                raise
         except Exception as exc:
             _log.warning("Не удалось сохранить кастомные форматтеры: %s", exc)
 

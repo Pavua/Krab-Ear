@@ -84,6 +84,13 @@ class PluginManager:
     # Обнаружение
     # ------------------------------------------------------------------
 
+    # W24 (LOW, local-DoS): cap the number of plugin subdirectories scanned so a
+    # directory with thousands of entries cannot stall discovery indefinitely.
+    _MAX_PLUGIN_DIRS = 100
+    # W24 (LOW): skip manifests larger than 64 KiB — legitimate plugin.json files
+    # are never close to this size; oversized files are likely a DoS attempt.
+    _MAX_MANIFEST_BYTES = 64 * 1024
+
     def discover_plugins(self, plugins_dir: Path | None = None) -> list[PluginInfo]:
         """Сканирует директорию plugins_dir в поисках plugin.json манифестов.
 
@@ -98,11 +105,25 @@ class PluginManager:
             return []
 
         found: list[PluginInfo] = []
-        for entry in sorted(plugins_dir.iterdir()):
+        # W24 (LOW, local-DoS): cap subdirectory scan to first _MAX_PLUGIN_DIRS entries.
+        entries = sorted(plugins_dir.iterdir())[:self._MAX_PLUGIN_DIRS]
+        for entry in entries:
             if not entry.is_dir():
                 continue
             manifest_path = entry / "plugin.json"
             if not manifest_path.is_file():
+                continue
+            # W24 (LOW, local-DoS): skip oversized manifests before opening.
+            try:
+                if manifest_path.stat().st_size > self._MAX_MANIFEST_BYTES:
+                    logger.warning(
+                        "Манифест %s превышает лимит %d байт, пропускается",
+                        manifest_path,
+                        self._MAX_MANIFEST_BYTES,
+                    )
+                    continue
+            except OSError as exc:
+                logger.warning("Не удалось проверить размер манифеста %s: %s", manifest_path, exc)
                 continue
             info = self._parse_manifest(manifest_path, entry)
             if info is None:
@@ -136,12 +157,33 @@ class PluginManager:
                 )
                 return None
 
+        # W24 (HIGH, path-traversal at parse time): reject entry_point values that
+        # are absolute paths or contain ".." components before they ever reach
+        # _import_plugin().  This is an early, cheap guard; _import_plugin() has
+        # a second containment check on the resolved path.
+        ep = str(data["entry_point"])
+        ep_path = Path(ep)
+        if ep_path.is_absolute():
+            logger.warning(
+                "Манифест %s: entry_point %r — абсолютный путь запрещён",
+                manifest_path,
+                ep,
+            )
+            return None
+        if ".." in ep_path.parts:
+            logger.warning(
+                "Манифест %s: entry_point %r содержит '..' (path-traversal запрещён)",
+                manifest_path,
+                ep,
+            )
+            return None
+
         return PluginInfo(
             name=str(data["name"]),
             version=str(data["version"]),
             description=str(data.get("description", "")),
             author=str(data.get("author", "")),
-            entry_point=str(data["entry_point"]),
+            entry_point=ep,
             plugin_dir=plugin_dir,
         )
 
@@ -178,7 +220,22 @@ class PluginManager:
 
     def _import_plugin(self, info: PluginInfo) -> Plugin:
         """Динамически импортирует модуль плагина и создаёт экземпляр."""
-        entry_path = info.plugin_dir / info.entry_point
+        # W24 (HIGH, path-traversal + RCE containment): resolve the entry_point
+        # against plugin_dir and verify it stays inside.  _parse_manifest()
+        # already rejects absolute paths and ".." at parse time; this is a
+        # defence-in-depth check that covers symlink escapes and any future
+        # codepath that bypasses _parse_manifest().
+        raw_entry = info.plugin_dir / info.entry_point
+        try:
+            resolved_entry = raw_entry.resolve()
+            resolved_dir = info.plugin_dir.resolve()
+            resolved_entry.relative_to(resolved_dir)
+        except ValueError:
+            raise ValueError(
+                f"entry_point {info.entry_point!r} выходит за пределы plugin_dir "
+                f"{info.plugin_dir} (path-traversal запрещён)"
+            )
+        entry_path = resolved_entry
         if not entry_path.is_file():
             raise FileNotFoundError(f"Файл точки входа не найден: {entry_path}")
 
