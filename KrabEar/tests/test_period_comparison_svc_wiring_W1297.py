@@ -138,41 +138,62 @@ class ModeWeeksReachableViaIPCTest(unittest.TestCase):
             "Store should be queried exactly twice (once per period) for mode=weeks",
         )
 
-    def test_handler_delegation_via_ast(self) -> None:
-        """_handle_compare_periods body delegates to self._period_comparison_svc
-        (verified at AST level — no direct explicit-date logic remains)."""
+    def test_handler_delegation_via_dispatch(self) -> None:
+        """compare_periods IPC reaches PeriodComparisonService via the LIVE chain.
+
+        W#47: the dead in-class _handle_compare_periods duplicate was deleted.
+        The single source of truth is now:
+            dispatch["compare_periods"] → self._analytics_svc.handle_compare_periods
+            → AnalyticsService.handle_compare_periods → period_comparison.compare_periods
+        Assert that LIVE delegation, not the (removed) in-class stub.
+        """
+        # 1. service.py dispatch routes to the extracted AnalyticsService.
         src = SERVICE_PY.read_text(encoding="utf-8")
-        tree = ast.parse(src)
+        self.assertIn(
+            '"compare_periods": self._analytics_svc.handle_compare_periods',
+            src,
+            "compare_periods not delegated to self._analytics_svc.handle_compare_periods",
+        )
+        self.assertNotIn(
+            "def _handle_compare_periods(",
+            src,
+            "dead in-class _handle_compare_periods duplicate reappeared in service.py",
+        )
+
+        # 2. AnalyticsService.handle_compare_periods delegates to the
+        #    period_comparison.compare_periods implementation (AST level).
+        analytics_py = PROJECT_ROOT / "backend" / "analytics_service.py"
+        a_tree = ast.parse(analytics_py.read_text(encoding="utf-8"))
 
         handler_node = None
-        for node in ast.walk(tree):
+        for node in ast.walk(a_tree):
             if (
                 isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and node.name == "_handle_compare_periods"
+                and node.name == "handle_compare_periods"
             ):
                 handler_node = node
                 break
 
-        self.assertIsNotNone(handler_node, "_handle_compare_periods not found in service.py")
+        self.assertIsNotNone(
+            handler_node, "handle_compare_periods not found in analytics_service.py"
+        )
 
-        # The handler must contain a call to self._period_comparison_svc.handle_compare_periods
         found_delegation = False
         for node in ast.walk(handler_node):
             if isinstance(node, ast.Call):
                 func = node.func
-                if (
-                    isinstance(func, ast.Attribute)
-                    and func.attr == "handle_compare_periods"
-                    and isinstance(func.value, ast.Attribute)
-                    and func.value.attr == "_period_comparison_svc"
+                # period_comparison.compare_periods imported as _compare_periods_fn.
+                if isinstance(func, ast.Name) and func.id in (
+                    "_compare_periods_fn",
+                    "compare_periods",
                 ):
                     found_delegation = True
                     break
 
         self.assertTrue(
             found_delegation,
-            "_handle_compare_periods does not delegate to "
-            "self._period_comparison_svc.handle_compare_periods",
+            "AnalyticsService.handle_compare_periods does not delegate to "
+            "period_comparison.compare_periods",
         )
 
 
