@@ -261,7 +261,14 @@ class SettingsService:
     # ------------------------------------------------------------------
 
     def handle_get_settings(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self.cached_settings()
+        # wave-35 CRIT: redact secrets before sending over unauthenticated IPC socket.
+        # Non-empty credential fields are replaced with 'REDACTED'; empty/absent fields
+        # are left as-is so the UI can distinguish "not configured" from "set".
+        settings = self.cached_settings()
+        for k in self._SENSITIVE_FIELDS:
+            if settings.get(k):
+                settings[k] = "REDACTED"
+        return settings
 
     def handle_set_settings(self, params: dict[str, Any]) -> dict[str, Any]:
         with self._save_lock:  # W1437
@@ -783,7 +790,12 @@ class SettingsService:
             self._maybe_disable_sentry_for_privacy(old_settings, restored)
             # W1308/W1341/W1436: reload pydantic settings and fire hooks
             self._reload_and_fire_hooks(old_settings, restored)
-            result: dict = {"restored_settings": restored, "backup_id": backup_id}
+            # wave-35 CRIT: redact secrets in the IPC response (same logic as handle_get_settings).
+            restored_safe = dict(restored)
+            for k in self._SENSITIVE_FIELDS:
+                if restored_safe.get(k):
+                    restored_safe[k] = "REDACTED"
+            result: dict = {"restored_settings": restored_safe, "backup_id": backup_id}
             if dropped_fields:
                 result["warning"] = "credentials_dropped"
                 result["dropped_fields"] = dropped_fields
