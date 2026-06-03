@@ -34,6 +34,7 @@ MED dead-privacy-guard (wire):
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 from typing import Any, Callable, Optional
@@ -63,6 +64,32 @@ _WORD_RE = re.compile(
 # чтобы исключить O(N²) поведение на патологическом вводе (например, "."*50000).
 _SENTENCE_TERMINATORS: frozenset[str] = frozenset(".!?…")
 _WHITESPACE_CHARS: frozenset[str] = frozenset(" \t\n\r")
+
+
+# ---------------------------------------------------------------------------
+# Numeric safety guard (Wave 23 — MED NaN in IPC JSON + LOW OverflowError)
+# ---------------------------------------------------------------------------
+# float("nan") and float("inf") are NOT valid JSON (RFC 8259).  Swift's
+# JSONDecoder rejects them and the entire IPC response is silently dropped.
+# TranscriptionScorer also raises OverflowError on Inf duration_sec.
+# Mirror the _safe_float pattern from core/audio_quality.py.
+
+def _safe_float(v: Any, default: float = 0.0) -> float:
+    """Coerce NaN / Inf / non-numeric input to a finite default (Wave 23).
+
+    Returns *default* if *v* is:
+    - not a numeric type (int/float),
+    - NaN  (math.isnan),
+    - infinite (math.isinf).
+
+    Always returns a value that round-trips through
+    ``json.dumps(..., allow_nan=False)`` without ValueError.
+    """
+    if not isinstance(v, (int, float)):
+        return default
+    if not math.isfinite(v):
+        return default
+    return float(v)
 
 
 def _clip_text(text: str, caller: str = "") -> str:
@@ -194,8 +221,15 @@ class MetadataEnricher:
         t0 = time.monotonic()
 
         text: str = str(item.get("text") or "")
-        duration_sec: float = float(item.get("duration_sec") or 0.0)
-        confidence: float = float(item.get("confidence") or 0.0)
+        # Wave 23: guard against NaN/Inf before passing to TranscriptionScorer
+        # (OverflowError on Inf) and before serialising to IPC JSON (NaN is
+        # not RFC 8259-compliant; Swift JSONDecoder rejects the whole response).
+        duration_sec: float = _safe_float(
+            float(item.get("duration_sec") or 0.0), default=0.0
+        )
+        confidence: float = _safe_float(
+            float(item.get("confidence") or 0.0), default=0.0
+        )
         has_diarization: bool = bool(item.get("has_diarization", False))
         has_llm: bool = bool(item.get("has_llm_enhancement", False))
 
@@ -256,13 +290,19 @@ class MetadataEnricher:
         self._total_enrichment_time_sec += elapsed
 
         enriched = dict(item)
+        # Wave 23: sanitise any non-finite float fields copied verbatim from
+        # the input item so the full response is JSON-safe (allow_nan=False).
+        for _field in ("duration_sec", "confidence"):
+            if _field in enriched and isinstance(enriched[_field], (int, float)):
+                enriched[_field] = _safe_float(enriched[_field], default=0.0)
         enriched["metadata"] = {
             "word_count": word_count,
             "sentence_count": sentence_count,
             "avg_word_length": avg_wl,
             "language_detected": language_detected,
             "emotion": emotion,
-            "speech_pace_wpm": speech_pace_wpm,
+            # Wave 23: guard float metrics so the dict is always JSON-safe.
+            "speech_pace_wpm": _safe_float(speech_pace_wpm, default=0.0),
             "quality_grade": quality_grade,
             "auto_title": auto_title,
             "topics": topics,
