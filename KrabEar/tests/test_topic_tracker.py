@@ -637,15 +637,15 @@ class TestHandlerPrivacyModeGuard(unittest.TestCase):
     """
 
     def _make_fake_service(self, privacy_mode_enabled: bool):
-        """Возвращает минимальный stub-объект с нужными атрибутами для _handle_get_topic_timeline."""
+        """Возвращает реальный SearchAndAnalysisService (живой extracted handler).
+
+        W797 dedup: in-class BackendService._handle_get_topic_timeline удалён —
+        production-путь идёт через self._search_and_analysis_svc.handle_get_topic_timeline,
+        поэтому тест указывает на каноническую реализацию.
+        """
         from unittest.mock import MagicMock
         from core.topic_tracker import TopicTracker
-
-        svc = MagicMock()
-        svc._get_runtime_setting.return_value = privacy_mode_enabled
-
-        # Подключаем реальный TopicTracker
-        svc._topic_tracker = TopicTracker()
+        from backend.search_and_analysis_service import SearchAndAnalysisService
 
         # store._lock возвращает context manager, _load_active_items_unlocked — пустой список
         from contextlib import contextmanager
@@ -657,24 +657,32 @@ class TestHandlerPrivacyModeGuard(unittest.TestCase):
         store_mock = MagicMock()
         store_mock._lock = _fake_lock
         store_mock._load_active_items_unlocked.return_value = []
-        svc.store = store_mock
 
-        return svc
+        def _settings_get(key, default=None):
+            if key == "privacy_mode_enabled":
+                return privacy_mode_enabled
+            return default
 
-    def test_get_topic_timeline_empty_in_privacy_mode(self):
-        """При privacy_mode_enabled=True handler возвращает timeline=[] и reason."""
-        from backend import service as svc_module
-
-        svc = self._make_fake_service(privacy_mode_enabled=True)
-
-        # Вызываем непривязанный метод напрямую
-        result = svc_module.BackendService._handle_get_topic_timeline(
-            svc, {"window_size": 5, "limit": 100}
+        return SearchAndAnalysisService(
+            store=store_mock,
+            semantic_searcher=None,
+            action_items_extractor=None,
+            topic_tracker=TopicTracker(),
+            recording_insights=None,
+            recording_comparison=None,
+            stats_report=None,
+            settings_get=_settings_get,
         )
 
+    def test_get_topic_timeline_empty_in_privacy_mode(self):
+        """При privacy_mode_enabled=True handler возвращает пустой таймлайн и reason."""
+        svc = self._make_fake_service(privacy_mode_enabled=True)
+
+        result = svc.handle_get_topic_timeline({"window_size": 5, "limit": 100})
+
         self.assertIsInstance(result, dict, f"Ожидали dict, получили: {type(result)}")
-        self.assertIn("timeline", result, f"Ожидали ключ 'timeline' в ответе: {result}")
-        self.assertEqual(result["timeline"], [], f"privacy_mode: timeline должен быть пустым: {result}")
+        self.assertIn("segments", result, f"Ожидали ключ 'segments' в ответе: {result}")
+        self.assertEqual(result["segments"], [], f"privacy_mode: segments должен быть пустым: {result}")
         self.assertEqual(
             result.get("reason"), "privacy_mode_active",
             f"reason должен быть 'privacy_mode_active': {result}",
@@ -682,13 +690,9 @@ class TestHandlerPrivacyModeGuard(unittest.TestCase):
 
     def test_get_topic_timeline_normal_without_privacy_mode(self):
         """При privacy_mode_enabled=False handler работает нормально (возвращает segments)."""
-        from backend import service as svc_module
-
         svc = self._make_fake_service(privacy_mode_enabled=False)
 
-        result = svc_module.BackendService._handle_get_topic_timeline(
-            svc, {"window_size": 5, "limit": 100}
-        )
+        result = svc.handle_get_topic_timeline({"window_size": 5, "limit": 100})
 
         self.assertIsInstance(result, dict)
         # С пустой историей — segments пустой, но ключ должен присутствовать

@@ -416,13 +416,13 @@ class IPCHandlerTest(unittest.TestCase):
         svc, store = self._make_service()
         item = store.add_history_item(text="Some meeting text here")
         with self.assertRaises(RuntimeError) as ctx:
-            svc._handle_extract_action_items({"id": item.id})
+            svc._search_analysis_svc.handle_extract_action_items({"id": item.id})
         self.assertIn("LLM", str(ctx.exception))
 
     def test_extract_action_items_raises_for_missing_id(self):
         svc, store = self._make_service()
         with self.assertRaises(RuntimeError):
-            svc._handle_extract_action_items({"id": ""})
+            svc._search_analysis_svc.handle_extract_action_items({"id": ""})
 
     def test_extract_action_items_raises_for_unknown_id(self):
         svc, store = self._make_service()
@@ -433,14 +433,14 @@ class IPCHandlerTest(unittest.TestCase):
         # Wave 757: also update the delegated service
         svc._search_analysis_svc._action_items_extractor = mock_extractor
         with self.assertRaises(RuntimeError) as ctx:
-            svc._handle_extract_action_items({"id": "nonexistent-uuid"})
+            svc._search_analysis_svc.handle_extract_action_items({"id": "nonexistent-uuid"})
         self.assertIn("не найден", str(ctx.exception))
 
     def test_get_pending_action_items_returns_all_without_extraction(self):
         svc, store = self._make_service()
         item1 = store.add_history_item(text="Meeting one")
         item2 = store.add_history_item(text="Meeting two")
-        result = svc._handle_get_pending_action_items({})
+        result = svc._search_analysis_svc.handle_get_pending_action_items({})
         ids = [p["id"] for p in result["pending"]]
         self.assertIn(item1.id, ids)
         self.assertIn(item2.id, ids)
@@ -452,7 +452,7 @@ class IPCHandlerTest(unittest.TestCase):
         item2 = store.add_history_item(text="Meeting two")
         # Mark item1 as extracted
         store.update_history_item_action_items(item1.id, [], [], [])
-        result = svc._handle_get_pending_action_items({})
+        result = svc._search_analysis_svc.handle_get_pending_action_items({})
         ids = [p["id"] for p in result["pending"]]
         self.assertNotIn(item1.id, ids)
         self.assertIn(item2.id, ids)
@@ -461,7 +461,7 @@ class IPCHandlerTest(unittest.TestCase):
         svc, store = self._make_service()
         short_item = store.add_history_item(text="Quick note", audio_duration_sec=30.0)
         long_item = store.add_history_item(text="Long meeting", audio_duration_sec=120.0)
-        result = svc._handle_get_pending_action_items({"min_duration_sec": 60.0})
+        result = svc._search_analysis_svc.handle_get_pending_action_items({"min_duration_sec": 60.0})
         ids = [p["id"] for p in result["pending"]]
         self.assertNotIn(short_item.id, ids)
         self.assertIn(long_item.id, ids)
@@ -470,7 +470,7 @@ class IPCHandlerTest(unittest.TestCase):
         svc, store = self._make_service()
         item = store.add_history_item(text="Meeting")
         with self.assertRaises(RuntimeError) as ctx:
-            svc._handle_batch_extract_action_items({"ids": [item.id]})
+            svc._search_analysis_svc.handle_batch_extract_action_items({"ids": [item.id]})
         self.assertIn("LLM", str(ctx.exception))
 
     def test_batch_extract_handles_not_found(self):
@@ -480,7 +480,7 @@ class IPCHandlerTest(unittest.TestCase):
         # Wave 757: also update delegated service
         svc._search_analysis_svc._action_items_extractor = extractor
         with patch.object(extractor._session, "post", return_value=make_mock_response(VALID_LLM_RESPONSE_EN)):
-            result = svc._handle_batch_extract_action_items({
+            result = svc._search_analysis_svc.handle_batch_extract_action_items({
                 "ids": ["nonexistent-id"],
                 "language": "en",
             })

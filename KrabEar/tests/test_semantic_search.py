@@ -290,22 +290,22 @@ class TestSemanticSearchIPC(unittest.TestCase):
             )
 
     def test_semantic_search_status_ipc(self):
-        result = self.service._handle_semantic_search_status({})
+        result = self.service._search_analysis_svc.handle_semantic_search_status({})
         self.assertIn("enabled", result)
         self.assertFalse(result["enabled"])
         self.assertIn("indexed_count", result)
 
     def test_semantic_search_disabled_returns_disabled(self):
-        result = self.service._handle_semantic_search({"query": "test"})
+        result = self.service._search_analysis_svc.handle_semantic_search({"query": "test"})
         self.assertEqual(result["mode"], "keyword")  # fallback
 
     def test_semantic_search_reindex_disabled(self):
-        result = self.service._handle_semantic_search_reindex({})
+        result = self.service._search_analysis_svc.handle_semantic_search_reindex({})
         self.assertEqual(result.get("reason"), "semantic_search_disabled")
 
     def test_semantic_search_empty_query_raises(self):
         with self.assertRaises(ValueError):
-            self.service._handle_semantic_search({"query": ""})
+            self.service._search_analysis_svc.handle_semantic_search({"query": ""})
 
     def test_semantic_search_with_enabled_searcher(self):
         # Enable the searcher and inject a fake model
@@ -314,7 +314,7 @@ class TestSemanticSearchIPC(unittest.TestCase):
         self.searcher._model = fake_model
         self.searcher._model_loaded = True
         self.searcher.index_item("item1", "Привет мир")
-        result = self.service._handle_semantic_search({"query": "привет", "top_k": 5})
+        result = self.service._search_analysis_svc.handle_semantic_search({"query": "привет", "top_k": 5})
         self.assertIn("results", result)
         self.assertEqual(result["mode"], "semantic")
 
