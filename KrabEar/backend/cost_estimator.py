@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
@@ -104,6 +105,15 @@ class CostEstimator:
             features_cost, total_relative_cost.
         """
         duration_sec = float(duration_sec)
+        if not math.isfinite(duration_sec):
+            logger.warning("estimate_cost: non-finite duration_sec=%s — returning zero cost", duration_sec)
+            return CostEstimate(
+                compute_time_sec=0.0,
+                memory_mb=0.0,
+                disk_mb=0.0,
+                features_cost={"stt": 0.0, "diarization": 0.0, "llm": 0.0, "translation": 0.0},
+                total_relative_cost=0.0,
+            )
         if duration_sec < 0:
             raise ValueError(f"duration_sec must be >= 0, got {duration_sec}")
         quality = quality if quality in _STT_RATES else "balanced"

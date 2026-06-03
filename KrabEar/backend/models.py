@@ -9,7 +9,32 @@ from __future__ import annotations
 from dataclasses import dataclass, fields as dc_fields, field
 from datetime import datetime, timezone
 from typing import Any
+import math
 import uuid
+
+
+def _coerce_finite(value: Any, default: float) -> float | None:
+    """Return finite float or *default* for None/NaN/Inf; None iff value was absent."""
+    if value is None:
+        return None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    return v if math.isfinite(v) else default
+
+
+def _coerce_confidence(value: Any) -> float | None:
+    """Return confidence clamped to [0.0, 1.0], or None if value was absent."""
+    if value is None:
+        return None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(v):
+        return 0.0
+    return max(0.0, min(1.0, v))
 
 
 @dataclass(slots=True)
@@ -193,8 +218,8 @@ class HistoryItem:
             llm_applied=bool(payload.get("llm_applied", False)),
             llm_latency_ms=int(payload.get("llm_latency_ms", 0) or 0),
             diarization=payload.get("diarization") if isinstance(payload.get("diarization"), dict) else None,
-            audio_duration_sec=float(payload["audio_duration_sec"]) if payload.get("audio_duration_sec") is not None else None,
-            confidence=float(payload["confidence"]) if payload.get("confidence") is not None else None,
+            audio_duration_sec=_coerce_finite(payload.get("audio_duration_sec"), 0.0),
+            confidence=_coerce_confidence(payload.get("confidence")),
             tags=[str(t) for t in payload["tags"]] if isinstance(payload.get("tags"), list) else [],
             favorite=bool(payload.get("favorite", False)),
             emotion=(str(payload["emotion"]).strip().lower() or None) if payload.get("emotion") else None,
