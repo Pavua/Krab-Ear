@@ -246,3 +246,60 @@ class TestPrivacyOffPassthrough(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Wave-38/39 privacy gates: get_history_statistics + get_history_overview
+# ---------------------------------------------------------------------------
+
+class TestHistoryAggregatePrivacyGates(unittest.TestCase):
+    """Verify wave-38/39 aggregate gates return zeroed dicts before store access."""
+
+    def test_get_history_statistics_privacy_on(self):
+        svc = _make_service(privacy_on=True)
+        res = svc.handle_get_history_statistics({})
+        self.assertEqual(res.get("total_items"), 0)
+        self.assertEqual(res.get("total_duration_sec"), 0.0)
+        self.assertEqual(res.get("top_speakers"), {})
+        self.assertEqual(res.get("daily_counts"), {})
+        self.assertIsNone(res.get("date_range"))
+        self.assertEqual(res.get("reason"), "privacy_mode_active")
+
+    def test_get_history_statistics_no_store_access(self):
+        store_accessed = []
+        svc = _make_service(privacy_on=True)
+        original = svc.store._load_active_items_unlocked
+        svc.store._load_active_items_unlocked = lambda: store_accessed.append(1) or []
+        svc.handle_get_history_statistics({})
+        self.assertEqual(store_accessed, [], "store must not be accessed in privacy mode")
+        svc.store._load_active_items_unlocked = original
+
+    def test_get_history_statistics_privacy_off_passthrough(self):
+        # privacy OFF -> gate does not fire -> store IS accessed (tripwire raises AssertionError)
+        # That proves the gate is absent, which is the correct behaviour when privacy is off.
+        svc = _make_service(privacy_on=False)
+        with self.assertRaises(AssertionError):
+            svc.handle_get_history_statistics({})
+
+    def test_get_history_overview_privacy_on(self):
+        svc = _make_service(privacy_on=True)
+        res = svc.handle_get_history_overview({})
+        self.assertEqual(res.get("today_count"), 0)
+        self.assertEqual(res.get("last_24h_count"), 0)
+        self.assertEqual(res.get("source_langs"), [])
+        self.assertEqual(res.get("today_text_chars"), 0)
+        self.assertEqual(res.get("reason"), "privacy_mode_active")
+
+    def test_get_history_overview_no_store_access(self):
+        # handle_get_history_overview calls self.store.get_history_overview()
+        # which does not exist on _FakeStore — but the privacy gate fires FIRST.
+        # So no AttributeError should be raised.
+        svc = _make_service(privacy_on=True)
+        res = svc.handle_get_history_overview({})
+        self.assertEqual(res.get("reason"), "privacy_mode_active")
+
+    def test_get_history_overview_privacy_off_passthrough(self):
+        # privacy OFF -> gate does not fire -> store IS accessed (get_history_overview missing in fake)
+        svc = _make_service(privacy_on=False)
+        with self.assertRaises((AssertionError, AttributeError, TypeError)):
+            svc.handle_get_history_overview({})
