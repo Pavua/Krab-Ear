@@ -102,6 +102,34 @@ class EventReplayManager:
         except Exception:
             return False
 
+    @staticmethod
+    def _redact_entry(entry: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает копию записи события с заглушкой вместо payload.
+
+        Метаданные (``type``/``ts``/``seq``) сохраняются для отладки, но
+        ``data`` заменяется на ``{"redacted": True, "reason": "privacy_mode"}``,
+        чтобы ни текст транскрипций, ни иной PII не покинул процесс через
+        read-path в режиме конфиденциальности.
+        """
+        redacted = dict(entry)
+        redacted["data"] = {"redacted": True, "reason": "privacy_mode"}
+        return redacted
+
+    def _snapshot(self) -> list[dict[str, Any]]:
+        """Снимок кольцевого буфера под локом.
+
+        Если privacy_mode_enabled активен СЕЙЧАС, payload каждой записи
+        заменяется заглушкой — это закрывает read-leak: события, записанные ДО
+        включения privacy (cleartext в кольце/файле), не возвращаются read-path
+        методами в открытом виде, пока privacy включён. record_event редактирует
+        write-time; этот метод — read-time, симметрично (W23 MED).
+        """
+        with self._lock:
+            snapshot = list(self._buffer)
+        if self._is_privacy_mode():
+            return [self._redact_entry(e) for e in snapshot]
+        return snapshot
+
     def record_event(
         self,
         event_type: str,
@@ -139,6 +167,15 @@ class EventReplayManager:
                 line = json.dumps(entry, ensure_ascii=False) + "\n"
                 try:
                     self._file_handle.write(line)
+                    # W23 LOW (NOTE — оставлено намеренно): per-event flush() —
+                    # это user-space flush (НЕ os.fsync, без syscall на диск), и
+                    # write/_file_bytes/компакция (close + os.replace + reopen)
+                    # обязаны оставаться под _lock: они мутируют общий дескриптор
+                    # и счётчик байт; вынесение flush наружу гонялось бы с
+                    # компакцией другого потока (close дескриптора mid-flush).
+                    # Существующий контракт (test_clear_truncates_persist_file и
+                    # др.) требует, чтобы данные были видны на диске сразу после
+                    # record_event без явного flush, поэтому flush остаётся здесь.
                     self._file_handle.flush()
                     # Учёт по фактическим UTF-8 байтам (кириллица многобайтовая).
                     self._file_bytes += len(line.encode("utf-8"))
@@ -212,8 +249,9 @@ class EventReplayManager:
         limit = max(1, min(limit, _MAX_BUFFER_SIZE))
         since_dt: datetime | None = _parse_ts(since) if since else None
 
-        with self._lock:
-            snapshot = list(self._buffer)
+        # _snapshot редактирует payload, если privacy_mode активен СЕЙЧАС —
+        # фильтрация по type/ts работает по метаданным, которые сохраняются.
+        snapshot = self._snapshot()
 
         results = []
         for entry in snapshot:
@@ -242,8 +280,9 @@ class EventReplayManager:
         from_dt = _parse_ts(from_ts)
         to_dt = _parse_ts(to_ts)
 
-        with self._lock:
-            snapshot = list(self._buffer)
+        # _snapshot редактирует payload при активном privacy_mode (read-leak fix);
+        # фильтрация по диапазону опирается на метаданные ts, которые остаются.
+        snapshot = self._snapshot()
 
         results = []
         for entry in snapshot:
@@ -259,10 +298,16 @@ class EventReplayManager:
         return results
 
     def get_event_stats(self) -> dict[str, Any]:
-        """Возвращает статистику: количество событий по типу, скорость за минуту."""
-        with self._lock:
-            snapshot = list(self._buffer)
-            total = len(snapshot)
+        """Возвращает статистику: количество событий по типу, скорость за минуту.
+
+        Статистика агрегирует только метаданные (``type``/``ts``), поэтому
+        transcript-текст здесь не фигурирует даже без privacy. Используем тот же
+        ``_snapshot`` (редактирует payload при активном privacy_mode), чтобы все
+        read-path методы шли единым путём и счётчики не зависели от того, был ли
+        privacy включён при записи (W23 MED — read-path consistency).
+        """
+        snapshot = self._snapshot()
+        total = len(snapshot)
 
         counts_by_type: dict[str, int] = defaultdict(int)
         for entry in snapshot:
