@@ -107,8 +107,8 @@ _FORMULA_LEAD_CHARS: frozenset = frozenset({"=", "+", "-", "@"})
 def _md_cell(value: Any) -> str:
     """Нейтрализует пользовательский текст перед вставкой в ячейку Markdown.
 
-    Защищает от четырёх векторов инъекции в отчёте (теги, имена коллекций,
-    метки спикеров, заголовки):
+    Защищает от шести векторов инъекции в отчёте (теги, имена коллекций,
+    метки спикеров, заголовки, пути файловой системы):
 
     1. Слом Markdown-таблицы: ``|`` экранируется как ``\\|``.
     2. Слом структуры строки / вставка лишних строк: CR/LF (и прочие
@@ -120,6 +120,13 @@ def _md_cell(value: Any) -> str:
     4. Слом inline code span: обратный апостроф (U+0060) заменяется на
        MODIFIER LETTER GRAVE ACCENT (U+02CB), чтобы бэктик в значении
        не закрывал обёртывающий `...` span и не вставлял сырой Markdown/HTML.
+    5. Markdown-ссылки и изображения (``[text](url)``, ``![alt](url)``):
+       ``[`` и ``]`` заменяются на fullwidth-эквиваленты U+FF3B/U+FF3D.
+       Это предотвращает создание кликабельных ссылок и XSS через
+       ``javascript:`` URI в заголовках/тегах/путях файловой системы.
+    6. Сырой HTML (``<tag>``): ``<`` заменяется на ``&lt;``, ``>`` — на
+       ``&gt;``.  Блокирует инъекцию тегов ``<script>``, ``<img onerror=...>``
+       и т.д. в Markdown-отчётах, открываемых в браузере или GitHub.
 
     Args:
         value: Любое значение пользовательского происхождения.
@@ -135,6 +142,12 @@ def _md_cell(value: Any) -> str:
     # Нейтрализуем бэктик: заменяем на визуально близкий MODIFIER LETTER GRAVE (U+02CB).
     # Это defence-in-depth для любого кода, оборачивающего _md_cell(...) в `...`.
     s = s.replace("`", "ˋ")
+    # Нейтрализуем Markdown-ссылки / изображения: заменяем [ ] на fullwidth.
+    # Без этого "[click](javascript:alert(1))" проходит как кликабельная ссылка.
+    s = s.replace("[", "［").replace("]", "］")
+    # Нейтрализуем сырой HTML: < и > → HTML-сущности.
+    # Без этого "<script>x</script>" / "<img onerror=...>" рендерятся браузером.
+    s = s.replace("<", "&lt;").replace(">", "&gt;")
     # Нейтрализуем формульную инъекцию: смотрим на первый непробельный символ.
     stripped = s.lstrip()
     if stripped and stripped[0] in _FORMULA_LEAD_CHARS:
@@ -618,7 +631,10 @@ class StatsReportGenerator:
             lines.append("| Файл | Размер |")
             lines.append("|------|--------|")
             for label, size_kb in sorted(files_info, key=lambda x: -x[1])[:10]:
-                lines.append(f"| {label} | {size_kb:.1f} KB |")
+                # label может содержать имена файлов/директорий из файловой системы:
+                # «evil|inject» сломает таблицу, «=cmd» запустит формулу,
+                # «[txt](url)» — Markdown-ссылку, «<tag>» — HTML-инъекцию.
+                lines.append(f"| {_md_cell(label)} | {size_kb:.1f} KB |")
             lines.append(f"| **Итого (основные файлы)** | **{total_kb:.1f} KB** |")
             lines.append(f"| Бэкапов | {backups_count} файлов ({backups_size_kb:.1f} KB) |")
             lines.append("")
