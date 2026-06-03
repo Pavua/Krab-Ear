@@ -2910,6 +2910,16 @@ class HistoryService:
             top_speakers (dict): {speaker_id: count} — топ спикеров по частоте встреч
             daily_counts (dict): {"YYYY-MM-DD": count} — количество записей за последние 30 дней
         """
+        # wave-38 MED: leaks top_speakers (speaker IDs), date_range, daily_counts
+        # in privacy mode — reveals usage patterns. Gate mirrors get_recording_stats (wave-37).
+        if self._is_privacy_mode():
+            return {
+                "total_items": 0, "total_duration_sec": 0.0, "total_words": 0,
+                "avg_confidence": 0.0, "languages": {}, "date_range": None,
+                "items_with_translation": 0, "items_with_diarization": 0,
+                "avg_speakers": 0.0, "top_speakers": {}, "daily_counts": {},
+                "reason": "privacy_mode_active",
+            }
         with self.store._lock():
             active = self.store._load_active_items_unlocked()
 
