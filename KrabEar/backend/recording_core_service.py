@@ -395,6 +395,11 @@ class RecordingCoreService:
         with self._preview_lock:
             preview_text = self._preview_text
             preview_duration = self._preview_duration_sec
+        # wave-31 HIGH: gate preview_text behind privacy_mode — the SSE partial-transcript
+        # stream was already gated (W1673), but the IPC poll path was leaking accumulated
+        # partial transcript text even when privacy_mode_enabled=True.
+        if self._get_runtime_setting("privacy_mode_enabled", False):
+            preview_text = ""
         audio_rms = (
             self.recorder.snapshot_rms()
             if hasattr(self.recorder, "snapshot_rms")
@@ -1501,7 +1506,12 @@ class RecordingCoreService:
         except Exception:
             pass
 
-        if self._semantic_searcher.is_enabled and _cfg_settings.SEMANTIC_SEARCH_AUTO_INDEX:
+        # wave-31 MED: skip semantic auto-index when privacy_mode is on — embeddings
+        # encode transcript content and persist it across sessions, violating the
+        # privacy guarantee that privacy-mode recordings leave no searchable traces.
+        # _privacy_mode is already resolved above (line ~1366) in this same function.
+        if self._semantic_searcher.is_enabled and _cfg_settings.SEMANTIC_SEARCH_AUTO_INDEX \
+                and not _privacy_mode:
             _index_text = display_text or text
             _index_id = item.id
             threading.Thread(
