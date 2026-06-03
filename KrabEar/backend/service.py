@@ -3446,6 +3446,8 @@ class BackendService:
 
     def _handle_get_learning_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_learning_stats — статистика прогресса изучения языка."""
+        if self._get_runtime_setting('privacy_mode_enabled', False):
+            return {'ok': False, 'reason': 'privacy_mode_active'}
         params_with_store = dict(params)
         params_with_store.setdefault("store", self.store)
         return self._language_learning.handle_get_learning_stats(params_with_store)
