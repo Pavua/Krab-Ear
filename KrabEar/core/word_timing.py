@@ -28,6 +28,19 @@ _MIN_INTER_WORD_PAUSE_SEC: float = 0.08
 # ── Вспомогательные функции ──────────────────────────────────────────────────
 
 
+def _safe_float(v: float, default: float = 0.0) -> float:
+    """Возвращает конечный float или *default* для NaN/Inf (wave-26).
+
+    Защита от утечки Infinity/NaN в IPC-JSON: любой не-конечный результат
+    (например, при патологическом вводе) заменяется безопасным значением,
+    чтобы ``json.dumps(..., allow_nan=False)`` не падал на стороне Swift.
+    Зеркалит паттерн ``metadata_enricher._sanitize_float`` (wave-25).
+    """
+    if not isinstance(v, (int, float)) or not math.isfinite(v):
+        return default
+    return float(v)
+
+
 def _extract_words(segments: List[dict]) -> List[dict]:
     """Извлекает пословные временные метки из Whisper-сегментов.
 
@@ -57,7 +70,11 @@ def _extract_words(segments: List[dict]) -> List[dict]:
             if start is not None and end is not None:
                 start = float(start)
                 end = float(end)
-                if end > start:
+                # Same finiteness guard as the word-level branch above (line 49):
+                # a non-finite (inf/nan) start/end would otherwise leak Infinity into
+                # avg_word_duration_ms AND make statistics.stdev raise
+                # ("inf or nan encountered in data"), crashing the IPC handler.
+                if math.isfinite(start) and math.isfinite(end) and end > start:
                     text = seg.get("text", seg.get("word", ""))
                     result.append({"word": str(text), "start": start, "end": end})
     return result
@@ -159,12 +176,16 @@ class WordTimingAnalyzer:
         # ── Равномерность темпа (1 / (1 + CV)) ─────────────────────────
         speaking_rate_consistency = self._compute_consistency(durations_ms)
 
+        # Defense-in-depth: guard every float field against NaN/Inf before it
+        # crosses the IPC boundary (wave-26). The _extract_words finiteness filter
+        # already prevents the known leak paths; this is a belt-and-suspenders net
+        # so no future regression can ship Infinity into json.dumps(allow_nan=False).
         return TimingReport(
-            avg_word_duration_ms=round(avg_word_duration_ms, 2),
-            avg_pause_duration_ms=round(avg_pause_duration_ms, 2),
-            total_pause_time_sec=round(total_pause_time_sec, 3),
-            speaking_rate_consistency=round(speaking_rate_consistency, 4),
-            longest_pause_sec=round(longest_pause_sec, 3),
+            avg_word_duration_ms=round(_safe_float(avg_word_duration_ms), 2),
+            avg_pause_duration_ms=round(_safe_float(avg_pause_duration_ms), 2),
+            total_pause_time_sec=round(_safe_float(total_pause_time_sec), 3),
+            speaking_rate_consistency=round(_safe_float(speaking_rate_consistency), 4),
+            longest_pause_sec=round(_safe_float(longest_pause_sec), 3),
             hesitation_count=hesitation_count,
         )
 
