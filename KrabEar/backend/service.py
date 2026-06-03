@@ -145,7 +145,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 # Обеспечиваем корректный импорт модулей KrabEar при запуске как standalone скрипта.
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -2725,7 +2725,6 @@ class BackendService:
         """Делегирует к HealthCheckService.handle_probe_llm_http (W1690)."""
         return self._health_check_svc.handle_probe_llm_http(params)
 
-
     def _handle_get_shutdown_status(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает статус последнего graceful shutdown.
 
@@ -2946,15 +2945,6 @@ class BackendService:
         )
         return {"count": len(cleared), "cleared": cleared}
 
-        item_id = str(params.get("id", "")).strip()
-        if not item_id:
-            raise RuntimeError("Параметр id обязателен")
-
-        if target is None:
-            raise RuntimeError(f"Элемент не найден: {item_id}")
-
-        text = target.text or ""
-
     def _handle_list_audio_inputs(self, params):
         """Delegated to RecordingCoreService."""
         return self._recording_core_svc.handle_list_audio_inputs(params)
@@ -3147,7 +3137,6 @@ class BackendService:
             "markdown": digest.formatted_markdown,
         }
 
-
     def _handle_get_daily_insight(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает один наиболее релевантный инсайт за сегодня (W1274 F3).
 
@@ -3165,7 +3154,6 @@ class BackendService:
             "insight": insight.to_dict() if insight is not None else None,
             "privacy_mode": False,
         }
-
 
     def _handle_check_integrity(self, params: dict[str, Any]) -> dict[str, Any]:
         """Делегирует к HealthCheckService.handle_check_integrity (W1690)."""
@@ -3365,13 +3353,11 @@ class BackendService:
 
     # ── Timeline view ────────────────────────────────────────────────────────
 
-
     def _handle_get_learning_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_learning_stats — статистика прогресса изучения языка."""
         params_with_store = dict(params)
         params_with_store.setdefault("store", self.store)
         return self._language_learning.handle_get_learning_stats(params_with_store)
-
 
     def _handle_estimate_recording_cost(self, params: dict) -> dict:
         """IPC: estimate_recording_cost — оценка вычислительной стоимости обработки записи.
