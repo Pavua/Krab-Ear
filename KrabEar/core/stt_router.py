@@ -411,7 +411,11 @@ class STTRouter:
         transport = transport_raw if isinstance(transport_raw, str) else "auto"
         venv_python_raw = getattr(self._settings, "STT_GIGAAM_VENV_PYTHON", "")
         if isinstance(venv_python_raw, str) and venv_python_raw.strip():
-            venv_python: Optional[str] = venv_python_raw.strip()
+            venv_python: Optional[str] = self._validate_gigaam_venv_python(
+                venv_python_raw.strip()
+            )
+            if venv_python is None:
+                return None
         else:
             venv_python = None
 
@@ -462,6 +466,71 @@ class STTRouter:
     # ------------------------------------------------------------------
     # Внутренние методы
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _validate_gigaam_venv_python(path: str) -> Optional[str]:
+        """Validate STT_GIGAAM_VENV_PYTHON before passing to subprocess.Popen.
+
+        Prevents arbitrary binary execution by an attacker who can write
+        to settings (e.g. via a rogue IPC client or a compromised settings.json).
+
+        Rules:
+          1. The *lexical* (absolute, non-symlink-followed) path must be inside
+             the user's home directory.  We use Path.absolute() rather than
+             Path.resolve() because venv Python binaries are often symlinks into
+             Homebrew Cellar (/opt/homebrew/…) — resolving them would make every
+             venv python path appear to be "outside home".  The lexical path is
+             what the user typed (or what was stored in settings.json) and is the
+             appropriate scope to restrict.
+          2. The final filename (basename) must be a known Python interpreter name:
+             python, python3, python3.10, python3.11, python3.12.
+
+        Returns the lexical absolute path as a string, or None if validation
+        fails (caller logs a warning and returns None from get_gigaam_adapter()).
+        """
+        from pathlib import Path  # noqa: PLC0415 (local import for narrow scope)
+
+        _VALID_BASENAMES = frozenset({
+            "python",
+            "python3",
+            "python3.10",
+            "python3.11",
+            "python3.12",
+        })
+
+        try:
+            # Use absolute() (no symlink resolution) to keep venv paths inside home.
+            venv_python = Path(path).absolute()
+            home = Path.home().absolute()
+
+            if not venv_python.is_relative_to(home):
+                logger.warning(
+                    "STTRouter: STT_GIGAAM_VENV_PYTHON %r is outside home directory"
+                    " — ignoring to prevent arbitrary binary execution",
+                    path,
+                )
+                return None
+
+            if venv_python.name not in _VALID_BASENAMES:
+                logger.warning(
+                    "STTRouter: STT_GIGAAM_VENV_PYTHON basename %r is not a"
+                    " recognised Python interpreter — ignoring"
+                    " (allowed: %s)",
+                    venv_python.name,
+                    ", ".join(sorted(_VALID_BASENAMES)),
+                )
+                return None
+
+        except Exception as exc:  # noqa: BLE001 (path resolution can raise on weird input)
+            logger.warning(
+                "STTRouter: STT_GIGAAM_VENV_PYTHON validation error for %r: %s"
+                " — ignoring",
+                path,
+                exc,
+            )
+            return None
+
+        return str(venv_python)
 
     def _get_lang_id(self) -> Any:
         """Lazy-init AudioLanguageID singleton (один на router instance)."""
