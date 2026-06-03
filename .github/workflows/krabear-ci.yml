@@ -139,6 +139,15 @@ jobs:
         # No user-controlled input is used in this step -- no injection risk.
         run: python3 scripts/audit_path_containment.py --fail-on-found
 
+      - name: Dead in-class handler / test-validates-the-hole guard (#47)
+        # Detects in-class BackendService._handle_<X> methods that are dead shadows of
+        # a live extracted dispatch target, plus tests that validate the dead copy
+        # instead of the live extracted handler. 36 found in #1675 (3 masked real
+        # security bugs: get_topic_timeline DoS + sentiment/keyword privacy leaks);
+        # all deleted + repointed in #1689 before this gate was enforced.
+        # No user-controlled input is used in this step -- no injection risk.
+        run: python3 scripts/audit_dispatch_test_targets.py --fail-on-found
+
 
       - name: Compare benchmark history (regression gate)
         env:

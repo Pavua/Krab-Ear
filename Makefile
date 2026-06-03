@@ -142,18 +142,21 @@ audit-purge-coverage:
 audit-path-containment:
 	python3 scripts/audit_path_containment.py --fail-on-found $(ARGS)
 
-# Audit "test validates the dead in-class copy" bug class (telegram #44 guard).
+# Audit "test validates the dead in-class copy" bug class (#47 / #1675 guard).
 # Finds in-class BackendService._handle_<X> methods that are dead shadows of a
 # live extracted dispatch target (send_to_telegram/list_telegram_chats → the
 # apple_integration_service copy, +34 W797 siblings), plus the tests that
 # AST/call-validate the dead copy instead of the live extracted handler.
-# REPORT-ONLY (not in audit-all / CI yet): pass ARGS=--fail-on-found to gate,
-# ARGS=--json for machine output, ARGS=--selftest for the known-bad/good check.
+# Found 36 dead duplicates (34 test-validated) in #1675; all deleted + tests
+# repointed in #1689 (which also surfaced & fixed 3 real security divergences the
+# dead copies masked: get_topic_timeline DoS + sentiment/keyword privacy leaks).
+# Strict (--fail-on-found) enforced in CI since #1689. Pass ARGS=--json for
+# machine output, ARGS=--selftest for the known-bad/good check.
 audit-dispatch-test-targets:
-	python3 scripts/audit_dispatch_test_targets.py $(ARGS)
+	python3 scripts/audit_dispatch_test_targets.py --fail-on-found $(ARGS)
 
 # Run all static audit checks (CI parity — runs same checks as CI guard jobs).
-audit-all: audit-orphans audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-path-containment
+audit-all: audit-orphans audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-path-containment audit-dispatch-test-targets
 	@echo "All audit checks passed."
 
 # Reproduce the ubuntu krab-ear-ci env LOCALLY (Python 3.12, mlx ABSENT) and run
