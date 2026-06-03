@@ -40,6 +40,19 @@ _HIGH_FREQ_MIN = 4000       # высокие частоты: 4000+ Гц
 # средние: 400–4000 Гц (речевой диапазон)
 
 
+def _safe_float(v: float, default: float = 0.0) -> float:
+    """Возвращает конечный float или *default* для NaN/Inf (wave-26).
+
+    NaN/Inf во входном аудио (например, полностью NaN-массив) numpy
+    распространяет в RMS → noise_level_db/snr_db → IPC-JSON, где
+    ``json.dumps(..., allow_nan=False)`` падает на стороне Swift.
+    Зеркалит паттерн ``metadata_enricher._sanitize_float`` (wave-25).
+    """
+    if not isinstance(v, (int, float)) or not math.isfinite(v):
+        return default
+    return float(v)
+
+
 # ---------------------------------------------------------------------------
 # Датаклассы
 # ---------------------------------------------------------------------------
@@ -56,11 +69,16 @@ class NoiseProfile:
     suitable_for_stt: bool = True       # True если SNR > 15 dB
 
     def to_dict(self) -> dict:
-        """Сериализует в словарь для JSON-ответа IPC."""
+        """Сериализует в словарь для JSON-ответа IPC.
+
+        Числовые поля проходят через ``_safe_float`` (wave-26) как финальный
+        барьер на IPC-границе: даже если ``NoiseProfile`` собран напрямую с
+        NaN/Inf, ответ остаётся совместимым с ``json.dumps(allow_nan=False)``.
+        """
         return {
             "noise_type": self.noise_type,
-            "noise_level_db": self.noise_level_db,
-            "snr_db": self.snr_db,
+            "noise_level_db": _safe_float(self.noise_level_db, default=-120.0),
+            "snr_db": _safe_float(self.snr_db, default=0.0),
             "frequency_profile": self.frequency_profile,
             "recommendations": self.recommendations,
             "suitable_for_stt": self.suitable_for_stt,
@@ -110,15 +128,22 @@ class NoiseProfiler:
 
         # --- Noise floor (тихие фреймы) ---
         noise_rms = float(np.percentile(frame_rms_values, _QUIET_PERCENTILE))
-        noise_level_db = self._rms_to_dbfs(noise_rms)
+        # wave-26 HIGH guard: NaN/Inf in the audio (e.g. an all-NaN array) propagates
+        # through numpy RMS → percentile → dBFS, leaking NaN into noise_level_db
+        # (and mis-driving noise_type/suitable_for_stt downstream). Sanitize to the
+        # silent-floor sentinel BEFORE classification so every derived field stays
+        # consistent and json.dumps(allow_nan=False) on the Swift side never raises.
+        noise_level_db = _safe_float(self._rms_to_dbfs(noise_rms), default=-120.0)
 
         # --- Уровень сигнала (активные фреймы) ---
         signal_rms = float(np.percentile(frame_rms_values, 75))
-        if signal_rms < 1e-10:
-            signal_rms = float(np.sqrt(np.mean(audio ** 2)))
+        if not math.isfinite(signal_rms) or signal_rms < 1e-10:
+            signal_rms = _safe_float(float(np.sqrt(np.mean(audio ** 2))), default=0.0)
 
         # --- SNR ---
-        snr_db = self._compute_snr(signal_rms, noise_rms, audio, sample_rate)
+        snr_db = _safe_float(
+            self._compute_snr(signal_rms, noise_rms, audio, sample_rate), default=0.0
+        )
 
         # --- Спектральный профиль ---
         freq_profile = self._classify_frequency_profile(audio, sample_rate)

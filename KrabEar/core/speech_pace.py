@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional
@@ -48,6 +49,17 @@ _READING_WPM = 150.0
 def _tokenize_words(text: str) -> List[str]:
     """Возвращает список слов из текста (кириллица + латиница)."""
     return _RE_WORD.findall(text)
+
+
+def _safe_float(v: float, default: float = 0.0) -> float:
+    """Возвращает конечный float или *default* для NaN/Inf (wave-26).
+
+    Защита от утечки Infinity/NaN в IPC-JSON. Зеркалит паттерн
+    ``metadata_enricher._sanitize_float`` (wave-25).
+    """
+    if not isinstance(v, (int, float)) or not math.isfinite(v):
+        return default
+    return float(v)
 
 
 def _pace_category(wpm: float, language: Optional[str] = None) -> str:
@@ -126,8 +138,14 @@ class SpeechPaceAnalyzer:
         Returns:
             PaceReport с рассчитанными метриками темпа.
         """
-        if not text or not text.strip() or duration_sec <= 0:
-            return self._empty_report(duration_sec=max(0.0, duration_sec))
+        # wave-26 HIGH guard: reject non-finite durations BEFORE the `<= 0` test.
+        #   - duration_sec=Inf  passes `<= 0` (Inf > 0) → leaks Inf into duration_sec.
+        #   - duration_sec=NaN  passes `<= 0` (NaN comparisons are always False) →
+        #     leaks NaN into wpm/cpm AND mis-classifies pace_category as "very_fast".
+        # Both then crash Swift's json.dumps(allow_nan=False). math.isfinite catches both.
+        if not text or not text.strip() or not math.isfinite(duration_sec) or duration_sec <= 0:
+            safe_dur = duration_sec if math.isfinite(duration_sec) else 0.0
+            return self._empty_report(duration_sec=max(0.0, safe_dur))
 
         words = _tokenize_words(text)
         word_count = len(words)
@@ -145,14 +163,17 @@ class SpeechPaceAnalyzer:
         # Расчётное время чтения при 150 wpm (в секундах)
         reading_time_sec = (word_count / _READING_WPM) * 60.0
 
+        # Defense-in-depth: guard all computed floats against NaN/Inf (wave-26),
+        # so nothing non-finite can ever cross the IPC boundary.
+        safe_wpm = _safe_float(wpm)
         return PaceReport(
-            words_per_minute=round(wpm, 2),
-            chars_per_minute=round(cpm, 2),
-            pace_category=_pace_category(wpm, language=language),
-            estimated_reading_time_sec=round(reading_time_sec, 2),
+            words_per_minute=round(safe_wpm, 2),
+            chars_per_minute=round(_safe_float(cpm), 2),
+            pace_category=_pace_category(safe_wpm, language=language),
+            estimated_reading_time_sec=round(_safe_float(reading_time_sec), 2),
             word_count=word_count,
             char_count=char_count,
-            duration_sec=round(duration_sec, 3),
+            duration_sec=round(_safe_float(duration_sec), 3),
         )
 
     def compare_pace(self, reports: List[PaceReport]) -> dict:
