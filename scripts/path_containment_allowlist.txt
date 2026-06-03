@@ -1,0 +1,19 @@
+# path_containment_allowlist.txt — reviewed-safe exceptions for
+# scripts/audit_path_containment.py (the startswith path-containment guard).
+#
+# The guard flags ``X.startswith(Y)`` checks that test whether a resolved
+# filesystem path lives under an allowed root using a string prefix instead of
+# ``Path.relative_to`` / ``is_relative_to`` (the #1660 / recording_core /
+# history_import bug class).  A flagged site that is genuinely safe after review
+# can be suppressed here.
+#
+# Format (one entry per line, ``#`` starts a comment):
+#   KrabEar/backend/foo.py:123              # file:line  — pin to an exact line
+#   KrabEar/backend/foo.py:Class.method     # file:symbol — survives line drift
+#
+# Prefer fixing the site (swap to relative_to) over allowlisting.  Every entry
+# MUST carry a justification comment.
+#
+# (currently empty — see the PR description for the live findings list; the one
+#  REAL finding, history_service.handle_import_history_ndjson, is intentionally
+#  NOT allowlisted so it stays visible as a fix target.)

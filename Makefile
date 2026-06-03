@@ -1,4 +1,4 @@
-.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release reset-tcc clean-worktree-builds audit-orphans audit-handlers audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-all dispatch-tests service-loc
+.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release reset-tcc clean-worktree-builds audit-orphans audit-handlers audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-path-containment audit-all dispatch-tests service-loc
 
 VENV = .venv_krab_ear
 PYTHON = $(VENV)/bin/python
@@ -130,6 +130,18 @@ audit-dead-modules:
 # Pass ARGS=--json for machine-readable output.
 audit-purge-coverage:
 	python3 scripts/audit_purge_coverage.py --fail-on-found $(ARGS)
+
+# Audit path-containment startswith checks (root-cause guard for the #1660 class).
+# Flags ``X.startswith(Y)`` used as a filesystem path-containment test (prefix
+# match instead of Path.relative_to / is_relative_to) — the classic sibling-prefix
+# escape (``/home/user_evil`` passes ``startswith('/home/user')``). Report-only:
+# --fail-on-found is intentionally NOT passed here and the target is NOT in
+# audit-all yet, because one live finding (history_service.handle_import_history_ndjson)
+# is a real un-fixed bug. Once it is fixed, switch this to --fail-on-found and add
+# it to audit-all. Pass ARGS=--json for machine-readable output, ARGS=--fail-on-found
+# to preview the enforcing behaviour, ARGS=--selftest for inline classifier asserts.
+audit-path-containment:
+	python3 scripts/audit_path_containment.py $(ARGS)
 
 # Run all static audit checks (CI parity — runs same checks as CI guard jobs).
 audit-all: audit-orphans audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage
