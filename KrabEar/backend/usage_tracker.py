@@ -216,7 +216,16 @@ class UsageTracker:
             return
         try:
             data = json.loads(self._stats_file.read_text(encoding="utf-8"))
-            self._daily = data.get("daily", {})
+            raw_daily = data.get("daily", {})
+            # F2: discard any entry whose value is not a dict — a planted non-dict
+            # value (e.g. string, int) would crash .get() calls in record_usage /
+            # get_usage_stats and must be silently dropped on load.
+            self._daily = {k: v for k, v in raw_daily.items() if isinstance(v, dict)}
+            if len(self._daily) != len(raw_daily):
+                logger.warning(
+                    "usage_tracker: discarded %d non-dict entries from daily stats (planted/corrupt)",
+                    len(raw_daily) - len(self._daily),
+                )
             all_time = data.get("all_time", {})
             self._all_recordings = int(all_time.get("recordings", 0))
             self._all_duration = float(all_time.get("duration_sec", 0.0))
