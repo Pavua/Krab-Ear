@@ -21,7 +21,7 @@ logger = logging.getLogger("KrabEar.Backend.SummaryProfiles")
 # into the LLM call) and DoS via unbounded max_tokens.
 _MAX_NAME_LEN: int = 100
 _MAX_DESCRIPTION_LEN: int = 500
-_MAX_PROMPT_LEN: int = 4096   # ~3 KB — generous for real prompts, blocks injection blobs
+_MAX_PROMPT_LEN: int = 2000   # 2 KB cap — blocks injection blobs, generous for real prompts
 _MAX_FORMAT_LEN: int = 500
 _MAX_TOKENS_CEILING: int = 8192  # hard cap; clamp silently (BUG 2)
 
