@@ -22,6 +22,10 @@ logger = logging.getLogger("KrabEar.Backend.DataMigrator")
 # Текущая поддерживаемая версия схемы
 LATEST_VERSION = "2.0"
 
+# C2 DoS guard: максимальное число хранимых migration-бэкапов.
+# Сверх лимита — самые старые удаляются при создании нового.
+_MAX_MIGRATION_BACKUPS = 5
+
 # Поля v2.0, которых не было в v1.0
 _V2_DEFAULTS: dict[str, Any] = {
     "tags": [],
@@ -207,8 +211,10 @@ class DataMigrator:
             raise ValueError(f"Неподдерживаемая целевая версия: {target_version!r}. Поддерживается только '2.0'.")
 
         current = self.get_schema_version(data_dir)
-        backup_path = self._create_backup(data_dir)
 
+        # C2 DoS guard: если миграция не нужна — возвращаем ранний ответ БЕЗ создания
+        # резервной копии. Без этой проверки IPC-спам run_migration создавал бы бэкап
+        # при каждом вызове, заполняя диск.
         if current == target_version:
             logger.info("Миграция не требуется: текущая версия %s == целевой %s", current, target_version)
             return MigrationResult(
@@ -216,8 +222,10 @@ class DataMigrator:
                 to_version=target_version,
                 items_migrated=0,
                 items_skipped=0,
-                backup_path=backup_path,
+                backup_path="",
             )
+
+        backup_path = self._create_backup(data_dir)
 
         # Миграция v1.0 → v2.0
         if current == "1.0" and target_version == "2.0":
@@ -378,6 +386,9 @@ class DataMigrator:
     def _create_backup(self, data_dir: Path) -> str:
         """Создаёт резервную копию данных перед миграцией.
 
+        После создания удаляет самые старые migration_backup_* директории,
+        чтобы число бэкапов не превышало _MAX_MIGRATION_BACKUPS (C2 DoS guard).
+
         Returns:
             Строковый путь к директории резервной копии.
         """
@@ -418,6 +429,21 @@ class DataMigrator:
         )
 
         logger.info("Резервная копия для миграции создана: %s", backup_dir)
+
+        # C2 DoS guard: прореживаем старые бэкапы, оставляя только _MAX_MIGRATION_BACKUPS
+        # последних (сортировка по имени == хронологическая, т.к. имя содержит timestamp).
+        try:
+            existing = sorted(
+                [d for d in backups_dir.iterdir() if d.is_dir() and d.name.startswith("migration_backup_")],
+                key=lambda d: d.name,
+            )
+            excess = existing[: max(0, len(existing) - _MAX_MIGRATION_BACKUPS)]
+            for old_dir in excess:
+                shutil.rmtree(old_dir, ignore_errors=True)
+                logger.info("Удалён старый migration-бэкап (лимит %d): %s", _MAX_MIGRATION_BACKUPS, old_dir)
+        except Exception:
+            logger.warning("Не удалось прочистить старые migration-бэкапы", exc_info=True)
+
         return str(backup_dir)
 
     def _migrate_v1_to_v2(self, data_dir: Path, backup_path: str) -> MigrationResult:
