@@ -250,5 +250,98 @@ class TestRestoreSettingsBackupRedactsResponse(unittest.TestCase):
                 )
 
 
+class TestSetSettingsWritePathRedaction(unittest.TestCase):
+    """wave-36 HIGH x3 — write-path handlers must redact secrets in their IPC response."""
+
+    def setUp(self):
+        self.store = _make_store()
+        self.svc = SettingsService(store=self.store)
+
+    # ------------------------------------------------------------------
+    # set_settings: response redaction
+    # ------------------------------------------------------------------
+
+    def test_set_settings_response_redacts_all_sensitive_fields(self):
+        """handle_set_settings response must not echo credentials back."""
+        result = self.svc.handle_set_settings({"language": "ru"})
+        for field in SENSITIVE_FIELDS:
+            if _BASE_SETTINGS.get(field):
+                self.assertEqual(
+                    result.get(field), "REDACTED",
+                    f"set_settings response: {field!r} должен быть REDACTED",
+                )
+
+    def test_set_settings_response_leaves_non_sensitive_unchanged(self):
+        result = self.svc.handle_set_settings({"language": "ru"})
+        self.assertEqual(result.get("language"), "ru")
+        self.assertEqual(result.get("quality_profile"), "balanced")
+
+    def test_set_settings_does_not_overwrite_credential_with_redacted_string(self):
+        """Sending telnyx_api_key='REDACTED' must NOT persist 'REDACTED' to store."""
+        # The store's save_settings is a side_effect that returns the passed dict.
+        self.svc.handle_set_settings({"telnyx_api_key": "REDACTED"})
+        # Grab what was actually persisted (last positional argument to save_settings)
+        saved = self.store.save_settings.call_args[0][0]
+        self.assertNotEqual(
+            saved.get("telnyx_api_key"), "REDACTED",
+            "La cadena 'REDACTED' no debe grabarse en disco como credencial real",
+        )
+        # Real value from old_settings must be preserved
+        self.assertEqual(
+            saved.get("telnyx_api_key"), "KEY_telnyx_secret_value",
+            "El valor real de telnyx_api_key debe preservarse si el cliente envía REDACTED",
+        )
+
+    def test_set_settings_empty_credential_stays_empty(self):
+        """Passing empty string for a sensitive field IS allowed (user clearing the key)."""
+        self.svc.handle_set_settings({"telnyx_api_key": ""})
+        saved = self.store.save_settings.call_args[0][0]
+        self.assertEqual(saved.get("telnyx_api_key"), "")
+
+    def test_set_settings_real_credential_update_persisted(self):
+        """A new non-REDACTED credential value must be persisted normally."""
+        self.svc.handle_set_settings({"telnyx_api_key": "KEY_new_value"})
+        saved = self.store.save_settings.call_args[0][0]
+        self.assertEqual(saved.get("telnyx_api_key"), "KEY_new_value")
+
+    # ------------------------------------------------------------------
+    # apply_profile_preset: response redaction
+    # ------------------------------------------------------------------
+
+    def test_apply_profile_preset_response_redacts_secrets(self):
+        """handle_apply_profile_preset response must not contain plaintext credentials."""
+        result = self.svc.handle_apply_profile_preset({"profile": "default"})
+        for field in SENSITIVE_FIELDS:
+            if _BASE_SETTINGS.get(field):
+                self.assertEqual(
+                    result.get(field), "REDACTED",
+                    f"apply_profile_preset response: {field!r} должен быть REDACTED",
+                )
+
+    def test_apply_profile_preset_non_sensitive_unchanged(self):
+        result = self.svc.handle_apply_profile_preset({"profile": "meeting"})
+        self.assertEqual(result.get("language"), "ru")
+
+    # ------------------------------------------------------------------
+    # set_notification_preferences: response redaction
+    # ------------------------------------------------------------------
+
+    def test_set_notification_preferences_response_redacts_secrets(self):
+        """handle_set_notification_preferences response must not contain plaintext credentials."""
+        result = self.svc.handle_set_notification_preferences(
+            {"notifications_enabled": True, "notify_sound_enabled": False}
+        )
+        for field in SENSITIVE_FIELDS:
+            if _BASE_SETTINGS.get(field):
+                self.assertEqual(
+                    result.get(field), "REDACTED",
+                    f"set_notification_preferences response: {field!r} должен быть REDACTED",
+                )
+
+    def test_set_notification_preferences_non_sensitive_unchanged(self):
+        result = self.svc.handle_set_notification_preferences({"notifications_enabled": True})
+        self.assertEqual(result.get("language"), "ru")
+
+
 if __name__ == "__main__":
     unittest.main()

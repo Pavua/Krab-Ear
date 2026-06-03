@@ -302,6 +302,14 @@ class SettingsService:
         # A2: refuse to overwrite env-pinned security settings via IPC.
         self._check_env_pinned(params)
 
+        # wave-36 HIGH: a client that previously received 'REDACTED' must not write
+        # the string 'REDACTED' back to disk, silently overwriting the real credential.
+        # Strip any sensitive-field entry whose value is exactly 'REDACTED' before merge.
+        params = {
+            k: v for k, v in params.items()
+            if not (k in self._SENSITIVE_FIELDS and v == "REDACTED")
+        }
+
         try:
             self._backup.create_backup(old_settings, reason="before_set")
         except Exception as exc:  # noqa: BLE001
@@ -493,7 +501,8 @@ class SettingsService:
         self._maybe_disable_sentry_for_privacy(old_settings, settings)
         # W1341/W1436: hot-reload pydantic settings then fire hooks (single point of truth).
         self._reload_and_fire_hooks(old_settings, settings)
-        return result
+        # wave-36 HIGH: redact secrets before sending result over IPC socket.
+        return self._redact_secrets(result)
 
     def handle_apply_profile_preset(self, params: dict[str, Any]) -> dict[str, Any]:
         """Применяет пресет настроек профиля, сохраняет и сбрасывает кэш.
@@ -531,7 +540,8 @@ class SettingsService:
                 _log.warning("handle_apply_profile_preset: emit preset.changed failed: %s", exc)
             # W1308/W1341/W1436: reload pydantic settings and fire hooks
             self._reload_and_fire_hooks(old_settings, settings)
-            return result
+            # wave-36 HIGH: redact secrets before sending result over IPC socket.
+            return self._redact_secrets(result)
 
     def handle_get_notification_preferences(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает текущие настройки уведомлений из хранилища настроек."""
@@ -574,11 +584,29 @@ class SettingsService:
             self.invalidate_cache()
             # W1308/W1341/W1436: reload pydantic settings and fire hooks
             self._reload_and_fire_hooks(old_settings, settings)
-            return result
+            # wave-36 HIGH: redact secrets before sending result over IPC socket.
+            return self._redact_secrets(result)
 
     # W929 F4: single source of truth — imported from settings_backup.
     # Covers all 9 secret fields; local 4-field set was a subset causing leaks.
     _SENSITIVE_FIELDS: frozenset[str] = _SENSITIVE_FIELDS_BACKUP
+
+    def _redact_secrets(self, d: dict) -> dict:
+        """Return a shallow copy of *d* with all non-empty sensitive fields replaced by 'REDACTED'.
+
+        wave-36 HIGH: write-path handlers (set_settings, apply_profile_preset,
+        set_notification_preferences) previously returned the raw save_settings() result
+        which contained plaintext credentials.  This helper is the single redaction point
+        for all three paths.
+
+        Empty / absent values are left as-is so the UI can distinguish
+        'not configured' (empty string) from 'configured but hidden' (REDACTED).
+        """
+        result = dict(d)
+        for k in self._SENSITIVE_FIELDS:
+            if result.get(k):
+                result[k] = "REDACTED"
+        return result
 
     def handle_export_settings(self, params: dict[str, Any]) -> dict[str, Any]:
         """Экспортирует текущие настройки в JSON-файл, исключая чувствительные поля.
