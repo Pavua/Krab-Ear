@@ -134,14 +134,13 @@ audit-purge-coverage:
 # Audit path-containment startswith checks (root-cause guard for the #1660 class).
 # Flags ``X.startswith(Y)`` used as a filesystem path-containment test (prefix
 # match instead of Path.relative_to / is_relative_to) — the classic sibling-prefix
-# escape (``/home/user_evil`` passes ``startswith('/home/user')``). Report-only:
-# --fail-on-found is intentionally NOT passed here and the target is NOT in
-# audit-all yet, because one live finding (history_service.handle_import_history_ndjson)
-# is a real un-fixed bug. Once it is fixed, switch this to --fail-on-found and add
-# it to audit-all. Pass ARGS=--json for machine-readable output, ARGS=--fail-on-found
-# to preview the enforcing behaviour, ARGS=--selftest for inline classifier asserts.
+# escape (``/home/user_evil`` passes ``startswith('/home/user')``). Strict
+# (--fail-on-found) enforced in CI since #1674 (all findings fixed before gate
+# enforcement — history_service.handle_import_history_ndjson was the last finding,
+# now fixed). Pass ARGS=--json for machine-readable output,
+# ARGS=--selftest for inline classifier asserts.
 audit-path-containment:
-	python3 scripts/audit_path_containment.py $(ARGS)
+	python3 scripts/audit_path_containment.py --fail-on-found $(ARGS)
 
 # Audit "test validates the dead in-class copy" bug class (telegram #44 guard).
 # Finds in-class BackendService._handle_<X> methods that are dead shadows of a
@@ -154,7 +153,7 @@ audit-dispatch-test-targets:
 	python3 scripts/audit_dispatch_test_targets.py $(ARGS)
 
 # Run all static audit checks (CI parity — runs same checks as CI guard jobs).
-audit-all: audit-orphans audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage
+audit-all: audit-orphans audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-path-containment
 	@echo "All audit checks passed."
 
 # Print current service.py line count (quick monolith size gauge).

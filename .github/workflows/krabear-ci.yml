@@ -131,6 +131,14 @@ jobs:
         # shadows the extracted one. Exits non-zero if any dead module or duplicate found.
         # No user-controlled input is used in this step -- no injection risk.
         run: python3 scripts/audit_dead_extracted_modules.py --fail-on-found
+      - name: Path-containment startswith guard (#1674)
+        # Detects filesystem path-containment checks written as string prefix matches
+        # (str(resolved).startswith(str(root))), which allow sibling-prefix escapes
+        # (/home/user_evil passes a check meant to confine to /home/user).
+        # All findings were fixed before this gate was enforced (closes #1674 loop).
+        # No user-controlled input is used in this step -- no injection risk.
+        run: python3 scripts/audit_path_containment.py --fail-on-found
+
 
       - name: Compare benchmark history (regression gate)
         env:
