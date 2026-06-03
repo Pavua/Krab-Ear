@@ -1,4 +1,4 @@
-.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release reset-tcc clean-worktree-builds audit-orphans audit-handlers audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-path-containment audit-dispatch-test-targets audit-all dispatch-tests service-loc
+.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release reset-tcc clean-worktree-builds audit-orphans audit-handlers audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-path-containment audit-dispatch-test-targets audit-all pre-merge-check dispatch-tests service-loc
 
 VENV = .venv_krab_ear
 PYTHON = $(VENV)/bin/python
@@ -155,6 +155,16 @@ audit-dispatch-test-targets:
 # Run all static audit checks (CI parity — runs same checks as CI guard jobs).
 audit-all: audit-orphans audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-path-containment
 	@echo "All audit checks passed."
+
+# Reproduce the ubuntu krab-ear-ci env LOCALLY (Python 3.12, mlx ABSENT) and run
+# changed/given test files BEFORE the slow remote CI — breaks the "mlx-masking"
+# red-tip cycle (dev .venv_krab_ear is py3.14 WITH mlx → false-green vs ubuntu).
+# Usage: make pre-merge-check                       (auto-detect changed test files)
+#        make pre-merge-check ARGS="KrabEar/tests/test_foo.py KrabEar/tests/test_bar.py"
+#        make pre-merge-check ARGS=REBUILD          (force-rebuild the harness venv)
+pre-merge-check:
+	@chmod +x scripts/pre_merge_py312_check.sh
+	scripts/pre_merge_py312_check.sh $(ARGS)
 
 # Print current service.py line count (quick monolith size gauge).
 service-loc:
