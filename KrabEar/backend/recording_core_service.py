@@ -141,6 +141,14 @@ class RecordingCoreService:
         self._preview_error_last_reset_ts: float | None = None
 
         # Realtime partial transcriber state
+        # wave-27 MED (race): concurrent start_recording/stop_recording mutate
+        # _rt_partial / _rsf without coordination — an interleaving where stop()
+        # reads None while start() is mid-construction (or vice-versa) can orphan
+        # the RealtimePartialTranscriber daemon thread (started but its handle
+        # overwritten with None → never stopped). All lifecycle transitions of
+        # _rt_partial and _rsf (construct+assign on start, stop()+None on stop)
+        # are made atomic under this lock.
+        self._rt_lock = threading.Lock()
         self._rt_partial: RealtimePartialTranscriber | None = None
         self._rt_session_id: str = ""
 
@@ -266,22 +274,28 @@ class RecordingCoreService:
                     except Exception:
                         return True
 
+                # wave-27 MED (race): build, start and publish the handle atomically
+                # so a concurrent stop_recording cannot observe a half-constructed /
+                # orphaned daemon. The handle is assigned only AFTER start() succeeds.
                 try:
-                    self._rt_partial = RealtimePartialTranscriber(
-                        transcriber=self.transcriber,
-                        recorder=self.recorder,
-                        event_bus=event_bus,
-                        interval_sec=_interval,
-                        buffer_sec=_buffer,
-                        privacy_getter=_privacy_getter,
-                    )
-                    self._rt_partial.start(
-                        session_id=self._rt_session_id,
-                        sample_rate=_sample_rate,
-                    )
+                    with self._rt_lock:
+                        _rt = RealtimePartialTranscriber(
+                            transcriber=self.transcriber,
+                            recorder=self.recorder,
+                            event_bus=event_bus,
+                            interval_sec=_interval,
+                            buffer_sec=_buffer,
+                            privacy_getter=_privacy_getter,
+                        )
+                        _rt.start(
+                            session_id=self._rt_session_id,
+                            sample_rate=_sample_rate,
+                        )
+                        self._rt_partial = _rt
                 except Exception:
                     logger.exception("Не удалось запустить RealtimePartialTranscriber")
-                    self._rt_partial = None
+                    with self._rt_lock:
+                        self._rt_partial = None
 
         # W930 CRITICAL fix: wire SessionTracker start — skip in privacy mode
         _privacy_mode = bool(settings.get("privacy_mode_enabled", False))
@@ -299,18 +313,25 @@ class RecordingCoreService:
                 logger.warning("SessionTracker.start_session завершился с ошибкой (не критично)", exc_info=True)
 
         # W1325 F1 HIGH: wire RealtimeSilenceFilter (default OFF)
-        self._rsf = None
+        # wave-27 MED (race): reset + construct + start + publish the handle
+        # atomically under _rt_lock so a concurrent stop_recording cannot orphan
+        # the filter's background work.
+        with self._rt_lock:
+            self._rsf = None
         if bool(settings.get("realtime_silence_filter_enabled", False)):
             try:
-                self._rsf = RealtimeSilenceFilter(
-                    recorder=self.recorder,
-                    settings=settings,
-                    event_bus_emit=event_bus.emit,
-                )
-                self._rsf.start()
+                with self._rt_lock:
+                    _rsf = RealtimeSilenceFilter(
+                        recorder=self.recorder,
+                        settings=settings,
+                        event_bus_emit=event_bus.emit,
+                    )
+                    _rsf.start()
+                    self._rsf = _rsf
             except Exception:
                 logger.exception("Не удалось запустить RealtimeSilenceFilter")
-                self._rsf = None
+                with self._rt_lock:
+                    self._rsf = None
         return {"status": "recording"}
 
     def handle_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -896,24 +917,31 @@ class RecordingCoreService:
         bookmark_session_id: str = (
             (_active.get("session_id") or "__live__") if _active else "__live__"
         )
-        if self._rt_partial is not None:
+        # wave-27 MED (race): claim the handle and clear the field atomically under
+        # _rt_lock, so a concurrent start_recording can never see a stopped-but-still
+        # -published transcriber (and we never double-stop / orphan). The (idempotent)
+        # stop() itself runs after the swap — outside the lock — to avoid holding it
+        # across blocking thread-join work.
+        with self._rt_lock:
+            _rt_partial = self._rt_partial
+            self._rt_partial = None
+        if _rt_partial is not None:
             try:
-                self._rt_partial.stop()
+                _rt_partial.stop()
             except Exception:
                 logger.exception("Ошибка при остановке RealtimePartialTranscriber")
-            finally:
-                self._rt_partial = None
 
         # W1325 F1 HIGH: stop RSF and capture silence_ranges
         _silence_ranges: list[tuple[float, float]] = []
-        if self._rsf is not None:
+        with self._rt_lock:
+            _rsf = self._rsf
+            self._rsf = None
+        if _rsf is not None:
             try:
-                _silence_ranges = self._rsf.stop() or []
+                _silence_ranges = _rsf.stop() or []
             except Exception:
                 logger.exception("Ошибка при остановке RealtimeSilenceFilter")
                 _silence_ranges = []
-            finally:
-                self._rsf = None
         self._last_silence_ranges = _silence_ranges
 
         stop_tail_trim_ms = self._coerce_bounded(

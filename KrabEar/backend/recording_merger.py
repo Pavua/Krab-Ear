@@ -8,11 +8,17 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger("KrabEar.Backend.RecordingMerger")
 
 _TIMESTAMP_SEP = "\n\n"
+
+# wave-27 MED (DoS): hard cap on how many history items a single merge may pull.
+# Each id triggers a per-item store lookup + full transcript read; an unbounded
+# item_ids list (accidental or hostile) could fan out into a heavy I/O storm and
+# build an arbitrarily large merged record. 50 covers every realistic UI flow.
+MAX_MERGE_ITEMS = 50
 
 
 class RecordingMerger:
@@ -43,8 +49,13 @@ class RecordingMerger:
     def __init__(
         self,
         semantic_searcher: Any | None = None,
+        privacy_mode_fn: Optional[Callable[[], bool]] = None,
     ) -> None:
         self._semantic_searcher = semantic_searcher
+        # wave-27 MED (privacy): когда privacy_mode активен, merge/preview не должны
+        # читать и собирать полный текст транскриптов. Колбэк опрашивается в начале
+        # каждой публичной операции; None → гейт выключен (standalone/тесты).
+        self._privacy_mode_fn = privacy_mode_fn
         # Late-injection: см. docstring класса.
         self.recording_chain_mgr: Any | None = None
         # wave1776 HIGH 1: каноническая cascade-функция (item_id, item_ts) -> None.
@@ -80,7 +91,26 @@ class RecordingMerger:
         раз → deadlock).  Богатые delete-каскады (.md/semantic/versions/chains)
         выполняются ПОСЛЕ освобождения lock'а — это best-effort шаги, не входящие
         в атомарный инвариант «merged записан И оригиналы tombstoned».
+
+        wave-27 MED (privacy): при активном privacy_mode возвращаем
+        ``{"ok": False, "reason": "privacy_mode_active"}`` БЕЗ чтения текста.
+        wave-27 MED (DoS): при ``len(item_ids) > MAX_MERGE_ITEMS`` возвращаем
+        ``{"ok": False, "reason": "too_many_items", ...}`` ДО любых store-lookup'ов.
         """
+        # wave-27 MED (privacy): гейт ДО чтения транскриптов из store.
+        if self._privacy_mode_fn is not None and self._privacy_mode_fn():
+            return {"ok": False, "reason": "privacy_mode_active"}
+
+        # wave-27 MED (DoS): ограничиваем количество объединяемых записей. Проверяем
+        # ДО _load_items, чтобы огромный список не вызвал лавину per-item lookup'ов.
+        if len(item_ids) > MAX_MERGE_ITEMS:
+            return {
+                "ok": False,
+                "reason": "too_many_items",
+                "max_items": MAX_MERGE_ITEMS,
+                "requested": len(item_ids),
+            }
+
         items = self._load_items(item_ids, store)
 
         # wave1776 MED 4: защищённые (is_protected) оригиналы никогда не удаляются.
@@ -271,7 +301,14 @@ class RecordingMerger:
 
         Ответ содержит те же поля, что вернул бы merge_items, плюс
         ``preview: true`` и ``merged_from`` со списком ID.
+
+        wave-27 MED (privacy): при активном privacy_mode возвращаем
+        ``{"ok": False, "reason": "privacy_mode_active"}`` БЕЗ чтения текста.
         """
+        # wave-27 MED (privacy): гейт ДО чтения транскриптов из store.
+        if self._privacy_mode_fn is not None and self._privacy_mode_fn():
+            return {"ok": False, "reason": "privacy_mode_active"}
+
         items = self._load_items(item_ids, store)
         merged_data = self._build_merged_data(items, separator)
 

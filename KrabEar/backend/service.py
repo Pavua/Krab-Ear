@@ -615,7 +615,7 @@ class BackendService:
             store=self.store,
             privacy_mode_fn=lambda: self._get_runtime_setting("privacy_mode_enabled", False),
         )
-        self._merger = RecordingMerger()
+        self._merger = RecordingMerger(privacy_mode_fn=lambda: self._get_runtime_setting('privacy_mode_enabled', False))
         self._transcript_versioning = TranscriptVersionManager(data_dir=self.store.data_dir)
         # BulkReprocessor — массовое перетранскрибирование истории (W1037 F4 / W1044 re-wire)
         # wave-25 HIGH: wire is_recording_fn so the anti-SIGSEGV guard is live.  Without it the
