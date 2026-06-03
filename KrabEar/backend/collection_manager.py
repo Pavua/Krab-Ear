@@ -9,10 +9,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger("KrabEar.Backend.CollectionManager")
 
@@ -23,6 +24,9 @@ MAX_COLLECTIONS = 500
 MAX_ITEMS_PER_COLLECTION = 10_000
 MAX_COLLECTION_NAME_LEN = 200
 MAX_ITEM_ID_LEN = 200
+
+# Basic item_id format guard (A4 wave-34): no path separators or null bytes.
+_ITEM_ID_UNSAFE_RE = re.compile(r'[/\\.\x00]')
 
 
 class CollectionManager:
@@ -42,13 +46,27 @@ class CollectionManager:
     }
     """
 
-    def __init__(self, store: Any) -> None:
+    def __init__(
+        self,
+        store: Any,
+        settings_fn: Optional[Callable[[], dict[str, Any]]] = None,
+    ) -> None:
         self._store = store
+        self._settings_fn = settings_fn
         self._data_dir = Path(getattr(store, "data_dir", "."))
         self._collections_path = self._data_dir / _COLLECTIONS_FILE
         self._lock = threading.Lock()
         self._data: dict[str, Any] = {"collections": {}}
         self._load()
+
+    def _is_privacy_mode(self) -> bool:
+        """Returns True when privacy_mode_enabled is set in cached settings."""
+        if self._settings_fn is None:
+            return False
+        try:
+            return bool(self._settings_fn().get("privacy_mode_enabled", False))
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------
     # Персистентность
@@ -223,7 +241,7 @@ class CollectionManager:
             ValueError: если item_id не является непустой строкой до MAX_ITEM_ID_LEN символов.
         """
         collection_name = collection_name.strip()
-        # Input validation: must be a non-empty string within length limit
+        # Input validation: must be a non-empty string within length limit (A4 wave-34)
         if not isinstance(item_id, str):
             raise ValueError("item_id должен быть строкой")
         item_id = item_id.strip()
@@ -232,6 +250,10 @@ class CollectionManager:
         if len(item_id) > MAX_ITEM_ID_LEN:
             raise ValueError(
                 f"item_id слишком длинный (максимум {MAX_ITEM_ID_LEN} символов)"
+            )
+        if _ITEM_ID_UNSAFE_RE.search(item_id):
+            raise ValueError(
+                f"item_id содержит недопустимые символы: {item_id!r}"
             )
 
         with self._lock:
@@ -322,6 +344,9 @@ class CollectionManager:
     def get_collection_items(self, collection_name: str) -> list[dict[str, Any]]:
         """Возвращает записи истории, входящие в коллекцию.
 
+        Privacy gate (A2 wave-34): когда privacy_mode_enabled=True, возвращает
+        пустой список вместо transcript cleartext.
+
         Args:
             collection_name: Имя коллекции.
 
@@ -337,6 +362,8 @@ class CollectionManager:
         with self._lock:
             if collection_name not in self._data["collections"]:
                 raise KeyError(f"Коллекция '{collection_name}' не найдена")
+            if self._is_privacy_mode():
+                return []
             item_ids = list(self._data["collections"][collection_name]["item_ids"])
 
         result = []
@@ -409,7 +436,16 @@ class CollectionManager:
             items = self.get_collection_items(collection_name)
         except KeyError as exc:
             raise RuntimeError(str(exc)) from exc
-        return {"collection_name": collection_name, "items": items, "count": len(items)}
+        privacy_active = self._is_privacy_mode()
+        result: dict[str, Any] = {
+            "collection_name": collection_name,
+            "items": items,
+            "count": len(items),
+        }
+        if privacy_active:
+            result["ok"] = True
+            result["reason"] = "privacy_mode_active"
+        return result
 
     # ------------------------------------------------------------------
     # Хелперы
