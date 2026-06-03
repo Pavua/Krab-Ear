@@ -140,6 +140,10 @@ class HistoryService:
         # terminal-задачи хранят items[].text (полный текст транскрипций) и errors.
         # Файлового артефакта нет; clear() сбрасывает _jobs и все сопутствующие dict-ы.
         self._job_tracker: Any = None         # JobTracker — in-memory async-job registry (transcript PII)
+        # wave-33 A1: SharingManager — in-memory _index хранит полный текст транскрипций
+        # (content/text/translated_text). rmtree(shares/) удаляет файлы, но RAM-копия
+        # продолжает отдавать данные через get_shared. clear() сбрасывает _index.
+        self._sharing_manager: Any = None     # SharingManager — in-memory share index (transcript PII)
 
     # ------------------------------------------------------------------
     # Privacy helpers
@@ -1958,6 +1962,11 @@ class HistoryService:
             if _shares_dir.is_dir():
                 _shutil.rmtree(_shares_dir, ignore_errors=True)
                 logger.info("purge_all_data: удалена директория shares/")
+            # wave-33 A1 (HIGH): rmtree удаляет файлы, но SharingManager._index —
+            # RAM-копия с полным текстом транскрипций — переживает purge и продолжает
+            # отдавать данные через get_shared. clear() сбрасывает in-memory индекс.
+            if self._sharing_manager is not None:
+                self._sharing_manager.clear()
         except Exception:
             logger.warning("purge_all_data: удаление shares/ не удалось", exc_info=True)
             secondary_errors.append("shares")

@@ -618,6 +618,11 @@ class BackendService:
             store=self.store,
             privacy_mode_fn=lambda: self._get_runtime_setting("privacy_mode_enabled", False),
         )
+        # wave-33 A1: wire SharingManager into HistoryService so handle_purge_all_data
+        # can clear SharingManager._index — a RAM copy of share packages holding full
+        # transcript text (content/text/translated_text) that survives the rmtree(shares/)
+        # step and keeps serving data via get_shared/list_shared.
+        self._history._sharing_manager = self._sharing
         self._merger = RecordingMerger(privacy_mode_fn=lambda: self._get_runtime_setting('privacy_mode_enabled', False))
         self._transcript_versioning = TranscriptVersionManager(data_dir=self.store.data_dir)
         # BulkReprocessor — массовое перетранскрибирование истории (W1037 F4 / W1044 re-wire)

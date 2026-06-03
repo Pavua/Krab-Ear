@@ -95,6 +95,41 @@ class SharingManager:
         self._load_index()
 
     # ------------------------------------------------------------------
+    # Path-containment guard (wave-33 A2)
+    # ------------------------------------------------------------------
+
+    def _resolve_contained_share_path(self, filename: str) -> Optional[Path]:
+        """Возвращает абсолютный путь к файлу пакета ВНУТРИ shares/, либо None.
+
+        wave-33 A2 (HIGH): shares_index.json — файл на диске; вредоносный/повреждённый
+        индекс может содержать filename='../../important_file'.  revoke_share() и
+        purge_all() ранее делали self._shares_dir / filename + unlink() напрямую, что
+        позволяло удалить произвольный файл вне shares/.  Здесь мы резолвим путь и
+        проверяем, что он строго внутри shares_dir через Path.is_relative_to
+        (НЕ str.startswith — sibling-prefix '/data/shares_evil' обошёл бы это).
+
+        Returns:
+            Path внутри shares_dir, если filename безопасен; иначе None
+            (вызывающий код пропускает удаление с предупреждением).
+        """
+        if not filename:
+            return None
+        root = self._shares_dir.resolve()
+        try:
+            candidate = (self._shares_dir / filename).resolve()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Не удалось разрешить путь файла пакета %r: %s", filename, exc)
+            return None
+        if candidate == root or not candidate.is_relative_to(root):
+            logger.warning(
+                "Отклонён небезопасный filename пакета (path traversal): %r → %s",
+                filename,
+                candidate,
+            )
+            return None
+        return candidate
+
+    # ------------------------------------------------------------------
     # Персистентность индекса
     # ------------------------------------------------------------------
 
@@ -296,9 +331,11 @@ class SharingManager:
 
             # W1762 HIGH FIX: удаляем файл(ы) пакета с диска перед обновлением индекса.
             # Если удаление не удалось — сообщаем громко, не помечаем как отозванный.
+            # wave-33 A2 (HIGH): резолвим путь с проверкой containment, чтобы
+            # подделанный filename='../../x' в индексе не удалил произвольный файл.
             filename = entry.get("filename", "")
-            if filename:
-                file_path = self._shares_dir / filename
+            file_path = self._resolve_contained_share_path(filename)
+            if file_path is not None:
                 try:
                     file_path.unlink(missing_ok=True)
                 except Exception as exc:
@@ -345,7 +382,12 @@ class SharingManager:
                 filename = entry.get("filename", "")
                 if not filename:
                     continue
-                file_path = self._shares_dir / filename
+                # wave-33 A2 (HIGH): проверяем containment перед unlink, чтобы
+                # подделанный filename='../../x' не удалил файл вне shares/.
+                file_path = self._resolve_contained_share_path(filename)
+                if file_path is None:
+                    errors += 1
+                    continue
                 try:
                     file_path.unlink(missing_ok=True)
                     deleted += 1
@@ -372,6 +414,22 @@ class SharingManager:
                 bool(cleared),
             )
             return {"deleted": deleted, "errors": errors, "cleared": cleared}
+
+    def clear(self) -> None:
+        """Очищает in-memory индекс пакетов (privacy-purge in-memory hook, wave-33 A1).
+
+        wave-33 A1 (HIGH): handle_purge_all_data удаляет директорию shares/ через
+        rmtree, но НЕ трогает self._index — словарь хранит полные транскрипции
+        (content/text/translated_text), которые остаются доступны через get_shared()
+        / list_shared() даже после удаления файлов с диска.  Этот метод сбрасывает
+        in-memory копию.  Вызывается из HistoryService.handle_purge_all_data одной
+        строкой после rmtree(shares/) (тот же паттерн, что context_memory.clear /
+        live_subs.reset / job_tracker.clear).
+
+        НЕ трогает файлы на диске (это делает rmtree в purge-шаге) — только RAM.
+        """
+        with self._lock:
+            self._index.clear()
 
     def get_share_package_by_token(self, token: str) -> SharePackage | None:
         """Alias для get_shared (более явное именование для токен-ориентированного API)."""
@@ -436,14 +494,37 @@ class SharingManager:
             result["warning"] = "no_items_found"
         return result
 
+    def _privacy_gate(self) -> Optional[dict[str, Any]]:
+        """Возвращает {ok:False, ...} если privacy_mode активен, иначе None (wave-33 A3).
+
+        Общий guard для read/prepare IPC-обработчиков: когда privacy_mode_enabled=True,
+        шаринг (включая чтение существующих пакетов) отключён, чтобы транскрипции не
+        раскрывались через get_shared/list_shared/prepare_share.
+        """
+        if self._privacy_mode_fn is not None and self._privacy_mode_fn():
+            return {
+                "ok": False,
+                "reason": "privacy_mode_active",
+                "error": "Sharing disabled in privacy mode",
+            }
+        return None
+
     def handle_list_shared(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: список сохранённых пакетов."""
+        # wave-33 A3: privacy gate — не раскрываем метаданные пакетов в privacy mode
+        gated = self._privacy_gate()
+        if gated is not None:
+            return gated
         include_expired = bool(params.get("include_expired", False))
         include_revoked = bool(params.get("include_revoked", False))
         return {"shares": self.list_shared(include_expired=include_expired, include_revoked=include_revoked)}
 
     def handle_get_shared(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: получить пакет по share_id."""
+        # wave-33 A3: privacy gate — get_shared не должен отдавать транскрипцию в privacy mode
+        gated = self._privacy_gate()
+        if gated is not None:
+            return gated
         share_id = str(params.get("share_id", "")).strip()
         if not share_id:
             raise RuntimeError("Параметр 'share_id' обязателен")
@@ -505,17 +586,75 @@ class SharingManager:
             return self._render_text(items, include_translation)
 
     def _render_json(self, items: list[Any], include_translation: bool) -> str:
+        # wave-33 A4 (MED): JSON-экспорт ранее сериализовал ПОЛНЫЙ item.to_dict(),
+        # включая чувствительные поля (audio_path — локальный путь к аудиофайлу,
+        # chat_id/message_id — идентификаторы Telegram-переписки, privacy_mode, reasoning
+        # и любые _extra-поля от новых бинарей).  Переходим на строгий allowlist:
+        # экспортируем только безопасное подмножество (text, source_lang, ts/created_at,
+        # длительность, confidence, speaker_count); перевод добавляется по флагу.
+        #
+        # Имена приведены к реальной схеме HistoryItem.to_dict(): ts (created_at),
+        # audio_duration_sec (duration_sec), translated_text (translation).
         rows = []
         for item in items:
             d = item.to_dict() if hasattr(item, "to_dict") else dict(item)
-            if not include_translation:
-                d.pop("translated_text", None)
-                d.pop("translation_mode", None)
-                d.pop("source_lang", None)
-                d.pop("target_lang", None)
-                d.pop("translation_status", None)
-                d.pop("translation_engine", None)
-            rows.append(d)
+            row: dict[str, Any] = {}
+            # ID записи (внутренний UUID, не PII — нужен для ссылки/round-trip)
+            if "id" in d:
+                row["id"] = d["id"]
+            # Текст транскрипции
+            if "text" in d:
+                row["text"] = d["text"]
+            # Язык источника
+            if "source_lang" in d:
+                row["source_lang"] = d["source_lang"]
+            # Метка времени записи (created_at эквивалент)
+            if "ts" in d:
+                row["created_at"] = d["ts"]
+            elif "created_at" in d:
+                row["created_at"] = d["created_at"]
+            # Длительность аудио
+            if "audio_duration_sec" in d and d["audio_duration_sec"] is not None:
+                row["duration_sec"] = d["audio_duration_sec"]
+            elif "duration_sec" in d:
+                row["duration_sec"] = d["duration_sec"]
+            # Достоверность STT
+            if "confidence" in d and d["confidence"] is not None:
+                row["confidence"] = d["confidence"]
+            # Диаризация — содержимое транскрипции по спикерам (НЕ метаданные-утечка:
+            # это тот же шаренный текст, что и `text`, просто разбит по спикерам).
+            # Сохраняем как часть безопасного экспорта, если присутствует.
+            diar = d.get("diarization")
+            if isinstance(diar, list) and diar:
+                row["diarization"] = diar
+            speaker_segments = d.get("speaker_segments")
+            if isinstance(speaker_segments, list) and speaker_segments:
+                row["speaker_segments"] = speaker_segments
+            # Кол-во спикеров: прямое поле либо производное от diarization/speaker_segments
+            if "speaker_count" in d:
+                row["speaker_count"] = d["speaker_count"]
+            else:
+                _seg_source = (
+                    speaker_segments
+                    if isinstance(speaker_segments, list) and speaker_segments
+                    else diar
+                )
+                if isinstance(_seg_source, list) and _seg_source:
+                    speakers = {
+                        s.get("speaker")
+                        for s in _seg_source
+                        if isinstance(s, dict) and s.get("speaker")
+                    }
+                    if speakers:
+                        row["speaker_count"] = len(speakers)
+            # Перевод — только при include_translation
+            if include_translation:
+                translated = d.get("translated_text", "")
+                if translated:
+                    row["translation"] = translated
+                    if d.get("target_lang"):
+                        row["target_lang"] = d["target_lang"]
+            rows.append(row)
         return json.dumps(rows, ensure_ascii=False, indent=2)
 
     def _render_markdown(self, items: list[Any], include_translation: bool) -> str:
