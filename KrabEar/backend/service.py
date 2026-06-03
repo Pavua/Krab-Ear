@@ -2014,12 +2014,32 @@ class BackendService:
         (TOCTOU). set_purged() взводится ДО очистки (и сам удаляет backups/);
         clear_purged() снимается в finally ПОСЛЕ завершения всех wipe-шагов, чтобы
         будущие бэкапы возобновились. Вся остальная логика purge не тронута.
+
+        wave-26 MED: после того как HistoryService удалит hotwords.json с диска,
+        очищаем in-memory коллекции HotwordDetector — иначе горячие слова (имена,
+        термины, ПДн) выживают в RAM до перезапуска и доступны через check_hotwords IPC.
+        ``_hotword_detector`` живёт в BackendService, а не в HistoryService, поэтому
+        wire сделан здесь, а не в handle_purge_all_data — намеренно (см. комментарий
+        в audit_inmemory_purge_coverage.py).
         """
         self._auto_backup.set_purged()
         try:
-            return self._history.handle_purge_all_data(params)
+            result = self._history.handle_purge_all_data(params)
         finally:
             self._auto_backup.clear_purged()
+        # wave-26 MED: wipe in-memory hotwords after disk file was deleted by history purge.
+        # Guard: only clear if the purge actually ran (confirm check passed → ok key present
+        # and is not False).  If confirm was missing, handle_purge_all_data returned early
+        # with ok=False and nothing was deleted — do not clear in-memory state.
+        if isinstance(result, dict) and result.get("ok") is not False:
+            try:
+                self._hotword_detector.clear()
+            except Exception:
+                import logging as _logging
+                _logging.getLogger("KrabEar.BackendService").warning(
+                    "purge_all_data: hotword_detector.clear() failed", exc_info=True
+                )
+        return result
 
     def _handle_ping(self, params: dict[str, Any]) -> dict[str, Any]:
         """Делегирует к HealthCheckService.handle_ping (W1690)."""

@@ -142,6 +142,15 @@ REGISTRY: tuple[RegistryEntry, ...] = (
 # (see StateStore.reset_search_caches, which clears both).  It is therefore folded
 # into the ``store/reset_search_caches`` registry entry above rather than given a
 # separate entry whose clear-call would never appear distinctly in the purge AST.
+#
+# ``HotwordDetector._hotwords`` / ``._patterns`` (wave-26 MED) are intentionally
+# NOT in this REGISTRY because HotwordDetector lives in BackendService, not in
+# HistoryService.  The clear-call ``self._hotword_detector.clear()`` is wired in
+# ``BackendService._handle_purge_all_data`` (KrabEar/backend/service.py) — after the
+# HistoryService purge deletes hotwords.json from disk.  This guard only scans
+# ``history_service.py::handle_purge_all_data``; a comment here documents the
+# intentional out-of-band placement so future auditors do not re-add it to the
+# registry (which would always show as a false gap).
 
 
 @dataclass
