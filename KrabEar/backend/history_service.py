@@ -3671,6 +3671,7 @@ class HistoryService:
             total_duplicates (int): общее количество дублирующихся записей.
         """
         threshold = float(params.get("similarity_threshold", 0.9))
+        threshold = max(0.0, min(1.0, threshold))
         limit = int(params.get("limit", 500))
 
         items, _ = self.store.get_history_page_filtered(

@@ -227,9 +227,9 @@ class OpenWakeWordAdapter:
         if self._settings_get("privacy_mode_enabled", False):
             logger.info(
                 "OpenWakeWordAdapter.handle_wake_word_start: "
-                "пропущен — privacy_mode_enabled=True"
+                "отклонён — privacy_mode_enabled=True"
             )
-            return {"ok": True, "skipped": "privacy_mode"}
+            return {"ok": False, "reason": "cannot activate wake-word in privacy mode"}
 
         model_name = str(params.get("model", "hey_jarvis"))
 
