@@ -383,22 +383,41 @@ class ArchiveManager:
     def unarchive_items(self, item_ids: list[str], store: Any | None = None) -> dict[str, Any]:
         """Восстанавливает записи из архива обратно в активную историю.
 
+        wave-33 (B2): зеркалит purge-epoch проверку из archive_items.
+        Без этой проверки конкурентный purge_all_data между чтением архива и
+        записью в активную историю мог бы воскресить только что очищенные PII-записи.
+        Снимок epoch берётся ДО захвата self._lock; перепроверка — внутри.
+
         Args:
             item_ids: Список ID записей для восстановления.
             store: StateStore (по умолчанию используется self._store).
 
         Returns:
             Словарь с ключами unarchived_count, not_found.
+            При обнаружении конкурентного purge возвращает ok=False, reason=purge_in_progress.
         """
         _store = store if store is not None else self._store
         ids_set = {str(i).strip() for i in item_ids if str(i).strip()}
         if not ids_set:
             return {"unarchived_count": 0, "not_found": []}
 
+        # wave-33 (B2): снимок purge-epoch ДО захвата self._lock.
+        epoch_before = self._current_epoch()
+
         unarchived_count = 0
         not_found: list[str] = []
 
         with self._lock:
+            # wave-33 (B2): перепроверяем epoch под self._lock. Если конкурентный
+            # purge инкрементировал его между снимком и захватом — отменяем:
+            # иначе только что очищенный архив получил бы PII обратно в active.
+            if self._current_epoch() != epoch_before:
+                logger.warning(
+                    "unarchive_items: обнаружен конкурентный purge (epoch %d→%d) — отмена",
+                    epoch_before, self._current_epoch(),
+                )
+                return {"ok": False, "reason": "purge_in_progress"}
+
             all_archived = self._read_archive()
             found_ids: set[str] = set()
             remaining: list[dict[str, Any]] = []
@@ -519,7 +538,14 @@ class ArchiveManager:
         wave-25: archive_items может вернуть dict ошибки (ok=False) при переполнении
         батча (too_many_ids) или гонке с privacy-purge (purge_in_progress) — в этом
         случае прокидываем dict как есть; иначе нормализуем ArchiveResult в dict.
+
+        wave-33 (B3): в режиме privacy_mode архивирование запрещено — оно перемещало
+        бы PII-записи в archive.ndjson, скрывая их от handle_purge_all_data.
         """
+        # wave-33 (B3): privacy gate — не архивировать в режиме приватности.
+        if params.get("privacy_mode"):
+            return {"ok": False, "reason": "privacy_mode_enabled"}
+
         raw_ids = params.get("item_ids", [])
         if not isinstance(raw_ids, list):
             raise ValueError("Параметр item_ids должен быть списком")
