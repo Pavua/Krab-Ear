@@ -1573,6 +1573,8 @@ class BackendService:
             "cleanup_stale_app_profiles": self._paste_app_memory.handle_cleanup_stale_app_profiles,  # удалить устаревшие записи
             "get_audio_devices": self._handle_get_audio_devices,  # список доступных аудиовходов для GUI
             "test_microphone": self._handle_test_microphone,  # тест микрофона: RMS/peak уровни
+            "get_disk_status": self._handle_get_disk_status,  # статус дискового пространства (HEAVY: recursive walk data_dir, wave-33)
+            "get_storage_breakdown": self._handle_get_storage_breakdown,  # разбивка использования диска по компонентам
             "auto_summarize_batch": self._history.handle_auto_summarize_batch,  # авто-резюме пакета транскрипций через LLM
             "list_summary_profiles": self._history.handle_list_summary_profiles,  # список профилей резюмирования
             "add_summary_profile": self._history.handle_add_summary_profile,  # добавить кастомный профиль резюмирования
