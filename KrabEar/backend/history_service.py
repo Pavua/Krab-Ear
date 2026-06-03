@@ -136,6 +136,10 @@ class HistoryService:
         # (полный PII, re-exposable через get_context_memory IPC). Файлового
         # артефакта нет, поэтому очищается ТОЛЬКО через late-injected clear().
         self._context_memory: Any = None      # ContextMemory — in-memory transcript deque (raw PII)
+        # Wave-22: JobTracker — in-memory реестр async-задач транскрибации.
+        # terminal-задачи хранят items[].text (полный текст транскрипций) и errors.
+        # Файлового артефакта нет; clear() сбрасывает _jobs и все сопутствующие dict-ы.
+        self._job_tracker: Any = None         # JobTracker — in-memory async-job registry (transcript PII)
 
     # ------------------------------------------------------------------
     # Privacy helpers
@@ -2294,6 +2298,22 @@ class HistoryService:
         except Exception:
             logger.warning("purge_all_data: очистка clipboard_history не удалась", exc_info=True)
             secondary_errors.append("clipboard_history")
+
+        # --- 36. Wave-22: очистить in-memory реестр async-задач JobTracker ---
+        # JobTracker._jobs хранит terminal-задачи (status=done/failed/cancelled),
+        # содержащие полный текст транскрипций в items[].text и errors (в т.ч.
+        # фрагменты транскриптов в сообщениях об ошибках). Задачи могут жить в
+        # памяти до 1 часа (max_age_sec=3600) после завершения — без этого шага
+        # PII переживает privacy-purge в RAM. Файлового артефакта нет; clear()
+        # берёт _lock, устанавливает cancel_event для live-воркеров и опустошает
+        # _jobs, _cancel_events, _evict_times, _cancel_events_ts за один проход.
+        if self._job_tracker is not None:
+            try:
+                cleared = self._job_tracker.clear()
+                logger.info("purge_all_data: JobTracker очищен (%d задач)", cleared)
+            except Exception:
+                logger.warning("purge_all_data: job_tracker.clear() не удался", exc_info=True)
+                secondary_errors.append("job_tracker")
 
         # --- C. W1734: Audit log entry ---
         try:
