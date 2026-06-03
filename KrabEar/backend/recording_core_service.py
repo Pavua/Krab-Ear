@@ -1574,7 +1574,14 @@ class RecordingCoreService:
                 except Exception:
                     logger.debug("Не удалось emit realtime.final_transcript", exc_info=True)
 
-        if self._coerce_bool(settings.get("auto_save_transcripts", False), default=False):
+        # wave-36 MED: do not write .md transcript files when privacy_mode is on.
+        # TranscriptWriter.write_transcript() persists plaintext to disk — writing
+        # it violates the privacy-mode guarantee that no transcript cleartext is
+        # persisted.  _privacy_mode is already resolved at ~line 1371 above.
+        if (
+            not _privacy_mode
+            and self._coerce_bool(settings.get("auto_save_transcripts", False), default=False)
+        ):
             try:
                 transcripts_dir = Path(self.store.data_dir) / "transcripts"
                 item_dict = {
