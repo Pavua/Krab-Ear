@@ -269,23 +269,51 @@ class StateStore:
             raise
         return item
 
+    def _id_exists_unlocked(self, item_id: str) -> bool:
+        """Проверяет, существует ли активная запись с данным id (без захвата lock).
+
+        Лёгкая проверка: итерирует основной журнал + отфильтровывает tombstone-ids.
+        Не применяет delta-override'ы (status/tags/etc) — нам нужен только факт
+        наличия строки в history.ndjson минус логически удалённые записи.
+        """
+        deleted = self._load_deleted_ids_unlocked()
+        if item_id in deleted:
+            return False
+        for item in self._iter_history_items_unlocked():
+            if item.id == item_id:
+                return True
+        return False
+
     def set_paste_status(self, item_id: str, paste_status: str) -> bool:
-        """Записывает обновление статуса вставки отдельным append-журналом."""
+        """Записывает обновление статуса вставки отдельным append-журналом.
+
+        Перед записью проверяет, что запись с данным id существует в активном
+        хранилище. Это защищает от спама junk-ids, которые раздувают
+        history_status.ndjson без пользы (каждый read — O(n) по журналу).
+        """
         clean_id = item_id.strip()
         if not clean_id:
             return False
 
         payload = {"id": clean_id, "paste_status": paste_status.strip() or "failed"}
         with self._lock():
+            if not self._id_exists_unlocked(clean_id):
+                return False
             self._append_ndjson(self.status_path, payload)
         return True
 
     def delete_history_item(self, item_id: str) -> bool:
-        """Логически удаляет запись через tombstone."""
+        """Логически удаляет запись через tombstone.
+
+        Перед записью tombstone проверяет, что запись существует в активном
+        хранилище. Это блокирует спам junk-ids, раздувающих tombstones.ndjson.
+        """
         clean_id = item_id.strip()
         if not clean_id:
             return False
         with self._lock():
+            if not self._id_exists_unlocked(clean_id):
+                return False
             self._append_ndjson(self.tombstones_path, {"id": clean_id})
         return True
 
@@ -630,13 +658,35 @@ class StateStore:
 
         return {"imported": imported, "skipped": skipped, "errors": errors}
 
+    # Максимальное число строк в history_status.ndjson перед принудительным
+    # компактированием. При спаме junk-ids журнал растёт без ограничений и
+    # делает каждый _load_status_overrides_unlocked() дорогим O(n) сканом.
+    _STATUS_JOURNAL_LINE_CAP = 50_000
+
     def maybe_compact(self) -> bool:
-        """Запускает компактирование при превышении порога размера файла."""
+        """Запускает компактирование при превышении порога размера файла.
+
+        Дополнительно проверяет, не превысил ли журнал статусов
+        history_status.ndjson лимит строк (_STATUS_JOURNAL_LINE_CAP = 50 000).
+        Это защита от атаки спамом set_paste_status с уникальными ids:
+        при нормальном использовании журнал содержит O(active_count) строк;
+        при спаме он неограниченно растёт, замедляя каждый history-read.
+        """
         with self._lock():
             try:
                 current_size = self.history_path.stat().st_size
             except FileNotFoundError:
                 return False
+
+            # Принудительное компактирование при перегрузке журнала статусов.
+            status_lines = self._count_ndjson_entries_unlocked(self.status_path)
+            if status_lines > self._STATUS_JOURNAL_LINE_CAP:
+                logger.warning(
+                    "history_status.ndjson exceeds line cap, forcing compaction",
+                    extra={"status_lines": status_lines, "cap": self._STATUS_JOURNAL_LINE_CAP},
+                )
+                self._compact_unlocked()
+                return True
 
             if current_size <= self.compact_threshold_bytes:
                 return False

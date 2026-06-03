@@ -103,7 +103,11 @@ EXCLUDED_METHODS: Set[str] = {
     "start_recording",
     "stop_recording",
     "get_recording_state",
-    "set_paste_status",
+    # set_paste_status УБРАН из EXCLUDED — он пишет в персистентный
+    # history_status.ndjson. Без rate limit злоумышленник может спамить
+    # junk-ids и раздуть журнал, делая каждое чтение истории O(n).
+    # Переведён в light-bucket (120/min) — это достаточно для легитимных
+    # вставок (обычно 1–5 вызовов/транскрипт) и блокирует спам.
     "ping",
     # settings writes: slider drag может бёрстить 20+ событий/сек,
     # это legitimate write, не повод отклонять
