@@ -607,5 +607,69 @@ class TestGetSpeakerStatisticsWired(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# Тест 10: Privacy gate — wave-29 B1
+# ---------------------------------------------------------------------------
+
+class TestPrivacyGate(unittest.TestCase):
+    """Privacy gate: privacy_mode_enabled=True → пустой ответ без доступа к истории."""
+
+    def test_privacy_mode_returns_empty_speakers_list(self):
+        """privacy_mode_enabled=True → speakers=[], total_speakers=0, no store access."""
+        analyzer = SpeakerStatisticsAnalyzer(
+            settings_get=lambda k, d: True if k == "privacy_mode_enabled" else d
+        )
+
+        class NeverCalledStore:
+            def _lock(self):
+                raise AssertionError("store должен NOT вызываться в privacy mode")
+
+        result = analyzer.handle_get_speaker_statistics({}, store=NeverCalledStore())
+        self.assertEqual(result.get("total_speakers"), 0)
+        self.assertEqual(result.get("speakers"), [])
+        self.assertEqual(result.get("reason"), "privacy_mode_active")
+
+    def test_privacy_mode_off_returns_real_data(self):
+        """privacy_mode_enabled=False → обычный путь, данные из store."""
+        analyzer = SpeakerStatisticsAnalyzer(
+            settings_get=lambda k, d: False if k == "privacy_mode_enabled" else d
+        )
+        item = _make_diar_item(
+            turns=[_turn("SPEAKER_00", 0.0, 30.0, "тест")],
+            confidence=0.9,
+        )
+        store = FakeStore([item])
+        result = analyzer.handle_get_speaker_statistics({}, store=store)
+        # Реальные данные возвращаются
+        self.assertNotIn("reason", result)
+        self.assertEqual(result["total_speakers"], 1)
+        self.assertIn("SPEAKER_00", result.get("speakers", {}))
+
+    def test_no_settings_get_behaves_as_privacy_off(self):
+        """Без settings_get (None) — privacy gate выключен, обычный путь."""
+        analyzer = SpeakerStatisticsAnalyzer()  # settings_get=None
+        item = _make_diar_item(turns=[_turn("SPEAKER_00", 0.0, 10.0)])
+        store = FakeStore([item])
+        result = analyzer.handle_get_speaker_statistics({}, store=store)
+        self.assertEqual(result["total_speakers"], 1)
+
+    def test_privacy_mode_no_history_access_with_real_data_in_store(self):
+        """Даже при наличии данных в store — privacy mode возвращает пустой список."""
+        analyzer = SpeakerStatisticsAnalyzer(
+            settings_get=lambda k, d: True if k == "privacy_mode_enabled" else d
+        )
+
+        class ShouldNotBeReadStore:
+            # Store содержит реальные данные с именами (Паша), но _lock() не должен вызываться.
+            def _lock(self):
+                raise AssertionError("store._lock() вызван при privacy_mode=True")
+
+        result = analyzer.handle_get_speaker_statistics(
+            {}, store=ShouldNotBeReadStore()
+        )
+        self.assertEqual(result["total_speakers"], 0)
+        self.assertEqual(result["speakers"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

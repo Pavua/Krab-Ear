@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any
+from typing import Any, Callable, Optional
 
 _log = logging.getLogger("KrabEar.Backend.SpeakerStatistics")
 
@@ -23,6 +23,20 @@ class SpeakerStatisticsAnalyzer:
     Принимает на вход список элементов истории (объекты HistoryItem или словари)
     и возвращает агрегированную статистику по каждому спикеру.
     """
+
+    def __init__(
+        self,
+        *,
+        settings_get: Optional[Callable[[str, Any], Any]] = None,
+    ) -> None:
+        """
+        Args:
+            settings_get: callable(key, default) → Any — runtime settings lookup
+                          (передаётся как BackendService._get_runtime_setting).
+                          Используется для privacy_mode_enabled guard.
+                          None → guard выключен (privacy_mode считается False).
+        """
+        self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -212,12 +226,23 @@ class SpeakerStatisticsAnalyzer:
     ) -> dict[str, Any]:
         """IPC: get_speaker_statistics — per-speaker статистика из всей истории.
 
+        Privacy gate (wave-29 B1): когда privacy_mode_enabled=True возвращает
+        пустой ответ БЕЗ обращения к истории. Псевдонимы (реальные имена) и
+        паттерны речи — наиболее чувствительные PII.
+
         Params:
             (нет обязательных параметров)
 
         Returns:
             Словарь speaker_statistics (см. ``analyze_speakers``).
         """
+        if self._settings_get("privacy_mode_enabled", False):
+            return {
+                "ok": True,
+                "speakers": [],
+                "total_speakers": 0,
+                "reason": "privacy_mode_active",
+            }
         try:
             with store._lock():
                 items = store._load_active_items_unlocked()
