@@ -240,6 +240,7 @@ class BulkReprocessor:
         threshold: float = 0.7,
         dry_run: bool = False,
         task_id: str = "",
+        settings: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Запускает массовое перетранскрибирование истории.
 
@@ -249,6 +250,8 @@ class BulkReprocessor:
             threshold: Порог confidence (0.0–1.0).
             dry_run: Если True — только считает, без реального STT и сохранения.
             task_id: ID задачи для emit событий прогресса.
+            settings: Опционально — текущие settings для privacy-mode check.
+                      Если не передан, privacy-mode не проверяется.
 
         Returns:
             {
@@ -259,6 +262,24 @@ class BulkReprocessor:
                 "cancelled": bool,
             }
         """
+        # D2 (wave-35 MED): refuse to bulk-reprocess when privacy mode is ON.
+        # Privacy mode guarantees that no transcript cleartext can be read or
+        # written by the backend.  Bulk reprocessing would: (a) read audio files
+        # linked to existing history items, (b) run STT on them, and (c) persist
+        # the new plaintext back into history_text_updates.ndjson — all of which
+        # violate the privacy-mode contract.  We reject the entire run (not just
+        # individual items) because the run cannot produce useful output anyway.
+        if settings is not None and settings.get("privacy_mode_enabled"):
+            return {
+                "ok": False,
+                "reason": "privacy_mode_active",
+                "total": 0,
+                "reprocessed": 0,
+                "skipped": 0,
+                "errors": [],
+                "cancelled": False,
+            }
+
         # Guard: refuse to run while active recording is in progress.
         # Competing with an ongoing recording for MLX GPU → potential SIGSEGV (PR #71 class).
         # Raises RuntimeError (W1043 contract); the IPC handler translates this into a
