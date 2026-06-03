@@ -21,6 +21,15 @@ _ARCHIVE_SUBDIR = "archive"
 _ARCHIVE_FILE = "archive.ndjson"
 _ARCHIVE_LOCK_FILE = "archive.ndjson.lock"  # sibling lock file for cross-process flock
 
+# wave-25 (B1-b): жёсткие границы на batch архивирования, чтобы держать store-flock
+# bounded. Гигантский item_ids держал бы межпроцессную fcntl.flock истории на всё
+# время итерации (lock starvation для записи/компактирования). Все id валидируются
+# ДО захвата lock; превышение MAX_ARCHIVE_BATCH отклоняется.
+_MAX_ARCHIVE_BATCH = 100        # макс. item_ids за один archive_items()
+_MAX_ITEM_ID_LEN = 200          # макс. длина одного id (отсекает мусорные строки)
+# wave-25 (B1-c): защита от unbounded-load archive.ndjson на каждый list/stats/unarchive.
+_MAX_ARCHIVE_LOAD = 50_000      # выше — warn + truncate (защита памяти)
+
 
 @dataclass
 class ArchiveResult:
@@ -50,16 +59,36 @@ class ArchiveManager:
         self._archive_dir.mkdir(parents=True, exist_ok=True)
         self._archive_path.touch(exist_ok=True)
         self._lock_path.touch(exist_ok=True)
+        # wave-25 (B1-a): purge-epoch счётчик для закрытия TOCTOU-окна между
+        # снимком активной истории и записью в архив. Инкрементируется в clear_all()
+        # (privacy-purge). archive_items() снимает значение ДО захвата store-flock и
+        # перепроверяет ПОСЛЕ — если purge произошёл, операция отменяется, иначе
+        # purge-followed-by-archive воскресил бы PII-записи. Защищён _epoch_lock,
+        # т.к. clear_all() и archive_items() могут гонять из разных потоков.
+        self._epoch_lock = threading.Lock()
+        self._purge_epoch = 0
         # Late-injection: RecordingChainManager для каскадной очистки ghost item_ids (W1253 RC-3).
         self._recording_chain_mgr = None
+
+    def _current_epoch(self) -> int:
+        """Текущее значение purge-epoch (thread-safe чтение)."""
+        with self._epoch_lock:
+            return self._purge_epoch
 
     # ------------------------------------------------------------------
     # Внутренние хелперы
     # ------------------------------------------------------------------
 
     def _read_archive(self) -> list[dict[str, Any]]:
-        """Загружает все записи архива."""
+        """Загружает записи архива.
+
+        wave-25 (B1-c): на каждый list/stats/unarchive вызов мы парсим весь
+        archive.ndjson. На раздутом архиве это unbounded-память. Жёстко обрезаем
+        при _MAX_ARCHIVE_LOAD (warn + truncate), чтобы один гигантский файл не
+        исчерпал RAM бэкенда.
+        """
         items: list[dict[str, Any]] = []
+        truncated = False
         try:
             for line in self._archive_path.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
@@ -69,10 +98,20 @@ class ArchiveManager:
                     obj = json.loads(line)
                     if isinstance(obj, dict) and obj.get("id"):
                         items.append(obj)
+                        if len(items) >= _MAX_ARCHIVE_LOAD:
+                            truncated = True
+                            break
                 except json.JSONDecodeError:
                     continue
         except Exception as exc:
             logger.warning("Не удалось прочитать архив: %s", exc)
+        if truncated:
+            logger.warning(
+                "archive: загружено %d записей (достигнут предел %d) — список усечён; "
+                "архив следует уплотнить/проредить",
+                len(items),
+                _MAX_ARCHIVE_LOAD,
+            )
         return items
 
     def _append_ndjson(self, path: Path, payload: dict[str, Any]) -> None:
@@ -117,6 +156,12 @@ class ArchiveManager:
         Returns:
             Количество удалённых архивных записей (до очистки).
         """
+        # wave-25 (B1-a): инкремент purge-epoch ДО любой работы. archive_items(),
+        # снявший старое значение и ещё не дошедший до записи, перепроверит epoch
+        # под store-flock, увидит расхождение и отменит запись — закрывает TOCTOU,
+        # при котором purge-followed-by-archive воскресил бы PII в archive.ndjson.
+        with self._epoch_lock:
+            self._purge_epoch += 1
         with self._lock:
             archived_before = len(self._read_archive())
             tmp = self._archive_path.with_suffix(".ndjson.tmp")
@@ -173,7 +218,47 @@ class ArchiveManager:
         if self._recording_chain_mgr is not None:
             self._recording_chain_mgr.remove_item_from_all_chains(clean_id)
 
-    def archive_items(self, item_ids: list[str], store: Any | None = None) -> ArchiveResult:
+    def _validate_archive_ids(self, item_ids: list[str]) -> list[str] | dict[str, Any]:
+        """Валидирует item_ids ДО захвата store-flock (wave-25 B1-b).
+
+        Lock starvation fix: раньше итерация по item_ids (включая мусорные/гигантские
+        списки) шла ВНУТРИ store._lock() — межпроцессной fcntl.flock, сериализующей
+        ВСЕ записи/компактирование истории. Огромный список держал бы lock сколь угодно
+        долго. Теперь все id чистятся и проверяются заранее; flock держится только на
+        ограниченный (≤ _MAX_ARCHIVE_BATCH) валидный набор.
+
+        Отклоняем не-строки, пустые после strip, длиннее _MAX_ITEM_ID_LEN. Если число
+        валидных id превышает _MAX_ARCHIVE_BATCH — возвращаем ошибку (батч слишком велик).
+
+        Returns:
+            Список очищенных id (с сохранением порядка, без дубликатов) ИЛИ
+            dict с ok=False и reason при превышении лимита.
+        """
+        clean_ids: list[str] = []
+        seen: set[str] = set()
+        for raw in item_ids:
+            if not isinstance(raw, str):
+                # Молча пропускаем не-строки (мусор), чтобы не держать lock на них.
+                continue
+            clean = raw.strip()
+            if not clean or len(clean) > _MAX_ITEM_ID_LEN:
+                continue
+            if clean in seen:
+                continue
+            seen.add(clean)
+            clean_ids.append(clean)
+        if len(clean_ids) > _MAX_ARCHIVE_BATCH:
+            return {
+                "ok": False,
+                "reason": "too_many_ids",
+                "max": _MAX_ARCHIVE_BATCH,
+                "got": len(clean_ids),
+            }
+        return clean_ids
+
+    def archive_items(
+        self, item_ids: list[str], store: Any | None = None
+    ) -> ArchiveResult | dict[str, Any]:
         """Перемещает записи из активной истории в архив.
 
         W1768 (data-loss race fix): чтение активной записи, дозапись в архив и
@@ -192,12 +277,18 @@ class ArchiveManager:
         StateStore, а не публичные `get_history_item_by_id` / `delete_history_item`,
         которые сами захватывают `_lock()`.
 
+        wave-25 (B1-a/b): item_ids валидируются и кэпируются (≤ _MAX_ARCHIVE_BATCH)
+        ДО захвата lock (bounded flock-hold). purge-epoch снимается ДО store-flock и
+        перепроверяется ПОСЛЕ его захвата — если конкурентный privacy-purge произошёл
+        в окне, операция отменяется (purge-followed-by-archive воскресил бы PII).
+
         Args:
             item_ids: Список ID записей для архивирования.
             store: StateStore (по умолчанию используется self._store).
 
         Returns:
-            ArchiveResult с количеством архивированных записей, путём и размером.
+            ArchiveResult при успехе; либо dict с ok=False и reason при
+            переполнении батча (too_many_ids) или гонке с purge (purge_in_progress).
         """
         _store = store if store is not None else self._store
         if not item_ids:
@@ -207,6 +298,20 @@ class ArchiveManager:
                 size_mb=0.0,
             )
 
+        # wave-25 (B1-b): валидация + кэп ДО любого lock — flock-hold ограничен.
+        validated = self._validate_archive_ids(item_ids)
+        if isinstance(validated, dict):
+            return validated  # too_many_ids
+        if not validated:
+            return ArchiveResult(
+                archived_count=0,
+                archive_path=str(self._archive_path),
+                size_mb=0.0,
+            )
+
+        # wave-25 (B1-a): снимок purge-epoch ДО захвата store-flock.
+        epoch_before = self._current_epoch()
+
         archived_count = 0
         # self._lock сериализует архивные операции (archive/unarchive/list) внутри процесса.
         with self._lock:
@@ -215,14 +320,20 @@ class ArchiveManager:
                 # (межпроцессная fcntl.flock). Снимок активных записей берётся один
                 # раз, чтобы конкурентный compact() не вклинился между чтениями.
                 with _store._lock():
+                    # wave-25 (B1-a): перепроверяем epoch ПОД store-flock. Если purge
+                    # инкрементировал его в окне между снимком и захватом — отменяем,
+                    # иначе только что очищенный архив получил бы PII обратно.
+                    if self._current_epoch() != epoch_before:
+                        logger.warning(
+                            "archive_items: обнаружен конкурентный purge (epoch %d→%d) — отмена",
+                            epoch_before, self._current_epoch(),
+                        )
+                        return {"ok": False, "reason": "purge_in_progress"}
                     active_by_id = {
                         item.id: item
                         for item in _store._load_active_items_unlocked()
                     }
-                    for item_id in item_ids:
-                        clean_id = str(item_id).strip()
-                        if not clean_id:
-                            continue
+                    for clean_id in validated:
                         item = active_by_id.get(clean_id)
                         if item is None:
                             logger.debug("archive_items: запись не найдена id=%s", clean_id)
@@ -241,10 +352,15 @@ class ArchiveManager:
                         self._archive_side_effects(clean_id)
             else:
                 # Fallback для тестовых двойников без unlocked-API StateStore.
-                for item_id in item_ids:
-                    clean_id = str(item_id).strip()
-                    if not clean_id:
-                        continue
+                # wave-25 (B1-a): epoch-перепроверка и здесь (purge мог пройти между
+                # снимком и началом работы); store-flock в этой ветке нет.
+                if self._current_epoch() != epoch_before:
+                    logger.warning(
+                        "archive_items: обнаружен конкурентный purge (epoch %d→%d) — отмена",
+                        epoch_before, self._current_epoch(),
+                    )
+                    return {"ok": False, "reason": "purge_in_progress"}
+                for clean_id in validated:
                     item = _store.get_history_item_by_id(clean_id)
                     if item is None:
                         logger.debug("archive_items: запись не найдена id=%s", clean_id)
@@ -398,11 +514,18 @@ class ArchiveManager:
     # ------------------------------------------------------------------
 
     def handle_archive_items(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC-обработчик archive_items."""
+        """IPC-обработчик archive_items.
+
+        wave-25: archive_items может вернуть dict ошибки (ok=False) при переполнении
+        батча (too_many_ids) или гонке с privacy-purge (purge_in_progress) — в этом
+        случае прокидываем dict как есть; иначе нормализуем ArchiveResult в dict.
+        """
         raw_ids = params.get("item_ids", [])
         if not isinstance(raw_ids, list):
             raise ValueError("Параметр item_ids должен быть списком")
         result = self.archive_items(item_ids=raw_ids)
+        if isinstance(result, dict):
+            return result  # {"ok": False, "reason": ...}
         return {
             "archived_count": result.archived_count,
             "archive_path": result.archive_path,

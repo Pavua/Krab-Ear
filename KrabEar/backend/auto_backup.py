@@ -54,6 +54,13 @@ class AutoBackupManager:
         self.max_copies = max_copies
         self.enabled = enabled
         self._lock = threading.Lock()
+        # wave-25 (B2): privacy-purge guard. handle_purge_all_data делает rmtree(backups/),
+        # но фоновый/оппортунистический backup-цикл может ПЕРЕСОЗДАТЬ директорию сразу
+        # после очистки → PII-снапшоты истории воскресают (TOCTOU). set_purged()
+        # взводит этот Event и удаляет backups/; пока он взведён, check_and_backup()
+        # пропускает запись молча. clear_purged() снимает флаг после завершения purge
+        # (будущие бэкапы снова разрешены). threading.Event сам по себе thread-safe.
+        self._purged = threading.Event()
 
     # ------------------------------------------------------------------
     # Вспомогательные свойства
@@ -237,6 +244,40 @@ class AutoBackupManager:
         }
 
     # ------------------------------------------------------------------
+    # Privacy-purge guard (wave-25 B2)
+    # ------------------------------------------------------------------
+
+    def set_purged(self) -> None:
+        """Помечает менеджер как «после privacy-purge» и удаляет backups/.
+
+        Вызывается из handle_purge_all_data ДО/во время очистки. Взводит флаг
+        (последующие check_and_backup() пропускаются молча) и сразу удаляет
+        директорию backups/, если она существует — закрывает окно, в котором
+        оппортунистический backup-цикл мог пересоздать PII-снапшоты сразу после
+        rmtree() в purge-теле.
+        """
+        self._purged.set()
+        with self._lock:
+            try:
+                if self.backups_dir.exists():
+                    shutil.rmtree(self.backups_dir, ignore_errors=True)
+                    logger.info("auto_backup: backups/ удалён (set_purged)")
+            except Exception:
+                logger.warning("auto_backup: set_purged rmtree backups/ не удался", exc_info=True)
+
+    def clear_purged(self) -> None:
+        """Снимает purge-флаг — будущие бэкапы снова разрешены.
+
+        Вызывается из handle_purge_all_data ПОСЛЕ завершения всех wipe-шагов, чтобы
+        нормальное авто-резервное копирование возобновилось со следующего цикла.
+        """
+        self._purged.clear()
+
+    def is_purged(self) -> bool:
+        """True, если менеджер находится в post-purge состоянии (бэкапы заморожены)."""
+        return self._purged.is_set()
+
+    # ------------------------------------------------------------------
     # Публичный API
     # ------------------------------------------------------------------
 
@@ -251,6 +292,12 @@ class AutoBackupManager:
         """
         if not self.enabled:
             return {"backed_up": False, "skipped_reason": "disabled", "backup_path": None}
+
+        # wave-25 (B2): после privacy-purge бэкапы заморожены до clear_purged().
+        # Без этого фоновый/оппортунистический цикл пересоздал бы backups/ с PII
+        # сразу после rmtree() в purge-теле (TOCTOU).
+        if self._purged.is_set():
+            return {"backed_up": False, "skipped_reason": "purged", "backup_path": None}
 
         with self._lock:
             meta = self._load_meta()
@@ -274,6 +321,13 @@ class AutoBackupManager:
                         }
                 except Exception:
                     pass  # Повреждённая метадата — делаем бэкап
+
+            # wave-25 (B2): перепроверяем purge-флаг ПОД lock прямо перед записью.
+            # set_purged() взводит Event ДО захвата _lock (для rmtree backups/),
+            # поэтому, если purge стартовал, пока мы держим lock, этот re-check его
+            # увидит и не даст _do_backup() пересоздать только что удалённый backups/.
+            if self._purged.is_set():
+                return {"backed_up": False, "skipped_reason": "purged", "backup_path": None}
 
             result = self._do_backup()
             self._prune_old_backups()
