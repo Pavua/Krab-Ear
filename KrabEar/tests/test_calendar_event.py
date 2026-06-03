@@ -1,4 +1,11 @@
-"""Tests for _handle_create_calendar_event (Phase D.4 — Apple Calendar integration)."""
+"""Tests for create_calendar_event (Phase D.4 — Apple Calendar integration).
+
+W797 follow-up (#47): the in-class BackendService._handle_create_calendar_event
+duplicate was deleted — production dispatch routes straight to
+self._apple_integration_svc.handle_create_calendar_event. These tests now invoke
+the LIVE extracted AppleIntegrationService handler. The _escape_as_str static
+helper is retained on BackendService and is still exercised directly below.
+"""
 
 import sys
 import os
@@ -11,31 +18,12 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from backend.service import BackendService
+from backend.apple_integration_service import AppleIntegrationService
 
 
 def _make_service():
-    """Return a BackendService with minimal fake collaborators."""
-    from backend.state_store import StateStore
-    import tempfile
-    import pathlib
-
-    tmp = pathlib.Path(tempfile.mkdtemp())
-    store = StateStore(data_dir=tmp)
-
-    service = BackendService.__new__(BackendService)
-    service.store = store
-    service.transcriber = MagicMock()
-    service.recorder = MagicMock()
-    service.translator = MagicMock()
-    service.llm_rewriter = MagicMock()
-    service.metrics = MagicMock()
-    service.event_bus = MagicMock()
-    service._call_assist = MagicMock()
-    service._history_svc = MagicMock()
-    service._translation_svc = MagicMock()
-    service._settings_svc = MagicMock()
-    service._settings_svc.get_settings.return_value = {}
-    return service
+    """Return the LIVE AppleIntegrationService that production dispatch routes to."""
+    return AppleIntegrationService(telegram_bridge=MagicMock())
 
 
 class TestCreateCalendarEvent(unittest.TestCase):
@@ -51,7 +39,7 @@ class TestCreateCalendarEvent(unittest.TestCase):
         """Handler must call osascript and return ok=True on success."""
         mock_run.return_value = MagicMock(returncode=0, stdout="event id 42\n", stderr="")
 
-        result = self.service._handle_create_calendar_event({
+        result = self.service.handle_create_calendar_event({
             "title": "Meeting",
             "start_date": "05/05/2026 10:00:00",
         })
@@ -78,7 +66,7 @@ class TestCreateCalendarEvent(unittest.TestCase):
         """Double-quotes in title/notes must be escaped so osascript doesn't break."""
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
-        result = self.service._handle_create_calendar_event({
+        result = self.service.handle_create_calendar_event({
             "title": 'He said "hello"',
             "notes": 'Notes with "quotes"',
             "start_date": "05/05/2026 14:00:00",
@@ -101,7 +89,7 @@ class TestCreateCalendarEvent(unittest.TestCase):
         """When calendar_name is set, the tell calendar block must use it."""
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
-        result = self.service._handle_create_calendar_event({
+        result = self.service.handle_create_calendar_event({
             "title": "Sprint Review",
             "start_date": "05/06/2026 09:00:00",
             "calendar_name": "Work",
@@ -119,7 +107,7 @@ class TestCreateCalendarEvent(unittest.TestCase):
         """When duration_minutes is omitted, it defaults to 30."""
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
-        self.service._handle_create_calendar_event({
+        self.service.handle_create_calendar_event({
             "title": "Quick call",
             "start_date": "05/07/2026 11:00:00",
         })
@@ -136,7 +124,7 @@ class TestCreateCalendarEvent(unittest.TestCase):
         import subprocess
         mock_run.side_effect = subprocess.TimeoutExpired(cmd=["osascript"], timeout=15)
 
-        result = self.service._handle_create_calendar_event({
+        result = self.service.handle_create_calendar_event({
             "title": "Slow event",
             "start_date": "05/08/2026 12:00:00",
         })
@@ -149,7 +137,7 @@ class TestCreateCalendarEvent(unittest.TestCase):
     # ------------------------------------------------------------------
     def test_create_event_missing_title_returns_error(self):
         """Empty title must return ok=False immediately without calling osascript."""
-        result = self.service._handle_create_calendar_event({
+        result = self.service.handle_create_calendar_event({
             "title": "",
             "start_date": "05/09/2026 08:00:00",
         })
@@ -168,7 +156,7 @@ class TestCreateCalendarEvent(unittest.TestCase):
             stderr="Calendar got an error: access denied"
         )
 
-        result = self.service._handle_create_calendar_event({
+        result = self.service.handle_create_calendar_event({
             "title": "Bad event",
             "start_date": "05/10/2026 09:00:00",
         })
@@ -184,7 +172,7 @@ class TestCreateCalendarEvent(unittest.TestCase):
         """When calendar_name is None, script must target first writable calendar."""
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
-        self.service._handle_create_calendar_event({
+        self.service.handle_create_calendar_event({
             "title": "Auto calendar",
             "start_date": "05/11/2026 15:00:00",
         })
@@ -196,16 +184,24 @@ class TestCreateCalendarEvent(unittest.TestCase):
     # test_handler_registered_in_dispatch_table
     # ------------------------------------------------------------------
     def test_handler_registered_in_dispatch_table(self):
-        """create_calendar_event must be present in the handler lookup table."""
-        # Build the handler table by calling handle_request with any method —
-        # or just verify the method exists and the handler table key exists.
-        handler = getattr(self.service, "_handle_create_calendar_event", None)
-        self.assertIsNotNone(handler, "_handle_create_calendar_event method must exist")
-
-        # Verify registration by checking the internal dispatch table key
-        # (BackendService builds it lazily in handle_request; call a dummy)
-        # We'll just check the method is callable.
+        """create_calendar_event must route to the live extracted handler."""
+        # The live handler lives on AppleIntegrationService (production dispatch
+        # routes "create_calendar_event" → self._apple_integration_svc.handle_*).
+        handler = getattr(self.service, "handle_create_calendar_event", None)
+        self.assertIsNotNone(handler, "handle_create_calendar_event method must exist")
         self.assertTrue(callable(handler))
+
+        # Verify the dispatch table in service.py wires the IPC key to the
+        # extracted service rather than any deleted in-class duplicate.
+        import os
+        service_src = os.path.join(PROJECT_ROOT, "backend", "service.py")
+        with open(service_src, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn(
+            '"create_calendar_event": self._apple_integration_svc.handle_create_calendar_event',
+            src,
+            "create_calendar_event must dispatch to the extracted AppleIntegrationService",
+        )
 
     # ------------------------------------------------------------------
     # W1028-F5: backslash-before-quote AppleScript injection regression
@@ -228,7 +224,6 @@ class TestCreateCalendarEvent(unittest.TestCase):
         self.assertIn('\\"', result, "Quote must be backslash-escaped")
         # The dangerous sequence (unescaped backslash cancelling quote escape)
         # must NOT appear: a single \ followed immediately by "
-        import re as _re
         # After escaping, there must be no odd-count backslash run before "
         # Simplest check: the raw literal \" (one backslash, one quote) only
         # appears as part of a larger \\" (two backslashes + quote) sequence.
@@ -260,7 +255,7 @@ class TestCreateCalendarEvent(unittest.TestCase):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
         injection_title = 'foo\\"; do evil'
-        self.service._handle_create_calendar_event({
+        self.service.handle_create_calendar_event({
             "title": injection_title,
             "start_date": "05/26/2026 10:00:00",
         })
@@ -277,7 +272,7 @@ class TestCreateCalendarEvent(unittest.TestCase):
         """Same backslash-injection test for notes field."""
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
-        self.service._handle_create_calendar_event({
+        self.service.handle_create_calendar_event({
             "title": "Safe title",
             "notes": 'bad\\"; inject',
             "start_date": "05/26/2026 11:00:00",
@@ -291,7 +286,7 @@ class TestCreateCalendarEvent(unittest.TestCase):
         """Same backslash-injection test for calendar_name field."""
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
-        self.service._handle_create_calendar_event({
+        self.service.handle_create_calendar_event({
             "title": "Safe title",
             "start_date": "05/26/2026 12:00:00",
             "calendar_name": 'Work\\"; malicious',

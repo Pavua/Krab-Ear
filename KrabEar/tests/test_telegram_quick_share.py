@@ -8,6 +8,12 @@
   - test_list_chats_when_offline_returns_error
   - test_invalid_chat_id_returns_error
   - test_empty_body_returns_error
+
+W797 follow-up (#47): the in-class BackendService._handle_send_to_telegram /
+_handle_list_telegram_chats duplicates were deleted — production dispatch routes
+straight to self._apple_integration_svc.handle_*. These tests now invoke the
+LIVE extracted AppleIntegrationService handlers and patch the settings symbol on
+backend.apple_integration_service (where the live code reads it).
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ if PROJECT_ROOT not in sys.path:
 
 import requests
 
+from backend.apple_integration_service import AppleIntegrationService
 from backend.telegram_bridge import CircuitBreakerOpen, TelegramBridge
 
 
@@ -58,27 +65,19 @@ def _make_bridge_stub(
     return bridge
 
 
-def _make_service_with_bridge(bridge: MagicMock) -> object:
-    """Создаёт минимальный объект-заглушку BackendService для тестирования обработчиков."""
-    from core.config import settings as real_settings
+def _make_apple_svc(bridge: MagicMock, privacy_mode: bool = False) -> AppleIntegrationService:
+    """Build the LIVE extracted AppleIntegrationService used by production dispatch.
 
-    class FakeService:
-        _telegram_bridge = bridge
-        _settings = real_settings
-
-        def _handle_send_to_telegram(self, params):
-            from backend.service import BackendService
-            return BackendService._handle_send_to_telegram(self, params)
-
-        def _handle_list_telegram_chats(self, params):
-            from backend.service import BackendService
-            return BackendService._handle_list_telegram_chats(self, params)
-
-    svc = FakeService()
-    # Inject a local settings object we can tweak
-    import types
-    svc_settings = types.SimpleNamespace(TELEGRAM_BRIDGE_ENABLED=True)
-    return svc, svc_settings
+    privacy_mode toggles the value returned for the 'privacy_mode_enabled' key by
+    the injected settings_get callable (the same role _get_runtime_setting played
+    on the deleted in-class handler).
+    """
+    return AppleIntegrationService(
+        telegram_bridge=bridge,
+        settings_get=lambda key, default: (
+            privacy_mode if key == "privacy_mode_enabled" else default
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -90,15 +89,11 @@ class TestSendToTelegramCallsBridge(unittest.TestCase):
 
     def test_send_to_telegram_calls_bridge(self):
         bridge = _make_bridge_stub()
+        svc = _make_apple_svc(bridge)
 
-        from backend.service import BackendService
-        svc = MagicMock()
-        svc._telegram_bridge = bridge
-        svc._get_runtime_setting.return_value = False  # privacy_mode_enabled=False
-
-        with patch("backend.service.settings") as mock_settings:
+        with patch("backend.apple_integration_service.settings") as mock_settings:
             mock_settings.TELEGRAM_BRIDGE_ENABLED = True
-            BackendService._handle_send_to_telegram(svc, {
+            svc.handle_send_to_telegram({
                 "chat_id": "123456",
                 "text": "Тест транскрипции",
             })
@@ -110,15 +105,11 @@ class TestSendToTelegramCallsBridge(unittest.TestCase):
 
     def test_send_to_telegram_returns_message_id(self):
         bridge = _make_bridge_stub(send_result={"message_id": 42, "sent_at": 1700000000.0, "chat_title": "Saved"})
+        svc = _make_apple_svc(bridge)
 
-        from backend.service import BackendService
-        svc = MagicMock()
-        svc._telegram_bridge = bridge
-        svc._get_runtime_setting.return_value = False  # privacy_mode_enabled=False
-
-        with patch("backend.service.settings") as mock_settings:
+        with patch("backend.apple_integration_service.settings") as mock_settings:
             mock_settings.TELEGRAM_BRIDGE_ENABLED = True
-            result = BackendService._handle_send_to_telegram(svc, {
+            result = svc.handle_send_to_telegram({
                 "chat_id": 123,
                 "text": "Hello",
             })
@@ -134,16 +125,12 @@ class TestSendToTelegramBridgeOffline(unittest.TestCase):
         bridge = _make_bridge_stub(
             send_side_effect=requests.ConnectionError("Connection refused")
         )
+        svc = _make_apple_svc(bridge)
 
-        from backend.service import BackendService
-        svc = MagicMock()
-        svc._telegram_bridge = bridge
-        svc._get_runtime_setting.return_value = False  # privacy_mode_enabled=False
-
-        with patch("backend.service.settings") as mock_settings:
+        with patch("backend.apple_integration_service.settings") as mock_settings:
             mock_settings.TELEGRAM_BRIDGE_ENABLED = True
             with self.assertRaises(RuntimeError) as ctx:
-                BackendService._handle_send_to_telegram(svc, {
+                svc.handle_send_to_telegram({
                     "chat_id": 123,
                     "text": "Hello",
                 })
@@ -154,16 +141,12 @@ class TestSendToTelegramBridgeOffline(unittest.TestCase):
         bridge = _make_bridge_stub(
             send_side_effect=CircuitBreakerOpen("CB открыт")
         )
+        svc = _make_apple_svc(bridge)
 
-        from backend.service import BackendService
-        svc = MagicMock()
-        svc._telegram_bridge = bridge
-        svc._get_runtime_setting.return_value = False  # privacy_mode_enabled=False
-
-        with patch("backend.service.settings") as mock_settings:
+        with patch("backend.apple_integration_service.settings") as mock_settings:
             mock_settings.TELEGRAM_BRIDGE_ENABLED = True
             with self.assertRaises(RuntimeError) as ctx:
-                BackendService._handle_send_to_telegram(svc, {
+                svc.handle_send_to_telegram({
                     "chat_id": 123,
                     "text": "Hello",
                 })
@@ -177,16 +160,12 @@ class TestSendToTelegramInvalidParams(unittest.TestCase):
     def test_invalid_chat_id_returns_error(self):
         """Пустой chat_id → ValueError до вызова bridge."""
         bridge = _make_bridge_stub()
+        svc = _make_apple_svc(bridge)
 
-        from backend.service import BackendService
-        svc = MagicMock()
-        svc._telegram_bridge = bridge
-        svc._get_runtime_setting.return_value = False  # privacy_mode_enabled=False
-
-        with patch("backend.service.settings") as mock_settings:
+        with patch("backend.apple_integration_service.settings") as mock_settings:
             mock_settings.TELEGRAM_BRIDGE_ENABLED = True
             with self.assertRaises((ValueError, RuntimeError)):
-                BackendService._handle_send_to_telegram(svc, {
+                svc.handle_send_to_telegram({
                     "chat_id": "",
                     "text": "Привет",
                 })
@@ -196,16 +175,12 @@ class TestSendToTelegramInvalidParams(unittest.TestCase):
     def test_empty_body_returns_error(self):
         """Пустой text → ValueError до вызова bridge."""
         bridge = _make_bridge_stub()
+        svc = _make_apple_svc(bridge)
 
-        from backend.service import BackendService
-        svc = MagicMock()
-        svc._telegram_bridge = bridge
-        svc._get_runtime_setting.return_value = False  # privacy_mode_enabled=False
-
-        with patch("backend.service.settings") as mock_settings:
+        with patch("backend.apple_integration_service.settings") as mock_settings:
             mock_settings.TELEGRAM_BRIDGE_ENABLED = True
             with self.assertRaises((ValueError, RuntimeError)):
-                BackendService._handle_send_to_telegram(svc, {
+                svc.handle_send_to_telegram({
                     "chat_id": 123,
                     "text": "   ",
                 })
@@ -226,15 +201,11 @@ class TestListTelegramChatsReturnsChats(unittest.TestCase):
             {"id": -100123, "title": "Work Group", "type": "group"},
         ]
         bridge = _make_bridge_stub(chats_result=chats)
+        svc = _make_apple_svc(bridge)
 
-        from backend.service import BackendService
-        svc = MagicMock()
-        svc._telegram_bridge = bridge
-        svc._get_runtime_setting.return_value = False  # W1211
-
-        with patch("backend.service.settings") as mock_settings:
+        with patch("backend.apple_integration_service.settings") as mock_settings:
             mock_settings.TELEGRAM_BRIDGE_ENABLED = True
-            result = BackendService._handle_list_telegram_chats(svc, {})
+            result = svc.handle_list_telegram_chats({})
 
         self.assertIn("chats", result)
         self.assertEqual(len(result["chats"]), 2)
@@ -243,15 +214,11 @@ class TestListTelegramChatsReturnsChats(unittest.TestCase):
 
     def test_list_chats_calls_bridge_get_chats(self):
         bridge = _make_bridge_stub()
+        svc = _make_apple_svc(bridge)
 
-        from backend.service import BackendService
-        svc = MagicMock()
-        svc._telegram_bridge = bridge
-        svc._get_runtime_setting.return_value = False  # W1211
-
-        with patch("backend.service.settings") as mock_settings:
+        with patch("backend.apple_integration_service.settings") as mock_settings:
             mock_settings.TELEGRAM_BRIDGE_ENABLED = True
-            BackendService._handle_list_telegram_chats(svc, {})
+            svc.handle_list_telegram_chats({})
 
         bridge.get_chats.assert_called_once()
 
@@ -263,16 +230,12 @@ class TestListTelegramChatsOffline(unittest.TestCase):
         bridge = _make_bridge_stub(
             chats_side_effect=requests.ConnectionError("offline")
         )
+        svc = _make_apple_svc(bridge)
 
-        from backend.service import BackendService
-        svc = MagicMock()
-        svc._telegram_bridge = bridge
-        svc._get_runtime_setting.return_value = False  # W1211
-
-        with patch("backend.service.settings") as mock_settings:
+        with patch("backend.apple_integration_service.settings") as mock_settings:
             mock_settings.TELEGRAM_BRIDGE_ENABLED = True
             with self.assertRaises(RuntimeError) as ctx:
-                BackendService._handle_list_telegram_chats(svc, {})
+                svc.handle_list_telegram_chats({})
 
         self.assertIn("krab_unavailable", str(ctx.exception))
 
@@ -280,16 +243,12 @@ class TestListTelegramChatsOffline(unittest.TestCase):
         bridge = _make_bridge_stub(
             chats_side_effect=CircuitBreakerOpen("CB открыт")
         )
+        svc = _make_apple_svc(bridge)
 
-        from backend.service import BackendService
-        svc = MagicMock()
-        svc._telegram_bridge = bridge
-        svc._get_runtime_setting.return_value = False  # W1211
-
-        with patch("backend.service.settings") as mock_settings:
+        with patch("backend.apple_integration_service.settings") as mock_settings:
             mock_settings.TELEGRAM_BRIDGE_ENABLED = True
             with self.assertRaises(RuntimeError) as ctx:
-                BackendService._handle_list_telegram_chats(svc, {})
+                svc.handle_list_telegram_chats({})
 
         self.assertIn("circuit_open", str(ctx.exception))
 
@@ -299,32 +258,24 @@ class TestBridgeDisabled(unittest.TestCase):
 
     def test_send_disabled_raises(self):
         bridge = _make_bridge_stub()
+        svc = _make_apple_svc(bridge)
 
-        from backend.service import BackendService
-        svc = MagicMock()
-        svc._telegram_bridge = bridge
-        svc._get_runtime_setting.return_value = False  # W1211
-
-        with patch("backend.service.settings") as mock_settings:
+        with patch("backend.apple_integration_service.settings") as mock_settings:
             mock_settings.TELEGRAM_BRIDGE_ENABLED = False
             with self.assertRaises(RuntimeError) as ctx:
-                BackendService._handle_send_to_telegram(svc, {"chat_id": 1, "text": "Hi"})
+                svc.handle_send_to_telegram({"chat_id": 1, "text": "Hi"})
 
         self.assertIn("bridge_disabled", str(ctx.exception))
         bridge.send_message.assert_not_called()
 
     def test_list_disabled_raises(self):
         bridge = _make_bridge_stub()
+        svc = _make_apple_svc(bridge)
 
-        from backend.service import BackendService
-        svc = MagicMock()
-        svc._telegram_bridge = bridge
-        svc._get_runtime_setting.return_value = False  # W1211
-
-        with patch("backend.service.settings") as mock_settings:
+        with patch("backend.apple_integration_service.settings") as mock_settings:
             mock_settings.TELEGRAM_BRIDGE_ENABLED = False
             with self.assertRaises(RuntimeError) as ctx:
-                BackendService._handle_list_telegram_chats(svc, {})
+                svc.handle_list_telegram_chats({})
 
         self.assertIn("bridge_disabled", str(ctx.exception))
         bridge.get_chats.assert_not_called()
@@ -336,18 +287,11 @@ class TestSendToTelegramPrivacyMode(unittest.TestCase):
     def test_send_to_telegram_blocked_in_privacy_mode(self):
         """privacy_mode_enabled=True → возвращает error=privacy_mode_active, bridge не вызывается."""
         bridge = _make_bridge_stub()
+        svc = _make_apple_svc(bridge, privacy_mode=True)
 
-        from backend.service import BackendService
-        svc = MagicMock()
-        svc._telegram_bridge = bridge
-        # Simulate _get_runtime_setting returning True for privacy_mode_enabled
-        svc._get_runtime_setting.side_effect = lambda key, default: (
-            True if key == "privacy_mode_enabled" else default
-        )
-
-        with patch("backend.service.settings") as mock_settings:
+        with patch("backend.apple_integration_service.settings") as mock_settings:
             mock_settings.TELEGRAM_BRIDGE_ENABLED = True
-            result = BackendService._handle_send_to_telegram(svc, {
+            result = svc.handle_send_to_telegram({
                 "chat_id": 123,
                 "text": "Секретный транскрипт",
             })
@@ -360,17 +304,11 @@ class TestSendToTelegramPrivacyMode(unittest.TestCase):
     def test_send_to_telegram_allowed_when_privacy_mode_off(self):
         """privacy_mode_enabled=False → обычный путь, bridge вызывается."""
         bridge = _make_bridge_stub(send_result={"message_id": 7, "sent_at": 1700000000.0, "chat_title": "Test"})
+        svc = _make_apple_svc(bridge, privacy_mode=False)
 
-        from backend.service import BackendService
-        svc = MagicMock()
-        svc._telegram_bridge = bridge
-        svc._get_runtime_setting.side_effect = lambda key, default: (
-            False if key == "privacy_mode_enabled" else default
-        )
-
-        with patch("backend.service.settings") as mock_settings:
+        with patch("backend.apple_integration_service.settings") as mock_settings:
             mock_settings.TELEGRAM_BRIDGE_ENABLED = True
-            result = BackendService._handle_send_to_telegram(svc, {
+            result = svc.handle_send_to_telegram({
                 "chat_id": 456,
                 "text": "Публичное сообщение",
             })
