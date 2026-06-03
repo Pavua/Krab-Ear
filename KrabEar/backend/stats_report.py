@@ -506,8 +506,12 @@ class StatsReportGenerator:
                 speaker = seg.get("speaker") or seg.get("label") or ""
                 if not speaker:
                     continue
-                start = float(seg.get("start", 0.0))
-                end = float(seg.get("end", 0.0))
+                # D3 MED: guard against bad diarization data (non-numeric start/end)
+                try:
+                    start = float(seg.get("start", 0.0))
+                    end = float(seg.get("end", 0.0))
+                except (TypeError, ValueError):
+                    continue
                 dur = max(0.0, end - start)
                 speaker_duration[speaker] += dur
                 speaker_turns[speaker] += 1

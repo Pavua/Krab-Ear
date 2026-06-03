@@ -498,11 +498,19 @@ class SearchAndAnalysisService:
     def handle_generate_stats_report(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: generate_stats_report — полный Markdown-отчёт статистики за период.
 
+        Privacy guard (wave-34 D2): когда privacy_mode_enabled=True возвращает ошибку
+        без доступа к тексту транскрипций — отчёт включает топ-слова, паттерны,
+        спикеров и другие данные, производные от текстов транскрипций.
+
         Params:
             days (int): период анализа в днях (default 30).
         Returns:
             {markdown, days}
         """
+        # wave-34 D2 privacy guard — stats report reads transcript text (top words,
+        # speaker aliases, patterns); must be blocked in privacy mode.
+        if self._settings_get("privacy_mode_enabled", False):
+            return {"ok": False, "reason": "privacy_mode_active"}
         days = int(params.get("days", 30))
         markdown = self._stats_report.generate_report(store=self._store, days=days)
         return {"markdown": markdown, "days": days}
@@ -510,8 +518,16 @@ class SearchAndAnalysisService:
     def handle_generate_mini_stats_report(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: generate_mini_stats_report — краткий 5-строчный Markdown-отчёт состояния.
 
+        Privacy guard (wave-34 D2): когда privacy_mode_enabled=True возвращает ошибку
+        без доступа к тексту транскрипций — мини-отчёт включает топ-слова и данные
+        из истории транскрипций.
+
         Returns:
             {markdown}
         """
+        # wave-34 D2 privacy guard — mini report reads transcript text and vocabulary;
+        # must be blocked in privacy mode.
+        if self._settings_get("privacy_mode_enabled", False):
+            return {"ok": False, "reason": "privacy_mode_active"}
         markdown = self._stats_report.generate_mini_report(store=self._store)
         return {"markdown": markdown}
