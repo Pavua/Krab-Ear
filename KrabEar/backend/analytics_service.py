@@ -76,7 +76,24 @@ class AnalyticsService:
 
         Возвращает:
             overview, today, trends, languages, quality, engagement, storage, performance
+
+        Privacy gate (wave-27): когда privacy_mode_enabled=True возвращает пустой
+        дашборд БЕЗ обращения к истории транскрипций — паритет с тремя соседними
+        analytics-хэндлерами (sentiment / keyword / activity_calendar), которые
+        уже соблюдают этот gate (W1295 / W1093 / wave-25). Дашборд раньше его
+        обходил и раскрывал агрегаты по истории в приватном режиме.
         """
+        if self._settings_get("privacy_mode_enabled", False):
+            return {
+                "ok": True,
+                "total_recordings": 0,
+                "total_duration_sec": 0.0,
+                "recent_recordings": [],
+                "sentiment_summary": {},
+                "keyword_summary": {},
+                "quality_summary": {},
+                "reason": "privacy_mode_active",
+            }
         days = max(1, min(int(params.get("days", 30) or 30), 365))
         _t0 = _time.monotonic()
         result = self._analytics_dashboard.get_full_dashboard(store=self._store, days=days)
