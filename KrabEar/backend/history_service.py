@@ -278,6 +278,11 @@ class HistoryService:
         return item.to_dict()
 
     def handle_get_history_page(self, params: dict[str, Any]) -> dict[str, Any]:
+        # Privacy mode gate (wave-35, HIGH B1): this is the PRIMARY list-history
+        # endpoint — no transcript items may leak over IPC while privacy is active.
+        if self._is_privacy_mode():
+            return {"items": [], "next_cursor": None, "reason": "privacy_mode_active"}
+
         cursor = params.get("cursor")
         cursor_str = None if cursor is None else str(cursor)
         limit = int(params.get("limit", 50))
@@ -644,6 +649,10 @@ class HistoryService:
         Returns:
             {"items": [...], "count": N}
         """
+        # Privacy mode gate (wave-35, HIGH B3): no diarized transcript items over IPC.
+        if self._is_privacy_mode():
+            return {"items": [], "count": 0, "reason": "privacy_mode_active"}
+
         speaker = str(params.get("speaker", "")).strip()
         if not speaker:
             raise RuntimeError("speaker обязателен")
@@ -666,6 +675,10 @@ class HistoryService:
 
     def handle_get_history_item(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает полные детали одной записи истории по ID."""
+        # Privacy mode gate (wave-35, HIGH B2): no single-item transcript over IPC.
+        if self._is_privacy_mode():
+            return {"ok": False, "reason": "privacy_mode_active"}
+
         item_id = str(params.get("id", "")).strip()
         if not item_id:
             raise RuntimeError("id обязателен")
@@ -756,6 +769,10 @@ class HistoryService:
         Params: tag (str), limit (int, optional, default 100)
         Returns: {"items": [...], "count": N}
         """
+        # Privacy mode gate (wave-35, HIGH B4): no tagged transcript items over IPC.
+        if self._is_privacy_mode():
+            return {"items": [], "count": 0, "reason": "privacy_mode_active"}
+
         tag = str(params.get("tag", "")).strip()
         if not tag:
             raise RuntimeError("tag обязателен")
@@ -819,6 +836,10 @@ class HistoryService:
 
         Returns: {"items": [...], "count": N}
         """
+        # Privacy mode gate (wave-35, HIGH B4): no favorite transcript items over IPC.
+        if self._is_privacy_mode():
+            return {"items": [], "count": 0, "reason": "privacy_mode_active"}
+
         with self.store._lock():
             active = self.store._load_active_items_unlocked()
 
@@ -868,6 +889,10 @@ class HistoryService:
         Params: id (str)
         Returns: {"id": ..., "note": str | None}
         """
+        # Privacy mode gate (wave-35, MED B6): annotations may quote transcript PII.
+        if self._is_privacy_mode():
+            return {"id": "", "note": None, "reason": "privacy_mode_active"}
+
         item_id = str(params.get("id", "")).strip()
         if not item_id:
             raise RuntimeError("id обязателен")
@@ -886,6 +911,10 @@ class HistoryService:
         Params: query (str)
         Returns: {"results": [{"id": ..., "note": ...}, ...], "count": N}
         """
+        # Privacy mode gate (wave-35, MED B6): annotations may quote transcript PII.
+        if self._is_privacy_mode():
+            return {"results": [], "count": 0, "reason": "privacy_mode_active"}
+
         query = str(params.get("query", "")).strip()
         results = self.store.search_annotations(query)
         return {"results": results, "count": len(results)}
@@ -1046,6 +1075,18 @@ class HistoryService:
             segments (int): количество сегментов
             path (str|None): путь к файлу, если save_to_file=True
         """
+        # Privacy mode gate (wave-35, MED B7): this export returns SRT transcript
+        # content directly in the IPC response — withhold while privacy is active.
+        if self._is_privacy_mode():
+            return {
+                "content": "",
+                "item_id": "",
+                "speakers": 0,
+                "segments": 0,
+                "path": None,
+                "reason": "privacy_mode_active",
+            }
+
         item_id = str(params.get("id", "")).strip()
         if not item_id:
             raise RuntimeError("id обязателен")
@@ -1588,6 +1629,10 @@ class HistoryService:
             items (list): список записей {text, ts, history_id}
             count (int): общее количество элементов в истории
         """
+        # Privacy mode gate (wave-35, MED B5): clipboard entries hold transcript text.
+        if self._is_privacy_mode():
+            return {"items": [], "reason": "privacy_mode_active"}
+
         limit = self._coerce_bounded(
             value=params.get("limit", 10),
             default=10,
@@ -1610,6 +1655,10 @@ class HistoryService:
             history_id (str): подтверждённый идентификатор
             found (bool): True если запись найдена
         """
+        # Privacy mode gate (wave-35, MED B5): do not surface stored clipboard text.
+        if self._is_privacy_mode():
+            return {"ok": False, "reason": "privacy_mode_active"}
+
         history_id = str(params.get("history_id", "")).strip()
         if not history_id:
             raise RuntimeError("history_id обязателен")
@@ -2508,6 +2557,10 @@ class HistoryService:
             fallback (bool): True если LLM был недоступен (circuit open / отключён)
             error (str|None): описание ошибки при fallback=True
         """
+        # Privacy mode gate (wave-35, LOW B8): summary echoes transcript content.
+        if self._is_privacy_mode():
+            return {"ok": False, "reason": "privacy_mode_active"}
+
         ids: list[str] | None = params.get("ids")
         from_ts: str | None = params.get("from_ts")
         to_ts: str | None = params.get("to_ts")
@@ -2750,6 +2803,10 @@ class HistoryService:
             count (int): количество найденных записей
             avg_confidence (float): среднее значение confidence среди найденных записей
         """
+        # Privacy mode gate (wave-35, HIGH B4): no transcript items over IPC.
+        if self._is_privacy_mode():
+            return {"items": [], "count": 0, "avg_confidence": 0.0, "reason": "privacy_mode_active"}
+
         raw_min = params.get("min_confidence")
         if raw_min is None:
             raise RuntimeError("Параметр min_confidence обязателен")
@@ -3670,6 +3727,10 @@ class HistoryService:
             groups (list): список групп, каждая содержит items[] и similarity.
             total_duplicates (int): общее количество дублирующихся записей.
         """
+        # Privacy mode gate (wave-35, HIGH B4): no transcript items over IPC.
+        if self._is_privacy_mode():
+            return {"ok": False, "reason": "privacy_mode_active"}
+
         threshold = float(params.get("similarity_threshold", 0.9))
         limit = int(params.get("limit", 500))
 
@@ -3679,6 +3740,13 @@ class HistoryService:
             paste_status=None,
             translation_mode=None,
         )
+
+        # wave-35: O(n^2) SequenceMatcher guard — cap the candidate set so a large
+        # `limit` (user-controlled) cannot wedge the backend on a pairwise compare.
+        MAX_DEDUP_ITEMS = 200
+        if len(items) > MAX_DEDUP_ITEMS:
+            return {"ok": False, "reason": "too many items for deduplication"}
+
         detector = DuplicateDetector()
         groups = detector.find_duplicates(items, similarity_threshold=threshold)
 
