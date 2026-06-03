@@ -183,6 +183,22 @@ class SettingsBackup:
                 f"Бэкап настроек не найден: {backup_path}"
             )
 
+        # wave-27 MED: unbounded json.load on attacker-writable backup file.
+        # Settings files are tiny (< 100 KB); anything > 10 MB is anomalous and
+        # could exhaust memory on a crafted large payload.
+        _MAX_BACKUP_BYTES = 10 * 1024 * 1024  # 10 MB
+        try:
+            file_size = backup_path.stat().st_size
+        except OSError as exc:
+            raise FileNotFoundError(
+                f"Не удалось прочитать бэкап '{backup_id}': {exc}"
+            ) from exc
+        if file_size > _MAX_BACKUP_BYTES:
+            raise ValueError(
+                f"Файл бэкапа '{backup_id}' слишком большой "
+                f"({file_size} байт > {_MAX_BACKUP_BYTES}); загрузка отклонена"
+            )
+
         try:
             with backup_path.open("r", encoding="utf-8") as fh:
                 data = json.load(fh)
@@ -248,15 +264,18 @@ class SettingsBackup:
         except OSError:
             file_size = 0
 
-        # Количество ключей — читаем только верхний уровень JSON
+        # Количество ключей — читаем только верхний уровень JSON.
+        # wave-27 MED: guard against oversized files before json.load.
+        _MAX_BACKUP_BYTES = 10 * 1024 * 1024  # 10 MB
         settings_count_keys = 0
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                data = json.load(fh)
-            if isinstance(data, dict):
-                settings_count_keys = len(data)
-        except (OSError, json.JSONDecodeError):
-            pass
+        if file_size <= _MAX_BACKUP_BYTES:
+            try:
+                with path.open("r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                if isinstance(data, dict):
+                    settings_count_keys = len(data)
+            except (OSError, json.JSONDecodeError):
+                pass
 
         return {
             "backup_id": backup_id,
