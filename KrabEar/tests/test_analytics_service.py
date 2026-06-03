@@ -536,19 +536,34 @@ class TestAnalyticsServiceRegistration(unittest.TestCase):
         ):
             self.assertIn(f'"{method}"', content, f'"{method}" not found in service.py dispatch table')
 
-    def test_stub_methods_present(self) -> None:
-        """Backward-compat stub methods still exist in service.py."""
+    def test_dispatch_delegates_to_extracted_service(self) -> None:
+        """Dispatch table routes each method to the LIVE _analytics_svc handler.
+
+        W#47: the dead in-class _handle_* duplicates were deleted; the single
+        source of truth is the extracted AnalyticsService. Assert the live
+        delegation wiring instead of the (now removed) stub method names.
+        """
         service_path = PROJECT_ROOT / "backend" / "service.py"
         content = service_path.read_text(encoding="utf-8")
-        for stub in (
-            "_handle_compare_periods",
-            "_handle_get_activity_calendar",
-            "_handle_get_sentiment_trends",
-            "_handle_get_keyword_cloud",
-            "_handle_get_timeline_view",
-            "_handle_get_analytics_dashboard",
+        for method in (
+            "compare_periods",
+            "get_activity_calendar",
+            "get_sentiment_trends",
+            "get_keyword_cloud",
+            "get_timeline_view",
+            "get_analytics_dashboard",
         ):
-            self.assertIn(stub, content, f"{stub} stub not found in service.py")
+            self.assertIn(
+                f'"{method}": self._analytics_svc.handle_{method}',
+                content,
+                f'"{method}" not delegated to self._analytics_svc.handle_{method} in service.py',
+            )
+            # The dead in-class duplicate must NOT come back.
+            self.assertNotIn(
+                f"def _handle_{method}(",
+                content,
+                f"dead in-class _handle_{method} duplicate reappeared in service.py",
+            )
 
 
 if __name__ == "__main__":

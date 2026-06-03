@@ -29,13 +29,15 @@ def _make_item(text: str, days_ago: float = 1.0, language: str = "ru") -> dict:
     return {"text": text, "ts": ts.isoformat(), "language": language}
 
 
-def _build_service_stub(privacy_enabled: bool):
-    """Возвращает заглушку _handle_get_sentiment_trends из service.py."""
-    # Импортируем service.py напрямую, чтобы не тянуть все зависимости
-    service_path = PROJECT_ROOT / "backend" / "service.py"
-    source = service_path.read_text(encoding="utf-8")
+# W#47: the privacy gate now lives in the extracted AnalyticsService — the dead
+# in-class _handle_get_sentiment_trends duplicate in service.py was deleted.
+# Source-scraping tests below target the LIVE handler in analytics_service.py.
+ANALYTICS_PY = PROJECT_ROOT / "backend" / "analytics_service.py"
 
-    # Проверяем присутствие privacy gate с правильным ключом
+
+def _build_service_stub(privacy_enabled: bool):
+    """Возвращает источник analytics_service.py (LIVE handle_get_sentiment_trends)."""
+    source = ANALYTICS_PY.read_text(encoding="utf-8")
     return source
 
 
@@ -47,13 +49,12 @@ class PrivacyResponseKeyTestCase(unittest.TestCase):
     """Проверяет что privacy_mode ответ использует ключ 'daily_sentiment'."""
 
     def test_privacy_response_uses_daily_sentiment_key(self) -> None:
-        """Privacy gate в service.py должен возвращать 'daily_sentiment', не 'trends'."""
-        service_path = PROJECT_ROOT / "backend" / "service.py"
-        source = service_path.read_text(encoding="utf-8")
+        """Privacy gate должен возвращать 'daily_sentiment', не 'trends'."""
+        source = ANALYTICS_PY.read_text(encoding="utf-8")
 
-        # Найдём блок _handle_get_sentiment_trends
-        idx = source.find("def _handle_get_sentiment_trends")
-        self.assertGreater(idx, 0, "_handle_get_sentiment_trends не найден в service.py")
+        # Найдём блок handle_get_sentiment_trends (LIVE extracted handler)
+        idx = source.find("def handle_get_sentiment_trends")
+        self.assertGreater(idx, 0, "handle_get_sentiment_trends не найден в analytics_service.py")
 
         # Вырежем ~30 строк после определения функции
         snippet = source[idx: idx + 1200]
@@ -71,10 +72,9 @@ class PrivacyResponseKeyTestCase(unittest.TestCase):
 
     def test_privacy_response_includes_reason(self) -> None:
         """Privacy gate должен включать поле 'reason' = 'privacy_mode_active'."""
-        service_path = PROJECT_ROOT / "backend" / "service.py"
-        source = service_path.read_text(encoding="utf-8")
+        source = ANALYTICS_PY.read_text(encoding="utf-8")
 
-        idx = source.find("def _handle_get_sentiment_trends")
+        idx = source.find("def handle_get_sentiment_trends")
         snippet = source[idx: idx + 1200]
 
         self.assertIn("reason", snippet,
@@ -84,10 +84,9 @@ class PrivacyResponseKeyTestCase(unittest.TestCase):
 
     def test_privacy_response_includes_mood_trend(self) -> None:
         """Privacy gate должен включать 'mood_trend' для консистентности схемы."""
-        service_path = PROJECT_ROOT / "backend" / "service.py"
-        source = service_path.read_text(encoding="utf-8")
+        source = ANALYTICS_PY.read_text(encoding="utf-8")
 
-        idx = source.find("def _handle_get_sentiment_trends")
+        idx = source.find("def handle_get_sentiment_trends")
         snippet = source[idx: idx + 1200]
 
         self.assertIn("mood_trend", snippet,
@@ -95,10 +94,9 @@ class PrivacyResponseKeyTestCase(unittest.TestCase):
 
     def test_privacy_response_includes_ok_flag(self) -> None:
         """Privacy gate должен возвращать 'ok': True чтобы не вызывать ошибку клиента."""
-        service_path = PROJECT_ROOT / "backend" / "service.py"
-        source = service_path.read_text(encoding="utf-8")
+        source = ANALYTICS_PY.read_text(encoding="utf-8")
 
-        idx = source.find("def _handle_get_sentiment_trends")
+        idx = source.find("def handle_get_sentiment_trends")
         snippet = source[idx: idx + 1200]
 
         self.assertIn('"ok": True', snippet,
@@ -172,23 +170,22 @@ class ASTPrivacyGateValidationTestCase(unittest.TestCase):
     """AST-проверка: нет литерала 'trends' в privacy gate функции."""
 
     def test_no_bare_trends_key_in_handler_ast(self) -> None:
-        """AST parse service.py и проверяем что 'trends' не является ключом словаря
-        внутри _handle_get_sentiment_trends (старый баг W1295)."""
-        service_path = PROJECT_ROOT / "backend" / "service.py"
-        source = service_path.read_text(encoding="utf-8")
-        tree = ast.parse(source, filename=str(service_path))
+        """AST parse analytics_service.py и проверяем что 'trends' не является ключом
+        словаря внутри handle_get_sentiment_trends (старый баг W1295)."""
+        source = ANALYTICS_PY.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(ANALYTICS_PY))
 
         handler_body_lineno = None
         handler_end_lineno = None
 
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "_handle_get_sentiment_trends":
+            if isinstance(node, ast.FunctionDef) and node.name == "handle_get_sentiment_trends":
                 handler_body_lineno = node.lineno
                 handler_end_lineno = getattr(node, "end_lineno", node.lineno + 50)
                 break
 
         self.assertIsNotNone(handler_body_lineno,
-                             "_handle_get_sentiment_trends не найден в AST")
+                             "handle_get_sentiment_trends не найден в AST")
 
         # Собираем все строковые ключи словарей внутри функции
         dict_keys_in_handler: list[str] = []
@@ -216,11 +213,10 @@ class ASTPrivacyGateValidationTestCase(unittest.TestCase):
         )
 
     def test_ast_handler_has_privacy_check(self) -> None:
-        """_handle_get_sentiment_trends должен содержать проверку privacy_mode_enabled."""
-        service_path = PROJECT_ROOT / "backend" / "service.py"
-        source = service_path.read_text(encoding="utf-8")
+        """handle_get_sentiment_trends должен содержать проверку privacy_mode_enabled."""
+        source = ANALYTICS_PY.read_text(encoding="utf-8")
 
-        idx = source.find("def _handle_get_sentiment_trends")
+        idx = source.find("def handle_get_sentiment_trends")
         snippet = source[idx: idx + 1200]
 
         self.assertIn("privacy_mode_enabled", snippet,
@@ -241,11 +237,10 @@ class SchemaParityTestCase(unittest.TestCase):
         empty_report = analyzer.analyze_sentiment_trends([])
         normal_keys = set(analyzer.to_dict(empty_report).keys())
 
-        # Из service.py вырезаем строки privacy gate и парсим словарь
-        service_path = PROJECT_ROOT / "backend" / "service.py"
-        source = service_path.read_text(encoding="utf-8")
+        # Из analytics_service.py (LIVE handler) вырезаем строки privacy gate.
+        source = ANALYTICS_PY.read_text(encoding="utf-8")
 
-        idx = source.find("def _handle_get_sentiment_trends")
+        idx = source.find("def handle_get_sentiment_trends")
         snippet = source[idx: idx + 1200]
 
         # Ключи присутствия которых мы ожидаем в privacy gate

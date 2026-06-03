@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import time as _time
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable, Optional
 
 from backend.observability import add_breadcrumb
 
@@ -40,6 +40,7 @@ class AnalyticsService:
         keyword_cloud_gen: Any,
         timeline_view: Any,
         store: Any,
+        settings_get: Optional[Callable[[str, Any], Any]] = None,
     ) -> None:
         """
         Args:
@@ -49,6 +50,11 @@ class AnalyticsService:
             keyword_cloud_gen:   KeywordCloudGenerator — облако ключевых слов.
             timeline_view:       TimelineViewGenerator — timeline группировка.
             store:               StateStore            — доступ к истории.
+            settings_get:        callable(key, default) → Any — runtime settings lookup
+                                 (передаётся как BackendService._get_runtime_setting).
+                                 Используется для privacy_mode_enabled guard в
+                                 get_sentiment_trends / get_keyword_cloud (W1295/W1093).
+                                 None → guard выключен (privacy_mode считается False).
         """
         self._analytics_dashboard = analytics_dashboard
         self._sentiment_trends = sentiment_trends
@@ -56,6 +62,7 @@ class AnalyticsService:
         self._keyword_cloud_gen = keyword_cloud_gen
         self._timeline_view = timeline_view
         self._store = store
+        self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
 
     # ------------------------------------------------------------------
     # Handlers
@@ -81,7 +88,25 @@ class AnalyticsService:
         return result
 
     def handle_get_sentiment_trends(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Анализирует тренды тональности транскрипций за последние N дней."""
+        """Анализирует тренды тональности транскрипций за последние N дней.
+
+        Privacy gate (W1295 F1 / W1369 schema parity): когда privacy_mode_enabled=True
+        возвращает пустой ответ БЕЗ обращения к истории транскрипций. Схема ключей
+        совпадает с ``SentimentTrendAnalyzer.to_dict`` (daily_sentiment / mood_trend /
+        most_positive_day / …) чтобы Swift-декодер не падал.
+        """
+        if self._settings_get("privacy_mode_enabled", False):
+            return {
+                "ok": True,
+                "daily_sentiment": [],
+                "overall_sentiment": 0.0,
+                "mood_trend": "stable",
+                "sentiment_distribution": {"positive": 0, "negative": 0, "neutral": 0},
+                "most_positive_day": {},  # W1369: schema parity with to_dict()
+                "most_negative_day": {},  # W1369: schema parity with to_dict()
+                "reason": "privacy_mode_active",
+                "privacy_mode_active": True,
+            }
         days = int(params.get("days", 30))
         try:
             with self._store._lock():
@@ -139,7 +164,14 @@ class AnalyticsService:
         }
 
     def handle_get_keyword_cloud(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Генерирует данные облака ключевых слов из истории транскрипций."""
+        """Генерирует данные облака ключевых слов из истории транскрипций.
+
+        Privacy gate (W1093 F3): когда privacy_mode_enabled=True возвращает words=[]
+        БЕЗ обращения к истории транскрипций — слова из истории не должны раскрываться
+        в режиме приватности.
+        """
+        if self._settings_get("privacy_mode_enabled", False):
+            return {"ok": True, "words": [], "reason": "privacy_mode_active"}
         max_words = int(params.get("max_words", 100))
         language = params.get("language")
         try:

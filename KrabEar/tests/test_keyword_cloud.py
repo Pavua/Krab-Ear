@@ -570,41 +570,45 @@ class TestGenerateCloudMaxWordsZeroOrNegative(unittest.TestCase):
 class TestHandleGetKeywordCloudPrivacyMode(unittest.TestCase):
     """F3 fix — privacy_mode_enabled блокирует word cloud (W1093).
 
-    Тест не импортирует BackendService напрямую (тяжёлый модуль с Python 3.10+
-    зависимостями). Вместо этого вырезаем логику хендлера в автономную функцию
-    и проверяем её корректность через stub.
+    W#47: dead in-class BackendService._handle_get_keyword_cloud удалён — privacy
+    gate теперь в extracted AnalyticsService. Тест вызывает ЖИВОЙ хендлер
+    AnalyticsService.handle_get_keyword_cloud (не локальную копию), чтобы guard
+    проверялся на production-коде.
     """
 
     @staticmethod
     def _invoke_handler(privacy_enabled: bool, params: dict):
-        """Имитирует тело _handle_get_keyword_cloud с проверкой privacy_mode."""
-        # Воспроизводим точный код хендлера из service.py (W1093 F3 fix)
-        def _get_runtime_setting(key, default=None):
-            if key == "privacy_mode_enabled":
-                return privacy_enabled
-            return default
-
-        if _get_runtime_setting("privacy_mode_enabled", False):
-            return {"ok": True, "words": [], "reason": "privacy_mode_active"}
-
-        # При privacy_mode=False — генерируем облако напрямую
+        """Вызывает LIVE AnalyticsService.handle_get_keyword_cloud с privacy gate."""
+        from unittest.mock import MagicMock
+        from backend.analytics_service import AnalyticsService
         from backend.keyword_cloud import KeywordCloudGenerator
-        gen = KeywordCloudGenerator()
-        items = [{"text": "Иван Москва банк Иван", "source_lang": "ru"}]
-        max_words = int(params.get("max_words", 100))
-        language = params.get("language")
-        cloud_words = gen.generate_cloud(items, max_words=max_words, language=language)
-        return {
-            "words": [
-                {
-                    "word": cw.word,
-                    "count": cw.count,
-                    "weight": cw.weight,
-                    "font_size": cw.font_size,
-                }
-                for cw in cloud_words
-            ]
-        }
+
+        class _Store:
+            class _CM:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+            def _lock(self):
+                return self._CM()
+
+            def _load_active_items_unlocked(self):
+                return [{"text": "Иван Москва банк Иван", "source_lang": "ru"}]
+
+        svc = AnalyticsService(
+            analytics_dashboard=MagicMock(),
+            sentiment_trends=MagicMock(),
+            activity_calendar=MagicMock(),
+            keyword_cloud_gen=KeywordCloudGenerator(),
+            timeline_view=MagicMock(),
+            store=_Store(),
+            settings_get=lambda k, d=None: (
+                privacy_enabled if k == "privacy_mode_enabled" else d
+            ),
+        )
+        return svc.handle_get_keyword_cloud(params)
 
     def test_privacy_mode_enabled_returns_empty_words(self) -> None:
         """С privacy_mode_enabled=True хендлер возвращает words=[] и reason."""

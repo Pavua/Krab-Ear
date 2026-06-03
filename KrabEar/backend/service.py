@@ -835,6 +835,7 @@ class BackendService:
             keyword_cloud_gen=self._keyword_cloud_gen,
             timeline_view=self._timeline_view,
             store=self.store,
+            settings_get=self._get_runtime_setting,
         )
         self._apple_integration_svc = AppleIntegrationService(
             telegram_bridge=self._telegram_bridge,
@@ -3591,32 +3592,6 @@ class BackendService:
         markdown = self._stats_report.generate_mini_report(store=self.store)
         return {"markdown": markdown}
 
-    def _handle_compare_periods(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Сравнивает статистику двух временных периодов.
-
-        Режимы: explicit (даты), weeks, months.
-        """
-        return self._period_comparison_svc.handle_compare_periods(params)
-
-    def _handle_get_activity_calendar(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает GitHub-style activity calendar данные за последние N месяцев."""
-        months = int(params.get("months", 12))
-        months = max(1, min(months, 24))
-        include_svg = bool(params.get("include_svg", False))
-        cell_size = int(params.get("cell_size", 12))
-        try:
-            with self.store._lock():
-                items = self.store._load_active_items_unlocked()
-        except Exception:
-            items = []
-        calendar = self._activity_calendar.generate_calendar(items, months=months)
-        result = calendar.to_dict()
-        if include_svg:
-            result["svg"] = self._activity_calendar.generate_calendar_svg(
-                items, months=months, cell_size=cell_size
-            )
-        return result
-
     def _handle_get_recording_insights(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует эвристические инсайты по записям за последние N дней."""
         days = int(params.get("days", 7))
@@ -3648,29 +3623,6 @@ class BackendService:
             "insight": insight.to_dict() if insight is not None else None,
             "privacy_mode": False,
         }
-
-    def _handle_get_sentiment_trends(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Анализирует тренды тональности транскрипций за последние N дней."""
-        if self._get_runtime_setting("privacy_mode_enabled", False):
-            return {
-                "ok": True,
-                "daily_sentiment": [],
-                "overall_sentiment": 0.0,
-                "mood_trend": "stable",
-                "sentiment_distribution": {"positive": 0, "negative": 0, "neutral": 0},
-                "most_positive_day": {},  # W1369: schema parity with to_dict()
-                "most_negative_day": {},  # W1369: schema parity with to_dict()
-                "reason": "privacy_mode_active",
-                "privacy_mode_active": True,
-            }
-        days = int(params.get("days", 30))
-        try:
-            with self.store._lock():
-                items = self.store._load_active_items_unlocked()
-        except Exception:
-            items = []
-        report = self._sentiment_trends.analyze_sentiment_trends(items, days=days)
-        return self._sentiment_trends.to_dict(report)
 
     def _handle_compare_recordings(self, params: dict[str, Any]) -> dict[str, Any]:
         """Сравнивает несколько записей side-by-side.
@@ -3733,30 +3685,6 @@ class BackendService:
             "recent_topics": self._context_memory.get_recent_topics(last_n=last_n),
             "size": self._context_memory.size(),
             "window_size": 50,
-        }
-
-    def _handle_get_keyword_cloud(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Генерирует данные облака ключевых слов из истории транскрипций."""
-        max_words = int(params.get("max_words", 100))
-        language = params.get("language")
-        try:
-            with self.store._lock():
-                items = self.store._load_active_items_unlocked()
-        except Exception:
-            items = []
-        cloud_words = self._keyword_cloud_gen.generate_cloud(
-            items, max_words=max_words, language=language
-        )
-        return {
-            "words": [
-                {
-                    "word": cw.word,
-                    "count": cw.count,
-                    "weight": cw.weight,
-                    "font_size": cw.font_size,
-                }
-                for cw in cloud_words
-            ]
         }
 
     # ── Audio fingerprinting ─────────────────────────────────────────────────
@@ -4288,34 +4216,6 @@ end tell'''
 
     # ── Timeline view ────────────────────────────────────────────────────────
 
-    def _handle_get_timeline_view(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Группирует историю транскрипций по временным блокам (timeline).
-
-        Параметры:
-          - group_by: str — гранулярность: "hour", "day", "week" (по умолчанию "day").
-          - limit: int — макс. записей для анализа (по умолчанию 500, макс. 5000).
-          - include_heatmap: bool — включить activity heatmap (по умолчанию False).
-          - heatmap_days: int — горизонт heatmap в днях (по умолчанию 30).
-        """
-        group_by = str(params.get("group_by", "day")).strip()
-        limit = max(1, min(int(params.get("limit", 500)), 5000))
-        include_heatmap = bool(params.get("include_heatmap", False))
-        heatmap_days = max(1, min(int(params.get("heatmap_days", 30)), 365))
-
-        raw_items = self.store._load_active_items_with_lock()[:limit]
-        blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
-        result: dict[str, Any] = {
-            "blocks": [b.to_dict() for b in blocks],
-            "total_blocks": len(blocks),
-            "group_by": group_by,
-        }
-
-        if include_heatmap:
-            heatmap = self._timeline_view.generate_activity_heatmap(raw_items, days=heatmap_days)
-            result["activity_heatmap"] = heatmap
-
-        return result
-
     def _handle_generate_auto_title(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует автоматический заголовок для транскрибации.
 
@@ -4361,18 +4261,6 @@ end tell'''
         params_with_store = dict(params)
         params_with_store.setdefault("store", self.store)
         return self._language_learning.handle_get_learning_stats(params_with_store)
-
-    def _handle_get_analytics_dashboard(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: get_analytics_dashboard — комплексный дашборд всех метрик аналитики.
-
-        Параметры:
-            days (int): окно анализа в днях (по умолчанию 30, макс. 365)
-
-        Возвращает:
-            overview, today, trends, languages, quality, engagement, storage, performance
-        """
-        days = max(1, min(int(params.get("days", 30) or 30), 365))
-        return self._analytics_dashboard.get_full_dashboard(store=self.store, days=days)
 
     def _handle_get_topic_timeline(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_topic_timeline — таймлайн смен тем разговора из истории транскрибаций.
