@@ -1,0 +1,23 @@
+# dispatch_test_targets_allowlist.txt
+# Allowlist for scripts/audit_dispatch_test_targets.py — the "test validates the
+# dead in-class copy" root-cause guard.
+#
+# Each non-comment line is ONE of two id forms:
+#
+#   method:<ipc_method>
+#       Mark a whole dead-duplicate pair as INTENTIONAL — the in-class
+#       BackendService._handle_<ipc_method> is allowed to coexist with the live
+#       extracted dispatch target.  Suppresses the method and all its test sites.
+#       Example:  method:send_to_telegram
+#
+#   test:<handler>@<testfile>
+#       Mark ONE test site as intentional (e.g. a test that deliberately asserts
+#       the in-class method is ABSENT / dead).  Only that (handler, file) site is
+#       suppressed; the method still reports if other live sites remain.
+#       Example:  test:_handle_send_to_telegram@tests/test_audit_dead_ipc_handlers.py
+#
+# Empty by design: this guard is REPORT-ONLY (no --fail-on-found in CI yet).  The
+# 36 dead-duplicate handlers it currently flags (telegram pair + 34 siblings from
+# the W797 service-extraction marathon) are the deliberate fix target — they are
+# NOT allowlisted, so the report stays loud until the dead copies are deleted and
+# the validating tests are repointed at the live extracted handlers.
