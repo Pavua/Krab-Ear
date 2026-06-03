@@ -65,6 +65,10 @@ MEDIUM_METHODS: Set[str] = {
     "filter_by_confidence",     # фильтрация по confidence
     "find_duplicates",          # поиск дублей
     "translate_text",           # перевод текста
+    # wave-23: translate_selection раньше был в EXCLUDED_METHODS (un-throttled),
+    # но он пишет attacker-controlled значение в персистентный translation_cache
+    # (disk). Переведён в medium-bucket (30/min) — write-path теперь rate-limited.
+    "translate_selection",      # Phase 2A: перевод выделенного текста (пишет в кэш)
     "get_glossary_suggestions",  # предложения для глоссария
     "get_vocabulary_suggestions",
     "get_smart_vocabulary_suggestions",  # W1769: regex-извлечение слов по всей истории (ReDoS-чувствительный)
@@ -98,7 +102,10 @@ EXCLUDED_METHODS: Set[str] = {
     "list_settings_backups",
     "restore_settings_backup",
     "create_manual_settings_backup",
-    "translate_selection",  # Phase 2A: вызывается часто при выделении текста
+    # wave-23: translate_selection УБРАН из EXCLUDED — он пишет
+    # attacker-controlled значение в персистентный translation_cache (disk).
+    # Теперь классифицирован как medium (30/min, см. MEDIUM_METHODS), чтобы
+    # write-path был rate-limited против disk-DoS.
     # Live subtitles: вызывается ~10-30 раз/сек по одному аудио-чанку
     "live_subs_ingest",
     "live_subs_stop",
