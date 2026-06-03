@@ -451,11 +451,17 @@ class TestEdgeCases(unittest.TestCase):
     """Проверяет граничные случаи и обработку ошибок."""
 
     def test_very_large_duration(self):
+        # wave-34 F1: durations >86400 s (24h) are now rejected to prevent poisoning.
+        # 1e6 s (~11.5 days) exceeds the cap → record_playback returns an error dict
+        # and play_count stays at 0.
         tracker = PlaybackTracker()
-        huge_duration = 1e6  # 1 миллион секунд
-        tracker.record_playback("huge", duration_listened_sec=huge_duration)
+        huge_duration = 1e6  # 1 миллион секунд — превышает лимит 24h
+        result = tracker.record_playback("huge", duration_listened_sec=huge_duration)
+        self.assertEqual(result.get("ok"), False)
+        self.assertEqual(result.get("reason"), "invalid_duration")
         stats = tracker.get_playback_stats("huge")
-        self.assertAlmostEqual(stats["total_listened_sec"], huge_duration, places=-2)
+        self.assertEqual(stats["play_count"], 0)
+        self.assertEqual(stats["total_listened_sec"], 0.0)
 
     def test_fractional_durations(self):
         tracker = PlaybackTracker()

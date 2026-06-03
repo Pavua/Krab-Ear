@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import tempfile
 import threading
@@ -143,7 +144,16 @@ class PlaybackTracker:
         if self._is_privacy_mode():
             _log.debug("record_playback: пропуск (privacy_mode=True) для item_id=%r", item_id)
             return {"ok": True, "reason": "privacy_mode_active"}
-        duration = max(0.0, float(duration_listened_sec))
+        duration_float = float(duration_listened_sec)
+        # F1: cap single playback duration to 24h; reject non-finite values.
+        if not math.isfinite(duration_float) or duration_float > 86400:
+            _log.warning(
+                "record_playback: invalid duration_listened_sec=%r for item_id=%r — rejected",
+                duration_listened_sec,
+                item_id,
+            )
+            return {"ok": False, "reason": "invalid_duration"}
+        duration = max(0.0, duration_float)
         now_iso = datetime.now(timezone.utc).isoformat()
 
         with self._lock:
@@ -156,7 +166,12 @@ class PlaybackTracker:
                 {"play_count": 0, "total_listened_sec": 0.0, "last_played": None},
             )
             entry["play_count"] = int(entry.get("play_count", 0)) + 1
-            entry["total_listened_sec"] = float(entry.get("total_listened_sec", 0.0)) + duration
+            old_total = float(entry.get("total_listened_sec", 0.0))
+            new_total = old_total + duration
+            # F1: final Infinity guard — clamp if accumulation somehow produced non-finite.
+            if not math.isfinite(new_total):
+                new_total = old_total
+            entry["total_listened_sec"] = new_total
             entry["last_played"] = now_iso
             self._save()
         return self.get_playback_stats(item_id)
