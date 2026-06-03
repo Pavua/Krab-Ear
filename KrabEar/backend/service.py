@@ -410,9 +410,9 @@ class BackendService:
 
         self._system_monitor = SystemMonitor()
         self._clipboard_history: list[dict] = []
-        self._collections = CollectionManager(store=self.store)
+        self._collections = CollectionManager(store=self.store, settings_fn=self._cached_settings)
         self._norm_profiles = NormalizationProfileRegistry(data_dir=self.store.data_dir)
-        self._chains = RecordingChainManager(store=self.store)
+        self._chains = RecordingChainManager(store=self.store, settings_fn=self._cached_settings)
         self._bookmarks = BookmarkManager(data_dir=self.store.data_dir)
         self._recording_scheduler = RecordingScheduler(data_dir=self.store.data_dir)
         self._history = HistoryService(

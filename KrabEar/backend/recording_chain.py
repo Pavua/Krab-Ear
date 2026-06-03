@@ -12,15 +12,30 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger("KrabEar.Backend.RecordingChain")
 
 _CHAINS_FILE = "recording_chains.json"
+
+# DoS caps (A3 wave-34)
+MAX_CHAINS = 500
+MAX_ITEMS_PER_CHAIN = 1000
+MAX_CHAIN_NAME_LEN = 200
+
+# Basic UUID-like item_id format guard (A4 wave-34):
+# must be non-empty, no path separators, no null bytes.
+_ITEM_ID_UNSAFE_RE = re.compile(r'[/\\.\x00]')
+
+
+def _is_valid_item_id(item_id: str) -> bool:
+    """Returns True when item_id passes minimal format validation."""
+    return bool(item_id) and not _ITEM_ID_UNSAFE_RE.search(item_id)
 
 
 class RecordingChainManager:
@@ -40,13 +55,27 @@ class RecordingChainManager:
     }
     """
 
-    def __init__(self, store: Any) -> None:
+    def __init__(
+        self,
+        store: Any,
+        settings_fn: Optional[Callable[[], dict[str, Any]]] = None,
+    ) -> None:
         self._store = store
+        self._settings_fn = settings_fn
         self._data_dir = Path(getattr(store, "data_dir", "."))
         self._chains_path = self._data_dir / _CHAINS_FILE
         self._lock = threading.Lock()
         self._data: dict[str, Any] = {"chains": {}}
         self._load()
+
+    def _is_privacy_mode(self) -> bool:
+        """Returns True when privacy_mode_enabled is set in cached settings."""
+        if self._settings_fn is None:
+            return False
+        try:
+            return bool(self._settings_fn().get("privacy_mode_enabled", False))
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------
     # Персистентность
@@ -95,8 +124,16 @@ class RecordingChainManager:
         name = name.strip()
         if not name:
             raise ValueError("Имя цепочки не может быть пустым")
+        if len(name) > MAX_CHAIN_NAME_LEN:
+            raise ValueError(
+                f"Имя цепочки слишком длинное (максимум {MAX_CHAIN_NAME_LEN} символов)"
+            )
         chain_id = str(uuid.uuid4())
         with self._lock:
+            if len(self._data["chains"]) >= MAX_CHAINS:
+                raise RuntimeError(
+                    f"Достигнут лимит цепочек ({MAX_CHAINS})"
+                )
             self._data["chains"][chain_id] = {
                 "chain_id": chain_id,
                 "name": name,
@@ -116,8 +153,14 @@ class RecordingChainManager:
             if chain.get("ended_at") is not None:
                 raise RuntimeError(f"Цепочка уже завершена: {chain_id}")
             item_id = str(item_id).strip()
-            if not item_id:
-                raise ValueError("item_id не может быть пустым")
+            if not _is_valid_item_id(item_id):
+                raise ValueError(
+                    f"item_id содержит недопустимые символы или пустой: {item_id!r}"
+                )
+            if len(chain["item_ids"]) >= MAX_ITEMS_PER_CHAIN:
+                raise RuntimeError(
+                    f"Цепочка достигла лимита элементов ({MAX_ITEMS_PER_CHAIN})"
+                )
             if item_id not in chain["item_ids"]:
                 chain["item_ids"].append(item_id)
                 self._save()
@@ -154,7 +197,28 @@ class RecordingChainManager:
                 self._save()
 
     def get_chain(self, chain_id: str) -> dict[str, Any]:
-        """Возвращает цепочку: элементы по порядку, суммарные duration и word_count."""
+        """Возвращает цепочку: элементы по порядку, суммарные duration и word_count.
+
+        Privacy gate (A1 wave-34): когда privacy_mode_enabled=True, возвращает
+        минимальный конверт без transcript cleartext (items пустой список).
+        """
+        if self._is_privacy_mode():
+            # Return structural metadata without transcript content.
+            with self._lock:
+                chain = self._data["chains"].get(chain_id)
+                if chain is None:
+                    raise KeyError(f"Цепочка не найдена: {chain_id}")
+                return {
+                    "chain_id": chain_id,
+                    "name": chain["name"],
+                    "created_at": chain["created_at"],
+                    "ended_at": chain.get("ended_at"),
+                    "item_ids": list(chain["item_ids"]),
+                    "items": [],
+                    "total_duration_sec": 0.0,
+                    "total_word_count": 0,
+                    "privacy_mode": True,
+                }
         with self._lock:
             chain = self._data["chains"].get(chain_id)
             if chain is None:
@@ -243,7 +307,13 @@ class RecordingChainManager:
         return count
 
     def merge_chain_text(self, chain_id: str) -> str:
-        """Конкатенирует тексты всех записей цепочки в порядке добавления."""
+        """Конкатенирует тексты всех записей цепочки в порядке добавления.
+
+        Privacy gate (A1 wave-34): когда privacy_mode_enabled=True, возвращает
+        пустую строку вместо transcript cleartext.
+        """
+        if self._is_privacy_mode():
+            return ""
         chain_data = self.get_chain(chain_id)
         parts: list[str] = []
         for item in chain_data["items"]:
@@ -264,6 +334,9 @@ class RecordingChainManager:
         # Имя цепочки (PII) НЕ логируем — только сам факт сбоя записи.
         try:
             chain_id = self.start_chain(name)
+        except RuntimeError as exc:
+            # DoS cap: limit_exceeded (A3 wave-34)
+            return {"ok": False, "error": str(exc), "reason": "limit_exceeded"}
         except OSError as exc:
             logger.error("start_chain: не удалось сохранить цепочку: %s", exc)
             return {"ok": False, "error": f"persist_failed: {exc}"}
@@ -279,6 +352,9 @@ class RecordingChainManager:
         # RC-4 W1769: persistence failure → error envelope вместо ложного успеха.
         try:
             self.add_to_chain(chain_id, item_id)
+        except RuntimeError as exc:
+            # DoS cap: limit_exceeded (A3 wave-34) or chain already ended
+            return {"ok": False, "error": str(exc), "reason": "limit_exceeded"}
         except OSError as exc:
             logger.error("add_to_chain: не удалось сохранить цепочку: %s", exc)
             return {"ok": False, "error": f"persist_failed: {exc}"}
