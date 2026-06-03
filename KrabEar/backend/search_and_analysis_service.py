@@ -328,7 +328,9 @@ class SearchAndAnalysisService:
 
         Params:
             window_size (int): размер скользящего окна (1..1000, по умолчанию 5).
-            limit       (int): максимальное количество последних записей (0..10000, 0 — все).
+            limit       (int): максимальное количество последних записей (1..10000,
+                               по умолчанию 100). limit <= 0 трактуется как default (100) —
+                               НЕ «все записи» (W1281-F2 DoS-защита).
         Returns:
             {segments, total_shifts, current_topic}
         """
@@ -344,17 +346,20 @@ class SearchAndAnalysisService:
 
         # W1728 DoS clamp: window_size unbounded → O(n²) work; cap at 1000
         window_size = max(1, min(int(params.get("window_size", 5) or 5), 1000))
-        # W1728 DoS clamp: limit unbounded → massive memory allocation; cap at 10000
+        # W1728/W1281-F2 DoS clamp: limit must always slice the history.
+        # limit <= 0 (incl. negative) falls back to the default (100), never
+        # "process all records" — an attacker passing limit=0 or limit=-1 must
+        # not force unbounded work over the entire (unbounded) history.
         raw_limit = int(params.get("limit", 100) or 100)
-        limit = max(0, min(raw_limit, 10000))
+        limit = raw_limit if raw_limit > 0 else 100
+        limit = min(limit, 10000)
         try:
             with self._store._lock():
                 items = self._store._load_active_items_unlocked()
         except Exception:
             items = []
 
-        if limit > 0:
-            items = items[-limit:]
+        items = items[-limit:]
 
         timeline = self._topic_tracker.get_topic_timeline(items, window_size=window_size)
         current_topic = self._topic_tracker.get_current_topic(items, last_n=window_size)

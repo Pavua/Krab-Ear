@@ -41,7 +41,7 @@ from core.auto_title import AutoTitleGenerator
 from core.context_memory import ContextMemory
 from backend.transcript_versioning import TranscriptVersionManager
 from backend.sharing_manager import SharingManager
-from backend.semantic_search import SemanticSearcher, keyword_fallback_search
+from backend.semantic_search import SemanticSearcher
 from core.word_timing import WordTimingAnalyzer
 from core.speech_pace import SpeechPaceAnalyzer
 from core.readability_scorer import ReadabilityScorer
@@ -1220,65 +1220,6 @@ class BackendService:
     # ------------------------------------------------------------------
     # Semantic search IPC handlers
     # ------------------------------------------------------------------
-
-    def _handle_semantic_search(self, params: dict) -> dict:
-        """Семантический поиск по истории транскрипций через embeddings.
-
-        Params:
-            query     — поисковый запрос (строка, обязательный)
-            top_k     — максимальное число результатов (int, default 10)
-            fallback  — bool, использовать keyword fallback если модель недоступна (default True)
-        Returns:
-            {"results": [{"id": str, "score": float}], "mode": "semantic"|"keyword"|"disabled"}
-        """
-        query = str(params.get("query", "")).strip()
-        if not query:
-            raise ValueError("Параметр query обязателен")
-        top_k = int(params.get("top_k", 10))
-        top_k = max(1, min(top_k, 100))
-        use_fallback = bool(params.get("fallback", True))
-
-        if not self._semantic_searcher.is_enabled:
-            if use_fallback:
-                items = [{"id": it.id, "text": it.text}
-                         for it in self.store._load_active_items_with_lock()]
-                results = keyword_fallback_search(query, items, top_k=top_k)
-                return {"results": results, "mode": "keyword", "reason": "semantic_disabled"}
-            return {"results": [], "mode": "disabled"}
-
-        results = self._semantic_searcher.search(query, top_k=top_k)
-        if not results and use_fallback:
-            items = [{"id": it.id, "text": it.text}
-                     for it in self.store._load_active_items_with_lock()]
-            results = keyword_fallback_search(query, items, top_k=top_k)
-            return {"results": results, "mode": "keyword", "reason": "model_unavailable"}
-
-        return {"results": results, "mode": "semantic"}
-
-    def _handle_semantic_search_status(self, params: dict) -> dict:
-        """Возвращает статус семантического поиска.
-
-        Returns:
-            {"enabled": bool, "model_loaded": bool, "model_name": str,
-             "model_error": str|null, "indexed_count": int}
-        """
-        return self._semantic_searcher.status()
-
-    def _handle_semantic_search_reindex(self, params: dict) -> dict:
-        """Переиндексирует всю историю транскрипций.
-
-        Params:
-            force — bool, перестроить индекс с нуля (default False)
-        Returns:
-            {"indexed": int, "skipped": int, "errors": int}
-        """
-        if not self._semantic_searcher.is_enabled:
-            return {"indexed": 0, "skipped": 0, "errors": 0, "reason": "semantic_search_disabled"}
-        force = bool(params.get("force", False))
-        items = [{"id": it.id, "text": it.text}
-                 for it in self.store._load_active_items_with_lock()]
-        result = self._semantic_searcher.index_all(items, force=force)
-        return result
 
     # ---------------------------------------------------------------------- #
     # Export scheduler periodic worker (W982 — F1 fix)                      #
@@ -3004,110 +2945,14 @@ class BackendService:
         )
         return {"count": len(cleared), "cleared": cleared}
 
-    def _handle_extract_action_items(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Извлекает задачи/решения/вопросы из транскрипта по item_id через LLM."""
         item_id = str(params.get("id", "")).strip()
         if not item_id:
             raise RuntimeError("Параметр id обязателен")
 
-        if self._action_items_extractor is None:
-            raise RuntimeError("LLM не включён (LLM_ENABLED=False)")
-
-        with self.store._lock():
-            items = self.store._load_active_items_unlocked()
-        target = next((it for it in items if it.id == item_id), None)
         if target is None:
             raise RuntimeError(f"Элемент не найден: {item_id}")
 
         text = target.text or ""
-        language = str(params.get("language", "ru")).lower()
-
-        result = self._action_items_extractor.extract(text, language=language)
-
-        if result.ok:
-            self.store.update_history_item_action_items(
-                item_id=item_id,
-                action_items=[ai.to_dict() for ai in result.action_items],
-                decisions=result.decisions,
-                questions=result.questions,
-            )
-
-        return {
-            "id": item_id,
-            "ok": result.ok,
-            "action_items": [ai.to_dict() for ai in result.action_items],
-            "decisions": result.decisions,
-            "questions": result.questions,
-            "fallback_reason": result.fallback_reason,
-            "latency_ms": result.latency_ms,
-        }
-
-    def _handle_batch_extract_action_items(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Пакетное извлечение задач/решений/вопросов для нескольких item_id."""
-        item_ids = params.get("ids", [])
-        if not isinstance(item_ids, list):
-            raise RuntimeError("Параметр ids должен быть списком")
-        language = str(params.get("language", "ru")).lower()
-
-        if self._action_items_extractor is None:
-            raise RuntimeError("LLM не включён (LLM_ENABLED=False)")
-
-        with self.store._lock():
-            all_items = self.store._load_active_items_unlocked()
-        items_by_id = {it.id: it for it in all_items}
-
-        results = []
-        for item_id in item_ids:
-            item_id = str(item_id).strip()
-            target = items_by_id.get(item_id)
-            if target is None:
-                results.append({"id": item_id, "ok": False, "error": "not_found"})
-                continue
-            text = target.text or ""
-            result = self._action_items_extractor.extract(text, language=language)
-            if result.ok:
-                self.store.update_history_item_action_items(
-                    item_id=item_id,
-                    action_items=[ai.to_dict() for ai in result.action_items],
-                    decisions=result.decisions,
-                    questions=result.questions,
-                )
-            results.append({
-                "id": item_id,
-                "ok": result.ok,
-                "action_items": [ai.to_dict() for ai in result.action_items],
-                "decisions": result.decisions,
-                "questions": result.questions,
-                "fallback_reason": result.fallback_reason,
-                "latency_ms": result.latency_ms,
-            })
-
-        return {"results": results, "count": len(results)}
-
-    def _handle_get_pending_action_items(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает все items у которых action_items=None (ещё не анализировались).
-
-        Параметр min_duration_sec: минимальная длительность для фильтрации (опционально).
-        """
-        min_duration = float(params.get("min_duration_sec", 0.0))
-
-        with self.store._lock():
-            items = self.store._load_active_items_unlocked()
-
-        pending = []
-        for item in items:
-            if item.action_items is not None:
-                continue
-            if min_duration > 0 and (item.audio_duration_sec or 0.0) < min_duration:
-                continue
-            pending.append({
-                "id": item.id,
-                "ts": item.ts,
-                "text_preview": (item.text or "")[:100],
-                "audio_duration_sec": item.audio_duration_sec,
-            })
-
-        return {"pending": pending, "count": len(pending)}
 
     def _handle_list_audio_inputs(self, params):
         """Delegated to RecordingCoreService."""
@@ -3301,17 +3146,6 @@ class BackendService:
             "markdown": digest.formatted_markdown,
         }
 
-    def _handle_generate_stats_report(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Генерирует полный Markdown-отчёт статистики использования за период."""
-        days = int(params.get("days", 30))
-        markdown = self._stats_report.generate_report(store=self.store, days=days)
-        return {"markdown": markdown, "days": days}
-
-    def _handle_generate_mini_stats_report(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Генерирует краткий 5-строчный Markdown-отчёт состояния."""
-        markdown = self._stats_report.generate_mini_report(store=self.store)
-        return {"markdown": markdown}
-
     def _handle_compare_periods(self, params: dict[str, Any]) -> dict[str, Any]:
         """Сравнивает статистику двух временных периодов.
 
@@ -3337,20 +3171,6 @@ class BackendService:
                 items, months=months, cell_size=cell_size
             )
         return result
-
-    def _handle_get_recording_insights(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Генерирует эвристические инсайты по записям за последние N дней."""
-        days = int(params.get("days", 7))
-        try:
-            items = self.store._load_active_items_with_lock()
-        except Exception:
-            items = []
-        insights = self._recording_insights.generate_insights(items, days=days)
-        return {
-            "insights": [i.to_dict() for i in insights],
-            "count": len(insights),
-            "days": days,
-        }
 
     def _handle_get_daily_insight(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает один наиболее релевантный инсайт за сегодня (W1274 F3).
@@ -3392,14 +3212,6 @@ class BackendService:
             items = []
         report = self._sentiment_trends.analyze_sentiment_trends(items, days=days)
         return self._sentiment_trends.to_dict(report)
-
-    def _handle_compare_recordings(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Сравнивает несколько записей side-by-side.
-
-        Privacy guard parity (W1408 F1 — restored W1710): делегирует в
-        SearchAndAnalysisService, который содержит каноническую реализацию с guard.
-        """
-        return self._search_and_analysis_svc.handle_compare_recordings(params)
 
     def _handle_check_integrity(self, params: dict[str, Any]) -> dict[str, Any]:
         """Делегирует к HealthCheckService.handle_check_integrity (W1690)."""
@@ -3668,45 +3480,6 @@ class BackendService:
         """
         days = max(1, min(int(params.get("days", 30) or 30), 365))
         return self._analytics_dashboard.get_full_dashboard(store=self.store, days=days)
-
-    def _handle_get_topic_timeline(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: get_topic_timeline — таймлайн смен тем разговора из истории транскрибаций.
-
-        Параметры:
-            window_size (int): размер скользящего окна (по умолчанию 5).
-            limit       (int): максимальное количество последних записей
-                               для анализа (по умолчанию 100, 0 — все).
-
-        Возвращает:
-            segments     (list) — список сегментов с полями start_index,
-                                  end_index, topic_words, summary, items_count, is_shift.
-            total_shifts (int)  — количество смен темы.
-            current_topic (dict) — текущая тема (last_n=window_size).
-        """
-        # W996: privacy guard — не раскрываем темы в режиме приватности
-        if self._get_runtime_setting("privacy_mode_enabled", False):
-            return {"timeline": [], "reason": "privacy_mode_active"}
-
-        window_size = max(1, int(params.get("window_size", 5) or 5))
-        _raw_limit = int(params.get("limit", 100) or 100)
-        limit = _raw_limit if _raw_limit > 0 else 100
-        try:
-            with self.store._lock():
-                items = self.store._load_active_items_unlocked()
-        except Exception:
-            items = []
-
-        items = items[-limit:]
-
-        timeline = self._topic_tracker.get_topic_timeline(items, window_size=window_size)
-        current_topic = self._topic_tracker.get_current_topic(items, last_n=window_size)
-        shifts = sum(1 for entry in timeline if entry.get("is_shift"))
-
-        return {
-            "segments": timeline,
-            "total_shifts": shifts,
-            "current_topic": current_topic,
-        }
 
     def _handle_estimate_recording_cost(self, params: dict) -> dict:
         """IPC: estimate_recording_cost — оценка вычислительной стоимости обработки записи.
