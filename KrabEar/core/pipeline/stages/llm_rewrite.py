@@ -35,6 +35,10 @@ class LLMRewriteStage:
     def should_run(self, ctx: PipelineContext) -> bool:
         if self._rewriter is None:
             return False
+        # Privacy gate (MED wave-26): never send text to external LLM when privacy_mode_enabled.
+        # Mirrors AudioEngine._llm_rewrite_allowed() which guards the legacy path.
+        if self._settings_get("privacy_mode_enabled", False):
+            return False
         if not bool(self._settings_get("llm_rewrite_enabled", False)):
             return False
         # Проверяем circuit breaker через allow_request() без потребления пробы
