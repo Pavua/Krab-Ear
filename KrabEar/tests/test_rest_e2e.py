@@ -347,10 +347,15 @@ class CORSPreflightTest(unittest.TestCase):
         self.client = _make_client()
 
     def _options(self, path):
+        # #1663 hardening: the default CORS allowlist is the bare localhost set
+        # (http://127.0.0.1, http://localhost) — origins with an explicit port
+        # like http://localhost:3000 are NOT allowlisted and correctly receive
+        # no Access-Control-Allow-Origin. Use a genuinely allowlisted origin so
+        # these tests assert that preflight still works for allowed origins.
         return self.client.options(
             path,
             headers={
-                "Origin": "http://localhost:3000",
+                "Origin": "http://localhost",
                 "Access-Control-Request-Method": "GET",
                 "Access-Control-Request-Headers": "Content-Type",
             },
