@@ -176,6 +176,7 @@ class CallAssistService:
         reset_preview_fn: Callable[[], None] | None = None,
         start_preview_fn: Callable[[str], None] | None = None,
         coerce_bool_fn: Callable[[Any, bool], bool] | None = None,
+        settings_get: Callable[[str, Any], Any] | None = None,
     ) -> None:
         self.store: Any = store
         self.recorder: Any = recorder
@@ -185,6 +186,7 @@ class CallAssistService:
         self._reset_preview: Callable[[], None] = reset_preview_fn or (lambda: None)
         self._start_preview: Callable[[str], None] = start_preview_fn or (lambda qp: None)
         self._coerce_bool: Callable[[Any, bool], bool] = coerce_bool_fn or self._default_coerce_bool
+        self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
         self._lock: threading.Lock = threading.Lock()
         self._state: dict[str, Any] = {
             "active": False,
@@ -391,8 +393,11 @@ class CallAssistService:
             self._state["stopped_at"] = stopped_at
             state = dict(self._state)
 
-        # F2: stop recorder when the call assist session ends to prevent unbounded recording
-        if self.recorder.is_recording:
+        # F2 / C3 (wave-31): only stop recorder when call assist was actually active.
+        # The recorder is shared with the main recording workflow; stopping it
+        # unconditionally would silently abort an unrelated recording that happened
+        # to be running when handle_stop is called on an already-idle session.
+        if active and self.recorder.is_recording:
             self.recorder.stop()
 
         settings = self.store.load_settings()
@@ -491,7 +496,22 @@ class CallAssistService:
         return self.state
 
     def handle_diagnostics(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает diagnostics и explain-пакет почему перевод не появился."""
+        """Возвращает diagnostics и explain-пакет почему перевод не появился.
+
+        Privacy gate (C2, wave-31): когда privacy_mode_enabled=True — возвращает
+        минимальный ответ без live-транскрипта и translation payload'а.
+        """
+        if self._settings_get("privacy_mode_enabled", False):
+            with self._lock:
+                active = bool(self._state.get("active"))
+            return {
+                "active": active,
+                "gateway_session_id": None,
+                "diagnostics": {},
+                "why": {},
+                "pending_posts": {"current": 0, "max_observed": 0},
+                "privacy_mode_active": True,
+            }
         settings = self.store.load_settings()
         voice_gateway_url = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()
         voice_gateway_api_key = str(settings.get("voice_gateway_api_key", "")).strip()
@@ -536,7 +556,17 @@ class CallAssistService:
         }
 
     def handle_summary(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Запрашивает summary текущей звонковой сессии."""
+        """Запрашивает summary текущей звонковой сессии.
+
+        Privacy gate (C2, wave-31): когда privacy_mode_enabled=True — возвращает
+        пустой summary без транскрипта.
+        """
+        if self._settings_get("privacy_mode_enabled", False):
+            return {
+                "gateway_session_id": None,
+                "summary": {},
+                "privacy_mode_active": True,
+            }
         t0 = time.monotonic()
         settings = self.store.load_settings()
         voice_gateway_url = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()
@@ -780,7 +810,13 @@ class CallAssistService:
         return payload if isinstance(payload, dict) else {"ok": True, "country": country}
 
     def handle_timeline(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает timeline текущей звонковой сессии."""
+        """Возвращает timeline текущей звонковой сессии.
+
+        Privacy gate (C2, wave-31): когда privacy_mode_enabled=True — возвращает
+        пустой timeline без transcript-событий.
+        """
+        if self._settings_get("privacy_mode_enabled", False):
+            return {"ok": True, "items": [], "count": 0, "privacy_mode_active": True}
         gw_url, gw_key, gw_sid = self._gateway_context()
         limit = int(params.get("limit", 80) or 80)
         limit = max(1, min(limit, 500))

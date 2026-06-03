@@ -426,6 +426,7 @@ class BackendService:
             transcriber=self.transcriber,
             reset_preview_fn=lambda: self._recording_core_svc.reset_preview_state(),
             start_preview_fn=lambda qp: self._recording_core_svc.start_preview_worker(qp),
+            settings_get=self._get_runtime_setting,
         )
         self._call_cost_estimator = CallCostEstimator()
         # NB (W1775): CallAutoEnd — advisory-проверка по таймеру/скалярам, она НЕ
@@ -773,6 +774,7 @@ class BackendService:
         self._history._context_memory = self._context_memory
         self._call_session_service = CallSessionService(
             store=self._call_session_store,
+            settings_get=self._get_runtime_setting,
         )
         self._audio_analytics_svc = AudioAnalyticsService(
             audio_converter=self._audio_converter,
