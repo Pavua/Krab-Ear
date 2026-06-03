@@ -27,13 +27,38 @@ from backend.translator import TranslationResult
 from backend.state_store import StateStore
 from backend.service import BackendService
 
+import contextlib
+import importlib
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pytest
+
+
+@contextlib.contextmanager
+def _force_mlx_available():
+    """Делает ``import mlx_whisper`` успешным внутри ``HealthChecker._check_stt_model``.
+
+    На Apple Silicon dev-машине пакет ``mlx_whisper`` установлен; на Linux CI
+    (ubuntu, Python 3.12) и в любом окружении без Metal он физически
+    отсутствует → проверка STT честно возвращает 'unavailable' → агрегат
+    'unhealthy'. Этот e2e-тест проверяет round-trip формата ответа
+    ``health_check``, а не платформенную доступность STT, поэтому условие
+    «mlx доступен» фиксируется моком для детерминизма на обеих платформах.
+    """
+    original_import = importlib.import_module
+
+    def fake_import(name: str, *args, **kwargs):
+        if name == "mlx_whisper":
+            return object()  # truthy, не None
+        return original_import(name, *args, **kwargs)
+
+    with patch("importlib.import_module", side_effect=fake_import):
+        yield
 
 # Wave 732: all tests in this module must run on the same xdist worker in order.
 # test_full_workflow uses sequential class-level state (cls.item_ids) that
@@ -398,7 +423,15 @@ class FullWorkflowTestCase(unittest.TestCase):
     # ======================================================================
 
     def test_27_health_check_returns_status(self) -> None:
-        result = self.assertOk(self.req("health_check"))
+        # mlx_whisper отсутствует на Linux CI (ubuntu, Python 3.12) и в любом
+        # окружении без Apple Silicon → HealthChecker._check_stt_model честно
+        # вернёт 'unavailable' → агрегат 'unhealthy'. Этот тест проверяет
+        # структуру ответа health_check, а не платформенную доступность STT,
+        # поэтому фиксируем «mlx доступен» моком — иначе на CI без Metal статус
+        # становится 'unhealthy' (не баг, а правда о платформе). Тот же приём
+        # используют позитивные тесты в test_health_checker.py.
+        with _force_mlx_available():
+            result = self.assertOk(self.req("health_check"))
         self.assertIn("status", result)
         # HealthChecker returns "healthy" | "degraded" | "critical" (not "ok")
         self.assertIn(result["status"], {"healthy", "ok", "degraded", "critical"})

@@ -3,6 +3,8 @@
 from __future__ import annotations
 from backend.health_checker import HealthChecker
 
+import contextlib
+import importlib
 import sys
 import tempfile
 import time
@@ -13,6 +15,33 @@ from unittest.mock import MagicMock, patch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+
+@contextlib.contextmanager
+def force_mlx_available():
+    """Делает ``import mlx_whisper`` успешным внутри ``_check_stt_model``.
+
+    Реальный сигнал 1 проверки STT (wave1776) — импортируемость ``mlx_whisper``.
+    На Apple Silicon dev-машине пакет установлен, поэтому позитивные тесты
+    («должно быть ok») проходили. На Linux CI (ubuntu, Python 3.12) и в любом
+    окружении без Metal ``mlx_whisper`` физически отсутствует → проверка
+    честно возвращает ``unavailable`` → агрегат ``unhealthy``, и тесты падали
+    НЕ из-за регрессии, а из-за платформенной зависимости теста.
+
+    Эти позитивные тесты проверяют ветку «mlx доступен + модель не упала → ok»,
+    поэтому условие «mlx доступен» должно быть детерминированно зафиксировано
+    моком (так же, как негативные тесты фиксируют недоступность). Это делает
+    набор тестов независимым от платформы, ничего не ослабляя в утверждениях.
+    """
+    original_import = importlib.import_module
+
+    def fake_import(name: str, *args, **kwargs):
+        if name == "mlx_whisper":
+            return object()  # truthy, не None
+        return original_import(name, *args, **kwargs)
+
+    with patch("importlib.import_module", side_effect=fake_import):
+        yield
 
 
 class FakeStore:
@@ -142,7 +171,8 @@ class TestSttModelCheck(unittest.TestCase):
     def test_stt_ok_with_transcriber_and_mlx_available(self) -> None:
         """mlx_whisper доступен + модель не упала → status 'ok'."""
         checker = HealthChecker(store=self.store, transcriber=FakeTranscriber())
-        result = checker._check_stt_model()
+        with force_mlx_available():
+            result = checker._check_stt_model()
         self.assertEqual(result["status"], "ok")
         self.assertIsNotNone(result["model"])
         # 'cached' field больше не возвращается (был ложным)
@@ -207,7 +237,8 @@ class TestSttModelCheck(unittest.TestCase):
             unavailable_models={},
         )
         checker = HealthChecker(store=self.store, transcriber=transcriber)
-        result = checker._check_stt_model()
+        with force_mlx_available():
+            result = checker._check_stt_model()
         self.assertEqual(result["status"], "ok")
 
     def test_wave1776_stt_ok_when_different_model_is_unavailable(self) -> None:
@@ -217,7 +248,8 @@ class TestSttModelCheck(unittest.TestCase):
             unavailable_models={"mlx-community/whisper-large-mlx": time.monotonic()},
         )
         checker = HealthChecker(store=self.store, transcriber=transcriber)
-        result = checker._check_stt_model()
+        with force_mlx_available():
+            result = checker._check_stt_model()
         self.assertEqual(result["status"], "ok")
 
     # ------------------------------------------------------------------
@@ -322,7 +354,8 @@ class TestSttModelCheck(unittest.TestCase):
         """current_model задан + mlx_whisper доступен + не упал → 'ok'."""
         transcriber = FakeTranscriber(current_model="mlx-community/whisper-small-mlx")
         checker = HealthChecker(store=self.store, transcriber=transcriber)
-        result = checker._check_stt_model()
+        with force_mlx_available():
+            result = checker._check_stt_model()
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["model"], "mlx-community/whisper-small-mlx")
 
@@ -571,7 +604,8 @@ class TestFullCheckAllIntegration(unittest.TestCase):
             llm_rewriter=FakeLLMRewriter(circuit_state="closed"),
             start_time=time.monotonic() - 60.0,
         )
-        result = checker.check_all()
+        with force_mlx_available():
+            result = checker.check_all()
         # Статус может быть healthy или degraded из-за audio_devices (нет в CI)
         self.assertIn(result["status"], ("healthy", "degraded"))
         self.assertEqual(result["checks"]["stt_model"]["status"], "ok")
@@ -637,7 +671,8 @@ class TestHealthCheckerRequiredChecks(unittest.TestCase):
             transcriber=FakeTranscriber(),
             llm_rewriter=FakeLLMRewriter(circuit_state="closed"),
         )
-        result = checker.check_all()
+        with force_mlx_available():
+            result = checker.check_all()
         self.assertIn(result["status"], ("healthy", "degraded"))
 
     def test_one_subsystem_down_returns_degraded(self) -> None:
