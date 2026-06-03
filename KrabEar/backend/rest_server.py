@@ -492,6 +492,23 @@ TEMP_DIR.mkdir(parents=True, exist_ok=True)
 # Request timing middleware
 # ---------------------------------------------------------------------------
 
+# Maximum JSON body size for POST /v1/vocabulary (wave-31 H1 MED fix).
+# This fires BEFORE flask-smorest's @v1_blp.arguments() deserializes the
+# body, preventing a 500 MB allocation before the 500-word / 100-char cap
+# validation even runs.  The global MAX_CONTENT_LENGTH (500 MB) is for audio
+# uploads — vocabulary payloads never legitimately exceed a few kilobytes.
+_VOCABULARY_POST_MAX_BYTES = 512 * 1024  # 512 KB
+
+
+@app.before_request
+def _check_vocabulary_post_size():
+    """Reject oversized POST /v1/vocabulary bodies before JSON parse (H1 MED)."""
+    if request.path == "/v1/vocabulary" and request.method == "POST":
+        cl = request.content_length
+        if cl is not None and cl > _VOCABULARY_POST_MAX_BYTES:
+            return jsonify({"error": "Request too large"}), 413
+
+
 @app.before_request
 def start_timer():
     g._request_start = time.time()
