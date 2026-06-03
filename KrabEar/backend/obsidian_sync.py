@@ -71,6 +71,25 @@ logger = logging.getLogger("KrabEar.Backend.ObsidianSync")
 _SYNC_STATE_FILE = "obsidian_sync.json"
 _DEFAULT_FOLDER = "Transcriptions"
 
+# wave-32 MED DoS: cap the number of items synced per run to prevent disk-fill
+# when the vault has never been synced and history contains tens of thousands of
+# items. force=True still honours this cap; callers can paginate if needed.
+MAX_SYNC_ITEMS = 10_000
+
+# wave-32 MED (vault_path confuseddeputy): subdirectories under $HOME that must
+# never be written to by the sync engine even if an IPC caller supplies them as
+# vault_path. Checked AFTER expanduser().resolve() so symlinks are followed.
+_FORBIDDEN_HOME_SUBDIRS: tuple[str, ...] = (
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".kube",
+    "Library/Keychains",
+    "Library/Application Support/com.apple",
+    "Library/Preferences",
+    "Library/Saved Application State",
+)
+
 # W1768 (MED, path-traversal): разрешённый шаблон для имени папки внутри vault.
 # Только буквы/цифры/подчёркивания (\w), дефис, пробел и слэш — чтобы поддержать
 # вложенные подпапки (например "Krab Ear/Транскрипции"), но запретить любые
@@ -272,6 +291,17 @@ class ObsidianSyncManager:
 
         import time as _time
 
+        # wave-32 MED DoS: cap items to prevent disk-fill on large histories.
+        # Truncate BEFORE the path-traversal check so the cap is applied even on
+        # force-sync. Log a warning so operators notice the truncation.
+        if len(items) > MAX_SYNC_ITEMS:
+            logger.warning(
+                "ObsidianSync.sync: items truncated %d → %d (MAX_SYNC_ITEMS cap)",
+                len(items),
+                MAX_SYNC_ITEMS,
+            )
+            items = items[:MAX_SYNC_ITEMS]
+
         result = SyncResult()
         # W1768 (MED, path-traversal): _folder перезагружается из obsidian_sync.json
         # при рестарте (_load_state), поэтому НЕ доверяем ему и повторно проверяем
@@ -405,10 +435,62 @@ class ObsidianSyncManager:
     # ------------------------------------------------------------------
 
     def handle_configure(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC-обработчик configure_obsidian_sync."""
+        """IPC-обработчик configure_obsidian_sync.
+
+        wave-32 MED (vault_path confused-deputy): this is the IPC entrypoint;
+        validate that vault_path is under $HOME and not inside a known sensitive
+        system subdirectory BEFORE delegating to configure().  An untrusted IPC
+        caller could supply vault_path=/Users/victim/.ssh/ to write transcript
+        .md files into SSH key directories.  configure() itself is also called
+        by internal code that may legitimately use paths outside $HOME (e.g.
+        test fixtures), so the guard lives here at the IPC boundary only.
+
+        Two-layer check:
+          1. If path is under $HOME → also check it is not inside a forbidden
+             sensitive subdir (e.g. ~/.ssh, ~/.gnupg, Library/Keychains).
+          2. If path is outside $HOME → reject entirely (arbitrary write location).
+        """
         vault_path = params.get("vault_path")
         if not vault_path:
             raise ValueError("Параметр vault_path обязателен")
+
+        # Resolve the path once so symlinks are followed before comparison.
+        p = Path(str(vault_path)).expanduser().resolve()
+        home = Path.home().resolve()
+
+        # wave-32 MED (vault_path confused-deputy): path guard.
+        #
+        # Reject paths inside well-known sensitive subdirs of $HOME (e.g.
+        # ~/.ssh/ — writing there can corrupt known_hosts and break SSH auth;
+        # ~/.gnupg/ — leaks GPG key material; Library/Keychains — macOS secrets).
+        # Also reject paths outside $HOME entirely (e.g. /etc, /var) — arbitrary
+        # system-owned directories are never valid Obsidian vault locations.
+        #
+        # We use Path.relative_to() for containment checks (not str.startswith)
+        # because a sibling-prefix path (/home/user_evil) would bypass a naive
+        # string comparison against /home/user.
+        _under_home: bool
+        try:
+            p.relative_to(home)
+            _under_home = True
+        except ValueError:
+            _under_home = False
+
+        if not _under_home:
+            raise ValueError(
+                f"vault_path must be under the home directory: {p}"
+            )
+
+        for _forbidden in _FORBIDDEN_HOME_SUBDIRS:
+            try:
+                p.relative_to(home / _forbidden)
+                raise ValueError(
+                    f"vault_path is inside a restricted directory ({_forbidden}): {p}"
+                )
+            except ValueError as _ve:
+                if "restricted directory" in str(_ve):
+                    raise
+
         folder = str(params.get("folder", _DEFAULT_FOLDER))
         return self.configure(str(vault_path), folder)
 
@@ -637,15 +719,33 @@ class ObsidianSyncManager:
                     )
                     failed_paths.append(str(md_path))
 
-        # Сбрасываем timestamp синхронизации (последняя синхронизация больше
-        # не актуальна — vault очищен). Vault/folder сохраняем как конфигурацию.
+        # wave-32 LOW (purge-gap): delete obsidian_sync.json so vault_path and
+        # last_sync_ts do not survive a privacy-wipe across restarts. The file
+        # persists sync metadata (vault location + last-sync timestamp); removing
+        # it ensures no record of where the vault lives survives after a restart.
+        # In-memory _vault_path/_folder are NOT cleared so sync can continue in
+        # the current session without requiring re-configure; but the state will
+        # not be loaded from disk on next startup (clean slate).
         with self._lock:
             self._last_sync_ts = None
-            self._save_state()
+            if self._state_path is not None:
+                try:
+                    self._state_path.unlink(missing_ok=True)
+                    logger.info(
+                        "ObsidianSyncManager.purge_all_synced_files: "
+                        "obsidian_sync.json deleted (privacy-wipe)"
+                    )
+                except OSError as exc:
+                    logger.warning(
+                        "ObsidianSyncManager.purge_all_synced_files: "
+                        "failed to delete obsidian_sync.json: %s",
+                        exc,
+                    )
+                    failed_paths.append(str(self._state_path))
 
         logger.info(
-            "ObsidianSyncManager.purge_all_synced_files: удалено %d .md файлов из %s"
-            " (сбоев удаления: %d)",
+            "ObsidianSyncManager.purge_all_synced_files: deleted %d .md files from %s"
+            " (deletion failures: %d)",
             deleted,
             target_dir,
             len(failed_paths),
@@ -656,7 +756,7 @@ class ObsidianSyncManager:
         # in secondary_errors and the partial failure is visible.
         if failed_paths:
             raise OSError(
-                f"purge_all_synced_files: не удалось удалить {len(failed_paths)} .md файл(ов): "
+                f"purge_all_synced_files: failed to delete {len(failed_paths)} file(s): "
                 + ", ".join(failed_paths)
             )
 
