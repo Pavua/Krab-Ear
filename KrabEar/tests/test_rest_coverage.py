@@ -542,18 +542,36 @@ class CORSCredentialsHeaderTest(unittest.TestCase):
         # wave1207: CORS_ORIGINS=* disables credentials
         self.assertNotEqual(allow_creds.lower(), "true")
 
-    def test_cors_allow_origin_present_on_cross_origin_request(self):
+    def test_cors_blocks_non_allowlisted_cross_origin(self):
+        """#1663 hardening: a cross-origin request from an origin that is NOT
+        in the localhost allowlist must NOT receive Access-Control-Allow-Origin
+        (so the browser refuses the transcript/event read). The previous test
+        asserted ACAO was present for an arbitrary cross-origin — that tested
+        the vulnerable permissive behavior and is now stale."""
         resp = self.client.get(
             "/health",
             headers={"Origin": "https://example.com"},
         )
-        self.assertIn("Access-Control-Allow-Origin", resp.headers)
+        self.assertNotIn("Access-Control-Allow-Origin", resp.headers)
 
-    def test_metrics_cors_expose_headers(self):
-        """X-Request-ID should be in Access-Control-Expose-Headers."""
+    def test_cors_allow_origin_present_for_allowlisted_origin(self):
+        """An allowlisted localhost origin still receives ACAO reflecting it."""
         resp = self.client.get(
             "/health",
-            headers={"Origin": "http://localhost:3000"},
+            headers={"Origin": "http://localhost"},
+        )
+        self.assertEqual(
+            resp.headers.get("Access-Control-Allow-Origin"),
+            "http://localhost",
+        )
+
+    def test_metrics_cors_expose_headers(self):
+        """X-Request-ID should be in Access-Control-Expose-Headers for an
+        allowlisted origin (default allowlist has no port, so use bare
+        http://localhost, not http://localhost:3000)."""
+        resp = self.client.get(
+            "/health",
+            headers={"Origin": "http://localhost"},
         )
         expose = resp.headers.get("Access-Control-Expose-Headers", "")
         self.assertIn("X-Request-ID", expose)

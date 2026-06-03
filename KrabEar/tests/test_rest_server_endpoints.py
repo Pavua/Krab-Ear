@@ -494,16 +494,29 @@ class CorsHeadersTest(_RestBase):
     """CORS Access-Control-Allow-Origin present on responses."""
 
     def test_cors_header_present_on_health(self):
+        # #1663 hardening: ACAO is only injected for allowlisted origins. The
+        # default allowlist is the bare localhost set (no port), so use
+        # http://localhost rather than http://localhost:3000 (not allowlisted).
         resp = self.client.get(
             "/health",
-            headers={"Origin": "http://localhost:3000"},
+            headers={"Origin": "http://localhost"},
         )
-        # flask-cors should add Access-Control-Allow-Origin
+        # flask-cors should add Access-Control-Allow-Origin for the allowlisted
+        # origin, reflecting it back.
         cors_header = resp.headers.get("Access-Control-Allow-Origin")
-        self.assertIsNotNone(
+        self.assertEqual(
             cors_header,
+            "http://localhost",
             "Expected Access-Control-Allow-Origin header on /health response",
         )
+
+    def test_cors_header_absent_for_non_allowlisted_origin(self):
+        """A non-allowlisted cross-origin must NOT receive ACAO (#1663)."""
+        resp = self.client.get(
+            "/health",
+            headers={"Origin": "https://attacker.example"},
+        )
+        self.assertIsNone(resp.headers.get("Access-Control-Allow-Origin"))
 
     def test_cors_options_preflight(self):
         resp = self.client.options(

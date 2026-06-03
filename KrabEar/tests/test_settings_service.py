@@ -653,14 +653,36 @@ class TestExportSettingsRedactsAllSensitiveFields(unittest.TestCase):
         # The count reported should not include the sensitive keys.
         self.assertEqual(result["settings_count"], len(exported))
 
-    def test_sensitive_fields_set_has_9_entries(self):
-        """Canonical SENSITIVE_FIELDS in settings_backup must have exactly 9 entries."""
+    def test_sensitive_fields_set_covers_all_known_secrets(self):
+        """Canonical SENSITIVE_FIELDS must redact every known credential key.
+
+        The set legitimately grows as new secret-bearing settings are added
+        (Wave 20 added llm_api_key / smtp_password / ipc_signing_secret on top
+        of the original 9). Asserting a magic count is brittle and broke CI;
+        instead pin the security invariant — every known secret key MUST be in
+        the redaction set, and nothing may silently leave it.
+        """
         from backend.settings_backup import SENSITIVE_FIELDS
 
+        required_secrets = {
+            "voice_gateway_api_key",
+            "hf_token",
+            "rest_api_key",
+            "lm_studio_api_key",
+            "telnyx_api_key",
+            "twilio_account_sid",
+            "twilio_auth_token",
+            "sentry_dsn",
+            "stt_gigaam_hf_token",
+            "llm_api_key",
+            "smtp_password",
+            "ipc_signing_secret",
+        }
+        missing = required_secrets - SENSITIVE_FIELDS
         self.assertEqual(
-            len(SENSITIVE_FIELDS),
-            9,
-            f"Expected 9 sensitive fields, got {len(SENSITIVE_FIELDS)}: {SENSITIVE_FIELDS}",
+            missing,
+            set(),
+            f"Secret keys dropped from SENSITIVE_FIELDS redaction set: {missing}",
         )
 
 

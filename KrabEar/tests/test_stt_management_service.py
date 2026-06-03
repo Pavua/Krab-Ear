@@ -299,8 +299,13 @@ class TestDispatchWiring(unittest.TestCase):
     def _dispatch_block(self) -> str:
         with open(self.SERVICE_PY, encoding="utf-8") as f:
             src = f.read()
-        start = src.index("handlers: dict[str, Callable")
-        end = src.index("\n        handler = handlers.get(method)")
+        # W1769 consolidated the dispatch dict literal into the in-class
+        # ``_build_dispatch_table`` method (single source of truth). The dict
+        # literal opens at ``return {`` inside that method; the method ends just
+        # before the next ``def`` at the same indentation.
+        anchor = src.index("def _build_dispatch_table")
+        start = src.index("return {", anchor)
+        end = src.index("\n    def ", start)
         return src[start:end]
 
     def test_all_handlers_delegated_to_stt_mgmt_svc(self):
