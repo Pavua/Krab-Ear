@@ -3109,6 +3109,12 @@ class HistoryService:
             entries (int): количество экспортированных записей
             content (str): содержимое файла
         """
+        # Privacy gate (wave-37, HIGH): full transcript corpus export must be
+        # blocked while privacy mode is active — neither disk write nor inline
+        # IPC content may leak.
+        if self._is_privacy_mode():
+            return {"file": None, "entries": 0, "content": "", "reason": "privacy_mode_active"}
+
         ids: list[str] | None = params.get("ids")
         from_ts: str | None = params.get("from_ts")
         to_ts: str | None = params.get("to_ts")
@@ -3600,6 +3606,12 @@ class HistoryService:
             size_mb (float): суммарный размер файлов в МБ
             entries (int): количество активных записей истории
         """
+        # Privacy gate (wave-37, HIGH): raw history.ndjson contains full
+        # cleartext transcripts — must not be copied to backups/ while
+        # privacy mode is active.
+        if self._is_privacy_mode():
+            return {"backup_path": None, "size_mb": 0.0, "entries": 0, "reason": "privacy_mode_active"}
+
         import shutil
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
