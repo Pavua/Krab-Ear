@@ -669,7 +669,12 @@ class TestReDoSBypassFix(unittest.TestCase):
         """
         import threading
 
-        pathological = "a" * 30 + "b"  # 31 chars — confirmed hang trigger at n≥26
+        # 19 chars keeps the catastrophic-backtracking SHAPE but the unguarded
+        # raw-pattern probe (Step 2 below — informational only, no assertion)
+        # completes in <0.1s. The old 31-char input made the unguarded regex run to
+        # completion (~97s, holding the GIL), blowing past CI's 90s per-file
+        # wall-clock (exit 124). Step 1 — the guard MUST fire — is the real test.
+        pathological = "a" * 18 + "b"  # 19 chars — fast; guard-fire is the assertion
 
         bypass_cases = [
             (r"((?:a)+)+$", "NC inner, cap outer"),
