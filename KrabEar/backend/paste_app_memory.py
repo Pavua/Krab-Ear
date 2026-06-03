@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -33,6 +34,12 @@ _FILE_NAME = "paste_app_memory.json"
 
 # Максимальная длина bundle_id во избежание раздувания персистентного JSON (F-2)
 _MAX_BUNDLE_ID_LEN = 512
+
+# Максимальное количество уникальных bundle_id-записей (защита от DoS через мусорные ID)
+MAX_BUNDLE_IDS = 500
+
+# Допустимый формат macOS bundle ID: com.Vendor.App, alphanumeric + dots + hyphens
+_BUNDLE_ID_RE = re.compile(r'^[A-Za-z0-9]([A-Za-z0-9.\-]*[A-Za-z0-9])?$')
 
 
 def _utcnow_iso() -> str:
@@ -82,9 +89,27 @@ class PasteAppMemory:
                 _MAX_BUNDLE_ID_LEN,
             )
             return
+        if not _BUNDLE_ID_RE.match(bundle_id):
+            _log.warning(
+                "PasteAppMemory.record: bundle_id содержит недопустимые символы %r, игнорируем",
+                bundle_id,
+            )
+            return
         if profile not in VALID_PROFILES:
             raise ValueError(f"Неизвестный профиль вставки: {profile!r}. Допустимые: {sorted(VALID_PROFILES)}")
         with self._lock:
+            if bundle_id not in self._data and len(self._data) >= MAX_BUNDLE_IDS:
+                # Лимит достигнут — вытесняем самую старую запись (LRU eviction)
+                oldest_bid = min(
+                    self._data,
+                    key=lambda k: self._data[k].get("last_used", ""),
+                )
+                _log.warning(
+                    "PasteAppMemory.record: достигнут лимит %d записей, вытесняем %r",
+                    MAX_BUNDLE_IDS,
+                    oldest_bid,
+                )
+                del self._data[oldest_bid]
             self._data[bundle_id] = {
                 "profile": profile,
                 "last_used": _utcnow_iso(),

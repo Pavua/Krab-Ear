@@ -16,6 +16,11 @@ from typing import Any
 
 _log = logging.getLogger(__name__)
 
+# Лимиты для защиты от раздувания данных
+MAX_TEMPLATES = 200
+MAX_TEMPLATE_NAME_LEN = 200
+MAX_TEMPLATE_TEXT_LEN = 10_000
+
 # Встроенные шаблоны (доступны всегда, можно переопределить)
 _BUILTIN_TEMPLATES: list[dict[str, Any]] = [
     {
@@ -132,6 +137,14 @@ class TemplateManager:
             raise ValueError("Текст шаблона не может быть пустым")
         if not re.match(r"^[\w\-]+$", name):
             raise ValueError(f"Имя шаблона содержит недопустимые символы: {name!r}")
+        if len(name) > MAX_TEMPLATE_NAME_LEN:
+            raise ValueError(
+                f"Имя шаблона слишком длинное: {len(name)} > {MAX_TEMPLATE_NAME_LEN} символов"
+            )
+        if len(text) > MAX_TEMPLATE_TEXT_LEN:
+            raise ValueError(
+                f"Текст шаблона слишком длинный: {len(text)} > {MAX_TEMPLATE_TEXT_LEN} символов"
+            )
 
         template: dict[str, Any] = {
             "name": name,
@@ -150,6 +163,12 @@ class TemplateManager:
                     updated = True
                     break
             if not updated:
+                # Проверяем лимит только при добавлении нового шаблона
+                user_count = sum(1 for t in templates if not t.get("builtin", False))
+                if user_count >= MAX_TEMPLATES:
+                    raise ValueError(
+                        f"Превышен лимит пользовательских шаблонов: максимум {MAX_TEMPLATES}"
+                    )
                 templates.append(template)
             self._save_user(templates)
             _log.debug("Шаблон %r %s", name, "обновлён" if updated else "добавлен")
