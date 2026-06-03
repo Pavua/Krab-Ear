@@ -299,6 +299,11 @@ class HistoryService:
         return {"items": items, "next_cursor": next_cursor}
 
     def handle_search_history(self, params: dict[str, Any]) -> dict[str, Any]:
+        # Privacy mode gate (wave-31): consistent with handle_search_with_highlights
+        # and handle_fuzzy_search — no transcript text in IPC responses when active.
+        if self._is_privacy_mode():
+            return {"ok": True, "items": [], "total": 0, "reason": "privacy_mode_active"}
+
         query = str(params.get("query", "")).strip()
         cursor = params.get("cursor")
         cursor_str = None if cursor is None else str(cursor)
@@ -1459,6 +1464,17 @@ class HistoryService:
     # CSV export
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _neutralize_csv(val: str) -> str:
+        """Defuse CSV formula injection by prepending a single-quote when the
+        value starts with a formula-leading character (=, +, -, @, |, %).
+        Wave-27 applied this to the speaker column; wave-31 mirrors it to the
+        text and translation columns.
+        """
+        if val and val[0] in ('=', '+', '-', '@', '|', '%'):
+            return "'" + val
+        return val
+
     def handle_export_history_csv(self, params: dict[str, Any]) -> dict[str, Any]:
         """Экспорт истории в CSV формат."""
         import csv
@@ -1513,13 +1529,23 @@ class HistoryService:
                     )
                 else:
                     speaker_val = ", ".join(speaker_ids)
+            # E2 (wave-31): neutralize formula-leading chars in text/translation columns.
+            # E3 (wave-31): fix lang/duration columns — to_dict() uses source_lang and
+            # audio_duration_sec, not the non-existent "lang"/"duration" keys.
+            raw_text = item.get("text", "") or ""
+            raw_translation = translation or ""
+            lang_val = item.get("source_lang", "") or item.get("lang", "") or ""
+            dur_raw = item.get("audio_duration_sec")
+            if dur_raw is None:
+                dur_raw = item.get("duration_sec")
+            duration_val = str(dur_raw) if dur_raw is not None else ""
             writer.writerow([
                 item.get("ts", ""),
-                item.get("text", ""),
-                translation,
-                item.get("lang", ""),
+                self._neutralize_csv(raw_text),
+                self._neutralize_csv(raw_translation),
+                lang_val,
                 item.get("confidence", ""),
-                item.get("duration", ""),
+                duration_val,
                 item.get("paste_status", ""),
                 speaker_val,
             ])
