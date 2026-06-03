@@ -14,6 +14,13 @@ from typing import Any
 
 logger = logging.getLogger("KrabEar.Backend.Bookmarks")
 
+# MED DoS cap (wave-28): unbounded add_bookmark filled disk.
+# 10 000 active entries ~ 6 MB in the worst case (256-char notes).
+MAX_BOOKMARKS = 10_000
+
+# Compact when tombstones exceed this fraction of total NDJSON lines.
+_COMPACT_TOMBSTONE_RATIO = 0.5
+
 
 class BookmarkManager:
     """Управление закладками для записей Krab Ear.
@@ -64,16 +71,68 @@ class BookmarkManager:
                 records[bid] = obj
         return list(records.values())
 
+    def _should_compact(self, raw: str) -> bool:
+        """True если доля tombstone-строк превышает _COMPACT_TOMBSTONE_RATIO."""
+        lines = [ln for ln in raw.splitlines() if ln.strip()]
+        if not lines:
+            return False
+        deleted = sum(
+            1 for ln in lines
+            if '"deleted": true' in ln or '"deleted":true' in ln
+        )
+        return deleted / len(lines) >= _COMPACT_TOMBSTONE_RATIO
+
+    def _compact_unlocked(self, active: list[dict[str, Any]]) -> None:
+        """Перезаписывает bookmarks.ndjson только активными записями.
+
+        Вызывать только внутри self._lock.
+        Атомарная замена через tmp-файл (rename) в той же директории.
+        """
+        tmp = self._path.with_suffix(".ndjson.tmp")
+        try:
+            content = "\n".join(
+                json.dumps(bm, ensure_ascii=False) for bm in active
+            )
+            if content:
+                content += "\n"
+            tmp.write_text(content, encoding="utf-8")
+            tmp.replace(self._path)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+        logger.info(
+            "bookmarks: compacted → %d активных записей", len(active)
+        )
+
     def _load_active(self) -> list[dict[str, Any]]:
-        """Читает все активные закладки (без tombstone'ов)."""
+        """Читает все активные закладки (без tombstone'ов).
+
+        Если tombstone-доля превышает _COMPACT_TOMBSTONE_RATIO — автоматически
+        выполняет compaction под lock для сдерживания роста файла.
+        """
         with self._lock:
             raw = self._path.read_text(encoding="utf-8")
-        return self._parse_active(raw)
+            active = self._parse_active(raw)
+            if self._should_compact(raw):
+                try:
+                    self._compact_unlocked(active)
+                except Exception:
+                    logger.warning("bookmarks: компакция не удалась", exc_info=True)
+        return active
 
     def _load_active_unlocked(self) -> list[dict[str, Any]]:
-        """Читает активные закладки — вызывать только внутри self._lock."""
+        """Читает активные закладки — вызывать только внутри self._lock.
+
+        Автоматически выполняет compaction если tombstone-доля превышает порог.
+        """
         raw = self._path.read_text(encoding="utf-8")
-        return self._parse_active(raw)
+        active = self._parse_active(raw)
+        if self._should_compact(raw):
+            try:
+                self._compact_unlocked(active)
+            except Exception:
+                logger.warning("bookmarks: компакция не удалась", exc_info=True)
+        return active
 
     # ------------------------------------------------------------------
     # Public API
@@ -82,26 +141,39 @@ class BookmarkManager:
     def add(self, session_id: str, offset_sec: float, note: str = "") -> dict[str, Any]:
         """Создаёт закладку для сессии/item в момент offset_sec.
 
+        MED DoS cap (wave-28): если активных закладок уже MAX_BOOKMARKS —
+        возвращает {"ok": False, "reason": "limit_exceeded"} без записи.
+
         Args:
             session_id: ID текущей записи (или "__live__" если ещё нет item_id).
             offset_sec: смещение в секундах от начала записи.
             note: текстовая заметка пользователя (опционально).
 
         Returns:
-            Словарь закладки с полями id / session_id / offset_sec / note / ts.
+            Словарь закладки с полями id / session_id / offset_sec / note / ts,
+            или {"ok": False, "reason": "limit_exceeded"} при превышении лимита.
         """
         import uuid
         from datetime import datetime
 
-        bookmark: dict[str, Any] = {
-            "id": str(uuid.uuid4()),
-            "session_id": str(session_id).strip() or "__live__",
-            "offset_sec": round(float(offset_sec), 3),
-            "note": str(note).strip(),
-            "ts": datetime.now().isoformat(timespec="seconds"),
-            "deleted": False,
-        }
-        self._append(bookmark)
+        with self._lock:
+            active = self._load_active_unlocked()
+            if len(active) >= MAX_BOOKMARKS:
+                logger.warning(
+                    "bookmarks: лимит %d превышен — add_bookmark отклонён", MAX_BOOKMARKS
+                )
+                return {"ok": False, "reason": "limit_exceeded"}
+
+            bookmark: dict[str, Any] = {
+                "id": str(uuid.uuid4()),
+                "session_id": str(session_id).strip() or "__live__",
+                "offset_sec": round(float(offset_sec), 3),
+                "note": str(note).strip(),
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "deleted": False,
+            }
+            self._append_unlocked(bookmark)
+
         logger.info(
             "Закладка создана: id=%s session=%s offset=%.1fs",
             bookmark["id"], bookmark["session_id"], bookmark["offset_sec"],
@@ -252,6 +324,9 @@ class BookmarkManager:
 
         note = str(params.get("note", "")).strip()
         bm = self.add(session_id=session_id, offset_sec=offset_sec, note=note)
+        # MED DoS cap (wave-28): add() returns {ok:False, reason:...} when limit hit.
+        if not bm.get("id"):
+            return bm
         return {"bookmark": bm}
 
     def handle_list_bookmarks(self, params: dict[str, Any]) -> dict[str, Any]:
