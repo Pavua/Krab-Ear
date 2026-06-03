@@ -351,5 +351,82 @@ class TestMetadataPreservation(unittest.TestCase):
         self.assertIs(result, ctx)
 
 
+class TestAudioNormWave31InfNan(unittest.TestCase):
+    """Wave-31 security: inf/nan sanitization before STT."""
+
+    def setUp(self):
+        self.stage = AudioNormalizationStage()
+
+    def _normalize(self, arr):
+        """Helper: run _normalize_array directly."""
+        return self.stage._normalize_array(arr)
+
+    def test_inf_values_replaced_with_zero(self):
+        """Positive inf in input must become 0.0, not propagate to STT."""
+        data = np.array([np.inf, 1.0, -np.inf, 0.5], dtype=np.float32)
+        out = self._normalize(data)
+        self.assertFalse(np.any(np.isinf(out)), "Output must not contain inf")
+        self.assertFalse(np.any(np.isnan(out)), "Output must not contain nan")
+
+    def test_nan_values_replaced_with_zero(self):
+        """NaN in input must become 0.0, not propagate to STT."""
+        data = np.array([np.nan, 1.0, np.nan, 0.5], dtype=np.float32)
+        out = self._normalize(data)
+        self.assertFalse(np.any(np.isnan(out)), "Output must not contain nan")
+
+    def test_mixed_inf_nan_and_normal_sample_normalized(self):
+        """[inf, nan, 1.0] → [0.0, 0.0, normalized_1.0]; finite sample is normalized."""
+        data = np.array([np.inf, np.nan, 1.0], dtype=np.float32)
+        out = self._normalize(data)
+        self.assertFalse(np.any(np.isinf(out)), "No inf in output")
+        self.assertFalse(np.any(np.isnan(out)), "No nan in output")
+        # The sanitized input is [0, 0, 1.0]; RMS = 1/sqrt(3) ≈ 0.5774
+        # After normalization gain = TARGET_RMS / rms → output[2] ≠ 0
+        self.assertNotEqual(float(out[2]), 0.0, "The finite sample must be normalized (non-zero)")
+
+    def test_all_zero_audio_returned_unchanged_no_div_by_zero(self):
+        """All-zero buffer (silence) must pass through without divide-by-zero."""
+        data = np.zeros(256, dtype=np.float32)
+        out = self._normalize(data)
+        self.assertEqual(out.shape, data.shape)
+        self.assertTrue(np.all(out == 0.0), "All-zero input → all-zero output")
+
+    def test_all_inf_audio_becomes_all_zero(self):
+        """Buffer of only inf values → all sanitized to 0.0, returned as silence."""
+        data = np.full(64, np.inf, dtype=np.float32)
+        out = self._normalize(data)
+        self.assertTrue(np.all(out == 0.0), "All-inf input sanitized to all-zero")
+        self.assertFalse(np.any(np.isinf(out)))
+
+    def test_all_nan_audio_becomes_all_zero(self):
+        """Buffer of only NaN values → all sanitized to 0.0."""
+        data = np.full(64, np.nan, dtype=np.float32)
+        out = self._normalize(data)
+        self.assertTrue(np.all(out == 0.0))
+        self.assertFalse(np.any(np.isnan(out)))
+
+    def test_output_is_always_finite(self):
+        """Regardless of input, output must never contain inf or nan."""
+        for arr in [
+            np.array([np.inf, np.nan, np.inf], dtype=np.float32),
+            np.array([-np.inf, 0.0, np.nan], dtype=np.float32),
+            np.zeros(10, dtype=np.float32),
+            np.full(10, np.nan, dtype=np.float32),
+        ]:
+            with self.subTest(arr=arr):
+                out = self._normalize(arr)
+                self.assertTrue(np.all(np.isfinite(out)), f"Non-finite in output for input {arr}")
+
+    def test_process_pipeline_with_inf_input_no_error_appended(self):
+        """process() with inf-containing ndarray must not append an error."""
+        data = np.array([np.inf, 1.0, np.nan], dtype=np.float32)
+        ctx = _make_ctx(data)
+        result = self.stage.process(ctx)
+        self.assertEqual(result.errors, [], f"Unexpected errors: {result.errors}")
+        out = result.normalized_audio
+        self.assertFalse(np.any(np.isinf(out)))
+        self.assertFalse(np.any(np.isnan(out)))
+
+
 if __name__ == "__main__":
     unittest.main()

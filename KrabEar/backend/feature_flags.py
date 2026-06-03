@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +28,11 @@ from core.parsing_utils import safe_json_loads
 logger = logging.getLogger("KrabEar.Backend.FeatureFlags")
 
 _FLAGS_FILE = "feature_flags.json"
+
+# Защита от DoS через неограниченное количество/длину пользовательских флагов
+MAX_FLAGS = 200
+MAX_FLAG_NAME_LEN = 100
+_FLAG_NAME_RE = re.compile(r'^[a-z0-9_]+$')
 
 
 # Описание встроенных флагов: имя → (default, description, since_version)
@@ -142,25 +148,32 @@ class FeatureFlags:
         with self._lock:
             return bool(self._flags.get(flag_name, False))
 
-    def set_flag(self, flag_name: str, enabled: bool) -> None:
+    def set_flag(self, flag_name: str, enabled: bool) -> dict[str, object] | None:
         """Устанавливает значение флага и сохраняет в файл.
 
         Args:
-            flag_name: Имя флага (непустая строка без пробелов/символов новой строки).
+            flag_name: Имя флага (строчные буквы, цифры и подчёркивание, макс. 100 символов).
             enabled: True — включить, False — отключить.
 
+        Returns:
+            None при успехе; dict с 'ok': False и 'reason' при отказе валидации.
+
         Raises:
-            ValueError: если flag_name пустой, не является строкой, или содержит
-                        только пробельные символы (пробел, таб, новая строка и т.д.).
+            ValueError: если flag_name пустой или не является строкой.
         """
-        if not flag_name or not isinstance(flag_name, str) or not flag_name.strip() or flag_name != flag_name.strip():
-            raise ValueError(
-                "Имя флага должно быть непустой строкой без ведущих/завершающих пробельных символов"
-            )
+        if not flag_name or not isinstance(flag_name, str):
+            raise ValueError("Имя флага должно быть непустой строкой")
+        if len(flag_name) > MAX_FLAG_NAME_LEN:
+            return {"ok": False, "reason": "flag_name_too_long"}
+        if not _FLAG_NAME_RE.match(flag_name):
+            return {"ok": False, "reason": "flag_name_invalid_chars"}
         with self._lock:
+            if flag_name not in self._flags and len(self._flags) >= MAX_FLAGS:
+                return {"ok": False, "reason": "flag_limit_reached"}
             self._flags[flag_name] = bool(enabled)
             self._save()
         logger.info("FeatureFlags: флаг %s = %s", flag_name, enabled)
+        return None
 
     def list_flags(self) -> dict[str, bool]:
         """Возвращает словарь {flag_name: enabled} для всех известных флагов."""
@@ -230,7 +243,9 @@ class FeatureFlags:
         enabled_raw = params.get("enabled")
         if not isinstance(enabled_raw, bool):
             raise ValueError("Параметр enabled должен быть boolean")
-        self.set_flag(flag_name, enabled_raw)
+        err = self.set_flag(flag_name, enabled_raw)
+        if err is not None:
+            return {**err, "ts": datetime.now(timezone.utc).isoformat()}
         return {
             "flag_name": flag_name,
             "enabled": enabled_raw,

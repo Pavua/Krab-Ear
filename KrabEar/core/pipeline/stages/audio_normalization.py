@@ -61,11 +61,22 @@ class AudioNormalizationStage:
     # ------------------------------------------------------------------
 
     def _normalize_array(self, data: np.ndarray) -> np.ndarray:
-        """Нормализует numpy array: стерео→моно + амплитуда."""
+        """Нормализует numpy array: стерео→моно + амплитуда.
+
+        Перед нормализацией заменяет NaN/±Inf нулями (защита от некорректных
+        буферов, которые иначе отравили бы RMS-вычисление и вывод STT).
+        """
         if data.ndim > 1:
             data = data.mean(axis=1)
 
         data = data.astype(np.float32)
+        # Санитизация: inf/nan → 0.0 (некорректные сэмплы не должны уходить в STT)
+        data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Тишина или полностью пустой буфер — нормализация невозможна/не нужна
+        if np.max(np.abs(data)) == 0.0:
+            return data
+
         rms = float(np.sqrt(np.mean(data ** 2)))
         if rms < 1e-6:
             # Тишина — возвращаем как есть
