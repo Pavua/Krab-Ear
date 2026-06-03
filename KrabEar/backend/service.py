@@ -523,7 +523,9 @@ class BackendService:
         self._quality_trends = QualityTrendAnalyzer()
         self._activity_calendar = ActivityCalendar()
         self._stats_report = StatsReportGenerator()
-        self._speaker_statistics = SpeakerStatisticsAnalyzer()
+        self._speaker_statistics = SpeakerStatisticsAnalyzer(
+            settings_get=self._get_runtime_setting,
+        )
         self._recording_insights = RecordingInsightsGenerator()
         self._keyword_cloud_gen = KeywordCloudGenerator()
         self._integrity_checker = IntegrityChecker()
