@@ -29,6 +29,10 @@ logger = logging.getLogger("KrabEar.Backend.EventBus")
 # После него отправляется keepalive-комментарий, чтобы соединение не закрылось.
 _SSE_POLL_TIMEOUT_SEC = 15.0
 _QUEUE_MAXSIZE = 64
+# Maximum concurrent SSE/pull subscribers.  Each subscriber holds a Queue and a
+# thread (inside the Flask/gevent SSE handler), so an uncapped subscriber list is
+# a thread + memory exhaustion vector under load or during connection-flood attacks.
+MAX_SUBSCRIBERS = 100
 
 
 class EventBus:
@@ -55,11 +59,25 @@ class EventBus:
 
         Возвращённую очередь нужно передать в unsubscribe() при отключении.
         None в очереди означает сигнал завершения.
+
+        Raises RuntimeError when MAX_SUBSCRIBERS is already reached to prevent
+        thread/memory exhaustion under connection floods.
+
+        Note: SSE endpoint authentication (Bearer token) is enforced at the HTTP
+        layer in rest_server.py (require_auth decorator) — not inside EventBus.
+        EventBus is auth-agnostic; callers must gate access before calling subscribe().
         """
         q: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=_QUEUE_MAXSIZE)
         with self._lock:
+            current_count = len(self._subscribers)
+            if current_count >= MAX_SUBSCRIBERS:
+                raise RuntimeError(
+                    f"max_subscribers reached ({MAX_SUBSCRIBERS}); "
+                    "refusing new SSE connection"
+                )
             self._subscribers.append(q)
-        logger.debug("EventBus: новый подписчик, всего %d", len(self._subscribers))
+            new_count = len(self._subscribers)
+        logger.debug("EventBus: новый подписчик, всего %d", new_count)
         return q
 
     def unsubscribe(self, q: queue.Queue[dict[str, Any] | None]) -> None:
@@ -69,7 +87,8 @@ class EventBus:
                 self._subscribers.remove(q)
             except ValueError:
                 pass
-        logger.debug("EventBus: подписчик отключён, осталось %d", len(self._subscribers))
+            remaining = len(self._subscribers)
+        logger.debug("EventBus: подписчик отключён, осталось %d", remaining)
 
     def add_listener(self, callback: Callable[[str, dict[str, Any]], None]) -> None:
         """Регистрирует синхронный server-side листенер событий.
