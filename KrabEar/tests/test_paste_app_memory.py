@@ -296,7 +296,11 @@ class TestPasteAppMemoryGetUnset(unittest.TestCase):
 
 
 class TestPasteAppMemoryUnicode(unittest.TestCase):
-    """10. unicode_bundle_id — юникод в bundle_id и profile value."""
+    """10. unicode_bundle_id — юникод в bundle_id отклоняется (wave-34 format validation).
+
+    macOS bundle IDs официально ASCII-only (alphanumeric + dots + hyphens).
+    С wave-34 bundle_id содержащий Unicode-символы молча игнорируется.
+    """
 
     def setUp(self) -> None:
         import tempfile
@@ -306,27 +310,32 @@ class TestPasteAppMemoryUnicode(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmpdir.cleanup()
 
-    def test_unicode_bundle_id_stored_and_retrieved(self) -> None:
-        """bundle_id с юникод-символами корректно сохраняется и читается."""
+    def test_unicode_bundle_id_rejected(self) -> None:
+        """bundle_id с юникод-символами (wave-34) молча отклоняется."""
         mem = _make_mem(self.tmp_path)
         unicode_bundle = "com.пример.приложение"
         mem.record(unicode_bundle, "plain")
-        self.assertEqual(mem.get_profile_for(unicode_bundle), "plain")
+        self.assertIsNone(mem.get_profile_for(unicode_bundle))
 
-    def test_unicode_survives_reload(self) -> None:
-        """юникод bundle_id корректно персистится (JSON roundtrip)."""
+    def test_unicode_bundle_not_persisted(self) -> None:
+        """юникод bundle_id не попадает в JSON-файл."""
         unicode_bundle = "com.例え.アプリ"
         mem1 = _make_mem(self.tmp_path)
         mem1.record(unicode_bundle, "markdown")
         mem2 = _make_mem(self.tmp_path)
-        self.assertEqual(mem2.get_profile_for(unicode_bundle), "markdown")
+        self.assertIsNone(mem2.get_profile_for(unicode_bundle))
 
-    def test_unicode_in_json_file_no_escape(self) -> None:
-        """JSON-файл хранит юникод без ASCII-экранирования (ensure_ascii=False)."""
+    def test_ascii_app_name_with_unicode_rejected(self) -> None:
+        """bundle_id с юникодом в сегменте отклоняется, ASCII-часть не попадает в файл."""
         mem = _make_mem(self.tmp_path)
         mem.record("com.тест.app", "plain")
-        raw = (self.tmp_path / "paste_app_memory.json").read_text(encoding="utf-8")
-        self.assertIn("тест", raw)
+        path = self.tmp_path / "paste_app_memory.json"
+        if path.exists():
+            raw = path.read_text(encoding="utf-8")
+            self.assertNotIn("тест", raw)
+        else:
+            # файл не был создан — тоже корректно
+            pass
 
 
 class TestPasteAppMemoryConcurrent(unittest.TestCase):
