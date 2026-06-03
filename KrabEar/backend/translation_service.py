@@ -484,7 +484,14 @@ class TranslationService:
         - повторяющиеся слова в парах оригинал→перевод
 
         Возвращает кандидатов, которых ещё нет в текущем глоссарии.
+
+        Privacy gate (wave-29): когда privacy_mode_enabled=True возвращает пустые предложения
+        без обращения к истории — утечка capitalized words / brand names / source→target pairs
+        из translation history нарушает режим конфиденциальности.
         """
+        if self._cached_settings().get("privacy_mode_enabled"):
+            return {"ok": True, "suggestions": [], "reason": "privacy_mode_active"}
+
         from core.utils import _BRAND_REPLACEMENTS_RAW
 
         scan_limit = max(10, min(int(params.get("scan_limit", 200) or 200), 1000))
@@ -601,7 +608,14 @@ class TranslationService:
 
         Сканирует последние N записей истории, находит слова с частотой >= min_count,
         фильтрует стоп-слова и короткие слова, возвращает top-K кандидатов.
+
+        Privacy gate (wave-29): когда privacy_mode_enabled=True возвращает пустой список
+        без обращения к истории транскрибаций — leaking proper nouns / domain terms
+        нарушает режим конфиденциальности.
         """
+        if self._cached_settings().get("privacy_mode_enabled"):
+            return {"ok": True, "suggestions": [], "total": 0, "reason": "privacy_mode_active"}
+
         scan_limit = max(10, min(int(params.get("scan_limit", 100) or 100), 500))
         min_count = max(2, min(int(params.get("min_count", 3) or 3), 20))
         top_k = max(5, min(int(params.get("top_k", 20) or 20), 50))
