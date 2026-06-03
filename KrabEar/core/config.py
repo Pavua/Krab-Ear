@@ -664,6 +664,10 @@ class Settings(BaseSettings):
     SEMANTIC_SEARCH_MODEL: str = "intfloat/multilingual-e5-base"
     # При True: автоиндексация после каждой транскрибации (фоновый поток).
     SEMANTIC_SEARCH_AUTO_INDEX: bool = True
+    # wave-22 LOW: верхний предел числа строк в embeddings-индексе. При превышении
+    # вытесняются самые старые строки (most-recent-N / FIFO) — индекс не растёт
+    # неограниченно на длинных сессиях. 0 (или <=0) = без ограничения.
+    SEMANTIC_SEARCH_MAX_ITEMS: int = 5000
 
     @property
     def model_max_list(self) -> List[str]:
