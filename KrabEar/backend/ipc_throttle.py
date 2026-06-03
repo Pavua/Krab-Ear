@@ -42,6 +42,9 @@ HEAVY_METHODS: Set[str] = {
     "repair_integrity",         # исправление целостности
     "get_waveform",             # генерация waveform-данных
     "extract_action_items",     # LLM извлечение задач/решений/вопросов из транскрипта
+    # wave-29 MED DoS: batch делает serial LLM calls на все ids (до 20 после фикса);
+    # без throttle = потенциально 20 LLM calls/запрос без ограничений по времени.
+    "batch_extract_action_items",  # пакетное LLM извлечение (≤20 ids, serial calls)
     "semantic_search_reindex",  # полная переиндексация всей истории через sentence-embeddings (W1183)
     "export_html_report",       # генерация автономного HTML-отчёта с аналитикой (W1183)
     "generate_html_report",     # алиас export_html_report для Swift UI (W1183)
