@@ -18,16 +18,21 @@ class TestListLlmModelsEndpoint(unittest.TestCase):
     """_handle_list_llm_models must call /api/v1/models, not /v1/models."""
 
     def _make_service(self, llm_base_url="http://127.0.0.1:1234/v1"):
-        """Build a minimal BackendService stub with only what _handle_list_llm_models needs."""
-        from backend.service import BackendService
+        """Build the LIVE extracted LLMOpsService with only what handle_list_llm_models needs.
 
-        svc = BackendService.__new__(BackendService)
+        Repointed off the deleted dead-duplicate BackendService._handle_list_llm_models (#47);
+        exposes a `_handle_list_llm_models` alias so existing test bodies stay unchanged.
+        """
+        from backend.llm_ops_service import LLMOpsService
+
         settings_svc = MagicMock()
         settings_svc.cached_settings.return_value = {
             "llm_base_url": llm_base_url,
             "llm_api_key": "",
         }
-        svc._settings_svc = settings_svc
+        svc = LLMOpsService(store=None, settings_svc=settings_svc, transcriber=None)
+        # Alias to the live handler so test bodies can keep calling _handle_list_llm_models.
+        svc._handle_list_llm_models = svc.handle_list_llm_models
         return svc
 
     def _mock_response(self, ids=None):
