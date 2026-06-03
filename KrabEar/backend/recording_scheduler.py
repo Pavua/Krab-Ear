@@ -10,9 +10,9 @@ import json
 import logging
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger("KrabEar.Backend.RecordingScheduler")
 
@@ -25,16 +25,79 @@ MAX_SCHEDULED_RECORDINGS = 1_000
 # Eviction: remove terminal entries older than this many seconds
 _EVICT_AFTER_SECONDS = 86_400  # 24 h
 
+# C1: pending schedule cap — reject new schedules when this many are already pending
+MAX_PENDING_SCHEDULES = 50
+
+# C2: validation bounds
+_MAX_DURATION_SEC = 7200  # 2 hours
+_MAX_FUTURE_DAYS = 30  # reject start_time > 30 days from now
+
+# C1: background trigger poll interval (seconds)
+_TRIGGER_POLL_INTERVAL = 30
+
 
 class RecordingScheduler:
-    """Планировщик записей: создание, отмена, перечисление, триггер по времени."""
+    """Планировщик записей: создание, отмена, перечисление, триггер по времени.
 
-    def __init__(self, data_dir: str | Path) -> None:
+    Параметр trigger_fn (C1): если передан, фоновый поток вызывает check_and_trigger()
+    каждые _TRIGGER_POLL_INTERVAL секунд и, при обнаружении задания, передаёт его
+    параметры в trigger_fn(duration_sec, label).  Поток демонический — останавливается
+    вместе с процессом или по вызову stop().
+    """
+
+    def __init__(
+        self,
+        data_dir: str | Path,
+        trigger_fn: Optional[Callable[[int, str], None]] = None,
+    ) -> None:
         self._data_dir = Path(data_dir)
         self._file = self._data_dir / "scheduled_recordings.json"
         self._lock = threading.Lock()
         self._schedules: dict[str, dict] = {}
         self._load()
+
+        # C1: background trigger thread
+        self._trigger_fn = trigger_fn
+        self._stop_event = threading.Event()
+        self._bg_thread: Optional[threading.Thread] = None
+        if trigger_fn is not None:
+            self._bg_thread = threading.Thread(
+                target=self._trigger_loop,
+                name="RecordingScheduler-trigger",
+                daemon=True,
+            )
+            self._bg_thread.start()
+            logger.debug("RecordingScheduler: фоновый поток триггера запущен (интервал %ds)", _TRIGGER_POLL_INTERVAL)
+
+    # ------------------------------------------------------------------
+    # Фоновый поток (C1)
+    # ------------------------------------------------------------------
+
+    def _trigger_loop(self) -> None:
+        """Фоновый цикл: каждые _TRIGGER_POLL_INTERVAL секунд проверяет расписание."""
+        while not self._stop_event.wait(timeout=_TRIGGER_POLL_INTERVAL):
+            try:
+                triggered = self.check_and_trigger()
+                if triggered and self._trigger_fn is not None:
+                    try:
+                        self._trigger_fn(
+                            int(triggered.get("duration_sec", 0)),
+                            str(triggered.get("label", "")),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "RecordingScheduler: ошибка вызова trigger_fn для задания %s",
+                            triggered.get("id"),
+                        )
+            except Exception:
+                logger.exception("RecordingScheduler: ошибка в фоновом цикле триггера")
+
+    def stop(self) -> None:
+        """Останавливает фоновый поток триггера (если был запущен)."""
+        self._stop_event.set()
+        if self._bg_thread is not None and self._bg_thread.is_alive():
+            self._bg_thread.join(timeout=5)
+            logger.debug("RecordingScheduler: фоновый поток остановлен")
 
     # ------------------------------------------------------------------
     # Персистентность
@@ -102,20 +165,41 @@ class RecordingScheduler:
 
         Args:
             start_time: ISO 8601 строка (напр. "2026-04-12T15:00:00" или "2026-04-12T15:00:00+03:00").
-            duration_sec: Длительность записи в секундах (>0).
+            duration_sec: Длительность записи в секундах (1..7200).
             label: Опциональная метка/описание.
 
         Returns:
             Словарь с полями задания.
+
+        Raises:
+            ValueError: если duration_sec вне диапазона [1, _MAX_DURATION_SEC],
+                        start_time в прошлом или дальше _MAX_FUTURE_DAYS дней.
         """
-        if duration_sec <= 0:
-            raise ValueError("duration_sec должен быть положительным числом")
+        # C2: validate duration
+        if not (1 <= int(duration_sec) <= _MAX_DURATION_SEC):
+            raise ValueError(
+                f"duration_sec должен быть в диапазоне [1, {_MAX_DURATION_SEC}], "
+                f"получено: {duration_sec}"
+            )
 
         # Парсим start_time и нормализуем до UTC ISO строки
         try:
             dt = _parse_datetime(start_time)
         except Exception as exc:
             raise ValueError(f"Неверный формат start_time: {exc}") from exc
+
+        # C2: validate start_time range
+        now = datetime.now(tz=timezone.utc)
+        if dt < now:
+            raise ValueError(
+                f"start_time не может быть в прошлом: {dt.isoformat()} < {now.isoformat()}"
+            )
+        max_future = now + timedelta(days=_MAX_FUTURE_DAYS)
+        if dt > max_future:
+            raise ValueError(
+                f"start_time не может быть дальше {_MAX_FUTURE_DAYS} дней от текущего момента: "
+                f"{dt.isoformat()} > {max_future.isoformat()}"
+            )
 
         schedule_id = str(uuid.uuid4())
         entry: dict[str, Any] = {
@@ -124,11 +208,21 @@ class RecordingScheduler:
             "duration_sec": int(duration_sec),
             "label": str(label),
             "status": STATUS_PENDING,
-            "created_at": datetime.now(tz=timezone.utc).isoformat(),
+            "created_at": now.isoformat(),
         }
         with self._lock:
-            # Evict stale terminal entries before checking the cap
+            # Evict stale terminal entries before checking the caps
             self._evict_old_terminal()
+            # C1: pending-count cap (stricter than total cap)
+            pending_count = sum(
+                1 for e in self._schedules.values()
+                if e.get("status") == STATUS_PENDING
+            )
+            if pending_count >= MAX_PENDING_SCHEDULES:
+                raise ValueError(
+                    f"Достигнут лимит ожидающих записей ({MAX_PENDING_SCHEDULES}). "
+                    "Отмените некоторые задания перед добавлением новых."
+                )
             if len(self._schedules) >= MAX_SCHEDULED_RECORDINGS:
                 raise ValueError(
                     f"Достигнут лимит запланированных записей ({MAX_SCHEDULED_RECORDINGS}). "

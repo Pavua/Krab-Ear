@@ -316,10 +316,22 @@ class DataMigrator:
 
         Params:
             backup_path (str): путь к директории резервной копии (из MigrationResult.backup_path).
+            confirm (bool): ОБЯЗАТЕЛЬНО True — без явного подтверждения откат не выполняется
+                (защита от случайного/автоматического вызова, аналогично purge_all_data).
 
         Returns:
             restored_files (list[str]), backup_path (str)
+
+        Raises:
+            ValueError: если confirm != True или backup_path не указан.
         """
+        # C3: require explicit confirmation (mirrors purge_all_data pattern)
+        if not params.get("confirm"):
+            return {
+                "ok": False,
+                "reason": "set confirm=true to execute rollback",
+            }
+
         data_dir = self._require_configured_data_dir()
 
         backup_path = str(params.get("backup_path", "")).strip()
