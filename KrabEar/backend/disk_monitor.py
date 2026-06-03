@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import shutil
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -57,6 +58,22 @@ class DiskSpaceMonitor:
         # Хранит last-emitted level, чтобы не дублировать одинаковые события
         self._last_disk_level: str | None = None
         self._last_history_large_emitted: bool = False
+
+        # F1 (wave-33 MED): 30s in-process cache для get_disk_status IPC-метода.
+        # _collect_status() делает рекурсивный rglob-обход (transcripts/ + history.ndjson),
+        # что при тысячах файлов saturates I/O. При cache hit возвращаем cached dict
+        # без rglob. Cache обновляется фоновым потоком и при check_now().
+        self._disk_cache: dict[str, Any] = {}
+        self._disk_cache_ts: float = 0.0
+        _DISK_CACHE_TTL_SEC: float = 30.0
+        self._DISK_CACHE_TTL_SEC: float = _DISK_CACHE_TTL_SEC
+
+        # F2 (wave-33 MED): минимальный интервал между forced checks (force=True)
+        # предотвращает re-emit SSE событий при частых вызовах check_now() из IPC.
+        # Первый forced check всегда выполняется (ts=0.0).
+        self._last_force_ts: float = 0.0
+        _FORCE_MIN_INTERVAL_SEC: float = 60.0
+        self._FORCE_MIN_INTERVAL_SEC: float = _FORCE_MIN_INTERVAL_SEC
 
         # Late-injected by BackendService after construction (Phase B Wave 60).
         # If None, disk.low_space errors are not pushed to the error bus.
@@ -124,9 +141,26 @@ class DiskSpaceMonitor:
         """Выполняет немедленную проверку (синхронно) и возвращает статус.
 
         Используется для IPC handle_get_disk_status().
+
+        F2 (wave-33 MED): повторный forced check в течение 60 s возвращает
+        cached result без повторного I/O и без re-emit SSE событий.
+        Первый вызов (self._last_force_ts == 0.0) всегда выполняется.
         """
+        now = time.monotonic()
+        with self._lock:
+            since_last_force = now - self._last_force_ts
+            if since_last_force < self._FORCE_MIN_INTERVAL_SEC and self._disk_cache:
+                # Возвращаем кэш без re-emit
+                return dict(self._disk_cache)
+
         status = self._collect_status()
         self._evaluate_and_emit(status, force=True)
+
+        with self._lock:
+            self._last_force_ts = time.monotonic()
+            self._disk_cache = dict(status)
+            self._disk_cache_ts = self._last_force_ts
+
         return status
 
     # ------------------------------------------------------------------
@@ -209,6 +243,10 @@ class DiskSpaceMonitor:
         with self._lock:
             self._last_status = status
             self._last_check_ts = ts
+            # F1 (wave-33 MED): обновляем 30s cache после каждого полного сбора метрик.
+            # check_now() использует этот cache при повторных forced-вызовах в течение 60s.
+            self._disk_cache = dict(status)
+            self._disk_cache_ts = time.monotonic()
 
         return status
 

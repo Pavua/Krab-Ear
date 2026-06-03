@@ -66,6 +66,11 @@ HEAVY_METHODS: Set[str] = {
     # без ограничения размера — без throttle повторный вызов раздувает диск и блокирует I/O.
     # MAX_SYNC_ITEMS=10_000 cap + heavy-bucket (≤5/min) предотвращают disk-fill атаку.
     "run_obsidian_sync",        # синхронизация транскрипций с Obsidian vault (file I/O)
+    # wave-33 MED DoS: get_disk_status вызывает рекурсивный rglob-обход всей data_dir
+    # (transcripts/ может содержать тысячи .md файлов). Без throttle IPC-клиент может
+    # спамить вызовы и насыщать I/O scheduler. Переводим в heavy-bucket (≤5/min).
+    # 30s in-process cache внутри DiskSpaceMonitor дополнительно снижает I/O нагрузку.
+    "get_disk_status",          # рекурсивный walk data_dir (transcripts/, history.ndjson)
 }
 
 MEDIUM_METHODS: Set[str] = {
