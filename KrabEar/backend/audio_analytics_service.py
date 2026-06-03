@@ -135,7 +135,14 @@ class AudioAnalyticsService:
             raise ValueError("Параметр file_path обязателен")
         _validate_audio_read_path(file_path, self._data_dir)  # W1736
 
-        threshold_db = float(params.get("threshold_db", SILENCE_THRESHOLD_DB))
+        # D1 MED: clamp threshold_db to prevent OverflowError in 10**(db/20) inside
+        # silence_detector when callers supply extreme values (e.g. threshold_db=99999).
+        import math
+        raw_tdb = params.get("threshold_db", SILENCE_THRESHOLD_DB)
+        threshold_db = float(raw_tdb) if raw_tdb is not None else SILENCE_THRESHOLD_DB
+        if not math.isfinite(threshold_db):
+            threshold_db = SILENCE_THRESHOLD_DB
+        threshold_db = max(-80.0, min(0.0, threshold_db))
         return analyze_silence_file(file_path, threshold_db=threshold_db)
 
     def handle_analyze_quality_trends(self, params: dict[str, Any]) -> dict[str, Any]:
