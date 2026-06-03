@@ -1522,7 +1522,7 @@ class BackendService:
             "repaste_item": self._history.handle_repaste_item,
             "get_clipboard_history": self._history.handle_get_clipboard_history,  # история буфера обмена: последние N вставленных транскрипций
             "cleanup_old_history": self._history.handle_cleanup_old_history,  # удаляет записи старше N дней
-            "purge_all_data": self._history.handle_purge_all_data,  # W1730: полная очистка всех данных (история + цепочки + embeddings)
+            "purge_all_data": self._handle_purge_all_data,  # wave-25: purge + auto_backup TOCTOU-guard (обёртка над HistoryService.handle_purge_all_data)
             "get_storage_info": self._history.handle_get_storage_info,  # размер файлов данных
             "get_transcripts_path": self._history.handle_get_transcripts_path,  # путь к папке транскриптов
             "backup_history": self._history.handle_backup_history,  # создаёт timestamped-резервную копию истории
@@ -1997,6 +1997,22 @@ class BackendService:
             output_dir=output_dir,
             enabled=enabled,
         )
+
+    def _handle_purge_all_data(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Privacy-purge с guard'ом авто-резервного копирования (wave-25 B2).
+
+        Тонкая обёртка над HistoryService.handle_purge_all_data. Замораживает
+        AutoBackupManager на время очистки, чтобы фоновый/оппортунистический
+        backup-цикл не пересоздал backups/ с PII сразу после rmtree() в purge-теле
+        (TOCTOU). set_purged() взводится ДО очистки (и сам удаляет backups/);
+        clear_purged() снимается в finally ПОСЛЕ завершения всех wipe-шагов, чтобы
+        будущие бэкапы возобновились. Вся остальная логика purge не тронута.
+        """
+        self._auto_backup.set_purged()
+        try:
+            return self._history.handle_purge_all_data(params)
+        finally:
+            self._auto_backup.clear_purged()
 
     def _handle_ping(self, params: dict[str, Any]) -> dict[str, Any]:
         """Делегирует к HealthCheckService.handle_ping (W1690)."""
