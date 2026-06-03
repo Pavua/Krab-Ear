@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import subprocess
 import threading
@@ -151,14 +152,30 @@ def _try_rest_load(base_url: str, model_id: str) -> bool:
         return False
 
 
+_MODEL_ID_SAFE_RE = re.compile(r"[A-Za-z0-9._:/-]{1,256}$")
+
+
 def _try_cli(action: str, model_id: str) -> bool:
-    """Fallback на `lms <action> <model_id>` shell command."""
+    """Fallback на `lms <action> -- <model_id>` shell command.
+
+    Защита от flag-injection (MED, wave-22): model_id, начинающийся с '-',
+    или содержащий недопустимые символы, отклоняется ДО вызова subprocess.
+    POSIX «--» separator вставляется явно чтобы lms CLI не мог разобрать
+    model_id как флаг даже при будущих изменениях валидации.
+    """
     lms = shutil.which("lms")
     if not lms:
         return False
+    # Reject leading-dash values (would be parsed as CLI flags) and unsafe chars.
+    if model_id.startswith("-") or not _MODEL_ID_SAFE_RE.fullmatch(model_id):
+        logger.warning(
+            "LM Studio CLI: model_id rejected (flag-injection guard): %r",
+            model_id,
+        )
+        return False
     try:
         result = subprocess.run(
-            [lms, action, model_id],
+            [lms, action, "--", model_id],
             timeout=_CLI_TIMEOUT_SEC,
             capture_output=True,
             text=True,
