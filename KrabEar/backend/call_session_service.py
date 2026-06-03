@@ -18,26 +18,50 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from typing import Any, Callable, Optional
 
 from backend.observability import add_breadcrumb, mask_phone
 
 logger = logging.getLogger("KrabEar.Backend.CallSession")
 
+_REDACTED = "REDACTED"
+
 
 class CallSessionService:
     """Обработчики IPC для управления звонковыми сессиями."""
 
-    def __init__(self, store: Any) -> None:
+    def __init__(
+        self,
+        store: Any,
+        settings_get: Optional[Callable[[str, Any], Any]] = None,
+    ) -> None:
         """
         Args:
             store: CallSessionStore — NDJSON-хранилище сессий.
+            settings_get: callable(key, default) → Any — runtime settings lookup
+                (передаётся как BackendService._get_runtime_setting).
+                Используется для privacy_mode_enabled gate в handle_call_session_get
+                и handle_call_session_list (C1, wave-31).
+                None → gate выключен (privacy_mode считается False).
 
         NB (W1775): параметр `auto_end` удалён — он сохранялся в `self._auto_end`,
         но нигде не читался (assigned-and-never-read). Auto-end вызывается напрямую
         из BackendService (`call_check_auto_end`), а не отсюда.
         """
         self._store = store
+        self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
+
+    @staticmethod
+    def _scrub_session(raw: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает копию словаря сессии с redacted phone и пустым транскриптом.
+
+        Используется в privacy_mode: номер телефона и история транскрипций —
+        PII; структура ответа (все ключи) сохраняется для schema-parity.
+        """
+        scrubbed = dict(raw)
+        scrubbed["phone_number"] = _REDACTED
+        scrubbed["transcript_history"] = []
+        return scrubbed
 
     # ------------------------------------------------------------------ #
     # CRUD handlers                                                        #
@@ -99,6 +123,10 @@ class CallSessionService:
           - id: str — идентификатор сессии.
 
         Возвращает полный словарь CallSession или ошибку "not_found".
+
+        Privacy gate (C1, wave-31): когда privacy_mode_enabled=True возвращает
+        сессию с redacted phone_number и пустым transcript_history — структура
+        ответа сохраняется для schema-parity, PII не раскрывается.
         """
         session_id = str(params.get("id") or "").strip()
         if not session_id:
@@ -106,7 +134,10 @@ class CallSessionService:
         session = self._store.get(session_id)
         if session is None:
             raise KeyError(f"Сессия не найдена: {session_id!r}")
-        return session.to_dict()
+        raw = session.to_dict()
+        if self._settings_get("privacy_mode_enabled", False):
+            return self._scrub_session(raw)
+        return raw
 
     def handle_call_session_list(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает список звонковых сессий.
@@ -117,6 +148,9 @@ class CallSessionService:
 
         Возвращает:
           {sessions: [...], total: N}
+
+        Privacy gate (C1, wave-31): когда privacy_mode_enabled=True возвращает
+        scrubbed сессии — phone_number=REDACTED, transcript_history=[] в каждой.
         """
         limit = max(1, min(int(params.get("limit", 50)), 500))
         status_filter = params.get("status_filter") or None
@@ -127,6 +161,8 @@ class CallSessionService:
             limit=limit,
             status_filter=status_filter,
         )
+        if self._settings_get("privacy_mode_enabled", False):
+            sessions = [self._scrub_session(s) for s in sessions]
         return {"sessions": sessions, "total": len(sessions)}
 
     def handle_call_session_update_status(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -259,6 +295,36 @@ class CallSessionService:
                 "duration_sec": session.duration_sec,
                 "cost_usd": session.cost_usd,
                 "end_reason": session.end_reason,
+            }
+        except ValueError:
+            # C4 (wave-31): FSM transition error on IDLE/terminal sessions
+            # (e.g. call_session_end on an idle session that was never dialed).
+            # Return a graceful structured error instead of propagating the
+            # ValueError which would cause a 500-style IPC error.
+            current_state: str = "unknown"
+            try:
+                current_sess = self._store.get(session_id)
+                if current_sess is not None:
+                    current_state = str(current_sess.status)
+            except Exception:  # noqa: BLE001
+                pass
+            add_breadcrumb(
+                category="call_session",
+                message="call_session_end",
+                level="warning",
+                data={
+                    "ok": False,
+                    "session_id": session_id,
+                    "end_reason": reason,
+                    "error": "invalid_state_transition",
+                    "current_state": current_state,
+                    "duration_ms": round((time.monotonic() - _t0) * 1000),
+                },
+            )
+            return {
+                "ok": False,
+                "reason": "invalid_state_transition",
+                "current_state": current_state,
             }
         except Exception as exc:
             add_breadcrumb(
