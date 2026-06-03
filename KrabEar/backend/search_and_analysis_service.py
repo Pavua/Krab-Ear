@@ -96,6 +96,10 @@ class SearchAndAnalysisService:
     def handle_semantic_search(self, params: dict) -> dict:
         """IPC: semantic_search — семантический поиск по истории транскрипций через embeddings.
 
+        Privacy guard (wave-31 D2): когда privacy_mode_enabled=True возвращает пустой ответ
+        без доступа к тексту транскрипций — семантический поиск по определению возвращает
+        transcript-derived context, который не должен утекать в privacy mode.
+
         Params:
             query     — поисковый запрос (строка, обязательный)
             top_k     — максимальное число результатов (int, default 10)
@@ -103,6 +107,15 @@ class SearchAndAnalysisService:
         Returns:
             {"results": [{"id": str, "score": float}], "mode": "semantic"|"keyword"|"disabled"}
         """
+        # wave-31 D2: privacy guard — both semantic and keyword fallback paths expose
+        # transcript-derived data; block entirely in privacy mode.
+        if self._settings_get("privacy_mode_enabled", False):
+            return {
+                "results": [],
+                "mode": "disabled",
+                "reason": "privacy_mode_active",
+            }
+
         query = str(params.get("query", "")).strip()
         if not query:
             raise ValueError("Параметр query обязателен")
@@ -139,11 +152,21 @@ class SearchAndAnalysisService:
     def handle_semantic_search_reindex(self, params: dict) -> dict:
         """IPC: semantic_search_reindex — переиндексирует всю историю транскрипций.
 
+        Privacy guard (wave-31 D2): когда privacy_mode_enabled=True возвращает
+        {"indexed": 0, "reason": "privacy_mode_active"} без доступа к текстам.
+        Reindex читает тексты из store и индексирует их через embeddings — утечка
+        в privacy mode недопустима.
+
         Params:
             force — bool, перестроить индекс с нуля (default False)
         Returns:
             {"indexed": int, "skipped": int, "errors": int}
         """
+        # wave-31 D2: privacy guard — reindex reads transcript texts from store and
+        # persists their embeddings; must be blocked in privacy mode.
+        if self._settings_get("privacy_mode_enabled", False):
+            return {"indexed": 0, "reason": "privacy_mode_active"}
+
         if not self._semantic_searcher.is_enabled:
             return {"indexed": 0, "skipped": 0, "errors": 0, "reason": "semantic_search_disabled"}
         force = bool(params.get("force", False))
