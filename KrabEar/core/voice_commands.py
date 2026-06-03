@@ -68,6 +68,29 @@ _AMBIGUOUS_SINGLE_WORD_PATTERNS: frozenset = frozenset({
     "dash",          # dash/чёрточка — обычное слово (→ не «-»)  [W1776]
     "new line",      # «new line» — ходовая фраза (→ не «\n»)  [W1776]
     "new paragraph",  # «new paragraph» — ходовая фраза (→ не «\n\n»)  [W1776]
+    # --- DESTRUCTIVE delete_last FALLBACKS (wave-27 HIGH) ---
+    # Голые fallback-формы команд удаления — это перфектные омонимы обычной речи:
+    # «удалить последнее» (что? — фраза обрывается), «delete last» («the delete
+    # last time…»), «borrar último» («borrar último archivo» — обычный оборот).
+    # `process()` бежит на КАЖДОМ STT-транскрипте → негейтнутая голая форма молча
+    # стирает реальную диктовку (HIGH silent data loss). В strict-режиме (production
+    # default) эти голые формы НЕ срабатывают — остаются буквальным текстом.
+    # Явные полные формы («delete last sentence/word/paragraph», «удалить последнее
+    # слово» и т.д.) — намеренные команды и срабатывают в обоих режимах как прежде.
+    "удалить последнее",   # RU bare fallback (→ не delete)  [wave-27]
+    "borrar último",       # ES bare fallback (→ не delete)  [wave-27]
+    "delete last",         # EN bare fallback (→ не delete)  [wave-27]
+})
+
+# Подмножество _AMBIGUOUS_SINGLE_WORD_PATTERNS: голые delete_last fallback-формы.
+# Для этих паттернов действует ДОПОЛНИТЕЛЬНАЯ защита (wave-27 MED position-check):
+# даже когда они срабатывают (lenient-режим), команда применяется ТОЛЬКО если стоит
+# в конце высказывания (за ней нет продолжающего текста). «delete last» в середине
+# речи — почти всегда омоним, а не намеренная команда стереть предыдущее слово.
+_DELETE_LAST_FALLBACK_PATTERNS: frozenset = frozenset({
+    "удалить последнее",
+    "borrar último",
+    "delete last",
 })
 
 # ---------------------------------------------------------------------------
@@ -448,6 +471,21 @@ class VoiceCommandProcessor:
                         output.append(" ")
 
                 elif action == "delete_last":
+                    # wave-27 MED position-check: голая fallback-форма команды
+                    # удаления («delete last», «удалить последнее», «borrar último»)
+                    # применяется ТОЛЬКО в конце высказывания. Если за ней следует
+                    # продолжающий текст — это почти наверняка омоним обычной речи
+                    # («the delete last time…»), а не намеренная команда стереть
+                    # предыдущее слово. В этом случае откатываем match и обрабатываем
+                    # токен как обычный текст (буквальная передача, без удаления).
+                    if raw_pat.lower() in _DELETE_LAST_FALLBACK_PATTERNS:
+                        tail = matched_end
+                        while tail < length and text[tail] == " ":
+                            tail += 1
+                        if tail < length:
+                            # Есть продолжение → не команда; откат, пробуем дальше.
+                            matched = False
+                            continue
                     handler = _DELETE_HANDLERS.get(arg, _delete_last_word)
                     current = "".join(output)
                     output = [handler(current)]
