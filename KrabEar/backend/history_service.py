@@ -3369,6 +3369,10 @@ class HistoryService:
     def handle_word_frequency_analysis(self, params: dict) -> dict:
         """Анализирует частоту слов по истории транскрипций.
 
+        Privacy gate (wave-29): если privacy_mode_enabled → возвращает пустые списки.
+        top_words/bigrams содержат текст транскрипций — утечка PII в privacy mode.
+        Sibling guard: аналогично handle_get_keyword_cloud (уже гейтован ранее).
+
         Params:
             language (str, optional): фильтрация по языку-источнику ('ru', 'es', 'en', …).
             limit (int, optional): лимит записей для анализа (default 1000).
@@ -3381,6 +3385,19 @@ class HistoryService:
             bigrams          — топ-20 биграмм [{phrase, count}]
             by_language      — частоты по языкам {'ru': {'top_words': [...]}, …}
         """
+        if self._cached_settings is not None and self._cached_settings().get("privacy_mode_enabled"):
+            return {
+                "ok": True,
+                "words": [],
+                "bigrams": [],
+                "top_words": [],
+                "total_words": 0,
+                "unique_words": 0,
+                "vocabulary_richness": 0.0,
+                "by_language": {},
+                "reason": "privacy_mode_active",
+            }
+
         from collections import Counter
 
         language_filter = str(params.get("language", "")).strip().lower() or None
