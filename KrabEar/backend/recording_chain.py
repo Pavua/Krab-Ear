@@ -29,8 +29,10 @@ MAX_ITEMS_PER_CHAIN = 1000
 MAX_CHAIN_NAME_LEN = 200
 
 # Basic UUID-like item_id format guard (A4 wave-34):
-# must be non-empty, no path separators, no null bytes.
-_ITEM_ID_UNSAFE_RE = re.compile(r'[/\\.\x00]')
+# must be non-empty, no path separators, no null bytes, no newlines/CRLFs.
+# D3 (wave-35 LOW): added \r, \n, \t — a CRLF-injected item_id would write a
+# newline mid-JSON into recording_chains.json, silently corrupting the file.
+_ITEM_ID_UNSAFE_RE = re.compile(r'[/\\.\x00\r\n\t]')
 
 
 def _is_valid_item_id(item_id: str) -> bool:
@@ -145,7 +147,14 @@ class RecordingChainManager:
         return chain_id
 
     def add_to_chain(self, chain_id: str, item_id: str) -> None:
-        """Добавляет запись истории в цепочку."""
+        """Добавляет запись истории в цепочку.
+
+        D3 (wave-35 LOW): dedup check was moved BEFORE the cap check.  Previously
+        the cap was checked first, so re-adding an already-present item_id (a
+        perfectly valid idempotent call) could raise RuntimeError("limit_exceeded")
+        even though the chain size would not change.  This is now fixed: the cap
+        is only checked when the item_id is genuinely new.
+        """
         with self._lock:
             chain = self._data["chains"].get(chain_id)
             if chain is None:
@@ -157,13 +166,16 @@ class RecordingChainManager:
                 raise ValueError(
                     f"item_id содержит недопустимые символы или пустой: {item_id!r}"
                 )
+            # Dedup check FIRST: if item already present, it's a no-op (idempotent).
+            # Cap check only applies when the item_id is genuinely new.
+            if item_id in chain["item_ids"]:
+                return
             if len(chain["item_ids"]) >= MAX_ITEMS_PER_CHAIN:
                 raise RuntimeError(
                     f"Цепочка достигла лимита элементов ({MAX_ITEMS_PER_CHAIN})"
                 )
-            if item_id not in chain["item_ids"]:
-                chain["item_ids"].append(item_id)
-                self._save()
+            chain["item_ids"].append(item_id)
+            self._save()
 
     def unlink_recording_from_chain(self, chain_id: str, item_id: str) -> bool:
         """Удаляет запись из цепочки.

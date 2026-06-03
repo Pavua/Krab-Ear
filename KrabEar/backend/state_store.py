@@ -78,6 +78,23 @@ class StateStore:
 
         # Инвертированный индекс для быстрого полнотекстового поиска.
         self._search_index: SearchIndex = SearchIndex()
+
+        # D1 (wave-35 MED): O(1) in-memory existence set для set_paste_status /
+        # delete_history_item.  До этого фикса существование item-а проверялось
+        # через _id_exists_unlocked, который делал два O(n) скана: _load_deleted_ids
+        # + _iter_history_items — оба под глобальным flock.  Теперь для check
+        # достаточно одного hash-lookup.
+        #
+        # Инварианты:
+        #   • add_history_item     → добавляет id в _active_ids
+        #   • delete_history_item  → удаляет id из _active_ids
+        #   • _compact_unlocked    → перестраивает _active_ids по финальному active-списку
+        #   • reset_search_caches  → не трогает _active_ids (остаются корректны после purge)
+        #
+        # Заполняется лениво при первом обращении (lazy init), чтобы не тормозить
+        # конструктор StateStore, который вызывается при каждом старте backend-а
+        # до того, как lock-файл вообще прочитан.
+        self._active_ids: set[str] | None = None
         # Phase B.2 — error_bus late-injection
 
     def _push_error(self, code: str, message_debug: str, severity: str | None = None) -> None:
@@ -258,6 +275,9 @@ class StateStore:
         try:
             with self._lock():
                 self._append_ndjson(self.history_path, item.to_dict())
+                # D1 (wave-35): keep in-memory id set consistent after write.
+                if self._active_ids is not None:
+                    self._active_ids.add(item.id)
         except Exception as exc:
             logger.error("Ошибка записи в history.ndjson: %s", exc)
             # Phase B.2: history.write_fail — disk full, permission denied, lock timeout
@@ -284,12 +304,28 @@ class StateStore:
                 return True
         return False
 
+    def _ensure_active_ids_unlocked(self) -> set[str]:
+        """Возвращает in-memory множество активных item id.
+
+        При первом вызове (или после сброса через _compact_unlocked) выполняет
+        единственный O(n) скан NDJSON и кэширует результат в self._active_ids.
+        Все последующие вызовы — O(1).  Должен вызываться только под _lock().
+        """
+        if self._active_ids is None:
+            self._active_ids = {item.id for item in self._load_active_items_unlocked()}
+        return self._active_ids
+
     def set_paste_status(self, item_id: str, paste_status: str) -> bool:
         """Записывает обновление статуса вставки отдельным append-журналом.
 
         Перед записью проверяет, что запись с данным id существует в активном
         хранилище. Это защищает от спама junk-ids, которые раздувают
         history_status.ndjson без пользы (каждый read — O(n) по журналу).
+
+        D1 (wave-35 MED): проверка существования переключена с O(n)
+        _id_exists_unlocked (два NDJSON-скана) на O(1) hash-lookup
+        в _ensure_active_ids_unlocked() (один scan при первом обращении,
+        далее in-memory set).
         """
         clean_id = item_id.strip()
         if not clean_id:
@@ -297,7 +333,7 @@ class StateStore:
 
         payload = {"id": clean_id, "paste_status": paste_status.strip() or "failed"}
         with self._lock():
-            if not self._id_exists_unlocked(clean_id):
+            if clean_id not in self._ensure_active_ids_unlocked():
                 return False
             self._append_ndjson(self.status_path, payload)
         return True
@@ -315,6 +351,9 @@ class StateStore:
             if not self._id_exists_unlocked(clean_id):
                 return False
             self._append_ndjson(self.tombstones_path, {"id": clean_id})
+            # D1 (wave-35): keep in-memory id set consistent after tombstone.
+            if self._active_ids is not None:
+                self._active_ids.discard(clean_id)
         return True
 
     def get_history_page(self, cursor: str | None, limit: int) -> tuple[list[dict[str, Any]], str | None]:
@@ -1196,6 +1235,12 @@ class StateStore:
                     _versioner.purge_versions_for_item(_item_id)
                 except Exception:
                     logger.exception("_compact_unlocked: версии id=%s", _item_id)
+
+        # D1 (wave-35): reset the in-memory active-ids cache after compaction so
+        # _ensure_active_ids_unlocked() rebuilds it from the freshly compacted
+        # history.ndjson on the next call — delta journals (tombstones, status,
+        # tags, etc.) have been cleared, making a stale cached set incorrect.
+        self._active_ids = _active_ids  # _active_ids was already built above
 
     def _history_stats_unlocked(self) -> dict[str, int]:
         """Собирает метрики журналов истории без повторного захвата lock."""
