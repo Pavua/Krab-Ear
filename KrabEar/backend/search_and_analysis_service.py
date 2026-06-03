@@ -172,12 +172,29 @@ class SearchAndAnalysisService:
     def handle_extract_action_items(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: extract_action_items — извлекает задачи/решения/вопросы из транскрипта.
 
+        Privacy guard: когда privacy_mode_enabled=True возвращает пустой ответ без
+        передачи текста транскрипта в LLM.
+
         Params:
             id       — item_id истории (обязательный).
             language — язык транскрипта, "ru"|"es"|"en" (default "ru").
         Returns:
             {id, ok, action_items, decisions, questions, fallback_reason, latency_ms}
         """
+        if self._settings_get("privacy_mode_enabled", False):
+            item_id = str(params.get("id", "")).strip()
+            return {
+                "id": item_id,
+                "ok": True,
+                "action_items": [],
+                "decisions": [],
+                "questions": [],
+                "fallback_reason": None,
+                "latency_ms": 0,
+                "reason": "privacy_mode_active",
+                "privacy_mode_active": True,
+            }
+
         item_id = str(params.get("id", "")).strip()
         if not item_id:
             raise RuntimeError("Параметр id обязателен")
@@ -214,18 +231,37 @@ class SearchAndAnalysisService:
             "latency_ms": result.latency_ms,
         }
 
+    # Maximum number of item_ids accepted in a single batch call.
+    # Each ID triggers a serial LLM call — unbounded list is a DoS vector.
+    MAX_BATCH_ACTION_ITEMS: int = 20
+
     def handle_batch_extract_action_items(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: batch_extract_action_items — пакетное извлечение для нескольких item_id.
 
+        DoS guard: максимум MAX_BATCH_ACTION_ITEMS id за один вызов (serial LLM calls).
+        Privacy guard: когда privacy_mode_enabled=True возвращает пустой ответ.
+
         Params:
-            ids      — список item_id (list[str], обязательный).
+            ids      — список item_id (list[str], обязательный, не более 20).
             language — язык транскрипта, "ru"|"es"|"en" (default "ru").
         Returns:
             {"results": [...], "count": int}
         """
+        if self._settings_get("privacy_mode_enabled", False):
+            return {
+                "results": [],
+                "count": 0,
+                "reason": "privacy_mode_active",
+                "privacy_mode_active": True,
+            }
+
         item_ids = params.get("ids", [])
         if not isinstance(item_ids, list):
             raise RuntimeError("Параметр ids должен быть списком")
+        if len(item_ids) > self.MAX_BATCH_ACTION_ITEMS:
+            raise RuntimeError(
+                f"Слишком много элементов: {len(item_ids)} > {self.MAX_BATCH_ACTION_ITEMS}"
+            )
         language = str(params.get("language", "ru")).lower()
 
         if self._action_items_extractor is None:
