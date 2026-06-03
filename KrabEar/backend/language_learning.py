@@ -14,6 +14,11 @@ from typing import Any
 
 import logging
 
+# C3 DoS guard: максимальное число записей истории, которое анализируют
+# get_learning_stats / extract_vocabulary за один IPC-вызов.
+# Без лимита злоумышленник мог подать ≥100k записей → O(N) tokenize+Counter → зависание.
+_MAX_ITEMS_FOR_STATS = 1000
+
 logger = logging.getLogger("KrabEar.Backend.LanguageLearning")
 
 # ---------------------------------------------------------------------------
@@ -264,9 +269,13 @@ class LanguageLearningManager:
                 frequency_distribution — распределение {easy, medium, hard},
                 top_words — топ-10 самых частотных слов,
                 source_lang — исходный язык,
-                target_lang — целевой язык.
+                target_lang — целевой язык,
+                items_scanned — сколько записей фактически обработано (≤ _MAX_ITEMS_FOR_STATS).
         """
-        vocab = self.extract_vocabulary(items, source_lang, target_lang)
+        # C3 DoS guard: берём последние _MAX_ITEMS_FOR_STATS записей.
+        # Свежие записи приоритетнее для словарной статистики.
+        items_capped = items[-_MAX_ITEMS_FOR_STATS:] if len(items) > _MAX_ITEMS_FOR_STATS else items
+        vocab = self.extract_vocabulary(items_capped, source_lang, target_lang)
 
         unique_words = len(vocab)
         total_occurrences = sum(e.frequency for e in vocab)
@@ -289,6 +298,7 @@ class LanguageLearningManager:
             "top_words": top_words,
             "source_lang": source_lang,
             "target_lang": target_lang,
+            "items_scanned": len(items_capped),
         }
 
     # ------------------------------------------------------------------

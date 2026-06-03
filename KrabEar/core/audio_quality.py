@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -43,6 +44,10 @@ def _safe_float(v: float, default: float = 0.0) -> float:
 # ---------------------------------------------------------------------------
 # Пороговые значения для оценки качества
 # ---------------------------------------------------------------------------
+
+# C1 (MED DoS): cap file size before sf.read to prevent OOM on attacker-supplied files.
+# A 1-hour 48 kHz stereo float32 file decodes to ~1.4 GB; set a conservative 500 MB limit.
+_MAX_AUDIO_FILE_BYTES = 500 * 1024 * 1024  # 500 MB
 
 _CLIPPING_THRESHOLD = 0.99      # амплитуда ≥ порога считается клиппингом
 _SILENCE_FRAME_SIZE = 1024      # семплов в одном фрейме при анализе тишины
@@ -279,12 +284,24 @@ def analyze_file(path: str | Path, analyzer: Optional[AudioQualityAnalyzer] = No
     """Удобная функция: анализирует аудиофайл по пути.
 
     Требует установленного пакета soundfile.
+
+    Raises:
+        FileNotFoundError: файл не найден.
+        ValueError: файл превышает _MAX_AUDIO_FILE_BYTES (DoS-guard C1).
     """
     import soundfile as sf
 
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Аудиофайл не найден: {path}")
+
+    # C1 DoS guard: reject files that would OOM-load into RAM as raw PCM.
+    file_bytes = os.path.getsize(path)
+    if file_bytes > _MAX_AUDIO_FILE_BYTES:
+        raise ValueError(
+            f"Аудиофайл слишком большой для анализа качества: "
+            f"{file_bytes // (1024 * 1024)} МБ > {_MAX_AUDIO_FILE_BYTES // (1024 * 1024)} МБ"
+        )
 
     audio_data, sample_rate = sf.read(str(path), dtype="float32", always_2d=False)
     if analyzer is None:
