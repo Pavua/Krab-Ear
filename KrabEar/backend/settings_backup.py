@@ -47,6 +47,10 @@ SENSITIVE_FIELDS: frozenset[str] = frozenset({
     "llm_api_key",
     "smtp_password",
     "ipc_signing_secret",
+    # Wave 37 addition — LOW credential: Picovoice wake-word access key;
+    # same credential-class as hf_token / telnyx_api_key — must not appear
+    # in backup files on disk.
+    "porcupine_access_key",
 })
 # Legacy alias kept for any internal references within this module.
 _SENSITIVE = SENSITIVE_FIELDS

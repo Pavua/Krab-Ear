@@ -3410,6 +3410,8 @@ class BackendService:
         Note: W947 introduced this as _handle_get_calendar_link_v2; W1030 renamed
         to canonical form _handle_get_calendar_link.
         """
+        if self._get_runtime_setting('privacy_mode_enabled', False):
+            return {'ok': False, 'reason': 'privacy_mode_active'}
         item_id = str(params.get("history_item_id", "")).strip()
         if not item_id:
             return {"ok": False, "error": "history_item_id is required"}
@@ -3435,6 +3437,8 @@ class BackendService:
         Note: W947 introduced this as _handle_search_by_calendar_event_v2; W1030 renamed
         to canonical form _handle_search_by_calendar_event.
         """
+        if self._get_runtime_setting('privacy_mode_enabled', False):
+            return {'ok': False, 'reason': 'privacy_mode_active'}
         event_title = str(params.get("event_title", ""))
         try:
             results = self.store.search_by_calendar_event(event_title)
