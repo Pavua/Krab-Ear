@@ -108,14 +108,15 @@ class BulkReprocessor:
         _data_dir = getattr(store, "data_dir", None)
         self._data_dir: Path | None = Path(_data_dir).resolve() if _data_dir else None
         # Защита от параллельных запусков. BackendService держит ОДИН общий singleton
-        # self._bulk_reprocessor (service.py:530), а IPC — thread-per-connection, причём
-        # bulk_reprocess_start НЕ в HEAVY_METHODS (light-лимит 120/мин). Два клиента могли
-        # запустить два reprocess()-цикла по ОДНОМУ набору кандидатов: (a) дубль MLX
-        # транскрибаций + гонка last-writer-wins на update_history_item_text для одного id;
-        # (b) сломанная отмена — re-entry второго запуска вызывал _reset_cancel()/clear() и
-        # стирал pending cancel первого, либо один cancel() обрывал ОБА. Non-blocking acquire
-        # _run_lock гарантирует ровно один активный цикл; второй вызов сразу возвращает error
-        # без старта второго цикла, не трогая cancel-флаг активного запуска.
+        # self._bulk_reprocessor (service.py), а IPC — thread-per-connection. wave-25 перевёл
+        # bulk_reprocess_start в HEAVY_METHODS (≤5/мин), но rate-limit НЕ заменяет этот guard:
+        # два запроса в пределах окна всё ещё могут запустить два reprocess()-цикла по ОДНОМУ
+        # набору кандидатов: (a) дубль MLX транскрибаций + гонка last-writer-wins на
+        # update_history_item_text для одного id; (b) сломанная отмена — re-entry второго
+        # запуска вызывал _reset_cancel()/clear() и стирал pending cancel первого, либо один
+        # cancel() обрывал ОБА. Non-blocking acquire _run_lock гарантирует ровно один активный
+        # цикл; второй вызов сразу возвращает error без старта второго цикла, не трогая
+        # cancel-флаг активного запуска.
         self._run_lock = threading.Lock()
 
     def cancel(self) -> None:
@@ -260,6 +261,8 @@ class BulkReprocessor:
         """
         # Guard: refuse to run while active recording is in progress.
         # Competing with an ongoing recording for MLX GPU → potential SIGSEGV (PR #71 class).
+        # Raises RuntimeError (W1043 contract); the IPC handler translates this into a
+        # structured {"ok": False, "reason": "recording_active"} response (wave-25).
         if self._is_recording_fn is not None and self._is_recording_fn():
             raise RuntimeError("bulk_reprocess refused: active recording in progress")
 

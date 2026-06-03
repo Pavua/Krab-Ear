@@ -15,6 +15,7 @@ BackendService.handle_request dispatch table.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import tempfile
 import threading
@@ -42,6 +43,35 @@ from backend.models import DEFAULT_SETTINGS
 from core.utils import TextUtils
 
 logger = logging.getLogger("KrabEar.Backend.RecordingCore")
+
+# wave-25 MED: default auto-dedup similarity threshold. Used as the safe fallback when a
+# persisted/overridden value is non-finite or outside [0.0, 1.0].
+_DEFAULT_DEDUP_THRESHOLD = 0.9
+
+
+def _sanitize_dedup_threshold(raw: Any) -> float:
+    """Coerce *raw* into a valid auto-dedup similarity threshold in [0.0, 1.0].
+
+    wave-25 MED: a negative auto_dedup_threshold (e.g. -1.0) made the guard
+    ``similarity >= threshold`` always True → EVERY new recording was silently dropped
+    as a duplicate (data-loss). A NaN/Inf was likewise unsafe. Values outside [0.0, 1.0]
+    (or non-numeric) fall back to the safe default rather than being honoured.
+    """
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "auto_dedup_threshold: нечисловое значение %r — откат к %.2f",
+            raw, _DEFAULT_DEDUP_THRESHOLD,
+        )
+        return _DEFAULT_DEDUP_THRESHOLD
+    if not math.isfinite(value) or value < 0.0 or value > 1.0:
+        logger.warning(
+            "auto_dedup_threshold: значение %r вне диапазона [0.0, 1.0] — откат к %.2f",
+            value, _DEFAULT_DEDUP_THRESHOLD,
+        )
+        return _DEFAULT_DEDUP_THRESHOLD
+    return value
 
 
 class RecordingCoreService:
@@ -1310,7 +1340,9 @@ class RecordingCoreService:
         # forwarded to check_duplicate.  Previously the arg was omitted, leaving the
         # auto_dedup_threshold setting completely unwired (data-loss bug: sim>=0.85
         # always dropped even when threshold was 0.99).
-        _dedup_threshold = float(settings.get("auto_dedup_threshold", 0.9))
+        # wave-25 MED: sanitize — a negative/NaN/out-of-range value would make every
+        # recording look like a duplicate (sim >= -1.0 is always True → data-loss).
+        _dedup_threshold = _sanitize_dedup_threshold(settings.get("auto_dedup_threshold", 0.9))
         if _privacy_mode:
             logger.info("privacy_mode: recording persisted with privacy_mode=True",
                         extra={"duration_sec": round(float(duration_sec), 2)})
@@ -1673,7 +1705,8 @@ class RecordingCoreService:
                 _dedup_enabled = bool(settings.get("auto_dedup_enabled", False))
                 _privacy_mode = bool(settings.get("privacy_mode_enabled", False))
                 # W1711: read runtime threshold — same fix as stop_recording path.
-                _dedup_threshold = float(settings.get("auto_dedup_threshold", 0.9))
+                # wave-25 MED: sanitize (negative/NaN/out-of-range → safe default 0.9).
+                _dedup_threshold = _sanitize_dedup_threshold(settings.get("auto_dedup_threshold", 0.9))
                 with self._persist_lock:
                     if self._auto_deduplicator is not None and _dedup_enabled and not _privacy_mode:
                         try:

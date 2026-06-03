@@ -45,6 +45,10 @@ HEAVY_METHODS: Set[str] = {
     "semantic_search_reindex",  # полная переиндексация всей истории через sentence-embeddings (W1183)
     "export_html_report",       # генерация автономного HTML-отчёта с аналитикой (W1183)
     "generate_html_report",     # алиас export_html_report для Swift UI (W1183)
+    # wave-25 MED: bulk_reprocess_start запускает синхронный цикл MLX-транскрибаций
+    # (до 1000 записей) прямо на IPC reader-треде → блокирует ВЕСЬ IPC на минуты.
+    # Переводим в heavy-bucket (≤5/min — фактически ≤2/min с учётом cooldown).
+    "bulk_reprocess_start",     # массовое перетранскрибирование истории
 }
 
 MEDIUM_METHODS: Set[str] = {
