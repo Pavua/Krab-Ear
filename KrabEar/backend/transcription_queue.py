@@ -58,7 +58,7 @@ import uuid
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger("KrabEar.Backend.TranscriptionQueue")
 
@@ -177,7 +177,11 @@ class TranscriptionQueue:
     только pending. Если persist_path=None — поведение полностью in-memory (default).
     """
 
-    def __init__(self, persist_path: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        persist_path: Optional[Path] = None,
+        privacy_mode_fn: Optional[Callable[[], bool]] = None,
+    ) -> None:
         self._lock = threading.Lock()
         # Все задания по job_id.
         # Active (pending/processing) jobs live here indefinitely.
@@ -187,6 +191,11 @@ class TranscriptionQueue:
         # Insertion-ordered set of terminal job_ids; used for O(1) oldest-first eviction.
         self._terminal_order: OrderedDict[str, None] = OrderedDict()
         self._persist_path: Optional[Path] = persist_path
+        # Optional callable returning True when privacy mode is active.  When set and
+        # returning True, IPC read handlers (handle_list_queue, handle_get_status,
+        # handle_peek) suppress all job data — file_path + result fields must not be
+        # exposed to IPC callers while privacy mode is on.
+        self._privacy_mode_fn: Optional[Callable[[], bool]] = privacy_mode_fn
         if self._persist_path is not None:
             self._load()
 
@@ -540,6 +549,21 @@ class TranscriptionQueue:
             self._save()
         return True
 
+    def clear(self) -> None:
+        """Очищает все задания из памяти (pending, processing и terminal).
+
+        Вызывается privacy-purge'ом (``handle_purge_all_data``) для немедленного
+        вытеснения file_path + result полей из RAM.  Персистентный файл очереди
+        (если задан persist_path) также перезаписывается пустым содержимым.
+
+        Thread-safe — захватывает self._lock.
+        """
+        with self._lock:
+            self._jobs.clear()
+            self._terminal_order.clear()
+            self._save()
+        logger.info("TranscriptionQueue: cleared all jobs (privacy purge)")
+
     # ------------------------------------------------------------------
     # IPC-обработчики (паттерн handle_* как в других сервисах)
     # ------------------------------------------------------------------
@@ -579,6 +603,8 @@ class TranscriptionQueue:
 
     def handle_get_status(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_queue_status — статус задания по job_id."""
+        if self._privacy_mode_fn is not None and self._privacy_mode_fn():
+            return {"status": "unknown", "reason": "privacy_mode_active"}
         job_id = str(params.get("job_id", "")).strip()
         if not job_id:
             raise ValueError("Параметр job_id обязателен")
@@ -599,9 +625,13 @@ class TranscriptionQueue:
 
     def handle_peek(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: peek_transcription_queue — следующее задание без снятия из очереди."""
+        if self._privacy_mode_fn is not None and self._privacy_mode_fn():
+            return {"job": None, "reason": "privacy_mode_active"}
         job = self.peek()
         return {"job": job}
 
     def handle_list_queue(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: list_transcription_queue — список всех заданий."""
+        if self._privacy_mode_fn is not None and self._privacy_mode_fn():
+            return {"jobs": [], "total": 0, "reason": "privacy_mode_active"}
         return {"jobs": self.list_queue(), "stats": self.get_queue_stats()}
