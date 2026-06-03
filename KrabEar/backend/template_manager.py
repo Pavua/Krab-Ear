@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 from pathlib import Path
@@ -76,12 +77,25 @@ class TemplateManager:
         return result
 
     def _save_user(self, templates: list[dict[str, Any]]) -> None:
-        """Сохраняет только пользовательские (не builtin) шаблоны."""
+        """Сохраняет только пользовательские (не builtin) шаблоны атомарно.
+
+        W24 (LOW, data-loss): direct write_text truncates the file before writing;
+        a crash or disk-full mid-write would produce a corrupt/empty JSON file that
+        _load() cannot parse, silently discarding all user templates.
+        Atomic pattern: write to sibling .tmp → fsync → os.replace (rename).
+        """
         user_only = [t for t in templates if not t.get("builtin", False)]
-        self._file.write_text(
-            json.dumps(user_only, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        content = json.dumps(user_only, ensure_ascii=False, indent=2)
+        tmp = self._file.with_suffix(".json.tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(content)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, self._file)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
 
     # ------------------------------------------------------------------
     # Публичный API

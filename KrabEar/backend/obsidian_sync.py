@@ -376,8 +376,20 @@ class ObsidianSyncManager:
 
         file_count = 0
         if vault_path is not None:
-            target_dir = vault_path / folder
-            if target_dir.exists():
+            # W24 (LOW, containment): re-validate folder containment before
+            # reading the filesystem.  The persisted folder value may have been
+            # tampered with (e.g. "../../etc") between configure() and
+            # get_sync_status().  Return 0 rather than reading outside the vault.
+            try:
+                target_dir = _validate_and_resolve_folder(vault_path, folder)
+            except ValueError as exc:
+                logger.warning(
+                    "get_sync_status: небезопасный folder %r, file_count=0: %s",
+                    folder,
+                    exc,
+                )
+                target_dir = None
+            if target_dir is not None and target_dir.exists():
                 file_count = sum(1 for f in target_dir.iterdir() if f.suffix == ".md")
 
         return {
@@ -492,7 +504,14 @@ class ObsidianSyncManager:
         if target_lang:
             lines.append(f"target_lang: {_yaml_scalar(str(target_lang))}")
         if confidence is not None:
-            lines.append(f"confidence: {confidence:.3f}")
+            # W24 (LOW, silent-skip): coerce confidence defensively so a
+            # non-numeric value (e.g. a string "high") does not raise ValueError
+            # and cause the entire item to be silently skipped during sync.
+            try:
+                confidence_f = float(confidence)
+            except (TypeError, ValueError):
+                confidence_f = 0.0
+            lines.append(f"confidence: {confidence_f:.3f}")
         lines.append("source: krab-ear")
         lines.append("---")
         lines.append("")
