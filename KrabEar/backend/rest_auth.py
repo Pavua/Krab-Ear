@@ -21,6 +21,7 @@ import json
 import os
 import secrets
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -80,8 +81,20 @@ class RestAuth:
                 return True
             return False
 
+    # How often (in seconds) to flush a last_used timestamp update to disk
+    # (wave-31 H2 MED fix).  Concurrent auth calls within this window share a
+    # single flock(LOCK_EX) write instead of serialising on every call.
+    _LAST_USED_WRITE_INTERVAL_SEC = 60
+
     def verify_token(self, raw_token: str) -> Optional[dict]:
-        """Verify raw_token.  Updates last_used and returns meta or None."""
+        """Verify raw_token.  Updates last_used and returns meta or None.
+
+        Lazy-write optimisation (wave-31 H2 MED): _save() is deferred until
+        at least _LAST_USED_WRITE_INTERVAL_SEC seconds have elapsed since the
+        last flush for this token.  This eliminates the per-request flock(LOCK_EX)
+        contention that caused a serialisation DoS when 10+ auth calls arrived
+        in parallel — each waiting for the exclusive file lock.
+        """
         if not raw_token:
             return None
         token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
@@ -91,8 +104,24 @@ class RestAuth:
                 # Защита от timing-oracle: constant-time сравнение хэшей.
                 stored = entry.get("token_hash") or ""
                 if hmac.compare_digest(stored, token_hash):
+                    now = time.time()
+                    # Parse existing last_used to a float epoch for comparison.
+                    last_used_raw = entry.get("last_used")
+                    last_used_ts: float = 0.0
+                    if last_used_raw:
+                        try:
+                            from datetime import datetime as _dt
+                            last_used_ts = _dt.fromisoformat(
+                                last_used_raw.replace("Z", "+00:00")
+                            ).timestamp()
+                        except Exception:
+                            last_used_ts = 0.0
                     entry["last_used"] = datetime.now(timezone.utc).isoformat()
-                    self._save(self._tokens)
+                    # Only flush to disk when the timestamp would change by
+                    # more than the deferred-write interval — avoids an
+                    # flock(LOCK_EX) round-trip on every single auth request.
+                    if abs(now - last_used_ts) > self._LAST_USED_WRITE_INTERVAL_SEC:
+                        self._save(self._tokens)
                     return self._public_meta(entry)
         return None
 
