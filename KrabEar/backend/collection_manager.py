@@ -18,6 +18,12 @@ logger = logging.getLogger("KrabEar.Backend.CollectionManager")
 
 _COLLECTIONS_FILE = "collections.json"
 
+# DoS caps (MED wave-25)
+MAX_COLLECTIONS = 500
+MAX_ITEMS_PER_COLLECTION = 10_000
+MAX_COLLECTION_NAME_LEN = 200
+MAX_ITEM_ID_LEN = 200
+
 
 class CollectionManager:
     """Управление коллекциями/папками для организации записей истории.
@@ -137,20 +143,30 @@ class CollectionManager:
         """Создаёт новую коллекцию.
 
         Args:
-            name: Уникальное имя коллекции (непустое).
+            name: Уникальное имя коллекции (непустое, не длиннее MAX_COLLECTION_NAME_LEN).
             description: Опциональное описание.
 
         Returns:
             dict с полями name, description, created_at, item_count.
 
         Raises:
-            ValueError: если имя пустое или коллекция с таким именем уже существует.
+            ValueError: если имя пустое, слишком длинное, или коллекция уже существует.
         """
         name = name.strip()
         if not name:
             raise ValueError("Имя коллекции не может быть пустым")
+        if len(name) > MAX_COLLECTION_NAME_LEN:
+            raise ValueError(
+                f"Имя коллекции слишком длинное (максимум {MAX_COLLECTION_NAME_LEN} символов)"
+            )
 
         with self._lock:
+            if len(self._data["collections"]) >= MAX_COLLECTIONS:
+                return {
+                    "ok": False,
+                    "reason": "limit_exceeded",
+                    "detail": f"Достигнут лимит коллекций ({MAX_COLLECTIONS})",
+                }
             if name in self._data["collections"]:
                 raise ValueError(f"Коллекция '{name}' уже существует")
 
@@ -195,25 +211,42 @@ class CollectionManager:
 
         Args:
             collection_name: Имя коллекции.
-            item_id: ID записи истории.
+            item_id: ID записи истории (непустой str, не длиннее MAX_ITEM_ID_LEN).
 
         Returns:
             dict с именем коллекции и обновлённым item_count.
+            Возвращает {"ok": False, "reason": "limit_exceeded", ...} при превышении
+            лимита элементов коллекции, не бросает исключение.
 
         Raises:
             KeyError: если коллекция не найдена.
-            ValueError: если item_id пустой.
+            ValueError: если item_id не является непустой строкой до MAX_ITEM_ID_LEN символов.
         """
         collection_name = collection_name.strip()
+        # Input validation: must be a non-empty string within length limit
+        if not isinstance(item_id, str):
+            raise ValueError("item_id должен быть строкой")
         item_id = item_id.strip()
         if not item_id:
             raise ValueError("item_id не может быть пустым")
+        if len(item_id) > MAX_ITEM_ID_LEN:
+            raise ValueError(
+                f"item_id слишком длинный (максимум {MAX_ITEM_ID_LEN} символов)"
+            )
 
         with self._lock:
             if collection_name not in self._data["collections"]:
                 raise KeyError(f"Коллекция '{collection_name}' не найдена")
             col = self._data["collections"][collection_name]
             if item_id not in col["item_ids"]:
+                if len(col["item_ids"]) >= MAX_ITEMS_PER_COLLECTION:
+                    return {
+                        "ok": False,
+                        "reason": "limit_exceeded",
+                        "detail": (
+                            f"Коллекция достигла лимита элементов ({MAX_ITEMS_PER_COLLECTION})"
+                        ),
+                    }
                 col["item_ids"].append(item_id)
                 self._save()
             return self._collection_to_dict(col)
