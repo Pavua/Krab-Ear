@@ -277,7 +277,14 @@ class GlossaryAutoLearnService:
         Returns:
             {"suggestions": [{id, source_term, target_term, frequency,
                                domain, confidence}]}
+
+        Privacy gate (wave-29): когда privacy_mode_enabled=True возвращает пустые предложения
+        без обращения к истории переводов — утечка medical domain term pairs нарушает
+        режим конфиденциальности.
         """
+        if self._cached_settings().get("privacy_mode_enabled"):
+            return {"suggestions": []}
+
         limit = int(params.get("limit", 20))
         if limit < 1:
             limit = 1
