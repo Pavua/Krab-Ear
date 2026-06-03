@@ -153,42 +153,43 @@ class TestPrivacyModeGuard(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.mkdtemp()
 
-    def test_privacy_mode_skips_wake_word_start(self) -> None:
-        """When privacy_mode_enabled=True, handle_wake_word_start must skip."""
+    def test_privacy_mode_blocks_wake_word_start(self) -> None:
+        """When privacy_mode_enabled=True, handle_wake_word_start must return ok=False."""
         adapter = _make_adapter(
             self._tmp,
             settings={"privacy_mode_enabled": True},
         )
         result = adapter.handle_wake_word_start({"model": "hey_jarvis"})
-        self.assertTrue(result["ok"], result)
-        self.assertEqual(result.get("skipped"), "privacy_mode")
+        self.assertFalse(result["ok"], result)
+        self.assertIn("reason", result)
+        self.assertEqual(result["reason"], "cannot activate wake-word in privacy mode")
 
     def test_privacy_mode_false_proceeds(self) -> None:
-        """When privacy_mode_enabled=False, the call should NOT be skipped."""
+        """When privacy_mode_enabled=False, the call should NOT be blocked."""
         adapter = _make_adapter(
             self._tmp,
             settings={"privacy_mode_enabled": False},
         )
         with patch.object(adapter, "start"):
             result = adapter.handle_wake_word_start({"model": "hey_jarvis"})
-        self.assertNotEqual(result.get("skipped"), "privacy_mode")
+        self.assertNotEqual(result.get("reason"), "cannot activate wake-word in privacy mode")
 
     def test_privacy_mode_missing_key_proceeds(self) -> None:
-        """When key is absent (defaults to False), must not skip."""
+        """When key is absent (defaults to False), must not block."""
         adapter = _make_adapter(self._tmp, settings={})
         with patch.object(adapter, "start"):
             result = adapter.handle_wake_word_start({"model": "hey_jarvis"})
-        self.assertNotEqual(result.get("skipped"), "privacy_mode")
+        self.assertNotEqual(result.get("reason"), "cannot activate wake-word in privacy mode")
 
-    def test_privacy_mode_skips_regardless_of_threshold(self) -> None:
-        """Even with a valid threshold, privacy mode must skip before threshold check."""
+    def test_privacy_mode_blocks_regardless_of_threshold(self) -> None:
+        """Even with a valid threshold, privacy mode must block before threshold check."""
         adapter = _make_adapter(
             self._tmp,
             settings={"privacy_mode_enabled": True},
         )
         result = adapter.handle_wake_word_start({"model": "hey_jarvis", "threshold": 0.7})
-        self.assertTrue(result["ok"], result)
-        self.assertEqual(result.get("skipped"), "privacy_mode")
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["reason"], "cannot activate wake-word in privacy mode")
 
 
 # ---------------------------------------------------------------------------

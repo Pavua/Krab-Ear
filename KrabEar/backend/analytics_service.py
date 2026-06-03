@@ -124,7 +124,10 @@ class AnalyticsService:
                 "reason": "privacy_mode_active",
                 "privacy_mode_active": True,
             }
-        days = int(params.get("days", 30))
+        try:
+            days = int(params.get("days", 30))
+        except (TypeError, ValueError):
+            days = 30
         try:
             with self._store._lock():
                 items = self._store._load_active_items_unlocked()
