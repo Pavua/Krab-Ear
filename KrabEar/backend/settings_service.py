@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -266,8 +267,34 @@ class SettingsService:
         with self._save_lock:  # W1437
             return self._handle_set_settings_locked(params)
 
+    # ---------------------------------------------------------------------------
+    # ENV-PIN guard: these settings may be locked by the operator via env vars.
+    # If the env var is set the IPC caller must NOT be allowed to overwrite it.
+    # ---------------------------------------------------------------------------
+    _ENV_PINNED_SETTINGS: dict[str, str] = {
+        "ipc_signing_secret": "KRAB_EAR_IPC_SIGNING_SECRET",
+        "ipc_signing_enabled": "KRAB_EAR_IPC_SIGNING_ENABLED",
+    }
+
+    def _check_env_pinned(self, params: dict[str, Any]) -> None:
+        """Raise ValueError for any key in *params* that is pinned by an env var.
+
+        The error message names the env var the operator must unset to allow
+        the update, so callers get a clear action item.
+        """
+        for key, env_var in self._ENV_PINNED_SETTINGS.items():
+            if key in params and os.environ.get(env_var) is not None:
+                raise ValueError(
+                    f"{key} is pinned by env; "
+                    f"remove {env_var} to allow updates"
+                )
+
     def _handle_set_settings_locked(self, params: dict[str, Any]) -> dict[str, Any]:
         old_settings = self.cached_settings()
+
+        # A2: refuse to overwrite env-pinned security settings via IPC.
+        self._check_env_pinned(params)
+
         try:
             self._backup.create_backup(old_settings, reason="before_set")
         except Exception as exc:  # noqa: BLE001

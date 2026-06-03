@@ -102,13 +102,20 @@ class RequestSigner:
         Args:
             method: Имя IPC-метода.
             params: Словарь параметров.
-            secret: Общий секрет в виде hex-строки.
+            secret: Общий секрет в виде hex-строки.  Не может быть пустым.
             timestamp: Unix-время (float). Если None — текущее время.
             nonce: Если None — генерируется автоматически через secrets.token_hex(16).
+
+        Raises:
+            ValueError: если *secret* пустой или состоит только из пробелов.
 
         Returns:
             SignedRequest с заполненными полями signature, timestamp, nonce.
         """
+        if not isinstance(secret, str) or not secret.strip():
+            raise ValueError(
+                "ipc_signing_secret must be non-empty when signing is enabled"
+            )
         if timestamp is None:
             timestamp = time.time()
         if nonce is None:
@@ -160,6 +167,9 @@ class RequestSigner:
         if not isinstance(signature, str) or not isinstance(nonce, str):
             return False
         if not isinstance(timestamp, (int, float)) or math.isnan(timestamp) or math.isinf(timestamp):
+            return False
+        # Empty secret is trivially forgeable — refuse to verify rather than silently accept.
+        if not isinstance(secret, str) or not secret.strip():
             return False
 
         # 1. Проверка временно́го окна (быстрый отсев устаревших запросов)
