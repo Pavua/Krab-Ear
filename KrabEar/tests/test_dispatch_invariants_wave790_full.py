@@ -306,7 +306,9 @@ _EXPECTED = {
     "replace_word_in_last_transcript": "svc._llm_ops_svc.handle_replace_word_in_last_transcript",
     "score_transcription": "svc._handle_score_transcription",
     # W1734: purge_all_data — destructive privacy wipe (archive + bookmarks + call_sessions + chains)
-    "purge_all_data": "svc._history.handle_purge_all_data",
+    # wave-25 #1697: now routes via in-class _handle_purge_all_data TOCTOU-guard wrapper
+    # (wraps self._history.handle_purge_all_data with auto_backup.set_purged + purge-epoch).
+    "purge_all_data": "svc._handle_purge_all_data",
     # W1773: three handlers stranded in the deleted dead ipc_dispatch.py, now wired.
     # get_never_played uses a lambda (presence-only assertion in per-handler test below).
     "rename_collection": "svc._collections.handle_rename_collection",
