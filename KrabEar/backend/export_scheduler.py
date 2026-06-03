@@ -8,6 +8,7 @@ check_and_export() — без фоновых потоков.
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -324,8 +325,8 @@ class ExportScheduler:
         export_ts = datetime.now().strftime("%Y-%m-%d %H:%M")
         rows: list[str] = []
         for item in items_dicts:
-            ts = item.get("ts", "")
-            text = item.get("text", "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            ts = html.escape(str(item.get("ts", "")))
+            text = html.escape(str(item.get("text", "")))
             rows.append(f"<tr><td>{ts}</td><td>{text}</td></tr>")
         rows_html = "\n".join(rows)
         return f"""<!DOCTYPE html>
@@ -366,6 +367,7 @@ class ExportScheduler:
         interval_hours: int = 24,
         output_dir: str | None = None,
         enabled: bool = True,
+        interval_seconds: int | None = None,
     ) -> dict:
         """Настраивает расписание экспорта.
 
@@ -374,6 +376,8 @@ class ExportScheduler:
             interval_hours: интервал между экспортами в часах (мин. 1).
             output_dir: папка для файлов экспорта (None = авто).
             enabled: True чтобы включить авто-экспорт.
+            interval_seconds: если задан, должен быть >= 60 (мин. 1 минута).
+                Переопределяет interval_hours (конвертируется в часы).
 
         Returns:
             Обновлённый статус расписания.
@@ -381,6 +385,13 @@ class ExportScheduler:
         fmt = str(fmt).lower().strip()
         if fmt not in SUPPORTED_FORMATS:
             raise ValueError(f"Неподдерживаемый формат: {fmt!r}. Допустимые: {sorted(SUPPORTED_FORMATS)}")
+        if interval_seconds is not None:
+            interval_seconds = int(interval_seconds)
+            if interval_seconds < 60:
+                raise ValueError(
+                    f"interval_seconds must be >= 60, got {interval_seconds}"
+                )
+            interval_hours = max(1, interval_seconds // 3600)
         interval_hours = max(1, int(interval_hours))
 
         # Validate output_dir before persisting — reject paths outside data_dir

@@ -42,6 +42,10 @@ AUTO_DEDUP_ENABLED: bool = False
 # W1243 F2: максимальное число записей для полного сканирования run_deduplication
 _MAX_DEDUP_SCAN: int = 1000
 
+# Maximum number of history items allowed for synchronous IPC deduplication.
+# Larger histories block the IPC thread due to O(n²) SequenceMatcher comparisons.
+MAX_DEDUP_ITEMS: int = 500
+
 # Timestamp-заглушка для записей без поля ts — ставим в эпоху 0 (самые старые)
 _MISSING_TS_PLACEHOLDER: str = "1970-01-01T00:00:00+00:00"
 
@@ -718,6 +722,28 @@ class AutoDeduplicator:
         if store is None:
             raise ValueError("store не передан в handle_run_deduplication")
         semantic_searcher = params.get("_semantic_searcher")
+
+        # W1248: privacy mode check must happen before any store access.
+        if self._privacy_mode_enabled():
+            logger.debug("handle_run_deduplication: пропущено — активен режим приватности")
+            return {
+                "total_scanned": 0,
+                "total_in_store": 0,
+                "capped": False,
+                "duplicate_groups": 0,
+                "duplicates": [],
+                "skipped_reason": "privacy_mode",
+            }
+
+        # G2: cap synchronous IPC deduplication to avoid blocking the IPC thread
+        # with O(n²) SequenceMatcher comparisons on large histories.
+        try:
+            probe_page, _ = store.get_history_page(cursor=None, limit=MAX_DEDUP_ITEMS + 1)
+            history_items = probe_page
+        except Exception:
+            history_items = []
+        if len(history_items) > MAX_DEDUP_ITEMS:
+            return {"ok": False, "reason": f"too many items (max {MAX_DEDUP_ITEMS})"}
 
         result = self.run_deduplication(store=store, threshold=threshold)
 
