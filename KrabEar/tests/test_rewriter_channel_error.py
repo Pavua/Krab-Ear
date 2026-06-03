@@ -195,7 +195,7 @@ class TestSwitchToStableRewriterAction(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestRecommendedModels(unittest.TestCase):
-    """_handle_list_llm_models returns recommended_models with qwen3-4b-abliterated first."""
+    """list_llm_models (LLMOpsService) returns recommended_models with qwen3-4b-abliterated first."""
 
     def test_recommended_models_starts_with_qwen3(self):
         """Mock /v1/models endpoint — recommended_models[0] must be qwen3-4b-abliterated."""
@@ -208,7 +208,7 @@ class TestRecommendedModels(unittest.TestCase):
             ]
         }
 
-        # Simulate the logic in _handle_list_llm_models without full BackendService setup
+        # Simulate the logic in LLMOpsService.handle_list_llm_models without full BackendService setup
         data = mock_resp.json()
         ids = [item.get("id") for item in data.get("data", []) if item.get("id")]
         recommended_models = [

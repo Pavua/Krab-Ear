@@ -207,21 +207,26 @@ class TestLLMOpsServiceSSRF(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Site 3: BackendService._handle_list_llm_models
+# Site 3: list_llm_models via the LIVE extracted LLMOpsService
+# (repointed off deleted dead-duplicate BackendService._handle_list_llm_models, #47)
 # ---------------------------------------------------------------------------
 
 class TestBackendServiceListLlmModelsSSRF(unittest.TestCase):
-    """BackendService._handle_list_llm_models must not GET for bad schemes."""
+    """list_llm_models (live LLMOpsService handler) must not GET for bad schemes."""
 
     def _make_service(self, llm_base_url: str):
-        from backend.service import BackendService
-        svc = BackendService.__new__(BackendService)
+        from backend.llm_ops_service import LLMOpsService
+        svc = LLMOpsService.__new__(LLMOpsService)
         settings_svc = MagicMock()
         settings_svc.cached_settings.return_value = {
             "llm_base_url": llm_base_url,
             "llm_api_key": "",
         }
         svc._settings_svc = settings_svc
+        svc._store = MagicMock()
+        svc._transcriber = MagicMock()
+        # Alias to the live handler so test bodies can keep calling _handle_list_llm_models.
+        svc._handle_list_llm_models = svc.handle_list_llm_models
         return svc
 
     def test_file_scheme_no_get_returns_error(self):

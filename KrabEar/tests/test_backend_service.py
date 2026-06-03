@@ -2155,10 +2155,10 @@ class ListLlmModelsTestCase(unittest.TestCase):
                 {"id": "mmm-model"},
             ]
         }
-        with patch("backend.service.BackendService._handle_list_llm_models",
-                   wraps=self.service._handle_list_llm_models):
-            with patch("requests.get", return_value=fake_resp):
-                resp = self._req()
+        # list_llm_models routes through the live LLMOpsService via the dispatch table;
+        # only the outbound HTTP call needs mocking (#47: dead in-class copy deleted).
+        with patch("requests.get", return_value=fake_resp):
+            resp = self._req()
 
         self.assertTrue(resp.get("ok"), f"unexpected: {resp}")
         result = resp["result"]
