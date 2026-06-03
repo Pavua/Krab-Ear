@@ -20,6 +20,11 @@ STATUS_PENDING = "pending"
 STATUS_COMPLETED = "completed"
 STATUS_CANCELLED = "cancelled"
 
+# DoS cap (MED wave-25)
+MAX_SCHEDULED_RECORDINGS = 1_000
+# Eviction: remove terminal entries older than this many seconds
+_EVICT_AFTER_SECONDS = 86_400  # 24 h
+
 
 class RecordingScheduler:
     """Планировщик записей: создание, отмена, перечисление, триггер по времени."""
@@ -34,6 +39,31 @@ class RecordingScheduler:
     # ------------------------------------------------------------------
     # Персистентность
     # ------------------------------------------------------------------
+
+    def _evict_old_terminal(self) -> None:
+        """Удаляет завершённые/отменённые записи старше _EVICT_AFTER_SECONDS.
+
+        Вызывается под self._lock. Предотвращает неограниченный рост файла.
+        """
+        now = datetime.now(tz=timezone.utc)
+        to_delete = []
+        for sid, entry in self._schedules.items():
+            if entry.get("status") not in (STATUS_COMPLETED, STATUS_CANCELLED):
+                continue
+            created_raw = entry.get("created_at", "")
+            try:
+                created_dt = _parse_datetime(created_raw)
+            except Exception:
+                continue
+            if (now - created_dt).total_seconds() >= _EVICT_AFTER_SECONDS:
+                to_delete.append(sid)
+        for sid in to_delete:
+            del self._schedules[sid]
+        if to_delete:
+            logger.debug(
+                "RecordingScheduler: evicted %d terminal entries",
+                len(to_delete),
+            )
 
     def _load(self) -> None:
         """Загружает расписания из файла, если он существует."""
@@ -97,6 +127,13 @@ class RecordingScheduler:
             "created_at": datetime.now(tz=timezone.utc).isoformat(),
         }
         with self._lock:
+            # Evict stale terminal entries before checking the cap
+            self._evict_old_terminal()
+            if len(self._schedules) >= MAX_SCHEDULED_RECORDINGS:
+                raise ValueError(
+                    f"Достигнут лимит запланированных записей ({MAX_SCHEDULED_RECORDINGS}). "
+                    "Отмените или дождитесь завершения существующих заданий."
+                )
             self._schedules[schedule_id] = entry
             self._save()
 
@@ -118,8 +155,12 @@ class RecordingScheduler:
         return True
 
     def list_scheduled(self) -> list[dict]:
-        """Возвращает все записи расписания (все статусы), отсортированные по start_time."""
+        """Возвращает все записи расписания (все статусы), отсортированные по start_time.
+
+        Заодно выполняет eviction старых terminal-записей (>24h) для самоочистки.
+        """
         with self._lock:
+            self._evict_old_terminal()
             items = list(self._schedules.values())
         items.sort(key=lambda x: x.get("start_time", ""))
         return [dict(item) for item in items]
