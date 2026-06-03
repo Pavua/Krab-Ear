@@ -20,6 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from backend.llm_ops_service import LLMOpsService
 from backend.state_store import StateStore
 
 
@@ -29,43 +30,20 @@ from backend.state_store import StateStore
 
 
 class _FakeService:
-    """Минимальная заглушка BackendService с реальным StateStore."""
+    """Минимальная заглушка BackendService с реальным StateStore.
+
+    Делегирует на ЖИВОЙ extracted-обработчик LLMOpsService.handle_replace_word_in_last_transcript
+    (in-class BackendService._handle_replace_word_in_last_transcript удалён как dead-duplicate, #47).
+    """
 
     def __init__(self, store: StateStore) -> None:
         self.store = store
+        self._llm_ops_svc = LLMOpsService(
+            store=store, settings_svc=None, transcriber=None
+        )
 
     def _handle_replace_word_in_last_transcript(self, params: dict) -> dict:
-        # Импортируем и вызываем реальный метод через bound-method trick.
-        # Прямо вызываем логику — метод не зависит от других атрибутов сервиса.
-        import re
-
-        old = str(params.get("old_word", "")).strip()
-        new = str(params.get("new_word", "")).strip()
-        if not old or not new:
-            return {"ok": False, "replaced_count": 0, "history_id": None, "error": "missing_words"}
-
-        history_id = str(params.get("history_id", "")).strip() or None
-
-        if history_id is None:
-            with self.store._lock():
-                active = self.store._load_active_items_unlocked()
-            history_id = active[-1].id if active else None
-
-        if history_id is None:
-            return {"ok": False, "replaced_count": 0, "history_id": None, "error": "no_recent_history"}
-
-        item = self.store.get_history_item_by_id(history_id)
-        if item is None:
-            return {"ok": False, "replaced_count": 0, "history_id": history_id, "error": "item_not_found"}
-
-        pattern = re.compile(r'\b' + re.escape(old) + r'\b', re.IGNORECASE)
-        new_text, replaced_count = pattern.subn(new, item.text)
-
-        if replaced_count == 0:
-            return {"ok": False, "replaced_count": 0, "history_id": history_id, "error": "word_not_found"}
-
-        self.store.update_history_item_text(history_id, new_text)
-        return {"ok": True, "replaced_count": replaced_count, "history_id": history_id, "new_text": new_text}
+        return self._llm_ops_svc.handle_replace_word_in_last_transcript(params)
 
 
 # ---------------------------------------------------------------------------

@@ -5,9 +5,9 @@ Covers:
   F2 MED: handle_list_telegram_chats must respect privacy_mode_enabled.
   F3 MED: TelegramBridge.send_message() must truncate text > 4096 UTF-8 chars.
 
-Tests use AST-level verification for service.py (avoids the Python 3.10+
-dataclass(slots=True) import chain) and runtime tests for telegram_bridge.py
-which has no such constraint.
+Tests use AST-level verification for apple_integration_service.py (the live
+home of handle_list_telegram_chats after the W797 in-class duplicate removal,
+#47) and runtime tests for telegram_bridge.py which has no such constraint.
 """
 
 from __future__ import annotations
@@ -31,9 +31,16 @@ from backend.telegram_bridge import TelegramBridge
 
 
 class TestListChatsPrivacyGuardAST(unittest.TestCase):
-    """AST-verify that _handle_list_telegram_chats contains the privacy guard."""
+    """AST-verify that handle_list_telegram_chats contains the privacy guard.
 
-    _SERVICE_PATH = os.path.join(PROJECT_ROOT, "backend", "service.py")
+    W797 follow-up (#47): the in-class BackendService._handle_list_telegram_chats
+    duplicate was deleted. The live handler now lives in
+    backend/apple_integration_service.py as handle_list_telegram_chats — these
+    AST checks point at that module / method.
+    """
+
+    _SERVICE_PATH = os.path.join(PROJECT_ROOT, "backend", "apple_integration_service.py")
+    _METHOD = "handle_list_telegram_chats"
 
     def _load_ast(self) -> ast.Module:
         with open(self._SERVICE_PATH, encoding="utf-8") as fh:
@@ -47,23 +54,23 @@ class TestListChatsPrivacyGuardAST(unittest.TestCase):
         return []
 
     def test_privacy_guard_present_in_handle_list_telegram_chats(self) -> None:
-        """_handle_list_telegram_chats must call _get_runtime_setting('privacy_mode_enabled')."""
+        """handle_list_telegram_chats must gate on 'privacy_mode_enabled'."""
         tree = self._load_ast()
-        body = self._find_method_body(tree, "_handle_list_telegram_chats")
-        self.assertTrue(body, "_handle_list_telegram_chats not found in service.py")
+        body = self._find_method_body(tree, self._METHOD)
+        self.assertTrue(body, f"{self._METHOD} not found in apple_integration_service.py")
 
         full_dump = " ".join(ast.dump(stmt) for stmt in body)
         self.assertIn(
             "privacy_mode_enabled",
             full_dump,
-            "_handle_list_telegram_chats is missing privacy_mode_enabled guard",
+            f"{self._METHOD} is missing privacy_mode_enabled guard",
         )
 
     def test_privacy_guard_returns_skipped_key(self) -> None:
         """The early-return under privacy_mode must include key 'skipped'."""
         tree = self._load_ast()
-        body = self._find_method_body(tree, "_handle_list_telegram_chats")
-        self.assertTrue(body, "_handle_list_telegram_chats not found in service.py")
+        body = self._find_method_body(tree, self._METHOD)
+        self.assertTrue(body, f"{self._METHOD} not found in apple_integration_service.py")
 
         found_skipped = False
         for node in ast.walk(ast.Module(body=body, type_ignores=[])):
@@ -74,14 +81,14 @@ class TestListChatsPrivacyGuardAST(unittest.TestCase):
                         break
         self.assertTrue(
             found_skipped,
-            "No Return({..., 'skipped': ...}) found in _handle_list_telegram_chats",
+            f"No Return({{..., 'skipped': ...}}) found in {self._METHOD}",
         )
 
     def test_list_chats_skipped_in_privacy_mode(self) -> None:
         """AST: early-return dict must contain chats key with empty list literal."""
         tree = self._load_ast()
-        body = self._find_method_body(tree, "_handle_list_telegram_chats")
-        self.assertTrue(body, "_handle_list_telegram_chats not found in service.py")
+        body = self._find_method_body(tree, self._METHOD)
+        self.assertTrue(body, f"{self._METHOD} not found in apple_integration_service.py")
 
         # Find the if-block that checks privacy_mode_enabled and verify it returns
         # a dict with an empty list for 'chats'.
@@ -103,15 +110,15 @@ class TestListChatsPrivacyGuardAST(unittest.TestCase):
                                 break
         self.assertTrue(
             found,
-            "privacy_mode If-block in _handle_list_telegram_chats must return "
+            f"privacy_mode If-block in {self._METHOD} must return "
             "{'chats': [], ...}",
         )
 
     def test_list_chats_returns_chats_normally(self) -> None:
-        """AST: _handle_list_telegram_chats must have a normal return path with 'chats' key."""
+        """AST: handle_list_telegram_chats must have a normal return path with 'chats' key."""
         tree = self._load_ast()
-        body = self._find_method_body(tree, "_handle_list_telegram_chats")
-        self.assertTrue(body, "_handle_list_telegram_chats not found in service.py")
+        body = self._find_method_body(tree, self._METHOD)
+        self.assertTrue(body, f"{self._METHOD} not found in apple_integration_service.py")
 
         # Find a Return node with {'chats': ...} that is NOT inside a privacy if-block.
         # We look for at least one Return whose dict value for 'chats' is NOT a list literal.
@@ -126,7 +133,7 @@ class TestListChatsPrivacyGuardAST(unittest.TestCase):
                             break
         self.assertTrue(
             found_normal_return,
-            "_handle_list_telegram_chats is missing a normal return {'chats': <var>} path",
+            f"{self._METHOD} is missing a normal return {{'chats': <var>}} path",
         )
 
 

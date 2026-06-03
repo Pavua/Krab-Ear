@@ -307,7 +307,12 @@ class TestActivityCalendarIpc(unittest.TestCase):
         service_path = PROJECT_ROOT / "backend" / "service.py"
         content = service_path.read_text(encoding="utf-8")
         self.assertIn('"get_activity_calendar"', content)
-        self.assertIn("_handle_get_activity_calendar", content)
+        # W#47: dead in-class _handle_get_activity_calendar deleted; assert the
+        # LIVE delegation to the extracted AnalyticsService instead.
+        self.assertIn(
+            '"get_activity_calendar": self._analytics_svc.handle_get_activity_calendar',
+            content,
+        )
 
     def test_handler_method_exists_in_activity_calendar(self):
         """ActivityCalendar имеет методы generate_calendar и generate_calendar_svg."""

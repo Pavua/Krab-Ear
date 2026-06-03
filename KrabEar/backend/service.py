@@ -41,7 +41,7 @@ from core.auto_title import AutoTitleGenerator
 from core.context_memory import ContextMemory
 from backend.transcript_versioning import TranscriptVersionManager
 from backend.sharing_manager import SharingManager
-from backend.semantic_search import SemanticSearcher, keyword_fallback_search
+from backend.semantic_search import SemanticSearcher
 from core.word_timing import WordTimingAnalyzer
 from core.speech_pace import SpeechPaceAnalyzer
 from core.readability_scorer import ReadabilityScorer
@@ -119,7 +119,7 @@ from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, A
 from backend.email_sender import EmailSender
 from backend.recap_scheduler import RecapScheduler
 from backend.paste_app_memory import PasteAppMemory
-from backend.telegram_bridge import CircuitBreakerOpen, TelegramBridge
+from backend.telegram_bridge import TelegramBridge
 from backend.disk_monitor import DiskSpaceMonitor
 from backend.observability import (
     _BREADCRUMB_EXCLUDED_METHODS,
@@ -145,7 +145,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 # Обеспечиваем корректный импорт модулей KrabEar при запуске как standalone скрипта.
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -835,6 +835,7 @@ class BackendService:
             keyword_cloud_gen=self._keyword_cloud_gen,
             timeline_view=self._timeline_view,
             store=self.store,
+            settings_get=self._get_runtime_setting,
         )
         self._apple_integration_svc = AppleIntegrationService(
             telegram_bridge=self._telegram_bridge,
@@ -1220,65 +1221,6 @@ class BackendService:
     # ------------------------------------------------------------------
     # Semantic search IPC handlers
     # ------------------------------------------------------------------
-
-    def _handle_semantic_search(self, params: dict) -> dict:
-        """Семантический поиск по истории транскрипций через embeddings.
-
-        Params:
-            query     — поисковый запрос (строка, обязательный)
-            top_k     — максимальное число результатов (int, default 10)
-            fallback  — bool, использовать keyword fallback если модель недоступна (default True)
-        Returns:
-            {"results": [{"id": str, "score": float}], "mode": "semantic"|"keyword"|"disabled"}
-        """
-        query = str(params.get("query", "")).strip()
-        if not query:
-            raise ValueError("Параметр query обязателен")
-        top_k = int(params.get("top_k", 10))
-        top_k = max(1, min(top_k, 100))
-        use_fallback = bool(params.get("fallback", True))
-
-        if not self._semantic_searcher.is_enabled:
-            if use_fallback:
-                items = [{"id": it.id, "text": it.text}
-                         for it in self.store._load_active_items_with_lock()]
-                results = keyword_fallback_search(query, items, top_k=top_k)
-                return {"results": results, "mode": "keyword", "reason": "semantic_disabled"}
-            return {"results": [], "mode": "disabled"}
-
-        results = self._semantic_searcher.search(query, top_k=top_k)
-        if not results and use_fallback:
-            items = [{"id": it.id, "text": it.text}
-                     for it in self.store._load_active_items_with_lock()]
-            results = keyword_fallback_search(query, items, top_k=top_k)
-            return {"results": results, "mode": "keyword", "reason": "model_unavailable"}
-
-        return {"results": results, "mode": "semantic"}
-
-    def _handle_semantic_search_status(self, params: dict) -> dict:
-        """Возвращает статус семантического поиска.
-
-        Returns:
-            {"enabled": bool, "model_loaded": bool, "model_name": str,
-             "model_error": str|null, "indexed_count": int}
-        """
-        return self._semantic_searcher.status()
-
-    def _handle_semantic_search_reindex(self, params: dict) -> dict:
-        """Переиндексирует всю историю транскрипций.
-
-        Params:
-            force — bool, перестроить индекс с нуля (default False)
-        Returns:
-            {"indexed": int, "skipped": int, "errors": int}
-        """
-        if not self._semantic_searcher.is_enabled:
-            return {"indexed": 0, "skipped": 0, "errors": 0, "reason": "semantic_search_disabled"}
-        force = bool(params.get("force", False))
-        items = [{"id": it.id, "text": it.text}
-                 for it in self.store._load_active_items_with_lock()]
-        result = self._semantic_searcher.index_all(items, force=force)
-        return result
 
     # ---------------------------------------------------------------------- #
     # Export scheduler periodic worker (W982 — F1 fix)                      #
@@ -2783,50 +2725,6 @@ class BackendService:
         """Делегирует к HealthCheckService.handle_probe_llm_http (W1690)."""
         return self._health_check_svc.handle_probe_llm_http(params)
 
-    def _handle_warmup_stt(self, params: dict) -> dict:
-        """Ручной запуск STT warmup — полезен после смены профиля или модели.
-
-        Загружает текущую активную Whisper-модель через tiny (1s silent) inference.
-        Блокирующий вызов — выполняется в потоке IPC handler'а, возвращает
-        результат только после завершения warmup (или ошибки).
-
-        Returns:
-            {
-              "loaded": bool,      # True если warmup inference прошёл без ошибок
-              "latency_ms": int,   # время inference в мс
-              "model_name": str,   # имя прогретой модели
-              "error": str | None  # сообщение об ошибке (None если loaded=True)
-            }
-        """
-        if not hasattr(self.transcriber, "engine"):
-            return {"loaded": False, "latency_ms": 0, "model_name": "", "error": "engine not available"}
-        return self.transcriber.engine.warmup()
-
-    def _handle_warmup_rewriter(self, params: dict) -> dict:
-        """Ручной запуск LLM rewriter warmup probe.
-
-        Отправляет минимальный (max_tokens=1) запрос в LM Studio для прогрева модели.
-        НЕ трогает circuit breaker — warmup не является user-facing вызовом.
-
-        Params:
-            timeout_sec (float | None): таймаут в секундах; по умолчанию из настроек.
-
-        Returns:
-            {
-              "ok": bool,          # True если HTTP 200
-              "latency_ms": int,   # время ответа в мс
-              "error": str | None, # описание ошибки или None
-              "model": str | None  # имя используемой модели
-            }
-        """
-        if self._llm_rewriter is None:
-            return {"ok": False, "latency_ms": 0, "error": "rewriter_disabled", "model": None}
-        runtime_timeout = self._get_runtime_setting("rewriter_warmup_timeout_sec", 15)
-        timeout_sec = float(params.get("timeout_sec") or runtime_timeout)
-        result = self._llm_rewriter.warmup_probe(timeout_sec=timeout_sec)
-        result["model"] = getattr(self._llm_rewriter, "_model", None)
-        return result
-
     def _handle_get_shutdown_status(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает статус последнего graceful shutdown.
 
@@ -2970,112 +2868,6 @@ class BackendService:
             "metrics": metrics_snapshot,
         }
 
-    def _handle_list_llm_models(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает список моделей доступных в LM Studio через /api/v1/models.
-
-        Используется GUI для динамического заполнения dropdown'а выбора LLM-модели.
-        При недоступности LM Studio возвращает пустой список с описанием ошибки.
-        Таймаут 3 секунды — не блокирует UI.
-        """
-        try:
-            import re as _re
-            import requests as _requests
-            from backend.llm_rewriter import _validate_llm_url
-            cached = self._settings_svc.cached_settings()
-            base_url = str(cached.get("llm_base_url", "http://127.0.0.1:1234/v1")).rstrip("/")
-            api_key = str(cached.get("llm_api_key", ""))
-            headers: dict[str, str] = {}
-            if api_key:
-                headers["Authorization"] = f"Bearer {api_key}"
-            # Wave 68 (LM Studio probe fix): /v1/models возвращает 200 но логирует ERROR
-            # в LM Studio. /api/v1/models — корректный endpoint. Same pattern as PR #396
-            # для llm_rewriter.py:1064 (passive_health_check).
-            _host = _re.sub(r"/v\d+$", "", base_url)
-            _url = f"{_host}/api/v1/models"
-            # Wave 1741: SSRF guard — reject file://, gopher://, etc.
-            _validate_llm_url(_url)
-            resp = _requests.get(
-                _url,
-                headers=headers,
-                timeout=3,
-                allow_redirects=False,  # Wave 1741: no redirect-based SSRF
-            )
-            if resp.status_code != 200:
-                return {"models": [], "error": f"http_{resp.status_code}"}
-            data = resp.json()
-            ids = [
-                item.get("id")
-                for item in data.get("data", [])
-                if item.get("id")
-            ]
-            recommended_models = [
-                "qwen3-4b-abliterated",
-                "huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx",
-                "qwen3-8b-abliterated",
-            ]
-            return {
-                "models": sorted(ids),
-                "recommended_models": recommended_models,
-                "error": None,
-            }
-        except Exception as exc:
-            return {"models": [], "recommended_models": [], "error": str(exc)}
-
-    def _handle_replace_word_in_last_transcript(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Заменяет слово в последней (или указанной) записи истории без перезаписи.
-
-        Параметры:
-          - old_word: str — слово для замены (не пустое).
-          - new_word: str — новое слово (не пустое).
-          - history_id: str | None — ID записи; если не указан, берётся последняя запись.
-
-        Возвращает:
-          {"ok": bool, "replaced_count": int, "history_id": str | None, "new_text": str | None}
-
-        Ошибки (ok=False):
-          - "missing_words"    — old_word или new_word пусты.
-          - "no_recent_history" — история пуста и history_id не указан.
-          - "item_not_found"   — запись с history_id не найдена.
-          - "word_not_found"   — слово не найдено в тексте (с учётом границ слова).
-        """
-        import re
-
-        old = str(params.get("old_word", "")).strip()
-        new = str(params.get("new_word", "")).strip()
-        if not old or not new:
-            return {"ok": False, "replaced_count": 0, "history_id": None, "error": "missing_words"}
-
-        history_id = str(params.get("history_id", "")).strip() or None
-
-        if history_id is None:
-            # Берём самую последнюю запись
-            with self.store._lock():
-                active = self.store._load_active_items_unlocked()
-            history_id = active[-1].id if active else None
-
-        if history_id is None:
-            return {"ok": False, "replaced_count": 0, "history_id": None, "error": "no_recent_history"}
-
-        item = self.store.get_history_item_by_id(history_id)
-        if item is None:
-            return {"ok": False, "replaced_count": 0, "history_id": history_id, "error": "item_not_found"}
-
-        # Замена с учётом границ слова и без учёта регистра
-        pattern = re.compile(r'\b' + re.escape(old) + r'\b', re.IGNORECASE)
-        new_text, replaced_count = pattern.subn(new, item.text)
-
-        if replaced_count == 0:
-            return {"ok": False, "replaced_count": 0, "history_id": history_id, "error": "word_not_found"}
-
-        self.store.update_history_item_text(history_id, new_text)
-        logger.info(
-            "replace_word_in_last_transcript: history_id=%s old=%r new=%r count=%d",
-            history_id,
-            old,
-            new,
-            replaced_count,
-        )
-        return {"ok": True, "replaced_count": replaced_count, "history_id": history_id, "new_text": new_text}
     # --- Privacy audit log handlers ---
 
     def _handle_get_privacy_audit_log(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -3111,76 +2903,6 @@ class BackendService:
         audit = get_privacy_audit_logger()
         audit.clear()
         return {"ok": True}
-
-    # --- D.2.3: Scored STT routing decision ---
-
-    def _handle_get_stt_routing_decision(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает результат scored STT adapter selection для отладки.
-
-        Параметры:
-            language         — ISO 639-1 код языка (например «ru», «en», «zh»).
-            audio_duration_s — длительность аудио в секундах (float, опционально).
-
-        Возвращает:
-            selected_engine — имя выбранного адаптера или null.
-            scores          — dict {engine_name: score} для всех доступных адаптеров.
-            language        — нормализованный код языка.
-            audio_duration_s — длительность из params или null.
-        """
-        from core.stt_router import score_adapters, select_adapter_scored
-
-        language = str(params.get("language", "")).strip().lower() or "und"
-        raw_dur = params.get("audio_duration_s")
-        audio_duration_s: Optional[float] = float(raw_dur) if raw_dur is not None else None
-
-        # Собираем доступные адаптеры из AudioEngine (если есть)
-        # Используем duck-typed stubs на основе настроек — без реального импорта адаптеров.
-        adapters = self._build_virtual_adapters_for_routing()
-        scores = score_adapters(adapters, language, audio_duration_s)
-        best = select_adapter_scored(language, audio_duration_s, adapters)
-        selected_name: Optional[str] = getattr(best, "name", None) if best is not None else None
-
-        return {
-            "selected_engine": selected_name,
-            "scores": scores,
-            "language": language,
-            "audio_duration_s": audio_duration_s,
-        }
-
-    def _build_virtual_adapters_for_routing(self) -> "list[Any]":
-        """Создаёт список виртуальных адаптеров для scored selection.
-
-        Не загружает реальные модели — только описывает возможности каждого
-        адаптера на основе настроек. Используется в IPC для отладки routing.
-        """
-        from types import SimpleNamespace
-
-        def _make(name: str, languages: "set[str]", enabled: bool) -> "Any":
-            ns = SimpleNamespace(
-                name=name,
-                supported_languages=languages,
-            )
-            ns.is_available = lambda: enabled  # type: ignore[attr-defined]
-            return ns
-
-        adapters = []
-
-        # GigaAM — RU-only specialist
-        gigaam_enabled = getattr(settings, "STT_GIGAAM_ENABLED", False)
-        adapters.append(_make("gigaam", {"ru", "uk"}, bool(gigaam_enabled)))
-
-        # Parakeet — EN-only specialist
-        parakeet_enabled = getattr(settings, "PARAKEET_ENABLED", False)
-        adapters.append(_make("parakeet", {"en"}, bool(parakeet_enabled)))
-
-        # SenseVoice — ZH/JA/KO/YUE specialist + decent EN/RU
-        sensevoice_enabled = getattr(settings, "SENSEVOICE_ENABLED", False)
-        adapters.append(_make("sensevoice", {"zh", "ja", "ko", "yue", "en", "ru"}, bool(sensevoice_enabled)))
-
-        # Whisper-MLX — multilingual generalist (empty set = multilingual)
-        adapters.append(_make("whisper-mlx", set(), True))
-
-        return adapters
 
     def _handle_clear_unavailable_models(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: clear_unavailable_models — сбрасывает TTL blacklist недоступных STT-моделей.
@@ -3222,171 +2944,6 @@ class BackendService:
             extra={"cleared": [c["model_id"] for c in cleared]},
         )
         return {"count": len(cleared), "cleared": cleared}
-
-    def _handle_summarize_item(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Генерирует LLM-summary для элемента истории по ID."""
-        item_id = str(params.get("id", "")).strip()
-        if not item_id:
-            raise RuntimeError("Параметр id обязателен")
-
-        # Найти элемент в истории
-        with self.store._lock():
-            items = self.store._load_active_items_unlocked()
-        target = None
-        for item in items:
-            if item.id == item_id:
-                target = item
-                break
-        if target is None:
-            raise RuntimeError(f"Элемент не найден: {item_id}")
-
-        text = target.text or ""
-        if len(text) < 50:
-            raise RuntimeError("Текст слишком короткий для summary")
-
-        summary = self._generate_summary(text)
-        if summary is None:
-            # Fallback на локальный summary
-            local = self._summarize_text_locally(text, mode="summary_short", max_points=3)
-            return {
-                "id": item_id,
-                "summary": local["summary"],
-                "llm": False,
-                "source_chars": len(text),
-            }
-
-        return {
-            "id": item_id,
-            "summary": summary,
-            "llm": True,
-            "source_chars": len(text),
-        }
-
-    def _handle_extract_action_items(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Извлекает задачи/решения/вопросы из транскрипта по item_id через LLM."""
-        item_id = str(params.get("id", "")).strip()
-        if not item_id:
-            raise RuntimeError("Параметр id обязателен")
-
-        if self._action_items_extractor is None:
-            raise RuntimeError("LLM не включён (LLM_ENABLED=False)")
-
-        with self.store._lock():
-            items = self.store._load_active_items_unlocked()
-        target = next((it for it in items if it.id == item_id), None)
-        if target is None:
-            raise RuntimeError(f"Элемент не найден: {item_id}")
-
-        text = target.text or ""
-        language = str(params.get("language", "ru")).lower()
-
-        result = self._action_items_extractor.extract(text, language=language)
-
-        if result.ok:
-            self.store.update_history_item_action_items(
-                item_id=item_id,
-                action_items=[ai.to_dict() for ai in result.action_items],
-                decisions=result.decisions,
-                questions=result.questions,
-            )
-
-        return {
-            "id": item_id,
-            "ok": result.ok,
-            "action_items": [ai.to_dict() for ai in result.action_items],
-            "decisions": result.decisions,
-            "questions": result.questions,
-            "fallback_reason": result.fallback_reason,
-            "latency_ms": result.latency_ms,
-        }
-
-    def _handle_batch_extract_action_items(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Пакетное извлечение задач/решений/вопросов для нескольких item_id."""
-        item_ids = params.get("ids", [])
-        if not isinstance(item_ids, list):
-            raise RuntimeError("Параметр ids должен быть списком")
-        language = str(params.get("language", "ru")).lower()
-
-        if self._action_items_extractor is None:
-            raise RuntimeError("LLM не включён (LLM_ENABLED=False)")
-
-        with self.store._lock():
-            all_items = self.store._load_active_items_unlocked()
-        items_by_id = {it.id: it for it in all_items}
-
-        results = []
-        for item_id in item_ids:
-            item_id = str(item_id).strip()
-            target = items_by_id.get(item_id)
-            if target is None:
-                results.append({"id": item_id, "ok": False, "error": "not_found"})
-                continue
-            text = target.text or ""
-            result = self._action_items_extractor.extract(text, language=language)
-            if result.ok:
-                self.store.update_history_item_action_items(
-                    item_id=item_id,
-                    action_items=[ai.to_dict() for ai in result.action_items],
-                    decisions=result.decisions,
-                    questions=result.questions,
-                )
-            results.append({
-                "id": item_id,
-                "ok": result.ok,
-                "action_items": [ai.to_dict() for ai in result.action_items],
-                "decisions": result.decisions,
-                "questions": result.questions,
-                "fallback_reason": result.fallback_reason,
-                "latency_ms": result.latency_ms,
-            })
-
-        return {"results": results, "count": len(results)}
-
-    def _handle_get_pending_action_items(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает все items у которых action_items=None (ещё не анализировались).
-
-        Параметр min_duration_sec: минимальная длительность для фильтрации (опционально).
-        """
-        min_duration = float(params.get("min_duration_sec", 0.0))
-
-        with self.store._lock():
-            items = self.store._load_active_items_unlocked()
-
-        pending = []
-        for item in items:
-            if item.action_items is not None:
-                continue
-            if min_duration > 0 and (item.audio_duration_sec or 0.0) < min_duration:
-                continue
-            pending.append({
-                "id": item.id,
-                "ts": item.ts,
-                "text_preview": (item.text or "")[:100],
-                "audio_duration_sec": item.audio_duration_sec,
-            })
-
-        return {"pending": pending, "count": len(pending)}
-
-    def _handle_get_last_llm_diff(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает последний word-level diff от LLM rewriter'а."""
-        engine = self.transcriber.engine
-        diff = getattr(engine, '_last_llm_diff', None)
-        if diff is None:
-            return {"available": False, "diff": None}
-        return {
-            "available": True,
-            "diff": {
-                "similarity_ratio": diff.similarity_ratio,
-                "words_added": diff.words_added,
-                "words_removed": diff.words_removed,
-                "words_unchanged": diff.words_unchanged,
-                "summary": diff.summary,
-                "changes": [
-                    {"type": c.type, "text": c.text, "position": c.position}
-                    for c in diff.changes
-                ],
-            },
-        }
 
     def _handle_list_audio_inputs(self, params):
         """Delegated to RecordingCoreService."""
@@ -3580,57 +3137,6 @@ class BackendService:
             "markdown": digest.formatted_markdown,
         }
 
-    def _handle_generate_stats_report(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Генерирует полный Markdown-отчёт статистики использования за период."""
-        days = int(params.get("days", 30))
-        markdown = self._stats_report.generate_report(store=self.store, days=days)
-        return {"markdown": markdown, "days": days}
-
-    def _handle_generate_mini_stats_report(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Генерирует краткий 5-строчный Markdown-отчёт состояния."""
-        markdown = self._stats_report.generate_mini_report(store=self.store)
-        return {"markdown": markdown}
-
-    def _handle_compare_periods(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Сравнивает статистику двух временных периодов.
-
-        Режимы: explicit (даты), weeks, months.
-        """
-        return self._period_comparison_svc.handle_compare_periods(params)
-
-    def _handle_get_activity_calendar(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает GitHub-style activity calendar данные за последние N месяцев."""
-        months = int(params.get("months", 12))
-        months = max(1, min(months, 24))
-        include_svg = bool(params.get("include_svg", False))
-        cell_size = int(params.get("cell_size", 12))
-        try:
-            with self.store._lock():
-                items = self.store._load_active_items_unlocked()
-        except Exception:
-            items = []
-        calendar = self._activity_calendar.generate_calendar(items, months=months)
-        result = calendar.to_dict()
-        if include_svg:
-            result["svg"] = self._activity_calendar.generate_calendar_svg(
-                items, months=months, cell_size=cell_size
-            )
-        return result
-
-    def _handle_get_recording_insights(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Генерирует эвристические инсайты по записям за последние N дней."""
-        days = int(params.get("days", 7))
-        try:
-            items = self.store._load_active_items_with_lock()
-        except Exception:
-            items = []
-        insights = self._recording_insights.generate_insights(items, days=days)
-        return {
-            "insights": [i.to_dict() for i in insights],
-            "count": len(insights),
-            "days": days,
-        }
-
     def _handle_get_daily_insight(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает один наиболее релевантный инсайт за сегодня (W1274 F3).
 
@@ -3649,37 +3155,6 @@ class BackendService:
             "privacy_mode": False,
         }
 
-    def _handle_get_sentiment_trends(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Анализирует тренды тональности транскрипций за последние N дней."""
-        if self._get_runtime_setting("privacy_mode_enabled", False):
-            return {
-                "ok": True,
-                "daily_sentiment": [],
-                "overall_sentiment": 0.0,
-                "mood_trend": "stable",
-                "sentiment_distribution": {"positive": 0, "negative": 0, "neutral": 0},
-                "most_positive_day": {},  # W1369: schema parity with to_dict()
-                "most_negative_day": {},  # W1369: schema parity with to_dict()
-                "reason": "privacy_mode_active",
-                "privacy_mode_active": True,
-            }
-        days = int(params.get("days", 30))
-        try:
-            with self.store._lock():
-                items = self.store._load_active_items_unlocked()
-        except Exception:
-            items = []
-        report = self._sentiment_trends.analyze_sentiment_trends(items, days=days)
-        return self._sentiment_trends.to_dict(report)
-
-    def _handle_compare_recordings(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Сравнивает несколько записей side-by-side.
-
-        Privacy guard parity (W1408 F1 — restored W1710): делегирует в
-        SearchAndAnalysisService, который содержит каноническую реализацию с guard.
-        """
-        return self._search_and_analysis_svc.handle_compare_recordings(params)
-
     def _handle_check_integrity(self, params: dict[str, Any]) -> dict[str, Any]:
         """Делегирует к HealthCheckService.handle_check_integrity (W1690)."""
         return self._health_check_svc.handle_check_integrity(params)
@@ -3692,26 +3167,6 @@ class BackendService:
             "fixed": result.fixed,
             "skipped": result.skipped,
             "details": result.details,
-        }
-
-    def _handle_extract_terms(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Извлекает ключевые термины из текста."""
-        text = params.get("text", "")
-        language = params.get("language", "ru")
-        if not text:
-            return {"terms": []}
-        terms = self._term_extractor.extract_terms(text, language=language)
-        return {
-            "terms": [
-                {
-                    "term": t.term,
-                    "score": t.score,
-                    "frequency": t.frequency,
-                    "language": t.language,
-                    "category": t.category,
-                }
-                for t in terms
-            ]
         }
 
     def _handle_get_context_memory(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -3735,195 +3190,19 @@ class BackendService:
             "window_size": 50,
         }
 
-    def _handle_get_keyword_cloud(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Генерирует данные облака ключевых слов из истории транскрипций."""
-        max_words = int(params.get("max_words", 100))
-        language = params.get("language")
-        try:
-            with self.store._lock():
-                items = self.store._load_active_items_unlocked()
-        except Exception:
-            items = []
-        cloud_words = self._keyword_cloud_gen.generate_cloud(
-            items, max_words=max_words, language=language
-        )
-        return {
-            "words": [
-                {
-                    "word": cw.word,
-                    "count": cw.count,
-                    "weight": cw.weight,
-                    "font_size": cw.font_size,
-                }
-                for cw in cloud_words
-            ]
-        }
-
     # ── Audio fingerprinting ─────────────────────────────────────────────────
 
     # ── Telegram Bridge ──────────────────────────────────────────────────────
 
-    def _handle_send_to_telegram(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Отправляет текст в Telegram через main Krab userbot.
-
-        Параметры:
-          - text: str — текст сообщения (обязательный, не пустой).
-          - chat_id: int | str — ID или username чата Telegram (обязательный).
-          - reply_to: int | None — ID сообщения для цитирования (опционально).
-
-        Возвращает:
-          {message_id, sent_at, chat_title}
-
-        Ошибки:
-          - "bridge_disabled" — если TELEGRAM_BRIDGE_ENABLED=false.
-          - "krab_unavailable" — если main Krab недоступен (503 / ConnectionError).
-          - "circuit_open" — если circuit breaker разомкнут после 3 ошибок подряд.
-        """
-        if not settings.TELEGRAM_BRIDGE_ENABLED:
-            raise RuntimeError("bridge_disabled: Telegram Bridge отключён в настройках")
-
-        # Privacy mode guard: never send transcript text to external service.
-        if self._get_runtime_setting("privacy_mode_enabled", False):
-            return {
-                "ok": False,
-                "error": "privacy_mode_active",
-                "user_msg_ru": "Приватный режим включён — отправка в Telegram запрещена.",
-            }
-
-        text = str(params.get("text") or "").strip()
-        if not text:
-            raise ValueError("Параметр 'text' обязателен и не может быть пустым")
-
-        raw_chat_id = params.get("chat_id")
-        if raw_chat_id is None or str(raw_chat_id).strip() == "":
-            raise ValueError("Параметр 'chat_id' обязателен")
-        chat_id: int | str
-        try:
-            chat_id = int(raw_chat_id)
-        except (ValueError, TypeError):
-            chat_id = str(raw_chat_id).strip()
-
-        reply_to_raw = params.get("reply_to")
-        reply_to: int | None = None
-        if reply_to_raw is not None:
-            try:
-                reply_to = int(reply_to_raw)
-            except (ValueError, TypeError):
-                pass
-
-        try:
-            result = self._telegram_bridge.send_message(
-                text=text,
-                chat_id=chat_id,
-                reply_to=reply_to,
-            )
-        except CircuitBreakerOpen as exc:
-            raise RuntimeError(f"circuit_open: {exc}") from exc
-        except (Exception,) as exc:
-            msg = str(exc)
-            if "krab_unavailable" in msg or "krab_error" in msg:
-                raise RuntimeError(msg) from exc
-            # ConnectionError, Timeout и др. — оборачиваем в понятный код
-            raise RuntimeError(f"krab_unavailable: {msg}") from exc
-
-        return result
-
-    # ── Apple Notes integration (Phase D.4) ─────────────────────────────────
-    # (W1442) `_escape_as_str` def kept at single location below near W944 fix block
-
-    def _handle_create_apple_note(self, params: dict) -> dict:
-        """Create Apple Note from text via osascript.
-
-        params: {"title": str, "body": str, "folder": str | None}
-        Returns: {"ok": bool, "note_id": str | None, "error": str | None}
-        """
-        import subprocess
-
-        title = self._escape_as_str(params.get("title", "Krab Ear note"))
-        body = self._escape_as_str(params.get("body", ""))
-        folder = params.get("folder", "") or ""
-
-        if folder:
-            folder_escaped = self._escape_as_str(folder)
-            script = f'''
-tell application "Notes"
-    tell account "iCloud"
-        set targetFolder to folder "{folder_escaped}"
-        make new note at targetFolder with properties {{name:"{title}", body:"{body}"}}
-    end tell
-end tell
-'''
-        else:
-            script = f'''
-tell application "Notes"
-    make new note with properties {{name:"{title}", body:"{body}"}}
-end tell
-'''
-
-        try:
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=10,
-            )
-            if result.returncode == 0:
-                return {"ok": True, "note_id": result.stdout.strip(), "error": None}
-            return {"ok": False, "note_id": None, "error": result.stderr.strip()}
-        except subprocess.TimeoutExpired:
-            return {"ok": False, "note_id": None, "error": "osascript timeout"}
-        except Exception as exc:
-            return {"ok": False, "note_id": None, "error": str(exc)}
-
-    def _handle_create_apple_reminder(self, params: dict) -> dict:
-        """Create Apple Reminder from text via osascript.
-
-        params: {"title": str, "body": str, "list_name": str | None, "due_date": str | None}
-        Returns: {"ok": bool, "error": str | None}
-        """
-        import subprocess
-
-        title = self._escape_as_str(params.get("title", "Krab Ear reminder"))
-        body = self._escape_as_str(params.get("body", ""))
-        list_name = params.get("list_name") or None
-        due_date = params.get("due_date") or None
-
-        # Build properties clause
-        properties = f'name:"{title}"'
-        if body:
-            properties += f', body:"{body}"'
-        if due_date:
-            due_date_escaped = self._escape_as_str(due_date)
-            properties += f', due date:date "{due_date_escaped}"'
-
-        if list_name:
-            list_name_escaped = self._escape_as_str(list_name)
-            script = f'''
-tell application "Reminders"
-    tell list "{list_name_escaped}"
-        make new reminder with properties {{{properties}}}
-    end tell
-end tell
-'''
-        else:
-            script = f'''
-tell application "Reminders"
-    make new reminder with properties {{{properties}}}
-end tell
-'''
-
-        try:
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=10,
-            )
-            if result.returncode == 0:
-                return {"ok": True, "error": None}
-            return {"ok": False, "error": result.stderr.strip()}
-        except subprocess.TimeoutExpired:
-            return {"ok": False, "error": "osascript timeout"}
-        except Exception as exc:
-            return {"ok": False, "error": str(exc)}
-
-    # ── Apple Calendar integration (Phase D.4) ──────────────────────────────
+    # ── Apple Notes / Reminders / Calendar / iMessage / Telegram integration ──
+    # (Phase D.4) The IPC handlers send_to_telegram, list_telegram_chats,
+    # create_apple_note, create_apple_reminder, create_calendar_event and
+    # send_imessage now live exclusively in
+    # backend/apple_integration_service.py (AppleIntegrationService); the
+    # dispatch table routes each key straight to self._apple_integration_svc.
+    # The dead in-class duplicates were removed (#47, W797 follow-up). The
+    # `_escape_as_str` helper below is retained as the canonical AppleScript
+    # escaper referenced by tests.
 
     @staticmethod
     def _escape_as_str(s: str) -> str:
@@ -3943,63 +3222,6 @@ end tell
         s = s.replace('\\', '\\\\')  # backslash FIRST — prevents Stand\" → Stand\\"
         s = s.replace('"', '\\"')
         return s
-
-    def _handle_create_calendar_event(self, params: dict) -> dict:
-        """Create Apple Calendar event via osascript.
-
-        params:
-          title: str (required)
-          notes: str (optional, default "")
-          start_date: str (required, ISO 8601 or AppleScript-parseable date string)
-          duration_minutes: int (optional, default 30)
-          calendar_name: str | None (optional, default first writable calendar)
-        Returns: {"ok": bool, "error": str | None}
-        """
-        import subprocess
-
-        title = params.get("title", "").strip()
-        if not title:
-            return {"ok": False, "error": "title is required"}
-
-        title_esc = self._escape_as_str(title)
-        notes = params.get("notes", "") or ""
-        notes_esc = self._escape_as_str(notes)
-        start_date = str(params.get("start_date", "")).strip()
-        if not start_date:
-            return {"ok": False, "error": "start_date is required"}
-        start_date_esc = self._escape_as_str(start_date)
-        duration_minutes = int(params.get("duration_minutes", 30) or 30)
-        calendar_name = params.get("calendar_name") or None
-
-        event_block = f'''
-        set startDate to date "{start_date_esc}"
-        set endDate to startDate + ({duration_minutes} * minutes)
-        make new event with properties {{summary:"{title_esc}", description:"{notes_esc}", start date:startDate, end date:endDate}}'''
-
-        if calendar_name:
-            cal_esc = self._escape_as_str(calendar_name)
-            script = f'''tell application "Calendar"
-    tell calendar "{cal_esc}"{event_block}
-    end tell
-end tell'''
-        else:
-            script = f'''tell application "Calendar"
-    tell (first calendar whose writable is true){event_block}
-    end tell
-end tell'''
-
-        try:
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=15,
-            )
-            if result.returncode == 0:
-                return {"ok": True, "error": None}
-            return {"ok": False, "error": result.stderr.strip()}
-        except subprocess.TimeoutExpired:
-            return {"ok": False, "error": "osascript timeout"}
-        except Exception as exc:
-            return {"ok": False, "error": str(exc)}
 
     # ── CalendarLinker IPC handlers (W942 MEDIUM-1) ─────────────────────────
 
@@ -4127,291 +3349,15 @@ end tell'''
             return {"ok": False, "error": str(exc)}
         return {"ok": True, "results": results}
 
-    # ── iMessage integration (Phase D.4) ────────────────────────────────────
-
-    def _handle_send_imessage(self, params: dict) -> dict:
-        """Send iMessage/SMS via Messages.app using osascript.
-
-        params:
-          recipient: str (required) — phone number, email, or contact name
-          body: str (required) — message text
-          service: str (optional, default "iMessage") — "iMessage" | "SMS"
-        Returns: {"ok": bool, "error": str | None}
-        """
-        import subprocess
-
-        recipient = params.get("recipient", "").strip()
-        if not recipient:
-            return {"ok": False, "error": "recipient is required"}
-
-        body = params.get("body", "").strip()
-        if not body:
-            return {"ok": False, "error": "body is required"}
-
-        service_name = params.get("service", "iMessage") or "iMessage"
-        if service_name not in ("iMessage", "SMS"):
-            service_name = "iMessage"
-
-        # Map service name to AppleScript service type constant
-        service_type = "iMessage" if service_name == "iMessage" else "SMS"
-
-        # Escape double quotes and backslashes to prevent AppleScript injection
-        recipient_esc = self._escape_as_str(recipient)
-        body_esc = self._escape_as_str(body)
-
-        script = f'''tell application "Messages"
-    set targetService to 1st service whose service type = {service_type}
-    set targetBuddy to buddy "{recipient_esc}" of targetService
-    send "{body_esc}" to targetBuddy
-end tell'''
-
-        try:
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=10,
-            )
-            if result.returncode == 0:
-                return {"ok": True, "error": None}
-            return {"ok": False, "error": result.stderr.strip()}
-        except subprocess.TimeoutExpired:
-            return {"ok": False, "error": "osascript timeout"}
-        except Exception as exc:
-            return {"ok": False, "error": str(exc)}
-
-    def _handle_list_telegram_chats(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает список доступных чатов через main Krab userbot.
-
-        Параметры: нет.
-
-        Возвращает:
-          {chats: [{id, title, type}, ...]}
-
-        Ошибки:
-          - "bridge_disabled" — если TELEGRAM_BRIDGE_ENABLED=false.
-          - "krab_unavailable" — если main Krab недоступен (503 / ConnectionError).
-          - "circuit_open" — если circuit breaker разомкнут.
-        """
-        # W1211 F2: privacy_mode_enabled guard — return empty list without contacting bridge
-        if self._get_runtime_setting("privacy_mode_enabled", False):
-            return {"ok": True, "chats": [], "skipped": "privacy_mode"}
-
-        if not settings.TELEGRAM_BRIDGE_ENABLED:
-            raise RuntimeError("bridge_disabled: Telegram Bridge отключён в настройках")
-
-        try:
-            chats = self._telegram_bridge.get_chats()
-        except CircuitBreakerOpen as exc:
-            raise RuntimeError(f"circuit_open: {exc}") from exc
-        except Exception as exc:
-            msg = str(exc)
-            if "krab_unavailable" in msg or "krab_error" in msg:
-                raise RuntimeError(msg) from exc
-            raise RuntimeError(f"krab_unavailable: {msg}") from exc
-
-        return {"chats": chats}
-
     # ── Phase 3: Call Session CRUD ───────────────────────────────────────────
 
-    # ------------------------------------------------------------------
-    # STT hotwords (initial_prompt boost)
-    # ------------------------------------------------------------------
-
-    # Whisper initial_prompt hard limit: ~224 tokens ≈ ~170 avg words.
-    # We cap hotwords at 100 entries (≈ safe budget) to avoid prompt overflow.
-    # When the list exceeds this limit, oldest entries are dropped (FIFO).
-    _STT_HOTWORDS_MAX: int = 100
-
-    def _handle_add_stt_hotword(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Добавляет термин в список STT hotwords.
-
-        Параметры:
-          - word: str — термин для добавления (имя, бренд, технический термин).
-
-        Возвращает: {hotwords: list[str], truncated: bool} — обновлённый список.
-          truncated=True если список обрезан до _STT_HOTWORDS_MAX.
-        """
-        word = str(params.get("word") or "").strip()
-        if not word:
-            raise ValueError("Параметр 'word' обязателен и не может быть пустым")
-        current: list[str] = self._settings_svc.cached_settings().get("stt_hotwords", [])
-        if not isinstance(current, list):
-            current = []
-        truncated = False
-        if word not in current:
-            current = current + [word]
-            # Enforce per-IPC budget: drop oldest entries when limit exceeded.
-            if len(current) > self._STT_HOTWORDS_MAX:
-                excess = len(current) - self._STT_HOTWORDS_MAX
-                logger.warning(
-                    "stt_hotwords: список превышает лимит %d — удаляем %d старых записей",
-                    self._STT_HOTWORDS_MAX, excess,
-                )
-                current = current[excess:]
-                truncated = True
-            self._settings_svc.handle_set_settings({"stt_hotwords": current})
-        return {"hotwords": current, "truncated": truncated}
-
-    def _handle_remove_stt_hotword(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Удаляет термин из списка STT hotwords.
-
-        Параметры:
-          - word: str — термин для удаления.
-
-        Возвращает: {hotwords: list[str]} — обновлённый список.
-        """
-        word = str(params.get("word") or "").strip()
-        if not word:
-            raise ValueError("Параметр 'word' обязателен и не может быть пустым")
-        current: list[str] = self._settings_svc.cached_settings().get("stt_hotwords", [])
-        if not isinstance(current, list):
-            current = []
-        updated = [w for w in current if w != word]
-        if len(updated) != len(current):
-            self._settings_svc.handle_set_settings({"stt_hotwords": updated})
-        return {"hotwords": updated}
-
-    def _handle_list_stt_hotwords(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает текущий список STT hotwords.
-
-        Учитывает флаг stt_hotwords_enabled: если False — возвращает пустой список.
-
-        Возвращает: {hotwords: list[str], enabled: bool}
-        """
-        s = self._settings_svc.cached_settings()
-        enabled = bool(s.get("stt_hotwords_enabled", True))
-        if not enabled:
-            return {"hotwords": [], "enabled": False}
-        current: list[str] = s.get("stt_hotwords", [])
-        if not isinstance(current, list):
-            current = []
-        return {"hotwords": sorted(current), "enabled": True}
-
     # ── Timeline view ────────────────────────────────────────────────────────
-
-    def _handle_get_timeline_view(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Группирует историю транскрипций по временным блокам (timeline).
-
-        Параметры:
-          - group_by: str — гранулярность: "hour", "day", "week" (по умолчанию "day").
-          - limit: int — макс. записей для анализа (по умолчанию 500, макс. 5000).
-          - include_heatmap: bool — включить activity heatmap (по умолчанию False).
-          - heatmap_days: int — горизонт heatmap в днях (по умолчанию 30).
-        """
-        group_by = str(params.get("group_by", "day")).strip()
-        limit = max(1, min(int(params.get("limit", 500)), 5000))
-        include_heatmap = bool(params.get("include_heatmap", False))
-        heatmap_days = max(1, min(int(params.get("heatmap_days", 30)), 365))
-
-        raw_items = self.store._load_active_items_with_lock()[:limit]
-        blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
-        result: dict[str, Any] = {
-            "blocks": [b.to_dict() for b in blocks],
-            "total_blocks": len(blocks),
-            "group_by": group_by,
-        }
-
-        if include_heatmap:
-            heatmap = self._timeline_view.generate_activity_heatmap(raw_items, days=heatmap_days)
-            result["activity_heatmap"] = heatmap
-
-        return result
-
-    def _handle_generate_auto_title(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Генерирует автоматический заголовок для транскрибации.
-
-        Параметры:
-            text (str): текст транскрибации (обязательный).
-            timestamp (str): ISO 8601 timestamp (опциональный) — включает дату в заголовок.
-            max_length (int): максимальная длина заголовка (по умолчанию 50).
-            with_date (bool): если true и timestamp указан — включает дату.
-            items (list): список записей для пакетной генерации (альтернатива text).
-
-        Ответ (одиночный):
-            {title: str}
-
-        Ответ (пакетный):
-            {titles: [{id, title, generated_at}]}
-        """
-        # Пакетный режим
-        items = params.get("items")
-        if items is not None:
-            if not isinstance(items, list):
-                raise ValueError("Параметр 'items' должен быть списком")
-            titles = self._auto_title_generator.batch_generate(items)
-            return {"titles": titles}
-
-        # Одиночный режим
-        text = str(params.get("text", "") or "")
-        timestamp = str(params.get("timestamp", "") or "")
-        max_length = int(params.get("max_length", 50))
-        with_date = bool(params.get("with_date", False))
-
-        if not text:
-            return {"title": "Запись"}
-
-        if with_date and timestamp:
-            title = self._auto_title_generator.generate_title_with_date(text, timestamp)
-        else:
-            title = self._auto_title_generator.generate_title(text, max_length=max_length)
-
-        return {"title": title}
 
     def _handle_get_learning_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_learning_stats — статистика прогресса изучения языка."""
         params_with_store = dict(params)
         params_with_store.setdefault("store", self.store)
         return self._language_learning.handle_get_learning_stats(params_with_store)
-
-    def _handle_get_analytics_dashboard(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: get_analytics_dashboard — комплексный дашборд всех метрик аналитики.
-
-        Параметры:
-            days (int): окно анализа в днях (по умолчанию 30, макс. 365)
-
-        Возвращает:
-            overview, today, trends, languages, quality, engagement, storage, performance
-        """
-        days = max(1, min(int(params.get("days", 30) or 30), 365))
-        return self._analytics_dashboard.get_full_dashboard(store=self.store, days=days)
-
-    def _handle_get_topic_timeline(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: get_topic_timeline — таймлайн смен тем разговора из истории транскрибаций.
-
-        Параметры:
-            window_size (int): размер скользящего окна (по умолчанию 5).
-            limit       (int): максимальное количество последних записей
-                               для анализа (по умолчанию 100, 0 — все).
-
-        Возвращает:
-            segments     (list) — список сегментов с полями start_index,
-                                  end_index, topic_words, summary, items_count, is_shift.
-            total_shifts (int)  — количество смен темы.
-            current_topic (dict) — текущая тема (last_n=window_size).
-        """
-        # W996: privacy guard — не раскрываем темы в режиме приватности
-        if self._get_runtime_setting("privacy_mode_enabled", False):
-            return {"timeline": [], "reason": "privacy_mode_active"}
-
-        window_size = max(1, int(params.get("window_size", 5) or 5))
-        _raw_limit = int(params.get("limit", 100) or 100)
-        limit = _raw_limit if _raw_limit > 0 else 100
-        try:
-            with self.store._lock():
-                items = self.store._load_active_items_unlocked()
-        except Exception:
-            items = []
-
-        items = items[-limit:]
-
-        timeline = self._topic_tracker.get_topic_timeline(items, window_size=window_size)
-        current_topic = self._topic_tracker.get_current_topic(items, last_n=window_size)
-        shifts = sum(1 for entry in timeline if entry.get("is_shift"))
-
-        return {
-            "segments": timeline,
-            "total_shifts": shifts,
-            "current_topic": current_topic,
-        }
 
     def _handle_estimate_recording_cost(self, params: dict) -> dict:
         """IPC: estimate_recording_cost — оценка вычислительной стоимости обработки записи.
@@ -4456,47 +3402,6 @@ end tell'''
         return self._cost_estimator.estimate_batch_cost(files)
 
     # ── Abbreviation expander IPC handlers ────────────────────────────────────
-
-    def _handle_select_model(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: select_model — умный выбор STT-модели на основе условий.
-
-        Параметры:
-            duration_sec  — длительность аудио в секундах (float, обязательный).
-            quality       — "balanced" | "max" (строка, опциональный, по умолчанию "balanced").
-            is_preview    — True если это превью-транскрибация (bool, опциональный).
-            system_load   — нагрузка CPU 0.0–1.0 (float, опциональный, по умолчанию 0).
-
-        Возвращает:
-            {model_name, reason, estimated_latency_ms, quality_tier}
-        """
-        from core.model_selector import SmartModelSelector
-
-        try:
-            duration_sec = float(params.get("duration_sec", 0.0))
-        except (TypeError, ValueError):
-            raise ValueError("Параметр 'duration_sec' должен быть числом")
-
-        quality = str(params.get("quality", "balanced")).strip()
-        is_preview = bool(params.get("is_preview", False))
-
-        try:
-            system_load = float(params.get("system_load", 0.0))
-        except (TypeError, ValueError):
-            system_load = 0.0
-
-        selector = SmartModelSelector()
-        sel = selector.select_model(
-            duration_sec=duration_sec,
-            quality=quality,
-            is_preview=is_preview,
-            system_load=system_load,
-        )
-        return {
-            "model_name": sel.model_name,
-            "reason": sel.reason,
-            "estimated_latency_ms": sel.estimated_latency_ms,
-            "quality_tier": sel.quality_tier,
-        }
 
     def _handle_get_smart_vocabulary_suggestions(self, params: dict) -> dict:
         """IPC: get_smart_vocabulary_suggestions — предложения для словаря STT."""

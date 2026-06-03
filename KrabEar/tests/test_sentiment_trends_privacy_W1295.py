@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.sentiment_trends import SentimentTrendAnalyzer
+from backend.analytics_service import AnalyticsService
 
 
 # ---------------------------------------------------------------------------
@@ -37,42 +38,53 @@ class _FakeSentimentTrends:
 
 
 def _make_backend_service(privacy_enabled: bool):
-    """Создаёт минимальный mock BackendService с _handle_get_sentiment_trends."""
+    """Возвращает LIVE AnalyticsService с privacy gate, обёрнутый для совместимости
+    со старым API теста (svc._handle_get_sentiment_trends).
 
-    # Импортируем хэндлер прямо из service.py через bound method trick, не инстанциируя весь BackendService.
-    # Вместо этого создаём простой объект-заглушку с нужными методами.
-    class FakeService:
-        def __init__(self):
-            self._sentiment_trends = _FakeSentimentTrends()
-            self._privacy = privacy_enabled
-            self.store = MagicMock()
-            # W1707: Python 3.14 MagicMock._lock is the real internal RLock.
-            # Explicitly set _lock to a context-manager MagicMock.
-            _lock_ctx = MagicMock()
-            _lock_ctx.return_value.__enter__ = MagicMock(return_value=None)
-            _lock_ctx.return_value.__exit__ = MagicMock(return_value=False)
-            self.store._lock = _lock_ctx
-            self.store._load_active_items_unlocked.return_value = []
+    W#47: dead in-class BackendService._handle_get_sentiment_trends удалён —
+    privacy gate теперь в extracted AnalyticsService. Тест проверяет ЖИВОЙ код.
+    """
+    store = MagicMock()
+    # W1707: Python 3.14 MagicMock._lock is the real internal RLock.
+    # Explicitly set _lock to a context-manager MagicMock.
+    _lock_ctx = MagicMock()
+    _lock_ctx.return_value.__enter__ = MagicMock(return_value=None)
+    _lock_ctx.return_value.__exit__ = MagicMock(return_value=False)
+    store._lock = _lock_ctx
+    store._load_active_items_unlocked.return_value = []
 
-        def _get_runtime_setting(self, key: str, default=None):
-            if key == "privacy_mode_enabled":
-                return self._privacy
-            return default
+    sentiment = _FakeSentimentTrends()
+    analytics = AnalyticsService(
+        analytics_dashboard=MagicMock(),
+        sentiment_trends=sentiment,
+        activity_calendar=MagicMock(),
+        keyword_cloud_gen=MagicMock(),
+        timeline_view=MagicMock(),
+        store=store,
+        settings_get=lambda k, d=None: (
+            privacy_enabled if k == "privacy_mode_enabled" else d
+        ),
+    )
 
-        # Копируем хэндлер из service.py
+    class _ServiceShim:
+        """Adapts the live AnalyticsService to the test's historical API."""
+
+        def __init__(self, svc):
+            self._analytics = svc
+
+        # Allow tests to swap the sentiment collaborator (privacy short-circuit check).
+        @property
+        def _sentiment_trends(self):
+            return self._analytics._sentiment_trends
+
+        @_sentiment_trends.setter
+        def _sentiment_trends(self, value):
+            self._analytics._sentiment_trends = value
+
         def _handle_get_sentiment_trends(self, params):
-            if self._get_runtime_setting("privacy_mode_enabled", False):
-                return {"ok": True, "trends": [], "skipped": "privacy_mode"}
-            days = int(params.get("days", 30))
-            try:
-                with self.store._lock():
-                    items = self.store._load_active_items_unlocked()
-            except Exception:
-                items = []
-            report = self._sentiment_trends.analyze_sentiment_trends(items, days=days)
-            return self._sentiment_trends.to_dict(report)
+            return self._analytics.handle_get_sentiment_trends(params)
 
-    return FakeService()
+    return _ServiceShim(analytics)
 
 
 # ---------------------------------------------------------------------------
@@ -83,12 +95,15 @@ class SentimentTrendsPrivacyModeTestCase(unittest.TestCase):
     """W1289 F1: _handle_get_sentiment_trends пропускает анализ в privacy mode."""
 
     def test_sentiment_trends_skipped_in_privacy_mode(self) -> None:
-        """Когда privacy_mode_enabled=True, хэндлер должен возвращать skipped=privacy_mode."""
+        """Когда privacy_mode_enabled=True, хэндлер должен короткозамкнуть анализ.
+
+        W#47/W1369: живой privacy gate возвращает reason='privacy_mode_active' и
+        пустой 'daily_sentiment' (схема совпадает с to_dict, не legacy 'trends')."""
         svc = _make_backend_service(privacy_enabled=True)
         result = svc._handle_get_sentiment_trends({})
         self.assertTrue(result.get("ok"))
-        self.assertEqual(result.get("skipped"), "privacy_mode")
-        self.assertEqual(result.get("trends"), [])
+        self.assertEqual(result.get("reason"), "privacy_mode_active")
+        self.assertEqual(result.get("daily_sentiment"), [])
 
     def test_sentiment_trends_skipped_does_not_call_detector(self) -> None:
         """В privacy mode EmotionDetector не должен вызываться."""
@@ -101,8 +116,8 @@ class SentimentTrendsPrivacyModeTestCase(unittest.TestCase):
         """Когда privacy_mode_enabled=False, хэндлер должен вернуть нормальный ответ."""
         svc = _make_backend_service(privacy_enabled=False)
         result = svc._handle_get_sentiment_trends({"days": 7})
-        # нормальный ответ не содержит "skipped"
-        self.assertNotIn("skipped", result)
+        # нормальный ответ не помечен privacy gate'ом
+        self.assertNotIn("privacy_mode_active", result)
         self.assertIn("mood_trend", result)
 
     def test_sentiment_trends_privacy_response_has_ok_true(self) -> None:
@@ -112,11 +127,11 @@ class SentimentTrendsPrivacyModeTestCase(unittest.TestCase):
         self.assertEqual(result["ok"], True)
 
     def test_sentiment_trends_privacy_response_has_empty_trends_list(self) -> None:
-        """trends=[] в privacy mode."""
+        """daily_sentiment=[] в privacy mode (W1369 schema)."""
         svc = _make_backend_service(privacy_enabled=True)
         result = svc._handle_get_sentiment_trends({})
-        self.assertIsInstance(result["trends"], list)
-        self.assertEqual(len(result["trends"]), 0)
+        self.assertIsInstance(result["daily_sentiment"], list)
+        self.assertEqual(len(result["daily_sentiment"]), 0)
 
 
 # ---------------------------------------------------------------------------
