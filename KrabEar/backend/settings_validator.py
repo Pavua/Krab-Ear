@@ -51,6 +51,11 @@ _RANGE_FIELDS: dict[str, tuple[Any, Any, Any, type]] = {
     "background_guard_max_uniform_active_ratio": (0.40, 0.99, 0.92, float),
     "notify_confidence_threshold": (0.0, 1.0, 0.5, float),
     "call_budget_usd": (0.0, 1000.0, 2.0, float),
+    # Realtime silence filter (wave-34 B1/B2/B3)
+    "rt_silence_check_sec": (0.5, 60.0, 5.0, float),
+    "rt_silence_window_sec": (1.0, 30.0, 10.0, float),
+    "realtime_silence_threshold_db": (-80.0, -10.0, -55.0, float),
+    "rt_partial_interval_sec": (0.1, 30.0, 1.0, float),
 }
 
 # Bool-поля с дефолтными значениями

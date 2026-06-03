@@ -12,6 +12,7 @@ RealtimeSilenceFilter запускает фоновый поток во врем
 from __future__ import annotations
 
 import logging
+import math
 import threading
 from typing import TYPE_CHECKING
 
@@ -43,12 +44,28 @@ class RealtimeSilenceFilter:
     ) -> None:
         self._recorder = recorder
         self._enabled: bool = bool(settings.get("realtime_silence_filter_enabled", False))
-        self._check_sec: float = float(settings.get("rt_silence_check_sec", _DEFAULT_CHECK_SEC))
-        self._window_sec: float = float(settings.get("rt_silence_window_sec", _DEFAULT_WINDOW_SEC))
+
+        # B1 (MED): clamp check_sec — raw<=0 makes wait() return immediately → busy loop.
+        _raw_check = float(settings.get("rt_silence_check_sec", _DEFAULT_CHECK_SEC))
+        if not math.isfinite(_raw_check):
+            _raw_check = _DEFAULT_CHECK_SEC
+        self._check_sec: float = max(0.5, _raw_check)
+
+        # B2 (MED): clamp window_sec — raw<=0 copies full buffer every tick (O(n) waste).
+        _raw_window = float(settings.get("rt_silence_window_sec", _DEFAULT_WINDOW_SEC))
+        if not math.isfinite(_raw_window):
+            _raw_window = _DEFAULT_WINDOW_SEC
+        self._window_sec: float = max(1.0, _raw_window)
+
         self._max_silence_sec: float = float(settings.get("rt_silence_max_sec", _DEFAULT_MAX_SILENCE_SEC))
-        self._threshold_db: float = float(
+
+        # B3 (LOW): clamp threshold_db — huge positive value classifies all speech as silent.
+        _raw_threshold = float(
             settings.get("realtime_silence_threshold_db", _DEFAULT_THRESHOLD_DB)
         )
+        if not math.isfinite(_raw_threshold):
+            _raw_threshold = _DEFAULT_THRESHOLD_DB
+        self._threshold_db: float = max(-80.0, min(-10.0, _raw_threshold))
         self._emit = event_bus_emit
 
         self._detector = SilenceDetector()
