@@ -137,6 +137,7 @@ from backend.privacy_audit import get_privacy_audit_logger
 import argparse
 from datetime import datetime, timedelta, timezone
 import logging
+import math
 import os
 from pathlib import Path
 import re
@@ -617,11 +618,17 @@ class BackendService:
         self._merger = RecordingMerger()
         self._transcript_versioning = TranscriptVersionManager(data_dir=self.store.data_dir)
         # BulkReprocessor — массовое перетранскрибирование истории (W1037 F4 / W1044 re-wire)
+        # wave-25 HIGH: wire is_recording_fn so the anti-SIGSEGV guard is live.  Without it the
+        # guard was dead (always False) and a bulk MLX reprocess could start mid-recording →
+        # concurrent Metal GPU access → SIGSEGV (PR #71 class crash).  recorder.is_recording is a
+        # property; the lambda re-reads it on each call so a recording that starts AFTER the
+        # constructor is still observed.
         self._bulk_reprocessor = BulkReprocessor(
             store=self.store,
             transcriber=self.transcriber,
             version_manager=self._transcript_versioning,
             event_bus=event_bus,
+            is_recording_fn=lambda: bool(getattr(self.recorder, "is_recording", False)),
         )
         self._language_learning = LanguageLearningManager()
         self._config_presets = ConfigPresetsLibrary(data_dir=self.store.data_dir)
@@ -2068,7 +2075,12 @@ class BackendService:
         return self._recording_core_svc.handle_get_recording_state(params)
 
     def _handle_get_usage_stats(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает ежедневную статистику использования: записи, длительность, слова."""
+        """Возвращает ежедневную статистику использования: записи, длительность, слова.
+
+        wave-25 MED: ранее тело было пустым (dead stub → None), и IPC-ответ был
+        бессмысленным. Делегируем реальному UsageTracker.get_usage_stats().
+        """
+        return self._usage_tracker.get_usage_stats()
 
     def _handle_list_normalization_profiles(self, params: dict) -> dict:
         """Возвращает список всех профилей нормализации текста."""
@@ -3468,6 +3480,17 @@ class BackendService:
         Returns:
             dict: total_scanned, duplicate_groups, duplicates.
         """
+        # wave-25 LOW: validate threshold before delegating. A NaN/Inf or negative value
+        # makes `similarity >= threshold` always True → the whole history is reported as
+        # one giant duplicate group (and downstream removal would be over-aggressive).
+        if "threshold" in params:
+            try:
+                _thr = float(params["threshold"])
+            except (TypeError, ValueError):
+                return {"ok": False, "reason": "invalid_threshold"}
+            if not math.isfinite(_thr) or _thr < 0 or _thr > 1:
+                return {"ok": False, "reason": "invalid_threshold"}
+            params["threshold"] = _thr
         params["_store"] = self.store
         params["_semantic_searcher"] = self._semantic_searcher
         return self._auto_deduplicator.handle_run_deduplication(params)
@@ -3568,15 +3591,32 @@ class BackendService:
             dict: total, reprocessed, skipped, errors, cancelled.
         """
         only_low_confidence = bool(params.get("only_low_confidence", True))
-        threshold = float(params.get("threshold", 0.7))
+        try:
+            threshold = float(params.get("threshold", 0.7))
+        except (TypeError, ValueError):
+            return {"ok": False, "reason": "invalid_threshold"}
+        # wave-25 MED: a NaN/Inf or out-of-range confidence threshold from the socket
+        # defeats the only-low-confidence guard (NaN comparisons are always False →
+        # every record would be reprocessed / no record would be skipped). Reject it.
+        if not math.isfinite(threshold) or threshold < 0 or threshold > 1:
+            return {"ok": False, "reason": "invalid_threshold"}
         dry_run = bool(params.get("dry_run", False))
         task_id = str(params.get("task_id", ""))
-        return self._bulk_reprocessor.reprocess(
-            only_low_confidence=only_low_confidence,
-            threshold=threshold,
-            dry_run=dry_run,
-            task_id=task_id,
-        )
+        # wave-25 HIGH: BulkReprocessor refuses (raises) while a recording is active to avoid
+        # concurrent MLX GPU access (SIGSEGV, PR #71 class). Translate that into a structured
+        # IPC response instead of letting the RuntimeError bubble as a generic error.
+        try:
+            return self._bulk_reprocessor.reprocess(
+                only_low_confidence=only_low_confidence,
+                threshold=threshold,
+                dry_run=dry_run,
+                task_id=task_id,
+            )
+        except RuntimeError as exc:
+            if "active recording" in str(exc):
+                logger.warning("bulk_reprocess_start отклонён: идёт активная запись")
+                return {"ok": False, "reason": "recording_active"}
+            raise
 
     def _handle_bulk_reprocess_cancel(self, params: dict) -> dict:
         """Запрашивает отмену текущего запуска BulkReprocessor.
