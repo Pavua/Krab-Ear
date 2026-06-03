@@ -249,7 +249,12 @@ class TestFeatureFlagsIPC(unittest.TestCase):
 
 
 class TestFeatureFlagsWhitespaceValidation(unittest.TestCase):
-    """Wave 159: set_flag rejects whitespace-only flag names."""
+    """Wave 159 (updated Wave-31): set_flag rejects whitespace-only and invalid-charset names.
+
+    Wave-31 changed pure-whitespace names from raising ValueError to returning an
+    error dict with reason='flag_name_invalid_chars' (because they pass the non-empty
+    check but fail the [a-z0-9_]+ regex).  Empty string still raises ValueError.
+    """
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -259,33 +264,37 @@ class TestFeatureFlagsWhitespaceValidation(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_set_flag_whitespace_only_rejected(self) -> None:
-        """Имя из одних пробелов должно вызывать ValueError."""
-        with self.assertRaises(ValueError):
-            self.ff.set_flag("   ", True)
+        """Имя из одних пробелов отклоняется (invalid chars, не хранится)."""
+        result = self.ff.set_flag("   ", True)
+        self.assertIsNotNone(result)
+        self.assertFalse(result.get("ok", True))  # type: ignore[union-attr]
+        self.assertNotIn("   ", self.ff.list_flags())
 
     def test_set_flag_empty_rejected(self) -> None:
-        """Пустая строка вызывает ValueError (уже проходило — проверяем regression)."""
+        """Пустая строка вызывает ValueError (regression)."""
         with self.assertRaises(ValueError):
             self.ff.set_flag("", True)
 
     def test_set_flag_tab_only_rejected(self) -> None:
-        """Имя из одного таба должно вызывать ValueError."""
-        with self.assertRaises(ValueError):
-            self.ff.set_flag("\t", True)
+        """Имя из одного таба отклоняется (invalid chars)."""
+        result = self.ff.set_flag("\t", True)
+        self.assertIsNotNone(result)
+        self.assertFalse(result.get("ok", True))  # type: ignore[union-attr]
+        self.assertNotIn("\t", self.ff.list_flags())
 
     def test_set_flag_newline_only_rejected(self) -> None:
-        """Имя из символа новой строки должно вызывать ValueError."""
-        with self.assertRaises(ValueError):
-            self.ff.set_flag("\n", True)
+        """Имя из символа новой строки отклоняется (invalid chars)."""
+        result = self.ff.set_flag("\n", True)
+        self.assertIsNotNone(result)
+        self.assertFalse(result.get("ok", True))  # type: ignore[union-attr]
+        self.assertNotIn("\n", self.ff.list_flags())
 
     def test_set_flag_with_leading_space_rejected(self) -> None:
-        """Имя с ведущим пробелом отклоняется (не нормализуется).
-
-        Решение: reject, а не normalize — имена флагов должны быть строгими
-        идентификаторами без пробелов. Caller обязан передавать clean name.
-        """
-        with self.assertRaises(ValueError):
-            self.ff.set_flag("  my_flag", True)
+        """Имя с ведущим пробелом отклоняется (пробел не входит в [a-z0-9_]+)."""
+        result = self.ff.set_flag("  my_flag", True)
+        self.assertIsNotNone(result)
+        self.assertFalse(result.get("ok", True))  # type: ignore[union-attr]
+        self.assertNotIn("  my_flag", self.ff.list_flags())
 
     def test_set_flag_valid_name_still_works(self) -> None:
         """Обычное имя без пробелов продолжает работать."""
@@ -488,6 +497,106 @@ class TestFeatureFlagsWave98(unittest.TestCase):
             tmp_path.exists(),
             f"Временный файл {tmp_path.name} не должен оставаться после успешного _save()",
         )
+
+
+class TestFeatureFlagsWave31Security(unittest.TestCase):
+    """Wave-31 security: flag-name validation + flag-count cap (DoS guard)."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.ff = FeatureFlags(data_dir=self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    # --- flag-name charset validation ---
+
+    def test_set_flag_spaces_in_name_rejected(self) -> None:
+        """Names with spaces are invalid identifiers and must be rejected."""
+        result = self.ff.set_flag("my flag", True)
+        self.assertIsNotNone(result)
+        self.assertFalse(result.get("ok", True))  # type: ignore[union-attr]
+        self.assertEqual(result["reason"], "flag_name_invalid_chars")  # type: ignore[index]
+        # Flag must NOT have been stored
+        self.assertNotIn("my flag", self.ff.list_flags())
+
+    def test_set_flag_uppercase_rejected(self) -> None:
+        result = self.ff.set_flag("MyFlag", True)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["reason"], "flag_name_invalid_chars")  # type: ignore[index]
+
+    def test_set_flag_hyphen_rejected(self) -> None:
+        result = self.ff.set_flag("my-flag", True)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["reason"], "flag_name_invalid_chars")  # type: ignore[index]
+
+    def test_set_flag_dot_rejected(self) -> None:
+        result = self.ff.set_flag("my.flag", True)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["reason"], "flag_name_invalid_chars")  # type: ignore[index]
+
+    def test_set_flag_valid_lowercase_alphanumeric_underscore_accepted(self) -> None:
+        result = self.ff.set_flag("valid_flag_123", True)
+        self.assertIsNone(result)
+        self.assertTrue(self.ff.is_enabled("valid_flag_123"))
+
+    # --- name length validation ---
+
+    def test_set_flag_too_long_name_rejected(self) -> None:
+        long_name = "a" * 101
+        result = self.ff.set_flag(long_name, True)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["reason"], "flag_name_too_long")  # type: ignore[index]
+        self.assertNotIn(long_name, self.ff.list_flags())
+
+    def test_set_flag_exactly_100_chars_accepted(self) -> None:
+        name_100 = "a" * 100
+        result = self.ff.set_flag(name_100, True)
+        self.assertIsNone(result)
+        self.assertIn(name_100, self.ff.list_flags())
+
+    # --- flag count cap ---
+
+    def test_set_flag_201st_flag_rejected(self) -> None:
+        """Registering 201 distinct custom flags must fail on the 201st."""
+        from backend.feature_flags import MAX_FLAGS, _BUILTIN_FLAGS
+        # How many custom slots are available?
+        builtin_count = len(_BUILTIN_FLAGS)
+        slots = MAX_FLAGS - builtin_count
+        # Fill all remaining custom slots
+        for i in range(slots):
+            name = f"custom_{i:05d}"
+            r = self.ff.set_flag(name, True)
+            self.assertIsNone(r, f"Slot {i} should be accepted but got {r}")
+        # One more should fail
+        result = self.ff.set_flag("custom_overflow", True)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["reason"], "flag_limit_reached")  # type: ignore[index]
+        self.assertNotIn("custom_overflow", self.ff.list_flags())
+
+    def test_updating_existing_flag_at_max_capacity_allowed(self) -> None:
+        """Updating a flag that already exists must NOT be blocked by the cap."""
+        from backend.feature_flags import MAX_FLAGS, _BUILTIN_FLAGS
+        builtin_count = len(_BUILTIN_FLAGS)
+        slots = MAX_FLAGS - builtin_count
+        for i in range(slots):
+            self.ff.set_flag(f"fill_{i:05d}", True)
+        # Update a builtin — should succeed even at capacity
+        result = self.ff.set_flag("pipeline_v2", True)
+        self.assertIsNone(result)
+        self.assertTrue(self.ff.is_enabled("pipeline_v2"))
+
+    # --- IPC propagation ---
+
+    def test_handle_set_feature_flag_with_invalid_name_returns_error_dict(self) -> None:
+        result = self.ff.handle_set_feature_flag({"flag_name": "bad name!", "enabled": True})
+        self.assertIn("ok", result)
+        self.assertFalse(result["ok"])
+        self.assertIn("reason", result)
+
+    def test_handle_set_feature_flag_with_valid_name_returns_flag_name(self) -> None:
+        result = self.ff.handle_set_feature_flag({"flag_name": "valid_flag", "enabled": True})
+        self.assertEqual(result.get("flag_name"), "valid_flag")
 
 
 if __name__ == "__main__":
