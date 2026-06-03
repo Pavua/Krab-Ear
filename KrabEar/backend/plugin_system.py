@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import logging
+import re
 import sys
 import threading
 from dataclasses import dataclass, field
@@ -128,9 +129,10 @@ class PluginManager:
             info = self._parse_manifest(manifest_path, entry)
             if info is None:
                 continue
-            self._discovered[info.name] = info
-            if info.name not in self._statuses:
-                self._statuses[info.name] = _STATUS_DISCOVERED
+            with self._lock:
+                self._discovered[info.name] = info
+                if info.name not in self._statuses:
+                    self._statuses[info.name] = _STATUS_DISCOVERED
             found.append(info)
 
         return found
@@ -239,6 +241,14 @@ class PluginManager:
         if not entry_path.is_file():
             raise FileNotFoundError(f"Файл точки входа не найден: {entry_path}")
 
+        # B2 (LOW): validate name before interpolating into sys.modules key to
+        # prevent namespace collisions from attacker-controlled plugin.json names
+        # (e.g. a name like "foo\x00bar" or "../../evil" could corrupt sys.modules).
+        if not re.match(r"^[A-Za-z0-9_-]+$", info.name):
+            raise ValueError(
+                f"Имя плагина {info.name!r} содержит недопустимые символы "
+                f"(разрешены только буквы, цифры, '_' и '-')"
+            )
         module_name = f"_krabear_plugin_{info.name}"
         spec = importlib.util.spec_from_file_location(module_name, entry_path)
         if spec is None or spec.loader is None:
@@ -274,7 +284,9 @@ class PluginManager:
     def list_plugins(self) -> list[dict[str, Any]]:
         """Возвращает список всех обнаруженных плагинов с их статусом."""
         result: list[dict[str, Any]] = []
-        for name, info in self._discovered.items():
+        with self._lock:
+            snapshot = list(self._discovered.items())
+        for name, info in snapshot:
             plugin_entry: dict[str, Any] = {
                 "name": info.name,
                 "version": info.version,
@@ -341,16 +353,17 @@ class PluginManager:
         Raises:
             KeyError: если плагин не обнаружен.
         """
-        if name not in self._discovered:
-            raise KeyError(f"Плагин '{name}' не найден")
-        if name not in self._disabled:
-            return False
-        self._disabled.discard(name)
-        # Восстанавливаем статус: loaded если был загружен, иначе discovered.
-        if name in self._loaded:
-            self._statuses[name] = _STATUS_LOADED
-        else:
-            self._statuses[name] = _STATUS_DISCOVERED
+        with self._lock:
+            if name not in self._discovered:
+                raise KeyError(f"Плагин '{name}' не найден")
+            if name not in self._disabled:
+                return False
+            self._disabled.discard(name)
+            # Восстанавливаем статус: loaded если был загружен, иначе discovered.
+            if name in self._loaded:
+                self._statuses[name] = _STATUS_LOADED
+            else:
+                self._statuses[name] = _STATUS_DISCOVERED
         logger.info("Плагин '%s' включён", name)
         return True
 
@@ -366,12 +379,13 @@ class PluginManager:
         Raises:
             KeyError: если плагин не обнаружен.
         """
-        if name not in self._discovered:
-            raise KeyError(f"Плагин '{name}' не найден")
-        if name in self._disabled:
-            return False
-        self._disabled.add(name)
-        self._statuses[name] = _STATUS_DISABLED
+        with self._lock:
+            if name not in self._discovered:
+                raise KeyError(f"Плагин '{name}' не найден")
+            if name in self._disabled:
+                return False
+            self._disabled.add(name)
+            self._statuses[name] = _STATUS_DISABLED
         logger.info("Плагин '%s' отключён", name)
         return True
 
@@ -420,6 +434,10 @@ class PluginManager:
                 self._statuses[name] = _STATUS_UNLOADED
             else:
                 self._statuses.pop(name, None)
+            # B2 (LOW): evict the module entry so a future load_plugin() gets a
+            # fresh module object and doesn't reuse stale state from sys.modules.
+            module_key = f"_krabear_plugin_{name}"
+            sys.modules.pop(module_key, None)
 
         logger.info("Плагин '%s' выгружен", name)
         return True
