@@ -2802,31 +2802,6 @@ class BackendService:
             return {"loaded": False, "latency_ms": 0, "model_name": "", "error": "engine not available"}
         return self.transcriber.engine.warmup()
 
-    def _handle_warmup_rewriter(self, params: dict) -> dict:
-        """Ручной запуск LLM rewriter warmup probe.
-
-        Отправляет минимальный (max_tokens=1) запрос в LM Studio для прогрева модели.
-        НЕ трогает circuit breaker — warmup не является user-facing вызовом.
-
-        Params:
-            timeout_sec (float | None): таймаут в секундах; по умолчанию из настроек.
-
-        Returns:
-            {
-              "ok": bool,          # True если HTTP 200
-              "latency_ms": int,   # время ответа в мс
-              "error": str | None, # описание ошибки или None
-              "model": str | None  # имя используемой модели
-            }
-        """
-        if self._llm_rewriter is None:
-            return {"ok": False, "latency_ms": 0, "error": "rewriter_disabled", "model": None}
-        runtime_timeout = self._get_runtime_setting("rewriter_warmup_timeout_sec", 15)
-        timeout_sec = float(params.get("timeout_sec") or runtime_timeout)
-        result = self._llm_rewriter.warmup_probe(timeout_sec=timeout_sec)
-        result["model"] = getattr(self._llm_rewriter, "_model", None)
-        return result
-
     def _handle_get_shutdown_status(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает статус последнего graceful shutdown.
 
@@ -3222,45 +3197,6 @@ class BackendService:
             extra={"cleared": [c["model_id"] for c in cleared]},
         )
         return {"count": len(cleared), "cleared": cleared}
-
-    def _handle_summarize_item(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Генерирует LLM-summary для элемента истории по ID."""
-        item_id = str(params.get("id", "")).strip()
-        if not item_id:
-            raise RuntimeError("Параметр id обязателен")
-
-        # Найти элемент в истории
-        with self.store._lock():
-            items = self.store._load_active_items_unlocked()
-        target = None
-        for item in items:
-            if item.id == item_id:
-                target = item
-                break
-        if target is None:
-            raise RuntimeError(f"Элемент не найден: {item_id}")
-
-        text = target.text or ""
-        if len(text) < 50:
-            raise RuntimeError("Текст слишком короткий для summary")
-
-        summary = self._generate_summary(text)
-        if summary is None:
-            # Fallback на локальный summary
-            local = self._summarize_text_locally(text, mode="summary_short", max_points=3)
-            return {
-                "id": item_id,
-                "summary": local["summary"],
-                "llm": False,
-                "source_chars": len(text),
-            }
-
-        return {
-            "id": item_id,
-            "summary": summary,
-            "llm": True,
-            "source_chars": len(text),
-        }
 
     def _handle_extract_action_items(self, params: dict[str, Any]) -> dict[str, Any]:
         """Извлекает задачи/решения/вопросы из транскрипта по item_id через LLM."""
@@ -3692,26 +3628,6 @@ class BackendService:
             "fixed": result.fixed,
             "skipped": result.skipped,
             "details": result.details,
-        }
-
-    def _handle_extract_terms(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Извлекает ключевые термины из текста."""
-        text = params.get("text", "")
-        language = params.get("language", "ru")
-        if not text:
-            return {"terms": []}
-        terms = self._term_extractor.extract_terms(text, language=language)
-        return {
-            "terms": [
-                {
-                    "term": t.term,
-                    "score": t.score,
-                    "frequency": t.frequency,
-                    "language": t.language,
-                    "category": t.category,
-                }
-                for t in terms
-            ]
         }
 
     def _handle_get_context_memory(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -4315,46 +4231,6 @@ end tell'''
             result["activity_heatmap"] = heatmap
 
         return result
-
-    def _handle_generate_auto_title(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Генерирует автоматический заголовок для транскрибации.
-
-        Параметры:
-            text (str): текст транскрибации (обязательный).
-            timestamp (str): ISO 8601 timestamp (опциональный) — включает дату в заголовок.
-            max_length (int): максимальная длина заголовка (по умолчанию 50).
-            with_date (bool): если true и timestamp указан — включает дату.
-            items (list): список записей для пакетной генерации (альтернатива text).
-
-        Ответ (одиночный):
-            {title: str}
-
-        Ответ (пакетный):
-            {titles: [{id, title, generated_at}]}
-        """
-        # Пакетный режим
-        items = params.get("items")
-        if items is not None:
-            if not isinstance(items, list):
-                raise ValueError("Параметр 'items' должен быть списком")
-            titles = self._auto_title_generator.batch_generate(items)
-            return {"titles": titles}
-
-        # Одиночный режим
-        text = str(params.get("text", "") or "")
-        timestamp = str(params.get("timestamp", "") or "")
-        max_length = int(params.get("max_length", 50))
-        with_date = bool(params.get("with_date", False))
-
-        if not text:
-            return {"title": "Запись"}
-
-        if with_date and timestamp:
-            title = self._auto_title_generator.generate_title_with_date(text, timestamp)
-        else:
-            title = self._auto_title_generator.generate_title(text, max_length=max_length)
-
-        return {"title": title}
 
     def _handle_get_learning_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_learning_stats — статистика прогресса изучения языка."""
