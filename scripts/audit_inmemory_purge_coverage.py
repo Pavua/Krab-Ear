@@ -151,6 +151,14 @@ REGISTRY: tuple[RegistryEntry, ...] = (
 # ``history_service.py::handle_purge_all_data``; a comment here documents the
 # intentional out-of-band placement so future auditors do not re-add it to the
 # registry (which would always show as a false gap).
+#
+# ``TranscriptionQueue._jobs`` (wave-30 MED) is intentionally NOT in this REGISTRY
+# for the same reason: TranscriptionQueue lives in BackendService (self._transcription_queue),
+# not in HistoryService.  The clear-call ``self._transcription_queue.clear()`` is wired
+# in ``BackendService._handle_purge_all_data`` immediately after
+# ``self._hotword_detector.clear()`` — same out-of-band pattern.  Adding it to this
+# registry would permanently show as a false gap because this guard only scans
+# ``history_service.py::handle_purge_all_data``.
 
 
 @dataclass

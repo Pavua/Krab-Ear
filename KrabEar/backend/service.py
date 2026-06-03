@@ -648,7 +648,9 @@ class BackendService:
             enabled=settings.PASTE_APP_MEMORY_ENABLED,
         )
         self._text_postprocessor = TextPostProcessor()
-        self._transcription_queue = TranscriptionQueue()
+        self._transcription_queue = TranscriptionQueue(
+            privacy_mode_fn=lambda: self._get_runtime_setting("privacy_mode_enabled", False),
+        )
         self._emotion_detector = EmotionDetector()
         self._sentiment_trends = SentimentTrendAnalyzer(detector=self._emotion_detector)
         self._topic_tracker = TopicTracker()
@@ -2040,6 +2042,17 @@ class BackendService:
                 import logging as _logging
                 _logging.getLogger("KrabEar.BackendService").warning(
                     "purge_all_data: hotword_detector.clear() failed", exc_info=True
+                )
+            # Wave-30 MED: wipe in-memory transcription queue (file_path + result fields)
+            # after history purge.  _transcription_queue lives in BackendService (not
+            # HistoryService), so the clear is wired here — same pattern as _hotword_detector.
+            # Documented in audit_inmemory_purge_coverage.py registry comment.
+            try:
+                self._transcription_queue.clear()
+            except Exception:
+                import logging as _logging
+                _logging.getLogger("KrabEar.BackendService").warning(
+                    "purge_all_data: transcription_queue.clear() failed", exc_info=True
                 )
         return result
 
