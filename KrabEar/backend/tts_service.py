@@ -34,6 +34,13 @@ _SILERO_MAX_TEXT_LEN = 5000
 # Лимит текста для macOS say — unbounded subprocess.run + 1 MB IPC limit = local DoS.
 # Аналогично Silero: обрезаем перед передачей в say(1).
 _SAY_MAX_TEXT_LEN = 5000
+# Kokoro voice validation: voice names follow pattern like 'af_sky', 'bf_emma', etc.
+# Reject arbitrary strings that don't match to prevent passing untrusted data into KPipeline.
+_KOKORO_VOICE_RE = re.compile(r'^[a-z][a-z0-9_-]*$')
+_KOKORO_DEFAULT_VOICE = "af_heart"
+# IPC-level max text length guard for synthesize_speech — applied in handle_synthesize_speech
+# before any backend synthesis starts (Silero/Kokoro/say each have their own inner caps too).
+MAX_TTS_TEXT_LEN = 5000
 # Таймауты для subprocess.run в _say_to_wav — блокирует daemon-поток без ограничения.
 _SAY_SUBPROCESS_TIMEOUT = 30   # секунд — достаточно для ~5000 символов на say
 _AFCONVERT_TIMEOUT = 15        # секунд — конвертация AIFF→WAV всегда быстрая
@@ -300,7 +307,19 @@ class TTSService:
             import numpy as np
             all_samples: list[Any] = []
             sample_rate = 24000  # Kokoro default
-            for _gs, _ps, audio in pipeline(text, voice=voice or "af_heart"):
+            # Validate Kokoro voice parameter — reject arbitrary strings that don't match
+            # the expected pattern (e.g. 'af_sky', 'bf_emma') to prevent passing
+            # untrusted data into KPipeline().
+            raw_voice = voice or _KOKORO_DEFAULT_VOICE
+            if not _KOKORO_VOICE_RE.match(raw_voice):
+                logger.warning(
+                    "Kokoro: недопустимое имя голоса %r (ожидается ^[a-z][a-z0-9_-]*$),"
+                    " использую %r",
+                    raw_voice,
+                    _KOKORO_DEFAULT_VOICE,
+                )
+                raw_voice = _KOKORO_DEFAULT_VOICE
+            for _gs, _ps, audio in pipeline(text, voice=raw_voice):
                 if audio is not None:
                     all_samples.append(audio)
             if not all_samples:
@@ -395,6 +414,15 @@ class TTSService:
         text = str(params.get("text", "")).strip()
         if not text:
             return {"ok": False, "error": "text is required"}
+
+        # IPC-level text length guard — prevents local DoS from very long strings.
+        # Individual backends (Silero / say) also have their own inner caps, but
+        # applying the guard early avoids even the language-detection overhead.
+        if len(text) > MAX_TTS_TEXT_LEN:
+            return {
+                "ok": False,
+                "error": f"text exceeds maximum length {MAX_TTS_TEXT_LEN} (got {len(text)})",
+            }
 
         language = str(params.get("language", "auto")).strip().lower()
         if language not in ("ru", "en", "auto"):
