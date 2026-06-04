@@ -12,7 +12,7 @@ from backend.analytics_dashboard import (
 import sys
 import tempfile
 import unittest
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -20,45 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-
-# ---------------------------------------------------------------------------
-# Вспомогательные фабрики
-# ---------------------------------------------------------------------------
-
-def _make_item(
-    days_ago: int = 0,
-    hour: int = 10,
-    confidence: float | None = 0.85,
-    audio_duration_sec: float = 30.0,
-    text: str = "hello world test",
-    source_lang: str = "ru",
-    translated_text: str = "",
-    translation_status: str = "not_requested",
-    llm_applied: bool = False,
-):
-    """Создаёт fake-элемент истории с заданными параметрами.
-
-    Использует UTC (datetime.now(timezone.utc)) для консистентности с _build_dashboard()
-    (W1707: _build_dashboard now uses UTC to match stored UTC timestamps).
-    """
-    # Use UTC date to match _build_dashboard's today_str (also UTC now)
-    base_date = datetime.now(timezone.utc).date() - timedelta(days=days_ago)
-    dt = datetime.combine(base_date, datetime.min.time(), tzinfo=timezone.utc)
-    dt = dt.replace(hour=hour, minute=0, second=0, microsecond=0)
-
-    class FakeItem:
-        ts = dt.isoformat()
-
-    item = FakeItem()
-    item.confidence = confidence
-    item.audio_duration_sec = audio_duration_sec
-    item.text = text
-    item.source_lang = source_lang
-    item.translated_text = translated_text
-    item.translation_status = translation_status
-    item.llm_applied = llm_applied
-    item.diarization = None
-    return item
+from tests.test_helpers import make_test_item as _make_item  # noqa: E402
 
 
 def _make_store(items: list) -> MagicMock:

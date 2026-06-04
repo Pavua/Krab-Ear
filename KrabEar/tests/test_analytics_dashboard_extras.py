@@ -6,7 +6,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -21,40 +21,7 @@ from backend.analytics_dashboard import (
     _calc_trend,
     _parse_ts,
 )
-
-
-# ---------------------------------------------------------------------------
-# Вспомогательные фабрики (дублирует test_analytics_dashboard для изоляции)
-# ---------------------------------------------------------------------------
-
-def _make_item(
-    days_ago: int = 0,
-    hour: int = 10,
-    confidence: float | None = 0.85,
-    audio_duration_sec: float = 30.0,
-    text: str = "hello world test",
-    source_lang: str = "ru",
-    translated_text: str = "",
-    translation_status: str = "not_requested",
-    llm_applied: bool = False,
-):
-    base_date = datetime.now(timezone.utc).date() - timedelta(days=days_ago)  # W1707: UTC to match dashboard
-    dt = datetime.combine(base_date, datetime.min.time(), tzinfo=timezone.utc)
-    dt = dt.replace(hour=hour, minute=0, second=0, microsecond=0)
-
-    class FakeItem:
-        ts = dt.isoformat()
-
-    item = FakeItem()
-    item.confidence = confidence
-    item.audio_duration_sec = audio_duration_sec
-    item.text = text
-    item.source_lang = source_lang
-    item.translated_text = translated_text
-    item.translation_status = translation_status
-    item.llm_applied = llm_applied
-    item.diarization = None
-    return item
+from tests.test_helpers import make_test_item as _make_item  # noqa: E402
 
 
 def _make_store(items: list) -> MagicMock:
