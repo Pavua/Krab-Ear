@@ -421,10 +421,17 @@ class EdgeCaseNamesTestCase(unittest.TestCase):
             with self.assertRaises(ValueError, msg=f"should fail for {repr(bad)}"):
                 self._mgr.create_collection(bad)
 
-    def test_very_long_name_accepted(self) -> None:
+    def test_very_long_name_rejected(self) -> None:
+        """wave-34: 200-char cap added — names >200 chars are now rejected."""
         long_name = "А" * 500
-        result = self._mgr.create_collection(long_name)
-        self.assertEqual(result["name"], long_name)
+        with self.assertRaises(ValueError):
+            self._mgr.create_collection(long_name)
+
+    def test_max_length_name_accepted(self) -> None:
+        """Names exactly at the 200-char limit are still accepted."""
+        max_name = "А" * 200
+        result = self._mgr.create_collection(max_name)
+        self.assertEqual(result["name"], max_name)
 
     def test_leading_trailing_whitespace_stripped(self) -> None:
         """Name with surrounding spaces is stored stripped."""

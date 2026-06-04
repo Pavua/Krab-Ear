@@ -236,6 +236,7 @@ class TestRecordingCoreServiceDeviceInjection(unittest.TestCase):
         svc._settings_svc = fake_settings_svc
         svc.transcriber = fake_transcriber
         svc._preview_lock = __import__("threading").Lock()
+        svc._rt_lock = __import__("threading").Lock()  # wave-27: added to __init__, required by handle_start_recording
         svc._preview_text = ""
         svc._preview_duration_sec = 0.0
         svc._preview_worker_thread = None
