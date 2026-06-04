@@ -27,6 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from backend.audio_analytics_service import AudioAnalyticsService  # noqa: E402
 from backend.search_and_analysis_service import SearchAndAnalysisService  # noqa: E402
 from backend.search_history import SearchHistoryManager  # noqa: E402
+from tests.test_helpers import make_test_item  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -192,12 +193,13 @@ class TestPendingActionItemsPrivacyGate(unittest.TestCase):
 
     def test_privacy_off_returns_pending_items(self):
         """privacy_mode=False → normal pending list from store."""
-        item = MagicMock()
-        item.id = "item-1"
-        item.ts = "2026-06-01T00:00:00Z"
-        item.text = "some transcript text"
-        item.action_items = None
-        item.audio_duration_sec = 60.0
+        item = make_test_item(
+            item_id="item-1",
+            ts="2026-06-01T00:00:00+00:00",
+            text="some transcript text",
+            action_items=None,
+            audio_duration_sec=60.0,
+        )
         svc = self._make_svc(_privacy_off, items=[item])
         result = svc.handle_get_pending_action_items({})
         pending = result.get("pending", [])
@@ -206,12 +208,13 @@ class TestPendingActionItemsPrivacyGate(unittest.TestCase):
 
     def test_privacy_off_text_preview_present(self):
         """privacy_mode=False → text_preview is included in results."""
-        item = MagicMock()
-        item.id = "item-2"
-        item.ts = "2026-06-01T00:00:00Z"
-        item.text = "x" * 200
-        item.action_items = None
-        item.audio_duration_sec = 30.0
+        item = make_test_item(
+            item_id="item-2",
+            ts="2026-06-01T00:00:00+00:00",
+            text="x" * 200,
+            action_items=None,
+            audio_duration_sec=30.0,
+        )
         svc = self._make_svc(_privacy_off, items=[item])
         result = svc.handle_get_pending_action_items({})
         pending = result.get("pending", [])
