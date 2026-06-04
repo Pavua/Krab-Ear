@@ -3528,6 +3528,9 @@ class BackendService:
 
     def _handle_get_daily_cost_summary(self, params: dict) -> dict:
         """IPC: get_daily_cost_summary — сводка вычислительных расходов за сегодня."""
+        # wave-42 MED: today_recordings_count + total_duration reveal activity patterns.
+        if self._get_runtime_setting("privacy_mode_enabled", False):
+            return {"ok": False, "reason": "privacy_mode_active"}
         return self._cost_estimator.get_daily_cost_summary(self._usage_tracker)
 
     def _handle_estimate_batch_cost(self, params: dict) -> dict:

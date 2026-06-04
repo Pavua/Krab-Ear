@@ -489,7 +489,7 @@ class TranslationService:
         без обращения к истории — утечка capitalized words / brand names / source→target pairs
         из translation history нарушает режим конфиденциальности.
         """
-        if self._cached_settings().get("privacy_mode_enabled"):
+        if (self._cached_settings() or {}).get("privacy_mode_enabled"):
             return {"ok": True, "suggestions": [], "reason": "privacy_mode_active"}
 
         from core.utils import _BRAND_REPLACEMENTS_RAW
@@ -613,7 +613,7 @@ class TranslationService:
         без обращения к истории транскрибаций — leaking proper nouns / domain terms
         нарушает режим конфиденциальности.
         """
-        if self._cached_settings().get("privacy_mode_enabled"):
+        if (self._cached_settings() or {}).get("privacy_mode_enabled"):
             return {"ok": True, "suggestions": [], "total": 0, "reason": "privacy_mode_active"}
 
         scan_limit = max(10, min(int(params.get("scan_limit", 100) or 100), 500))

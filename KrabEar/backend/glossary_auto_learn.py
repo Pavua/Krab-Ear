@@ -282,7 +282,7 @@ class GlossaryAutoLearnService:
         без обращения к истории переводов — утечка medical domain term pairs нарушает
         режим конфиденциальности.
         """
-        if self._cached_settings().get("privacy_mode_enabled"):
+        if (self._cached_settings() or {}).get("privacy_mode_enabled"):
             return {"suggestions": []}
 
         limit = int(params.get("limit", 20))
