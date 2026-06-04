@@ -18,6 +18,47 @@ from pathlib import Path
 from typing import Any
 
 
+def _sanitize_md_body_text(text: str) -> str:
+    """Sanitize a string before inserting it into a Markdown body.
+
+    Prevents YAML-frontmatter-boundary injection: a bare ``---`` on its own
+    line is a Markdown horizontal rule / YAML separator and can corrupt the
+    .md file structure or confuse Obsidian's parser.
+
+    Also strips NUL bytes and CR characters that have no place in a Markdown
+    document.
+
+    Does NOT strip newlines in general — multi-line transcripts are valid.
+
+    Escaping rule: lines that are exactly ``---`` or ``...`` (the YAML end
+    marker) become ``\\---`` / ``\\...`` so Markdown renderers show them as
+    literal dashes rather than structural elements.
+    """
+    if not text:
+        return text
+    # Strip control chars that are meaningless in UTF-8 Markdown
+    text = text.replace('\x00', '').replace('\r', '')
+    # Escape bare YAML document boundary lines
+    text = re.sub(r'(?m)^(---+|\.\.\.)$', r'\\\g<0>', text)
+    return text
+
+
+def _sanitize_speaker_name(name: str) -> str:
+    """Sanitize a speaker label for safe inline Markdown use.
+
+    Speaker names appear inside ``**[name (HH:MM:SS)]**`` inline formatting.
+    Newlines would break the line structure; brackets confuse the Markdown
+    parser.  Strip leading/trailing whitespace and replace newlines / brackets
+    / backticks with space or underscore to keep the display clean.
+    """
+    if not name:
+        return "Спикер"
+    name = name.replace('\n', ' ').replace('\r', '')
+    # Keep the name printable — replace chars that break inline MD formatting
+    name = re.sub(r'[\[\]`]', '_', name)
+    return name.strip() or "Спикер"
+
+
 def _yaml_scalar(value: str) -> str:
     """Return a YAML-safe scalar string.
 
@@ -610,8 +651,10 @@ class ObsidianSyncManager:
             speaker_turns = diarization.get("speaker_turns", [])
             if speaker_turns:
                 for turn in speaker_turns:
-                    speaker = turn.get("speaker", "Спикер")
-                    turn_text = turn.get("text", "")
+                    # W1769: sanitize speaker name + turn text to prevent
+                    # YAML-frontmatter boundary injection in .md body.
+                    speaker = _sanitize_speaker_name(turn.get("speaker", "Спикер"))
+                    turn_text = _sanitize_md_body_text(str(turn.get("text", "")))
                     start = turn.get("start", 0.0)
                     # Форматируем время как HH:MM:SS
                     h = int(start // 3600)
@@ -621,18 +664,18 @@ class ObsidianSyncManager:
                     lines.append(f"**[{speaker} ({timestamp})]** {turn_text}")
                     lines.append("")
             else:
-                lines.append(f"[Спикер (00:00:00)] {text}")
+                lines.append(f"[Спикер (00:00:00)] {_sanitize_md_body_text(text)}")
                 lines.append("")
         else:
             # Без диаризации — стандартный формат
-            lines.append(f"[Спикер (00:00:00)] {text}")
+            lines.append(f"[Спикер (00:00:00)] {_sanitize_md_body_text(text)}")
             lines.append("")
 
         # Секция перевода (если есть)
         if translated_text and translation_mode != "off":
             lines.append("## Перевод")
             lines.append("")
-            lines.append(translated_text)
+            lines.append(_sanitize_md_body_text(translated_text))
             lines.append("")
 
         # Краткое содержание — placeholder
