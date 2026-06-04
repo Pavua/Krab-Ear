@@ -38,6 +38,8 @@ for _p in (str(PROJECT_ROOT), str(PACKAGE_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from tests.test_helpers import make_test_item  # noqa: E402
+
 from backend.recap_scheduler import _build_html
 from backend.daily_digest import DailyDigestGenerator
 
@@ -147,13 +149,13 @@ class TestDailyDigestWhitelistsSourceLang(unittest.TestCase):
     """DailyDigestGenerator must reject malicious source_lang at aggregation."""
 
     def _make_item(self, source_lang: str, ts: str = "2026-05-31T10:00:00Z"):
-        item = MagicMock()
-        item.source_lang = source_lang
-        item.ts = ts
-        item.audio_duration_sec = 60.0
-        item.text = "Hello world test text for digest"
-        item.confidence = 0.9
-        return item
+        return make_test_item(
+            source_lang=source_lang,
+            ts=ts,
+            audio_duration_sec=60.0,
+            text="Hello world test text for digest",
+            confidence=0.9,
+        )
 
     def _run_with_items(self, items):
         gen = DailyDigestGenerator()
@@ -206,13 +208,13 @@ class TestEndToEndXSSChain(unittest.TestCase):
     """Full attack chain: malicious source_lang → digest → _build_html → no <script>."""
 
     def _make_item(self, source_lang: str):
-        item = MagicMock()
-        item.source_lang = source_lang
-        item.ts = "2026-05-31T10:00:00Z"
-        item.audio_duration_sec = 30.0
-        item.text = "normal transcription text"
-        item.confidence = 0.85
-        return item
+        return make_test_item(
+            source_lang=source_lang,
+            ts="2026-05-31T10:00:00Z",
+            audio_duration_sec=30.0,
+            text="normal transcription text",
+            confidence=0.85,
+        )
 
     def test_stored_xss_lang_does_not_reach_html_output(self):
         """
@@ -255,13 +257,13 @@ class TestEndToEndXSSChain(unittest.TestCase):
         self.assertNotIn("<script>", html_output)
 
     def _make_item_with_text(self, text: str):
-        item = MagicMock()
-        item.source_lang = "ru"
-        item.ts = "2026-05-31T10:00:00Z"
-        item.audio_duration_sec = 30.0
-        item.text = text
-        item.confidence = 0.9
-        return item
+        return make_test_item(
+            source_lang="ru",
+            ts="2026-05-31T10:00:00Z",
+            audio_duration_sec=30.0,
+            text=text,
+            confidence=0.9,
+        )
 
 
 if __name__ == "__main__":

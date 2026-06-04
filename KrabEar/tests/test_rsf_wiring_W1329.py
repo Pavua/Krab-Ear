@@ -15,10 +15,12 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch, call
 
 # Ensure backend.* and core.* are importable
+
 PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+from tests.test_helpers import make_test_item  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -75,10 +77,7 @@ class FakeStore:
     data_dir = Path("/tmp")
 
     def add_history_item(self, **kwargs):
-        item = MagicMock()
-        item.id = "test-id-1"
-        item.ts = "2026-01-01T00:00:00"
-        return item
+        return make_test_item(id="test-id-1", ts="2026-01-01T00:00:00")
 
     def get_history_page(self, cursor=None, limit=10):
         return [], None

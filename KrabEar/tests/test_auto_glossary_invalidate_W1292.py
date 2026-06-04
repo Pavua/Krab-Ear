@@ -19,6 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backend.history_service import HistoryService
 from backend.state_store import StateStore
+from tests.test_helpers import make_test_item  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -114,10 +115,9 @@ class TestRecordingPersistInvalidatesAutoGlossary(unittest.TestCase):
 
         fake_store = MagicMock()
         fake_store.data_dir = Path(self.tmp.name) / "data"
-        fake_item = MagicMock()
-        fake_item.id = "test-id-001"
-        fake_item.ts = "2026-05-27T00:00:00"
-        fake_store.add_history_item.return_value = fake_item
+        fake_store.add_history_item.return_value = make_test_item(
+            id="test-id-001", ts="2026-05-27T00:00:00"
+        )
 
         svc = RecordingCoreService(
             recorder=MagicMock(),

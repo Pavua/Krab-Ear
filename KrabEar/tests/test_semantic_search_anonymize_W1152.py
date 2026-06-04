@@ -16,9 +16,13 @@ from unittest.mock import MagicMock, patch, call
 
 # --- path setup ---
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(PROJECT_ROOT))
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]  # KrabEar/
+for _p in (str(PROJECT_ROOT), str(PACKAGE_ROOT)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from backend.semantic_search import SemanticSearcher
+from tests.test_helpers import make_test_item  # noqa: E402
 
 
 class TestPurgeAll(unittest.TestCase):
@@ -113,9 +117,8 @@ class TestAnonymizeBeforeIndex(unittest.TestCase):
 
         semantic_searcher.index_item.side_effect = fake_index_item
 
-        # Build a minimal HistoryItem-like mock
-        item = MagicMock()
-        item.id = "test-id-001"
+        # Build a real HistoryItem (make_test_item ensures AttributeError on typos)
+        item = make_test_item()
 
         with patch.object(_cfg_settings.__class__, "SEMANTIC_SEARCH_AUTO_INDEX", True, create=True), \
              patch("threading.Thread") as mock_thread:

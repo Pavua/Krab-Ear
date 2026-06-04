@@ -19,6 +19,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from tests.test_helpers import make_test_item  # noqa: E402
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -53,13 +55,8 @@ class TestQualityTrendAnalyzerRecordQuality(unittest.TestCase):
         """Запись confidence из объектов с атрибутами."""
         now = datetime.now(timezone.utc)
 
-        item1 = MagicMock()
-        item1.ts = now
-        item1.confidence = 0.92
-
-        item2 = MagicMock()
-        item2.ts = now
-        item2.confidence = 0.88
+        item1 = make_test_item(ts=now.isoformat(), confidence=0.92)
+        item2 = make_test_item(id="test-id-002", ts=now.isoformat(), confidence=0.88)
 
         report = self.analyzer.analyze_trends([item1, item2], days=30)
 
