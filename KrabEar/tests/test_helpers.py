@@ -92,3 +92,50 @@ def make_test_items(n: int, **overrides: Any) -> list[HistoryItem]:
         make_test_item(**({} if has_explicit_id else {"id": f"test-id-{i:03d}"}), **overrides)
         for i in range(n)
     ]
+
+
+# ---------------------------------------------------------------------------
+# Self-tests — keep pytest exit code 0 when this file is run standalone
+# (CI collects test_*.py via glob; exit code 5 = "no tests" → treated as FAIL)
+# ---------------------------------------------------------------------------
+
+class TestMakeTestItemFactory:
+    """Smoke tests for make_test_item() and make_test_items()."""
+
+    def test_defaults_are_valid_history_item(self) -> None:
+        item = make_test_item()
+        assert item.id == "test-id-001"
+        assert item.text == "Test transcript."
+        assert item.source_lang == "ru"
+        assert item.confidence == 0.92
+        assert item.audio_duration_sec == 12.5
+
+    def test_override_replaces_default(self) -> None:
+        item = make_test_item(text="custom", confidence=0.5)
+        assert item.text == "custom"
+        assert item.confidence == 0.5
+        assert item.source_lang == "ru"  # default preserved
+
+    def test_days_ago_sets_ts(self) -> None:
+        from datetime import datetime, timezone
+        item = make_test_item(days_ago=0)
+        dt = datetime.fromisoformat(item.ts.replace("Z", "+00:00"))
+        today = datetime.now(timezone.utc).date()
+        assert dt.date() == today
+
+    def test_item_id_alias(self) -> None:
+        item = make_test_item(item_id="my-special-id")
+        assert item.id == "my-special-id"
+
+    def test_explicit_ts_wins_over_days_ago(self) -> None:
+        item = make_test_item(days_ago=5, ts="2026-03-15T10:00:00Z")
+        assert item.ts == "2026-03-15T10:00:00Z"
+
+    def test_make_test_items_unique_ids(self) -> None:
+        items = make_test_items(3)
+        ids = [i.id for i in items]
+        assert ids == ["test-id-000", "test-id-001", "test-id-002"]
+
+    def test_make_test_items_shared_override(self) -> None:
+        items = make_test_items(2, source_lang="es")
+        assert all(i.source_lang == "es" for i in items)
