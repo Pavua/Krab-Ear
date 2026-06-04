@@ -313,6 +313,9 @@ class PlaybackTracker:
 
     def handle_get_playback_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_playback_stats — статистика воспроизведения записи."""
+        # wave-41: privacy gate — read paths must not expose playback history in privacy mode.
+        if self._is_privacy_mode():
+            return {"item_id": "", "play_count": 0, "total_listened_sec": 0.0, "last_played": None}
         item_id = str(params.get("item_id", "")).strip()
         if not item_id:
             raise ValueError("Параметр item_id обязателен")
@@ -320,12 +323,18 @@ class PlaybackTracker:
 
     def handle_get_most_replayed(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_most_replayed — топ наиболее часто воспроизводимых записей."""
+        # wave-41: privacy gate — suppress replay history in privacy mode.
+        if self._is_privacy_mode():
+            return {"items": [], "count": 0}
         limit = int(params.get("limit", 10))
         items = self.get_most_replayed(limit=limit)
         return {"items": items, "count": len(items)}
 
     def handle_get_never_played(self, params: dict[str, Any], store: Any) -> dict[str, Any]:
         """IPC: get_never_played — записи истории, которые ни разу не воспроизводились."""
+        # wave-41: privacy gate — suppress cross-referencing history with playback data.
+        if self._is_privacy_mode():
+            return {"items": [], "count": 0}
         limit = int(params.get("limit", 50))
         items = self.get_never_played(store=store, limit=limit)
         return {"items": items, "count": len(items)}
