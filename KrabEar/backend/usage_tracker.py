@@ -175,6 +175,24 @@ class UsageTracker:
             "total_words": words,
         }
 
+    def clear_all(self) -> None:
+        """Стирает всю статистику из памяти и удаляет usage_stats.json с диска.
+
+        Вызывается из handle_purge_all_data (wave-41 MED: usage_stats.json
+        ранее переживал приватностную очистку). После clear_all() трекер
+        продолжает работу с нулевыми счётчиками.
+        """
+        with self._lock:
+            self._daily = {}
+            self._all_recordings = 0
+            self._all_duration = 0.0
+            self._all_words = 0
+        if self._stats_file is not None and self._stats_file.exists():
+            try:
+                self._stats_file.unlink()
+            except Exception:
+                logger.exception("usage_tracker: не удалось удалить %s при purge", self._stats_file)
+
     # ------------------------------------------------------------------
     # Внутренние методы
     # ------------------------------------------------------------------
