@@ -33,6 +33,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.search_and_analysis_service import SearchAndAnalysisService
+from tests.test_helpers import make_test_item
 
 
 # ---------------------------------------------------------------------------
@@ -41,15 +42,15 @@ from backend.search_and_analysis_service import SearchAndAnalysisService
 
 
 def _make_fake_item(item_id: str, text: str = "обсуждение проекта разработки системы") -> Any:
-    item = types.SimpleNamespace()
-    item.id = item_id
-    item.text = text
-    item.ts = 1_700_000_000.0
-    item.audio_duration_sec = 30.0
-    item.confidence = 0.9
-    item.language = "ru"
-    item.action_items = None
-    return item
+    return make_test_item(
+        id=item_id,
+        text=text,
+        ts="2023-11-14T18:53:20Z",
+        audio_duration_sec=30.0,
+        confidence=0.9,
+        source_lang="ru",
+        action_items=None,
+    )
 
 
 def _make_fake_store(items: list[Any] | None = None) -> Any:
