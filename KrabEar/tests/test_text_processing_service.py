@@ -18,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.text_processing_service import TextProcessingService  # noqa: E402
+from tests.test_helpers import make_test_item  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -191,11 +192,8 @@ def _mock_store_with_items(items: list) -> MagicMock:
 
 
 class TestSummarizeItem(unittest.TestCase):
-    def _make_item(self, item_id: str, text: str) -> MagicMock:
-        item = MagicMock()
-        item.id = item_id
-        item.text = text
-        return item
+    def _make_item(self, item_id: str, text: str):
+        return make_test_item(id=item_id, text=text)
 
     def test_missing_id_raises(self) -> None:
         svc, _ = _make_service()
