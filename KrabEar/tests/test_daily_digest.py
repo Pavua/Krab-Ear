@@ -4,12 +4,14 @@ from __future__ import annotations
 from backend.state_store import StateStore
 from backend.daily_digest import DailyDigestGenerator, DailyDigest
 
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, Mock
 import sys
 import tempfile
 import unittest
+
+from tests.test_helpers import make_test_item
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -101,19 +103,21 @@ class DailyDigestTestCase(unittest.TestCase):
         # Создаём mock store с items за разные дни
         mock_store = Mock()
 
-        item1 = Mock()
-        item1.text = "запись 15 января"
-        item1.ts = f"{target_date}T10:00:00"
-        item1.audio_duration_sec = 60.0
-        item1.source_lang = "ru"
-        item1.confidence = 0.95
+        item1 = make_test_item(
+            text="запись 15 января",
+            ts=f"{target_date}T10:00:00",
+            audio_duration_sec=60.0,
+            source_lang="ru",
+            confidence=0.95,
+        )
 
-        item2 = Mock()
-        item2.text = "запись 16 января"
-        item2.ts = "2024-01-16T10:00:00"
-        item2.audio_duration_sec = 120.0
-        item2.source_lang = "en"
-        item2.confidence = 0.90
+        item2 = make_test_item(
+            text="запись 16 января",
+            ts="2024-01-16T10:00:00",
+            audio_duration_sec=120.0,
+            source_lang="en",
+            confidence=0.90,
+        )
 
         mock_store._load_active_items_with_lock.return_value = [item1, item2]
 
@@ -128,26 +132,29 @@ class DailyDigestTestCase(unittest.TestCase):
 
         mock_store = Mock()
 
-        item1 = Mock()
-        item1.text = "русский текст"
-        item1.ts = f"{today}T10:00:00"
-        item1.audio_duration_sec = 60.0
-        item1.source_lang = "ru"
-        item1.confidence = 0.95
+        item1 = make_test_item(
+            text="русский текст",
+            ts=f"{today}T10:00:00",
+            audio_duration_sec=60.0,
+            source_lang="ru",
+            confidence=0.95,
+        )
 
-        item2 = Mock()
-        item2.text = "spanish text"
-        item2.ts = f"{today}T11:00:00"
-        item2.audio_duration_sec = 60.0
-        item2.source_lang = "es"
-        item2.confidence = 0.90
+        item2 = make_test_item(
+            text="spanish text",
+            ts=f"{today}T11:00:00",
+            audio_duration_sec=60.0,
+            source_lang="es",
+            confidence=0.90,
+        )
 
-        item3 = Mock()
-        item3.text = "another russian"
-        item3.ts = f"{today}T12:00:00"
-        item3.audio_duration_sec = 60.0
-        item3.source_lang = "ru"
-        item3.confidence = 0.92
+        item3 = make_test_item(
+            text="another russian",
+            ts=f"{today}T12:00:00",
+            audio_duration_sec=60.0,
+            source_lang="ru",
+            confidence=0.92,
+        )
 
         mock_store._load_active_items_with_lock.return_value = [item1, item2, item3]
 
@@ -161,26 +168,29 @@ class DailyDigestTestCase(unittest.TestCase):
 
         mock_store = Mock()
 
-        item1 = Mock()
-        item1.text = "низкая уверенность"
-        item1.ts = f"{today}T10:00:00"
-        item1.audio_duration_sec = 60.0
-        item1.source_lang = "ru"
-        item1.confidence = 0.70
+        item1 = make_test_item(
+            text="низкая уверенность",
+            ts=f"{today}T10:00:00",
+            audio_duration_sec=60.0,
+            source_lang="ru",
+            confidence=0.70,
+        )
 
-        item2 = Mock()
-        item2.text = "очень высокая уверенность текст с большой длиной"
-        item2.ts = f"{today}T11:00:00"
-        item2.audio_duration_sec = 120.0
-        item2.source_lang = "ru"
-        item2.confidence = 0.98
+        item2 = make_test_item(
+            text="очень высокая уверенность текст с большой длиной",
+            ts=f"{today}T11:00:00",
+            audio_duration_sec=120.0,
+            source_lang="ru",
+            confidence=0.98,
+        )
 
-        item3 = Mock()
-        item3.text = "средняя уверенность"
-        item3.ts = f"{today}T12:00:00"
-        item3.audio_duration_sec = 90.0
-        item3.source_lang = "ru"
-        item3.confidence = 0.85
+        item3 = make_test_item(
+            text="средняя уверенность",
+            ts=f"{today}T12:00:00",
+            audio_duration_sec=90.0,
+            source_lang="ru",
+            confidence=0.85,
+        )
 
         mock_store._load_active_items_with_lock.return_value = [item1, item2, item3]
 
@@ -197,12 +207,13 @@ class DailyDigestTestCase(unittest.TestCase):
 
         mock_store = Mock()
 
-        item = Mock()
-        item.text = long_text
-        item.ts = f"{today}T10:00:00"
-        item.audio_duration_sec = 60.0
-        item.source_lang = "ru"
-        item.confidence = 0.95
+        item = make_test_item(
+            text=long_text,
+            ts=f"{today}T10:00:00",
+            audio_duration_sec=60.0,
+            source_lang="ru",
+            confidence=0.95,
+        )
 
         mock_store._load_active_items_with_lock.return_value = [item]
 
@@ -217,12 +228,13 @@ class DailyDigestTestCase(unittest.TestCase):
 
         mock_store = Mock()
 
-        item = Mock()
-        item.text = "важное ключевое слово важное"
-        item.ts = f"{today}T10:00:00"
-        item.audio_duration_sec = 120.0
-        item.source_lang = "ru"
-        item.confidence = 0.95
+        item = make_test_item(
+            text="важное ключевое слово важное",
+            ts=f"{today}T10:00:00",
+            audio_duration_sec=120.0,
+            source_lang="ru",
+            confidence=0.95,
+        )
 
         mock_store._load_active_items_with_lock.return_value = [item]
 
@@ -301,13 +313,13 @@ def _make_mock_store(items, today=None):
 
 def _make_item(text, ts=None, lang="ru", confidence=0.90, duration=60.0):
     """Фабрика тестовых items."""
-    item = Mock()
-    item.text = text
-    item.ts = ts or f"{datetime.now(timezone.utc).date().isoformat()}T10:00:00"
-    item.source_lang = lang
-    item.confidence = confidence
-    item.audio_duration_sec = duration
-    return item
+    return make_test_item(
+        text=text,
+        ts=ts or f"{datetime.now(timezone.utc).date().isoformat()}T10:00:00",
+        source_lang=lang,
+        confidence=confidence,
+        audio_duration_sec=duration,
+    )
 
 
 class DailyDigestDirectItemsTestCase(unittest.TestCase):
@@ -431,12 +443,13 @@ class DailyDigestDirectItemsTestCase(unittest.TestCase):
 
     def test_items_with_none_duration_handled_gracefully(self):
         """Items с audio_duration_sec=None не вызывают исключений."""
-        item = Mock()
-        item.text = "текст"
-        item.ts = f"{self.today}T10:00:00"
-        item.source_lang = "ru"
-        item.confidence = 0.9
-        item.audio_duration_sec = None
+        item = make_test_item(
+            text="текст",
+            ts=f"{self.today}T10:00:00",
+            source_lang="ru",
+            confidence=0.9,
+            audio_duration_sec=None,
+        )
 
         store = Mock()
         store._load_active_items_with_lock.return_value = [item]
@@ -446,12 +459,13 @@ class DailyDigestDirectItemsTestCase(unittest.TestCase):
 
     def test_items_with_no_source_lang_skipped_in_languages(self):
         """Items без source_lang не попадают в languages_used."""
-        item = Mock()
-        item.text = "текст без языка"
-        item.ts = f"{self.today}T10:00:00"
-        item.source_lang = ""
-        item.confidence = 0.9
-        item.audio_duration_sec = 60.0
+        item = make_test_item(
+            text="текст без языка",
+            ts=f"{self.today}T10:00:00",
+            source_lang="",
+            confidence=0.9,
+            audio_duration_sec=60.0,
+        )
         store = _make_mock_store([item])
         digest = self.gen.generate_digest(date_str=self.today, store=store)
         self.assertEqual(digest.languages_used, {})
