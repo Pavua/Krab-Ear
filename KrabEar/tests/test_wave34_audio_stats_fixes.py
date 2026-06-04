@@ -31,7 +31,6 @@ Tests:
 from __future__ import annotations
 
 import sys
-import types
 import unittest
 from pathlib import Path
 from typing import Any
@@ -42,8 +41,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.audio_analytics_service import AudioAnalyticsService  # noqa: E402
+from backend.models import HistoryItem  # noqa: E402
 from backend.search_and_analysis_service import SearchAndAnalysisService  # noqa: E402
 from backend.stats_report import StatsReportGenerator  # noqa: E402
+from tests.test_helpers import make_test_item  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -67,16 +68,15 @@ def _make_audio_service(data_dir=None) -> AudioAnalyticsService:
 # Helpers — SearchAndAnalysisService
 # ---------------------------------------------------------------------------
 
-def _make_fake_item(item_id: str, text: str = "тестовый текст транскрипции") -> Any:
-    item = types.SimpleNamespace()
-    item.id = item_id
-    item.text = text
-    item.ts = 1_700_000_000.0
-    item.audio_duration_sec = 30.0
-    item.confidence = 0.9
-    item.language = "ru"
-    item.action_items = None
-    return item
+def _make_fake_item(item_id: str, text: str = "тестовый текст транскрипции") -> HistoryItem:
+    return make_test_item(
+        id=item_id,
+        text=text,
+        ts="2023-11-14T22:13:20+00:00",
+        audio_duration_sec=30.0,
+        confidence=0.9,
+        source_lang="ru",
+    )
 
 
 def _make_fake_store(items: list[Any] | None = None) -> Any:
@@ -256,17 +256,16 @@ class TestStatsReportPrivacyGate(unittest.TestCase):
 class TestSectionTopSpeakersFloatGuard(unittest.TestCase):
     """D3: bad diarization data (non-numeric start/end) → no crash, speaker skipped."""
 
-    def _make_item_with_diarization(self, segments: list[dict]) -> Any:
-        item = types.SimpleNamespace()
-        item.id = "item1"
-        item.text = "тестовый текст"
-        item.ts = 1_700_000_000.0
-        item.audio_duration_sec = 60.0
-        item.confidence = 0.9
-        item.language = "ru"
-        item.tags = []
-        item.diarization = {"segments": segments}
-        return item
+    def _make_item_with_diarization(self, segments: list[dict]) -> HistoryItem:
+        return make_test_item(
+            id="item1",
+            text="тестовый текст",
+            ts="2023-11-14T22:13:20+00:00",
+            audio_duration_sec=60.0,
+            confidence=0.9,
+            source_lang="ru",
+            diarization={"segments": segments},
+        )
 
     def _call_section(self, items: list[Any]) -> str:
         gen = StatsReportGenerator()
