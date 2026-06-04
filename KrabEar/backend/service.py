@@ -2067,6 +2067,16 @@ class BackendService:
                 _logging.getLogger("KrabEar.BackendService").warning(
                     "purge_all_data: transcription_queue.clear() failed", exc_info=True
                 )
+            # wave-41 MED: wipe usage_stats.json from disk + reset in-memory counters.
+            # UsageTracker._stats_file survives purge otherwise — daily_history / streak /
+            # peak_day all contain indirect usage-pattern PII.
+            try:
+                self._usage_tracker.clear_all()
+            except Exception:
+                import logging as _logging
+                _logging.getLogger("KrabEar.BackendService").warning(
+                    "purge_all_data: usage_tracker.clear_all() failed", exc_info=True
+                )
         return result
 
     def _handle_ping(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2127,7 +2137,13 @@ class BackendService:
 
         wave-25 MED: ранее тело было пустым (dead stub → None), и IPC-ответ был
         бессмысленным. Делегируем реальному UsageTracker.get_usage_stats().
+
+        wave-41 MED: добавлен privacy gate — stats раскрывают паттерны использования
+        (количество записей, длительность, streak, пиковые дни), что является
+        косвенными метаданными в privacy_mode.
         """
+        if self._get_runtime_setting('privacy_mode_enabled', False):
+            return {'ok': False, 'reason': 'privacy_mode_active'}
         return self._usage_tracker.get_usage_stats()
 
     def _handle_list_normalization_profiles(self, params: dict) -> dict:
