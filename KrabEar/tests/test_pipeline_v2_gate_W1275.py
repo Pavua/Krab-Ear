@@ -411,6 +411,7 @@ class TestStageErrorPrefixesNormalized(unittest.TestCase):
         """TranslationStage failed result uses 'translation: ...' prefix."""
         from core.pipeline.stages.translation import TranslationStage
         from core.pipeline.context import PipelineContext
+        from backend.translator import TranslationResult
 
         ctx = PipelineContext(audio_input=b"")
         ctx.raw_text = "hello"
@@ -418,12 +419,19 @@ class TestStageErrorPrefixesNormalized(unittest.TestCase):
         ctx.final_text = "hello"
         ctx.translation_mode = "ru"
 
-        mock_result = MagicMock()
-        mock_result.ok = False
-        mock_result.status = "unsupported_lang"
+        # Use a real TranslationResult so attribute typos raise AttributeError.
+        # status="unsupported_lang" + text="" makes ok==False via the @property.
+        failed_result = TranslationResult(
+            text="",
+            status="unsupported_lang",
+            source_lang="en",
+            target_lang="ru",
+            mode="ru",
+            engine="test",
+        )
 
         mock_translator = MagicMock()
-        mock_translator.translate.return_value = mock_result
+        mock_translator.translate.return_value = failed_result
 
         stage = TranslationStage(mock_translator, settings_get=lambda k, d=None: d)
         stage.process(ctx)
