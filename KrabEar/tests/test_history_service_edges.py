@@ -41,11 +41,14 @@ class DeleteEdgeTestCase(unittest.TestCase):
         self.store = StateStore(Path(self.tmp.name) / "data")
         self.svc = HistoryService(store=self.store)
 
-    def test_delete_nonexistent_id_returns_deleted_true(self):
-        """StateStore tombstone-delete: несуществующий ID возвращает {'deleted': True}."""
-        # delete_history_item всегда пишет tombstone (idempotent), ValueError не кидает.
-        result = self.svc.handle_delete_history_item({"id": "nonexistent-id-0000"})
-        self.assertTrue(result["deleted"])
+    def test_delete_nonexistent_id_raises_value_error(self):
+        """StateStore tombstone-delete: несуществующий ID вызывает ValueError.
+
+        Семантика изменена в wave-1762: StateStore.delete_history_item() проверяет
+        существование записи перед tombstone, блокируя спам junk-ID в tombstones.ndjson.
+        """
+        with self.assertRaises(ValueError):
+            self.svc.handle_delete_history_item({"id": "nonexistent-id-0000"})
 
     def test_delete_empty_id_raises(self):
         """Пустой id должен вызывать ValueError."""

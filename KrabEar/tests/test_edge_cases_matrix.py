@@ -380,17 +380,15 @@ class NonExistentIdEdgeCases(EdgeCaseMatrixBase):
         self.assertIn("error", r, "Ответ должен содержать поле error")
 
     def test_delete_nonexistent_item(self):
-        """delete_history_item с несуществующим ID → ok=True, deleted=True (tombstone-semantics).
+        """delete_history_item с несуществующим ID → ok=False (wave-1762 change).
 
-        StateStore.delete_history_item всегда делает append tombstone и возвращает True —
-        идемпотентное удаление не требует существования записи.
+        StateStore.delete_history_item теперь проверяет существование записи перед
+        tombstone (блокирует спам junk-ID). Несуществующий ID возвращает ok=False
+        через IPC error-handling вместо старой идемпотентной tombstone-семантики.
         """
-        # handle_delete_history_item использует params["id"], не params["item_id"]
         r = self.req("delete_history_item", {"id": self.FAKE_ID})
-        # Tombstone-семантика: StateStore.delete_history_item всегда возвращает True
-        self.assertTrue(r["ok"], f"Tombstone для несуществующего ID должен вернуть ok=True: {r}")
-        self.assertTrue(r["result"].get("deleted", False),
-                        "deleted должен быть True (tombstone-семантика)")
+        self.assertFalse(r["ok"],
+                         f"Несуществующий ID должен вернуть ok=False: {r}")
 
     def test_toggle_favorite_nonexistent(self):
         """toggle_favorite с несуществующим ID — не падает."""

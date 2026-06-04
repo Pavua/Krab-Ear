@@ -197,13 +197,15 @@ class TestEventEmission(unittest.TestCase):
         recorder = FakeRecorder(_make_silence(10.0))
         settings = {
             "realtime_silence_filter_enabled": True,
-            "rt_silence_check_sec": 0.05,
+            # wave-34: rt_silence_check_sec is clamped to max(0.5, value).
+            # 0.05 becomes 0.5 — need ≥2 intervals of real time to fire.
+            "rt_silence_check_sec": 0.5,
             "rt_silence_window_sec": 10.0,
             "rt_silence_max_sec": 8.0,
         }
         rsf = RealtimeSilenceFilter(recorder, settings, event_bus_emit=fake_emit)
         rsf.start()
-        time.sleep(0.2)
+        time.sleep(1.5)  # 2+ check intervals at 0.5s each
         rsf.stop()
 
         self.assertGreater(len(events), 0)
@@ -400,13 +402,14 @@ class TestRealtimeSilenceFilterWave145(unittest.TestCase):
         recorder = FakeRecorder(_make_silence(10.0))
         settings = {
             "realtime_silence_filter_enabled": True,
-            "rt_silence_check_sec": 0.05,
+            # wave-34: rt_silence_check_sec clamped to max(0.5, value); 0.05→0.5
+            "rt_silence_check_sec": 0.5,
             "rt_silence_window_sec": 10.0,
             "rt_silence_max_sec": 1.0,  # очень низкий порог → всё тихое попадёт
         }
         rsf = RealtimeSilenceFilter(recorder, settings)
         rsf.start()
-        time.sleep(0.25)
+        time.sleep(1.2)  # 2+ check intervals at 0.5s each
         ranges = rsf.stop()
         self.assertGreater(len(ranges), 0,
                            "С низким порогом тишины должны быть диапазоны")

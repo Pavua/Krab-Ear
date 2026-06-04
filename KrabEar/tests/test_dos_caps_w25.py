@@ -32,6 +32,7 @@ from backend.collection_manager import (  # noqa: E402
 from backend.recording_scheduler import (  # noqa: E402
     RecordingScheduler,
     MAX_SCHEDULED_RECORDINGS,
+    MAX_PENDING_SCHEDULES,  # wave-25: separate pending cap (50) added alongside total cap (1000)
     STATUS_CANCELLED,
     STATUS_COMPLETED,
     _EVICT_AFTER_SECONDS,
@@ -168,8 +169,14 @@ class TestRecordingSchedulerCaps(unittest.TestCase):
         return dt.isoformat()
 
     def _fill_to_cap(self) -> None:
-        """Schedule exactly MAX_SCHEDULED_RECORDINGS pending entries."""
-        for i in range(MAX_SCHEDULED_RECORDINGS):
+        """Schedule exactly MAX_PENDING_SCHEDULES pending entries.
+
+        Wave-25 added MAX_PENDING_SCHEDULES=50 (pending cap, checked first)
+        alongside MAX_SCHEDULED_RECORDINGS=1000 (total cap). _fill_to_cap
+        creates pending (future) items so it hits the pending cap, not the
+        total cap. Tests are repointed to test the pending cap.
+        """
+        for i in range(MAX_PENDING_SCHEDULES):
             self._sched.schedule_recording(
                 start_time=self._future_iso(offset_hours=i + 1),
                 duration_sec=60,
@@ -177,9 +184,12 @@ class TestRecordingSchedulerCaps(unittest.TestCase):
             )
 
     def test_1001st_recording_raises_value_error(self) -> None:
-        """Scheduling the (MAX_SCHEDULED_RECORDINGS+1)th entry must raise ValueError."""
+        """Scheduling the (MAX_PENDING_SCHEDULES+1)th PENDING entry must raise ValueError.
+
+        Wave-25: pending cap (50) fires before total cap (1000) for future items.
+        """
         self._fill_to_cap()
-        with self.assertRaises(ValueError, msg="Expected ValueError at cap+1"):
+        with self.assertRaises(ValueError, msg="Expected ValueError at pending cap+1"):
             self._sched.schedule_recording(
                 start_time=self._future_iso(offset_hours=2000),
                 duration_sec=30,
@@ -187,9 +197,10 @@ class TestRecordingSchedulerCaps(unittest.TestCase):
             )
 
     def test_exactly_1000_recordings_allowed(self) -> None:
+        """Exactly MAX_PENDING_SCHEDULES pending items are accepted (cap is inclusive)."""
         self._fill_to_cap()
         items = self._sched.list_scheduled()
-        self.assertEqual(len(items), MAX_SCHEDULED_RECORDINGS)
+        self.assertEqual(len(items), MAX_PENDING_SCHEDULES)
 
     def test_eviction_of_old_cancelled_entries_frees_cap(self) -> None:
         """Old (>24h) cancelled entries are evicted, allowing new schedules."""
