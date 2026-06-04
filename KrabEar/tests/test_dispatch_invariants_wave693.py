@@ -141,21 +141,35 @@ class TestWave693DispatchInvariants(unittest.TestCase):
 
     # ------------------------------------------------------------------
     # Test 5 — get_activity_calendar and check_integrity implementation
-    #          methods exist as defs in service.py
+    #          methods exist in their respective live homes.
     # ------------------------------------------------------------------
     def test_get_activity_calendar_and_check_integrity_impl_defs_exist(self):
-        """Both _handle_get_activity_calendar and _handle_check_integrity must be
-        defined as methods in service.py (not just referenced but missing body).
-        """
-        with open(SERVICE_PY, encoding="utf-8") as f:
-            src = f.read()
+        """get_activity_calendar lives in AnalyticsService (extracted Wave 392);
+        _handle_check_integrity lives in service.py as a delegation wrapper.
 
-        for method in ("_handle_get_activity_calendar", "_handle_check_integrity"):
-            self.assertIn(
-                f"def {method}(",
-                src,
-                f"Implementation method '{method}' is missing from service.py",
-            )
+        Wave 693 originally checked service.py for _handle_get_activity_calendar,
+        but that in-class handler was removed when AnalyticsService was extracted
+        (task #47 / commit 3c3622c1).  Test updated to point at the live location.
+        """
+        analytics_svc_py = os.path.join(KRAB_EAR_ROOT, "backend", "analytics_service.py")
+
+        # get_activity_calendar → extracted to AnalyticsService
+        with open(analytics_svc_py, encoding="utf-8") as f:
+            analytics_src = f.read()
+        self.assertIn(
+            "def handle_get_activity_calendar(",
+            analytics_src,
+            "handle_get_activity_calendar is missing from analytics_service.py",
+        )
+
+        # _handle_check_integrity → still lives in service.py as delegation wrapper
+        with open(SERVICE_PY, encoding="utf-8") as f:
+            service_src = f.read()
+        self.assertIn(
+            "def _handle_check_integrity(",
+            service_src,
+            "_handle_check_integrity delegation wrapper is missing from service.py",
+        )
 
 
 if __name__ == "__main__":
