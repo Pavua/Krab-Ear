@@ -7,6 +7,7 @@ attribute-typo bugs.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from backend.models import HistoryItem
@@ -23,11 +24,26 @@ _ITEM_DEFAULTS: dict[str, Any] = {
 }
 
 
-def make_test_item(**overrides: Any) -> HistoryItem:
+def make_test_item(
+    days_ago: int | None = None,
+    hour: int | None = None,
+    item_id: str | None = None,
+    **overrides: Any,
+) -> HistoryItem:
     """Return a real HistoryItem with sensible defaults.
 
-    All keyword arguments are forwarded to HistoryItem(), overriding the
-    corresponding default value.  Fields not listed in _ITEM_DEFAULTS or
+    Convenience parameters (not HistoryItem fields):
+        days_ago (int | None): shift ts *N* days into the past.  ``0`` = today.
+        hour (int | None): set hour component of the resulting ts (0–23).
+        item_id (str | None): alias for the ``id`` field (backwards compat with
+            old per-file ``_make_item(item_id=...)`` factories).
+
+    If ``days_ago`` or ``hour`` is provided they compute a ``ts`` string
+    (``YYYY-MM-DDTHH:MM:SSZ``) **unless** ``ts`` is also in *overrides*
+    (explicit ``ts`` wins).
+
+    All remaining keyword arguments are forwarded to HistoryItem(), overriding
+    the corresponding default value.  Fields not listed in _ITEM_DEFAULTS or
     *overrides* keep their dataclass defaults (empty string, None, False, []).
 
     Example::
@@ -35,7 +51,24 @@ def make_test_item(**overrides: Any) -> HistoryItem:
         item = make_test_item(text="Привет мир", confidence=0.75)
         assert item.source_lang == "ru"   # from defaults
         assert item.confidence == 0.75    # from override
+
+        item = make_test_item(days_ago=3, hour=14)
+        # ts ≈ "2026-06-01T14:00:00Z" (3 days ago at 14:00 UTC)
+
+        item = make_test_item(item_id="my-id")
+        assert item.id == "my-id"
     """
+    # Resolve item_id alias (old factory compat).
+    if item_id is not None and "id" not in overrides:
+        overrides["id"] = item_id
+    # Compute ts from days_ago / hour convenience params.
+    if (days_ago is not None or hour is not None) and "ts" not in overrides:
+        now = datetime.now(timezone.utc)
+        if days_ago is not None:
+            now = now - timedelta(days=days_ago)
+        if hour is not None:
+            now = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+        overrides["ts"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     kwargs = {**_ITEM_DEFAULTS, **overrides}
     return HistoryItem(**kwargs)
 
