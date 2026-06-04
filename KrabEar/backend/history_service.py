@@ -3548,7 +3548,7 @@ class HistoryService:
             bigrams          — топ-20 биграмм [{phrase, count}]
             by_language      — частоты по языкам {'ru': {'top_words': [...]}, …}
         """
-        if self._cached_settings is not None and self._cached_settings().get("privacy_mode_enabled"):
+        if self._is_privacy_mode():
             return {
                 "ok": True,
                 "words": [],
