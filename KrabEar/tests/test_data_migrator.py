@@ -495,6 +495,8 @@ class TestRollbackMigration(unittest.TestCase):
 
     def test_rollback_returns_expected_keys(self) -> None:
         """rollback_migration возвращает restored_files и backup_path."""
+        # Need actual v1 history data to trigger backup creation
+        _write_ndjson(self._tmpdir / "history.ndjson", [_make_v1_item("id1")])
         result = self._migrator.migrate(self._tmpdir)
         rollback = self._migrator.rollback_migration(self._tmpdir, result.backup_path)
         self.assertIn("restored_files", rollback)
@@ -734,6 +736,7 @@ class DataMigratorRollbackIPCTestCase(unittest.TestCase):
         # data_dir в params игнорируется (W1761); backup_path должен быть внутри backups/
         rollback_result = self._migrator.handle_rollback_migration({
             "backup_path": backup_path,
+            "confirm": True,  # wave-32: explicit confirm required
         })
 
         self.assertIn("restored_files", rollback_result)
@@ -741,15 +744,16 @@ class DataMigratorRollbackIPCTestCase(unittest.TestCase):
         self.assertEqual(rollback_result["backup_path"], backup_path)
 
     def test_handle_rollback_migration_missing_backup_path_raises(self) -> None:
-        """handle_rollback_migration требует backup_path."""
+        """handle_rollback_migration требует backup_path (with confirm=True to reach validation)."""
         with self.assertRaises(ValueError):
-            self._migrator.handle_rollback_migration({})
+            self._migrator.handle_rollback_migration({"confirm": True})
 
     def test_handle_rollback_migration_invalid_backup_path_raises(self) -> None:
         """handle_rollback_migration выбрасывает (ValueError/RuntimeError) при несуществующем backup."""
         with self.assertRaises((ValueError, RuntimeError)):
             self._migrator.handle_rollback_migration({
                 "backup_path": str(self._tmpdir / "backups" / "nonexistent_backup"),
+                "confirm": True,  # wave-32: need confirm to reach path validation
             })
 
     def test_handle_rollback_migration_traversal_outside_backups_raises(self) -> None:
@@ -757,6 +761,7 @@ class DataMigratorRollbackIPCTestCase(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self._migrator.handle_rollback_migration({
                 "backup_path": "/tmp/evil_krab_rollback_test",
+                "confirm": True,  # wave-32: need confirm to reach path traversal check
             })
 
 

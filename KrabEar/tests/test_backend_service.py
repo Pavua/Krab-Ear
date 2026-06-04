@@ -271,7 +271,7 @@ class BackendServiceTestCase(unittest.TestCase):
         self.assertEqual(get_settings["result"]["audio_ducking_percent"], 50)
         self.assertEqual(get_settings["result"]["overlay_opacity_percent"], 45)
         self.assertEqual(get_settings["result"]["voice_gateway_url"], "http://127.0.0.1:8090")
-        self.assertEqual(get_settings["result"]["voice_gateway_api_key"], "")
+        self.assertEqual(get_settings["result"]["voice_gateway_api_key"], "")  # empty = not configured, stays empty
         self.assertEqual(get_settings["result"]["update_channel"], "stable")
         self.assertTrue(get_settings["result"]["call_notify_default"])
         self.assertTrue(get_settings["result"]["call_auto_summary"])
@@ -346,7 +346,7 @@ class BackendServiceTestCase(unittest.TestCase):
         self.assertEqual(set_settings["result"]["background_guard_max_uniform_active_ratio"], 0.88)
         self.assertEqual(set_settings["result"]["overlay_opacity_percent"], 60)
         self.assertEqual(set_settings["result"]["voice_gateway_url"], "http://127.0.0.1:9000")
-        self.assertEqual(set_settings["result"]["voice_gateway_api_key"], "token")
+        self.assertEqual(set_settings["result"]["voice_gateway_api_key"], "REDACTED")  # wave-35: sensitive fields are redacted in responses
         self.assertEqual(set_settings["result"]["update_channel"], "beta")
         self.assertFalse(set_settings["result"]["call_notify_default"])
         self.assertFalse(set_settings["result"]["call_auto_summary"])
@@ -504,7 +504,7 @@ class BackendServiceTestCase(unittest.TestCase):
         self.assertEqual(response["result"]["capture_source_mode"], "mic")
         self.assertEqual(response["result"]["ui_last_tab"], "history")
         self.assertEqual(response["result"]["voice_gateway_url"], "https://gateway.example.com")
-        self.assertEqual(response["result"]["voice_gateway_api_key"], "key")
+        self.assertEqual(response["result"]["voice_gateway_api_key"], "REDACTED")  # wave-35: non-empty sensitive fields redacted
         self.assertFalse(response["result"]["call_auto_summary"])
         self.assertEqual(response["result"]["hotkey_profile"], "default")
         self.assertEqual(response["result"]["update_channel"], "stable")
