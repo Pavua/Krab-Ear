@@ -246,7 +246,11 @@ class TimelineExporter:
 
     # ── JSON ─────────────────────────────────────────────────────────────────
 
-    def export_json(self, blocks: list[dict[str, Any]]) -> str:
+    def export_json(
+        self,
+        blocks: list[dict[str, Any]],
+        privacy_mode: bool = False,
+    ) -> str:
         """Сериализует список блоков в структурированный JSON.
 
         Добавляет мета-поля: ``exported_at``, ``total_blocks``,
@@ -254,10 +258,17 @@ class TimelineExporter:
 
         Args:
             blocks: список dict (TimelineBlock.to_dict()).
+            privacy_mode: если True — удаляет ``summary_text`` из каждого блока
+                          (может содержать фрагменты транскрипций).
 
         Returns:
             Отформатированная JSON-строка (indent=2).
         """
+        # wave-1770 HIGH (defense-in-depth): strip transcript-derived summary_text
+        # even though the IPC caller already gates on privacy_mode. Consistent with
+        # export_svg() / export_ical() which both accept and honour this parameter.
+        if privacy_mode:
+            blocks = [{k: v for k, v in b.items() if k != "summary_text"} for b in blocks]
         total_recordings = sum(int(b.get("items_count", 0)) for b in blocks)
         total_duration = sum(float(b.get("total_duration_sec", 0.0)) for b in blocks)
 

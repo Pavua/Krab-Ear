@@ -3805,7 +3805,12 @@ class BackendService:
 
         blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
         block_dicts = [b.to_dict() for b in blocks]
-        svg_content = self._timeline_exporter.export_svg(block_dicts, width=width, height=height)
+        # wave-1770 HIGH (defense-in-depth): pass privacy_mode to exporter so that
+        # even if the IPC gate above were bypassed, the method would suppress content.
+        svg_content = self._timeline_exporter.export_svg(
+            block_dicts, width=width, height=height,
+            privacy_mode=bool(settings.get("privacy_mode_enabled"))
+        )
 
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         filename = f"timeline_{ts}.svg"
@@ -3850,7 +3855,11 @@ class BackendService:
 
         blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
         block_dicts = [b.to_dict() for b in blocks]
-        json_content = self._timeline_exporter.export_json(block_dicts)
+        # wave-1770 HIGH (defense-in-depth): pass privacy_mode to exporter.
+        json_content = self._timeline_exporter.export_json(
+            block_dicts,
+            privacy_mode=bool(settings.get("privacy_mode_enabled"))
+        )
 
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         filename = f"timeline_{ts}.json"
@@ -3895,7 +3904,11 @@ class BackendService:
 
         blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
         block_dicts = [b.to_dict() for b in blocks]
-        ical_content = self._timeline_exporter.export_ical(block_dicts)
+        # wave-1770 HIGH (defense-in-depth): pass privacy_mode to exporter.
+        ical_content = self._timeline_exporter.export_ical(
+            block_dicts,
+            privacy_mode=bool(settings.get("privacy_mode_enabled"))
+        )
 
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         filename = f"timeline_{ts}.ics"
