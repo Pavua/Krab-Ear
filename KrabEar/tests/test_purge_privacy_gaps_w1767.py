@@ -874,6 +874,25 @@ class BackendServiceW1767WiringTestCase(unittest.TestCase):
         )
         self.assertIsNotNone(svc._history._settings_backup)
 
+    def test_backend_wires_sharing_manager_into_history(self) -> None:
+        """wave-1770 MED: BackendService.__init__ must wire _sharing into _history._sharing_manager.
+
+        Without this wiring, SharingManager.clear() is never called during purge_all_data,
+        leaving in-memory share index populated with stale PII after a purge.
+        """
+        from backend.state_store import StateStore
+        from backend.service import BackendService
+
+        store = StateStore(data_dir=Path(self._tmpdir))
+        svc = BackendService(store=store)
+
+        self.assertIs(
+            svc._history._sharing_manager,
+            svc._sharing,
+            "BackendService must wire _sharing into _history._sharing_manager for purge coverage",
+        )
+        self.assertIsNotNone(svc._history._sharing_manager)
+
 
 if __name__ == "__main__":
     unittest.main()
