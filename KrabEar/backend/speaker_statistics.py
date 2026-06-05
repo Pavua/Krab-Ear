@@ -8,6 +8,7 @@ SpeakerStatisticsAnalyzer — вычисляет per-speaker статистик�
 from __future__ import annotations
 
 import logging
+import math
 import re
 from typing import Any, Callable, Optional
 
@@ -138,7 +139,12 @@ class SpeakerStatisticsAnalyzer:
                 # Confidence: берём от записи целиком, если задан.
                 if item_confidence is not None:
                     try:
-                        entry["confidences"].append(float(item_confidence))
+                        # wave-1770 MED: guard NaN/Inf from malformed diarization data
+                        # before appending — non-finite values propagate through avg_conf
+                        # and serialize as JSON NaN/Infinity which Swift decoders reject.
+                        conf_f = float(item_confidence)
+                        if math.isfinite(conf_f):
+                            entry["confidences"].append(conf_f)
                     except (TypeError, ValueError):
                         pass
 

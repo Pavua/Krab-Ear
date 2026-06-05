@@ -245,7 +245,10 @@ class RecapScheduler:
         self.enabled = bool(s.get("recap_enabled", self._default_enabled))
         hour_raw = s.get("recap_time_hour", self._default_recap_time_hour)
         try:
-            self.recap_time_hour = int(hour_raw)
+            # wave-1770 HIGH: clamp to valid 0-23 range. An out-of-bounds value
+            # (e.g. -1 or 25) would make `now.hour != self.recap_time_hour` always
+            # True, silently disabling the scheduler indefinitely.
+            self.recap_time_hour = max(0, min(23, int(hour_raw)))
         except (TypeError, ValueError):
             self.recap_time_hour = self._default_recap_time_hour
         email_raw = s.get("recap_email_to", self._default_recap_email_to)
