@@ -486,6 +486,15 @@ class WebhookManager:
         safe, reason = _is_safe_webhook_url(url, allow_local=allow_local)
         if not safe:
             raise ValueError(f"URL отклонён защитой SSRF ({reason}): {url!r}")
+        # wave-1770 LOW: enforce minimum HMAC secret length.
+        # Empty secret means "no signature" (legitimate — some endpoints don't support it).
+        # A non-empty but short secret (< 16 chars) is effectively weak and trivially brutable.
+        _MIN_SECRET_LEN = 16
+        if secret and len(secret) < _MIN_SECRET_LEN:
+            raise ValueError(
+                f"HMAC secret слишком короткий ({len(secret)} симв.); "
+                f"минимум {_MIN_SECRET_LEN} символов или пустая строка (без подписи)"
+            )
 
         # MED DoS cap (wave-28): reject if already at MAX_WEBHOOKS.
         # fire() iterates all webhooks on every event — unbounded registration is a

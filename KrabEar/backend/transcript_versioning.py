@@ -299,6 +299,21 @@ class TranscriptVersionManager:
         Raises:
             KeyError: если одна из версий не найдена.
         """
+        # wave-1770 HIGH: privacy gate — diff содержит полный текст транскрипции.
+        # Гейт на уровне метода (не только IPC-обработчика), т.к. diff_versions()
+        # может быть вызван из других путей, минуя IPC-уровень.
+        if self._is_privacy_mode():
+            return {
+                "item_id": item_id,
+                "v1": v1,
+                "v2": v2,
+                "text_v1": "",
+                "text_v2": "",
+                "unified_diff": [],
+                "added_lines": 0,
+                "removed_lines": 0,
+                "reason": "privacy_mode_active",
+            }
         rec1 = self.get_version(item_id, v1)
         rec2 = self.get_version(item_id, v2)
 

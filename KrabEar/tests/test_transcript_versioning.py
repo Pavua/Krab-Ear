@@ -733,5 +733,66 @@ class TestTranscriptVersioningClearAllW1770(unittest.TestCase):
         self.assertEqual(fetched["source"], "manual")
 
 
+class TestTranscriptVersioningDiffPrivacyGateW1770(unittest.TestCase):
+    """wave-1770 HIGH: diff_versions() должен возвращать пустой schema-parity ответ
+    при включённом privacy_mode, не раскрывая text_v1 / text_v2.
+
+    Ранее diff_versions() не имел privacy gate, в отличие от handle_get_transcript_versions.
+    Метод мог быть вызван в обход IPC-обработчика и раскрывал полный текст транскрипции.
+    """
+
+    def setUp(self) -> None:
+        self._temp_dir = tempfile.TemporaryDirectory()
+        # Подключаем settings_fn, имитирующую privacy_mode_enabled=True.
+        self._privacy_on = True
+        self.manager = TranscriptVersionManager(
+            self._temp_dir.name,
+            settings_fn=lambda: {"privacy_mode_enabled": self._privacy_on},
+        )
+        # Создаём две версии с чувствительным текстом.
+        self.manager.save_version("secret_item", "Секретный текст версии 1", "stt_raw")
+        self.manager.save_version("secret_item", "Секретный текст версии 2", "manual")
+
+    def tearDown(self) -> None:
+        self._temp_dir.cleanup()
+
+    def test_diff_versions_returns_empty_when_privacy_mode_on(self) -> None:
+        """diff_versions() не раскрывает тексты версий при privacy_mode=True."""
+        result = self.manager.diff_versions("secret_item", 1, 2)
+        self.assertEqual(result["text_v1"], "", "text_v1 должен быть пустым в privacy mode")
+        self.assertEqual(result["text_v2"], "", "text_v2 должен быть пустым в privacy mode")
+        self.assertEqual(result["unified_diff"], [])
+        self.assertEqual(result["added_lines"], 0)
+        self.assertEqual(result["removed_lines"], 0)
+        self.assertEqual(result.get("reason"), "privacy_mode_active")
+
+    def test_diff_versions_schema_parity_in_privacy_mode(self) -> None:
+        """Schema-parity: ответ содержит все ожидаемые поля даже при privacy mode."""
+        result = self.manager.diff_versions("secret_item", 1, 2)
+        for key in ("item_id", "v1", "v2", "text_v1", "text_v2", "unified_diff",
+                    "added_lines", "removed_lines"):
+            self.assertIn(key, result, f"Поле {key!r} отсутствует в schema-parity ответе")
+        self.assertEqual(result["item_id"], "secret_item")
+        self.assertEqual(result["v1"], 1)
+        self.assertEqual(result["v2"], 2)
+
+    def test_diff_versions_works_when_privacy_mode_off(self) -> None:
+        """При privacy_mode=False diff_versions() возвращает реальные данные."""
+        self._privacy_on = False
+        result = self.manager.diff_versions("secret_item", 1, 2)
+        self.assertIn("Секретный", result["text_v1"])
+        self.assertIn("Секретный", result["text_v2"])
+        self.assertNotIn("reason", result)
+
+    def test_diff_versions_no_settings_fn_works_normally(self) -> None:
+        """Менеджер без settings_fn не блокирует diff_versions() (безопасное умолчание)."""
+        mgr = TranscriptVersionManager(self._temp_dir.name)
+        # Файл уже содержит версии от setUp — можно diff'ить.
+        result = mgr.diff_versions("secret_item", 1, 2)
+        # Без settings_fn — privacy mode выключен, diff работает нормально.
+        self.assertIn("v1", result)
+        self.assertIn("v2", result)
+
+
 if __name__ == "__main__":
     unittest.main()

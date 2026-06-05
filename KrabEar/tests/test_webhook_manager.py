@@ -94,7 +94,7 @@ class WebhookManagerCRUDTestCase(unittest.TestCase):
 
     # 9 — секрет не раскрывается в list_webhooks
     def test_secret_not_exposed_in_list(self) -> None:
-        self._mgr.register_webhook("https://example.com/hook", events=[], secret="my-secret")
+        self._mgr.register_webhook("https://example.com/hook", events=[], secret="my-very-long-secret")
         hooks = self._mgr.list_webhooks()
         for hook in hooks:
             self.assertNotIn("secret", hook)
@@ -367,7 +367,7 @@ class WebhookManagerIPCTestCase(unittest.TestCase):
         result = self._mgr.handle_register_webhook({
             "url": "https://example.com/hook",
             "events": ["stt.final"],
-            "secret": "s3cr3t",
+            "secret": "s3cr3t-is-long-enough-now",
             "webhook_allow_local": True,  # игнорируется IPC-обработчиком
         })
         self.assertIn("webhook_id", result)
@@ -449,7 +449,7 @@ class WebhookManagerSSRFBypassFixTestCase(unittest.TestCase):
         result = self._mgr.handle_register_webhook({
             "url": "https://example.com/webhook",
             "events": ["stt.final"],
-            "secret": "abc",
+            "secret": "abcdefghijklmnop",
         })
         self.assertIn("webhook_id", result)
         self.assertIsInstance(result["webhook_id"], str)
@@ -710,6 +710,65 @@ class WebhookManagerURLValidationTestCase(unittest.TestCase):
         """
         with self.assertRaises(ValueError):
             self._mgr.register_webhook("http://localhost:9999/hook", events=[])
+
+
+class WebhookManagerSecretLengthW1770TestCase(unittest.TestCase):
+    """wave-1770 LOW: HMAC secret minimum length enforcement (≥ 16 chars).
+
+    Short non-empty secrets (e.g. "abc") are trivially brutable — enforce
+    minimum 16-char length at register_webhook() time, while allowing empty
+    string (meaning "no HMAC signature") for endpoints that don't support it.
+    """
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._mgr = _make_manager(self._tmpdir)
+
+    def tearDown(self) -> None:
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_empty_secret_allowed(self) -> None:
+        """Пустой secret допустим — означает 'без подписи'."""
+        wid = self._mgr.register_webhook("https://example.com/hook", events=[], secret="")
+        self.assertIsNotNone(wid)
+
+    def test_exactly_16_chars_secret_allowed(self) -> None:
+        """Secret ровно 16 символов — допустимый минимум."""
+        wid = self._mgr.register_webhook(
+            "https://example.com/hook", events=[], secret="1234567890123456"
+        )
+        self.assertIsNotNone(wid)
+
+    def test_longer_secret_allowed(self) -> None:
+        """Secret длиннее 16 символов — без ограничения сверху."""
+        wid = self._mgr.register_webhook(
+            "https://example.com/hook", events=[], secret="very-long-secret-that-is-safe"
+        )
+        self.assertIsNotNone(wid)
+
+    def test_15_chars_raises(self) -> None:
+        """Secret из 15 символов вызывает ValueError (одним меньше минимума)."""
+        with self.assertRaises(ValueError):
+            self._mgr.register_webhook(
+                "https://example.com/hook", events=[], secret="123456789012345"
+            )
+
+    def test_1_char_raises(self) -> None:
+        """Однобуквенный secret вызывает ValueError."""
+        with self.assertRaises(ValueError):
+            self._mgr.register_webhook(
+                "https://example.com/hook", events=[], secret="x"
+            )
+
+    def test_short_secret_via_ipc_raises(self) -> None:
+        """handle_register_webhook также отклоняет слабый secret."""
+        with self.assertRaises((ValueError, RuntimeError)):
+            self._mgr.handle_register_webhook({
+                "url": "https://example.com/hook",
+                "events": [],
+                "secret": "weak",
+            })
 
 
 if __name__ == "__main__":
