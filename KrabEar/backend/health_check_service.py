@@ -74,15 +74,30 @@ class HealthCheckService:
     #            "uptime_sec": float, "is_recording": bool, "history_count": int}
     # ------------------------------------------------------------------
 
+    def _is_privacy_mode(self) -> bool:
+        """Returns True if privacy_mode_enabled is active via SettingsService."""
+        if self._settings_svc is None:
+            return False
+        try:
+            return bool(self._settings_svc.cached_settings().get("privacy_mode_enabled", False))
+        except Exception:
+            return False
+
     def handle_ping(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает статус сервиса. Используется HealthMonitor.swift (3-сек тик).
 
         ВАЖНО: контракт bit-exact — не менять имена полей и типы.
         """
-        try:
-            history_count = self.store.count_active_items()
-        except Exception:
-            history_count = -1
+        # wave-1770 HIGH: history_count reveals user activity pattern.
+        # Schema stays identical (int), but returns 0 in privacy mode to avoid
+        # leaking recording count through this 3-second polling endpoint.
+        if self._is_privacy_mode():
+            history_count = 0
+        else:
+            try:
+                history_count = self.store.count_active_items()
+            except Exception:
+                history_count = -1
         return {
             "status": "ok",
             "service": "krabear-backend",
@@ -115,10 +130,15 @@ class HealthCheckService:
         except Exception:
             diarization_device = "unknown"
 
-        try:
-            history_count = self.store.count_active_items()
-        except Exception:
-            history_count = -1
+        # wave-1770 HIGH: mask history stats in privacy mode.
+        privacy = self._is_privacy_mode()
+        if privacy:
+            history_count = 0
+        else:
+            try:
+                history_count = self.store.count_active_items()
+            except Exception:
+                history_count = -1
 
         # Агрегированный отчёт профайлера по всем отслеживаемым span'ам (STT/translate/LLM).
         try:
@@ -148,8 +168,11 @@ class HealthCheckService:
                 "last_engine": self._last_stt_engine_ref[0] if self._last_stt_engine_ref else "",
             },
             "llm": self._llm_rewriter.status() if self._llm_rewriter else {"enabled": False},
+            # wave-1770 HIGH: suppress transcript count in privacy mode;
+            # data_dir paths are always included (needed for diagnostics tooling
+            # and don't expose transcript content).
             "history": {
-                "total_items": history_count,
+                "total_items": history_count,  # 0 in privacy mode
                 "data_dir": str(self.store.data_dir),
                 "transcripts_dir": str(Path(self.store.data_dir) / "transcripts"),
             },

@@ -18,6 +18,10 @@ from typing import Any
 logger = logging.getLogger("KrabEar.Backend.HotwordDetector")
 
 _CONTEXT_RADIUS = 20  # символов вокруг совпадения
+# wave-1770 MED: caps to prevent unbounded accumulation DoS.
+# Precedent: stt_management_service caps STT hotwords at 100 (wave-30 W773).
+_MAX_HOTWORDS = 100
+_MAX_WORD_LEN = 200  # chars; longer "words" are almost certainly malformed input
 
 
 @dataclass
@@ -104,7 +108,23 @@ class HotwordDetector:
         word = word.strip()
         if not word:
             raise ValueError("word не может быть пустым")
+        # wave-1770 MED: validate word length to prevent oversized pattern storage.
+        if len(word) > _MAX_WORD_LEN:
+            raise ValueError(
+                f"hotword слишком длинный ({len(word)} симв.); максимум {_MAX_WORD_LEN}"
+            )
         with self._lock:
+            # wave-1770 MED: cap total count (FIFO — oldest entry dropped when full).
+            # check if word is NEW (not an update to existing entry) before enforcing cap.
+            key = word if case_sensitive else word.lower()
+            if key not in self._hotwords and len(self._hotwords) >= _MAX_HOTWORDS:
+                oldest_key = next(iter(self._hotwords))
+                del self._hotwords[oldest_key]
+                self._patterns.pop(oldest_key, None)
+                logger.warning(
+                    "HotwordDetector: cap %d reached — dropped oldest hotword %r",
+                    _MAX_HOTWORDS, oldest_key,
+                )
             self._register(word, category, case_sensitive)
             self._save()
         logger.debug("Hotword добавлен: %r (category=%s)", word, category)
