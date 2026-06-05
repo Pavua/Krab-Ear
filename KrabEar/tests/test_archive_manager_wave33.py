@@ -330,32 +330,46 @@ class UnarchivePurgeEpochTestCase(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class HandleArchivePrivacyGateTestCase(unittest.TestCase):
-    """B3 (LOW) — handle_archive_items rejects requests when privacy_mode is set."""
+    """B3 — handle_archive_items / list_archived / get_archive_stats blocked in privacy mode.
+
+    wave-1770: fixed dead gate (params.get("privacy_mode") was never set by IPC;
+    gate now uses settings_get("privacy_mode_enabled") like all other handlers).
+    Also added missing gates to handle_list_archived and handle_get_archive_stats.
+    """
+
+    def _make_mgr(self, privacy_mode: bool = False):
+        settings = {"privacy_mode_enabled": privacy_mode}
+        mgr = ArchiveManager(
+            store=self._store,
+            settings_get=lambda k, d: settings.get(k, d),
+        )
+        return mgr
 
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
         self._store = FakeStore(data_dir=self._tmpdir)
-        self._mgr = ArchiveManager(store=self._store)
+        self._mgr = self._make_mgr(privacy_mode=False)
+        self._mgr_priv = self._make_mgr(privacy_mode=True)
 
     def test_handle_archive_items_blocked_in_privacy_mode(self) -> None:
-        """With privacy_mode=True, handle_archive_items returns ok=False."""
+        """With privacy_mode_enabled=True, handle_archive_items returns ok=False."""
         self._store.add_fake_item("priv-1", "Приватная запись")
-        result = self._mgr.handle_archive_items({"item_ids": ["priv-1"], "privacy_mode": True})
+        result = self._mgr_priv.handle_archive_items({"item_ids": ["priv-1"]})
 
         self.assertEqual(result.get("ok"), False)
         self.assertEqual(result.get("reason"), "privacy_mode_enabled")
 
     def test_handle_archive_items_blocked_does_not_archive(self) -> None:
-        """When blocked by privacy_mode, no items are written to archive."""
+        """When blocked, no items are written to archive."""
         self._store.add_fake_item("priv-2", "Не архивировать")
-        self._mgr.handle_archive_items({"item_ids": ["priv-2"], "privacy_mode": True})
+        self._mgr_priv.handle_archive_items({"item_ids": ["priv-2"]})
 
         archived = self._mgr.list_archived()
         ids = {item["id"] for item in archived}
         self.assertNotIn("priv-2", ids)
 
     def test_handle_archive_items_succeeds_without_privacy_mode(self) -> None:
-        """Normal call (no privacy_mode) succeeds and archives the item."""
+        """Normal call (privacy_mode=False) succeeds and archives the item."""
         self._store.add_fake_item("priv-3", "Архивировать нормально")
         result = self._mgr.handle_archive_items({"item_ids": ["priv-3"]})
 
@@ -363,35 +377,51 @@ class HandleArchivePrivacyGateTestCase(unittest.TestCase):
         self.assertEqual(result["archived_count"], 1)
 
     def test_handle_archive_items_privacy_mode_false_allowed(self) -> None:
-        """privacy_mode=False (explicit falsy) does not block archiving."""
+        """settings privacy_mode_enabled=False does not block archiving."""
         self._store.add_fake_item("priv-4", "Явно не приватный")
-        result = self._mgr.handle_archive_items({"item_ids": ["priv-4"], "privacy_mode": False})
+        result = self._mgr.handle_archive_items({"item_ids": ["priv-4"]})
 
         self.assertIn("archived_count", result)
         self.assertEqual(result["archived_count"], 1)
 
     def test_handle_archive_items_privacy_mode_absent_allowed(self) -> None:
-        """Absent privacy_mode key does not block archiving."""
+        """Default settings (no privacy_mode key) does not block archiving."""
+        mgr_no_settings = ArchiveManager(store=self._store)
         self._store.add_fake_item("priv-5", "Без privacy_mode ключа")
-        result = self._mgr.handle_archive_items({"item_ids": ["priv-5"]})
+        result = mgr_no_settings.handle_archive_items({"item_ids": ["priv-5"]})
 
         self.assertEqual(result.get("archived_count"), 1)
 
     def test_handle_archive_items_privacy_mode_item_stays_in_active(self) -> None:
         """When blocked, the item is not deleted from active store."""
         self._store.add_fake_item("priv-6", "Остаётся активной")
-        self._mgr.handle_archive_items({"item_ids": ["priv-6"], "privacy_mode": True})
+        self._mgr_priv.handle_archive_items({"item_ids": ["priv-6"]})
 
         # FakeStore.delete_history_item marks items as deleted; none should be marked.
         self.assertNotIn("priv-6", self._store._deleted)
 
     def test_handle_archive_privacy_mode_returns_ok_false_reason(self) -> None:
         """Result shape is {ok: False, reason: privacy_mode_enabled}."""
-        result = self._mgr.handle_archive_items({"item_ids": [], "privacy_mode": True})
+        result = self._mgr_priv.handle_archive_items({"item_ids": []})
         self.assertIn("ok", result)
         self.assertIn("reason", result)
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "privacy_mode_enabled")
+
+    def test_handle_list_archived_blocked_in_privacy_mode(self) -> None:
+        """wave-1770 HIGH: list_archived returns empty list in privacy mode."""
+        self._store.add_fake_item("priv-7", "Текст")
+        self._mgr.handle_archive_items({"item_ids": ["priv-7"]})
+        result = self._mgr_priv.handle_list_archived({})
+        self.assertEqual(result["items"], [])
+        self.assertEqual(result["total"], 0)
+        self.assertIn("reason", result)
+
+    def test_handle_get_archive_stats_blocked_in_privacy_mode(self) -> None:
+        """wave-1770 HIGH: get_archive_stats returns zeroes in privacy mode."""
+        result = self._mgr_priv.handle_get_archive_stats({})
+        self.assertEqual(result["total_archived"], 0)
+        self.assertIn("reason", result)
 
 
 if __name__ == "__main__":

@@ -715,7 +715,10 @@ class BackendService:
             data_dir=self.store.data_dir,
             settings_fn=self._get_runtime_setting,
         )
-        self._archive_manager = ArchiveManager(store=self.store)
+        self._archive_manager = ArchiveManager(
+            store=self.store,
+            settings_get=self._get_runtime_setting,  # wave-1770: privacy gate wiring
+        )
         # W1687 F7 MED: wire recording chain manager so archived items are
         # removed from their chains (ghost references prevented).
         self._archive_manager._recording_chain_mgr = self._chains

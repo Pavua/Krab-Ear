@@ -47,10 +47,18 @@ class ArchiveManager:
     истории. Удалённые из активной истории записи могут быть восстановлены.
     """
 
-    def __init__(self, store: Any, semantic_searcher: Any | None = None, transcript_versioner: Any | None = None) -> None:
+    def __init__(
+        self,
+        store: Any,
+        semantic_searcher: Any | None = None,
+        transcript_versioner: Any | None = None,
+        settings_get: Any | None = None,
+    ) -> None:
         self._store = store
         self._semantic_searcher = semantic_searcher
         self._transcript_versioner = transcript_versioner  # W1259
+        # settings_get(key, default) → runtime settings lookup (privacy_mode_enabled gate).
+        self._settings_get = settings_get or (lambda k, d: d)
         data_dir = Path(getattr(store, "data_dir", "."))
         self._archive_dir = data_dir / _ARCHIVE_SUBDIR
         self._archive_path = self._archive_dir / _ARCHIVE_FILE
@@ -543,7 +551,9 @@ class ArchiveManager:
         бы PII-записи в archive.ndjson, скрывая их от handle_purge_all_data.
         """
         # wave-33 (B3): privacy gate — не архивировать в режиме приватности.
-        if params.get("privacy_mode"):
+        # FIXED: was checking params.get("privacy_mode") which is never injected;
+        # use runtime settings lookup instead (same pattern as all other gates).
+        if self._settings_get("privacy_mode_enabled", False):
             return {"ok": False, "reason": "privacy_mode_enabled"}
 
         raw_ids = params.get("item_ids", [])
@@ -566,11 +576,29 @@ class ArchiveManager:
         return self.unarchive_items(item_ids=raw_ids)
 
     def handle_list_archived(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC-обработчик list_archived."""
+        """IPC-обработчик list_archived.
+
+        Privacy gate (wave-1770 HIGH): returns archived items including transcript
+        text and translated_text — must be blocked in privacy mode.
+        """
+        if self._settings_get("privacy_mode_enabled", False):
+            return {"items": [], "total": 0, "reason": "privacy_mode_active"}
         limit = int(params.get("limit", 50))
         items = self.list_archived(limit=limit)
         return {"items": items, "total": len(items)}
 
     def handle_get_archive_stats(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC-обработчик get_archive_stats."""
+        """IPC-обработчик get_archive_stats.
+
+        Privacy gate (wave-1770 HIGH): archive stats expose item count/timing
+        which reveals recording activity patterns in privacy mode.
+        """
+        if self._settings_get("privacy_mode_enabled", False):
+            return {
+                "total_archived": 0,
+                "archive_size_mb": 0.0,
+                "oldest_ts": None,
+                "newest_ts": None,
+                "reason": "privacy_mode_active",
+            }
         return self.get_archive_stats()
