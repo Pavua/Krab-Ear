@@ -141,8 +141,10 @@ class TestRestoreCredentialPreservation(unittest.TestCase):
             "hf_supersecrettoken",
             "hf_token must be preserved from current settings when absent in backup",
         )
-        # Verify the response restored_settings also reflects preserved value
-        self.assertEqual(result["restored_settings"].get("hf_token"), "hf_supersecrettoken")
+        # wave-35: credential fields are REDACTED in IPC responses (never echoed in plaintext).
+        # The real value is still preserved in the store (checked above via cached_settings()),
+        # but the API response returns "REDACTED" for all non-empty credential fields.
+        self.assertEqual(result["restored_settings"].get("hf_token"), "REDACTED")
 
     def test_restore_warns_when_backup_lacks_credentials(self):
         """Response должен содержать warning='credentials_dropped' и dropped_fields,

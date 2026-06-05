@@ -324,8 +324,9 @@ class SttHotwordsIntegrationTests(unittest.TestCase):
     def test_long_hotword_list_truncated_to_whisper_limit(self):
         """При добавлении >_STT_HOTWORDS_MAX слов список обрезается до лимита,
         oldest entries удаляются, в ответе truncated=True."""
-        from backend.service import BackendService
-        max_limit = BackendService._STT_HOTWORDS_MAX
+        # Constant moved to STTManagementService after service extraction (Wave 392)
+        from backend.stt_management_service import _STT_HOTWORDS_MAX
+        max_limit = _STT_HOTWORDS_MAX
 
         # Добавляем max_limit слов
         for i in range(max_limit):

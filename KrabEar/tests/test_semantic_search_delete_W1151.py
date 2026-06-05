@@ -21,8 +21,12 @@ if str(PROJECT_ROOT) not in sys.path:
 class _FakeStore:
     """Minimal StateStore stub."""
     def __init__(self, item_ids: list[str] | None = None):
+        import tempfile
         self._items = set(item_ids or [])
         self.deleted: list[str] = []
+        # wave-1762: _erase_transcript_md needs a real data_dir to construct paths.
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.data_dir = self._tmpdir.name
 
     def delete_history_item(self, item_id: str) -> bool:
         if item_id in self._items:
@@ -30,6 +34,16 @@ class _FakeStore:
             self.deleted.append(item_id)
             return True
         return False
+
+    def _lock(self):
+        """wave-27: handle_delete_history_item acquires store._lock() before checking existence."""
+        import contextlib
+        return contextlib.nullcontext()
+
+    def _load_active_items_unlocked(self):
+        """wave-1762: called inside _lock() to resolve item timestamps for cascade."""
+        from types import SimpleNamespace
+        return [SimpleNamespace(id=i, ts="2026-01-01T00:00:00Z") for i in self._items]
 
     # Minimal attrs used by HistoryService.__init__
     data_dir = None

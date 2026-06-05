@@ -22,6 +22,36 @@ def _future_iso(seconds: int = 3600) -> str:
     return dt.isoformat()
 
 
+def _inject_past_recording(
+    sched,
+    seconds: int = 1,
+    duration_sec: int = 60,
+    label: str = "",
+) -> dict:
+    """Inject a past-time entry directly into sched._schedules.
+
+    wave-25 added C2 validation that rejects start_time in the past.
+    Tests that need past-time entries (to drive check_and_trigger) must
+    bypass that guard by writing directly to _schedules.
+    Returns the entry dict (same shape as schedule_recording()).
+    """
+    import uuid as _uuid
+    past = _past_iso(seconds)
+    sid = str(_uuid.uuid4())
+    entry = {
+        "id": sid,
+        "start_time": past,
+        "duration_sec": duration_sec,
+        "label": label,
+        "status": STATUS_PENDING,
+        "created_at": past,
+    }
+    with sched._lock:
+        sched._schedules[sid] = entry
+        sched._save()
+    return dict(entry)
+
+
 def _past_iso(seconds: int = 1) -> str:
     """Возвращает ISO строку в прошлом."""
     dt = datetime.now(tz=timezone.utc) - timedelta(seconds=seconds)
@@ -104,16 +134,39 @@ class TestScheduleRecording(unittest.TestCase):
         result = self.sched.get_next_scheduled()
         self.assertIsNone(result)
 
+    def _inject_past_entry(self, label: str = "Now", duration_sec: int = 60) -> str:
+        """Inject a past-time entry directly (bypasses past-time validation added in wave-25).
+
+        schedule_recording() now rejects start_time in the past (C2 validation).
+        For tests of check_and_trigger(), we need past entries — inject them
+        directly into _schedules to bypass the guard.
+        """
+        import uuid
+        past_iso = _past_iso(1)
+        schedule_id = str(uuid.uuid4())
+        entry = {
+            "id": schedule_id,
+            "start_time": past_iso,
+            "duration_sec": duration_sec,
+            "label": label,
+            "status": STATUS_PENDING,
+            "created_at": past_iso,
+        }
+        with self.sched._lock:
+            self.sched._schedules[schedule_id] = entry
+            self.sched._save()
+        return schedule_id
+
     def test_check_and_trigger_fires_past_entry(self):
-        # Создаём запись с start_time в прошлом (1 секунду назад)
-        self.sched.schedule_recording(start_time=_past_iso(1), duration_sec=60, label="Now")
+        # wave-25: schedule_recording() rejects past start_time; inject directly.
+        self._inject_past_entry(label="Now", duration_sec=60)
         result = self.sched.check_and_trigger()
         self.assertIsNotNone(result)
         self.assertEqual(result["label"], "Now")
         self.assertEqual(result["duration_sec"], 60)
 
     def test_check_and_trigger_marks_completed(self):
-        self.sched.schedule_recording(start_time=_past_iso(1), duration_sec=30)
+        self._inject_past_entry(duration_sec=30)
         self.sched.check_and_trigger()
         items = self.sched.list_scheduled()
         self.assertEqual(items[0]["status"], STATUS_COMPLETED)
@@ -213,23 +266,21 @@ class TestCheckAndTriggerAdvanced(unittest.TestCase):
 
     def test_trigger_only_fires_once_per_job(self):
         """Once triggered, a job is completed and won't fire again."""
-        self.sched.schedule_recording(start_time=_past_iso(1), duration_sec=60)
+        _inject_past_recording(self.sched, 1, 60)
         result1 = self.sched.check_and_trigger()
         self.assertIsNotNone(result1)
         result2 = self.sched.check_and_trigger()
         self.assertIsNone(result2)
 
     def test_trigger_returns_correct_duration_and_label(self):
-        self.sched.schedule_recording(
-            start_time=_past_iso(1), duration_sec=120, label="TestLabel"
-        )
+        _inject_past_recording(self.sched, 1, 120, "TestLabel")
         result = self.sched.check_and_trigger()
         self.assertIsNotNone(result)
         self.assertEqual(result["duration_sec"], 120)
         self.assertEqual(result["label"], "TestLabel")
 
     def test_trigger_returns_job_id(self):
-        entry = self.sched.schedule_recording(start_time=_past_iso(1), duration_sec=60)
+        entry = _inject_past_recording(self.sched, 1, 60)
         result = self.sched.check_and_trigger()
         self.assertIsNotNone(result)
         self.assertEqual(result["id"], entry["id"])
@@ -243,7 +294,7 @@ class TestCheckAndTriggerAdvanced(unittest.TestCase):
         self.assertEqual(items[0]["status"], STATUS_PENDING)
 
     def test_cancelled_job_not_triggered(self):
-        entry = self.sched.schedule_recording(start_time=_past_iso(1), duration_sec=60)
+        entry = _inject_past_recording(self.sched, 1, 60)
         self.sched.cancel_scheduled(entry["id"])
         result = self.sched.check_and_trigger()
         self.assertIsNone(result)
@@ -251,7 +302,7 @@ class TestCheckAndTriggerAdvanced(unittest.TestCase):
     def test_multiple_jobs_only_due_one_triggered(self):
         """When multiple jobs exist, only the due one is triggered."""
         self.sched.schedule_recording(start_time=_future_iso(3600), duration_sec=30, label="future")
-        self.sched.schedule_recording(start_time=_past_iso(1), duration_sec=60, label="due_now")
+        _inject_past_recording(self.sched, 1, 60, "due_now")
         result = self.sched.check_and_trigger()
         self.assertIsNotNone(result)
         self.assertEqual(result["label"], "due_now")
@@ -262,8 +313,8 @@ class TestCheckAndTriggerAdvanced(unittest.TestCase):
 
     def test_multiple_past_jobs_triggers_one_at_a_time(self):
         """Multiple overdue jobs: each call triggers one, not all at once."""
-        self.sched.schedule_recording(start_time=_past_iso(2), duration_sec=30, label="a")
-        self.sched.schedule_recording(start_time=_past_iso(3), duration_sec=30, label="b")
+        _inject_past_recording(self.sched, 2, 30, "a")
+        _inject_past_recording(self.sched, 3, 30, "b")
         r1 = self.sched.check_and_trigger()
         r2 = self.sched.check_and_trigger()
         r3 = self.sched.check_and_trigger()
@@ -273,7 +324,7 @@ class TestCheckAndTriggerAdvanced(unittest.TestCase):
 
     def test_completed_jobs_appear_in_list(self):
         """Completed jobs remain in list_scheduled with completed status."""
-        self.sched.schedule_recording(start_time=_past_iso(1), duration_sec=60)
+        _inject_past_recording(self.sched, 1, 60)
         self.sched.check_and_trigger()
         items = self.sched.list_scheduled()
         self.assertEqual(len(items), 1)
@@ -306,7 +357,7 @@ class TestScheduleWithLabelAsProfile(unittest.TestCase):
         """list_scheduled returns pending, cancelled, and completed jobs."""
         self.sched.schedule_recording(start_time=_future_iso(3600), duration_sec=60, label="pending_job")
         e2 = self.sched.schedule_recording(start_time=_future_iso(7200), duration_sec=60, label="cancel_job")
-        self.sched.schedule_recording(start_time=_past_iso(1), duration_sec=60, label="done_job")
+        _inject_past_recording(self.sched, 1, 60, "done_job")
         self.sched.cancel_scheduled(e2["id"])
         self.sched.check_and_trigger()
 
@@ -379,17 +430,13 @@ class Wave140SchedulerTestCase(unittest.TestCase):
         self.assertEqual(len(pending), 2)
 
     def test_past_time_rejected(self):
-        """Past start_time is accepted (persisted) but not triggered immediately."""
-        # The scheduler stores it; check_and_trigger fires it only within 5s window
+        """Past start_time is now REJECTED by wave-25 C2 validation."""
         far_past = (
             datetime.now(tz=timezone.utc) - timedelta(hours=1)
         ).isoformat()
-        entry = self.sched.schedule_recording(start_time=far_past, duration_sec=60)
-        # Entry is stored but is already beyond the 5-second trigger window
-        self.assertEqual(entry["status"], STATUS_PENDING)
-        result = self.sched.check_and_trigger()
-        # 1 hour ago is outside the [0,5]s window — not triggered
-        self.assertIsNone(result)
+        # wave-25: schedule_recording() raises ValueError for past start_time
+        with self.assertRaises(ValueError, msg="Past start_time must raise ValueError"):
+            self.sched.schedule_recording(start_time=far_past, duration_sec=60)
 
     def test_unicode_label(self):
         """Unicode labels (Russian, emoji) round-trip through persist/reload."""
