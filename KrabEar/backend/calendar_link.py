@@ -194,6 +194,7 @@ class CalendarLinker:
         if best is None:
             return None
         best.pop("_start_epoch", None)
-        logger.info("CalendarLinker: событие найдено")
-        logger.debug("CalendarLinker: событие title=%s", best.get("title"))
+        # wave-1770 LOW: removed debug log of calendar event title — titles are
+        # user-sensitive scheduling metadata; log only presence, not content.
+        logger.info("CalendarLinker: событие найдено (title omitted from logs)")
         return best
