@@ -328,10 +328,17 @@ end tell'''
         recipient = params.get("recipient", "").strip()
         if not recipient:
             return {"ok": False, "error": "recipient is required"}
+        # Bounds check: prevent excessively long or unusual recipients.
+        # Phone (+XX digits, up to 20 chars), email (up to 254 per RFC5321),
+        # or contact name (up to 128 chars).  Strict max covers all three.
+        if len(recipient) > 254:
+            return {"ok": False, "error": "recipient too long (max 254 chars)"}
 
         body = params.get("body", "").strip()
         if not body:
             return {"ok": False, "error": "body is required"}
+        if len(body) > 10_000:
+            return {"ok": False, "error": "body too long (max 10000 chars)"}
 
         service_name = params.get("service", "iMessage") or "iMessage"
         if service_name not in ("iMessage", "SMS"):

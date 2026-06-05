@@ -52,6 +52,24 @@ class TelegramBridge:
     # Allowlist of hostnames that the bridge may connect to.
     # Prevents SSRF via KRAB_EAR_TELEGRAM_BRIDGE_URL env-var override.
     _ALLOWED_HOSTS: frozenset[str] = frozenset({"localhost", "127.0.0.1", "::1"})
+    # IPv4-mapped IPv6 forms also allowed (e.g. ::ffff:127.0.0.1) — checked via
+    # ipaddress.is_loopback in _is_loopback_host() to avoid string-comparison gaps.
+
+    @staticmethod
+    def _is_loopback_host(hostname: str) -> bool:
+        """Return True if *hostname* resolves to a loopback address.
+
+        Covers: 'localhost', '127.x.x.x', '::1', '::ffff:127.x.x.x'
+        (IPv4-mapped IPv6 loopback).  String comparison alone misses the last
+        form and would allow SSRF via crafted IPv4-mapped addresses.
+        """
+        import ipaddress as _ip
+        if hostname == "localhost":
+            return True
+        try:
+            return _ip.ip_address(hostname).is_loopback
+        except ValueError:
+            return False
 
     def __init__(
         self,
@@ -64,10 +82,10 @@ class TelegramBridge:
         # time so that a bad KRAB_EAR_TELEGRAM_BRIDGE_URL cannot be used for SSRF
         # (e.g. 0.0.0.0, 169.254.x.x link-local, private LAN IPs).
         _parsed = urlparse(base_url)
-        if _parsed.hostname not in self._ALLOWED_HOSTS:
+        if not self._is_loopback_host(_parsed.hostname or ""):
             raise ValueError(
                 f"telegram_bridge: refusing non-localhost base_url {base_url!r}; "
-                f"hostname {_parsed.hostname!r} not in {set(self._ALLOWED_HOSTS)}"
+                f"hostname {_parsed.hostname!r} is not a loopback address"
             )
         self._base_url = base_url.rstrip("/")
         self._timeout_sec = timeout_sec
