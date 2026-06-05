@@ -58,6 +58,7 @@ def _sanitize_threshold(value: object) -> float:
         return DEFAULT_DEDUP_THRESHOLD
     return max(0.0, min(1.0, v))
 
+
 # W1243 F2: максимальное число записей для полного сканирования run_deduplication
 _MAX_DEDUP_SCAN: int = 1000
 
