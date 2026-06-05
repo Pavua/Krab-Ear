@@ -89,7 +89,7 @@ class WebhookManagerPurgeAllTestCase(unittest.TestCase):
         self._tmpdir = tempfile.mkdtemp()
         self._mgr = WebhookManager(data_dir=self._tmpdir)
 
-    def _register(self, secret: str = "s3cR3t") -> str:
+    def _register(self, secret: str = "s3cR3t-is-long-enough") -> str:
         """Регистрирует тестовый webhook с секретом через прямой Python-вызов."""
         return self._mgr.register_webhook(
             url="https://example.com/hook",

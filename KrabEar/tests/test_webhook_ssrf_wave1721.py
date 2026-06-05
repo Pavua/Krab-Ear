@@ -207,7 +207,7 @@ class SecretsFilePermissionsTestCase(unittest.TestCase):
     def test_webhooks_json_is_mode_0600(self) -> None:
         """webhooks.json must have permissions 0600 after first save."""
         mgr = _make_manager()
-        mgr.register_webhook("https://example.com/hook", events=[], secret="s3cr3t")
+        mgr.register_webhook("https://example.com/hook", events=[], secret="s3cr3t-long-enough")
 
         mode = oct(stat.S_IMODE(mgr._webhooks_path.stat().st_mode))
         self.assertEqual(mode, "0o600", f"Expected 0600, got {mode}")
@@ -224,7 +224,7 @@ class SecretsFilePermissionsTestCase(unittest.TestCase):
     def test_webhooks_json_secrets_not_world_readable(self) -> None:
         """webhooks.json must not be group-readable or other-readable."""
         mgr = _make_manager()
-        mgr.register_webhook("https://example.com/hook", events=[], secret="top-secret")
+        mgr.register_webhook("https://example.com/hook", events=[], secret="top-secret-long-enough")
 
         file_stat = mgr._webhooks_path.stat()
         mode = file_stat.st_mode

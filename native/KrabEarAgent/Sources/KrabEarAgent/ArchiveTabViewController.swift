@@ -21,7 +21,9 @@ final class ArchiveTabViewController: NSViewController, NSTableViewDataSource, N
     // UI Components
     private let mainStack = NSStackView()
     private let statsBar = NSStackView()
-    private let statsLabel = NSTextField(labelWithString: "0 записей • 0 MB • старейшая: --.--")
+    // Wave 621/658 (AGENT-J): no dangerous Unicode glyphs in NSTextField(labelWithString:)
+    // Use " | " separator instead of "•" (U+2022) which triggers CoreText hang.
+    private let statsLabel = NSTextField(labelWithString: "0 записей | 0 MB | старейшая: --.--")
     
     private let tableScroll = NSScrollView()
     private let tableView = NSTableView()
