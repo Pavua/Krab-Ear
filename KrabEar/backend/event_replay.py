@@ -442,6 +442,13 @@ class EventReplayManager:
         except (TypeError, ValueError):
             return {"ok": False, "reason": "from_ts and to_ts must be numeric (Unix epoch)"}
 
+        # wave-1770 HIGH: datetime.fromtimestamp() raises ValueError (NaN),
+        # OverflowError (year outside 1..9999), or OSError (platform time_t limit)
+        # on out-of-range values. Guard here before the window check.
+        import math as _math
+        if not (_math.isfinite(from_ts_num) and _math.isfinite(to_ts_num)):
+            return {"ok": False, "reason": "from_ts and to_ts must be finite numbers"}
+
         if from_ts_num > to_ts_num:
             return {"ok": False, "reason": "from_ts must be <= to_ts"}
 
@@ -450,8 +457,11 @@ class EventReplayManager:
             return {"ok": False, "reason": "time window too large (max 7 days)"}
 
         # Конвертируем числовые timestamps в ISO 8601 для replay_events.
-        from_iso = datetime.fromtimestamp(from_ts_num, tz=timezone.utc).isoformat(timespec="seconds")
-        to_iso = datetime.fromtimestamp(to_ts_num, tz=timezone.utc).isoformat(timespec="seconds")
+        try:
+            from_iso = datetime.fromtimestamp(from_ts_num, tz=timezone.utc).isoformat(timespec="seconds")
+            to_iso = datetime.fromtimestamp(to_ts_num, tz=timezone.utc).isoformat(timespec="seconds")
+        except (ValueError, OverflowError, OSError):
+            return {"ok": False, "reason": "from_ts or to_ts out of valid date range"}
 
         events = self.replay_events(from_iso, to_iso)
         truncated = len(events) == _MAX_REPLAY_EVENTS
