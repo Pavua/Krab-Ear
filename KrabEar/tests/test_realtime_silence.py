@@ -97,7 +97,7 @@ class TestRealtimeSilenceFilterDisabled(unittest.TestCase):
         recorder = FakeRecorder(_make_silence(10.0))
         settings = {
             "realtime_silence_filter_enabled": enabled,
-            "rt_silence_check_sec": 0.05,
+            "rt_silence_check_sec": 0.5,
             "rt_silence_window_sec": 10.0,
             "rt_silence_max_sec": 8.0,
         }
@@ -223,13 +223,13 @@ class TestEventEmission(unittest.TestCase):
         recorder = FakeRecorder(_make_speech(10.0))
         settings = {
             "realtime_silence_filter_enabled": True,
-            "rt_silence_check_sec": 0.05,
+            "rt_silence_check_sec": 0.5,
             "rt_silence_window_sec": 10.0,
             "rt_silence_max_sec": 8.0,
         }
         rsf = RealtimeSilenceFilter(recorder, settings, event_bus_emit=fake_emit)
         rsf.start()
-        time.sleep(0.2)
+        time.sleep(1.2)
         rsf.stop()
 
         self.assertEqual(len(events), 0)
@@ -243,13 +243,13 @@ class TestMultipleSilenceRanges(unittest.TestCase):
         recorder = FakeRecorder(_make_silence(10.0))
         settings = {
             "realtime_silence_filter_enabled": True,
-            "rt_silence_check_sec": 0.05,
+            "rt_silence_check_sec": 0.5,
             "rt_silence_window_sec": 10.0,
             "rt_silence_max_sec": 8.0,
         }
         rsf = RealtimeSilenceFilter(recorder, settings)
         rsf.start()
-        time.sleep(0.2)
+        time.sleep(1.2)
         ranges_mid = rsf.get_silence_ranges()
         rsf.stop()
         self.assertIsInstance(ranges_mid, list)
@@ -259,7 +259,7 @@ class TestMultipleSilenceRanges(unittest.TestCase):
         recorder = FakeRecorder(audio)
         settings = {
             "realtime_silence_filter_enabled": True,
-            "rt_silence_check_sec": 0.05,
+            "rt_silence_check_sec": 0.5,
             "rt_silence_window_sec": 10.0,
             "rt_silence_max_sec": 8.0,
         }
@@ -281,7 +281,7 @@ class TestEdgeCases(unittest.TestCase):
         recorder = FakeRecorder(np.zeros(0, dtype=np.float32))
         settings = {
             "realtime_silence_filter_enabled": True,
-            "rt_silence_check_sec": 0.05,
+            "rt_silence_check_sec": 0.5,
             "rt_silence_window_sec": 10.0,
             "rt_silence_max_sec": 8.0,
         }
@@ -296,7 +296,7 @@ class TestEdgeCases(unittest.TestCase):
         recorder.is_recording = False
         settings = {
             "realtime_silence_filter_enabled": True,
-            "rt_silence_check_sec": 0.05,
+            "rt_silence_check_sec": 0.5,
             "rt_silence_window_sec": 10.0,
             "rt_silence_max_sec": 8.0,
         }
@@ -310,7 +310,7 @@ class TestEdgeCases(unittest.TestCase):
         recorder = FakeRecorder(_make_speech(5.0))
         settings = {
             "realtime_silence_filter_enabled": True,
-            "rt_silence_check_sec": 0.05,
+            "rt_silence_check_sec": 0.5,
             "rt_silence_window_sec": 10.0,
             "rt_silence_max_sec": 8.0,
         }
@@ -363,13 +363,13 @@ class TestRealtimeSilenceFilterWave145(unittest.TestCase):
         recorder = FakeRecorder(_make_silence(15.0))
         settings = {
             "realtime_silence_filter_enabled": True,
-            "rt_silence_check_sec": 0.05,
+            "rt_silence_check_sec": 0.5,
             "rt_silence_window_sec": 15.0,
             "rt_silence_max_sec": 8.0,
         }
         rsf = RealtimeSilenceFilter(recorder, settings)
         rsf.start()
-        time.sleep(0.25)
+        time.sleep(1.2)
         ranges = rsf.stop()
         # Должны быть диапазоны тишины для 15-секундного пустого буфера
         self.assertGreater(len(ranges), 0, "Должны быть диапазоны тишины")
@@ -384,13 +384,13 @@ class TestRealtimeSilenceFilterWave145(unittest.TestCase):
         recorder = FakeRecorder(_make_speech(12.0))
         settings = {
             "realtime_silence_filter_enabled": True,
-            "rt_silence_check_sec": 0.05,
+            "rt_silence_check_sec": 0.5,
             "rt_silence_window_sec": 12.0,
             "rt_silence_max_sec": 8.0,
         }
         rsf = RealtimeSilenceFilter(recorder, settings)
         rsf.start()
-        time.sleep(0.25)
+        time.sleep(1.2)
         ranges = rsf.stop()
         self.assertEqual(ranges, [], "На речи не должно быть диапазонов тишины")
 
@@ -422,13 +422,13 @@ class TestRealtimeSilenceFilterWave145(unittest.TestCase):
         recorder = FakeRecorder(np.zeros(0, dtype=np.float32))
         settings = {
             "realtime_silence_filter_enabled": True,
-            "rt_silence_check_sec": 0.05,
+            "rt_silence_check_sec": 0.5,
             "rt_silence_window_sec": 10.0,
             "rt_silence_max_sec": 8.0,
         }
         rsf = RealtimeSilenceFilter(recorder, settings)
         rsf.start()
-        time.sleep(0.2)
+        time.sleep(1.2)
         ranges = rsf.stop()
         self.assertEqual(ranges, [])
 
@@ -442,7 +442,7 @@ class TestRealtimeSilenceFilterWave145(unittest.TestCase):
         recorder = FakeRecorder(_make_silence(15.0))
         settings = {
             "realtime_silence_filter_enabled": True,
-            "rt_silence_check_sec": 0.05,
+            "rt_silence_check_sec": 0.5,
             "rt_silence_window_sec": 15.0,
             "rt_silence_max_sec": 8.0,
         }
@@ -461,7 +461,7 @@ class TestRealtimeSilenceFilterWave145(unittest.TestCase):
         threads = [threading.Thread(target=reader) for _ in range(4)]
         for t in threads:
             t.start()
-        time.sleep(0.2)
+        time.sleep(1.2)
         rsf.stop()
         for t in threads:
             t.join()
@@ -492,7 +492,7 @@ class TestCursorAdvanceBugW1325F2(unittest.TestCase):
         recorder = FakeRecorder(_make_speech(10.0))  # speech → no silence detected
         settings = {
             "realtime_silence_filter_enabled": True,
-            "rt_silence_check_sec": 0.05,
+            "rt_silence_check_sec": 0.5,
             "rt_silence_window_sec": 10.0,
             "rt_silence_max_sec": 8.0,
         }
@@ -515,7 +515,7 @@ class TestCursorAdvanceBugW1325F2(unittest.TestCase):
         recorder = FakeRecorder(audio)
         settings = {
             "realtime_silence_filter_enabled": True,
-            "rt_silence_check_sec": 0.05,
+            "rt_silence_check_sec": 0.5,
             "rt_silence_window_sec": 10.0,
             "rt_silence_max_sec": 8.0,
         }
@@ -545,7 +545,7 @@ class TestCursorAdvanceBugW1325F2(unittest.TestCase):
         recorder = FakeRecorder(speech)
         settings = {
             "realtime_silence_filter_enabled": True,
-            "rt_silence_check_sec": 0.05,
+            "rt_silence_check_sec": 0.5,
             "rt_silence_window_sec": 20.0,
             "rt_silence_max_sec": 4.0,
         }

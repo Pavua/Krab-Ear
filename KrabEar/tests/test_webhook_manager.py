@@ -622,10 +622,13 @@ class WebhookManagerConcurrentFireTestCase(unittest.TestCase):
                 t.start()
             for t in threads:
                 t.join(timeout=2.0)
-
-        # 5 fire_webhook calls × 3 webhooks = 15 deliveries
-        time.sleep(0.1)
-        self.assertEqual(call_count[0], 15)
+            # fire_webhook() spawns internal delivery threads; wait for them
+            # INSIDE the patch so _post_once stays mocked until they complete.
+            # Without this, delivery threads call the real _post_once after the
+            # patch context exits → DNS failure on ubuntu CI (no network).
+            time.sleep(0.5)
+            # 5 fire_webhook calls × 3 webhooks = 15 deliveries
+            self.assertEqual(call_count[0], 15)
 
     # 36 — concurrent register + fire не вызывает RuntimeError
     def test_concurrent_register_and_fire_safe(self) -> None:
