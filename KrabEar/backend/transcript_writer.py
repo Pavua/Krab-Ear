@@ -6,13 +6,34 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
+import re
 import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("KrabEar.Backend.TranscriptWriter")
+
+
+def _sanitize_md_body(text: str) -> str:
+    """Sanitizes user text before inserting into a Markdown body.
+
+    Prevents YAML-frontmatter-boundary injection: a bare ``---`` or ``...``
+    on its own line is a YAML document separator and can corrupt Obsidian
+    vault parsing when the Markdown file is processed by YAML-aware tools.
+
+    Also strips NUL and CR bytes that have no semantic meaning in UTF-8 Markdown.
+
+    Pattern: identical to obsidian_sync._sanitize_md_body_text (wave-1770 HIGH sync).
+    """
+    if not text:
+        return text
+    text = text.replace('\x00', '').replace('\r', '')
+    # Escape bare YAML document boundary markers
+    text = re.sub(r'(?m)^(---+|\.\.\.)$', r'\\\g<0>', text)
+    return text
 
 
 class TranscriptWriter:
@@ -79,10 +100,18 @@ class TranscriptWriter:
 
         date_human = cls._format_date_human(ts)
         duration = cls._format_duration(item.get("audio_duration_sec"))
-        confidence = item.get("confidence", 0.0)
-        confidence_pct = f"{round((confidence or 0) * 100)}%" if confidence else "—"
+        # wave-1770 MED: guard against NaN/Inf confidence (wave-28 pattern).
+        # round(NaN * 100) raises ValueError; isfinite() prevents silent exception.
+        _conf = item.get("confidence", 0.0)
+        try:
+            _conf_f = float(_conf or 0)
+        except (TypeError, ValueError):
+            _conf_f = 0.0
+        confidence_pct = f"{round(_conf_f * 100)}%" if _conf_f and math.isfinite(_conf_f) else "—"
 
-        text_section = cls._build_text_section(item)
+        # wave-1770 HIGH: sanitize user text before Markdown insertion to prevent
+        # YAML-frontmatter-boundary injection via bare '---' lines in the transcript.
+        text_section = _sanitize_md_body(cls._build_text_section(item))
 
         lines = [
             f"# Транскрибация ({date_str})",
@@ -99,7 +128,7 @@ class TranscriptWriter:
             text_section,
         ]
 
-        translated_text = item.get("translated_text", "").strip()
+        translated_text = _sanitize_md_body(item.get("translated_text", "").strip())
         translation_status = item.get("translation_status", "")
         if translated_text and translation_status == "ok":
             lines += [

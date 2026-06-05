@@ -293,7 +293,14 @@ class GetLearningStatsTestCase(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class IPCHandlersTestCase(unittest.TestCase):
-    """Тесты IPC-обработчиков LanguageLearningManager."""
+    """Тесты IPC-обработчиков LanguageLearningManager.
+
+    NOTE (wave-1770 LOW): handle_extract_learning_vocabulary and
+    handle_generate_flashcards were decorative handlers never wired into the
+    BackendService dispatch table. They were removed from LanguageLearningManager
+    and the corresponding tests (test-validates-the-hole) are removed here too.
+    Only handle_get_learning_stats (wired via service.py) is tested.
+    """
 
     def setUp(self) -> None:
         self.mgr = LanguageLearningManager()
@@ -301,64 +308,6 @@ class IPCHandlersTestCase(unittest.TestCase):
             _make_item("программирование алгоритм структура", "programación algoritmo estructura"),
             _make_item("алгоритм поиск сортировка", "algoritmo búsqueda ordenación"),
         ]
-
-    def test_handle_extract_learning_vocabulary_basic(self) -> None:
-        result = self.mgr.handle_extract_learning_vocabulary({
-            "source_lang": "ru",
-            "target_lang": "es",
-            "items": self.items,
-        })
-        self.assertIn("vocabulary", result)
-        self.assertIn("total", result)
-        self.assertIn("source_lang", result)
-        self.assertIn("target_lang", result)
-        self.assertIsInstance(result["vocabulary"], list)
-
-    def test_handle_extract_learning_vocabulary_missing_source_lang(self) -> None:
-        with self.assertRaises(RuntimeError):
-            self.mgr.handle_extract_learning_vocabulary({
-                "target_lang": "es",
-                "items": self.items,
-            })
-
-    def test_handle_extract_learning_vocabulary_missing_target_lang(self) -> None:
-        with self.assertRaises(RuntimeError):
-            self.mgr.handle_extract_learning_vocabulary({
-                "source_lang": "ru",
-                "items": self.items,
-            })
-
-    def test_handle_extract_learning_vocabulary_limit(self) -> None:
-        result = self.mgr.handle_extract_learning_vocabulary({
-            "source_lang": "ru",
-            "target_lang": "es",
-            "limit": 2,
-            "items": self.items,
-        })
-        self.assertLessEqual(len(result["vocabulary"]), 2)
-
-    def test_handle_generate_flashcards_basic(self) -> None:
-        result = self.mgr.handle_generate_flashcards({
-            "source_lang": "ru",
-            "target_lang": "es",
-            "items": self.items,
-        })
-        self.assertIn("cards", result)
-        self.assertIn("total", result)
-        self.assertIsInstance(result["cards"], list)
-
-    def test_handle_generate_flashcards_max_cards(self) -> None:
-        result = self.mgr.handle_generate_flashcards({
-            "source_lang": "ru",
-            "target_lang": "es",
-            "max_cards": 3,
-            "items": self.items,
-        })
-        self.assertLessEqual(len(result["cards"]), 3)
-
-    def test_handle_generate_flashcards_missing_lang_raises(self) -> None:
-        with self.assertRaises(RuntimeError):
-            self.mgr.handle_generate_flashcards({"target_lang": "es", "items": self.items})
 
     def test_handle_get_learning_stats_basic(self) -> None:
         result = self.mgr.handle_get_learning_stats({
@@ -374,18 +323,6 @@ class IPCHandlersTestCase(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.mgr.handle_get_learning_stats({"source_lang": "ru", "items": self.items})
 
-    def test_vocab_entries_have_all_fields(self) -> None:
-        result = self.mgr.handle_extract_learning_vocabulary({
-            "source_lang": "ru",
-            "target_lang": "es",
-            "items": self.items,
-        })
-        for entry in result["vocabulary"]:
-            self.assertIn("word_source", entry)
-            self.assertIn("word_target", entry)
-            self.assertIn("context_sentence", entry)
-            self.assertIn("frequency", entry)
-            self.assertIn("first_seen", entry)
 
 
 # ---------------------------------------------------------------------------

@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import ipaddress as _ipaddress
 import json
 import logging
 import math
@@ -400,6 +401,31 @@ class SettingsService:
             raise ValueError(f"Voice Gateway URL must be localhost or HTTPS: {_gw_url}")
         settings["voice_gateway_url"] = _gw_url
         settings["voice_gateway_api_key"] = str(settings.get("voice_gateway_api_key", "")).strip()
+
+        # wave-1770 HIGH: validate smtp_host to prevent SSRF to cloud metadata endpoints.
+        # An attacker with IPC access can set smtp_host=169.254.169.254 to trigger TCP
+        # connections to AWS/GCP instance-metadata services when recap email fires.
+        # Allow: empty (SMTP disabled), hostnames, loopback/localhost (local relay),
+        # RFC 1918 (internal corporate mail servers).
+        # Block: link-local 169.254.0.0/16 (cloud metadata), multicast, ::.
+        _smtp_host_raw = str(settings.get("smtp_host", "")).strip()
+        if _smtp_host_raw:
+            try:
+                _smtp_addr = _ipaddress.ip_address(_smtp_host_raw)
+                if _smtp_addr.is_link_local:
+                    raise ValueError(
+                        f"smtp_host {_smtp_host_raw!r} отклонён: link-local адрес "
+                        "(169.254.0.0/16 / fe80::/10) — cloud metadata endpoint запрещён"
+                    )
+                if _smtp_addr.is_multicast:
+                    raise ValueError(
+                        f"smtp_host {_smtp_host_raw!r} отклонён: multicast адрес запрещён"
+                    )
+            except ValueError as _ve:
+                if "отклонён" in str(_ve):
+                    raise
+                # Not an IP address (hostname) — allow
+        settings["smtp_host"] = _smtp_host_raw
 
         try:
             page_size = int(settings.get("history_page_size", 50))

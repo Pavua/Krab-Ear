@@ -686,5 +686,65 @@ class TestExportSettingsRedactsAllSensitiveFields(unittest.TestCase):
         )
 
 
+class TestSmtpHostSsrfGuardW1770(unittest.TestCase):
+    """wave-1770 HIGH: smtp_host must reject link-local (cloud metadata) IPs.
+
+    169.254.169.254 is the AWS/GCP/Azure instance-metadata endpoint. If smtp_host
+    is set to this IP and recap email fires, smtplib opens a TCP connection to the
+    metadata service, potentially leaking instance credentials.
+    """
+
+    def _svc(self) -> SettingsService:
+        return SettingsService(store=_make_store())
+
+    def test_link_local_ip_rejected(self) -> None:
+        """169.254.169.254 must raise ValueError."""
+        svc = self._svc()
+        with self.assertRaises(ValueError):
+            svc.handle_set_settings({"smtp_host": "169.254.169.254"})
+
+    def test_link_local_any_rejected(self) -> None:
+        """169.254.0.1 (any link-local) must raise ValueError."""
+        svc = self._svc()
+        with self.assertRaises(ValueError):
+            svc.handle_set_settings({"smtp_host": "169.254.0.1"})
+
+    def test_multicast_rejected(self) -> None:
+        """224.0.0.1 (multicast) must raise ValueError."""
+        svc = self._svc()
+        with self.assertRaises(ValueError):
+            svc.handle_set_settings({"smtp_host": "224.0.0.1"})
+
+    def test_empty_smtp_host_allowed(self) -> None:
+        """Empty smtp_host (SMTP disabled) passes validation without exception."""
+        svc = self._svc()
+        result = svc.handle_set_settings({"smtp_host": ""})
+        self.assertEqual(result.get("smtp_host", ""), "")
+
+    def test_localhost_allowed(self) -> None:
+        """localhost (local relay) is allowed."""
+        svc = self._svc()
+        result = svc.handle_set_settings({"smtp_host": "localhost"})
+        self.assertEqual(result.get("smtp_host"), "localhost")
+
+    def test_loopback_ip_allowed(self) -> None:
+        """127.0.0.1 (loopback — local Postfix relay) is allowed."""
+        svc = self._svc()
+        result = svc.handle_set_settings({"smtp_host": "127.0.0.1"})
+        self.assertEqual(result.get("smtp_host"), "127.0.0.1")
+
+    def test_external_hostname_allowed(self) -> None:
+        """smtp.gmail.com (external hostname) is allowed."""
+        svc = self._svc()
+        result = svc.handle_set_settings({"smtp_host": "smtp.gmail.com"})
+        self.assertEqual(result.get("smtp_host"), "smtp.gmail.com")
+
+    def test_private_ip_allowed(self) -> None:
+        """RFC1918 (10.x.x.x) is allowed — corporate mail relays commonly use these."""
+        svc = self._svc()
+        result = svc.handle_set_settings({"smtp_host": "10.0.0.1"})
+        self.assertEqual(result.get("smtp_host"), "10.0.0.1")
+
+
 if __name__ == "__main__":
     unittest.main()

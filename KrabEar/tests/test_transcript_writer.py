@@ -294,5 +294,69 @@ class TestTranscriptWriterAtomicWrite(unittest.TestCase):
             self.assertIn("Содержимое потока B", combined)
 
 
+class TestTranscriptWriterSecurityW1770(unittest.TestCase):
+    """wave-1770: security fixes for TranscriptWriter.
+
+    HIGH: Markdown/YAML frontmatter injection via bare '---' in transcript text.
+    MED:  NaN/Inf confidence value causes ValueError in round().
+    """
+
+    def test_bare_dashes_in_text_are_escaped(self) -> None:
+        """Bare '---' lines in transcript text are escaped to prevent YAML injection."""
+        item = {
+            "ts": "2024-01-01T12:00:00",
+            "text": "Hello world\n---\nMore text",
+            "confidence": 0.9,
+        }
+        content = TranscriptWriter.build_content(item)
+        lines = content.split("\n")
+        text_start = next((i for i, ln in enumerate(lines) if ln.strip() == "## Текст"), None)
+        self.assertIsNotNone(text_start)
+        body = "\n".join(lines[text_start:])
+        self.assertNotIn("\n---\n", body, "Bare '---' from user text must be escaped")
+        self.assertIn("\\---", body, "Escaped '\\---' must appear in body")
+
+    def test_translated_text_dashes_escaped(self) -> None:
+        """Bare '---' in translated_text is also escaped."""
+        item = {
+            "ts": "2024-01-01T12:00:00",
+            "text": "Normal",
+            "translated_text": "Translated\n---\nmore",
+            "translation_status": "ok",
+            "confidence": 0.8,
+        }
+        content = TranscriptWriter.build_content(item)
+        perv_idx = content.find("## Перевод")
+        if perv_idx >= 0:
+            translation_body = content[perv_idx:]
+            self.assertNotIn("\n---\n", translation_body)
+
+    def test_nan_confidence_shows_dash(self) -> None:
+        """NaN confidence must not crash — renders as '—'."""
+        item = {"ts": "2024-01-01T12:00:00", "text": "Test", "confidence": float("nan")}
+        content = TranscriptWriter.build_content(item)
+        self.assertIn("—", content)
+
+    def test_inf_confidence_shows_dash(self) -> None:
+        """Inf confidence must not crash — renders as '—'."""
+        item = {"ts": "2024-01-01T12:00:00", "text": "Test", "confidence": float("inf")}
+        content = TranscriptWriter.build_content(item)
+        self.assertIn("—", content)
+
+    def test_valid_confidence_shows_percent(self) -> None:
+        """Normal 0.85 confidence renders as '85%'."""
+        item = {"ts": "2024-01-01T12:00:00", "text": "Test", "confidence": 0.85}
+        content = TranscriptWriter.build_content(item)
+        self.assertIn("85%", content)
+
+    def test_yaml_end_marker_escaped(self) -> None:
+        """Bare '...' YAML end marker in text is also escaped."""
+        item = {"ts": "2024-01-01T12:00:00", "text": "Line one\n...\nLine two", "confidence": 0.7}
+        content = TranscriptWriter.build_content(item)
+        text_idx = content.find("## Текст")
+        body = content[text_idx:] if text_idx >= 0 else content
+        self.assertNotIn("\n...\n", body, "Bare '...' must be escaped")
+
+
 if __name__ == "__main__":
     unittest.main()

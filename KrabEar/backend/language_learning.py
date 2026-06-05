@@ -305,72 +305,11 @@ class LanguageLearningManager:
     # IPC-обработчики
     # ------------------------------------------------------------------
 
-    def handle_extract_learning_vocabulary(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: extract_learning_vocabulary.
-
-        Параметры:
-            source_lang (str): язык исходного текста.
-            target_lang (str): язык перевода.
-            store (StateStore, optional): StateStore для загрузки истории.
-            items (list, optional): явный список записей (для тестов/переопределения).
-            limit (int, optional): максимальное количество записей словаря. Default 100.
-        """
-        source_lang = str(params.get("source_lang", "")).strip()
-        target_lang = str(params.get("target_lang", "")).strip()
-        limit = int(params.get("limit", 100))
-
-        if not source_lang:
-            raise RuntimeError("Параметр 'source_lang' обязателен")
-        if not target_lang:
-            raise RuntimeError("Параметр 'target_lang' обязателен")
-
-        items = self._resolve_items(params)
-        vocab = self.extract_vocabulary(items, source_lang, target_lang)
-
-        return {
-            "vocabulary": [
-                {
-                    "word_source": e.word_source,
-                    "word_target": e.word_target,
-                    "context_sentence": e.context_sentence,
-                    "frequency": e.frequency,
-                    "first_seen": e.first_seen,
-                }
-                for e in vocab[:limit]
-            ],
-            "total": len(vocab),
-            "source_lang": source_lang,
-            "target_lang": target_lang,
-        }
-
-    def handle_generate_flashcards(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: generate_flashcards.
-
-        Параметры:
-            source_lang (str): язык исходного текста.
-            target_lang (str): язык перевода.
-            max_cards (int, optional): максимальное количество карточек. Default 20.
-            store (StateStore, optional): StateStore для загрузки истории.
-            items (list, optional): явный список записей.
-        """
-        source_lang = str(params.get("source_lang", "")).strip()
-        target_lang = str(params.get("target_lang", "")).strip()
-        max_cards = int(params.get("max_cards", 20))
-
-        if not source_lang:
-            raise RuntimeError("Параметр 'source_lang' обязателен")
-        if not target_lang:
-            raise RuntimeError("Параметр 'target_lang' обязателен")
-
-        items = self._resolve_items(params)
-        cards = self.generate_flashcards(items, source_lang, target_lang, max_cards=max_cards)
-
-        return {
-            "cards": cards,
-            "total": len(cards),
-            "source_lang": source_lang,
-            "target_lang": target_lang,
-        }
+    # wave-1770 LOW: handle_extract_learning_vocabulary and handle_generate_flashcards
+    # were decorative handlers (not wired into BackendService dispatch table since
+    # their creation). Removed to prevent audit_decorative_wiring false-positives and
+    # dead-code drift. If these IPC methods are needed in the future, re-add them with
+    # proper privacy gates, limit bounds, and dispatch table entries.
 
     def handle_get_learning_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_learning_stats.
