@@ -20,6 +20,7 @@ W1243 F2 HIGH fix:
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import uuid
 import time
@@ -38,6 +39,24 @@ DEFAULT_DEDUP_THRESHOLD: float = 0.9
 MERGE_THRESHOLD: float = 0.95
 # Настройка-флаг для DEFAULT_SETTINGS / runtime settings
 AUTO_DEDUP_ENABLED: bool = False
+
+
+def _sanitize_threshold(value: object) -> float:
+    """Validate and clamp IPC threshold to [0.0, 1.0].
+
+    wave-1770 HIGH: IPC handlers previously accepted NaN/Inf/negative threshold
+    values which caused data-loss (negative → every recording silently dropped as
+    duplicate) or silent dedup bypass (NaN makes all comparisons falsy).
+
+    Returns *value* clamped to [0.0, 1.0], or DEFAULT_DEDUP_THRESHOLD on error.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_DEDUP_THRESHOLD
+    if not math.isfinite(v):
+        return DEFAULT_DEDUP_THRESHOLD
+    return max(0.0, min(1.0, v))
 
 # W1243 F2: максимальное число записей для полного сканирования run_deduplication
 _MAX_DEDUP_SCAN: int = 1000
@@ -687,7 +706,8 @@ class AutoDeduplicator:
         timestamp = str(params.get("timestamp", "")).strip()
         if not timestamp:
             timestamp = datetime.now(tz=timezone.utc).isoformat()
-        threshold = float(params.get("threshold", DEFAULT_DEDUP_THRESHOLD))
+        # wave-1770 HIGH: validate before use — negative/NaN/Inf cause data-loss.
+        threshold = _sanitize_threshold(params.get("threshold", DEFAULT_DEDUP_THRESHOLD))
         store = params.get("_store")
         if store is None:
             raise ValueError("store не передан в handle_check_duplicate")
@@ -717,7 +737,8 @@ class AutoDeduplicator:
         Returns:
             dict с полями из run_deduplication.
         """
-        threshold = float(params.get("threshold", DEFAULT_DEDUP_THRESHOLD))
+        # wave-1770 HIGH: validate threshold before use.
+        threshold = _sanitize_threshold(params.get("threshold", DEFAULT_DEDUP_THRESHOLD))
         store = params.get("_store")
         if store is None:
             raise ValueError("store не передан в handle_run_deduplication")
