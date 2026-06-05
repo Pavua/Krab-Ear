@@ -350,5 +350,67 @@ class TestAutoBackupConcurrentLock(unittest.TestCase):
         self.assertEqual(errors, [])
 
 
+class TestAutoBackupPrivacyGateW1770(unittest.TestCase):
+    """wave-1770 HIGH: check_and_backup() must skip when privacy_mode_enabled=True.
+
+    Without this gate, automatic backups created every N hours would write full
+    history.ndjson (transcript PII) to disk even in privacy mode — contradicting
+    the user's explicit privacy expectation.
+    """
+
+    def _mgr(self, privacy_on: bool, tmpdir: Path) -> AutoBackupManager:
+        store = _make_store(tmpdir)
+        return AutoBackupManager(
+            store=store,
+            interval_hours=0,  # always eligible (never "too_soon")
+            settings_fn=lambda: {"privacy_mode_enabled": privacy_on},
+        )
+
+    def test_backup_skipped_when_privacy_mode_on(self) -> None:
+        """privacy_mode_enabled=True → skipped_reason='privacy_mode', no file written."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = self._mgr(True, Path(tmpdir))
+            result = mgr.check_and_backup()
+            self.assertFalse(result.get("backed_up"),
+                             "Backup must be skipped in privacy mode")
+            self.assertEqual(result.get("skipped_reason"), "privacy_mode")
+            # No backup directory should be created
+            self.assertFalse((Path(tmpdir) / "backups").exists(),
+                             "backups/ directory must not be created in privacy mode")
+
+    def test_backup_runs_when_privacy_mode_off(self) -> None:
+        """privacy_mode_enabled=False → backup proceeds normally."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = self._mgr(False, Path(tmpdir))
+            result = mgr.check_and_backup()
+            # Should attempt backup (may succeed or fail for other reasons)
+            self.assertNotEqual(result.get("skipped_reason"), "privacy_mode")
+
+    def test_backup_runs_when_no_settings_fn(self) -> None:
+        """settings_fn=None → privacy gate disabled → backup proceeds (safe default)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = _make_store(Path(tmpdir))
+            mgr = AutoBackupManager(store=store, interval_hours=0)
+            result = mgr.check_and_backup()
+            self.assertNotEqual(result.get("skipped_reason"), "privacy_mode")
+
+    def test_backup_runs_when_settings_fn_raises(self) -> None:
+        """If settings_fn raises, fail-open: backup still runs."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = _make_store(Path(tmpdir))
+
+            def bad_settings_fn():
+                raise RuntimeError("settings unavailable")
+
+            mgr = AutoBackupManager(
+                store=store,
+                interval_hours=0,
+                settings_fn=bad_settings_fn,
+            )
+            result = mgr.check_and_backup()
+            # fail-open: should not be skipped due to privacy_mode
+            self.assertNotEqual(result.get("skipped_reason"), "privacy_mode")
+
+
 if __name__ == "__main__":
     unittest.main()

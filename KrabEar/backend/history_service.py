@@ -144,6 +144,10 @@ class HistoryService:
         # (content/text/translated_text). rmtree(shares/) удаляет файлы, но RAM-копия
         # продолжает отдавать данные через get_shared. clear() сбрасывает _index.
         self._sharing_manager: Any = None     # SharingManager — in-memory share index (transcript PII)
+        # wave-1770 HIGH: SearchHistoryManager — in-memory _entries list survives file
+        # deletion unless clear_search_history() is explicitly called during purge.
+        # Late-injected by BackendService.__init__ after both objects are constructed.
+        self._search_history_mgr: Any = None  # SearchHistoryManager — in-memory query list (user search PII)
 
     # ------------------------------------------------------------------
     # Privacy helpers
@@ -2315,13 +2319,19 @@ class HistoryService:
             logger.warning("purge_all_data: удаление auto_glossary.json не удалось", exc_info=True)
             secondary_errors.append("auto_glossary")
 
-        # --- 27. W1770: удалить историю поиска (search_history.json) ---
-        # SearchHistoryManager хранит последние поисковые запросы пользователя —
-        # это введённый пользователем текст (PII).
+        # --- 27. W1770/wave-1770 HIGH: очистить историю поиска (в памяти + файл) ---
+        # SearchHistoryManager хранит последние поисковые запросы пользователя (PII).
+        # Прямой unlink файла не очищает in-memory _entries — они продолжают возвращаться
+        # через get_recent_searches/get_popular_searches до рестарта. clear_search_history()
+        # очищает и RAM, и файл атомарно.
         try:
-            (_data_dir / "search_history.json").unlink(missing_ok=True)
+            if self._search_history_mgr is not None:
+                self._search_history_mgr.clear_search_history()
+            else:
+                # Fallback для случая когда late-inject не сработал (тесты без полного wiring).
+                (_data_dir / "search_history.json").unlink(missing_ok=True)
         except Exception:
-            logger.warning("purge_all_data: удаление search_history.json не удалось", exc_info=True)
+            logger.warning("purge_all_data: очистка search_history не удалась", exc_info=True)
             secondary_errors.append("search_history")
 
         # --- 28. W1770: удалить пользовательские горячие слова и legacy-словарь ---

@@ -488,6 +488,7 @@ class BackendService:
             interval_hours=AUTO_BACKUP_INTERVAL_HOURS,
             max_copies=AUTO_BACKUP_MAX_COPIES,
             enabled=settings.AUTO_BACKUP_ENABLED,
+            settings_fn=self._settings_svc.cached_settings,  # wave-1770 HIGH: privacy gate
         )
         self._export_scheduler = ExportScheduler(
             data_dir=self.store.data_dir,
@@ -932,6 +933,10 @@ class BackendService:
         # handle_purge_all_data can call clear() — terminal jobs hold transcript
         # text in items[].text (full PII) and survive privacy-purge without this wire.
         self._history._job_tracker = self._recording_core_svc._job_tracker
+        # wave-1770 HIGH: inject SearchHistoryManager so handle_purge_all_data can call
+        # clear_search_history() (clears in-memory _entries) instead of just unlinking
+        # the file (which left RAM entries returning stale queries until restart).
+        self._history._search_history_mgr = self._search_history
         self._calendar_linker = CalendarLinker(
             cache_minutes=int(settings.CALENDAR_LINK_CACHE_MIN)
         )

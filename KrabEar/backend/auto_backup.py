@@ -15,7 +15,7 @@ import shutil
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, ContextManager
+from typing import Any, Callable, ContextManager, Optional
 
 from backend.settings_backup import SENSITIVE_FIELDS as _SENSITIVE_FIELDS
 
@@ -41,6 +41,7 @@ class AutoBackupManager:
         interval_hours: int = AUTO_BACKUP_INTERVAL_HOURS,
         max_copies: int = AUTO_BACKUP_MAX_COPIES,
         enabled: bool = True,
+        settings_fn: Optional[Callable[[], dict[str, Any]]] = None,
     ) -> None:
         """
         Args:
@@ -48,11 +49,15 @@ class AutoBackupManager:
             interval_hours: минимальный интервал между бэкапами (часы).
             max_copies: максимальное количество хранимых бэкапов.
             enabled: если False — check_and_backup() ничего не делает.
+            settings_fn: опциональный callable → current settings dict.
+                         Используется для privacy_mode gate в check_and_backup().
+                         None = privacy gate disabled (safe default — no backup skipped).
         """
         self.store = store
         self.interval_hours = interval_hours
         self.max_copies = max_copies
         self.enabled = enabled
+        self._settings_fn = settings_fn
         self._lock = threading.Lock()
         # wave-25 (B2): privacy-purge guard. handle_purge_all_data делает rmtree(backups/),
         # но фоновый/оппортунистический backup-цикл может ПЕРЕСОЗДАТЬ директорию сразу
@@ -292,6 +297,20 @@ class AutoBackupManager:
         """
         if not self.enabled:
             return {"backed_up": False, "skipped_reason": "disabled", "backup_path": None}
+
+        # wave-1770 HIGH: skip backup when privacy_mode_enabled — history.ndjson contains
+        # full transcript text (PII). The manual backup (handle_backup_history) already
+        # gates on privacy_mode; auto-backup must do the same.
+        if self._settings_fn is not None:
+            try:
+                if self._settings_fn().get("privacy_mode_enabled", False):
+                    return {
+                        "backed_up": False,
+                        "skipped_reason": "privacy_mode",
+                        "backup_path": None,
+                    }
+            except Exception:
+                pass  # fail-open: settings unavailable → don't block backup
 
         # wave-25 (B2): после privacy-purge бэкапы заморожены до clear_purged().
         # Без этого фоновый/оппортунистический цикл пересоздал бы backups/ с PII

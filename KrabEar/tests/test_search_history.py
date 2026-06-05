@@ -431,5 +431,67 @@ class TestSearchHistoryGeminiWaveA(unittest.TestCase):
             self.assertEqual(mgr._entries[-1]["query"], f"q{_MAX_ENTRIES + 99}")
 
 
+class TestSearchHistoryInMemoryClearW1770(unittest.TestCase):
+    """wave-1770 HIGH: clear_search_history() must purge in-memory _entries.
+
+    Previously, handle_purge_all_data only called Path.unlink() on search_history.json,
+    leaving _entries intact in memory. After purge, get_recent_searches still returned
+    old queries until backend restart — breaking the privacy guarantee.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.mkdtemp()
+        self._mgr = SearchHistoryManager(data_dir=self._tmp)
+
+    def test_clear_search_history_wipes_in_memory_entries(self) -> None:
+        """clear_search_history() must empty _entries list AND delete file."""
+        # Add some queries
+        self._mgr.record_search("тест запрос")
+        self._mgr.record_search("другой запрос")
+        self.assertEqual(len(self._mgr._entries), 2)
+
+        # Call clear (simulates what purge_all_data now does)
+        self._mgr.clear_search_history()
+
+        # In-memory list must be empty
+        self.assertEqual(len(self._mgr._entries), 0,
+                         "_entries must be cleared from memory after clear_search_history()")
+        # File must be deleted
+        sh_path = Path(self._tmp) / "search_history.json"
+        self.assertFalse(sh_path.exists(),
+                         "search_history.json must be deleted after clear_search_history()")
+
+    def test_get_recent_searches_returns_empty_after_clear(self) -> None:
+        """After clear_search_history(), IPC handler returns empty list without restart."""
+        self._mgr.record_search("query_one")
+        self._mgr.record_search("query_two")
+
+        self._mgr.clear_search_history()
+
+        result = self._mgr.handle_get_recent_searches({})
+        self.assertEqual(result.get("searches", []), [],
+                         "Searches must be empty after clear without restart")
+
+    def test_file_only_unlink_does_not_clear_memory(self) -> None:
+        """Regression: direct file unlink alone does NOT clear _entries (old bug)."""
+        self._mgr.record_search("secret_search_term")
+
+        # Simulate old bug: only unlink file, don't call clear_search_history()
+        sh_path = Path(self._tmp) / "search_history.json"
+        sh_path.unlink(missing_ok=True)
+
+        # _entries is still in memory
+        self.assertEqual(len(self._mgr._entries), 1,
+                         "This test confirms the in-memory list survives file deletion alone")
+        # This is the bug. The fix is to call clear_search_history() instead.
+
+    def test_clear_search_history_idempotent(self) -> None:
+        """Multiple calls to clear_search_history() are safe (no errors)."""
+        self._mgr.record_search("test")
+        self._mgr.clear_search_history()
+        self._mgr.clear_search_history()  # second call must not raise
+        self.assertEqual(len(self._mgr._entries), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

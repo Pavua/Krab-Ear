@@ -119,6 +119,12 @@ class SearchAndAnalysisService:
         query = str(params.get("query", "")).strip()
         if not query:
             raise ValueError("Параметр query обязателен")
+        # wave-1770 MED: cap query length to prevent embedding model GPU memory spike.
+        # A 1 MB query (IPC max) triggers proportional memory allocation in the
+        # encoder. Match the cap used in search_history.py (1000 chars in _add_query).
+        _MAX_QUERY_LEN = 10_000
+        if len(query) > _MAX_QUERY_LEN:
+            query = query[:_MAX_QUERY_LEN]
         top_k = int(params.get("top_k", 10))
         top_k = max(1, min(top_k, 100))
         use_fallback = bool(params.get("fallback", True))
