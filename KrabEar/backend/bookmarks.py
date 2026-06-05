@@ -33,12 +33,14 @@ class BookmarkManager:
     Удаление — через tombstone-записи ("deleted": true).
     """
 
-    def __init__(self, data_dir: Path) -> None:
+    def __init__(self, data_dir: Path, settings_get: Any = None) -> None:
         self._data_dir = Path(data_dir)
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self._path = self._data_dir / "bookmarks.ndjson"
         self._path.touch(exist_ok=True)
         self._lock = threading.Lock()
+        # wave-1770: privacy gate callable — settings_get("privacy_mode_enabled", False)
+        self._settings_get = settings_get or (lambda k, d: d)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -344,11 +346,16 @@ class BookmarkManager:
     def handle_list_bookmarks(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: list_bookmarks — закладки для конкретного item_id.
 
+        Privacy gate (wave-1770 HIGH): bookmarks contain session_id + offset_sec +
+        user notes linked to transcript recordings. Hidden in privacy mode.
+
         Params:
             item_id — ID записи (обязательно)
         Returns:
             {"bookmarks": [...], "count": N}
         """
+        if self._settings_get("privacy_mode_enabled", False):
+            return {"bookmarks": [], "count": 0, "reason": "privacy_mode_active"}
         item_id = str(params.get("item_id", "")).strip()
         if not item_id:
             raise ValueError("Параметр item_id обязателен")
@@ -358,9 +365,13 @@ class BookmarkManager:
     def handle_list_all_bookmarks(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: list_all_bookmarks — все закладки.
 
+        Privacy gate (wave-1770 HIGH): same as handle_list_bookmarks.
+
         Returns:
             {"bookmarks": [...], "count": N}
         """
+        if self._settings_get("privacy_mode_enabled", False):
+            return {"bookmarks": [], "count": 0, "reason": "privacy_mode_active"}
         bookmarks = self.list_all()
         return {"bookmarks": bookmarks, "count": len(bookmarks)}
 
@@ -381,6 +392,9 @@ class BookmarkManager:
     def handle_jump_to_bookmark(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: jump_to_bookmark — получить данные закладки для навигации плеера.
 
+        Privacy gate (wave-1770 HIGH): returns bookmark data (offset, notes, session_id)
+        linked to a transcript recording — hidden in privacy mode.
+
         Эмитит событие playback.seek (через event bus) чтобы GUI перешёл
         к offset_sec. Если event bus недоступен — просто возвращает данные закладки.
 
@@ -389,6 +403,8 @@ class BookmarkManager:
         Returns:
             {"bookmark": <bookmark_dict>, "seek_to_sec": float}
         """
+        if self._settings_get("privacy_mode_enabled", False):
+            return {"ok": False, "reason": "privacy_mode_active"}
         bid = str(params.get("id", "")).strip()
         if not bid:
             raise ValueError("Параметр id обязателен")

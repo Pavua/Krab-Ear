@@ -413,7 +413,10 @@ class BackendService:
         self._collections = CollectionManager(store=self.store, settings_fn=self._cached_settings)
         self._norm_profiles = NormalizationProfileRegistry(data_dir=self.store.data_dir)
         self._chains = RecordingChainManager(store=self.store, settings_fn=self._cached_settings)
-        self._bookmarks = BookmarkManager(data_dir=self.store.data_dir)
+        self._bookmarks = BookmarkManager(
+            data_dir=self.store.data_dir,
+            settings_get=self._get_runtime_setting,  # wave-1770: privacy gate wiring
+        )
         self._recording_scheduler = RecordingScheduler(data_dir=self.store.data_dir)
         self._history = HistoryService(
             store=self.store,

@@ -569,7 +569,14 @@ class ArchiveManager:
         }
 
     def handle_unarchive_items(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC-обработчик unarchive_items."""
+        """IPC-обработчик unarchive_items.
+
+        Privacy gate (Antigravity audit wave-1770): unarchiving during privacy mode
+        would move old PII-bearing records back into the active store, breaking
+        session isolation. Blocked symmetrically with handle_archive_items.
+        """
+        if self._settings_get("privacy_mode_enabled", False):
+            return {"ok": False, "reason": "privacy_mode_enabled"}
         raw_ids = params.get("item_ids", [])
         if not isinstance(raw_ids, list):
             raise ValueError("Параметр item_ids должен быть списком")
