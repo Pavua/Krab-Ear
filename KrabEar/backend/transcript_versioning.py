@@ -451,8 +451,16 @@ class TranscriptVersionManager:
     def handle_revert_transcript_version(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: revert_transcript_version.
 
+        Privacy gate (wave-1770 HIGH): reverting reads transcript text from version
+        history and creates a new manual version. Without this gate, an attacker could
+        extract transcript text by reverting versions even while privacy mode is active,
+        bypassing the gate on handle_get_transcript_versions. Gate symmetric with its
+        companion handler.
+
         Параметры: item_id (str), version_num (int).
         """
+        if self._is_privacy_mode():
+            return {"ok": False, "reason": "privacy_mode_active"}
         item_id = str(params.get("item_id", "")).strip()
         if not item_id:
             raise ValueError("Параметр item_id обязателен")
