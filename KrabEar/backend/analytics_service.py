@@ -149,7 +149,7 @@ class AnalyticsService:
                 "duration_sec": 0.0,
                 "words": 0,
                 "avg_confidence": 0.0,
-                "languages": {},
+                "languages": [],  # wave-1770 MED: must be list[], not dict{} — normal response returns list
             }
             return {
                 "ok": False,

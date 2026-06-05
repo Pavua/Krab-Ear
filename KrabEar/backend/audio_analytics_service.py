@@ -162,7 +162,9 @@ class AudioAnalyticsService:
         if self._settings_get("privacy_mode_enabled", False):
             return {"ok": False, "reason": "privacy_mode_active"}
 
-        days = int(params.get("days", 30))
+        # wave-1770 HIGH: clamp days to prevent OverflowError in timedelta arithmetic.
+        # timedelta(days=999_999_999) raises OverflowError; cap at 365.
+        days = max(1, min(365, int(params.get("days", 30))))
         try:
             with self._store._lock():
                 items = self._store._load_active_items_unlocked()

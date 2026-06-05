@@ -412,7 +412,9 @@ class PeriodComparisonService:
         mode = str(params.get("mode", "explicit")).strip()
 
         if mode == "weeks":
-            weeks_back = int(params.get("weeks_back", 2))
+            # wave-1770 HIGH: clamp weeks_back to prevent OverflowError.
+            # timedelta(days=weeks_back*7) with weeks_back=10^9 raises OverflowError.
+            weeks_back = max(1, min(52, int(params.get("weeks_back", 2))))
             report = compare_weeks(self.store, weeks_back=weeks_back)
         elif mode == "months":
             report = compare_months(self.store)
