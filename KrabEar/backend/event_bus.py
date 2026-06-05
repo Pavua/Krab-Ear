@@ -114,6 +114,14 @@ class EventBus:
         """Публикует событие всем активным подписчикам.
 
         Если очередь подписчика переполнена — пропускаем его (не блокируем pipeline).
+
+        Privacy note (wave-1770 design): EventBus is privacy-agnostic by design —
+        it does not have access to settings. CALLERS that emit transcript events
+        (stt.partial, stt.final, live_subs.result) MUST check privacy_mode_enabled
+        before calling emit(). Current call sites: recording_core_service.py
+        (RealtimePartialTranscriber.privacy_getter) and live_subs_service.py.
+        Adding a centralized gate here would require settings injection which
+        breaks the pub/sub abstraction layer.
         """
         event = {
             "type": event_type,
@@ -239,7 +247,12 @@ def sse_stream(bus: EventBus, event_filter: str | None = None) -> Iterator[str]:
             if allowed is not None and event["type"] not in allowed:
                 continue
 
-            yield f"event: {event['type']}\ndata: {json.dumps(event['data'])}\n\n"
+            # wave-1770 MED: strip CR/LF from event_type to prevent SSE CRLF
+            # header injection. All current call sites pass hardcoded strings,
+            # but the public emit() API accepts arbitrary strings — future callers
+            # forwarding user input would be exploitable without this guard.
+            safe_type = event["type"].replace("\r", "").replace("\n", "")
+            yield f"event: {safe_type}\ndata: {json.dumps(event['data'])}\n\n"
     finally:
         bus.unsubscribe(q)
 
