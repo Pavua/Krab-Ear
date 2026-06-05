@@ -207,7 +207,9 @@ class BackendServiceTestCase(unittest.TestCase):
     """Проверяет командный контракт сервиса, включая 1000 циклов записи."""
 
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
+        # ignore_cleanup_errors=True: BackendService starts background threads that
+        # may write to data dir after the test ends → OSError on cleanup in CI.
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.tmp.cleanup)
         store = StateStore(Path(self.tmp.name) / "data")
         self.service = BackendService(
@@ -1761,7 +1763,9 @@ class BackendServiceInitTestCase(unittest.TestCase):
     """Проверяет корректную инициализацию BackendService и таблицу диспетчеризации."""
 
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
+        # ignore_cleanup_errors=True: BackendService starts background threads that
+        # may write to data dir after the test ends → OSError on cleanup in CI.
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.tmp.cleanup)
         store = StateStore(Path(self.tmp.name) / "data")
         # W1749: patch sounddevice.rec/wait so test_microphone does not block
@@ -1881,7 +1885,9 @@ class BackendServiceErrorHandlingTestCase(unittest.TestCase):
     """Test graceful error handling for edge cases."""
 
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
+        # ignore_cleanup_errors=True: BackendService starts background threads that
+        # may write to data dir after the test ends → OSError on cleanup in CI.
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.tmp.cleanup)
         store = StateStore(Path(self.tmp.name) / "data")
         self.service = BackendService(
@@ -1995,7 +2001,9 @@ class SynthesizeSpeechIPCTestCase(unittest.TestCase):
     """Тесты IPC-метода synthesize_speech через BackendService.handle_request."""
 
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
+        # ignore_cleanup_errors=True: BackendService starts background threads that
+        # may write to data dir after the test ends → OSError on cleanup in CI.
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.tmp.cleanup)
         store = StateStore(Path(self.tmp.name) / "data")
         self.service = BackendService(
@@ -2049,7 +2057,9 @@ class MetricsDashboardPreviewLoopTestCase(unittest.TestCase):
     """Тесты поля preview_loop в get_metrics_dashboard (C2)."""
 
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
+        # ignore_cleanup_errors=True: BackendService starts background threads that
+        # may write to data dir after the test ends → OSError on cleanup in CI.
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.tmp.cleanup)
         store = StateStore(Path(self.tmp.name) / "data")
         self.service = BackendService(
