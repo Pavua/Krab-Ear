@@ -714,5 +714,67 @@ class TestMergerSemanticSearchIntegration(unittest.TestCase):
         self.assertIn("brk2", self.store._deleted)
 
 
+class TestSeparatorLimitW1770(unittest.TestCase):
+    """wave-1770 HIGH: oversized separator causes merged text to overflow IPC limit.
+
+    A 300 KB separator × 50 items exceeds the 1 MB IPC_MAX_MESSAGE_BYTES, causing
+    silent IPC failure. Cap enforced at MAX_SEPARATOR_LEN characters.
+    """
+
+    def setUp(self) -> None:
+        from backend.recording_merger import MAX_SEPARATOR_LEN
+        self.store = FakeStore()
+        self.store.add_fake_item("a", "Hello")
+        self.store.add_fake_item("b", "World")
+        self.merger = RecordingMerger()
+        self.MAX = MAX_SEPARATOR_LEN
+
+    def test_oversized_separator_rejected_in_merge(self) -> None:
+        """separator > MAX_SEPARATOR_LEN → {"ok": False, "reason": "separator_too_long"}."""
+        big_sep = "x" * (self.MAX + 1)
+        result = self.merger.handle_merge_recordings(
+            {"item_ids": ["a", "b"], "separator": big_sep}, store=self.store
+        )
+        self.assertFalse(result.get("ok"), "Oversized separator must be rejected")
+        self.assertEqual(result.get("reason"), "separator_too_long")
+        self.assertIn("max_separator_len", result)
+
+    def test_oversized_separator_rejected_in_preview(self) -> None:
+        """preview_merge also rejects separator > MAX_SEPARATOR_LEN."""
+        big_sep = "y" * (self.MAX + 1)
+        result = self.merger.handle_preview_merge(
+            {"item_ids": ["a", "b"], "separator": big_sep}, store=self.store
+        )
+        self.assertFalse(result.get("ok"), "Oversized separator must be rejected in preview")
+        self.assertEqual(result.get("reason"), "separator_too_long")
+
+    def test_exact_max_separator_allowed(self) -> None:
+        """separator exactly MAX_SEPARATOR_LEN characters is allowed."""
+        sep = "-" * self.MAX
+        result = self.merger.handle_merge_recordings(
+            {"item_ids": ["a", "b"], "separator": sep}, store=self.store
+        )
+        # Should succeed (not be rejected for separator length)
+        self.assertNotEqual(result.get("reason"), "separator_too_long",
+                            "Exactly-max-length separator must be allowed")
+
+    def test_normal_separator_allowed(self) -> None:
+        """Default (empty/newline) separator always allowed."""
+        result = self.merger.handle_merge_recordings(
+            {"item_ids": ["a", "b"]}, store=self.store
+        )
+        self.assertNotEqual(result.get("reason"), "separator_too_long")
+
+    def test_no_originals_deleted_on_rejection(self) -> None:
+        """Original items must not be touched when separator is rejected."""
+        big_sep = "z" * (self.MAX + 1)
+        self.merger.handle_merge_recordings(
+            {"item_ids": ["a", "b"], "separator": big_sep, "delete_originals": True},
+            store=self.store
+        )
+        self.assertEqual(len(self.store._deleted), 0,
+                         "Originals must not be deleted when separator is rejected")
+
+
 if __name__ == "__main__":
     unittest.main()

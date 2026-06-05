@@ -535,5 +535,50 @@ class CollectionManagerPurgeAllTestCase(unittest.TestCase):
         self.assertEqual(self._mgr.list_collections(), [])
 
 
+class TestListCollectionsPrivacyGateW1770(unittest.TestCase):
+    """wave-1770 MED: handle_list_collections must gate in privacy mode.
+
+    Collection names/descriptions are user-defined free-text PII — inconsistency
+    with handle_get_collection_items (which already gates) was a privacy leak.
+    """
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._store = FakeStore(data_dir=self._tmpdir)
+
+    def _mgr_with_privacy(self, privacy_on: bool) -> CollectionManager:
+        mgr = CollectionManager(
+            store=self._store,
+            settings_fn=lambda: {"privacy_mode_enabled": privacy_on},
+        )
+        mgr.create_collection("МоёСобрание", "Секретные данные")
+        return mgr
+
+    def test_list_collections_returns_empty_in_privacy_mode(self) -> None:
+        """Privacy ON → empty collections list, reason set."""
+        mgr = self._mgr_with_privacy(True)
+        result = mgr.handle_list_collections({})
+        self.assertEqual(result["collections"], [],
+                         "Collections must be hidden in privacy mode")
+        self.assertEqual(result.get("reason"), "privacy_mode_active")
+
+    def test_list_collections_returns_data_when_privacy_off(self) -> None:
+        """Privacy OFF → collections are returned normally."""
+        mgr = self._mgr_with_privacy(False)
+        result = mgr.handle_list_collections({})
+        self.assertEqual(len(result["collections"]), 1)
+        self.assertEqual(result["collections"][0]["name"], "МоёСобрание")
+        self.assertNotIn("reason", result)
+
+    def test_collection_names_not_leaked_via_ipc_in_privacy_mode(self) -> None:
+        """Ensure no collection name/description appears in response body."""
+        mgr = self._mgr_with_privacy(True)
+        result = mgr.handle_list_collections({})
+        import json
+        serialized = json.dumps(result)
+        self.assertNotIn("МоёСобрание", serialized, "Collection name must not leak")
+        self.assertNotIn("Секретные", serialized, "Collection description must not leak")
+
+
 if __name__ == "__main__":
     unittest.main()

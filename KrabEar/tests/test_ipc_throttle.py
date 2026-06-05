@@ -385,5 +385,61 @@ class TestUnknownMethodBehavior(unittest.TestCase):
         self.assertTrue(throttle.check_rate("method_two"))
 
 
+class TestTokenBucketCapacityValidationW1770(unittest.TestCase):
+    """wave-1770 MED: _TokenBucket must reject capacity ≤ 0.
+
+    capacity=0 → rate=0.0 → ZeroDivisionError in wait_time().
+    capacity<0 → negative wait_time() (semantically invalid and confusing).
+    """
+
+    def _bucket(self, capacity: int):
+        from backend.ipc_throttle import _TokenBucket
+        return _TokenBucket(capacity)
+
+    def test_zero_capacity_raises(self) -> None:
+        """capacity=0 must raise ValueError."""
+        with self.assertRaises(ValueError):
+            self._bucket(0)
+
+    def test_negative_capacity_raises(self) -> None:
+        """capacity=-1 must raise ValueError."""
+        with self.assertRaises(ValueError):
+            self._bucket(-1)
+
+    def test_large_negative_raises(self) -> None:
+        """capacity=-999 must raise ValueError."""
+        with self.assertRaises(ValueError):
+            self._bucket(-999)
+
+    def test_one_is_minimum_valid(self) -> None:
+        """capacity=1 is the minimum valid value — no ZeroDivisionError."""
+        bucket = self._bucket(1)
+        self.assertEqual(bucket.capacity, 1.0)
+        # wait_time must not raise ZeroDivisionError
+        result = bucket.wait_time()
+        self.assertGreaterEqual(result, 0.0)
+
+    def test_normal_capacity_wait_time_positive(self) -> None:
+        """After exhausting tokens, wait_time() returns a positive float, not negative."""
+        bucket = self._bucket(100)
+        for _ in range(100):
+            bucket.consume()
+        wait = bucket.wait_time()
+        self.assertGreater(wait, 0.0, "wait_time must be positive after exhausting tokens")
+
+    def test_ipcthrottle_propagates_valueerror_on_zero_capacity_bucket_creation(self) -> None:
+        """IPCThrottle raises ValueError when a zero-capacity bucket is lazily created.
+
+        Buckets are created on first check_rate() call for that method category.
+        With limits={"heavy": 0}, the first heavy method triggers the error.
+        """
+        from backend.ipc_throttle import IPCThrottle, HEAVY_METHODS
+        throttle = IPCThrottle(limits={"heavy": 0})
+        # Pick any heavy method to trigger lazy bucket creation
+        heavy_method = next(iter(HEAVY_METHODS))
+        with self.assertRaises(ValueError):
+            throttle.check_rate(heavy_method)
+
+
 if __name__ == "__main__":
     unittest.main()

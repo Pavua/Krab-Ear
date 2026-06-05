@@ -179,6 +179,12 @@ class _TokenBucket:
     __slots__ = ("capacity", "rate", "_tokens", "_last_refill")
 
     def __init__(self, capacity: int) -> None:
+        # wave-1770 MED: capacity=0 causes rate=0.0 → ZeroDivisionError in wait_time()
+        # when computing deficit / self.rate. Negative capacity is also nonsensical.
+        if capacity <= 0:
+            raise ValueError(
+                f"_TokenBucket capacity must be ≥ 1, got {capacity!r}"
+            )
         self.capacity: float = float(capacity)
         self.rate: float = capacity / 60.0   # tokens/sec
         self._tokens: float = float(capacity)

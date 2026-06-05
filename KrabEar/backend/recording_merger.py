@@ -19,6 +19,11 @@ _TIMESTAMP_SEP = "\n\n"
 # item_ids list (accidental or hostile) could fan out into a heavy I/O storm and
 # build an arbitrarily large merged record. 50 covers every realistic UI flow.
 MAX_MERGE_ITEMS = 50
+# wave-1770 HIGH: cap separator length to prevent merged text overflowing the
+# 1 MB IPC_MAX_MESSAGE_BYTES limit. 50 items × 10 KB each = 500 KB text max;
+# a 300 KB separator alone would push the payload far beyond the limit, causing
+# silent IPC failure with no error returned to the Swift caller.
+MAX_SEPARATOR_LEN = 1000
 
 
 class RecordingMerger:
@@ -335,6 +340,13 @@ class RecordingMerger:
         item_ids = self._extract_ids(params)
         delete_originals = bool(params.get("delete_originals", False))
         separator = str(params.get("separator", _TIMESTAMP_SEP))
+        # wave-1770 HIGH: reject oversized separator before building merged text.
+        if len(separator) > MAX_SEPARATOR_LEN:
+            return {
+                "ok": False,
+                "reason": "separator_too_long",
+                "max_separator_len": MAX_SEPARATOR_LEN,
+            }
         return self.merge_items(
             item_ids,
             store,
@@ -351,6 +363,13 @@ class RecordingMerger:
         """
         item_ids = self._extract_ids(params)
         separator = str(params.get("separator", _TIMESTAMP_SEP))
+        # wave-1770 HIGH: same separator cap as handle_merge_recordings.
+        if len(separator) > MAX_SEPARATOR_LEN:
+            return {
+                "ok": False,
+                "reason": "separator_too_long",
+                "max_separator_len": MAX_SEPARATOR_LEN,
+            }
         return self.preview_merge(item_ids, store, separator=separator)
 
     # ------------------------------------------------------------------

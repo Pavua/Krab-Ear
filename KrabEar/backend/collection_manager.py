@@ -399,6 +399,10 @@ class CollectionManager:
 
     def handle_list_collections(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC-обработчик: list_collections."""
+        # wave-1770 MED: collection names/descriptions are user-defined free-text PII.
+        # Gate consistently with handle_get_collection_items (line ~365).
+        if self._is_privacy_mode():
+            return {"collections": [], "reason": "privacy_mode_active"}
         return {"collections": self.list_collections()}
 
     def handle_add_to_collection(self, params: dict[str, Any]) -> dict[str, Any]:
