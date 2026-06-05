@@ -547,5 +547,82 @@ class TestSsrfSchemeGuard(unittest.TestCase):
         self.assertIsNotNone(new_req)
 
 
+class TestCliModelIdFlagInjectionGuardW1770(unittest.TestCase):
+    """wave-1770 LOW: CLI flag-injection guard in _try_cli() — regression test.
+
+    Lines 170-175 of lm_studio_lifecycle.py guard against model_id values that
+    start with '-' (would be interpreted as CLI flags) or contain unsafe chars.
+    Previously untested — this class closes the coverage gap.
+    """
+
+    def test_leading_dash_model_id_rejected(self) -> None:
+        """-x model_id отклоняется без вызова subprocess."""
+        from backend.lm_studio_lifecycle import _try_cli
+        from unittest.mock import patch
+        calls: list = []
+        with patch("backend.lm_studio_lifecycle.shutil.which", return_value="/usr/local/bin/lms"), \
+             patch("backend.lm_studio_lifecycle.subprocess.run",
+                   side_effect=lambda *a, **kw: calls.append(a) or
+                   type("R", (), {"returncode": 0})()):
+            result = _try_cli("unload", "-xmalicious")
+        self.assertFalse(result)
+        self.assertEqual(len(calls), 0, "subprocess.run не должен вызываться при rejected model_id")
+
+    def test_double_dash_model_id_rejected(self) -> None:
+        """--help model_id отклоняется guard'ом."""
+        from backend.lm_studio_lifecycle import _try_cli
+        from unittest.mock import patch
+        calls: list = []
+        with patch("backend.lm_studio_lifecycle.shutil.which", return_value="/usr/local/bin/lms"), \
+             patch("backend.lm_studio_lifecycle.subprocess.run",
+                   side_effect=lambda *a, **kw: calls.append(a) or
+                   type("R", (), {"returncode": 0})()):
+            result = _try_cli("unload", "--help")
+        self.assertFalse(result)
+        self.assertEqual(len(calls), 0)
+
+    def test_special_chars_in_model_id_rejected(self) -> None:
+        """Символы вне [A-Za-z0-9._:/-] отклоняются guard'ом."""
+        from backend.lm_studio_lifecycle import _try_cli
+        from unittest.mock import patch
+        bad_ids = ["model;rm -rf /", "model$(whoami)", "model\x00null", "model@test"]
+        for bad_id in bad_ids:
+            with self.subTest(model_id=bad_id):
+                calls: list = []
+                with patch("backend.lm_studio_lifecycle.shutil.which", return_value="/usr/local/bin/lms"), \
+                     patch("backend.lm_studio_lifecycle.subprocess.run",
+                           side_effect=lambda *a, **kw: calls.append(a) or
+                           type("R", (), {"returncode": 0})()):
+                    result = _try_cli("unload", bad_id)
+                self.assertFalse(result, f"model_id {bad_id!r} должен быть отклонён")
+                self.assertEqual(len(calls), 0)
+
+    def test_valid_model_id_passes_to_subprocess(self) -> None:
+        """Корректный model_id проходит guard и вызывает subprocess."""
+        from backend.lm_studio_lifecycle import _try_cli
+        from unittest.mock import patch
+        calls: list = []
+        with patch("backend.lm_studio_lifecycle.shutil.which", return_value="/usr/local/bin/lms"), \
+             patch("backend.lm_studio_lifecycle.subprocess.run",
+                   side_effect=lambda *a, **kw: calls.append(a) or
+                   type("R", (), {"returncode": 0})()):
+            result = _try_cli("unload", "lmstudio-community/Qwen3-4B-MLX-4bit")
+        self.assertTrue(result)
+        self.assertEqual(len(calls), 1)
+
+    def test_model_id_with_colon_passes(self) -> None:
+        """model:version формат (разрешённый ':') проходит guard."""
+        from backend.lm_studio_lifecycle import _try_cli
+        from unittest.mock import patch
+        calls: list = []
+        with patch("backend.lm_studio_lifecycle.shutil.which", return_value="/usr/local/bin/lms"), \
+             patch("backend.lm_studio_lifecycle.subprocess.run",
+                   side_effect=lambda *a, **kw: calls.append(a) or
+                   type("R", (), {"returncode": 0})()):
+            result = _try_cli("load", "vendor/model:latest")
+        self.assertTrue(result)
+        self.assertEqual(len(calls), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -321,12 +321,17 @@ class PlaybackTracker:
             raise ValueError("Параметр item_id обязателен")
         return self.get_playback_stats(item_id)
 
+    # wave-1770 MED: maximum page size returned per IPC call.
+    # Prevents DoS via limit=2147483647 forcing a huge list allocation.
+    _MAX_IPC_LIMIT = 1000
+
     def handle_get_most_replayed(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_most_replayed — топ наиболее часто воспроизводимых записей."""
         # wave-41: privacy gate — suppress replay history in privacy mode.
         if self._is_privacy_mode():
             return {"items": [], "count": 0}
-        limit = int(params.get("limit", 10))
+        # wave-1770 MED: cap limit to prevent DoS via unbounded allocation.
+        limit = max(1, min(int(params.get("limit", 10)), self._MAX_IPC_LIMIT))
         items = self.get_most_replayed(limit=limit)
         return {"items": items, "count": len(items)}
 
@@ -335,6 +340,7 @@ class PlaybackTracker:
         # wave-41: privacy gate — suppress cross-referencing history with playback data.
         if self._is_privacy_mode():
             return {"items": [], "count": 0}
-        limit = int(params.get("limit", 50))
+        # wave-1770 MED: cap limit to prevent DoS via unbounded allocation.
+        limit = max(1, min(int(params.get("limit", 50)), self._MAX_IPC_LIMIT))
         items = self.get_never_played(store=store, limit=limit)
         return {"items": items, "count": len(items)}

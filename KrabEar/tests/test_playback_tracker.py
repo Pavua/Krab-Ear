@@ -744,5 +744,58 @@ class TestPlaybackTrackerWave133(unittest.TestCase):
             self.assertEqual(stats["play_count"], 1)
 
 
+class TestIpcLimitBoundsW1770(unittest.TestCase):
+    """wave-1770 MED: IPC handlers must cap 'limit' param to prevent DoS
+    via unbounded list allocation (e.g. limit=2147483647).
+    """
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._tracker = PlaybackTracker(data_dir=self._tmpdir)
+        for i in range(5):
+            self._tracker.record_playback(f"item_{i}", duration_listened_sec=1.0)
+
+    def tearDown(self) -> None:
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _fake_store(self, n: int = 5):
+        """Returns a FakeStore-compatible stub with n unplayed items."""
+        return FakeStore([f"new_{i}" for i in range(n)])
+
+    def test_get_most_replayed_large_limit_capped(self) -> None:
+        """limit=2147483647 → результат не превышает _MAX_IPC_LIMIT."""
+        result = self._tracker.handle_get_most_replayed({"limit": 2147483647})
+        self.assertLessEqual(result["count"], self._tracker._MAX_IPC_LIMIT)
+
+    def test_get_never_played_huge_limit_capped(self) -> None:
+        """limit=9223372036854775807 → результат не превышает _MAX_IPC_LIMIT."""
+        store = self._fake_store(n=5)
+        result = self._tracker.handle_get_never_played(
+            {"limit": 9223372036854775807}, store=store
+        )
+        self.assertLessEqual(result["count"], self._tracker._MAX_IPC_LIMIT)
+
+    def test_get_most_replayed_zero_limit_silently_becomes_one(self) -> None:
+        """limit=0 → никаких исключений (max(1, ...) защита)."""
+        result = self._tracker.handle_get_most_replayed({"limit": 0})
+        self.assertIn("items", result)
+        self.assertIn("count", result)
+
+    def test_get_most_replayed_normal_limit_respected(self) -> None:
+        """Нормальный limit=2 возвращает ≤ 2 элементов."""
+        result = self._tracker.handle_get_most_replayed({"limit": 2})
+        self.assertLessEqual(result["count"], 2)
+
+    def test_get_never_played_exact_max_limit_works(self) -> None:
+        """limit=_MAX_IPC_LIMIT → без исключений, корректный ответ."""
+        store = self._fake_store(n=5)
+        result = self._tracker.handle_get_never_played(
+            {"limit": self._tracker._MAX_IPC_LIMIT}, store=store
+        )
+        self.assertIn("items", result)
+        self.assertIn("count", result)
+
+
 if __name__ == "__main__":
     unittest.main()
