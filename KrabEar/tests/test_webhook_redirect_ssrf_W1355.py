@@ -187,9 +187,29 @@ class ResponseBodyCapTestCase(unittest.TestCase):
 class PrivacyModeGateTestCase(unittest.TestCase):
     """fire_webhook is skipped entirely when privacy_mode is active."""
 
+    def setUp(self) -> None:
+        # Track managers so we can shutdown executors in tearDown.
+        # fire_webhook() uses a ThreadPoolExecutor; without explicit shutdown,
+        # worker threads may linger and cause the test process to hang on ubuntu CI.
+        self._managers = []
+
+    def tearDown(self) -> None:
+        for mgr in self._managers:
+            try:
+                mgr._executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+        self._managers.clear()
+
+    def _make(self) -> object:
+        """Create a manager and register it for teardown."""
+        mgr = _make_manager()  # module-level function, not self._make()
+        self._managers.append(mgr)
+        return mgr
+
     def test_fire_webhook_skipped_in_privacy_mode(self) -> None:
         """When privacy_mode=True, fire_webhook must not start any delivery threads."""
-        mgr = _make_manager()
+        mgr = self._make()
         mgr.register_webhook("https://hooks.example.com/cb", events=[], allow_local=True)
         mgr.set_privacy_mode(True)
 
@@ -199,40 +219,37 @@ class PrivacyModeGateTestCase(unittest.TestCase):
         mock_deliver.assert_not_called()
 
     def test_fire_webhook_active_when_privacy_mode_disabled(self) -> None:
-        """When privacy_mode=False (default), fire_webhook spawns delivery threads."""
-        mgr = _make_manager()
+        """When privacy_mode=False (default), fire_webhook submits delivery tasks."""
+        mgr = self._make()
         mgr.register_webhook("https://hooks.example.com/cb", events=[], allow_local=True)
         # privacy_mode defaults to False
 
-        resp_mock = _fake_response(status=200)
-        opener_mock = MagicMock()
-        opener_mock.open.return_value = resp_mock
+        called = []
 
-        threads_started = []
+        def fake_deliver(*args, **kwargs):
+            called.append(True)
 
-        # TrackingThread: pure duck-type (no threading.Thread inheritance) to
-        # avoid threading._shutdown() atexit hang (see SyncThread comment below).
-        class TrackingThread:
-            def __init__(self_inner, target=None, args=(), kwargs=None, daemon=None, **kw):
-                pass
-            def start(self_inner):
-                threads_started.append(True)
-                # Don't actually run — just record
-            def join(self_inner, timeout=None) -> None:
-                pass
-            def is_alive(self_inner) -> bool:
-                return False
-            daemon = True
+        # fire_webhook() uses _executor.submit() (ThreadPoolExecutor), not
+        # threading.Thread directly. Patch _deliver_with_retry AND run the
+        # executor task synchronously by replacing submit with a direct call.
+        import concurrent.futures as _cf
 
-        with patch("backend.webhook_manager.threading.Thread", side_effect=lambda **kwargs: TrackingThread(**kwargs)):
+        def sync_submit(fn, *args, **kwargs):
+            fn(*args, **kwargs)
+            fut = _cf.Future()
+            fut.set_result(None)
+            return fut
+
+        with patch.object(mgr, "_deliver_with_retry", side_effect=fake_deliver), \
+             patch.object(mgr._executor, "submit", side_effect=sync_submit):
             mgr.fire_webhook("transcription.done", {"text": "hello"})
 
-        # At least one thread was "started"
-        self.assertGreater(len(threads_started), 0)
+        # Delivery was triggered (not skipped by privacy mode)
+        self.assertGreater(len(called), 0)
 
     def test_privacy_mode_toggle(self) -> None:
         """set_privacy_mode toggles the internal flag correctly."""
-        mgr = _make_manager()
+        mgr = self._make()
         self.assertFalse(mgr._privacy_mode)
 
         mgr.set_privacy_mode(True)
@@ -243,7 +260,7 @@ class PrivacyModeGateTestCase(unittest.TestCase):
 
     def test_fire_webhook_after_disabling_privacy_mode_works(self) -> None:
         """After disabling privacy mode, delivery resumes normally."""
-        mgr = _make_manager()
+        mgr = self._make()
         mgr.register_webhook("https://hooks.example.com/cb", events=[], allow_local=True)
         mgr.set_privacy_mode(True)
         mgr.set_privacy_mode(False)
