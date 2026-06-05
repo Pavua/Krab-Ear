@@ -107,16 +107,28 @@ def _cosine_sim(a: dict[str, float], b: dict[str, float]) -> float:
     return round(dot / (norm_a * norm_b), 4)
 
 
+def _finite(v: float) -> float:
+    """Returns v if finite, else 0.0. Wave-28 / CLAUDE.md pattern."""
+    return v if math.isfinite(v) else 0.0
+
+
 def _stat_dict(values: list[float]) -> dict:
-    """Вычисляет min/max/avg/std для списка чисел (пустой → None везде)."""
+    """Вычисляет min/max/avg/std для списка чисел (пустой → None везде).
+
+    wave-1770 HIGH: all computed floats guarded with _finite() to prevent
+    NaN/Inf from sum overflow (e.g. 100+ items with duration ~1e305) leaking
+    into IPC response as JSON null, crashing Swift numeric UI components.
+    CLAUDE.md wave-28 rule: every IPC handler computing floats from history
+    must wrap them with isfinite guard.
+    """
     if not values:
         return {"min": None, "max": None, "avg": None, "std": None, "count": 0}
     n = len(values)
-    mn = min(values)
-    mx = max(values)
-    avg = sum(values) / n
-    variance = sum((v - avg) ** 2 for v in values) / n
-    std = round(math.sqrt(variance), 4)
+    mn = _finite(min(values))
+    mx = _finite(max(values))
+    avg = _finite(sum(values) / n)
+    variance = _finite(sum((v - avg) ** 2 for v in values) / n)
+    std = round(_finite(math.sqrt(variance)), 4)
     return {
         "min": round(mn, 4),
         "max": round(mx, 4),
