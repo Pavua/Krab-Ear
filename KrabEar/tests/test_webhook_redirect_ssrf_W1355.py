@@ -270,28 +270,22 @@ class PrivacyModeGateTestCase(unittest.TestCase):
         def fake_deliver(*args, **kwargs):
             called.append(True)
 
-        with patch.object(mgr, "_deliver_with_retry", side_effect=fake_deliver):
-            # Intercept threading.Thread to call target synchronously.
-            # SyncThread does NOT inherit from threading.Thread — inheriting
-            # but overriding start() without calling super().start() leaves the
-            # thread in _limbo (never moved to _active), causing threading._shutdown()
-            # at atexit to hang indefinitely on ubuntu CI (exit code 124 = timeout).
-            class SyncThread:
-                def __init__(self, target=None, args=(), kwargs=None, daemon=None, **kw):
-                    self._target = target
-                    self._args = args
-                    self._kwargs = kwargs or {}
-                def start(self) -> None:
-                    if self._target:
-                        self._target(*self._args, **self._kwargs)
-                def join(self, timeout=None) -> None:
-                    pass
-                def is_alive(self) -> bool:
-                    return False
-                daemon = True
+        # fire_webhook() uses _executor.submit() (ThreadPoolExecutor), not
+        # threading.Thread directly. Use sync_submit to run the task synchronously,
+        # ensuring _deliver_with_retry mock is active for the entire call.
+        # Without this, the executor worker runs the REAL _deliver_with_retry
+        # after the patch exits → real HTTP to hooks.example.com → hangs on CI.
+        import concurrent.futures as _cf
 
-            with patch("backend.webhook_manager.threading.Thread", SyncThread):
-                mgr.fire_webhook("test.event", {})
+        def sync_submit(fn, *args, **kwargs):
+            fn(*args, **kwargs)
+            fut = _cf.Future()
+            fut.set_result(None)
+            return fut
+
+        with patch.object(mgr, "_deliver_with_retry", side_effect=fake_deliver), \
+             patch.object(mgr._executor, "submit", side_effect=sync_submit):
+            mgr.fire_webhook("test.event", {})
 
         self.assertGreater(len(called), 0)
 
