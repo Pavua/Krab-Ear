@@ -210,14 +210,19 @@ class PrivacyModeGateTestCase(unittest.TestCase):
 
         threads_started = []
 
-        original_start = None
-
-        import threading
-
-        class TrackingThread(threading.Thread):
+        # TrackingThread: pure duck-type (no threading.Thread inheritance) to
+        # avoid threading._shutdown() atexit hang (see SyncThread comment below).
+        class TrackingThread:
+            def __init__(self_inner, target=None, args=(), kwargs=None, daemon=None, **kw):
+                pass
             def start(self_inner):
                 threads_started.append(True)
                 # Don't actually run — just record
+            def join(self_inner, timeout=None) -> None:
+                pass
+            def is_alive(self_inner) -> bool:
+                return False
+            daemon = True
 
         with patch("backend.webhook_manager.threading.Thread", side_effect=lambda **kwargs: TrackingThread(**kwargs)):
             mgr.fire_webhook("transcription.done", {"text": "hello"})

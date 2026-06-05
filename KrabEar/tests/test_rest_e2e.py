@@ -539,6 +539,22 @@ class TranscribeValidationE2ETest(unittest.TestCase):
 
     def setUp(self):
         self.client = _make_client()
+        # Ensure rest_server.store is _mock_store for every test method.
+        # When tests run in chunks (same Python process), rest_server.py may be
+        # cached in sys.modules with a REAL StateStore bound to `store`.  The
+        # module-level `with patch("backend.state_store.StateStore", ...)` only
+        # applies during import; it does NOT re-apply for subsequent imports from
+        # cache.  Without this patch, _load_settings_field() reads the real
+        # settings.json, which may have privacy_mode_enabled=True on some runners,
+        # causing the endpoint to return 403 {"skipped": "privacy_mode"} instead
+        # of the 400 validation error the tests expect.
+        from unittest.mock import patch as _patch
+        import backend.rest_server as _rest
+        self._store_patch = _patch.object(_rest, "store", _mock_store)
+        self._store_patch.start()
+
+    def tearDown(self):
+        self._store_patch.stop()
 
     def test_transcribe_missing_file_returns_400(self):
         resp = self.client.post("/v1/stt/transcribe")
