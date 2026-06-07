@@ -142,8 +142,8 @@ extension HealthMonitor {
         // Используем ProbeSSEBox для lifecycle без Sendable нарушений
         let box = ProbeSSEBox(statusIndicator: statusIndicator)
 
-        probeSubscriptionTask = Task.detached { [weak box] in
-            guard let box else { return }
+        // Держим box сильной ссылкой, чтобы он жил на время работы Task
+        probeSubscriptionTask = Task.detached {
             await box.startStreaming(url: url)
         }
     }

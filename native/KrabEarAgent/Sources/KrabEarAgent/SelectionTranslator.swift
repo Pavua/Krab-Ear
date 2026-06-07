@@ -180,6 +180,7 @@ final class SelectionTranslator {
             } else {
                 // AX write не удалась — fallback на clipboard paste
                 logger.info("SelectionTranslator: AX write failed, fallback на clipboard paste")
+                _savedClipboard = NSPasteboard.general.string(forType: .string)
                 await clipboardPasteFallback(translatedText: translated)
                 showSuccessHUD(original: text, translated: translated, latency: Date().timeIntervalSince(startTime))
             }

@@ -39,6 +39,9 @@ final class BackendSupervisor: @unchecked Sendable {
     /// который заглушил backend на > 5 мин (например ночной Jetsam OOM кран).
     private var lastRestartAttemptAt: Date?
 
+    /// Lock для защиты изменяемого состояния в @unchecked Sendable классе.
+    private let stateLock = NSLock()
+
     /// Cooldown: если прошло столько секунд с последней failed попытки,
     /// `consecutiveRestarts` обнуляется и можно снова делать `maxConsecutiveRestarts`
     /// попыток. Тестовый хук позволяет overrid'ить значение для unit тестов.
@@ -104,7 +107,10 @@ final class BackendSupervisor: @unchecked Sendable {
             // Судим только по ping — launchd-managed backend это всё что важно.
             return (try? client.call(method: "ping")) != nil
         case .active:
-            guard let proc = backendProcess, proc.isRunning else { return false }
+            stateLock.lock()
+            let isProcRunning = backendProcess?.isRunning ?? false
+            stateLock.unlock()
+            guard isProcRunning else { return false }
             return (try? client.call(method: "ping")) != nil
         }
     }
@@ -126,7 +132,9 @@ final class BackendSupervisor: @unchecked Sendable {
             return (try? client.call(method: "ping")) != nil
         }
         if pingOK() {
+            stateLock.lock()
             consecutiveRestarts = 0
+            stateLock.unlock()
             return
         }
 
@@ -141,7 +149,9 @@ final class BackendSupervisor: @unchecked Sendable {
             for _ in 0..<100 {  // 100 * 200ms = 20s
                 usleep(200_000)
                 if (try? client.call(method: "ping")) != nil {
+                    stateLock.lock()
                     consecutiveRestarts = 0
+                    stateLock.unlock()
                     return
                 }
             }
@@ -156,7 +166,9 @@ final class BackendSupervisor: @unchecked Sendable {
             for _ in 0..<30 {  // 30 * 200ms = 6s — whisper cold start на fresh spawn
                 usleep(200_000)
                 if (try? client.call(method: "ping")) != nil {
+                    stateLock.lock()
                     consecutiveRestarts = 0
+                    stateLock.unlock()
                     return
                 }
             }
@@ -187,7 +199,9 @@ final class BackendSupervisor: @unchecked Sendable {
         }
 
         if await pingOK() {
+            stateLock.lock()
             consecutiveRestarts = 0
+            stateLock.unlock()
             return
         }
 
@@ -196,7 +210,9 @@ final class BackendSupervisor: @unchecked Sendable {
             for _ in 0..<100 {  // 100 * 200ms = 20s
                 try? await Task.sleep(nanoseconds: 200_000_000)
                 if await pingOK() {
+                    stateLock.lock()
                     consecutiveRestarts = 0
+                    stateLock.unlock()
                     return
                 }
             }
@@ -209,7 +225,9 @@ final class BackendSupervisor: @unchecked Sendable {
             for _ in 0..<30 {  // 30 * 200ms = 6s
                 try? await Task.sleep(nanoseconds: 200_000_000)
                 if await pingOK() {
+                    stateLock.lock()
                     consecutiveRestarts = 0
+                    stateLock.unlock()
                     return
                 }
             }
@@ -224,7 +242,9 @@ final class BackendSupervisor: @unchecked Sendable {
     /// полагается на launchd KeepAlive и только ждёт восстановления.
     func restartIfDead() -> Bool {
         if isBackendAlive() {
+            stateLock.lock()
             consecutiveRestarts = 0
+            stateLock.unlock()
             return true
         }
 
@@ -240,6 +260,7 @@ final class BackendSupervisor: @unchecked Sendable {
             }
 
         case .active:
+            stateLock.lock()
             // Wave 59: cooldown reset — если прошло >= restartCooldownSec с
             // последней попытки, обнуляем счётчик. Backend получает свежий
             // бюджет на maxConsecutiveRestarts попыток после периода тишины.
@@ -248,10 +269,13 @@ final class BackendSupervisor: @unchecked Sendable {
                 consecutiveRestarts = 0
             }
             guard consecutiveRestarts < Self.maxConsecutiveRestarts else {
+                stateLock.unlock()
                 return false
             }
             consecutiveRestarts += 1
             lastRestartAttemptAt = Date()
+            stateLock.unlock()
+            
             stopBackend()
             do {
                 try ensureBackendRunning()
@@ -270,8 +294,25 @@ final class BackendSupervisor: @unchecked Sendable {
             // отдельный user action: `launchctl bootout gui/<uid>/ai.krab.ear.backend`.
             return
         case .active:
-            backendProcess?.terminate()
+            stateLock.lock()
+            let proc = backendProcess
             backendProcess = nil
+            stateLock.unlock()
+            
+            if let p = proc {
+                p.terminate()
+                // Эскалация SIGTERM -> SIGKILL через 1 сек
+                DispatchQueue.global(qos: .utility).async {
+                    var waitCount = 0
+                    while p.isRunning && waitCount < 10 {
+                        Thread.sleep(forTimeInterval: 0.1)
+                        waitCount += 1
+                    }
+                    if p.isRunning {
+                        kill(p.processIdentifier, SIGKILL)
+                    }
+                }
+            }
         }
     }
 
@@ -314,6 +355,8 @@ final class BackendSupervisor: @unchecked Sendable {
         process.standardError = FileHandle.nullDevice
 
         try process.run()
+        stateLock.lock()
         backendProcess = process
+        stateLock.unlock()
     }
 }

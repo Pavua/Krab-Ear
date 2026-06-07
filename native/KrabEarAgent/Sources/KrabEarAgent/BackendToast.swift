@@ -79,9 +79,10 @@ final class BackendToast {
         dismissTimer?.invalidate()
 
         if panel == nil {
+            NSLog("[BackendToast] WARNING: show() called before prewarmPanel()! This will cause an AppHang due to synchronous ColorSync and CoreText setup.")
             createPanel()
         }
-        guard let panel = panel else { return }
+        guard let panel = panel, panel.contentView?.window != nil else { return }
 
         guard let label = panel.contentView?.subviews.first as? NSTextField
         else { return }
@@ -169,7 +170,7 @@ final class BackendToast {
     }
 
     private func fadeOutAndHide() {
-        guard let panel = panel else { return }
+        guard let panel = panel, panel.contentView?.window != nil else { return }
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.25
             panel.animator().alphaValue = 0.0

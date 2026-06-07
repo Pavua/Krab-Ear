@@ -218,6 +218,7 @@ final class HotkeyManager {
     }
 
     func stop() {
+        cancelPendingSingleTap()
         if let globalMonitor {
             NSEvent.removeMonitor(globalMonitor)
             self.globalMonitor = nil

@@ -47,9 +47,9 @@ final class AgentLogger: @unchecked Sendable {
     }
 
     deinit {
-        queue.sync {
-            try? self.handle?.close()
-            self.handle = nil
+        let handleToClose = self.handle
+        queue.async {
+            try? handleToClose?.close()
         }
     }
 
