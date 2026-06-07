@@ -372,5 +372,62 @@ class TestHandleSendImessage(unittest.TestCase):
         self.assertEqual(result["error"], "osascript timeout")
 
 
+# ---------------------------------------------------------------------------
+# wave-1770 HIGH: privacy_mode gate on all Apple-app integration handlers.
+# These handlers send transcript text to external macOS apps (Notes, Reminders,
+# Calendar, Messages) — must be blocked when privacy_mode_enabled=True.
+# ---------------------------------------------------------------------------
+
+class TestApplePrivacyGateW1770(unittest.TestCase):
+    """All 4 Apple-app handlers must refuse when privacy_mode is on."""
+
+    def _privacy_service(self) -> AppleIntegrationService:
+        # settings_get returns True for privacy_mode_enabled.
+        return AppleIntegrationService(
+            telegram_bridge=MagicMock(),
+            settings_get=lambda key, default: True if key == "privacy_mode_enabled" else default,
+        )
+
+    def test_note_blocked_in_privacy_mode(self) -> None:
+        called = []
+        with patch("subprocess.run", side_effect=lambda *a, **k: called.append(a) or _completed()):
+            result = self._privacy_service().handle_create_apple_note({"title": "t", "body": "secret"})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "privacy_mode_active")
+        self.assertEqual(len(called), 0, "osascript must NOT run in privacy mode")
+
+    def test_reminder_blocked_in_privacy_mode(self) -> None:
+        called = []
+        with patch("subprocess.run", side_effect=lambda *a, **k: called.append(a) or _completed()):
+            result = self._privacy_service().handle_create_apple_reminder({"title": "t", "body": "secret"})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "privacy_mode_active")
+        self.assertEqual(len(called), 0)
+
+    def test_calendar_blocked_in_privacy_mode(self) -> None:
+        called = []
+        with patch("subprocess.run", side_effect=lambda *a, **k: called.append(a) or _completed()):
+            result = self._privacy_service().handle_create_calendar_event(
+                {"title": "t", "start_date": "2026-01-01 10:00:00"})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "privacy_mode_active")
+        self.assertEqual(len(called), 0)
+
+    def test_imessage_blocked_in_privacy_mode(self) -> None:
+        called = []
+        with patch("subprocess.run", side_effect=lambda *a, **k: called.append(a) or _completed()):
+            result = self._privacy_service().handle_send_imessage({"recipient": "+7", "body": "secret"})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "privacy_mode_active")
+        self.assertEqual(len(called), 0)
+
+    def test_handlers_work_when_privacy_off(self) -> None:
+        """Sanity: with privacy off (default), handlers proceed to osascript."""
+        svc = AppleIntegrationService(telegram_bridge=MagicMock())  # default settings_get → False
+        with patch("subprocess.run", return_value=_completed(stdout="ok")):
+            result = svc.handle_create_apple_note({"title": "t", "body": "b"})
+        self.assertNotEqual(result.get("error"), "privacy_mode_active")
+
+
 if __name__ == "__main__":
     unittest.main()

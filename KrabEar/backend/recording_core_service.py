@@ -1284,24 +1284,29 @@ class RecordingCoreService:
         translated_text = translation.text.strip() if translation.ok else ""
         final_text = translated_text if (translate_and_paste and translated_text) else text
         translation_status = translation.status
-        if translation.ok and translated_text:
-            event_bus.emit_typed(EventType.TRANSLATION_COMPLETED, TranslationCompleted(
-                history_id="",
-                source_text=text,
-                translated_text=translated_text,
-                source_lang=translation.source_lang or "",
-                target_lang=translation.target_lang or "",
-                engine=translation.engine or "",
-                mode=translation.mode or "",
-            ))
-        elif not translation.ok and translation_status not in ("not_requested", "off"):
-            event_bus.emit_typed(EventType.TRANSLATION_FAILED, TranslationFailed(
-                history_id=None,
-                source_text=text,
-                reason=translation.status or "unknown",
-                source_lang=translation.source_lang,
-                target_lang=translation.target_lang,
-            ))
+        # wave-1770 HIGH: gate translation events behind privacy_mode.
+        # TRANSLATION_COMPLETED/FAILED carry source_text + translated_text (full transcript PII)
+        # and were emitted to the SSE event bus unconditionally. sr carries the per-recording
+        # privacy flag (same source as the live history-write gate).
+        if not sr.get("privacy_mode_enabled", False):
+            if translation.ok and translated_text:
+                event_bus.emit_typed(EventType.TRANSLATION_COMPLETED, TranslationCompleted(
+                    history_id="",
+                    source_text=text,
+                    translated_text=translated_text,
+                    source_lang=translation.source_lang or "",
+                    target_lang=translation.target_lang or "",
+                    engine=translation.engine or "",
+                    mode=translation.mode or "",
+                ))
+            elif not translation.ok and translation_status not in ("not_requested", "off"):
+                event_bus.emit_typed(EventType.TRANSLATION_FAILED, TranslationFailed(
+                    history_id=None,
+                    source_text=text,
+                    reason=translation.status or "unknown",
+                    source_lang=translation.source_lang,
+                    target_lang=translation.target_lang,
+                ))
 
         tp = transcribe_payload if isinstance(transcribe_payload, dict) else {}
         if tp.get("engine"):
@@ -1785,6 +1790,9 @@ class RecordingCoreService:
                     history_item = self.store.add_history_item(
                         text=display_text,
                         paste_status="failed",
+                        # wave-1770: tag privacy_mode correctly for batch import — was
+                        # always False, breaking privacy-tagged filtering/purge logic.
+                        privacy_mode=_privacy_mode,
                         source_text=text,
                         translated_text=translated_text,
                         translation_mode=translation.mode,
@@ -1818,38 +1826,43 @@ class RecordingCoreService:
                 if len(final_text) > 500:
                     summary = self._generate_summary(final_text)
 
-                try:
-                    transcripts_dir = Path(self.store.data_dir) / "transcripts"
-                    transcripts_dir.mkdir(exist_ok=True)
-                    source_name = Path(audio_path).stem
-                    timestamp = time.strftime("%Y%m%d_%H%M%S")
-                    transcript_filename = f"{timestamp}_{source_name}.md"
-                    transcript_path = transcripts_dir / transcript_filename
-                    with open(transcript_path, "w", encoding="utf-8") as f:
-                        f.write(f"# Транскрипт: {Path(audio_path).name}\n\n")
-                        f.write(f"- Дата: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                        if audio_duration_sec is not None:
-                            _mins = int(audio_duration_sec) // 60
-                            _secs = audio_duration_sec - _mins * 60
-                            f.write(f"- Аудио: {_mins}м {_secs:.1f}с\n")
-                        f.write(f"- Обработка: {elapsed:.1f}с\n")
-                        f.write(f"- Источник: {audio_path}\n")
-                        f.write(f"- Язык: {detected_lang}\n")
-                        diar_info = transcribe_payload.get("diarization", {}) if isinstance(transcribe_payload, dict) else {}
-                        if diar_info and diar_info.get("enabled"):
-                            speakers = diar_info.get("speaker_turns", [])
-                            unique_speakers = len(set(t.get("speaker") for t in speakers))
-                            f.write(f"- Спикеры: {unique_speakers}\n")
-                        if summary:
-                            f.write(f"\n## Краткое содержание\n\n{summary}\n")
-                        if diar_info and diar_info.get("enabled") and diar_info.get("speaker_turns"):
-                            f.write(f"\n## Диалог\n\n{display_text}\n")
-                        else:
-                            f.write(f"\n## Текст\n\n{final_text}\n")
-                        if translated_text:
-                            f.write(f"\n## Перевод ({translation.mode})\n\n{translated_text}\n")
-                except Exception as exc:
-                    logger.warning("Не удалось сохранить транскрипт в файл: %s", exc)
+                # wave-1770 HIGH: gate .md transcript-file write behind privacy_mode,
+                # consistent with the live recording path (TranscriptWriter gated at ~1586).
+                # Without this, batch import wrote plaintext transcripts to disk even when
+                # privacy_mode_enabled=True.
+                if not _privacy_mode:
+                    try:
+                        transcripts_dir = Path(self.store.data_dir) / "transcripts"
+                        transcripts_dir.mkdir(exist_ok=True)
+                        source_name = Path(audio_path).stem
+                        timestamp = time.strftime("%Y%m%d_%H%M%S")
+                        transcript_filename = f"{timestamp}_{source_name}.md"
+                        transcript_path = transcripts_dir / transcript_filename
+                        with open(transcript_path, "w", encoding="utf-8") as f:
+                            f.write(f"# Транскрипт: {Path(audio_path).name}\n\n")
+                            f.write(f"- Дата: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                            if audio_duration_sec is not None:
+                                _mins = int(audio_duration_sec) // 60
+                                _secs = audio_duration_sec - _mins * 60
+                                f.write(f"- Аудио: {_mins}м {_secs:.1f}с\n")
+                            f.write(f"- Обработка: {elapsed:.1f}с\n")
+                            f.write(f"- Источник: {audio_path}\n")
+                            f.write(f"- Язык: {detected_lang}\n")
+                            diar_info = transcribe_payload.get("diarization", {}) if isinstance(transcribe_payload, dict) else {}
+                            if diar_info and diar_info.get("enabled"):
+                                speakers = diar_info.get("speaker_turns", [])
+                                unique_speakers = len(set(t.get("speaker") for t in speakers))
+                                f.write(f"- Спикеры: {unique_speakers}\n")
+                            if summary:
+                                f.write(f"\n## Краткое содержание\n\n{summary}\n")
+                            if diar_info and diar_info.get("enabled") and diar_info.get("speaker_turns"):
+                                f.write(f"\n## Диалог\n\n{display_text}\n")
+                            else:
+                                f.write(f"\n## Текст\n\n{final_text}\n")
+                            if translated_text:
+                                f.write(f"\n## Перевод ({translation.mode})\n\n{translated_text}\n")
+                    except Exception as exc:
+                        logger.warning("Не удалось сохранить транскрипт в файл: %s", exc)
 
                 item_result: dict[str, Any] = {
                     "path": audio_path,

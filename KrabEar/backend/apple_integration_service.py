@@ -173,6 +173,10 @@ class AppleIntegrationService:
         params: {"title": str, "body": str, "folder": str | None}
         Returns: {"ok": bool, "note_id": str | None, "error": str | None}
         """
+        # wave-1770 HIGH: sends transcript text to external Apple Notes app.
+        if self._settings_get("privacy_mode_enabled", False):
+            return {"ok": False, "error": "privacy_mode_active",
+                    "user_msg": "Приватный режим включён — запись в Notes запрещена."}
         title = self._escape_as_str(params.get("title", "Krab Ear note"))
         body = self._escape_as_str(params.get("body", ""))
         folder = params.get("folder", "") or ""
@@ -215,6 +219,10 @@ end tell
         params: {"title": str, "body": str, "list_name": str | None, "due_date": str | None}
         Returns: {"ok": bool, "error": str | None}
         """
+        # wave-1770 HIGH: sends transcript text to external Apple Reminders app.
+        if self._settings_get("privacy_mode_enabled", False):
+            return {"ok": False, "error": "privacy_mode_active",
+                    "user_msg": "Приватный режим включён — запись в Reminders запрещена."}
         title = self._escape_as_str(params.get("title", "Krab Ear reminder"))
         body = self._escape_as_str(params.get("body", ""))
         list_name = params.get("list_name") or None
@@ -270,6 +278,10 @@ end tell
           calendar_name: str | None (optional, default first writable calendar)
         Returns: {"ok": bool, "error": str | None}
         """
+        # wave-1770 HIGH: sends transcript text to external Calendar app.
+        if self._settings_get("privacy_mode_enabled", False):
+            return {"ok": False, "error": "privacy_mode_active",
+                    "user_msg": "Приватный режим включён — запись в Calendar запрещена."}
         title = params.get("title", "").strip()
         if not title:
             return {"ok": False, "error": "title is required"}
@@ -325,6 +337,10 @@ end tell'''
           service: str (optional, default "iMessage") — "iMessage" | "SMS"
         Returns: {"ok": bool, "error": str | None}
         """
+        # wave-1770 HIGH: sends transcript text to external Messages app (iMessage/SMS).
+        if self._settings_get("privacy_mode_enabled", False):
+            return {"ok": False, "error": "privacy_mode_active",
+                    "user_msg": "Приватный режим включён — отправка iMessage запрещена."}
         recipient = params.get("recipient", "").strip()
         if not recipient:
             return {"ok": False, "error": "recipient is required"}
