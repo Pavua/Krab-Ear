@@ -211,7 +211,9 @@ class ComparePeriodsPrivacyGateTestCase(unittest.TestCase):
             self.assertEqual(p["duration_sec"], 0.0)
             self.assertEqual(p["words"], 0)
             self.assertEqual(p["avg_confidence"], 0.0)
-            self.assertIsInstance(p["languages"], dict)
+            # wave-1770 MED fix: privacy gate returns languages:[] (list) not {} (dict)
+            # Normal response returns list of language strings; privacy gate must match.
+            self.assertIsInstance(p["languages"], list)
 
         self.assertEqual(result.get("recordings_change_pct"), 0.0)
         self.assertEqual(result.get("duration_change_pct"), 0.0)

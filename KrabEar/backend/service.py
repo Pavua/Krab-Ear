@@ -252,6 +252,17 @@ class BackendService:
                 new_key = str(new.get("lm_studio_api_key", ""))
                 if new_key != str(old.get("lm_studio_api_key", "")):
                     _rewriter_ref.set_api_key(new_key)
+                # Hot-swap model when user changes it via GUI dropdown (llm_model setting).
+                # Previously the rewriter was initialized once from the static config and
+                # never updated — GUI dropdown changes were silently ignored.
+                new_model = str(new.get("llm_model", "")).strip()
+                old_model = str(old.get("llm_model", "")).strip()
+                if new_model and new_model != old_model:
+                    logger.info(
+                        "LLM rewriter: hot-swap model %r → %r (settings change)",
+                        old_model, new_model,
+                    )
+                    _rewriter_ref.set_model(new_model)
             self._settings_svc.register_after_save_hook(_on_settings_saved)
 
         # W1603 / W1599 F2 MED: Re-initialize Sentry when privacy_mode toggles OFF.
