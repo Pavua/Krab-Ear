@@ -14,6 +14,7 @@ import json
 import logging
 import math
 import os
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -42,6 +43,7 @@ _SETTINGS_IO_ALLOWED_ROOTS: tuple[str, ...] = (
     "~/Downloads",
     "/tmp",
     "/private/tmp",  # macOS: /tmp symlinks to /private/tmp
+    tempfile.gettempdir(),  # macOS $TMPDIR = /private/var/folders/.../T/ (used by pytest tmp_path)
 )
 
 

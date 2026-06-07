@@ -41,6 +41,7 @@ _EXPORT_ALLOWED_ROOTS: tuple[str, ...] = (
     "~/Downloads",
     "/tmp",            # W1432: allowed for scripts/tests; restored W1707
     "/private/tmp",    # macOS: /tmp symlinks to /private/tmp
+    tempfile.gettempdir(),  # macOS $TMPDIR = /private/var/folders/.../T/ (pytest tmp_path)
 )
 
 
