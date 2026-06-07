@@ -132,6 +132,13 @@ class RecordingCoreService:
 
         # Preview worker state (owned by this service)
         self._preview_lock = threading.Lock()
+        # wave-1770 MED (race): _start/_stop_preview_worker mutate _preview_thread
+        # without coordination — concurrent start/stop can overwrite the handle before
+        # join(), orphaning the daemon. A DEDICATED reentrant lock serialises the
+        # thread-handle lifecycle. It must NOT be _preview_lock: _stop joins the worker
+        # while the worker may be blocked acquiring _preview_lock to write _preview_text
+        # → deadlock. RLock because _start_preview_worker calls _stop_preview_worker.
+        self._preview_thread_lock = threading.RLock()
         self._preview_thread: threading.Thread | None = None
         self._preview_stop_event = threading.Event()
         self._preview_text: str = ""
@@ -279,6 +286,17 @@ class RecordingCoreService:
                 # orphaned daemon. The handle is assigned only AFTER start() succeeds.
                 try:
                     with self._rt_lock:
+                        # wave-1770 MED: stop any existing daemon before overwriting the
+                        # handle. A rapid start→start (without an intervening stop) would
+                        # otherwise orphan the previous RealtimePartialTranscriber thread.
+                        # stop() joins the daemon's own internal thread; that thread does
+                        # not touch _rt_lock, so stopping under the lock cannot deadlock.
+                        if self._rt_partial is not None:
+                            try:
+                                self._rt_partial.stop()
+                            except Exception:
+                                logger.warning("rt_partial: stop старого инстанса упал", exc_info=True)
+                            self._rt_partial = None
                         _rt = RealtimePartialTranscriber(
                             transcriber=self.transcriber,
                             recorder=self.recorder,
@@ -713,26 +731,32 @@ class RecordingCoreService:
         self._start_preview_worker(quality_profile=quality_profile)
 
     def _start_preview_worker(self, quality_profile: str) -> None:
-        self._stop_preview_worker()
-        if not callable(getattr(self.transcriber, "transcribe_preview", None)):
-            logger.info(
-                "Realtime preview disabled: transcriber %s не имеет метода transcribe_preview",
-                type(self.transcriber).__name__,
+        # wave-1770 MED: serialise thread-handle lifecycle (reentrant — calls _stop below).
+        with self._preview_thread_lock:
+            self._stop_preview_worker()
+            if not callable(getattr(self.transcriber, "transcribe_preview", None)):
+                logger.info(
+                    "Realtime preview disabled: transcriber %s не имеет метода transcribe_preview",
+                    type(self.transcriber).__name__,
+                )
+                return
+            self._preview_stop_event.clear()
+            self._preview_thread = threading.Thread(
+                target=self._preview_loop,
+                args=(quality_profile,),
+                daemon=True,
             )
-            return
-        self._preview_stop_event.clear()
-        self._preview_thread = threading.Thread(
-            target=self._preview_loop,
-            args=(quality_profile,),
-            daemon=True,
-        )
-        self._preview_thread.start()
+            self._preview_thread.start()
 
     def _stop_preview_worker(self) -> None:
-        self._preview_stop_event.set()
-        if self._preview_thread and self._preview_thread.is_alive():
-            self._preview_thread.join(timeout=IPC_PREVIEW_THREAD_TIMEOUT_SEC)
-        self._preview_thread = None
+        # wave-1770 MED: serialise thread-handle lifecycle. RLock so _start (which holds
+        # it) can call this. join() is safe here — the worker writes _preview_text under
+        # the SEPARATE _preview_lock, never _preview_thread_lock, so no deadlock.
+        with self._preview_thread_lock:
+            self._preview_stop_event.set()
+            if self._preview_thread and self._preview_thread.is_alive():
+                self._preview_thread.join(timeout=IPC_PREVIEW_THREAD_TIMEOUT_SEC)
+            self._preview_thread = None
 
     def _preview_loop(self, quality_profile: str) -> None:
         snapshot_audio = getattr(self.recorder, "snapshot_audio", None)
