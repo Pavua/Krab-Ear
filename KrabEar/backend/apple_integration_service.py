@@ -201,7 +201,7 @@ end tell
         try:
             result = subprocess.run(
                 ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, encoding="utf-8", timeout=10,  # wave-1770 MED: pin UTF-8
             )
             if result.returncode == 0:
                 return {"ok": True, "note_id": result.stdout.strip(), "error": None}
@@ -255,7 +255,7 @@ end tell
         try:
             result = subprocess.run(
                 ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, encoding="utf-8", timeout=10,  # wave-1770 MED: pin UTF-8
             )
             if result.returncode == 0:
                 return {"ok": True, "error": None}
@@ -316,7 +316,7 @@ end tell'''
         try:
             result = subprocess.run(
                 ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=15,
+                capture_output=True, text=True, encoding="utf-8", timeout=15,  # wave-1770 MED: pin UTF-8
             )
             if result.returncode == 0:
                 return {"ok": True, "error": None}
@@ -376,7 +376,7 @@ end tell'''
         try:
             result = subprocess.run(
                 ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, encoding="utf-8", timeout=10,  # wave-1770 MED: pin UTF-8
             )
             if result.returncode == 0:
                 return {"ok": True, "error": None}

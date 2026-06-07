@@ -78,6 +78,10 @@ class TranslationService:
     # 5s-TTL re-parse. Ограничиваем число записей и длину термина/значения.
     MAX_GLOSSARY_ENTRIES = 500          # макс. число пар в translation_glossary
     MAX_TERM_BYTES = 200                # макс. длина source/target в байтах UTF-8
+    # wave-1770 MED: cap translate input length. IPC accepts up to 1 MB; a huge text
+    # routed to an LLM/external translator is a latency/cost DoS. 50k chars (~10k words)
+    # comfortably covers any real transcript while bounding worst-case work.
+    MAX_TRANSLATE_TEXT_CHARS = 50_000
 
     @classmethod
     def _check_term_caps(cls, source: str, target: str) -> str | None:
@@ -174,7 +178,7 @@ class TranslationService:
 
     def handle_translate_text(self, params: dict[str, Any]) -> dict[str, Any]:
         """Отдельная IPC-команда перевода текста для UI и будущих workflow."""
-        text = str(params.get("text", "")).strip()
+        text = str(params.get("text", "")).strip()[: self.MAX_TRANSLATE_TEXT_CHARS]  # wave-1770 MED: bound input
         mode = str(params.get("translation_mode", "off"))
         translation_style = str(params.get("translation_style", "neutral"))
         settings = self._cached_settings()
@@ -245,7 +249,7 @@ class TranslationService:
             latency_ms           — время обработки в миллисекундах.
         """
         t0 = time.monotonic()
-        text = str(params.get("text", "")).strip()
+        text = str(params.get("text", "")).strip()[: self.MAX_TRANSLATE_TEXT_CHARS]  # wave-1770 MED: bound input
 
         # Пустой текст — возвращаем быстрый ответ без ошибки
         if not text:
