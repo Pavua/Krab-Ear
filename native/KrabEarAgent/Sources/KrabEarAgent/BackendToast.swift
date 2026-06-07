@@ -55,7 +55,9 @@ final class BackendToast {
 
         // Прогрев CoreText glyph cache: representative Cyrillic + Latin + emoji string.
         // Это тот же шрифт (systemFont 13pt .medium), который используется в show().
-        label.stringValue = "Backend перезапущен ✓"
+        // Глиф ✓ — НАМЕРЕННАЯ prewarm-строка (прогревает CoreText glyph cache до первого
+        // show()), а не runtime-рендер в ColorSync-callback.
+        label.stringValue = "Backend перезапущен ✓"  // SF-SYMBOL-SAFE
         label.sizeToFit()
         label.stringValue = ""
 

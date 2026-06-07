@@ -136,6 +136,12 @@ final class StackViewConstraintOrderingTests: XCTestCase {
         liveStack.addArrangedSubview(liveSettingsBar)
         XCTAssertEqual(liveSettingsBar.superview, liveStack, "liveSettingsBar should be in liveStack")
 
+        // liveStack lives inside a real parent (как в production оно вложено в scroll/host
+        // view). Без этого liveStack.superview тоже nil и сравнение nil==nil даёт ложный
+        // провал, хотя смысл теста — показать РАЗНЫЕ (отсутствующие общие) предки.
+        let liveStackHost = NSView()
+        liveStackHost.addSubview(liveStack)
+
         // Simulate applyVisualTheme: removes liveSettingsBar from liveStack.
         liveStack.removeArrangedSubview(liveSettingsBar)
         liveSettingsBar.removeFromSuperview()
@@ -144,6 +150,8 @@ final class StackViewConstraintOrderingTests: XCTestCase {
         XCTAssertNil(liveSettingsBar.superview, "liveSettingsBar should have no parent after removal")
         // This verifies the precondition that would cause a crash if .isActive = true
         // were called now — our fix avoids creating this constraint in the first place.
+        // liveSettingsBar.superview == nil, а liveStack.superview == liveStackHost → не равны,
+        // что и доказывает отсутствие общего предка.
         XCTAssertNotEqual(liveSettingsBar.superview, liveStack.superview,
                           "Removed view and former parent have no common ancestor")
     }
