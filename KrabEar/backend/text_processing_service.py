@@ -76,6 +76,11 @@ class TextProcessingService:
 
     def handle_summarize_text(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: summarize_text — локальный lightweight-summary для длинных транскриптов."""
+        # wave-1770 (Antigravity cross-cut): gate consistent with other text-analysis
+        # handlers in this file (extract_terms/score_*/detect_emotion).
+        if self._is_privacy_mode():
+            return {"mode": "summary_short", "summary": "", "bullets": [],
+                    "source_chars": 0, "reason": "privacy_mode_active"}
         text = str(params.get("text", "")).strip()
         if not text:
             raise RuntimeError("text обязателен")
@@ -137,6 +142,13 @@ class TextProcessingService:
         item_id = str(params.get("id", "")).strip()
         if not item_id:
             raise RuntimeError("Параметр id обязателен")
+
+        # wave-1770 HIGH (Antigravity cross-cut): reads transcript text from history and
+        # summarizes it. The local-fallback path (LLM unavailable) bypasses the rewriter's
+        # own privacy gate, leaking history text in privacy mode. Gate at handler level.
+        if self._is_privacy_mode():
+            return {"id": item_id, "summary": "", "llm": False,
+                    "source_chars": 0, "reason": "privacy_mode_active"}
 
         with self._store._lock():
             items = self._store._load_active_items_unlocked()
@@ -318,6 +330,9 @@ class TextProcessingService:
         Returns:
             {"expanded": str, "changed": bool}
         """
+        # wave-1770 (Antigravity cross-cut): gate consistent with sibling text handlers.
+        if self._is_privacy_mode():
+            return {"expanded": "", "changed": False, "reason": "privacy_mode_active"}
         text = str(params.get("text", ""))
         language = str(params.get("language", "ru"))
         expanded = self._abbreviation_expander.expand(text, language=language)
@@ -412,6 +427,10 @@ class TextProcessingService:
             steps_applied  — список имён выполненных шагов.
             changes_count  — число шагов, изменивших текст.
         """
+        # wave-1770 (Antigravity cross-cut): gate consistent with sibling text handlers.
+        if self._is_privacy_mode():
+            return {"text": "", "steps_applied": [], "changes_count": 0,
+                    "reason": "privacy_mode_active"}
         text = str(params.get("text", ""))
         steps = params.get("steps")  # None → цепочка по умолчанию
         if steps is not None and not isinstance(steps, list):

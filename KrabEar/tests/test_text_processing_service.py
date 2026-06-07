@@ -560,5 +560,45 @@ class TestBackendServiceDelegation(unittest.TestCase):
             self.assertIn(key, result)
 
 
+class TestSummarizeAndTransformPrivacyGatesW1770(unittest.TestCase):
+    """wave-1770 (Antigravity cross-cut): summarize_item/text + expand/post_process
+    were missing privacy gates while sibling text handlers had them.
+    summarize_item is HIGH — it reads transcript text from history."""
+
+    def _privacy_svc(self):
+        svc, mocks = _make_service()
+        svc._settings_get = lambda key, default=False: True if key == "privacy_mode_enabled" else default
+        return svc, mocks
+
+    def test_summarize_item_blocked_does_not_read_history(self):
+        svc, mocks = self._privacy_svc()
+        result = svc.handle_summarize_item({"id": "abc"})
+        self.assertEqual(result.get("reason"), "privacy_mode_active")
+        self.assertEqual(result["summary"], "")
+        # Critical: history must NOT be loaded in privacy mode.
+        mocks["store"]._load_active_items_unlocked.assert_not_called()
+
+    def test_summarize_text_blocked(self):
+        svc, _ = self._privacy_svc()
+        result = svc.handle_summarize_text({"text": "long transcript text here"})
+        self.assertEqual(result.get("reason"), "privacy_mode_active")
+        self.assertEqual(result["summary"], "")
+        self.assertEqual(result["bullets"], [])
+
+    def test_expand_abbreviations_blocked(self):
+        svc, mocks = self._privacy_svc()
+        result = svc.handle_expand_abbreviations({"text": "т.н. секрет"})
+        self.assertEqual(result.get("reason"), "privacy_mode_active")
+        self.assertEqual(result["expanded"], "")
+        mocks["abbreviation_expander"].expand.assert_not_called()
+
+    def test_post_process_blocked(self):
+        svc, mocks = self._privacy_svc()
+        result = svc.handle_post_process_text({"text": "secret"})
+        self.assertEqual(result.get("reason"), "privacy_mode_active")
+        self.assertEqual(result["text"], "")
+        mocks["text_postprocessor"].process.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
