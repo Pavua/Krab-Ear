@@ -107,13 +107,21 @@ class SpeakerManager:
     _FINGERPRINTS_FILENAME = "speaker_fingerprints.json"
     AUTO_REGISTER_MIN_CONFIDENCE: float = 0.50
 
-    def __init__(self, data_dir: str | Path | None = None, store: "StateStore | None" = None) -> None:
+    def __init__(
+        self,
+        data_dir: str | Path | None = None,
+        store: "StateStore | None" = None,
+        settings_fn: Any = None,
+    ) -> None:
         self._lock = threading.Lock()
         self._aliases: dict[str, str] = {}
         self._fingerprints: dict[str, list[float]] = {}
         self._auto_speaker_counter: int = 0
         self._embedding_model: Any = None
         self._store: "StateStore | None" = store
+        # wave-1770 HIGH: privacy gate for IPC handlers that return PII (real names, biometrics).
+        # Injected by BackendService after construction (same late-injection pattern as other managers).
+        self._settings_fn = settings_fn
         if data_dir is not None:
             self._path: Path | None = Path(data_dir) / self._FILENAME
             self._fingerprints_path: Path | None = (
@@ -124,6 +132,15 @@ class SpeakerManager:
         else:
             self._path = None
             self._fingerprints_path = None
+
+    def _is_privacy_mode(self) -> bool:
+        """Returns True when privacy_mode_enabled is active via settings_fn."""
+        if self._settings_fn is None:
+            return False
+        try:
+            return bool(self._settings_fn().get("privacy_mode_enabled", False))
+        except Exception:
+            return False
 
     def _load(self) -> None:
         if self._path is None or not self._path.exists():
@@ -482,6 +499,9 @@ class SpeakerManager:
 
     def handle_get_speaker_aliases(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_speaker_aliases."""
+        # wave-1770 HIGH: speaker aliases = real person names (PII). Gate in privacy mode.
+        if self._is_privacy_mode():
+            return {"aliases": {}, "reason": "privacy_mode_active"}
         return {"aliases": self.get_all_aliases()}
 
     def handle_remove_speaker_alias(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -525,6 +545,9 @@ class SpeakerManager:
 
     def handle_list_speaker_fingerprints(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: list_speaker_fingerprints."""
+        # wave-1770 HIGH: fingerprints = voice biometrics (PII) + real names. Gate in privacy mode.
+        if self._is_privacy_mode():
+            return {"speakers": [], "count": 0, "reason": "privacy_mode_active"}
         fps = self.get_all_fingerprints()
         aliases = self.get_all_aliases()
         return {

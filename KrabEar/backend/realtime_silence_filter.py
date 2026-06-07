@@ -57,7 +57,13 @@ class RealtimeSilenceFilter:
             _raw_window = _DEFAULT_WINDOW_SEC
         self._window_sec: float = max(1.0, _raw_window)
 
-        self._max_silence_sec: float = float(settings.get("rt_silence_max_sec", _DEFAULT_MAX_SILENCE_SEC))
+        # wave-1770 MED: guard NaN/Inf on rt_silence_max_sec (same pattern as _window_sec above).
+        # Without this guard, float('inf') permanently suppresses silence detection;
+        # float('nan') makes all comparisons unpredictable.
+        _raw_max = float(settings.get("rt_silence_max_sec", _DEFAULT_MAX_SILENCE_SEC))
+        if not math.isfinite(_raw_max):
+            _raw_max = _DEFAULT_MAX_SILENCE_SEC
+        self._max_silence_sec: float = max(0.5, min(60.0, _raw_max))
 
         # B3 (LOW): clamp threshold_db — huge positive value classifies all speech as silent.
         _raw_threshold = float(

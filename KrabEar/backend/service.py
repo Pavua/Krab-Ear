@@ -709,7 +709,10 @@ class BackendService:
             llm_rewriter=self._llm_rewriter,
         )
         self._obsidian_sync = ObsidianSyncManager(data_dir=self.store.data_dir, event_bus=event_bus)
-        self._speaker_manager = SpeakerManager(data_dir=self.store.data_dir)
+        self._speaker_manager = SpeakerManager(
+            data_dir=self.store.data_dir,
+            settings_fn=self._settings_svc.cached_settings,  # wave-1770 HIGH: privacy gate for PII handlers
+        )
         # Wire speaker_manager into HistoryService for name resolution during exports
         self._history._speaker_manager = self._speaker_manager
         self._playback_tracker = PlaybackTracker(
