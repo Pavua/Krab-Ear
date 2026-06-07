@@ -130,6 +130,9 @@ class TextScoringService:
         Ответ (пакетный):
             {titles: [{id, title, generated_at}]}
         """
+        # wave-1770 MED: gate consistent with handle_extract_terms — both analyze transcript text.
+        if self._get_runtime_setting("privacy_mode_enabled", False):
+            return {"title": "", "titles": [], "reason": "privacy_mode_active"}
         # Пакетный режим
         items = params.get("items")
         if items is not None:

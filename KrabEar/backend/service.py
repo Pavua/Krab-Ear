@@ -708,6 +708,8 @@ class BackendService:
             store=self.store,
             llm_rewriter=self._llm_rewriter,
         )
+        # wave-1770 MED: inject settings_get for privacy gates on text analysis handlers.
+        self._text_processing_svc._settings_get = self._get_runtime_setting
         self._obsidian_sync = ObsidianSyncManager(data_dir=self.store.data_dir, event_bus=event_bus)
         self._speaker_manager = SpeakerManager(
             data_dir=self.store.data_dir,
@@ -2986,7 +2988,8 @@ class BackendService:
             "session": {
                 "recording_active": bool(getattr(self.recorder, 'is_recording', False)),
                 "preview_active": preview_active,
-                "preview_text_length": len(self._recording_core_svc.preview_text),
+                # wave-1770 MED: mask preview_text_length in privacy mode (reveals recording activity).
+                "preview_text_length": 0 if settings.get("privacy_mode_enabled") else len(self._recording_core_svc.preview_text),
                 "preview_duration_sec": self._recording_core_svc.preview_duration_sec,
             },
             "preview_loop": {

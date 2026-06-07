@@ -57,6 +57,18 @@ class TextProcessingService:
         self._text_postprocessor = text_postprocessor
         self._store = store
         self._llm_rewriter = llm_rewriter
+        # wave-1770 MED: late-injected settings getter for privacy gates.
+        # Set by BackendService after construction (same pattern as other services).
+        self._settings_get = None
+
+    def _is_privacy_mode(self) -> bool:
+        """Returns True if privacy_mode_enabled is active via late-injected settings_get."""
+        if self._settings_get is None:
+            return False
+        try:
+            return bool(self._settings_get("privacy_mode_enabled", False))
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------ #
     # summarize_text / summarize_item                                      #
@@ -164,6 +176,10 @@ class TextProcessingService:
 
     def handle_compare_texts(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: compare_texts — сравнивает два текста или две записи истории по ID."""
+        if self._is_privacy_mode():
+            return {"similarity": 0.0, "common_phrases": [], "unique_to_1": [],
+                    "unique_to_2": [], "word_count_diff": 0, "summary": "",
+                    "reason": "privacy_mode_active"}
         item_id_1 = params.get("item_id_1")
         item_id_2 = params.get("item_id_2")
         text1 = params.get("text1", "")
@@ -191,6 +207,10 @@ class TextProcessingService:
 
     def handle_score_readability(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: score_readability — оценивает читабельность текста транскрибации."""
+        if self._is_privacy_mode():
+            return {"flesch_score": 0.0, "avg_sentence_length": 0.0, "avg_word_length": 0.0,
+                    "vocabulary_level": "simple", "sentence_count": 0, "word_count": 0,
+                    "longest_sentence": "", "shortest_sentence": "", "reason": "privacy_mode_active"}
         text = params.get("text", "")
         if not text:
             return {
@@ -220,7 +240,7 @@ class TextProcessingService:
 
         Params:
             text (str): транскрибированный текст.
-            confidence (float): уверенность STT-модели, 0.0–1.0.
+            confidence (float): уверенность STT-модели, 0.0-1.0.
             duration_sec (float): длительность аудио в секундах.
             has_diarization (bool, optional): была ли применена диаризация. Default False.
             has_llm_enhancement (bool, optional): был ли применён LLM-рерайтер. Default False.
@@ -228,6 +248,10 @@ class TextProcessingService:
         Returns:
             Словарь с полями QualityScore: overall_score, grade, factors, recommendations.
         """
+        # wave-1770 MED: gate consistent with extract_terms pattern.
+        if self._is_privacy_mode():
+            return {"overall_score": 0, "grade": "F", "factors": {},
+                    "recommendations": [], "reason": "privacy_mode_active"}
         text = params.get("text", "")
         confidence = float(params.get("confidence", 0.0))
         duration_sec = float(params.get("duration_sec", 0.0))
@@ -263,6 +287,11 @@ class TextProcessingService:
             primary_emotion, confidence, indicators, exclamation_count,
             question_count, caps_ratio
         """
+        # wave-1770 MED: gate consistent with extract_terms pattern.
+        if self._is_privacy_mode():
+            return {"primary_emotion": "neutral", "confidence": 0.0, "indicators": [],
+                    "exclamation_count": 0, "question_count": 0, "caps_ratio": 0.0,
+                    "reason": "privacy_mode_active"}
         text = str(params.get("text", ""))
         language = str(params.get("language", "ru"))
         result = self._emotion_detector.detect(text, language=language)
