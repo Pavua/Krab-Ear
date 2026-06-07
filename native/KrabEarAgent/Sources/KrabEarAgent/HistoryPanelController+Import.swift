@@ -27,9 +27,11 @@ extension HistoryPanelController {
         panel.message = "Выберите аудиофайлы или папки с записями звонков для транскрибации"
         panel.prompt = "Транскрибировать"
 
-        guard panel.runModal() == .OK else { return }
-        let paths = panel.urls.map(\.path)
-        enqueueImport(paths: paths, sourceTag: "open_panel")
+        presentPanelSheet(panel, for: self.window) { [weak self] resp in
+            guard let self, resp == .OK else { return }
+            let paths = panel.urls.map(\.path)
+            self.enqueueImport(paths: paths, sourceTag: "open_panel")
+        }
     }
 
     @objc func onCancelImport() {

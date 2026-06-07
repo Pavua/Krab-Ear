@@ -133,35 +133,37 @@ extension HistoryPanelController {
         panel.title = "Сохранить экспорт истории"
         panel.prompt = "Сохранить"
 
-        guard panel.runModal() == .OK, let outputURL = panel.url else { return }
+        presentPanelSheet(panel, for: self.window) { [weak self] resp in
+            guard let self, resp == .OK, let outputURL = panel.url else { return }
 
-        let content = buildHistoryMarkdownExport()
-        do {
-            try content.write(to: outputURL, atomically: true, encoding: .utf8)
-            showInfoAlert(
-                title: "Экспорт истории",
-                body: "Сохранено записей: \(items.count)\n\(outputURL.path)"
-            )
-        } catch {
-            showInfoAlert(
-                title: "Экспорт истории",
-                body: "Не удалось сохранить файл: \(error.localizedDescription)"
-            )
-        }
-        // Также сохраняем копию через IPC (export_history) в transcripts/.
-        // Off-main-thread чтобы не блокировать UI пока backend пишет файл (AppHang risk).
-        let ipc = self.ipcClient
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard
-                let ipcResponse = try? ipc.call(
-                    method: "export_history",
-                    params: ["format": "md", "save_to_file": true]
-                ),
-                let ipcResult = ipcResponse["result"] as? [String: Any],
-                let serverPath = ipcResult["path"] as? String
-            else { return }
-            DispatchQueue.main.async {
-                self?.notificationService.notify(title: "Krab Ear", body: "Серверная копия: \(serverPath)")
+            let content = self.buildHistoryMarkdownExport()
+            do {
+                try content.write(to: outputURL, atomically: true, encoding: .utf8)
+                self.showInfoAlert(
+                    title: "Экспорт истории",
+                    body: "Сохранено записей: \(self.items.count)\n\(outputURL.path)"
+                )
+            } catch {
+                self.showInfoAlert(
+                    title: "Экспорт истории",
+                    body: "Не удалось сохранить файл: \(error.localizedDescription)"
+                )
+            }
+            // Также сохраняем копию через IPC (export_history) в transcripts/.
+            // Off-main-thread чтобы не блокировать UI пока backend пишет файл (AppHang risk).
+            let ipc = self.ipcClient
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                guard
+                    let ipcResponse = try? ipc.call(
+                        method: "export_history",
+                        params: ["format": "md", "save_to_file": true]
+                    ),
+                    let ipcResult = ipcResponse["result"] as? [String: Any],
+                    let serverPath = ipcResult["path"] as? String
+                else { return }
+                DispatchQueue.main.async {
+                    self?.notificationService.notify(title: "Krab Ear", body: "Серверная копия: \(serverPath)")
+                }
             }
         }
     }
@@ -183,19 +185,21 @@ extension HistoryPanelController {
         panel.title = "Сохранить экспорт NDJSON"
         panel.prompt = "Сохранить"
 
-        guard panel.runModal() == .OK, let outputURL = panel.url else { return }
-        let content = buildHistoryNdjsonExport()
-        do {
-            try content.write(to: outputURL, atomically: true, encoding: .utf8)
-            showInfoAlert(
-                title: "Экспорт NDJSON",
-                body: "Сохранено записей: \(items.count)\n\(outputURL.path)"
-            )
-        } catch {
-            showInfoAlert(
-                title: "Экспорт NDJSON",
-                body: "Не удалось сохранить файл: \(error.localizedDescription)"
-            )
+        presentPanelSheet(panel, for: self.window) { [weak self] resp in
+            guard let self, resp == .OK, let outputURL = panel.url else { return }
+            let content = self.buildHistoryNdjsonExport()
+            do {
+                try content.write(to: outputURL, atomically: true, encoding: .utf8)
+                self.showInfoAlert(
+                    title: "Экспорт NDJSON",
+                    body: "Сохранено записей: \(self.items.count)\n\(outputURL.path)"
+                )
+            } catch {
+                self.showInfoAlert(
+                    title: "Экспорт NDJSON",
+                    body: "Не удалось сохранить файл: \(error.localizedDescription)"
+                )
+            }
         }
     }
 
@@ -207,34 +211,36 @@ extension HistoryPanelController {
         panel.title = "Выберите NDJSON-файл истории"
         panel.prompt = "Импортировать"
 
-        guard panel.runModal() == .OK, let inputURL = panel.url else { return }
-        let inputPath = inputURL.path
+        presentPanelSheet(panel, for: self.window) { [weak self] resp in
+            guard let self, resp == .OK, let inputURL = panel.url else { return }
+            let inputPath = inputURL.path
 
-        let ipcClient = self.ipcClient
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard
-                let response = try? ipcClient.call(
-                    method: "import_history_ndjson",
-                    params: ["path": inputPath]
-                ),
-                let result = response["result"] as? [String: Any]
-            else {
-                DispatchQueue.main.async {
-                    self?.showInfoAlert(title: "Импорт NDJSON", body: "Ошибка при импорте файла.")
+            let ipcClient = self.ipcClient
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard
+                    let response = try? ipcClient.call(
+                        method: "import_history_ndjson",
+                        params: ["path": inputPath]
+                    ),
+                    let result = response["result"] as? [String: Any]
+                else {
+                    DispatchQueue.main.async {
+                        self?.showInfoAlert(title: "Импорт NDJSON", body: "Ошибка при импорте файла.")
+                    }
+                    return
                 }
-                return
-            }
 
-            let imported = (result["imported"] as? Int) ?? 0
-            let skipped = (result["skipped"] as? Int) ?? 0
-            let errors = (result["errors"] as? Int) ?? 0
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                self.loadInitial()
-                self.showInfoAlert(
-                    title: "Импорт NDJSON",
-                    body: "Импортировано: \(imported)\nПропущено дублей: \(skipped)\nОшибок: \(errors)"
-                )
+                let imported = (result["imported"] as? Int) ?? 0
+                let skipped = (result["skipped"] as? Int) ?? 0
+                let errors = (result["errors"] as? Int) ?? 0
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    self.loadInitial()
+                    self.showInfoAlert(
+                        title: "Импорт NDJSON",
+                        body: "Импортировано: \(imported)\nПропущено дублей: \(skipped)\nОшибок: \(errors)"
+                    )
+                }
             }
         }
     }
@@ -473,7 +479,7 @@ extension HistoryPanelController {
                     alert.messageText = "Ошибка отправки"
                     alert.informativeText = result?["error"] as? String ?? "unknown"
                 }
-                alert.runModal()
+                presentAlertSheet(alert, for: self.window) { _ in }
             }
         }
     }
@@ -512,7 +518,7 @@ extension HistoryPanelController {
                     alert.messageText = "Ошибка отправки"
                     alert.informativeText = result?["error"] as? String ?? "unknown"
                 }
-                alert.runModal()
+                presentAlertSheet(alert, for: self.window) { _ in }
             }
         }
     }
@@ -561,7 +567,7 @@ extension HistoryPanelController {
                     alert.messageText = "Ошибка создания события"
                     alert.informativeText = result?["error"] as? String ?? "unknown"
                 }
-                alert.runModal()
+                presentAlertSheet(alert, for: self.window) { _ in }
             }
         }
     }

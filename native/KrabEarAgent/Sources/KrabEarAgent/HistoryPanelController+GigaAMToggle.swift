@@ -49,7 +49,7 @@ extension HistoryPanelController {
                 """
             alert.alertStyle = .informational
             alert.addButton(withTitle: "Понятно")
-            alert.runModal()
+            presentAlertSheet(alert, for: self.window) { _ in }
             return
         }
 

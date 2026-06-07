@@ -42,22 +42,23 @@ extension HistoryPanelController {
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Удалить")
         alert.addButton(withTitle: "Отмена")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        let ipcClient = self.ipcClient
-        let notificationService = self.notificationService
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let response = try? ipcClient.call(method: "cleanup_old_history", params: ["days": days]),
-                  let result = response["result"] as? [String: Any],
-                  let deleted = result["deleted_count"] as? Int else {
-                DispatchQueue.main.async {
-                    notificationService.notify(title: "Krab Ear", body: "Ошибка очистки")
+        presentAlertSheet(alert, for: self.window) { [weak self] resp in
+            guard let self, resp == .alertFirstButtonReturn else { return }
+            let ipcClient = self.ipcClient
+            let notificationService = self.notificationService
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let response = try? ipcClient.call(method: "cleanup_old_history", params: ["days": days]),
+                      let result = response["result"] as? [String: Any],
+                      let deleted = result["deleted_count"] as? Int else {
+                    DispatchQueue.main.async {
+                        notificationService.notify(title: "Krab Ear", body: "Ошибка очистки")
+                    }
+                    return
                 }
-                return
-            }
-            DispatchQueue.main.async {
-                notificationService.notify(title: "Krab Ear", body: "Удалено записей: \(deleted)")
-                self?.loadInitial()
+                DispatchQueue.main.async {
+                    notificationService.notify(title: "Krab Ear", body: "Удалено записей: \(deleted)")
+                    self?.loadInitial()
+                }
             }
         }
     }
@@ -208,8 +209,8 @@ extension HistoryPanelController {
                 alert.alertStyle = .informational
                 alert.addButton(withTitle: "Скопировать")
                 alert.addButton(withTitle: "Закрыть")
-                let resp = alert.runModal()
-                if resp == .alertFirstButtonReturn {
+                presentAlertSheet(alert, for: self?.window) { resp in
+                    guard resp == .alertFirstButtonReturn else { return }
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(textForCopy, forType: .string)
                 }
@@ -267,6 +268,7 @@ extension HistoryPanelController {
 
         let ipcClient = self.ipcClient
         let notificationService = self.notificationService
+        let parentWindow = self.window  // захват на main для последующего sheet
 
         // 1. Загрузить список чатов на background thread
         DispatchQueue.global(qos: .userInitiated).async {
@@ -322,7 +324,7 @@ extension HistoryPanelController {
                 alert.addButton(withTitle: "Отправить")
                 alert.addButton(withTitle: "Отмена")
 
-                let resp = alert.runModal()
+                presentAlertSheet(alert, for: parentWindow) { resp in
                 guard resp == .alertFirstButtonReturn else { return }
 
                 let body = bodyField.string.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -354,7 +356,7 @@ extension HistoryPanelController {
                             successAlert.informativeText = "Запись \(itemID.prefix(8))… успешно отправлена."
                             successAlert.alertStyle = .informational
                             successAlert.addButton(withTitle: "ОК")
-                            successAlert.runModal()
+                            presentAlertSheet(successAlert, for: parentWindow) { _ in }
                         }
                     } else {
                         // Попробуем извлечь ошибку
@@ -372,10 +374,11 @@ extension HistoryPanelController {
                             errAlert.informativeText = errMsg
                             errAlert.alertStyle = .warning
                             errAlert.addButton(withTitle: "ОК")
-                            errAlert.runModal()
+                            presentAlertSheet(errAlert, for: parentWindow) { _ in }
                         }
                     }
                 }
+                }  // закрывает completion presentAlertSheet(alert, for: parentWindow)
             }
         }
     }

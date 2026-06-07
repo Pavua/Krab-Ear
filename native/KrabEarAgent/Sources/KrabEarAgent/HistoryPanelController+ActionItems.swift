@@ -260,13 +260,15 @@ extension HistoryPanelController {
                 formatter.dateFormat = "yyyyMMdd_HHmmss"
                 panel.nameFieldStringValue = "krab_action_items_\(formatter.string(from: Date())).md"
                 panel.canCreateDirectories = true
-                guard panel.runModal() == .OK, let url = panel.url else { return }
-                do {
-                    try markdown.write(to: url, atomically: true, encoding: .utf8)
-                    self.actionItemsStatusLabel.stringValue = "Сохранено: \(url.path)"
-                    NSWorkspace.shared.selectFile(url.path, inFileViewerRootedAtPath: "")
-                } catch {
-                    self.actionItemsStatusLabel.stringValue = "Ошибка записи: \(error.localizedDescription)"
+                presentPanelSheet(panel, for: self.window) { resp in
+                    guard resp == .OK, let url = panel.url else { return }
+                    do {
+                        try markdown.write(to: url, atomically: true, encoding: .utf8)
+                        self.actionItemsStatusLabel.stringValue = "Сохранено: \(url.path)"
+                        NSWorkspace.shared.selectFile(url.path, inFileViewerRootedAtPath: "")
+                    } catch {
+                        self.actionItemsStatusLabel.stringValue = "Ошибка записи: \(error.localizedDescription)"
+                    }
                 }
             }
         }

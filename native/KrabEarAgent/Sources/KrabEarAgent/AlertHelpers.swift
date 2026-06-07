@@ -68,3 +68,40 @@ func showInputSheet(
         }
     }
 }
+
+// MARK: - Универсальные completion-based sheet-обёртки (замена runModal())
+
+/// Показывает уже сконфигурированный `NSAlert` (с любым набором кнопок и
+/// accessoryView) как sheet и вызывает `completion` с ответом пользователя.
+/// Прямая замена блокирующего `alert.runModal()`: на macOS Sequoia модальный
+/// run loop без родительского окна вешает main thread (AppHang, KRAB-EAR-AGENT-E/H).
+/// `window == nil` → лог + `completion(nil)` (bail, диалог не показывается).
+@MainActor
+func presentAlertSheet(
+    _ alert: NSAlert,
+    for window: NSWindow?,
+    completion: @escaping (NSApplication.ModalResponse?) -> Void
+) {
+    guard let window else {
+        NSLog("[KrabEar] presentAlertSheet bail (no window): %@", alert.messageText)
+        completion(nil)
+        return
+    }
+    alert.beginSheetModal(for: window) { completion($0) }
+}
+
+/// То же для `NSSavePanel` (и `NSOpenPanel`, который её наследует) — замена
+/// блокирующего `panel.runModal()`. `.OK` приходит в `completion` как обычно.
+@MainActor
+func presentPanelSheet(
+    _ panel: NSSavePanel,
+    for window: NSWindow?,
+    completion: @escaping (NSApplication.ModalResponse?) -> Void
+) {
+    guard let window else {
+        NSLog("[KrabEar] presentPanelSheet bail (no window): %@", panel.title)
+        completion(nil)
+        return
+    }
+    panel.beginSheetModal(for: window) { completion($0) }
+}

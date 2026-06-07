@@ -57,44 +57,46 @@ extension AgentAppDelegate {
             alert.window.makeFirstResponder(oldField)
         }
 
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        presentAlertSheet(alert, for: NSApp.keyWindow) { [weak self] resp in
+            guard let self, resp == .alertFirstButtonReturn else { return }
 
-        let oldWord = oldField.stringValue.trimmingCharacters(in: .whitespaces)
-        let newWord = newField.stringValue.trimmingCharacters(in: .whitespaces)
-        guard !oldWord.isEmpty, !newWord.isEmpty else {
-            showReplaceResult(success: false, message: "Оба поля должны быть заполнены.")
-            return
-        }
-
-        // IPC call: word replacement is fast (< 50 ms) — call synchronously like QuickPresets.
-        do {
-            let result = try callWithRecovery(
-                method: "replace_word_in_last_transcript",
-                params: ["old_word": oldWord, "new_word": newWord]
-            )
-            let ok = result["ok"] as? Bool ?? false
-            let count = result["replaced_count"] as? Int ?? 0
-            let error = result["error"] as? String
-
-            if ok {
-                let noun = count == 1 ? "вхождение" : (count < 5 ? "вхождения" : "вхождений")
-                showReplaceResult(
-                    success: true,
-                    message: "Заменено \(count) \(noun): «\(oldWord)» → «\(newWord)»."
-                )
-            } else {
-                let reason: String
-                switch error {
-                case "word_not_found":    reason = "Слово «\(oldWord)» не найдено в последней записи."
-                case "no_recent_history": reason = "История пуста."
-                case "item_not_found":    reason = "Запись не найдена."
-                case "missing_words":     reason = "Укажите оба слова."
-                default:                  reason = error ?? "Неизвестная ошибка."
-                }
-                showReplaceResult(success: false, message: reason)
+            let oldWord = oldField.stringValue.trimmingCharacters(in: .whitespaces)
+            let newWord = newField.stringValue.trimmingCharacters(in: .whitespaces)
+            guard !oldWord.isEmpty, !newWord.isEmpty else {
+                self.showReplaceResult(success: false, message: "Оба поля должны быть заполнены.")
+                return
             }
-        } catch {
-            showReplaceResult(success: false, message: "Ошибка IPC: \(error.localizedDescription)")
+
+            // IPC call: word replacement is fast (< 50 ms) — call synchronously like QuickPresets.
+            do {
+                let result = try self.callWithRecovery(
+                    method: "replace_word_in_last_transcript",
+                    params: ["old_word": oldWord, "new_word": newWord]
+                )
+                let ok = result["ok"] as? Bool ?? false
+                let count = result["replaced_count"] as? Int ?? 0
+                let error = result["error"] as? String
+
+                if ok {
+                    let noun = count == 1 ? "вхождение" : (count < 5 ? "вхождения" : "вхождений")
+                    self.showReplaceResult(
+                        success: true,
+                        message: "Заменено \(count) \(noun): «\(oldWord)» → «\(newWord)»."
+                    )
+                } else {
+                    let reason: String
+                    switch error {
+                    case "word_not_found":    reason = "Слово «\(oldWord)» не найдено в последней записи."
+                    case "no_recent_history": reason = "История пуста."
+                    case "item_not_found":    reason = "Запись не найдена."
+                    case "missing_words":     reason = "Укажите оба слова."
+                    default:                  reason = error ?? "Неизвестная ошибка."
+                    }
+                    self.showReplaceResult(success: false, message: reason)
+                }
+            } catch {
+                self.showReplaceResult(success: false, message: "Ошибка IPC: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -118,7 +120,7 @@ extension AgentAppDelegate {
             errAlert.informativeText = message
             errAlert.alertStyle = .warning
             errAlert.addButton(withTitle: "OK")
-            errAlert.runModal()
+            presentAlertSheet(errAlert, for: NSApp.keyWindow) { _ in }
         }
     }
 }

@@ -299,42 +299,44 @@ extension HistoryPanelController {
         alert.accessoryView = grid
         alert.addButton(withTitle: "Рассчитать")
         alert.addButton(withTitle: "Отмена")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        presentAlertSheet(alert, for: self.window) { [weak self] resp in
+            guard let self, resp == .alertFirstButtonReturn else { return }
 
-        let country = countryField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        let inbound = Double(inboundField.stringValue) ?? 200
-        let landline = Double(landlineField.stringValue) ?? 100
-        let mobile = Double(mobileField.stringValue) ?? 100
-        let media = Double(mediaField.stringValue) ?? 400
-        let useLivePricing = livePricingButton.state == .on
+            let country = countryField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            let inbound = Double(inboundField.stringValue) ?? 200
+            let landline = Double(landlineField.stringValue) ?? 100
+            let mobile = Double(mobileField.stringValue) ?? 100
+            let media = Double(mediaField.stringValue) ?? 400
+            let useLivePricing = livePricingButton.state == .on
 
-        let ipcClient = self.ipcClient
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard
-                let response = try? ipcClient.call(
-                    method: "call_assist_cost_estimate",
-                    params: [
-                        "country": country,
-                        "minutes_inbound": inbound,
-                        "minutes_outbound_landline": landline,
-                        "minutes_outbound_mobile": mobile,
-                        "minutes_media_stream": media,
-                        "use_live_pricing": useLivePricing,
-                    ]
-                ),
-                let result = response["result"] as? [String: Any]
-            else {
-                DispatchQueue.main.async {
-                    self?.appendCallAssistOutput(title: "Оценка стоимости", body: "Не удалось получить расчёт от Gateway.")
+            let ipcClient = self.ipcClient
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard
+                    let response = try? ipcClient.call(
+                        method: "call_assist_cost_estimate",
+                        params: [
+                            "country": country,
+                            "minutes_inbound": inbound,
+                            "minutes_outbound_landline": landline,
+                            "minutes_outbound_mobile": mobile,
+                            "minutes_media_stream": media,
+                            "use_live_pricing": useLivePricing,
+                        ]
+                    ),
+                    let result = response["result"] as? [String: Any]
+                else {
+                    DispatchQueue.main.async {
+                        self?.appendCallAssistOutput(title: "Оценка стоимости", body: "Не удалось получить расчёт от Gateway.")
+                    }
+                    return
                 }
-                return
-            }
 
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                let report = HistoryPanelController.formatCallCostEstimate(result)
-                self.appendCallAssistOutput(title: "Оценка стоимости", body: report)
-                self.showInfoAlert(title: "Оценка стоимости", body: report)
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    let report = HistoryPanelController.formatCallCostEstimate(result)
+                    self.appendCallAssistOutput(title: "Оценка стоимости", body: report)
+                    self.showInfoAlert(title: "Оценка стоимости", body: report)
+                }
             }
         }
     }
@@ -419,52 +421,53 @@ extension HistoryPanelController {
         formatAlert.accessoryView = formatSelector
         formatAlert.addButton(withTitle: "Экспорт")
         formatAlert.addButton(withTitle: "Отмена")
-        guard formatAlert.runModal() == .alertFirstButtonReturn else { return }
+        presentAlertSheet(formatAlert, for: self.window) { [weak self] resp in
+            guard let self, resp == .alertFirstButtonReturn else { return }
 
-        let selected = formatSelector.indexOfSelectedItem
-        let exportFormat = selected == 1 ? "ndjson" : "md"
-        let ipcClient = self.ipcClient
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard
-                let response = try? ipcClient.call(
-                    method: "call_assist_timeline_export",
-                    params: [
-                        "format": exportFormat,
-                        "limit": 400,
-                    ]
-                ),
-                let result = response["result"] as? [String: Any]
-            else {
-                DispatchQueue.main.async {
-                    self?.appendCallAssistOutput(title: "Timeline export", body: "Не удалось выгрузить timeline.")
-                }
-                return
-            }
-            let content = (result["content"] as? String) ?? ""
-            if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                DispatchQueue.main.async {
-                    self?.appendCallAssistOutput(title: "Timeline export", body: "Timeline пуст, экспортировать нечего.")
-                }
-                return
-            }
-            // NSSavePanel + file write — должны идти на main (NSSavePanel требует main).
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                let savePanel = NSSavePanel()
-                let formatter = DateFormatter()
-                formatter.dateFormat = "yyyyMMdd_HHmmss"
-                let suffix = exportFormat == "ndjson" ? "ndjson" : "md"
-                savePanel.nameFieldStringValue = "krab_call_timeline_\(formatter.string(from: Date())).\(suffix)"
-                savePanel.canCreateDirectories = true
-                if savePanel.runModal() != .OK {
+            let selected = formatSelector.indexOfSelectedItem
+            let exportFormat = selected == 1 ? "ndjson" : "md"
+            let ipcClient = self.ipcClient
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard
+                    let response = try? ipcClient.call(
+                        method: "call_assist_timeline_export",
+                        params: [
+                            "format": exportFormat,
+                            "limit": 400,
+                        ]
+                    ),
+                    let result = response["result"] as? [String: Any]
+                else {
+                    DispatchQueue.main.async {
+                        self?.appendCallAssistOutput(title: "Timeline export", body: "Не удалось выгрузить timeline.")
+                    }
                     return
                 }
-                guard let url = savePanel.url else { return }
-                do {
-                    try content.write(to: url, atomically: true, encoding: .utf8)
-                    self.appendCallAssistOutput(title: "Timeline export", body: "Сохранено: \(url.path)")
-                } catch {
-                    self.appendCallAssistOutput(title: "Timeline export", body: "Ошибка записи файла: \(error.localizedDescription)")
+                let content = (result["content"] as? String) ?? ""
+                if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    DispatchQueue.main.async {
+                        self?.appendCallAssistOutput(title: "Timeline export", body: "Timeline пуст, экспортировать нечего.")
+                    }
+                    return
+                }
+                // NSSavePanel + file write — должны идти на main (NSSavePanel требует main).
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    let savePanel = NSSavePanel()
+                    let formatter = DateFormatter()
+                    formatter.dateFormat = "yyyyMMdd_HHmmss"
+                    let suffix = exportFormat == "ndjson" ? "ndjson" : "md"
+                    savePanel.nameFieldStringValue = "krab_call_timeline_\(formatter.string(from: Date())).\(suffix)"
+                    savePanel.canCreateDirectories = true
+                    presentPanelSheet(savePanel, for: self.window) { [weak self] resp in
+                        guard let self, resp == .OK, let url = savePanel.url else { return }
+                        do {
+                            try content.write(to: url, atomically: true, encoding: .utf8)
+                            self.appendCallAssistOutput(title: "Timeline export", body: "Сохранено: \(url.path)")
+                        } catch {
+                            self.appendCallAssistOutput(title: "Timeline export", body: "Ошибка записи файла: \(error.localizedDescription)")
+                        }
+                    }
                 }
             }
         }

@@ -2131,7 +2131,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         Страница истории: определяет, сколько записей подгружать на один шаг.
         """
         alert.addButton(withTitle: "OK")
-        alert.runModal()
+        presentAlertSheet(alert, for: self.window) { _ in }
     }
 
     @objc private func onToggleRecordFromPanel() {
@@ -2183,12 +2183,13 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         alert.accessoryView = stack
         alert.addButton(withTitle: "Сохранить")
         alert.addButton(withTitle: "Отмена")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        presentAlertSheet(alert, for: self.window) { [weak self] resp in
+        guard let self, resp == .alertFirstButtonReturn else { return }
 
         let source = sourceField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let target = targetField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !source.isEmpty, !target.isEmpty else {
-            showInfoAlert(title: "Глоссарий", body: "Поля не должны быть пустыми.")
+            self.showInfoAlert(title: "Глоссарий", body: "Поля не должны быть пустыми.")
             return
         }
 
@@ -2213,6 +2214,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
                 self.syncSettingsControls()
             }
         }
+        }  // закрывает completion presentAlertSheet
     }
 
     @objc private func onRemoveGlossaryTerm() {
@@ -2224,11 +2226,12 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         alert.accessoryView = sourceField
         alert.addButton(withTitle: "Удалить")
         alert.addButton(withTitle: "Отмена")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        presentAlertSheet(alert, for: self.window) { [weak self] resp in
+        guard let self, resp == .alertFirstButtonReturn else { return }
 
         let source = sourceField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !source.isEmpty else {
-            showInfoAlert(title: "Глоссарий", body: "Нужно указать термин.")
+            self.showInfoAlert(title: "Глоссарий", body: "Нужно указать термин.")
             return
         }
 
@@ -2253,6 +2256,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
                 self.syncSettingsControls()
             }
         }
+        }  // закрывает completion presentAlertSheet
     }
 
     @objc private func onExportGlossary() {
@@ -2272,7 +2276,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
                 panel.nameFieldStringValue = "krab-ear-glossary.csv"
                 panel.allowedContentTypes = [.commaSeparatedText]
                 panel.title = "Сохранить глоссарий"
-                if panel.runModal() == .OK, let url = panel.url {
+                presentPanelSheet(panel, for: self.window) { resp in
+                    guard resp == .OK, let url = panel.url else { return }
                     do {
                         try csv.write(to: url, atomically: true, encoding: .utf8)
                     } catch {
@@ -2288,24 +2293,27 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         panel.allowedContentTypes = [.commaSeparatedText]
         panel.title = "Загрузить глоссарий из CSV"
         panel.message = "Файл должен содержать заголовок source,target"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        guard let csv = try? String(contentsOf: url, encoding: .utf8) else {
-            showInfoAlert(title: "Импорт глоссария", body: "Не удалось прочитать файл.")
-            return
+        presentPanelSheet(panel, for: self.window) { [weak self] resp in
+            guard let self, resp == .OK, let url = panel.url else { return }
+            guard let csv = try? String(contentsOf: url, encoding: .utf8) else {
+                self.showInfoAlert(title: "Импорт глоссария", body: "Не удалось прочитать файл.")
+                return
+            }
+
+            // Предложить режим: merge или replace
+            let modeAlert = NSAlert()
+            modeAlert.messageText = "Режим импорта"
+            modeAlert.informativeText = "Merge — добавить/обновить термины; Replace — полностью заменить глоссарий."
+            modeAlert.addButton(withTitle: "Merge")
+            modeAlert.addButton(withTitle: "Replace")
+            modeAlert.addButton(withTitle: "Отмена")
+            // Второй sheet показываем из completion первого (панель уже закрыта).
+            presentAlertSheet(modeAlert, for: self.window) { modeResp in
+                guard let modeResp, modeResp != .alertThirdButtonReturn else { return }
+                let mode = modeResp == .alertFirstButtonReturn ? "merge" : "replace"
+                self.performGlossaryImport(csv: csv, mode: mode, onConflict: "skip")
+            }
         }
-
-        // Предложить режим: merge или replace
-        let modeAlert = NSAlert()
-        modeAlert.messageText = "Режим импорта"
-        modeAlert.informativeText = "Merge — добавить/обновить термины; Replace — полностью заменить глоссарий."
-        modeAlert.addButton(withTitle: "Merge")
-        modeAlert.addButton(withTitle: "Replace")
-        modeAlert.addButton(withTitle: "Отмена")
-        let modeResp = modeAlert.runModal()
-        guard modeResp != .alertThirdButtonReturn else { return }
-        let mode = modeResp == .alertFirstButtonReturn ? "merge" : "replace"
-
-        performGlossaryImport(csv: csv, mode: mode, onConflict: "skip")
     }
 
     /// Выполняет IPC-вызов import_glossary_csv и обрабатывает конфликты.
@@ -2349,23 +2357,25 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
                         + "\n\nПерезаписать существующие записи?"
                     conflictAlert.addButton(withTitle: "Перезаписать")
                     conflictAlert.addButton(withTitle: "Сохранить существующие")
-                    let resp = conflictAlert.runModal()
-                    if resp == .alertFirstButtonReturn {
-                        self.performGlossaryImport(csv: csv, mode: mode, onConflict: "overwrite")
-                        return
+                    presentAlertSheet(conflictAlert, for: self.window) { resp in
+                        if resp == .alertFirstButtonReturn {
+                            self.performGlossaryImport(csv: csv, mode: mode, onConflict: "overwrite")
+                            return  // syncSettingsControls сделает рекурсивный вызов
+                        }
+                        // User chose to keep existing — show final summary
+                        self.showInfoAlert(
+                            title: "Импорт глоссария",
+                            body: "Импортировано: \(imported), конфликтов пропущено: \(conflictCount), пропущено строк: \(skipped), итого: \(total)."
+                        )
+                        self.syncSettingsControls()
                     }
-                    // User chose to keep existing — show final summary
-                    self.showInfoAlert(
-                        title: "Импорт глоссария",
-                        body: "Импортировано: \(imported), конфликтов пропущено: \(conflictCount), пропущено строк: \(skipped), итого: \(total)."
-                    )
                 } else {
                     self.showInfoAlert(
                         title: "Импорт глоссария",
                         body: "Импортировано: \(imported), пропущено: \(skipped), итого в глоссарии: \(total)."
                     )
+                    self.syncSettingsControls()
                 }
-                self.syncSettingsControls()
             }
         }
     }

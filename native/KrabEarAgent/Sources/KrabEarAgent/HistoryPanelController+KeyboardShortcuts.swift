@@ -91,11 +91,7 @@ extension HistoryPanelController {
         alert.informativeText = HistoryPanelController.keyboardShortcutsHelpText()
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
-        if let window = self.window {
-            alert.beginSheetModal(for: window, completionHandler: nil)
-        } else {
-            alert.runModal()
-        }
+        presentAlertSheet(alert, for: self.window) { _ in }
     }
 
     /// Pure helper — список shortcuts как текст для alert / docs / тестов.
