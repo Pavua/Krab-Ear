@@ -17,6 +17,7 @@ NB (W1775): прежде конструктор принимал `auto_end: Call
 from __future__ import annotations
 
 import logging
+import math
 import time
 from typing import Any, Callable, Optional
 
@@ -260,7 +261,9 @@ class CallSessionService:
         if not session_id:
             raise ValueError("Параметр 'id' обязателен")
         reason = str(params.get("reason") or "completed").strip()
-        cost_usd = float(params.get("cost_usd") or 0.0)
+        # wave-1770 LOW: NaN/Inf cost_usd serializes to JSON NaN → Swift crash.
+        _raw_cost = float(params.get("cost_usd") or 0.0)
+        cost_usd = _raw_cost if math.isfinite(_raw_cost) and _raw_cost >= 0 else 0.0
         failed = bool(params.get("failed", False))
 
         try:

@@ -59,6 +59,9 @@ _RANGE_FIELDS: dict[str, tuple[Any, Any, Any, type]] = {
     # wave-1770 MED: rt_silence_max_sec was missing from _RANGE_FIELDS — NaN/Inf
     # caused silence detection to permanently suppress or behave unpredictably.
     "rt_silence_max_sec": (0.5, 60.0, 8.0, float),
+    # wave-1770 MED: llm_probe_interval_sec missing from _RANGE_FIELDS — setting it
+    # to 999999 via IPC would delay LM Studio crash detection for days.
+    "llm_probe_interval_sec": (1.0, 300.0, 30.0, float),
 }
 
 # Bool-поля с дефолтными значениями

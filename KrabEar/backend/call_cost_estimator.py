@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 logger = logging.getLogger("KrabEar.Backend.CallCostEstimator")
@@ -180,7 +181,10 @@ class CallCostEstimator:
         """
         provider = str(params.get("provider", "telnyx")).strip()
         destination = str(params.get("destination", "us")).strip()
-        duration_sec = float(params.get("duration_sec", 0))
+        # wave-1770 HIGH: NaN/Inf duration propagates to running_cost_usd → JSON NaN →
+        # Swift Decodable crash. Guard here before any arithmetic.
+        _raw_dur = float(params.get("duration_sec", 0))
+        duration_sec = _raw_dur if math.isfinite(_raw_dur) and _raw_dur >= 0 else 0.0
 
         minute_rate = self.estimate_minute_cost(provider, destination)
         hourly_rate = minute_rate * 60.0
