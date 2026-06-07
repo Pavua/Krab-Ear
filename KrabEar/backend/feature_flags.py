@@ -222,12 +222,16 @@ class FeatureFlags:
 
     def handle_get_feature_flags(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_feature_flags → список всех флагов с подробностями."""
+        # wave-1770 (Antigravity): snapshot under lock — iterating self._flags directly
+        # raised RuntimeError "dictionary changed size during iteration" if set_flag
+        # added a flag concurrently. list_flags() returns a locked copy.
+        flags_snapshot = self.list_flags()
         flags_list = []
-        for name in self._flags:
+        for name in flags_snapshot:
             try:
                 info = self.get_flag_info(name)
             except KeyError:
-                info = {"name": name, "enabled": self._flags[name], "description": "", "since_version": "unknown", "is_builtin": False}
+                info = {"name": name, "enabled": flags_snapshot[name], "description": "", "since_version": "unknown", "is_builtin": False}
             flags_list.append(info)
         return {
             "flags": flags_list,
