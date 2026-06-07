@@ -93,6 +93,13 @@ final class AgentLogger: @unchecked Sendable {
     /// Количество хранимых резервных копий после ротации.
     private let backupCount: Int = 3
 
+    /// URL N-й резервной копии. Стандартная конвенция (как Python
+    /// RotatingFileHandler): индекс добавляется в конец ПОЛНОГО имени —
+    /// `agent.log.1`, `agent.log.2`, … — а НЕ перед расширением (`agent.1.log`).
+    private func rotatedURL(_ index: Int) -> URL {
+        URL(fileURLWithPath: "\(fileURL.path).\(index)")
+    }
+
     /// Ротирует лог, если его размер превышает maxBytes.
     /// Должна вызываться только внутри serial queue.
     private func rotateIfNeeded() {
@@ -104,13 +111,10 @@ final class AgentLogger: @unchecked Sendable {
         try? handle?.close()
         handle = nil
 
-        let base = fileURL.deletingPathExtension()
-        let ext  = fileURL.pathExtension.isEmpty ? "" : ".\(fileURL.pathExtension)"
-
         // Сдвигаем .1→.2, .2→.3 … и удаляем самый старый.
         for i in stride(from: backupCount - 1, through: 1, by: -1) {
-            let src  = URL(fileURLWithPath: "\(base.path).\(i)\(ext)")
-            let dest = URL(fileURLWithPath: "\(base.path).\(i + 1)\(ext)")
+            let src  = rotatedURL(i)
+            let dest = rotatedURL(i + 1)
             if FileManager.default.fileExists(atPath: dest.path) {
                 try? FileManager.default.removeItem(at: dest)
             }
@@ -118,8 +122,8 @@ final class AgentLogger: @unchecked Sendable {
                 try? FileManager.default.moveItem(at: src, to: dest)
             }
         }
-        // .log → .1.log
-        let rotated = URL(fileURLWithPath: "\(base.path).1\(ext)")
+        // agent.log → agent.log.1
+        let rotated = rotatedURL(1)
         if FileManager.default.fileExists(atPath: rotated.path) {
             try? FileManager.default.removeItem(at: rotated)
         }
@@ -127,6 +131,33 @@ final class AgentLogger: @unchecked Sendable {
 
         // Пересоздаём основной файл и открываем хэндл.
         openHandle()
+    }
+
+    /// Переоткрывает хэндл, если файл по пути был удалён или подменён извне.
+    ///
+    /// На Unix `unlink()` файла с открытым fd НЕ ломает последующие записи —
+    /// они тихо уходят в осиротевший (anonymous) inode, который жив пока fd
+    /// открыт. Поэтому стратегия reopen-on-write-error не ловит удаление файла:
+    /// `write()` не падает, catch-ветка не срабатывает, `agent.log` не
+    /// пересоздаётся. Здесь явно сверяем inode пути с inode нашего дескриптора;
+    /// при расхождении (или отсутствии файла) переоткрываем — что воссоздаёт файл.
+    /// Должна вызываться только внутри serial queue.
+    private func reopenIfStale() {
+        guard let h = self.handle else { return }
+        // Два лёгких syscall'а (без аллокации NSDictionary через attributesOfItem):
+        // lstat по пути + fstat по дескриптору. lstat (не stat) — чтобы не ловить
+        // конфликт имён со структурой `stat` в Swift/Darwin; для не-симлинка ≡ stat.
+        var pathStat = stat()
+        let pathOK = lstat(fileURL.path, &pathStat) == 0       // false — файл удалён
+        var fdStat = stat()
+        let fdOK = fstat(h.fileDescriptor, &fdStat) == 0
+
+        if !pathOK || !fdOK || pathStat.st_ino != fdStat.st_ino {
+            // Путь указывает на другой inode (или исчез) → наш хэндл устарел.
+            try? h.close()
+            self.handle = nil
+            self.openHandle()
+        }
     }
 
     /// Форматирует и пишет строку лога. Вызывает reopen + одну повторную попытку при сбое.
@@ -140,6 +171,9 @@ final class AgentLogger: @unchecked Sendable {
             if self.handle == nil {
                 self.openHandle()
             }
+
+            // Детект внешнего удаления/подмены файла (stale handle на Unix).
+            self.reopenIfStale()
 
             // Проверяем размер перед записью и ротируем при необходимости.
             self.rotateIfNeeded()
