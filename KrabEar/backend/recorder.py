@@ -52,6 +52,14 @@ class AudioRecorder:
         self._device: "int | str | None" = device
 
         self._lock = threading.Lock()
+        # wave-1770 MED (race): _lock is the DATA lock (protects _chunks/_is_recording)
+        # and is released before stop()'s join() — the worker needs it to append chunks,
+        # so holding it across join() would deadlock. That release window let a concurrent
+        # start() slip in: it would see _is_recording=False, spawn a new worker, then the
+        # still-running stop() would set _stop_event (killing the new recording) and null
+        # the new _thread handle. _lifecycle_lock serialises start()/stop() AS WHOLE
+        # operations; the worker never touches it, so holding it across join() is safe.
+        self._lifecycle_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._chunks: list[np.ndarray] = []
@@ -71,18 +79,21 @@ class AudioRecorder:
 
     def start(self) -> bool:
         """Запускает запись, если рекордер сейчас в idle состоянии."""
-        with self._lock:
-            if self._is_recording:
-                return False
-            self._chunks = []
-            self._chunks_total_samples = 0
-            self._stop_event.clear()
-            self._is_recording = True
-            self._started_at = time.monotonic()
-            self._pending_result = None  # W1670: сброс результата предыдущей авто-остановки
-            self._thread = threading.Thread(target=self._worker, daemon=True)
-            self._thread.start()
-            return True
+        # wave-1770 MED: serialise the whole start against a concurrent stop() so the
+        # data-lock release window inside stop() cannot interleave with a new start.
+        with self._lifecycle_lock:
+            with self._lock:
+                if self._is_recording:
+                    return False
+                self._chunks = []
+                self._chunks_total_samples = 0
+                self._stop_event.clear()
+                self._is_recording = True
+                self._started_at = time.monotonic()
+                self._pending_result = None  # W1670: сброс результата предыдущей авто-остановки
+                self._thread = threading.Thread(target=self._worker, daemon=True)
+                self._thread.start()
+                return True
 
     def stop(self, timeout_sec: float = 3.0, trim_tail_ms: int = 0) -> tuple[np.ndarray, float] | None:
         """Останавливает запись и возвращает (audio, duration).
@@ -91,27 +102,31 @@ class AudioRecorder:
         возвращает накопленный аудио-буфер из _pending_result вместо None.
         Это предотвращает потерю до ~880 МБ аудио при превышении лимита длительности.
         """
-        with self._lock:
-            if not self._is_recording:
-                # W1670: авто-остановка уже сработала — вернуть сохранённый результат
-                pending = self._pending_result
-                if pending is not None:
-                    self._pending_result = None
-                    return pending
-                return None
-            self._is_recording = False
-            thread = self._thread
+        # wave-1770 MED: hold _lifecycle_lock across the ENTIRE stop (incl. join) so a
+        # concurrent start() cannot spawn a new worker during the data-lock release window.
+        # The worker uses _lock (data), never _lifecycle_lock → join() here can't deadlock.
+        with self._lifecycle_lock:
+            with self._lock:
+                if not self._is_recording:
+                    # W1670: авто-остановка уже сработала — вернуть сохранённый результат
+                    pending = self._pending_result
+                    if pending is not None:
+                        self._pending_result = None
+                        return pending
+                    return None
+                self._is_recording = False
+                thread = self._thread
 
-        self._stop_event.set()
-        if thread is not None:
-            thread.join(timeout=timeout_sec)
+            self._stop_event.set()
+            if thread is not None:
+                thread.join(timeout=timeout_sec)
 
-        with self._lock:
-            duration = max(0.0, time.monotonic() - self._started_at)
-            chunks = list(self._chunks)
-            self._chunks = []
-            self._chunks_total_samples = 0
-            self._thread = None
+            with self._lock:
+                duration = max(0.0, time.monotonic() - self._started_at)
+                chunks = list(self._chunks)
+                self._chunks = []
+                self._chunks_total_samples = 0
+                self._thread = None
 
         if not chunks:
             return np.array([], dtype=np.float32), duration

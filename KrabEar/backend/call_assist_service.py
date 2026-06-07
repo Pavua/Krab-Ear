@@ -652,9 +652,12 @@ class CallAssistService:
         limit = int(params.get("limit", 30) or 30)
         limit = max(1, min(limit, 200))
 
+        # wave-1770: URL-encode params (same pattern as handle_timeline lines 827-863).
+        # Without quote(), a value like "ru&admin=1" injects extra query params.
         query = (
-            f"/v1/quick-phrases?source_lang={source_lang}"
-            f"&target_lang={target_lang}&category={category}&limit={limit}"
+            f"/v1/quick-phrases?source_lang={urllib_parse.quote(source_lang, safe='')}"
+            f"&target_lang={urllib_parse.quote(target_lang, safe='')}"
+            f"&category={urllib_parse.quote(category, safe='')}&limit={limit}"
         )
         result = self.gateway.get(
             voice_gateway_url=voice_gateway_url,
@@ -902,6 +905,10 @@ class CallAssistService:
         return payload if isinstance(payload, dict) else {"ok": True, "stats": {"count": 0}}
 
     def handle_timeline_summary(self, params: dict[str, Any]) -> dict[str, Any]:
+        # wave-1770: privacy gate — sibling handle_summary/handle_timeline gate (wave-31 C2),
+        # but the timeline_* variants were missed. Summary contains conversation transcript.
+        if self._settings_get("privacy_mode_enabled", False):
+            return {"ok": True, "summary": "", "tasks": [], "privacy_mode_active": True}
         gw_url, gw_key, gw_sid = self._gateway_context("timeline summary")
         limit = int(params.get("limit", 400) or 400)
         limit = max(1, min(limit, 5000))
@@ -915,6 +922,9 @@ class CallAssistService:
         return payload if isinstance(payload, dict) else {"ok": True, "summary": "", "tasks": []}
 
     def handle_timeline_export(self, params: dict[str, Any]) -> dict[str, Any]:
+        # wave-1770: privacy gate — export returns the FULL conversation log.
+        if self._settings_get("privacy_mode_enabled", False):
+            return {"ok": True, "format": "md", "content": "", "privacy_mode_active": True}
         gw_url, gw_key, gw_sid = self._gateway_context("timeline export")
         export_format = str(params.get("format", "md")).strip().lower() or "md"
         if export_format not in {"md", "ndjson"}:
@@ -941,6 +951,10 @@ class CallAssistService:
 
     def handle_timeline_to_history(self, params: dict[str, Any]) -> dict[str, Any]:
         """Сохраняет экспорт timeline в историю Krab Ear."""
+        # wave-1770: privacy gate — persists the full conversation transcript to history.
+        # Must block in privacy mode (most sensitive of the three — writes to disk).
+        if self._settings_get("privacy_mode_enabled", False):
+            return {"ok": False, "privacy_mode_active": True, "history_id": None}
         gw_url, gw_key, gw_sid = self._gateway_context("сохранения timeline")
 
         export_format = str(params.get("format", "md")).strip().lower() or "md"
@@ -1104,11 +1118,9 @@ class CallAssistService:
                 text = self._extract_text(preview_payload)
 
                 if text and text != last_sent_text:
-                    logger.debug(
-                        "Call Assist: sending text len=%d preview=%r",
-                        len(text),
-                        text[:30],
-                    )
+                    # wave-1770: do NOT log transcript preview — call text is PII even at
+                    # DEBUG. Log length only (enough for diagnostics, no content leak).
+                    logger.debug("Call Assist: sending text len=%d", len(text))
 
                     with self._lock:
                         self._pending_post_count += 1
