@@ -329,5 +329,38 @@ class TestAuditLoggerRotationPermissionError(unittest.TestCase):
         self.assertIsNone(self.logger._file_handle)
 
 
+class TestAuditLoggerWriteErrorRecoveryW1770(unittest.TestCase):
+    """wave-1770: на ошибке записи дескриптор сбрасывается, чтобы не спамить
+    стектрейсами на каждом последующем вызове и переоткрыться при восстановлении ФС."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.logger = AuditLogger(data_dir=self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_write_error_resets_handle_for_reopen(self):
+        from unittest.mock import MagicMock
+        # Первая запись открывает дескриптор.
+        self.logger.log_request("m1", {}, {"ok": True}, 1.0)
+        self.assertIsNotNone(self.logger._file_handle)
+
+        # Подменяем дескриптор на «битый» — write бросает (имитация disk full).
+        broken = MagicMock()
+        broken.write.side_effect = OSError("No space left on device")
+        self.logger._file_handle = broken
+
+        # Запись не падает (исключение проглатывается)...
+        self.logger.log_request("m2", {}, {"ok": True}, 1.0)
+        # ...и дескриптор сброшен + дата очищена → следующая запись переоткроет файл.
+        self.assertIsNone(self.logger._file_handle)
+        self.assertEqual(self.logger._current_date, "")
+
+        # Следующая запись успешно переоткрывает файл (ФС «восстановилась»).
+        self.logger.log_request("m3", {}, {"ok": True}, 1.0)
+        self.assertIsNotNone(self.logger._file_handle)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -166,6 +166,16 @@ class AuditLogger:
                     self._file_handle.flush()
             except Exception:
                 logger.exception("Ошибка записи в audit log")
+                # wave-1770: на ошибке записи (disk full / FS error) дескриптор остаётся
+                # «битым» — без сброса каждый следующий вызов снова падает, забивая лог
+                # стектрейсами. Закрываем + обнуляем, чтобы _rotate_if_needed переоткрыл
+                # файл на следующей записи (диск мог освободиться).
+                try:
+                    self._file_handle.close()
+                except Exception:
+                    pass
+                self._file_handle = None
+                self._current_date = ""  # forces _rotate_if_needed to re-open next write
 
             now = time.monotonic()
             if now - self._last_cleanup_ts >= self._CLEANUP_INTERVAL_S:
