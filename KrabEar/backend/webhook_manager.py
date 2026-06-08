@@ -428,6 +428,33 @@ class WebhookManager:
         except Exception as exc:
             logger.warning("WebhookManager: не удалось загрузить %s: %s", self._webhooks_path, exc)
             self._webhooks = {}
+        else:
+            self._sanitize_loaded_allow_local()
+
+    def _sanitize_loaded_allow_local(self) -> None:
+        """Не доверяем персистированному ``allow_local`` (SSRF defence-in-depth).
+
+        ``allow_local`` НИКОГДА не выставляется через IPC (`handle_register_webhook`
+        жёстко передаёт False) — единственный путь True это прямой Python-вызов в dev.
+        Подложенная/затампленная ``webhooks.json`` запись с ``allow_local: true`` +
+        внутренним URL обошла бы весь SSRF-pinning на fire-time. Поэтому при загрузке
+        с диска: если URL небезопасен по non-local правилам, снимаем allow_local —
+        fire-time SSRF guard снова заблокирует внутренний адрес. Публичные URL (где
+        allow_local и так безвреден) не затрагиваются.
+        """
+        if not isinstance(self._webhooks, dict):
+            return
+        for wid, cfg in self._webhooks.items():
+            if not isinstance(cfg, dict) or not cfg.get("allow_local"):
+                continue
+            url = cfg.get("url", "")
+            safe, _reason = _is_safe_webhook_url(url, allow_local=False)
+            if not safe:
+                cfg["allow_local"] = False
+                logger.warning(
+                    "WebhookManager: stripped persisted allow_local=True for webhook %s "
+                    "(url not safe under non-local rules; SSRF guard re-engaged)", wid
+                )
 
     def _save(self) -> None:
         """Атомарно сохраняет реестр в файл (под _lock), chmod 0600.

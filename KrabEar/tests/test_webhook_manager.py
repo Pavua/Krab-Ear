@@ -771,5 +771,61 @@ class WebhookManagerSecretLengthW1770TestCase(unittest.TestCase):
             })
 
 
+class LoadAllowLocalSanitizeTestCase(unittest.TestCase):
+    """Persisted allow_local=True with an internal URL must be stripped on load (SSRF)."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+
+    def _write_registry(self, registry: dict) -> None:
+        import json
+        (Path(self._tmpdir) / "webhooks.json").write_text(
+            json.dumps(registry), encoding="utf-8"
+        )
+
+    def test_tampered_internal_allow_local_is_stripped(self) -> None:
+        """A planted allow_local=True + 127.0.0.1 entry loads with allow_local forced False."""
+        self._write_registry({
+            "tampered": {
+                "url": "http://127.0.0.1:5005/admin",
+                "events": [],
+                "secret": "",
+                "enabled": True,
+                "allow_local": True,
+            }
+        })
+        mgr = _make_manager(self._tmpdir)  # __init__ → _load → _sanitize
+        self.assertFalse(mgr._webhooks["tampered"]["allow_local"])
+
+    def test_public_url_keeps_allow_local_flag(self) -> None:
+        """A public-URL entry with allow_local=True is harmless and not over-stripped."""
+        self._write_registry({
+            "public": {
+                "url": "https://example.com/hook",
+                "events": [],
+                "secret": "",
+                "enabled": True,
+                "allow_local": True,
+            }
+        })
+        mgr = _make_manager(self._tmpdir)
+        # Public URL passes _is_safe_webhook_url(allow_local=False) → flag preserved.
+        self.assertTrue(mgr._webhooks["public"]["allow_local"])
+
+    def test_normal_ipc_entry_untouched(self) -> None:
+        """allow_local=False entries (the IPC norm) are left exactly as-is."""
+        self._write_registry({
+            "normal": {
+                "url": "http://127.0.0.1/x",
+                "events": [],
+                "secret": "",
+                "enabled": True,
+                "allow_local": False,
+            }
+        })
+        mgr = _make_manager(self._tmpdir)
+        self.assertFalse(mgr._webhooks["normal"]["allow_local"])
+
+
 if __name__ == "__main__":
     unittest.main()
