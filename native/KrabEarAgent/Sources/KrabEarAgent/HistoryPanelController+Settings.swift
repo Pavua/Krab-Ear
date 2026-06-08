@@ -496,6 +496,10 @@ extension HistoryPanelController {
             clipboardModeSelector.selectItem(at: 0)
         }
         audioDuckingButton.state = settings.audioDuckingEnabled ? .on : .off
+        audioDuckingSlider.isEnabled = settings.audioDuckingEnabled
+        let duckingAlpha = settings.audioDuckingEnabled ? 1.0 : KrabEarTheme.Interaction.disabledOpacity
+        audioDuckingSlider.alphaValue = duckingAlpha
+        audioDuckingValueLabel.alphaValue = duckingAlpha
         let safeDuckPercent = max(0, min(settings.audioDuckingPercent, 100))
         audioDuckingSlider.doubleValue = Double(safeDuckPercent)
         audioDuckingValueLabel.stringValue = "\(safeDuckPercent)%"
@@ -531,6 +535,7 @@ extension HistoryPanelController {
         }
         fetchAndPopulateLLMModels(currentModel: currentModel)
         llmModelSelector.isEnabled = settings.llmRewriteEnabled
+        llmModelSelector.alphaValue = settings.llmRewriteEnabled ? 1.0 : KrabEarTheme.Interaction.disabledOpacity
         glossaryStatusLabel.stringValue = "Глоссарий: \(settings.translationGlossary.count)"
         // Reload glossary search list with current filter query.
         reloadGlossaryList(
@@ -669,14 +674,58 @@ extension HistoryPanelController {
 
     /// Лейбл-бейдж: малый текст, цвет из KrabEarTheme, опциональный тултип.
     @MainActor
-    private func makeBadge(text: String, color: NSColor, tooltip: String? = nil) -> NSTextField {
-        let badge = NSTextField(labelWithString: text)
-        badge.font = KrabEarTheme.Typography.captionMedium
-        badge.textColor = color
-        if let tooltip {
-            badge.toolTip = tooltip
+    func makeBadge(text: String, color: NSColor, tooltip: String? = nil, symbol: String? = nil) -> NSView {
+        let container = NSView()
+        container.wantsLayer = true
+        container.layer?.cornerRadius = 8
+        container.layer?.backgroundColor = color.withAlphaComponent(0.15).cgColor
+        
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.spacing = 4
+        stack.alignment = .centerY
+        
+        if let symbol = symbol, let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) {
+            let imageView = NSImageView(image: image)
+            imageView.contentTintColor = color
+            imageView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .medium)
+            stack.addArrangedSubview(imageView)
         }
-        return badge
+        
+        let label = NSTextField(labelWithString: text)
+        label.font = KrabEarTheme.Typography.captionMedium.tabular()
+        label.textColor = color
+        label.isEditable = false
+        label.isBordered = false
+        label.drawsBackground = false
+        stack.addArrangedSubview(label)
+        
+        container.addSubview(stack)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: container.topAnchor, constant: 2),
+            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -2),
+            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 6),
+            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -6)
+        ])
+        
+        if let tooltip = tooltip {
+            container.toolTip = tooltip
+        }
+        
+        return container
+    }
+
+    /// Тонкий подзаголовок для группировки внутри карточки.
+    @MainActor
+    func makeSubhead(_ title: String) -> NSTextField {
+        let label = NSTextField(labelWithString: title)
+        label.font = KrabEarTheme.Typography.captionMedium
+        label.textColor = KrabEarTheme.Colors.textSecondary
+        label.isEditable = false
+        label.isBordered = false
+        label.drawsBackground = false
+        return label
     }
 
     /// Строка с NSButton.switch в стиле Liquid Glass + лейбл + опциональный badge.
@@ -704,7 +753,8 @@ extension HistoryPanelController {
         let section = CollapsibleSectionView(
             sectionId: "dictation_audio_pipeline",
             title: "Аудио-пайплайн",
-            isExpanded: true
+            isExpanded: true,
+            iconSymbol: "waveform"
         )
 
         let card = ThemeCardView()
@@ -720,9 +770,10 @@ extension HistoryPanelController {
         )
 
         let gpuCrashBadge = makeBadge(
-            text: "⚠ бета",
+            text: "бета",
             color: KrabEarTheme.Colors.warning, // предупреждение, не ошибка — orange через токен
-            tooltip: "Может вызывать сбой GPU на Apple Silicon. Отключите при нестабильной работе."
+            tooltip: "Может вызывать сбой GPU на Apple Silicon. Отключите при нестабильной работе.",
+            symbol: "exclamationmark.triangle.fill"
         )
 
         let diarSubCaption = NSTextField(labelWithString:
@@ -830,7 +881,8 @@ extension HistoryPanelController {
         let section = CollapsibleSectionView(
             sectionId: "live_translation_settings",
             title: "Настройки перевода",
-            isExpanded: true
+            isExpanded: true,
+            iconSymbol: "globe"
         )
         let card = ThemeCardView()
 
@@ -877,7 +929,8 @@ extension HistoryPanelController {
         let section = CollapsibleSectionView(
             sectionId: "dictation_llm",
             title: "LLM постобработка",
-            isExpanded: false
+            isExpanded: false,
+            iconSymbol: "brain"
         )
         let card = ThemeCardView()
 
@@ -888,7 +941,8 @@ extension HistoryPanelController {
         let llmBetaBadge = makeBadge(
             text: "бета",
             color: KrabEarTheme.Colors.warning,
-            tooltip: "LM Studio должен быть запущен локально с совместимой моделью."
+            tooltip: "LM Studio должен быть запущен локально с совместимой моделью.",
+            symbol: "exclamationmark.triangle.fill"
         )
         let llmToggleRow = makeSwitchRow(
             label: "LLM постобработка",
@@ -922,7 +976,8 @@ extension HistoryPanelController {
         let section = CollapsibleSectionView(
             sectionId: "dictation_hotkeys",
             title: "Горячие клавиши",
-            isExpanded: false
+            isExpanded: false,
+            iconSymbol: "keyboard"
         )
         let card = ThemeCardView()
 
@@ -979,7 +1034,8 @@ extension HistoryPanelController {
         let section = CollapsibleSectionView(
             sectionId: "dictation_system_settings",
             title: "Система",
-            isExpanded: false
+            isExpanded: false,
+            iconSymbol: "gearshape"
         )
         let card = ThemeCardView()
 
@@ -1006,6 +1062,7 @@ extension HistoryPanelController {
         duckSliderStack.orientation = .horizontal
         duckSliderStack.spacing = KrabEarTheme.Metrics.tight
         duckSliderStack.alignment = .centerY
+        audioDuckingValueLabel.font = KrabEarTheme.Typography.monospace.tabular()
         duckSliderStack.addArrangedSubview(audioDuckingSlider)
         duckSliderStack.addArrangedSubview(audioDuckingValueLabel)
         let duckRow = NSStackView()
@@ -1028,6 +1085,7 @@ extension HistoryPanelController {
         overlaySliderStack.orientation = .horizontal
         overlaySliderStack.spacing = KrabEarTheme.Metrics.tight
         overlaySliderStack.alignment = .centerY
+        overlayOpacityValueLabel.font = KrabEarTheme.Typography.monospace.tabular()
         overlaySliderStack.addArrangedSubview(overlayOpacitySlider)
         overlaySliderStack.addArrangedSubview(overlayOpacityValueLabel)
         let overlayRow = NSStackView()
@@ -1070,15 +1128,18 @@ extension HistoryPanelController {
             button: abToggle
         )
 
+        card.contentStackView.addArrangedSubview(makeSubhead("ЗВУК"))
         card.contentStackView.addArrangedSubview(duckingToggleRow)
         card.contentStackView.addArrangedSubview(duckRow)
         card.contentStackView.addArrangedSubview(makeSeparator())
+        card.contentStackView.addArrangedSubview(makeSubhead("ИНТЕРФЕЙС И ЗАПУСК"))
         card.contentStackView.addArrangedSubview(overlayRow)
         card.contentStackView.addArrangedSubview(makeSeparator())
         card.contentStackView.addArrangedSubview(autoStartRow)
         card.contentStackView.addArrangedSubview(makeSeparator())
         card.contentStackView.addArrangedSubview(dockRow)
         card.contentStackView.addArrangedSubview(makeSeparator())
+        card.contentStackView.addArrangedSubview(makeSubhead("ДИЗАЙН"))
         card.contentStackView.addArrangedSubview(abRow)
 
         section.contentStackView.addArrangedSubview(card)
@@ -1098,7 +1159,8 @@ extension HistoryPanelController {
         let section = CollapsibleSectionView(
             sectionId: "settings_voice_assistant",
             title: "Разговор с AI",
-            isExpanded: false
+            isExpanded: false,
+            iconSymbol: "sparkles"
         )
 
         let card = ThemeCardView()
@@ -1120,7 +1182,8 @@ extension HistoryPanelController {
         let wakePrivacyBadge = makeBadge(
             text: "приватность",
             color: KrabEarTheme.Colors.textSecondary,
-            tooltip: "Требует Porcupine AccessKey + .ppn файл «Краб» (Picovoice Console, free tier). По умолчанию выключен."
+            tooltip: "Требует Porcupine AccessKey + .ppn файл «Краб» (Picovoice Console, free tier). По умолчанию выключен.",
+            symbol: "lock.fill"
         )
         let wakeWordRow = makeSwitchRow(
             label: "Детектор пробуждения «Краб»",
@@ -1234,7 +1297,8 @@ extension HistoryPanelController {
         let section = CollapsibleSectionView(
             sectionId: "settings_quick_presets",
             title: "Пресеты записи",
-            isExpanded: true
+            isExpanded: true,
+            iconSymbol: "slider.horizontal.3"
         )
         let card = ThemeCardView()
         let buttonStack = NSStackView()
@@ -1276,7 +1340,8 @@ extension HistoryPanelController {
         let section = CollapsibleSectionView(
             sectionId: "settings_privacy_security",
             title: "Безопасность и приватность",
-            isExpanded: true
+            isExpanded: true,
+            iconSymbol: "shield"
         )
         let card = ThemeCardView()
 
@@ -1289,9 +1354,10 @@ extension HistoryPanelController {
         )
 
         let shieldBadge = makeBadge(
-            text: "🔒",
+            text: "приватность",
             color: KrabEarTheme.Colors.accent,
-            tooltip: "Данные не покидают устройство. LM Studio (127.0.0.1) по-прежнему доступен."
+            tooltip: "Данные не покидают устройство. LM Studio (127.0.0.1) по-прежнему доступен.",
+            symbol: "lock.fill"
         )
 
         let privacyRow = makeSwitchRow(

@@ -645,7 +645,7 @@ public class CollapsibleSectionView: NSView {
 
     public private(set) var isExpanded: Bool
 
-    public init(sectionId: String, title: String, isExpanded: Bool = true) {
+    public init(sectionId: String, title: String, isExpanded: Bool = true, iconSymbol: String? = nil) {
         self.sectionId = sectionId
         self.isExpanded = isExpanded
         super.init(frame: .zero)
@@ -655,14 +655,14 @@ public class CollapsibleSectionView: NSView {
             self.isExpanded = UserDefaults.standard.bool(forKey: key)
         }
 
-        setup(title: title)
+        setup(title: title, iconSymbol: iconSymbol)
     }
 
     public required init?(coder: NSCoder) {
         fatalError("init(coder:) not supported")
     }
 
-    private func setup(title: String) {
+    private func setup(title: String, iconSymbol: String?) {
         translatesAutoresizingMaskIntoConstraints = false
 
         disclosureButton.setButtonType(.pushOnPushOff)
@@ -715,6 +715,12 @@ public class CollapsibleSectionView: NSView {
         ])
 
         headerStack.addArrangedSubview(disclosureButton)
+        if let iconSymbol = iconSymbol, let image = NSImage(systemSymbolName: iconSymbol, accessibilityDescription: nil) {
+            let imageView = NSImageView(image: image)
+            imageView.contentTintColor = KrabEarTheme.Colors.textSecondary
+            imageView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+            headerStack.addArrangedSubview(imageView)
+        }
         headerStack.addArrangedSubview(titleLabel)
         headerStack.addArrangedSubview(NSView()) // spacer — makes full width clickable
 
