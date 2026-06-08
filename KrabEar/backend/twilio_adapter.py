@@ -162,7 +162,8 @@ class TwilioAdapter:
         url = f"{self._base_url()}{path}"
         try:
             resp = self._get_session().post(
-                url, data=payload, auth=self._auth(), timeout=10.0
+                url, data=payload, auth=self._auth(), timeout=10.0,
+                allow_redirects=False,
             )
             return self._handle_response(resp)
         except requests.exceptions.RequestException as exc:
@@ -174,7 +175,8 @@ class TwilioAdapter:
         url = f"{self._base_url()}{path}"
         try:
             resp = self._get_session().get(
-                url, params=params or {}, auth=self._auth(), timeout=10.0
+                url, params=params or {}, auth=self._auth(), timeout=10.0,
+                allow_redirects=False,
             )
             return self._handle_response(resp)
         except requests.exceptions.RequestException as exc:
@@ -326,6 +328,16 @@ class TwilioAdapter:
                 "ok": False,
                 "error": "invalid_phone_number",
                 "message": f"Номер '{to_number}' не соответствует формату E.164",
+            }
+
+        # `From` берётся из настроек (TWILIO_FROM_NUMBER через set_settings) и
+        # раньше форвардился в payload без проверки — зеркалим guard для to_number,
+        # иначе мусорный/адверсарный _from_number уходит в REST-запрос.
+        if not _is_valid_phone(self._from_number):
+            return {
+                "ok": False,
+                "error": "invalid_from_number",
+                "message": "TWILIO_FROM_NUMBER не соответствует формату E.164",
             }
 
         payload: Dict[str, Any] = {

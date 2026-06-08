@@ -151,7 +151,7 @@ class TelnyxAdapter:
         """POST запрос к Telnyx API. Возвращает {"ok": True/False, ...}."""
         url = f"{self._api_base}{path}"
         try:
-            resp = self._get_session().post(url, json=payload, timeout=10.0)
+            resp = self._get_session().post(url, json=payload, timeout=10.0, allow_redirects=False)
             return self._handle_response(resp)
         except requests.exceptions.RequestException as exc:
             logger.error("Telnyx POST %s network error: %s", path, exc)
@@ -161,7 +161,7 @@ class TelnyxAdapter:
         """GET запрос к Telnyx API."""
         url = f"{self._api_base}{path}"
         try:
-            resp = self._get_session().get(url, timeout=10.0)
+            resp = self._get_session().get(url, timeout=10.0, allow_redirects=False)
             return self._handle_response(resp)
         except requests.exceptions.RequestException as exc:
             logger.error("Telnyx GET %s network error: %s", path, exc)
@@ -171,7 +171,7 @@ class TelnyxAdapter:
         """DELETE запрос к Telnyx API."""
         url = f"{self._api_base}{path}"
         try:
-            resp = self._get_session().delete(url, timeout=10.0)
+            resp = self._get_session().delete(url, timeout=10.0, allow_redirects=False)
             return self._handle_response(resp)
         except requests.exceptions.RequestException as exc:
             logger.error("Telnyx DELETE %s network error: %s", path, exc)

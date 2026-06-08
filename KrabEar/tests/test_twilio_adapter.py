@@ -441,5 +441,46 @@ class ConcurrentDialTestCase(unittest.TestCase):
         self.assertIn(valid_sid, adapter._base_url())
 
 
+class RedirectAndFromNumberHardeningTestCase(unittest.TestCase):
+    """Audit hardening: block credential-leaking redirects + validate From number."""
+
+    def test_post_disables_redirects(self) -> None:
+        """_post must pass allow_redirects=False (Basic-Auth must not follow a redirect)."""
+        adapter = _make_adapter()
+        resp = _mock_response(201, json_data={"sid": "CA" + "0" * 32, "status": "queued"})
+        _set_mock_post(adapter, resp)
+        adapter.dial("+15551234567")
+        _, kwargs = adapter._session.post.call_args
+        self.assertIs(kwargs.get("allow_redirects"), False)
+
+    def test_get_disables_redirects(self) -> None:
+        """_get must pass allow_redirects=False."""
+        adapter = _make_adapter()
+        resp = _mock_response(200, json_data={"sid": "CA" + "0" * 32, "status": "completed"})
+        _set_mock_get(adapter, resp)
+        adapter.get_call_status("CA" + "0" * 32)
+        _, kwargs = adapter._session.get.call_args
+        self.assertIs(kwargs.get("allow_redirects"), False)
+
+    def test_dial_rejects_invalid_from_number(self) -> None:
+        """Adversarial/garbage TWILIO_FROM_NUMBER must be rejected before the REST call."""
+        adapter = _make_adapter(from_number="not-a-phone")
+        # Session must never be hit — rejection happens before _post.
+        sess = MagicMock()
+        adapter._session = sess
+        result = adapter.dial("+15551234567")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "invalid_from_number")
+        sess.post.assert_not_called()
+
+    def test_dial_accepts_valid_from_number(self) -> None:
+        """A valid E.164 From number still dials normally (no regression)."""
+        adapter = _make_adapter(from_number="+15550009999")
+        resp = _mock_response(201, json_data={"sid": "CA" + "0" * 32, "status": "queued"})
+        _set_mock_post(adapter, resp)
+        result = adapter.dial("+15551234567")
+        self.assertTrue(result["ok"])
+
+
 if __name__ == "__main__":
     unittest.main()

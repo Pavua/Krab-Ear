@@ -425,5 +425,29 @@ class ConcurrentDialTestCase(unittest.TestCase):
         self.assertFalse(adapter.is_configured())
 
 
+class RedirectHardeningTestCase(unittest.TestCase):
+    """Audit hardening: Bearer token must not follow an HTTP redirect."""
+
+    def test_post_disables_redirects(self) -> None:
+        adapter = _make_adapter()
+        resp = _mock_response(200, json_data={"data": {"call_control_id": "v3:abc", "call_session_id": "s1"}})
+        sess_mock = MagicMock()
+        sess_mock.post.return_value = resp
+        adapter._session = sess_mock
+        adapter.dial("+15551234567")
+        _, kwargs = sess_mock.post.call_args
+        self.assertIs(kwargs.get("allow_redirects"), False)
+
+    def test_get_disables_redirects(self) -> None:
+        adapter = _make_adapter()
+        resp = _mock_response(200, json_data={"data": []})
+        sess_mock = MagicMock()
+        sess_mock.get.return_value = resp
+        adapter._session = sess_mock
+        adapter.list_active_calls()
+        _, kwargs = sess_mock.get.call_args
+        self.assertIs(kwargs.get("allow_redirects"), False)
+
+
 if __name__ == "__main__":
     unittest.main()
