@@ -576,11 +576,19 @@ These top-level directories are created at runtime and are excluded from version
 
 ### Gemini 3.1 Pro для дизайна (strict rule)
 
-Визуальный дизайн (цвета, шрифты, layout, themes, design tokens) делается **ТОЛЬКО** через Gemini 3.1 Pro API:
-- Endpoint: `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=AIzaSyCBHw753dZVMQY6wA_08YlVdv2mq8-gtsE`
-- Pattern: draft brief `/tmp/krab-ear-gemini/<name>_payload.json` → `curl POST` → save response → apply by sub-agent.
-- Claude НЕ делает визуал сам. Граница: "стало выглядеть иначе" → Gemini; "стало себя вести иначе" → Claude/Sonnet.
-- Behavior код (Auto Layout mechanics, ThemeButton tracking areas, state machines) — ОК для Claude.
+Визуальный дизайн (цвета, шрифты, layout, themes, design tokens) делается **ТОЛЬКО** через Gemini 3.1 Pro, и **ТОЛЬКО** через `agy` (Antigravity CLI) на оплаченной подписке user **Google AI Pro** — НЕ через `gemini` CLI (free OAuth) и НЕ через прямой API-ключ (старый ключ revoked 2026-04-20).
+- **Канал (валидирован 2026-06-08):** `agy` → `/opt/homebrew/Caskroom/antigravity-cli/.../antigravity` (v1.0.6). Модель дизайна — `Gemini 3.1 Pro (High)` (список: `agy models`).
+- **Инвокация (агентный кодер — сам читает brief, правит Swift, гоняет `swift build`):**
+  ```bash
+  agy -p "$(cat docs/design-briefs/<brief>.md)\n\nВЫПОЛНИ это ТЗ..." \
+    --model "Gemini 3.1 Pro (High)" --dangerously-skip-permissions \
+    --add-dir "$(pwd)" --print-timeout 40m < /dev/null > /tmp/krab-ear-gemini/run.log 2>&1
+  ```
+  - 🔴 **GOTCHA:** в `run_in_background` обязателен `< /dev/null` — иначе `agy -p` виснет на чтении stdin до EOF (симптом: ELAPSED большой, CPU time ~0, 0 правок). Foreground smoke проходит без него.
+  - Квота **за запросы** (не токены) → давать крупные пакетные задачи, 1 brief = 1 запрос.
+- **Workflow:** Claude пишет brief в `docs/design-briefs/` (что нельзя ломать + что улучшить) → agy исполняет → **Claude ОБЯЗАТЕЛЬНО ревьюит дифф** (`git diff` grep на `runModal`/`sectionId`/переименования контролов/wiring/хардкод-числа) + сам `swift build -c release` → commit с `Co-Authored-By: Gemini 3.1 Pro (Antigravity)` + bundle-binary parity (`Krab Ear.app/Contents/MacOS/KrabEarAgent` + `native/runtime/KrabEarAgent` + codesign) → push.
+- Claude НЕ делает визуал сам. Граница: "стало выглядеть иначе" → agy/Gemini; "стало себя вести иначе" → Claude/Sonnet.
+- Behavior код (Auto Layout mechanics, ThemeButton tracking areas, state machines, cross-object проводка) — ОК для Claude. В Privacy-индикаторе (2026-06-08) Claude дал agy точную карту проводки в брифе, но рисование замка оставил agy.
 
 ### TCC permissions troubleshooting
 
