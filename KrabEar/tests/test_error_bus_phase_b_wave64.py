@@ -271,6 +271,8 @@ class SemaphoreLeakCloseBehaviorTests(unittest.TestCase):
             self._sp = _sp
             self._timeouts_left = timeouts_to_hang
             self.stdin = SemaphoreLeakCloseBehaviorTests._FakeStdin()
+            self.stdout = SemaphoreLeakCloseBehaviorTests._FakeStdin()
+            self.stderr = SemaphoreLeakCloseBehaviorTests._FakeStdin()
             self.terminated = False
             self.killed = False
 
@@ -318,6 +320,9 @@ class SemaphoreLeakCloseBehaviorTests(unittest.TestCase):
         )
         self.assertIsNone(sess._proc)
         self.assertFalse(sess._loaded)
+        # stdout/stderr pipes closed explicitly to avoid GC-finalize BrokenPipeError noise
+        self.assertTrue(proc.stdout.closed)
+        self.assertTrue(proc.stderr.closed)
 
     def test_forced_kill_pushes_semaphore_leak(self):
         """Worker ignores shutdown-op (first wait times out) → terminate + push."""

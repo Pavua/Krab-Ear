@@ -752,6 +752,18 @@ class _GigaAMSubprocessSession:
                 except subprocess.TimeoutExpired:
                     self._proc.kill()
         finally:
+            # Явно закрываем оставшиеся pipe-обёртки (stdout/stderr) ПОД guard ДО
+            # сброса ссылки. Иначе `self._proc = None` роняет последнюю ссылку на
+            # Popen → его __del__ финализирует буферизованные pipe и flush в убитый
+            # worker даёт "Exception ignored while finalizing file ... BrokenPipeError"
+            # в stderr (косметический шум, но засоряет логи на каждом force-kill).
+            for _pipe in (getattr(self._proc, "stdout", None),
+                          getattr(self._proc, "stderr", None)):
+                if _pipe is not None:
+                    try:
+                        _pipe.close()
+                    except (OSError, BrokenPipeError):
+                        pass
             self._proc = None
             self._loaded = False
             # Wave 64: mlx.semaphore_leak — multiprocessing resource_tracker emits
