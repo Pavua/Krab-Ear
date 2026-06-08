@@ -100,6 +100,13 @@ class TestEscapeAsStrHelper(unittest.TestCase):
         result = _escape_as_str("ab\x00cd")
         self.assertNotIn("\x00", result)
 
+    def test_strips_unicode_line_separator(self):
+        # U+2028/U+2029 survive an \r\n strip and, if the OSA lexer treats them
+        # as line terminators, give the same injection bypass as a raw newline.
+        result = _escape_as_str('line1\u2028end tell\u2029tell app x')
+        self.assertNotIn('\u2028', result)
+        self.assertNotIn('\u2029', result)
+
     def test_escapes_double_quote(self):
         result = _escape_as_str('say "hello"')
         self.assertIn('\\"hello\\"', result)

@@ -159,8 +159,12 @@ class AppleIntegrationService:
         """
         if not isinstance(s, str):
             s = str(s)
-        # W1765 MED-1: экранируем переносы строк и NUL (могут прервать AppleScript-инструкцию)
-        s = re.sub(r'[\r\n\x00]', ' ', s)
+        # W1765 MED-1: экранируем переносы строк и NUL (могут прервать AppleScript-инструкцию).
+        # Также Unicode LINE/PARAGRAPH SEPARATOR (U+2028/U+2029) — они выживают после
+        # \r/\n-стрипа и, если OSA-лексер трактует их как конец строки, дают тот же
+        # injection-bypass; стрип сепараторов из текста для AppleScript-литерала
+        # однозначно корректен (defense-in-depth, тот же класс что W942/W1765).
+        s = re.sub('[\r\n\x00\u2028\u2029]', ' ', s)
         s = s.replace('\\', '\\\\')  # обратный слэш ПЕРВЫМ — иначе \\" → дублирование
         s = s.replace('"', '\\"')
         return s
