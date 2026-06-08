@@ -116,6 +116,7 @@ extension HistoryPanelController {
         guard !isSyncingSettings else { return }
         let enabled = privacyModeButton.state == .on
         applySettingsPatch(["privacy_mode_enabled": enabled])
+        (NSApp.delegate as? AgentAppDelegate)?.setPrivacyMode(enabled)
     }
 
     @objc func onStartSoundChanged() {
@@ -477,6 +478,7 @@ extension HistoryPanelController {
         autoPasteButton.state = settings.autoPaste ? .on : .off
         quickEditButton.state = settings.quickEditEnabled ? .on : .off
         privacyModeButton.state = settings.privacyModeEnabled ? .on : .off
+        (NSApp.delegate as? AgentAppDelegate)?.setPrivacyMode(settings.privacyModeEnabled)
         startSoundButton.state = settings.playStartSound ? .on : .off
         realtimePreviewButton.state = settings.realtimePreviewEnabled ? .on : .off
         translateAndPasteButton.state = settings.translateAndPaste ? .on : .off

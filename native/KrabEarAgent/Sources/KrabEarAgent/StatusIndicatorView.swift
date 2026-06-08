@@ -98,6 +98,64 @@ final class StatusIndicatorView: NSView {
         path.fill()
     }
 
+    // MARK: - Phase B.2: Privacy Badge
+
+    private var privacyBadgeLayer: CALayer?
+    private var isPrivacyModeEnabled: Bool = false
+
+    /// Показывает/скрывает privacy оверлей (SF Symbol lock.fill)
+    func setPrivacyMode(_ on: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.isPrivacyModeEnabled = on
+            self._updatePrivacyBadge()
+        }
+    }
+
+    private func _updatePrivacyBadge() {
+        if !isPrivacyModeEnabled {
+            privacyBadgeLayer?.removeFromSuperlayer()
+            privacyBadgeLayer = nil
+            return
+        }
+
+        if privacyBadgeLayer != nil { return } // уже есть
+
+        wantsLayer = true
+        guard let hostLayer = self.layer else { return }
+
+        // Размещаем bottom-left
+        let badgeSize: CGFloat = 8.0
+        let badgeFrame = CGRect(
+            x: -2,
+            y: -2,
+            width: badgeSize,
+            height: badgeSize
+        )
+
+        let badge = CALayer()
+        badge.frame = badgeFrame
+        badge.cornerRadius = badgeSize / 2
+        badge.backgroundColor = KrabEarTheme.Colors.accent.cgColor
+        badge.zPosition = 10
+
+        if let lockImg = NSImage(systemSymbolName: "lock.fill", accessibilityDescription: nil) {
+            let config = NSImage.SymbolConfiguration(pointSize: 6, weight: .semibold)
+                .applying(NSImage.SymbolConfiguration(paletteColors: [.white]))
+            if let configLock = lockImg.withSymbolConfiguration(config),
+               let cgImage = configLock.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+                let imgLayer = CALayer()
+                imgLayer.frame = CGRect(x: 1, y: 1, width: 6, height: 6)
+                imgLayer.contents = cgImage
+                imgLayer.contentsGravity = .resizeAspect
+                badge.addSublayer(imgLayer)
+            }
+        }
+
+        hostLayer.addSublayer(badge)
+        privacyBadgeLayer = badge
+    }
+
     // MARK: - Phase B.1: severity badge
 
     /// Добавляет 6pt circle overlay в top-right corner.
@@ -267,7 +325,7 @@ final class StatusIndicatorView: NSView {
 
 /// Helper: создаёт NSImage с dot указанного цвета — для NSStatusItem.button.image.
 enum StatusIndicatorImage {
-    static func image(for state: HealthState, size: CGFloat = 14) -> NSImage {
+    static func image(for state: HealthState, privacyMode: Bool = false, size: CGFloat = 14) -> NSImage {
         let img = NSImage(size: NSSize(width: size, height: size))
         img.lockFocus()
         let color: NSColor
@@ -279,6 +337,24 @@ enum StatusIndicatorImage {
         color.setFill()
         let rect = NSRect(x: 2, y: 2, width: size - 4, height: size - 4)
         NSBezierPath(ovalIn: rect).fill()
+
+        if privacyMode {
+            // lock.fill in bottom-left corner
+            KrabEarTheme.Colors.accent.setFill()
+            let badgeSize: CGFloat = 8.0
+            let badgeRect = NSRect(x: 0, y: 0, width: badgeSize, height: badgeSize)
+            NSBezierPath(ovalIn: badgeRect).fill()
+
+            if let lockImg = NSImage(systemSymbolName: "lock.fill", accessibilityDescription: nil) {
+                let lockConfig = NSImage.SymbolConfiguration(pointSize: 6, weight: .semibold)
+                    .applying(NSImage.SymbolConfiguration(paletteColors: [.white]))
+                if let configLock = lockImg.withSymbolConfiguration(lockConfig) {
+                    let lockRect = NSRect(x: 1, y: 1, width: 6, height: 6)
+                    configLock.draw(in: lockRect)
+                }
+            }
+        }
+
         img.unlockFocus()
         return img
     }

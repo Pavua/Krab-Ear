@@ -23,12 +23,30 @@ import ObjectiveC.runtime
 private nonisolated(unsafe) var healthMonitorKey: UInt8 = 0
 private nonisolated(unsafe) var statusUpdateTimerKey: UInt8 = 0
 private nonisolated(unsafe) var statusIndicatorViewKey: UInt8 = 0
+private nonisolated(unsafe) var privacyModeEnabledKey: UInt8 = 0
+private nonisolated(unsafe) var lastHealthStateKey: UInt8 = 0
 
 @MainActor
 extension AgentAppDelegate {
     var healthMonitor: HealthMonitor? {
         get { objc_getAssociatedObject(self, &healthMonitorKey) as? HealthMonitor }
         set { objc_setAssociatedObject(self, &healthMonitorKey, newValue, .OBJC_ASSOCIATION_RETAIN) }
+    }
+
+    var privacyModeEnabled: Bool {
+        get { objc_getAssociatedObject(self, &privacyModeEnabledKey) as? Bool ?? false }
+        set { objc_setAssociatedObject(self, &privacyModeEnabledKey, newValue, .OBJC_ASSOCIATION_RETAIN) }
+    }
+
+    var lastHealthState: HealthState {
+        get { objc_getAssociatedObject(self, &lastHealthStateKey) as? HealthState ?? .stopped }
+        set { objc_setAssociatedObject(self, &lastHealthStateKey, newValue, .OBJC_ASSOCIATION_RETAIN) }
+    }
+
+    func setPrivacyMode(_ on: Bool) {
+        self.privacyModeEnabled = on
+        self.statusIndicatorView.setPrivacyMode(on)
+        self.applyHealthStateToStatusItem(self.lastHealthState)
     }
 
     var statusUpdateTimer: Timer? {
@@ -121,23 +139,11 @@ extension AgentAppDelegate {
 
     /// Обновляет визуал menu bar status item на основе HealthState.
     func applyHealthStateToStatusItem(_ state: HealthState) {
+        self.lastHealthState = state
         guard let button = statusItem?.button else { return }
 
-        let dotColor: NSColor
-        switch state {
-        case .healthy: dotColor = .systemGreen
-        case .hung: dotColor = .systemYellow
-        case .stopped: dotColor = .systemRed
-        }
-
-        // Wave 67 (AGENT-J fix): use SF Symbol image instead of `●` Unicode char.
-        // `●` (U+25CF) is not in SF Pro primary glyphs → CoreText fallback to Apple Symbols
-        // → `TFPFont::CopyGlyphPath` heavy synchronous on first CALayer commit → AppHang ≥2s.
-        // SF Symbol is pre-rendered template via NSImage — no glyph path generation.
-        let symConfig = NSImage.SymbolConfiguration(pointSize: 10, weight: .bold)
-            .applying(NSImage.SymbolConfiguration(paletteColors: [dotColor]))
-        let dotImage = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil)?
-            .withSymbolConfiguration(symConfig)
+        // Создаем image для menu-bar с учетом privacyModeEnabled
+        let dotImage = StatusIndicatorImage.image(for: state, privacyMode: self.privacyModeEnabled, size: 14)
         button.image = dotImage
         button.imagePosition = .imageLeft  // dot слева от title
 
@@ -146,5 +152,8 @@ extension AgentAppDelegate {
 
         // Phase B.1: синхронизируем StatusIndicatorView
         statusIndicatorView.updateState(state)
+        
+        // Phase B.2: синхронизируем Privacy Mode
+        statusIndicatorView.setPrivacyMode(self.privacyModeEnabled)
     }
 }
