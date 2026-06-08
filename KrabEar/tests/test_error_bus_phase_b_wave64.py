@@ -240,6 +240,114 @@ class SemaphoreLeakTests(unittest.TestCase):
         self.assertFalse(second)
 
 
+class SemaphoreLeakCloseBehaviorTests(unittest.TestCase):
+    """close() pushes mlx.semaphore_leak ONLY on force-kill, not graceful shutdown.
+
+    Regression for the Sentry false-positive flood: the finally block used to push
+    the benign warning unconditionally on EVERY close(), even when the worker exited
+    cleanly. The leak only happens when we terminate()/kill() a worker that didn't
+    self-clean its multiprocessing primitives.
+    """
+
+    class _FakeStdin:
+        def __init__(self):
+            self.closed = False
+            self.written = []
+
+        def write(self, s):
+            self.written.append(s)
+
+        def flush(self):
+            pass
+
+        def close(self):
+            self.closed = True
+
+    class _FakeProc:
+        """Fake Popen: wait() raises TimeoutExpired `timeouts_to_hang` times, then returns 0."""
+
+        def __init__(self, timeouts_to_hang=0):
+            import subprocess as _sp
+            self._sp = _sp
+            self._timeouts_left = timeouts_to_hang
+            self.stdin = SemaphoreLeakCloseBehaviorTests._FakeStdin()
+            self.terminated = False
+            self.killed = False
+
+        def wait(self, timeout=None):
+            if self._timeouts_left > 0:
+                self._timeouts_left -= 1
+                raise self._sp.TimeoutExpired(cmd="worker", timeout=timeout)
+            return 0
+
+        def terminate(self):
+            self.terminated = True
+
+        def kill(self):
+            self.killed = True
+
+        def poll(self):
+            return 0
+
+    def _make_session(self, proc):
+        from core.pipeline.stt_gigaam import _GigaAMSubprocessSession
+        sess = _GigaAMSubprocessSession(
+            venv_python="/usr/bin/python3",
+            worker_path="/tmp/worker.py",
+            mode="balanced",
+            device="cpu",
+        )
+        sess._proc = proc
+        sess._loaded = True
+        bus, captured = _make_error_bus()
+        sess._error_bus = bus
+        return sess, captured
+
+    def test_graceful_close_does_not_push(self):
+        """Worker exits on shutdown-op within timeout → no semaphore_leak push."""
+        proc = self._FakeProc(timeouts_to_hang=0)
+        sess, captured = self._make_session(proc)
+
+        sess.close()
+
+        self.assertFalse(proc.terminated, "graceful path must not terminate()")
+        self.assertFalse(proc.killed)
+        self.assertEqual(
+            [e.code for e in captured], [],
+            "graceful shutdown must NOT push mlx.semaphore_leak",
+        )
+        self.assertIsNone(sess._proc)
+        self.assertFalse(sess._loaded)
+
+    def test_forced_kill_pushes_semaphore_leak(self):
+        """Worker ignores shutdown-op (first wait times out) → terminate + push."""
+        proc = self._FakeProc(timeouts_to_hang=1)
+        sess, captured = self._make_session(proc)
+
+        sess.close()
+
+        self.assertTrue(proc.terminated, "force path must terminate()")
+        codes = [e.code for e in captured]
+        self.assertEqual(codes, ["mlx.semaphore_leak"])
+        self.assertEqual(captured[0].component, "mlx")
+        self.assertEqual(captured[0].severity, "warn")
+
+    def test_close_without_error_bus_is_safe(self):
+        """Force-kill path with no error_bus injected must not raise."""
+        proc = self._FakeProc(timeouts_to_hang=1)
+        from core.pipeline.stt_gigaam import _GigaAMSubprocessSession
+        sess = _GigaAMSubprocessSession(
+            venv_python="/usr/bin/python3",
+            worker_path="/tmp/worker.py",
+            mode="balanced",
+            device="cpu",
+        )
+        sess._proc = proc
+        sess._loaded = True
+        sess.close()  # must not raise
+        self.assertTrue(proc.terminated)
+
+
 # ---------------------------------------------------------------------------
 # 4. stt.empty_audio_warning — audio_quality.py
 # ---------------------------------------------------------------------------

@@ -729,6 +729,7 @@ class _GigaAMSubprocessSession:
         """Graceful shutdown: shutdown-команда + wait + force kill при таймауте."""
         if self._proc is None:
             return
+        forced = False
         try:
             # Shutdown — worker отвечает молча (просто exit).
             try:
@@ -741,6 +742,10 @@ class _GigaAMSubprocessSession:
             try:
                 self._proc.wait(timeout=2.0)
             except subprocess.TimeoutExpired:
+                # Worker не вышел сам по shutdown-op → force-kill. ТОЛЬКО в этом
+                # случае multiprocessing resource_tracker воркера не успевает убрать
+                # свои semaphore/SemLock примитивы и ругается "leaked semaphore objects".
+                forced = True
                 self._proc.terminate()
                 try:
                     self._proc.wait(timeout=1.0)
@@ -750,10 +755,12 @@ class _GigaAMSubprocessSession:
             self._proc = None
             self._loaded = False
             # Wave 64: mlx.semaphore_leak — multiprocessing resource_tracker emits
-            # a "leaked semaphore objects" warning after subprocess shutdown.
-            # Push to error_bus so it appears once per session (dedupe 1800s).
+            # a "leaked semaphore objects" warning ТОЛЬКО при force-kill воркера.
+            # На graceful shutdown (worker сам вышел за timeout) утечки нет — раньше
+            # warning пушился безусловно в finally и заваливал Sentry false-positive'ами
+            # на каждый close(). Теперь пушим только когда реально терминировали worker.
             _error_bus = getattr(self, "_error_bus", None)
-            if _error_bus is not None:
+            if forced and _error_bus is not None:
                 try:
                     from backend.error_bus import KrabError
                     from backend.error_codes import ERROR_REGISTRY
