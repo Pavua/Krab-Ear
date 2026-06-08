@@ -164,8 +164,40 @@ extension HistoryPanelController {
         searchActionsCard.contentStackView.addArrangedSubview(topSearchRow)
         searchActionsCard.contentStackView.addArrangedSubview(topActionsRow)
 
+        // Empty state setup
+        historyEmptyStateContainer.orientation = .vertical
+        historyEmptyStateContainer.spacing = KrabEarTheme.Metrics.tight
+        historyEmptyStateContainer.alignment = .centerX
+        let emptyIcon = NSImageView(image: NSImage(systemSymbolName: "tray", accessibilityDescription: nil)!.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 32, weight: .regular))!)
+        emptyIcon.contentTintColor = KrabEarTheme.Colors.textSecondary
+        let emptyLabel = NSTextField(labelWithString: "История пуста")
+        emptyLabel.font = KrabEarTheme.Typography.caption
+        emptyLabel.textColor = KrabEarTheme.Colors.textSecondary
+        emptyLabel.isBordered = false
+        emptyLabel.drawsBackground = false
+        emptyLabel.isEditable = false
+        emptyLabel.isSelectable = false
+        historyEmptyStateContainer.addArrangedSubview(emptyIcon)
+        historyEmptyStateContainer.addArrangedSubview(emptyLabel)
+        historyEmptyStateContainer.isHidden = true
+        
+        // overlay over scrollView
+        let tableOverlayContainer = NSView()
+        tableOverlayContainer.translatesAutoresizingMaskIntoConstraints = false
+        tableOverlayContainer.addSubview(scrollView)
+        tableOverlayContainer.addSubview(historyEmptyStateContainer)
+        historyEmptyStateContainer.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            scrollView.leadingAnchor.constraint(equalTo: tableOverlayContainer.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: tableOverlayContainer.trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: tableOverlayContainer.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: tableOverlayContainer.bottomAnchor),
+            historyEmptyStateContainer.centerXAnchor.constraint(equalTo: tableOverlayContainer.centerXAnchor),
+            historyEmptyStateContainer.centerYAnchor.constraint(equalTo: tableOverlayContainer.centerYAnchor)
+        ])
+
         let tableCard = ThemeCardView()
-        tableCard.contentStackView.addArrangedSubview(scrollView)
+        tableCard.contentStackView.addArrangedSubview(tableOverlayContainer)
 
         let primaryActionsCard = ThemeCardView()
         primaryActionsCard.contentStackView.addArrangedSubview(primaryActionsRow)

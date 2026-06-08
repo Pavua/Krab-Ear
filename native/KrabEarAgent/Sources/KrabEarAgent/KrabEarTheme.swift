@@ -904,3 +904,141 @@ public extension NSScrollView {
         self.borderType = .noBorder
     }
 }
+
+// MARK: - History Custom Cell (Gemini Liquid Glass)
+
+@MainActor
+public class HistoryBadgeView: NSView {
+    private let label = NSTextField(labelWithString: "")
+    private let iconView = NSImageView()
+    private let backgroundLayer = CALayer()
+
+    public init(text: String, symbol: String? = nil, color: NSColor = KrabEarTheme.Colors.textSecondary) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.addSublayer(backgroundLayer)
+
+        label.font = KrabEarTheme.Typography.captionMedium.tabular()
+        label.textColor = color
+        label.maximumNumberOfLines = 1
+        label.lineBreakMode = .byTruncatingTail
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.drawsBackground = false
+        label.isBordered = false
+        label.isEditable = false
+        label.isSelectable = false
+
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.spacing = 4
+        stack.alignment = .centerY
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        if let symbol = symbol, let img = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) {
+            let config = NSImage.SymbolConfiguration(textStyle: .caption1, scale: .small)
+            iconView.image = img.withSymbolConfiguration(config)
+            iconView.contentTintColor = color
+            iconView.translatesAutoresizingMaskIntoConstraints = false
+            stack.addArrangedSubview(iconView)
+        }
+        
+        stack.addArrangedSubview(label)
+
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2)
+        ])
+
+        backgroundLayer.backgroundColor = color.withAlphaComponent(0.1).cgColor
+        backgroundLayer.cornerRadius = 4 // Капсула
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    public override func layout() {
+        super.layout()
+        backgroundLayer.frame = bounds
+        backgroundLayer.cornerRadius = bounds.height / 2
+    }
+}
+
+@MainActor
+public class HistoryItemCellView: NSTableCellView {
+    public let transcriptLabel = NSTextField(wrappingLabelWithString: "")
+    public let translationLabel = NSTextField(wrappingLabelWithString: "")
+    public let metaStack = NSStackView()
+    private let backgroundHighlight = CALayer()
+
+    public override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.addSublayer(backgroundHighlight)
+        backgroundHighlight.backgroundColor = KrabEarTheme.Colors.accent.withAlphaComponent(0.0).cgColor
+        backgroundHighlight.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
+
+        transcriptLabel.font = KrabEarTheme.Typography.body
+        transcriptLabel.textColor = KrabEarTheme.Colors.textPrimary
+        transcriptLabel.maximumNumberOfLines = 2
+        transcriptLabel.lineBreakMode = .byTruncatingTail
+        transcriptLabel.drawsBackground = false
+        transcriptLabel.isBordered = false
+        transcriptLabel.isEditable = false
+        transcriptLabel.isSelectable = false
+        transcriptLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        translationLabel.font = NSFont(descriptor: KrabEarTheme.Typography.body.fontDescriptor.withSymbolicTraits(.italic), size: KrabEarTheme.Typography.body.pointSize - 1)
+        translationLabel.textColor = NSColor.secondaryLabelColor
+        translationLabel.maximumNumberOfLines = 0
+        translationLabel.lineBreakMode = .byWordWrapping
+        translationLabel.drawsBackground = false
+        translationLabel.isBordered = false
+        translationLabel.isEditable = false
+        translationLabel.isSelectable = false
+        translationLabel.translatesAutoresizingMaskIntoConstraints = false
+        translationLabel.isHidden = true
+        translationLabel.alphaValue = 0.8
+
+        metaStack.orientation = .horizontal
+        metaStack.spacing = KrabEarTheme.Metrics.standard
+        metaStack.alignment = .centerY
+        metaStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let contentStack = NSStackView()
+        contentStack.orientation = .vertical
+        contentStack.spacing = 2
+        contentStack.alignment = .leading
+        contentStack.translatesAutoresizingMaskIntoConstraints = false
+        contentStack.addArrangedSubview(transcriptLabel)
+        contentStack.addArrangedSubview(translationLabel)
+        contentStack.addArrangedSubview(metaStack)
+
+        addSubview(contentStack)
+
+        NSLayoutConstraint.activate([
+            contentStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: KrabEarTheme.Metrics.standard),
+            contentStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -KrabEarTheme.Metrics.standard),
+            contentStack.topAnchor.constraint(equalTo: topAnchor, constant: KrabEarTheme.Metrics.tight),
+            contentStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -KrabEarTheme.Metrics.tight)
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    public override func layout() {
+        super.layout()
+        backgroundHighlight.frame = bounds.insetBy(dx: 2, dy: 2)
+    }
+
+    public override var backgroundStyle: NSView.BackgroundStyle {
+        didSet {
+            if backgroundStyle == .emphasized {
+                backgroundHighlight.backgroundColor = KrabEarTheme.Colors.accent.withAlphaComponent(0.2).cgColor
+            } else {
+                backgroundHighlight.backgroundColor = KrabEarTheme.Colors.accent.withAlphaComponent(0.0).cgColor
+            }
+        }
+    }
+}

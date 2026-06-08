@@ -129,6 +129,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
     let mainTabView = NSTabView()
     let tableView = NSTableView()
+    let historyEmptyStateContainer = NSStackView()
     let searchField = NSSearchField()
     let historyPageSizeSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let historyDensitySelector = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -1429,13 +1430,15 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
         let tsColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("ts"))
         tsColumn.title = "Время"
-        tsColumn.width = 132
-        tsColumn.minWidth = 96
+        tsColumn.width = 0
+        tsColumn.minWidth = 0
+        tsColumn.isHidden = true
 
         let statusColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("status"))
         statusColumn.title = "Вставка"
-        statusColumn.width = 82
-        statusColumn.minWidth = 64
+        statusColumn.width = 0
+        statusColumn.minWidth = 0
+        statusColumn.isHidden = true
 
         let textColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("text"))
         textColumn.title = "Текст"
@@ -1450,7 +1453,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         tableView.usesAlternatingRowBackgroundColors = false
         tableView.delegate = self
         tableView.dataSource = self
-        tableView.rowHeight = 28
+        tableView.rowHeight = 64
         tableView.target = self
         tableView.doubleAction = #selector(onTableViewDoubleClick)
         tableView.backgroundColor = .clear
