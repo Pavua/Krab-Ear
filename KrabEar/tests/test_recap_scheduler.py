@@ -699,6 +699,35 @@ class TestW933RuntimeSettingsProvider(unittest.TestCase):
                 "после отключения recap_enabled не должен отправлять",
             )
 
+    def test_recap_email_enabled_key_is_the_real_settings_key(self):
+        """REAL settings key is "recap_email_enabled" (DEFAULT_SETTINGS), not "recap_enabled".
+
+        Regression: _refresh_settings read the non-existent "recap_enabled" key, so
+        set_settings({"recap_email_enabled": False}) was a silent no-op (the scheduler
+        kept the constructor default). This test uses ONLY the real key — it would FAIL
+        before the fix because the toggle-off would not register.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            live_settings: dict = {
+                "recap_email_enabled": True,   # the REAL key, no legacy "recap_enabled"
+                "recap_time_hour": 20,
+                "recap_email_to": "test@example.com",
+            }
+            sched, _, _ = self._make_scheduler_with_provider(
+                tmpdir, initial_hour=20, provider_dict=live_settings
+            )
+            now_20 = datetime(2026, 5, 26, 20, 0, 0)
+            sched._refresh_settings()
+            self.assertTrue(sched.enabled, "recap_email_enabled=True должен включать")
+            self.assertTrue(sched._should_send(now_20))
+
+            # Toggle off via the REAL key — must register (was the silent no-op bug).
+            live_settings["recap_email_enabled"] = False
+            sched._refresh_settings()
+            self.assertFalse(sched.enabled, "recap_email_enabled=False должен выключать")
+            self.assertFalse(sched._should_send(now_20))
+
     def test_email_to_change_picked_up_on_next_tick(self):
         """Изменение recap_email_to в settings_provider обновляет адрес получателя."""
         with tempfile.TemporaryDirectory() as tmp:

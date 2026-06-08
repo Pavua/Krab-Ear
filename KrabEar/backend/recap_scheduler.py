@@ -235,14 +235,19 @@ class RecapScheduler:
             return {}
 
     def _refresh_settings(self) -> None:
-        """Перечитывает recap_enabled / recap_time_hour / recap_email_to из runtime настроек.
+        """Перечитывает recap_email_enabled / recap_time_hour / recap_email_to из runtime настроек.
 
         Вызывается в начале каждого тика _run() вне recap_lock,
         что соответствует рекомендации W922: re-read происходит до
         проверки _should_send().
         """
         s = self._current_settings()
-        self.enabled = bool(s.get("recap_enabled", self._default_enabled))
+        # Ключ настройки — "recap_email_enabled" (DEFAULT_SETTINGS / settings.json).
+        # Раньше читался несуществующий "recap_enabled" → set_settings(recap_email_enabled=True)
+        # был тихим no-op (письма не уходили, ошибки нет). Принимаем оба ключа для
+        # обратной совместимости со старыми persisted-настройками.
+        enabled_raw = s.get("recap_email_enabled", s.get("recap_enabled", self._default_enabled))
+        self.enabled = bool(enabled_raw)
         hour_raw = s.get("recap_time_hour", self._default_recap_time_hour)
         try:
             # wave-1770 HIGH: clamp to valid 0-23 range. An out-of-bounds value
