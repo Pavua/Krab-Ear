@@ -1707,7 +1707,12 @@ class HistoryService:
         history_id = str(params.get("history_id", "")).strip()
         if not history_id:
             raise RuntimeError("history_id обязателен")
-        for entry in reversed(self._clipboard_history):
+        # wave-29 thread-safety: _clipboard_history — общий по ссылке список, в который
+        # RecordingCoreService (поток завершения записи) делает .append() конкурентно с
+        # этим IPC-обработчиком. Итерируем по снимку list(...) — в CPython это атомарная
+        # копия под GIL, исключающая неконсистентную итерацию по мутируемому списку.
+        # (handle_get_clipboard_history уже безопасен: slice [-limit:] копирует.)
+        for entry in reversed(list(self._clipboard_history)):
             if entry.get("history_id") == history_id:
                 return {
                     "text": entry["text"],
