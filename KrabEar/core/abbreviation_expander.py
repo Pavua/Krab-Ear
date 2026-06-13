@@ -461,6 +461,7 @@ class AbbreviationExpander:
 
     def _save_custom(self) -> None:
         """Сохраняет пользовательские аббревиатуры в файл."""
+        from core.atomic_io import atomic_write_text
         if not self._data_dir:
             return
         path = Path(self._data_dir) / "abbreviations.json"
@@ -475,7 +476,7 @@ class AbbreviationExpander:
                 }
                 if custom_entries:
                     custom[lang] = custom_entries
-            path.write_text(json.dumps(custom, ensure_ascii=False, indent=2), encoding="utf-8")
+            atomic_write_text(path, json.dumps(custom, ensure_ascii=False, indent=2))
             logger.debug("Сохранены пользовательские аббревиатуры в %s", path)
         except OSError as exc:
             logger.warning("Не удалось сохранить abbreviations.json: %s", exc)

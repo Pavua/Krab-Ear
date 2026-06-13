@@ -155,6 +155,8 @@ class NormalizationProfileRegistry:
     _CUSTOM_FILE = "normalization_profiles.json"
 
     def __init__(self, data_dir: Path | None = None) -> None:
+        import threading
+        self._lock = threading.RLock()
         self._profiles: dict[str, NormalizationProfile] = {}
         self._data_dir = data_dir
 
@@ -194,30 +196,32 @@ class NormalizationProfileRegistry:
         overwrite: bool = False,
     ) -> NormalizationProfile:
         """Добавляет (или перезаписывает) пользовательский профиль и сохраняет на диск."""
-        if not name or not name.strip():
-            raise ValueError("Имя профиля не может быть пустым")
-        if name in self._profiles and self._profiles[name].builtin and not overwrite:
-            raise ValueError(f"Нельзя перезаписать встроенный профиль: {name!r}")
-        profile = NormalizationProfile(
-            name=name.strip(),
-            description=description,
-            rules=list(dict.fromkeys(rules)),  # deduplicate, preserve order (W1264 N2)
-            builtin=False,
-        )
-        self._profiles[profile.name] = profile
-        self._save_custom()
-        return profile
+        with self._lock:
+            if not name or not name.strip():
+                raise ValueError("Имя профиля не может быть пустым")
+            if name in self._profiles and self._profiles[name].builtin and not overwrite:
+                raise ValueError(f"Нельзя перезаписать встроенный профиль: {name!r}")
+            profile = NormalizationProfile(
+                name=name.strip(),
+                description=description,
+                rules=list(dict.fromkeys(rules)),  # deduplicate, preserve order (W1264 N2)
+                builtin=False,
+            )
+            self._profiles[profile.name] = profile
+            self._save_custom()
+            return profile
 
     def remove_profile(self, name: str) -> bool:
         """Удаляет пользовательский профиль. Возвращает True если профиль был удалён."""
-        profile = self._profiles.get(name)
-        if profile is None:
-            return False
-        if profile.builtin:
-            raise ValueError(f"Нельзя удалить встроенный профиль: {name!r}")
-        del self._profiles[name]
-        self._save_custom()
-        return True
+        with self._lock:
+            profile = self._profiles.get(name)
+            if profile is None:
+                return False
+            if profile.builtin:
+                raise ValueError(f"Нельзя удалить встроенный профиль: {name!r}")
+            del self._profiles[name]
+            self._save_custom()
+            return True
 
     def get_profile(self, name: str) -> NormalizationProfile | None:
         return self._profiles.get(name)
@@ -230,50 +234,46 @@ class NormalizationProfileRegistry:
         return self._data_dir / self._CUSTOM_FILE
 
     def _load_custom(self, data_dir: Path) -> None:
-        path = data_dir / self._CUSTOM_FILE
-        if not path.exists():
-            return
-        try:
-            raw_list: list[dict] = json.loads(path.read_text(encoding="utf-8"))
-            loaded = 0
-            for raw in raw_list:
-                name = raw.get("name", "")
-                if name in _BUILTIN_NAMES:
-                    logger.warning(
-                        "Пропуск кастомного профиля %r: имя зарезервировано для встроенного профиля",
-                        name,
+        with self._lock:
+            path = data_dir / self._CUSTOM_FILE
+            if not path.exists():
+                return
+            try:
+                raw_list: list[dict] = json.loads(path.read_text(encoding="utf-8"))
+                loaded = 0
+                for raw in raw_list:
+                    name = raw.get("name", "")
+                    if name in _BUILTIN_NAMES:
+                        logger.warning(
+                            "Пропуск кастомного профиля %r: имя зарезервировано для встроенного профиля",
+                            name,
+                        )
+                        continue
+                    p = NormalizationProfile(
+                        name=name,
+                        description=raw.get("description", ""),
+                        rules=list(raw.get("rules", [])),
+                        builtin=False,
                     )
-                    continue
-                p = NormalizationProfile(
-                    name=name,
-                    description=raw.get("description", ""),
-                    rules=list(raw.get("rules", [])),
-                    builtin=False,
-                )
-                self._profiles[p.name] = p
-                loaded += 1
-            logger.debug("Загружено %d пользовательских профилей из %s", loaded, path)
-        except Exception as exc:
-            logger.warning("Не удалось загрузить кастомные профили: %s", exc)
+                    self._profiles[p.name] = p
+                    loaded += 1
+                logger.debug("Загружено %d пользовательских профилей из %s", loaded, path)
+            except Exception as exc:
+                logger.warning("Не удалось загрузить кастомные профили: %s", exc)
 
     def _save_custom(self) -> None:
-        path = self._custom_path()
-        if path is None:
-            return
-        custom = [p.to_dict() for p in self._profiles.values() if not p.builtin]
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = path.with_suffix(".tmp")
-            data = json.dumps(custom, ensure_ascii=False, indent=2)
-            tmp_path.write_text(data, encoding="utf-8")
-            # fsync — гарантируем сброс данных на диск перед атомарным rename
-            with tmp_path.open("r+b") as fh:
-                fh.flush()
-                import os
-                os.fsync(fh.fileno())
-            tmp_path.replace(path)
-        except Exception as exc:
-            logger.warning("Не удалось сохранить кастомные профили: %s", exc)
+        from core.atomic_io import atomic_write_text
+        with self._lock:
+            path = self._custom_path()
+            if path is None:
+                return
+            custom = [p.to_dict() for p in self._profiles.values() if not p.builtin]
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                data = json.dumps(custom, ensure_ascii=False, indent=2)
+                atomic_write_text(path, data)
+            except Exception as exc:
+                logger.warning("Не удалось сохранить кастомные профили: %s", exc)
 
 
 # ── Singleton-подобный глобальный реестр (без data_dir по умолчанию) ────────

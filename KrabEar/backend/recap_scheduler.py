@@ -276,9 +276,10 @@ class RecapScheduler:
         return {"last_sent_date": None, "send_count": 0}
 
     def _save_state(self, state: dict) -> None:
+        from core.atomic_io import atomic_write_text
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self._state_path.write_text(
-            json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+        atomic_write_text(
+            self._state_path, json.dumps(state, ensure_ascii=False, indent=2)
         )
 
     # ------------------------------------------------------------------
@@ -482,7 +483,8 @@ class RecapScheduler:
                 next_run (str): ISO-8601 время следующего запуска
                 running (bool): True если фоновый поток активен
         """
-        state = self._load_state()
+        with self._lock:
+            state = self._load_state()
         now = self._clock_fn()
 
         # Вычисляем следующий запуск

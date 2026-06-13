@@ -144,10 +144,11 @@ class RecordingScheduler:
 
     def _save(self) -> None:
         """Сохраняет текущие расписания в файл."""
+        from core.atomic_io import atomic_write_text
         try:
             self._data_dir.mkdir(parents=True, exist_ok=True)
             payload = list(self._schedules.values())
-            self._file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            atomic_write_text(self._file, json.dumps(payload, ensure_ascii=False, indent=2))
         except Exception:
             logger.exception("Ошибка сохранения scheduled_recordings.json")
 

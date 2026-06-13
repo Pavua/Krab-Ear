@@ -210,12 +210,13 @@ class TranscriptionQueue:
         Сохраняет только задания со статусом pending; остальные
         восстанавливать при старте смысла нет.
         """
+        from core.atomic_io import atomic_write_text
         if self._persist_path is None:
             return
         pending = [j for j in self._jobs.values() if j.status == STATUS_PENDING]
         try:
             lines = "\n".join(json.dumps(j.to_dict(), ensure_ascii=False) for j in pending)
-            self._persist_path.write_text(lines + "\n" if lines else "", encoding="utf-8")
+            atomic_write_text(self._persist_path, lines + "\n" if lines else "")
         except Exception as exc:
             logger.error("TranscriptionQueue: не удалось сохранить очередь в %s: %s", self._persist_path, exc)
 

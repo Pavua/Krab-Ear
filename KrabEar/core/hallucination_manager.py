@@ -405,13 +405,14 @@ class HallucinationManager:
 
     def _save_custom(self) -> None:
         """Сохраняет пользовательские паттерны в JSON-файл."""
+        from core.atomic_io import atomic_write_text
         if self._persist_path is None:
             return
         try:
             self._data_dir.mkdir(parents=True, exist_ok=True)
-            self._persist_path.write_text(
-                json.dumps(self._custom, ensure_ascii=False, indent=2),
-                encoding="utf-8",
+            atomic_write_text(
+                self._persist_path,
+                json.dumps(self._custom, ensure_ascii=False, indent=2)
             )
         except Exception as exc:
             logger.warning("Не удалось сохранить hallucination_patterns.json: %s", exc)

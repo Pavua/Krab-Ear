@@ -203,9 +203,10 @@ class StateStore:
 
     def save_vocabulary(self, words: list[str]) -> None:
         """Сохраняет список пользовательских слов."""
+        from core.atomic_io import atomic_write_text
         unique_words = sorted(list(set(w.strip() for w in words if w.strip())))
         with self._lock():
-            self.vocabulary_path.write_text("\n".join(unique_words) + "\n", encoding="utf-8")
+            atomic_write_text(self.vocabulary_path, "\n".join(unique_words) + "\n")
 
     def add_history_item(
         self,

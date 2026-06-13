@@ -155,14 +155,15 @@ class ConfigPresetsLibrary:
 
     def _save(self) -> None:
         """Сохраняет кастомные пресеты в файл."""
+        from core.atomic_io import atomic_write_text
         self._data_dir.mkdir(parents=True, exist_ok=True)
         payload = {
             "version": _PRESET_FORMAT_VERSION,
             "presets": self._custom,
         }
-        self._presets_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        atomic_write_text(
+            self._presets_path,
+            json.dumps(payload, ensure_ascii=False, indent=2)
         )
 
     # ------------------------------------------------------------------
