@@ -752,12 +752,19 @@ class _GigaAMSubprocessSession:
                 except subprocess.TimeoutExpired:
                     self._proc.kill()
         finally:
-            # Явно закрываем оставшиеся pipe-обёртки (stdout/stderr) ПОД guard ДО
+            # Явно закрываем ВСЕ pipe-обёртки (stdin/stdout/stderr) ПОД guard ДО
             # сброса ссылки. Иначе `self._proc = None` роняет последнюю ссылку на
             # Popen → его __del__ финализирует буферизованные pipe и flush в убитый
             # worker даёт "Exception ignored while finalizing file ... BrokenPipeError"
-            # в stderr (косметический шум, но засоряет логи на каждом force-kill).
-            for _pipe in (getattr(self._proc, "stdout", None),
+            # в stderr (косметический шум, но засоряет логи).
+            # stdin — главный виновник: это write-конец, в котором копится небуференный
+            # вывод. Если worker умер ДО shutdown, write/flush на 736-738 бросает
+            # BrokenPipe → inline `stdin.close()` (739) ПРОПУСКАется (прыжок в except),
+            # и stdin остаётся незакрытым. W64-фикс закрывал только stdout/stderr
+            # (read-концы без буфера) и пропускал stdin → шум сохранялся. Закрываем
+            # stdin здесь идемпотентно (двойной close безопасен под guard).
+            for _pipe in (getattr(self._proc, "stdin", None),
+                          getattr(self._proc, "stdout", None),
                           getattr(self._proc, "stderr", None)):
                 if _pipe is not None:
                     try:

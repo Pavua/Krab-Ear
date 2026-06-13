@@ -352,6 +352,35 @@ class SemaphoreLeakCloseBehaviorTests(unittest.TestCase):
         sess.close()  # must not raise
         self.assertTrue(proc.terminated)
 
+    def test_stdin_closed_in_finally_when_worker_predied(self):
+        """Worker died before shutdown → stdin.flush() raises BrokenPipe, so the
+        inline stdin.close() is skipped. The finally block MUST still close stdin,
+        or Python's GC finalizes the still-buffered stdin pipe later and emits the
+        'Exception ignored while finalizing file ... BrokenPipeError' noise. The
+        original W64 fix closed only stdout/stderr (read ends, no buffered writes)
+        and missed stdin — the actual write end that buffers the unsent shutdown-op.
+        """
+        class _PreDiedStdin(SemaphoreLeakCloseBehaviorTests._FakeStdin):
+            def flush(self):
+                raise BrokenPipeError(32, "Broken pipe")
+
+        proc = self._FakeProc(timeouts_to_hang=0)
+        proc.stdin = _PreDiedStdin()
+        sess, captured = self._make_session(proc)
+
+        sess.close()  # must not raise
+
+        self.assertTrue(
+            proc.stdin.closed,
+            "stdin must be closed in finally even when flush() raised BrokenPipe — "
+            "otherwise the buffered stdin pipe leaks to GC-finalize and prints "
+            "BrokenPipeError noise on every pre-died-worker teardown",
+        )
+        self.assertTrue(proc.stdout.closed)
+        self.assertTrue(proc.stderr.closed)
+        self.assertIsNone(sess._proc)
+        self.assertFalse(sess._loaded)
+
 
 # ---------------------------------------------------------------------------
 # 4. stt.empty_audio_warning — audio_quality.py
