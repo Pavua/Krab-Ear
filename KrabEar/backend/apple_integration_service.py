@@ -169,7 +169,29 @@ class AppleIntegrationService:
         s = s.replace('"', '\\"')
         return s
 
-    # ── Apple Notes integration (Phase D.4) ─────────────────────────────────
+    @staticmethod
+    def _clamp_field(value: str, max_chars: int, field_name: str = "field") -> str:
+        """Fix 4 (LOW): Обрезает user-поле до max_chars символов перед формированием osascript.
+
+        Слишком длинные значения могут привести к ошибкам osascript, чрезмерному
+        потреблению памяти или зависанию macOS-процесса.
+        Существующая sanitize-логика (_escape_as_str) применяется после обрезки.
+
+        Лимиты: title ≤ 500, body/notes ≤ 20 000 символов.
+        """
+        if len(value) > max_chars:
+            logger.warning(
+                "AppleIntegrationService: поле %r обрезано до %d символов (было %d)",
+                field_name, max_chars, len(value),
+            )
+            return value[:max_chars]
+        return value
+
+    # константы для защиты от слишком длинных полей (Fix 4)
+    _MAX_TITLE_CHARS = 500
+    _MAX_BODY_CHARS = 20_000
+
+    # ── Apple Notes integration (Phase D.4) ───────────────────────────────────────────
 
     def handle_create_apple_note(self, params: dict) -> dict:
         """Create Apple Note from text via osascript.
@@ -181,8 +203,12 @@ class AppleIntegrationService:
         if self._settings_get("privacy_mode_enabled", False):
             return {"ok": False, "error": "privacy_mode_active",
                     "user_msg": "Приватный режим включён — запись в Notes запрещена."}
-        title = self._escape_as_str(params.get("title", "Krab Ear note"))
-        body = self._escape_as_str(params.get("body", ""))
+        title = self._escape_as_str(
+            self._clamp_field(params.get("title", "Krab Ear note"), self._MAX_TITLE_CHARS, "title")
+        )
+        body = self._escape_as_str(
+            self._clamp_field(params.get("body", ""), self._MAX_BODY_CHARS, "body")
+        )
         folder = params.get("folder", "") or ""
 
         if folder:
@@ -227,8 +253,12 @@ end tell
         if self._settings_get("privacy_mode_enabled", False):
             return {"ok": False, "error": "privacy_mode_active",
                     "user_msg": "Приватный режим включён — запись в Reminders запрещена."}
-        title = self._escape_as_str(params.get("title", "Krab Ear reminder"))
-        body = self._escape_as_str(params.get("body", ""))
+        title = self._escape_as_str(
+            self._clamp_field(params.get("title", "Krab Ear reminder"), self._MAX_TITLE_CHARS, "title")
+        )
+        body = self._escape_as_str(
+            self._clamp_field(params.get("body", ""), self._MAX_BODY_CHARS, "body")
+        )
         list_name = params.get("list_name") or None
         due_date = params.get("due_date") or None
 
@@ -290,9 +320,13 @@ end tell
         if not title:
             return {"ok": False, "error": "title is required"}
 
-        title_esc = self._escape_as_str(title)
+        title_esc = self._escape_as_str(
+            self._clamp_field(title, self._MAX_TITLE_CHARS, "title")
+        )
         notes = params.get("notes", "") or ""
-        notes_esc = self._escape_as_str(notes)
+        notes_esc = self._escape_as_str(
+            self._clamp_field(notes, self._MAX_BODY_CHARS, "notes")
+        )
         start_date = str(params.get("start_date", "")).strip()
         if not start_date:
             return {"ok": False, "error": "start_date is required"}

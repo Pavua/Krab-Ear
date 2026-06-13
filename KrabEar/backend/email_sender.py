@@ -267,6 +267,18 @@ class EmailSender:
                 with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
                     if self.smtp_use_tls:
                         server.starttls(context=ssl_ctx)
+                    else:
+                        # Fix 3 (LOW): предупреждение о незащищённом SMTP-соединении.
+                        # Пароль и тело письма передаются в открытом виде — MITM-риск.
+                        # Для защиты установите smtp_use_tls=True (порт 587) или smtp_use_ssl=True (порт 465).
+                        logger.warning(
+                            "SMTP: соединение с %s:%d НЕ зашифровано (нет STARTTLS/SSL) — "
+                            "учётные данные и тело письма передаются в открытом виде (MITM-риск). "
+                            "Используйте smtp_use_tls=True или smtp_use_ssl=True.",
+                            self.smtp_host, self.smtp_port,
+                            extra={"event": "email.smtp.plaintext_connection",
+                                   "host": self.smtp_host, "port": self.smtp_port},
+                        )
                     if self.smtp_user and password:
                         server.login(self.smtp_user, password)
                     server.sendmail(self.smtp_from, [to], msg.as_string())

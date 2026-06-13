@@ -35,8 +35,8 @@ _RETRY_BACKOFF = 1.0
 _RETRY_STATUS = frozenset([500, 502, 503, 504])
 
 # Maximum seconds we will sleep on a Twilio 429 Retry-After header.
-# Prevents a MITM or misbehaving server from blocking the IPC thread forever.
-_RETRY_AFTER_MAX_SEC = 60.0
+# Fix 2 (LOW): потолок снижен с 60s до 5s, чтобы блокировка IPC-потока не превышала ~5с.
+_RETRY_AFTER_MAX_SEC = 5.0
 
 # Минимальная пауза при 429 если Retry-After не задан
 _RATE_LIMIT_SLEEP_SEC = 2.0

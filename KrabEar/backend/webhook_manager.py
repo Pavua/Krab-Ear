@@ -399,8 +399,11 @@ class WebhookManager:
         self._webhooks: dict[str, dict[str, Any]] = {}
         # Статистика in-memory: webhook_id → {deliveries, failures, last_status, last_ts}
         self._stats: dict[str, dict[str, Any]] = {}
-        # Privacy mode: если True — fire_webhook не отправляет события (F3 gate)
+        # Privacy mode: если True — fire_webhook не отправляет события (F3 gate).
+        # Читается и пишется только под self._lock (Fix 1a: thread-safe чтение).
         self._privacy_mode: bool = False
+        # Fix 1b: idempotent-guard для shutdown() — предотвращает двойной дрейн executor'а.
+        self._executor_shutdown: bool = False
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self._load()
         # BUG 4 fix: bounded delivery pool — caps concurrent webhook delivery threads.
@@ -592,9 +595,31 @@ class WebhookManager:
 
         Когда privacy mode активен, fire_webhook пропускает все доставки
         (события не покидают устройство). F3 gate fix.
+
+        Fix 1a: пишем под _lock — то же состояние читается под _lock в fire_webhook.
         """
-        self._privacy_mode = enabled
+        with self._lock:
+            self._privacy_mode = enabled
         logger.info("WebhookManager: privacy_mode=%s", enabled)
+
+    def shutdown(self, wait: bool = True) -> None:
+        """Дренирует ThreadPoolExecutor, ожидая завершения in-flight доставок.
+
+        Fix 1b: graceful shutdown executor'а — вызовы fire_webhook больше не
+        принимаются после shutdown(), а уже запущенные задачи завершаются.
+        Idempotent: повторный вызов безопасен (guard через _executor_shutdown).
+
+        Args:
+            wait: если True (по умолчанию) — ждёт завершения всех задач;
+                  если False — не ждёт (только отмечает shutdown).
+        """
+        with self._lock:
+            if self._executor_shutdown:
+                return  # уже завершён — idempotent
+            self._executor_shutdown = True
+        # Дрейн вне lock чтобы не держать lock пока ждём потоки
+        self._executor.shutdown(wait=wait, cancel_futures=False)
+        logger.info("WebhookManager: executor завершён (wait=%s)", wait)
 
     def fire_webhook(self, event_type: str, data: dict[str, Any]) -> None:
         """Отправляет событие всем подходящим webhook-ам (неблокирующий POST).
@@ -607,8 +632,11 @@ class WebhookManager:
         BUG 4 fix: использует bounded ThreadPoolExecutor (max 4 workers) вместо
         unbounded per-request daemon threads — burst событий не создаёт сотни потоков.
         """
-        # F3: privacy mode gate — не отправлять события при включённом privacy mode
-        if self._privacy_mode:
+        # F3 + Fix 1a: privacy_mode читается под _lock (то же состояние, которое
+        # пишется в set_privacy_mode под _lock) — race condition закрыт.
+        with self._lock:
+            privacy_active = self._privacy_mode
+        if privacy_active:
             logger.debug(
                 "WebhookManager: fire_webhook(%s) пропущен (privacy mode активен)", event_type
             )
