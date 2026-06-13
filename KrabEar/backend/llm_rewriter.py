@@ -88,8 +88,11 @@ class CircuitBreaker:
     рестарта процесса. LLMRewriter.rewrite() гарантирует это через свой
     "never raises" контракт.
 
-    Thread safety: не требуется — IPC server в Krab Ear однопоточный.
-    Если появится multi-threaded access, обернуть в threading.Lock.
+    Thread safety: защищён self._lock (threading.Lock). Чтение state и все
+    мутации счётчика/состояния (allow_request/record_success/record_failure)
+    атомарны — конкурентные HTTP-хендлеры иначе теряли инкременты
+    _consecutive_failures (lost update). _transition_to намеренно lock-free
+    (вызывается только из уже-залоченных методов → без реентерабельности).
     """
 
     def __init__(
@@ -106,65 +109,70 @@ class CircuitBreaker:
         self._consecutive_failures = 0
         self._opened_at: Optional[float] = None
         self._half_open_probe_in_flight = False
+        self._lock = threading.Lock()
 
     @property
     def state(self) -> str:
         """Публичное имя состояния ('closed' | 'open' | 'half_open')."""
-        return self._state.value
+        with self._lock:
+            return self._state.value
 
     def allow_request(self) -> bool:
         """Можно ли сейчас делать HTTP запрос?"""
-        if self._state == CircuitState.CLOSED:
-            return True
+        with self._lock:
+            if self._state == CircuitState.CLOSED:
+                return True
 
-        if self._state == CircuitState.OPEN:
-            if self._opened_at is None:
+            if self._state == CircuitState.OPEN:
+                if self._opened_at is None:
+                    return False
+                elapsed = time.monotonic() - self._opened_at
+                if elapsed >= self._current_reset_sec:
+                    self._transition_to(CircuitState.HALF_OPEN)
+                    self._half_open_probe_in_flight = True
+                    return True
                 return False
-            elapsed = time.monotonic() - self._opened_at
-            if elapsed >= self._current_reset_sec:
-                self._transition_to(CircuitState.HALF_OPEN)
+
+            if self._state == CircuitState.HALF_OPEN:
+                if self._half_open_probe_in_flight:
+                    return False
                 self._half_open_probe_in_flight = True
                 return True
+
             return False
 
-        if self._state == CircuitState.HALF_OPEN:
-            if self._half_open_probe_in_flight:
-                return False
-            self._half_open_probe_in_flight = True
-            return True
-
-        return False
-
     def record_success(self):
-        self._half_open_probe_in_flight = False
-        if self._state == CircuitState.HALF_OPEN:
-            logger.info("Circuit breaker: HALF_OPEN -> CLOSED (проба успешна)")
-            self._transition_to(CircuitState.CLOSED)
-        self._consecutive_failures = 0
+        with self._lock:
+            self._half_open_probe_in_flight = False
+            if self._state == CircuitState.HALF_OPEN:
+                logger.info("Circuit breaker: HALF_OPEN -> CLOSED (проба успешна)")
+                self._transition_to(CircuitState.CLOSED)
+            self._consecutive_failures = 0
 
     def record_failure(self):
-        self._half_open_probe_in_flight = False
-        self._consecutive_failures += 1
+        with self._lock:
+            self._half_open_probe_in_flight = False
+            self._consecutive_failures += 1
 
-        if self._state == CircuitState.HALF_OPEN:
-            self._current_reset_sec = min(self._current_reset_sec * 2, self._max_reset_sec)
-            logger.warning(
-                "Circuit breaker: HALF_OPEN -> OPEN (проба провалилась), cooldown теперь %d сек",
-                self._current_reset_sec,
-            )
-            self._transition_to(CircuitState.OPEN)
-            return
+            if self._state == CircuitState.HALF_OPEN:
+                self._current_reset_sec = min(self._current_reset_sec * 2, self._max_reset_sec)
+                logger.warning(
+                    "Circuit breaker: HALF_OPEN -> OPEN (проба провалилась), cooldown теперь %d сек",
+                    self._current_reset_sec,
+                )
+                self._transition_to(CircuitState.OPEN)
+                return
 
-        if (
-            self._state == CircuitState.CLOSED
-            and self._consecutive_failures >= self._fail_threshold
-        ):
-            logger.warning(
-                "Circuit breaker: CLOSED -> OPEN (%d fails подряд), cooldown %d сек",
-                self._consecutive_failures,
-                self._current_reset_sec,
-            )
-            self._transition_to(CircuitState.OPEN)
+            if (
+                self._state == CircuitState.CLOSED
+                and self._consecutive_failures >= self._fail_threshold
+            ):
+                logger.warning(
+                    "Circuit breaker: CLOSED -> OPEN (%d fails подряд), cooldown %d сек",
+                    self._consecutive_failures,
+                    self._current_reset_sec,
+                )
+                self._transition_to(CircuitState.OPEN)
 
     def _transition_to(self, new_state: CircuitState):
         self._state = new_state

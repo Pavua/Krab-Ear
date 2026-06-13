@@ -468,14 +468,15 @@ class AbbreviationExpander:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             custom: dict[str, dict[str, dict]] = {}
-            for lang, entries in self._abbrevs.items():
-                custom_entries = {
-                    abbr: {"expansion": e["expansion"], "flags": e.get("flags", "")}
-                    for abbr, e in entries.items()
-                    if not e.get("builtin", False)
-                }
-                if custom_entries:
-                    custom[lang] = custom_entries
+            with self._lock:
+                for lang, entries in self._abbrevs.items():
+                    custom_entries = {
+                        abbr: {"expansion": e["expansion"], "flags": e.get("flags", "")}
+                        for abbr, e in entries.items()
+                        if not e.get("builtin", False)
+                    }
+                    if custom_entries:
+                        custom[lang] = custom_entries
             atomic_write_text(path, json.dumps(custom, ensure_ascii=False, indent=2))
             logger.debug("Сохранены пользовательские аббревиатуры в %s", path)
         except OSError as exc:

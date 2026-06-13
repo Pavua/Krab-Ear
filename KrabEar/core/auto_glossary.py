@@ -289,8 +289,9 @@ class AutoGlossaryBuilder:
         )
         terms = self._build_from_history(window_days=window_days, top_n=top_n)
 
-        self._cache = terms
-        self._cache_built_at = time.time()
+        with self._cache_lock:
+            self._cache = terms
+            self._cache_built_at = time.time()
 
         if self._data_dir and not self._is_privacy_mode_active():
             self._save_cache_to_disk()

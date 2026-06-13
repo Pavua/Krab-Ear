@@ -460,7 +460,9 @@ class PluginManager:
             Список возвращаемых значений от каждого сработавшего хука.
         """
         results: list[Any] = []
-        for name, plugin in self._loaded.items():
+        with self._lock:
+            plugins_snapshot = list(self._loaded.items())
+        for name, plugin in plugins_snapshot:
             if name in self._disabled:
                 continue
             hook_fn = getattr(plugin, hook_name, None)

@@ -539,7 +539,7 @@ class AudioEngine:
             return False
         if time.monotonic() - ts >= _UNAVAILABLE_MODEL_TTL_SEC:
             # TTL истёк — убираем запись, адаптер снова доступен
-            del self._unavailable_models[model_id]
+            self._unavailable_models.pop(model_id, None)
             return False
         return True
 
