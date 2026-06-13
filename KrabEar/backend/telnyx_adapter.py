@@ -37,8 +37,11 @@ _RETRY_BACKOFF = 1.0  # seconds; urllib3 uses backoff_factor × (2 ** (attempt -
 _RETRY_STATUS = frozenset([500, 502, 503, 504])
 
 # Maximum seconds we will sleep on a Telnyx 429 Retry-After header.
-# Fix 2 (LOW): потолок снижен с 60s до 5s, чтобы блокировка IPC-потока не превышала ~5с.
-_RETRY_AFTER_MAX_SEC = 5.0
+# W1196 F1 (HIGH security): cap attacker-controlled Retry-After at 60s. The LOW
+# «IPC-block» reduce-to-5s was reverted — 60s is a deliberate security/UX balance
+# vs legitimate provider Retry-After; the proper IPC-block fix is async dial off the
+# IPC thread, not lowering a HIGH-severity security cap.
+_RETRY_AFTER_MAX_SEC = 60.0
 
 # Минимальная пауза между попытками при 429 (если Retry-After не указан)
 _RATE_LIMIT_SLEEP_SEC = 2.0

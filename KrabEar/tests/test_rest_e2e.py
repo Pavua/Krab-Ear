@@ -93,12 +93,18 @@ class HFTokenEnvPropagationTest(unittest.TestCase):
         self._canon = Path(self._tmpdir) / "settings.json"
         self._patch = patch.object(cfg, "_SETTINGS_JSON_FILE", self._canon)
         self._patch.start()
+        # Chunk-pollution guard (CLAUDE.md): in a chunked CI run rest_server is cached
+        # from a prior import, so rest_server.store may not be _mock_store and the
+        # store-fallback path would call a real/foreign store. Pin it explicitly.
+        self._store_patch = patch.object(rest_server, "store", _mock_store)
+        self._store_patch.start()
         self._saved_env = {k: os.environ.get(k) for k in self._ENV_KEYS}
         for k in self._ENV_KEYS:
             os.environ.pop(k, None)
         self._saved_ret = _mock_store.load_settings.return_value
 
     def tearDown(self):
+        self._store_patch.stop()
         self._patch.stop()
         _mock_store.load_settings.return_value = self._saved_ret
         for k, v in self._saved_env.items():

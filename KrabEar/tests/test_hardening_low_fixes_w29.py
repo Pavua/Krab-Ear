@@ -1,7 +1,7 @@
 """Тесты для 4 LOW hardening fixes (wave-29 deferred).
 
 1. WebhookManager.shutdown() дренирует executor и idempotent.
-2. TelnyxAdapter на HTTP 429 не спит дольше _RETRY_AFTER_MAX_SEC (≤5s).
+2. TelnyxAdapter на HTTP 429 не спит дольше _RETRY_AFTER_MAX_SEC (≤60s, W1196/W1208 cap).
 3. EmailSender логирует WARNING при plaintext SMTP (нет TLS/SSL).
 4. AppleIntegrationService обрезает поля title/body/notes до лимитов.
 """
@@ -10,12 +10,10 @@ from __future__ import annotations
 
 import logging
 import pathlib
-import socket
 import threading
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 # ---------------------------------------------------------------------------
 # Fix 1: WebhookManager.shutdown() — дрейн executor + idempotent
@@ -76,17 +74,18 @@ def test_webhook_manager_privacy_mode_thread_safe(tmp_path: pathlib.Path) -> Non
 
 
 # ---------------------------------------------------------------------------
-# Fix 2: Telnyx/Twilio 429 cap ≤5s
+# Fix 2: Telnyx/Twilio 429 Retry-After cap (W1196/W1208 = 60s)
 # ---------------------------------------------------------------------------
 
 
 def test_telnyx_429_sleep_capped_at_max() -> None:
-    """На HTTP 429 с большим Retry-After сон ограничен _RETRY_AFTER_MAX_SEC (≤5s)."""
+    """На HTTP 429 с большим Retry-After сон ограничен _RETRY_AFTER_MAX_SEC (≤60s, W1196/W1208 cap)."""
     import backend.telnyx_adapter as ta
 
-    # Убеждаемся что константа снижена
-    assert ta._RETRY_AFTER_MAX_SEC <= 5.0, (
-        f"_RETRY_AFTER_MAX_SEC должен быть ≤5s, получили {ta._RETRY_AFTER_MAX_SEC}"
+    # Sanity: потолок Retry-After в пределах W1196 security-cap (60s).
+    assert ta._RETRY_AFTER_MAX_SEC <= 60.0, (
+        f"_RETRY_AFTER_MAX_SEC должен быть ≤60s (W1196/W1208 security cap), "
+        f"получили {ta._RETRY_AFTER_MAX_SEC}"
     )
 
     adapter = ta.TelnyxAdapter(api_key="test_key_xyz")
@@ -124,11 +123,12 @@ def test_telnyx_429_no_sleep_in_stub_mode() -> None:
 
 
 def test_twilio_429_sleep_capped_at_max() -> None:
-    """На HTTP 429 Twilio-адаптер тоже не спит дольше _RETRY_AFTER_MAX_SEC (≤5s)."""
+    """На HTTP 429 Twilio-адаптер тоже не спит дольше _RETRY_AFTER_MAX_SEC (≤60s, W1196/W1208 cap)."""
     import backend.twilio_adapter as ta
 
-    assert ta._RETRY_AFTER_MAX_SEC <= 5.0, (
-        f"_RETRY_AFTER_MAX_SEC должен быть ≤5s, получили {ta._RETRY_AFTER_MAX_SEC}"
+    assert ta._RETRY_AFTER_MAX_SEC <= 60.0, (
+        f"_RETRY_AFTER_MAX_SEC должен быть ≤60s (W1196/W1208 security cap), "
+        f"получили {ta._RETRY_AFTER_MAX_SEC}"
     )
 
     account_sid = "AC" + "a" * 32  # валидный формат
@@ -177,7 +177,7 @@ def test_email_smtp_plaintext_warning_logged(tmp_path: pathlib.Path) -> None:
     smtp_instance.__enter__ = MagicMock(return_value=smtp_instance)
     smtp_instance.__exit__ = MagicMock(return_value=False)
 
-    with patch("backend.email_sender.smtplib.SMTP", return_value=smtp_instance) as _mock_smtp, \
+    with patch("backend.email_sender.smtplib.SMTP", return_value=smtp_instance), \
          patch("backend.email_sender.MIMEMultipart", return_value=msg_mock), \
          patch("backend.email_sender.MIMEText"), \
          caplog_ctx(logging.getLogger("KrabEar.Backend.EmailSender")) as log:
@@ -339,7 +339,6 @@ def test_apple_calendar_notes_clamped() -> None:
 
 def test_apple_clamp_field_short_values_unchanged() -> None:
     """Поля в пределах лимита не должны обрезаться."""
-    from backend.apple_integration_service import AppleIntegrationService
 
     svc = _make_apple_service()
     title = "Обычный заголовок"
@@ -386,4 +385,3 @@ class _ListHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         self._store.append(record)
-
