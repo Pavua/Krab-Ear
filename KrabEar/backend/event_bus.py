@@ -33,6 +33,11 @@ _QUEUE_MAXSIZE = 64
 # thread (inside the Flask/gevent SSE handler), so an uncapped subscriber list is
 # a thread + memory exhaustion vector under load or during connection-flood attacks.
 MAX_SUBSCRIBERS = 100
+# Максимальное число синхронных push-листенеров (server-side callbacks).
+# Листенеры добавляются только при старте подсистем (WebhookManager и др.) —
+# фиксированное число, не per-request. Ограничение защищает от случайного
+# накопления при многократных reinit (тесты, hot-reload) без явного remove_listener.
+_MAX_LISTENERS = 100
 
 
 class EventBus:
@@ -105,10 +110,34 @@ class EventBus:
 
         Исключения внутри листенера логируются и проглатываются — один сбойный
         листенер не должен ломать доставку события остальным подписчикам.
+
+        Ограничение _MAX_LISTENERS: если лимит достигнут — предупреждаем и отклоняем
+        (в нормальной работе листенеры добавляются только при старте подсистем).
         """
         with self._lock:
+            current_count = len(self._listeners)
+            if current_count >= _MAX_LISTENERS:
+                logger.warning(
+                    "EventBus: отклонён листенер — превышен лимит _MAX_LISTENERS=%d (текущее число: %d)",
+                    _MAX_LISTENERS,
+                    current_count,
+                )
+                return
             self._listeners.append(callback)
         logger.debug("EventBus: зарегистрирован листенер, всего %d", len(self._listeners))
+
+    def remove_listener(self, callback: Callable[[str, dict[str, Any]], None]) -> None:
+        """Удаляет push-листенер из списка (симметрично add_listener).
+
+        Если callback не найден в списке — операция игнорируется (аналогично unsubscribe).
+        """
+        with self._lock:
+            try:
+                self._listeners.remove(callback)
+            except ValueError:
+                pass
+            remaining = len(self._listeners)
+        logger.debug("EventBus: листенер удалён, осталось %d", remaining)
 
     def emit(self, event_type: str, payload: dict[str, Any]) -> None:
         """Публикует событие всем активным подписчикам.

@@ -141,6 +141,10 @@ class SharingManager:
                 loaded = json.loads(raw)
                 if isinstance(loaded, dict):
                     self._index = loaded
+                    # Wave-29: чистим истёкшие записи при загрузке — они несут content
+                    # и копились в shares_index.json across рестартов (memory + privacy).
+                    if self._prune_expired_locked():
+                        self._save_index()
         except Exception as exc:
             logger.warning("Не удалось загрузить индекс shares: %s", exc)
 
@@ -160,6 +164,36 @@ class SharingManager:
             tmp.replace(self._index_path)
         except Exception as exc:
             logger.error("Не удалось сохранить индекс shares: %s", exc)
+
+    def _prune_expired_locked(self) -> int:
+        """Wave-29: удаляет из _index записи с истёкшим TTL (они несут полный
+        ``content`` → unbounded memory + privacy leak; раньше ``list_shared`` лишь
+        ФИЛЬТРОВАЛ их, но не удалял). Удаляет и файл пакета (path-containment safe).
+        Revoked-записи уже без content (sensitive-поля popped в revoke_share) —
+        оставляем как tombstone. Должна вызываться под self._lock.
+
+        Returns:
+            число удалённых записей.
+        """
+        now = time.time()
+        expired = [
+            sid for sid, entry in self._index.items()
+            if not entry.get("_reserved")
+            and not entry.get("is_revoked")
+            and entry.get("expires_at") is not None
+            and entry["expires_at"] < now
+        ]
+        for sid in expired:
+            entry = self._index.pop(sid, {})
+            fpath = self._resolve_contained_share_path(entry.get("filename", ""))
+            if fpath is not None:
+                try:
+                    fpath.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        if expired:
+            logger.debug("SharingManager: pruned %d expired share(s) from _index", len(expired))
+        return len(expired)
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -260,6 +294,10 @@ class SharingManager:
         """
         now = time.time()
         with self._lock:
+            # Wave-29: ленивая чистка истёкших записей (освобождает in-memory content).
+            # При include_expired=True не чистим — это режим показа истёкших.
+            if not include_expired and self._prune_expired_locked():
+                self._save_index()
             result = []
             for entry in self._index.values():
                 # W1767 #17: пропускаем временные «reserved» placeholders

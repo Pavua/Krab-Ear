@@ -62,6 +62,11 @@ def _sanitize_threshold(value: object) -> float:
 # W1243 F2: максимальное число записей для полного сканирования run_deduplication
 _MAX_DEDUP_SCAN: int = 1000
 
+# Максимальное число одновременно хранимых dedup-задач в реестре _jobs.
+# При превышении эвиктируется самый старый terminal-job (done/failed/cancelled).
+# Предотвращает unbounded-growth утечку памяти при частых вызовах run_deduplication_async.
+_MAX_TRACKED_JOBS: int = 100
+
 # Maximum number of history items allowed for synchronous IPC deduplication.
 # Larger histories block the IPC thread due to O(n²) SequenceMatcher comparisons.
 MAX_DEDUP_ITEMS: int = 500
@@ -567,10 +572,36 @@ class AutoDeduplicator:
     # Background job management (W1243 F2)
     # ------------------------------------------------------------------
 
+    def _evict_oldest_terminal_job_locked(self) -> None:
+        """Эвиктирует самый старый terminal-job (done/failed/cancelled) из реестра.
+
+        Вызывается под self._lock при превышении _MAX_TRACKED_JOBS.
+        Итерирует по _jobs в порядке вставки (Python 3.7+ dict) и удаляет первый
+        найденный terminal-job. Если terminal-задач нет — ничего не делает
+        (running/queued задачи защищены от эвикции).
+        """
+        _terminal = {"done", "failed", "cancelled"}
+        for jid, job in self._jobs.items():
+            if job.get("status") in _terminal:
+                del self._jobs[jid]
+                logger.debug(
+                    "AutoDedup: эвиктирован terminal-job %s (реестр превысил %d записей)",
+                    jid,
+                    _MAX_TRACKED_JOBS,
+                )
+                return
+
     def _create_dedup_job(self) -> str:
-        """Создаёт новую запись в реестре фоновых dedup-задач."""
+        """Создаёт новую запись в реестре фоновых dedup-задач.
+
+        Перед добавлением проверяет ёмкость реестра: если len(_jobs) >= _MAX_TRACKED_JOBS,
+        эвиктирует самый старый terminal-job, чтобы предотвратить unbounded-growth.
+        """
         job_id = f"dedup-{uuid.uuid4().hex[:8]}"
         with self._lock:
+            # Эвикция при превышении лимита: удаляем самый старый завершённый job
+            if len(self._jobs) >= _MAX_TRACKED_JOBS:
+                self._evict_oldest_terminal_job_locked()
             self._jobs[job_id] = {
                 "job_id": job_id,
                 "status": "queued",
