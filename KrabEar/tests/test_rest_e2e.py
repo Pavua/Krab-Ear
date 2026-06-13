@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -74,53 +76,68 @@ def _make_client():
 
 @unittest.skipUnless(_REST_AVAILABLE, "REST server dependencies not available")
 class HFTokenEnvPropagationTest(unittest.TestCase):
-    """Regression: the REST process must copy the runtime hf_token from
-    settings.json into os.environ (W1755 parity). The IPC BackendService did this
-    in __init__, but rest_server.py is a separate process that never constructs
-    BackendService → pyannote diarization read an empty HF_TOKEN → 401 on the gated
-    repo → diarization silently disabled for every REST /v1/stt/transcribe upload.
+    """Regression: the REST process must source the gated-pyannote HF token from the
+    CANONICAL GUI settings.json and OVERWRITE its env, because (a) its own DATA_DIR
+    store can be empty and (b) its launchd plist bakes a token that goes stale once the
+    user rotates it in the GUI. A stale plist token used to win (setdefault) → 401 on
+    the gated repo → diarization silently disabled for every REST upload.
     """
 
     _ENV_KEYS = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN")
 
     def setUp(self):
         import backend.rest_server as rest_server
+        import core.config as cfg
         self.rs = rest_server
+        self._tmpdir = tempfile.mkdtemp(prefix="krab_hf_test_")
+        self._canon = Path(self._tmpdir) / "settings.json"
+        self._patch = patch.object(cfg, "_SETTINGS_JSON_FILE", self._canon)
+        self._patch.start()
         self._saved_env = {k: os.environ.get(k) for k in self._ENV_KEYS}
         for k in self._ENV_KEYS:
             os.environ.pop(k, None)
         self._saved_ret = _mock_store.load_settings.return_value
 
     def tearDown(self):
+        self._patch.stop()
         _mock_store.load_settings.return_value = self._saved_ret
         for k, v in self._saved_env.items():
             if v is None:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def test_runtime_hf_token_propagated_to_all_env_keys(self):
-        _mock_store.load_settings.return_value = {"hf_token": "hf_unit_TEST_token"}
+    def _write_canon(self, data):
+        self._canon.write_text(json.dumps(data))
+
+    def test_canonical_token_overwrites_stale_plist_env(self):
+        os.environ["HF_TOKEN"] = "hf_stale_plist_token"  # simulate dead plist-baked token
+        self._write_canon({"hf_token": "hf_gui_valid"})
+        _mock_store.load_settings.return_value = {}
         self.rs._propagate_hf_token_to_env()
         for k in self._ENV_KEYS:
-            self.assertEqual(os.environ.get(k), "hf_unit_TEST_token", f"{k} not propagated")
+            self.assertEqual(os.environ.get(k), "hf_gui_valid",
+                             f"{k}: live GUI token must overwrite a stale plist token")
 
-    def test_existing_env_token_wins_setdefault(self):
-        os.environ["HF_TOKEN"] = "hf_preexisting"
-        _mock_store.load_settings.return_value = {"hf_token": "hf_from_settings"}
-        self.rs._propagate_hf_token_to_env()
-        self.assertEqual(os.environ["HF_TOKEN"], "hf_preexisting",
-                         "pre-existing env token must win (setdefault)")
-
-    def test_gigaam_token_is_fallback_when_no_generic(self):
-        _mock_store.load_settings.return_value = {"stt_gigaam_hf_token": "hf_gigaam_only"}
+    def test_canonical_gigaam_token_is_fallback_key(self):
+        self._write_canon({"stt_gigaam_hf_token": "hf_gigaam_only"})
+        _mock_store.load_settings.return_value = {}
         self.rs._propagate_hf_token_to_env()
         self.assertEqual(os.environ.get("HF_TOKEN"), "hf_gigaam_only")
 
-    def test_empty_settings_sets_no_env(self):
-        _mock_store.load_settings.return_value = {}
+    def test_falls_back_to_rest_store_when_canonical_missing(self):
+        # canonical file not written → does not exist → fall back to this process store
+        _mock_store.load_settings.return_value = {"hf_token": "hf_from_store"}
         self.rs._propagate_hf_token_to_env()
-        self.assertIsNone(os.environ.get("HF_TOKEN"))
+        self.assertEqual(os.environ.get("HF_TOKEN"), "hf_from_store")
+
+    def test_no_token_anywhere_leaves_existing_env_untouched(self):
+        os.environ["HF_TOKEN"] = "hf_preexisting_env"
+        _mock_store.load_settings.return_value = {}  # canonical missing + store empty
+        self.rs._propagate_hf_token_to_env()
+        self.assertEqual(os.environ.get("HF_TOKEN"), "hf_preexisting_env",
+                         "no token anywhere must not clobber an existing env token")
 
 
 # ---------------------------------------------------------------------------

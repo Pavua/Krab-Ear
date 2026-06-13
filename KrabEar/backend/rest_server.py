@@ -471,32 +471,48 @@ transcriber = Transcriber(engine=engine)
 
 
 def _propagate_hf_token_to_env() -> None:
-    """W1755 parity for the REST process: copy the runtime hf_token /
-    stt_gigaam_hf_token from settings.json into os.environ so that pyannote
-    diarization authenticates against the gated repo.
+    """Make the user's gated-pyannote HF token reach the REST engine's diarization.
 
-    The IPC BackendService does this in __init__, but rest_server.py is a SEPARATE
-    process that never constructs BackendService — so its AudioEngine read an empty
-    HF_TOKEN → anonymous Pipeline.from_pretrained → 401 on the gated pyannote model,
-    silently disabling diarization for every REST /v1/stt/transcribe upload.
+    The token is managed in the GUI and persisted by the IPC backend to the CANONICAL
+    ~/Library/Application Support/KrabEar/settings.json. The REST process is separate
+    and breaks two ways: (a) it may run with a different DATA_DIR, so its own
+    store.load_settings() is empty; (b) its launchd plist bakes an HF_TOKEN at install
+    time which goes STALE/revoked once the user rotates the token via the GUI. Both
+    leave pyannote with an empty or dead token → 401 on the gated repo → diarization
+    silently disabled for every REST /v1/stt/transcribe upload.
 
-    setdefault semantics: a pre-existing os.environ token (e.g. KRAB_EAR_HF_TOKEN)
-    wins. Generic hf_token is preferred over the gigaam-specific token (the latter
-    may lack pyannote gating rights → spurious 401). The token is NEVER logged.
+    Fix: source the token from the canonical GUI settings.json and OVERWRITE the env
+    keys when a token is present — the live GUI token is the single source of truth and
+    must win over a stale plist-baked env token (setdefault would let the dead token
+    survive). Falls back to this process's own store only when canonical is absent.
+    A token is set only when one actually exists, so env-only setups are untouched.
+    The token value is NEVER logged.
     """
+    def _pick(d: dict) -> str:
+        return (str(d.get("hf_token", "") or "").strip()
+                or str(d.get("stt_gigaam_hf_token", "") or "").strip())
+
+    _token = ""
+    # 1. Canonical GUI settings.json — authoritative (raw lowercase keys).
     try:
-        _s = store.load_settings()
-        _hf = str(_s.get("hf_token", "") or "").strip()
-        _gigaam = str(_s.get("stt_gigaam_hf_token", "") or "").strip()
+        from core.config import _SETTINGS_JSON_FILE
+        if _SETTINGS_JSON_FILE.exists():
+            _canon = json.loads(_SETTINGS_JSON_FILE.read_text())
+            if isinstance(_canon, dict):
+                _token = _pick(_canon)
     except Exception:
-        return
-    _token = _hf or _gigaam
+        _token = ""
+    # 2. Fallback: this REST process's own store (its DATA_DIR) when canonical absent.
+    if not _token:
+        try:
+            _token = _pick(store.load_settings())
+        except Exception:
+            _token = ""
     if not _token:
         return
     try:
         for _k in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN"):
-            if not os.environ.get(_k):
-                os.environ[_k] = _token
+            os.environ[_k] = _token  # overwrite: live GUI token beats a stale plist token
     except Exception as exc:  # null-byte in token → ValueError; never log the token
         logger.warning("REST hf_token env propagation failed: %s", type(exc).__name__)
 
