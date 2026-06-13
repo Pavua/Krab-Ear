@@ -470,6 +470,40 @@ store = StateStore(settings.DATA_DIR)
 transcriber = Transcriber(engine=engine)
 
 
+def _propagate_hf_token_to_env() -> None:
+    """W1755 parity for the REST process: copy the runtime hf_token /
+    stt_gigaam_hf_token from settings.json into os.environ so that pyannote
+    diarization authenticates against the gated repo.
+
+    The IPC BackendService does this in __init__, but rest_server.py is a SEPARATE
+    process that never constructs BackendService — so its AudioEngine read an empty
+    HF_TOKEN → anonymous Pipeline.from_pretrained → 401 on the gated pyannote model,
+    silently disabling diarization for every REST /v1/stt/transcribe upload.
+
+    setdefault semantics: a pre-existing os.environ token (e.g. KRAB_EAR_HF_TOKEN)
+    wins. Generic hf_token is preferred over the gigaam-specific token (the latter
+    may lack pyannote gating rights → spurious 401). The token is NEVER logged.
+    """
+    try:
+        _s = store.load_settings()
+        _hf = str(_s.get("hf_token", "") or "").strip()
+        _gigaam = str(_s.get("stt_gigaam_hf_token", "") or "").strip()
+    except Exception:
+        return
+    _token = _hf or _gigaam
+    if not _token:
+        return
+    try:
+        for _k in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN"):
+            if not os.environ.get(_k):
+                os.environ[_k] = _token
+    except Exception as exc:  # null-byte in token → ValueError; never log the token
+        logger.warning("REST hf_token env propagation failed: %s", type(exc).__name__)
+
+
+_propagate_hf_token_to_env()
+
+
 def _rest_engine_cleanup() -> None:
     """atexit cleanup — закрывает GigaAM адаптер если он был создан (graceful shutdown)."""
     try:

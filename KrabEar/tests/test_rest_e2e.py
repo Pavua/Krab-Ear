@@ -10,6 +10,7 @@ Run:
 from __future__ import annotations
 
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -69,6 +70,57 @@ def _make_client():
     app.config["TESTING"] = True
     app.config["RATELIMIT_ENABLED"] = False  # disable limiter in all tests by default
     return app.test_client()
+
+
+@unittest.skipUnless(_REST_AVAILABLE, "REST server dependencies not available")
+class HFTokenEnvPropagationTest(unittest.TestCase):
+    """Regression: the REST process must copy the runtime hf_token from
+    settings.json into os.environ (W1755 parity). The IPC BackendService did this
+    in __init__, but rest_server.py is a separate process that never constructs
+    BackendService → pyannote diarization read an empty HF_TOKEN → 401 on the gated
+    repo → diarization silently disabled for every REST /v1/stt/transcribe upload.
+    """
+
+    _ENV_KEYS = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN")
+
+    def setUp(self):
+        import backend.rest_server as rest_server
+        self.rs = rest_server
+        self._saved_env = {k: os.environ.get(k) for k in self._ENV_KEYS}
+        for k in self._ENV_KEYS:
+            os.environ.pop(k, None)
+        self._saved_ret = _mock_store.load_settings.return_value
+
+    def tearDown(self):
+        _mock_store.load_settings.return_value = self._saved_ret
+        for k, v in self._saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_runtime_hf_token_propagated_to_all_env_keys(self):
+        _mock_store.load_settings.return_value = {"hf_token": "hf_unit_TEST_token"}
+        self.rs._propagate_hf_token_to_env()
+        for k in self._ENV_KEYS:
+            self.assertEqual(os.environ.get(k), "hf_unit_TEST_token", f"{k} not propagated")
+
+    def test_existing_env_token_wins_setdefault(self):
+        os.environ["HF_TOKEN"] = "hf_preexisting"
+        _mock_store.load_settings.return_value = {"hf_token": "hf_from_settings"}
+        self.rs._propagate_hf_token_to_env()
+        self.assertEqual(os.environ["HF_TOKEN"], "hf_preexisting",
+                         "pre-existing env token must win (setdefault)")
+
+    def test_gigaam_token_is_fallback_when_no_generic(self):
+        _mock_store.load_settings.return_value = {"stt_gigaam_hf_token": "hf_gigaam_only"}
+        self.rs._propagate_hf_token_to_env()
+        self.assertEqual(os.environ.get("HF_TOKEN"), "hf_gigaam_only")
+
+    def test_empty_settings_sets_no_env(self):
+        _mock_store.load_settings.return_value = {}
+        self.rs._propagate_hf_token_to_env()
+        self.assertIsNone(os.environ.get("HF_TOKEN"))
 
 
 # ---------------------------------------------------------------------------
