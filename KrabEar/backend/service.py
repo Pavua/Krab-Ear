@@ -324,7 +324,11 @@ class BackendService:
         # W1755 — propagate runtime hf_token/stt_gigaam_hf_token to os.environ so that
         # pyannote diarization finds HF_TOKEN at startup.  A GUI token change (set_settings)
         # also re-runs propagation via the after_save hook below so no restart is needed.
-        self._propagate_hf_token_to_env()
+        # overwrite=True at init: the GUI/canonical token is authoritative and must beat a
+        # STALE token baked into the launchd plist's EnvironmentVariables at install time —
+        # a revoked plist HF_TOKEN otherwise wins via setdefault → pyannote 401. When no GUI
+        # token exists the method returns early, so a deliberate env override is preserved.
+        self._propagate_hf_token_to_env(overwrite=True)
 
         def _on_hf_token_saved(old: dict, new: dict) -> None:
             _changed = (
@@ -1116,9 +1120,12 @@ class BackendService:
         Вызывается при старте (overwrite=False) и из after_save hook (overwrite=True) чтобы
         токен работал без рестарта.
 
-        Приоритет (overwrite=False / init): существующий os.environ["HF_TOKEN"] побеждает —
-        setdefault-семантика.  overwrite=True (after_save hook): перезаписывает env чтобы
-        новый GUI-токен вступил в силу немедленно.
+        Приоритет: боевые call-site'ы (init И after_save hook) вызывают с overwrite=True —
+        GUI/канонический токен авторитетен и побеждает STALE-токен, запечённый в launchd-plist
+        EnvironmentVariables на install (revoked plist HF_TOKEN иначе побеждал бы через
+        setdefault → pyannote 401). overwrite=False (setdefault, существующий env побеждает)
+        сохранён в сигнатуре для прямых вызовов/тестов. Когда GUI-токена нет — метод выходит
+        рано (см. ниже), поэтому явный env-override (KRAB_EAR_HF_TOKEN) сохраняется.
 
         Источник: hf_token (общий) имеет приоритет над stt_gigaam_hf_token для generic ключей
         (gigaam-специфичный токен может не иметь прав на pyannote gating → spurious 401).
