@@ -686,6 +686,7 @@ extension HistoryPanelController {
         callAssistStatusLabel.stringValue = chunks.joined(separator: " • ")
         callAssistStartButton.isEnabled = !active
         callAssistStopButton.isEnabled = active || status == "running"
+        callAssistActive = active || status == "running"
     }
 
     func refreshCallAssistState(silentOnError: Bool = true) {

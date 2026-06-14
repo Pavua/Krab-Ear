@@ -6,7 +6,7 @@
  - enqueueImport / processNextImportIfNeeded / finishImportQueueIfNeeded
  - sendImportNotification / updateImportStatusLabel
  - startImportElapsedTimer / stopImportElapsedTimer
- - normalizedImportSignature / previewImport / writeImportQueueReport
+ - normalizedImportSignature / writeImportQueueReport
  - ImportDropZoneView (drag-and-drop зона)
 */
 
@@ -615,30 +615,6 @@ extension HistoryPanelController {
             .filter { !$0.isEmpty }
             .sorted()
         return normalized.joined(separator: "|")
-    }
-
-    func previewImport(paths: [String]) -> ImportPreview {
-        guard
-            let response = try? ipcClient.call(
-                method: "preview_transcribe_paths",
-                params: ["paths": paths, "sample_limit": 3]
-            ),
-            let result = response["result"] as? [String: Any]
-        else {
-            return ImportPreview(audioCount: 0, folderCount: 0, sample: [], byExtension: [:], totalBytes: 0)
-        }
-        let audioCount = (result["audio_count"] as? Int) ?? 0
-        let folderCount = (result["folder_count"] as? Int) ?? 0
-        let sample = (result["sample"] as? [String]) ?? []
-        let totalBytes = (result["total_bytes"] as? Int) ?? 0
-        let byExtension = (result["by_ext"] as? [String: Int]) ?? [:]
-        return ImportPreview(
-            audioCount: audioCount,
-            folderCount: folderCount,
-            sample: sample,
-            byExtension: byExtension,
-            totalBytes: totalBytes
-        )
     }
 
     func writeImportQueueReport(summary: String) -> String? {

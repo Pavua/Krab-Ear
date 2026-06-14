@@ -58,7 +58,12 @@ extension HistoryPanelController {
             Task { @MainActor in
                 self.refreshRealtimePreview()
                 self.previewPollTick += 1
-                if self.previewPollTick % 3 == 0 {
+                // Poll Call Assist state only while a session is active — avoids
+                // hammering get_call_assist_state when idle (BACKEND-T over-poll /
+                // IPC rate-limit fix). callAssistActive is set on every start/stop
+                // via applyCallAssistState, and the immediate refresh below + the
+                // event-driven refreshes pick up an already-running session.
+                if self.callAssistActive, self.previewPollTick % 3 == 0 {
                     self.refreshCallAssistState()
                 }
             }

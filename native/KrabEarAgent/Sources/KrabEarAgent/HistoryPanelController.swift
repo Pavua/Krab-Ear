@@ -113,6 +113,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     var transcribeProgressFailCount: Int = 0
     var isSyncingTabs = false
     var previewPollTick = 0
+    // True while a Call Assist session is running. Gates the periodic
+    // get_call_assist_state poll in the preview timer so it is NOT hammered
+    // when no session is active (BACKEND-T over-poll / IPC rate-limit fix).
+    // Kept in sync by applyCallAssistState(_:) on every start/stop/refresh.
+    var callAssistActive = false
     var isRecoveringHistoryFromFilters = false
 
     // MARK: - Inline translation (per-item toggle)
