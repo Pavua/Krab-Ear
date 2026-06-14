@@ -180,6 +180,41 @@ class TestPasteFormatterClass(unittest.TestCase):
         result = self.formatter.format_for_app("Привет.", "TELEGRAM")
         self.assertFalse(result.endswith("."))
 
+    # --- handle_format_for_paste: formatter_used accuracy ---
+    # Draft-factory (gemini): formatter_used re-derived the selection in the
+    # handler but only mirrored steps 1-2 (custom/builtin EXACT), missing the
+    # partial-match step (3) that format_for_app actually uses → it reported
+    # "default" while a real built-in formatter had been applied.
+
+    def test_formatter_used_exact_builtin(self):
+        out = self.formatter.handle_format_for_paste({"text": "Привет.", "app_name": "telegram"})
+        self.assertEqual(out["formatter_used"], "telegram")
+
+    def test_formatter_used_partial_match_reports_real_formatter(self):
+        """'Telegram Desktop' применяет telegram-форматтер → formatter_used должен быть 'telegram', не 'default'."""
+        out = self.formatter.handle_format_for_paste(
+            {"text": "Проверка.", "app_name": "Telegram Desktop"}
+        )
+        # текст реально отформатирован telegram (точка убрана)...
+        self.assertFalse(out["formatted_text"].endswith("."))
+        # ...значит метадата НЕ должна врать «default»
+        self.assertEqual(out["formatter_used"], "telegram")
+
+    def test_formatter_used_default_for_unknown(self):
+        out = self.formatter.handle_format_for_paste(
+            {"text": "Текст.", "app_name": "unknownapp_xyz"}
+        )
+        self.assertEqual(out["formatter_used"], "default")
+
+    def test_formatter_used_custom_exact(self):
+        self.formatter.add_custom_formatter("myapp", {"capitalize": True})
+        out = self.formatter.handle_format_for_paste({"text": "x", "app_name": "myapp"})
+        self.assertEqual(out["formatter_used"], "myapp")
+
+    def test_formatter_used_empty_is_default(self):
+        out = self.formatter.handle_format_for_paste({"text": "Текст.", "app_name": ""})
+        self.assertEqual(out["formatter_used"], "default")
+
     # --- list_formatters ---
 
     def test_list_formatters_returns_builtins(self):

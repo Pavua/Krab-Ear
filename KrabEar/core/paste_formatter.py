@@ -341,6 +341,27 @@ class PasteFormatter:
                 return True
         return False
 
+    def _resolve_formatter_name(self, normalized: str) -> str:
+        """Имя форматтера, который применит :meth:`format_for_app` для *normalized*.
+
+        Единственный источник истины для 4-ступенчатого приоритета (custom-exact →
+        builtin-exact → builtin-partial → default), чтобы метадата ``formatter_used``
+        в IPC-ответе не разъезжалась с фактически применённым форматтером.
+        ВАЖНО: должен повторять порядок в :meth:`format_for_app` строка-в-строку
+        (в частности, partial-match проверяет ТОЛЬКО встроенные форматтеры, не custom).
+        """
+        with self._lock:
+            if normalized in self._custom:
+                return normalized
+        if normalized != "default" and normalized in _BUILTIN_FORMATTERS:
+            return normalized
+        for key in _BUILTIN_FORMATTERS:
+            if key == "default":
+                continue
+            if normalized and (key in normalized or normalized in key):
+                return key
+        return "default"
+
     # ------------------------------------------------------------------
     # IPC-обработчики
     # ------------------------------------------------------------------
@@ -358,12 +379,9 @@ class PasteFormatter:
         text = str(params.get("text", ""))
         app_name = str(params.get("app_name", "default")).strip()
         formatted = self.format_for_app(text, app_name)
-        # Определяем какой форматтер был использован
-        normalized = app_name.lower()
-        with self._lock:
-            formatter_used = normalized if normalized in self._custom else None
-        if formatter_used is None:
-            formatter_used = normalized if normalized in _BUILTIN_FORMATTERS else "default"
+        # Какой форматтер реально применён — через общий резолвер, чтобы метадата
+        # совпадала с format_for_app (включая partial-match, напр. "Telegram Desktop").
+        formatter_used = self._resolve_formatter_name(app_name.strip().lower())
         return {
             "formatted_text": formatted,
             "app_name": app_name,
