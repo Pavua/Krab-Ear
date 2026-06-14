@@ -207,7 +207,10 @@ extension HistoryPanelController {
             highlightsStack.spacing = KrabEarTheme.Metrics.tight
             
             for h in highlights {
-                let bullet = NSTextField(labelWithString: "•")
+                // AGENT-J guard: U+2022 BULLET «•» — CoreText-hang glyph в system-font
+                // NSTextField. Используем U+00B7 MIDDLE DOT «·» (безопасен, не в
+                // DANGEROUS_GLYPHS), визуально маркер списка сохранён.
+                let bullet = NSTextField(labelWithString: "·")
                 bullet.font = KrabEarTheme.Typography.body
                 bullet.textColor = KrabEarTheme.Colors.accent
                 
