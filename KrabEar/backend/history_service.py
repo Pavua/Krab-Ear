@@ -4233,7 +4233,40 @@ class HistoryService:
         )
 
         generator = HTMLReportGenerator()
-        html_content = generator.generate_report(items=items_dicts, title=title)
+
+        # Optional «Сводка дня» card — the daily digest for the most recent day
+        # present in the report (keeps the recap coherent with the report's
+        # contents).  Privacy mode already short-circuited above, so this never
+        # runs in privacy mode.  Best-effort: a digest failure must not break
+        # the export.
+        daily_digest_payload: dict[str, Any] | None = None
+        if items_dicts:
+            try:
+                latest_ts = max(
+                    (str(it.get("ts") or "") for it in items_dicts), default=""
+                )
+                recap_date = latest_ts[:10] or None
+                from backend.daily_digest import DailyDigestGenerator
+
+                digest = DailyDigestGenerator().generate_digest(
+                    date_str=recap_date, store=self.store
+                )
+                if digest.total_recordings > 0:
+                    daily_digest_payload = {
+                        "date": digest.date,
+                        "total_recordings": digest.total_recordings,
+                        "total_duration_min": digest.total_duration_min,
+                        "total_words": digest.total_words,
+                        "languages_used": digest.languages_used,
+                        "top_topics": digest.top_topics,
+                        "highlights": digest.highlights,
+                    }
+            except Exception as exc:
+                logger.debug("Сводка дня для HTML-отчёта пропущена: %s", exc)
+
+        html_content = generator.generate_report(
+            items=items_dicts, title=title, daily_digest=daily_digest_payload
+        )
 
         save_path: str | None = None
         if self._coerce_bool(params.get("save_to_file", False), default=False):

@@ -644,5 +644,106 @@ class TestHTMLReportExtras(unittest.TestCase):
         self.assertGreater(size, 1000)
 
 
+# ---------------------------------------------------------------------------
+# Daily recap card embedded into the report (Wave 2)
+# ---------------------------------------------------------------------------
+
+class TestDailyRecapInReport(unittest.TestCase):
+    """`generate_report(daily_digest=...)` renders the «Сводка дня» card."""
+
+    def setUp(self) -> None:
+        self.gen = HTMLReportGenerator()
+        self.items = [
+            _simple_item(text=f"Запись {i}", ts=f"2026-04-12T10:0{i}:00")
+            for i in range(3)
+        ]
+        self.digest = {
+            "date": "2026-04-12",
+            "total_recordings": 5,
+            "total_duration_min": 12.34,
+            "total_words": 1234,
+            "languages_used": {"ru": 4, "en": 1},
+            "top_topics": ["проект", "дедлайн"],
+            "highlights": ["Обсудили релиз", "Назначили встречу"],
+        }
+
+    def test_recap_absent_when_digest_none(self) -> None:
+        result = self.gen.generate_report(self.items)
+        self.assertNotIn("Сводка дня", result)
+
+    def test_recap_present_when_digest_passed(self) -> None:
+        result = self.gen.generate_report(self.items, daily_digest=self.digest)
+        self.assertIn("Сводка дня", result)
+        self.assertIn("2026-04-12", result)
+        self.assertIn("Записей", result)
+        self.assertIn("Минут", result)
+        self.assertIn("Слов", result)
+        self.assertIn("12.3", result)   # duration formatted to one decimal
+        self.assertIn("1,234", result)  # words with thousands separator
+        self.assertIn("recap-chip", result)
+        self.assertIn("проект", result)
+        self.assertIn("Обсудили релиз", result)
+
+    def test_recap_languages_sorted_by_count_desc(self) -> None:
+        result = self.gen.generate_report(self.items, daily_digest=self.digest)
+        self.assertLess(result.index("ru ·"), result.index("en ·"))
+
+    def test_recap_escapes_html_in_topics_and_highlights(self) -> None:
+        evil = {
+            "date": "2026-04-12",
+            "total_recordings": 1,
+            "total_duration_min": 1.0,
+            "total_words": 2,
+            "languages_used": {},
+            "top_topics": ["<script>alert(1)</script>"],
+            "highlights": ["<img src=x onerror=alert(2)>"],
+        }
+        result = self.gen.generate_report(self.items, daily_digest=evil)
+        self.assertNotIn("<script>alert(1)</script>", result)
+        self.assertNotIn("<img src=x onerror=alert(2)>", result)
+        self.assertIn("&lt;script&gt;", result)
+
+    def test_render_daily_recap_empty_for_non_dict(self) -> None:
+        self.assertEqual(self.gen._render_daily_recap(None), "")
+        self.assertEqual(self.gen._render_daily_recap([]), "")
+
+    def test_recap_tolerates_malformed_numbers(self) -> None:
+        bad = {
+            "date": "2026-04-12",
+            "total_recordings": "oops",
+            "total_duration_min": None,
+            "total_words": [1, 2],
+            "languages_used": {"ru": 1},
+            "top_topics": [],
+            "highlights": [],
+        }
+        html_out = self.gen._render_daily_recap(bad)  # must not raise
+        self.assertIn("Сводка дня", html_out)
+        self.assertIn("0.0", html_out)  # duration fallback
+
+
+class TestExportHtmlReportDailyRecapIPC(unittest.TestCase):
+    """handle_export_html_report embeds the recap for the report's latest day."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.store = _make_store(Path(self._tmp.name))
+        self.svc = _make_svc(self.store)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_recap_present_when_day_has_recordings(self) -> None:
+        self.store.add_history_item(text="Раз два три четыре пять")
+        result = self.svc.handle_export_html_report({})
+        self.assertTrue(result["ok"])
+        self.assertIn("Сводка дня", result["html"])
+
+    def test_recap_absent_for_empty_history(self) -> None:
+        result = self.svc.handle_export_html_report({})
+        self.assertTrue(result["ok"])
+        self.assertNotIn("Сводка дня", result["html"])
+
+
 if __name__ == "__main__":
     unittest.main()

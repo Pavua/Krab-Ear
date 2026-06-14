@@ -129,6 +129,13 @@ a:hover { text-decoration: underline; }
 .stat-value { font-size: 2rem; font-weight: 700; color: var(--accent); line-height: 1; }
 .stat-label { font-size: .78rem; color: var(--text3); margin-top: 6px; }
 
+/* ── Daily recap ── */
+.recap-block-title { font-size: .74rem; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: .06em; margin: 22px 0 10px; }
+.recap-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.recap-chip { display: inline-block; padding: 4px 12px; border-radius: 999px; background: var(--surface2); color: var(--text2); font-size: .82rem; font-weight: 600; border: 1px solid var(--border); }
+.recap-highlights { margin: 6px 0 0; padding-left: 20px; color: var(--text2); }
+.recap-highlights li { margin: 4px 0; font-size: .9rem; line-height: 1.5; }
+
 /* ── Section headings ── */
 .section-title {
   font-size: 1rem;
@@ -313,12 +320,18 @@ class HTMLReportGenerator:
         self,
         items: list[dict[str, Any]],
         title: str = "Krab Ear Report",
+        daily_digest: dict[str, Any] | None = None,
     ) -> str:
         """Создаёт полный HTML-документ для списка записей истории.
 
         Args:
             items: список dict-представлений HistoryItem (from_dict / to_dict).
             title: заголовок отчёта.
+            daily_digest: опциональный payload generate_daily_digest
+                (date/total_recordings/total_duration_min/total_words/
+                languages_used/top_topics/highlights). Если передан — между
+                сводной статистикой и таймлайном вставляется карточка
+                «Сводка дня». ``None`` — карточка не выводится.
 
         Returns:
             Строка с полным HTML-документом.
@@ -326,6 +339,7 @@ class HTMLReportGenerator:
         stats = self._compute_stats(items)
         header_html = self._render_header(title, stats, items)
         stats_html = self._render_stats_card(stats)
+        recap_html = self._render_daily_recap(daily_digest) if daily_digest else ""
         timeline_html = self._render_timeline(items)
         entries_html = self._render_entries(items)
         wordcloud_html = self._render_wordcloud(items)
@@ -335,6 +349,7 @@ class HTMLReportGenerator:
             header_html
             + '<div class="container">'
             + stats_html
+            + recap_html
             + timeline_html
             + entries_html
             + wordcloud_html
@@ -471,6 +486,99 @@ class HTMLReportGenerator:
   <div class="stats-grid">
     {cells_html}
   </div>
+</div>
+"""
+
+    # ------------------------------------------------------------------
+    # Daily recap
+    # ------------------------------------------------------------------
+
+    def _render_daily_recap(self, digest: dict[str, Any]) -> str:
+        """Render a «Сводка дня» card from a generate_daily_digest payload.
+
+        Mirrors the in-app Daily Recap section: three metric tiles + language /
+        topic chips + highlights.  Every user-derived string is html.escape'd —
+        top_topics/highlights are extracted from raw transcript text, so without
+        escaping they could inject markup into this standalone HTML file when
+        opened in a browser (stored-XSS, defense-in-depth).
+        """
+        if not isinstance(digest, dict):
+            return ""
+
+        date_str = html.escape(str(digest.get("date") or ""))
+        try:
+            recordings_int = int(digest.get("total_recordings", 0) or 0)
+        except (TypeError, ValueError):
+            recordings_int = 0
+        try:
+            duration_str = f"{float(digest.get('total_duration_min', 0) or 0):.1f}"
+        except (TypeError, ValueError):
+            duration_str = "0.0"
+        try:
+            words_int = int(digest.get("total_words", 0) or 0)
+        except (TypeError, ValueError):
+            words_int = 0
+
+        tiles = [
+            (str(recordings_int), "Записей"),
+            (duration_str, "Минут"),
+            (f"{words_int:,}", "Слов"),
+        ]
+        tiles_html = "\n".join(
+            f'<div class="stat-item"><div class="stat-value">{html.escape(v)}</div>'
+            f'<div class="stat-label">{html.escape(lbl)}</div></div>'
+            for v, lbl in tiles
+        )
+
+        blocks = ""
+
+        langs = digest.get("languages_used")
+        if isinstance(langs, dict) and langs:
+            ordered = sorted(
+                langs.items(), key=lambda kv: (-int(kv[1] or 0), str(kv[0]))
+            )
+            chips = "".join(
+                f'<span class="recap-chip">{html.escape(str(code))} · '
+                f'{int(cnt or 0)}</span>'
+                for code, cnt in ordered
+            )
+            blocks += (
+                '<div class="recap-block-title">Языки</div>'
+                f'<div class="recap-chips">{chips}</div>'
+            )
+
+        topics = digest.get("top_topics")
+        if isinstance(topics, list) and topics:
+            chips = "".join(
+                f'<span class="recap-chip">{html.escape(str(t))}</span>'
+                for t in topics if str(t).strip()
+            )
+            if chips:
+                blocks += (
+                    '<div class="recap-block-title">Темы</div>'
+                    f'<div class="recap-chips">{chips}</div>'
+                )
+
+        highlights = digest.get("highlights")
+        if isinstance(highlights, list) and highlights:
+            lis = "\n".join(
+                f"<li>{html.escape(str(h))}</li>"
+                for h in highlights if str(h).strip()
+            )
+            if lis:
+                blocks += (
+                    '<div class="recap-block-title">Главное</div>'
+                    f'<ul class="recap-highlights">{lis}</ul>'
+                )
+
+        date_suffix = f" — {date_str}" if date_str else ""
+        return f"""
+<div class="stats-card">
+  <h2>Сводка дня{date_suffix}</h2>
+  <div class="stats-grid">
+    {tiles_html}
+  </div>
+  {blocks}
 </div>
 """
 
