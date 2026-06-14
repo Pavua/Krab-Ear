@@ -13,7 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend.collection_manager import CollectionManager
+from backend.collection_manager import CollectionManager, MAX_COLLECTION_NAME_LEN
 
 
 class FakeHistoryItem:
@@ -103,6 +103,29 @@ class RenameCollectionTestCase(unittest.TestCase):
         self._mgr.create_collection("Б")
         with self.assertRaises(ValueError):
             self._mgr.rename_collection("А", "Б")
+
+    def test_rename_to_overlong_name_raises_value_error(self) -> None:
+        """Переименование в слишком длинное имя → ValueError (симметрия с create_collection).
+
+        Draft-factory finding (cerebras gpt-oss): create_collection валидирует
+        len > MAX_COLLECTION_NAME_LEN, а rename_collection — нет, поэтому через
+        rename можно было обойти лимит и записать на диск имя любой длины.
+        """
+        self._mgr.create_collection("КороткоеИмя")
+        overlong = "д" * (MAX_COLLECTION_NAME_LEN + 1)
+        with self.assertRaises(ValueError):
+            self._mgr.rename_collection("КороткоеИмя", overlong)
+        # старое имя должно остаться нетронутым (валидация ДО мутации)
+        names = [c["name"] for c in self._mgr.list_collections()]
+        self.assertIn("КороткоеИмя", names)
+        self.assertNotIn(overlong, names)
+
+    def test_rename_to_max_len_name_ok(self) -> None:
+        """Имя ровно MAX_COLLECTION_NAME_LEN символов — допустимо (граница)."""
+        self._mgr.create_collection("Граница")
+        at_limit = "ц" * MAX_COLLECTION_NAME_LEN
+        result = self._mgr.rename_collection("Граница", at_limit)
+        self.assertEqual(result["name"], at_limit)
 
     def test_rename_to_same_name_is_noop(self) -> None:
         """Переименование в то же самое имя — допустимо (идемпотентно)."""

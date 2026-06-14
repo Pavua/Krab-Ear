@@ -309,12 +309,18 @@ class CollectionManager:
 
         Raises:
             KeyError: если коллекция с old_name не найдена.
-            ValueError: если new_name пустой или уже занят.
+            ValueError: если new_name пустой, слишком длинный или уже занят.
         """
         old_name = old_name.strip()
         new_name = new_name.strip()
         if not new_name:
             raise ValueError("Новое имя коллекции не может быть пустым")
+        # Симметрия с create_collection: rename не должен обходить лимит длины
+        # (иначе через переименование можно записать на диск имя любой длины).
+        if len(new_name) > MAX_COLLECTION_NAME_LEN:
+            raise ValueError(
+                f"Имя коллекции слишком длинное (максимум {MAX_COLLECTION_NAME_LEN} символов)"
+            )
 
         with self._lock:
             if old_name not in self._data["collections"]:
