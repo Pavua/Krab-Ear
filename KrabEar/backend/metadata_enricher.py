@@ -92,6 +92,23 @@ def _safe_float(v: Any, default: float = 0.0) -> float:
     return float(v)
 
 
+def _coerce_finite_float(v: Any, default: float = 0.0) -> float:
+    """``float(v)`` that never raises and is always finite (Wave-23 gap fix).
+
+    The bare ``float(item.get(...) or 0.0)`` call-sites used to run *before*
+    :func:`_safe_float`, so a non-numeric ``str``/``list`` (e.g. a malformed
+    ``enrich_recording`` IPC payload ``{"duration_sec": "abc"}``) raised
+    ``ValueError``/``TypeError`` and crashed the handler instead of degrading
+    to *default* like NaN/Inf do. This coerces first (preserving numeric
+    strings like ``"12.5"``) then applies the finite guard.
+    """
+    try:
+        parsed = float(v)
+    except (TypeError, ValueError):
+        return default
+    return _safe_float(parsed, default)
+
+
 def _clip_text(text: str, caller: str = "") -> str:
     """Обрезает текст до _MAX_TEXT_LEN символов с предупреждением (Wave 1765).
 
@@ -224,12 +241,8 @@ class MetadataEnricher:
         # Wave 23: guard against NaN/Inf before passing to TranscriptionScorer
         # (OverflowError on Inf) and before serialising to IPC JSON (NaN is
         # not RFC 8259-compliant; Swift JSONDecoder rejects the whole response).
-        duration_sec: float = _safe_float(
-            float(item.get("duration_sec") or 0.0), default=0.0
-        )
-        confidence: float = _safe_float(
-            float(item.get("confidence") or 0.0), default=0.0
-        )
+        duration_sec: float = _coerce_finite_float(item.get("duration_sec"), default=0.0)
+        confidence: float = _coerce_finite_float(item.get("confidence"), default=0.0)
         has_diarization: bool = bool(item.get("has_diarization", False))
         has_llm: bool = bool(item.get("has_llm_enhancement", False))
 
