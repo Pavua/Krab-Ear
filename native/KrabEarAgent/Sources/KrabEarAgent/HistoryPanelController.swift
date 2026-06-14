@@ -745,6 +745,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         searchField.action = #selector(onSearch)
         searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         searchField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        // Автодополнение: недавние запросы из backend (см. +SearchSuggestions).
+        setupSearchSuggestionsMenu()
+        refreshSearchSuggestions()
         topSearchRow.addArrangedSubview(searchField)
 
         let clearSearch: ThemeSecondaryButton = {
@@ -2009,6 +2012,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     @objc private func onSearch() {
         currentQuery = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         loadInitial()
+        // Обновляем «недавние поиски» (backend записал запрос в loadInitial →
+        // search_history → record_search). currentQuery кладём оптимистично.
+        if !currentQuery.isEmpty {
+            refreshSearchSuggestions(prepending: currentQuery)
+        }
     }
 
     @objc private func onClearSearch() {
