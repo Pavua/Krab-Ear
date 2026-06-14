@@ -342,6 +342,15 @@ class HistoryService:
             from_ts=from_ts_str,
             to_ts=to_ts_str,
         )
+        # Записываем запрос для автодополнения недавних/частых поисков
+        # (get_recent_searches / get_popular_searches). РАСПОЛОЖЕНО ПОСЛЕ privacy-гейта
+        # выше → в режиме приватности запросы не персистятся. Best-effort: сбой записи
+        # НЕ должен ломать сам поиск.
+        if self._search_history_mgr is not None and query:
+            try:
+                self._search_history_mgr.record_search(query, results_count=len(items))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("record_search failed (non-fatal): %s", exc)
         return {"items": items, "next_cursor": next_cursor}
 
     def handle_fuzzy_search(self, params: dict[str, Any]) -> dict[str, Any]:
