@@ -24,6 +24,7 @@ Result schema (AlignedResult from parakeet-mlx):
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, Optional
 
 from .stt_adapter import STTAdapterBase, STTResult
@@ -62,6 +63,10 @@ class ParakeetSTTAdapter(STTAdapterBase):
         self._model_path = model_path or _DEFAULT_MODEL
         self._model: Any = None  # lazy-loaded on first transcribe()
         self._load_failed: bool = False
+        # Protects check-then-load against concurrent calls from multiple
+        # threads (e.g. parallel warmup + first transcribe()).  Mirrors
+        # SenseVoiceSTTAdapter._load_lock (W1218 F2).
+        self._load_lock: threading.Lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # STTAdapterBase contract
@@ -82,6 +87,59 @@ class ParakeetSTTAdapter(STTAdapterBase):
     def is_available(self) -> bool:
         """Returns True if parakeet_mlx is importable."""
         return _try_import_parakeet() is not None
+
+    def _load_model(self, parakeet_mlx: Any) -> None:
+        """Load the parakeet-mlx model into self._model.
+
+        Call only while holding self._load_lock (double-checked locking,
+        mirrors SenseVoiceSTTAdapter, W1218 F2).  from_pretrained loads the
+        model weights onto the Metal GPU, so — unlike PyTorch adapters — it is
+        serialized through mlx_lock() and the cross-process flock exactly like
+        inference below: a concurrent load + an in-flight inference on another
+        thread would race the GPU → SIGSEGV (the race this module's header
+        warns about; see PR #71).
+        """
+        try:
+            from core.mlx_inter_lock import (
+                MLXInterLockTimeout,
+                mlx_inter_process_lock,
+            )
+            from core.mlx_lock import mlx_lock
+        except ImportError:
+            import contextlib
+            MLXInterLockTimeout = Exception  # type: ignore[assignment,misc]
+            mlx_inter_process_lock = contextlib.nullcontext  # type: ignore[assignment]
+            mlx_lock = contextlib.nullcontext  # type: ignore[assignment]
+
+        try:
+            logger.info(
+                "ParakeetSTTAdapter: loading model %s (first call)",
+                self._model_path,
+            )
+            with mlx_inter_process_lock():
+                with mlx_lock():
+                    self._model = parakeet_mlx.from_pretrained(self._model_path)
+            logger.info("ParakeetSTTAdapter: model loaded successfully")
+        except MLXInterLockTimeout:
+            # Transient cross-process lock timeout — do NOT mark the adapter
+            # permanently failed; surface so the router can retry / fall back
+            # without poisoning future loads.
+            logger.error(
+                "ParakeetSTTAdapter: MLX inter-process lock timeout during "
+                "model load — aborting to prevent GPU-corruption SIGSEGV.",
+                exc_info=True,
+            )
+            raise
+        except Exception as exc:
+            self._load_failed = True
+            logger.error(
+                "ParakeetSTTAdapter: failed to load model %s: %s",
+                self._model_path,
+                exc,
+            )
+            raise RuntimeError(
+                f"ParakeetSTTAdapter: model load failed: {exc}"
+            ) from exc
 
     def transcribe(
         self,
@@ -120,23 +178,14 @@ class ParakeetSTTAdapter(STTAdapterBase):
             )
 
         # Lazy model load — cache as instance attribute.
+        # Double-checked locking (mirrors SenseVoiceSTTAdapter, W1218 F2): the
+        # first check is unsynchronized for speed; if a load is needed we take
+        # _load_lock and re-check so a second thread (parallel warmup + first
+        # transcribe()) cannot load the model twice.
         if self._model is None and not self._load_failed:
-            try:
-                logger.info(
-                    "ParakeetSTTAdapter: loading model %s (first call)", self._model_path
-                )
-                self._model = parakeet_mlx.from_pretrained(self._model_path)
-                logger.info("ParakeetSTTAdapter: model loaded successfully")
-            except Exception as exc:
-                self._load_failed = True
-                logger.error(
-                    "ParakeetSTTAdapter: failed to load model %s: %s",
-                    self._model_path,
-                    exc,
-                )
-                raise RuntimeError(
-                    f"ParakeetSTTAdapter: model load failed: {exc}"
-                ) from exc
+            with self._load_lock:
+                if self._model is None and not self._load_failed:
+                    self._load_model(parakeet_mlx)
 
         if self._load_failed or self._model is None:
             raise RuntimeError(

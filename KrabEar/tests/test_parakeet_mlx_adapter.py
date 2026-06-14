@@ -417,5 +417,107 @@ class TestRouterFactoryParakeet(unittest.TestCase):
         self.assertNotIn("ParakeetSTTAdapter", names)
 
 
+# ---------------------------------------------------------------------------
+# Lazy-load thread-safety + MLX GPU serialization (W1218 parity for Parakeet)
+# ---------------------------------------------------------------------------
+
+class TestParakeetMLXLoadThreadSafe(unittest.TestCase):
+    """Concurrent transcribe() must not double-load the MLX model, and the load
+    must run under mlx_lock() (Metal GPU serialization).
+
+    Before the W1218-parity fix ParakeetSTTAdapter had no _load_lock and loaded
+    the model inline outside mlx_lock(): two threads could both pass the
+    ``if self._model is None`` check and call from_pretrained twice, and the GPU
+    load could race an in-flight inference on another thread → SIGSEGV (the race
+    this module's header warns about; see PR #71).
+    """
+
+    def test_concurrent_transcribe_loads_model_once(self):
+        import threading
+        import time
+        import numpy as np
+
+        calls = []  # list.append is atomic under the GIL
+        load_event = threading.Event()  # lets threads pile up before model appears
+
+        fake_module = types.ModuleType("parakeet_mlx")
+        fake_model = MagicMock()
+        fake_model.transcribe.return_value = _make_fake_result("hi")
+
+        def counting_from_pretrained(path):
+            calls.append(path)
+            load_event.wait(timeout=2.0)  # block so racing threads stack up
+            return fake_model
+
+        fake_module.from_pretrained = counting_from_pretrained
+
+        adapter = ParakeetSTTAdapter()
+        errors: list = []
+
+        def worker():
+            try:
+                audio = np.zeros(1600, dtype=np.float32)
+                with patch(
+                    "core.pipeline.stt_parakeet._try_import_parakeet",
+                    return_value=fake_module,
+                ):
+                    adapter.transcribe(audio)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        time.sleep(0.05)  # let all four enter transcribe() before the load finishes
+        load_event.set()
+        for t in threads:
+            t.join(timeout=5.0)
+
+        self.assertEqual(errors, [], f"Threads raised: {errors}")
+        self.assertEqual(
+            len(calls),
+            1,
+            f"model loaded {len(calls)}× — double-load race (missing _load_lock)",
+        )
+
+    def test_model_load_runs_inside_mlx_lock(self):
+        import numpy as np
+
+        depth = {"cur": 0, "at_load": None}
+
+        @contextlib.contextmanager
+        def recording_lock():
+            depth["cur"] += 1
+            try:
+                yield
+            finally:
+                depth["cur"] -= 1
+
+        fake_module = types.ModuleType("parakeet_mlx")
+        fake_model = MagicMock()
+        fake_model.transcribe.return_value = _make_fake_result("hi")
+
+        def recording_from_pretrained(path):
+            depth["at_load"] = depth["cur"]
+            return fake_model
+
+        fake_module.from_pretrained = recording_from_pretrained
+
+        adapter = ParakeetSTTAdapter()
+        audio = np.zeros(1600, dtype=np.float32)
+        with patch(
+            "core.pipeline.stt_parakeet._try_import_parakeet",
+            return_value=fake_module,
+        ), patch("core.mlx_lock.mlx_lock", recording_lock):
+            adapter.transcribe(audio)
+
+        self.assertIsNotNone(depth["at_load"], "from_pretrained was never called")
+        self.assertGreaterEqual(
+            depth["at_load"],
+            1,
+            "model load ran outside mlx_lock() — GPU load not serialized vs inference",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
