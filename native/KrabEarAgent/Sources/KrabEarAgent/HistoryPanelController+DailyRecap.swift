@@ -25,14 +25,12 @@ extension HistoryPanelController {
         return v
     }
 
-    private var dailyRecapResultsView: NSTextView {
-        if let v = objc_getAssociatedObject(self, &DailyRecapAssoc.resultsView) as? NSTextView { return v }
-        let v = NSTextView()
-        v.isEditable = false
-        v.isSelectable = true
-        v.font = KrabEarTheme.Typography.body
-        v.textContainerInset = NSSize(width: 8, height: 8)
-        v.minSize = NSSize(width: 0, height: 160)
+    private var dailyRecapContentView: NSStackView {
+        if let v = objc_getAssociatedObject(self, &DailyRecapAssoc.resultsView) as? NSStackView { return v }
+        let v = NSStackView()
+        v.orientation = .vertical
+        v.alignment = .leading
+        v.spacing = KrabEarTheme.Metrics.comfortable
         objc_setAssociatedObject(self, &DailyRecapAssoc.resultsView, v, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         return v
     }
@@ -63,23 +61,33 @@ extension HistoryPanelController {
         controlsRow.spacing = KrabEarTheme.Metrics.standard
         controlsRow.distribution = .fill
 
-        let resultsScroll = NSScrollView()
-        resultsScroll.hasVerticalScroller = true
-        resultsScroll.borderType = .lineBorder
-        resultsScroll.documentView = dailyRecapResultsView
-        resultsScroll.translatesAutoresizingMaskIntoConstraints = false
-        resultsScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 160).isActive = true
-
         card.contentStackView.addArrangedSubview(controlsRow)
         card.contentStackView.addArrangedSubview(dailyRecapStatusLabel)
-        card.contentStackView.addArrangedSubview(resultsScroll)
+        
+        let container = dailyRecapContentView
+        container.translatesAutoresizingMaskIntoConstraints = false
+        card.contentStackView.addArrangedSubview(container)
+        
+        NSLayoutConstraint.activate([
+            container.widthAnchor.constraint(equalTo: card.contentStackView.widthAnchor)
+        ])
 
         let section = CollapsibleSectionView(
             sectionId: "history_daily_recap",
             title: "Сводка дня",
             isExpanded: false
         )
-        section.contentStackView.addArrangedSubview(card)
+        
+        let sectionContainer = NSStackView()
+        sectionContainer.orientation = .vertical
+        sectionContainer.addArrangedSubview(card)
+        sectionContainer.translatesAutoresizingMaskIntoConstraints = false
+        section.contentStackView.addArrangedSubview(sectionContainer)
+        
+        NSLayoutConstraint.activate([
+            sectionContainer.widthAnchor.constraint(equalTo: section.contentStackView.widthAnchor)
+        ])
+        
         return section
     }
 
@@ -107,14 +115,16 @@ extension HistoryPanelController {
                         self?.dailyRecapStatusLabel.stringValue = privacy
                             ? "Сводка недоступна в режиме приватности"
                             : "Нет данных за дату"
-                        self?.dailyRecapResultsView.string = ""
+                        self?.clearDailyRecap()
                     }
                     return
                 }
-                let text = HistoryPanelController.formatDailyRecap(result)
+                
                 DispatchQueue.main.async {
                     self?.dailyRecapStatusLabel.stringValue = "Готово"
-                    self?.dailyRecapResultsView.string = text
+                    if let container = self?.dailyRecapContentView {
+                        Self.fillDailyRecap(in: container, data: result)
+                    }
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -122,6 +132,10 @@ extension HistoryPanelController {
                 }
             }
         }
+    }
+
+    private func clearDailyRecap() {
+        dailyRecapContentView.arrangedSubviews.forEach { $0.removeFromSuperview() }
     }
 
     /// Сегодняшняя дата в ISO (yyyy-MM-dd); self-contained, без private-хелперов панели.
@@ -132,44 +146,147 @@ extension HistoryPanelController {
         return fmt.string(from: Date())
     }
 
-    /// Форматирует структурированный digest в читаемый текст.
-    static func formatDailyRecap(_ d: [String: Any]) -> String {
-        let date = (d["date"] as? String) ?? "—"
-        let recordings = (d["total_recordings"] as? Int) ?? 0
-        let durationMin = (d["total_duration_min"] as? Double) ?? 0.0
-        let words = (d["total_words"] as? Int) ?? 0
-        let languages = (d["languages_used"] as? [String: Int]) ?? [:]
-        let topics = (d["top_topics"] as? [String]) ?? []
-        let highlights = (d["highlights"] as? [String]) ?? []
+    // MARK: - UI Builders
+    
+    private static func fillDailyRecap(in container: NSStackView, data: [String: Any]) {
+        container.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
-        var lines: [String] = []
-        lines.append("📅 Сводка за \(date)")
-        lines.append("")
-
+        let recordings = (data["total_recordings"] as? Int) ?? 0
         if recordings == 0 {
-            lines.append("За этот день записей нет.")
-            return lines.joined(separator: "\n")
+            let emptyLabel = NSTextField(labelWithString: "За этот день записей нет.")
+            emptyLabel.font = KrabEarTheme.Typography.body
+            emptyLabel.textColor = KrabEarTheme.Colors.textSecondary
+            container.addArrangedSubview(emptyLabel)
+            return
         }
 
-        lines.append("🎙 Записей: \(recordings)    ⏱ \(String(format: "%.1f", durationMin)) мин    📝 \(words) слов")
+        let durationMin = (data["total_duration_min"] as? Double) ?? 0.0
+        let words = (data["total_words"] as? Int) ?? 0
+        let languages = (data["languages_used"] as? [String: Int]) ?? [:]
+        let topics = (data["top_topics"] as? [String]) ?? []
+        let highlights = (data["highlights"] as? [String]) ?? []
 
+        // Metrics Row
+        let metricsRow = NSStackView()
+        metricsRow.orientation = .horizontal
+        metricsRow.distribution = .fillEqually
+        metricsRow.spacing = KrabEarTheme.Metrics.standard
+        metricsRow.addArrangedSubview(createMetricTile(title: "Записей", value: "\(recordings)"))
+        metricsRow.addArrangedSubview(createMetricTile(title: "Минут", value: String(format: "%.1f", durationMin)))
+        metricsRow.addArrangedSubview(createMetricTile(title: "Слов", value: "\(words)"))
+        container.addArrangedSubview(metricsRow)
+        
+        metricsRow.translatesAutoresizingMaskIntoConstraints = false
+        metricsRow.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
+
+        // Languages
         if !languages.isEmpty {
-            let langStr = languages
-                .sorted { $0.value > $1.value }
-                .map { "\($0.key): \($0.value)" }
-                .joined(separator: ", ")
-            lines.append("🌐 Языки: \(langStr)")
+            let sorted = languages.sorted { $0.value > $1.value }
+            let chips = sorted.map { createChip(text: "\($0.key) · \($0.value)") }
+            container.addArrangedSubview(createSectionHeader(title: "🌐 Языки"))
+            let scroll = createChipsScroll(chips: chips)
+            container.addArrangedSubview(scroll)
+            scroll.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
         }
+
+        // Topics
         if !topics.isEmpty {
-            lines.append("🏷 Темы: \(topics.joined(separator: ", "))")
+            let chips = topics.map { createChip(text: $0) }
+            container.addArrangedSubview(createSectionHeader(title: "🏷 Темы"))
+            let scroll = createChipsScroll(chips: chips)
+            container.addArrangedSubview(scroll)
+            scroll.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
         }
+
+        // Highlights
         if !highlights.isEmpty {
-            lines.append("")
-            lines.append("✨ Главное:")
+            container.addArrangedSubview(createSectionHeader(title: "✨ Главное"))
+            let highlightsStack = NSStackView()
+            highlightsStack.orientation = .vertical
+            highlightsStack.alignment = .leading
+            highlightsStack.spacing = KrabEarTheme.Metrics.tight
+            
             for h in highlights {
-                lines.append("  • \(h)")
+                let bullet = NSTextField(labelWithString: "•")
+                bullet.font = KrabEarTheme.Typography.body
+                bullet.textColor = KrabEarTheme.Colors.accent
+                
+                let text = NSTextField(wrappingLabelWithString: h)
+                text.font = KrabEarTheme.Typography.body
+                text.textColor = KrabEarTheme.Colors.textPrimary
+                text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+                
+                let hStack = NSStackView(views: [bullet, text])
+                hStack.orientation = .horizontal
+                hStack.alignment = .top
+                hStack.spacing = KrabEarTheme.Metrics.tight
+                highlightsStack.addArrangedSubview(hStack)
             }
+            container.addArrangedSubview(highlightsStack)
+            highlightsStack.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
         }
-        return lines.joined(separator: "\n")
+    }
+
+    private static func createMetricTile(title: String, value: String) -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 2
+        stack.wantsLayer = true
+        stack.layer?.backgroundColor = KrabEarTheme.Colors.border.cgColor
+        stack.layer?.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
+        stack.edgeInsets = NSEdgeInsets(top: KrabEarTheme.Metrics.comfortable, left: KrabEarTheme.Metrics.standard, bottom: KrabEarTheme.Metrics.comfortable, right: KrabEarTheme.Metrics.standard)
+
+        let valLabel = NSTextField(labelWithString: value)
+        valLabel.font = .systemFont(ofSize: 22, weight: .semibold)
+        valLabel.textColor = KrabEarTheme.Colors.textPrimary
+
+        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel.font = KrabEarTheme.Typography.captionMedium
+        titleLabel.textColor = KrabEarTheme.Colors.textSecondary
+
+        stack.addArrangedSubview(valLabel)
+        stack.addArrangedSubview(titleLabel)
+        return stack
+    }
+
+    private static func createChip(text: String) -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 4
+        stack.wantsLayer = true
+        stack.layer?.backgroundColor = KrabEarTheme.Colors.border.cgColor
+        stack.layer?.cornerRadius = 10
+        stack.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
+
+        let lbl = NSTextField(labelWithString: text)
+        lbl.font = KrabEarTheme.Typography.captionMedium
+        lbl.textColor = KrabEarTheme.Colors.textPrimary
+        stack.addArrangedSubview(lbl)
+
+        return stack
+    }
+
+    private static func createChipsScroll(chips: [NSView]) -> NSView {
+        let stack = NSStackView(views: chips)
+        stack.orientation = .horizontal
+        stack.spacing = KrabEarTheme.Metrics.tight
+
+        let scroll = NSScrollView()
+        scroll.hasHorizontalScroller = false
+        scroll.hasVerticalScroller = false
+        scroll.documentView = stack
+        scroll.drawsBackground = false
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        return scroll
+    }
+
+    private static func createSectionHeader(title: String) -> NSTextField {
+        let lbl = NSTextField(labelWithString: title)
+        lbl.font = KrabEarTheme.Typography.sectionTitle
+        lbl.textColor = KrabEarTheme.Colors.textSecondary
+        return lbl
     }
 }
