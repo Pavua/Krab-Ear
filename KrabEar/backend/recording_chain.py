@@ -35,6 +35,19 @@ MAX_CHAIN_NAME_LEN = 200
 _ITEM_ID_UNSAFE_RE = re.compile(r'[/\\.\x00\r\n\t]')
 
 
+class ChainEndedError(RuntimeError):
+    """add_to_chain вызван для уже завершённой цепочки.
+
+    Subclass of RuntimeError so existing ``except RuntimeError`` callers keep
+    working, while handle_add_to_chain can map it to a distinct error reason
+    ("chain_ended") instead of conflating it with the item-limit cap.
+    """
+
+
+class ChainLimitError(RuntimeError):
+    """add_to_chain превысил MAX_ITEMS_PER_CHAIN (DoS cap)."""
+
+
 def _is_valid_item_id(item_id: str) -> bool:
     """Returns True when item_id passes minimal format validation."""
     return bool(item_id) and not _ITEM_ID_UNSAFE_RE.search(item_id)
@@ -160,7 +173,7 @@ class RecordingChainManager:
             if chain is None:
                 raise KeyError(f"Цепочка не найдена: {chain_id}")
             if chain.get("ended_at") is not None:
-                raise RuntimeError(f"Цепочка уже завершена: {chain_id}")
+                raise ChainEndedError(f"Цепочка уже завершена: {chain_id}")
             item_id = str(item_id).strip()
             if not _is_valid_item_id(item_id):
                 raise ValueError(
@@ -171,7 +184,7 @@ class RecordingChainManager:
             if item_id in chain["item_ids"]:
                 return
             if len(chain["item_ids"]) >= MAX_ITEMS_PER_CHAIN:
-                raise RuntimeError(
+                raise ChainLimitError(
                     f"Цепочка достигла лимита элементов ({MAX_ITEMS_PER_CHAIN})"
                 )
             chain["item_ids"].append(item_id)
@@ -364,8 +377,13 @@ class RecordingChainManager:
         # RC-4 W1769: persistence failure → error envelope вместо ложного успеха.
         try:
             self.add_to_chain(chain_id, item_id)
+        except ChainEndedError as exc:
+            # Distinct from the DoS cap: the client mis-targeted a finished chain.
+            return {"ok": False, "error": str(exc), "reason": "chain_ended"}
+        except ChainLimitError as exc:
+            return {"ok": False, "error": str(exc), "reason": "limit_exceeded"}
         except RuntimeError as exc:
-            # DoS cap: limit_exceeded (A3 wave-34) or chain already ended
+            # Any other RuntimeError keeps the generic cap reason (forward-compat).
             return {"ok": False, "error": str(exc), "reason": "limit_exceeded"}
         except OSError as exc:
             logger.error("add_to_chain: не удалось сохранить цепочку: %s", exc)

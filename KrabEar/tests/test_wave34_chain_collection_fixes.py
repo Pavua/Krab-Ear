@@ -265,6 +265,21 @@ class TestRecordingChainDoSCaps(unittest.TestCase):
         self.assertFalse(result.get("ok", True))
         self.assertEqual(result.get("reason"), "limit_exceeded")
 
+    def test_handle_add_to_ended_chain_returns_chain_ended_reason(self) -> None:
+        # Draft-factory (gpt-oss): adding to an ENDED chain raised RuntimeError too,
+        # which handle_add_to_chain conflated with the item-limit RuntimeError and
+        # mislabelled as reason="limit_exceeded". It must report "chain_ended".
+        chain_id = self._mgr.start_chain("ended chain")
+        self._mgr._data["chains"][chain_id]["ended_at"] = "2026-01-01T00:00:00+00:00"
+        result = self._mgr.handle_add_to_chain(
+            {"chain_id": chain_id, "item_id": "some-item"}
+        )
+        self.assertFalse(result.get("ok", True))
+        self.assertEqual(
+            result.get("reason"), "chain_ended",
+            f"добавление в завершённую цепочку → reason должен быть chain_ended, не {result.get('reason')!r}",
+        )
+
 
 # ---------------------------------------------------------------------------
 # A4: item_id format validation
