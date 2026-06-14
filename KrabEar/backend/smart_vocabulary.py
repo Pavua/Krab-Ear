@@ -369,6 +369,9 @@ class SmartVocabularyBuilder:
             if not raw.strip():
                 continue
 
+            # W1769 parity: усекаем перед regex (как в get_vocabulary_suggestions),
+            # чтобы гигантский инжектнутый текст не блокировал regex-проход.
+            raw = raw[:_MAX_REGEX_TEXT_LEN]
             words = _RE_WORD.findall(raw)
             for w in words:
                 if len(w) >= self.min_word_length and not _is_stop_word(w):
@@ -394,6 +397,8 @@ class SmartVocabularyBuilder:
             raw = str(item.get("source_text", "") or item.get("text", "") or "")
             if not raw.strip():
                 continue
+            # W1769 parity: усекаем перед regex (как в get_vocabulary_suggestions).
+            raw = raw[:_MAX_REGEX_TEXT_LEN]
             words = _RE_WORD.findall(raw)
             for w in words:
                 if len(w) >= self.min_word_length and not _is_stop_word(w):

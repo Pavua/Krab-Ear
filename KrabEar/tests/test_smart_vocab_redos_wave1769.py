@@ -279,5 +279,45 @@ class TestVulnerablePatternIsQuadratic(unittest.TestCase):
         self.assertLess(new_dt * 10, old_dt, "Новый паттерн не быстрее старого — фикс не применён")
 
 
+class TestPrivateExtractorsTruncate(unittest.TestCase):
+    """W1769 defense-in-depth parity: the private extractors (_extract_misrecognized_words
+    / _extract_domain_terms) run _RE_WORD.findall on history-item text just like the
+    public get_vocabulary_suggestions, but originally skipped the _MAX_REGEX_TEXT_LEN
+    truncation the public path applies. They must cap raw input to the same bound so a
+    giant injected transcript can't drive an unbounded regex scan if auto_update/
+    build_vocabulary get wired."""
+
+    def setUp(self) -> None:
+        self.builder = SmartVocabularyBuilder(min_word_length=3)
+        # фиктивное слово, размещённое ЗА границей _MAX_REGEX_TEXT_LEN
+        filler = "abc " * ((_MAX_REGEX_TEXT_LEN // 4) + 200)  # > cap символов
+        self.marker = "markerwordxyz"
+        self.long_text = filler + self.marker
+        self.assertGreater(len(self.long_text), _MAX_REGEX_TEXT_LEN)
+
+    def test_misrecognized_truncates_past_cap(self):
+        # confidence < _LOW_CONFIDENCE_THRESHOLD (0.65) → запись обрабатывается
+        item = {"text": self.long_text, "confidence": 0.4}
+        words = self.builder._extract_misrecognized_words([item], min_frequency=1)
+        self.assertNotIn(
+            self.marker, [w.lower() for w in words],
+            "слово за пределами _MAX_REGEX_TEXT_LEN не должно извлекаться (нет усечения)",
+        )
+
+    def test_domain_terms_truncates_past_cap(self):
+        item = {"text": self.long_text, "confidence": 0.9}
+        words = self.builder._extract_domain_terms([item], min_frequency=1)
+        self.assertNotIn(
+            self.marker, [w.lower() for w in words],
+            "слово за пределами _MAX_REGEX_TEXT_LEN не должно извлекаться (нет усечения)",
+        )
+
+    def test_word_before_cap_still_extracted(self):
+        # регрессия: слово ДО границы должно по-прежнему извлекаться
+        item = {"text": "uniqueterm uniqueterm uniqueterm", "confidence": 0.4}
+        words = self.builder._extract_misrecognized_words([item], min_frequency=1)
+        self.assertIn("uniqueterm", [w.lower() for w in words])
+
+
 if __name__ == "__main__":
     unittest.main()
