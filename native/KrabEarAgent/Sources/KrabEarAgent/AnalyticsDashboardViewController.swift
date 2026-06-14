@@ -183,7 +183,8 @@ final class AnalyticsDashboardWindowController: NSWindowController {
 final class AnalyticsDashboardViewController: NSViewController {
 
     // MARK: - Injected dependencies
-    private let ipcClient: IPCClient
+    // internal (не private): доступ из AnalyticsDashboardViewController+PDFExport.swift
+    let ipcClient: IPCClient
 
     // MARK: - State
     private var data = AnalyticsDashboardData()
@@ -233,7 +234,7 @@ final class AnalyticsDashboardViewController: NSViewController {
     private let p95LatencyLabel = NSTextField(labelWithString: "—")
 
     // MARK: - Status
-    private let statusLabel = NSTextField(labelWithString: "")
+    let statusLabel = NSTextField(labelWithString: "")  // internal: +PDFExport access
 
     // MARK: - Init
 
@@ -274,6 +275,7 @@ final class AnalyticsDashboardViewController: NSViewController {
 
         let refreshBtn = ThemeSecondaryButton(title: "Обновить", target: self, action: #selector(onRefresh))
         let exportBtn = ThemeSecondaryButton(title: "Экспорт HTML", target: self, action: #selector(onExportHTML))
+        let exportPDFBtn = ThemeSecondaryButton(title: "Экспорт PDF", target: self, action: #selector(onExportPDF))
 
         statusLabel.font = KrabEarTheme.Typography.caption
         statusLabel.textColor = KrabEarTheme.Colors.textSecondary
@@ -287,6 +289,7 @@ final class AnalyticsDashboardViewController: NSViewController {
         toolbarStack.addArrangedSubview(statusLabel)
         toolbarStack.addArrangedSubview(refreshBtn)
         toolbarStack.addArrangedSubview(exportBtn)
+        toolbarStack.addArrangedSubview(exportPDFBtn)
 
         // ---- Scroll + content ----
         scrollView.translatesAutoresizingMaskIntoConstraints = false
