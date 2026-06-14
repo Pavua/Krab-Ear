@@ -214,6 +214,8 @@ extension HistoryPanelController {
         historyStack.addArrangedSubview(importSection)
         // Семантический поиск (PR #284 backend, отдельный extension UI).
         historyStack.addArrangedSubview(setupSemanticSearchSection())
+        // Сводка дня (backend daily_digest, отдельный extension +DailyRecap).
+        historyStack.addArrangedSubview(setupDailyRecapSection())
         // Действия и решения (PR #289 backend, Action Items extractor через LLM).
         historyStack.addArrangedSubview(setupActionItemsSection())
         // Gemini 3.1 Pro: управление + статистика.
