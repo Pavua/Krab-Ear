@@ -307,7 +307,16 @@ class PlaybackTracker:
         item_id = str(params.get("item_id", "")).strip()
         if not item_id:
             raise ValueError("Параметр item_id обязателен")
-        duration = float(params.get("duration_listened_sec", 0.0))
+        # wave-security: безопасная коэрция — non-numeric/None/список → 0.0,
+        # NaN/Inf → 0.0, числовые строки ("12.5") парсятся корректно.
+        # float("abc") бросал ValueError и крашил IPC-хендлер.
+        raw_duration = params.get("duration_listened_sec", 0.0)
+        try:
+            duration = float(raw_duration)
+        except (TypeError, ValueError):
+            duration = 0.0
+        if not math.isfinite(duration):
+            duration = 0.0
         # record_playback now returns the result dict directly (privacy no-op / tracker_full / stats)
         return self.record_playback(item_id, duration_listened_sec=duration)
 
