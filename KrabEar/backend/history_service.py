@@ -1347,6 +1347,276 @@ class HistoryService:
 
         return {"ok": True, "entries": len(items), "chars": len(md_content)}
 
+    # ------------------------------------------------------------------
+    # Экспорт ВЫБРАННЫХ записей (multi-select → Markdown/SRT)
+    # ------------------------------------------------------------------
+
+    def handle_export_selected_items(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Экспортирует только указанные записи истории (multi-select экспорт).
+
+        Параметры:
+            item_ids (list[str]): список идентификаторов записей для экспорта
+            format (str): формат — «markdown» (по умолчанию) или «srt»
+            save_to_file (bool): если True, сохраняет файл в data_dir/transcripts/
+
+        Возвращает:
+            ok (bool): True при успехе
+            content (str): текст экспорта
+            entries (int): количество экспортированных записей
+            path (str|None): путь к файлу, если save_to_file=True
+            reason (str): причина ошибки (при ok=False)
+
+        Связи: переиспользует render-логику из handle_export_history_markdown
+        и _finalize_srt_export. Вызывается из Swift-расширения
+        HistoryPanelController+ExportSelection.swift через IPC метод
+        «export_selected_items».
+        """
+        # Privacy mode gate — экспорт транскрипций в режиме приватности запрещён
+        if self._is_privacy_mode():
+            return {
+                "ok": False,
+                "content": "",
+                "entries": 0,
+                "path": None,
+                "reason": "privacy_mode_active",
+            }
+
+        # Валидация item_ids
+        raw_ids = params.get("item_ids")
+        if not raw_ids or not isinstance(raw_ids, list):
+            return {
+                "ok": False,
+                "content": "",
+                "entries": 0,
+                "path": None,
+                "reason": "item_ids обязателен и не должен быть пустым",
+            }
+        requested_ids: set[str] = {str(i) for i in raw_ids if i}
+        if not requested_ids:
+            return {
+                "ok": False,
+                "content": "",
+                "entries": 0,
+                "path": None,
+                "reason": "item_ids обязателен и не должен быть пустым",
+            }
+
+        export_format = str(params.get("format", "markdown")).lower().strip()
+        if export_format not in ("markdown", "srt"):
+            # Неизвестный формат — используем markdown как fallback (не ломаем UX)
+            logger.warning(
+                "handle_export_selected_items: неизвестный формат '%s', "
+                "используется markdown", export_format,
+            )
+            export_format = "markdown"
+
+        # Собираем все страницы истории и фильтруем по requested_ids
+        from backend.models import HistoryItem as _HI
+        selected_items: list[_HI] = []
+        cursor: str | None = None
+        for _ in range(500):  # защита от бесконечного цикла
+            page_dicts, next_cursor = self.store.get_history_page_filtered(
+                cursor=cursor, limit=100,
+                paste_status=None, translation_mode=None,
+            )
+            if not page_dicts:
+                break
+            for d in page_dicts:
+                if d.get("id") in requested_ids:
+                    selected_items.append(_HI.from_dict(d))
+            if next_cursor is None:
+                break
+            cursor = next_cursor
+            # Ранний выход: нашли все запрошенные элементы
+            if len(selected_items) >= len(requested_ids):
+                break
+
+        if not selected_items:
+            # Все запрошенные ID не найдены — возвращаем пустой, но ok=True
+            # (совместимо с паттерном handle_export_history на пустую историю)
+            content = "# Krab Ear — Экспорт выбранных записей\n\nЗаписей не найдено.\n"
+            return {"ok": True, "content": content, "entries": 0, "path": None}
+
+        export_ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        if export_format == "srt":
+            content = self._render_selected_items_srt(selected_items, params)
+        else:
+            content = self._render_selected_items_markdown(selected_items, export_ts)
+
+        # Path containment: сохраняем только внутри data_dir (аналогично
+        # существующим handle_export_history / handle_export_history_json)
+        save_path: str | None = None
+        if self._coerce_bool(params.get("save_to_file", False), default=False):
+            try:
+                base = Path(self.store.data_dir)
+                transcripts_dir = base / "transcripts"
+                transcripts_dir.mkdir(exist_ok=True)
+                ext = "srt" if export_format == "srt" else "md"
+                filename = (
+                    f"selected_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    f"_{len(selected_items)}items.{ext}"
+                )
+                file_path = transcripts_dir / filename
+                # Защита от path traversal (аналог audit_path_containment guard)
+                resolved = file_path.resolve()
+                if not resolved.is_relative_to(base.resolve()):
+                    logger.error(
+                        "handle_export_selected_items: путь вне data_dir: %s", resolved
+                    )
+                else:
+                    file_path.write_text(content, encoding="utf-8")
+                    save_path = str(file_path)
+            except Exception as exc:
+                logger.warning("Не удалось сохранить выбранный экспорт в файл: %s", exc)
+
+        return {
+            "ok": True,
+            "content": content,
+            "entries": len(selected_items),
+            "path": save_path,
+        }
+
+    def _render_selected_items_markdown(
+        self,
+        items: "list[Any]",
+        export_ts: str,
+    ) -> str:
+        """Рендерит список HistoryItem в Markdown. Переиспользует логику из
+        handle_export_history_markdown, но принимает готовый список items."""
+        ts_list = [it.ts for it in items if it.ts]
+        earliest_ts = self._format_ts_human(ts_list[-1]) if ts_list else "?"
+        latest_ts = self._format_ts_human(ts_list[0]) if ts_list else "?"
+
+        lines: list[str] = [
+            "# Krab Ear — Экспорт выбранных записей",
+            "",
+            f"**Период:** {earliest_ts} — {latest_ts}  ",
+            f"**Записей:** {len(items)}  ",
+            f"**Экспорт:** {export_ts}",
+            "",
+            "---",
+            "",
+        ]
+
+        languages_used: set[str] = set()
+        for idx, item in enumerate(items, start=1):
+            ts_human = self._format_ts_human(item.ts)
+            duration_str = self._format_duration_human(item.audio_duration_sec)
+
+            section_title = f"## {idx}. {ts_human}"
+            if duration_str:
+                section_title += f" ({duration_str})"
+            lines.append(section_title)
+            lines.append("")
+
+            meta: list[str] = []
+            if item.source_lang:
+                meta.append(f"**Язык:** {item.source_lang}")
+                languages_used.add(item.source_lang)
+            if item.target_lang and item.translation_status == "ok":
+                languages_used.add(item.target_lang)
+
+            diar = item.diarization
+            diar_turns: list[dict] = []
+            has_diarization = False
+            if diar and isinstance(diar, dict) and diar.get("enabled"):
+                diar_turns = diar.get("speaker_turns", [])
+                speakers = {t.get("speaker") for t in diar_turns if t.get("speaker")}
+                if len(speakers) >= 2:
+                    has_diarization = True
+                    meta.append(f"**Спикеры:** {len(speakers)}")
+
+            if meta:
+                lines.append(" | ".join(meta))
+                lines.append("")
+
+            if has_diarization and diar_turns:
+                for turn in diar_turns:
+                    speaker = turn.get("speaker", "?")
+                    turn_text = str(turn.get("text", "")).strip()
+                    if not turn_text:
+                        continue
+                    start_sec = turn.get("start")
+                    if start_sec is not None:
+                        ts_mark = f"`{self._srt_timestamp(float(start_sec))[:8]}`"
+                        lines.append(f"**[{speaker}]** {ts_mark}: {turn_text}")
+                    else:
+                        lines.append(f"**[{speaker}]**: {turn_text}")
+            else:
+                lines.append(item.text)
+
+            if item.translated_text and item.translation_status == "ok":
+                mode_label = item.translation_mode or "перевод"
+                lines.append("")
+                lines.append(f"> **Перевод** ({mode_label}): {item.translated_text}")
+
+            lines.append("")
+
+        lines.append("---")
+        lines.append("")
+        lines.append("## Сводная статистика")
+        lines.append("")
+        lines.append(f"- **Всего записей:** {len(items)}")
+        if languages_used:
+            lines.append(f"- **Языки:** {', '.join(sorted(languages_used))}")
+        lines.append(f"- **Экспортировано:** {export_ts}")
+        lines.append("")
+
+        return "\n".join(lines)
+
+    def _render_selected_items_srt(
+        self,
+        items: "list[Any]",
+        params: dict[str, Any],
+    ) -> str:
+        """Рендерит список HistoryItem в единый SRT-файл. Каждая запись —
+        отдельный блок субтитров. Переиспользует логику _srt_timestamp."""
+        srt_lines: list[str] = []
+        seq = 0
+        for item in items:
+            diar = item.diarization
+            if diar and isinstance(diar, dict) and diar.get("enabled"):
+                turns = diar.get("speaker_turns", [])
+                speakers_set = {t.get("speaker") for t in turns if t.get("speaker")}
+                if len(speakers_set) >= 2 and turns:
+                    for turn in turns:
+                        speaker = turn.get("speaker", "SPEAKER_00")
+                        turn_text = str(turn.get("text", "")).strip()
+                        if not turn_text:
+                            continue
+                        seq += 1
+                        start_sec = float(turn.get("start", 0.0) or 0.0)
+                        end_sec = float(
+                            turn.get("end", start_sec + 1.0) or start_sec + 1.0
+                        )
+                        srt_lines.append(str(seq))
+                        srt_lines.append(
+                            f"{self._srt_timestamp(start_sec)} --> "
+                            f"{self._srt_timestamp(end_sec)}"
+                        )
+                        if self._should_include_speaker_labels(params):
+                            lbl = self._resolve_speaker_name(
+                                speaker, lang=getattr(item, "source_lang", None)
+                            )
+                            srt_lines.append(f"{lbl}: {turn_text}")
+                        else:
+                            srt_lines.append(f"[{speaker}]: {turn_text}")
+                        srt_lines.append("")
+                    continue
+            # Нет диаризации — один сегмент на запись
+            seq += 1
+            duration = item.audio_duration_sec or 0.0
+            end_ts = (
+                self._srt_timestamp(duration) if duration > 0 else "00:00:01,000"
+            )
+            srt_lines.append(str(seq))
+            srt_lines.append(f"00:00:00,000 --> {end_ts}")
+            srt_lines.append(item.text)
+            srt_lines.append("")
+
+        return "\n".join(srt_lines)
+
     def _finalize_srt_export(
         self,
         params: dict[str, Any],

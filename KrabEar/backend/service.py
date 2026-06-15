@@ -1571,6 +1571,7 @@ class BackendService:
             "export_history_csv": self._history.handle_export_history_csv,
             "batch_export": self._history.handle_batch_export,  # пакетный экспорт в нескольких форматах
             "export_history_markdown": self._history.handle_export_history_markdown,
+            "export_selected_items": self._history.handle_export_selected_items,  # экспорт ВЫБРАННЫХ записей (markdown/srt)
             "export_obsidian": self._history.handle_export_obsidian,  # Obsidian-совместимый .md экспорт
             "export_history_json": self._history.handle_export_history_json,
             "export_html_report": self._history.handle_export_html_report,  # автономный HTML-отчёт с аналитикой
