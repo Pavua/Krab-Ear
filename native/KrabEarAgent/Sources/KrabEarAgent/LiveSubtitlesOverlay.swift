@@ -74,7 +74,7 @@ final class LiveSubtitlesOverlay: NSObject {
 
     private let panel: NSPanel
     private let stackView = NSStackView()
-    private let backdropView = NSVisualEffectView()
+    private let backdropView = HUDBackdropView()
 
     // MARK: - SSE
 
@@ -142,21 +142,18 @@ final class LiveSubtitlesOverlay: NSObject {
         panel.isOpaque = false
         panel.alphaValue = 0.95
 
-        // Backdrop blur
-        backdropView.material = .hudWindow
-        backdropView.blendingMode = .behindWindow
-        backdropView.state = .active
-        backdropView.wantsLayer = true
-        backdropView.layer?.cornerRadius = 12
-        backdropView.layer?.masksToBounds = true
-        backdropView.layer?.borderWidth = 0.5
-        backdropView.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
+        // Backdrop blur config is now in HUDBackdropView
 
         // StackView для строк субтитров
         stackView.orientation = .vertical
-        stackView.spacing = 4
+        stackView.spacing = KrabEarTheme.Metrics.tight
         stackView.alignment = .centerX
-        stackView.edgeInsets = NSEdgeInsets(top: 10, left: 16, bottom: 10, right: 16)
+        stackView.edgeInsets = NSEdgeInsets(
+            top: KrabEarTheme.Metrics.comfortable,
+            left: KrabEarTheme.Metrics.spacious,
+            bottom: KrabEarTheme.Metrics.comfortable,
+            right: KrabEarTheme.Metrics.spacious
+        )
         stackView.translatesAutoresizingMaskIntoConstraints = false
 
         backdropView.addSubview(stackView)
@@ -270,22 +267,39 @@ final class LiveSubtitlesOverlay: NSObject {
     private func showListeningIndicator() {
         // Удаляем старый контент
         stackView.arrangedSubviews.forEach { stackView.removeArrangedSubview($0); $0.removeFromSuperview() }
-        let label = NSTextField(labelWithString: "🎙️ Слушаю...")
-        label.font = .systemFont(ofSize: 14, weight: .medium)
-        label.textColor = NSColor.white.withAlphaComponent(0.7)
+        
+        let container = NSStackView()
+        container.orientation = .horizontal
+        container.spacing = KrabEarTheme.Metrics.tight
+        container.alignment = .centerY
+        
+        let pulse = PulseIndicatorView(frame: NSRect(x: 0, y: 0, width: 8, height: 8))
+        pulse.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            pulse.widthAnchor.constraint(equalToConstant: 8),
+            pulse.heightAnchor.constraint(equalToConstant: 8)
+        ])
+        pulse.startPulsing()
+        
+        let label = NSTextField(labelWithString: "Слушаю...")
+        label.font = KrabEarTheme.Typography.captionMedium
+        label.textColor = KrabEarTheme.Colors.textSecondary
         label.alignment = .center
         label.isBordered = false
         label.drawsBackground = false
-        label.tag = 9901  // маркер — чтобы убрать при первом результате
-        stackView.addArrangedSubview(label)
+        
+        container.addArrangedSubview(pulse)
+        container.addArrangedSubview(label)
+        
+        stackView.addArrangedSubview(container)
     }
 
     /// Убирает listening indicator и показывает hint об источнике аудио.
     private func showNoResultsHint() {
         stackView.arrangedSubviews.forEach { stackView.removeArrangedSubview($0); $0.removeFromSuperview() }
-        let label = NSTextField(labelWithString: "🔇 Не распознано речи\n(проверь Privacy → Screen Recording\nили выбери другой источник аудио)")
-        label.font = .systemFont(ofSize: 12, weight: .regular)
-        label.textColor = NSColor.white.withAlphaComponent(0.6)
+        let label = NSTextField(labelWithString: "Не распознано речи\n(проверь Privacy → Screen Recording\nили выбери другой источник аудио)")
+        label.font = KrabEarTheme.Typography.caption
+        label.textColor = KrabEarTheme.Colors.textSecondary
         label.alignment = .center
         label.maximumNumberOfLines = 3
         label.isBordered = false
@@ -330,11 +344,11 @@ final class LiveSubtitlesOverlay: NSObject {
     private func makeLabel(_ text: String, isTranslation: Bool) -> NSTextField {
         let label = NSTextField(labelWithString: text)
         label.font = isTranslation
-            ? .systemFont(ofSize: 15, weight: .semibold)
-            : .systemFont(ofSize: 11, weight: .regular)
+            ? KrabEarTheme.Typography.display
+            : KrabEarTheme.Typography.body
         label.textColor = isTranslation
-            ? .white
-            : NSColor.white.withAlphaComponent(0.65)
+            ? KrabEarTheme.Colors.textPrimary
+            : KrabEarTheme.Colors.textSecondary
         label.alignment = .center
         label.lineBreakMode = .byTruncatingTail
         label.cell?.truncatesLastVisibleLine = true
@@ -420,6 +434,92 @@ final class LiveSubtitlesOverlay: NSObject {
             ?? ""
         guard !translation.isEmpty || !original.isEmpty else { return }
         addEntry(original: original, translation: translation)
+    }
+}
+
+
+// MARK: - Visual Helpers
+
+private class HUDBackdropView: NSVisualEffectView {
+    private let bgLayer = CALayer()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        material = .popover
+        blendingMode = .behindWindow
+        state = .active
+        
+        layer?.cornerRadius = KrabEarTheme.Metrics.cardCornerRadius
+        layer?.cornerCurve = .continuous
+        layer?.masksToBounds = true
+        layer?.borderWidth = 1.0
+        
+        bgLayer.backgroundColor = KrabEarTheme.Colors.cardBackground.cgColor
+        layer?.insertSublayer(bgLayer, at: 0)
+        
+        updateColors()
+    }
+    
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    
+    override func layout() {
+        super.layout()
+        bgLayer.frame = bounds
+    }
+    
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateColors()
+    }
+    
+    private func updateColors() {
+        layer?.borderColor = KrabEarTheme.Colors.border.cgColor
+        bgLayer.backgroundColor = KrabEarTheme.Colors.cardBackground.cgColor
+    }
+}
+
+private class PulseIndicatorView: NSView {
+    private let pulseLayer = CALayer()
+    
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        pulseLayer.cornerRadius = 4
+        layer?.addSublayer(pulseLayer)
+        updateColors()
+    }
+    
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    
+    override func layout() {
+        super.layout()
+        pulseLayer.frame = bounds
+    }
+    
+    func startPulsing() {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        let animation = CABasicAnimation(keyPath: "opacity")
+        animation.fromValue = 1.0
+        animation.toValue = 0.3
+        animation.duration = KrabEarTheme.Motion.Duration.long
+        animation.autoreverses = true
+        animation.repeatCount = .infinity
+        animation.timingFunction = KrabEarTheme.Motion.Easing.easeInOut
+        pulseLayer.add(animation, forKey: "pulse")
+    }
+    
+    func stopPulsing() {
+        pulseLayer.removeAnimation(forKey: "pulse")
+    }
+    
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateColors()
+    }
+    
+    private func updateColors() {
+        pulseLayer.backgroundColor = KrabEarTheme.Colors.success.cgColor
     }
 }
 

@@ -37,14 +37,14 @@ extension ConversationViewController {
 
         let root = NSStackView()
         root.orientation = .vertical
-        root.spacing = KrabEarTheme.Metrics.standard
+        root.spacing = KrabEarTheme.Metrics.spacious
         root.alignment = .leading
         root.translatesAutoresizingMaskIntoConstraints = false
         root.edgeInsets = NSEdgeInsets(
-            top:    KrabEarTheme.Metrics.comfortable,
-            left:   KrabEarTheme.Metrics.comfortable,
-            bottom: KrabEarTheme.Metrics.comfortable,
-            right:  KrabEarTheme.Metrics.comfortable
+            top:    KrabEarTheme.Metrics.spacious,
+            left:   KrabEarTheme.Metrics.spacious,
+            bottom: KrabEarTheme.Metrics.spacious,
+            right:  KrabEarTheme.Metrics.spacious
         )
         outerScroll.documentView = root
         NSLayoutConstraint.activate([
@@ -54,44 +54,91 @@ extension ConversationViewController {
         // --- Status card ---
         let statusCard = makeCard()
         let statusRow  = hStack()
+        
+        let statusBadge = NSView()
+        statusBadge.wantsLayer = true
+        statusBadge.layer?.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
+        statusBadge.layer?.backgroundColor = KrabEarTheme.Colors.windowBackground.withAlphaComponent(0.05).cgColor
+        statusBadge.translatesAutoresizingMaskIntoConstraints = false
+        
+        let badgeStack = hStack()
+        badgeStack.edgeInsets = NSEdgeInsets(
+            top: KrabEarTheme.Metrics.tight,
+            left: KrabEarTheme.Metrics.standard,
+            bottom: KrabEarTheme.Metrics.tight,
+            right: KrabEarTheme.Metrics.standard
+        )
+        
         styleLabel(statusLabel, font: KrabEarTheme.Typography.sectionTitle)
-        statusRow.addArrangedSubview(statusLabel)
+        badgeStack.addArrangedSubview(statusLabel)
+        
+        statusBadge.addSubview(badgeStack)
+        NSLayoutConstraint.activate([
+            badgeStack.topAnchor.constraint(equalTo: statusBadge.topAnchor),
+            badgeStack.leadingAnchor.constraint(equalTo: statusBadge.leadingAnchor),
+            badgeStack.trailingAnchor.constraint(equalTo: statusBadge.trailingAnchor),
+            badgeStack.bottomAnchor.constraint(equalTo: statusBadge.bottomAnchor)
+        ])
+
+        statusRow.addArrangedSubview(statusBadge)
         statusRow.addArrangedSubview(NSView()) // spacer
         statusCard.contentStackView.addArrangedSubview(statusRow)
         root.addArrangedSubview(statusCard)
 
         // --- Waveform placeholder card ---
-        let waveCard = makeCard(title: "Визуализатор")
+        let waveCard = makeCard(title: "Визуализация")
         waveformPlaceholder.translatesAutoresizingMaskIntoConstraints = false
         waveformPlaceholder.wantsLayer = true
-        waveformPlaceholder.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.3).cgColor
+        waveformPlaceholder.layer?.backgroundColor = KrabEarTheme.Colors.accent.withAlphaComponent(0.15).cgColor
         waveformPlaceholder.layer?.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
         waveCard.contentStackView.addArrangedSubview(waveformPlaceholder)
-        waveformPlaceholder.heightAnchor.constraint(equalToConstant: 48).isActive = true
-        let waveHintLabel = NSTextField(labelWithString: "Визуализация звука появится в следующем PR")
+        
+        NSLayoutConstraint.activate([
+            waveformPlaceholder.heightAnchor.constraint(equalToConstant: 48),
+            waveformPlaceholder.widthAnchor.constraint(greaterThanOrEqualToConstant: 200)
+        ])
+        
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            let pulse = CABasicAnimation(keyPath: "opacity")
+            pulse.fromValue = 0.5
+            pulse.toValue = 1.0
+            pulse.duration = KrabEarTheme.Motion.Duration.long
+            pulse.autoreverses = true
+            pulse.repeatCount = .infinity
+            pulse.timingFunction = KrabEarTheme.Motion.Easing.easeInOut
+            waveformPlaceholder.layer?.add(pulse, forKey: "opacityPulse")
+        }
+        
+        let waveHintLabel = NSTextField(labelWithString: "Аудиоспектр появится в следующем обновлении")
         styleLabel(waveHintLabel, font: KrabEarTheme.Typography.caption)
         waveHintLabel.textColor = KrabEarTheme.Colors.textSecondary
         waveCard.contentStackView.addArrangedSubview(waveHintLabel)
         root.addArrangedSubview(waveCard)
 
         // --- Transcript card ---
-        let transcriptCard = makeCard(title: "Транскрипция")
+        let transcriptCard = makeCard(title: "Диалог")
         let transcriptScroll = NSScrollView()
         transcriptScroll.translatesAutoresizingMaskIntoConstraints = false
         transcriptScroll.hasVerticalScroller = true
         transcriptScroll.autohidesScrollers = true
         transcriptScroll.drawsBackground = false
         transcriptScroll.borderType = .noBorder
+        
+        transcriptScroll.wantsLayer = true
+        transcriptScroll.layer?.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
+        transcriptScroll.layer?.backgroundColor = KrabEarTheme.Colors.windowBackground.withAlphaComponent(0.03).cgColor
+        transcriptScroll.layer?.borderColor = KrabEarTheme.Colors.border.cgColor
+        transcriptScroll.layer?.borderWidth = 1.0
 
         transcriptView.isEditable = false
         transcriptView.isSelectable = true
         transcriptView.backgroundColor = .clear
-        transcriptView.textContainerInset = NSSize(width: 4, height: 4)
+        transcriptView.textContainerInset = NSSize(width: KrabEarTheme.Metrics.comfortable, height: KrabEarTheme.Metrics.comfortable)
         transcriptView.font = KrabEarTheme.Typography.body
         transcriptView.textColor = KrabEarTheme.Colors.textPrimary
         transcriptView.string = "Нажмите «Начать разговор» чтобы начать диалог с AI."
         transcriptScroll.documentView = transcriptView
-        transcriptScroll.heightAnchor.constraint(equalToConstant: 180).isActive = true
+        transcriptScroll.heightAnchor.constraint(equalToConstant: 220).isActive = true
 
         transcriptCard.contentStackView.addArrangedSubview(transcriptScroll)
         root.addArrangedSubview(transcriptCard)
@@ -102,11 +149,13 @@ extension ConversationViewController {
 
         startButton.target = self
         startButton.action = #selector(onStartStopTapped)
+        startButton.heightAnchor.constraint(equalToConstant: 32).isActive = true
         controlsRow.addArrangedSubview(startButton)
 
         interruptButton.target = self
         interruptButton.action = #selector(onInterruptTapped)
         interruptButton.isHidden = true
+        interruptButton.heightAnchor.constraint(equalToConstant: 32).isActive = true
         controlsRow.addArrangedSubview(interruptButton)
         controlsRow.addArrangedSubview(NSView()) // spacer
 
@@ -125,7 +174,7 @@ extension ConversationViewController {
         settingsDisclosure.action = #selector(onSettingsDisclosureTapped)
 
         let settingsHeaderLabel = NSTextField(labelWithString: "Настройки разговора")
-        styleLabel(settingsHeaderLabel, font: KrabEarTheme.Typography.body)
+        styleLabel(settingsHeaderLabel, font: KrabEarTheme.Typography.sectionTitle)
         disclosureRow.addArrangedSubview(settingsDisclosure)
         disclosureRow.addArrangedSubview(settingsHeaderLabel)
         disclosureRow.addArrangedSubview(NSView())
@@ -135,6 +184,12 @@ extension ConversationViewController {
         settingsDrawer.alignment   = .leading
         settingsDrawer.isHidden    = true
         settingsDrawer.translatesAutoresizingMaskIntoConstraints = false
+        settingsDrawer.edgeInsets = NSEdgeInsets(
+            top: KrabEarTheme.Metrics.standard,
+            left: 0,
+            bottom: 0,
+            right: 0
+        )
 
         buildSettingsDrawer()
 
@@ -150,6 +205,8 @@ extension ConversationViewController {
         let langRow = hStack()
         let langLabel = NSTextField(labelWithString: "Язык подсказки:")
         styleLabel(langLabel, font: KrabEarTheme.Typography.body)
+        langLabel.textColor = KrabEarTheme.Colors.textSecondary
+        langLabel.widthAnchor.constraint(equalToConstant: 120).isActive = true
         langHintSelector.addItems(withTitles: ["Авто", "RU", "EN", "ES"])
         langHintSelector.target  = self
         langHintSelector.action  = #selector(onLangHintChanged)
@@ -162,6 +219,8 @@ extension ConversationViewController {
         let engineRow = hStack()
         let engineLabel = NSTextField(labelWithString: "Движок:")
         styleLabel(engineLabel, font: KrabEarTheme.Typography.body)
+        engineLabel.textColor = KrabEarTheme.Colors.textSecondary
+        engineLabel.widthAnchor.constraint(equalToConstant: 120).isActive = true
         engineSelector.addItems(withTitles: ["Авто", "moshi", "seamless"])
         engineSelector.target = self
         engineSelector.action = #selector(onEngineChanged)
@@ -174,6 +233,8 @@ extension ConversationViewController {
         let brainRow = hStack()
         let brainLabel = NSTextField(labelWithString: "Мозг:")
         styleLabel(brainLabel, font: KrabEarTheme.Typography.body)
+        brainLabel.textColor = KrabEarTheme.Colors.textSecondary
+        brainLabel.widthAnchor.constraint(equalToConstant: 120).isActive = true
         brainSelector.addItems(withTitles: ["Авто", "qwen3-4b", "llama-3.2-3b"])
         brainSelector.target = self
         brainSelector.action = #selector(onBrainChanged)
@@ -186,9 +247,11 @@ extension ConversationViewController {
         let urlRow = hStack()
         let urlLabel = NSTextField(labelWithString: "Gateway URL:")
         styleLabel(urlLabel, font: KrabEarTheme.Typography.body)
+        urlLabel.textColor = KrabEarTheme.Colors.textSecondary
+        urlLabel.widthAnchor.constraint(equalToConstant: 120).isActive = true
         let urlValue = NSTextField(labelWithString: config.wsURLString)
-        styleLabel(urlValue, font: KrabEarTheme.Typography.caption)
-        urlValue.textColor = KrabEarTheme.Colors.textSecondary
+        styleLabel(urlValue, font: KrabEarTheme.Typography.monospace)
+        urlValue.textColor = KrabEarTheme.Colors.textDisabled
         urlValue.lineBreakMode = .byTruncatingMiddle
         urlRow.addArrangedSubview(urlLabel)
         urlRow.addArrangedSubview(urlValue)
