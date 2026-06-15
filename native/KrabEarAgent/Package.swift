@@ -28,6 +28,10 @@ let package = Package(
             url: "https://github.com/getsentry/sentry-cocoa.git",
             from: "8.0.0"
         ),
+        .package(
+            url: "https://github.com/alta/swift-opus.git",
+            from: "0.0.2"
+        ),
     ],
     targets: [
         .executableTarget(
@@ -36,6 +40,7 @@ let package = Package(
                 // Раскомментируйте после добавления Porcupine зависимости:
                 // .product(name: "Porcupine", package: "porcupine"),
                 .product(name: "Sentry", package: "sentry-cocoa"),
+                .product(name: "Opus", package: "swift-opus"),
             ],
             path: "Sources/KrabEarAgent",
             swiftSettings: [
