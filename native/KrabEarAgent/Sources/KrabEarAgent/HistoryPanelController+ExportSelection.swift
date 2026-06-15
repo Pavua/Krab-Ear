@@ -228,7 +228,8 @@ extension HistoryPanelController {
             let isNew = !existingNames.contains(name)
             let capturedIds = ids
 
-            // AGENT-3: IPC off-main.
+            // AGENT-3: IPC off-main. Считаем фактические успехи/сбои —
+            // не показываем ложный success-алерт, если бэкенд отклонил запрос.
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 if isNew {
                     _ = try? ipcClient.call(
@@ -236,17 +237,28 @@ extension HistoryPanelController {
                         params: ["name": name, "description": ""]
                     )
                 }
+                var added = 0
+                var failed = 0
                 for id in capturedIds {
-                    _ = try? ipcClient.call(
-                        method: "add_to_collection",
-                        params: ["collection_name": name, "item_id": id]
-                    )
+                    do {
+                        _ = try ipcClient.call(
+                            method: "add_to_collection",
+                            params: ["collection_name": name, "item_id": id]
+                        )
+                        added += 1
+                    } catch {
+                        failed += 1
+                    }
                 }
                 DispatchQueue.main.async {
-                    self?.showInfoAlert(
-                        title: "Добавить в коллекцию",
-                        body: "Добавлено записей: \(capturedIds.count) в коллекцию \"\(name)\"."
-                    )
+                    let body: String
+                    if added > 0 {
+                        let suffix = failed > 0 ? " Не удалось: \(failed)." : ""
+                        body = "Добавлено записей: \(added) в коллекцию \"\(name)\".\(suffix)"
+                    } else {
+                        body = "Не удалось добавить записи в коллекцию \"\(name)\"."
+                    }
+                    self?.showInfoAlert(title: "Добавить в коллекцию", body: body)
                 }
             }
         }
