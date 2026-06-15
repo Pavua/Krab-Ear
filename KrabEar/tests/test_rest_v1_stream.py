@@ -27,15 +27,15 @@ class MockWS:
         self.receives = receives
         self.sends = []
         self.closed = False
-    
+
     def receive(self):
         if not self.receives:
             return None
         return self.receives.pop(0)
-        
+
     def send(self, msg):
         self.sends.append(msg)
-        
+
     def close(self, message=None):
         self.closed = True
 
@@ -45,14 +45,14 @@ class TestRestV1Stream(unittest.TestCase):
         self.mock_store.load_settings.return_value = {"privacy_mode_enabled": False}
         self.store_patch = patch("backend.rest_server.store", self.mock_store)
         self.store_patch.start()
-        
+
         self.mock_live_subs = MagicMock()
         self.live_subs_patch = patch("backend.rest_server.LiveSubsService", return_value=self.mock_live_subs)
         self.live_subs_patch.start()
-        
+
         self.auth_patch = patch("backend.rest_server._ws_check_auth", return_value=True)
         self.auth_patch.start()
-        
+
         app.config["TESTING"] = True
 
     def tearDown(self):
@@ -65,17 +65,17 @@ class TestRestV1Stream(unittest.TestCase):
             "text": "Привет",
             "language_detected": "ru"
         }
-        
+
         b64 = base64.b64encode(b"\x00\x00").decode('utf-8')
         ws = MockWS([
             json.dumps({"type": "config", "mode": "transcribe", "target_lang": "ru"}),
             json.dumps({"type": "audio", "data": b64, "sample_rate": 16000, "is_final": False}),
             json.dumps({"type": "end"})
         ])
-        
+
         with app.test_request_context('/v1/stream'):
             ws_stream(ws)
-            
+
         self.assertTrue(len(ws.sends) >= 2)
         resp1 = json.loads(ws.sends[0])
         self.assertEqual(resp1["type"], "final")
@@ -84,10 +84,10 @@ class TestRestV1Stream(unittest.TestCase):
     def test_privacy_gate(self):
         self.mock_store.load_settings.return_value = {"privacy_mode_enabled": True}
         ws = MockWS([json.dumps({"type": "config"})])
-        
+
         with app.test_request_context('/v1/stream'):
             ws_stream(ws)
-            
+
         self.assertTrue(len(ws.sends) >= 1)
         resp = json.loads(ws.sends[0])
         self.assertEqual(resp["type"], "error")
@@ -95,10 +95,10 @@ class TestRestV1Stream(unittest.TestCase):
 
     def test_cloud_stub(self):
         ws = MockWS([json.dumps({"type": "config", "backend": "cloud"})])
-        
+
         with app.test_request_context('/v1/stream'):
             ws_stream(ws)
-            
+
         self.assertTrue(len(ws.sends) >= 1)
         resp = json.loads(ws.sends[0])
         self.assertEqual(resp["type"], "error")
