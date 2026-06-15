@@ -41,19 +41,28 @@ class MockWS:
 
 class TestRestV1Stream(unittest.TestCase):
     def setUp(self):
+        # 🔴 Chunk-pollution guard: another test file in the same pytest chunk can
+        # reload `backend.rest_server` (swapping sys.modules), which strands the
+        # module-level `app`/`ws_stream` captured at collection time on the OLD
+        # module object while string-target patches land on the NEW one. Re-resolve
+        # the module at run time and pin every patch + handler call to that SAME
+        # object so the privacy gate reads our mock store, not a stranded leftover.
+        import backend.rest_server as rs
+        self.rs = rs
+
         self.mock_store = MagicMock()
         self.mock_store.load_settings.return_value = {"privacy_mode_enabled": False}
-        self.store_patch = patch("backend.rest_server.store", self.mock_store)
+        self.store_patch = patch.object(rs, "store", self.mock_store)
         self.store_patch.start()
 
         self.mock_live_subs = MagicMock()
-        self.live_subs_patch = patch("backend.rest_server.LiveSubsService", return_value=self.mock_live_subs)
+        self.live_subs_patch = patch.object(rs, "LiveSubsService", return_value=self.mock_live_subs)
         self.live_subs_patch.start()
 
-        self.auth_patch = patch("backend.rest_server._ws_check_auth", return_value=True)
+        self.auth_patch = patch.object(rs, "_ws_check_auth", return_value=True)
         self.auth_patch.start()
 
-        app.config["TESTING"] = True
+        rs.app.config["TESTING"] = True
 
     def tearDown(self):
         self.store_patch.stop()
@@ -73,8 +82,8 @@ class TestRestV1Stream(unittest.TestCase):
             json.dumps({"type": "end"})
         ])
 
-        with app.test_request_context('/v1/stream'):
-            ws_stream(ws)
+        with self.rs.app.test_request_context('/v1/stream'):
+            self.rs.ws_stream(ws)
 
         self.assertTrue(len(ws.sends) >= 2)
         resp1 = json.loads(ws.sends[0])
@@ -85,8 +94,8 @@ class TestRestV1Stream(unittest.TestCase):
         self.mock_store.load_settings.return_value = {"privacy_mode_enabled": True}
         ws = MockWS([json.dumps({"type": "config"})])
 
-        with app.test_request_context('/v1/stream'):
-            ws_stream(ws)
+        with self.rs.app.test_request_context('/v1/stream'):
+            self.rs.ws_stream(ws)
 
         self.assertTrue(len(ws.sends) >= 1)
         resp = json.loads(ws.sends[0])
@@ -102,8 +111,8 @@ class TestRestV1Stream(unittest.TestCase):
             json.dumps({"type": "end"})
         ])
 
-        with app.test_request_context('/v1/stream'):
-            ws_stream(ws)
+        with self.rs.app.test_request_context('/v1/stream'):
+            self.rs.ws_stream(ws)
 
         self.assertTrue(len(ws.sends) >= 1)
         resp = json.loads(ws.sends[0])

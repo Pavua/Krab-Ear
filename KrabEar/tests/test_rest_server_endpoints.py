@@ -582,29 +582,34 @@ class RequestIdHeaderTest(_RestBase):
         self.assertTrue(len(rid) > 0, "X-Request-ID must not be empty")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
+@unittest.skipUnless(_REST_AVAILABLE, "REST server dependencies not available")
 class TTSSynthesizeEndpointTest(_RestBase):
     """POST /v1/tts/synthesize tests."""
 
-    @patch("backend.rest_server.tts_service.handle_synthesize_speech")
-    def test_valid_request_returns_200(self, mock_synthesize):
-        mock_synthesize.return_value = {
-            "wav_bytes_b64": "UklGR... (fake)",
+    def test_valid_request_returns_200(self):
+        # 🔴 Pin the patch to `_rest_mod` — the SAME module object _make_client()'s
+        # app belongs to. A string target "backend.rest_server.tts_service..." can
+        # land on a reloaded module B while the app/route still live on the captured
+        # module A → the real macOS `say` runs (absent on Linux → FileNotFoundError
+        # in CI). The sentinel engine below proves the mock served the request.
+        fake_tts = MagicMock()
+        fake_tts.handle_synthesize_speech.return_value = {
+            "wav_bytes_b64": "ZmFrZQ==",
             "language": "ru",
-            "engine": "say",
-            "byte_count": 100,
+            "engine": "mock-engine",
+            "byte_count": 4,
         }
-        resp = self.client.post(
-            "/v1/tts/synthesize",
-            json={"text": "привет", "language": "ru"},
-        )
+        with patch.object(_rest_mod, "tts_service", fake_tts):
+            resp = self.client.post(
+                "/v1/tts/synthesize",
+                json={"text": "привет", "language": "ru"},
+            )
         self.assertEqual(resp.status_code, 200)
         body = resp.get_json()
         self.assertIsNotNone(body)
         self.assertIn("wav_bytes_b64", body)
-        self.assertEqual(body["engine"], "say")
+        self.assertEqual(body["engine"], "mock-engine")
+        fake_tts.handle_synthesize_speech.assert_called_once()
 
     def test_missing_text_returns_400(self):
         resp = self.client.post(
@@ -616,17 +621,22 @@ class TTSSynthesizeEndpointTest(_RestBase):
         self.assertIsNotNone(body)
         self.assertIn("error", body)
 
-    @patch("backend.rest_server.tts_service.handle_synthesize_speech")
-    def test_service_error_returns_400(self, mock_synthesize):
-        mock_synthesize.return_value = {
+    def test_service_error_returns_400(self):
+        fake_tts = MagicMock()
+        fake_tts.handle_synthesize_speech.return_value = {
             "ok": False,
-            "error": "text exceeds maximum length"
+            "error": "text exceeds maximum length",
         }
-        resp = self.client.post(
-            "/v1/tts/synthesize",
-            json={"text": "x" * 6000},
-        )
+        with patch.object(_rest_mod, "tts_service", fake_tts):
+            resp = self.client.post(
+                "/v1/tts/synthesize",
+                json={"text": "x" * 6000},
+            )
         self.assertEqual(resp.status_code, 400)
         body = resp.get_json()
         self.assertIsNotNone(body)
         self.assertIn("error", body)
+
+
+if __name__ == "__main__":
+    unittest.main()
