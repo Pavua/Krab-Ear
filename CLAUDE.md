@@ -649,7 +649,7 @@ Stack:
 - **Engines**: Kyutai Moshi 7B (EN) + SeamlessStreaming 2.5B (RU/ES/multilingual, PyTorch+MPS не MLX).
 - **Brain**: `lmstudio-community/Qwen3-30B-A3B-Instruct-2507-MLX-4bit` via Krab agent OpenClaw.
 - **Orchestration**: Voice Gateway `/v1/sessions/{id}/conversation` WS endpoint.
-- **UI**: новый tab "Разговор с AI" в Krab Ear `.app` (`ConversationViewController`).
+- **UI**: новый tab "Разговор с AI" в Krab Ear `.app` (`ConversationViewController`). Gemini 3.1 Pro design refresh 2026-06-15 (`ConversationViewController+UI.swift` — статус-бейдж, транскрипт-карточка, токены). Live mic level-meter (`ConversationViewController+LevelMeter.swift` — `MicLevelMeterView`, 20 CALayer-баров с ring-buffer, обновляется из `processAudioSamples` RMS на @MainActor ~12.5/сек; idle-reset из `stopAudioCapture`; НЕ трогает `@Sendable` Core-Audio RT-tap).
 - **Triggers**: GUI button + Right Option double-tap (300ms) + Silero wake word "Краб".
 - **Brain stack**: Krab agent (Telegram userbot) — общая memory + MCP tools + OpenClaw. Voice assistant = "новый channel" в same brain.
 
