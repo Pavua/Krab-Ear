@@ -70,7 +70,7 @@ private final class StageBadgeView: NSView {
         layer?.cornerRadius = KrabEarTheme.Metrics.tight
 
         label.font = KrabEarTheme.Typography.captionMedium
-        label.textColor = .secondaryLabelColor
+        label.textColor = KrabEarTheme.Colors.textSecondary
         label.translatesAutoresizingMaskIntoConstraints = false
 
         addSubview(label)
@@ -86,7 +86,7 @@ private final class StageBadgeView: NSView {
 
     override func updateLayer() {
         super.updateLayer()
-        layer?.backgroundColor = NSColor.secondaryLabelColor.withAlphaComponent(0.12).cgColor
+        layer?.backgroundColor = KrabEarTheme.Colors.textSecondary.withAlphaComponent(0.12).cgColor
     }
 }
 
@@ -105,6 +105,9 @@ public final class RealtimeOverlayController: NSObject {
     /// Glass background — NSVisualEffectView с виброй
     private let effectView: NSVisualEffectView
 
+    /// Surface background (0.5 alpha cardBackground)
+    private let surfaceView: DynamicTintView
+
     /// 4b: Dynamic tint overlay (red during recording / accent during transcribing)
     private let tintView: DynamicTintView
 
@@ -117,12 +120,10 @@ public final class RealtimeOverlayController: NSObject {
 
     /// 4a: Recording indicator dot (red, CABasicAnimation pulse)
     private let recordingDot = NSView()
+    private let recordingDotHalo = CALayer()
 
     /// 4c: Stage badge (pill) для reveal animation ("Распознано" / "Очищено" / "LLM")
     private let stageBadge   = StageBadgeView()
-
-    /// VU meter — visualizes RMS audio level during recording
-    private let audioLevelMeter = AudioLevelMeter()
 
     /// Основной текст (preview / stage text)
     /// internal — доступен из RealtimeOverlayController+PartialSSE.swift
@@ -190,6 +191,7 @@ public final class RealtimeOverlayController: NSObject {
         )
 
         self.effectView = NSVisualEffectView(frame: initialRect)
+        self.surfaceView = DynamicTintView(frame: initialRect)
         self.tintView   = DynamicTintView(frame: initialRect)
 
         super.init()
@@ -209,7 +211,7 @@ public final class RealtimeOverlayController: NSObject {
         overlayState = .live
         lineRingBuffer = []  // M4: reset ring buffer on each new recording
         stageBadge.isHidden = true
-        tintView.tintColor = NSColor.systemRed.withAlphaComponent(0.06)
+        tintView.tintColor = KrabEarTheme.Colors.error.withAlphaComponent(0.04)
         // M2: restore last user-dragged position; fall back to near-cursor if off-screen or not saved.
         if !restoreSavedPosition() {
             positionNearCursor()
@@ -232,7 +234,7 @@ public final class RealtimeOverlayController: NSObject {
         if overlayState == .hidden { return }
         overlayState = .hidden
         recordingDot.isHidden = true
-        audioLevelMeter.setLevel(0.0)
+        recordingDotHalo.transform = CATransform3DIdentity
         tintView.tintColor = .clear
         animateHide { [weak self] in
             Task { @MainActor [weak self] in
@@ -286,7 +288,16 @@ public final class RealtimeOverlayController: NSObject {
 
     public func setAudioLevel(_ rms: Float) {
         guard overlayState == .live else { return }
-        audioLevelMeter.setLevel(rms)
+        let clamped = max(0.0, min(1.0, rms))
+        let scale = 1.0 + CGFloat(clamped) * 2.5
+        let haloOpacity = Float(0.4 + clamped * 0.4)
+        
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(0.1)
+        CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeOut))
+        recordingDotHalo.transform = CATransform3DMakeScale(scale, scale, 1.0)
+        recordingDotHalo.opacity = haloOpacity
+        CATransaction.commit()
     }
 
     // MARK: - Reveal Animation API
@@ -316,7 +327,7 @@ public final class RealtimeOverlayController: NSObject {
 
         overlayState = .reveal
         // 4b: accent tint during transcribing (F7 token: 0.08)
-        tintView.tintColor = NSColor.controlAccentColor.withAlphaComponent(0.08)
+        tintView.tintColor = KrabEarTheme.Colors.accent.withAlphaComponent(0.04)
 
         let stageInterval = duration / 3.0
 
@@ -364,7 +375,7 @@ public final class RealtimeOverlayController: NSObject {
     }
 
     private func setupEffectView() {
-        effectView.material      = .hudWindow
+        effectView.material      = .popover
         effectView.blendingMode  = .behindWindow
         effectView.state         = .active
         effectView.isEmphasized  = true
@@ -376,10 +387,7 @@ public final class RealtimeOverlayController: NSObject {
         panel.contentView?.wantsLayer = true
         if let rootLayer = panel.contentView?.layer {
             rootLayer.masksToBounds   = false
-            rootLayer.shadowColor     = KrabEarTheme.Colors.overlayShadow.cgColor
-            rootLayer.shadowOpacity   = 0.25
-            rootLayer.shadowRadius    = 28
-            rootLayer.shadowOffset    = CGSize(width: 0, height: -4)
+            KrabEarTheme.Elevation.applyOverlay(to: rootLayer)
         }
 
         borderLayer.borderColor = KrabEarTheme.Colors.border.cgColor
@@ -402,42 +410,60 @@ public final class RealtimeOverlayController: NSObject {
     }
 
     private func setupUI() {
+        // Surface background
+        surfaceView.wantsLayer = true
+        surfaceView.layer?.cornerRadius = cornerRadius
+        surfaceView.tintColor = KrabEarTheme.Colors.cardBackground
+        surfaceView.translatesAutoresizingMaskIntoConstraints = false
+        effectView.addSubview(surfaceView)
+
         // 4b: tint view (behind all labels, inside effectView)
         tintView.wantsLayer = true
         tintView.layer?.cornerRadius = cornerRadius
         tintView.tintColor = .clear
         tintView.translatesAutoresizingMaskIntoConstraints = false
         effectView.addSubview(tintView)
+
         NSLayoutConstraint.activate([
+            surfaceView.topAnchor.constraint(equalTo: effectView.topAnchor),
+            surfaceView.leadingAnchor.constraint(equalTo: effectView.leadingAnchor),
+            surfaceView.trailingAnchor.constraint(equalTo: effectView.trailingAnchor),
+            surfaceView.bottomAnchor.constraint(equalTo: effectView.bottomAnchor),
+
             tintView.topAnchor.constraint(equalTo: effectView.topAnchor),
             tintView.leadingAnchor.constraint(equalTo: effectView.leadingAnchor),
             tintView.trailingAnchor.constraint(equalTo: effectView.trailingAnchor),
             tintView.bottomAnchor.constraint(equalTo: effectView.bottomAnchor),
         ])
 
-        statusLabel.font      = KrabEarTheme.Typography.captionMedium
-        statusLabel.textColor = .tertiaryLabelColor
+        statusLabel.font      = KrabEarTheme.Typography.captionMedium.tabular()
+        statusLabel.textColor = KrabEarTheme.Colors.textSecondary
         statusLabel.alignment = .right
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
 
         modeLabel.font      = KrabEarTheme.Typography.captionMedium
-        modeLabel.textColor = .tertiaryLabelColor
+        modeLabel.textColor = KrabEarTheme.Colors.textSecondary
         modeLabel.alignment = .left
         modeLabel.translatesAutoresizingMaskIntoConstraints = false
 
         // 4a: Recording dot
         recordingDot.wantsLayer = true
-        recordingDot.layer?.cornerRadius = KrabEarTheme.Metrics.tight
-        recordingDot.layer?.backgroundColor = NSColor.systemRed.cgColor
+        recordingDot.layer?.cornerRadius = 4 // 8x8 dot
+        recordingDot.layer?.backgroundColor = KrabEarTheme.Colors.error.cgColor
         recordingDot.isHidden = true
         recordingDot.translatesAutoresizingMaskIntoConstraints = false
+
+        recordingDotHalo.backgroundColor = KrabEarTheme.Colors.error.withAlphaComponent(0.4).cgColor
+        recordingDotHalo.cornerRadius = 4
+        recordingDotHalo.frame = CGRect(x: 0, y: 0, width: 8, height: 8)
+        recordingDot.layer?.addSublayer(recordingDotHalo)
 
         // 4c: Stage badge (pill)
         stageBadge.isHidden = true
         stageBadge.translatesAutoresizingMaskIntoConstraints = false
 
         primaryLabel.font            = KrabEarTheme.Typography.display
-        primaryLabel.textColor       = .labelColor
+        primaryLabel.textColor       = KrabEarTheme.Colors.textPrimary
         primaryLabel.alignment       = .left
         primaryLabel.maximumNumberOfLines = 0
         primaryLabel.lineBreakMode   = .byWordWrapping
@@ -445,41 +471,32 @@ public final class RealtimeOverlayController: NSObject {
         primaryLabel.translatesAutoresizingMaskIntoConstraints = false
         setPrimaryText("Слушаю…")  // F7-4: use kern-attributed setter
 
-        audioLevelMeter.translatesAutoresizingMaskIntoConstraints = false
+        effectView.addSubview(recordingDot)
         effectView.addSubview(modeLabel)
         effectView.addSubview(statusLabel)
-        effectView.addSubview(recordingDot)
         effectView.addSubview(stageBadge)
-        effectView.addSubview(audioLevelMeter)
         effectView.addSubview(primaryLabel)
 
         NSLayoutConstraint.activate([
-            modeLabel.topAnchor.constraint(equalTo: effectView.topAnchor, constant: 10),
-            modeLabel.leadingAnchor.constraint(equalTo: effectView.leadingAnchor, constant: KrabEarTheme.Metrics.comfortable),
-
-            statusLabel.centerYAnchor.constraint(equalTo: modeLabel.centerYAnchor),
-            statusLabel.trailingAnchor.constraint(equalTo: effectView.trailingAnchor, constant: -14),
-
-            // 4a: red dot — left of modeLabel, vertically centered
+            recordingDot.leadingAnchor.constraint(equalTo: effectView.leadingAnchor, constant: KrabEarTheme.Metrics.comfortable),
+            recordingDot.topAnchor.constraint(equalTo: effectView.topAnchor, constant: KrabEarTheme.Metrics.comfortable),
             recordingDot.widthAnchor.constraint(equalToConstant: 8),
             recordingDot.heightAnchor.constraint(equalToConstant: 8),
-            recordingDot.trailingAnchor.constraint(equalTo: modeLabel.leadingAnchor, constant: -6),
-            recordingDot.centerYAnchor.constraint(equalTo: modeLabel.centerYAnchor),
 
-            // VU meter — below modeLabel row, full width
-            audioLevelMeter.topAnchor.constraint(equalTo: modeLabel.bottomAnchor, constant: 6),
-            audioLevelMeter.leadingAnchor.constraint(equalTo: effectView.leadingAnchor, constant: KrabEarTheme.Metrics.comfortable),
-            audioLevelMeter.trailingAnchor.constraint(equalTo: effectView.trailingAnchor, constant: -14),
-            audioLevelMeter.heightAnchor.constraint(equalToConstant: 4),
+            modeLabel.centerYAnchor.constraint(equalTo: recordingDot.centerYAnchor),
+            modeLabel.leadingAnchor.constraint(equalTo: recordingDot.trailingAnchor, constant: KrabEarTheme.Metrics.standard),
 
-            // 4c: stage badge — below VU meter in reveal
-            stageBadge.topAnchor.constraint(equalTo: audioLevelMeter.bottomAnchor, constant: 6),
+            statusLabel.centerYAnchor.constraint(equalTo: modeLabel.centerYAnchor),
+            statusLabel.trailingAnchor.constraint(equalTo: effectView.trailingAnchor, constant: -KrabEarTheme.Metrics.comfortable),
+
+            // stage badge — below top row in reveal
+            stageBadge.topAnchor.constraint(equalTo: modeLabel.bottomAnchor, constant: KrabEarTheme.Metrics.standard),
             stageBadge.leadingAnchor.constraint(equalTo: effectView.leadingAnchor, constant: KrabEarTheme.Metrics.comfortable),
 
-            primaryLabel.topAnchor.constraint(equalTo: stageBadge.bottomAnchor, constant: 2),
+            primaryLabel.topAnchor.constraint(equalTo: stageBadge.bottomAnchor, constant: KrabEarTheme.Metrics.tight),
             primaryLabel.leadingAnchor.constraint(equalTo: effectView.leadingAnchor, constant: KrabEarTheme.Metrics.comfortable),
-            primaryLabel.trailingAnchor.constraint(equalTo: effectView.trailingAnchor, constant: -14),
-            primaryLabel.bottomAnchor.constraint(lessThanOrEqualTo: effectView.bottomAnchor, constant: -12),
+            primaryLabel.trailingAnchor.constraint(equalTo: effectView.trailingAnchor, constant: -KrabEarTheme.Metrics.comfortable),
+            primaryLabel.bottomAnchor.constraint(lessThanOrEqualTo: effectView.bottomAnchor, constant: -KrabEarTheme.Metrics.comfortable),
         ])
     }
 
@@ -668,23 +685,16 @@ public final class RealtimeOverlayController: NSObject {
     /// internal — доступен из RealtimeOverlayController+PartialSSE.swift
     func adjustHeight() {
         let width = clamp(value: 520, min: minWidth, max: maxWidth)
-        let insets: CGFloat = 14 * 2
-        let topRowH: CGFloat = 26
-        let vuMeterH: CGFloat = 4 + 6 + 6  // height + topSpacing + bottomSpacing
-        let stageLabelH: CGFloat = stageBadge.isHidden ? 0 : 18
-        let padding: CGFloat = 10 + 2 + 12
+        let insets: CGFloat = KrabEarTheme.Metrics.comfortable * 2
+        let topRowH: CGFloat = KrabEarTheme.Metrics.comfortable + 16
+        let stageLabelH: CGFloat = stageBadge.isHidden ? 0 : (18 + KrabEarTheme.Metrics.standard)
+        let padding: CGFloat = KrabEarTheme.Metrics.tight + KrabEarTheme.Metrics.comfortable
         let textWidth = width - insets
 
         let textH = heightForString(primaryLabel.stringValue, font: primaryLabel.font ?? KrabEarTheme.Typography.display, width: textWidth)
-        let total = topRowH + vuMeterH + stageLabelH + padding + textH
+        let total = topRowH + stageLabelH + padding + textH
         let height = clamp(value: total, min: minHeight, max: maxHeight)
 
-        // 2026-05-09 FINAL FIX: instead of trying to resize panel anchored at top
-        // (multiple attempts didn't fix accumulative drift — likely AppKit/Auto-Layout
-        // hidden interaction), use FIXED panel height = maxHeight на весь жизнь overlay.
-        // Текст растёт ВНУТРИ panel благодаря primaryLabel.topAnchor + bottomAnchor
-        // (lessThanOrEqualTo) constraints. Short text не wastes space — panel становится
-        // фиксированная статичная HUD-карточка с предсказуемым layout. Никакого drift.
         let oldFrame = panel.frame
         let fixedHeight = maxHeight
         if abs(oldFrame.size.height - fixedHeight) > 0.5 {
@@ -701,14 +711,13 @@ public final class RealtimeOverlayController: NSObject {
 
     private func currentPanelHeight() -> CGFloat {
         let width: CGFloat = 520
-        let insets: CGFloat = 14 * 2
-        let topRowH: CGFloat = 26
-        let vuMeterH: CGFloat = 4 + 6 + 6  // height + topSpacing + bottomSpacing
-        let stageLabelH: CGFloat = stageBadge.isHidden ? 0 : 18
-        let padding: CGFloat = 10 + 2 + 12
+        let insets: CGFloat = KrabEarTheme.Metrics.comfortable * 2
+        let topRowH: CGFloat = KrabEarTheme.Metrics.comfortable + 16
+        let stageLabelH: CGFloat = stageBadge.isHidden ? 0 : (18 + KrabEarTheme.Metrics.standard)
+        let padding: CGFloat = KrabEarTheme.Metrics.tight + KrabEarTheme.Metrics.comfortable
         let textWidth = width - insets
         let textH = heightForString(primaryLabel.stringValue, font: primaryLabel.font ?? KrabEarTheme.Typography.display, width: textWidth)
-        let total = topRowH + vuMeterH + stageLabelH + padding + textH
+        let total = topRowH + stageLabelH + padding + textH
         return clamp(value: total, min: minHeight, max: maxHeight)
     }
 
@@ -738,7 +747,7 @@ public final class RealtimeOverlayController: NSObject {
         let attrs: [NSAttributedString.Key: Any] = [
             .kern: 0.3 as NSNumber,
             .font: font,
-            .foregroundColor: NSColor.labelColor
+            .foregroundColor: KrabEarTheme.Colors.textPrimary
         ]
         primaryLabel.attributedStringValue = NSAttributedString(string: text, attributes: attrs)
     }
