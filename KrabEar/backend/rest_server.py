@@ -37,6 +37,7 @@ from backend.api_versioning import api_version_header, get_api_info
 from backend.translator import Translator
 from backend.live_subs_service import LiveSubsService
 from backend.cloud_stt import get_cloud_stt_provider
+from backend.tts_service import TTSService
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -472,6 +473,7 @@ engine = AudioEngine(skip_gigaam_warmup=True)
 store = StateStore(settings.DATA_DIR)
 transcriber = Transcriber(engine=engine)
 translator = Translator()
+tts_service = TTSService()
 
 
 def _propagate_hf_token_to_env() -> None:
@@ -1156,6 +1158,53 @@ def _load_settings_field(key: str, default):
         return s.get(key, default)
     except Exception:
         return default
+
+
+@v1_blp.route("/tts/synthesize", methods=["POST"])
+@limiter.limit("10 per minute")
+@require_api_key
+def synthesize_speech():
+    """Synthesize speech from text.
+
+    Request: application/json
+        - text: str (required)
+        - language: "ru" | "en" | "auto" (default: auto)
+        - voice: str (optional)
+
+    Notes:
+        - Использование реального TTS (Silero/Kokoro) или фоллбэка (macOS say)
+          зависит от флага settings.TTS_ENABLED (и settings.TTS_FALLBACK_SAY).
+
+    Returns 403 {"ok": false, "skipped": "privacy_mode"} when IPC privacy
+    mode is active (privacy_mode_enabled=true in settings.json).
+    """
+    if _load_settings_field("privacy_mode_enabled", False):
+        return jsonify({"ok": False, "skipped": "privacy_mode"}), 403
+
+    req_data = request.get_json(silent=True)
+    if not req_data:
+        return jsonify({"error": "Invalid or missing JSON"}), 400
+
+    if "text" not in req_data:
+        return jsonify({"error": "text is required"}), 400
+
+    params = {
+        "text": req_data.get("text", ""),
+        "language": req_data.get("language", "auto"),
+        "voice": req_data.get("voice"),
+    }
+
+    result = tts_service.handle_synthesize_speech(params)
+
+    if not result.get("ok", True):
+        return jsonify({"error": result.get("error", "Unknown TTS error")}), 400
+
+    return jsonify({
+        "wav_bytes_b64": result.get("wav_bytes_b64", ""),
+        "language": result.get("language", "auto"),
+        "engine": result.get("engine", "none"),
+        "byte_count": result.get("byte_count", 0),
+    }), 200
 
 
 @v1_blp.route("/stt/transcribe", methods=["POST"])

@@ -584,3 +584,49 @@ class RequestIdHeaderTest(_RestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TTSSynthesizeEndpointTest(_RestBase):
+    """POST /v1/tts/synthesize tests."""
+
+    @patch("backend.rest_server.tts_service.handle_synthesize_speech")
+    def test_valid_request_returns_200(self, mock_synthesize):
+        mock_synthesize.return_value = {
+            "wav_bytes_b64": "UklGR... (fake)",
+            "language": "ru",
+            "engine": "say",
+            "byte_count": 100,
+        }
+        resp = self.client.post(
+            "/v1/tts/synthesize",
+            json={"text": "привет", "language": "ru"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertIsNotNone(body)
+        self.assertIn("wav_bytes_b64", body)
+        self.assertEqual(body["engine"], "say")
+
+    def test_missing_text_returns_400(self):
+        resp = self.client.post(
+            "/v1/tts/synthesize",
+            json={"language": "ru"},
+        )
+        self.assertEqual(resp.status_code, 400)
+        body = resp.get_json()
+        self.assertIsNotNone(body)
+        self.assertIn("error", body)
+
+    @patch("backend.rest_server.tts_service.handle_synthesize_speech")
+    def test_service_error_returns_400(self, mock_synthesize):
+        mock_synthesize.return_value = {
+            "ok": False,
+            "error": "text exceeds maximum length"
+        }
+        resp = self.client.post(
+            "/v1/tts/synthesize",
+            json={"text": "x" * 6000},
+        )
+        self.assertEqual(resp.status_code, 400)
+        body = resp.get_json()
+        self.assertIsNotNone(body)
+        self.assertIn("error", body)
