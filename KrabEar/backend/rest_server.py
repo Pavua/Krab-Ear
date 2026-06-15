@@ -34,6 +34,8 @@ from backend.state_store import StateStore
 from backend.transcriber import Transcriber
 from backend.metrics_collector import metrics
 from backend.api_versioning import api_version_header, get_api_info
+from backend.translator import Translator
+from backend.live_subs_service import LiveSubsService
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -468,6 +470,7 @@ class TranscribeResponseSchema(Schema):
 engine = AudioEngine(skip_gigaam_warmup=True)
 store = StateStore(settings.DATA_DIR)
 transcriber = Transcriber(engine=engine)
+translator = Translator()
 
 
 def _propagate_hf_token_to_env() -> None:
@@ -1581,6 +1584,153 @@ def ws_events(ws):
     raw_types = request.args.get("types", "")
     type_filter = {t.strip() for t in raw_types.split(",") if t.strip()} if raw_types else None
     _handle_ws_connection(ws, event_bus, type_filter)
+
+
+@sock.route("/v1/stream")
+@_block_cross_origin_reads
+def ws_stream(ws):
+    """WebSocket endpoint для потоковой транскрипции/перевода (Stage 1)."""
+    # 🔴 Privacy-gate
+    if store.load_settings().get("privacy_mode_enabled", False):
+        try:
+            ws.send(json.dumps({"type": "error", "code": "privacy_mode_active", "message": "Privacy mode active"}))
+            ws.close(message=b"privacy_mode_active")
+        except Exception:
+            pass
+        return
+
+    # CORS check is done by @_block_cross_origin_reads mostly, but WS does not use standard decorator nicely
+    # actually _block_cross_origin_reads doesn't work for WebSocket routes directly in flask_sock because
+    # it returns a Response object instead of closing WS. We need to handle it inline.
+    origin = request.headers.get("Origin", "")
+    if origin and not _is_origin_allowed(origin):
+        logger.warning("Blocked cross-origin WS stream from Origin=%r", origin)
+        try:
+            ws.send(json.dumps({"type": "error", "code": "cross_origin_denied", "message": "cross-origin access denied"}))
+            ws.close(message=b"cross-origin access denied")
+        except Exception:
+            pass
+        return
+
+    # Auth
+    if not _ws_check_auth(ws):
+        return
+
+    import base64
+    try:
+        first_msg = ws.receive()
+        if not first_msg:
+            return
+        config = json.loads(first_msg)
+        if config.get("type") != "config":
+            ws.send(json.dumps({"type": "error", "code": "invalid_config", "message": "First message must be config"}))
+            ws.close(message=b"invalid_config")
+            return
+    except Exception as e:
+        logger.error("WS /v1/stream config error: %s", e)
+        try:
+            ws.send(json.dumps({"type": "error", "code": "invalid_json", "message": "Invalid JSON"}))
+            ws.close(message=b"invalid_json")
+        except Exception:
+            pass
+        return
+
+    backend = config.get("backend", "auto")
+    if backend == "cloud":
+        try:
+            ws.send(json.dumps({"type": "error", "code": "cloud_not_implemented", "message": "cloud backend — Stage 2"}))
+            ws.close(message=b"cloud_not_implemented")
+        except Exception:
+            pass
+        return
+
+    mode = config.get("mode", "transcribe")
+    target_lang = config.get("target_lang", "off") if mode == "translate" else "off"
+
+    # Instantiate the streaming service for this connection
+    live_subs = LiveSubsService(
+        transcriber=transcriber,
+        translator=translator,
+        settings_get=lambda k, d=None: store.load_settings().get(k, d)
+    )
+
+    logger.info("WS /v1/stream: Client connected")
+
+    try:
+        while True:
+            raw_msg = ws.receive()
+            if not raw_msg:
+                break
+
+            # Privacy gate on each chunk
+            if store.load_settings().get("privacy_mode_enabled", False):
+                ws.send(json.dumps({"type": "error", "code": "privacy_mode_active", "message": "Privacy mode active"}))
+                break
+
+            try:
+                msg = json.loads(raw_msg)
+            except Exception:
+                ws.send(json.dumps({"type": "error", "code": "invalid_json", "message": "Invalid JSON"}))
+                break
+
+            msg_type = msg.get("type")
+            if msg_type == "end":
+                result = live_subs.ingest(audio_bytes=b"", sample_rate=16000, target_lang=target_lang, is_final=True)
+                if result and result.get("text"):
+                    resp = {
+                        "type": "final",
+                        "text": result.get("text", ""),
+                        "lang": result.get("language_detected") or "ru",
+                        "confidence": 0.0,
+                    }
+                    if mode == "translate" and result.get("translation"):
+                        resp["translation"] = result["translation"]
+                    ws.send(json.dumps(resp))
+                break
+
+            elif msg_type == "audio":
+                audio_b64 = msg.get("data", "")
+                sample_rate = msg.get("sample_rate", 16000)
+                is_final = msg.get("is_final", False)
+
+                try:
+                    audio_bytes = base64.b64decode(audio_b64)
+                except Exception as e:
+                    ws.send(json.dumps({"type": "error", "code": "invalid_base64", "message": str(e)}))
+                    continue
+
+                result = live_subs.ingest(
+                    audio_bytes=audio_bytes,
+                    sample_rate=sample_rate,
+                    target_lang=target_lang,
+                    is_final=is_final
+                )
+
+                if result and result.get("text"):
+                    resp = {
+                        "type": "final",
+                        "text": result.get("text", ""),
+                        "lang": result.get("language_detected") or "ru",
+                        "confidence": 0.0,
+                    }
+                    if mode == "translate" and result.get("translation"):
+                        resp["translation"] = result["translation"]
+                    ws.send(json.dumps(resp))
+
+                if is_final:
+                    break
+            else:
+                ws.send(json.dumps({"type": "error", "code": "invalid_message", "message": f"Unknown type: {msg_type}"}))
+
+    except Exception as e:
+        logger.error("WS /v1/stream loop error: %s", e)
+    finally:
+        live_subs.reset()
+        try:
+            ws.close()
+        except Exception:
+            pass
+        logger.info("WS /v1/stream: Client disconnected")
 
 
 def create_app():
