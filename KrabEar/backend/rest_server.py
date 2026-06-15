@@ -36,6 +36,7 @@ from backend.metrics_collector import metrics
 from backend.api_versioning import api_version_header, get_api_info
 from backend.translator import Translator
 from backend.live_subs_service import LiveSubsService
+from backend.cloud_stt import get_cloud_stt_provider
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -1586,9 +1587,7 @@ def ws_events(ws):
     _handle_ws_connection(ws, event_bus, type_filter)
 
 
-@sock.route("/v1/stream")
-@_block_cross_origin_reads
-def ws_stream(ws):
+def _ws_stream_handler(ws):
     """WebSocket endpoint для потоковой транскрипции/перевода (Stage 1)."""
     # 🔴 Privacy-gate
     if store.load_settings().get("privacy_mode_enabled", False):
@@ -1636,13 +1635,8 @@ def ws_stream(ws):
         return
 
     backend = config.get("backend", "auto")
-    if backend == "cloud":
-        try:
-            ws.send(json.dumps({"type": "error", "code": "cloud_not_implemented", "message": "cloud backend — Stage 2"}))
-            ws.close(message=b"cloud_not_implemented")
-        except Exception:
-            pass
-        return
+    source_lang = config.get("source_lang", "auto")
+    cloud_provider_name = config.get("provider", "openai")
 
     mode = config.get("mode", "transcribe")
     target_lang = config.get("target_lang", "off") if mode == "translate" else "off"
@@ -1653,6 +1647,9 @@ def ws_stream(ws):
         translator=translator,
         settings_get=lambda k, d=None: store.load_settings().get(k, d)
     )
+
+    cloud_audio_buffer = bytearray()
+    cloud_sample_rate = 16000
 
     logger.info("WS /v1/stream: Client connected")
 
@@ -1675,17 +1672,42 @@ def ws_stream(ws):
 
             msg_type = msg.get("type")
             if msg_type == "end":
-                result = live_subs.ingest(audio_bytes=b"", sample_rate=16000, target_lang=target_lang, is_final=True)
-                if result and result.get("text"):
-                    resp = {
-                        "type": "final",
-                        "text": result.get("text", ""),
-                        "lang": result.get("language_detected") or "ru",
-                        "confidence": 0.0,
-                    }
-                    if mode == "translate" and result.get("translation"):
-                        resp["translation"] = result["translation"]
-                    ws.send(json.dumps(resp))
+                if backend == "cloud":
+                    if cloud_audio_buffer:
+                        provider = get_cloud_stt_provider(cloud_provider_name)
+                        if not provider:
+                            ws.send(json.dumps({"type": "error", "code": "invalid_cloud_provider", "message": "Unknown provider"}))
+                        else:
+                            res = provider.transcribe(bytes(cloud_audio_buffer), cloud_sample_rate, source_lang)
+                            if "error" in res:
+                                if res["error"] == "no_api_key":
+                                    ws.send(json.dumps({"type": "error", "code": "cloud_no_api_key", "message": res.get("message", "")}))
+                                else:
+                                    ws.send(json.dumps({"type": "error", "code": "cloud_api_error", "message": res.get("message", "")}))
+                            else:
+                                text = res.get("text", "")
+                                if text:
+                                    resp = {
+                                        "type": "final",
+                                        "text": text,
+                                        "lang": res.get("lang") or "ru",
+                                        "confidence": res.get("confidence", 0.0),
+                                    }
+                                    if mode == "translate" and text and target_lang != "off":
+                                        resp["translation"] = translator.translate(text, target_lang)
+                                    ws.send(json.dumps(resp))
+                else:
+                    result = live_subs.ingest(audio_bytes=b"", sample_rate=16000, target_lang=target_lang, is_final=True)
+                    if result and result.get("text"):
+                        resp = {
+                            "type": "final",
+                            "text": result.get("text", ""),
+                            "lang": result.get("language_detected") or "ru",
+                            "confidence": 0.0,
+                        }
+                        if mode == "translate" and result.get("translation"):
+                            resp["translation"] = result["translation"]
+                        ws.send(json.dumps(resp))
                 break
 
             elif msg_type == "audio":
@@ -1699,26 +1721,55 @@ def ws_stream(ws):
                     ws.send(json.dumps({"type": "error", "code": "invalid_base64", "message": str(e)}))
                     continue
 
-                result = live_subs.ingest(
-                    audio_bytes=audio_bytes,
-                    sample_rate=sample_rate,
-                    target_lang=target_lang,
-                    is_final=is_final
-                )
+                if backend == "cloud":
+                    cloud_sample_rate = sample_rate
+                    cloud_audio_buffer.extend(audio_bytes)
+                    if is_final:
+                        if cloud_audio_buffer:
+                            provider = get_cloud_stt_provider(cloud_provider_name)
+                            if not provider:
+                                ws.send(json.dumps({"type": "error", "code": "invalid_cloud_provider", "message": "Unknown provider"}))
+                            else:
+                                res = provider.transcribe(bytes(cloud_audio_buffer), cloud_sample_rate, source_lang)
+                                if "error" in res:
+                                    if res["error"] == "no_api_key":
+                                        ws.send(json.dumps({"type": "error", "code": "cloud_no_api_key", "message": res.get("message", "")}))
+                                    else:
+                                        ws.send(json.dumps({"type": "error", "code": "cloud_api_error", "message": res.get("message", "")}))
+                                else:
+                                    text = res.get("text", "")
+                                    if text:
+                                        resp = {
+                                            "type": "final",
+                                            "text": text,
+                                            "lang": res.get("lang") or "ru",
+                                            "confidence": res.get("confidence", 0.0),
+                                        }
+                                        if mode == "translate" and text and target_lang != "off":
+                                            resp["translation"] = translator.translate(text, target_lang)
+                                        ws.send(json.dumps(resp))
+                        break
+                else:
+                    result = live_subs.ingest(
+                        audio_bytes=audio_bytes,
+                        sample_rate=sample_rate,
+                        target_lang=target_lang,
+                        is_final=is_final
+                    )
 
-                if result and result.get("text"):
-                    resp = {
-                        "type": "final",
-                        "text": result.get("text", ""),
-                        "lang": result.get("language_detected") or "ru",
-                        "confidence": 0.0,
-                    }
-                    if mode == "translate" and result.get("translation"):
-                        resp["translation"] = result["translation"]
-                    ws.send(json.dumps(resp))
+                    if result and result.get("text"):
+                        resp = {
+                            "type": "final",
+                            "text": result.get("text", ""),
+                            "lang": result.get("language_detected") or "ru",
+                            "confidence": 0.0,
+                        }
+                        if mode == "translate" and result.get("translation"):
+                            resp["translation"] = result["translation"]
+                        ws.send(json.dumps(resp))
 
-                if is_final:
-                    break
+                    if is_final:
+                        break
             else:
                 ws.send(json.dumps({"type": "error", "code": "invalid_message", "message": f"Unknown type: {msg_type}"}))
 
@@ -1733,9 +1784,14 @@ def ws_stream(ws):
         logger.info("WS /v1/stream: Client disconnected")
 
 
-def create_app():
-    """Фабричная функция для запуска через WSGI-сервер (gunicorn и др.)."""
+def create_app(config_mapping=None):
+    """Factory для создания Flask-приложения."""
     return app
+
+
+# Регистрация WebSocket роута
+ws_stream = _ws_stream_handler
+sock.route("/v1/stream")(_block_cross_origin_reads(_ws_stream_handler))
 
 
 if __name__ == "__main__":

@@ -93,8 +93,14 @@ class TestRestV1Stream(unittest.TestCase):
         self.assertEqual(resp["type"], "error")
         self.assertEqual(resp["code"], "privacy_mode_active")
 
-    def test_cloud_stub(self):
-        ws = MockWS([json.dumps({"type": "config", "backend": "cloud"})])
+    def test_cloud_unknown_provider(self):
+        # New contract (Stage 2): cloud backend with unknown provider → error on flush.
+        b64 = base64.b64encode(b"\x00\x00").decode('utf-8')
+        ws = MockWS([
+            json.dumps({"type": "config", "backend": "cloud", "provider": "nonexistent"}),
+            json.dumps({"type": "audio", "data": b64, "sample_rate": 16000, "is_final": False}),
+            json.dumps({"type": "end"})
+        ])
 
         with app.test_request_context('/v1/stream'):
             ws_stream(ws)
@@ -102,7 +108,7 @@ class TestRestV1Stream(unittest.TestCase):
         self.assertTrue(len(ws.sends) >= 1)
         resp = json.loads(ws.sends[0])
         self.assertEqual(resp["type"], "error")
-        self.assertEqual(resp["code"], "cloud_not_implemented")
+        self.assertEqual(resp["code"], "invalid_cloud_provider")
 
 if __name__ == "__main__":
     unittest.main()
