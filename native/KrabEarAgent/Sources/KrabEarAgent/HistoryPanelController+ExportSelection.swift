@@ -6,7 +6,7 @@
 
  Паттерны:
  - ipcClient.call — строго off-main (DispatchQueue.global → DispatchQueue.main).
- - NSSavePanel — через AlertHelpers.presentPanelSheet (НИКОГДА .runModal()).
+ - NSSavePanel — через AlertHelpers.presentPanelSheet (НИКОГДА через runModal).
  - NSAlert     — через AlertHelpers.presentAlertSheet или showInfoAlert.
  - Glyph-free: не используем ● ○ ◉ • ▶ ◀ ▲ ▼ ★ ✕ ✓ ⏱ в labelWithString.
 */
