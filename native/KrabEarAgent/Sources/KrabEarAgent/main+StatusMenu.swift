@@ -35,6 +35,8 @@ extension AgentAppDelegate {
             item.button?.title = "KE"
             item.button?.toolTip = "Krab Ear"
             statusItem = item
+            // Drag-drop аудиофайлов на иконку menu bar (main+StatusDragDrop.swift).
+            setupStatusItemDragDrop()
         }
     }
 
