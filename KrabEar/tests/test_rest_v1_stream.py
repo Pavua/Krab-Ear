@@ -119,5 +119,24 @@ class TestRestV1Stream(unittest.TestCase):
         self.assertEqual(resp["type"], "error")
         self.assertEqual(resp["code"], "invalid_cloud_provider")
 
+    def test_cloud_audio_buffer_cap(self):
+        # Oversized cloud-audio accumulation must be rejected (local memory-DoS guard).
+        big = base64.b64encode(b"\x00" * 64).decode('utf-8')
+        ws = MockWS([
+            json.dumps({"type": "config", "backend": "cloud", "provider": "openai"}),
+            json.dumps({"type": "audio", "data": big, "sample_rate": 16000, "is_final": False}),
+            json.dumps({"type": "end"})
+        ])
+
+        with patch.object(self.rs, "MAX_CLOUD_AUDIO_BYTES", 8):
+            with self.rs.app.test_request_context('/v1/stream'):
+                self.rs.ws_stream(ws)
+
+        self.assertTrue(len(ws.sends) >= 1)
+        resp = json.loads(ws.sends[0])
+        self.assertEqual(resp["type"], "error")
+        self.assertEqual(resp["code"], "audio_too_large")
+
+
 if __name__ == "__main__":
     unittest.main()

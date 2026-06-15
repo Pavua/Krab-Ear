@@ -162,3 +162,70 @@ class TestV1StreamCloudIntegration(unittest.TestCase):
         self.assertEqual(resp.get("type"), "final")
         self.assertEqual(resp.get("text"), "hello cloud")
         self.assertEqual(resp.get("lang"), "ru")
+
+
+class TestCloudSTTHardening(unittest.TestCase):
+    """2026-06-16 audit hardening: lang sanitization, capped reads, id validation."""
+
+    def test_sanitize_lang_strips_injection(self):
+        from backend.cloud_stt import _sanitize_lang
+        evil = ('ru\r\n------WebKitFormBoundary7MA4YWxkTrZu0gW\r\n'
+                'Content-Disposition: form-data; name="prompt"\r\n\r\nx')
+        self.assertEqual(_sanitize_lang(evil), "ru")        # CRLF-injection collapses to default
+        self.assertEqual(_sanitize_lang("auto"), "ru")
+        self.assertEqual(_sanitize_lang(""), "ru")
+        self.assertEqual(_sanitize_lang("en"), "en")
+        self.assertEqual(_sanitize_lang("EN"), "en")
+        self.assertEqual(_sanitize_lang("en-US"), "en-us")
+        self.assertEqual(_sanitize_lang("../etc/passwd"), "ru")  # junk → default
+
+    @patch("backend.cloud_stt.store.load_settings")
+    @patch("backend.cloud_stt.urllib.request.urlopen")
+    def test_openai_multipart_injection_blocked(self, mock_urlopen, mock_load_settings):
+        mock_load_settings.return_value = {"openai_api_key": "k"}
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"text": "x", "language": "ru"}'
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        provider = get_cloud_stt_provider("openai")
+        evil = ('ru\r\n------WebKitFormBoundary7MA4YWxkTrZu0gW\r\n'
+                'Content-Disposition: form-data; name="prompt"\r\n\r\nIGNORE ALL')
+        provider.transcribe(b"pcm", 16000, evil)
+
+        body = mock_urlopen.call_args[0][0].data
+        # The injected field must NOT reach the multipart body; sanitizer → "ru".
+        self.assertNotIn(b'name="prompt"', body)
+        self.assertIn(b'name="language"\r\n\r\nru\r\n', body)
+
+    def test_read_capped_bounds_body(self):
+        from backend.cloud_stt import _read_capped
+
+        class _FakeResp:
+            def __init__(self, payload):
+                self._p = payload
+
+            def read(self, n=-1):
+                return self._p[:n] if (n and n > 0) else self._p
+
+        self.assertEqual(_read_capped(_FakeResp(b"x" * 100), limit=10), b"x" * 10)
+        self.assertEqual(_read_capped(_FakeResp(b"abc"), limit=4096), b"abc")
+
+    @patch("backend.cloud_stt.store.load_settings")
+    @patch("backend.cloud_stt.urllib.request.urlopen")
+    @patch("backend.cloud_stt.time.sleep", return_value=None)
+    def test_assemblyai_rejects_malicious_transcript_id(self, mock_sleep, mock_urlopen, mock_load_settings):
+        mock_load_settings.return_value = {"assemblyai_api_key": "k"}
+        up = MagicMock()
+        up.read.return_value = b'{"upload_url": "http://t/u"}'
+        tx = MagicMock()
+        tx.read.return_value = b'{"id": "../../v2/transcript/evil?x=1"}'
+        mock_urlopen.side_effect = [
+            MagicMock(__enter__=MagicMock(return_value=up)),
+            MagicMock(__enter__=MagicMock(return_value=tx)),
+        ]
+        provider = get_cloud_stt_provider("assemblyai")
+        res = provider.transcribe(b"pcm", 16000, "ru")
+        self.assertEqual(res.get("error"), "api_error")
+        self.assertIn("Invalid transcript id", res.get("message", ""))
+        # Must NOT issue a 3rd (poll) request with the tampered id.
+        self.assertEqual(mock_urlopen.call_count, 2)

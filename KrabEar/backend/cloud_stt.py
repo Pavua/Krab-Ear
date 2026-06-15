@@ -8,6 +8,7 @@
 import io
 import json
 import logging
+import re
 import time
 import urllib.request
 import urllib.parse
@@ -21,6 +22,53 @@ logger = logging.getLogger("KrabEar.CloudSTT")
 
 # Используем тот же store, что и в rest_server.py (или создаём новый с тем же DATA_DIR)
 store = StateStore(settings.DATA_DIR)
+
+# --- Hardening limits / validators (2026-06-16 audit of the new VG-bridge surface) ---
+_MAX_RESP_BYTES = 4 * 1024 * 1024          # cap any provider HTTP body (success path) — bound memory
+_MAX_ERR_BYTES = 2048                       # truncate provider error bodies before logging/forwarding
+MAX_CLOUD_AUDIO_BYTES = 50 * 1024 * 1024    # ~26 min of 16 kHz mono PCM16 — WS accumulator cap (rest_server)
+_POLL_BUDGET_SEC = 90.0                     # AssemblyAI: overall wall-clock cap on the poll loop
+_LANG_RE = re.compile(r"^[a-z]{2,3}(?:-[a-z]{2,4})?$", re.IGNORECASE)
+_TRANSCRIPT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def _sanitize_lang(source_lang: str, default: str = "ru") -> str:
+    """Validate a WS-supplied language code before it reaches an HTTP request.
+
+    `source_lang` arrives from the `/v1/stream` WS `config` unvalidated, and the
+    OpenAI provider inserts it verbatim into a raw multipart body with a FIXED
+    boundary — so a value containing CRLF + that boundary could inject extra form
+    fields (`prompt`/`model`). Accept only short ISO-639-style codes; fall back to
+    `default` for "auto"/garbage. Deepgram (urlencode) and AssemblyAI (json) are
+    not injectable, but sanitizing centrally defends every provider uniformly.
+    """
+    if not source_lang or source_lang == "auto":
+        return default
+    candidate = source_lang.strip()
+    if _LANG_RE.match(candidate):
+        return candidate.lower()
+    return default
+
+
+def _read_capped(resp, limit: int = _MAX_RESP_BYTES) -> bytes:
+    """Read at most `limit` bytes from an HTTP response to bound memory use.
+
+    A misbehaving/compromised provider could otherwise stream an unbounded body
+    into the WS handler thread. `http.client.HTTPResponse.read(amt)` fills up to
+    `amt` bytes (for both Content-Length and chunked transfers) and leaves the
+    remainder unread — so a single capped read bounds memory; `[:limit]` drops
+    the sentinel +1 byte used to detect an over-limit body.
+    """
+    data = resp.read(limit + 1)
+    return data[:limit] if data else b""
+
+
+def _err_body(exc) -> str:
+    """Capped, decoded HTTPError body (truncated for both logging and WS forwarding)."""
+    try:
+        return _read_capped(exc, _MAX_ERR_BYTES).decode("utf-8", "replace")
+    except Exception:
+        return ""
 
 
 def pcm16_to_wav(pcm_bytes: bytes, sample_rate: int) -> bytes:
@@ -79,7 +127,7 @@ class OpenAISTTProvider:
         body.extend(b'whisper-1\r\n')
 
         # Language field
-        lang = source_lang if source_lang and source_lang != "auto" else "ru"
+        lang = _sanitize_lang(source_lang)
         body.extend(f"--{boundary}\r\n".encode("utf-8"))
         body.extend(b'Content-Disposition: form-data; name="language"\r\n\r\n')
         body.extend(lang.encode("utf-8"))
@@ -104,14 +152,14 @@ class OpenAISTTProvider:
 
         try:
             with urllib.request.urlopen(req, timeout=30) as response:
-                result = json.loads(response.read().decode("utf-8"))
+                result = json.loads(_read_capped(response).decode("utf-8", "replace"))
                 return {
                     "text": result.get("text", ""),
                     "lang": result.get("language", lang),
                     "confidence": 1.0,  # OpenAI API не возвращает confidence в verbose_json по умолчанию?
                 }
         except urllib.error.HTTPError as e:
-            err_msg = e.read().decode("utf-8")
+            err_msg = _err_body(e)
             logger.error("OpenAI STT error: %s", err_msg)
             return {"error": "api_error", "provider": "openai", "message": err_msg}
         except Exception as e:
@@ -133,7 +181,7 @@ class DeepgramSTTProvider:
                 "message": "Deepgram API key is missing in settings"
             }
 
-        lang = source_lang if source_lang and source_lang != "auto" else "ru"
+        lang = _sanitize_lang(source_lang)
 
         # Для Deepgram можно отправлять raw pcm если указать параметры
         params = {
@@ -158,7 +206,7 @@ class DeepgramSTTProvider:
 
         try:
             with urllib.request.urlopen(req, timeout=30) as response:
-                result = json.loads(response.read().decode("utf-8"))
+                result = json.loads(_read_capped(response).decode("utf-8", "replace"))
                 channels = result.get("results", {}).get("channels", [])
                 if not channels:
                     return {"text": "", "lang": lang, "confidence": 0.0}
@@ -171,7 +219,7 @@ class DeepgramSTTProvider:
                     "confidence": float(alts[0].get("confidence", 0.0)),
                 }
         except urllib.error.HTTPError as e:
-            err_msg = e.read().decode("utf-8")
+            err_msg = _err_body(e)
             logger.error("Deepgram STT error: %s", err_msg)
             return {"error": "api_error", "provider": "deepgram", "message": err_msg}
         except Exception as e:
@@ -207,10 +255,10 @@ class AssemblyAISTTProvider:
         )
         try:
             with urllib.request.urlopen(upload_req, timeout=30) as upload_resp:
-                upload_res = json.loads(upload_resp.read().decode("utf-8"))
+                upload_res = json.loads(_read_capped(upload_resp).decode("utf-8", "replace"))
                 upload_url = upload_res.get("upload_url")
         except urllib.error.HTTPError as e:
-            err_msg = e.read().decode("utf-8")
+            err_msg = _err_body(e)
             logger.error("AssemblyAI Upload error: %s", err_msg)
             return {"error": "api_error", "provider": "assemblyai", "message": err_msg}
         except Exception as e:
@@ -220,7 +268,7 @@ class AssemblyAISTTProvider:
         if not upload_url:
             return {"error": "api_error", "provider": "assemblyai", "message": "No upload URL returned"}
 
-        lang = source_lang if source_lang and source_lang != "auto" else "ru"
+        lang = _sanitize_lang(source_lang)
 
         # 2. Transcribe
         transcript_req = urllib.request.Request(
@@ -237,10 +285,10 @@ class AssemblyAISTTProvider:
         )
         try:
             with urllib.request.urlopen(transcript_req, timeout=30) as transcript_resp:
-                transcript_res = json.loads(transcript_resp.read().decode("utf-8"))
+                transcript_res = json.loads(_read_capped(transcript_resp).decode("utf-8", "replace"))
                 transcript_id = transcript_res.get("id")
         except urllib.error.HTTPError as e:
-            err_msg = e.read().decode("utf-8")
+            err_msg = _err_body(e)
             logger.error("AssemblyAI Transcribe error: %s", err_msg)
             return {"error": "api_error", "provider": "assemblyai", "message": err_msg}
         except Exception as e:
@@ -249,6 +297,10 @@ class AssemblyAISTTProvider:
 
         if not transcript_id:
             return {"error": "api_error", "provider": "assemblyai", "message": "No transcript ID returned"}
+        # Provider-supplied id is interpolated into the poll URL — keep it within
+        # the host path (no '/', '?', CRLF) even though the host stays fixed.
+        if not _TRANSCRIPT_ID_RE.match(str(transcript_id)):
+            return {"error": "api_error", "provider": "assemblyai", "message": "Invalid transcript id from provider"}
 
         # 3. Poll
         poll_url = f"https://api.assemblyai.com/v2/transcript/{transcript_id}"
@@ -259,11 +311,16 @@ class AssemblyAISTTProvider:
         )
 
         max_attempts = 15
+        # Bound the total blocking time of this synchronous poll loop so it cannot
+        # tie up the WS handler thread for the worst-case 15*(2+30)s ≈ 8 min.
+        poll_deadline = time.monotonic() + _POLL_BUDGET_SEC
         for _ in range(max_attempts):
+            if time.monotonic() >= poll_deadline:
+                break
             time.sleep(2)
             try:
-                with urllib.request.urlopen(poll_req, timeout=30) as poll_resp:
-                    poll_res = json.loads(poll_resp.read().decode("utf-8"))
+                with urllib.request.urlopen(poll_req, timeout=15) as poll_resp:
+                    poll_res = json.loads(_read_capped(poll_resp).decode("utf-8", "replace"))
                     status = poll_res.get("status")
                     if status == "completed":
                         return {

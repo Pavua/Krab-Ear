@@ -36,7 +36,7 @@ from backend.metrics_collector import metrics
 from backend.api_versioning import api_version_header, get_api_info
 from backend.translator import Translator
 from backend.live_subs_service import LiveSubsService
-from backend.cloud_stt import get_cloud_stt_provider
+from backend.cloud_stt import get_cloud_stt_provider, MAX_CLOUD_AUDIO_BYTES
 from backend.tts_service import TTSService
 
 # Настройка логирования
@@ -1773,6 +1773,12 @@ def _ws_stream_handler(ws):
                 if backend == "cloud":
                     cloud_sample_rate = sample_rate
                     cloud_audio_buffer.extend(audio_bytes)
+                    # Bound the WS accumulator — flask MAX_CONTENT_LENGTH does not
+                    # apply to WebSocket frames, so an unbounded stream would exhaust
+                    # process memory (the buffer is later doubled by pcm16_to_wav).
+                    if len(cloud_audio_buffer) > MAX_CLOUD_AUDIO_BYTES:
+                        ws.send(json.dumps({"type": "error", "code": "audio_too_large", "message": "Cloud audio buffer exceeded limit"}))
+                        break
                     if is_final:
                         if cloud_audio_buffer:
                             provider = get_cloud_stt_provider(cloud_provider_name)
