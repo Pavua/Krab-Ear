@@ -144,6 +144,11 @@ class GigaAMAdapter:
         # from both passing the `_subprocess is None` guard and double-spawning workers.
         # Distinct from _GigaAMSubprocessSession._lock (which serialises IPC sends).
         self._spawn_lock = threading.Lock()
+        # In-process sibling of _spawn_lock: serialises the heavy (~2 GB) lazy
+        # model load in _get_model() so two concurrent in-process transcribe()
+        # calls cannot both pass the `_model is None` guard and load twice
+        # (memory pressure / OOM).  Mirrors ParakeetSTTAdapter._load_lock (W1218).
+        self._model_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -405,53 +410,65 @@ class GigaAMAdapter:
     # ------------------------------------------------------------------
 
     def _get_model(self) -> object:
-        """Lazy-load модели GigaAM при первом вызове."""
+        """Lazy-load модели GigaAM при первом вызове.
+
+        Double-checked locking: the first check is unsynchronized for speed; if
+        a load is needed we take _model_lock and re-check so two concurrent
+        in-process transcribe() calls (thread-per-client IPC + the batch
+        transcription queue) cannot both pass the guard and call
+        gigaam.load_model() twice — loading the ~2 GB model twice risks memory
+        pressure / OOM.  Sibling of the subprocess path's _spawn_lock (W1216 F2).
+        """
         if self._model is not None:
             return self._model
 
-        try:
-            import gigaam  # type: ignore[import]
-        except ImportError as exc:
-            raise ImportError(
-                "GigaAM не установлен. Установите: pip install gigaam\n"
-                "Подробнее: https://github.com/salute-developers/GigaAM"
-            ) from exc
+        with self._model_lock:
+            if self._model is not None:
+                return self._model
 
-        logger.info(
-            "GigaAMAdapter: загрузка модели mode=%s device=%s ...",
-            self._mode,
-            self._device,
-        )
-        try:
-            model = gigaam.load_model(self._mode)
-            # PyTorch MPS: если модель поддерживает .to(device), перемещаем
-            if self._device != "cpu" and hasattr(model, "to"):
-                try:
-                    import torch  # type: ignore[import]
-                    if self._device == "mps" and torch.backends.mps.is_available():
-                        model = model.to(torch.device("mps"))
-                    elif self._device == "cuda" and torch.cuda.is_available():
-                        model = model.to(torch.device("cuda"))
-                    else:
-                        # Запрошенный device недоступен → CPU fallback
+            try:
+                import gigaam  # type: ignore[import]
+            except ImportError as exc:
+                raise ImportError(
+                    "GigaAM не установлен. Установите: pip install gigaam\n"
+                    "Подробнее: https://github.com/salute-developers/GigaAM"
+                ) from exc
+
+            logger.info(
+                "GigaAMAdapter: загрузка модели mode=%s device=%s ...",
+                self._mode,
+                self._device,
+            )
+            try:
+                model = gigaam.load_model(self._mode)
+                # PyTorch MPS: если модель поддерживает .to(device), перемещаем
+                if self._device != "cpu" and hasattr(model, "to"):
+                    try:
+                        import torch  # type: ignore[import]
+                        if self._device == "mps" and torch.backends.mps.is_available():
+                            model = model.to(torch.device("mps"))
+                        elif self._device == "cuda" and torch.cuda.is_available():
+                            model = model.to(torch.device("cuda"))
+                        else:
+                            # Запрошенный device недоступен → CPU fallback
+                            logger.warning(
+                                "GigaAMAdapter: device=%s недоступен → CPU fallback",
+                                self._device,
+                            )
+                    except Exception as move_exc:
                         logger.warning(
-                            "GigaAMAdapter: device=%s недоступен → CPU fallback",
+                            "GigaAMAdapter: не удалось переместить модель на %s: %s → CPU",
                             self._device,
+                            move_exc,
                         )
-                except Exception as move_exc:
-                    logger.warning(
-                        "GigaAMAdapter: не удалось переместить модель на %s: %s → CPU",
-                        self._device,
-                        move_exc,
-                    )
-        except Exception as exc:
-            raise RuntimeError(
-                f"GigaAMAdapter: ошибка загрузки модели mode={self._mode!r}: {exc}"
-            ) from exc
+            except Exception as exc:
+                raise RuntimeError(
+                    f"GigaAMAdapter: ошибка загрузки модели mode={self._mode!r}: {exc}"
+                ) from exc
 
-        self._model = model
-        logger.info("GigaAMAdapter: модель загружена успешно (mode=%s)", self._mode)
-        return self._model
+            self._model = model
+            logger.info("GigaAMAdapter: модель загружена успешно (mode=%s)", self._mode)
+            return self._model
 
     def _ensure_16k(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
         """Resample аудио до 16 кГц если sample_rate != 16000."""

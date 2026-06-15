@@ -373,5 +373,62 @@ class TestGigaAMAdapterWavWrite(unittest.TestCase):
             os.unlink(path)
 
 
+# ---------------------------------------------------------------------------
+# In-process lazy-load thread-safety (sibling of subprocess _spawn_lock, W1216)
+# ---------------------------------------------------------------------------
+
+class TestGigaAMAdapterModelLoadThreadSafe(unittest.TestCase):
+    """Concurrent in-process _get_model() must load the model exactly once.
+
+    Before the fix _get_model() had no lock (unlike the subprocess path's
+    _spawn_lock, W1216 F2): two threads could both pass ``if self._model is not
+    None`` and call gigaam.load_model() twice — loading the ~2 GB model twice
+    (memory pressure / OOM).
+    """
+
+    def test_concurrent_get_model_loads_once(self):
+        import threading
+        import time
+        from core.pipeline.stt_gigaam import GigaAMAdapter
+
+        calls = []  # list.append is atomic under the GIL
+        load_event = threading.Event()  # lets threads pile up before model appears
+
+        fake_gigaam = types.ModuleType("gigaam")
+        fake_model = MagicMock()
+
+        def counting_load_model(mode):
+            calls.append(mode)
+            load_event.wait(timeout=2.0)  # block so racing threads stack up
+            return fake_model
+
+        fake_gigaam.load_model = counting_load_model
+
+        with patch.dict(sys.modules, {"gigaam": fake_gigaam}):
+            adapter = GigaAMAdapter(device="cpu", mode="rnnt", transport="in_process")
+            errors = []
+
+            def worker():
+                try:
+                    adapter._get_model()
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=worker) for _ in range(4)]
+            for t in threads:
+                t.start()
+            time.sleep(0.05)  # let all four reach the load before it completes
+            load_event.set()
+            for t in threads:
+                t.join(timeout=5.0)
+
+        self.assertEqual(errors, [], f"Threads raised: {errors}")
+        self.assertEqual(
+            len(calls),
+            1,
+            f"load_model called {len(calls)}× — double-load race (missing _model_lock)",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
