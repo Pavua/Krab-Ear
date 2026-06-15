@@ -85,31 +85,24 @@ extension ConversationViewController {
         statusCard.contentStackView.addArrangedSubview(statusRow)
         root.addArrangedSubview(statusCard)
 
-        // --- Waveform placeholder card ---
+        // --- Waveform / level-meter card ---
         let waveCard = makeCard(title: "Визуализация")
         waveformPlaceholder.translatesAutoresizingMaskIntoConstraints = false
         waveformPlaceholder.wantsLayer = true
-        waveformPlaceholder.layer?.backgroundColor = KrabEarTheme.Colors.accent.withAlphaComponent(0.15).cgColor
+        waveformPlaceholder.layer?.backgroundColor = KrabEarTheme.Colors.accent.withAlphaComponent(0.08).cgColor
         waveformPlaceholder.layer?.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
         waveCard.contentStackView.addArrangedSubview(waveformPlaceholder)
-        
+
         NSLayoutConstraint.activate([
             waveformPlaceholder.heightAnchor.constraint(equalToConstant: 48),
             waveformPlaceholder.widthAnchor.constraint(greaterThanOrEqualToConstant: 200)
         ])
-        
-        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-            let pulse = CABasicAnimation(keyPath: "opacity")
-            pulse.fromValue = 0.5
-            pulse.toValue = 1.0
-            pulse.duration = KrabEarTheme.Motion.Duration.long
-            pulse.autoreverses = true
-            pulse.repeatCount = .infinity
-            pulse.timingFunction = KrabEarTheme.Motion.Easing.easeInOut
-            waveformPlaceholder.layer?.add(pulse, forKey: "opacityPulse")
-        }
-        
-        let waveHintLabel = NSTextField(labelWithString: "Аудиоспектр появится в следующем обновлении")
+
+        // Встраиваем живой level-meter внутрь waveformPlaceholder.
+        // Пульс-анимация заглушки убрана — бары сами передают активность.
+        setupMicLevelMeter()
+
+        let waveHintLabel = NSTextField(labelWithString: "Уровень микрофона")
         styleLabel(waveHintLabel, font: KrabEarTheme.Typography.caption)
         waveHintLabel.textColor = KrabEarTheme.Colors.textSecondary
         waveCard.contentStackView.addArrangedSubview(waveHintLabel)

@@ -123,6 +123,8 @@ extension ConversationViewController {
         audioHolder.engine?.stop()
         audioHolder.engine = nil
         audioHolder.playerNode = nil
+        // Сбросить level-meter в idle-состояние (@MainActor — безопасно).
+        resetMicLevelMeter()
         AgentLogger.shared.info("[Audio] Захват остановлен")
     }
 
@@ -132,6 +134,10 @@ extension ConversationViewController {
     func processAudioSamples(_ samples: [Float]) {
         // Stub: в Phase 1.4 здесь будет Opus-encode → sendAudioFrame(opusData).
         _ = samples // encoder placeholder — consume to silence warning
+
+        // Level-meter: вычислить RMS и передать в визуализатор.
+        // Безопасно — вызываемся на @MainActor, без IPC (AGENT-3 чист).
+        computeAndPushLevel(samples)
     }
 
     // MARK: - Playback (downlink → speaker)
