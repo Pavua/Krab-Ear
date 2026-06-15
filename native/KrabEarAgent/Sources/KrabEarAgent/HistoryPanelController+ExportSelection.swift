@@ -41,6 +41,24 @@ extension HistoryPanelController {
         copyItem.target = self
         menu.addItem(copyItem)
 
+        menu.addItem(NSMenuItem.separator())
+
+        let deleteItem = NSMenuItem(
+            title: "Удалить выбранные",
+            action: #selector(onBulkDelete),
+            keyEquivalent: ""
+        )
+        deleteItem.target = self
+        menu.addItem(deleteItem)
+
+        let addToCollectionItem = NSMenuItem(
+            title: "Добавить в коллекцию...",
+            action: #selector(onBulkAddToCollection),
+            keyEquivalent: ""
+        )
+        addToCollectionItem.target = self
+        menu.addItem(addToCollectionItem)
+
         tableView.menu = menu
     }
 
@@ -84,6 +102,150 @@ extension HistoryPanelController {
                     self?.showInfoAlert(
                         title: "Экспорт выбранных",
                         body: "Ошибка IPC: \(error.localizedDescription)"
+                    )
+                }
+            }
+        }
+    }
+
+    // MARK: - Bulk Delete
+
+    @objc func onBulkDelete() {
+        let rows = tableView.selectedRowIndexes
+        guard !rows.isEmpty else {
+            let alert = NSAlert()
+            alert.messageText = "Удалить выбранные"
+            alert.informativeText = "Не выбрано ни одной записи."
+            alert.addButton(withTitle: "OK")
+            presentAlertSheet(alert, for: self.window) { _ in }
+            return
+        }
+
+        let count = rows.count
+        let confirmAlert = NSAlert()
+        confirmAlert.messageText = "Удалить выбранные записи?"
+        confirmAlert.informativeText = "Будет удалено записей: \(count). Действие необратимо."
+        confirmAlert.addButton(withTitle: "Удалить")   // .alertFirstButtonReturn
+        confirmAlert.addButton(withTitle: "Отмена")
+
+        presentAlertSheet(confirmAlert, for: self.window) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self else { return }
+
+            // Collect IDs before mutating items.
+            let ids: [String] = rows.compactMap { idx in
+                guard idx < self.items.count else { return nil }
+                return self.items[idx].id
+            }
+
+            // Optimistic UI: remove rows in descending order so indexes stay valid.
+            for idx in rows.sorted(by: >) {
+                if idx < self.items.count {
+                    self.items.remove(at: idx)
+                }
+            }
+            self.tableView.reloadData()
+
+            // AGENT-3: IPC off-main.
+            let ipcClient = self.ipcClient
+            DispatchQueue.global(qos: .userInitiated).async {
+                for id in ids {
+                    _ = try? ipcClient.call(method: "delete_history_item", params: ["id": id])
+                }
+            }
+        }
+    }
+
+    // MARK: - Bulk Add to Collection
+
+    @objc func onBulkAddToCollection() {
+        let rows = tableView.selectedRowIndexes
+        guard !rows.isEmpty else {
+            let alert = NSAlert()
+            alert.messageText = "Добавить в коллекцию"
+            alert.informativeText = "Не выбрано ни одной записи."
+            alert.addButton(withTitle: "OK")
+            presentAlertSheet(alert, for: self.window) { _ in }
+            return
+        }
+
+        let ids: [String] = rows.compactMap { idx in
+            guard idx < items.count else { return nil }
+            return items[idx].id
+        }
+        guard !ids.isEmpty else { return }
+
+        // Step 1: fetch collection list off-main.
+        let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            nonisolated(unsafe) let response = try? ipcClient.call(method: "list_collections", params: [:])
+            nonisolated(unsafe) let result = response?["result"] as? [String: Any] ?? [:]
+            DispatchQueue.main.async {
+                self?.presentAddToCollectionSheet(result: result, ids: ids, ipcClient: ipcClient)
+            }
+        }
+    }
+
+    // MARK: - Add-to-collection sheet (must be called on main thread)
+
+    private func presentAddToCollectionSheet(
+        result: [String: Any],
+        ids: [String],
+        ipcClient: IPCClient
+    ) {
+        // Privacy-mode guard.
+        if let reason = result["reason"] as? String, reason.contains("privacy") {
+            showInfoAlert(title: "Добавить в коллекцию", body: "Недоступно в режиме приватности.")
+            return
+        }
+
+        let existingNames: [String] = (result["collections"] as? [[String: Any]])?.compactMap {
+            $0["name"] as? String
+        } ?? []
+
+        // Build alert with NSComboBox accessory view.
+        let alert = NSAlert()
+        alert.messageText = "Добавить в коллекцию"
+        alert.informativeText = "Выберите существующую коллекцию или введите имя новой."
+        alert.addButton(withTitle: "Добавить")   // .alertFirstButtonReturn
+        alert.addButton(withTitle: "Отмена")
+
+        let comboBox = NSComboBox(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        comboBox.isEditable = true
+        for name in existingNames {
+            comboBox.addItem(withObjectValue: name)
+        }
+        alert.accessoryView = comboBox
+        alert.window.initialFirstResponder = comboBox
+
+        presentAlertSheet(alert, for: self.window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            let name = comboBox.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else {
+                self?.showInfoAlert(title: "Добавить в коллекцию", body: "Имя коллекции не может быть пустым.")
+                return
+            }
+
+            let isNew = !existingNames.contains(name)
+            let capturedIds = ids
+
+            // AGENT-3: IPC off-main.
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                if isNew {
+                    _ = try? ipcClient.call(
+                        method: "create_collection",
+                        params: ["name": name, "description": ""]
+                    )
+                }
+                for id in capturedIds {
+                    _ = try? ipcClient.call(
+                        method: "add_to_collection",
+                        params: ["collection_name": name, "item_id": id]
+                    )
+                }
+                DispatchQueue.main.async {
+                    self?.showInfoAlert(
+                        title: "Добавить в коллекцию",
+                        body: "Добавлено записей: \(capturedIds.count) в коллекцию \"\(name)\"."
                     )
                 }
             }
