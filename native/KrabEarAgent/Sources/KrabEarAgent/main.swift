@@ -121,6 +121,9 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     var historyPanel: HistoryPanelController?
     var hotkeyManager: HotkeyManager?
     var statusItem: NSStatusItem?
+    /// Ссылка на карточку «Сводка дня» в status-меню — хранится для refresh в NSMenuDelegate.
+    /// Объявлена здесь, т.к. stored-property в extension Swift не поддерживает.
+    var menuBarRecapView: MenuBarRecapView?
     // PR 1.5: Wake word listener (Porcupine)
     private var wakeWordListener: WakeWordListener?
     private var quickStartController: QuickStartWindowController?

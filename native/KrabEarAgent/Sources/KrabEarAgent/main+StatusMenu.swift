@@ -178,6 +178,19 @@ extension AgentAppDelegate {
 
         let menu = NSMenu()
 
+        // ── Сводка дня: вставляем В НАЧАЛО меню (ТЗ §Wiring) ─────────────────
+        // MenuBarRecapView — self-contained карточка с IPC off-main (AGENT-3).
+        // Ссылка сохраняется в menuBarRecapView для обновления через NSMenuDelegate.
+        let recapView = MenuBarRecapView()
+        let recapItem = NSMenuItem()
+        recapItem.view = recapView
+        menu.addItem(recapItem)           // первый пункт меню
+        menu.addItem(.separator())
+        self.menuBarRecapView = recapView
+        menu.delegate = self
+        recapView.refresh(ipcClient: ipcClient)   // первичный fetch при построении меню
+        // ─────────────────────────────────────────────────────────────────────
+
         let recordItem = NSMenuItem(
             title: isRecording ? "Остановить запись" : "Начать запись",
             action: #selector(onRecordToggle),
