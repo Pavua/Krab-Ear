@@ -230,5 +230,8 @@ extension HistoryPanelController {
             c.isActive = true
             themeWidthConstraints.append(c)
         }
+
+        // Экспорт выбранных записей: multi-select + context menu.
+        setupExportSelectionContextMenu()
     }
 }
