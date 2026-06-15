@@ -77,11 +77,15 @@ final class QuickEditOverlay: NSObject {
 
     private func buildPanel(initialText: String) -> NSPanel {
         let panelWidth: CGFloat = 600
-        let textHeight: CGFloat = min(200, max(56, estimatedTextHeight(initialText, width: panelWidth - 32)))
-        let buttonBarH: CGFloat = 40
-        let countdownH: CGFloat = 20
-        let vPad: CGFloat = 12
-        let totalH: CGFloat = vPad + textHeight + 8 + countdownH + 8 + buttonBarH + vPad
+        let hPad = KrabEarTheme.Metrics.comfortable
+        let vPad = KrabEarTheme.Metrics.comfortable
+        let spacing = KrabEarTheme.Metrics.standard
+        let buttonBarH = KrabEarTheme.Metrics.controlHeight
+
+        let scrollViewWidth = panelWidth - hPad * 2
+        let textHeight = min(200, max(56, estimatedTextHeight(initialText, width: scrollViewWidth)))
+        
+        let totalH = vPad + textHeight + spacing + buttonBarH + vPad
 
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: totalH),
@@ -96,89 +100,136 @@ final class QuickEditOverlay: NSObject {
         panel.backgroundColor = .clear
         panel.isOpaque = false
 
+        // Container view for shadow
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: panelWidth, height: totalH))
+        container.wantsLayer = true
+        KrabEarTheme.Elevation.applyOverlay(to: container.layer!)
+
         // Visual effect background (Liquid Glass)
-        let blur = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: panelWidth, height: totalH))
+        let blur = NSVisualEffectView(frame: container.bounds)
         blur.material = .popover
         blur.blendingMode = .behindWindow
         blur.state = .active
         blur.wantsLayer = true
-        blur.layer?.cornerRadius = 12
+        blur.layer?.cornerRadius = KrabEarTheme.Metrics.cardCornerRadius
         blur.layer?.masksToBounds = true
+        container.addSubview(blur)
 
-        // Thin border
+        // Tint layer for card background
+        let tintLayer = CALayer()
+        tintLayer.frame = blur.bounds
+        tintLayer.backgroundColor = KrabEarTheme.Colors.cardBackground.cgColor
+        blur.layer?.addSublayer(tintLayer)
+
+        // Thin dynamic border
         let borderLayer = CALayer()
         borderLayer.frame = blur.bounds
-        borderLayer.cornerRadius = 12
-        borderLayer.borderColor = NSColor(white: 1.0, alpha: 0.18).cgColor
+        borderLayer.cornerRadius = KrabEarTheme.Metrics.cardCornerRadius
+        borderLayer.borderColor = KrabEarTheme.Colors.border.cgColor
         borderLayer.borderWidth = 1
         borderLayer.zPosition = 1
         blur.layer?.addSublayer(borderLayer)
 
-        // NSTextView scroll wrapper
-        let scrollView = NSScrollView(frame: NSRect(
-            x: 16, y: vPad + buttonBarH + 8 + countdownH + 8,
-            width: panelWidth - 32, height: textHeight
-        ))
+        // Text view wrapper
+        let textY = vPad + buttonBarH + spacing
+        let scrollView = NSScrollView(frame: NSRect(x: hPad, y: textY, width: scrollViewWidth, height: textHeight))
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
-        scrollView.drawsBackground = false
         scrollView.wantsLayer = true
+        scrollView.layer?.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
+        scrollView.layer?.masksToBounds = true
+        scrollView.backgroundColor = KrabEarTheme.Colors.cardBackground
+        scrollView.drawsBackground = true
 
-        let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: panelWidth - 32, height: textHeight))
+        // Inner border for text field so it looks neat
+        let scrollBorder = CALayer()
+        scrollBorder.frame = scrollView.bounds
+        scrollBorder.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
+        scrollBorder.borderColor = KrabEarTheme.Colors.border.cgColor
+        scrollBorder.borderWidth = 1
+        scrollBorder.zPosition = 1
+        scrollView.layer?.addSublayer(scrollBorder)
+
+        let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: scrollViewWidth, height: textHeight))
         tv.isEditable = true
         tv.isSelectable = true
         tv.isRichText = false
-        tv.backgroundColor = .clear
+        tv.backgroundColor = .clear // Let the scroll view background show
         tv.drawsBackground = false
         tv.string = initialText
-        tv.font = NSFont.systemFont(ofSize: 14)
-        tv.textColor = NSColor.labelColor
+        tv.font = KrabEarTheme.Typography.body
+        tv.textColor = KrabEarTheme.Colors.textPrimary
         tv.isAutomaticSpellingCorrectionEnabled = false
         tv.isAutomaticTextReplacementEnabled = false
         tv.isAutomaticDashSubstitutionEnabled = false
         tv.isAutomaticQuoteSubstitutionEnabled = false
-        tv.textContainerInset = NSSize(width: 4, height: 4)
+        tv.textContainerInset = NSSize(width: KrabEarTheme.Metrics.comfortable, height: KrabEarTheme.Metrics.comfortable)
         scrollView.documentView = tv
         self.textView = tv
 
-        // Countdown label
-        let countdown = NSTextField(
-            labelWithString: formatCountdown(remainingSeconds)
-        )
-        countdown.frame = NSRect(
-            x: 16, y: vPad + buttonBarH + 8,
-            width: 120, height: countdownH
-        )
-        countdown.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
-        countdown.textColor = NSColor.secondaryLabelColor
-        countdown.alignment = .left
-        self.countdownLabel = countdown
-
-        // Кнопка «Вставить» (Enter)
-        let pasteBtn = ThemePrimaryButton(title: "Вставить", target: self, action: #selector(onPaste))
-        pasteBtn.frame = NSRect(x: panelWidth - 16 - 100 - 8 - 90, y: vPad, width: 90, height: 28)
+        // Button bar layout
+        let pasteBtnW: CGFloat = 90
+        let cancelBtnW: CGFloat = 90
+        let btnSpacing = KrabEarTheme.Metrics.tight
+        
+        let pasteBtn = ThemePrimaryButton(frame: NSRect(
+            x: panelWidth - hPad - pasteBtnW,
+            y: vPad,
+            width: pasteBtnW,
+            height: buttonBarH
+        ))
+        pasteBtn.title = "Вставить"
+        pasteBtn.target = self
+        pasteBtn.action = #selector(onPaste)
         pasteBtn.keyEquivalent = "\r"
-        pasteBtn.font = NSFont.systemFont(ofSize: 13)
 
-        // Кнопка «Отменить» (Esc)
-        let cancelBtn = ThemeSecondaryButton(title: "Отменить", target: self, action: #selector(onCancel))
-        cancelBtn.frame = NSRect(x: panelWidth - 16 - 100, y: vPad, width: 100, height: 28)
+        let cancelBtn = ThemeSecondaryButton(frame: NSRect(
+            x: panelWidth - hPad - pasteBtnW - btnSpacing - cancelBtnW,
+            y: vPad,
+            width: cancelBtnW,
+            height: buttonBarH
+        ))
+        cancelBtn.title = "Отменить"
+        cancelBtn.target = self
+        cancelBtn.action = #selector(onCancel)
         cancelBtn.keyEquivalent = "\u{1B}"
-        cancelBtn.font = NSFont.systemFont(ofSize: 13)
+
+        // Countdown label
+        let countdown = NSTextField(labelWithString: formatCountdown(remainingSeconds))
+        countdown.frame = NSRect(
+            x: hPad,
+            y: vPad + (buttonBarH - 16) / 2, // Center vertically with buttons
+            width: 40,
+            height: 16
+        )
+        countdown.font = KrabEarTheme.Typography.captionMedium.tabular()
+        countdown.textColor = KrabEarTheme.Colors.accent
+        countdown.isEditable = false
+        countdown.isBordered = false
+        countdown.drawsBackground = false
+        self.countdownLabel = countdown
 
         // Hint label
         let hint = NSTextField(labelWithString: "Enter — вставить  |  Esc — отменить")
-        hint.frame = NSRect(x: 16, y: vPad + 5, width: 280, height: 18)
-        hint.font = NSFont.systemFont(ofSize: 11)
-        hint.textColor = NSColor.tertiaryLabelColor
+        hint.frame = NSRect(
+            x: hPad + 40 + btnSpacing,
+            y: vPad + (buttonBarH - 16) / 2,
+            width: 280,
+            height: 16
+        )
+        hint.font = KrabEarTheme.Typography.caption
+        hint.textColor = KrabEarTheme.Colors.textDisabled
+        hint.isEditable = false
+        hint.isBordered = false
+        hint.drawsBackground = false
 
-        blur.addSubview(scrollView)
-        blur.addSubview(countdown)
-        blur.addSubview(pasteBtn)
-        blur.addSubview(cancelBtn)
-        blur.addSubview(hint)
-        panel.contentView = blur
+        container.addSubview(scrollView)
+        container.addSubview(countdown)
+        container.addSubview(hint)
+        container.addSubview(cancelBtn)
+        container.addSubview(pasteBtn)
+        panel.contentView = container
 
         return panel
     }
@@ -261,7 +312,9 @@ final class QuickEditOverlay: NSObject {
         }
         if animated {
             NSAnimationContext.runAnimationGroup({ ctx in
-                ctx.duration = 0.15
+                let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                ctx.duration = reduceMotion ? 0.0 : KrabEarTheme.Motion.Duration.micro
+                ctx.timingFunction = KrabEarTheme.Motion.Easing.easeOut
                 panel.animator().alphaValue = 0
             }, completionHandler: {
                 MainActor.assumeIsolated {
@@ -295,13 +348,13 @@ final class QuickEditOverlay: NSObject {
     }
 
     private func estimatedTextHeight(_ text: String, width: CGFloat) -> CGFloat {
-        let font = NSFont.systemFont(ofSize: 14)
+        let font = KrabEarTheme.Typography.body
         let attributes: [NSAttributedString.Key: Any] = [.font: font]
         let bounds = (text as NSString).boundingRect(
-            with: CGSize(width: width - 8, height: 10000),
+            with: CGSize(width: width - KrabEarTheme.Metrics.comfortable * 2, height: 10000),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: attributes
         )
-        return max(56, min(200, bounds.height + 24))
+        return max(56, min(200, bounds.height + KrabEarTheme.Metrics.comfortable * 2))
     }
 }

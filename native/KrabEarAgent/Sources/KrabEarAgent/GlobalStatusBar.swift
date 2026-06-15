@@ -19,8 +19,8 @@
  - нет событий >12s → скрыть (heartbeat lost / op finished без emit'а idle)
 
  Wave 523 — AGENT-J sister fix:
- Replaced NSTextField + Unicode glyphs (▶ ⇄ ◉ •) with NSImageView + SF Symbols.
- Root cause identical to AGENT-J (● in StatusIndicatorView, Wave 67 PR #412):
+ Replaced NSTextField + legacy Unicode arrow/bullet glyphs with NSImageView + SF Symbols.
+ Root cause identical to AGENT-J (bullet glyph in StatusIndicatorView, Wave 67 PR #412):
  NSTextField with non-BMP / uncommon Unicode triggers CoreText glyph-metrics build
  on main thread during ColorSync callback → AppHang. SF Symbols bypass CoreText,
  rendered via Metal/CoreGraphics path instead.
@@ -35,30 +35,37 @@ final class GlobalStatusBar: NSView {
 
     private let backgroundView: NSVisualEffectView = {
         let v = NSVisualEffectView()
-        v.material = .hudWindow
-        v.blendingMode = .withinWindow
+        v.material = .popover
+        v.blendingMode = .behindWindow
         v.state = .active
         v.wantsLayer = true
-        v.layer?.cornerRadius = 10
+        v.layer?.cornerRadius = 14 // Половина высоты (28) для full-pill
+        v.layer?.cornerCurve = .continuous
         v.layer?.masksToBounds = true
+        v.layer?.borderWidth = 1.0
         v.translatesAutoresizingMaskIntoConstraints = false
         return v
     }()
 
-    /// SF Symbol icon view replacing the old Unicode-glyph NSTextField (Wave 523, AGENT-J sister).
-    /// NSTextField with Unicode glyphs (▶ ⇄ ◉ •) triggered CoreText fallback AppHang —
-    /// identical root cause to AGENT-J (● in StatusIndicatorView, fixed Wave 67 PR #412).
     private let iconImageView: NSImageView = {
         let v = NSImageView()
         v.imageScaling = .scaleProportionallyDown
         v.translatesAutoresizingMaskIntoConstraints = false
         return v
     }()
+    
+    // Статус-акцент: маленький цветной слой-индикатор
+    private let dotIndicatorLayer: CALayer = {
+        let l = CALayer()
+        l.cornerRadius = 3
+        l.bounds = CGRect(x: 0, y: 0, width: 6, height: 6)
+        return l
+    }()
 
     private let textLabel: NSTextField = {
         let l = NSTextField(labelWithString: "")
-        l.font = NSFont.systemFont(ofSize: 12, weight: .regular)
-        l.textColor = NSColor.labelColor
+        l.font = KrabEarTheme.Typography.captionMedium.tabular()
+        l.textColor = KrabEarTheme.Colors.textPrimary
         l.lineBreakMode = .byTruncatingTail
         l.maximumNumberOfLines = 1
         l.translatesAutoresizingMaskIntoConstraints = false
@@ -115,10 +122,19 @@ final class GlobalStatusBar: NSView {
 
     private func setupViews() {
         translatesAutoresizingMaskIntoConstraints = false
+        
+        wantsLayer = true
+        // Тень пилюли: Elevation.applyCard (тонко)
+        KrabEarTheme.Elevation.applyCard(to: layer!)
+        
         addSubview(backgroundView)
         backgroundView.addSubview(iconImageView)
+        backgroundView.layer?.addSublayer(dotIndicatorLayer)
         backgroundView.addSubview(textLabel)
         backgroundView.addSubview(progressBar)
+
+        let pad = KrabEarTheme.Metrics.standard
+        let tight = KrabEarTheme.Metrics.tight
 
         NSLayoutConstraint.activate([
             backgroundView.topAnchor.constraint(equalTo: topAnchor),
@@ -126,21 +142,40 @@ final class GlobalStatusBar: NSView {
             backgroundView.trailingAnchor.constraint(equalTo: trailingAnchor),
             backgroundView.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            iconImageView.leadingAnchor.constraint(equalTo: backgroundView.leadingAnchor, constant: 10),
+            iconImageView.leadingAnchor.constraint(equalTo: backgroundView.leadingAnchor, constant: pad),
             iconImageView.centerYAnchor.constraint(equalTo: backgroundView.centerYAnchor),
             iconImageView.widthAnchor.constraint(equalToConstant: 14),
             iconImageView.heightAnchor.constraint(equalToConstant: 14),
 
-            textLabel.leadingAnchor.constraint(equalTo: iconImageView.trailingAnchor, constant: 8),
+            textLabel.leadingAnchor.constraint(equalTo: iconImageView.trailingAnchor, constant: tight),
             textLabel.centerYAnchor.constraint(equalTo: backgroundView.centerYAnchor),
-            textLabel.trailingAnchor.constraint(lessThanOrEqualTo: progressBar.leadingAnchor, constant: -8),
+            textLabel.trailingAnchor.constraint(lessThanOrEqualTo: progressBar.leadingAnchor, constant: -pad),
 
-            progressBar.trailingAnchor.constraint(equalTo: backgroundView.trailingAnchor, constant: -10),
+            progressBar.trailingAnchor.constraint(equalTo: backgroundView.trailingAnchor, constant: -pad),
             progressBar.centerYAnchor.constraint(equalTo: backgroundView.centerYAnchor),
             progressBar.widthAnchor.constraint(equalToConstant: 80),
 
             heightAnchor.constraint(equalToConstant: 28),
         ])
+        
+        updateColors()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateColors()
+    }
+    
+    private func updateColors() {
+        backgroundView.layer?.backgroundColor = KrabEarTheme.Colors.cardBackground.cgColor
+        backgroundView.layer?.borderColor = KrabEarTheme.Colors.border.cgColor
+    }
+    
+    override func layout() {
+        super.layout()
+        // Располагаем индикатор-точку поверх иконки или рядом
+        // Разместим ее в левом верхнем углу iconImageView
+        dotIndicatorLayer.position = CGPoint(x: iconImageView.frame.minX + 2, y: iconImageView.frame.minY + 2)
     }
 
     // MARK: - Public API
@@ -155,6 +190,7 @@ final class GlobalStatusBar: NSView {
     func stop() {
         stopSSE()
         stopHeartbeat()
+        stopPulseAnimation()
         DispatchQueue.main.async { [weak self] in self?.isHidden = true }
     }
 
@@ -184,6 +220,7 @@ final class GlobalStatusBar: NSView {
                 let elapsed = Date().timeIntervalSince(self.lastEventAt)
                 if elapsed > 12.0 && !self.isHidden {
                     self.isHidden = true
+                    self.stopPulseAnimation()
                 }
             }
         }
@@ -212,6 +249,7 @@ final class GlobalStatusBar: NSView {
         let op = (payload["op"] as? String) ?? "idle"
         if op == "idle" {
             isHidden = true
+            stopPulseAnimation()
             lastEventAt = Date()
             return
         }
@@ -236,14 +274,39 @@ final class GlobalStatusBar: NSView {
 
         textLabel.stringValue = parts.joined(separator: " · ")
         iconImageView.image = imageForOp(op)
+        
         if progress >= 0 {
             progressBar.isHidden = false
             progressBar.doubleValue = max(0, min(1.0, progress))
         } else {
             progressBar.isHidden = true
         }
+        
+        if isHidden {
+            startPulseAnimation()
+        }
         isHidden = false
         lastEventAt = Date()
+    }
+    
+    private func startPulseAnimation() {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            dotIndicatorLayer.opacity = 1.0
+            return
+        }
+        let anim = CABasicAnimation(keyPath: "opacity")
+        anim.fromValue = 1.0
+        anim.toValue = 0.3
+        anim.duration = KrabEarTheme.Motion.Duration.long
+        anim.autoreverses = true
+        anim.repeatCount = .infinity
+        anim.timingFunction = KrabEarTheme.Motion.Easing.easeInOut
+        dotIndicatorLayer.add(anim, forKey: "pulse")
+    }
+    
+    private func stopPulseAnimation() {
+        dotIndicatorLayer.removeAnimation(forKey: "pulse")
+        dotIndicatorLayer.opacity = 1.0
     }
 
     // MARK: - Labels
@@ -259,8 +322,8 @@ final class GlobalStatusBar: NSView {
 
     /// Returns an SF Symbol image for the given operation type.
     ///
-    /// Replaces the old Unicode-glyph string (▶ ⇄ ◉ •) approach that caused CoreText
-    /// fallback → AppHang (same AGENT-J root cause as ● in StatusIndicatorView).
+    /// Replaces the old Unicode-glyph string approach that caused CoreText
+    /// fallback → AppHang (same AGENT-J root cause as the bullet glyph in StatusIndicatorView).
     /// SF Symbols are rendered via Metal/CoreGraphics, bypassing CoreText glyph lookup.
     ///
     /// - "transcribe_job"  → `waveform`  (audio waveform — transcription in progress)
@@ -273,17 +336,21 @@ final class GlobalStatusBar: NSView {
         switch op {
         case "transcribe_job":
             symbolName = "waveform"
-            tintColor = .systemBlue
+            tintColor = KrabEarTheme.Colors.accent
         case "obsidian_sync":
             symbolName = "arrow.triangle.2.circlepath"
-            tintColor = .systemGreen
+            tintColor = KrabEarTheme.Colors.success
         case "mlx_inference":
             symbolName = "cpu"
-            tintColor = .systemOrange
+            // Используем .warning
+            tintColor = KrabEarTheme.Colors.warning
         default:
             symbolName = "circle.fill"
-            tintColor = .secondaryLabelColor
+            tintColor = KrabEarTheme.Colors.textSecondary
         }
+        
+        dotIndicatorLayer.backgroundColor = tintColor.cgColor
+        
         let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
             .applying(NSImage.SymbolConfiguration(paletteColors: [tintColor]))
         return NSImage(systemSymbolName: symbolName, accessibilityDescription: op)?
