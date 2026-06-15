@@ -79,11 +79,13 @@ _WHISPER_MLX_MARKER = "whisper"
 _GIGAAM_ADAPTER_NAME = "gigaam"
 _PARAKEET_ADAPTER_NAME = "parakeet"
 _SENSEVOICE_ADAPTER_NAME = "sensevoice"
+_SHERPA_ADAPTER_NAME = "sherpa"
 
 # Адаптеры, получающие speed bonus
 _SPEED_BONUS_FAST: Dict[str, int] = {
     _GIGAAM_ADAPTER_NAME: 20,
     _PARAKEET_ADAPTER_NAME: 20,
+    _SHERPA_ADAPTER_NAME: 25,
     _SENSEVOICE_ADAPTER_NAME: 10,
 }
 
@@ -132,7 +134,7 @@ def score_adapter(
         Match:   exact language support = 100
                  multilingual (no supported_languages restriction) = 60
                  language not supported = 0
-        Speed:   gigaam/parakeet = +20, sensevoice = +10, other = +0
+        Speed:   sherpa = +25, gigaam/parakeet = +20, sensevoice = +10, other = +0
         Quality: whisper-mlx = +15, gigaam = +10, parakeet = +10
         Penalty: gigaam AND audio_duration_s > 30 → -50
 
