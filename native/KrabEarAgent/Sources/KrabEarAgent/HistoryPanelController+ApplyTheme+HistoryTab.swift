@@ -224,6 +224,8 @@ extension HistoryPanelController {
         historyStack.addArrangedSubview(statsSection)
         // Календарь активности (GitHub-style heatmap)
         historyStack.addArrangedSubview(setupActivityCalendarSection())
+        // Инсайты записей
+        historyStack.addArrangedSubview(setupRecordingInsightsSection())
         historyStack.addArrangedSubview(statusCard)
 
         // Width constraints для всех history children.
