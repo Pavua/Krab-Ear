@@ -273,21 +273,29 @@ class ParakeetSTTAdapter(STTAdapterBase):
     def warmup(self) -> bool:
         """Pre-load model to reduce first-call latency.
 
-        Returns True on success, False if parakeet-mlx not installed.
+        Returns True on success, False if parakeet-mlx not installed or load fails.
+
+        Uses double-checked locking under self._load_lock and delegates to
+        self._load_model() — identical pattern to SenseVoiceSTTAdapter.warmup()
+        (W1218 F2).  This ensures:
+          (1) from_pretrained is serialized through mlx_lock() + mlx_inter_process_lock()
+              exactly as in transcribe(), preventing concurrent-warmup SIGSEGV.
+          (2) Transient MLXInterLockTimeout does NOT permanently set _load_failed;
+              _load_model() owns the transient-vs-permanent decision.
         """
         if not self.is_available():
             return False
-        try:
-            # Force lazy load by accessing _model (if not already loaded).
-            if self._model is None and not self._load_failed:
-                parakeet_mlx = _try_import_parakeet()
-                if parakeet_mlx is not None:
-                    self._model = parakeet_mlx.from_pretrained(self._model_path)
-            return self._model is not None
-        except Exception as exc:
-            logger.warning("ParakeetSTTAdapter.warmup() failed: %s", exc)
-            self._load_failed = True
+        parakeet_mlx = _try_import_parakeet()
+        if parakeet_mlx is None:
             return False
+        if self._model is None and not self._load_failed:
+            with self._load_lock:
+                if self._model is None and not self._load_failed:
+                    try:
+                        self._load_model(parakeet_mlx)
+                    except Exception:
+                        return False
+        return self._model is not None
 
     def unload(self) -> None:
         """Release model from memory."""
