@@ -638,5 +638,263 @@ class TTSSynthesizeEndpointTest(_RestBase):
         self.assertIn("error", body)
 
 
+# ===========================================================================
+# 13. GET /v1/models — STT/cloud/LLM catalog (Voice Gateway bridge)
+# ===========================================================================
+
+@unittest.skipUnless(_REST_AVAILABLE, "REST server dependencies not available")
+class ModelsEndpointTest(_RestBase):
+    """GET /v1/models → 200 with catalog of STT engines, cloud providers, LLM models.
+
+    Tests are chunk-pollution-safe: all patching is done via patch.object on the
+    _rest_mod object reference captured at module-import time (not string targets),
+    following the pattern documented in CLAUDE.md "Reload variant" section.
+
+    mlx-masking safe: we NEVER assert that mlx_whisper is importable or that
+    stt_engines is non-empty.  Instead we monkeypatch build_router to return a
+    known fake router — deterministic on both py3.14+mlx and py3.12-without-mlx.
+    """
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _fake_router(self, adapters=None):
+        """Return a mock STTRouter whose _adapters list is controllable."""
+        router = MagicMock()
+        router._adapters = adapters or []
+        return router
+
+    def _fake_adapter(self, model_id="whisper-mlx/test", display_name="Test Whisper",
+                      available=True, langs=("en", "ru")):
+        adapter = MagicMock()
+        adapter.model_id = model_id
+        adapter.display_name = display_name
+        adapter.is_available.return_value = available
+        # supports_language: return True only for langs in the probe set
+        adapter.supports_language.side_effect = lambda lang: lang in langs
+        return adapter
+
+    # ------------------------------------------------------------------
+    # 1. Basic 200 + expected top-level keys
+    # ------------------------------------------------------------------
+
+    def test_models_returns_200(self):
+        with patch("core.pipeline.stt_router_factory.build_router",
+                   return_value=self._fake_router()):
+            resp = self.client.get("/v1/models")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_models_returns_json_with_ok_true(self):
+        with patch("core.pipeline.stt_router_factory.build_router",
+                   return_value=self._fake_router()):
+            resp = self.client.get("/v1/models")
+        body = resp.get_json()
+        self.assertIsNotNone(body)
+        self.assertTrue(body.get("ok"), "Expected ok=true in /v1/models response")
+
+    def test_models_has_required_keys(self):
+        with patch("core.pipeline.stt_router_factory.build_router",
+                   return_value=self._fake_router()):
+            resp = self.client.get("/v1/models")
+        body = resp.get_json()
+        for key in ("stt_engines", "cloud_stt", "llm_models",
+                    "default_stt", "default_llm"):
+            self.assertIn(key, body, f"Missing key: {key}")
+
+    def test_stt_engines_is_list(self):
+        with patch("core.pipeline.stt_router_factory.build_router",
+                   return_value=self._fake_router()):
+            resp = self.client.get("/v1/models")
+        body = resp.get_json()
+        self.assertIsInstance(body["stt_engines"], list)
+
+    def test_cloud_stt_is_list(self):
+        with patch("core.pipeline.stt_router_factory.build_router",
+                   return_value=self._fake_router()):
+            resp = self.client.get("/v1/models")
+        body = resp.get_json()
+        self.assertIsInstance(body["cloud_stt"], list)
+
+    def test_llm_models_is_list(self):
+        with patch("core.pipeline.stt_router_factory.build_router",
+                   return_value=self._fake_router()):
+            resp = self.client.get("/v1/models")
+        body = resp.get_json()
+        self.assertIsInstance(body["llm_models"], list)
+
+    # ------------------------------------------------------------------
+    # 2. stt_engines content when adapter present
+    # ------------------------------------------------------------------
+
+    def test_stt_engines_includes_adapter_when_present(self):
+        """A fake adapter in the router appears in stt_engines."""
+        fake_adapter = self._fake_adapter(
+            model_id="whisper-mlx/whisper-large-v3-mlx",
+            display_name="Whisper MLX (whisper-large-v3-mlx)",
+            available=True,
+            langs=("en", "ru", "es"),
+        )
+        with patch("core.pipeline.stt_router_factory.build_router",
+                   return_value=self._fake_router([fake_adapter])):
+            resp = self.client.get("/v1/models")
+        body = resp.get_json()
+        engines = body["stt_engines"]
+        self.assertEqual(len(engines), 1)
+        eng = engines[0]
+        self.assertEqual(eng["name"], "whisper-mlx/whisper-large-v3-mlx")
+        self.assertEqual(eng["display_name"], "Whisper MLX (whisper-large-v3-mlx)")
+        self.assertTrue(eng["available"])
+        self.assertTrue(eng["enabled"])
+        self.assertEqual(eng["type"], "local")
+        # languages should include "en", "ru", "es" (from our fake supports_language)
+        self.assertIn("en", eng["languages"])
+        self.assertIn("ru", eng["languages"])
+        self.assertIn("es", eng["languages"])
+
+    def test_stt_engines_adapter_available_false_reflected(self):
+        """An unavailable adapter is reported available=False."""
+        fake_adapter = self._fake_adapter(available=False)
+        with patch("core.pipeline.stt_router_factory.build_router",
+                   return_value=self._fake_router([fake_adapter])):
+            resp = self.client.get("/v1/models")
+        body = resp.get_json()
+        self.assertFalse(body["stt_engines"][0]["available"])
+
+    # ------------------------------------------------------------------
+    # 3. cloud_stt — availability reflects API key presence
+    # ------------------------------------------------------------------
+
+    def test_cloud_stt_has_three_providers(self):
+        """Exactly 3 cloud providers are listed (openai, deepgram, assemblyai)."""
+        with patch("core.pipeline.stt_router_factory.build_router",
+                   return_value=self._fake_router()):
+            resp = self.client.get("/v1/models")
+        body = resp.get_json()
+        names = {p["name"] for p in body["cloud_stt"]}
+        self.assertEqual(names, {"openai", "deepgram", "assemblyai"})
+
+    def test_cloud_stt_openai_available_when_key_set(self):
+        """When openai_api_key is present in settings, openai shows available=True."""
+        self.mock_store.load_settings.return_value = {"openai_api_key": "sk-test123"}
+        with patch("core.pipeline.stt_router_factory.build_router",
+                   return_value=self._fake_router()):
+            resp = self.client.get("/v1/models")
+        body = resp.get_json()
+        openai_entry = next(p for p in body["cloud_stt"] if p["name"] == "openai")
+        self.assertTrue(openai_entry["available"])
+
+    def test_cloud_stt_openai_unavailable_when_no_key(self):
+        """When openai_api_key is empty, openai shows available=False."""
+        self.mock_store.load_settings.return_value = {"openai_api_key": ""}
+        with patch("core.pipeline.stt_router_factory.build_router",
+                   return_value=self._fake_router()):
+            resp = self.client.get("/v1/models")
+        body = resp.get_json()
+        openai_entry = next(p for p in body["cloud_stt"] if p["name"] == "openai")
+        self.assertFalse(openai_entry["available"])
+
+    def test_cloud_stt_providers_have_type_cloud(self):
+        with patch("core.pipeline.stt_router_factory.build_router",
+                   return_value=self._fake_router()):
+            resp = self.client.get("/v1/models")
+        body = resp.get_json()
+        for p in body["cloud_stt"]:
+            self.assertEqual(p.get("type"), "cloud")
+
+    # ------------------------------------------------------------------
+    # 4. graceful degradation — build_router raises → 200 with empty stt_engines
+    # ------------------------------------------------------------------
+
+    def test_models_200_when_build_router_raises(self):
+        """If build_router explodes the endpoint still returns 200 with empty list."""
+        with patch("core.pipeline.stt_router_factory.build_router",
+                   side_effect=RuntimeError("model load failed")):
+            resp = self.client.get("/v1/models")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertTrue(body.get("ok"))
+        self.assertIsInstance(body["stt_engines"], list)
+
+    def test_models_200_when_store_raises(self):
+        """Even if store.load_settings raises the endpoint returns 200."""
+        self.mock_store.load_settings.side_effect = OSError("disk error")
+        with patch("core.pipeline.stt_router_factory.build_router",
+                   side_effect=RuntimeError("no store")):
+            resp = self.client.get("/v1/models")
+        self.assertEqual(resp.status_code, 200)
+
+    # ------------------------------------------------------------------
+    # 5. auth enforcement
+    # ------------------------------------------------------------------
+
+    def test_models_requires_auth_when_api_key_set(self):
+        """With REST_API_KEY configured, unauthenticated GET → 401."""
+        with patch.object(_rest_mod.settings, "REST_API_KEY", "secret-key-xyz"), \
+                patch("core.pipeline.stt_router_factory.build_router",
+                      return_value=self._fake_router()):
+            resp = self.client.get("/v1/models")
+        self.assertEqual(resp.status_code, 401)
+
+    def test_models_accepts_valid_bearer_token(self):
+        """With REST_API_KEY configured and correct token → 200."""
+        with patch.object(_rest_mod.settings, "REST_API_KEY", "secret-key-xyz"), \
+                patch("core.pipeline.stt_router_factory.build_router",
+                      return_value=self._fake_router()):
+            resp = self.client.get(
+                "/v1/models",
+                headers={"Authorization": "Bearer secret-key-xyz"},
+            )
+        self.assertEqual(resp.status_code, 200)
+
+    def test_models_rejects_wrong_token(self):
+        """Wrong Bearer token → 401."""
+        with patch.object(_rest_mod.settings, "REST_API_KEY", "secret-key-xyz"), \
+                patch("core.pipeline.stt_router_factory.build_router",
+                      return_value=self._fake_router()):
+            resp = self.client.get(
+                "/v1/models",
+                headers={"Authorization": "Bearer wrong-token"},
+            )
+        self.assertEqual(resp.status_code, 401)
+
+    # ------------------------------------------------------------------
+    # 6. default_stt / default_llm from settings
+    # ------------------------------------------------------------------
+
+    def test_default_stt_from_settings(self):
+        """default_stt is read from stt_ru_primary_model setting."""
+        self.mock_store.load_settings.return_value = {
+            "stt_ru_primary_model": "mlx-community/whisper-small-mlx",
+            "llm_model": "qwen3-4b-abliterated",
+        }
+        with patch("core.pipeline.stt_router_factory.build_router",
+                   return_value=self._fake_router()):
+            resp = self.client.get("/v1/models")
+        body = resp.get_json()
+        self.assertEqual(body["default_stt"], "mlx-community/whisper-small-mlx")
+
+    def test_default_llm_from_settings(self):
+        """default_llm is read from llm_model setting."""
+        self.mock_store.load_settings.return_value = {
+            "stt_ru_primary_model": "mlx-community/whisper-large-v3-mlx",
+            "llm_model": "supergemma4-26b-abliterated",
+        }
+        with patch("core.pipeline.stt_router_factory.build_router",
+                   return_value=self._fake_router()):
+            resp = self.client.get("/v1/models")
+        body = resp.get_json()
+        self.assertEqual(body["default_llm"], "supergemma4-26b-abliterated")
+
+    def test_default_stt_fallback_when_not_in_settings(self):
+        """When stt_ru_primary_model absent, falls back to the hardcoded default."""
+        self.mock_store.load_settings.return_value = {}
+        with patch("core.pipeline.stt_router_factory.build_router",
+                   return_value=self._fake_router()):
+            resp = self.client.get("/v1/models")
+        body = resp.get_json()
+        self.assertEqual(body["default_stt"], "mlx-community/whisper-large-v3-mlx")
+
+
 if __name__ == "__main__":
     unittest.main()
