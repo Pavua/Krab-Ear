@@ -314,6 +314,12 @@ class AssemblyAISTTProvider:
         # Bound the total blocking time of this synchronous poll loop so it cannot
         # tie up the WS handler thread for the worst-case 15*(2+30)s ≈ 8 min.
         poll_deadline = time.monotonic() + _POLL_BUDGET_SEC
+        # Track consecutive poll failures so a persistent error (cert failure, DNS
+        # outage) doesn't spin silently to the deadline.  A single transient blip
+        # (TCP reset, brief DNS hiccup) must NOT abort the transcript — AssemblyAI
+        # is async and the result is almost certainly ready on the next iteration.
+        _consecutive_poll_errors = 0
+        _MAX_CONSECUTIVE_POLL_ERRORS = 3
         for _ in range(max_attempts):
             if time.monotonic() >= poll_deadline:
                 break
@@ -321,6 +327,7 @@ class AssemblyAISTTProvider:
             try:
                 with urllib.request.urlopen(poll_req, timeout=15) as poll_resp:
                     poll_res = json.loads(_read_capped(poll_resp).decode("utf-8", "replace"))
+                    _consecutive_poll_errors = 0  # reset on any successful HTTP exchange
                     status = poll_res.get("status")
                     if status == "completed":
                         return {
@@ -331,8 +338,15 @@ class AssemblyAISTTProvider:
                     if status == "error":
                         return {"error": "api_error", "provider": "assemblyai", "message": poll_res.get("error", "Unknown")}
             except Exception as e:
-                logger.error("AssemblyAI Poll network error: %s", e)
-                return {"error": "network_error", "provider": "assemblyai", "message": str(e)}
+                _consecutive_poll_errors += 1
+                logger.warning(
+                    "AssemblyAI Poll transient error (%d/%d): %s",
+                    _consecutive_poll_errors, _MAX_CONSECUTIVE_POLL_ERRORS, e,
+                )
+                if _consecutive_poll_errors >= _MAX_CONSECUTIVE_POLL_ERRORS:
+                    logger.error("AssemblyAI Poll aborted after %d consecutive errors", _MAX_CONSECUTIVE_POLL_ERRORS)
+                    return {"error": "network_error", "provider": "assemblyai", "message": str(e)}
+                # Transient failure — continue within the deadline / attempt budget.
 
         return {"error": "timeout", "provider": "assemblyai", "message": "Polling timeout"}
 

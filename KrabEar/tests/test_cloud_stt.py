@@ -229,3 +229,117 @@ class TestCloudSTTHardening(unittest.TestCase):
         self.assertIn("Invalid transcript id", res.get("message", ""))
         # Must NOT issue a 3rd (poll) request with the tampered id.
         self.assertEqual(mock_urlopen.call_count, 2)
+
+
+class TestAssemblyAIPollRetry(unittest.TestCase):
+    """Regression tests for the transient-poll-error retry fix.
+
+    Before the fix the except-block inside the poll loop did
+    ``return {"error": "network_error", ...}`` on the FIRST exception,
+    discarding all remaining poll budget.  After the fix a single transient
+    error causes ``continue`` (retry); only 3 *consecutive* failures abort.
+    """
+
+    def _make_upload_ctx(self):
+        up = MagicMock()
+        up.read.return_value = b'{"upload_url": "http://test/upload"}'
+        return MagicMock(__enter__=MagicMock(return_value=up))
+
+    def _make_transcribe_ctx(self, tx_id="abc123_valid-id"):
+        tx = MagicMock()
+        tx.read.return_value = json.dumps({"id": tx_id}).encode()
+        return MagicMock(__enter__=MagicMock(return_value=tx))
+
+    def _make_poll_ctx(self, text="hello from cloud", lang="ru", confidence=0.9):
+        poll = MagicMock()
+        poll.read.return_value = json.dumps({
+            "status": "completed",
+            "text": text,
+            "language_code": lang,
+            "confidence": confidence,
+        }).encode()
+        return MagicMock(__enter__=MagicMock(return_value=poll))
+
+    @patch("backend.cloud_stt.store.load_settings")
+    @patch("backend.cloud_stt.urllib.request.urlopen")
+    @patch("backend.cloud_stt.time.sleep", return_value=None)
+    def test_single_transient_poll_error_retries_and_succeeds(
+        self, mock_sleep, mock_urlopen, mock_load_settings
+    ):
+        """upload OK → transcribe OK → poll iter1 raises transient Exception
+        → poll iter2 returns completed → result must contain transcript text."""
+        mock_load_settings.return_value = {"assemblyai_api_key": "test-key-abc"}
+
+        mock_urlopen.side_effect = [
+            self._make_upload_ctx(),
+            self._make_transcribe_ctx("txid-retry-test"),
+            ConnectionResetError("TCP reset"),   # iter1 — transient, must NOT abort
+            self._make_poll_ctx("retry worked"),  # iter2 — succeeds
+        ]
+
+        provider = get_cloud_stt_provider("assemblyai")
+        res = provider.transcribe(b"pcm_bytes", 16000, "ru")
+
+        # The transcription must succeed — the single blip was retried.
+        self.assertEqual(res.get("text"), "retry worked",
+                         "Expected transcript text after transient poll error retry")
+        self.assertNotIn("error", res,
+                         "Result must not be an error dict after single transient poll failure")
+        # Verify urlopen was called 4 times: upload + transcribe + (error) + poll-success
+        self.assertEqual(mock_urlopen.call_count, 4)
+
+    @patch("backend.cloud_stt.store.load_settings")
+    @patch("backend.cloud_stt.urllib.request.urlopen")
+    @patch("backend.cloud_stt.time.sleep", return_value=None)
+    def test_three_consecutive_poll_errors_returns_network_error(
+        self, mock_sleep, mock_urlopen, mock_load_settings
+    ):
+        """3 consecutive poll exceptions must abort and return network_error."""
+        mock_load_settings.return_value = {"assemblyai_api_key": "test-key-xyz"}
+
+        mock_urlopen.side_effect = [
+            self._make_upload_ctx(),
+            self._make_transcribe_ctx("txid-cap-test"),
+            OSError("DNS lookup failed"),    # consecutive error 1
+            OSError("DNS lookup failed"),    # consecutive error 2
+            OSError("DNS lookup failed"),    # consecutive error 3 — cap reached
+        ]
+
+        provider = get_cloud_stt_provider("assemblyai")
+        res = provider.transcribe(b"pcm_bytes", 16000, "ru")
+
+        self.assertEqual(res.get("error"), "network_error",
+                         "Expected network_error after 3 consecutive poll failures")
+        self.assertEqual(res.get("provider"), "assemblyai")
+        # 5 total calls: upload + transcribe + 3 poll errors
+        self.assertEqual(mock_urlopen.call_count, 5)
+
+    @patch("backend.cloud_stt.store.load_settings")
+    @patch("backend.cloud_stt.urllib.request.urlopen")
+    @patch("backend.cloud_stt.time.sleep", return_value=None)
+    def test_error_counter_resets_on_successful_poll(
+        self, mock_sleep, mock_urlopen, mock_load_settings
+    ):
+        """Two non-consecutive errors separated by a successful processing poll
+        must NOT trigger the cap — only consecutive failures count."""
+        mock_load_settings.return_value = {"assemblyai_api_key": "test-key-reset"}
+
+        processing_poll = MagicMock()
+        processing_poll.read.return_value = b'{"status": "processing"}'
+        processing_ctx = MagicMock(__enter__=MagicMock(return_value=processing_poll))
+
+        mock_urlopen.side_effect = [
+            self._make_upload_ctx(),
+            self._make_transcribe_ctx("txid-reset-test"),
+            OSError("blip 1"),       # error #1 — consecutive count = 1
+            processing_ctx,          # successful HTTP → resets consecutive counter
+            OSError("blip 2"),       # error #1 again (counter reset) — must retry
+            self._make_poll_ctx("counter reset works"),  # succeeds
+        ]
+
+        provider = get_cloud_stt_provider("assemblyai")
+        res = provider.transcribe(b"pcm_bytes", 16000, "ru")
+
+        self.assertEqual(res.get("text"), "counter reset works",
+                         "Expected success: non-consecutive errors must not abort early")
+        self.assertNotIn("error", res)
