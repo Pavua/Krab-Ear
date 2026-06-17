@@ -222,6 +222,8 @@ extension HistoryPanelController {
         let (managementSection, statsSection) = setupManagementSections()
         historyStack.addArrangedSubview(managementSection)
         historyStack.addArrangedSubview(statsSection)
+        // Календарь активности (GitHub-style heatmap)
+        historyStack.addArrangedSubview(setupActivityCalendarSection())
         historyStack.addArrangedSubview(statusCard)
 
         // Width constraints для всех history children.
