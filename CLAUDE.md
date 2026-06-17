@@ -579,6 +579,16 @@ These top-level directories are created at runtime and are excluded from version
 
 Параллелизм > глубина: **многих Haiku параллельно** лучше чем одного Opus linear (5-10× throughput при comparable cost).
 
+### Free-breadth workforce + Claude-gate (🔴 2026-06-17, consolidated Main Krab + Krab Ear)
+
+Claude (Opus/Sonnet) дорогой/быстро кончается → ТОЛЬКО для: брифов, **гейтинга** находок, синтеза, архитектурных решений, единственного критичного HIGH. Весь breadth/исполнение → не-Claude работники. Харнесс: `scripts/draft_audit.py` (fan-out adversarial-аудита одного модуля на free-провайдера; ключи в переменные, НЕ печатать).
+
+**Роутинг (8 провайдеров в `scripts/draft_audit.py`):** 🥇 **github** — ключ `gh auth token` (без отдельного ключа), `gpt-4o-mini`/`gpt-4o`/`Llama-3.1-70B`; лучшая free, **работает для security**. 🥈 **hf** — `hf_token` из KrabEar settings.json (write-scope), router.huggingface.co/v1; 🔴 режет security-промпты (403) → нейтральные задачи. 6 free-тиров (cerebras/groq/mistral/gemini/openrouter/zai) в lens_keys.env (chmod 600, НЕ эхать/коммитить). nvidia — стаб (ждёт ключ). + **agy** (Gemini 3.1 Pro, оплаченный Antigravity) + локальный **LM Studio** (≤10GB, ONE model, 36GB RAM).
+
+**🔴 Уроки (стоили квот):** (1) **cerebras/groq/hf режут security-промпты** (403 content-filter на injection/exploit) → security-аудиты на **github/mistral/openrouter** ONLY; нейтральные (ревью/генерация/доки) → любой. (2) **Free-модели дико переоценивают** (30 кандидатов→0 реальных; gpt-4o-mini точнее, но over-claims + ошибается в фактах И в лекарстве) → **Claude гейтит КАЖДУЮ находку против реального кода**; free = скаут, Claude = гейт; никогда не шипить free-находку без проверки (но гейт извлекает валидное зерно даже из ложной тревоги). (3) **deep-research Claude-workflow = quota-killer** (90 агентов/2.68M токенов сожгли 5ч) → ресёрч через agy-Gemini/web-поиск; ультракод-Workflow-на-каждой-задаче = анти-паттерн для free-breadth. (4) **Privacy-фильтр выбора работника:** code-review (код проекта, в т.ч. Swift) → любой free; приватные данные владельца (STT-транскрипты mlx-whisper, голос) → ТОЛЬКО провайдеры без обучения-на-данных — важнее скорости/цены (в нашем workflow на free уходит КОД, не транскрипт-данные). (5) **Находка ≠ спешный фикс:** rare+self-healing+hot-path-риск → chip; 0 коммитов после волны = валидный исход если ядро здорово; anti-rebuild: грепай точное имя перед постройкой.
+
+**Гейт (Krab Ear = Python-backend + Swift-agent, НЕ чисто Xcode):** Python → `pytest -p no:cacheprovider` + flake8 CI-cmd (W293 не расслаблен) + ubuntu-parity `scripts/pre_merge_py312_check.sh` + chunk-repro для rest-тестов + `make audit-all` для новых `core/pipeline/`; Swift → `swift build -c release`. CI-страж-поллер УБИВАЮТ → `gh run view <id> --json conclusion` напрямую.
+
 ### Gemini 3.1 Pro для дизайна (strict rule)
 
 Визуальный дизайн (цвета, шрифты, layout, themes, design tokens) делается **ТОЛЬКО** через Gemini 3.1 Pro, и **ТОЛЬКО** через `agy` (Antigravity CLI) на оплаченной подписке user **Google AI Pro** — НЕ через `gemini` CLI (free OAuth) и НЕ через прямой API-ключ (старый ключ revoked 2026-04-20).
