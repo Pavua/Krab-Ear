@@ -73,6 +73,11 @@ class LiveSubsService:
         Returns:
             None если flush не произошёл, иначе dict с результатами.
         """
+        # sample_rate приходит от клиента. WS /v1/stream вызывает ingest() НАПРЯМУЮ,
+        # минуя handle_ingest-санитайзер, поэтому клампим ЗДЕСЬ — в общей точке обоих
+        # путей (IPC + WS). Крошечный sample_rate иначе даёт resample_poly ~16000×
+        # upsample в _flush → попытка аллокации десятков GB → OOM/swap-thrash (W1771 HIGH).
+        sample_rate = self._sanitize_sample_rate(sample_rate)
         audio_array = self._decode_audio(audio_bytes, sample_rate)
         # Под локом — ТОЛЬКО мутация буфера и решение о flush. STT (несколько
         # секунд) намеренно НЕ выполняется здесь: head-of-line blocking
@@ -181,6 +186,21 @@ class LiveSubsService:
         (head-of-line blocking) и теряются. MLX-сериализация при этом сохраняется:
         она живёт внутри transcriber/engine (mlx_lock), а не в этом service-локе.
         """
+        # Privacy fail-safe (W1771 MED): даже если per-chunk gate вызывающего
+        # проиграл гонку с privacy-toggle (окно STT — несколько секунд), НИКОГДА
+        # не транскрибируем и не эмитим аудио, накопленное до переключения режима.
+        # Сбрасываем буфер (как stop()/reset()) и возвращаем пустую форму —
+        # все вызывающие (handle_ingest / stop / WS) терпят пустой text без эмиссии.
+        if self._settings_get("privacy_mode_enabled", False):
+            with self._lock:
+                self._reset()
+            return {"text": "", "translation": None}
+
+        # Defense-in-depth (W1771 HIGH): _flush не должен получать несанитизированный
+        # sample_rate. Клампим идемпотентно — для ingest() уже клампнуто, для stop()
+        # это 16000; защищает от любого будущего прямого вызова с битым rate.
+        sample_rate = self._sanitize_sample_rate(sample_rate)
+
         # Снапшот буфера под локом: атомарно забираем накопленное и сбрасываем,
         # чтобы конкурентный ingest не дописал в уже обрабатываемый массив.
         with self._lock:
