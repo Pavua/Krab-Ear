@@ -1388,6 +1388,162 @@ def transcribe_audio():
                 logger.warning("Не удалось удалить временный файл %s: %s", temp_path, e)
 
 
+@v1_blp.route("/models", methods=["GET"])
+@limiter.limit("60 per minute")
+@require_api_key
+def list_models():
+    """Best-effort catalog of all STT, cloud, and LLM models available to Krab Ear.
+
+    No privacy gate — model names are not user data.
+
+    Response 200:
+        {
+          "ok": true,
+          "stt_engines": [{"name", "display_name", "available": bool,
+                           "enabled": bool, "languages": [...], "type": "local"}, ...],
+          "cloud_stt": [{"name": "openai"|"deepgram"|"assemblyai",
+                         "available": bool, "type": "cloud"}, ...],
+          "llm_models": [str, ...],
+          "default_stt": str|null,
+          "default_llm": str|null
+        }
+
+    Each section degrades gracefully to empty on any error — the caller always
+    receives HTTP 200 with partial data, never 500.
+
+    Voice Gateway bridge: third pillar alongside POST /v1/stt/transcribe
+    and POST /v1/tts/synthesize (Phase 1.4 foundation, 2026-06-18).
+    """
+    # ------------------------------------------------------------------
+    # 1. STT engines via stt_router_factory
+    # ------------------------------------------------------------------
+    stt_engines = []
+    try:
+        from core.pipeline.stt_router_factory import build_router as _build_router
+        _cur_settings = store.load_settings() or {}
+        _router = _build_router(settings_dict=_cur_settings)
+        # Canonical language codes we probe per adapter (conservative list).
+        _PROBE_LANGS = ("ru", "en", "es", "zh", "ja", "ko", "de", "fr")
+        for _adapter in _router._adapters:
+            _name = _adapter.model_id
+            _display = getattr(_adapter, "display_name", _name)
+            _avail = False
+            try:
+                _avail = bool(_adapter.is_available())
+            except Exception:
+                pass
+            _langs = sorted(
+                lang for lang in _PROBE_LANGS
+                if _adapter.supports_language(lang)
+            )
+            # enabled = the adapter made it into the router
+            # (build_router only appends adapters whose enabled flag is set)
+            stt_engines.append({
+                "name": _name,
+                "display_name": _display,
+                "available": _avail,
+                "enabled": True,
+                "languages": _langs,
+                "type": "local",
+            })
+    except Exception as exc:
+        logger.warning(
+            "GET /v1/models: stt_engines enumeration failed — degrading to []",
+            extra={"error": str(exc)},
+        )
+
+    # ------------------------------------------------------------------
+    # 2. Cloud STT providers
+    # ------------------------------------------------------------------
+    cloud_stt = []
+    try:
+        _s = store.load_settings() or {}
+        _cloud_providers = [
+            ("openai", "openai_api_key"),
+            ("deepgram", "deepgram_api_key"),
+            ("assemblyai", "assemblyai_api_key"),
+        ]
+        for _pname, _key_field in _cloud_providers:
+            _api_key = str(_s.get(_key_field, "")).strip()
+            cloud_stt.append({
+                "name": _pname,
+                "available": bool(_api_key),
+                "type": "cloud",
+            })
+    except Exception as exc:
+        logger.warning(
+            "GET /v1/models: cloud_stt enumeration failed — degrading to []",
+            extra={"error": str(exc)},
+        )
+
+    # ------------------------------------------------------------------
+    # 3. LLM models from LM Studio /api/v1/models
+    # Mirrors llm_ops_service.handle_list_llm_models but uses urllib
+    # (already available) — rest_server is a separate process from IPC.
+    # ------------------------------------------------------------------
+    llm_models = []
+    try:
+        import re as _re
+        import urllib.request as _urlreq
+        import urllib.parse as _urlparse
+        _s2 = store.load_settings() or {}
+        _llm_base = str(_s2.get("llm_base_url", "http://127.0.0.1:1234/v1")).rstrip("/")
+        _llm_key = str(_s2.get("llm_api_key", "")).strip()
+        # Strip trailing /v<N> segment (Wave 68 pattern: /api/v1/models is the
+        # correct LM Studio endpoint, not /v1/models).
+        _llm_host = _re.sub(r"/v\d+$", "", _llm_base)
+        _llm_url = f"{_llm_host}/api/v1/models"
+        # SSRF guard: allow only http/https schemes
+        _parsed = _urlparse.urlparse(_llm_url)
+        if _parsed.scheme not in ("http", "https"):
+            raise ValueError(f"Disallowed LM Studio URL scheme: {_parsed.scheme!r}")
+        _req = _urlreq.Request(_llm_url)
+        if _llm_key:
+            _req.add_header("Authorization", f"Bearer {_llm_key}")
+        with _urlreq.urlopen(_req, timeout=5) as _resp:  # noqa: S310
+            if _resp.status == 200:
+                _data = json.loads(
+                    _resp.read(512 * 1024).decode("utf-8", errors="replace")
+                )
+                llm_models = sorted(
+                    item.get("id")
+                    for item in _data.get("data", [])
+                    if item.get("id")
+                )
+    except Exception as exc:
+        logger.warning(
+            "GET /v1/models: llm_models probe failed (LM Studio may be off)"
+            " — degrading to []",
+            extra={"error": str(exc)},
+        )
+
+    # ------------------------------------------------------------------
+    # 4. Defaults from runtime settings (with static fallbacks)
+    # ------------------------------------------------------------------
+    default_stt = None
+    default_llm = None
+    try:
+        _s3 = store.load_settings() or {}
+        _dstt = _s3.get("stt_ru_primary_model") or "mlx-community/whisper-large-v3-mlx"
+        default_stt = str(_dstt).strip() or None
+        _dllm = _s3.get("llm_model") or "qwen3-4b-abliterated"
+        default_llm = str(_dllm).strip() or None
+    except Exception as exc:
+        logger.warning(
+            "GET /v1/models: default_stt/default_llm read failed",
+            extra={"error": str(exc)},
+        )
+
+    return jsonify({
+        "ok": True,
+        "stt_engines": stt_engines,
+        "cloud_stt": cloud_stt,
+        "llm_models": llm_models,
+        "default_stt": default_stt,
+        "default_llm": default_llm,
+    }), 200
+
+
 @v1_blp.route("/events", methods=["GET"])
 @require_api_key
 @_block_cross_origin_reads
