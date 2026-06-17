@@ -71,7 +71,11 @@ extension HistoryPanelController {
         let topicsButton = ThemeSecondaryButton(title: "Темы", target: self, action: #selector(handleGetTopics))
         topicsButton.applyThemeSecondary()
         statsSection.contentStackView.addArrangedSubview(createRow(views: [topicsButton]))
-        
+
+        // Статистический отчёт: экспорт полного Markdown-отчёта за 30 дней.
+        let reportButton = makeStatsReportButton()
+        statsSection.contentStackView.addArrangedSubview(createRow(views: [reportButton]))
+
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
         scrollView.borderType = .bezelBorder
