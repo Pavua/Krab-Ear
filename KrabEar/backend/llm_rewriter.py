@@ -185,6 +185,17 @@ class CircuitBreaker:
             self._current_reset_sec = self._initial_reset_sec
             self._half_open_probe_in_flight = False
 
+    def force_reset(self) -> None:
+        """Принудительно переводит circuit breaker в CLOSED, потокобезопасно.
+
+        В отличие от _transition_to (lock-free, для внутреннего использования
+        из уже залоченных методов), force_reset удерживает _lock сам.
+        Используется из warmup_probe(), которая держит поток IPC и никогда не
+        вызывается из уже-залоченного контекста _lock.
+        """
+        with self._lock:
+            self._transition_to(CircuitState.CLOSED)
+
 
 _PUNCTUATION_SYSTEM_PROMPTS = {
     "ru": (
@@ -345,10 +356,10 @@ class LLMRewriter:
             try:
                 val = float(self._runtime_timeout_provider())
                 if val > 0:
-                    return val
+                    return min(val, 300.0)
             except Exception:
                 pass
-        return self._fallback_timeout
+        return min(self._fallback_timeout, 300.0)
 
     @_timeout.setter
     def _timeout(self, value: float) -> None:
@@ -1216,7 +1227,7 @@ class LLMRewriter:
                 self._circuit.record_success()  # HALF_OPEN → CLOSED if applicable
                 # Force CLOSED if still OPEN (record_success only transitions from HALF_OPEN)
                 if self._circuit.state == "open":
-                    self._circuit._transition_to(CircuitState.CLOSED)
+                    self._circuit.force_reset()
             return {"ok": ok, "latency_ms": elapsed_ms, "error": error}
         except requests.Timeout:
             elapsed_ms = int((time.monotonic() - start) * 1000)

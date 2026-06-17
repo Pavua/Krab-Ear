@@ -62,6 +62,10 @@ _RANGE_FIELDS: dict[str, tuple[Any, Any, Any, type]] = {
     # wave-1770 MED: llm_probe_interval_sec missing from _RANGE_FIELDS — setting it
     # to 999999 via IPC would delay LM Studio crash detection for days.
     "llm_probe_interval_sec": (1.0, 300.0, 30.0, float),
+    # W1771 LOW: llm_timeout_sec uncapped — set_settings({llm_timeout_sec: 86400})
+    # held _post_lock for the full duration, blocking all concurrent LLM calls.
+    # Belt-and-suspenders: _timeout property also caps at 300.0.
+    "llm_timeout_sec": (1.0, 300.0, 45.0, float),
 }
 
 # Bool-поля с дефолтными значениями
