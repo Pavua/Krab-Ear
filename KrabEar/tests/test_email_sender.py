@@ -370,6 +370,84 @@ class TestHandlesSmtpFailureGracefully(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# W1764 sibling: subject control-char guard
+# ---------------------------------------------------------------------------
+
+class TestSubjectControlCharGuard(unittest.TestCase):
+    """send() must raise ValueError for a subject with control characters BEFORE
+    any SMTP connection attempt (W1764 sibling — asymmetric to the 'to' guard).
+
+    Fail-before: without the guard, Python email.headers raises HeaderParseError
+    (not ValueError) inside _send_via_smtp — breaking send()'s documented contract.
+    Pass-after: clean ValueError raised before the SMTP path is entered.
+    """
+
+    def _make_sender(self) -> EmailSender:
+        return EmailSender(
+            backend_name="smtp",
+            smtp_host="smtp.example.com",
+            smtp_user="u@x.co",
+            smtp_password="p",
+            use_keychain=False,
+        )
+
+    def test_subject_with_lf_raises_value_error(self):
+        """LF in subject raises ValueError before any SMTP connection."""
+        sender = self._make_sender()
+        with patch("smtplib.SMTP") as MockSMTP:
+            with self.assertRaises(ValueError):
+                sender.send(
+                    to="user@x.co",
+                    subject="Тема\nBcc: evil@attacker.com",
+                    body_html="x",
+                )
+            # SMTP must never be instantiated — guard fires before network
+            MockSMTP.assert_not_called()
+
+    def test_subject_with_cr_raises_value_error(self):
+        """CR in subject raises ValueError before any SMTP connection."""
+        sender = self._make_sender()
+        with patch("smtplib.SMTP") as MockSMTP:
+            with self.assertRaises(ValueError):
+                sender.send(
+                    to="user@x.co",
+                    subject="Тема\rBcc: evil@attacker.com",
+                    body_html="x",
+                )
+            MockSMTP.assert_not_called()
+
+    def test_subject_with_crlf_raises_value_error(self):
+        """CRLF sequence in subject raises ValueError."""
+        sender = self._make_sender()
+        with self.assertRaises(ValueError):
+            sender.send(
+                to="user@x.co",
+                subject="Subject\r\nBcc: evil@attacker.com",
+                body_html="x",
+            )
+
+    def test_subject_with_null_byte_raises_value_error(self):
+        """Null byte (C0 control) in subject raises ValueError."""
+        sender = self._make_sender()
+        with self.assertRaises(ValueError):
+            sender.send(to="user@x.co", subject="Sub\x00ject", body_html="x")
+
+    def test_clean_subject_passes_guard(self):
+        """Normal Cyrillic subject without control chars passes through to SMTP."""
+        sender = self._make_sender()
+        mock_server = MagicMock()
+        with patch("smtplib.SMTP") as MockSMTP:
+            MockSMTP.return_value.__enter__ = MagicMock(return_value=mock_server)
+            MockSMTP.return_value.__exit__ = MagicMock(return_value=False)
+            sender.send(
+                to="user@x.co",
+                subject="Ежедневный дайджест Краб Ear",
+                body_html="<p>ok</p>",
+            )
+        mock_server.sendmail.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # from_settings() factory
 # ---------------------------------------------------------------------------
 

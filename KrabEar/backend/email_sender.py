@@ -186,6 +186,14 @@ class EmailSender:
             )
         if not subject:
             raise ValueError("Тема письма не указана")
+        # W1764 sibling: отклоняем тему с управляющими символами (\r, \n, C0-диапазон
+        # \x00-\x1f). Python email.headers поднял бы HeaderParseError внутри
+        # _send_via_smtp, нарушая контракт send() (только ValueError/RuntimeError).
+        if any(c < "\x20" for c in subject):
+            raise ValueError(
+                "Тема письма содержит недопустимые управляющие символы (\\r/\\n/C0). "
+                "Убедитесь, что значение не содержит переносов строк."
+            )
 
         if self.backend_name == "mail_app":
             self._send_via_mail_app(to=to, subject=subject, body_html=body_html)
