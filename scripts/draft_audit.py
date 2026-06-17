@@ -29,7 +29,12 @@ PROVIDERS = {
     "zai": ("https://api.z.ai/api/paas/v4/chat/completions", "ZAI_API_KEY"),
     "github": ("https://models.github.ai/inference/chat/completions", "__GH_CLI__"),
     "nvidia": ("https://integrate.api.nvidia.com/v1/chat/completions", "NVIDIA_API_KEY"),
+    "hf": ("https://router.huggingface.co/v1/chat/completions", "__HF_SETTINGS__"),
 }
+
+# Krab Ear GUI settings hold the HuggingFace token (`hf_token`, write-scoped, used
+# for pyannote + reusable for the HF inference router — many models, free/credit tier).
+_KE_SETTINGS = Path.home() / "Library" / "Application Support" / "KrabEar" / "settings.json"
 
 # Sensible default models per provider (override with --model):
 #   github=openai/gpt-4o-mini (strong+precise), cerebras=gpt-oss-120b, groq=llama-3.3-70b-versatile,
@@ -42,6 +47,11 @@ def load_key(var: str) -> str:
         try:
             r = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, timeout=10)
             return r.stdout.strip()
+        except Exception:
+            return ""
+    if var == "__HF_SETTINGS__":
+        try:
+            return json.loads(_KE_SETTINGS.read_text(encoding="utf-8")).get("hf_token", "") or ""
         except Exception:
             return ""
     if not ENVF.exists():
