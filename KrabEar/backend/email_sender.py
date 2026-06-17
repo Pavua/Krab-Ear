@@ -415,3 +415,54 @@ class EmailSender:
             smtp_use_ssl=bool(getattr(cfg, "SMTP_USE_SSL", False)),
             smtp_tls_insecure=bool(getattr(cfg, "SMTP_TLS_INSECURE", False)),
         )
+
+    def update_transport_from_settings(self, get_setting: object) -> None:
+        """Перечитывает SMTP-транспорт из runtime-настроек (lowercase ключи).
+
+        Вызывается RecapScheduler._refresh_settings() на каждом тике, чтобы
+        runtime-изменения smtp_host/smtp_port/smtp_use_tls и т.д. через
+        set_settings() применялись без перезапуска backend.
+
+        Читает lowercase ключи (те же, что settings.json / cached_settings):
+            recap_backend     -> backend_name  (default: текущее значение)
+            smtp_host         -> smtp_host     (default: текущее значение)
+            smtp_port         -> smtp_port     (default: текущее значение)
+            smtp_user         -> smtp_user     (default: текущее значение)
+            smtp_use_tls      -> smtp_use_tls  (default: текущее значение)
+            smtp_use_ssl      -> smtp_use_ssl  (default: текущее значение)
+            smtp_tls_insecure -> smtp_tls_insecure (default: текущее значение)
+
+        Пароль SMTP не хранится в cached_settings (он в Keychain); поле
+        _smtp_password намеренно не перезаписывается — Keychain-путь в
+        get_smtp_password() покрывает это через save_smtp_password().
+
+        smtp_from обновляется только если оно совпадает с текущим smtp_user
+        (т.е. было выведено из него в __init__), чтобы не затирать явно
+        заданный From-адрес.
+
+        Args:
+            get_setting: callable(key: str, default: object) -> object —
+                возвращает значение из текущих runtime-настроек.
+                Например: lambda key, d: s.get(key, d)  (s = settings dict).
+        """
+        try:
+            self.backend_name = str(get_setting("recap_backend", self.backend_name))
+            self.smtp_host = str(get_setting("smtp_host", self.smtp_host))
+            try:
+                self.smtp_port = int(get_setting("smtp_port", self.smtp_port))
+            except (TypeError, ValueError):
+                pass
+            old_user = self.smtp_user
+            self.smtp_user = str(get_setting("smtp_user", self.smtp_user))
+            # Update smtp_from only when it was derived from smtp_user at init time
+            # (smtp_from == old_user) to avoid clobbering an explicitly set From address.
+            if self.smtp_from == old_user:
+                self.smtp_from = self.smtp_user
+            self.smtp_use_tls = bool(get_setting("smtp_use_tls", self.smtp_use_tls))
+            self.smtp_use_ssl = bool(get_setting("smtp_use_ssl", self.smtp_use_ssl))
+            self.smtp_tls_insecure = bool(get_setting("smtp_tls_insecure", self.smtp_tls_insecure))
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "EmailSender.update_transport_from_settings: ошибка при чтении runtime-настроек; "
+                "транспорт не изменён"
+            )

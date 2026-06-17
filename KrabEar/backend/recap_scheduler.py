@@ -237,6 +237,11 @@ class RecapScheduler:
     def _refresh_settings(self) -> None:
         """Перечитывает recap_email_enabled / recap_time_hour / recap_email_to из runtime настроек.
 
+        Дополнительно обновляет SMTP-транспорт EmailSender'а (smtp_host,
+        smtp_port, smtp_use_tls и т.д.) — W1771 LOW fix: эти поля ранее
+        не перечитывались, оставаясь заморожены на значениях из
+        EmailSender.from_settings(pydantic_singleton) при старте backend.
+
         Вызывается в начале каждого тика _run() вне recap_lock,
         что соответствует рекомендации W922: re-read происходит до
         проверки _should_send().
@@ -258,6 +263,16 @@ class RecapScheduler:
             self.recap_time_hour = self._default_recap_time_hour
         email_raw = s.get("recap_email_to", self._default_recap_email_to)
         self.recap_email_to = str(email_raw or "")
+        # W1771 LOW: re-read SMTP transport from live runtime settings.
+        # email_sender was built once in BackendService.__init__ via
+        # EmailSender.from_settings(pydantic_singleton), which reads UPPERCASE
+        # env-bound attrs and ignores lowercase runtime set_settings() overrides.
+        # update_transport_from_settings() reads the same lowercase keys that
+        # recap_email_to / recap_time_hour use above — no new provider required.
+        if hasattr(self.email_sender, "update_transport_from_settings"):
+            self.email_sender.update_transport_from_settings(
+                lambda key, default: s.get(key, default)
+            )
 
     # ------------------------------------------------------------------
     # State persistence
