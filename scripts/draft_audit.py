@@ -38,8 +38,9 @@ _KE_SETTINGS = Path.home() / "Library" / "Application Support" / "KrabEar" / "se
 
 # Sensible default models per provider (override with --model):
 #   github=openai/gpt-4o-mini (strong+precise), cerebras=gpt-oss-120b, groq=llama-3.3-70b-versatile,
-#   mistral=codestral-latest (code, no security-prompt filter), nvidia=meta/llama-3.3-70b-instruct.
-# NOTE: cerebras/groq 403 (content-filter) on security-audit prompts -> route audits to github/mistral.
+#   mistral=codestral-latest, nvidia=deepseek-ai/deepseek-v4-pro (strong reviewer — caught a bug mistral missed).
+# NOTE: cerebras/groq 403 (content-filter) on security prompts -> route audits to github/mistral/nvidia.
+# 🔴 nvidia LOGS input/output (trial ToS) -> code-review of PUBLIC code ONLY, never private/transcript data.
 
 
 def load_key(var: str) -> str:
