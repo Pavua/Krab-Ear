@@ -155,32 +155,41 @@ class TestRealtimeSilenceFilterLifecycle(unittest.TestCase):
 # TestSilenceDetection
 # ---------------------------------------------------------------------------
 class TestSilenceDetection(unittest.TestCase):
-    def _run_filter(self, audio: np.ndarray, max_silence_sec: float = 8.0):
+    def _run_filter_direct(self, audio: np.ndarray, max_silence_sec: float = 8.0):
+        """Drive _check_once() directly — no thread, no wall-clock sleep.
+
+        wave-34 clamps rt_silence_check_sec to max(0.5, value), so the old
+        pattern of ``time.sleep(0.5)`` was only barely ≥1 check interval even
+        on an unloaded machine.  Under -P4 parallel CI (4 concurrent pytest
+        processes) the background thread frequently did not fire before
+        ``stop()`` was called, causing ``assertGreater(len(ranges), 0)`` to
+        fail with 0.  Calling ``_check_once()`` directly is deterministic and
+        still exercises the full detection logic without racing the scheduler.
+        """
         recorder = FakeRecorder(audio)
         settings = {
             "realtime_silence_filter_enabled": True,
-            "rt_silence_check_sec": 0.02,
+            "rt_silence_check_sec": 60.0,  # disable auto-tick; we call manually
             "rt_silence_window_sec": 30.0,
             "rt_silence_max_sec": max_silence_sec,
         }
         rsf = RealtimeSilenceFilter(recorder, settings)
-        rsf.start()
-        time.sleep(0.5)
-        return rsf.stop()
+        rsf._check_once()
+        return rsf.get_silence_ranges()
 
     def test_detects_long_silence(self):
         audio = _make_silence(10.0)
-        ranges = self._run_filter(audio, max_silence_sec=8.0)
+        ranges = self._run_filter_direct(audio, max_silence_sec=8.0)
         self.assertGreater(len(ranges), 0)
 
     def test_no_false_positive_on_speech(self):
         audio = _make_speech(10.0)
-        ranges = self._run_filter(audio, max_silence_sec=8.0)
+        ranges = self._run_filter_direct(audio, max_silence_sec=8.0)
         self.assertEqual(len(ranges), 0)
 
     def test_short_silence_below_threshold(self):
         audio = _make_silence(3.0)
-        ranges = self._run_filter(audio, max_silence_sec=8.0)
+        ranges = self._run_filter_direct(audio, max_silence_sec=8.0)
         self.assertEqual(len(ranges), 0)
 
 
@@ -197,16 +206,14 @@ class TestEventEmission(unittest.TestCase):
         recorder = FakeRecorder(_make_silence(10.0))
         settings = {
             "realtime_silence_filter_enabled": True,
-            # wave-34: rt_silence_check_sec is clamped to max(0.5, value).
-            # 0.05 becomes 0.5 — need ≥2 intervals of real time to fire.
-            "rt_silence_check_sec": 0.5,
+            # Use a large check_sec so the auto-tick never fires; call _check_once()
+            # directly to avoid a wall-clock race under -P4 parallel CI.
+            "rt_silence_check_sec": 60.0,
             "rt_silence_window_sec": 10.0,
             "rt_silence_max_sec": 8.0,
         }
         rsf = RealtimeSilenceFilter(recorder, settings, event_bus_emit=fake_emit)
-        rsf.start()
-        time.sleep(1.5)  # 2+ check intervals at 0.5s each
-        rsf.stop()
+        rsf._check_once()
 
         self.assertGreater(len(events), 0)
         et, payload = events[0]
@@ -363,14 +370,15 @@ class TestRealtimeSilenceFilterWave145(unittest.TestCase):
         recorder = FakeRecorder(_make_silence(15.0))
         settings = {
             "realtime_silence_filter_enabled": True,
-            "rt_silence_check_sec": 0.5,
+            # Disable auto-tick; drive deterministically via _check_once()
+            # to avoid wall-clock race under -P4 parallel CI.
+            "rt_silence_check_sec": 60.0,
             "rt_silence_window_sec": 15.0,
             "rt_silence_max_sec": 8.0,
         }
         rsf = RealtimeSilenceFilter(recorder, settings)
-        rsf.start()
-        time.sleep(1.2)
-        ranges = rsf.stop()
+        rsf._check_once()
+        ranges = rsf.get_silence_ranges()
         # Должны быть диапазоны тишины для 15-секундного пустого буфера
         self.assertGreater(len(ranges), 0, "Должны быть диапазоны тишины")
         for s, e in ranges:
@@ -402,15 +410,15 @@ class TestRealtimeSilenceFilterWave145(unittest.TestCase):
         recorder = FakeRecorder(_make_silence(10.0))
         settings = {
             "realtime_silence_filter_enabled": True,
-            # wave-34: rt_silence_check_sec clamped to max(0.5, value); 0.05→0.5
-            "rt_silence_check_sec": 0.5,
+            # Disable auto-tick; drive deterministically via _check_once()
+            # to avoid wall-clock race under -P4 parallel CI.
+            "rt_silence_check_sec": 60.0,
             "rt_silence_window_sec": 10.0,
             "rt_silence_max_sec": 1.0,  # очень низкий порог → всё тихое попадёт
         }
         rsf = RealtimeSilenceFilter(recorder, settings)
-        rsf.start()
-        time.sleep(1.2)  # 2+ check intervals at 0.5s each
-        ranges = rsf.stop()
+        rsf._check_once()
+        ranges = rsf.get_silence_ranges()
         self.assertGreater(len(ranges), 0,
                            "С низким порогом тишины должны быть диапазоны")
 
