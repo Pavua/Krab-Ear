@@ -540,6 +540,19 @@ class BackendService:
         # recap_enabled / recap_time_hour are picked up on each scheduler tick.
         if settings.RECAP_EMAIL_ENABLED:
             self._recap_scheduler.start()
+        # W1771 MED: start RecapScheduler when recap_email_enabled toggled on at runtime.
+        # Without this hook, enabling the digest via set_settings({recap_email_enabled: True})
+        # persists the setting but the daemon thread is never started (the init-time guard
+        # above only fires once), so emails are silently never sent until a backend restart.
+        # RecapScheduler.start() is idempotent (is_alive guard inside).
+
+        def _on_recap_enabled(old: dict, new: dict) -> None:
+            old_enabled = bool(old.get("recap_email_enabled", False))
+            new_enabled = bool(new.get("recap_email_enabled", False))
+            if not old_enabled and new_enabled:
+                self._recap_scheduler.start()
+        self._settings_svc.register_after_save_hook(_on_recap_enabled)
+
         self._quality_trends = QualityTrendAnalyzer()
         self._activity_calendar = ActivityCalendar()
         self._stats_report = StatsReportGenerator()
