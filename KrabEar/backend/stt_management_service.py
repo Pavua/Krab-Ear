@@ -286,3 +286,116 @@ class STTManagementService:
             "estimated_latency_ms": sel.estimated_latency_ms,
             "quality_tier": sel.quality_tier,
         }
+
+    # ------------------------------------------------------------------
+    # List all known STT engines (model-picker IPC for GUI)
+    # ------------------------------------------------------------------
+
+    def handle_list_stt_engines(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Перечисляет ВСЕ известные STT-движки, включая отключённые-но-установленные.
+
+        Используется GUI для построения model-picker'а: показывает все движки,
+        позволяет включить/отключить каждый через set_settings(toggle_key, bool).
+
+        Параметры: {} (игнорирует лишние параметры).
+
+        Возвращает:
+            {
+              "ok": true,
+              "engines": [
+                {
+                  "name": str,          # стабильный ID движка
+                  "display_name": str,  # человекочитаемое название
+                  "available": bool,    # best-effort is_available(), False при любой ошибке
+                  "enabled": bool,      # текущее значение флага в settings
+                  "toggle_key": str|null,  # ключ settings.json для включения/отключения
+                  "note": str,          # краткая подсказка на RU (ОЗУ, применение)
+                  "type": "local"       # тип движка
+                }
+              ],
+              "default": "whisper_mlx"  # всегда включённый движок по умолчанию
+            }
+
+        Privacy: возвращает ТОЛЬКО метаданные движков, НЕ транскрипты/историю.
+        Privacy gate: не нужен.
+        """
+        s = self._settings_svc.cached_settings()
+
+        # Canonical engine descriptors.  Order mirrors build_router() priority.
+        # Each entry defines the stable metadata; is_available() called in try/except.
+        _ENGINE_META = [
+            {
+                "name": "gigaam",
+                "display_name": "GigaAM v2 (RU)",
+                "toggle_key": "stt_gigaam_enabled",
+                "note": "Лучший для RU, subprocess ~1.5 ГБ",
+                "adapter_class": "core.pipeline.stt_gigaam_adapter.GigaAMSTTAdapter",
+            },
+            {
+                "name": "parakeet",
+                "display_name": "Parakeet MLX (EN)",
+                "toggle_key": "stt_parakeet_enabled",
+                "note": "Быстрый EN-only, MLX Apple Silicon, ~0.5 ГБ",
+                "adapter_class": "core.pipeline.stt_parakeet.ParakeetSTTAdapter",
+            },
+            {
+                "name": "sensevoice",
+                "display_name": "SenseVoice (ZH/JA/KO/YUE)",
+                "toggle_key": "stt_sensevoice_enabled",
+                "note": "Специалист по азиатским языкам (zh/ja/ko/yue), PyTorch MPS",
+                "adapter_class": "core.pipeline.stt_sensevoice.SenseVoiceSTTAdapter",
+            },
+            {
+                "name": "sherpa",
+                "display_name": "Sherpa-ONNX (Paraformer)",
+                "toggle_key": "stt_sherpa_enabled",
+                "note": "Ultra-low latency для звонков, ONNX, требует sherpa-onnx",
+                "adapter_class": "core.pipeline.stt_sherpa.SherpaOnnxSTTAdapter",
+            },
+            {
+                "name": "whisper_mlx",
+                "display_name": "Whisper MLX (multilingual)",
+                "toggle_key": None,
+                "note": "Многоязычный движок по умолчанию, MLX Apple Silicon",
+                "adapter_class": "core.pipeline.stt_whisper_mlx_adapter.WhisperMLXAdapter",
+            },
+        ]
+
+        engines = []
+        for meta in _ENGINE_META:
+            toggle_key = meta["toggle_key"]
+
+            # whisper_mlx is always enabled (no toggle)
+            if toggle_key is None:
+                enabled = True
+            else:
+                enabled = bool(s.get(toggle_key, False))
+
+            # Best-effort availability probe — never raise
+            available = False
+            try:
+                module_path, class_name = meta["adapter_class"].rsplit(".", 1)
+                import importlib
+                mod = importlib.import_module(module_path)
+                cls = getattr(mod, class_name)
+                inst = cls()
+                available = bool(inst.is_available())
+            except Exception:
+                available = False
+
+            engines.append({
+                "name": meta["name"],
+                "display_name": meta["display_name"],
+                "available": available,
+                "enabled": enabled,
+                "toggle_key": toggle_key,
+                "note": meta["note"],
+                "type": "local",
+            })
+
+        add_breadcrumb(
+            category="stt",
+            message="list_stt_engines",
+            data={"count": len(engines)},
+        )
+        return {"ok": True, "engines": engines, "default": "whisper_mlx"}

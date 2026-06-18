@@ -1878,6 +1878,7 @@ class BackendService:
             # without mandatory request signing + an explicit ALLOW_PRIVACY_AUDIT_CLEAR=true flag.
             # --- D.2.3: Scored STT routing decision ---
             "get_stt_routing_decision": self._stt_mgmt_svc.handle_get_stt_routing_decision,  # scored adapter selection debug
+            "list_stt_engines": self._stt_mgmt_svc.handle_list_stt_engines,  # перечислить все STT-движки (включая отключённые) для model-picker GUI
             # --- Speech pace analysis (W1048 F2) ---
             "analyze_speech_pace": self._handle_analyze_speech_pace,  # анализ темпа речи: wpm, cpm, категория, расчётное время чтения
             # --- Bulk reprocess (Wave 1044 — re-wired after Wave 65 removal) ---
