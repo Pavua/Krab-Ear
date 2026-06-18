@@ -154,8 +154,23 @@ if [ "$DRY_RUN" -eq 0 ]; then
   ok "Build artifact: $BUILD_BIN"
   BINARY_SIZE=$(du -sh "$BUILD_BIN" | cut -f1)
   ok "Binary size: $BINARY_SIZE"
+
+  # ── Generate .dSYM from embedded DWARF ──────────────────────────
+  # SPM release builds keep DWARF inside the binary but do NOT emit a
+  # standalone .dSYM bundle. Without this dsymutil step, Step 4 always
+  # warns "dSYM not found" → SKIP_SENTRY=1 → every AppHang in Sentry
+  # stays unsymbolicated (the perpetual AGENT-5/AGENT-B triage blocker).
+  log "dsymutil → $DSYM_PATH"
+  rm -rf "$DSYM_PATH"
+  if dsymutil "$BUILD_BIN" -o "$DSYM_PATH" 2>/dev/null && [ -d "$DSYM_PATH" ]; then
+    ok "dSYM generated: $DSYM_PATH"
+  else
+    warn "dsymutil failed — Sentry symbolication will be unavailable"
+    SKIP_SENTRY=1
+  fi
 else
   echo -e "  ${YELLOW}[dry-run]${NC} swift build -c release --package-path $PACKAGE_DIR"
+  echo -e "  ${YELLOW}[dry-run]${NC} dsymutil $BUILD_BIN -o $DSYM_PATH"
 fi
 
 # ── Step 2: Copy to both delivery points ─────────────────────────
