@@ -110,6 +110,18 @@ extension HistoryPanelController {
         guard !isSyncingSettings else { return }
         let enabled = quickEditButton.state == .on
         applySettingsPatch(["quick_edit_enabled": enabled])
+        // Dim timeout row when quick edit is disabled.
+        let alpha = enabled ? 1.0 : KrabEarTheme.Interaction.disabledOpacity
+        quickEditTimeoutStepper.isEnabled = enabled
+        quickEditTimeoutStepper.alphaValue = alpha
+        quickEditTimeoutValueLabel.alphaValue = alpha
+    }
+
+    @objc func onQuickEditTimeoutChanged(_ sender: NSStepper) {
+        guard !isSyncingSettings else { return }
+        let seconds = Double(sender.integerValue)
+        quickEditTimeoutValueLabel.stringValue = "\(sender.integerValue) сек"
+        applySettingsPatch(["quick_edit_timeout_sec": seconds])
     }
 
     @objc func onPrivacyModeChanged() {
@@ -477,6 +489,13 @@ extension HistoryPanelController {
         modeSelector.selectItem(at: settings.mode == "menubar" ? 1 : 0)
         autoPasteButton.state = settings.autoPaste ? .on : .off
         quickEditButton.state = settings.quickEditEnabled ? .on : .off
+        let safeTimeout = max(1, min(Int(settings.quickEditTimeoutSec), 30))
+        quickEditTimeoutStepper.integerValue = safeTimeout
+        quickEditTimeoutValueLabel.stringValue = "\(safeTimeout) сек"
+        let timeoutAlpha = settings.quickEditEnabled ? 1.0 : KrabEarTheme.Interaction.disabledOpacity
+        quickEditTimeoutStepper.isEnabled = settings.quickEditEnabled
+        quickEditTimeoutStepper.alphaValue = timeoutAlpha
+        quickEditTimeoutValueLabel.alphaValue = timeoutAlpha
         privacyModeButton.state = settings.privacyModeEnabled ? .on : .off
         syncVoiceCommandsToggles(enabled: settings.voiceCommandsEnabled, strictMode: settings.voiceCommandsStrictMode)
         (NSApp.delegate as? AgentAppDelegate)?.setPrivacyMode(settings.privacyModeEnabled)

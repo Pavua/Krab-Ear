@@ -181,6 +181,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let modeSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let autoPasteButton = NSButton(checkboxWithTitle: "Автовставка", target: nil, action: nil)
     let quickEditButton = NSButton(checkboxWithTitle: "Быстрое редактирование", target: nil, action: nil)
+    let quickEditTimeoutStepper = NSStepper()
+    let quickEditTimeoutValueLabel = NSTextField(labelWithString: "5 сек")
     /// Privacy Mode (D.5): when ON, disables Sentry telemetry + forces translation offline.
     let privacyModeButton = NSButton(checkboxWithTitle: "Режим приватности", target: nil, action: nil)
     let startSoundButton = NSButton(checkboxWithTitle: "Звук старта", target: nil, action: nil)
@@ -1122,6 +1124,22 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         quickEditButton.target = self
         quickEditButton.action = #selector(onQuickEditChanged)
         settingsRow3.addArrangedSubview(quickEditButton)
+
+        // Timeout stepper (legacy variant — compact inline)
+        quickEditTimeoutStepper.minValue = 1
+        quickEditTimeoutStepper.maxValue = 30
+        quickEditTimeoutStepper.increment = 1
+        quickEditTimeoutStepper.valueWraps = false
+        quickEditTimeoutStepper.integerValue = 5
+        quickEditTimeoutStepper.target = self
+        quickEditTimeoutStepper.action = #selector(onQuickEditTimeoutChanged(_:))
+        quickEditTimeoutValueLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        quickEditTimeoutValueLabel.textColor = .secondaryLabelColor
+        quickEditTimeoutValueLabel.alignment = .right
+        quickEditTimeoutValueLabel.setContentHuggingPriority(.required, for: .horizontal)
+        quickEditTimeoutValueLabel.stringValue = "5 сек"
+        settingsRow3.addArrangedSubview(quickEditTimeoutStepper)
+        settingsRow3.addArrangedSubview(quickEditTimeoutValueLabel)
 
         startSoundButton.target = self
         startSoundButton.action = #selector(onStartSoundChanged)
