@@ -25,6 +25,11 @@ extension HistoryPanelController {
         tableView.allowsMultipleSelection = true
 
         let menu = NSMenu()
+
+        // Подменю «Действия с записью» (одиночный выбор, 4 quick-action).
+        menu.addItem(makeQuickActionsMenuItem())
+        menu.addItem(NSMenuItem.separator())
+
         let compareItem = NSMenuItem(
             title: "Сравнить выбранные",
             action: #selector(onCompareSelected),
