@@ -79,18 +79,18 @@ final class MeetingReportViewController: NSViewController {
     override func loadView() {
         let root = NSView()
         root.wantsLayer = true
-        root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        root.layer?.backgroundColor = KrabEarTheme.Colors.windowBackground.cgColor
         self.view = root
 
         // Outer vertical stack
         let outerStack = NSStackView()
         outerStack.orientation = .vertical
-        outerStack.spacing = KrabEarTheme.Metrics.standard
+        outerStack.spacing = KrabEarTheme.Metrics.comfortable
         outerStack.edgeInsets = NSEdgeInsets(
-            top: KrabEarTheme.Metrics.cardPadding,
-            left: KrabEarTheme.Metrics.cardPadding,
-            bottom: KrabEarTheme.Metrics.cardPadding,
-            right: KrabEarTheme.Metrics.cardPadding
+            top: KrabEarTheme.Metrics.spacious,
+            left: KrabEarTheme.Metrics.spacious,
+            bottom: KrabEarTheme.Metrics.spacious,
+            right: KrabEarTheme.Metrics.spacious
         )
         outerStack.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(outerStack)
@@ -102,12 +102,17 @@ final class MeetingReportViewController: NSViewController {
         ])
 
         // Title row
+        let titleRow = NSStackView()
+        titleRow.orientation = .vertical
+        titleRow.spacing = KrabEarTheme.Metrics.tight
+        titleRow.alignment = .leading
+        
         let titleLabel = makeLabel(
             text: "Отчёт встречи",
-            font: NSFont.systemFont(ofSize: 17, weight: .semibold),
+            font: KrabEarTheme.Typography.display,
             color: KrabEarTheme.Colors.textPrimary
         )
-        outerStack.addArrangedSubview(titleLabel)
+        titleRow.addArrangedSubview(titleLabel)
 
         // Meta info: timestamp + stats
         let metaText = buildMetaString()
@@ -117,44 +122,59 @@ final class MeetingReportViewController: NSViewController {
                 font: KrabEarTheme.Typography.caption,
                 color: KrabEarTheme.Colors.textSecondary
             )
-            outerStack.addArrangedSubview(metaLabel)
+            titleRow.addArrangedSubview(metaLabel)
         }
-
-        // Separator
-        outerStack.addArrangedSubview(makeSeparator())
+        
+        outerStack.addArrangedSubview(titleRow)
+        
+        let topSep = makeSeparator()
+        outerStack.addArrangedSubview(topSep)
 
         // Content stack inside scroll view
         let contentStack = NSStackView()
         contentStack.orientation = .vertical
-        contentStack.spacing = KrabEarTheme.Metrics.standard
+        contentStack.spacing = KrabEarTheme.Metrics.comfortable
         contentStack.alignment = .leading
         contentStack.translatesAutoresizingMaskIntoConstraints = false
 
+        let contentWidth: CGFloat = 580
+
         // --- Резюме ---
-        contentStack.addArrangedSubview(makeSectionHeader(title: "Резюме", symbolName: "doc.text"))
-        if summary.isEmpty {
-            contentStack.addArrangedSubview(makePlaceholderLabel())
-        } else {
-            let tag = summaryIsLLM ? " (LLM)" : " (авто)"
-            let summaryBody = makeMultilineTextField(text: summary + tag, width: 580)
-            contentStack.addArrangedSubview(summaryBody)
+        if !summary.isEmpty {
+            let tag = summaryIsLLM ? "Сгенерировано LLM" : "Авто-резюме"
+            let card = makeSectionCard(title: "Резюме", symbolName: "doc.text", badge: tag, width: contentWidth)
+            let summaryBody = makeMultilineTextField(text: summary, width: contentWidth - (KrabEarTheme.Metrics.comfortable * 2))
+            card.contentStackView.addArrangedSubview(summaryBody)
+            contentStack.addArrangedSubview(card)
         }
 
         // --- Задачи ---
-        contentStack.addArrangedSubview(makeSectionHeader(title: "Задачи", symbolName: "checkmark.circle"))
-        contentStack.addArrangedSubview(makeBulletList(items: actionItems, width: 580))
+        if !actionItems.isEmpty {
+            let card = makeSectionCard(title: "Задачи", symbolName: "checkmark.circle", width: contentWidth)
+            card.contentStackView.addArrangedSubview(makeBulletList(items: actionItems, width: contentWidth - (KrabEarTheme.Metrics.comfortable * 2), style: .check))
+            contentStack.addArrangedSubview(card)
+        }
 
         // --- Решения ---
-        contentStack.addArrangedSubview(makeSectionHeader(title: "Решения", symbolName: "lightbulb"))
-        contentStack.addArrangedSubview(makeBulletList(items: decisions, width: 580))
+        if !decisions.isEmpty {
+            let card = makeSectionCard(title: "Решения", symbolName: "lightbulb", width: contentWidth)
+            card.contentStackView.addArrangedSubview(makeBulletList(items: decisions, width: contentWidth - (KrabEarTheme.Metrics.comfortable * 2), style: .number))
+            contentStack.addArrangedSubview(card)
+        }
 
         // --- Вопросы ---
-        contentStack.addArrangedSubview(makeSectionHeader(title: "Вопросы", symbolName: "questionmark.circle"))
-        contentStack.addArrangedSubview(makeBulletList(items: questions, width: 580))
+        if !questions.isEmpty {
+            let card = makeSectionCard(title: "Вопросы", symbolName: "questionmark.circle", width: contentWidth)
+            card.contentStackView.addArrangedSubview(makeBulletList(items: questions, width: contentWidth - (KrabEarTheme.Metrics.comfortable * 2), style: .bullet))
+            contentStack.addArrangedSubview(card)
+        }
 
         // --- Спикеры ---
-        contentStack.addArrangedSubview(makeSectionHeader(title: "Спикеры", symbolName: "person.2"))
-        contentStack.addArrangedSubview(makeSpeakersView(width: 580))
+        if !speakers.isEmpty {
+            let card = makeSectionCard(title: "Спикеры", symbolName: "person.2", width: contentWidth)
+            card.contentStackView.addArrangedSubview(makeSpeakersView(width: contentWidth - (KrabEarTheme.Metrics.comfortable * 2)))
+            contentStack.addArrangedSubview(card)
+        }
 
         // Scroll wrapper
         let scrollView = NSScrollView()
@@ -174,7 +194,8 @@ final class MeetingReportViewController: NSViewController {
         outerStack.addArrangedSubview(scrollView)
 
         // Separator before buttons
-        outerStack.addArrangedSubview(makeSeparator())
+        let bottomSep = makeSeparator()
+        outerStack.addArrangedSubview(bottomSep)
 
         // Button row
         let buttonRow = NSStackView()
@@ -185,6 +206,14 @@ final class MeetingReportViewController: NSViewController {
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         buttonRow.addArrangedSubview(spacer)
+
+        let closeBtn = ThemePrimaryButton(
+            title: "Закрыть",
+            target: self,
+            action: #selector(onClose)
+        )
+        closeBtn.applyThemeSecondary()
+        buttonRow.addArrangedSubview(closeBtn)
 
         let copyBtn = ThemePrimaryButton(
             title: "Копировать",
@@ -201,11 +230,11 @@ final class MeetingReportViewController: NSViewController {
         )
         buttonRow.addArrangedSubview(saveBtn)
 
-        let closeBtn = NSButton(title: "Закрыть", target: self, action: #selector(onClose))
-        closeBtn.bezelStyle = .rounded
-        buttonRow.addArrangedSubview(closeBtn)
-
         outerStack.addArrangedSubview(buttonRow)
+        
+        for view in [titleRow, topSep, scrollView, bottomSep, buttonRow] {
+            view.widthAnchor.constraint(equalToConstant: contentWidth).isActive = true
+        }
     }
 
     // MARK: - Button Actions
@@ -275,60 +304,116 @@ final class MeetingReportViewController: NSViewController {
         return line
     }
 
-    private func makeSectionHeader(title: String, symbolName: String) -> NSView {
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.spacing = KrabEarTheme.Metrics.tight
-        row.alignment = .centerY
-
+    private func makeSectionCard(title: String, symbolName: String, badge: String? = nil, width: CGFloat) -> ThemeCardView {
+        let card = ThemeCardView()
+        card.translatesAutoresizingMaskIntoConstraints = false
+        card.widthAnchor.constraint(equalToConstant: width).isActive = true
+        
+        let headerRow = NSStackView()
+        headerRow.orientation = .horizontal
+        headerRow.spacing = KrabEarTheme.Metrics.tight
+        headerRow.alignment = .centerY
+        
         if let img = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil) {
             let imgView = NSImageView(image: img)
             imgView.contentTintColor = KrabEarTheme.Colors.accent
             imgView.translatesAutoresizingMaskIntoConstraints = false
-            imgView.widthAnchor.constraint(equalToConstant: 14).isActive = true
-            imgView.heightAnchor.constraint(equalToConstant: 14).isActive = true
-            row.addArrangedSubview(imgView)
+            imgView.widthAnchor.constraint(equalToConstant: 16).isActive = true
+            imgView.heightAnchor.constraint(equalToConstant: 16).isActive = true
+            headerRow.addArrangedSubview(imgView)
         }
-
+        
         let lbl = makeLabel(
             text: title,
             font: KrabEarTheme.Typography.sectionTitle,
             color: KrabEarTheme.Colors.textPrimary
         )
-        row.addArrangedSubview(lbl)
-        return row
-    }
-
-    private func makePlaceholderLabel() -> NSTextField {
-        makeLabel(
-            text: "—",
-            font: KrabEarTheme.Typography.body,
-            color: KrabEarTheme.Colors.textSecondary
-        )
-    }
-
-    private func makeBulletList(items: [String], width: CGFloat) -> NSView {
-        guard !items.isEmpty else {
-            return makePlaceholderLabel()
+        headerRow.addArrangedSubview(lbl)
+        
+        if let badge = badge {
+            let spacer = NSView()
+            spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            headerRow.addArrangedSubview(spacer)
+            
+            let badgeLabel = makeLabel(
+                text: badge,
+                font: KrabEarTheme.Typography.captionMedium,
+                color: KrabEarTheme.Colors.accent
+            )
+            headerRow.addArrangedSubview(badgeLabel)
         }
+        
+        headerRow.translatesAutoresizingMaskIntoConstraints = false
+        card.contentStackView.addArrangedSubview(headerRow)
+        
+        let sep = makeSeparator()
+        card.contentStackView.addArrangedSubview(sep)
+        
+        headerRow.widthAnchor.constraint(equalTo: card.contentStackView.widthAnchor).isActive = true
+        sep.widthAnchor.constraint(equalTo: card.contentStackView.widthAnchor).isActive = true
+        
+        return card
+    }
+
+    private enum ListStyle {
+        case check
+        case number
+        case bullet
+    }
+
+    private func makeBulletList(items: [String], width: CGFloat, style: ListStyle = .bullet) -> NSView {
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.spacing = KrabEarTheme.Metrics.tight
         stack.alignment = .leading
 
-        for item in items {
+        for (index, item) in items.enumerated() {
             let row = NSStackView()
             row.orientation = .horizontal
             row.spacing = KrabEarTheme.Metrics.tight
             row.alignment = .top
-
-            let bullet = makeLabel(
-                text: "-",
-                font: KrabEarTheme.Typography.body,
-                color: KrabEarTheme.Colors.textSecondary
-            )
-            bullet.setContentHuggingPriority(.required, for: .horizontal)
-            row.addArrangedSubview(bullet)
+            
+            switch style {
+            case .check:
+                if let img = NSImage(systemSymbolName: "circle", accessibilityDescription: nil) {
+                    let imgView = NSImageView(image: img)
+                    imgView.contentTintColor = KrabEarTheme.Colors.textSecondary
+                    imgView.translatesAutoresizingMaskIntoConstraints = false
+                    imgView.widthAnchor.constraint(equalToConstant: 12).isActive = true
+                    imgView.heightAnchor.constraint(equalToConstant: 12).isActive = true
+                    
+                    let box = NSView()
+                    box.translatesAutoresizingMaskIntoConstraints = false
+                    box.widthAnchor.constraint(equalToConstant: 16).isActive = true
+                    box.heightAnchor.constraint(equalToConstant: 16).isActive = true
+                    box.addSubview(imgView)
+                    NSLayoutConstraint.activate([
+                        imgView.centerXAnchor.constraint(equalTo: box.centerXAnchor),
+                        imgView.centerYAnchor.constraint(equalTo: box.centerYAnchor)
+                    ])
+                    row.addArrangedSubview(box)
+                }
+            case .number:
+                let markerLabel = makeLabel(
+                    text: "\(index + 1).",
+                    font: KrabEarTheme.Typography.body,
+                    color: KrabEarTheme.Colors.textSecondary
+                )
+                markerLabel.alignment = .right
+                markerLabel.translatesAutoresizingMaskIntoConstraints = false
+                markerLabel.widthAnchor.constraint(equalToConstant: 16).isActive = true
+                row.addArrangedSubview(markerLabel)
+            case .bullet:
+                let markerLabel = makeLabel(
+                    text: "•",
+                    font: KrabEarTheme.Typography.body,
+                    color: KrabEarTheme.Colors.textSecondary
+                )
+                markerLabel.alignment = .right
+                markerLabel.translatesAutoresizingMaskIntoConstraints = false
+                markerLabel.widthAnchor.constraint(equalToConstant: 10).isActive = true
+                row.addArrangedSubview(markerLabel)
+            }
 
             let text = makeLabel(
                 text: item,
@@ -336,7 +421,7 @@ final class MeetingReportViewController: NSViewController {
                 color: KrabEarTheme.Colors.textPrimary
             )
             text.maximumNumberOfLines = 0
-            text.preferredMaxLayoutWidth = width - 20
+            text.preferredMaxLayoutWidth = width - 24
             row.addArrangedSubview(text)
 
             stack.addArrangedSubview(row)
@@ -345,9 +430,6 @@ final class MeetingReportViewController: NSViewController {
     }
 
     private func makeSpeakersView(width: CGFloat) -> NSView {
-        guard !speakers.isEmpty else {
-            return makePlaceholderLabel()
-        }
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.spacing = KrabEarTheme.Metrics.tight
@@ -360,7 +442,8 @@ final class MeetingReportViewController: NSViewController {
             let mins = Int(durSec) / 60
             let secs = Int(durSec) % 60
             let durString = mins > 0 ? "\(mins)м \(secs)с" : "\(secs)с"
-            let text = "\(label): \(turns) реплик, \(durString)"
+            
+            let text = "\(label) — \(turns) реплик, \(durString)"
 
             let row = NSStackView()
             row.orientation = .horizontal
@@ -371,9 +454,19 @@ final class MeetingReportViewController: NSViewController {
                 let imgView = NSImageView(image: img)
                 imgView.contentTintColor = KrabEarTheme.Colors.textSecondary
                 imgView.translatesAutoresizingMaskIntoConstraints = false
-                imgView.widthAnchor.constraint(equalToConstant: 12).isActive = true
-                imgView.heightAnchor.constraint(equalToConstant: 12).isActive = true
-                row.addArrangedSubview(imgView)
+                imgView.widthAnchor.constraint(equalToConstant: 14).isActive = true
+                imgView.heightAnchor.constraint(equalToConstant: 14).isActive = true
+                
+                let box = NSView()
+                box.translatesAutoresizingMaskIntoConstraints = false
+                box.widthAnchor.constraint(equalToConstant: 16).isActive = true
+                box.heightAnchor.constraint(equalToConstant: 16).isActive = true
+                box.addSubview(imgView)
+                NSLayoutConstraint.activate([
+                    imgView.centerXAnchor.constraint(equalTo: box.centerXAnchor),
+                    imgView.centerYAnchor.constraint(equalTo: box.centerYAnchor)
+                ])
+                row.addArrangedSubview(box)
             }
 
             let lbl = makeLabel(
