@@ -30,6 +30,10 @@ extension HistoryPanelController {
         menu.addItem(makeQuickActionsMenuItem())
         menu.addItem(NSMenuItem.separator())
 
+        // Пункт «Открыть как встречу» — одиночный выбор, подробный отчёт встречи.
+        menu.addItem(makeMeetingMenuItem())
+        menu.addItem(NSMenuItem.separator())
+
         let compareItem = NSMenuItem(
             title: "Сравнить выбранные",
             action: #selector(onCompareSelected),

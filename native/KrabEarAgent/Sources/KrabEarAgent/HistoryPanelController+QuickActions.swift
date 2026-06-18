@@ -348,18 +348,20 @@ extension HistoryPanelController {
     }
 }
 
-// MARK: - NSMenuItemValidation (Quick Actions)
+// MARK: - NSMenuItemValidation (Quick Actions + Meeting Mode)
 
 extension HistoryPanelController: NSMenuItemValidation {
-    /// Активирует пункты быстрых действий только когда выбрана ровно 1 строка.
+    /// Активирует пункты одиночного выбора только когда выбрана ровно 1 строка.
+    /// Список пополняется из каждого модуля (+QuickActions, +MeetingMode, …).
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        let quickActionSelectors: [Selector] = [
+        let singleSelectionSelectors: [Selector] = [
             #selector(onQuickSummary),
             #selector(onQuickTranslate),
             #selector(onQuickSendTelegram),
+            #selector(onOpenMeeting),
         ]
         guard let action = menuItem.action else { return true }
-        if quickActionSelectors.contains(action) {
+        if singleSelectionSelectors.contains(action) {
             return tableView.selectedRowIndexes.count == 1
         }
         // Остальные пункты — стандартное поведение AppKit.
