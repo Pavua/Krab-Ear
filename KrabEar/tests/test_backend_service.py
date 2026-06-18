@@ -219,6 +219,14 @@ class BackendServiceTestCase(unittest.TestCase):
             translator=FakeTranslator(),
         )
 
+    def tearDown(self) -> None:
+        # Stop BackendService daemon threads (DiskSpaceMonitor, RecapScheduler,
+        # ExportScheduler, LLMHttpProbe) before the test process exits.  Without
+        # this, daemon threads may attempt to log to stderr during interpreter
+        # shutdown, which triggers the fatal "could not acquire lock for
+        # <_io.BufferedWriter name='<stderr>'>" error in chunked CI runs.
+        self.service.close()
+
     def request(self, method: str, params=None, request_id="t1"):
         return self.service.handle_request(
             {"id": request_id, "method": method, "params": params or {}}
@@ -1511,6 +1519,9 @@ class VocabularySuggestionsTestCase(unittest.TestCase):
             translator=FakeTranslator(),
         )
 
+    def tearDown(self) -> None:
+        self.service.close()
+
     def request(self, method: str, params=None, request_id="t1"):
         return self.service.handle_request(
             {"id": request_id, "method": method, "params": params or {}}
@@ -1627,6 +1638,9 @@ class VocabularyPassthroughTestCase(unittest.TestCase):
             translator=FakeTranslator(),
         )
 
+    def tearDown(self) -> None:
+        self.service.close()
+
     def request(self, method: str, params=None, request_id="t1"):
         return self.service.handle_request(
             {"id": request_id, "method": method, "params": params or {}}
@@ -1667,6 +1681,9 @@ class GlossarySuggestionsTestCase(unittest.TestCase):
             transcriber=FakeTranscriber(),
             translator=FakeTranslator(),
         )
+
+    def tearDown(self) -> None:
+        self.service.close()
 
     def request(self, method: str, params=None, request_id="t1"):
         return self.service.handle_request(
@@ -1807,6 +1824,9 @@ class BackendServiceInitTestCase(unittest.TestCase):
             translator=FakeTranslator(),
         )
 
+    def tearDown(self) -> None:
+        self.service.close()
+
     def request(self, method: str, params=None, request_id="t1"):
         return self.service.handle_request(
             {"id": request_id, "method": method, "params": params or {}}
@@ -1896,6 +1916,9 @@ class BackendServiceErrorHandlingTestCase(unittest.TestCase):
             transcriber=FakeTranscriber(),
             translator=FakeTranslator(),
         )
+
+    def tearDown(self) -> None:
+        self.service.close()
 
     def _is_valid_response(self, resp) -> bool:
         """Проверяет, что ответ является валидным словарём с полем ok."""
@@ -2013,6 +2036,9 @@ class SynthesizeSpeechIPCTestCase(unittest.TestCase):
             translator=FakeTranslator(),
         )
 
+    def tearDown(self) -> None:
+        self.service.close()
+
     def _req(self, params: dict) -> dict:
         return self.service.handle_request(
             {"id": "tts1", "method": "synthesize_speech", "params": params}
@@ -2068,6 +2094,9 @@ class MetricsDashboardPreviewLoopTestCase(unittest.TestCase):
             transcriber=FakeTranscriber(),
             translator=FakeTranslator(),
         )
+
+    def tearDown(self) -> None:
+        self.service.close()
 
     def _dashboard(self) -> dict:
         resp = self.service.handle_request(
@@ -2130,6 +2159,9 @@ class ListLlmModelsTestCase(unittest.TestCase):
             transcriber=FakeTranscriber(),
             translator=FakeTranslator(),
         )
+
+    def tearDown(self) -> None:
+        self.service.close()
 
     def _req(self, params=None):
         return self.service.handle_request(

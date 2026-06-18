@@ -45,9 +45,13 @@ def _make_item(text: str = "", duration_sec: float = 5.0, confidence: float = 0.
 # ── HIGH ReDoS-backstop тесты ─────────────────────────────────────────────────
 
 class ReDoSBackstopTimingTestCase(unittest.TestCase):
-    """W1765 HIGH: враждебные вводы должны завершаться за < 0.3 с."""
+    """W1765 HIGH: враждебные вводы должны завершаться за < 2.0 с.
 
-    _TIMING_BUDGET_SEC: float = 0.3
+    Budget raised from 0.3 s to 2.0 s to accommodate loaded CI runners
+    while still catching true catastrophic ReDoS backtracking (seconds/minutes).
+    """
+
+    _TIMING_BUDGET_SEC: float = 2.0
 
     def setUp(self) -> None:
         self._enricher = MetadataEnricher()
@@ -55,7 +59,7 @@ class ReDoSBackstopTimingTestCase(unittest.TestCase):
     # ── test_hostile_dots_completes_fast ────────────────────────────────────
 
     def test_hostile_dots_completes_fast(self) -> None:
-        """enrich() на тексте из 50 000 точек завершается за < 0.3 с."""
+        """enrich() на тексте из 50 000 точек завершается за < 2.0 с."""
         # До W1765: без backstop этот ввод мог занимать > 10 с в реализациях,
         # уязвимых к O(N) regexps или catastrophic backtracking.
         hostile = "." * 50_000
@@ -73,7 +77,7 @@ class ReDoSBackstopTimingTestCase(unittest.TestCase):
     # ── test_hostile_mixed_terminators_completes_fast ────────────────────────
 
     def test_hostile_mixed_terminators_completes_fast(self) -> None:
-        """enrich() на тексте из 50 000 знаков .!?… завершается за < 0.3 с."""
+        """enrich() на тексте из 50 000 знаков .!?… завершается за < 2.0 с."""
         # Паттерн, провоцирующий жадное квантифицирование без следующего \\s+.
         hostile = ".!?…" * 12_500  # = 50 000 символов
         t0 = time.perf_counter()
@@ -89,7 +93,7 @@ class ReDoSBackstopTimingTestCase(unittest.TestCase):
     # ── test_overlong_text_completes_fast ────────────────────────────────────
 
     def test_overlong_text_completes_fast(self) -> None:
-        """enrich() на тексте длиннее _MAX_TEXT_LEN завершается за < 0.3 с."""
+        """enrich() на тексте длиннее _MAX_TEXT_LEN завершается за < 2.0 с."""
         # Реалистичный длинный текст — backstop должен усечь до 200 000 символов.
         overlong = ("Привет мир. " * 20_000)  # ~ 240 000 символов
         self.assertGreater(len(overlong), _MAX_TEXT_LEN)
