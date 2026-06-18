@@ -76,6 +76,10 @@ extension HistoryPanelController {
         let reportButton = makeStatsReportButton()
         statsSection.contentStackView.addArrangedSubview(createRow(views: [reportButton]))
 
+        // Поиск дубликатов: выявление похожих транскрипций через IPC find_duplicates.
+        let duplicatesButton = makeFindDuplicatesButton()
+        statsSection.contentStackView.addArrangedSubview(createRow(views: [duplicatesButton]))
+
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
         scrollView.borderType = .bezelBorder
