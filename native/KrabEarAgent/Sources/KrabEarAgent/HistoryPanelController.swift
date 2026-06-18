@@ -1875,6 +1875,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let sttEnginesSection = buildSTTEnginesSection()
         settingsBar.addArrangedSubview(sttEnginesSection)
 
+        // Словарь STT (hotwords): добавление/удаление терминов + предложения из истории.
+        let sttVocabSection = buildSTTVocabularySection()
+        settingsBar.addArrangedSubview(sttVocabSection)
+
         // Group: Нейросетевые функции (LLM + VA + Selection Translator + Quick Preset).
         settingsBar.addArrangedSubview(makeCategoryHeader(text: "Нейросетевые функции"))
         settingsBar.addArrangedSubview(llmSection)
