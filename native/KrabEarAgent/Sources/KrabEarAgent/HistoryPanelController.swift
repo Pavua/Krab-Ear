@@ -1871,6 +1871,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let profAudioSection = setupDictationProfileAudioSection()
         settingsBar.addArrangedSubview(profAudioSection)
 
+        // STT-движки (доступность + enable/disable каждого движка).
+        let sttEnginesSection = buildSTTEnginesSection()
+        settingsBar.addArrangedSubview(sttEnginesSection)
+
         // Group: Нейросетевые функции (LLM + VA + Selection Translator + Quick Preset).
         settingsBar.addArrangedSubview(makeCategoryHeader(text: "Нейросетевые функции"))
         settingsBar.addArrangedSubview(llmSection)

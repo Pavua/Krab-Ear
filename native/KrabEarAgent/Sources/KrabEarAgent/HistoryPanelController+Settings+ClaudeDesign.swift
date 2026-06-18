@@ -643,6 +643,9 @@ extension HistoryPanelController {
         // Section 6 — Автозвонки (Phase 3.4)
         let s6 = cdBuildCallAutomationSection()
 
+        // Section 7 — STT-движки (доступность + enable/disable каждого движка)
+        let s7 = cdBuildSTTEnginesSection()
+
         settingsBarCD.removeFromSuperview()
         settingsBarCD = NSStackView()
         settingsBarCD.orientation = .vertical
@@ -654,7 +657,7 @@ extension HistoryPanelController {
         // сразу, без скролла на длинный список секций.
         settingsBarCD.addArrangedSubview(buildDictationHeroCard())
 
-        for s in [s1, s2, s3, s4, s5, s6] {
+        for s in [s1, s2, s3, s4, s5, s6, s7] {
             settingsBarCD.addArrangedSubview(s)
         }
     }
