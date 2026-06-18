@@ -646,6 +646,9 @@ extension HistoryPanelController {
         // Section 7 — STT-движки (доступность + enable/disable каждого движка)
         let s7 = cdBuildSTTEnginesSection()
 
+        // Section 8 — Словарь STT (hotwords + предложения из истории)
+        let s8 = cdBuildSTTVocabularySection()
+
         settingsBarCD.removeFromSuperview()
         settingsBarCD = NSStackView()
         settingsBarCD.orientation = .vertical
@@ -657,7 +660,7 @@ extension HistoryPanelController {
         // сразу, без скролла на длинный список секций.
         settingsBarCD.addArrangedSubview(buildDictationHeroCard())
 
-        for s in [s1, s2, s3, s4, s5, s6, s7] {
+        for s in [s1, s2, s3, s4, s5, s6, s7, s8] {
             settingsBarCD.addArrangedSubview(s)
         }
     }
