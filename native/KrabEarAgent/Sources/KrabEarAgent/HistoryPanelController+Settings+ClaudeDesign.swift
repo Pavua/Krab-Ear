@@ -372,6 +372,25 @@ extension HistoryPanelController {
         quickEditButton.action = #selector(onQuickEditChanged)
         let quickEditRow = cdMakeRow(label: "Быстрое редактирование перед вставкой", control: quickEditButton)
 
+        // Quick Edit timeout stepper (1–30 sec, step 1)
+        quickEditTimeoutStepper.minValue = 1
+        quickEditTimeoutStepper.maxValue = 30
+        quickEditTimeoutStepper.increment = 1
+        quickEditTimeoutStepper.valueWraps = false
+        quickEditTimeoutStepper.integerValue = 5
+        quickEditTimeoutStepper.target = self
+        quickEditTimeoutStepper.action = #selector(onQuickEditTimeoutChanged(_:))
+        quickEditTimeoutValueLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        quickEditTimeoutValueLabel.textColor = KrabEarTheme.Colors.textSecondary
+        quickEditTimeoutValueLabel.alignment = .right
+        quickEditTimeoutValueLabel.setContentHuggingPriority(.required, for: .horizontal)
+        quickEditTimeoutValueLabel.stringValue = "5 сек"
+        let timeoutControlStack = NSStackView(views: [quickEditTimeoutStepper, quickEditTimeoutValueLabel])
+        timeoutControlStack.orientation = .horizontal
+        timeoutControlStack.spacing = KrabEarTheme.Metrics.tight
+        timeoutControlStack.alignment = .centerY
+        let quickEditTimeoutRow = cdMakeRow(label: "Таймаут редактирования (сек)", control: timeoutControlStack)
+
         // Realtime preview
         realtimePreviewButton.title = ""
         realtimePreviewButton.setButtonType(.switch)
@@ -414,6 +433,8 @@ extension HistoryPanelController {
         card.contentStackView.addArrangedSubview(pasteRow)
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(quickEditRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(quickEditTimeoutRow)
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(realtimeRow)
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
