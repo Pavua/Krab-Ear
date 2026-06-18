@@ -1348,6 +1348,24 @@ class BackendService:
             except Exception:
                 logger.exception("LLMHttpProbe.stop() raised during close()")
 
+        # Stop DiskSpaceMonitor daemon thread so it cannot write to stderr
+        # after interpreter shutdown begins (causes "could not acquire lock for
+        # <_io.BufferedWriter name='<stderr>'>" fatal error in chunked CI runs).
+        disk_monitor = getattr(self, "_disk_monitor", None)
+        if disk_monitor is not None:
+            try:
+                disk_monitor.stop()
+            except Exception:
+                logger.exception("DiskSpaceMonitor.stop() raised during close()")
+
+        # Stop RecapScheduler daemon thread for the same reason.
+        recap_scheduler = getattr(self, "_recap_scheduler", None)
+        if recap_scheduler is not None:
+            try:
+                recap_scheduler.stop()
+            except Exception:
+                logger.exception("RecapScheduler.stop() raised during close()")
+
     # ------------------------------------------------------------------ #
     # Backwards-compatible proxy properties for Wave 172 migration         #
     # Tests and any code that read/write these attrs on BackendService     #

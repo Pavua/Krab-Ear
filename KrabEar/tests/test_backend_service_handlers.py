@@ -102,6 +102,12 @@ class _BaseHandlersTest(unittest.TestCase):
             translator=FakeTranslator(),
         )
 
+    def tearDown(self) -> None:
+        # Stop BackendService daemon threads so they don't write to stderr
+        # during interpreter shutdown (avoids "could not acquire lock for
+        # <_io.BufferedWriter name='<stderr>'>" fatal error in chunked CI).
+        self.service.close()
+
     def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.service.handle_request(
             {"id": "t1", "method": method, "params": params or {}}

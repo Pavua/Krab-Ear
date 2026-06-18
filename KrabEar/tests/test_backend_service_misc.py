@@ -100,6 +100,12 @@ class _ServiceFixture(unittest.TestCase):
             translator=_FakeTranslator(),
         )
 
+    def tearDown(self) -> None:
+        # Stop BackendService daemon threads so they don't write to stderr
+        # during interpreter shutdown (avoids "could not acquire lock for
+        # <_io.BufferedWriter name='<stderr>'>" fatal error in chunked CI).
+        self.service.close()
+
     def request(self, method: str, params=None, request_id="t1"):
         return self.service.handle_request(
             {"id": request_id, "method": method, "params": params or {}}
@@ -308,39 +314,54 @@ class TestStartupSequence(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "data"
             svc = build_service(data_dir)
-            self.assertIsInstance(svc, BackendService)
+            try:
+                self.assertIsInstance(svc, BackendService)
+            finally:
+                svc.close()
 
     def test_build_service_initializes_store(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "data"
             svc = build_service(data_dir)
-            self.assertIsNotNone(svc.store)
+            try:
+                self.assertIsNotNone(svc.store)
+            finally:
+                svc.close()
 
     def test_build_service_can_serve_ping(self):
         """After build_service, a ping IPC call should succeed immediately."""
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "data"
             svc = build_service(data_dir)
-            resp = svc.handle_request({"id": "init-ping", "method": "ping", "params": {}})
-            self.assertTrue(resp.get("ok"))
-            self.assertEqual(resp["result"]["status"], "ok")
+            try:
+                resp = svc.handle_request({"id": "init-ping", "method": "ping", "params": {}})
+                self.assertTrue(resp.get("ok"))
+                self.assertEqual(resp["result"]["status"], "ok")
+            finally:
+                svc.close()
 
     def test_build_service_creates_settings_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "data"
-            build_service(data_dir)
-            settings_path = data_dir / "settings.json"
-            self.assertTrue(settings_path.exists(), "settings.json must be created on init")
+            svc = build_service(data_dir)
+            try:
+                settings_path = data_dir / "settings.json"
+                self.assertTrue(settings_path.exists(), "settings.json must be created on init")
+            finally:
+                svc.close()
 
     def test_minimal_init_no_recorder_no_transcriber(self):
         """BackendService with only a StateStore (no recorder/transcriber) must not crash."""
         with tempfile.TemporaryDirectory() as tmp:
             store = StateStore(Path(tmp) / "data")
             svc = BackendService(store=store)
-            self.assertIsNotNone(svc)
-            # ping should still work (recorder is created internally)
-            resp = svc.handle_request({"id": "1", "method": "ping", "params": {}})
-            self.assertTrue(resp.get("ok"))
+            try:
+                self.assertIsNotNone(svc)
+                # ping should still work (recorder is created internally)
+                resp = svc.handle_request({"id": "1", "method": "ping", "params": {}})
+                self.assertTrue(resp.get("ok"))
+            finally:
+                svc.close()
 
 
 if __name__ == "__main__":
