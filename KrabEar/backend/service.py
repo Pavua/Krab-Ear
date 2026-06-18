@@ -1675,6 +1675,7 @@ class BackendService:
             "cancel_scheduled_recording": self._recording_scheduler.handle_cancel_scheduled_recording,  # отменить запланированную запись
             "list_scheduled_recordings": self._recording_scheduler.handle_list_scheduled_recordings,  # список запланированных записей
             "generate_daily_digest": self._handle_generate_daily_digest,  # ежедневный дайджест транскрипций
+            "get_meeting_report": self._handle_get_meeting_report,  # полный отчёт о встрече: summary, задачи, решения, вопросы, спикеры
             "analyze_quality_trends": self._audio_analytics_svc.handle_analyze_quality_trends,  # анализ трендов качества
             "compare_periods": self._analytics_svc.handle_compare_periods,  # сравнение двух периодов использования
             "get_activity_calendar": self._analytics_svc.handle_get_activity_calendar,  # GitHub-style activity calendar данные
@@ -3307,6 +3308,182 @@ class BackendService:
             "top_topics": digest.top_topics,
             "highlights": digest.highlights,
             "markdown": digest.formatted_markdown,
+        }
+
+    def _handle_get_meeting_report(self, params: dict[str, Any]) -> dict[str, Any]:
+        """IPC: get_meeting_report — полный отчёт о встрече для одной записи истории.
+
+        Оркестрирует TextProcessingService (summary) + SearchAndAnalysisService
+        (action_items/decisions/questions) + прямой разбор speaker_turns из HistoryItem.
+
+        Privacy gate (критично — возвращает производный от транскрипта контент):
+        при privacy_mode_enabled=True возвращает ok=False + пустые поля.
+
+        Params:
+            id  — item_id истории (обязательный).
+        Returns:
+            {id, ok, summary, summary_is_llm, action_items, decisions, questions,
+             speakers, speaker_count, word_count, ts, markdown, fallback_reason}
+        """
+        item_id = str(params.get("id", "")).strip()
+
+        _empty = {
+            "id": item_id,
+            "ok": False,
+            "summary": "",
+            "summary_is_llm": False,
+            "action_items": [],
+            "decisions": [],
+            "questions": [],
+            "speakers": [],
+            "speaker_count": 0,
+            "word_count": 0,
+            "ts": "",
+            "markdown": "",
+            "fallback_reason": "",
+        }
+
+        # Privacy gate — MUST be first (returns transcript-derived content).
+        if self._get_runtime_setting("privacy_mode_enabled", False):
+            result = dict(_empty)
+            result["fallback_reason"] = "privacy_mode"
+            return result
+
+        if not item_id:
+            result = dict(_empty)
+            result["fallback_reason"] = "not_found"
+            return result
+
+        # Fetch HistoryItem from store.
+        try:
+            active_items = self.store._load_active_items_with_lock()
+        except Exception:
+            active_items = []
+
+        target = next((it for it in active_items if it.id == item_id), None)
+        if target is None:
+            result = dict(_empty)
+            result["fallback_reason"] = "not_found"
+            return result
+
+        item_ts = getattr(target, "ts", "") or ""
+        item_text = getattr(target, "text", "") or ""
+        word_count = len(item_text.split()) if item_text else 0
+
+        fallback_reasons: list[str] = []
+
+        # --- Summary (TextProcessingService) ---
+        summary = ""
+        summary_is_llm = False
+        try:
+            sum_result = self._text_processing_svc.handle_summarize_item({"id": item_id})
+            summary = sum_result.get("summary", "") or ""
+            summary_is_llm = bool(sum_result.get("llm", False))
+        except Exception as exc:
+            fallback_reasons.append(f"summary_failed:{type(exc).__name__}")
+
+        # --- Action items / decisions / questions (SearchAndAnalysisService) ---
+        action_items: list[str] = []
+        decisions: list[str] = []
+        questions: list[str] = []
+        try:
+            ai_result = self._search_and_analysis_svc.handle_extract_action_items({"id": item_id})
+            raw_action_items = ai_result.get("action_items", []) or []
+            # action_items may be list of dicts (ActionItem.to_dict()) or plain strings.
+            for ai in raw_action_items:
+                if isinstance(ai, dict):
+                    action_items.append(str(ai.get("text", ai.get("description", str(ai)))))
+                else:
+                    action_items.append(str(ai))
+            decisions = [str(d) for d in (ai_result.get("decisions", []) or [])]
+            questions = [str(q) for q in (ai_result.get("questions", []) or [])]
+            if ai_result.get("fallback_reason"):
+                fallback_reasons.append(f"action_items:{ai_result['fallback_reason']}")
+        except Exception as exc:
+            fallback_reasons.append(f"action_items_failed:{type(exc).__name__}")
+
+        # --- Speakers from speaker_turns ---
+        speakers: list[dict] = []
+        try:
+            speaker_turns = getattr(target, "speaker_turns", None) or []
+            if speaker_turns:
+                agg: dict[str, dict] = {}
+                for seg in speaker_turns:
+                    if not isinstance(seg, dict):
+                        continue
+                    label = str(seg.get("speaker", "UNKNOWN"))
+                    start = seg.get("start", 0.0)
+                    end = seg.get("end", 0.0)
+                    try:
+                        start_f = float(start)
+                        end_f = float(end)
+                    except (TypeError, ValueError):
+                        start_f, end_f = 0.0, 0.0
+                    dur = end_f - start_f if math.isfinite(end_f - start_f) else 0.0
+                    if dur < 0:
+                        dur = 0.0
+                    if label not in agg:
+                        agg[label] = {"label": label, "turns": 0, "duration_sec": 0.0}
+                    agg[label]["turns"] += 1
+                    agg[label]["duration_sec"] += dur
+                for entry in agg.values():
+                    entry["duration_sec"] = (
+                        entry["duration_sec"]
+                        if math.isfinite(entry["duration_sec"])
+                        else 0.0
+                    )
+                speakers = sorted(agg.values(), key=lambda x: x["label"])
+        except Exception as exc:
+            fallback_reasons.append(f"speakers_failed:{type(exc).__name__}")
+
+        speaker_count = len(speakers)
+
+        # --- Markdown digest ---
+        def _fmt_dur(sec: float) -> str:
+            sec = max(0.0, sec)
+            m = int(sec) // 60
+            s = int(sec) % 60
+            return f"{m}:{s:02d}"
+
+        md_lines = [f"# Встреча — {item_ts}", ""]
+        if summary:
+            md_lines += ["## Резюме", summary, ""]
+        if action_items:
+            md_lines.append("## Задачи")
+            md_lines += [f"- {a}" for a in action_items]
+            md_lines.append("")
+        if decisions:
+            md_lines.append("## Решения")
+            md_lines += [f"- {d}" for d in decisions]
+            md_lines.append("")
+        if questions:
+            md_lines.append("## Вопросы")
+            md_lines += [f"- {q}" for q in questions]
+            md_lines.append("")
+        if speakers:
+            md_lines.append("## Спикеры")
+            for sp in speakers:
+                md_lines.append(
+                    f"- {sp['label']} — {sp['turns']} реплик, {_fmt_dur(sp['duration_sec'])}"
+                )
+            md_lines.append("")
+
+        markdown = "\n".join(md_lines).rstrip() + "\n"
+
+        return {
+            "id": item_id,
+            "ok": True,
+            "summary": summary,
+            "summary_is_llm": summary_is_llm,
+            "action_items": action_items,
+            "decisions": decisions,
+            "questions": questions,
+            "speakers": speakers,
+            "speaker_count": speaker_count,
+            "word_count": word_count,
+            "ts": item_ts,
+            "markdown": markdown,
+            "fallback_reason": "; ".join(fallback_reasons),
         }
 
     def _handle_get_daily_insight(self, params: dict[str, Any]) -> dict[str, Any]:
