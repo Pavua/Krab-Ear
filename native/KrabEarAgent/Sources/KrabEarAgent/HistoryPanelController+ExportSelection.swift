@@ -25,6 +25,14 @@ extension HistoryPanelController {
         tableView.allowsMultipleSelection = true
 
         let menu = NSMenu()
+        let compareItem = NSMenuItem(
+            title: "Сравнить выбранные",
+            action: #selector(onCompareSelected),
+            keyEquivalent: ""
+        )
+        compareItem.target = self
+        menu.addItem(compareItem)
+
         let exportItem = NSMenuItem(
             title: "Экспортировать выбранное",
             action: #selector(onExportSelected),
