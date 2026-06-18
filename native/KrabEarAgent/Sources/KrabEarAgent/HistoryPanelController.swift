@@ -1879,6 +1879,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let sttVocabSection = buildSTTVocabularySection()
         settingsBar.addArrangedSubview(sttVocabSection)
 
+        // Голосовые команды: включить/выключить + строгий режим + справочник команд.
+        let voiceCommandsSection = buildVoiceCommandsSection()
+        settingsBar.addArrangedSubview(voiceCommandsSection)
+
         // Group: Нейросетевые функции (LLM + VA + Selection Translator + Quick Preset).
         settingsBar.addArrangedSubview(makeCategoryHeader(text: "Нейросетевые функции"))
         settingsBar.addArrangedSubview(llmSection)

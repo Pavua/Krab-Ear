@@ -95,6 +95,9 @@ struct AgentSettings {
     var quickEditTimeoutSec: Double
     // Privacy Mode (D.5): disables all telemetry and external network ops.
     var privacyModeEnabled: Bool
+    // Voice Commands (dictation post-processing layer)
+    var voiceCommandsEnabled: Bool
+    var voiceCommandsStrictMode: Bool
 
     static let `default` = AgentSettings(
         mode: "headless",
@@ -145,7 +148,9 @@ struct AgentSettings {
         callAutoEndOnSilence: true,
         quickEditEnabled: false,
         quickEditTimeoutSec: 5.0,
-        privacyModeEnabled: false
+        privacyModeEnabled: false,
+        voiceCommandsEnabled: true,
+        voiceCommandsStrictMode: true
     )
 
     init(from payload: [String: Any]) {
@@ -219,6 +224,8 @@ struct AgentSettings {
         self.quickEditEnabled = (payload["quick_edit_enabled"] as? Bool) ?? Self.default.quickEditEnabled
         self.quickEditTimeoutSec = (payload["quick_edit_timeout_sec"] as? Double) ?? Self.default.quickEditTimeoutSec
         self.privacyModeEnabled = (payload["privacy_mode_enabled"] as? Bool) ?? Self.default.privacyModeEnabled
+        self.voiceCommandsEnabled = (payload["voice_commands_enabled"] as? Bool) ?? Self.default.voiceCommandsEnabled
+        self.voiceCommandsStrictMode = (payload["voice_commands_strict_mode"] as? Bool) ?? Self.default.voiceCommandsStrictMode
     }
 
     init(
@@ -267,7 +274,9 @@ struct AgentSettings {
         callAutoEndOnSilence: Bool,
         quickEditEnabled: Bool,
         quickEditTimeoutSec: Double,
-        privacyModeEnabled: Bool = false
+        privacyModeEnabled: Bool = false,
+        voiceCommandsEnabled: Bool = true,
+        voiceCommandsStrictMode: Bool = true
     ) {
         self.mode = mode
         self.showDockIcon = showDockIcon
@@ -315,6 +324,8 @@ struct AgentSettings {
         self.quickEditEnabled = quickEditEnabled
         self.quickEditTimeoutSec = quickEditTimeoutSec
         self.privacyModeEnabled = privacyModeEnabled
+        self.voiceCommandsEnabled = voiceCommandsEnabled
+        self.voiceCommandsStrictMode = voiceCommandsStrictMode
     }
 
     func toPayload() -> [String: Any] {
@@ -365,6 +376,8 @@ struct AgentSettings {
             "quick_edit_enabled": quickEditEnabled,
             "quick_edit_timeout_sec": quickEditTimeoutSec,
             "privacy_mode_enabled": privacyModeEnabled,
+            "voice_commands_enabled": voiceCommandsEnabled,
+            "voice_commands_strict_mode": voiceCommandsStrictMode,
         ]
     }
 }

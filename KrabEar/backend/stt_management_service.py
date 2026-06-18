@@ -1,17 +1,19 @@
 """STTManagementService — обработчики IPC-методов управления STT в Krab Ear.
 
 Выделен из backend/service.py для снижения размера монолитного модуля.
-Содержит 6 IPC-обработчиков: STT hotwords CRUD, warmup_stt,
-scored routing decision, select_model.
+Содержит 7 IPC-обработчиков: STT hotwords CRUD, warmup_stt,
+scored routing decision, select_model, list_voice_commands.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 import time as _time
 from typing import Any, TYPE_CHECKING
 
 from backend.observability import add_breadcrumb
+from core.voice_commands import _RU_COMMANDS, _ES_COMMANDS, _EN_COMMANDS
 
 if TYPE_CHECKING:
     from backend.settings_service import SettingsService
@@ -399,3 +401,113 @@ class STTManagementService:
             data={"count": len(engines)},
         )
         return {"ok": True, "engines": engines, "default": "whisper_mlx"}
+
+    # ------------------------------------------------------------------
+    # Voice commands reference list
+    # ------------------------------------------------------------------
+
+    def handle_list_voice_commands(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает статический справочник голосовых команд диктовки.
+
+        Параметры (опциональные):
+          - language: str — фильтр по языку ("ru", "es", "en").
+            Если не задан — возвращаются все языки.
+
+        Возвращает:
+          {
+            "ok": True,
+            "languages": ["ru", "es", "en"],
+            "commands": [
+              {
+                "language": "ru",
+                "phrase": "удалить последнее слово",
+                "action": "delete_last",
+                "description": "Удаляет последнее слово"
+              },
+              ...
+            ]
+          }
+
+        Данные полностью статические (словари паттернов) — privacy gate не нужен.
+        Никогда не выбрасывает исключение — при ошибке деградирует до пустого ответа.
+        """
+        try:
+            lang_filter = str(params.get("language") or "").strip().lower() or None
+
+            _lang_tables: list[tuple[str, list[tuple[str, str, str]]]] = [
+                ("ru", _RU_COMMANDS),
+                ("es", _ES_COMMANDS),
+                ("en", _EN_COMMANDS),
+            ]
+
+            all_langs = [lang for lang, _ in _lang_tables]
+            if lang_filter and lang_filter not in all_langs:
+                return {"ok": True, "languages": all_langs, "commands": []}
+
+            commands: list[dict[str, Any]] = []
+            for lang, table in _lang_tables:
+                if lang_filter and lang != lang_filter:
+                    continue
+                for raw_pattern, action, arg in table:
+                    phrase = _clean_pattern(raw_pattern)
+                    description = _describe_command(action, arg)
+                    commands.append({
+                        "language": lang,
+                        "phrase": phrase,
+                        "action": action,
+                        "description": description,
+                    })
+
+            return {"ok": True, "languages": all_langs, "commands": commands}
+        except Exception:
+            logger.exception("handle_list_voice_commands: неожиданная ошибка")
+            return {"ok": False, "languages": [], "commands": []}
+
+
+# ---------------------------------------------------------------------------
+# Вспомогательные функции для handle_list_voice_commands
+# ---------------------------------------------------------------------------
+
+def _clean_pattern(raw: str) -> str:
+    """Преобразует regex-паттерн в читаемую человеком фразу.
+
+    Убирает regex-спецсимволы (lookaround-границы, экранирование),
+    нормализует пробелы.
+    """
+    # Убираем lookaround-обёртки (?<!\w) и (?!\w)
+    cleaned = re.sub(r'\(\?[<>!][^)]+\)', '', raw)
+    # Убираем экранирование — re.escape-дёрнутые символы → обычные
+    cleaned = re.sub(r'\\(.)', r'\1', cleaned)
+    # \s+ → пробел
+    cleaned = re.sub(r'\\s\+', ' ', cleaned)
+    # Нормализуем пробелы
+    return ' '.join(cleaned.split()).strip() or raw
+
+
+def _describe_command(action: str, arg: str) -> str:
+    """Формирует краткое описание команды на русском языке."""
+    if action == "delete_last":
+        targets = {
+            "word": "Удаляет последнее слово",
+            "sentence": "Удаляет последнее предложение",
+            "paragraph": "Удаляет последний абзац",
+        }
+        return targets.get(arg, "Удаляет последний элемент")
+    if action == "capitalize_next":
+        return "Следующее слово с заглавной буквы"
+    if action == "uppercase_sent":
+        return "Следующая фраза заглавными буквами"
+    if action == "insert":
+        # Специальные символы → понятное описание
+        special: dict[str, str] = {
+            "\n": "Вставляет перевод строки",
+            "\n\n": "Вставляет новый абзац",
+            "\t": "Вставляет табуляцию",
+            " ": "Вставляет пробел",
+            " — ": "Вставляет тире «—»",
+        }
+        if arg in special:
+            return special[arg]
+        # Знак препинания: «,», «.» и т.д.
+        return f"Вставляет «{arg}»"
+    return action
