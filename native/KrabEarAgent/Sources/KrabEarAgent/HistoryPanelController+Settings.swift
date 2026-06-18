@@ -478,6 +478,7 @@ extension HistoryPanelController {
         autoPasteButton.state = settings.autoPaste ? .on : .off
         quickEditButton.state = settings.quickEditEnabled ? .on : .off
         privacyModeButton.state = settings.privacyModeEnabled ? .on : .off
+        syncVoiceCommandsToggles(enabled: settings.voiceCommandsEnabled, strictMode: settings.voiceCommandsStrictMode)
         (NSApp.delegate as? AgentAppDelegate)?.setPrivacyMode(settings.privacyModeEnabled)
         startSoundButton.state = settings.playStartSound ? .on : .off
         realtimePreviewButton.state = settings.realtimePreviewEnabled ? .on : .off
