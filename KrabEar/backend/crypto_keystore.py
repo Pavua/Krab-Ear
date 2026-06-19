@@ -12,7 +12,9 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import shutil
 import subprocess
+import sys
 from typing import Sequence
 
 logger = logging.getLogger("KrabEar.Backend.CryptoKeystore")
@@ -106,3 +108,12 @@ def delete_history_key() -> None:
             result.returncode,
             result.stderr.strip(),
         )
+
+
+def keychain_available() -> bool:
+    """Проверяет доступность macOS Keychain без создания ключа.
+
+    Возвращает True, если ``security`` CLI присутствует и платформа — macOS/darwin.
+    Не вызывает ``get_or_create_history_key`` (не создаёт ключ как побочный эффект).
+    """
+    return sys.platform == "darwin" and shutil.which("security") is not None

@@ -676,6 +676,9 @@ extension HistoryPanelController {
         // Section 10 — Хранение истории (авто-удаление старых записей)
         let s10 = cdBuildRetentionSettingsSection()
 
+        // Section 11 — Безопасность (шифрование истории AES-256-GCM, Keychain)
+        let s11 = cdBuildSecuritySettingsSection()
+
         settingsBarCD.removeFromSuperview()
         settingsBarCD = NSStackView()
         settingsBarCD.orientation = .vertical
@@ -687,7 +690,7 @@ extension HistoryPanelController {
         // сразу, без скролла на длинный список секций.
         settingsBarCD.addArrangedSubview(buildDictationHeroCard())
 
-        for s in [s1, s2, s3, s4, s5, s6, s7, s8, s9, s10] {
+        for s in [s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11] {
             settingsBarCD.addArrangedSubview(s)
         }
     }
