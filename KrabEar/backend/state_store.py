@@ -1625,8 +1625,9 @@ class StateStore:
     def _append_history_ndjson(self, payload: dict[str, Any]) -> None:
         """Append к history.ndjson с опциональным шифрованием строки.
 
-        Шифрование применяется к JSON-строке ДО передачи в _append_ndjson,
-        что позволяет тестам патчить _append_ndjson и перехватывать ошибки.
+        Шифрование применяется к JSON-строке ДО передачи в _append_ndjson_raw
+        (sink записи), что позволяет тестам патчить _append_ndjson_raw и
+        перехватывать ошибки записи на диск.
         """
         json_str = self._maybe_encrypt(json.dumps(payload, ensure_ascii=False))
         self._append_ndjson_raw(self.history_path, json_str)

@@ -257,8 +257,11 @@ class DiskFullSimulationTestCase(unittest.TestCase):
     def test_add_history_oserror_propagates(self) -> None:
         """OSError при добавлении записи в историю проброшена наружу."""
         store = StateStore(self.data_dir)
+        # add_history_item пишет через _append_history_ndjson → _append_ndjson_raw
+        # (encryption refactor, chunk 1). Патчим актуальный sink, чтобы OSError
+        # реально возникла на записи и пробросилась наружу.
         with patch.object(
-            StateStore, "_append_ndjson", side_effect=OSError("No space left")
+            StateStore, "_append_ndjson_raw", side_effect=OSError("No space left")
         ):
             with self.assertRaises(OSError):
                 store.add_history_item(text="test", paste_status="ok")
