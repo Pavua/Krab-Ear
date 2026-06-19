@@ -2004,6 +2004,17 @@ class HistoryService:
     # Очистка и хранилище
     # ------------------------------------------------------------------
 
+    def cleanup_old_history_days(self, days: int) -> int:
+        """Удаляет записи старше days дней; возвращает количество удалённых.
+
+        Внутренний помощник, вызываемый как IPC-хендлером
+        (handle_cleanup_old_history), так и PurgeScheduler.
+        Вся каскадная очистка (версии, цепочки, семантический индекс,
+        трекер воспроизведения, .md файлы) включена — DRY.
+        """
+        result = self.handle_cleanup_old_history({"older_than_days": days})
+        return int(result.get("deleted_count", 0))
+
     def handle_cleanup_old_history(self, params: dict[str, Any]) -> dict[str, Any]:
         """Удаляет записи истории старше N дней (по умолчанию 90).
 

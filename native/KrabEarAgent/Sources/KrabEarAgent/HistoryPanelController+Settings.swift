@@ -498,6 +498,7 @@ extension HistoryPanelController {
         quickEditTimeoutValueLabel.alphaValue = timeoutAlpha
         privacyModeButton.state = settings.privacyModeEnabled ? .on : .off
         syncVoiceCommandsToggles(enabled: settings.voiceCommandsEnabled, strictMode: settings.voiceCommandsStrictMode)
+        syncRetentionSettings(enabled: settings.autoPurgeEnabled, retentionDays: settings.autoPurgeRetentionDays)
         (NSApp.delegate as? AgentAppDelegate)?.setPrivacyMode(settings.privacyModeEnabled)
         startSoundButton.state = settings.playStartSound ? .on : .off
         realtimePreviewButton.state = settings.realtimePreviewEnabled ? .on : .off

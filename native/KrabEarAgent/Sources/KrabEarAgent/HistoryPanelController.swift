@@ -1901,6 +1901,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let voiceCommandsSection = buildVoiceCommandsSection()
         settingsBar.addArrangedSubview(voiceCommandsSection)
 
+        // Хранение истории: авто-удаление старых записей.
+        let retentionSection = buildRetentionSettingsSection()
+        settingsBar.addArrangedSubview(retentionSection)
+
         // Group: Нейросетевые функции (LLM + VA + Selection Translator + Quick Preset).
         settingsBar.addArrangedSubview(makeCategoryHeader(text: "Нейросетевые функции"))
         settingsBar.addArrangedSubview(llmSection)

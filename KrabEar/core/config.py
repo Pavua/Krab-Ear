@@ -1050,4 +1050,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Исключает задержку 1–3 с на первой диктовке (cold-start model load).
     # Opt-out: выставить в False чтобы отложить загрузку до первой реальной записи.
     "stt_warmup_on_startup": True,
+    # --- Scheduled auto-purge of old history entries ---
+    # Opt-in: False по умолчанию — безопасная дефолтная политика.
+    # При включении записи старше auto_purge_retention_days дней
+    # автоматически удаляются каждые auto_purge_check_interval_hours часов.
+    "auto_purge_enabled": False,
+    "auto_purge_retention_days": 90,
+    "auto_purge_check_interval_hours": 24,
 }

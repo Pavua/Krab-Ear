@@ -673,6 +673,9 @@ extension HistoryPanelController {
         // Section 9 — Голосовые команды (включить/строгий режим + справочник)
         let s9 = cdBuildVoiceCommandsSection()
 
+        // Section 10 — Хранение истории (авто-удаление старых записей)
+        let s10 = cdBuildRetentionSettingsSection()
+
         settingsBarCD.removeFromSuperview()
         settingsBarCD = NSStackView()
         settingsBarCD.orientation = .vertical
@@ -684,7 +687,7 @@ extension HistoryPanelController {
         // сразу, без скролла на длинный список секций.
         settingsBarCD.addArrangedSubview(buildDictationHeroCard())
 
-        for s in [s1, s2, s3, s4, s5, s6, s7, s8, s9] {
+        for s in [s1, s2, s3, s4, s5, s6, s7, s8, s9, s10] {
             settingsBarCD.addArrangedSubview(s)
         }
     }

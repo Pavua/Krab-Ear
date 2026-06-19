@@ -66,6 +66,11 @@ _RANGE_FIELDS: dict[str, tuple[Any, Any, Any, type]] = {
     # held _post_lock for the full duration, blocking all concurrent LLM calls.
     # Belt-and-suspenders: _timeout property also caps at 300.0.
     "llm_timeout_sec": (1.0, 300.0, 45.0, float),
+    # Scheduled auto-purge (wave-34 lesson: clamp tunables to prevent CPU-spin).
+    # auto_purge_retention_days: 1 day minimum, 10 years maximum.
+    "auto_purge_retention_days": (1, 3650, 90, int),
+    # auto_purge_check_interval_hours: 1 hour minimum, 1 week maximum.
+    "auto_purge_check_interval_hours": (1, 168, 24, int),
 }
 
 # Bool-поля с дефолтными значениями

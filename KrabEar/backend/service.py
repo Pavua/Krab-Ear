@@ -118,6 +118,7 @@ from backend.shutdown_handler import GracefulShutdownHandler
 from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
 from backend.email_sender import EmailSender
 from backend.recap_scheduler import RecapScheduler
+from backend.purge_scheduler import PurgeScheduler
 from backend.paste_app_memory import PasteAppMemory
 from backend.telegram_bridge import TelegramBridge
 from backend.disk_monitor import DiskSpaceMonitor
@@ -552,6 +553,16 @@ class BackendService:
             if not old_enabled and new_enabled:
                 self._recap_scheduler.start()
         self._settings_svc.register_after_save_hook(_on_recap_enabled)
+
+        # Scheduled auto-purge: periodically delete history entries older than
+        # auto_purge_retention_days days when auto_purge_enabled=True.
+        # purge_fn delegates directly to HistoryService.cleanup_old_history_days
+        # so both the IPC handler and the scheduler share one implementation.
+        self._purge_scheduler = PurgeScheduler(
+            settings_get=self._get_runtime_setting,
+            purge_fn=self._history.cleanup_old_history_days,
+        )
+        self._purge_scheduler.start()
 
         self._quality_trends = QualityTrendAnalyzer()
         self._activity_calendar = ActivityCalendar()
@@ -1365,6 +1376,14 @@ class BackendService:
                 recap_scheduler.stop()
             except Exception:
                 logger.exception("RecapScheduler.stop() raised during close()")
+
+        # Stop PurgeScheduler daemon thread — mirrors the RecapScheduler stop above.
+        purge_scheduler = getattr(self, "_purge_scheduler", None)
+        if purge_scheduler is not None:
+            try:
+                purge_scheduler.stop()
+            except Exception:
+                logger.exception("PurgeScheduler.stop() raised during close()")
 
     # ------------------------------------------------------------------ #
     # Backwards-compatible proxy properties for Wave 172 migration         #

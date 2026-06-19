@@ -98,6 +98,9 @@ struct AgentSettings {
     // Voice Commands (dictation post-processing layer)
     var voiceCommandsEnabled: Bool
     var voiceCommandsStrictMode: Bool
+    // Scheduled auto-purge of old history entries
+    var autoPurgeEnabled: Bool
+    var autoPurgeRetentionDays: Int
 
     static let `default` = AgentSettings(
         mode: "headless",
@@ -150,7 +153,9 @@ struct AgentSettings {
         quickEditTimeoutSec: 5.0,
         privacyModeEnabled: false,
         voiceCommandsEnabled: true,
-        voiceCommandsStrictMode: true
+        voiceCommandsStrictMode: true,
+        autoPurgeEnabled: false,
+        autoPurgeRetentionDays: 90
     )
 
     init(from payload: [String: Any]) {
@@ -226,6 +231,8 @@ struct AgentSettings {
         self.privacyModeEnabled = (payload["privacy_mode_enabled"] as? Bool) ?? Self.default.privacyModeEnabled
         self.voiceCommandsEnabled = (payload["voice_commands_enabled"] as? Bool) ?? Self.default.voiceCommandsEnabled
         self.voiceCommandsStrictMode = (payload["voice_commands_strict_mode"] as? Bool) ?? Self.default.voiceCommandsStrictMode
+        self.autoPurgeEnabled = (payload["auto_purge_enabled"] as? Bool) ?? Self.default.autoPurgeEnabled
+        self.autoPurgeRetentionDays = (payload["auto_purge_retention_days"] as? Int) ?? Self.default.autoPurgeRetentionDays
     }
 
     init(
@@ -276,7 +283,9 @@ struct AgentSettings {
         quickEditTimeoutSec: Double,
         privacyModeEnabled: Bool = false,
         voiceCommandsEnabled: Bool = true,
-        voiceCommandsStrictMode: Bool = true
+        voiceCommandsStrictMode: Bool = true,
+        autoPurgeEnabled: Bool = false,
+        autoPurgeRetentionDays: Int = 90
     ) {
         self.mode = mode
         self.showDockIcon = showDockIcon
@@ -326,6 +335,8 @@ struct AgentSettings {
         self.privacyModeEnabled = privacyModeEnabled
         self.voiceCommandsEnabled = voiceCommandsEnabled
         self.voiceCommandsStrictMode = voiceCommandsStrictMode
+        self.autoPurgeEnabled = autoPurgeEnabled
+        self.autoPurgeRetentionDays = autoPurgeRetentionDays
     }
 
     func toPayload() -> [String: Any] {
@@ -378,6 +389,8 @@ struct AgentSettings {
             "privacy_mode_enabled": privacyModeEnabled,
             "voice_commands_enabled": voiceCommandsEnabled,
             "voice_commands_strict_mode": voiceCommandsStrictMode,
+            "auto_purge_enabled": autoPurgeEnabled,
+            "auto_purge_retention_days": autoPurgeRetentionDays,
         ]
     }
 }
