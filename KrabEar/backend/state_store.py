@@ -95,7 +95,98 @@ class StateStore:
         # конструктор StateStore, который вызывается при каждом старте backend-а
         # до того, как lock-файл вообще прочитан.
         self._active_ids: set[str] | None = None
+
+        # Шифрование истории (per-line AES-256-GCM).
+        # Инициализируется лениво при первом обращении к _history_crypto_unlocked().
+        # None означает "ещё не инициализировано", что отличается от "не доступно"
+        # (для последнего используем False-sentinel после первой попытки).
+        self._history_crypto_initialized: bool = False
+        self._history_crypto_instance = None  # HistoryCrypto | None
+
         # Phase B.2 — error_bus late-injection
+
+    def _get_history_crypto(self):
+        """Возвращает ``HistoryCrypto`` или ``None`` (ленивая инициализация).
+
+        Инициализируется один раз при первом вызове.  Если шифрование
+        отключено в настройках или Keychain недоступен — возвращает None.
+
+        🔴 Вызывается из _maybe_encrypt/_maybe_decrypt, которые в свою очередь
+        вызываются из _append_history_ndjson/_read_history_ndjson_unlocked, уже
+        работающих под _lock().  Поэтому load_settings() (которая захватывает
+        тот же lock) здесь вызвать нельзя — deadlock.  Вместо этого читаем
+        settings.json напрямую без блокировки (atomic read, файл маленький).
+        """
+        if not self._history_crypto_initialized:
+            self._history_crypto_initialized = True
+            try:
+                enabled = self._read_encryption_flag_unlocked()
+                if enabled:
+                    from backend.history_crypto import build_history_crypto
+                    self._history_crypto_instance = build_history_crypto()
+                # else: None — default off, no-op
+            except Exception:
+                logger.exception("StateStore: ошибка инициализации history crypto")
+        return self._history_crypto_instance
+
+    def _read_encryption_flag_unlocked(self) -> bool:
+        """Читает флаг history_encryption_enabled из settings.json без захвата lock.
+
+        Используется только из _get_history_crypto() (вызывается под lock).
+        Безопасно: settings.json пишется атомарно через tmp + replace,
+        поэтому неполные записи не встречаются.
+        """
+        try:
+            if not self.settings_path.exists():
+                return False
+            payload = safe_json_loads(
+                self.settings_path.read_text(encoding="utf-8"),
+                default=None,
+                context="settings.json (encryption flag check)",
+            )
+            if isinstance(payload, dict):
+                return bool(payload.get("history_encryption_enabled", False))
+        except Exception:
+            logger.exception("StateStore._read_encryption_flag_unlocked: ошибка чтения")
+        return False
+
+    def _maybe_encrypt(self, json_str: str) -> str:
+        """Шифрует строку JSON если шифрование включено и доступно.
+
+        Если шифрование выключено или HistoryCrypto недоступен — возвращает
+        json_str без изменений (поведение по умолчанию, байт-идентично текущему).
+        """
+        crypto = self._get_history_crypto()
+        if crypto is None:
+            return json_str
+        try:
+            return crypto.encrypt_line(json_str)
+        except Exception:
+            logger.exception("StateStore._maybe_encrypt: ошибка шифрования, пишем plaintext")
+            return json_str
+
+    def _maybe_decrypt(self, raw_line: str) -> str:
+        """Дешифрует строку если она зашифрована (определяется по SENTINEL).
+
+        Plaintext строки проходят без изменений — это обеспечивает
+        безопасное сосуществование открытых и зашифрованных записей в одном файле.
+        """
+        from backend.history_crypto import HistoryCrypto
+        if not HistoryCrypto.is_encrypted(raw_line):
+            return raw_line
+        crypto = self._get_history_crypto()
+        if crypto is None:
+            # Ключ недоступен — не можем расшифровать
+            logger.error(
+                "StateStore._maybe_decrypt: зашифрованная строка найдена, "
+                "но crypto недоступен — строка пропущена"
+            )
+            return ""  # пустая строка → safe_json_loads вернёт None → строка пропущена
+        try:
+            return crypto.decrypt_line(raw_line)
+        except Exception:
+            logger.exception("StateStore._maybe_decrypt: ошибка расшифровки — строка пропущена")
+            return ""  # аналогично
 
     def _push_error(self, code: str, message_debug: str, severity: str | None = None) -> None:
         """Push KrabError to attached ErrorBus if available. Late-injected attribute."""
@@ -275,7 +366,7 @@ class StateStore:
         )
         try:
             with self._lock():
-                self._append_ndjson(self.history_path, item.to_dict())
+                self._append_history_ndjson(item.to_dict())
                 # D1 (wave-35): keep in-memory id set consistent after write.
                 if self._active_ids is not None:
                     self._active_ids.add(item.id)
@@ -351,7 +442,7 @@ class StateStore:
         with self._lock():
             if not self._id_exists_unlocked(clean_id):
                 return False
-            self._append_ndjson(self.tombstones_path, {"id": clean_id})
+            self._append_tombstone_ndjson({"id": clean_id})
             # D1 (wave-35): keep in-memory id set consistent after tombstone.
             if self._active_ids is not None:
                 self._active_ids.discard(clean_id)
@@ -692,7 +783,7 @@ class StateStore:
                     skipped += 1
                     continue
 
-                self._append_ndjson(self.history_path, item.to_dict())
+                self._append_history_ndjson(item.to_dict())
                 known_ids.add(item.id)
                 # D1 (wave-36 LOW): keep in-memory id set consistent with items
                 # added via import so that subsequent set_paste_status calls on
@@ -1133,16 +1224,10 @@ class StateStore:
         _active_ids = {item.id for item in active}
         _all_ids: set[str] = set()
         try:
-            for line in self.tombstones_path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line:
-                    import json as _jj
-                    try:
-                        obj = _jj.loads(line)
-                        if isinstance(obj, dict) and obj.get("id"):
-                            _all_ids.add(obj["id"])
-                    except Exception:
-                        pass
+            for payload in self._read_history_ndjson_unlocked(self.tombstones_path):
+                item_id = str(payload.get("id", "")).strip()
+                if item_id:
+                    _all_ids.add(item_id)
         except Exception:
             pass
         _tombstoned_ids = _all_ids - _active_ids
@@ -1153,7 +1238,8 @@ class StateStore:
         try:
             with tmp_history.open("w", encoding="utf-8") as fh:
                 for item in active:
-                    fh.write(json.dumps(item.to_dict(), ensure_ascii=False) + "\n")
+                    line = self._maybe_encrypt(json.dumps(item.to_dict(), ensure_ascii=False))
+                    fh.write(line + "\n")
                 fh.flush()
                 # W853 fix 1: fsync before the atomic rename so the data is
                 # guaranteed to be on disk if a crash occurs during replace().
@@ -1467,11 +1553,17 @@ class StateStore:
         не воскрешает записи даже после компактирования.
         """
         deleted: set[str] = set()
-        for source_path in (self.tombstones_path, self.purged_ids_path):
-            for payload in self._read_ndjson_unlocked(source_path):
-                item_id = str(payload.get("id", "")).strip()
-                if item_id:
-                    deleted.add(item_id)
+        # tombstones_path использует шифрование (если включено) — читаем через
+        # _read_history_ndjson_unlocked, который применяет _maybe_decrypt.
+        # purged_ids_path никогда не шифруется (только ids, не PII).
+        for payload in self._read_history_ndjson_unlocked(self.tombstones_path):
+            item_id = str(payload.get("id", "")).strip()
+            if item_id:
+                deleted.add(item_id)
+        for payload in self._read_ndjson_unlocked(self.purged_ids_path):
+            item_id = str(payload.get("id", "")).strip()
+            if item_id:
+                deleted.add(item_id)
         return deleted
 
     def _load_status_overrides_unlocked(self) -> dict[str, str]:
@@ -1484,9 +1576,34 @@ class StateStore:
                 result[item_id] = status
         return result
 
+    def _read_history_ndjson_unlocked(self, path: Path) -> Iterator[dict[str, Any]]:
+        """Читает NDJSON-файл истории с опциональной расшифровкой строк.
+
+        Используется для history.ndjson и tombstones.ndjson, которые могут
+        содержать смесь открытых и зашифрованных строк.  Plaintext строки
+        проходят без изменений через ``_maybe_decrypt``.
+        """
+        if not path.exists():
+            return
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                raw = line.strip()
+                if not raw:
+                    continue
+                decrypted = self._maybe_decrypt(raw)
+                if not decrypted:
+                    # _maybe_decrypt вернул пустую строку → ошибка расшифровки,
+                    # строка уже залогирована → пропускаем.
+                    continue
+                payload = safe_json_loads(decrypted)
+                if payload is None:
+                    continue
+                if isinstance(payload, dict):
+                    yield payload
+
     def _iter_history_items_unlocked(self) -> Iterator[HistoryItem]:
-        """Итератор по основному журналу истории."""
-        for payload in self._read_ndjson_unlocked(self.history_path):
+        """Итератор по основному журналу истории (с расшифровкой если включено)."""
+        for payload in self._read_history_ndjson_unlocked(self.history_path):
             try:
                 item = HistoryItem.from_dict(payload)
             except Exception:
@@ -1504,6 +1621,28 @@ class StateStore:
         except ValueError:
             return 0
         return max(0, value)
+
+    def _append_history_ndjson(self, payload: dict[str, Any]) -> None:
+        """Append к history.ndjson с опциональным шифрованием строки.
+
+        Шифрование применяется к JSON-строке ДО передачи в _append_ndjson,
+        что позволяет тестам патчить _append_ndjson и перехватывать ошибки.
+        """
+        json_str = self._maybe_encrypt(json.dumps(payload, ensure_ascii=False))
+        self._append_ndjson_raw(self.history_path, json_str)
+
+    def _append_tombstone_ndjson(self, payload: dict[str, Any]) -> None:
+        """Append к tombstones с опциональным шифрованием строки."""
+        json_str = self._maybe_encrypt(json.dumps(payload, ensure_ascii=False))
+        self._append_ndjson_raw(self.tombstones_path, json_str)
+
+    @staticmethod
+    def _append_ndjson_raw(path: Path, line: str) -> None:
+        """Атомарный append уже готовой строки (без JSON-сериализации) с flush/fsync."""
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
 
     @staticmethod
     def _append_ndjson(path: Path, payload: dict[str, Any]) -> None:

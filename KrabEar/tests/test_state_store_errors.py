@@ -56,7 +56,13 @@ class StateStorePushErrorHelperTests(unittest.TestCase):
 
 
 class StateStoreWriteFailTests(unittest.TestCase):
-    """add_history_item pushes history.write_fail when _append_ndjson fails."""
+    """add_history_item pushes history.write_fail when _append_ndjson_raw fails.
+
+    Note: _append_history_ndjson (called by add_history_item) serialises + optionally
+    encrypts the payload, then delegates the actual file write to _append_ndjson_raw.
+    We patch _append_ndjson_raw because that is the single sink for ALL history writes
+    that goes through the new encrypted-write path.
+    """
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -65,8 +71,8 @@ class StateStoreWriteFailTests(unittest.TestCase):
         self.store._error_bus = MagicMock()
 
     def test_append_ndjson_failure_pushes_write_fail(self) -> None:
-        """When _append_ndjson raises (e.g. disk full), history.write_fail is pushed."""
-        with patch.object(StateStore, "_append_ndjson", side_effect=OSError("No space left on device")):
+        """When _append_ndjson_raw raises (e.g. disk full), history.write_fail is pushed."""
+        with patch.object(StateStore, "_append_ndjson_raw", side_effect=OSError("No space left on device")):
             with self.assertRaises(OSError):
                 self.store.add_history_item(text="test text")
 
@@ -77,7 +83,7 @@ class StateStoreWriteFailTests(unittest.TestCase):
 
     def test_permission_denied_pushes_write_fail(self) -> None:
         """PermissionError on write also triggers history.write_fail."""
-        with patch.object(StateStore, "_append_ndjson",
+        with patch.object(StateStore, "_append_ndjson_raw",
                           side_effect=PermissionError("Permission denied")):
             with self.assertRaises(PermissionError):
                 self.store.add_history_item(text="hello world")
@@ -93,7 +99,7 @@ class StateStoreWriteFailTests(unittest.TestCase):
 
     def test_write_fail_re_raises_after_push(self) -> None:
         """The exception is re-raised after pushing to error_bus (fail-loudly)."""
-        with patch.object(StateStore, "_append_ndjson", side_effect=OSError("ENOSPC")):
+        with patch.object(StateStore, "_append_ndjson_raw", side_effect=OSError("ENOSPC")):
             with self.assertRaises(OSError):
                 self.store.add_history_item(text="test")
 
@@ -107,7 +113,7 @@ class StateStoreWriteFailTests(unittest.TestCase):
         self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
         # No _error_bus
 
-        with patch.object(StateStore, "_append_ndjson", side_effect=OSError("disk full")):
+        with patch.object(StateStore, "_append_ndjson_raw", side_effect=OSError("disk full")):
             with self.assertRaises(OSError):
                 store.add_history_item(text="test")
 

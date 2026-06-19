@@ -43,5 +43,9 @@ flask-cors>=4.0.0
 # --- Sentry SDK for crash/error telemetry (no-op без DSN в settings) ---
 sentry-sdk>=2.0,<3.0
 
+# --- Per-line AES-256-GCM encryption of history.ndjson (history_encryption_enabled) ---
+# Ships abi3 wheel (cp311-abi3): installs on py3.12 (CI) AND py3.14 (dev) without Rust build.
+cryptography>=42,<50
+
 # --- Test parallelization (CI speedup via -n auto) ---
 pytest-xdist>=3.5
