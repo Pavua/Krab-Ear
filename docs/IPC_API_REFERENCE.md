@@ -869,6 +869,7 @@ Returns: `{profiles: [{name, description}, ...]}`
 | `list_audio_inputs` | Список аудиовходов для GUI пикера |
 | `get_audio_devices` | Список аудиоустройств с деталями |
 | `test_microphone` | Тест микрофона: RMS/peak |
+| `check_mic_noise` | Pre-flight: RMS/peak + профиль фонового шума |
 | `analyze_audio_quality` | Pre-flight анализ качества аудиофайла |
 | `analyze_silence` | Обнаружение тишины в аудиофайле |
 | `get_audio_info` | Метаданные аудиофайла |
@@ -893,7 +894,15 @@ Returns: `{devices: [{index, name, channels, sample_rate, default}, ...]}`
 *(service.py)*  
 Записывает короткий фрагмент аудио и возвращает RMS/peak уровни.  
 Params: `{duration_sec?}` (default 2.0)  
-Returns: `{rms, peak, ok}`
+Returns: `{rms, peak, ok}`  
+Throttle: heavy (≤5/min — синхронная запись на IPC-треде).
+
+### `check_mic_noise`
+*(service.py → core.NoiseProfiler)*  
+Pre-flight проверка микрофона: записывает короткий фрагмент и профилирует фоновый шум (надмножество `test_microphone`; `NoiseProfiler.profile()` по in-memory массиву, без временного файла).  
+Params: `{duration_sec?}` (default 2.0, clamp ≤5.0)  
+Returns: `{ok, rms, peak, noise: {noise_type, noise_level_db, snr_db, frequency_profile, recommendations, suitable_for_stt}, devices}`  
+Throttle: heavy (≤5/min — запись + FFT на IPC-треде).
 
 ### `analyze_audio_quality`
 *(audio_analytics_service.py)*  
