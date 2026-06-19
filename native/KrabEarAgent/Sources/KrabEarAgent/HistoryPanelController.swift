@@ -1905,6 +1905,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let retentionSection = buildRetentionSettingsSection()
         settingsBar.addArrangedSubview(retentionSection)
 
+        // Безопасность: шифрование истории на диске (AES-256-GCM, Keychain).
+        let securitySection = buildSecuritySettingsSection()
+        settingsBar.addArrangedSubview(securitySection)
+
         // Group: Нейросетевые функции (LLM + VA + Selection Translator + Quick Preset).
         settingsBar.addArrangedSubview(makeCategoryHeader(text: "Нейросетевые функции"))
         settingsBar.addArrangedSubview(llmSection)

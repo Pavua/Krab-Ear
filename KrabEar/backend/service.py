@@ -1932,6 +1932,9 @@ class BackendService:
             # --- Auto-Glossary IPC (W1104) ---
             "get_auto_glossary": self._handle_get_auto_glossary,  # W1104: возвращает текущий auto-glossary из кэша
             "refresh_auto_glossary": self._handle_refresh_auto_glossary,  # W1104: принудительно пересчитывает auto-glossary
+            # --- Шифрование истории (Chunk 2) ---
+            "set_history_encryption": self._handle_set_history_encryption,  # включить/выключить AES-256-GCM шифрование NDJSON-истории
+            "get_encryption_status": self._handle_get_encryption_status,  # статус шифрования: enabled + available (наличие Keychain)
         }
 
     def handle_request(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -4170,6 +4173,60 @@ class BackendService:
         file_path.write_text(ical_content, encoding="utf-8")
 
         return {"path": str(file_path), "blocks": len(blocks)}
+
+    # ------------------------------------------------------------------
+    # Шифрование истории (Chunk 2)
+    # ------------------------------------------------------------------
+
+    def _handle_get_encryption_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает статус шифрования истории.
+
+        Returns:
+            {"ok": True, "enabled": bool, "available": bool}
+
+        ``available`` — True когда macOS Keychain доступен (``security`` CLI есть).
+        Не создаёт ключ. Нет privacy gate (конфигурация, не данные транскрипций).
+        """
+        from backend.crypto_keystore import keychain_available
+        enabled = bool(self._settings_svc.cached_settings().get("history_encryption_enabled", False))
+        available = keychain_available()
+        return {"ok": True, "enabled": enabled, "available": available}
+
+    def _handle_set_history_encryption(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Включает или выключает AES-256-GCM шифрование NDJSON-истории.
+
+        params:
+            enabled: bool — True чтобы включить, False чтобы выключить.
+
+        При включении: проверяет доступность Keychain через
+        ``build_history_crypto()``; если недоступен — отказывает без изменения
+        настроек и возвращает ``{"ok": False, "error": "keychain_unavailable"}``.
+        При выключении: сразу сохраняет настройку (ключ из Keychain не удаляется).
+
+        Returns:
+            {"ok": True, "enabled": bool, "available": True}
+            или
+            {"ok": False, "error": "keychain_unavailable", "enabled": bool}
+        """
+        enabled = bool(params.get("enabled", False))
+
+        if enabled:
+            from backend.history_crypto import build_history_crypto
+            crypto = build_history_crypto()
+            if crypto is None:
+                current = bool(
+                    self._settings_svc.cached_settings().get("history_encryption_enabled", False)
+                )
+                return {
+                    "ok": False,
+                    "error": "keychain_unavailable",
+                    "enabled": current,
+                }
+
+        result = self._settings_svc.handle_set_settings({"history_encryption_enabled": enabled})
+        if not result.get("ok", True):
+            return result
+        return {"ok": True, "enabled": enabled, "available": True}
 
 
 # W1768: inline-дубликат IPCServer-класса УДАЛЁН. Каноничный, закалённый класс

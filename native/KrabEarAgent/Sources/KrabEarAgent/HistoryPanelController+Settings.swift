@@ -499,6 +499,9 @@ extension HistoryPanelController {
         privacyModeButton.state = settings.privacyModeEnabled ? .on : .off
         syncVoiceCommandsToggles(enabled: settings.voiceCommandsEnabled, strictMode: settings.voiceCommandsStrictMode)
         syncRetentionSettings(enabled: settings.autoPurgeEnabled, retentionDays: settings.autoPurgeRetentionDays)
+        // Статус шифрования получаем из backend напрямую (не из AgentSettings),
+        // потому что available зависит от состояния Keychain, а не только от флага.
+        loadEncryptionStatus()
         (NSApp.delegate as? AgentAppDelegate)?.setPrivacyMode(settings.privacyModeEnabled)
         startSoundButton.state = settings.playStartSound ? .on : .off
         realtimePreviewButton.state = settings.realtimePreviewEnabled ? .on : .off
