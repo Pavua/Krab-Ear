@@ -426,6 +426,9 @@ struct HistoryItem {
     let translationStatus: String
     /// Уверенность STT: 0.0–1.0, nil если метаданные отсутствуют (например импорт без анализа).
     let confidence: Double?
+    /// Длительность аудио в секундах (живые записи и импорты); nil если неизвестна.
+    /// Нужна для «Темп речи» (analyze_speech_pace требует duration_sec).
+    let audioDurationSec: Double?
     /// Извлечённые LLM-ом задачи (PR #289). Пусто если ещё не запускали extract.
     let actionItems: [ActionItem]
     /// Извлечённые решения (строки).
@@ -457,6 +460,14 @@ struct HistoryItem {
             self.confidence = Double(c)
         } else {
             self.confidence = nil
+        }
+        // audio_duration_sec может прийти Double или Float (JSONSerialization), либо null.
+        if let d = payload["audio_duration_sec"] as? Double {
+            self.audioDurationSec = d
+        } else if let d = payload["audio_duration_sec"] as? Float {
+            self.audioDurationSec = Double(d)
+        } else {
+            self.audioDurationSec = nil
         }
         // Action items / decisions / questions (PR #289 backend, опциональные поля).
         // Пустой массив вместо nil — упрощает UI код (.isEmpty всегда работает).

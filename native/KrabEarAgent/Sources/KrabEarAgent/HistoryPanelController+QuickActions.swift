@@ -57,6 +57,17 @@ extension HistoryPanelController {
         }
         submenu.addItem(translateItem)
 
+        let paceItem = NSMenuItem(
+            title: "Темп речи",
+            action: #selector(onQuickSpeechPace),
+            keyEquivalent: ""
+        )
+        paceItem.target = self
+        if let icon = NSImage(systemSymbolName: "speedometer", accessibilityDescription: nil) {
+            paceItem.image = icon
+        }
+        submenu.addItem(paceItem)
+
         let telegramItem = NSMenuItem(
             title: "Отправить в Telegram",
             action: #selector(onQuickSendTelegram),
@@ -217,7 +228,87 @@ extension HistoryPanelController {
         presentAlertSheet(alert, for: self.window) { _ in }
     }
 
-    // MARK: - 3. Отправить в Telegram
+    // MARK: - 3. Темп речи
+
+    @objc func onQuickSpeechPace() {
+        guard let item = selectedSingleItem() else { return }
+        let text = item.text
+        guard !text.isEmpty else {
+            showInfoAlert(title: "Темп речи", body: "Запись не содержит текста.")
+            return
+        }
+        // analyze_speech_pace требует duration_sec; без длительности WPM посчитать нельзя.
+        guard let duration = item.audioDurationSec, duration > 0 else {
+            showInfoAlert(
+                title: "Темп речи",
+                body: "Для этой записи неизвестна длительность аудио — темп посчитать нельзя."
+            )
+            return
+        }
+        let ipcClient = self.ipcClient
+
+        // AGENT-3: IPC строго off-main.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                nonisolated(unsafe) let response = try ipcClient.call(
+                    method: "analyze_speech_pace",
+                    params: ["text": text, "duration_sec": duration]
+                )
+                nonisolated(unsafe) let result = response["result"] as? [String: Any] ?? [:]
+                DispatchQueue.main.async {
+                    self?.presentSpeechPaceResult(result)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self?.showInfoAlert(
+                        title: "Темп речи",
+                        body: "Ошибка IPC: \(error.localizedDescription)"
+                    )
+                }
+            }
+        }
+    }
+
+    private func presentSpeechPaceResult(_ result: [String: Any]) {
+        if let err = result["error"] as? String, !err.isEmpty {
+            showInfoAlert(title: "Темп речи", body: err)
+            return
+        }
+        let wpm = result["words_per_minute"] as? Double ?? 0.0
+        let cpm = result["chars_per_minute"] as? Double ?? 0.0
+        let category = result["pace_category"] as? String ?? ""
+        let readingSec = result["estimated_reading_time_sec"] as? Double ?? 0.0
+        let wordCount = result["word_count"] as? Int ?? 0
+        let durationSec = result["duration_sec"] as? Double ?? 0.0
+
+        let categoryRU: String
+        switch category {
+        case "slow": categoryRU = "медленный"
+        case "normal": categoryRU = "обычный"
+        case "fast": categoryRU = "быстрый"
+        case "very_fast": categoryRU = "очень быстрый"
+        default: categoryRU = category.isEmpty ? "—" : category
+        }
+
+        let body = """
+        Темп: \(categoryRU)
+        Слов в минуту: \(Int(wpm.rounded()))
+        Символов в минуту: \(Int(cpm.rounded()))
+
+        Слов: \(wordCount)
+        Длительность: \(HistoryPanelController.formatDuration(durationSec))
+        Время чтения вслух: \(HistoryPanelController.formatDuration(readingSec))
+        """
+
+        let alert = NSAlert()
+        alert.messageText = "Темп речи"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.informativeText = body
+        presentAlertSheet(alert, for: self.window) { _ in }
+    }
+
+    // MARK: - 4. Отправить в Telegram
 
     @objc func onQuickSendTelegram() {
         guard let item = selectedSingleItem() else { return }
@@ -357,6 +448,7 @@ extension HistoryPanelController: NSMenuItemValidation {
         let singleSelectionSelectors: [Selector] = [
             #selector(onQuickSummary),
             #selector(onQuickTranslate),
+            #selector(onQuickSpeechPace),
             #selector(onQuickSendTelegram),
             #selector(onOpenMeeting),
         ]
