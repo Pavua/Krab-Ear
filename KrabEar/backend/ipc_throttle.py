@@ -71,6 +71,13 @@ HEAVY_METHODS: Set[str] = {
     # спамить вызовы и насыщать I/O scheduler. Переводим в heavy-bucket (≤5/min).
     # 30s in-process cache внутри DiskSpaceMonitor дополнительно снижает I/O нагрузку.
     "get_disk_status",          # рекурсивный walk data_dir (transcripts/, history.ndjson)
+    # mic DoS: test_microphone и check_mic_noise синхронно пишут аудио (sd.rec /
+    # sd.wait, до 5с) ПРЯМО на IPC reader-треде → блокируют ВЕСЬ IPC на длительность
+    # записи. check_mic_noise дополнительно гоняет NoiseProfiler FFT. Паритет с
+    # transcribe_paths / get_disk_status (та же категория «блокирующая операция на
+    # IPC-треде»). В light-bucket (120/min) спам блокировал бы socket; heavy = ≤5/min.
+    "test_microphone",          # синхронная запись 2-5с на IPC-треде (RMS/peak)
+    "check_mic_noise",          # запись + NoiseProfiler FFT на IPC-треде
 }
 
 MEDIUM_METHODS: Set[str] = {

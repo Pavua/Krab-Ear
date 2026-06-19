@@ -54,6 +54,15 @@ class TestIPCThrottleW1189HeavyMethods(unittest.TestCase):
     def test_generate_html_report_classified_heavy(self) -> None:
         self.assertEqual(_classify_method("generate_html_report"), "heavy")
 
+    def test_mic_handlers_in_heavy_set(self) -> None:
+        # mic DoS: оба синхронно пишут аудио на IPC reader-треде (блокируют socket).
+        self.assertIn("test_microphone", HEAVY_METHODS)
+        self.assertIn("check_mic_noise", HEAVY_METHODS)
+
+    def test_mic_handlers_classified_heavy(self) -> None:
+        self.assertEqual(_classify_method("test_microphone"), "heavy")
+        self.assertEqual(_classify_method("check_mic_noise"), "heavy")
+
 
 class TestIPCThrottleW1189MediumMethods(unittest.TestCase):
     """get_timeline_view, generate_stats_report, get_sentiment_trends, semantic_search → medium."""
