@@ -1832,6 +1832,27 @@ class BackendServiceInitTestCase(unittest.TestCase):
             {"id": request_id, "method": method, "params": params or {}}
         )
 
+    def test_check_mic_noise_returns_profile(self):
+        """check_mic_noise: RMS/peak + вложенный профиль шума под ключом noise.
+
+        sd.rec замокан на np.zeros (тишина) → NoiseProfiler отрабатывает по
+        in-memory массиву без временного файла и без реального микрофона.
+        """
+        resp = self.request("check_mic_noise", {"duration_sec": 1})
+        self.assertTrue(resp.get("ok"), msg=f"ожидали ok=True, получили {resp}")
+        result = resp.get("result", {})
+        self.assertTrue(result.get("ok"))
+        self.assertIn("rms", result)
+        self.assertIn("peak", result)
+        # Профиль шума вложен под "noise" со всеми полями NoiseProfile.to_dict().
+        noise = result.get("noise")
+        self.assertIsInstance(noise, dict)
+        for key in ("noise_type", "noise_level_db", "snr_db",
+                    "frequency_profile", "recommendations", "suitable_for_stt"):
+            self.assertIn(key, noise, msg=f"поле {key} отсутствует в noise")
+        self.assertIsInstance(noise["suitable_for_stt"], bool)
+        self.assertIsInstance(noise["recommendations"], list)
+
     def test_dispatch_table_has_all_methods(self):
         """Все IPC-методы присутствуют в таблице диспетчеризации."""
         # Собираем список доступных методов через ping + unknown probe

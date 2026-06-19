@@ -1658,6 +1658,7 @@ class BackendService:
             "cleanup_stale_app_profiles": self._paste_app_memory.handle_cleanup_stale_app_profiles,  # удалить устаревшие записи
             "get_audio_devices": self._handle_get_audio_devices,  # список доступных аудиовходов для GUI
             "test_microphone": self._handle_test_microphone,  # тест микрофона: RMS/peak уровни
+            "check_mic_noise": self._handle_check_mic_noise,  # pre-flight: RMS/peak + профиль шума (noise_type/SNR/STT-пригодность)
             "get_disk_status": self._handle_get_disk_status,  # статус дискового пространства (HEAVY: recursive walk data_dir, wave-33)
             "get_storage_breakdown": self._handle_get_storage_breakdown,  # разбивка использования диска по компонентам
             "auto_summarize_batch": self._history.handle_auto_summarize_batch,  # авто-резюме пакета транскрипций через LLM
@@ -3319,6 +3320,50 @@ class BackendService:
             }
         except Exception as exc:
             logger.warning("test_microphone: ошибка записи — %s", exc)
+            return {
+                "ok": False,
+                "error": str(exc),
+                "devices": self._recording_core_svc._list_audio_inputs(),
+            }
+
+    def _handle_check_mic_noise(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Pre-flight проверка микрофона: записывает короткий фрагмент и
+        профилирует фоновый шум ДО реальной записи.
+
+        Возвращает RMS/peak (как test_microphone) плюс вложенный профиль шума
+        под ключом ``noise``: noise_type, noise_level_db, snr_db,
+        frequency_profile, recommendations, suitable_for_stt.
+
+        Переиспользует тот же механизм записи, что и test_microphone, и
+        core.NoiseProfiler (работает по in-memory массиву — без временного файла).
+        Шум — это окружающие метаданные, не производный от транскрипта контент,
+        поэтому privacy-gate не нужен (как и у test_microphone).
+        """
+        import numpy as np
+        duration = min(float(params.get("duration_sec", 2.0)), 5.0)
+        try:
+            import sounddevice as sd  # type: ignore
+            sample_rate = 16000
+            frames = int(duration * sample_rate)
+            audio_data = sd.rec(frames, samplerate=sample_rate, channels=1, dtype="float32")
+            sd.wait()
+            audio_flat = audio_data.flatten()
+            rms = float(np.sqrt(np.mean(audio_flat ** 2)))
+            peak = float(np.max(np.abs(audio_flat)))
+
+            from core.noise_profiler import NoiseProfiler
+            noise = NoiseProfiler().profile(audio_flat, sample_rate).to_dict()
+
+            return {
+                "ok": True,
+                "duration_sec": duration,
+                "rms": round(rms, 6),
+                "peak": round(peak, 6),
+                "noise": noise,
+                "devices": self._recording_core_svc._list_audio_inputs(),
+            }
+        except Exception as exc:
+            logger.warning("check_mic_noise: ошибка записи/профилирования — %s", exc)
             return {
                 "ok": False,
                 "error": str(exc),

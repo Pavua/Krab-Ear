@@ -169,7 +169,9 @@ extension HistoryPanelController {
         micTestResultLabel.textColor = KrabEarTheme.Colors.textSecondary
         let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let response = try? ipcClient.call(method: "test_microphone", params: ["duration_sec": 2]),
+            // check_mic_noise — надмножество test_microphone: те же rms/peak ПЛЮС
+            // профиль фонового шума (тип/SNR/пригодность для STT) до записи.
+            guard let response = try? ipcClient.call(method: "check_mic_noise", params: ["duration_sec": 2]),
                   let result = response["result"] as? [String: Any] else {
                 DispatchQueue.main.async {
                     guard let self = self else { return }
@@ -181,12 +183,56 @@ extension HistoryPanelController {
             let rms = result["rms"] as? Double ?? 0
             let peak = result["peak"] as? Double ?? 0
             let status = rms > 0.01 ? "OK" : "Тихо"
+            // Многострочный отчёт о шуме (форматирование не трогает UI → можно на global).
+            let noiseReport = HistoryPanelController.formatMicNoiseReport(result, rms: rms, peak: peak, status: status)
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.micTestResultLabel.stringValue = String(format: "RMS: %.3f | Peak: %.3f | %@", rms, peak, status)
                 self.micTestResultLabel.textColor = rms > 0.01 ? KrabEarTheme.Colors.accent : KrabEarTheme.Colors.warning
+                if let noiseReport = noiseReport {
+                    self.showDiagnosticsOutput(noiseReport)
+                }
             }
         }
+    }
+
+    /// Собирает многострочный отчёт «Проверка микрофона» из ответа check_mic_noise.
+    /// Возвращает nil, если профиль шума отсутствует (нечего показывать).
+    nonisolated static func formatMicNoiseReport(
+        _ result: [String: Any], rms: Double, peak: Double, status: String
+    ) -> String? {
+        guard let noise = result["noise"] as? [String: Any] else { return nil }
+
+        let noiseTypeRU: [String: String] = [
+            "quiet": "тихо", "office": "офис", "street": "улица",
+            "music": "музыка", "crowd": "толпа",
+        ]
+        let freqRU: [String: String] = [
+            "low_frequency": "низкочастотный", "broadband": "широкополосный",
+            "high_frequency": "высокочастотный",
+        ]
+
+        let noiseType = noise["noise_type"] as? String ?? ""
+        let noiseLevel = noise["noise_level_db"] as? Double ?? 0
+        let snr = noise["snr_db"] as? Double ?? 0
+        let freq = noise["frequency_profile"] as? String ?? ""
+        let suitable = noise["suitable_for_stt"] as? Bool ?? false
+        let recommendations = noise["recommendations"] as? [String] ?? []
+
+        var lines: [String] = ["=== Проверка микрофона ==="]
+        lines.append(String(format: "RMS: %.3f | Peak: %.3f | %@", rms, peak, status))
+        lines.append("Тип шума: \(noiseTypeRU[noiseType] ?? noiseType)")
+        lines.append(String(format: "Уровень шума: %.1f dBFS", noiseLevel))
+        lines.append(String(format: "SNR: %.1f dB", snr))
+        lines.append("Профиль частот: \(freqRU[freq] ?? freq)")
+        lines.append("Пригодно для распознавания: \(suitable ? "Да ✓" : "Нет ✗")")
+        if !recommendations.isEmpty {
+            lines.append("Рекомендации:")
+            for rec in recommendations {
+                lines.append(" • \(rec)")
+            }
+        }
+        return lines.joined(separator: "\n")
     }
 
     // MARK: - Clipboard History handlers
