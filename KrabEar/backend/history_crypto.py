@@ -21,6 +21,7 @@ logger = logging.getLogger("KrabEar.Backend.HistoryCrypto")
 
 SENTINEL = "ENC1:"
 _NONCE_BYTES = 12
+_GCM_TAG_BYTES = 16  # AES-GCM tag — присутствует в каждом ciphertext
 
 
 class HistoryCrypto:
@@ -44,7 +45,8 @@ class HistoryCrypto:
             raise ValueError("Строка не является зашифрованной (отсутствует SENTINEL)")
         b64_part = token[len(SENTINEL):]
         raw = base64.b64decode(b64_part)
-        if len(raw) < _NONCE_BYTES:
+        if len(raw) < _NONCE_BYTES + _GCM_TAG_BYTES:
+            # Валидный GCM-токен = nonce(12) + ciphertext + tag(16) ≥ 28 байт.
             raise ValueError("Зашифрованные данные слишком коротки")
         nonce = raw[:_NONCE_BYTES]
         ct = raw[_NONCE_BYTES:]
@@ -69,7 +71,17 @@ def build_history_crypto() -> HistoryCrypto | None:
         key = get_or_create_history_key()
         return HistoryCrypto(key)
     except Exception as exc:
-        logger.warning(
+        # На платформе без Keychain (Linux CI) None — ожидаемая деградация (WARNING).
+        # Но если Keychain ДОСТУПЕН (macOS) и init всё равно упал — это реальный
+        # security-сбой (напр. отказ записи ключа) → ERROR, чтобы не выглядело
+        # как штатное «шифрование выкл».
+        try:
+            from backend.crypto_keystore import keychain_available
+            level = logging.ERROR if keychain_available() else logging.WARNING
+        except Exception:
+            level = logging.WARNING
+        logger.log(
+            level,
             "history_crypto: не удалось инициализировать шифрование: %s — "
             "история будет храниться в открытом виде",
             exc,

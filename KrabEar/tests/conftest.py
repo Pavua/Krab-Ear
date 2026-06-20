@@ -503,6 +503,36 @@ def _neutralize_sounddevice_hardware():
 
 
 @pytest.fixture(autouse=True)
+def _neutralize_keychain_security():
+    """Crypto-audit (2026-06-20): ни один тест не должен трогать РЕАЛЬНЫЙ macOS
+    Keychain через `security` CLI.
+
+    handle_purge_all_data теперь вызывает delete_history_key() (ротация ключа
+    шифрования при wipe).  Без этой нейтрализации каждый purge-тест на dev-macOS
+    удалял бы реальный ключ KrabEar из Keychain → история разработчика с
+    включённым шифрованием стала бы недешифруемой.
+
+    Хирургично: патчим subprocess.run глобально, но дивертим ТОЛЬКО команды
+    `security` → FileNotFoundError (которую _run_security оборачивает в
+    KeystoreUnavailable = «нет Keychain», как на ubuntu CI).  Любая другая
+    subprocess-команда проходит к реальному run.  Локальные patch(subprocess.run)
+    /patch(_run_security) в тестах самого keystore нестятся ПОВЕРХ и переопределяют
+    эту фикстуру, поэтому функцио­нальные тесты keystore не ломаются.
+    """
+    import subprocess as _sp
+    from unittest.mock import patch as _patch
+    _real_run = _sp.run
+
+    def _guarded_run(args, *a, **kw):
+        if isinstance(args, (list, tuple)) and args and args[0] == "security":
+            raise FileNotFoundError("security CLI нейтрализован в тестах (Keychain)")
+        return _real_run(args, *a, **kw)
+
+    with _patch("subprocess.run", side_effect=_guarded_run):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _purge_leaked_module_stubs():
     """Remove bare-stub and Mock entries from sys.modules after each test."""
     yield

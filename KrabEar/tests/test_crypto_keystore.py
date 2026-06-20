@@ -113,6 +113,18 @@ class TestGetOrCreateHistoryKey(unittest.TestCase):
             with self.assertRaises(KeystoreUnavailable):
                 get_or_create_history_key()
 
+    def test_store_failure_raises_keystore_unavailable(self) -> None:
+        """Crypto-audit (2026-06-20): если add-generic-password падает (rc!=0) —
+        НЕ возвращаем неперсистированный ключ, а райзим KeystoreUnavailable.
+        Иначе сессия зашифрует им историю, при рестарте ключ не найдётся →
+        новый ключ → потеря данных (недешифруемо)."""
+        from backend.crypto_keystore import get_or_create_history_key, KeystoreUnavailable
+        find_fail = _fail_result()
+        store_fail = _fail_result(45, "write denied (Keychain locked)")
+        with patch("backend.crypto_keystore._run_security", side_effect=[find_fail, store_fail]):
+            with self.assertRaises(KeystoreUnavailable):
+                get_or_create_history_key()
+
 
 class TestDeleteHistoryKey(unittest.TestCase):
     """delete_history_key: успех и игнор not-found."""
@@ -155,6 +167,26 @@ class TestKeystoreUnavailableOnLinux(unittest.TestCase):
         with patch("subprocess.run", side_effect=FileNotFoundError("not found")):
             with self.assertRaises(KeystoreUnavailable):
                 _run_security(["find-generic-password", "-s", "X"])
+
+    def test_timeout_wrapped(self) -> None:
+        """Crypto-audit (2026-06-20): subprocess.TimeoutExpired (заблокированный
+        Keychain показал модальный диалог) → KeystoreUnavailable, не висим вечно
+        на IPC reader-треде."""
+        import subprocess
+        from backend.crypto_keystore import KeystoreUnavailable, _run_security
+
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("security", 10)):
+            with self.assertRaises(KeystoreUnavailable):
+                _run_security(["find-generic-password", "-s", "X"])
+
+    def test_run_security_passes_timeout(self) -> None:
+        """_run_security передаёт timeout= в subprocess.run (защита от зависания)."""
+        from backend.crypto_keystore import _run_security
+
+        with patch("subprocess.run", return_value=_ok_result()) as mock_run:
+            _run_security(["find-generic-password", "-s", "X"])
+        self.assertIn("timeout", mock_run.call_args.kwargs)
+        self.assertEqual(mock_run.call_args.kwargs["timeout"], 10)
 
 
 if __name__ == "__main__":

@@ -2768,6 +2768,26 @@ class HistoryService:
                 logger.warning("purge_all_data: job_tracker.clear() не удался", exc_info=True)
                 secondary_errors.append("job_tracker")
 
+        # --- 37. Crypto-audit (2026-06-20): удалить ключ шифрования истории из Keychain.
+        # Без этого выживший AES-256 ключ расшифровывает pre-purge бэкап history.ndjson
+        # (Time Machine / iCloud / FS-снапшот) — ciphertext + живой ключ = весь текст.
+        # delete_history_key — no-op без Keychain (KeystoreUnavailable на Linux/CI → не
+        # ошибка purge). Сбрасываем ленивый крипто-кэш StateStore, чтобы следующая запись
+        # (если шифрование оставлено включённым) сгенерировала НОВЫЙ ключ.
+        try:
+            from backend.crypto_keystore import delete_history_key, KeystoreUnavailable
+            try:
+                delete_history_key()
+            except KeystoreUnavailable:
+                pass  # нет Keychain (Linux/CI) → ключа нет → нечего удалять
+            self.store._history_crypto_initialized = False
+            self.store._history_crypto_instance = None
+        except Exception:
+            logger.warning(
+                "purge_all_data: удаление ключа шифрования из Keychain не удалось", exc_info=True
+            )
+            secondary_errors.append("encryption_key")
+
         # --- C. W1734: Audit log entry ---
         try:
             from backend.privacy_audit import get_privacy_audit_logger

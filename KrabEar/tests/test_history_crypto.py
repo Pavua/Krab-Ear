@@ -107,6 +107,17 @@ class TestHistoryCryptoTamper(unittest.TestCase):
         with self.assertRaises(Exception):
             other_crypto.decrypt_line(token)
 
+    def test_short_token_below_min_payload_rejected(self) -> None:
+        """Crypto-audit (2026-06-20): токен с raw < nonce(12)+tag(16)=28 байт
+        отвергается явной ValueError (раньше граница была 12 → 13-27 байт
+        проходили проверку и падали глубже в InvalidTag, делая ветку мёртвой)."""
+        import base64
+
+        # 20 байт raw: больше старой границы (12), меньше валидного минимума (28)
+        short = SENTINEL + base64.b64encode(os.urandom(20)).decode("ascii")
+        with self.assertRaises(ValueError):
+            self.crypto.decrypt_line(short)
+
 
 class TestHistoryCryptoKeyValidation(unittest.TestCase):
     """Конструктор валидирует длину ключа."""

@@ -38,10 +38,18 @@ def _run_security(args: Sequence[str]) -> subprocess.CompletedProcess:
             ["security", *args],
             capture_output=True,
             text=True,
+            timeout=10,
         )
     except FileNotFoundError as exc:
         raise KeystoreUnavailable(
             "Команда 'security' не найдена — Keychain недоступен на этой платформе"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        # Заблокированный Keychain (после сна/screen-lock) может показать
+        # модальный пароль-диалог и подвесить вызов → IPC-тред зависает и
+        # держит connection-слот. Fail-closed: считаем Keychain недоступным.
+        raise KeystoreUnavailable(
+            "Команда 'security' зависла (>10с) — Keychain заблокирован?"
         ) from exc
 
 
@@ -84,9 +92,14 @@ def get_or_create_history_key() -> bytes:
         ]
     )
     if store_result.returncode != 0:
-        logger.error(
-            "crypto_keystore: не удалось сохранить ключ в Keychain: %s",
-            store_result.stderr.strip(),
+        # Fail-closed: НЕ возвращаем неперсистированный ключ. Иначе текущая
+        # сессия зашифрует им историю, а при рестарте ключ не найдётся →
+        # сгенерируется новый → данные станут НЕДЕШИФРУЕМЫМИ (потеря данных).
+        # raise → build_history_crypto вернёт None → шифрование останется ВЫКЛ
+        # (открытый текст, но без потери данных).
+        raise KeystoreUnavailable(
+            "не удалось сохранить ключ в Keychain "
+            f"(код {store_result.returncode}): {store_result.stderr.strip()}"
         )
     return key
 

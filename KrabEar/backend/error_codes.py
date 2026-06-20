@@ -218,6 +218,18 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "dedupe_seconds": 30,
     },
 
+    # Crypto-audit (2026-06-20): шифрование истории включено, но encrypt_line
+    # упал → запись ушла В ОТКРЫТОМ ВИДЕ. Данные НЕ потеряны, но защита не
+    # сработала — пользователь ДОЛЖЕН знать (иначе молчаливая security-регрессия).
+    "history.encrypt_fail": {
+        "user_msg_ru": "Шифрование записи не сработало — транскрипт сохранён в открытом виде.",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "error",
+        "dedupe_seconds": 30,
+    },
+
     # ── Layer: vocabulary ────────────────────────────────────────
     "vocabulary.load_fail": {
         "user_msg_ru": "Не загрузился словарь — STT работает без bias",

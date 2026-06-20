@@ -947,5 +947,54 @@ class PurgeAllDataE2EBackendServiceTestCase(unittest.TestCase):
         self.assertEqual(len(items), 1, "Item must NOT be deleted without confirmation")
 
 
+class PurgeRotatesEncryptionKeyTestCase(unittest.TestCase):
+    """Crypto-audit (2026-06-20): purge_all_data удаляет ключ шифрования из
+    Keychain и сбрасывает крипто-кэш StateStore.
+
+    Иначе выживший AES-256 ключ расшифровал бы pre-purge бэкап history.ndjson
+    (Time Machine / iCloud) — privacy-дыра.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.mkdtemp()
+
+    def tearDown(self) -> None:
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_purge_deletes_keychain_key_and_resets_cache(self) -> None:
+        from unittest.mock import patch
+
+        svc = _make_svc(self._tmp, item_ids=["a", "b"])
+        # Симулируем «шифрование инициализировано» в кэше StateStore.
+        svc.store._history_crypto_initialized = True
+        svc.store._history_crypto_instance = object()
+
+        with patch("backend.crypto_keystore.delete_history_key") as mock_del:
+            result = svc.handle_purge_all_data({"confirm": True})
+
+        self.assertTrue(result.get("ok"))
+        # 1. Ключ удалён из Keychain.
+        self.assertTrue(mock_del.called, "delete_history_key должен вызываться при purge")
+        # 2. Крипто-кэш сброшен — следующая запись перечитает/перегенерирует ключ.
+        self.assertFalse(svc.store._history_crypto_initialized)
+        self.assertIsNone(svc.store._history_crypto_instance)
+
+    def test_purge_survives_keystore_unavailable(self) -> None:
+        """KeystoreUnavailable (нет Keychain / Linux) НЕ должен ломать purge."""
+        from unittest.mock import patch
+        from backend.crypto_keystore import KeystoreUnavailable
+
+        svc = _make_svc(self._tmp, item_ids=["a"])
+        with patch(
+            "backend.crypto_keystore.delete_history_key",
+            side_effect=KeystoreUnavailable("no keychain"),
+        ):
+            result = svc.handle_purge_all_data({"confirm": True})
+        # KeystoreUnavailable ловится внутри — purge успешен, не в errors.
+        self.assertTrue(result.get("ok"))
+        self.assertNotIn("encryption_key", result.get("errors", []))
+
+
 if __name__ == "__main__":
     unittest.main()

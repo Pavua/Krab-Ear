@@ -161,8 +161,16 @@ class StateStore:
             return json_str
         try:
             return crypto.encrypt_line(json_str)
-        except Exception:
+        except Exception as exc:
+            # Шифрование включено, но упало → НЕ молчим: пишем plaintext (данные
+            # не теряем), но громко уведомляем через error_bus — иначе это была бы
+            # незаметная security-регрессия (пользователь думает, что зашифровано).
             logger.exception("StateStore._maybe_encrypt: ошибка шифрования, пишем plaintext")
+            self._push_error(
+                "history.encrypt_fail",
+                f"encrypt_line failed: {type(exc).__name__}: {exc}",
+                severity="error",
+            )
             return json_str
 
     def _maybe_decrypt(self, raw_line: str) -> str:
