@@ -35,9 +35,11 @@ extension ConversationViewController {
     /// real-time tap block. Must be updated in lockstep with `isSessionActive`.
     nonisolated(unsafe) static var _rtSessionActive: Bool = false
 
-    /// Downlink sample rate assumed from the Voice Gateway (PCM16 LE mono, 24 kHz).
-    /// AVAudioEngine auto-resamples to hardware rate; wrong value here → pitch shift only, no crash.
-    private static let downlinkSampleRate: Double = 24000
+    /// Downlink sample rate from the Voice Gateway (PCM16 LE mono).
+    /// VERIFIED live 2026-06-20: krab_ear_pipeline engine emits conv.ready.data.sample_rate = 16000
+    /// (symmetric with the 16kHz uplink). AVAudioEngine auto-resamples to hardware rate.
+    /// TODO: parse conv.ready.data.sample_rate dynamically (other engines may differ, e.g. Moshi 24k).
+    private static let downlinkSampleRate: Double = 16000
 
     private var audioHolder: AudioHolder {
         if let h = objc_getAssociatedObject(self, &ConversationViewController.audioHolderKey) as? AudioHolder {

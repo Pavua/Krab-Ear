@@ -53,7 +53,9 @@ extension HistoryPanelController {
     // MARK: - URL builder
 
     /// Строит WS-URL для Voice Gateway из настроек.
-    /// Пример: http://127.0.0.1:8090 → ws://127.0.0.1:8090/v1/conversation
+    /// Контракт VG (verified live 2026-06-20): `WS /v1/sessions/{session_id}/conversation`.
+    /// Пример: http://127.0.0.1:8090 → ws://127.0.0.1:8090/v1/sessions/vs_<uuid>/conversation
+    /// session_id свободный (vs_-префикс); `?lang=` добавляется в startWebSocketSession; auth — Bearer apiKey.
     private func buildConversationWSURL(from settings: AgentSettings) -> String {
         var base = settings.voiceGatewayURL
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -71,7 +73,9 @@ extension HistoryPanelController {
             base = "ws://" + base
         }
 
-        return base + "/v1/conversation"
+        // VG требует session-scoped путь. Генерируем стабильный per-launch id.
+        let sessionId = "vs_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
+        return base + "/v1/sessions/\(sessionId)/conversation"
     }
 
     // MARK: - PR 1.5 hook points
