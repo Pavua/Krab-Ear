@@ -64,22 +64,37 @@ extension AgentAppDelegate {
 
         // Quick Edit: показываем мини-оверлей для правки перед вставкой (если включено).
         if settings.quickEditEnabled {
-            quickEditOverlay.show(text: cleanText, timeoutSec: settings.quickEditTimeoutSec) { [weak self] result in
-                guard let self else { return }
-                switch result {
-                case .paste(let editedText):
-                    self.logger.info("QuickEdit: пользователь отредактировал текст, paste")
-                    self.performAutoPaste(text: editedText, historyId: effectiveHistoryId)
-                case .cancel:
-                    self.logger.info("QuickEdit: пользователь отменил вставку")
-                    self.markPasteStatus(historyId: effectiveHistoryId, status: "failed")
-                    self.historyPanel?.onHistoryDidUpdate()
-                    self.notify(title: "Krab Ear", body: "Вставка отменена")
-                case .timeout(let originalText):
-                    self.logger.info("QuickEdit: таймаут — вставляем исходный текст")
-                    self.performAutoPaste(text: originalText, historyId: effectiveHistoryId)
+            let ipc = self.ipcClient
+            quickEditOverlay.show(
+                text: cleanText,
+                timeoutSec: settings.quickEditTimeoutSec,
+                onAddToVocabulary: { word in
+                    // AGENT-3: IPC строго off main thread.
+                    DispatchQueue.global(qos: .utility).async {
+                        _ = try? ipc.call(
+                            method: "add_stt_hotword",
+                            params: ["word": word],
+                            timeoutSec: IPCClient.quickTimeoutSec
+                        )
+                    }
+                },
+                completion: { [weak self] result in
+                    guard let self else { return }
+                    switch result {
+                    case .paste(let editedText):
+                        self.logger.info("QuickEdit: пользователь отредактировал текст, paste")
+                        self.performAutoPaste(text: editedText, historyId: effectiveHistoryId)
+                    case .cancel:
+                        self.logger.info("QuickEdit: пользователь отменил вставку")
+                        self.markPasteStatus(historyId: effectiveHistoryId, status: "failed")
+                        self.historyPanel?.onHistoryDidUpdate()
+                        self.notify(title: "Krab Ear", body: "Вставка отменена")
+                    case .timeout(let originalText):
+                        self.logger.info("QuickEdit: таймаут — вставляем исходный текст")
+                        self.performAutoPaste(text: originalText, historyId: effectiveHistoryId)
+                    }
                 }
-            }
+            )
             return
         }
 

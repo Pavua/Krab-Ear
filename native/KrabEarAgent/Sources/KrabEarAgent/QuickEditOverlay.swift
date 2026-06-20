@@ -10,6 +10,7 @@
  - Enter / кнопка «Вставить» → paste(editedText)
  - Esc  / кнопка «Отменить» → cancel (вставки нет)
  - Таймаут без действия     → timeout(originalText) → paste original
+ - Кнопка «+ Словарь»       → добавляет выделенное слово в STT-словарь, таймер паузируется
  - NSPanel.nonactivatingPanel: НЕ уводит фокус из активного приложения пользователя
 */
 
@@ -37,10 +38,13 @@ final class QuickEditOverlay: NSObject {
     private var panel: NSPanel?
     private var textView: NSTextView?
     private var countdownLabel: NSTextField?
+    private var hintLabel: NSTextField?
+    private var addVocabBtn: ThemeSecondaryButton?
     private var timer: Timer?
     private var remainingSeconds: Double = 0
     private var originalText: String = ""
     private var completion: ((QuickEditResult) -> Void)?
+    private var onAddToVocabulary: ((String) -> Void)?
 
     // MARK: Public API
 
@@ -49,13 +53,21 @@ final class QuickEditOverlay: NSObject {
     /// - Parameters:
     ///   - text: Исходный транскрибированный текст (предзаполняет textarea).
     ///   - timeoutSec: Таймаут автовставки (сек). По умолчанию 5.
+    ///   - onAddToVocabulary: Опциональный коллбэк — вызывается с выделенным словом
+    ///     при нажатии «+ Словарь». Таймер при этом останавливается.
     ///   - completion: Вызывается ровно один раз с результатом.
-    func show(text: String, timeoutSec: Double = 5.0, completion: @escaping (QuickEditResult) -> Void) {
+    func show(
+        text: String,
+        timeoutSec: Double = 5.0,
+        onAddToVocabulary: ((String) -> Void)? = nil,
+        completion: @escaping (QuickEditResult) -> Void
+    ) {
         // Если оверлей уже открыт — сначала закрываем (edge case: две быстрые записи).
         dismiss(animated: false)
 
         self.originalText = text
         self.completion = completion
+        self.onAddToVocabulary = onAddToVocabulary
         self.remainingSeconds = timeoutSec
 
         let panel = buildPanel(initialText: text)
@@ -84,7 +96,7 @@ final class QuickEditOverlay: NSObject {
 
         let scrollViewWidth = panelWidth - hPad * 2
         let textHeight = min(200, max(56, estimatedTextHeight(initialText, width: scrollViewWidth)))
-        
+
         let totalH = vPad + textHeight + spacing + buttonBarH + vPad
 
         let panel = NSPanel(
@@ -172,7 +184,7 @@ final class QuickEditOverlay: NSObject {
         let pasteBtnW: CGFloat = 90
         let cancelBtnW: CGFloat = 90
         let btnSpacing = KrabEarTheme.Metrics.tight
-        
+
         let pasteBtn = ThemePrimaryButton(frame: NSRect(
             x: panelWidth - hPad - pasteBtnW,
             y: vPad,
@@ -195,11 +207,28 @@ final class QuickEditOverlay: NSObject {
         cancelBtn.action = #selector(onCancel)
         cancelBtn.keyEquivalent = "\u{1B}"
 
+        // «+ Словарь» button — shown only when callback is wired
+        let addVocabW: CGFloat = 100
+        if onAddToVocabulary != nil {
+            let addVocabX = cancelBtn.frame.minX - btnSpacing - addVocabW
+            let btn = ThemeSecondaryButton(frame: NSRect(
+                x: addVocabX,
+                y: vPad,
+                width: addVocabW,
+                height: buttonBarH
+            ))
+            btn.title = "+ Словарь"
+            btn.target = self
+            btn.action = #selector(onAddVocab)
+            container.addSubview(btn)
+            self.addVocabBtn = btn
+        }
+
         // Countdown label
         let countdown = NSTextField(labelWithString: formatCountdown(remainingSeconds))
         countdown.frame = NSRect(
             x: hPad,
-            y: vPad + (buttonBarH - 16) / 2, // Center vertically with buttons
+            y: vPad + (buttonBarH - 16) / 2,
             width: 40,
             height: 16
         )
@@ -210,12 +239,12 @@ final class QuickEditOverlay: NSObject {
         countdown.drawsBackground = false
         self.countdownLabel = countdown
 
-        // Hint label
-        let hint = NSTextField(labelWithString: "Enter — вставить  |  Esc — отменить")
+        // Hint label — shortened to make room for «+ Словарь»
+        let hint = NSTextField(labelWithString: "Enter — вставить, Esc — отмена")
         hint.frame = NSRect(
             x: hPad + 40 + btnSpacing,
             y: vPad + (buttonBarH - 16) / 2,
-            width: 280,
+            width: 220,
             height: 16
         )
         hint.font = KrabEarTheme.Typography.caption
@@ -223,6 +252,7 @@ final class QuickEditOverlay: NSObject {
         hint.isEditable = false
         hint.isBordered = false
         hint.drawsBackground = false
+        self.hintLabel = hint
 
         container.addSubview(scrollView)
         container.addSubview(countdown)
@@ -303,6 +333,36 @@ final class QuickEditOverlay: NSObject {
         }
     }
 
+    @objc private func onAddVocab() {
+        guard let tv = textView else { return }
+
+        // Извлекаем выделение
+        let range = tv.selectedRange()
+        guard range.length > 0 else {
+            // Нет выделения — подсказываем пользователю
+            hintLabel?.stringValue = "Выделите слово"
+            return
+        }
+        let raw = (tv.string as NSString).substring(with: range)
+        let word = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !word.isEmpty else {
+            hintLabel?.stringValue = "Выделите слово"
+            return
+        }
+
+        // Ставим таймер на паузу, чтобы оверлей не закрылся автоматически
+        timer?.invalidate()
+        timer = nil
+        countdownLabel?.stringValue = "—"
+
+        // Вызываем коллбэк (fire-and-forget — IPC делается off-main в caller)
+        onAddToVocabulary?(word)
+
+        // Краткое подтверждение в hint-лейбле (≤220 px)
+        let displayWord = word.count > 20 ? String(word.prefix(20)) + "..." : word
+        hintLabel?.stringValue = "✓ «\(displayWord)» в словаре"
+    }
+
     // MARK: - Dismiss
 
     private func dismiss(animated: Bool, completion: (@MainActor @Sendable () -> Void)? = nil) {
@@ -322,6 +382,9 @@ final class QuickEditOverlay: NSObject {
                     self.panel = nil
                     self.textView = nil
                     self.countdownLabel = nil
+                    self.hintLabel = nil
+                    self.addVocabBtn = nil
+                    self.onAddToVocabulary = nil
                     completion?()
                 }
             })
@@ -330,6 +393,9 @@ final class QuickEditOverlay: NSObject {
             self.panel = nil
             self.textView = nil
             self.countdownLabel = nil
+            self.hintLabel = nil
+            self.addVocabBtn = nil
+            self.onAddToVocabulary = nil
             completion?()
         }
     }
