@@ -29,6 +29,10 @@ import Foundation
 private enum SecurityAssocKeys {
     nonisolated(unsafe) static var encryptionToggle: UInt8 = 0
     nonisolated(unsafe) static var cdEncryptionToggle: UInt8 = 0
+    nonisolated(unsafe) static var statusIcon: UInt8 = 0
+    nonisolated(unsafe) static var cdStatusIcon: UInt8 = 0
+    nonisolated(unsafe) static var statusBadge: UInt8 = 0
+    nonisolated(unsafe) static var cdStatusBadge: UInt8 = 0
 }
 
 // MARK: - HistoryPanelController+SecuritySettings
@@ -49,6 +53,20 @@ extension HistoryPanelController {
 
         let card = ThemeCardView()
 
+        let iconView = NSImageView()
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        iconView.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        if let icon = NSImage(systemSymbolName: "lock.open", accessibilityDescription: nil) {
+            iconView.image = icon.withSymbolConfiguration(.init(pointSize: 14, weight: .regular))
+        }
+        iconView.contentTintColor = KrabEarTheme.Colors.textSecondary
+        objc_setAssociatedObject(self, &SecurityAssocKeys.statusIcon, iconView, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+
+        let badgeLabel = NSTextField(labelWithString: "Выключено")
+        badgeLabel.font = KrabEarTheme.Typography.caption
+        badgeLabel.textColor = KrabEarTheme.Colors.textSecondary
+        objc_setAssociatedObject(self, &SecurityAssocKeys.statusBadge, badgeLabel, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+
         // Тоггл «Шифровать историю на диске»
         let toggle = NSButton(
             checkboxWithTitle: "",
@@ -60,10 +78,15 @@ extension HistoryPanelController {
             self, &SecurityAssocKeys.encryptionToggle, toggle, .OBJC_ASSOCIATION_RETAIN_NONATOMIC
         )
 
+        let controlStack = NSStackView(views: [iconView, badgeLabel, toggle])
+        controlStack.orientation = .horizontal
+        controlStack.alignment = .centerY
+        controlStack.spacing = KrabEarTheme.Metrics.tight
+
         let toggleRow = makeSettingRow(
             label: "Шифровать историю на диске",
             description: "Новые записи сохраняются в зашифрованном виде (AES-256-GCM). Старые записи остаются как есть.",
-            control: toggle
+            control: controlStack
         )
 
         // Предупреждение о ключе Keychain
@@ -99,9 +122,23 @@ extension HistoryPanelController {
 
         let card = CDSettingsCardView()
 
+        let iconView = NSImageView()
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        iconView.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        if let icon = NSImage(systemSymbolName: "lock.open", accessibilityDescription: nil) {
+            iconView.image = icon.withSymbolConfiguration(.init(pointSize: 14, weight: .regular))
+        }
+        iconView.contentTintColor = KrabEarTheme.Colors.textSecondary
+        objc_setAssociatedObject(self, &SecurityAssocKeys.cdStatusIcon, iconView, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+
+        let badgeLabel = NSTextField(labelWithString: "Выключено")
+        badgeLabel.font = .systemFont(ofSize: 12, weight: .regular)
+        badgeLabel.textColor = KrabEarTheme.Colors.textSecondary
+        objc_setAssociatedObject(self, &SecurityAssocKeys.cdStatusBadge, badgeLabel, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+
         // Тоггл
         let toggle = NSButton(
-            checkboxWithTitle: "Шифровать историю",
+            checkboxWithTitle: "",
             target: self,
             action: #selector(onEncryptionToggleChangedCD)
         )
@@ -110,7 +147,12 @@ extension HistoryPanelController {
             self, &SecurityAssocKeys.cdEncryptionToggle, toggle, .OBJC_ASSOCIATION_RETAIN_NONATOMIC
         )
 
-        let toggleRow = cdMakeRow(label: "Шифровать историю на диске", control: toggle)
+        let controlStack = NSStackView(views: [iconView, badgeLabel, toggle])
+        controlStack.orientation = .horizontal
+        controlStack.alignment = .centerY
+        controlStack.spacing = 6
+
+        let toggleRow = cdMakeRow(label: "Шифровать историю на диске", control: controlStack)
 
         // Предупреждение
         let warningLabel = NSTextField(
@@ -213,6 +255,9 @@ extension HistoryPanelController {
     @MainActor
     func syncSecuritySettings(enabled: Bool, available: Bool) {
         let toggleState: NSControl.StateValue = enabled ? .on : .off
+        let iconSymbol = enabled ? "lock.fill" : "lock.open"
+        let statusText = !available ? "Недоступно (Keychain)" : (enabled ? "Зашифровано" : "Выключено")
+        let statusColor = !available ? KrabEarTheme.Colors.warning : (enabled ? KrabEarTheme.Colors.accent : KrabEarTheme.Colors.textSecondary)
 
         // Gemini variant
         if let toggle = objc_getAssociatedObject(
@@ -222,6 +267,16 @@ extension HistoryPanelController {
             toggle.isEnabled = available
             toggle.alphaValue = available ? 1.0 : KrabEarTheme.Interaction.disabledOpacity
         }
+        if let iconView = objc_getAssociatedObject(self, &SecurityAssocKeys.statusIcon) as? NSImageView {
+            if let icon = NSImage(systemSymbolName: iconSymbol, accessibilityDescription: nil) {
+                iconView.image = icon.withSymbolConfiguration(.init(pointSize: 14, weight: .regular))
+            }
+            iconView.contentTintColor = statusColor
+        }
+        if let badge = objc_getAssociatedObject(self, &SecurityAssocKeys.statusBadge) as? NSTextField {
+            badge.stringValue = statusText
+            badge.textColor = statusColor
+        }
 
         // Claude Design variant
         if let toggle = objc_getAssociatedObject(
@@ -230,6 +285,16 @@ extension HistoryPanelController {
             toggle.state = toggleState
             toggle.isEnabled = available
             toggle.alphaValue = available ? 1.0 : KrabEarTheme.Interaction.disabledOpacity
+        }
+        if let iconView = objc_getAssociatedObject(self, &SecurityAssocKeys.cdStatusIcon) as? NSImageView {
+            if let icon = NSImage(systemSymbolName: iconSymbol, accessibilityDescription: nil) {
+                iconView.image = icon.withSymbolConfiguration(.init(pointSize: 14, weight: .regular))
+            }
+            iconView.contentTintColor = statusColor
+        }
+        if let badge = objc_getAssociatedObject(self, &SecurityAssocKeys.cdStatusBadge) as? NSTextField {
+            badge.stringValue = statusText
+            badge.textColor = statusColor
         }
     }
 }

@@ -32,6 +32,8 @@ private enum RetentionAssocKeys {
     nonisolated(unsafe) static var cdEnabledToggle: UInt8 = 0
     nonisolated(unsafe) static var cdDaysStepper: UInt8 = 0
     nonisolated(unsafe) static var cdDaysLabel: UInt8 = 0
+    nonisolated(unsafe) static var statusIcon: UInt8 = 0
+    nonisolated(unsafe) static var cdStatusIcon: UInt8 = 0
 }
 
 // MARK: - HistoryPanelController+RetentionSettings
@@ -47,10 +49,19 @@ extension HistoryPanelController {
             sectionId: "history_retention_settings",
             title: "Хранение истории",
             isExpanded: false,
-            iconSymbol: "clock.arrow.2.circlepath"
+            iconSymbol: "clock.arrow.circlepath"
         )
 
         let card = ThemeCardView()
+
+        let iconView = NSImageView()
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        iconView.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        if let icon = NSImage(systemSymbolName: "clock.arrow.circlepath", accessibilityDescription: nil) {
+            iconView.image = icon.withSymbolConfiguration(.init(pointSize: 14, weight: .regular))
+        }
+        iconView.contentTintColor = AgentSettings.default.autoPurgeEnabled ? KrabEarTheme.Colors.accent : KrabEarTheme.Colors.textSecondary
+        objc_setAssociatedObject(self, &RetentionAssocKeys.statusIcon, iconView, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
 
         // Тоггл «Авто-удаление старых записей»
         let enabledToggle = NSButton(
@@ -63,10 +74,15 @@ extension HistoryPanelController {
             self, &RetentionAssocKeys.enabledToggle, enabledToggle, .OBJC_ASSOCIATION_RETAIN_NONATOMIC
         )
 
+        let controlStack = NSStackView(views: [iconView, enabledToggle])
+        controlStack.orientation = .horizontal
+        controlStack.alignment = .centerY
+        controlStack.spacing = KrabEarTheme.Metrics.tight
+
         let enabledRow = makeSettingRow(
             label: "Авто-удаление старых записей",
             description: "Записи старше указанного срока удаляются автоматически. Удаление необратимо.",
-            control: enabledToggle
+            control: controlStack
         )
 
         // Степпер «Хранить записи (дней)»
@@ -83,7 +99,7 @@ extension HistoryPanelController {
             self, &RetentionAssocKeys.daysStepper, stepper, .OBJC_ASSOCIATION_RETAIN_NONATOMIC
         )
 
-        let daysLabel = NSTextField(labelWithString: "\(AgentSettings.default.autoPurgeRetentionDays) дн.")
+        let daysLabel = NSTextField(labelWithString: "\(AgentSettings.default.autoPurgeRetentionDays) дн. (1–3650)")
         daysLabel.font = KrabEarTheme.Typography.body
         daysLabel.textColor = KrabEarTheme.Colors.textPrimary
         daysLabel.alignment = .right
@@ -123,9 +139,18 @@ extension HistoryPanelController {
 
         let card = CDSettingsCardView()
 
+        let iconView = NSImageView()
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        iconView.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        if let icon = NSImage(systemSymbolName: "clock.arrow.circlepath", accessibilityDescription: nil) {
+            iconView.image = icon.withSymbolConfiguration(.init(pointSize: 14, weight: .regular))
+        }
+        iconView.contentTintColor = AgentSettings.default.autoPurgeEnabled ? KrabEarTheme.Colors.accent : KrabEarTheme.Colors.textSecondary
+        objc_setAssociatedObject(self, &RetentionAssocKeys.cdStatusIcon, iconView, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+
         // Тоггл «Авто-удаление»
         let enabledToggle = NSButton(
-            checkboxWithTitle: "Авто-удаление",
+            checkboxWithTitle: "",
             target: self,
             action: #selector(onAutoPurgeEnabledChangedCD)
         )
@@ -134,7 +159,12 @@ extension HistoryPanelController {
             self, &RetentionAssocKeys.cdEnabledToggle, enabledToggle, .OBJC_ASSOCIATION_RETAIN_NONATOMIC
         )
 
-        let enabledRow = cdMakeRow(label: "Авто-удаление старых записей", control: enabledToggle)
+        let controlStack = NSStackView(views: [iconView, enabledToggle])
+        controlStack.orientation = .horizontal
+        controlStack.alignment = .centerY
+        controlStack.spacing = 6
+
+        let enabledRow = cdMakeRow(label: "Авто-удаление старых записей", control: controlStack)
 
         // Степпер «Хранить (дней)»
         let stepper = NSStepper()
@@ -150,7 +180,7 @@ extension HistoryPanelController {
             self, &RetentionAssocKeys.cdDaysStepper, stepper, .OBJC_ASSOCIATION_RETAIN_NONATOMIC
         )
 
-        let daysLabel = NSTextField(labelWithString: "\(AgentSettings.default.autoPurgeRetentionDays) дн.")
+        let daysLabel = NSTextField(labelWithString: "\(AgentSettings.default.autoPurgeRetentionDays) дн. (1–3650)")
         daysLabel.font = .systemFont(ofSize: 12, weight: .regular)
         daysLabel.textColor = KrabEarTheme.Colors.textPrimary
         daysLabel.alignment = .right
@@ -200,6 +230,9 @@ extension HistoryPanelController {
         ) as? NSStepper {
             stepper.isEnabled = enabled
         }
+        if let iconView = objc_getAssociatedObject(self, &RetentionAssocKeys.statusIcon) as? NSImageView {
+            iconView.contentTintColor = enabled ? KrabEarTheme.Colors.accent : KrabEarTheme.Colors.textSecondary
+        }
     }
 
     @objc func onRetentionDaysChanged() {
@@ -211,7 +244,7 @@ extension HistoryPanelController {
         if let label = objc_getAssociatedObject(
             self, &RetentionAssocKeys.daysLabel
         ) as? NSTextField {
-            label.stringValue = "\(days) дн."
+            label.stringValue = "\(days) дн. (1–3650)"
         }
         applySettingsPatch(["auto_purge_retention_days": days])
     }
@@ -230,6 +263,9 @@ extension HistoryPanelController {
         ) as? NSStepper {
             stepper.isEnabled = enabled
         }
+        if let iconView = objc_getAssociatedObject(self, &RetentionAssocKeys.cdStatusIcon) as? NSImageView {
+            iconView.contentTintColor = enabled ? KrabEarTheme.Colors.accent : KrabEarTheme.Colors.textSecondary
+        }
     }
 
     @objc func onRetentionDaysChangedCD() {
@@ -241,7 +277,7 @@ extension HistoryPanelController {
         if let label = objc_getAssociatedObject(
             self, &RetentionAssocKeys.cdDaysLabel
         ) as? NSTextField {
-            label.stringValue = "\(days) дн."
+            label.stringValue = "\(days) дн. (1–3650)"
         }
         applySettingsPatch(["auto_purge_retention_days": days])
     }
@@ -257,6 +293,9 @@ extension HistoryPanelController {
         ) as? NSButton {
             toggle.state = enabled ? .on : .off
         }
+        if let iconView = objc_getAssociatedObject(self, &RetentionAssocKeys.statusIcon) as? NSImageView {
+            iconView.contentTintColor = enabled ? KrabEarTheme.Colors.accent : KrabEarTheme.Colors.textSecondary
+        }
         if let stepper = objc_getAssociatedObject(
             self, &RetentionAssocKeys.daysStepper
         ) as? NSStepper {
@@ -266,7 +305,7 @@ extension HistoryPanelController {
         if let label = objc_getAssociatedObject(
             self, &RetentionAssocKeys.daysLabel
         ) as? NSTextField {
-            label.stringValue = "\(retentionDays) дн."
+            label.stringValue = "\(retentionDays) дн. (1–3650)"
         }
 
         // Claude Design variant
@@ -274,6 +313,9 @@ extension HistoryPanelController {
             self, &RetentionAssocKeys.cdEnabledToggle
         ) as? NSButton {
             toggle.state = enabled ? .on : .off
+        }
+        if let iconView = objc_getAssociatedObject(self, &RetentionAssocKeys.cdStatusIcon) as? NSImageView {
+            iconView.contentTintColor = enabled ? KrabEarTheme.Colors.accent : KrabEarTheme.Colors.textSecondary
         }
         if let stepper = objc_getAssociatedObject(
             self, &RetentionAssocKeys.cdDaysStepper
@@ -284,7 +326,7 @@ extension HistoryPanelController {
         if let label = objc_getAssociatedObject(
             self, &RetentionAssocKeys.cdDaysLabel
         ) as? NSTextField {
-            label.stringValue = "\(retentionDays) дн."
+            label.stringValue = "\(retentionDays) дн. (1–3650)"
         }
     }
 }
