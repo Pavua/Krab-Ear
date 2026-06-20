@@ -8,7 +8,7 @@
    4.  test_stop_session                    — stopConversation() возвращает в idle
    5.  test_streaming_message_display       — sttPartial !isFinal показывается без сохранения
    6.  test_user_message_appended           — sttPartial isFinal=true добавляет «Вы: …» в буфер
-   7.  test_assistant_message_appended      — toolInvoked + summaryReady добавляют строки
+   7.  test_assistant_message_appended      — replyFinal добавляет строку «AI: …» + .speaking
    8.  test_handles_session_error_gracefully — error event переводит в .error и останавливает
    9.  test_unicode_messages                — кирилица/emoji в транскрипте не ломает буфер
   10.  test_concurrent_session_blocked      — повторный startConversation игнорируется
@@ -183,29 +183,22 @@ final class ConversationViewControllerTests: XCTestCase {
 
     // MARK: - 7. test_assistant_message_appended
 
-    /// toolInvoked → строка «— AI вызывает инструмент: <name>…» + state → .thinking.
-    /// summaryReady → строка «[Резюме] <text>» добавляется в буфер.
+    /// replyFinal → строка «AI: <text>» добавляется в буфер + state → .speaking.
     func test_assistant_message_appended() {
         vc.transcriptBuffer = ""
         vc.isSessionActive = true
-        vc.conversationState = .listening
+        vc.conversationState = .thinking
 
-        // Tool invoked event — от движка к UI.
-        vc.handleDownlinkEvent(.toolInvoked(tool: "web_search", args: [:]))
+        // Финальный ответ AI.
+        let replyText = "В Москве сейчас солнечно."
+        vc.handleDownlinkEvent(.replyFinal(text: replyText))
 
-        XCTAssertTrue(vc.transcriptBuffer.contains("web_search"),
-                      "toolInvoked должен добавить имя инструмента в буфер")
-        XCTAssertEqual(vc.conversationState, .thinking,
-                       "toolInvoked должен перевести state в .thinking")
-
-        // Summary ready event.
-        let summaryText = "Краткое резюме звонка"
-        vc.handleDownlinkEvent(.summaryReady(text: summaryText, lang: "ru"))
-
-        XCTAssertTrue(vc.transcriptBuffer.contains("Резюме"),
-                      "summaryReady должен добавить «Резюме» в буфер")
-        XCTAssertTrue(vc.transcriptBuffer.contains(summaryText),
-                      "summaryReady должен содержать оригинальный текст резюме")
+        XCTAssertTrue(vc.transcriptBuffer.contains("AI:"),
+                      "replyFinal должен добавить строку с префиксом «AI:»")
+        XCTAssertTrue(vc.transcriptBuffer.contains(replyText),
+                      "replyFinal должен содержать оригинальный текст ответа")
+        XCTAssertEqual(vc.conversationState, .speaking,
+                       "replyFinal должен перевести state в .speaking")
     }
 
     // MARK: - 8. test_handles_session_error_gracefully

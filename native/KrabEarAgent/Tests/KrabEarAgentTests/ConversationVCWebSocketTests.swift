@@ -56,28 +56,26 @@ final class ConversationEventDecodeTests: XCTestCase {
         XCTAssertEqual(elapsed, 2.5, accuracy: 0.001)
     }
 
-    // MARK: tool.invoked
+    // MARK: conv.reply_final (заменяет tool.invoked + summary.ready)
 
-    func test_decode_toolInvoked() {
-        let json = #"{"type":"tool.invoked","tool":"web_search","args":{"q":"swift"}}"#
+    func test_decode_convReplyFinal() {
+        let json = #"{"type":"conv.reply_final","ts":1718880002,"session_id":"vs_abc123","data":{"text":"Привет от AI"}}"#
         let data = json.data(using: .utf8)!
-        guard case .toolInvoked(let tool, let args) = ConversationEvent.decode(from: data) else {
-            return XCTFail("Ожидался .toolInvoked")
+        guard case .replyFinal(let text) = ConversationEvent.decode(from: data) else {
+            return XCTFail("Ожидался .replyFinal")
         }
-        XCTAssertEqual(tool, "web_search")
-        XCTAssertEqual(args["q"] as? String, "swift")
+        XCTAssertEqual(text, "Привет от AI")
     }
 
-    // MARK: summary.ready
+    // MARK: conv.recycled
 
-    func test_decode_summaryReady() {
-        let json = #"{"type":"summary.ready","text":"Краткое резюме","lang":"ru"}"#
+    func test_decode_convRecycled() {
+        let json = #"{"type":"conv.recycled","data":{"reason":"5min_cap","recycled_count":1}}"#
         let data = json.data(using: .utf8)!
-        guard case .summaryReady(let text, let lang) = ConversationEvent.decode(from: data) else {
-            return XCTFail("Ожидался .summaryReady")
+        guard case .recycled(let reason) = ConversationEvent.decode(from: data) else {
+            return XCTFail("Ожидался .recycled")
         }
-        XCTAssertEqual(text, "Краткое резюме")
-        XCTAssertEqual(lang, "ru")
+        XCTAssertEqual(reason, "5min_cap")
     }
 
     // MARK: error

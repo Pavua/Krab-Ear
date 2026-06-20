@@ -188,24 +188,34 @@ final class ConversationViewController: NSViewController {
         case .sttPartial(let text, _, let isFinal):
             if isFinal {
                 appendTranscriptLine("Вы: \(text)")
+                conversationState = .thinking
             } else {
                 // Показываем частичный текст без сохранения в буфере.
                 updateTranscript(transcriptBuffer + (transcriptBuffer.isEmpty ? "" : "\n") + "Вы: \(text)…")
-            }
-            if conversationState == .connecting || conversationState == .listening {
-                conversationState = .listening
+                if conversationState == .connecting || conversationState == .listening {
+                    conversationState = .listening
+                }
             }
 
         case .engineLoaded(let name, let elapsed):
-            appendTranscriptLine("— Движок \(name) готов (\(String(format: "%.1f", elapsed))s)")
+            let elapsedStr = elapsed > 0 ? " (\(String(format: "%.1f", elapsed))s)" : ""
+            appendTranscriptLine("— Движок \(name) готов\(elapsedStr)")
             conversationState = .listening
 
-        case .toolInvoked(let tool, _):
-            appendTranscriptLine("— AI вызывает инструмент: \(tool)…")
-            conversationState = .thinking
+        case .replyFinal(let text):
+            appendTranscriptLine("AI: \(text)")
+            conversationState = .speaking
 
-        case .summaryReady(let text, _):
-            appendTranscriptLine("\n[Резюме] \(text)")
+        case .recycled(let reason):
+            let msg = reason.isEmpty ? "Сессия перезапущена" : "Сессия перезапущена: \(reason)"
+            appendTranscriptLine("— \(msg)")
+            conversationState = .error(msg)
+            stopConversation()
+
+        case .closed:
+            // Штатное закрытие сервером — завершаем без error-состояния, сразу (не ждём WS-дропа).
+            appendTranscriptLine("— Сессия завершена сервером")
+            stopConversation()
 
         case .error(let code, let message):
             appendTranscriptLine("— Ошибка [\(code)]: \(message)")
@@ -213,7 +223,8 @@ final class ConversationViewController: NSViewController {
             stopConversation()
 
         case .unknown(let type, _):
-            // Неизвестный тип события — логируем, не падаем.
+            // Неизвестный тип события (conv.interrupted, conv.vad_*, conv.audio_chunk)
+            // — логируем, не падаем.
             AgentLogger.shared.info("[ConversationVC] Неизвестное событие: \(type)")
         }
     }

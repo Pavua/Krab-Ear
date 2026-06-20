@@ -1,9 +1,11 @@
 /*
  Типы событий WebSocket для режима «Разговор с AI».
 
- Протокол: Section 4.1 из спецификации Voice Assistant Mode.
+ Протокол: Voice Gateway conv.* vocabulary (2026-06-20).
  Uplink JSON: управляющие команды (control).
- Downlink JSON: события от Voice Gateway.
+ Downlink JSON: события от Voice Gateway (конверт {"type","ts","session_id","data"}).
+
+ Все поля контента находятся в подобъекте "data", НЕ на верхнем уровне.
 */
 
 import Foundation
@@ -27,18 +29,22 @@ enum ConversationControlAction: String, Encodable {
 /// Все типы событий, получаемых от Voice Gateway по WebSocket.
 enum ConversationEvent {
     /// Частичная или финальная расшифровка речи пользователя.
+    /// conv.transcript_partial (isFinal=false) / conv.transcript_final (isFinal=true).
     case sttPartial(text: String, lang: String, isFinal: Bool)
 
-    /// Движок AI успешно загружен и готов к работе.
+    /// Движок AI успешно загружен и готов к работе (conv.ready).
     case engineLoaded(name: String, elapsedSec: Double)
 
-    /// AI вызвал инструмент (поиск, LLM-агент и т.д.).
-    case toolInvoked(tool: String, args: [String: Any])
+    /// Финальный текстовый ответ AI (conv.reply_final).
+    case replyFinal(text: String)
 
-    /// Готово краткое резюме разговора.
-    case summaryReady(text: String, lang: String)
+    /// Сессия переработана из-за 5-минутного лимита (conv.recycled) — нужно переподключиться.
+    case recycled(reason: String)
 
-    /// Ошибка от сервера.
+    /// Сессия закрыта сервером штатно (conv.closed) — завершаем диалог без ошибки.
+    case closed
+
+    /// Ошибка от сервера (conv.error / conv.fatal).
     case error(code: String, message: String)
 
     /// Неизвестный/нераспознанный тип события (для forward-compat).
@@ -50,14 +56,72 @@ enum ConversationEvent {
 extension ConversationEvent {
 
     /// Декодирует JSON-данные WebSocket downlink в ConversationEvent.
-    /// Возвращает nil при невалидном JSON (бинарные Opus-фреймы не затрагиваются).
+    /// Возвращает nil при невалидном JSON (бинарные PCM/Opus-фреймы не затрагиваются).
     static func decode(from data: Data) -> ConversationEvent? {
         guard
             let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let type = raw["type"] as? String
         else { return nil }
 
+        // Подобъект "data" присутствует во всех conv.* событиях.
+        let payload = (raw["data"] as? [String: Any]) ?? [:]
+
         switch type {
+
+        // MARK: conv.* (основной словарь Voice Gateway)
+
+        case "conv.transcript_partial":
+            let text = (payload["text"] as? String) ?? ""
+            return .sttPartial(text: text, lang: "", isFinal: false)
+
+        case "conv.transcript_final":
+            let text = (payload["text"] as? String) ?? ""
+            return .sttPartial(text: text, lang: "", isFinal: true)
+
+        case "conv.reply_final":
+            let text = (payload["text"] as? String) ?? ""
+            return .replyFinal(text: text)
+
+        case "conv.ready":
+            let name = (payload["engine"] as? String) ?? ""
+            return .engineLoaded(name: name, elapsedSec: 0.0)
+
+        case "conv.error":
+            let message = (payload["message"] as? String)
+                ?? (payload["error"] as? String)
+                ?? (raw["message"] as? String)
+                ?? ""
+            return .error(code: "conv.error", message: message)
+
+        case "conv.fatal":
+            let message = (payload["message"] as? String)
+                ?? (payload["error"] as? String)
+                ?? (raw["message"] as? String)
+                ?? ""
+            return .error(code: "conv.fatal", message: message)
+
+        case "conv.recycled":
+            let reason = (payload["reason"] as? String) ?? ""
+            return .recycled(reason: reason)
+
+        case "conv.closed":
+            // Сессия закрыта сервером — завершаем диалог без ошибки.
+            return .closed
+
+        case "conv.interrupted":
+            // AI прерван баржом-ин — клиент уже отправил interrupt; просто логируем.
+            return .unknown(type: type, raw: raw)
+
+        case "conv.vad_speech", "conv.vad_silence":
+            // VAD-маркеры состояния пользователя — обрабатываем молча.
+            return .unknown(type: type, raw: raw)
+
+        case "conv.audio_chunk":
+            // JSON-вариант аудио-чанка (в продакшне TTS приходит бинарными WS-фреймами).
+            return .unknown(type: type, raw: raw)
+
+        // MARK: Обратная совместимость со старым словарём (legacy, безвредно)
+
         case "stt.partial":
             let text    = (raw["text"] as? String) ?? ""
             let lang    = (raw["lang"] as? String) ?? ""
@@ -65,19 +129,9 @@ extension ConversationEvent {
             return .sttPartial(text: text, lang: lang, isFinal: isFinal)
 
         case "engine.loaded":
-            let name        = (raw["name"] as? String) ?? ""
-            let elapsedSec  = (raw["elapsed_sec"] as? Double) ?? 0.0
+            let name       = (raw["name"] as? String) ?? ""
+            let elapsedSec = (raw["elapsed_sec"] as? Double) ?? 0.0
             return .engineLoaded(name: name, elapsedSec: elapsedSec)
-
-        case "tool.invoked":
-            let tool = (raw["tool"] as? String) ?? ""
-            let args = (raw["args"] as? [String: Any]) ?? [:]
-            return .toolInvoked(tool: tool, args: args)
-
-        case "summary.ready":
-            let text = (raw["text"] as? String) ?? ""
-            let lang = (raw["lang"] as? String) ?? ""
-            return .summaryReady(text: text, lang: lang)
 
         case "error":
             let code    = (raw["code"] as? String) ?? "unknown"
