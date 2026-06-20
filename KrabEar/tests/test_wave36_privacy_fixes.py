@@ -203,37 +203,45 @@ class TestAutoSaveTranscriptsPrivacyGuard(unittest.TestCase):
     # --- Source-inspection tests ---
 
     def test_privacy_guard_present_near_auto_save(self):
-        """The auto_save_transcripts block must be guarded by not _privacy_mode."""
+        """The .md auto_save write must be privacy-guarded.
+
+        crypto-audit (2026-06-20) refactor: the guard now lives in the static helper
+        `_should_write_plaintext_md` (privacy_mode + history_encryption_enabled +
+        auto_save).  Verify the helper exists, checks privacy_mode, AND that the live
+        TranscriptWriter.write_transcript call is gated by it.
+        """
         src = self._rcs_source()
-        auto_save_idx = src.find("auto_save_transcripts")
-        self.assertGreater(auto_save_idx, 0,
-                           "auto_save_transcripts not found in recording_core_service.py")
+        helper_idx = src.find("def _should_write_plaintext_md")
+        self.assertGreater(helper_idx, 0,
+                           "_should_write_plaintext_md helper missing in recording_core_service.py")
+        helper_body = src[helper_idx: helper_idx + 800]
+        self.assertIn("privacy_mode", helper_body,
+                      "privacy_mode guard missing inside _should_write_plaintext_md")
 
-        # Context window: ~300 chars before the auto_save_transcripts reference
-        context_start = max(0, auto_save_idx - 300)
-        context = src[context_start: auto_save_idx + 50]
+        # The live .md write path must call the gate with require_auto_save=True
+        # (direct-substring check — robust against intervening block length).
+        self.assertIn(
+            "_should_write_plaintext_md(settings, _privacy_mode, require_auto_save=True)",
+            src,
+            "live TranscriptWriter path not gated by _should_write_plaintext_md(require_auto_save=True)")
+        # And the import path must gate with require_auto_save=False.
+        self.assertIn(
+            "_should_write_plaintext_md(settings, _privacy_mode, require_auto_save=False)",
+            src,
+            "import path not gated by _should_write_plaintext_md(require_auto_save=False)")
 
-        self.assertIn("_privacy_mode", context,
-                      "_privacy_mode guard missing near auto_save_transcripts block "
-                      "in recording_core_service.py")
+    def test_md_gate_combines_privacy_encryption_autosave(self):
+        """The .md write gate must combine privacy_mode AND encryption AND auto_save.
 
-    def test_not_privacy_mode_appears_on_auto_save_condition(self):
-        """The auto_save check must be combined with `not _privacy_mode` in a single `if`."""
+        After the 2026-06-20 refactor all three live in _should_write_plaintext_md.
+        """
         src = self._rcs_source()
-        # Find the guarded block: look for the `if (` or `if not _privacy_mode` guard pattern
-        # that was introduced by wave-36.  The pattern used in the fix is:
-        #   if (\n        not _privacy_mode\n        and self._coerce_bool(...auto_save_transcripts...)
-        #
-        # We search for the `not _privacy_mode` that precedes `auto_save_transcripts` in the
-        # same if-block.
-        auto_save_idx = src.find("auto_save_transcripts")
-        # Scan backwards ~400 chars to find `not _privacy_mode`
-        context_start = max(0, auto_save_idx - 400)
-        context = src[context_start: auto_save_idx + 50]
-
-        self.assertIn("not _privacy_mode", context,
-                      "Expected `not _privacy_mode` guard combined with auto_save_transcripts check "
-                      "in recording_core_service.py (wave-36 fix)")
+        helper_idx = src.find("def _should_write_plaintext_md")
+        self.assertGreater(helper_idx, 0, "_should_write_plaintext_md helper missing")
+        helper_body = src[helper_idx: helper_idx + 800]
+        for token in ("privacy_mode", "history_encryption_enabled", "auto_save_transcripts"):
+            self.assertIn(token, helper_body,
+                          f"{token} guard missing inside _should_write_plaintext_md")
 
     # --- Guard-replication test (mirrors wave-31 B2 pattern) ---
 
