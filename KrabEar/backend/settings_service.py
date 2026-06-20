@@ -371,7 +371,7 @@ class SettingsService:
             settings["history_text_density"] = "normal"
         if settings.get("capture_source_mode") not in {"mic", "system_audio", "mic_plus_system"}:
             settings["capture_source_mode"] = "mic"
-        if settings.get("ui_last_tab") not in {"dictation", "live_translation", "history"}:
+        if settings.get("ui_last_tab") not in {"dictation", "live_translation", "history", "conversation", "call_automation", "diagnostics", "archive"}:
             settings["ui_last_tab"] = "history"
 
         settings["auto_start_enabled"] = bool(settings.get("auto_start_enabled", False))

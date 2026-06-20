@@ -109,9 +109,8 @@ extension HistoryPanelController {
         let presetName = (profilePresetSelector.selectedItem?.representedObject as? String) ?? selectedTitle.lowercased()
         let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let response = try? ipcClient.call(method: "apply_profile_preset", params: ["preset": presetName]),
-                  let result = response["result"] as? [String: Any],
-                  result["applied"] as? Bool == true else {
+            guard let response = try? ipcClient.call(method: "apply_profile_preset", params: ["profile": presetName]),
+                  response["ok"] as? Bool == true else {
                 DispatchQueue.main.async {
                     self?.showDiagnosticsOutput("Ошибка: не удалось применить профиль '\(selectedTitle)'")
                 }
@@ -136,7 +135,7 @@ extension HistoryPanelController {
                 self.profilePresetSelector.removeAllItems()
                 for preset in presets {
                     if let name = preset["name"] as? String {
-                        let label = (preset["label"] as? String) ?? name
+                        let label = (preset["description"] as? String) ?? name
                         self.profilePresetSelector.addItem(withTitle: label)
                         self.profilePresetSelector.lastItem?.representedObject = name
                     }
@@ -270,13 +269,13 @@ extension HistoryPanelController {
                   let result = response["result"] as? [String: Any],
                   let clipItems = result["items"] as? [[String: Any]],
                   let firstItem = clipItems.first,
-                  let itemId = firstItem["id"] as? String else {
+                  let itemId = firstItem["history_id"] as? String else {
                 DispatchQueue.main.async {
                     notificationService.notify(title: "Krab Ear", body: "Нет элементов для вставки")
                 }
                 return
             }
-            guard let _ = try? ipcClient.call(method: "repaste_item", params: ["id": itemId]) else {
+            guard let _ = try? ipcClient.call(method: "repaste_item", params: ["history_id": itemId]) else {
                 DispatchQueue.main.async {
                     notificationService.notify(title: "Krab Ear", body: "Ошибка повторной вставки")
                 }

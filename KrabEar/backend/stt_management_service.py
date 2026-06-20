@@ -106,11 +106,12 @@ class STTManagementService:
         s = self._settings_svc.cached_settings()
         enabled = bool(s.get("stt_hotwords_enabled", True))
         if not enabled:
-            return {"hotwords": [], "enabled": False}
+            return {"hotwords": [], "enabled": False, "truncated": False}
         current: list[str] = s.get("stt_hotwords", [])
         if not isinstance(current, list):
             current = []
-        return {"hotwords": sorted(current), "enabled": True}
+        truncated = len(current) >= _STT_HOTWORDS_MAX
+        return {"hotwords": sorted(current), "enabled": True, "truncated": truncated}
 
     # ------------------------------------------------------------------
     # STT warmup

@@ -47,7 +47,7 @@ extension HistoryPanelController {
             let ipcClient = self.ipcClient
             let notificationService = self.notificationService
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                guard let response = try? ipcClient.call(method: "cleanup_old_history", params: ["days": days]),
+                guard let response = try? ipcClient.call(method: "cleanup_old_history", params: ["older_than_days": days]),
                       let result = response["result"] as? [String: Any],
                       let deleted = result["deleted_count"] as? Int else {
                     DispatchQueue.main.async {
@@ -68,7 +68,7 @@ extension HistoryPanelController {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let response = try? ipcClient.call(method: "get_vocabulary_suggestions", params: [:]),
                   let result = response["result"] as? [String: Any],
-                  let suggestions = result["suggestions"] as? [String] else {
+                  let suggestions = result["suggestions"] as? [[String: Any]] else {
                 DispatchQueue.main.async {
                     self?.showDiagnosticsOutput("Нет предложений по словарю")
                 }
@@ -76,8 +76,10 @@ extension HistoryPanelController {
             }
             // Форматируем тело на background (Swift 6 Sendable workaround).
             var lines: [String] = ["=== Словарь (предложения) ==="]
-            for (i, word) in suggestions.enumerated() {
-                lines.append("\(i + 1). \(word)")
+            for (i, item) in suggestions.enumerated() {
+                let word = item["word"] as? String ?? ""
+                let count = item["count"] as? Int ?? 0
+                lines.append("\(i + 1). \(word) (\(count))")
             }
             let body = lines.joined(separator: "\n")
             DispatchQueue.main.async {

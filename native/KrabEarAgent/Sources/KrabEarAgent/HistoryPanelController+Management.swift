@@ -155,7 +155,7 @@ extension HistoryPanelController {
         let item = items[row]
         let collection = collectionPopUp?.titleOfSelectedItem ?? ""
         
-        executeIPC(method: "add_to_collection", params: ["id": item.id, "collection": collection]) { [weak self] response in
+        executeIPC(method: "add_to_collection", params: ["item_id": item.id, "collection_name": collection]) { [weak self] response in
             self?.showDiagnosticsOutput(response)
         }
     }

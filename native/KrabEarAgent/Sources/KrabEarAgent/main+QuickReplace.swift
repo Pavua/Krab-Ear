@@ -69,10 +69,11 @@ extension AgentAppDelegate {
 
             // IPC call: word replacement is fast (< 50 ms) — call synchronously like QuickPresets.
             do {
-                let result = try self.callWithRecovery(
+                let response = try self.callWithRecovery(
                     method: "replace_word_in_last_transcript",
                     params: ["old_word": oldWord, "new_word": newWord]
                 )
+                let result = response["result"] as? [String: Any] ?? [:]
                 let ok = result["ok"] as? Bool ?? false
                 let count = result["replaced_count"] as? Int ?? 0
                 let error = result["error"] as? String

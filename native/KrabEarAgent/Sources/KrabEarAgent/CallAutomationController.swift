@@ -662,8 +662,8 @@ final class CallAutomationController: NSViewController {
             costEstimateLabel.stringValue = ""
             return
         }
-        let costPerMin  = (result["cost_per_minute"] as? Double) ?? 0
-        let country     = (result["country"] as? String) ?? ""
+        let costPerMin  = (result["minute_rate_usd"] as? Double) ?? 0
+        let country     = (result["destination"] as? String) ?? ""
         let provider    = (result["provider"] as? String) ?? selectedProvider.settingKey.capitalized
 
         if costPerMin > 0 {
@@ -939,7 +939,10 @@ final class CallAutomationController: NSViewController {
               let result = response?["result"] as? [String: Any] else { return }
 
         let statusRaw  = (result["status"] as? String) ?? session.status.rawValue
-        let transcript = (result["transcript"] as? String) ?? session.transcript
+        let entries = result["transcript_history"] as? [[String: Any]] ?? []
+        let transcript = entries.isEmpty
+            ? session.transcript
+            : entries.map { "\($0["speaker"] as? String ?? "?"): \($0["text"] as? String ?? "")" }.joined(separator: "\n")
         let cost       = (result["cost_usd"] as? Double) ?? session.costUSD
 
         session.status    = CallSession.Status(rawValue: statusRaw) ?? session.status
@@ -1022,11 +1025,11 @@ final class CallAutomationController: NSViewController {
             return
         }
         callHistory = items.compactMap { dict -> CallHistoryItem? in
-            guard let id = dict["session_id"] as? String else { return nil }
+            guard let id = dict["id"] as? String else { return nil }
             return CallHistoryItem(
                 sessionID: id,
-                phone:    (dict["phone"]    as? String) ?? "",
-                goal:     (dict["goal"]     as? String) ?? "",
+                phone:    (dict["phone_number"] as? String) ?? "",
+                goal:     (dict["goal_text"]    as? String) ?? "",
                 status:   (dict["status"]   as? String) ?? "unknown",
                 durationSec: (dict["duration_sec"] as? Double) ?? 0,
                 costUSD:  (dict["cost_usd"] as? Double) ?? 0,

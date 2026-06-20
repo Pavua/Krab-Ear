@@ -190,7 +190,7 @@ extension HistoryPanelController {
             text = "(без текста)"
         }
 
-        if let timestamp = item["timestamp"] as? String {
+        if let timestamp = item["ts"] as? String {
             // Show first 16 chars of ISO timestamp (YYYY-MM-DDTHH:MM).
             let ts = String(timestamp.prefix(16)).replacingOccurrences(of: "T", with: " ")
             return "\(text)  [\(ts)]"

@@ -5,8 +5,8 @@
  IPC-методы:
    suggest_medical_glossary_terms(limit: Int)
      → result: [ {source_term, target_term, frequency, domain, confidence} ]
-   apply_glossary_suggestions(selected_ids: [Int], suggestions: [[String:Any]])
-     → result: {added: Int}
+   apply_glossary_suggestions(selected_ids: [String], suggestions: [[String:Any]])
+     → result: {applied: Int}
 
  Добавляет кнопку «Предложить термины из истории» в секцию Перевод
  (Claude Design variant: cdBuildTranslationSection). Sheet содержит
@@ -355,15 +355,20 @@ extension HistoryPanelController {
                 ]
             }
             do {
+                // Convert row indices to source_term strings — Python keyed by source_term
+                let selectedTerms: [String] = selectedIds.compactMap { idx in
+                    guard idx >= 0 && idx < suggestionData.count else { return nil }
+                    return suggestionData[idx].sourceTerm
+                }
                 let result = try client.call(
                     method: "apply_glossary_suggestions",
                     params: [
-                        "selected_ids": selectedIds,
+                        "selected_ids": selectedTerms,
                         "suggestions":  rawSuggestions,
                     ]
                 )
                 let added = (result["result"] as? [String: Any]).flatMap {
-                    ($0["added"] as? Int) ?? ($0["added"] as? NSNumber)?.intValue
+                    ($0["applied"] as? Int) ?? ($0["applied"] as? NSNumber)?.intValue
                 } ?? selectedIds.count
                 DispatchQueue.main.async {
                     self.showGlossaryToast("Добавлено \(added) терминов в глоссарий")
