@@ -1,13 +1,18 @@
 /*
- ConversationViewController+Audio — AVAudioEngine capture / playback stubs.
+ ConversationViewController+Audio — AVAudioEngine capture / playback (Phase 1.4, wired).
 
- Phase 1.3 scope: установка движка и тапов, реальный стриминг — Phase 1.4.
+ Phase 1.4: PCM16 LE mono, no codec needed.
+   Uplink:   AVAudioEngine mic tap → resample to 16kHz mono Float32 →
+             Float32→PCM16 LE conversion → sendAudioFrame(pcmData)
+   Downlink: handleDownlinkAudio(data) → PCM16 LE → Float32 →
+             AVAudioPCMBuffer → AVAudioPlayerNode.scheduleBuffer
 
- Uplink:   AVAudioEngine mic tap → PCM 16kHz → Opus (stub) → sendAudioFrame()
- Downlink: handleDownlinkAudio() → Opus → PCM 24kHz (stub) → AVAudioPlayerNode
+ Voice Gateway speaks raw PCM16 LE mono (confirmed: conversation.py «Бинарные фреймы: PCM16 LE mono»).
+ No Opus library is needed — format conversion is done inline.
 
- Opus-кодек будет подключён в Phase 1.4 (PR 1.4).
- Пока что: PCM-захват настроен, encode/decode — заглушки.
+ Downlink sample rate (downlinkSampleRate = 24000 Hz) matches VG's documented TTS output.
+ AVAudioEngine's mainMixerNode auto-resamples to the hardware output rate, so a mismatch
+ here only affects playback pitch — it never crashes. Adjust as the VG contract evolves.
 
  Swift 6 concurrency note:
  AVAudioNode tap block is called on the Core Audio real-time thread — NOT on the
@@ -30,6 +35,10 @@ extension ConversationViewController {
     /// real-time tap block. Must be updated in lockstep with `isSessionActive`.
     nonisolated(unsafe) static var _rtSessionActive: Bool = false
 
+    /// Downlink sample rate assumed from the Voice Gateway (PCM16 LE mono, 24 kHz).
+    /// AVAudioEngine auto-resamples to hardware rate; wrong value here → pitch shift only, no crash.
+    private static let downlinkSampleRate: Double = 24000
+
     private var audioHolder: AudioHolder {
         if let h = objc_getAssociatedObject(self, &ConversationViewController.audioHolderKey) as? AudioHolder {
             return h
@@ -41,8 +50,8 @@ extension ConversationViewController {
 
     // MARK: - Capture (mic → uplink)
 
-    /// Запустить захват микрофона.
-    /// Реальный Opus-encode добавляется в PR 1.4; пока PCM-буфер захватывается, но не отправляется.
+    /// Запустить захват микрофона и подключить player-node для воспроизведения downlink.
+    /// Phase 1.4: один AVAudioEngine обслуживает и input-tap (uplink) и player-node (downlink).
     func startAudioCapture() {
         // Mirror session state for RT-thread access before starting engine.
         ConversationViewController._rtSessionActive = isSessionActive
@@ -97,7 +106,7 @@ extension ConversationViewController {
                 samples = []
             }
 
-            // Dispatch to main actor for any state mutations / Phase 1.4 encoding.
+            // Dispatch to main actor for PCM16 encoding and level-meter update.
             Task { @MainActor [weak self] in
                 self?.processAudioSamples(samples)
             }
@@ -105,57 +114,113 @@ extension ConversationViewController {
 
         inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: inputFormat, block: tapBlock)
 
+        // MARK: Downlink player node (Phase 1.4)
+        // Attach a player node to the SAME engine so one engine handles both
+        // input-tap (uplink) and playback (downlink) without two engine starts.
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+
+        guard let playbackFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: ConversationViewController.downlinkSampleRate,
+            channels: 1,
+            interleaved: false
+        ) else {
+            AgentLogger.shared.info("[Audio] Не удалось создать playback-формат 24kHz — downlink недоступен")
+            // Continue without player: uplink still works.
+            audioHolder.engine = engine
+            do {
+                try engine.start()
+                AgentLogger.shared.info("[Audio] Захват запущен (uplink only, no player)")
+            } catch {
+                AgentLogger.shared.info("[Audio] Ошибка запуска движка: \(error.localizedDescription)")
+            }
+            return
+        }
+
+        engine.connect(player, to: engine.mainMixerNode, format: playbackFormat)
+        audioHolder.playerNode = player
         audioHolder.engine = engine
 
         do {
             try engine.start()
-            AgentLogger.shared.info("[Audio] Захват запущен (16kHz mono stub)")
+            player.play()
+            AgentLogger.shared.info("[Audio] Захват запущен (PCM16 uplink + downlink player, 16kHz/24kHz)")
         } catch {
             AgentLogger.shared.info("[Audio] Ошибка запуска движка: \(error.localizedDescription)")
         }
     }
 
-    /// Остановить захват микрофона.
+    /// Остановить захват микрофона и player node.
     func stopAudioCapture() {
         // Clear RT mirror before removing tap so the in-flight block exits early.
         ConversationViewController._rtSessionActive = false
         audioHolder.engine?.inputNode.removeTap(onBus: 0)
+        // Stop player cleanly before engine stop to avoid scheduling on a stopped node.
+        audioHolder.playerNode?.stop()
+        audioHolder.playerNode = nil
         audioHolder.engine?.stop()
         audioHolder.engine = nil
-        audioHolder.playerNode = nil
         // Сбросить level-meter в idle-состояние (@MainActor — безопасно).
         resetMicLevelMeter()
         AgentLogger.shared.info("[Audio] Захват остановлен")
     }
 
     /// Обработать PCM-сэмплы на главном акторе.
-    /// Phase 1.3: заглушка. Phase 1.4: Opus-encode → sendAudioFrame(opusData).
+    /// Phase 1.4: Float32 → PCM16 LE → sendAudioFrame (uplink) + level-meter.
     /// Вызывается только из Task { @MainActor } внутри installTap-блока.
     func processAudioSamples(_ samples: [Float]) {
-        // Stub: в Phase 1.4 здесь будет Opus-encode → sendAudioFrame(opusData).
-        _ = samples // encoder placeholder — consume to silence warning
-
         // Level-meter: вычислить RMS и передать в визуализатор.
         // Безопасно — вызываемся на @MainActor, без IPC (AGENT-3 чист).
         computeAndPushLevel(samples)
+
+        // Uplink: Float32 → PCM16 LE → binary WS frame.
+        // This path is @MainActor; 1280 samples (80ms) makes the loop cheap.
+        guard isSessionActive, !samples.isEmpty else { return }
+        var pcm = Data(capacity: samples.count * 2)
+        for s in samples {
+            let clamped = s.isFinite ? max(-1.0, min(1.0, s)) : 0.0  // NaN/Inf-safe clamp
+            let i = Int16(clamped * 32767.0)
+            withUnsafeBytes(of: i.littleEndian) { pcm.append(contentsOf: $0) }
+        }
+        sendAudioFrame(pcm)
     }
 
     // MARK: - Playback (downlink → speaker)
 
-    /// Обработать бинарный Opus-фрейм от сервера.
-    /// Phase 1.3: stub — логируем размер, без реального воспроизведения.
-    /// Phase 1.4: Opus-decode → AVAudioPCMBuffer → scheduleBuffer.
+    /// Обработать бинарный PCM16 LE фрейм от сервера.
+    /// Phase 1.4: PCM16 LE → Float32 → AVAudioPCMBuffer → scheduleBuffer.
     /// Вызывается из Main Actor (из handleWSMessage) — безопасно обращаться к @MainActor свойствам.
     func handleDownlinkAudio(_ data: Data) {
         // Обновляем состояние — сервер присылает аудио только когда AI говорит.
         if conversationState != .speaking {
             conversationState = .speaking
         }
-        AgentLogger.shared.info("[Audio] Downlink frame: \(data.count) bytes (Opus decode stub)")
 
-        // Stub: в Phase 1.4 здесь будет:
-        // 1. Opus decode → PCM 24kHz
-        // 2. audioHolder.playerNode?.scheduleBuffer(pcmBuffer)
+        let frameCount = data.count / 2
+        guard frameCount > 0,
+              let fmt = AVAudioFormat(
+                  commonFormat: .pcmFormatFloat32,
+                  sampleRate: ConversationViewController.downlinkSampleRate,
+                  channels: 1,
+                  interleaved: false
+              ),
+              let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(frameCount)),
+              let player = audioHolder.playerNode
+        else {
+            AgentLogger.shared.info("[Audio] Downlink: пропуск фрейма (\(data.count) bytes) — player недоступен")
+            return
+        }
+
+        buf.frameLength = AVAudioFrameCount(frameCount)
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            let i16 = raw.bindMemory(to: Int16.self)
+            let out = buf.floatChannelData![0]
+            for n in 0..<frameCount {
+                out[n] = Float(Int16(littleEndian: i16[n])) / 32768.0
+            }
+        }
+        player.scheduleBuffer(buf, completionHandler: nil)
     }
 }
 
