@@ -1294,7 +1294,9 @@ def transcribe_audio():
         domain = request.form.get("domain", "casual")
         if domain not in VALID_DOMAIN:
             return jsonify({"error": f"Invalid domain: {domain}"}), 400
-        lang_hint = request.form.get("lang_hint") or None
+        # Accept both "lang_hint" (Krab Ear native) and "language" (Voice Gateway
+        # KrabEarSTTEngine sends this key) — cross-project contract drift fix.
+        lang_hint = request.form.get("lang_hint") or request.form.get("language") or None
 
         req_vocab_raw = request.form.get("vocabulary", "")
         req_vocab = [w.strip() for w in req_vocab_raw.split(",") if w.strip()] if req_vocab_raw else []
