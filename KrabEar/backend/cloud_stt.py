@@ -8,6 +8,7 @@
 import io
 import json
 import logging
+import math
 import re
 import time
 import urllib.request
@@ -71,13 +72,37 @@ def _err_body(exc) -> str:
         return ""
 
 
+def _safe_confidence(value: Any, default: float) -> float:
+    """float() от confidence провайдера, терпимое к null/нечисловому/NaN/Inf.
+
+    Cloud-audit (2026-06-20): Deepgram/AssemblyAI иногда возвращают
+    ``"confidence": null`` (или опускают на error-статусах). ``dict.get(k, d)``
+    отдаёт ``None`` при ПРИСУТСТВУЮЩЕМ null-ключе → ``float(None)`` → TypeError,
+    который ронял всю transcribe() и молча рвал WS-соединение.
+    """
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return default
+    return f if math.isfinite(f) else default
+
+
 def pcm16_to_wav(pcm_bytes: bytes, sample_rate: int) -> bytes:
     """Конвертирует raw PCM (16-bit, mono) в WAV."""
+    # Cloud-audit (2026-06-20): sample_rate приходит из WS-config клиента без
+    # валидации; wave.setframerate(<=0) бросает wave.Error → молчаливый обрыв WS.
+    # Клампим в разумный диапазон (мусорное значение → дефолт 16 кГц).
+    try:
+        sr = int(sample_rate)
+    except (TypeError, ValueError):
+        sr = 16000
+    if not (8000 <= sr <= 48000):
+        sr = 16000
     with io.BytesIO() as wav_io:
         with wave.open(wav_io, "wb") as wav_file:
             wav_file.setnchannels(1)
             wav_file.setsampwidth(2)
-            wav_file.setframerate(sample_rate)
+            wav_file.setframerate(sr)
             wav_file.writeframes(pcm_bytes)
         return wav_io.getvalue()
 
@@ -216,7 +241,7 @@ class DeepgramSTTProvider:
                 return {
                     "text": alts[0].get("transcript", ""),
                     "lang": lang,
-                    "confidence": float(alts[0].get("confidence", 0.0)),
+                    "confidence": _safe_confidence(alts[0].get("confidence"), 0.0),
                 }
         except urllib.error.HTTPError as e:
             err_msg = _err_body(e)
@@ -333,7 +358,7 @@ class AssemblyAISTTProvider:
                         return {
                             "text": poll_res.get("text", ""),
                             "lang": poll_res.get("language_code", lang),
-                            "confidence": float(poll_res.get("confidence", 1.0)),
+                            "confidence": _safe_confidence(poll_res.get("confidence"), 1.0),
                         }
                     if status == "error":
                         return {"error": "api_error", "provider": "assemblyai", "message": poll_res.get("error", "Unknown")}

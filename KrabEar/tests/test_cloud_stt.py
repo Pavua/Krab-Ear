@@ -5,7 +5,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from backend.cloud_stt import get_cloud_stt_provider
+from backend.cloud_stt import get_cloud_stt_provider, _safe_confidence, pcm16_to_wav
 from backend.rest_server import create_app, ws_stream
 
 
@@ -343,3 +343,55 @@ class TestAssemblyAIPollRetry(unittest.TestCase):
         self.assertEqual(res.get("text"), "counter reset works",
                          "Expected success: non-consecutive errors must not abort early")
         self.assertNotIn("error", res)
+
+
+class SafeConfidenceTest(unittest.TestCase):
+    """cloud-audit (2026-06-20): провайдер может вернуть confidence: null →
+    float(None) ронял transcribe() + молча рвал WS. _safe_confidence терпим."""
+
+    def test_null_returns_default(self):
+        self.assertEqual(_safe_confidence(None, 0.0), 0.0)
+        self.assertEqual(_safe_confidence(None, 1.0), 1.0)
+
+    def test_valid_float_passthrough(self):
+        self.assertEqual(_safe_confidence(0.85, 0.0), 0.85)
+
+    def test_string_number_coerced(self):
+        self.assertEqual(_safe_confidence("0.5", 0.0), 0.5)
+
+    def test_nan_inf_return_default(self):
+        self.assertEqual(_safe_confidence(float("nan"), 0.0), 0.0)
+        self.assertEqual(_safe_confidence(float("inf"), 0.0), 0.0)
+
+    def test_garbage_returns_default(self):
+        self.assertEqual(_safe_confidence("abc", 0.3), 0.3)
+        self.assertEqual(_safe_confidence({}, 0.3), 0.3)
+
+
+class PcmToWavSampleRateGuardTest(unittest.TestCase):
+    """cloud-audit (2026-06-20): невалидный sample_rate из WS-config ронял
+    wave.setframerate → молчаливый обрыв WS. pcm16_to_wav теперь клампит."""
+
+    _PCM = b"\x00\x00" * 100
+
+    def test_zero_sample_rate_no_crash(self):
+        wav = pcm16_to_wav(self._PCM, 0)  # раньше: wave.Error
+        self.assertTrue(wav.startswith(b"RIFF"))
+
+    def test_negative_sample_rate_no_crash(self):
+        self.assertTrue(pcm16_to_wav(self._PCM, -1).startswith(b"RIFF"))
+
+    def test_garbage_sample_rate_no_crash(self):
+        self.assertTrue(pcm16_to_wav(self._PCM, "bad").startswith(b"RIFF"))  # type: ignore[arg-type]
+
+    def test_valid_sample_rate_preserved(self):
+        import io
+        import wave
+        with wave.open(io.BytesIO(pcm16_to_wav(self._PCM, 16000))) as w:
+            self.assertEqual(w.getframerate(), 16000)
+
+    def test_out_of_range_clamped_to_default(self):
+        import io
+        import wave
+        with wave.open(io.BytesIO(pcm16_to_wav(self._PCM, 999999))) as w:
+            self.assertEqual(w.getframerate(), 16000)
