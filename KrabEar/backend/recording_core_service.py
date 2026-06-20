@@ -1603,14 +1603,10 @@ class RecordingCoreService:
                 except Exception:
                     logger.debug("Не удалось emit realtime.final_transcript", exc_info=True)
 
-        # wave-36 MED: do not write .md transcript files when privacy_mode is on.
-        # TranscriptWriter.write_transcript() persists plaintext to disk — writing
-        # it violates the privacy-mode guarantee that no transcript cleartext is
-        # persisted.  _privacy_mode is already resolved at ~line 1371 above.
-        if (
-            not _privacy_mode
-            and self._coerce_bool(settings.get("auto_save_transcripts", False), default=False)
-        ):
+        # wave-36 MED + crypto-audit (2026-06-20): не пишем plaintext .md когда активна
+        # защита данных (privacy_mode ИЛИ history_encryption_enabled); live-путь также
+        # требует auto_save_transcripts. Логика в _should_write_plaintext_md (тестируемо).
+        if self._should_write_plaintext_md(settings, _privacy_mode, require_auto_save=True):
             try:
                 transcripts_dir = Path(self.store.data_dir) / "transcripts"
                 item_dict = {
@@ -1850,11 +1846,10 @@ class RecordingCoreService:
                 if len(final_text) > 500:
                     summary = self._generate_summary(final_text)
 
-                # wave-1770 HIGH: gate .md transcript-file write behind privacy_mode,
-                # consistent with the live recording path (TranscriptWriter gated at ~1586).
-                # Without this, batch import wrote plaintext transcripts to disk even when
-                # privacy_mode_enabled=True.
-                if not _privacy_mode:
+                # wave-1770 HIGH + crypto-audit (2026-06-20): gate .md write behind data
+                # protection (privacy_mode ИЛИ history_encryption_enabled), consistent with
+                # the live path. require_auto_save=False — import пишет .md без этого флага.
+                if self._should_write_plaintext_md(settings, _privacy_mode, require_auto_save=False):
                     try:
                         transcripts_dir = Path(self.store.data_dir) / "transcripts"
                         transcripts_dir.mkdir(exist_ok=True)
@@ -2385,6 +2380,28 @@ class RecordingCoreService:
             return bool(value)
         except Exception:
             return default
+
+    @staticmethod
+    def _should_write_plaintext_md(
+        settings: dict[str, Any], privacy_mode: bool, *, require_auto_save: bool
+    ) -> bool:
+        """True, если plaintext .md-транскрипт допустимо записать на диск.
+
+        Транскрипт НЕ должен лежать открытым, если активна любая защита данных:
+        - privacy_mode  — ничего не персистится;
+        - history_encryption_enabled — шифрование-at-rest; plaintext .md сайдкар
+          подрывает гарантию «транскрипт не читаем на диске» (crypto-audit 2026-06-20).
+        Live-путь дополнительно требует auto_save_transcripts; import-путь исторически
+        пишет .md без этого флага (require_auto_save=False).
+        """
+        coerce = RecordingCoreService._coerce_bool
+        if privacy_mode:
+            return False
+        if coerce(settings.get("history_encryption_enabled", False), default=False):
+            return False
+        if require_auto_save and not coerce(settings.get("auto_save_transcripts", False), default=False):
+            return False
+        return True
 
     @staticmethod
     def _coerce_bounded(

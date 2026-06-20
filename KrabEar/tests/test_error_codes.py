@@ -126,6 +126,9 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             # Added W1759 merge-train — history.purge_incomplete: partial purge
             # operation left orphan records; dedicated code for observability.
             "history.purge_incomplete",
+            # crypto-audit (2026-06-20) — encryption enabled but encrypt_line failed →
+            # record written in plaintext; loud event so the silent downgrade is visible.
+            "history.encrypt_fail",
         }
         self.assertEqual(set(ERROR_REGISTRY.keys()), expected)
 
@@ -205,7 +208,8 @@ class ErrorRegistryShapeTests(unittest.TestCase):
         W1614 F1 added stt.transcribe_failed (was in registry but test set drifted)
         + audio.max_duration_reached (new) = 58;
         W1759 merge-train added history.purge_incomplete = 59;
+        crypto-audit (2026-06-20) added history.encrypt_fail = 60;
         test_expected_codes_present guards the exact set so this count test is a
         redundant but cheap invariant.
         """
-        self.assertEqual(len(ERROR_REGISTRY), 59)
+        self.assertEqual(len(ERROR_REGISTRY), 60)
