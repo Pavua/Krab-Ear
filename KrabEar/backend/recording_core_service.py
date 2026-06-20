@@ -1482,7 +1482,7 @@ class RecordingCoreService:
                     from backend.error_codes import ERROR_REGISTRY
                     from datetime import datetime, timezone
                     _e = ERROR_REGISTRY.get("history.write_fail", {})
-                    event_bus.emit("krab.error", {
+                    event_bus.emit("krab_error", {
                         "severity": _e.get("severity", "critical"), "component": "history",
                         "code": "history.write_fail",
                         "message_user": _e.get("user_msg_ru", "Не удалось сохранить"),

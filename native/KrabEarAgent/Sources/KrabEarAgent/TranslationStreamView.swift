@@ -345,7 +345,8 @@ final class TranslationStreamView: NSView {
         guard let data = json.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
         let payload = obj["data"] as? [String: Any] ?? obj
-        let original = (payload["original"] as? String) ?? ""
+        // Backend LiveSubsResult emits "text" (not "original"); accept both for safety.
+        let original = (payload["original"] as? String) ?? (payload["text"] as? String) ?? ""
         let translation = (payload["translation"] as? String)
             ?? (payload["translated"] as? String)
             ?? ""
