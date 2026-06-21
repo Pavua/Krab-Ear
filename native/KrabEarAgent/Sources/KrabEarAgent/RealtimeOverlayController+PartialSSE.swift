@@ -1,11 +1,13 @@
 /*
  RealtimeOverlayController+PartialSSE.swift
- SSE subscription for realtime.partial_transcript and realtime.final_transcript events.
+ SSE subscription for realtime.partial_transcript, realtime.final_transcript,
+ and realtime.partial_disabled events.
 
  Architecture:
- - Subscribes to REST /v1/events?filter=realtime.partial_transcript,realtime.final_transcript
+ - Subscribes to REST /v1/events?filter=realtime.partial_transcript,realtime.final_transcript,realtime.partial_disabled
  - partial_transcript  → showPartialText() — italic font, alpha 0.7
  - final_transcript    → showFinalText()   — normal font, alpha 1.0
+ - partial_disabled    → showDisabledState() — stops dot pulse, shows user message
  - Uses URLSession + PartialSSEDelegate (same pattern as LiveSubtitlesOverlay)
  - Associated object storage keeps delegate/task alive without stored properties
    (which would require modifying the main file and potentially reverting).
@@ -58,7 +60,7 @@ extension RealtimeOverlayController {
     /// Start SSE subscription for partial/final transcript events.
     func startPartialSSE(restBaseURL: String = "http://127.0.0.1:5005") {
         stopPartialSSE()
-        let filter = "realtime.partial_transcript,realtime.final_transcript"
+        let filter = "realtime.partial_transcript,realtime.final_transcript,realtime.partial_disabled"
         guard let url = URL(string: "\(restBaseURL)/v1/events?filter=\(filter)") else { return }
 
         let delegate = PartialSSEDelegate { [weak self] line in
@@ -121,13 +123,16 @@ extension RealtimeOverlayController {
 
         let eventData = obj["data"] as? [String: Any] ?? obj
         let text = (eventData["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
 
         switch type {
         case "realtime.partial_transcript":
+            guard !text.isEmpty else { return }
             showPartialText(text)
         case "realtime.final_transcript":
+            guard !text.isEmpty else { return }
             showFinalText(text)
+        case "realtime.partial_disabled":
+            showDisabledState()
         default:
             break
         }
@@ -163,6 +168,23 @@ extension RealtimeOverlayController {
             .foregroundColor: NSColor.labelColor,
         ]
         primaryLabel.attributedStringValue = NSAttributedString(string: text, attributes: attrs)
+        adjustHeight()
+    }
+
+    /// Backend emitted realtime.partial_disabled (10 consecutive STT failures).
+    /// Freeze partial state and show an informational message so the overlay
+    /// does not silently stall. Dot animation winds down naturally when the
+    /// recording session ends (hide() → stopAllPulse()).
+    private func showDisabledState() {
+        _isShowingPartial = false
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 14, weight: .regular),
+            .foregroundColor: KrabEarTheme.Colors.warning,
+        ]
+        primaryLabel.attributedStringValue = NSAttributedString(
+            string: "Превью остановлено — перезапустите запись",
+            attributes: attrs
+        )
         adjustHeight()
     }
 }
