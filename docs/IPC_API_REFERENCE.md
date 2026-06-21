@@ -183,8 +183,8 @@ Returns: HistoryItem object (все поля включая speaker_turns, actio
 ### `add_history_item`
 *(history_service.py)*  
 Вручную добавить запись в историю.  
-Params: `{text, ts?, lang?, duration_sec?, ...}`  
-Returns: `{id, ts}`
+Params: `{text, ts?, lang?, duration_sec?, paste_status?, ...}`  
+Returns: полный dict добавленной записи (`item.to_dict()`) — содержит `id`, `ts`, `text`, `lang`, `duration_sec`, `paste_status` и прочие поля HistoryItem (не только `{id, ts}`).
 
 ### `delete_history_item`
 *(history_service.py)*  
@@ -488,9 +488,10 @@ Returns: `{ok, id, enriched_fields: {...}}`
 
 ### `auto_summarize_batch`
 *(history_service.py)*  
-Генерирует сводное LLM-резюме для нескольких транскрипций.  
-Params: `{ids?: [...], limit?, profile?}`  
-Returns: `{summaries: [{id, summary}, ...], failed: [...]}`
+Генерирует ОДНО сводное LLM-резюме для пакета транскрипций (агрегат, не per-item).  
+Params: `{ids?: [...], limit?, profile?}` — пустой/невалидный `ids` → `ok=False`.  
+Returns: `{summary, key_points: [...], items_processed, total_words, llm, fallback, error, profile}`  
+*(не per-item `summaries` — это единый дайджест по всему пакету.)*
 
 ### `list_summary_profiles`
 *(history_service.py)*  
@@ -1562,8 +1563,8 @@ Returns: `{insights: [{title, description, type}]}`
 ### `compare_periods`
 *(analytics_service.py)*  
 Сравнивает статистику двух временных периодов.  
-Params: `{period_a: {from, to}, period_b: {from, to}}`  
-Returns: `{period_a: {...}, period_b: {...}, delta: {...}}`
+Params: `{period1_start, period1_end, period2_start, period2_end}` (плоские ISO-даты, все required)  
+Returns: `{period1: {recordings, duration_sec, words, avg_confidence}, period2: {...}, recordings_change_pct, ...}`
 
 ### `get_keyword_cloud`
 *(analytics_service.py)*  
