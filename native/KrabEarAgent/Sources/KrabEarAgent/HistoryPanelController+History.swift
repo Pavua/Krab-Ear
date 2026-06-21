@@ -539,10 +539,15 @@ extension HistoryPanelController {
         let title = String(item.text.prefix(60))
         let notes = item.text
 
-        // start_date = now + 1 hour, formatted as AppleScript-friendly string
+        // start_date = now + 1 hour.
+        // Fix 1: use ISO-8601 with POSIX locale so the Python backend can parse it
+        // locale-agnostically via datetime.strptime.  The old "MM/dd/yyyy HH:mm:ss"
+        // format was injected verbatim into AppleScript `date "..."` which is
+        // LOCALE-DEPENDENT and fails on ru_RU macOS (the primary target locale).
         let startDate = Date().addingTimeInterval(3600)
         let formatter = DateFormatter()
-        formatter.dateFormat = "MM/dd/yyyy HH:mm:ss"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
         let startDateStr = formatter.string(from: startDate)
 
         let ipcClient = self.ipcClient

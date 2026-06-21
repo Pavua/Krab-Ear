@@ -44,6 +44,33 @@ SAMPLE_EVENT = {
 }
 
 
+class TestEpochToIso(unittest.TestCase):
+    """Fix 2: _epoch_to_iso must use local-time arithmetic, not fromtimestamp + UTC offset."""
+
+    def test_epoch_zero_is_mac_base_date(self):
+        """Fix 2: _epoch_to_iso(0) must equal '2001-01-01T00:00:00' (Mac epoch origin)."""
+        result = _epoch_to_iso(0)
+        self.assertEqual(result, "2001-01-01T00:00:00",
+                         "Fix 2: epoch 0 must map to 2001-01-01T00:00:00, not a TZ-shifted value")
+
+    def test_epoch_3600_is_one_hour_after_base(self):
+        """Fix 2: 3600 seconds after Mac epoch = 2001-01-01T01:00:00."""
+        result = _epoch_to_iso(3600)
+        self.assertEqual(result, "2001-01-01T01:00:00")
+
+    def test_negative_epoch_returns_empty_string(self):
+        """Fix 2: wildly negative epoch (overflow) returns empty string gracefully."""
+        result = _epoch_to_iso(-99999999999999)
+        self.assertEqual(result, "")
+
+    def test_known_timestamp_consistent(self):
+        """Fix 2: a known Mac epoch value produces a predictable date string."""
+        # 366 days = 2002-01-02T00:00:00 (2001 was not a leap year)
+        sec = 366 * 24 * 3600
+        result = _epoch_to_iso(sec)
+        self.assertEqual(result, "2002-01-02T00:00:00")
+
+
 class TestParseOsascriptOutput(unittest.TestCase):
     def test_single_event(self):
         events = _parse_osascript_output(SAMPLE_RAW)

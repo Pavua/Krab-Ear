@@ -56,7 +56,11 @@ class TestCreateCalendarEvent(unittest.TestCase):
         script = cmd[2]
         self.assertIn("Calendar", script)
         self.assertIn("Meeting", script)
-        self.assertIn("05/05/2026 10:00:00", script)
+        # Fix 1: the legacy "MM/dd/yyyy HH:mm:ss" format is now parsed and converted
+        # to locale-safe arithmetic, so the raw date string must NOT appear literally.
+        # The script must use "(current date) + <delta>" arithmetic instead.
+        self.assertIn("(current date) +", script)
+        self.assertNotIn("05/05/2026 10:00:00", script)
 
     # ------------------------------------------------------------------
     # test_create_event_escapes_quotes

@@ -202,6 +202,29 @@ class TestHandleCreateAppleNote(unittest.TestCase):
         self.assertIn("Work", script)
         self.assertIn("targetFolder", script)
 
+    # Fix 3: Notes folder creation + no hardcoded iCloud account
+    def test_folder_uses_default_account_not_hardcoded_icloud(self):
+        """Fix 3: folder-targeting script must use 'default account', not hardcoded 'iCloud'."""
+        svc = _make_service()
+        with patch("subprocess.run", return_value=_completed(0, "id x")) as mock_run:
+            svc.handle_create_apple_note({"title": "T", "body": "B", "folder": "Krab Ear"})
+        script = mock_run.call_args[0][0][2]
+        self.assertIn("default account", script,
+                      "Fix 3: script must use 'default account' not hardcoded 'iCloud'")
+        self.assertNotIn('account "iCloud"', script,
+                         "Fix 3: hardcoded 'iCloud' account must be removed")
+
+    def test_folder_script_creates_folder_if_missing(self):
+        """Fix 3: script must contain try/on error block that creates the folder if missing."""
+        svc = _make_service()
+        with patch("subprocess.run", return_value=_completed(0, "id y")) as mock_run:
+            svc.handle_create_apple_note({"title": "T", "body": "B", "folder": "New Folder"})
+        script = mock_run.call_args[0][0][2]
+        self.assertIn("on error", script,
+                      "Fix 3: script must include try/on error for folder creation")
+        self.assertIn("make new folder", script,
+                      "Fix 3: script must create the folder if it does not exist")
+
     def test_default_title_used_when_missing(self):
         svc = _make_service()
         with patch("subprocess.run", return_value=_completed(0, "id 3")) as mock_run:
@@ -310,6 +333,43 @@ class TestHandleCreateCalendarEvent(unittest.TestCase):
             )
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "osascript timeout")
+
+    # Fix 1 regression tests — locale-safe AppleScript date arithmetic
+    def test_iso_start_date_uses_current_date_arithmetic(self):
+        """Fix 1: ISO-8601 start_date must produce '(current date) +' arithmetic, not date \"...\"."""
+        svc = _make_service()
+        with patch("subprocess.run", return_value=_completed(0)) as mock_run:
+            svc.handle_create_calendar_event(
+                {"title": "Meeting", "start_date": "2026-06-21T10:00:00"}
+            )
+        script = mock_run.call_args[0][0][2]
+        # Must use locale-safe arithmetic instead of locale-dependent date literal.
+        self.assertIn("(current date) +", script,
+                      "Fix 1: script must use '(current date) + <delta>' for locale safety")
+        self.assertNotIn('set startDate to date "', script,
+                         "Fix 1: locale-dependent date literal must NOT appear for ISO input")
+
+    def test_legacy_mm_dd_yyyy_also_uses_current_date_arithmetic(self):
+        """Fix 1: backward-compat — old 'MM/dd/yyyy HH:mm:ss' format also converts to delta."""
+        svc = _make_service()
+        with patch("subprocess.run", return_value=_completed(0)) as mock_run:
+            svc.handle_create_calendar_event(
+                {"title": "T", "start_date": "06/21/2026 10:00:00"}
+            )
+        script = mock_run.call_args[0][0][2]
+        self.assertIn("(current date) +", script,
+                      "Fix 1: legacy MM/dd/yyyy format must also use delta arithmetic")
+
+    def test_unknown_format_falls_back_to_raw_injection(self):
+        """Fix 1: unrecognised format falls back to raw string (best-effort)."""
+        svc = _make_service()
+        with patch("subprocess.run", return_value=_completed(0)) as mock_run:
+            svc.handle_create_calendar_event(
+                {"title": "T", "start_date": "Sunday, June 21, 2026 at 10:00 AM"}
+            )
+        script = mock_run.call_args[0][0][2]
+        # Falls back to date "..." injection — raw string was injected.
+        self.assertIn("startDate", script)
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +487,63 @@ class TestApplePrivacyGateW1770(unittest.TestCase):
         with patch("subprocess.run", return_value=_completed(stdout="ok")):
             result = svc.handle_create_apple_note({"title": "t", "body": "b"})
         self.assertNotEqual(result.get("error"), "privacy_mode_active")
+
+
+# ---------------------------------------------------------------------------
+# Fix 4: Telegram /api/notify response field graceful fallback
+# ---------------------------------------------------------------------------
+
+class TestTelegramBridgeSendMessageGracefulFallback(unittest.TestCase):
+    """Fix 4: TelegramBridge.send_message must gracefully handle /api/notify responses
+    that omit message_id / sent_at / chat_title (Main Krab currently returns only
+    {"ok": True, "chat_id": ...}).  The production code already has graceful fallbacks
+    (message_id=None, sent_at=time.time(), chat_title=str(chat_id)) — this test
+    confirms they stay in place so forward-compat reads keep working.
+    """
+
+    def _make_bridge(self):
+        from backend.telegram_bridge import TelegramBridge
+        return TelegramBridge(base_url="http://localhost:8080")
+
+    def test_missing_response_fields_use_graceful_defaults(self):
+        """Fix 4: when /api/notify returns only {ok, chat_id}, result fields fallback gracefully."""
+        import requests as req_mod
+        bridge = self._make_bridge()
+        mock_resp = MagicMock()
+        mock_resp.ok = True
+        # Simulate minimal Main Krab response — only ok + chat_id, no message_id etc.
+        mock_resp.json.return_value = {"ok": True, "chat_id": 12345}
+        with patch.object(req_mod, "post", return_value=mock_resp):
+            result = bridge.send_message(text="hello", chat_id=12345)
+        # message_id should be None (field absent) — graceful fallback.
+        self.assertIsNone(result["message_id"],
+                          "Fix 4: message_id must be None when absent from response")
+        # sent_at must be a numeric fallback (time.time()), not None.
+        self.assertIsNotNone(result["sent_at"])
+        self.assertIsInstance(result["sent_at"], float,
+                              "Fix 4: sent_at must fallback to time.time() float")
+        # chat_title must fallback to str(chat_id).
+        self.assertEqual(result["chat_title"], "12345",
+                         "Fix 4: chat_title must fallback to str(chat_id)")
+
+    def test_full_response_fields_passed_through(self):
+        """Fix 4: when /api/notify returns all fields, they are passed through unchanged."""
+        import requests as req_mod
+        bridge = self._make_bridge()
+        mock_resp = MagicMock()
+        mock_resp.ok = True
+        mock_resp.json.return_value = {
+            "ok": True,
+            "chat_id": 99,
+            "message_id": 777,
+            "sent_at": "2026-06-21T12:00:00",
+            "chat_title": "Dev Chat",
+        }
+        with patch.object(req_mod, "post", return_value=mock_resp):
+            result = bridge.send_message(text="test", chat_id=99)
+        self.assertEqual(result["message_id"], 777)
+        self.assertEqual(result["sent_at"], "2026-06-21T12:00:00")
+        self.assertEqual(result["chat_title"], "Dev Chat")
 
 
 if __name__ == "__main__":

@@ -167,6 +167,10 @@ class TelegramBridge:
 
         self._record_success()
         data = resp.json()
+        # Fix 4: Main Krab's /api/notify currently returns only {"ok": True, "chat_id": ...}.
+        # The fields below are best-effort / forward-compat for when Main Krab adds them.
+        # message_id=None and chat_title=str(chat_id) are graceful fallbacks; sent_at
+        # falls back to time.time() so callers always receive a numeric timestamp.
         return {
             "message_id": data.get("message_id"),
             "sent_at": data.get("sent_at") or time.time(),

@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
+from datetime import datetime
 from typing import Any, Callable, TYPE_CHECKING
 
 from core.config import settings
@@ -213,12 +214,19 @@ class AppleIntegrationService:
 
         if folder:
             folder_escaped = self._escape_as_str(folder)
+            # Fix 3: don't hardcode "iCloud" account — use the default account.
+            # Also wrap folder targeting in try/on error so the folder is created
+            # if it does not exist yet, rather than failing with an osascript error.
             script = f'''
 tell application "Notes"
-    tell account "iCloud"
-        set targetFolder to folder "{folder_escaped}"
-        make new note at targetFolder with properties {{name:"{title}", body:"{body}"}}
-    end tell
+    set defaultAcct to default account
+    set targetFolder to missing value
+    try
+        set targetFolder to folder "{folder_escaped}" of defaultAcct
+    on error
+        set targetFolder to (make new folder at defaultAcct with properties {{name:"{folder_escaped}"}})
+    end try
+    make new note at targetFolder with properties {{name:"{title}", body:"{body}"}}
 end tell
 '''
         else:
@@ -330,12 +338,36 @@ end tell
         start_date = str(params.get("start_date", "")).strip()
         if not start_date:
             return {"ok": False, "error": "start_date is required"}
-        start_date_esc = self._escape_as_str(start_date)
         duration_minutes = int(params.get("duration_minutes", 30) or 30)
         calendar_name = params.get("calendar_name") or None
 
+        # Fix 1 (HIGH for RU users): AppleScript `date "..."` coercion is LOCALE-DEPENDENT
+        # and breaks on ru_RU macOS.  Instead compute an integer delta from now and emit
+        # `(current date) + <delta>` arithmetic which is locale-agnostic.
+        # Accept ISO-8601 ("yyyy-MM-dd'T'HH:mm:ss") as the canonical format.
+        # Backward-compat: also accept the old "MM/dd/yyyy HH:mm:ss" format sent by
+        # pre-fix Swift clients, and fall back to raw-string injection as a last resort.
+        start_dt: datetime | None = None
+        _ISO_FMTS = ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S")
+        _LEGACY_FMTS = ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M")
+        for fmt in _ISO_FMTS + _LEGACY_FMTS:
+            try:
+                start_dt = datetime.strptime(start_date, fmt)
+                break
+            except ValueError:
+                continue
+
+        if start_dt is not None:
+            # Compute seconds-delta from now so AppleScript uses locale-safe arithmetic.
+            delta_sec = int((start_dt - datetime.now()).total_seconds())
+            start_date_block = f"set startDate to (current date) + {delta_sec}"
+        else:
+            # Unknown format: escape and inject raw string (best-effort, may fail on ru_RU).
+            start_date_esc = self._escape_as_str(start_date)
+            start_date_block = f'set startDate to date "{start_date_esc}"'
+
         event_block = f'''
-        set startDate to date "{start_date_esc}"
+        {start_date_block}
         set endDate to startDate + ({duration_minutes} * minutes)
         make new event with properties {{summary:"{title_esc}", description:"{notes_esc}", start date:startDate, end date:endDate}}'''
 

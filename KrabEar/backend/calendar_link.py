@@ -16,15 +16,16 @@ import platform
 import subprocess
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 logger = logging.getLogger("KrabEar.Backend.CalendarLink")
 
-# AppleScript `as integer` on a date returns seconds since 2001-01-01 00:00:00 UTC
+# AppleScript `as integer` on a date returns seconds since 2001-01-01 00:00:00 local time
 # (the macOS/Cocoa reference epoch), NOT Unix epoch (1970-01-01).
-# Offset = datetime(2001,1,1) - datetime(1970,1,1) = 978 307 200 seconds.
-_MAC_EPOCH_OFFSET = 978_307_200
+# We reconstruct the local datetime directly from the Mac epoch without going
+# through fromtimestamp() to avoid tz-shift artifacts.
+_MAC_EPOCH_BASE = datetime(2001, 1, 1)
 
 _OSASCRIPT_TEMPLATE = """
 tell application "Calendar"
@@ -60,15 +61,17 @@ end tell
 
 
 def _epoch_to_iso(epoch_sec: int) -> str:
-    """Конвертирует Mac timestamp (секунды с 2001-01-01) в ISO 8601 строку.
+    """Конвертирует Mac timestamp (секунды с 2001-01-01 local time) в ISO 8601 строку.
 
-    AppleScript ``as integer`` на дате возвращает секунды с 2001-01-01 (Mac epoch),
-    а не с 1970-01-01 (Unix epoch). Добавляем ``_MAC_EPOCH_OFFSET`` для коррекции.
+    AppleScript ``as integer`` на дате возвращает секунды с 2001-01-01 00:00:00 LOCAL
+    (Mac/Cocoa epoch), а не с Unix epoch 1970-01-01. Прибавляем timedelta напрямую
+    к datetime(2001,1,1) чтобы получить локальное datetime без tz-сдвига, который
+    возникал при использовании ``fromtimestamp`` + _MAC_EPOCH_OFFSET (Unix-epoch
+    конверсия давала неверное время для TZ != UTC, например ru_RU MSK UTC+3).
     """
     try:
-        unix_sec = epoch_sec + _MAC_EPOCH_OFFSET
-        return datetime.fromtimestamp(unix_sec).isoformat(timespec="seconds")
-    except (OSError, OverflowError, ValueError):
+        return (_MAC_EPOCH_BASE + timedelta(seconds=epoch_sec)).isoformat(timespec="seconds")
+    except (OverflowError, ValueError):
         return ""
 
 
