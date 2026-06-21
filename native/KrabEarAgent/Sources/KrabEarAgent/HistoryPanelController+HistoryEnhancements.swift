@@ -150,17 +150,36 @@ extension HistoryPanelController {
                 return
             }
 
-            let processed = result["processed"] as? Int ?? 0
-            let failed = result["failed"] as? Int ?? 0
-            let summaries = result["summaries"] as? [[String: Any]] ?? []
+            // Backend handle_auto_summarize_batch (history_service.py:2923) отдаёт
+            // ПЛОСКИЙ дайджест одного пакета — {summary, key_points, items_processed,
+            // total_words, llm, fallback, error} — а НЕ per-item массив. Ранее код
+            // читал несуществующие processed/failed/summaries → шапка всегда
+            // «(0 обработано, 0 ошибок)» и пустое тело.
+            let processed = result["items_processed"] as? Int ?? 0
+            let totalWords = result["total_words"] as? Int ?? 0
+            let isLLM = result["llm"] as? Bool ?? false
+            let fallback = result["fallback"] as? Bool ?? false
+            let summary = (result["summary"] as? String ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let keyPoints = result["key_points"] as? [String] ?? []
+            let errorMsg = (result["error"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
 
-            var lines: [String] = ["=== Авто-саммари (\(processed) обработано, \(failed) ошибок) ==="]
-            for item in summaries {
-                let itemID = (item["id"] as? String ?? "").prefix(8)
-                let summary = item["summary"] as? String ?? "(нет)"
-                let isLLM = item["llm"] as? Bool ?? false
-                lines.append("\n[\(itemID)…] (LLM: \(isLLM ? "да" : "нет"))")
-                lines.append(summary)
+            let llmTag = isLLM ? (fallback ? "LLM: fallback" : "LLM: да") : "LLM: нет"
+            var lines: [String] = ["=== Авто-саммари (\(processed) записей, \(totalWords) слов, \(llmTag)) ==="]
+            if let errorMsg, !errorMsg.isEmpty {
+                lines.append("Ошибка: \(errorMsg)")
+            }
+            if !summary.isEmpty {
+                lines.append("\n\(summary)")
+            }
+            if !keyPoints.isEmpty {
+                lines.append("\nКлючевые моменты:")
+                for point in keyPoints {
+                    lines.append("• \(point)")
+                }
+            }
+            if summary.isEmpty && keyPoints.isEmpty && (errorMsg?.isEmpty ?? true) {
+                lines.append("(нет данных)")
             }
 
             let output = lines.joined(separator: "\n")

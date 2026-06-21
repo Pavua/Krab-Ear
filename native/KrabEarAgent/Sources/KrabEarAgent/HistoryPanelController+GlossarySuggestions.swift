@@ -295,8 +295,14 @@ extension HistoryPanelController {
                     method: "suggest_medical_glossary_terms",
                     params: ["limit": 20]
                 )
-                let rawList = (result["result"] as? [[String: Any]])
-                           ?? (result["result"] as? [Any])?.compactMap { $0 as? [String: Any] }
+                // Backend handle_suggest_medical_glossary_terms возвращает
+                // {"suggestions": [...]} (glossary_auto_learn.py:269), который IPC
+                // оборачивает в response["result"]. Ранее код ждал, что
+                // response["result"] — это СПИСОК → каст всегда падал → лист
+                // предложений всегда пуст (фича не работала).
+                let inner = result["result"] as? [String: Any]
+                let rawList = (inner?["suggestions"] as? [[String: Any]])
+                           ?? (inner?["suggestions"] as? [Any])?.compactMap { $0 as? [String: Any] }
                            ?? []
                 let suggestions = rawList.enumerated().map { idx, dict in
                     GlossarySuggestion(index: idx, dict: dict)

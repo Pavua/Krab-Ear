@@ -7,7 +7,15 @@
    1. usageLabelTexts — форматирование get_usage_stats ответа в строки меток.
    2. scoreLabelText — форматирование score_transcription результата.
    3. errorStatsText — форматирование get_error_stats dict в строку диагностики.
-   4. componentHealthy — маппинг bool-флагов health_check на статус компонентов.
+   4. componentHealthy / backendOverallHealthy — маппинг health_check ответа.
+
+ 🔴 Контракт-фиксация (response-field drift wave): эти тесты раньше кормили
+ хелперы НЕСУЩЕСТВУЮЩИМИ плоскими ключами (today/week/total, score, stt:Bool),
+ совпадавшими с багнутым чтением Swift, — поэтому они были зелёными, а фичи в
+ проде молча не работали. Теперь тесты кормят РЕАЛЬНУЮ форму backend-ответов:
+   - get_usage_stats: вложенные {today,this_week,all_time}:{recordings,...}
+   - score_transcription: {overall_score, grade, ...}
+   - health_check: {checks: {stt_model:{status:"ok"}, ...}, status: "..."}
 */
 
 import XCTest
@@ -17,10 +25,15 @@ import XCTest
 final class HistoryPanelAnalyticsTests: XCTestCase {
 
     // MARK: - usageLabelTexts
+    // Backend get_usage_stats → периоды вложенные dict'ы со счётчиком "recordings".
 
-    /// Полный результат с данными — метки содержат корректные значения.
+    /// Полный результат — метки берут recordings из вложенных периодов.
     func test_usageLabelTexts_fullResult() {
-        let result: [String: Any] = ["today": 5, "week": 42, "total": 317]
+        let result: [String: Any] = [
+            "today": ["recordings": 5, "total_duration_sec": 12.0, "total_words": 30],
+            "this_week": ["recordings": 42, "total_words": 900],
+            "all_time": ["recordings": 317, "total_words": 7000],
+        ]
         let texts = HistoryPanelController.usageLabelTexts(from: result)
         XCTAssertEqual(texts.today, "Сегодня: 5")
         XCTAssertEqual(texts.week,  "Неделя: 42")
@@ -36,30 +49,31 @@ final class HistoryPanelAnalyticsTests: XCTestCase {
         XCTAssertEqual(texts.total, "Всего: 0")
     }
 
-    /// Строковые значения из backend тоже корректно отображаются.
-    func test_usageLabelTexts_stringValues() {
-        let result: [String: Any] = ["today": "3", "week": "21", "total": "99"]
+    /// Частичные данные — отсутствующие периоды дают "0", присутствующий читает recordings.
+    func test_usageLabelTexts_partialResult() {
+        let result: [String: Any] = ["today": ["recordings": 3, "total_words": 12]]
         let texts = HistoryPanelController.usageLabelTexts(from: result)
         XCTAssertEqual(texts.today, "Сегодня: 3")
-        XCTAssertEqual(texts.week,  "Неделя: 21")
-        XCTAssertEqual(texts.total, "Всего: 99")
+        XCTAssertEqual(texts.week,  "Неделя: 0")
+        XCTAssertEqual(texts.total, "Всего: 0")
     }
 
     // MARK: - scoreLabelText
+    // Backend score_transcription → {overall_score, grade, ...}.
 
-    /// Числовой score форматируется в метку "Оценка: <число>".
-    func test_scoreLabelText_withScore() {
-        let result: [String: Any] = ["score": 87]
-        XCTAssertEqual(HistoryPanelController.scoreLabelText(from: result), "Оценка: 87")
+    /// overall_score + grade → "Оценка: <score> (<grade>)".
+    func test_scoreLabelText_withScoreAndGrade() {
+        let result: [String: Any] = ["overall_score": 87, "grade": "B"]
+        XCTAssertEqual(HistoryPanelController.scoreLabelText(from: result), "Оценка: 87 (B)")
     }
 
-    /// Строковый score (например "B+") тоже поддерживается.
-    func test_scoreLabelText_withStringScore() {
-        let result: [String: Any] = ["score": "B+"]
-        XCTAssertEqual(HistoryPanelController.scoreLabelText(from: result), "Оценка: B+")
+    /// overall_score без grade → "Оценка: <score>".
+    func test_scoreLabelText_scoreOnly() {
+        let result: [String: Any] = ["overall_score": 91]
+        XCTAssertEqual(HistoryPanelController.scoreLabelText(from: result), "Оценка: 91")
     }
 
-    /// Отсутствующий score → fallback "—".
+    /// Отсутствующий overall_score → fallback "—".
     func test_scoreLabelText_missingScore_fallback() {
         let result: [String: Any] = [:]
         XCTAssertEqual(HistoryPanelController.scoreLabelText(from: result), "Оценка: —")
@@ -84,33 +98,60 @@ final class HistoryPanelAnalyticsTests: XCTestCase {
     }
 
     // MARK: - componentHealthy (health_check маппинг)
+    // Backend health_check → {checks: {<имя>: {status: "ok"|"error"|...}}, status: "..."}.
 
-    /// true → компонент здоров.
-    func test_componentHealthy_true() {
-        let result: [String: Any] = ["stt": true, "llm": false]
-        XCTAssertTrue(HistoryPanelController.componentHealthy(result, key: "stt"))
+    /// status "ok" → здоров; иной статус → нездоров.
+    func test_componentHealthy_okVsError() {
+        let result: [String: Any] = [
+            "checks": [
+                "stt_model": ["status": "ok", "model": "balanced"],
+                "llm": ["status": "error", "error": "timeout"],
+            ],
+        ]
+        XCTAssertTrue(HistoryPanelController.componentHealthy(result, key: "stt_model"))
         XCTAssertFalse(HistoryPanelController.componentHealthy(result, key: "llm"))
     }
 
-    /// Отсутствующий ключ → false (компонент считается нездоровым).
-    func test_componentHealthy_missingKey_returnsFalse() {
+    /// Отсутствующая проверка → false.
+    func test_componentHealthy_missingCheck_returnsFalse() {
+        let result: [String: Any] = ["checks": [:]]
+        XCTAssertFalse(HistoryPanelController.componentHealthy(result, key: "history_store"))
+    }
+
+    /// Нет ключа "checks" вовсе → false (а не краш).
+    func test_componentHealthy_noChecksKey_returnsFalse() {
         let result: [String: Any] = [:]
-        XCTAssertFalse(HistoryPanelController.componentHealthy(result, key: "history"))
+        XCTAssertFalse(HistoryPanelController.componentHealthy(result, key: "stt_model"))
     }
 
-    /// Нулевое значение (не Bool) → false.
-    func test_componentHealthy_nonBoolValue_returnsFalse() {
-        let result: [String: Any] = ["translation": 1]  // Int, не Bool
-        XCTAssertFalse(HistoryPanelController.componentHealthy(result, key: "translation"),
-                       "Int=1 не является Bool true — должен возвращать false")
+    /// Статус "unavailable"/"warn" → не "ok" → false.
+    func test_componentHealthy_nonOkStatus_returnsFalse() {
+        let result: [String: Any] = ["checks": ["audio_devices": ["status": "unavailable"]]]
+        XCTAssertFalse(HistoryPanelController.componentHealthy(result, key: "audio_devices"))
     }
 
-    /// Все четыре компонента здоровы → все возвращают true.
-    func test_componentHealthy_allHealthy() {
-        let result: [String: Any] = ["stt": true, "llm": true, "history": true, "translation": true]
-        for key in ["stt", "llm", "history", "translation"] {
+    /// Все реальные backend-проверки "ok" → все здоровы.
+    func test_componentHealthy_allRealChecksHealthy() {
+        let result: [String: Any] = [
+            "checks": [
+                "stt_model": ["status": "ok"],
+                "llm": ["status": "ok"],
+                "history_store": ["status": "ok"],
+            ],
+        ]
+        for key in ["stt_model", "llm", "history_store"] {
             XCTAssertTrue(HistoryPanelController.componentHealthy(result, key: key),
                           "Компонент '\(key)' должен быть здоров")
         }
+    }
+
+    // MARK: - backendOverallHealthy (для подсистем без отдельной health-проверки)
+
+    /// status "ok"/"degraded" → backend в целом здоров; "error" → нет.
+    func test_backendOverallHealthy() {
+        XCTAssertTrue(HistoryPanelController.backendOverallHealthy(["status": "ok"]))
+        XCTAssertTrue(HistoryPanelController.backendOverallHealthy(["status": "degraded"]))
+        XCTAssertFalse(HistoryPanelController.backendOverallHealthy(["status": "error"]))
+        XCTAssertFalse(HistoryPanelController.backendOverallHealthy([:]))
     }
 }

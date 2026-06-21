@@ -191,16 +191,38 @@ extension HistoryPanelController {
 
     /// Форматирует результат get_usage_stats в строки для метки.
     /// `static` — доступна для юнит-тестов без инстанцирования.
+    ///
+    /// Backend (`UsageTracker.get_usage_stats`) отдаёт периоды как ВЛОЖЕННЫЕ
+    /// dict'ы: `today`/`this_week`/`all_time` → `{recordings, total_duration_sec,
+    /// total_words}` (usage_tracker.py:110). Метки показывают счётчик записей.
+    /// Ранее читались несуществующие плоские ключи `week`/`total` → всегда "0".
     static func usageLabelTexts(from result: [String: Any]) -> (today: String, week: String, total: String) {
-        let today = "Сегодня: \(result["today"] ?? "0")"
-        let week  = "Неделя: \(result["week"]  ?? "0")"
-        let total = "Всего: \(result["total"]  ?? "0")"
+        func recordings(_ key: String) -> String {
+            guard let period = result[key] as? [String: Any] else { return "0" }
+            // recordings — счётчик: всегда целое. Backend шлёт int, но через JSON
+            // он может прийти как NSNumber/Double — нормализуем к целому виду.
+            if let i = period["recordings"] as? Int { return "\(i)" }
+            if let n = period["recordings"] as? NSNumber { return "\(n.intValue)" }
+            return "0"
+        }
+        let today = "Сегодня: \(recordings("today"))"
+        let week  = "Неделя: \(recordings("this_week"))"
+        let total = "Всего: \(recordings("all_time"))"
         return (today, week, total)
     }
 
     /// Форматирует результат score_transcription в строку метки.
+    ///
+    /// Backend (`TextProcessingService.handle_score_transcription`) возвращает
+    /// `overall_score` (0–100) + `grade` (A–F) — НЕ плоский `score`
+    /// (text_processing_service.py:280). Ранее читался несуществующий `score`
+    /// → метка всегда "Оценка: —".
     static func scoreLabelText(from result: [String: Any]) -> String {
-        "Оценка: \(result["score"] ?? "—")"
+        let score = result["overall_score"] ?? "—"
+        if let grade = result["grade"] as? String, !grade.isEmpty {
+            return "Оценка: \(score) (\(grade))"
+        }
+        return "Оценка: \(score)"
     }
 
     /// Форматирует error_stats dict в строку диагностики.
@@ -209,10 +231,29 @@ extension HistoryPanelController {
         return "Статистика ошибок:\n\(text)"
     }
 
-    /// Определяет цвет метки компонента по булевому флагу health-check.
-    /// Возвращает `true` (success) / `false` (error) — маппинг на NSColor выполняется в UI.
+    /// Определяет, здоров ли подсистемный компонент по ответу health_check.
+    /// Возвращает `true` (success) / `false` (error) — маппинг на NSColor в UI.
+    ///
+    /// Backend (`HealthChecker.check_all`) кладёт проверки во ВЛОЖЕННЫЙ
+    /// `checks` dict, каждая со строковым `status` (health_checker.py:53):
+    /// `{"checks": {"stt_model": {"status": "ok"}, "llm": {...}, ...}}`.
+    /// `key` — backend-имя проверки (`stt_model`/`llm`/`history_store`/…).
+    /// Ранее читались несуществующие плоские Bool `stt`/`llm`/… → панель
+    /// всегда показывала все компоненты как нездоровые (красные).
     static func componentHealthy(_ result: [String: Any], key: String) -> Bool {
-        result[key] as? Bool == true
+        guard let checks = result["checks"] as? [String: Any],
+              let check = checks[key] as? [String: Any],
+              let status = check["status"] as? String else {
+            return false
+        }
+        return status == "ok"
+    }
+
+    /// Здоров ли backend в целом (для подсистем без отдельной health-проверки,
+    /// напр. offline-переводчик): `status` ∈ ok/degraded, но не error.
+    static func backendOverallHealthy(_ result: [String: Any]) -> Bool {
+        guard let status = result["status"] as? String else { return false }
+        return status != "error"
     }
 
     @objc private func refreshUsageStatsAction() {
@@ -222,9 +263,10 @@ extension HistoryPanelController {
                 let r = try ipcClient.call(method: "get_usage_stats", params: [:])
                 nonisolated(unsafe) let result = r["result"] as? [String: Any] ?? [:]
                 DispatchQueue.main.async {
-                    self?.todayLabel.stringValue = "Сегодня: \(result["today"] ?? "0")"
-                    self?.weekLabel.stringValue = "Неделя: \(result["week"] ?? "0")"
-                    self?.totalLabel.stringValue = "Всего: \(result["total"] ?? "0")"
+                    let texts = HistoryPanelController.usageLabelTexts(from: result)
+                    self?.todayLabel.stringValue = texts.today
+                    self?.weekLabel.stringValue = texts.week
+                    self?.totalLabel.stringValue = texts.total
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -261,7 +303,7 @@ extension HistoryPanelController {
                 let r = try ipcClient.call(method: "score_transcription", params: ["text": textToScore])
                 nonisolated(unsafe) let result = r["result"] as? [String: Any] ?? [:]
                 DispatchQueue.main.async {
-                    self?.scoreLabel.stringValue = "Оценка: \(result["score"] ?? "—")"
+                    self?.scoreLabel.stringValue = HistoryPanelController.scoreLabelText(from: result)
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -279,10 +321,16 @@ extension HistoryPanelController {
                 nonisolated(unsafe) let result = r["result"] as? [String: Any] ?? [:]
                 DispatchQueue.main.async {
                     guard let self = self else { return }
-                    self.sttHealthLabel.textColor = (result["stt"] as? Bool == true) ? KrabEarTheme.Colors.success : KrabEarTheme.Colors.error
-                    self.llmHealthLabel.textColor = (result["llm"] as? Bool == true) ? KrabEarTheme.Colors.success : KrabEarTheme.Colors.error
-                    self.historyHealthLabel.textColor = (result["history"] as? Bool == true) ? KrabEarTheme.Colors.success : KrabEarTheme.Colors.error
-                    self.translationHealthLabel.textColor = (result["translation"] as? Bool == true) ? KrabEarTheme.Colors.success : KrabEarTheme.Colors.error
+                    func color(_ healthy: Bool) -> NSColor {
+                        healthy ? KrabEarTheme.Colors.success : KrabEarTheme.Colors.error
+                    }
+                    // Backend health_check кладёт проверки в result["checks"][<имя>]["status"]
+                    // (health_checker.py): stt_model / llm / history_store. У перевода
+                    // отдельной проверки нет (offline-движок) → отражаем общий статус backend.
+                    self.sttHealthLabel.textColor = color(HistoryPanelController.componentHealthy(result, key: "stt_model"))
+                    self.llmHealthLabel.textColor = color(HistoryPanelController.componentHealthy(result, key: "llm"))
+                    self.historyHealthLabel.textColor = color(HistoryPanelController.componentHealthy(result, key: "history_store"))
+                    self.translationHealthLabel.textColor = color(HistoryPanelController.backendOverallHealthy(result))
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -316,7 +364,9 @@ extension HistoryPanelController {
                 let r = try ipcClient.call(method: "export_settings", params: [:])
                 nonisolated(unsafe) let result = r["result"] as? [String: Any] ?? [:]
                 DispatchQueue.main.async {
-                    self?.showDiagnosticsOutput("Настройки экспортированы: \(result["path"] ?? "Успешно")")
+                    // Backend export_settings возвращает "file" (путь), не "path"
+                    // (settings_service.py:664).
+                    self?.showDiagnosticsOutput("Настройки экспортированы: \(result["file"] ?? "Успешно")")
                 }
             } catch {
                 DispatchQueue.main.async {
