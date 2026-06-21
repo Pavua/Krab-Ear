@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 import time
 from typing import Any, Callable, Optional
 
@@ -51,6 +52,11 @@ class CallSessionService:
         """
         self._store = store
         self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
+        # Transient in-memory flag: tracks whether bot autopilot is active per session.
+        # Mirrors Voice Gateway's agent.mode ("takeover" vs "autopilot").
+        # Not persisted — resets to True (bot active) when the process restarts.
+        self._bot_active: dict[str, bool] = {}
+        self._bot_active_lock = threading.Lock()
 
     @staticmethod
     def _scrub_session(raw: dict[str, Any]) -> dict[str, Any]:
@@ -344,3 +350,73 @@ class CallSessionService:
                 },
             )
             raise
+
+    # ------------------------------------------------------------------ #
+    # Operator takeover handlers                                           #
+    # ------------------------------------------------------------------ #
+
+    def handle_call_intervene(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Оператор берёт управление: бот замолкает (bot_active=False).
+
+        Зеркало Voice Gateway POST /v1/sessions/{id}/agent/takeover.
+        Состояние хранится в памяти (сбрасывается при рестарте процесса).
+
+        Параметры:
+          - session_id: str — идентификатор сессии.
+
+        Возвращает:
+          {ok, session_id, bot_active}
+        """
+        session_id = str(params.get("session_id") or "").strip()
+        if not session_id:
+            raise ValueError("Параметр 'session_id' обязателен")
+        # Verify session exists (raises KeyError if not found)
+        session = self._store.get(session_id)
+        if session is None:
+            raise KeyError(f"Сессия не найдена: {session_id!r}")
+        with self._bot_active_lock:
+            self._bot_active[session_id] = False
+        add_breadcrumb(
+            category="call_session",
+            message="call_intervene",
+            level="info",
+            data={"ok": True, "session_id": session_id, "bot_active": False},
+        )
+        logger.info(
+            "Оператор взял управление, бот приостановлен",
+            extra={"session_id": session_id, "bot_active": False},
+        )
+        return {"ok": True, "session_id": session_id, "bot_active": False}
+
+    def handle_call_resume_bot(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает управление боту (bot_active=True).
+
+        Зеркало Voice Gateway POST /v1/sessions/{id}/agent/resume.
+        Состояние хранится в памяти (сбрасывается при рестарте процесса).
+
+        Параметры:
+          - session_id: str — идентификатор сессии.
+
+        Возвращает:
+          {ok, session_id, bot_active}
+        """
+        session_id = str(params.get("session_id") or "").strip()
+        if not session_id:
+            raise ValueError("Параметр 'session_id' обязателен")
+        # Verify session exists (raises KeyError if not found)
+        session = self._store.get(session_id)
+        if session is None:
+            raise KeyError(f"Сессия не найдена: {session_id!r}")
+        with self._bot_active_lock:
+            self._bot_active[session_id] = True
+        add_breadcrumb(
+            category="call_session",
+            message="call_resume_bot",
+            level="info",
+            data={"ok": True, "session_id": session_id, "bot_active": True},
+        )
+        logger.info(
+            "Управление возвращено боту",
+            extra={"session_id": session_id, "bot_active": True},
+        )
+        return {"ok": True, "session_id": session_id, "bot_active": True}

@@ -1886,6 +1886,8 @@ class BackendService:
             "call_session_update_status": self._call_session_service.handle_call_session_update_status,  # переход статуса сессии
             "call_session_add_transcript": self._call_session_service.handle_call_session_add_transcript,  # добавить реплику в транскрипт
             "call_session_end": self._call_session_service.handle_call_session_end,  # завершить сессию: compute duration, total_cost
+            "call_intervene": self._call_session_service.handle_call_intervene,  # VERIFIED: called from Swift (CallAutomationController) — оператор берёт управление, бот замолкает
+            "call_resume_bot": self._call_session_service.handle_call_resume_bot,  # VERIFIED: called from Swift (CallAutomationController) — вернуть управление боту
             # --- STT hotwords (initial_prompt boost) ---
             "add_stt_hotword": self._stt_mgmt_svc.handle_add_stt_hotword,  # добавить термин в STT hotwords список
             "remove_stt_hotword": self._stt_mgmt_svc.handle_remove_stt_hotword,  # удалить термин из STT hotwords списка
