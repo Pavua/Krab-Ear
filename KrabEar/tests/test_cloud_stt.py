@@ -40,6 +40,26 @@ class TestCloudSTTProviders(unittest.TestCase):
         self.assertIn("multipart/form-data", req.headers.get("Content-type"))
 
     @patch("backend.cloud_stt.store.load_settings")
+    @patch("backend.cloud_stt.urllib.request.urlopen")
+    def test_openai_language_normalised_to_iso(self, mock_urlopen, mock_load_settings):
+        # OpenAI verbose_json returns "language" as a full English WORD ("russian"),
+        # not an ISO-639-1 code. Downstream consumers compare lang == "ru", so the
+        # provider must normalise. (External-seam contract-drift fix, 2026-06-20.)
+        mock_load_settings.return_value = {"openai_api_key": "test_openai_key"}
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"text": "\xd0\xbf\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82", "language": "russian"}'
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        provider = get_cloud_stt_provider("openai")
+        res = provider.transcribe(b"dummy_pcm", 16000, "auto")
+        self.assertEqual(res.get("lang"), "ru")  # "russian" -> "ru", not the raw word
+
+        # Unlisted language falls back to the first 2 chars (lowercased), never the full word.
+        mock_resp.read.return_value = b'{"text": "ola", "language": "Galician"}'
+        res2 = provider.transcribe(b"dummy_pcm", 16000, "auto")
+        self.assertEqual(res2.get("lang"), "ga")
+
+    @patch("backend.cloud_stt.store.load_settings")
     def test_deepgram_stub_mode(self, mock_load_settings):
         mock_load_settings.return_value = {}
         provider = get_cloud_stt_provider("deepgram")

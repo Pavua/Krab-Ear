@@ -178,10 +178,24 @@ class OpenAISTTProvider:
         try:
             with urllib.request.urlopen(req, timeout=30) as response:
                 result = json.loads(_read_capped(response).decode("utf-8", "replace"))
+                # verbose_json returns "language" as a full English word ("russian",
+                # "english", "spanish") — NOT an ISO-639-1 code.  Normalise to the
+                # 2-letter code that every other provider and downstream consumer expects.
+                _LANG_WORD_TO_ISO: Dict[str, str] = {
+                    "russian": "ru", "english": "en", "spanish": "es",
+                    "french": "fr", "german": "de", "italian": "it",
+                    "portuguese": "pt", "chinese": "zh", "japanese": "ja",
+                    "korean": "ko", "arabic": "ar", "turkish": "tr",
+                    "polish": "pl", "dutch": "nl", "ukrainian": "uk",
+                }
+                raw_lang = result.get("language", "")
+                normalised_lang = _LANG_WORD_TO_ISO.get(
+                    raw_lang.lower(), raw_lang[:2].lower() if raw_lang else lang
+                )
                 return {
                     "text": result.get("text", ""),
-                    "lang": result.get("language", lang),
-                    "confidence": 1.0,  # OpenAI API не возвращает confidence в verbose_json по умолчанию?
+                    "lang": normalised_lang or lang,
+                    "confidence": 1.0,  # OpenAI verbose_json does not include per-segment confidence
                 }
         except urllib.error.HTTPError as e:
             err_msg = _err_body(e)
