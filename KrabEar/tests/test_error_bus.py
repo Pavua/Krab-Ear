@@ -68,6 +68,56 @@ class KrabErrorModelTests(unittest.TestCase):
         dumped = err.model_dump(mode="json")
         self.assertEqual(dumped["timestamp"], "2026-05-04T12:00:00+00:00")
 
+    def test_model_dump_keys_match_swift_decoder_contract(self):
+        """Pin the krab_error wire contract against the Swift Codable decoder.
+
+        ``krab_error`` SSE payloads are ``KrabError.model_dump(mode="json")``
+        (backend/error_bus.py:205). The Swift consumer decodes them into the
+        ``KrabErrorPayload`` Codable struct (ErrorActionHandler.swift:20). Swift
+        ``Codable`` synthesis makes every NON-optional field a HARD-required JSON
+        key: if any of these keys disappears (rename/drop on a refactor), the
+        Swift decode throws and the error toast SILENTLY dies — no fallback, and
+        the dot/underscore SSE guard (audit_ipc_contract_drift Part C) can't see
+        field-level drift. This test fails the moment that contract breaks.
+
+        Swift-required (non-optional) keys — keep in lockstep with the struct:
+            severity, component, code, message_user, message_debug,
+            timestamp, context, actionable
+        ``action_id`` is ``String?`` in Swift → optional, not asserted as required.
+        """
+        swift_required_keys = {
+            "severity",
+            "component",
+            "code",
+            "message_user",
+            "message_debug",
+            "timestamp",
+            "context",
+            "actionable",
+        }
+        err = KrabError(
+            severity="error",
+            component="disk",
+            code="disk.critical",
+            message_user="Мало места на диске",
+            message_debug="free=120MB threshold=2GB",
+            timestamp=datetime.now(timezone.utc),
+            context={"free_mb": 120},
+            actionable=True,
+            action_id="open_disk_settings",
+        )
+        dumped = err.model_dump(mode="json")
+        missing = swift_required_keys - set(dumped)
+        self.assertEqual(
+            missing,
+            set(),
+            f"krab_error payload is missing Swift-required key(s) {missing}; "
+            f"Swift KrabErrorPayload decode (ErrorActionHandler.swift) would throw "
+            f"and the error toast would silently break.",
+        )
+        # action_id is optional in Swift but the model always emits it (incl. None).
+        self.assertIn("action_id", dumped)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
