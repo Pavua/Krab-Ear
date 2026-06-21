@@ -1,0 +1,30 @@
+# IPC / SSE Contract-Drift Allowlist
+# ====================================
+# Format (one entry per line, # is a comment):
+#   method:<method_name>             — Swift calls this but it's intentionally absent
+#                                      from the Python dispatch table.
+#   param:<method>:<key>             — Swift sends this param key but the handler
+#                                      deliberately ignores it (e.g., routes through
+#                                      a shared helper, or key is validated elsewhere).
+#   emit:<event_type>                — Backend emits this event type but it has no
+#                                      Swift consumer on purpose (backend-internal use).
+#
+# Every entry MUST have a comment explaining WHY it is allowlisted.
+# Do NOT add real bugs here — fix them instead.
+# ====================================
+
+# --- Part A (method-name) allowlist ---
+
+method:clear_privacy_audit_log
+# W957 SECURITY: intentionally removed from IPC dispatch table.
+# Destroying the compliance audit trail via unauthenticated IPC is prohibited.
+# The handler _handle_clear_privacy_audit_log() is retained in service.py for
+# future authenticated use only. Swift UI shows the button but calls are no-ops
+# by design. See service.py line ~1912 comment.
+
+# --- Part B (param-key) allowlist ---
+# (none — all Part B findings in the current baseline are real pre-existing drifts,
+#  not false positives. They should be fixed, not suppressed.)
+
+# --- Part C (SSE type-string) allowlist ---
+# (none — Part C is clean on current codebase.)

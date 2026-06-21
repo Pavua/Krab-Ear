@@ -170,14 +170,10 @@ extension HistoryPanelController {
     // MARK: - Actions (Статистика)
     
     @objc private func handleWordFrequency() {
-        let row = tableView.selectedRow
-        guard row >= 0, row < items.count else {
-            showDiagnosticsOutput("Выберите запись в таблице")
-            return
-        }
-        let item = items[row]
-        
-        executeIPC(method: "word_frequency_analysis", params: ["id": item.id]) { [weak self] response in
+        // Whole-history analysis (handler reads language/limit, not a specific item) —
+        // mirror handleGetStatistics. Previously sent an ignored ["id"] + required a
+        // selection, misleading the user into expecting per-item results.
+        executeIPC(method: "word_frequency_analysis") { [weak self] response in
             self?.statsTextView?.string = response
         }
     }
@@ -189,14 +185,10 @@ extension HistoryPanelController {
     }
     
     @objc private func handleGetTopics() {
-        let row = tableView.selectedRow
-        guard row >= 0, row < items.count else {
-            showDiagnosticsOutput("Выберите запись в таблице")
-            return
-        }
-        let item = items[row]
-        
-        executeIPC(method: "get_topic_timeline", params: ["id": item.id]) { [weak self] response in
+        // Whole-history topic timeline (handler reads window_size/limit, not a specific
+        // item). Mirror handleGetStatistics; previously sent an ignored ["id"] + required
+        // a selection, misleading the user into expecting a per-item timeline.
+        executeIPC(method: "get_topic_timeline") { [weak self] response in
             self?.statsTextView?.string = response
         }
     }

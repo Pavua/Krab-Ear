@@ -1,4 +1,4 @@
-.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release reset-tcc clean-worktree-builds audit-orphans audit-handlers audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-inmemory-purge-coverage audit-path-containment audit-dispatch-test-targets audit-all pre-merge-check dispatch-tests service-loc
+.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release reset-tcc clean-worktree-builds audit-orphans audit-handlers audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-inmemory-purge-coverage audit-path-containment audit-dispatch-test-targets audit-ipc-drift audit-all pre-merge-check dispatch-tests service-loc
 
 VENV = .venv_krab_ear
 PYTHON = $(VENV)/bin/python
@@ -166,8 +166,17 @@ audit-dispatch-test-targets:
 audit-inmemory-purge-coverage:
 	python3 scripts/audit_inmemory_purge_coverage.py --fail-on-found $(ARGS)
 
+# Audit Swift↔Python IPC method-name drift + param-key drift + SSE type-string drift.
+# Part A (method-name) is the hard gate — fails on any Swift call site whose method
+# literal is absent from the Python dispatch table. Part B (param-key) and Part C
+# (SSE dot/underscore mismatch) are report-only unless --strict is passed.
+# Allowlist: scripts/ipc_drift_allowlist.txt (one entry per line).
+# Pass ARGS=--json for machine-readable output, ARGS=--strict to fail on B/C too.
+audit-ipc-drift:
+	python3 scripts/audit_ipc_contract_drift.py $(ARGS)
+
 # Run all static audit checks (CI parity — runs same checks as CI guard jobs).
-audit-all: audit-orphans audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-path-containment audit-dispatch-test-targets audit-inmemory-purge-coverage
+audit-all: audit-orphans audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-path-containment audit-dispatch-test-targets audit-inmemory-purge-coverage audit-ipc-drift
 	@echo "All audit checks passed."
 
 # Reproduce the ubuntu krab-ear-ci env LOCALLY (Python 3.12, mlx ABSENT) and run

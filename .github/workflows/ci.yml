@@ -313,3 +313,11 @@ jobs:
         # security bugs); all deleted + repointed in #1689 before this gate enforced.
         # No user-controlled input is used in this step -- no injection risk.
         run: python3 scripts/audit_dispatch_test_targets.py --fail-on-found
+
+      - name: IPC/SSE contract-drift guard (#seam)
+        # Swift<->Python IPC method-name drift (Swift calls a method absent from the
+        # dispatch table) + param-key + SSE dot/underscore drift -- the class that
+        # produced 37 silent feature-breakages (2026-06-20 seam-audit campaign).
+        # Part A (method-name) is the hard gate; param-key/SSE are report-only.
+        # Allowlist: scripts/ipc_drift_allowlist.txt. No user input -- no injection risk.
+        run: python3 scripts/audit_ipc_contract_drift.py --fail-on-found
