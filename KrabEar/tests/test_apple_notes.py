@@ -124,7 +124,10 @@ class TestCreateAppleNote(unittest.TestCase):
         script = mock_run.call_args[0][0][2]
         self.assertIn('folder "Krab Ear"', script)
         self.assertIn("targetFolder", script)
-        self.assertIn("tell account", script)
+        # Folder now resolves under the DEFAULT account with a try/on-error create
+        # (was a hardcoded `account "iCloud"`) — account-agnostic, self-creating.
+        self.assertIn("default account", script)
+        self.assertIn("on error", script)
 
     # ------------------------------------------------------------------
     # test_create_note_handles_timeout
