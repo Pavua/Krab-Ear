@@ -148,10 +148,20 @@ final class ActivityCalendarHeatmapView: NSView {
         summaryLabel.stringValue = "🔥 Текущий стрик: \(streak) \(pluralizeDays(streak)) · Рекорд: \(record) \(pluralizeDays(record)) · Активных дней: \(activeDays)"
         
         let rootLayer = layer!
+
+        // data.weeks is [weekday][week_index]: outer index = weekday (0=Mon…6=Sun),
+        // inner index = week column. We need 7 rows (weekday, Y) × N columns (week, X).
+        // Determine number of week columns from the longest weekday row.
+        let numCols = data.weeks.map { $0.count }.max() ?? 0
+
+        // Month labels: one per week column (X axis). Sample the first non-nil day in
+        // each column across all weekday rows to get the month for that column.
         var currentMonth = ""
-        
-        for (col, week) in data.weeks.enumerated() {
-            let firstValidDay = week.compactMap { $0 }.first
+        for col in 0 ..< numCols {
+            let firstValidDay = data.weeks.compactMap { weekdayRow -> ActivityCalendarData.DayInfo? in
+                guard col < weekdayRow.count else { return nil }
+                return weekdayRow[col]
+            }.first
             if let date = firstValidDay?.date {
                 let parts = date.split(separator: "-")
                 if parts.count >= 2 {
@@ -165,21 +175,24 @@ final class ActivityCalendarHeatmapView: NSView {
                     }
                 }
             }
-            
-            for (row, day) in week.enumerated() {
+        }
+
+        // Cell grid: outer = row (weekday, Y), inner = col (week, X).
+        for (row, weekdayRow) in data.weeks.enumerated() {
+            for (col, day) in weekdayRow.enumerated() {
                 let cellLayer = CALayer()
                 let x = leftPadding + CGFloat(col) * (cellSize + cellGap)
                 let y = topPadding + CGFloat(row) * (cellSize + cellGap)
                 cellLayer.frame = CGRect(x: x, y: y, width: cellSize, height: cellSize)
                 cellLayer.cornerRadius = 2.0
                 cellLayer.backgroundColor = colorForLevel(day?.level ?? 0).cgColor
-                
+
                 // Implicit animations disabled for setup
                 cellLayer.actions = ["bounds": NSNull(), "position": NSNull(), "backgroundColor": NSNull()]
-                
+
                 rootLayer.addSublayer(cellLayer)
                 cellLayers.append(cellLayer)
-                
+
                 if let day = day {
                     let rect = CGRect(x: x, y: y, width: cellSize, height: cellSize)
                     let tooltipText = "\(day.date): \(day.recordings) записей, \(String(format: "%.1f", day.duration_min)) мин, \(day.words) слов"
@@ -226,7 +239,8 @@ final class ActivityCalendarHeatmapView: NSView {
         guard let data = data, !data.weeks.isEmpty else {
             return NSSize(width: NSView.noIntrinsicMetric, height: 20)
         }
-        let weeksCount = CGFloat(data.weeks.count)
+        // data.weeks is [weekday][week_index]: width is determined by the number of week columns.
+        let weeksCount = CGFloat(data.weeks.map { $0.count }.max() ?? 0)
         let width = leftPadding + weeksCount * (cellSize + cellGap) - cellGap
         let gridHeight = 7 * (cellSize + cellGap) - cellGap
         let totalHeight = topPadding + gridHeight + 12.0 + 20.0
