@@ -439,8 +439,16 @@ class SearchAndAnalysisService:
 
         items = items[-limit:]
 
-        timeline = self._topic_tracker.get_topic_timeline(items, window_size=window_size)
-        current_topic = self._topic_tracker.get_current_topic(items, last_n=window_size)
+        # _load_active_items_unlocked() returns HistoryItem OBJECTS, but TopicTracker
+        # expects plain dicts (it reads the ``text``/``source_text`` field via
+        # ``item.get(...)``). Passing the objects raised
+        # "'HistoryItem' object has no attribute 'get'" on every non-empty history
+        # (empty history short-circuits in track_topics, which is why unit tests with
+        # an empty store never caught it). Convert to dicts at the boundary.
+        item_dicts = [it.to_dict() if hasattr(it, "to_dict") else it for it in items]
+
+        timeline = self._topic_tracker.get_topic_timeline(item_dicts, window_size=window_size)
+        current_topic = self._topic_tracker.get_current_topic(item_dicts, last_n=window_size)
         shifts = sum(1 for entry in timeline if entry.get("is_shift"))
 
         return {

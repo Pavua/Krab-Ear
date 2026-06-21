@@ -610,9 +610,12 @@ class TestAnalysisGroup(_DispatchBase):
         self.assert_dispatch("get_keyword_cloud", {"max_words": 20}, ok_required=True)
 
     def test_get_topic_timeline(self):
-        # get_topic_timeline may fail on HistoryItem vs dict mismatch in topic_tracker
-        # — smoke test only: method must be registered and return a dict
-        self.assert_dispatch("get_topic_timeline", {"window_size": 3, "limit": 10})
+        # The HistoryItem-vs-dict mismatch in topic_tracker (objects passed where
+        # dicts were expected → "'HistoryItem' object has no attribute 'get'") was
+        # fixed by converting at the boundary in handle_get_topic_timeline; the
+        # method must now return ok=True. Real-items fail-before/pass-after guard
+        # lives in test_topic_timeline_real_items_regression.py.
+        self.assert_dispatch("get_topic_timeline", {"window_size": 3, "limit": 10}, ok_required=True)
 
     def test_summarize_text(self):
         # LLM недоступен в тестах → ok=False допустимо
