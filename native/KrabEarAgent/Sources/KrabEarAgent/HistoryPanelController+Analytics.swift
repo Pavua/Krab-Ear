@@ -218,7 +218,17 @@ extension HistoryPanelController {
     /// (text_processing_service.py:280). Ранее читался несуществующий `score`
     /// → метка всегда "Оценка: —".
     static func scoreLabelText(from result: [String: Any]) -> String {
-        let score = result["overall_score"] ?? "—"
+        // overall_score is a 0–100 score; transcription_scorer rounds it to a
+        // float, so it can arrive as Double (87.0) — coerce to an integer string
+        // so the label reads "87", not "87.0".
+        let score: String
+        if let i = result["overall_score"] as? Int {
+            score = "\(i)"
+        } else if let n = result["overall_score"] as? NSNumber {
+            score = "\(n.intValue)"
+        } else {
+            score = "—"
+        }
         if let grade = result["grade"] as? String, !grade.isEmpty {
             return "Оценка: \(score) (\(grade))"
         }
@@ -252,8 +262,13 @@ extension HistoryPanelController {
     /// Здоров ли backend в целом (для подсистем без отдельной health-проверки,
     /// напр. offline-переводчик): `status` ∈ ok/degraded, но не error.
     static func backendOverallHealthy(_ result: [String: Any]) -> Bool {
+        // HealthChecker._aggregate_status returns ONLY "healthy" / "degraded" /
+        // "unhealthy" (never "error" — that's a per-subsystem checks[X].status).
+        // The previous `status != "error"` was therefore ALWAYS true → the
+        // translation health dot showed green even when the backend was unhealthy.
+        // Green only when the backend is fully healthy.
         guard let status = result["status"] as? String else { return false }
-        return status != "error"
+        return status == "healthy"
     }
 
     @objc private func refreshUsageStatsAction() {

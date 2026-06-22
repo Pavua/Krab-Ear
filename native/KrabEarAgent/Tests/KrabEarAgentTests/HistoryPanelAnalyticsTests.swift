@@ -73,6 +73,13 @@ final class HistoryPanelAnalyticsTests: XCTestCase {
         XCTAssertEqual(HistoryPanelController.scoreLabelText(from: result), "Оценка: 91")
     }
 
+    /// overall_score приходит как Double (transcription_scorer round()) → должно
+    /// отображаться целым ("87", не "87.0").
+    func test_scoreLabelText_floatScoreRendersAsInt() {
+        let result: [String: Any] = ["overall_score": 87.0, "grade": "B"]
+        XCTAssertEqual(HistoryPanelController.scoreLabelText(from: result), "Оценка: 87 (B)")
+    }
+
     /// Отсутствующий overall_score → fallback "—".
     func test_scoreLabelText_missingScore_fallback() {
         let result: [String: Any] = [:]
@@ -149,9 +156,11 @@ final class HistoryPanelAnalyticsTests: XCTestCase {
 
     /// status "ok"/"degraded" → backend в целом здоров; "error" → нет.
     func test_backendOverallHealthy() {
-        XCTAssertTrue(HistoryPanelController.backendOverallHealthy(["status": "ok"]))
-        XCTAssertTrue(HistoryPanelController.backendOverallHealthy(["status": "degraded"]))
-        XCTAssertFalse(HistoryPanelController.backendOverallHealthy(["status": "error"]))
+        // _aggregate_status returns ONLY healthy/degraded/unhealthy (never "error").
+        // Green only when fully healthy; degraded/unhealthy/missing → not green.
+        XCTAssertTrue(HistoryPanelController.backendOverallHealthy(["status": "healthy"]))
+        XCTAssertFalse(HistoryPanelController.backendOverallHealthy(["status": "degraded"]))
+        XCTAssertFalse(HistoryPanelController.backendOverallHealthy(["status": "unhealthy"]))
         XCTAssertFalse(HistoryPanelController.backendOverallHealthy([:]))
     }
 }

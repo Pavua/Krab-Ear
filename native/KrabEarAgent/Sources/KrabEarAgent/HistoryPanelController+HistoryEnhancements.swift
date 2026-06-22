@@ -150,6 +150,17 @@ extension HistoryPanelController {
                 return
             }
 
+            // Gate/early-return paths (e.g. privacy mode) return {ok:false, reason:...}
+            // wrapped in `result` — surface the reason instead of rendering an empty
+            // "(нет данных)" digest with no explanation.
+            if let isOk = result["ok"] as? Bool, !isOk {
+                let reason = (result["reason"] as? String) ?? "недоступно"
+                DispatchQueue.main.async {
+                    self?.showDiagnosticsOutput("Авто-саммари недоступно: \(reason)")
+                }
+                return
+            }
+
             // Backend handle_auto_summarize_batch (history_service.py:2923) отдаёт
             // ПЛОСКИЙ дайджест одного пакета — {summary, key_points, items_processed,
             // total_words, llm, fallback, error} — а НЕ per-item массив. Ранее код
