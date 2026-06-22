@@ -17,7 +17,7 @@ against a throwaway/dev instance unless you intend to add those items. Exit 0 if
 all method checks pass, 1 otherwise. Asserts OUTPUT SANITY (shape + non-trivial
 content where data exists), tolerating privacy gates and legitimate emptiness.
 
-=== METHODS COVERED (28) ===
+=== METHODS COVERED (38) ===
   SEED / INFRA
     add_history_item            — seeds 10 varied items; collects ids
     ping                        — liveness + uptime fields
@@ -59,6 +59,21 @@ content where data exists), tolerating privacy gates and legitimate emptiness.
     get_recording_stats         — cumulative recording stats
     compare_recordings          — side-by-side recording comparison
     auto_summarize_batch        — batch LLM summary for ids
+  SECTION 9 — Stateful CRUD round-trips (add→list→assert→remove→assert)
+    list_stt_hotwords           — baseline + post-add + post-remove list
+    add_stt_hotword             — add sentinel word "ЗебраТестE2E"
+    remove_stt_hotword          — remove sentinel, verify gone
+    set_translation_glossary_item  — add source/target pair
+    remove_translation_glossary_item — remove, verify gone (via get_settings)
+    get_settings                — read translation_glossary + quick_edit_timeout_sec
+    set_settings                — flip quick_edit_timeout_sec sentinel + restore
+    create_collection           — create named collection
+    list_collections            — verify presence and absence around create/delete
+    add_to_collection           — add seeded item_id to collection
+    delete_collection           — delete, verify gone
+    add_bookmark                — add bookmark on seeded session_id
+    list_bookmarks              — verify presence and absence around add/delete
+    delete_bookmark             — delete bookmark by id
 
 === METHODS SKIPPED ===
   get_last_llm_diff             — requires active LLM rewriter session; diff is empty
@@ -821,6 +836,367 @@ def check_auto_summarize_batch():
     return ok
 
 run_check("auto_summarize_batch", check_auto_summarize_batch)
+
+
+# ===========================================================================
+# SECTION 9 — Stateful CRUD round-trips
+# ===========================================================================
+# Each round-trip: add/set → list/get → assert present → remove → list/get →
+# assert gone.  All test values carry the suffix "E2E_S9" so they are easy to
+# spot and the smoke is idempotent (re-running on a dirty store just re-adds
+# then re-removes the same sentinel values).
+# ===========================================================================
+print("\n=== SECTION 9: Stateful CRUD round-trips ===")
+
+# ---------------------------------------------------------------------------
+# 9a — STT hotwords
+#   add_stt_hotword    params: {word: str}  → {hotwords: list[str], truncated: bool}
+#   list_stt_hotwords  params: {}           → {hotwords: list[str], enabled: bool, truncated: bool}
+#   remove_stt_hotword params: {word: str}  → {hotwords: list[str]}
+# ---------------------------------------------------------------------------
+_HOTWORD_TEST = "ЗебраТестE2E"
+
+def check_stt_hotword_crud():
+    ok = True
+
+    # Step 1: initial list (capture baseline)
+    r0 = call("list_stt_hotwords", {})
+    ok &= need(r0.get("ok") is True, "9a/stt_hotwords: list_stt_hotwords initial ok==True")
+    res0 = r0.get("result", {})
+    ok &= need("hotwords" in res0, "9a/stt_hotwords: initial response has hotwords key")
+    baseline = res0.get("hotwords", [])
+    ok &= need(isinstance(baseline, list), "9a/stt_hotwords: hotwords is list")
+
+    # Step 2: add
+    r_add = call("add_stt_hotword", {"word": _HOTWORD_TEST})
+    ok &= need(r_add.get("ok") is True, "9a/stt_hotwords: add_stt_hotword ok==True")
+    res_add = r_add.get("result", {})
+    ok &= need("hotwords" in res_add, "9a/stt_hotwords: add response has hotwords key")
+    ok &= need("truncated" in res_add, "9a/stt_hotwords: add response has truncated key")
+    ok &= need(_HOTWORD_TEST in res_add.get("hotwords", []),
+               f"9a/stt_hotwords: added word present in add response")
+
+    # Step 3: list again, assert present
+    r1 = call("list_stt_hotwords", {})
+    res1 = r1.get("result", {})
+    hotwords_after_add = res1.get("hotwords", [])
+    ok &= need(_HOTWORD_TEST in hotwords_after_add,
+               f"9a/stt_hotwords: {_HOTWORD_TEST!r} visible in list after add")
+
+    # Step 4: remove
+    r_rm = call("remove_stt_hotword", {"word": _HOTWORD_TEST})
+    ok &= need(r_rm.get("ok") is True, "9a/stt_hotwords: remove_stt_hotword ok==True")
+    res_rm = r_rm.get("result", {})
+    ok &= need("hotwords" in res_rm, "9a/stt_hotwords: remove response has hotwords key")
+    ok &= need(_HOTWORD_TEST not in res_rm.get("hotwords", []),
+               "9a/stt_hotwords: word absent from remove response")
+
+    # Step 5: list again, assert gone
+    r2 = call("list_stt_hotwords", {})
+    res2 = r2.get("result", {})
+    ok &= need(_HOTWORD_TEST not in res2.get("hotwords", []),
+               f"9a/stt_hotwords: {_HOTWORD_TEST!r} absent in list after remove")
+
+    return ok
+
+run_check("9a/stt_hotwords_crud", check_stt_hotword_crud)
+
+
+# ---------------------------------------------------------------------------
+# 9b — Translation glossary
+#   There is NO dedicated list-glossary IPC method.  The glossary is stored as
+#   settings["translation_glossary"] (a {source: target} dict); read via
+#   get_settings.
+#
+#   set_translation_glossary_item    params: {source: str, target: str}
+#     → {updated: bool, count: int}  |  {updated: False, error: str}
+#   remove_translation_glossary_item params: {source: str}
+#     → {removed: bool, count: int}
+#   get_settings                     params: {}
+#     → full settings dict (translation_glossary is a nested dict key)
+# ---------------------------------------------------------------------------
+_GLOSS_SRC = "ЗебраE2E"
+_GLOSS_TGT = "CebraE2E"
+
+def check_translation_glossary_crud():
+    ok = True
+
+    # Step 1: read baseline glossary from settings
+    r0 = call("get_settings", {})
+    ok &= need(r0.get("ok") is True, "9b/glossary: get_settings baseline ok==True")
+    settings0 = r0.get("result", {})
+    baseline_glossary = settings0.get("translation_glossary", {}) or {}
+    ok &= need(isinstance(baseline_glossary, dict), "9b/glossary: translation_glossary is dict")
+
+    # Step 2: add entry
+    r_set = call("set_translation_glossary_item", {"source": _GLOSS_SRC, "target": _GLOSS_TGT})
+    ok &= need(r_set.get("ok") is True, "9b/glossary: set_translation_glossary_item ok==True")
+    res_set = r_set.get("result", {})
+    ok &= need(res_set.get("updated") is True,
+               f"9b/glossary: set returned updated=True (got {res_set!r})")
+    ok &= need("count" in res_set, "9b/glossary: set response has count key")
+
+    # Step 3: read settings, assert entry present
+    r1 = call("get_settings", {})
+    glossary_after = (r1.get("result", {}) or {}).get("translation_glossary", {}) or {}
+    ok &= need(_GLOSS_SRC in glossary_after,
+               f"9b/glossary: source {_GLOSS_SRC!r} present in glossary after set")
+    ok &= need(glossary_after.get(_GLOSS_SRC) == _GLOSS_TGT,
+               f"9b/glossary: target matches {_GLOSS_TGT!r} (got {glossary_after.get(_GLOSS_SRC)!r})")
+
+    # Step 4: remove entry
+    r_rm = call("remove_translation_glossary_item", {"source": _GLOSS_SRC})
+    ok &= need(r_rm.get("ok") is True, "9b/glossary: remove_translation_glossary_item ok==True")
+    res_rm = r_rm.get("result", {})
+    ok &= need(res_rm.get("removed") is True,
+               f"9b/glossary: remove returned removed=True (got {res_rm!r})")
+    ok &= need("count" in res_rm, "9b/glossary: remove response has count key")
+
+    # Step 5: read settings, assert entry gone
+    r2 = call("get_settings", {})
+    glossary_after_rm = (r2.get("result", {}) or {}).get("translation_glossary", {}) or {}
+    ok &= need(_GLOSS_SRC not in glossary_after_rm,
+               f"9b/glossary: source {_GLOSS_SRC!r} absent in glossary after remove")
+
+    return ok
+
+run_check("9b/translation_glossary_crud", check_translation_glossary_crud)
+
+
+# ---------------------------------------------------------------------------
+# 9c — Collections
+#   create_collection  params: {name: str, description?: str}
+#     → {name, description, created_at, item_count}
+#   list_collections   params: {}
+#     → {collections: [{name, description, created_at, item_count}, ...]}
+#     (privacy-gated: {collections: [], reason: "privacy_mode_active"})
+#   add_to_collection  params: {collection_name: str, item_id: str}
+#     → {name, description, created_at, item_count} (the updated collection dict)
+#   delete_collection  params: {name: str}
+#     → {deleted: bool, name: str}
+#
+#   NOTE: item_id validation rejects dots/slashes — SEED_IDS are UUID-like
+#   (hex+dashes), which pass the guard.  The smoke uses SEED_IDS[0] if available.
+# ---------------------------------------------------------------------------
+_COL_NAME = "КоллекцияE2E_S9"
+
+def check_collections_crud():
+    ok = True
+
+    # Step 1: list baseline (may be privacy-gated)
+    r0 = call("list_collections", {})
+    ok &= need(r0.get("ok") is True, "9c/collections: list_collections baseline ok==True")
+    res0 = r0.get("result", {})
+    ok &= need("collections" in res0, "9c/collections: baseline response has collections key")
+    privacy_gated = res0.get("reason") == "privacy_mode_active"
+    if privacy_gated:
+        need(True, "9c/collections: privacy gate active — list baseline empty, continuing")
+
+    # Step 2: create
+    r_create = call("create_collection", {"name": _COL_NAME, "description": "e2e smoke sentinel"})
+    ok &= need(r_create.get("ok") is True, "9c/collections: create_collection ok==True")
+    res_create = r_create.get("result", {})
+    # create_collection returns the collection dict directly (not wrapped)
+    ok &= need(res_create.get("name") == _COL_NAME,
+               f"9c/collections: created name matches (got {res_create.get('name')!r})")
+    ok &= need("item_count" in res_create, "9c/collections: create response has item_count key")
+    ok &= need(res_create.get("item_count") == 0,
+               "9c/collections: new collection item_count=0")
+
+    # Step 3: list again — assert present (unless privacy-gated)
+    r1 = call("list_collections", {})
+    res1 = r1.get("result", {})
+    if not privacy_gated:
+        names_after = [c.get("name") for c in res1.get("collections", [])]
+        ok &= need(_COL_NAME in names_after,
+                   f"9c/collections: {_COL_NAME!r} visible in list after create")
+
+    # Step 4: optionally add a seeded item (only if we have ids and they pass validation)
+    if SEED_IDS:
+        seed_id = SEED_IDS[0]
+        # Validate: no dots, slashes, backslashes, or null bytes in the id
+        unsafe = any(c in seed_id for c in "./\\\x00")
+        if not unsafe:
+            r_add = call("add_to_collection", {"collection_name": _COL_NAME, "item_id": seed_id})
+            ok &= need(r_add.get("ok") is True, "9c/collections: add_to_collection ok==True")
+            res_add = r_add.get("result", {})
+            # Returns the updated collection dict with item_count incremented
+            ok &= need(res_add.get("item_count", 0) >= 1,
+                       "9c/collections: item_count ≥1 after add_to_collection")
+        else:
+            need(True, f"9c/collections: SKIP add_to_collection — seed_id has unsafe chars: {seed_id!r}")
+
+    # Step 5: delete
+    r_del = call("delete_collection", {"name": _COL_NAME})
+    ok &= need(r_del.get("ok") is True, "9c/collections: delete_collection ok==True")
+    res_del = r_del.get("result", {})
+    ok &= need(res_del.get("deleted") is True,
+               f"9c/collections: deleted=True (got {res_del!r})")
+    ok &= need(res_del.get("name") == _COL_NAME,
+               "9c/collections: delete response echoes collection name")
+
+    # Step 6: list again — assert gone (skip check when privacy-gated)
+    r2 = call("list_collections", {})
+    res2 = r2.get("result", {})
+    if not privacy_gated:
+        names_after_del = [c.get("name") for c in res2.get("collections", [])]
+        ok &= need(_COL_NAME not in names_after_del,
+                   f"9c/collections: {_COL_NAME!r} absent after delete")
+
+    return ok
+
+run_check("9c/collections_crud", check_collections_crud)
+
+
+# ---------------------------------------------------------------------------
+# 9d — Settings round-trip (safe, reversible scalar)
+#   We use `quick_edit_timeout_sec` (float, default 5.0, no credential/key, not
+#   destructive).  We read the current value, set it to a recognisably different
+#   sentinel (17.0), confirm the change, then restore the original value.
+#
+#   get_settings  params: {}      → full settings dict (flat)
+#   set_settings  params: {key: value}
+#     → full settings dict after merge (same shape as get_settings)
+#
+#   NOTE: get_settings REDACTS sensitive fields to "REDACTED" — we avoid those.
+# ---------------------------------------------------------------------------
+_SETTINGS_KEY = "quick_edit_timeout_sec"
+_SETTINGS_SENTINEL = 17.0  # recognisably different from any plausible real value
+
+def check_settings_round_trip():
+    ok = True
+
+    # Step 1: read current value
+    r0 = call("get_settings", {})
+    ok &= need(r0.get("ok") is True, "9d/settings: get_settings baseline ok==True")
+    settings0 = r0.get("result", {})
+    original_val = settings0.get(_SETTINGS_KEY, 5.0)  # 5.0 = DEFAULT_SETTINGS default
+    ok &= need(isinstance(original_val, (int, float)),
+               f"9d/settings: {_SETTINGS_KEY} is numeric (got {original_val!r})")
+
+    # Step 2: set to sentinel
+    r_set = call("set_settings", {_SETTINGS_KEY: _SETTINGS_SENTINEL})
+    ok &= need(r_set.get("ok") is True, "9d/settings: set_settings sentinel ok==True")
+    res_set = r_set.get("result", {})
+    ok &= need(isinstance(res_set, dict), "9d/settings: set_settings returns dict result")
+    # set_settings returns the merged settings dict
+    set_val = res_set.get(_SETTINGS_KEY)
+    ok &= need(set_val == _SETTINGS_SENTINEL or (
+                   isinstance(set_val, (int, float)) and abs(set_val - _SETTINGS_SENTINEL) < 0.01
+               ),
+               f"9d/settings: set response reflects sentinel {_SETTINGS_SENTINEL} (got {set_val!r})")
+
+    # Step 3: get_settings again, confirm sentinel persisted
+    r1 = call("get_settings", {})
+    val_after = (r1.get("result", {}) or {}).get(_SETTINGS_KEY)
+    ok &= need(isinstance(val_after, (int, float)) and abs(val_after - _SETTINGS_SENTINEL) < 0.01,
+               f"9d/settings: get_settings reflects sentinel after set (got {val_after!r})")
+
+    # Step 4: restore original value
+    r_restore = call("set_settings", {_SETTINGS_KEY: original_val})
+    ok &= need(r_restore.get("ok") is True, "9d/settings: set_settings restore ok==True")
+
+    # Step 5: confirm restored
+    r2 = call("get_settings", {})
+    val_restored = (r2.get("result", {}) or {}).get(_SETTINGS_KEY)
+    ok &= need(isinstance(val_restored, (int, float)) and abs(val_restored - original_val) < 0.01,
+               f"9d/settings: value restored to {original_val} (got {val_restored!r})")
+
+    return ok
+
+run_check("9d/settings_round_trip", check_settings_round_trip)
+
+
+# ---------------------------------------------------------------------------
+# 9e — Bookmarks
+#   add_bookmark   params: {session_id: str, offset_sec: float, note?: str}
+#     → {"bookmark": {id, session_id, offset_sec, note, created_at}}
+#     | {"ok": False, "reason": "limit_exceeded"} when cap hit
+#   list_bookmarks params: {item_id: str}
+#     → {"bookmarks": [...], "count": N}
+#     | {"bookmarks": [], "count": 0, "reason": "privacy_mode_active"}
+#   delete_bookmark params: {id: str}
+#     → {"ok": bool}
+#
+#   NOTE: list_bookmarks uses `item_id` which equals the session_id stored by
+#   add_bookmark (the store links them by session_id).  We use a SEED_ID so the
+#   bookmark is attached to a real history item.
+# ---------------------------------------------------------------------------
+
+def check_bookmarks_crud():
+    if not SEED_IDS:
+        need(False, "9e/bookmarks: SKIP — no seeded ids available")
+        return False
+
+    ok = True
+    test_session_id = SEED_IDS[0]  # reuse first seeded item as session anchor
+
+    # Step 1: list bookmarks for this item (baseline — may be privacy-gated)
+    r0 = call("list_bookmarks", {"item_id": test_session_id})
+    ok &= need(r0.get("ok") is True, "9e/bookmarks: list_bookmarks baseline ok==True")
+    res0 = r0.get("result", {})
+    ok &= need("bookmarks" in res0, "9e/bookmarks: baseline response has bookmarks key")
+    ok &= need("count" in res0, "9e/bookmarks: baseline response has count key")
+    privacy_gated = res0.get("reason") == "privacy_mode_active"
+    if privacy_gated:
+        need(True, "9e/bookmarks: privacy gate active — list empty, continuing")
+
+    # Step 2: add bookmark
+    r_add = call("add_bookmark", {
+        "session_id": test_session_id,
+        "offset_sec": 12.5,
+        "note": "E2E smoke sentinel bookmark",
+    })
+    ok &= need(r_add.get("ok") is True, "9e/bookmarks: add_bookmark ok==True")
+    res_add = r_add.get("result", {})
+
+    # Handle DoS cap (limit_exceeded) gracefully
+    if res_add.get("ok") is False and res_add.get("reason") == "limit_exceeded":
+        need(True, "9e/bookmarks: cap limit reached — skipping add/remove assertion")
+        return ok
+
+    bm = res_add.get("bookmark", {})
+    ok &= need(isinstance(bm, dict), "9e/bookmarks: add response has bookmark dict")
+    bm_id = bm.get("id")
+    ok &= need(bool(bm_id), "9e/bookmarks: bookmark id present")
+    ok &= need(bm.get("session_id") == test_session_id,
+               "9e/bookmarks: bookmark session_id matches")
+    ok &= need(bm.get("offset_sec") == 12.5,
+               f"9e/bookmarks: offset_sec=12.5 (got {bm.get('offset_sec')!r})")
+
+    # Step 3: list again — assert present (skip when privacy-gated)
+    if not privacy_gated:
+        r1 = call("list_bookmarks", {"item_id": test_session_id})
+        res1 = r1.get("result", {})
+        bm_ids_after = [b.get("id") for b in res1.get("bookmarks", [])]
+        ok &= need(bm_id in bm_ids_after,
+                   f"9e/bookmarks: bookmark {bm_id!r} visible in list after add")
+
+    # Step 4: delete bookmark
+    if bm_id:
+        r_del = call("delete_bookmark", {"id": bm_id})
+        ok &= need(r_del.get("ok") is True, "9e/bookmarks: delete_bookmark ok==True")
+        res_del = r_del.get("result", {})
+        ok &= need(res_del.get("ok") is True,
+                   f"9e/bookmarks: delete returned ok=True (got {res_del!r})")
+
+        # Step 5: list again — assert gone (skip when privacy-gated)
+        if not privacy_gated:
+            r2 = call("list_bookmarks", {"item_id": test_session_id})
+            res2 = r2.get("result", {})
+            bm_ids_after_del = [b.get("id") for b in res2.get("bookmarks", [])]
+            ok &= need(bm_id not in bm_ids_after_del,
+                       f"9e/bookmarks: bookmark {bm_id!r} absent after delete")
+
+    return ok
+
+run_check("9e/bookmarks_crud", check_bookmarks_crud)
+
+# SKIPPED round-trips (method not in dispatch table or requires non-smoke state):
+#   list_translation_glossary / get_translation_glossary — NOT in dispatch table;
+#     glossary state is read via get_settings["translation_glossary"] (used in 9b above).
+#   rename_collection — not in dispatch table (delete+recreate is the supported flow).
+#   start_recording / stop_recording — require real audio I/O; out of scope for smoke.
 
 
 # ===========================================================================
