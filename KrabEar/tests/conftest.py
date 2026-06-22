@@ -23,6 +23,65 @@ from pathlib import Path
 
 import pytest
 
+# ---------------------------------------------------------------------------
+# W957 network guard (добавлено 2026-06-05 из Krab MAIN). Unit-тесты НЕ должны
+# выходить в реальную сеть: сетевые тесты без моков (напр. webhook SSRF
+# test_webhook_redirect_ssrf_W1355) висели на реальном connect без таймаута →
+# процесс копил RAM/потоки часами (S73: 57 ГБ / 2083 потока / 14ч → MacBook
+# freeze; повтор 2026-06-05: runaway-loop pytest KrabEar, swap 30 ГБ).
+# Guard патчит socket.socket.connect: не-loopback connect → мгновенный
+# RuntimeError. Escape: marker `live`/`acceptance` или env
+# KRAB_ALLOW_TEST_NETWORK=1 (integration-прогон).
+# ---------------------------------------------------------------------------
+import os  # noqa: E402
+import socket  # noqa: E402
+from collections.abc import Iterator  # noqa: E402
+from typing import Any  # noqa: E402
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "0.0.0.0", "localhost"})
+_ORIGINAL_SOCKET_CONNECT = socket.socket.connect
+
+
+def _is_loopback_address(address: Any) -> bool:
+    """True, если адрес соединения — loopback/localhost или Unix-сокет."""
+    if isinstance(address, (str, bytes)):
+        return True  # Unix domain socket — всегда локальный
+    if isinstance(address, tuple) and address:
+        host = address[0]
+        if isinstance(host, str):
+            return host in _LOOPBACK_HOSTS or host.startswith("127.")
+    return True
+
+
+@pytest.fixture(autouse=True)
+def _block_real_network(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Блокирует исходящие соединения на не-loopback адреса в unit-тестах (W957)."""
+    if os.environ.get("KRAB_ALLOW_TEST_NETWORK") == "1":
+        yield
+        return
+    if request.node.get_closest_marker("live") or request.node.get_closest_marker(
+        "acceptance"
+    ):
+        yield
+        return
+
+    def _guarded_connect(self: socket.socket, address: Any) -> Any:
+        if _is_loopback_address(address):
+            return _ORIGINAL_SOCKET_CONNECT(self, address)
+        raise RuntimeError(
+            "W957: реальный сетевой вызов заблокирован в unit-тесте "
+            f"(connect → {address!r}). Замокай httpx/requests/socket "
+            "или пометь @pytest.mark.live / выставь KRAB_ALLOW_TEST_NETWORK=1."
+        )
+
+    original = socket.socket.connect
+    socket.socket.connect = _guarded_connect  # type: ignore[method-assign]
+    try:
+        yield
+    finally:
+        socket.socket.connect = original  # type: ignore[method-assign]
+
+
 _BENCH_RE = re.compile(r"\[BENCH\]\s+(.+?):\s+([\d.]+)s")
 _HISTORY_FILE = Path(__file__).resolve().parents[2] / ".benchmarks" / "history.jsonl"
 

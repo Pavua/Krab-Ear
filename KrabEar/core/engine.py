@@ -1056,11 +1056,14 @@ class AudioEngine:
                 )
 
             raw_text = str(result.get("text", "")).strip()
+            _is_loop = False  # set below; guards rewriter/punct-pass skip
 
             # Phase C C.4-wire: stt.repetition_loop — fires when Whisper returns a
             # hallucination loop (repeated bigrams / sentences / low unique-ratio).
             # Text is returned UNMODIFIED — «не врём про input»: user sees actual
             # Whisper output plus warning toast and can decide whether to re-record.
+            # _is_loop=True also skips LLM rewrite/punct passes — sending a
+            # 500-char bigram loop to LM Studio reliably returns HTTP 400 (J bug).
             if raw_text and not is_preview:
                 _is_loop, _loop_reason = is_likely_repetition_loop(raw_text)
                 if _is_loop:
@@ -1152,7 +1155,7 @@ class AudioEngine:
                     text = _dt_result
 
             # 4.5a Punctuation-only LLM pass (opt-in, перед полным rewrite)
-            if self._punctuation_pass_allowed():
+            if self._punctuation_pass_allowed() and not _is_loop:
                 _report("punctuation_pass")
                 punct_result = self._llm_rewriter.fix_punctuation_only(
                     text, language=resolved_lang or settings.TRANSCRIBE_LANGUAGE
@@ -1169,7 +1172,7 @@ class AudioEngine:
             # 4.5 D.10a: LLM rewrite hook (только если admin+runtime toggle=true)
             llm_result = None
             llm_diff = None
-            if self._llm_rewrite_allowed():
+            if self._llm_rewrite_allowed() and not _is_loop:
                 _report("llm_rewrite")
                 llm_result = self._llm_rewriter.rewrite(cleaned_text)
                 if llm_result.ok:
