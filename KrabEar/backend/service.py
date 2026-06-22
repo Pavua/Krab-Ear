@@ -2017,6 +2017,21 @@ class BackendService:
         try:
             result = handler(params)
             response = {"id": request_id, "ok": True, "result": result}
+        except (ValueError, RuntimeError) as exc:
+            # Handlers deliberately raise ValueError/RuntimeError for EXPECTED
+            # conditions — a missing/invalid param or a not-found item
+            # ("Параметр id обязателен", "Элемент не найден: ..."). RuntimeError is
+            # this codebase's dominant validation idiom (~76 such raises). These are
+            # normal user outcomes, not internal failures, so surface a semantic
+            # `invalid_request` code and log at WARNING. The previous bare
+            # `except Exception` turned them into `internal_error` +
+            # logger.exception (ERROR + traceback → Sentry), so a stale-id summarize
+            # click or a malformed param looked like a backend crash. Genuine bugs
+            # raise AttributeError/KeyError/TypeError/IndexError/... (e.g. the
+            # HistoryItem-vs-dict crash raised AttributeError) and still fall through
+            # to the internal_error path below — they remain loud (ERROR + Sentry).
+            logger.warning("Метод %s отклонён (invalid_request): %s", method, exc)
+            response = self._error(request_id, "invalid_request", str(exc))
         except Exception as exc:
             logger.exception("Ошибка метода %s", method)
             response = self._error(request_id, "internal_error", str(exc))

@@ -326,7 +326,10 @@ class TestClipboardFlow(_IPCBase):
     def test_repaste_missing_id_returns_error(self) -> None:
         resp = self.call("repaste_item", {"history_id": "does-not-exist"})
         self.assertFalse(resp.get("ok"))
-        self.assertEqual(resp["error"]["code"], "internal_error")
+        # A not-found item is an EXPECTED condition, not a backend crash — the
+        # dispatch now maps handler ValueError/RuntimeError to a semantic
+        # `invalid_request` (WARNING-logged), not `internal_error` (ERROR/Sentry).
+        self.assertEqual(resp["error"]["code"], "invalid_request")
 
     def test_clipboard_limit_parameter(self) -> None:
         for i in range(10):
