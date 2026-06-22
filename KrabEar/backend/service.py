@@ -134,6 +134,7 @@ from backend.calendar_link import CalendarLinker
 from backend.audit_logger import AuditLogger
 from backend.bulk_reprocess import BulkReprocessor
 from backend.privacy_audit import get_privacy_audit_logger
+from backend.ipc_errors import IpcOperationalError
 
 import argparse
 from datetime import datetime, timedelta, timezone
@@ -2017,6 +2018,11 @@ class BackendService:
         try:
             result = handler(params)
             response = {"id": request_id, "ok": True, "result": result}
+        except IpcOperationalError as exc:
+            # Genuine operational failure (remote service down, disk/IO error) —
+            # stays loud (internal_error + Sentry), not downgraded to invalid_request.
+            logger.exception("Операционный сбой метода %s", method)
+            response = self._error(request_id, "internal_error", str(exc))
         except (ValueError, RuntimeError) as exc:
             # Handlers deliberately raise ValueError/RuntimeError for EXPECTED
             # conditions — a missing/invalid param or a not-found item

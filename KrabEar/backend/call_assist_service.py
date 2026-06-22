@@ -16,6 +16,7 @@ from urllib import error as urllib_error, parse as urllib_parse, request as urll
 import uuid
 
 from backend.observability import add_breadcrumb, mask_phone
+from backend.ipc_errors import IpcOperationalError
 
 logger = logging.getLogger("KrabEar.Backend.CallAssist")
 
@@ -529,7 +530,7 @@ class CallAssistService:
             path=f"/v1/sessions/{gateway_session_id}/diagnostics",
         )
         if not diag_result.get("ok"):
-            raise RuntimeError(f"Gateway diagnostics error: {diag_result.get('error', 'unknown')}")
+            raise IpcOperationalError(f"Gateway diagnostics error: {diag_result.get('error', 'unknown')}")
 
         include_why = bool(params.get("include_why", True))
         why_payload: dict[str, Any] = {}
@@ -596,7 +597,7 @@ class CallAssistService:
             },
         )
         if not ok:
-            raise RuntimeError(f"Gateway summary error: {summary_result.get('error', 'unknown')}")
+            raise IpcOperationalError(f"Gateway summary error: {summary_result.get('error', 'unknown')}")
         return {
             "gateway_session_id": gateway_session_id,
             "summary": summary_result.get("payload", {}),
@@ -634,7 +635,7 @@ class CallAssistService:
             },
         )
         if not quick_result.get("ok"):
-            raise RuntimeError(f"Gateway quick-phrase error: {quick_result.get('error', 'unknown')}")
+            raise IpcOperationalError(f"Gateway quick-phrase error: {quick_result.get('error', 'unknown')}")
         return {
             "gateway_session_id": gateway_session_id,
             "quick_phrase": quick_result.get("payload", {}),
@@ -809,7 +810,7 @@ class CallAssistService:
             },
         )
         if not ok:
-            raise RuntimeError(f"Gateway cost estimate error: {result.get('error', 'unknown')}")
+            raise IpcOperationalError(f"Gateway cost estimate error: {result.get('error', 'unknown')}")
         return payload if isinstance(payload, dict) else {"ok": True, "country": country}
 
     def handle_timeline(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -833,7 +834,7 @@ class CallAssistService:
         path = f"/v1/sessions/{gw_sid}/timeline?{'&'.join(query_parts)}"
         result = self.gateway.get(voice_gateway_url=gw_url, api_key=gw_key, path=path)
         if not result.get("ok"):
-            raise RuntimeError(f"Gateway timeline error: {result.get('error', 'unknown')}")
+            raise IpcOperationalError(f"Gateway timeline error: {result.get('error', 'unknown')}")
         payload = result.get("payload", {})
         return payload if isinstance(payload, dict) else {"ok": True, "items": [], "count": 0}
 
@@ -856,7 +857,7 @@ class CallAssistService:
             path=f"/v1/sessions/{gw_sid}/timeline/stats?limit={limit}",
         )
         if not stats_result.get("ok"):
-            raise RuntimeError(f"Gateway timeline stats error: {stats_result.get('error', 'unknown')}")
+            raise IpcOperationalError(f"Gateway timeline stats error: {stats_result.get('error', 'unknown')}")
         stats_payload = stats_result.get("payload", {})
         stats = stats_payload.get("stats", {}) if isinstance(stats_payload.get("stats"), dict) else stats_payload
         text_chars = int(stats.get("text_chars", 0))
@@ -876,7 +877,7 @@ class CallAssistService:
             path=f"/v1/telephony/cost/estimate?{'&'.join(query_parts)}",
         )
         if not cost_result.get("ok"):
-            raise RuntimeError(f"Gateway cost estimate error: {cost_result.get('error', 'unknown')}")
+            raise IpcOperationalError(f"Gateway cost estimate error: {cost_result.get('error', 'unknown')}")
 
         payload = cost_result.get("payload", {}) if isinstance(cost_result.get("payload"), dict) else {}
         total = float(payload.get("total_usd", 0.0))
@@ -900,7 +901,7 @@ class CallAssistService:
         path = f"/v1/sessions/{gw_sid}/timeline/stats?limit={limit}"
         result = self.gateway.get(voice_gateway_url=gw_url, api_key=gw_key, path=path)
         if not result.get("ok"):
-            raise RuntimeError(f"Gateway timeline stats error: {result.get('error', 'unknown')}")
+            raise IpcOperationalError(f"Gateway timeline stats error: {result.get('error', 'unknown')}")
         payload = result.get("payload", {})
         return payload if isinstance(payload, dict) else {"ok": True, "stats": {"count": 0}}
 
@@ -917,7 +918,7 @@ class CallAssistService:
         path = f"/v1/sessions/{gw_sid}/timeline/summary?limit={limit}&max_tasks={max_tasks}"
         result = self.gateway.get(voice_gateway_url=gw_url, api_key=gw_key, path=path)
         if not result.get("ok"):
-            raise RuntimeError(f"Gateway timeline summary error: {result.get('error', 'unknown')}")
+            raise IpcOperationalError(f"Gateway timeline summary error: {result.get('error', 'unknown')}")
         payload = result.get("payload", {})
         return payload if isinstance(payload, dict) else {"ok": True, "summary": "", "tasks": []}
 
@@ -934,7 +935,7 @@ class CallAssistService:
         path = f"/v1/sessions/{gw_sid}/timeline/export?format={export_format}&limit={limit}"
         result = self.gateway.get(voice_gateway_url=gw_url, api_key=gw_key, path=path)
         if not result.get("ok"):
-            raise RuntimeError(f"Gateway timeline export error: {result.get('error', 'unknown')}")
+            raise IpcOperationalError(f"Gateway timeline export error: {result.get('error', 'unknown')}")
         payload = result.get("payload", {})
         return payload if isinstance(payload, dict) else {"ok": True, "format": export_format, "content": ""}
 
@@ -945,7 +946,7 @@ class CallAssistService:
         path = f"/v1/sessions/{gw_sid}/timeline?keep_last={keep_last}"
         result = self.gateway.delete(voice_gateway_url=gw_url, api_key=gw_key, path=path)
         if not result.get("ok"):
-            raise RuntimeError(f"Gateway timeline clear error: {result.get('error', 'unknown')}")
+            raise IpcOperationalError(f"Gateway timeline clear error: {result.get('error', 'unknown')}")
         payload = result.get("payload", {})
         return payload if isinstance(payload, dict) else {"ok": True, "keep_last": keep_last}
 
@@ -993,7 +994,7 @@ class CallAssistService:
         path = f"/v1/sessions/{gw_sid}/timeline/export?format={export_format}&limit={limit}"
         result = self.gateway.get(voice_gateway_url=gw_url, api_key=gw_key, path=path)
         if not result.get("ok"):
-            raise RuntimeError(f"Gateway timeline export error: {result.get('error', 'unknown')}")
+            raise IpcOperationalError(f"Gateway timeline export error: {result.get('error', 'unknown')}")
         payload = result.get("payload", {})
         if not isinstance(payload, dict):
             payload = {}

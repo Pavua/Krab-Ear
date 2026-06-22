@@ -23,6 +23,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from backend.ipc_errors import IpcOperationalError
+
 logger = logging.getLogger("KrabEar.Backend.SharingManager")
 
 _BASE62_CHARS = string.ascii_letters + string.digits  # 62 символа
@@ -772,7 +774,7 @@ class SharingManager:
             with self._lock:
                 self._index.pop(package.share_id, None)
                 self._save_index()
-            raise RuntimeError(
+            raise IpcOperationalError(
                 f"Не удалось записать файл пакета '{file_path}': {exc}"
             ) from exc
 

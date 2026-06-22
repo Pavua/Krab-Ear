@@ -20,6 +20,7 @@ from typing import Any, Callable, TYPE_CHECKING
 
 from core.config import settings
 from backend.telegram_bridge import CircuitBreakerOpen, TelegramBridge
+from backend.ipc_errors import IpcOperationalError
 
 if TYPE_CHECKING:
     pass
@@ -97,12 +98,12 @@ class AppleIntegrationService:
                 reply_to=reply_to,
             )
         except CircuitBreakerOpen as exc:
-            raise RuntimeError(f"circuit_open: {exc}") from exc
+            raise IpcOperationalError(f"circuit_open: {exc}") from exc
         except (Exception,) as exc:
             msg = str(exc)
             if "krab_unavailable" in msg or "krab_error" in msg:
-                raise RuntimeError(msg) from exc
-            raise RuntimeError(f"krab_unavailable: {msg}") from exc
+                raise IpcOperationalError(msg) from exc
+            raise IpcOperationalError(f"krab_unavailable: {msg}") from exc
 
         return result
 
@@ -129,12 +130,12 @@ class AppleIntegrationService:
         try:
             chats = self._telegram_bridge.get_chats()
         except CircuitBreakerOpen as exc:
-            raise RuntimeError(f"circuit_open: {exc}") from exc
+            raise IpcOperationalError(f"circuit_open: {exc}") from exc
         except Exception as exc:
             msg = str(exc)
             if "krab_unavailable" in msg or "krab_error" in msg:
-                raise RuntimeError(msg) from exc
-            raise RuntimeError(f"krab_unavailable: {msg}") from exc
+                raise IpcOperationalError(msg) from exc
+            raise IpcOperationalError(f"krab_unavailable: {msg}") from exc
 
         return {"chats": chats}
 

@@ -30,6 +30,7 @@ if PROJECT_ROOT not in sys.path:
 
 from backend.service import BackendService
 from backend.state_store import StateStore
+from backend.ipc_errors import IpcOperationalError
 
 
 def _make_service() -> BackendService:
@@ -101,6 +102,26 @@ class DispatchErrorContractTest(unittest.TestCase):
         resp = self._dispatch("_synthetic_ke", {})
         self.assertFalse(resp.get("ok"))
         self.assertEqual(resp["error"]["code"], "internal_error")
+
+    # ----- IpcOperationalError → internal_error (loud, not downgraded) -----
+
+    def test_ipc_operational_error_stays_internal_error(self) -> None:
+        """IpcOperationalError must NOT be downgraded to invalid_request.
+
+        The dispatch must catch IpcOperationalError BEFORE the generic
+        (ValueError, RuntimeError) branch, since IpcOperationalError is a
+        RuntimeError subclass and would otherwise be silenced as invalid_request.
+        """
+        def _h(params):
+            raise IpcOperationalError("Gateway down")
+        self._inject("_synthetic_op_err", _h)
+        with self.assertLogs("KrabEar.Backend.Service", level="DEBUG") as cm:
+            resp = self._dispatch("_synthetic_op_err", {})
+        self.assertFalse(resp.get("ok"))
+        self.assertEqual(resp["error"]["code"], "internal_error")
+        self.assertIn("Gateway down", resp["error"]["message"])
+        # Must be logged at ERROR (not WARNING) — stays loud for Sentry.
+        self.assertIn("ERROR", "\n".join(cm.output))
 
     # ----- End-to-end through a real handler's not-found path -----
 
