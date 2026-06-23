@@ -112,6 +112,7 @@ from backend.ipc_throttle import IPCThrottle
 # ipc_server.py — здесь импорт удалён (дубликат класса убран).
 from backend.ipc_server import IPCServer
 from backend.text_snippet_service import TextSnippetService
+from backend.phonetic_vocab_service import PhoneticVocabService
 from backend.export_scheduler import ExportScheduler
 from backend.call_cost_estimator import CallCostEstimator
 from backend.call_auto_end import CallAutoEnd
@@ -195,6 +196,7 @@ class BackendService:
         self.store = store
         self.vocabulary = VocabularyStore(data_dir=store.data_dir)
         self._text_snippet_svc = TextSnippetService(data_dir=store.data_dir)
+        self._phonetic_vocab_svc = PhoneticVocabService(data_dir=store.data_dir)
 
         def _emit_audio_level(rms: float) -> None:
             """Callback для VU meter: эмитит событие recording.audio_level ~30 Hz."""
@@ -238,6 +240,11 @@ class BackendService:
         # pattern, mirrors _llm_rewriter wiring above).
         if hasattr(self.transcriber, "engine"):
             self.transcriber.engine._snippets_provider = self._text_snippet_svc.get_snippets
+        # Wire phonetic vocab provider into engine so PhoneticVocabulary in engine.py
+        # can access current entries at transcription time (late-injection pattern,
+        # mirrors _snippets_provider wiring above).
+        if hasattr(self.transcriber, "engine"):
+            self.transcriber.engine._phonetic_provider = self._phonetic_vocab_svc.get_entries
 
         self.translator = translator or Translator()
         # W1429 — wire persistent translation cache (late-injection pattern)
@@ -1933,6 +1940,10 @@ class BackendService:
             "add_text_snippet": self._text_snippet_svc.handle_add_text_snippet,  # добавить/обновить пару trigger→expansion
             "list_text_snippets": self._text_snippet_svc.handle_list_text_snippets,  # получить все сниппеты
             "remove_text_snippet": self._text_snippet_svc.handle_remove_text_snippet,  # удалить сниппет по триггеру
+            # --- Phonetic correction vocabulary (post-STT many-to-one variant→canonical substitutions) ---
+            "add_phonetic_entry": self._phonetic_vocab_svc.handle_add_phonetic_entry,  # добавить/обновить запись {canonical, variants}
+            "list_phonetic_entries": self._phonetic_vocab_svc.handle_list_phonetic_entries,  # получить все записи
+            "remove_phonetic_entry": self._phonetic_vocab_svc.handle_remove_phonetic_entry,  # удалить запись по canonical
             # --- Speech pace analysis (W1048 F2) ---
             "analyze_speech_pace": self._handle_analyze_speech_pace,  # анализ темпа речи: wpm, cpm, категория, расчётное время чтения
             # --- Bulk reprocess (Wave 1044 — re-wired after Wave 65 removal) ---

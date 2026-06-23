@@ -1144,6 +1144,24 @@ class AudioEngine:
                     )
                     text = _snip_result
 
+            # 4.3b Фонетический словарь пользователя (opt-in, после text_snippets)
+            # Варианты → канонические написания, напр. "пашел"/"павэл" → "Павел"
+            _phonetic_provider = getattr(self, "_phonetic_provider", None)
+            if _phonetic_provider is not None:
+                from core.phonetic_vocabulary import PhoneticVocabulary  # lazy — avoid circular
+                _phonetic_vocab = PhoneticVocabulary(
+                    settings_get=self._settings_get,
+                    entries_provider=_phonetic_provider,
+                )
+                _phonetic_result = _phonetic_vocab.correct(text)
+                if _phonetic_result != text:
+                    _report("phonetic_vocab")
+                    logger.info(
+                        "PhoneticVocab: %d chars → %d chars",
+                        len(text), len(_phonetic_result),
+                    )
+                    text = _phonetic_result
+
             # 4.4a Нормализация числительных и дат/времени (post-STT, pre-LLM)
             # «сто двадцать три» → «123», «третье ноября» → «03.11» и т.д.
             _norm_lang = resolved_lang or settings.TRANSCRIBE_LANGUAGE
