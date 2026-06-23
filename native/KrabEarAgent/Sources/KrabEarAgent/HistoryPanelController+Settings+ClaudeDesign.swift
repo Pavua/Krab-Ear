@@ -673,6 +673,9 @@ extension HistoryPanelController {
         // Section 9 — Голосовые команды (включить/строгий режим + справочник)
         let s9 = cdBuildVoiceCommandsSection()
 
+        // Section 9.5 — Текстовые сниппеты
+        let s9_5 = cdBuildTextSnippetsSection()
+
         // Section 10 — Хранение истории (авто-удаление старых записей)
         let s10 = cdBuildRetentionSettingsSection()
 
@@ -693,7 +696,7 @@ extension HistoryPanelController {
         // сразу, без скролла на длинный список секций.
         settingsBarCD.addArrangedSubview(buildDictationHeroCard())
 
-        for s in [s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12] {
+        for s in [s1, s2, s3, s4, s5, s6, s7, s8, s9, s9_5, s10, s11, s12] {
             settingsBarCD.addArrangedSubview(s)
         }
     }

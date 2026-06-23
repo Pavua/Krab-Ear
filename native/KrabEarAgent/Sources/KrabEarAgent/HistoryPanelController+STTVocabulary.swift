@@ -26,11 +26,13 @@ import Foundation
 
 // MARK: - Associated-object ключи
 
-private enum STTVocabAssocKeys {
+enum STTVocabAssocKeys {
     nonisolated(unsafe) static var vocabCard: UInt8 = 0
     nonisolated(unsafe) static var cdVocabCard: UInt8 = 0
     nonisolated(unsafe) static var addTextField: UInt8 = 0
     nonisolated(unsafe) static var cdAddTextField: UInt8 = 0
+    nonisolated(unsafe) static var autoLearnToggle: UInt8 = 0
+    nonisolated(unsafe) static var cdAutoLearnToggle: UInt8 = 0
 }
 
 // MARK: - HistoryPanelController+STTVocabulary
@@ -107,6 +109,17 @@ extension HistoryPanelController {
         card.contentStackView.addArrangedSubview(sttVocabMakeSeparator())
         card.contentStackView.addArrangedSubview(loadingLabel)
 
+        let autoLearnToggle = NSButton(checkboxWithTitle: "", target: self, action: #selector(onAutoLearnCorrectionsChanged))
+        autoLearnToggle.state = AgentSettings.default.autoLearnCorrectionsEnabled ? .on : .off
+        objc_setAssociatedObject(self, &STTVocabAssocKeys.autoLearnToggle, autoLearnToggle, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        let autoLearnRow = makeSettingRow(
+            label: "Авто-словарь из правок",
+            description: "Когда вы исправляете неверно распознанное слово, оно автоматически добавляется в словарь STT",
+            control: autoLearnToggle
+        )
+        card.contentStackView.addArrangedSubview(sttVocabMakeSeparator())
+        card.contentStackView.addArrangedSubview(autoLearnRow)
+
         section.contentStackView.addArrangedSubview(card)
 
         // Запускаем загрузку словаря с бэкенда (off-main, AGENT-3).
@@ -172,6 +185,14 @@ extension HistoryPanelController {
         card.contentStackView.addArrangedSubview(addRow)
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(loadingLabel)
+
+        let autoLearnToggle = NSButton(checkboxWithTitle: "Авто-словарь из правок", target: self, action: #selector(onAutoLearnCorrectionsChangedCD))
+        autoLearnToggle.state = AgentSettings.default.autoLearnCorrectionsEnabled ? .on : .off
+        autoLearnToggle.toolTip = "Когда вы исправляете неверно распознанное слово, оно автоматически добавляется в словарь STT"
+        objc_setAssociatedObject(self, &STTVocabAssocKeys.cdAutoLearnToggle, autoLearnToggle, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        let autoLearnRow = cdMakeRow(label: "", control: autoLearnToggle)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(autoLearnRow)
 
         section.contentStackView.addArrangedSubview(card)
 
@@ -543,6 +564,12 @@ extension HistoryPanelController {
         addHotwordFromText(word, isClaudeDesign: false)
     }
 
+    @objc func onAutoLearnCorrectionsChanged() {
+        guard !isSyncingSettings else { return }
+        guard let toggle = objc_getAssociatedObject(self, &STTVocabAssocKeys.autoLearnToggle) as? NSButton else { return }
+        applySettingsPatch(["auto_learn_corrections_enabled": toggle.state == .on])
+    }
+
     // MARK: - Обработчики кнопок (Claude Design)
 
     @objc func onAddSTTHotwordFromFieldCD(_ sender: NSTextField) {
@@ -564,6 +591,12 @@ extension HistoryPanelController {
     @objc func onAddSuggestionCD(_ sender: NSButton) {
         guard let word = sender.identifier?.rawValue, !word.isEmpty else { return }
         addHotwordFromText(word, isClaudeDesign: true)
+    }
+
+    @objc func onAutoLearnCorrectionsChangedCD() {
+        guard !isSyncingSettings else { return }
+        guard let toggle = objc_getAssociatedObject(self, &STTVocabAssocKeys.cdAutoLearnToggle) as? NSButton else { return }
+        applySettingsPatch(["auto_learn_corrections_enabled": toggle.state == .on])
     }
 
     // MARK: - Общая логика (off-main IPC)
@@ -640,7 +673,7 @@ extension HistoryPanelController {
 
     /// NSBox separator — только для этого extension.
     @MainActor
-    private func sttVocabMakeSeparator() -> NSView {
+    func sttVocabMakeSeparator() -> NSView {
         let separator = NSBox()
         separator.boxType = .separator
         separator.translatesAutoresizingMaskIntoConstraints = false
