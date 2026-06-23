@@ -1905,6 +1905,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let textSnippetsSection = buildTextSnippetsSection()
         settingsBar.addArrangedSubview(textSnippetsSection)
 
+        // Фонетический словарь
+        let phoneticVocabSection = buildPhoneticVocabSection()
+        settingsBar.addArrangedSubview(phoneticVocabSection)
+
         // Шаблоны вывода: управление пользовательскими шаблонами (TemplateManager).
         let outputTemplatesSection = buildOutputTemplatesSection()
         settingsBar.addArrangedSubview(outputTemplatesSection)

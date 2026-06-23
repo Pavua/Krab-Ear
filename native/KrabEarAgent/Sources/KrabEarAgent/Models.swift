@@ -105,6 +105,8 @@ struct AgentSettings {
     var autoLearnCorrectionsEnabled: Bool
     // Text Snippets
     var textSnippetsEnabled: Bool
+    // Phonetic Vocabulary
+    var phoneticVocabEnabled: Bool
 
     static let `default` = AgentSettings(
         mode: "headless",
@@ -161,7 +163,8 @@ struct AgentSettings {
         autoPurgeEnabled: false,
         autoPurgeRetentionDays: 90,
         autoLearnCorrectionsEnabled: false,
-        textSnippetsEnabled: false
+        textSnippetsEnabled: false,
+        phoneticVocabEnabled: false
     )
 
     init(from payload: [String: Any]) {
@@ -241,6 +244,7 @@ struct AgentSettings {
         self.autoPurgeRetentionDays = (payload["auto_purge_retention_days"] as? Int) ?? Self.default.autoPurgeRetentionDays
         self.autoLearnCorrectionsEnabled = (payload["auto_learn_corrections_enabled"] as? Bool) ?? Self.default.autoLearnCorrectionsEnabled
         self.textSnippetsEnabled = (payload["text_snippets_enabled"] as? Bool) ?? Self.default.textSnippetsEnabled
+        self.phoneticVocabEnabled = (payload["phonetic_vocab_enabled"] as? Bool) ?? Self.default.phoneticVocabEnabled
     }
 
     init(
@@ -295,7 +299,8 @@ struct AgentSettings {
         autoPurgeEnabled: Bool = false,
         autoPurgeRetentionDays: Int = 90,
         autoLearnCorrectionsEnabled: Bool = false,
-        textSnippetsEnabled: Bool = false
+        textSnippetsEnabled: Bool = false,
+        phoneticVocabEnabled: Bool = false
     ) {
         self.mode = mode
         self.showDockIcon = showDockIcon
@@ -349,6 +354,7 @@ struct AgentSettings {
         self.autoPurgeRetentionDays = autoPurgeRetentionDays
         self.autoLearnCorrectionsEnabled = autoLearnCorrectionsEnabled
         self.textSnippetsEnabled = textSnippetsEnabled
+        self.phoneticVocabEnabled = phoneticVocabEnabled
     }
 
     func toPayload() -> [String: Any] {
@@ -405,6 +411,7 @@ struct AgentSettings {
             "auto_purge_retention_days": autoPurgeRetentionDays,
             "auto_learn_corrections_enabled": autoLearnCorrectionsEnabled,
             "text_snippets_enabled": textSnippetsEnabled,
+            "phonetic_vocab_enabled": phoneticVocabEnabled,
         ]
     }
 }
