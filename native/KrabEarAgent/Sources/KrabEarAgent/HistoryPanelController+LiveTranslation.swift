@@ -43,7 +43,15 @@ extension HistoryPanelController {
         }
         let raw = String(describing: tabViewItem?.identifier ?? PanelTab.history.rawValue)
         let tab = PanelTab.from(settingsValue: raw)
-        applySettingsPatch(["ui_last_tab": tab.rawValue])
+        // Сохраняем последнюю вкладку вне main thread — sync IPC read() на main вызывал AppHang
+        // при каждом переключении вкладки (KRAB-EAR-AGENT-N). ui_last_tab не влияет на UI,
+        // поэтому syncSettingsControls здесь не нужен.
+        let ipc = ipcClient
+        var tabPayload = settingsProvider().toPayload()
+        tabPayload["ui_last_tab"] = tab.rawValue
+        DispatchQueue.global(qos: .utility).async {
+            _ = try? ipc.call(method: "set_settings", params: tabPayload)
+        }
         // Обновляем индикатор STT движка при открытии вкладки «Диктовка».
         if tab == .dictation {
             fetchAndUpdateSTTEngineLabel()
