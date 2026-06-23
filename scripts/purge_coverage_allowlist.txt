@@ -21,6 +21,7 @@ config_presets.json      # built-in + custom settings presets — no transcripti
 # They contain no transcript text and no transcript-derived names; like settings.json,
 # they are app configuration that should survive a "purge transcription data" wipe.
 abbreviations.json          # W1770: user abbreviation → expansion rules (text-processing prefs); no transcript content
+text_snippets.json          # voice-triggered text snippet expansions — user-authored config pairs (trigger phrase → expansion text), not transcript-derived content; analogous to abbreviations.json
 hallucination_patterns.json # W1770: user-defined regex hallucination filters (text-processing prefs); no transcript content
 normalization_profiles.json # W1770: named text-normalization profiles (clean/formal/telegram/...); app config, no transcript content
 paste_formatters.json       # W1770: custom paste-format rules per target app; app config, no transcript content

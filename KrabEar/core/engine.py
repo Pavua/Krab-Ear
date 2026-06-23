@@ -1126,6 +1126,24 @@ class AudioEngine:
                 )
                 text = _vc_result
 
+            # 4.3a Голосовые текстовые сниппеты (opt-in, после voice_commands)
+            # trigger-фразы → user-defined expansions, напр. "вставь подпись" → "С уважением,\nПавел"
+            _snippets_provider = getattr(self, "_snippets_provider", None)
+            if _snippets_provider is not None:
+                from core.text_snippet_expander import TextSnippetExpander  # lazy — avoid circular
+                _snip_expander = TextSnippetExpander(
+                    settings_get=self._settings_get,
+                    snippets_provider=_snippets_provider,
+                )
+                _snip_result = _snip_expander.expand(text)
+                if _snip_result != text:
+                    _report("text_snippets")
+                    logger.info(
+                        "TextSnippets: %d chars → %d chars",
+                        len(text), len(_snip_result),
+                    )
+                    text = _snip_result
+
             # 4.4a Нормализация числительных и дат/времени (post-STT, pre-LLM)
             # «сто двадцать три» → «123», «третье ноября» → «03.11» и т.д.
             _norm_lang = resolved_lang or settings.TRANSCRIBE_LANGUAGE
