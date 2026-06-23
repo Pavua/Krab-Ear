@@ -185,4 +185,63 @@ class LLMOpsService:
             new,
             replaced_count,
         )
+
+        # Closed-loop STT auto-learn: add corrected word to stt_hotwords so
+        # Whisper stops mishearing it next time. Non-fatal — vocab add failure
+        # must never break the replace itself.
+        self._maybe_auto_learn_word(new, old)
+
         return {"ok": True, "replaced_count": replaced_count, "history_id": history_id, "new_text": new_text}
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    # Maximum token budget for stt_hotwords (mirrors STTManagementService limit).
+    _STT_HOTWORDS_MAX: int = 100
+
+    def _maybe_auto_learn_word(self, new_word: str, old_word: str) -> None:
+        """Добавляет исправленное слово в stt_hotwords если auto_learn_corrections_enabled.
+
+        Non-fatal: любая ошибка логируется на уровне debug, replace продолжается.
+        Проверки перед добавлением:
+          - auto_learn_corrections_enabled == True
+          - new_word не совпадает с old_word (нечего учить)
+          - new_word не пустой, разумной длины (≤60 символов)
+          - new_word — одно слово или короткая фраза (≤4 токена по пробелам)
+        """
+        try:
+            cached = self._settings_svc.cached_settings() if self._settings_svc is not None else {}
+            if not cached.get("auto_learn_corrections_enabled", False):
+                return
+
+            # Sanity checks: non-empty, short, and meaningfully different from old word
+            word = new_word.strip()
+            if not word:
+                return
+            if word.lower() == old_word.strip().lower():
+                return
+            if len(word) > 60:
+                logger.debug("auto_learn: skipping long token %r (len=%d)", word, len(word))
+                return
+            if len(word.split()) > 4:
+                logger.debug("auto_learn: skipping multi-token phrase %r", word)
+                return
+
+            current: list = cached.get("stt_hotwords", [])
+            if not isinstance(current, list):
+                current = []
+            if word in current:
+                logger.debug("auto_learn: %r already in stt_hotwords, skip", word)
+                return
+
+            updated = current + [word]
+            if len(updated) > self._STT_HOTWORDS_MAX:
+                excess = len(updated) - self._STT_HOTWORDS_MAX
+                updated = updated[excess:]
+            self._settings_svc.handle_set_settings({"stt_hotwords": updated})
+            logger.debug(
+                "auto_learn: added %r to stt_hotwords (total=%d)", word, len(updated)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("auto_learn_correction failed (non-fatal): %s", exc)
