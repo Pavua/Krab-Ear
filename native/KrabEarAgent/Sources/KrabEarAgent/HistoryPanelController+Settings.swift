@@ -106,6 +106,19 @@ extension HistoryPanelController {
         applySettingsPatch(["auto_paste": autoPaste])
     }
 
+    @objc func onPasteUndoChanged() {
+        guard !isSyncingSettings else { return }
+        let enabled = pasteUndoButton.state == .on
+        applySettingsPatch(["paste_undo_enabled": enabled])
+        syncPasteUndoToggle(enabled: enabled)
+    }
+
+    @MainActor
+    func syncPasteUndoToggle(enabled: Bool) {
+        pasteUndoButton.state = enabled ? .on : .off
+        (NSApp.delegate as? AgentAppDelegate)?.pasteUndoService?.pasteUndoEnabled = enabled
+    }
+
     @objc func onQuickEditChanged() {
         guard !isSyncingSettings else { return }
         let enabled = quickEditButton.state == .on
@@ -507,6 +520,7 @@ extension HistoryPanelController {
         }
         syncTextSnippetsToggles(enabled: settings.textSnippetsEnabled)
         syncPhoneticVocabToggles(enabled: settings.phoneticVocabEnabled)
+        syncPasteUndoToggle(enabled: settings.pasteUndoEnabled)
         // Статус шифрования получаем из backend напрямую (не из AgentSettings),
         // потому что available зависит от состояния Keychain, а не только от флага.
         loadEncryptionStatus()

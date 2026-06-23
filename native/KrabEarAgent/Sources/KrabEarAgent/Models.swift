@@ -107,6 +107,8 @@ struct AgentSettings {
     var textSnippetsEnabled: Bool
     // Phonetic Vocabulary
     var phoneticVocabEnabled: Bool
+    // Paste Undo
+    var pasteUndoEnabled: Bool
 
     static let `default` = AgentSettings(
         mode: "headless",
@@ -164,7 +166,8 @@ struct AgentSettings {
         autoPurgeRetentionDays: 90,
         autoLearnCorrectionsEnabled: false,
         textSnippetsEnabled: false,
-        phoneticVocabEnabled: false
+        phoneticVocabEnabled: false,
+        pasteUndoEnabled: false
     )
 
     init(from payload: [String: Any]) {
@@ -245,6 +248,7 @@ struct AgentSettings {
         self.autoLearnCorrectionsEnabled = (payload["auto_learn_corrections_enabled"] as? Bool) ?? Self.default.autoLearnCorrectionsEnabled
         self.textSnippetsEnabled = (payload["text_snippets_enabled"] as? Bool) ?? Self.default.textSnippetsEnabled
         self.phoneticVocabEnabled = (payload["phonetic_vocab_enabled"] as? Bool) ?? Self.default.phoneticVocabEnabled
+        self.pasteUndoEnabled = (payload["paste_undo_enabled"] as? Bool) ?? Self.default.pasteUndoEnabled
     }
 
     init(
@@ -300,7 +304,8 @@ struct AgentSettings {
         autoPurgeRetentionDays: Int = 90,
         autoLearnCorrectionsEnabled: Bool = false,
         textSnippetsEnabled: Bool = false,
-        phoneticVocabEnabled: Bool = false
+        phoneticVocabEnabled: Bool = false,
+        pasteUndoEnabled: Bool = false
     ) {
         self.mode = mode
         self.showDockIcon = showDockIcon
@@ -355,6 +360,7 @@ struct AgentSettings {
         self.autoLearnCorrectionsEnabled = autoLearnCorrectionsEnabled
         self.textSnippetsEnabled = textSnippetsEnabled
         self.phoneticVocabEnabled = phoneticVocabEnabled
+        self.pasteUndoEnabled = pasteUndoEnabled
     }
 
     func toPayload() -> [String: Any] {
@@ -412,6 +418,7 @@ struct AgentSettings {
             "auto_learn_corrections_enabled": autoLearnCorrectionsEnabled,
             "text_snippets_enabled": textSnippetsEnabled,
             "phonetic_vocab_enabled": phoneticVocabEnabled,
+            "paste_undo_enabled": pasteUndoEnabled,
         ]
     }
 }
