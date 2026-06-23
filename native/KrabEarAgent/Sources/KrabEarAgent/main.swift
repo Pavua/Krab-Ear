@@ -115,6 +115,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
 
     /// Phase 2A: Selection translator — Cmd+Shift+T auto-translate selection.
     var selectionTranslator: SelectionTranslator?
+    var pasteUndoService: PasteUndoService?
 
     // Phase 2B live-subs state moved to main+LiveSubs.swift (associated objects).
 
@@ -346,6 +347,11 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         selectionTranslator?.start()
         logger.info("SelectionTranslator запущен (Cmd+Shift+T)")
 
+        pasteUndoService = PasteUndoService()
+        pasteUndoService?.pasteUndoEnabled = settings.pasteUndoEnabled
+        pasteUndoService?.start()
+        logger.info("PasteUndoService запущен (Cmd+Ctrl+Z). enabled=\(settings.pasteUndoEnabled)")
+
         if UserDefaults.standard.string(forKey: "KrabEar_ActivePreset") == nil {
             UserDefaults.standard.set("default", forKey: "KrabEar_ActivePreset")
         }
@@ -385,6 +391,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         hotkeyManager?.stop()
         wakeWordListener?.stop()
         selectionTranslator?.stop()
+        pasteUndoService?.stop()
         stopLiveSubsCapture()
         stopRealtimeOverlayPolling()
         backendSupervisor.stopBackend()
