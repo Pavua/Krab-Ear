@@ -499,6 +499,13 @@ extension HistoryPanelController {
         privacyModeButton.state = settings.privacyModeEnabled ? .on : .off
         syncVoiceCommandsToggles(enabled: settings.voiceCommandsEnabled, strictMode: settings.voiceCommandsStrictMode)
         syncRetentionSettings(enabled: settings.autoPurgeEnabled, retentionDays: settings.autoPurgeRetentionDays)
+        if let t = objc_getAssociatedObject(self, &STTVocabAssocKeys.autoLearnToggle) as? NSButton {
+            t.state = settings.autoLearnCorrectionsEnabled ? .on : .off
+        }
+        if let t = objc_getAssociatedObject(self, &STTVocabAssocKeys.cdAutoLearnToggle) as? NSButton {
+            t.state = settings.autoLearnCorrectionsEnabled ? .on : .off
+        }
+        syncTextSnippetsToggles(enabled: settings.textSnippetsEnabled)
         // Статус шифрования получаем из backend напрямую (не из AgentSettings),
         // потому что available зависит от состояния Keychain, а не только от флага.
         loadEncryptionStatus()

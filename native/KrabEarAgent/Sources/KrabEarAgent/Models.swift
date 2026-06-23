@@ -101,6 +101,10 @@ struct AgentSettings {
     // Scheduled auto-purge of old history entries
     var autoPurgeEnabled: Bool
     var autoPurgeRetentionDays: Int
+    // Auto-learn STT dictionary from corrections
+    var autoLearnCorrectionsEnabled: Bool
+    // Text Snippets
+    var textSnippetsEnabled: Bool
 
     static let `default` = AgentSettings(
         mode: "headless",
@@ -155,7 +159,9 @@ struct AgentSettings {
         voiceCommandsEnabled: true,
         voiceCommandsStrictMode: true,
         autoPurgeEnabled: false,
-        autoPurgeRetentionDays: 90
+        autoPurgeRetentionDays: 90,
+        autoLearnCorrectionsEnabled: false,
+        textSnippetsEnabled: false
     )
 
     init(from payload: [String: Any]) {
@@ -233,6 +239,8 @@ struct AgentSettings {
         self.voiceCommandsStrictMode = (payload["voice_commands_strict_mode"] as? Bool) ?? Self.default.voiceCommandsStrictMode
         self.autoPurgeEnabled = (payload["auto_purge_enabled"] as? Bool) ?? Self.default.autoPurgeEnabled
         self.autoPurgeRetentionDays = (payload["auto_purge_retention_days"] as? Int) ?? Self.default.autoPurgeRetentionDays
+        self.autoLearnCorrectionsEnabled = (payload["auto_learn_corrections_enabled"] as? Bool) ?? Self.default.autoLearnCorrectionsEnabled
+        self.textSnippetsEnabled = (payload["text_snippets_enabled"] as? Bool) ?? Self.default.textSnippetsEnabled
     }
 
     init(
@@ -285,7 +293,9 @@ struct AgentSettings {
         voiceCommandsEnabled: Bool = true,
         voiceCommandsStrictMode: Bool = true,
         autoPurgeEnabled: Bool = false,
-        autoPurgeRetentionDays: Int = 90
+        autoPurgeRetentionDays: Int = 90,
+        autoLearnCorrectionsEnabled: Bool = false,
+        textSnippetsEnabled: Bool = false
     ) {
         self.mode = mode
         self.showDockIcon = showDockIcon
@@ -337,6 +347,8 @@ struct AgentSettings {
         self.voiceCommandsStrictMode = voiceCommandsStrictMode
         self.autoPurgeEnabled = autoPurgeEnabled
         self.autoPurgeRetentionDays = autoPurgeRetentionDays
+        self.autoLearnCorrectionsEnabled = autoLearnCorrectionsEnabled
+        self.textSnippetsEnabled = textSnippetsEnabled
     }
 
     func toPayload() -> [String: Any] {
@@ -391,6 +403,8 @@ struct AgentSettings {
             "voice_commands_strict_mode": voiceCommandsStrictMode,
             "auto_purge_enabled": autoPurgeEnabled,
             "auto_purge_retention_days": autoPurgeRetentionDays,
+            "auto_learn_corrections_enabled": autoLearnCorrectionsEnabled,
+            "text_snippets_enabled": textSnippetsEnabled,
         ]
     }
 }
