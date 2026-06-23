@@ -109,6 +109,8 @@ struct AgentSettings {
     var phoneticVocabEnabled: Bool
     // Paste Undo
     var pasteUndoEnabled: Bool
+    // Smart field-aware paste (AX role-based behaviour gate)
+    var smartFieldFormatEnabled: Bool
 
     static let `default` = AgentSettings(
         mode: "headless",
@@ -167,7 +169,8 @@ struct AgentSettings {
         autoLearnCorrectionsEnabled: false,
         textSnippetsEnabled: false,
         phoneticVocabEnabled: false,
-        pasteUndoEnabled: false
+        pasteUndoEnabled: false,
+        smartFieldFormatEnabled: false
     )
 
     init(from payload: [String: Any]) {
@@ -249,6 +252,7 @@ struct AgentSettings {
         self.textSnippetsEnabled = (payload["text_snippets_enabled"] as? Bool) ?? Self.default.textSnippetsEnabled
         self.phoneticVocabEnabled = (payload["phonetic_vocab_enabled"] as? Bool) ?? Self.default.phoneticVocabEnabled
         self.pasteUndoEnabled = (payload["paste_undo_enabled"] as? Bool) ?? Self.default.pasteUndoEnabled
+        self.smartFieldFormatEnabled = (payload["smart_field_format_enabled"] as? Bool) ?? Self.default.smartFieldFormatEnabled
     }
 
     init(
@@ -305,7 +309,8 @@ struct AgentSettings {
         autoLearnCorrectionsEnabled: Bool = false,
         textSnippetsEnabled: Bool = false,
         phoneticVocabEnabled: Bool = false,
-        pasteUndoEnabled: Bool = false
+        pasteUndoEnabled: Bool = false,
+        smartFieldFormatEnabled: Bool = false
     ) {
         self.mode = mode
         self.showDockIcon = showDockIcon
@@ -361,6 +366,7 @@ struct AgentSettings {
         self.textSnippetsEnabled = textSnippetsEnabled
         self.phoneticVocabEnabled = phoneticVocabEnabled
         self.pasteUndoEnabled = pasteUndoEnabled
+        self.smartFieldFormatEnabled = smartFieldFormatEnabled
     }
 
     func toPayload() -> [String: Any] {
@@ -419,6 +425,7 @@ struct AgentSettings {
             "text_snippets_enabled": textSnippetsEnabled,
             "phonetic_vocab_enabled": phoneticVocabEnabled,
             "paste_undo_enabled": pasteUndoEnabled,
+            "smart_field_format_enabled": smartFieldFormatEnabled,
         ]
     }
 }

@@ -352,6 +352,14 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         pasteUndoService?.start()
         logger.info("PasteUndoService запущен (Cmd+Ctrl+Z). enabled=\(settings.pasteUndoEnabled)")
 
+        // Smart field-aware paste: применяем стартовое значение из настроек и вешаем callback
+        // для тихого уведомления при пропуске вставки в защищённое поле.
+        pasteService.smartFieldFormatEnabled = settings.smartFieldFormatEnabled
+        pasteService.onSecureFieldSkipped = { [weak self] in
+            self?.handlePasteFailure(reason: "secure_field_skipped")
+        }
+        logger.info("SmartFieldPaste ready. enabled=\(settings.smartFieldFormatEnabled)")
+
         if UserDefaults.standard.string(forKey: "KrabEar_ActivePreset") == nil {
             UserDefaults.standard.set("default", forKey: "KrabEar_ActivePreset")
         }

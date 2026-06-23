@@ -119,6 +119,21 @@ extension HistoryPanelController {
         (NSApp.delegate as? AgentAppDelegate)?.pasteUndoService?.pasteUndoEnabled = enabled
     }
 
+    // MARK: - Smart field-aware paste toggle
+
+    @objc func onSmartFieldFormatChanged() {
+        guard !isSyncingSettings else { return }
+        let enabled = smartFieldFormatButton.state == .on
+        applySettingsPatch(["smart_field_format_enabled": enabled])
+        syncSmartFieldFormatToggle(enabled: enabled)
+    }
+
+    @MainActor
+    func syncSmartFieldFormatToggle(enabled: Bool) {
+        smartFieldFormatButton.state = enabled ? .on : .off
+        (NSApp.delegate as? AgentAppDelegate)?.pasteService.smartFieldFormatEnabled = enabled
+    }
+
     @objc func onQuickEditChanged() {
         guard !isSyncingSettings else { return }
         let enabled = quickEditButton.state == .on
@@ -521,6 +536,7 @@ extension HistoryPanelController {
         syncTextSnippetsToggles(enabled: settings.textSnippetsEnabled)
         syncPhoneticVocabToggles(enabled: settings.phoneticVocabEnabled)
         syncPasteUndoToggle(enabled: settings.pasteUndoEnabled)
+        syncSmartFieldFormatToggle(enabled: settings.smartFieldFormatEnabled)
         // Статус шифрования получаем из backend напрямую (не из AgentSettings),
         // потому что available зависит от состояния Keychain, а не только от флага.
         loadEncryptionStatus()

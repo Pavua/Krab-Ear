@@ -181,6 +181,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let modeSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let autoPasteButton = NSButton(checkboxWithTitle: "Автовставка", target: nil, action: nil)
     let pasteUndoButton = NSButton(checkboxWithTitle: "Откат вставки (Cmd+Ctrl+Z)", target: nil, action: nil)
+    let smartFieldFormatButton = NSButton(checkboxWithTitle: "Умная вставка по типу поля", target: nil, action: nil)
     let quickEditButton = NSButton(checkboxWithTitle: "Быстрое редактирование", target: nil, action: nil)
     let quickEditTimeoutStepper = NSStepper()
     let quickEditTimeoutValueLabel = NSTextField(labelWithString: "5 сек")
@@ -1126,6 +1127,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         pasteUndoButton.action = #selector(onPasteUndoChanged)
         settingsRow3.addArrangedSubview(pasteUndoButton)
 
+        smartFieldFormatButton.target = self
+        smartFieldFormatButton.action = #selector(onSmartFieldFormatChanged)
+        settingsRow3.addArrangedSubview(smartFieldFormatButton)
+
         quickEditButton.target = self
         quickEditButton.action = #selector(onQuickEditChanged)
         settingsRow3.addArrangedSubview(quickEditButton)
@@ -2056,7 +2061,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
         // Checkbox buttons
         for button in [audioDuckingButton, diarizationButton, llmRewriteButton,
-                       autoPasteButton, pasteUndoButton, quickEditButton, startSoundButton, realtimePreviewButton,
+                       autoPasteButton, pasteUndoButton, smartFieldFormatButton,
+                       quickEditButton, startSoundButton, realtimePreviewButton,
                        translateAndPasteButton, callNotifyButton, callAutoSummaryButton,
                        autoStartButton, dockIconButton] as [NSButton] {
             button.applyThemeCheckbox()

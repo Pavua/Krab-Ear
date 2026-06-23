@@ -18,6 +18,55 @@ struct PasteAttemptResult {
 
 /// Нативная вставка текста в активное приложение через буфер обмена и Cmd+V.
 final class PasteService {
+
+    // MARK: - Smart field-aware paste
+
+    /// Управляет умной вставкой по типу поля (AX role-based). Обновляется из настроек.
+    var smartFieldFormatEnabled: Bool = false
+
+    /// Уведомительный хук для secure-field skip (вызывается синхронно на вызывающем потоке).
+    /// Позволяет внешнему коду (AgentAppDelegate) показать уведомление не создавая зависимость
+    /// от NotificationService напрямую в PasteService.
+    var onSecureFieldSkipped: (() -> Void)?
+
+    /// AX-роль сфокусированного элемента для указанного PID.
+    /// Зеркалит паттерн из `inspectFocusedElementState(pid:)` и `collapseSelectionIfNeeded(pid:)`.
+    private func focusedElementRole(pid: pid_t) -> String? {
+        let appElement = AXUIElementCreateApplication(pid)
+        var focusedRef: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(
+            appElement,
+            kAXFocusedUIElementAttribute as CFString,
+            &focusedRef
+        )
+        guard status == .success, let focusedRef else { return nil }
+        guard CFGetTypeID(focusedRef) == AXUIElementGetTypeID() else { return nil }
+        let focusedElement = focusedRef as! AXUIElement
+
+        var roleRef: CFTypeRef?
+        let roleStatus = AXUIElementCopyAttributeValue(
+            focusedElement,
+            kAXRoleAttribute as CFString,
+            &roleRef
+        )
+        guard roleStatus == .success, let role = roleRef as? String else { return nil }
+        return role
+    }
+
+    /// Преобразует текст для вставки в поле поиска/комбобокс: снимает хвостовой пробел
+    /// и хвостовой пунктуационный символ (`.`, `!`, `?`) из TRAILING run.
+    private func textForSearchField(_ text: String) -> String {
+        var result = text
+        // Сначала убираем хвостовой пробел.
+        while result.last?.isWhitespace == true {
+            result.removeLast()
+        }
+        // Затем убираем хвостовой пунктуационный символ (только один).
+        if let last = result.last, ".!?".contains(last) {
+            result.removeLast()
+        }
+        return result
+    }
     // macOS virtual key codes for modifier keys
     private let rightOptionKeyCode: CGKeyCode = Keycode.rightOption.rawValue
     private let leftOptionKeyCode: CGKeyCode = Keycode.leftOption.rawValue
@@ -89,7 +138,43 @@ final class PasteService {
             return PasteAttemptResult(ok: false, reason: "empty_text")
         }
 
-        putToClipboard(text)
+        // MARK: Smart field-aware paste gate
+        // Выполняется ТОЛЬКО при smartFieldFormatEnabled == true и при наличии AX доступа.
+        // Определяет роль сфокусированного поля и применяет соответствующий форматинг:
+        //   AXSecureTextField → пропускаем вставку полностью (пароль)
+        //   AXSearchField, AXComboBox → убираем хвостовую пунктуацию
+        //   всё остальное → текст не меняем
+        var textToInsert = text  // может быть переопределён для AXSearchField/AXComboBox
+        if smartFieldFormatEnabled, isAccessibilityTrusted() {
+            // Приоритет PID: явный targetPID → frontmost app.
+            let axPID: pid_t?
+            if let tpid = targetPID {
+                axPID = tpid
+            } else if let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                      frontmostPID != ProcessInfo.processInfo.processIdentifier {
+                axPID = frontmostPID
+            } else {
+                axPID = nil
+            }
+
+            if let pid = axPID, let role = focusedElementRole(pid: pid) {
+                switch role {
+                case "AXSecureTextField":
+                    // Никогда не вставляем в защищённое поле (пароль).
+                    logger.warn("[SmartPaste] Secure field (pid=\(pid)) — paste skipped")
+                    onSecureFieldSkipped?()
+                    return PasteAttemptResult(ok: false, reason: "secure_field_skipped")
+                case "AXSearchField", "AXComboBox":
+                    // Поисковые/комбо поля: убираем хвостовую пунктуацию.
+                    textToInsert = textForSearchField(cleanText)
+                    logger.info("[SmartPaste] Search/combo field (pid=\(pid), role=\(role)) — stripped trailing punct")
+                default:
+                    break
+                }
+            }
+        }
+
+        putToClipboard(textToInsert)
         let axTrusted = isAccessibilityTrusted()
 
         guard waitForModifierRelease(timeoutMs: modifierReleaseTimeoutMs) else {
@@ -144,7 +229,9 @@ final class PasteService {
         }
 
         // Запоминаем вставленный текст для быстрого повтора (Cmd+Option+V).
-        recordLastPaste(cleanText)
+        // Используем textToInsert (может отличаться от text после smartField trim).
+        let effectiveText = textToInsert.trimmingCharacters(in: .whitespacesAndNewlines)
+        recordLastPaste(effectiveText.isEmpty ? cleanText : effectiveText)
 
         // Если фокус определить не удалось, считаем попытку условно успешной:
         // в этом случае UI покажет статус ok, но в логе останется подробная диагностика.
