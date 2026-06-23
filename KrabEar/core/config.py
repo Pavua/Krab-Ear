@@ -988,6 +988,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # When True: trigger phrases in transcripts are replaced with user-defined expansions.
     # Pairs managed via add_text_snippet / list_text_snippets / remove_text_snippet IPC.
     "text_snippets_enabled": False,
+    # --- Phonetic correction vocabulary (post-STT, before paste) ---
+    # When True: misheard variants in transcripts are replaced with canonical spellings.
+    # Entries managed via add_phonetic_entry / list_phonetic_entries / remove_phonetic_entry IPC.
+    "phonetic_vocab_enabled": False,
     # --- Number / datetime normalization (text post-processing) ---
     "number_normalization_enabled": True,
     "datetime_normalization_enabled": True,
