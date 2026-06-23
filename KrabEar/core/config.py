@@ -1057,4 +1057,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "auto_purge_enabled": False,
     "auto_purge_retention_days": 90,
     "auto_purge_check_interval_hours": 24,
+    # --- Closed-loop STT vocabulary auto-learn from corrections ---
+    # Когда пользователь правит неверно распознанное слово через
+    # replace_word_in_last_transcript, исправленное слово автоматически
+    # добавляется в stt_hotwords, чтобы Whisper лучше распознавал его в следующий раз.
+    # Opt-in: False по умолчанию — пользователь управляет словарём вручную.
+    "auto_learn_corrections_enabled": False,
 }
