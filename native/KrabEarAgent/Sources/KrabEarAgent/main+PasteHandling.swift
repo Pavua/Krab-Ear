@@ -186,6 +186,13 @@ extension AgentAppDelegate {
     }
 
     func handlePasteFailure(reason: String, text: String? = nil) {
+        // Защищённое поле: тихое уведомление, НЕ ошибка — это ожидаемое поведение.
+        if reason == "secure_field_skipped" {
+            logger.info("[SmartPaste] Вставка в защищённое поле пропущена — показываем тихое уведомление")
+            notify(title: "Krab Ear", body: "Вставка в защищённое поле пропущена")
+            return
+        }
+
         let details: String
         switch reason {
         case "accessibility_not_granted":
