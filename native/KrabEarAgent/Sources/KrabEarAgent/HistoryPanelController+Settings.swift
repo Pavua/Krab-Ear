@@ -506,6 +506,7 @@ extension HistoryPanelController {
             t.state = settings.autoLearnCorrectionsEnabled ? .on : .off
         }
         syncTextSnippetsToggles(enabled: settings.textSnippetsEnabled)
+        syncPhoneticVocabToggles(enabled: settings.phoneticVocabEnabled)
         // Статус шифрования получаем из backend напрямую (не из AgentSettings),
         // потому что available зависит от состояния Keychain, а не только от флага.
         loadEncryptionStatus()
