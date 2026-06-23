@@ -984,6 +984,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "paste_app_memory_enabled": True,
     # REST API token store
     "rest_api_auth_enabled": False,
+    # --- Voice-triggered text snippet expansions (post-STT, before paste) ---
+    # When True: trigger phrases in transcripts are replaced with user-defined expansions.
+    # Pairs managed via add_text_snippet / list_text_snippets / remove_text_snippet IPC.
+    "text_snippets_enabled": False,
     # --- Number / datetime normalization (text post-processing) ---
     "number_normalization_enabled": True,
     "datetime_normalization_enabled": True,

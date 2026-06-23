@@ -111,6 +111,7 @@ from backend.ipc_throttle import IPCThrottle
 # Константы IPC_SOCKET_* / IPC_MAX_MESSAGE_BYTES теперь нужны только внутри
 # ipc_server.py — здесь импорт удалён (дубликат класса убран).
 from backend.ipc_server import IPCServer
+from backend.text_snippet_service import TextSnippetService
 from backend.export_scheduler import ExportScheduler
 from backend.call_cost_estimator import CallCostEstimator
 from backend.call_auto_end import CallAutoEnd
@@ -193,6 +194,7 @@ class BackendService:
     ) -> None:
         self.store = store
         self.vocabulary = VocabularyStore(data_dir=store.data_dir)
+        self._text_snippet_svc = TextSnippetService(data_dir=store.data_dir)
 
         def _emit_audio_level(rms: float) -> None:
             """Callback для VU meter: эмитит событие recording.audio_level ~30 Hz."""
@@ -231,6 +233,11 @@ class BackendService:
                     if getattr(transcriber.engine, "_llm_rewriter", None) is None:
                         transcriber.engine._llm_rewriter = self._llm_rewriter
                     transcriber.engine._settings_get = self._get_runtime_setting
+        # Wire snippet provider into engine so TextSnippetExpander in engine.py
+        # can access the current snippet list at transcription time (late-injection
+        # pattern, mirrors _llm_rewriter wiring above).
+        if hasattr(self.transcriber, "engine"):
+            self.transcriber.engine._snippets_provider = self._text_snippet_svc.get_snippets
 
         self.translator = translator or Translator()
         # W1429 — wire persistent translation cache (late-injection pattern)
@@ -1922,6 +1929,10 @@ class BackendService:
             "get_stt_routing_decision": self._stt_mgmt_svc.handle_get_stt_routing_decision,  # scored adapter selection debug
             "list_stt_engines": self._stt_mgmt_svc.handle_list_stt_engines,  # перечислить все STT-движки (включая отключённые) для model-picker GUI
             "list_voice_commands": self._stt_mgmt_svc.handle_list_voice_commands,  # статический справочник голосовых команд диктовки
+            # --- Text snippet expansions (voice-triggered post-STT substitutions) ---
+            "add_text_snippet": self._text_snippet_svc.handle_add_text_snippet,  # добавить/обновить пару trigger→expansion
+            "list_text_snippets": self._text_snippet_svc.handle_list_text_snippets,  # получить все сниппеты
+            "remove_text_snippet": self._text_snippet_svc.handle_remove_text_snippet,  # удалить сниппет по триггеру
             # --- Speech pace analysis (W1048 F2) ---
             "analyze_speech_pace": self._handle_analyze_speech_pace,  # анализ темпа речи: wpm, cpm, категория, расчётное время чтения
             # --- Bulk reprocess (Wave 1044 — re-wired after Wave 65 removal) ---
