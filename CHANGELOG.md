@@ -4,6 +4,16 @@ All notable changes to Krab Ear are documented in this file.
 
 **Note (2026-04-18):** Root CHANGELOG consolidated from `/docs/CHANGELOG.md` (archived). For Krab Core (Telegram userbot) architecture, see `PRD-KRAB-CORE.md` and `ARCHITECTURE-KRAB-CORE.md`. For Krab Ear Native documentation, see `docs/PRD-KRAB-EAR.md` and `docs/ARCHITECTURE-KRAB-EAR.md`.
 
+## [Unreleased] 2026-06-25 — AGE-51 AppHang при переключении вкладок
+
+### Fixed
+- **AGE-51 / KRAB-EAR-AGENT-P** — `HistoryPanelController.showPanel()` больше не прогревает все вкладки через последовательные `selectTabViewItem(at:)` и микро-ресайз окна. Этот путь заставлял AppKit синхронно строить тяжёлые content view вкладок на главном потоке при переключении вкладок.
+- Добавлен helper только для раскладки видимой вкладки и регрессионный тест `HistoryPanelTabSwitchAppHangTests`, который запрещает вернуть цикл прогрева всех табов.
+
+### Verified
+- `swift test --filter HistoryPanelTabSwitchAppHangTests`
+- `swift build -c release`
+
 ## [2026-05-26] v2.0.5 — Singleton GigaAM lock + Sentry release tag fix
 
 Full notes: [`docs/RELEASE_NOTES_v2.0.5.md`](docs/RELEASE_NOTES_v2.0.5.md). 105 commits since v2.0.4.

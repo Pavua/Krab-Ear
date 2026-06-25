@@ -528,34 +528,30 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         NSApp.activate(ignoringOtherApps: true)
         currentQuery = ""
         searchField.stringValue = ""
-        
-        // Сделать "История" дефолтной вкладкой при открытии
+
+        // Сначала показываем «Историю» как безопасный fallback; syncSettingsControls()
+        // ниже может восстановить сохранённую ui_last_tab без обхода всех вкладок.
         mainTabView.selectTabViewItem(at: 2)
-        
-        // Принудительный layout всех табов: выбираем каждый таб и делаем
-        // micro-resize чтобы NSTabView пересчитал фрейм для каждого content view.
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self, let window = self.window else { return }
-            self.isSyncingTabs = true
-            var frame = window.frame
-            for i in 0..<self.mainTabView.numberOfTabViewItems {
-                self.mainTabView.selectTabViewItem(at: i)
-                frame.size.height += 1
-                window.setFrame(frame, display: true)
-                frame.size.height -= 1
-                window.setFrame(frame, display: true)
-            }
-            self.mainTabView.selectTabViewItem(at: 2) // Вернуть на "История"
-            self.isSyncingTabs = false
-        }
 
         syncSettingsControls()
+        layoutVisiblePanelTab()
         loadInitial()
         startPreviewPolling()
         refreshCallAssistState(silentOnError: false)
         onLoadCallPhraseLibrary()
         loadProfilePresets()
         loadAudioDevices()
+    }
+
+    private func layoutVisiblePanelTab() {
+        guard let contentView = window?.contentView else { return }
+        // AGE-51 / KRAB-EAR-AGENT-P: не прогреваем все вкладки через selectTabViewItem.
+        // На Sequoia такое последовательное переключение заставляет AppKit синхронно
+        // строить тяжёлые content view вкладок на главном потоке. Достаточно пересчитать только
+        // реально видимую вкладку после syncSettingsControls().
+        mainTabView.needsLayout = true
+        mainTabView.selectedTabViewItem?.view?.needsLayout = true
+        contentView.layoutSubtreeIfNeeded()
     }
 
     /// Вызывается агентом после новой транскрибации/обновления статуса вставки.
