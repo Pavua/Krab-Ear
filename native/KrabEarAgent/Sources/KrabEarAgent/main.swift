@@ -116,6 +116,8 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     /// Phase 2A: Selection translator — Cmd+Shift+T auto-translate selection.
     var selectionTranslator: SelectionTranslator?
     var pasteUndoService: PasteUndoService?
+    /// Streaming live paste: вставка подтверждённых кусков текста по мере диктовки (opt-in).
+    var streamingPasteController: StreamingPasteController?
 
     // Phase 2B live-subs state moved to main+LiveSubs.swift (associated objects).
 
@@ -351,6 +353,11 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         pasteUndoService?.pasteUndoEnabled = settings.pasteUndoEnabled
         pasteUndoService?.start()
         logger.info("PasteUndoService запущен (Cmd+Ctrl+Z). enabled=\(settings.pasteUndoEnabled)")
+
+        // Streaming live paste: создаём контроллер, применяем начальный флаг из настроек.
+        streamingPasteController = StreamingPasteController(pasteService: pasteService)
+        streamingPasteController?.isEnabled = settings.streamingPasteEnabled
+        logger.info("StreamingPasteController ready. enabled=\(settings.streamingPasteEnabled)")
 
         // Smart field-aware paste: применяем стартовое значение из настроек и вешаем callback
         // для тихого уведомления при пропуске вставки в защищённое поле.

@@ -134,6 +134,21 @@ extension HistoryPanelController {
         (NSApp.delegate as? AgentAppDelegate)?.pasteService.smartFieldFormatEnabled = enabled
     }
 
+    // MARK: - Streaming live paste toggle
+
+    @objc func onStreamingPasteChanged() {
+        guard !isSyncingSettings else { return }
+        let enabled = streamingPasteButton.state == .on
+        applySettingsPatch(["streaming_paste_enabled": enabled])
+        syncStreamingPasteToggle(enabled: enabled)
+    }
+
+    @MainActor
+    func syncStreamingPasteToggle(enabled: Bool) {
+        streamingPasteButton.state = enabled ? .on : .off
+        (NSApp.delegate as? AgentAppDelegate)?.streamingPasteController?.isEnabled = enabled
+    }
+
     @objc func onQuickEditChanged() {
         guard !isSyncingSettings else { return }
         let enabled = quickEditButton.state == .on
@@ -537,6 +552,7 @@ extension HistoryPanelController {
         syncPhoneticVocabToggles(enabled: settings.phoneticVocabEnabled)
         syncPasteUndoToggle(enabled: settings.pasteUndoEnabled)
         syncSmartFieldFormatToggle(enabled: settings.smartFieldFormatEnabled)
+        syncStreamingPasteToggle(enabled: settings.streamingPasteEnabled)
         // Статус шифрования получаем из backend напрямую (не из AgentSettings),
         // потому что available зависит от состояния Keychain, а не только от флага.
         loadEncryptionStatus()

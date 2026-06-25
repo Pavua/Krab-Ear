@@ -104,6 +104,19 @@ extension AgentAppDelegate {
     // MARK: - Core paste helper
 
     func performAutoPaste(text: String, historyId: String?) {
+        // Если streaming paste уже вставил текст по мере диктовки — пропускаем финальную
+        // полную вставку, чтобы не задваивать текст. Сбрасываем флаг после принятия решения.
+        if settings.streamingPasteEnabled,
+           let spc = streamingPasteController,
+           spc.didStreamThisRecording
+        {
+            spc.resetAfterFinalPaste()
+            markPasteStatus(historyId: historyId, status: "ok")
+            historyPanel?.onHistoryDidUpdate()
+            logger.info("[StreamingPaste] Финальная вставка пропущена — текст уже вставлен потоково")
+            return
+        }
+
         guard let targetApp = resolvePreferredPasteTargetApp() else {
             markPasteStatus(historyId: historyId, status: "failed")
             historyPanel?.onHistoryDidUpdate()
