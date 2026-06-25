@@ -12,6 +12,10 @@ extension AgentAppDelegate {
 
     func startRealtimeOverlayPolling() {
         stopRealtimeOverlayPolling()
+
+        // Streaming live paste SSE — запускаем независимо от realtimePreviewEnabled.
+        streamingPasteController?.recordingDidStart()
+
         guard settings.realtimePreviewEnabled else { return }
 
         realtimeOverlay.show()
@@ -42,6 +46,8 @@ extension AgentAppDelegate {
         previewLastAudioRms = 1.0
         realtimeOverlay.stopPartialSSE()
         realtimeOverlay.hide()
+        // Streaming live paste SSE — останавливаем вместе с оверлеем.
+        streamingPasteController?.recordingDidStop()
     }
 
     // MARK: - A3 Adaptive backoff constants

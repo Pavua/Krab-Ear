@@ -111,6 +111,8 @@ struct AgentSettings {
     var pasteUndoEnabled: Bool
     // Smart field-aware paste (AX role-based behaviour gate)
     var smartFieldFormatEnabled: Bool
+    // Streaming live paste: вставляет подтверждённые куски текста по мере диктовки.
+    var streamingPasteEnabled: Bool
 
     static let `default` = AgentSettings(
         mode: "headless",
@@ -170,7 +172,8 @@ struct AgentSettings {
         textSnippetsEnabled: false,
         phoneticVocabEnabled: false,
         pasteUndoEnabled: false,
-        smartFieldFormatEnabled: false
+        smartFieldFormatEnabled: false,
+        streamingPasteEnabled: false
     )
 
     init(from payload: [String: Any]) {
@@ -253,6 +256,7 @@ struct AgentSettings {
         self.phoneticVocabEnabled = (payload["phonetic_vocab_enabled"] as? Bool) ?? Self.default.phoneticVocabEnabled
         self.pasteUndoEnabled = (payload["paste_undo_enabled"] as? Bool) ?? Self.default.pasteUndoEnabled
         self.smartFieldFormatEnabled = (payload["smart_field_format_enabled"] as? Bool) ?? Self.default.smartFieldFormatEnabled
+        self.streamingPasteEnabled = (payload["streaming_paste_enabled"] as? Bool) ?? Self.default.streamingPasteEnabled
     }
 
     init(
@@ -310,7 +314,8 @@ struct AgentSettings {
         textSnippetsEnabled: Bool = false,
         phoneticVocabEnabled: Bool = false,
         pasteUndoEnabled: Bool = false,
-        smartFieldFormatEnabled: Bool = false
+        smartFieldFormatEnabled: Bool = false,
+        streamingPasteEnabled: Bool = false
     ) {
         self.mode = mode
         self.showDockIcon = showDockIcon
@@ -367,6 +372,7 @@ struct AgentSettings {
         self.phoneticVocabEnabled = phoneticVocabEnabled
         self.pasteUndoEnabled = pasteUndoEnabled
         self.smartFieldFormatEnabled = smartFieldFormatEnabled
+        self.streamingPasteEnabled = streamingPasteEnabled
     }
 
     func toPayload() -> [String: Any] {
@@ -426,6 +432,7 @@ struct AgentSettings {
             "phonetic_vocab_enabled": phoneticVocabEnabled,
             "paste_undo_enabled": pasteUndoEnabled,
             "smart_field_format_enabled": smartFieldFormatEnabled,
+            "streaming_paste_enabled": streamingPasteEnabled,
         ]
     }
 }
