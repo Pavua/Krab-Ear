@@ -688,6 +688,9 @@ extension HistoryPanelController {
         // Section 11 — Безопасность (шифрование истории AES-256-GCM, Keychain)
         let s11 = cdBuildSecuritySettingsSection()
 
+        // Section 11.5 — Приватность и данные (read-only сводка)
+        let s11b = cdBuildPrivacyDashboardSection()
+
         // Section 12 — Шаблоны вывода (управление пользовательскими шаблонами)
         let s12 = cdBuildOutputTemplatesSection()
 
@@ -702,7 +705,7 @@ extension HistoryPanelController {
         // сразу, без скролла на длинный список секций.
         settingsBarCD.addArrangedSubview(buildDictationHeroCard())
 
-        for s in [s1, s2, s3, s4, s5, s6, s7, s7b, s8, s9, s9_5, s9_6, s10, s11, s12] {
+        for s in [s1, s2, s3, s4, s5, s6, s7, s7b, s8, s9, s9_5, s9_6, s10, s11, s11b, s12] {
             settingsBarCD.addArrangedSubview(s)
         }
     }
