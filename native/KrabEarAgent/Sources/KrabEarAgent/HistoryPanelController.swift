@@ -1936,6 +1936,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let securitySection = buildSecuritySettingsSection()
         settingsBar.addArrangedSubview(securitySection)
 
+        // Приватность и данные: read-only сводка (режим приватности, шифрование,
+        // хранилище, авто-очистка/purge, аудит приватности).
+        let privacyDashboardSection = buildPrivacyDashboardSection()
+        settingsBar.addArrangedSubview(privacyDashboardSection)
+
         // Group: Нейросетевые функции (LLM + VA + Selection Translator + Quick Preset).
         settingsBar.addArrangedSubview(makeCategoryHeader(text: "Нейросетевые функции"))
         settingsBar.addArrangedSubview(llmSection)
