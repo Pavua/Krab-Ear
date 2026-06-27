@@ -1099,6 +1099,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     func openQuickStart() {
         if quickStartController == nil {
             quickStartController = QuickStartWindowController(
+                ipcClient: ipcClient,
                 onComplete: { [weak self] in
                     guard let self = self else { return }
                     self.settings.onboardingCompleted = true
@@ -1119,14 +1120,23 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
 }
 
 final class QuickStartWindowController: NSWindowController, NSWindowDelegate {
+    private let ipcClient: IPCClient
     private let onComplete: () -> Void
     private let onOpenPanel: () -> Void
     private let launchAgentManager: LaunchAgentManager
     private let autostartCheckbox = NSButton(checkboxWithTitle: "Запускать Krab Ear при входе в систему", target: nil, action: nil)
     private let microphoneStatusLabel = NSTextField(labelWithString: "Микрофон: ...")
     private let accessibilityStatusLabel = NSTextField(labelWithString: "Accessibility: ...")
+    /// Шаг загрузки STT-модели — strong ref пока sheet активен.
+    private var modelDownloadStep: ModelDownloadStepController?
 
-    init(onComplete: @escaping () -> Void, onOpenPanel: @escaping () -> Void, launchAgentManager: LaunchAgentManager) {
+    init(
+        ipcClient: IPCClient,
+        onComplete: @escaping () -> Void,
+        onOpenPanel: @escaping () -> Void,
+        launchAgentManager: LaunchAgentManager
+    ) {
+        self.ipcClient = ipcClient
         self.onComplete = onComplete
         self.onOpenPanel = onOpenPanel
         self.launchAgentManager = launchAgentManager
@@ -1289,7 +1299,25 @@ final class QuickStartWindowController: NSWindowController, NSWindowDelegate {
     @objc private func onFinish() {
         let shouldAutostart = (autostartCheckbox.state == .on)
         launchAgentManager.setAutostart(enabled: shouldAutostart)
-        onComplete()
+        runModelDownloadStepThenComplete()
+    }
+
+    /// Перед завершением онбординга предлагаем скачать STT-модель (если её ещё нет в кэше).
+    /// Если модель уже кэширована — шаг пропускается мгновенно (существующие пользователи
+    /// не затронуты). Любой исход (скачано / позже / уже было) → `onComplete()`.
+    private func runModelDownloadStepThenComplete() {
+        guard let parent = self.window else {
+            // Нет окна — не блокируем завершение онбординга.
+            onComplete()
+            return
+        }
+        let step = ModelDownloadStepController(ipcClient: ipcClient) { [weak self] _ in
+            guard let self = self else { return }
+            self.modelDownloadStep = nil
+            self.onComplete()
+        }
+        self.modelDownloadStep = step
+        step.start(over: parent)
     }
 }
 
