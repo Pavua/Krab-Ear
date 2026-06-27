@@ -59,7 +59,8 @@ Regen: Wave 745 (2026-05-26) — replaces 840-line stub doc with ~58% drift. Doc
 41. [Model Cache Manager](#model-cache-manager)
 42. [Wake Word](#wake-word)
 43. [TTS](#tts)
-44. [Misc](#misc)
+44. [Launch Readiness (2026-06-27)](#launch-readiness-2026-06-27)
+45. [Misc](#misc)
 
 ---
 
@@ -2399,6 +2400,68 @@ Returns: `{active, model?, last_detection_ts?, detections_today}`
 Синтез речи. Dual-engine: Silero RU primary, Kokoro EN fallback, macOS `say` last resort. Автоопределение языка.  
 Params: `{text, language?, voice?}` — language: `"ru"`, `"en"`, `"auto"`  
 Returns: `{audio_b64?, file_path?, engine_used, duration_sec?}`
+
+---
+
+## Launch Readiness (2026-06-27)
+
+Фичи запуска: in-app загрузка STT-модели, автокалибровка под железо, privacy-дашборд, миграция шифрования истории.
+
+| Метод | Описание |
+|---|---|
+| `download_stt_model` | Запустить фоновую загрузку STT-модели из HuggingFace |
+| `get_stt_model_status` | Статус кэша/загрузки STT-модели |
+| `get_hardware_profile` | Аппаратный профиль Mac (chip/RAM/cores/tier) |
+| `get_calibration_recommendation` | Рекомендация STT-модели/движка по tier + микрофону |
+| `get_privacy_dashboard` | Агрегированный privacy/security дашборд (только счётчики/флаги) |
+| `migrate_history_encryption` | Зашифровать существующие plaintext-записи истории (at-rest) |
+| `get_history_encryption_status` | Статистика шифрования истории (total/encrypted/plaintext/pct) |
+
+### `download_stt_model`
+*(service.py → model_downloader.py)*  
+Запускает фоновую загрузку STT-модели из HuggingFace (фреш-инстолл анблок). Эмитит событие `model_download.progress` через EventBus.  
+Params: `{model_id?}` — HuggingFace repo_id; дефолт `settings.MODEL_BALANCED` (`mlx-community/whisper-large-v3-turbo`). Пустой/не-строка `model_id` → `ValueError`.  
+Returns: `{ok, status, model_id}` — status: `"started"` | `"already_cached"` | `"in_progress"`
+
+### `get_stt_model_status`
+*(service.py → model_downloader.py)*  
+Статус кэша и текущей загрузки STT-модели.  
+Params: `{model_id?}` — дефолт `settings.MODEL_BALANCED`. Пустой/не-строка `model_id` → `ValueError`.  
+Returns: `{ok, model_id, cached, downloading, status, pct, downloaded, total, error_msg, path}` — status: `"idle"` | `"downloading"` | `"done"` | `"error"`; `pct` 0..100; `downloaded`/`total` в байтах
+
+### `get_hardware_profile`
+*(service.py → core/hardware_profile.py)*  
+Аппаратный профиль Mac для автокалибровки STT. Читает только железо, не данные пользователя — нет privacy gate.  
+Нет params.  
+Returns: `{ok, chip, ram_gb, cores, is_apple_silicon, tier}` — tier: `"low"` | `"mid"` | `"high"`
+
+### `get_calibration_recommendation`
+*(service.py → core/hardware_profile.py)*  
+Рекомендует STT-модель и движок на основе hardware tier + кэшированного профиля микрофона (не делает новую запись). Нет privacy gate.  
+Нет params.  
+Returns: `{ok, recommended_model, recommended_engine, tier, mic, rationale}` — recommended_model: `"balanced"` | `"max"`; `mic`: `{snr_db, suitable_for_stt}` | `null`; `rationale` — текстовое обоснование
+
+### `get_privacy_dashboard`
+*(service.py)*  
+Агрегированный privacy/security дашборд одним вызовом. Возвращает только счётчики/флаги/размеры — ни одного транскрипта/словаря/псевдонима спикера (читает privacy-метаданные, не пользовательский контент → gate не нужен).  
+Нет params.  
+Returns: `{ok, privacy_mode, encryption_enabled, storage, retention, audit, purge_available}`  
+- `storage`: `{item_count, history_bytes, history_file_size_mb, transcripts_count, transcripts_size_mb, total_bytes, total_data_mb}`  
+- `retention`: `{auto_cleanup_enabled, auto_cleanup_after_days, auto_purge_enabled, auto_purge_retention_days}`  
+- `audit`: `{total_events, last_event_ts, by_type}`  
+- `purge_available`: всегда `True`
+
+### `migrate_history_encryption`
+*(service.py → state_store.py)*  
+Шифрует существующие plaintext-записи `history.ndjson` (at-rest миграция) в фоновом потоке: пишет `.bak`, атомарная замена. Прогресс через событие `history_encryption.migrate.progress`. Идемпотентно.  
+Нет params.  
+Returns: `{ok, status}` — status: `"started"` | `"already_running"` | (`ok:false`) `"encryption_unavailable"`
+
+### `get_history_encryption_status`
+*(service.py → state_store.py)*  
+Статистика шифрования `history.ndjson` (считает `ENC1:`-сигнатуры vs plaintext, не контент — gate не нужен).  
+Нет params.  
+Returns: `{ok, enabled, total, encrypted, plaintext, pct, migrating}`
 
 ---
 
