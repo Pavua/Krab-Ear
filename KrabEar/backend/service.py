@@ -1966,6 +1966,8 @@ class BackendService:
             # --- Загрузка STT-моделей (fresh-install unblock) ---
             "download_stt_model": self._handle_download_stt_model,  # запустить фоновую загрузку STT-модели из HuggingFace
             "get_stt_model_status": self._handle_get_stt_model_status,  # статус кэша/загрузки STT-модели
+            # --- Privacy Dashboard (aggregate view) ---
+            "get_privacy_dashboard": self._handle_get_privacy_dashboard,  # агрегированный дашборд privacy/security: режим, шифрование, хранилище, retention, audit
         }
 
     def handle_request(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -3151,6 +3153,139 @@ class BackendService:
             "entries": entries,
             "total_count": total,
         }
+
+    def _handle_get_privacy_dashboard(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Агрегированный дашборд privacy/security — все поля в одном вызове.
+
+        Агрегирует из существующих источников (не пересоздаёт их):
+          - privacy_mode_enabled       → _get_runtime_setting
+          - history_encryption_enabled → settings cache
+          - storage                    → HistoryService.handle_get_storage_info
+                                         + StateStore.get_history_stats (item_count)
+          - retention                  → auto_cleanup_enabled / auto_cleanup_after_days settings
+          - audit                      → PrivacyAuditLogger (counts + last_event_ts + by_type)
+          - purge_available            → всегда True (handle_purge_all_data доступен через IPC)
+
+        Privacy-safe: только счётчики/флаги/размеры — ни один транскрипт/словарь/
+        псевдоним спикера не попадает в ответ. Хендлер читает privacy-метаданные,
+        а не пользовательский контент, поэтому privacy-mode gate НЕ нужен.
+        Каждый источник обёрнут в try/except — сбой одного не валит весь дашборд.
+
+        Возвращает:
+            privacy_mode        (bool)  — режим конфиденциальности.
+            encryption_enabled  (bool)  — шифрование истории (AES-256-GCM).
+            storage             (dict)  — item_count, history_bytes, history_file_size_mb,
+                                          transcripts_count, transcripts_size_mb,
+                                          total_bytes, total_data_mb.
+            retention           (dict)  — auto_cleanup_enabled, auto_cleanup_after_days,
+                                          auto_purge_enabled, auto_purge_retention_days.
+            audit               (dict)  — total_events, last_event_ts, by_type.
+            purge_available     (bool)  — всегда True.
+        """
+        result: dict[str, Any] = {
+            "privacy_mode": False,
+            "encryption_enabled": False,
+            "storage": {},
+            "retention": {},
+            "audit": {},
+            "purge_available": True,
+        }
+
+        # --- privacy_mode ---
+        try:
+            result["privacy_mode"] = bool(
+                self._get_runtime_setting("privacy_mode_enabled", False)
+            )
+        except Exception:
+            logger.exception("get_privacy_dashboard: ошибка чтения privacy_mode_enabled")
+
+        # --- encryption_enabled: read flag directly from settings (no IPC cross-call) ---
+        try:
+            result["encryption_enabled"] = bool(
+                self._get_runtime_setting("history_encryption_enabled", False)
+            )
+        except Exception:
+            logger.exception(
+                "get_privacy_dashboard: ошибка чтения history_encryption_enabled"
+            )
+
+        # --- storage: sizes from HistoryService + item count from StateStore ---
+        try:
+            storage_info = self._history.handle_get_storage_info({})
+            item_count = 0
+            try:
+                stats = self.store.get_history_stats()
+                item_count = int(stats.get("active_count", 0))
+            except Exception:
+                logger.warning(
+                    "get_privacy_dashboard: не удалось получить item_count из StateStore"
+                )
+            result["storage"] = {
+                "item_count": item_count,
+                "history_bytes": storage_info.get("history_bytes", 0),
+                "history_file_size_mb": storage_info.get("history_file_size_mb", 0.0),
+                "transcripts_count": storage_info.get("transcripts_count", 0),
+                "transcripts_size_mb": storage_info.get("transcripts_size_mb", 0.0),
+                "total_bytes": storage_info.get("total_bytes", 0),
+                "total_data_mb": storage_info.get("total_data_mb", 0.0),
+            }
+        except Exception:
+            logger.exception("get_privacy_dashboard: ошибка получения storage info")
+            result["storage"] = {
+                "item_count": 0,
+                "history_bytes": 0,
+                "history_file_size_mb": 0.0,
+                "transcripts_count": 0,
+                "transcripts_size_mb": 0.0,
+                "total_bytes": 0,
+                "total_data_mb": 0.0,
+            }
+
+        # --- retention: auto_cleanup + auto_purge settings ---
+        try:
+            s = self._cached_settings()
+            result["retention"] = {
+                "auto_cleanup_enabled": bool(s.get("auto_cleanup_enabled", False)),
+                "auto_cleanup_after_days": int(s.get("auto_cleanup_after_days", 365)),
+                "auto_purge_enabled": bool(s.get("auto_purge_enabled", False)),
+                "auto_purge_retention_days": int(s.get("auto_purge_retention_days", 90)),
+            }
+        except Exception:
+            logger.exception("get_privacy_dashboard: ошибка чтения retention settings")
+            result["retention"] = {
+                "auto_cleanup_enabled": False,
+                "auto_cleanup_after_days": 365,
+                "auto_purge_enabled": False,
+                "auto_purge_retention_days": 90,
+            }
+
+        # --- audit: summary counts from PrivacyAuditLogger (no PII, no transcript content) ---
+        try:
+            audit = get_privacy_audit_logger()
+            total_events = audit.total_count()
+            all_entries = audit.read_entries(limit=max(total_events, 1))
+            last_event_ts: str | None = None
+            by_type: dict[str, int] = {}
+            for entry in all_entries:
+                action = str(entry.get("action", "unknown"))
+                by_type[action] = by_type.get(action, 0) + 1
+                ts = entry.get("ts")
+                if ts and (last_event_ts is None or ts > last_event_ts):
+                    last_event_ts = ts
+            result["audit"] = {
+                "total_events": total_events,
+                "last_event_ts": last_event_ts,
+                "by_type": by_type,
+            }
+        except Exception:
+            logger.exception("get_privacy_dashboard: ошибка чтения privacy audit log")
+            result["audit"] = {
+                "total_events": 0,
+                "last_event_ts": None,
+                "by_type": {},
+            }
+
+        return result
 
     def _handle_clear_privacy_audit_log(self, params: dict[str, Any]) -> dict[str, Any]:
         """Удаляет файл privacy audit log. Идемпотентен.
