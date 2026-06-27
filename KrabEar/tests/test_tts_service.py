@@ -17,7 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend.tts_service import _detect_language, TTSService
+from backend.tts_service import _detect_language, _sanitize_say_voice, TTSService
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -31,6 +31,31 @@ def _make_wav_bytes(sample_rate: int = 22050, frames: int = 100) -> bytes:
         wf.setframerate(sample_rate)
         wf.writeframes(b"\x00\x01" * frames)
     return buf.getvalue()
+
+
+# ── macOS `say` voice sanitizer tests ──────────────────────────────────────────
+
+class SayVoiceSanitizeTestCase(unittest.TestCase):
+    """_sanitize_say_voice: accept accented voice names, reject unsafe input.
+
+    Regression: the prior ASCII-only regex r"^[a-zA-Z0-9 _\\-]+$" rejected the
+    Spanish voice 'Mónica' (accented 'ó') → silently fell back to the Russian
+    'Milena' voice for ES TTS via macOS `say`.
+    """
+
+    def test_accented_latin_voice_preserved(self) -> None:
+        # Fail-before: old regex rejected 'ó' → returned 'Milena'.
+        self.assertEqual(_sanitize_say_voice("Mónica"), "Mónica")
+        self.assertEqual(_sanitize_say_voice("Mónica (Enhanced)"), "Mónica (Enhanced)")
+
+    def test_plain_ascii_voices_preserved(self) -> None:
+        for v in ("Milena", "Anna", "Yuna", "Daniel", "Eddy (English (US))"):
+            self.assertEqual(_sanitize_say_voice(v), v)
+
+    def test_unsafe_voice_falls_back_to_default(self) -> None:
+        # empty, newline, shell-meta, NUL, command-subst, over-64-length
+        for bad in ("", "a\nb", "foo;rm -rf /", "v\x00x", "$(whoami)", "a" * 65):
+            self.assertEqual(_sanitize_say_voice(bad), "Milena")
 
 
 # ── Language detection tests ───────────────────────────────────────────────────

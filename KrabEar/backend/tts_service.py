@@ -38,6 +38,24 @@ _SAY_MAX_TEXT_LEN = 5000
 # Reject arbitrary strings that don't match to prevent passing untrusted data into KPipeline.
 _KOKORO_VOICE_RE = re.compile(r'^[a-z][a-z0-9_-]*$')
 _KOKORO_DEFAULT_VOICE = "af_heart"
+# macOS `say -v <voice>` name sanitizer. The voice is an argv value (subprocess
+# list, never a shell), so option/shell injection is impossible — the only goal is
+# to reject control chars / unbounded length while ACCEPTING accented Latin voice
+# names like 'Mónica' / 'Mónica (Enhanced)'. The prior ASCII-only regex wrongly
+# rejected those → Spanish TTS silently fell back to the Russian 'Milena' voice.
+_SAY_VOICE_RE = re.compile(r"^[\w ().-]{1,64}$", re.UNICODE)
+_SAY_DEFAULT_VOICE = "Milena"
+
+
+def _sanitize_say_voice(voice: str) -> str:
+    """Return ``voice`` if it is a safe macOS ``say`` voice name, else fallback.
+
+    Accepts Unicode-letter names (e.g. ``Mónica``); rejects empty, control chars,
+    newlines, shell-meta and over-long strings. argv-only — no injection path.
+    """
+    return voice if voice and _SAY_VOICE_RE.match(voice) else _SAY_DEFAULT_VOICE
+
+
 # IPC-level max text length guard for synthesize_speech — applied in handle_synthesize_speech
 # before any backend synthesis starts (Silero/Kokoro/say each have their own inner caps too).
 MAX_TTS_TEXT_LEN = 5000
@@ -165,7 +183,7 @@ def _say_to_wav(text: str, voice: str | None = None, rate: int = 185) -> bytes:
     try:
         cmd_say = ["say", "-r", str(rate), "-o", aiff_path]
         if voice:
-            safe_voice = voice if re.match(r"^[a-zA-Z0-9 _\-]+$", voice) else "Milena"
+            safe_voice = _sanitize_say_voice(voice)
             cmd_say.extend(["-v", safe_voice])
         # Security: insert end-of-options sentinel so that user-controlled text
         # starting with "-" or "--" is never parsed as a 'say' option.
