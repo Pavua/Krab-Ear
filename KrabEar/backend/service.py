@@ -10,6 +10,7 @@
 from __future__ import annotations
 from __version__ import __version__ as APP_VERSION  # noqa: E402
 from backend.model_cache_manager import ModelCacheManager
+from backend.model_downloader import ModelDownloader
 from backend.hotword_detector import HotwordDetector
 from backend.openwakeword_adapter import OpenWakeWordAdapter
 from backend.plugin_system import PluginManager
@@ -871,6 +872,7 @@ class BackendService:
         self._plugin_manager = PluginManager(data_dir=self.store.data_dir)
         self._hotword_detector = HotwordDetector(data_dir=self.store.data_dir)
         self._model_cache_manager = ModelCacheManager()
+        self._model_downloader = ModelDownloader(event_bus=event_bus)
         # Auto-Glossary — автоматический глоссарий из истории транскрибаций
         self._auto_glossary = AutoGlossaryBuilder(
             store=self.store,
@@ -1961,6 +1963,9 @@ class BackendService:
             # --- Шифрование истории (Chunk 2) ---
             "set_history_encryption": self._handle_set_history_encryption,  # включить/выключить AES-256-GCM шифрование NDJSON-истории
             "get_encryption_status": self._handle_get_encryption_status,  # статус шифрования: enabled + available (наличие Keychain)
+            # --- Загрузка STT-моделей (fresh-install unblock) ---
+            "download_stt_model": self._handle_download_stt_model,  # запустить фоновую загрузку STT-модели из HuggingFace
+            "get_stt_model_status": self._handle_get_stt_model_status,  # статус кэша/загрузки STT-модели
         }
 
     def handle_request(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -4317,6 +4322,70 @@ class BackendService:
         if not result.get("ok", True):
             return result
         return {"ok": True, "enabled": enabled, "available": True}
+
+    # ------------------------------------------------------------------
+    # STT model download (fresh-install unblock)
+    # ------------------------------------------------------------------
+
+    def _handle_download_stt_model(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Запускает фоновую загрузку STT-модели.
+
+        params:
+            model_id (str, optional): HuggingFace repo_id.
+                Дефолт: settings.MODEL_BALANCED (mlx-community/whisper-large-v3-turbo).
+
+        Returns:
+            {"ok": True, "status": "started"|"already_cached"|"in_progress", "model_id": str}
+
+        Raises ValueError если model_id явно задан, но пустой или не строка.
+        """
+        raw_model_id = params.get("model_id")
+        if raw_model_id is not None:
+            if not isinstance(raw_model_id, str) or not raw_model_id.strip():
+                raise ValueError("Параметр 'model_id' должен быть непустой строкой")
+            model_id = raw_model_id.strip()
+        else:
+            model_id = self._get_runtime_setting("MODEL_BALANCED", "mlx-community/whisper-large-v3-turbo")
+
+        status = self._model_downloader.start_download(model_id)
+        add_breadcrumb(
+            category="stt",
+            message="download_stt_model",
+            data={"model_id": model_id, "status": status},
+        )
+        return {"ok": True, "status": status, "model_id": model_id}
+
+    def _handle_get_stt_model_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает статус кэша/загрузки STT-модели.
+
+        params:
+            model_id (str, optional): HuggingFace repo_id.
+                Дефолт: settings.MODEL_BALANCED.
+
+        Returns:
+            {
+                "ok": True,
+                "model_id": str,
+                "cached": bool,
+                "downloading": bool,
+                "status": "idle"|"downloading"|"done"|"error",
+                "pct": float (0..100),
+                "downloaded": int (bytes),
+                "total": int (bytes),
+                "error_msg": str,
+                "path": str,
+            }
+        """
+        raw_model_id = params.get("model_id")
+        if raw_model_id is not None:
+            if not isinstance(raw_model_id, str) or not raw_model_id.strip():
+                raise ValueError("Параметр 'model_id' должен быть непустой строкой")
+            model_id = raw_model_id.strip()
+        else:
+            model_id = self._get_runtime_setting("MODEL_BALANCED", "mlx-community/whisper-large-v3-turbo")
+
+        status_dict = self._model_downloader.get_status(model_id)
+        return {"ok": True, **status_dict}
 
 
 # W1768: inline-дубликат IPCServer-класса УДАЛЁН. Каноничный, закалённый класс
