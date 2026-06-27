@@ -83,10 +83,16 @@ class TestModelDownloaderAlreadyCached(unittest.TestCase):
 
     def test_already_cached_state_is_done(self) -> None:
         dl = _make_downloader()
+        # NOTE: get_status() must run INSIDE the _is_cached patch — it calls
+        # _is_cached() to compute the "cached" field. If left outside the patch
+        # it hits the REAL HF cache lookup, which returns True/False depending on
+        # whether the runner happens to have whisper-large-v3-turbo cached →
+        # environment-dependent flake (green on ubuntu where no cache exists,
+        # red on a macOS runner without that model cached, and vice-versa).
         with patch.object(dl, "_is_cached", return_value=True), \
                 patch.object(dl, "_model_cache_path", return_value=Path(_FAKE_PATH)):
             dl.start_download(_FAKE_MODEL)
-        status = dl.get_status(_FAKE_MODEL)
+            status = dl.get_status(_FAKE_MODEL)
         self.assertEqual(status["status"], "done")
         self.assertTrue(status["cached"])
         self.assertFalse(status["downloading"])
