@@ -248,6 +248,14 @@ class RecordingCoreService:
                 unload_model_async(base_url, brain_model)
         except Exception as exc:
             logger.debug("LM Studio brain unload hook failed: %s", exc)
+        # Brain lease coordination: release the brain lease so Krab userbot can use
+        # LM Studio while Ear is busy with STT/pyannote on the same Metal GPU.
+        if bool(settings.get("llm_brain_lease_enabled", True)):
+            try:
+                from backend.brain_lease import release_brain_lease
+                release_brain_lease("krab_ear")
+            except Exception as exc:
+                logger.debug("BrainLease: release hook error (ignored): %s", exc)
         add_breadcrumb(
             category="recording",
             message="started",
@@ -1001,6 +1009,16 @@ class RecordingCoreService:
             level="info",
             data={"duration_sec": round(float(duration_sec), 2)},
         )
+
+        # Brain lease coordination: acquire lease before preloading brain so Krab
+        # userbot knows Ear is about to use LM Studio on Metal GPU.
+        if bool(settings.get("llm_brain_lease_enabled", True)):
+            try:
+                from backend.brain_lease import acquire_brain_lease
+                ttl = float(settings.get("llm_brain_lease_ttl_sec", 30.0))
+                acquire_brain_lease("krab_ear", ttl_sec=ttl)
+            except Exception as exc:
+                logger.debug("BrainLease: acquire hook error (ignored): %s", exc)
 
         try:
             brain_model = str(settings.get("llm_brain_model", "")).strip()

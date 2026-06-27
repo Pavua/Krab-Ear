@@ -1071,4 +1071,13 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # добавляется в stt_hotwords, чтобы Whisper лучше распознавал его в следующий раз.
     # Opt-in: False по умолчанию — пользователь управляет словарём вручную.
     "auto_learn_corrections_enabled": False,
+    # --- LM Studio brain lease coordination (backend/brain_lease.py) ---
+    # Кооперативный кросс-процессный лиз: Krab Ear + Krab userbot не запускают
+    # тяжёлый inference на Metal GPU одновременно (→ GPU stuck → reboot).
+    # Lock file: ~/.openclaw/lm_studio_brain.lock (кросс-проектный contract).
+    # True по умолчанию — безопасная деградация (lease errors → True, Ear не блокируется).
+    "llm_brain_lease_enabled": True,
+    # TTL одного lease в секундах. Краш процесса не «вешает» lock: следующий acquire
+    # заберёт лиз по истёкшему TTL. 30 с достаточно для recording цикла.
+    "llm_brain_lease_ttl_sec": 30.0,
 }
