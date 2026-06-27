@@ -1966,6 +1966,9 @@ class BackendService:
             # --- Загрузка STT-моделей (fresh-install unblock) ---
             "download_stt_model": self._handle_download_stt_model,  # запустить фоновую загрузку STT-модели из HuggingFace
             "get_stt_model_status": self._handle_get_stt_model_status,  # статус кэша/загрузки STT-модели
+            # --- Auto-calibration: hardware profile + STT recommendation ---
+            "get_hardware_profile": self._handle_get_hardware_profile,  # chip/RAM/cores/tier для автокалибровки
+            "get_calibration_recommendation": self._handle_get_calibration_recommendation,  # рекомендация STT-модели по tier+mic
         }
 
     def handle_request(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -4386,6 +4389,99 @@ class BackendService:
 
         status_dict = self._model_downloader.get_status(model_id)
         return {"ok": True, **status_dict}
+
+    # ------------------------------------------------------------------
+    # Handlers: Auto-calibration
+    # ------------------------------------------------------------------
+
+    def _handle_get_hardware_profile(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает аппаратный профиль Mac для автокалибровки STT.
+
+        Не требует параметров.  Не читает данные пользователя — только железо.
+        Нет privacy gate.
+
+        Returns::
+
+            {
+                "ok": True,
+                "chip": str,            # Apple M4 Max / Intel Core i9 / unknown
+                "ram_gb": int,          # объём памяти в ГБ
+                "cores": int,           # логических CPU-ядер
+                "is_apple_silicon": bool,
+                "tier": "low"|"mid"|"high",
+            }
+        """
+        from core.hardware_profile import detect_hardware_profile
+        profile = detect_hardware_profile()
+        return {"ok": True, **profile.to_dict()}
+
+    def _handle_get_calibration_recommendation(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Рекомендует STT-модель и движок на основе hardware tier.
+
+        Не делает запись аудио — использует кэшированный профиль шума
+        (ключи _last_mic_snr_db / _last_mic_suitable_for_stt в settings).
+        Нет privacy gate.
+
+        Returns::
+
+            {
+                "ok": True,
+                "recommended_model": "balanced"|"max",
+                "recommended_engine": str,
+                "tier": "low"|"mid"|"high",
+                "mic": {"snr_db": float, "suitable_for_stt": bool} | null,
+                "rationale": str,
+            }
+        """
+        from core.hardware_profile import detect_hardware_profile, TIER_HIGH, TIER_MID
+
+        profile = detect_hardware_profile()
+        tier = profile.tier
+
+        if tier == TIER_HIGH:
+            recommended_model = "max"
+            rationale = (
+                f"RAM {profile.ram_gb} GB (high tier) — модель max обеспечивает "
+                "максимальную точность на этом железе."
+            )
+        elif tier == TIER_MID:
+            recommended_model = "balanced"
+            rationale = (
+                f"RAM {profile.ram_gb} GB (mid tier) — модель balanced оптимальна: "
+                "достаточная точность без перегрузки памяти."
+            )
+        else:  # TIER_LOW
+            recommended_model = "balanced"
+            rationale = (
+                f"RAM {profile.ram_gb} GB (low tier) — рекомендуется balanced; "
+                "запуск max-модели может исчерпать память."
+            )
+
+        recommended_engine = "mlx_whisper" if profile.is_apple_silicon else "whisper"
+
+        mic_info: dict[str, Any] | None = None
+        try:
+            cached = self._settings_svc.cached_settings()
+            snr = cached.get("_last_mic_snr_db")
+            suitable = cached.get("_last_mic_suitable_for_stt")
+            if snr is not None:
+                mic_info = {"snr_db": float(snr), "suitable_for_stt": bool(suitable)}
+                if not mic_info["suitable_for_stt"]:
+                    rationale += (
+                        " Последняя проверка микрофона показала низкое SNR "
+                        f"({snr:.1f} dB) — рекомендуется улучшить качество записи."
+                    )
+        except Exception:  # noqa: BLE001
+            mic_info = None
+
+        return {
+            "ok": True,
+            "recommended_model": recommended_model,
+            "recommended_engine": recommended_engine,
+            "tier": tier,
+            "mic": mic_info,
+            "rationale": rationale,
+        }
 
 
 # W1768: inline-дубликат IPCServer-класса УДАЛЁН. Каноничный, закалённый класс
