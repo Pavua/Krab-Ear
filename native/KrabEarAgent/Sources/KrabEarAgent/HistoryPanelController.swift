@@ -1904,6 +1904,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let sttEnginesSection = buildSTTEnginesSection()
         settingsBar.addArrangedSubview(sttEnginesSection)
 
+        // Калибровка (аппаратно-зависимая рекомендация STT-модели).
+        let calibrationSection = buildCalibrationSection()
+        settingsBar.addArrangedSubview(calibrationSection)
+
         // Словарь STT (hotwords): добавление/удаление терминов + предложения из истории.
         let sttVocabSection = buildSTTVocabularySection()
         settingsBar.addArrangedSubview(sttVocabSection)
