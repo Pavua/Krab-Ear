@@ -1963,6 +1963,8 @@ class BackendService:
             # --- Шифрование истории (Chunk 2) ---
             "set_history_encryption": self._handle_set_history_encryption,  # включить/выключить AES-256-GCM шифрование NDJSON-истории
             "get_encryption_status": self._handle_get_encryption_status,  # статус шифрования: enabled + available (наличие Keychain)
+            "migrate_history_encryption": self._handle_migrate_history_encryption,  # зашифровать существующие plaintext-записи (at-rest migration)
+            "get_history_encryption_status": self._handle_get_history_encryption_status,  # статистика шифрования: total/encrypted/plaintext/pct/migrating
             # --- Загрузка STT-моделей (fresh-install unblock) ---
             "download_stt_model": self._handle_download_stt_model,  # запустить фоновую загрузку STT-модели из HuggingFace
             "get_stt_model_status": self._handle_get_stt_model_status,  # статус кэша/загрузки STT-модели
@@ -4460,6 +4462,82 @@ class BackendService:
         if not result.get("ok", True):
             return result
         return {"ok": True, "enabled": enabled, "available": True}
+
+    def _handle_migrate_history_encryption(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Encrypt existing plaintext history.ndjson entries (at-rest migration).
+
+        Starts migration in a background thread.  Calling while migration is active
+        returns {ok: True, status: "already_running"}.  Calling after completion is
+        idempotent (0 lines will be re-encrypted).
+
+        Returns:
+            {"ok": True, "status": "started"}
+            {"ok": True, "status": "already_running"}
+            {"ok": False, "status": "encryption_unavailable"}
+        """
+        if getattr(self, "_history_migration_running", False):
+            return {"ok": True, "status": "already_running"}
+
+        from backend.history_crypto import build_history_crypto
+        if build_history_crypto() is None:
+            return {"ok": False, "status": "encryption_unavailable"}
+
+        def _run() -> None:
+            from backend.event_bus import bus as _event_bus
+
+            def _progress(total: int, done: int, encrypted: int, pct: int, status: str) -> None:
+                try:
+                    _event_bus.emit("history_encryption.migrate.progress", {
+                        "total": total,
+                        "done": done,
+                        "encrypted": encrypted,
+                        "pct": pct,
+                        "status": status,
+                    })
+                except Exception:
+                    pass
+
+            try:
+                result = self.store.migrate_history_encryption(progress_cb=_progress)
+                _event_bus.emit("history_encryption.migrate.progress", {
+                    "total": result.get("total", 0),
+                    "done": result.get("total", 0),
+                    "encrypted": result.get("encrypted", 0),
+                    "pct": 100 if result.get("ok") else 0,
+                    "status": "done" if result.get("ok") else result.get("reason", "error"),
+                })
+            except Exception:
+                logger.exception("migrate_history_encryption: migration error")
+            finally:
+                self._history_migration_running = False
+
+        import threading as _threading
+        self._history_migration_running = True
+        t = _threading.Thread(target=_run, daemon=True, name="history-enc-migration")
+        t.start()
+        return {"ok": True, "status": "started"}
+
+    def _handle_get_history_encryption_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return encryption statistics for history.ndjson.
+
+        Counts ENC1: lines vs plaintext only (signatures not content).
+        No privacy gate needed: returns metadata only, not transcript text.
+
+        Returns:
+            {
+                "ok": True,
+                "enabled": bool,
+                "total": int,
+                "encrypted": int,
+                "plaintext": int,
+                "migrating": bool,
+                "pct": int,
+            }
+        """
+        status = self.store.get_history_encryption_status()
+        status["ok"] = True
+        status["migrating"] = getattr(self, "_history_migration_running", False)
+        return status
 
     # ------------------------------------------------------------------
     # STT model download (fresh-install unblock)

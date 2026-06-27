@@ -1825,3 +1825,145 @@ class StateStore:
             if item_id and isinstance(cal_event, dict) and cal_event.get("title"):
                 result[item_id] = cal_event
         return result
+
+    # ------------------------------------------------------------------
+    # At-rest encryption migration
+    # ------------------------------------------------------------------
+
+    def migrate_history_encryption(self, progress_cb=None):
+        """Encrypt all plaintext lines in history.ndjson using AES-256-GCM.
+
+        Data-safety guarantees:
+        - Reads raw lines without decrypting (preserves ENC1: lines as-is).
+        - Creates a .bak copy BEFORE touching the live file.
+        - Writes to a .migration_tmp then atomically renames (os.replace).
+        - Fully idempotent: already-encrypted ENC1: lines are passed through unchanged.
+        - Tombstone/delete lines are preserved exactly.
+
+        Args:
+            progress_cb: optional callable(total, done, encrypted, pct, status)
+                         called after each line and once more at completion.
+
+        Returns:
+            {"ok": True, "encrypted": int, "total": int, "already_encrypted": int}
+            {"ok": False, "reason": str}
+        """
+        import shutil as _shutil
+        from backend.history_crypto import HistoryCrypto
+
+        # Force re-init so we pick up a freshly enabled flag.
+        self._history_crypto_initialized = False
+        crypto = self._get_history_crypto()
+        if crypto is None:
+            return {"ok": False, "reason": "encryption_unavailable"}
+
+        with self._lock():
+            if not self.history_path.exists() or self.history_path.stat().st_size == 0:
+                return {"ok": False, "reason": "empty_file"}
+
+            # Step 1: read all raw lines without decrypting
+            raw_lines = []
+            with self.history_path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    stripped = line.rstrip("\n")
+                    if stripped:
+                        raw_lines.append(stripped)
+
+            total = len(raw_lines)
+            encrypted_count = 0
+            already_count = 0
+            out_lines = []
+
+            # Step 2: encrypt plaintext only; ENC1: lines pass through unchanged
+            for idx, raw in enumerate(raw_lines):
+                if HistoryCrypto.is_encrypted(raw):
+                    out_lines.append(raw)
+                    already_count += 1
+                else:
+                    out_lines.append(crypto.encrypt_line(raw))
+                    encrypted_count += 1
+                if progress_cb is not None:
+                    done = idx + 1
+                    pct = int(done * 100 / total)
+                    try:
+                        progress_cb(total, done, encrypted_count, pct, "encrypting")
+                    except Exception:
+                        pass
+
+            # Step 3: write .bak BEFORE touching the live file
+            bak_path = self.history_path.with_suffix(".ndjson.bak")
+            _shutil.copy2(str(self.history_path), str(bak_path))
+
+            # Step 4: write tmp, then atomic replace
+            tmp_path = self.history_path.with_suffix(".ndjson.migration_tmp")
+            try:
+                with tmp_path.open("w", encoding="utf-8") as fh:
+                    for out_line in out_lines:
+                        fh.write(out_line + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(str(tmp_path), str(self.history_path))
+            except Exception:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise
+
+        # Step 5: reset crypto cache (file changed on disk)
+        self._history_crypto_initialized = False
+        self._search_index.clear()
+        self._recent_search_index = []
+        self._recent_search_index_signature = None
+
+        if progress_cb is not None:
+            try:
+                progress_cb(total, total, encrypted_count, 100, "done")
+            except Exception:
+                pass
+
+        return {
+            "ok": True,
+            "encrypted": encrypted_count,
+            "total": total,
+            "already_encrypted": already_count,
+        }
+
+    def get_history_encryption_status(self):
+        """Return encryption statistics for history.ndjson.
+
+        Scans raw lines to count ENC1: vs plaintext.
+        No lock needed — read-only scan of the live file.
+
+        Returns:
+            {
+                "enabled": bool,
+                "total": int,
+                "encrypted": int,
+                "plaintext": int,
+                "pct": int,
+            }
+        """
+        from backend.history_crypto import HistoryCrypto
+
+        enabled = self._read_encryption_flag_unlocked()
+        total = 0
+        encrypted = 0
+        if self.history_path.exists():
+            with self.history_path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    raw = line.strip()
+                    if not raw:
+                        continue
+                    total += 1
+                    if HistoryCrypto.is_encrypted(raw):
+                        encrypted += 1
+        plaintext = total - encrypted
+        pct = int(encrypted * 100 / total) if total > 0 else 0
+        return {
+            "enabled": enabled,
+            "total": total,
+            "encrypted": encrypted,
+            "plaintext": plaintext,
+            "pct": pct,
+        }

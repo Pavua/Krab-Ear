@@ -1071,6 +1071,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # добавляется в stt_hotwords, чтобы Whisper лучше распознавал его в следующий раз.
     # Opt-in: False по умолчанию — пользователь управляет словарём вручную.
     "auto_learn_corrections_enabled": False,
+    # --- История: AES-256-GCM шифрование at-rest (backend/history_crypto.py) ---
+    # Opt-in: False по умолчанию — не ломает существующие установки без Keychain.
+    # При включении только НОВЫЕ строки шифруются автоматически; для шифрования
+    # существующих записей используй IPC migrate_history_encryption.
+    "history_encryption_enabled": False,
     # --- LM Studio brain lease coordination (backend/brain_lease.py) ---
     # Кооперативный кросс-процессный лиз: Krab Ear + Krab userbot не запускают
     # тяжёлый inference на Metal GPU одновременно (→ GPU stuck → reboot).
