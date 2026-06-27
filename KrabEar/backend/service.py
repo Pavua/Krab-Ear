@@ -10,6 +10,7 @@
 from __future__ import annotations
 from __version__ import __version__ as APP_VERSION  # noqa: E402
 from backend.model_cache_manager import ModelCacheManager
+from backend.model_downloader import ModelDownloader
 from backend.hotword_detector import HotwordDetector
 from backend.openwakeword_adapter import OpenWakeWordAdapter
 from backend.plugin_system import PluginManager
@@ -871,6 +872,7 @@ class BackendService:
         self._plugin_manager = PluginManager(data_dir=self.store.data_dir)
         self._hotword_detector = HotwordDetector(data_dir=self.store.data_dir)
         self._model_cache_manager = ModelCacheManager()
+        self._model_downloader = ModelDownloader(event_bus=event_bus)
         # Auto-Glossary — автоматический глоссарий из истории транскрибаций
         self._auto_glossary = AutoGlossaryBuilder(
             store=self.store,
@@ -1963,6 +1965,14 @@ class BackendService:
             "get_encryption_status": self._handle_get_encryption_status,  # статус шифрования: enabled + available (наличие Keychain)
             "migrate_history_encryption": self._handle_migrate_history_encryption,  # зашифровать существующие plaintext-записи (at-rest migration)
             "get_history_encryption_status": self._handle_get_history_encryption_status,  # статистика шифрования: total/encrypted/plaintext/pct/migrating
+            # --- Загрузка STT-моделей (fresh-install unblock) ---
+            "download_stt_model": self._handle_download_stt_model,  # запустить фоновую загрузку STT-модели из HuggingFace
+            "get_stt_model_status": self._handle_get_stt_model_status,  # статус кэша/загрузки STT-модели
+            # --- Privacy Dashboard (aggregate view) ---
+            "get_privacy_dashboard": self._handle_get_privacy_dashboard,  # агрегированный дашборд privacy/security: режим, шифрование, хранилище, retention, audit
+            # --- Auto-calibration: hardware profile + STT recommendation ---
+            "get_hardware_profile": self._handle_get_hardware_profile,  # chip/RAM/cores/tier для автокалибровки
+            "get_calibration_recommendation": self._handle_get_calibration_recommendation,  # рекомендация STT-модели по tier+mic
         }
 
     def handle_request(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -3148,6 +3158,139 @@ class BackendService:
             "entries": entries,
             "total_count": total,
         }
+
+    def _handle_get_privacy_dashboard(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Агрегированный дашборд privacy/security — все поля в одном вызове.
+
+        Агрегирует из существующих источников (не пересоздаёт их):
+          - privacy_mode_enabled       → _get_runtime_setting
+          - history_encryption_enabled → settings cache
+          - storage                    → HistoryService.handle_get_storage_info
+                                         + StateStore.get_history_stats (item_count)
+          - retention                  → auto_cleanup_enabled / auto_cleanup_after_days settings
+          - audit                      → PrivacyAuditLogger (counts + last_event_ts + by_type)
+          - purge_available            → всегда True (handle_purge_all_data доступен через IPC)
+
+        Privacy-safe: только счётчики/флаги/размеры — ни один транскрипт/словарь/
+        псевдоним спикера не попадает в ответ. Хендлер читает privacy-метаданные,
+        а не пользовательский контент, поэтому privacy-mode gate НЕ нужен.
+        Каждый источник обёрнут в try/except — сбой одного не валит весь дашборд.
+
+        Возвращает:
+            privacy_mode        (bool)  — режим конфиденциальности.
+            encryption_enabled  (bool)  — шифрование истории (AES-256-GCM).
+            storage             (dict)  — item_count, history_bytes, history_file_size_mb,
+                                          transcripts_count, transcripts_size_mb,
+                                          total_bytes, total_data_mb.
+            retention           (dict)  — auto_cleanup_enabled, auto_cleanup_after_days,
+                                          auto_purge_enabled, auto_purge_retention_days.
+            audit               (dict)  — total_events, last_event_ts, by_type.
+            purge_available     (bool)  — всегда True.
+        """
+        result: dict[str, Any] = {
+            "privacy_mode": False,
+            "encryption_enabled": False,
+            "storage": {},
+            "retention": {},
+            "audit": {},
+            "purge_available": True,
+        }
+
+        # --- privacy_mode ---
+        try:
+            result["privacy_mode"] = bool(
+                self._get_runtime_setting("privacy_mode_enabled", False)
+            )
+        except Exception:
+            logger.exception("get_privacy_dashboard: ошибка чтения privacy_mode_enabled")
+
+        # --- encryption_enabled: read flag directly from settings (no IPC cross-call) ---
+        try:
+            result["encryption_enabled"] = bool(
+                self._get_runtime_setting("history_encryption_enabled", False)
+            )
+        except Exception:
+            logger.exception(
+                "get_privacy_dashboard: ошибка чтения history_encryption_enabled"
+            )
+
+        # --- storage: sizes from HistoryService + item count from StateStore ---
+        try:
+            storage_info = self._history.handle_get_storage_info({})
+            item_count = 0
+            try:
+                stats = self.store.get_history_stats()
+                item_count = int(stats.get("active_count", 0))
+            except Exception:
+                logger.warning(
+                    "get_privacy_dashboard: не удалось получить item_count из StateStore"
+                )
+            result["storage"] = {
+                "item_count": item_count,
+                "history_bytes": storage_info.get("history_bytes", 0),
+                "history_file_size_mb": storage_info.get("history_file_size_mb", 0.0),
+                "transcripts_count": storage_info.get("transcripts_count", 0),
+                "transcripts_size_mb": storage_info.get("transcripts_size_mb", 0.0),
+                "total_bytes": storage_info.get("total_bytes", 0),
+                "total_data_mb": storage_info.get("total_data_mb", 0.0),
+            }
+        except Exception:
+            logger.exception("get_privacy_dashboard: ошибка получения storage info")
+            result["storage"] = {
+                "item_count": 0,
+                "history_bytes": 0,
+                "history_file_size_mb": 0.0,
+                "transcripts_count": 0,
+                "transcripts_size_mb": 0.0,
+                "total_bytes": 0,
+                "total_data_mb": 0.0,
+            }
+
+        # --- retention: auto_cleanup + auto_purge settings ---
+        try:
+            s = self._cached_settings()
+            result["retention"] = {
+                "auto_cleanup_enabled": bool(s.get("auto_cleanup_enabled", False)),
+                "auto_cleanup_after_days": int(s.get("auto_cleanup_after_days", 365)),
+                "auto_purge_enabled": bool(s.get("auto_purge_enabled", False)),
+                "auto_purge_retention_days": int(s.get("auto_purge_retention_days", 90)),
+            }
+        except Exception:
+            logger.exception("get_privacy_dashboard: ошибка чтения retention settings")
+            result["retention"] = {
+                "auto_cleanup_enabled": False,
+                "auto_cleanup_after_days": 365,
+                "auto_purge_enabled": False,
+                "auto_purge_retention_days": 90,
+            }
+
+        # --- audit: summary counts from PrivacyAuditLogger (no PII, no transcript content) ---
+        try:
+            audit = get_privacy_audit_logger()
+            total_events = audit.total_count()
+            all_entries = audit.read_entries(limit=max(total_events, 1))
+            last_event_ts: str | None = None
+            by_type: dict[str, int] = {}
+            for entry in all_entries:
+                action = str(entry.get("action", "unknown"))
+                by_type[action] = by_type.get(action, 0) + 1
+                ts = entry.get("ts")
+                if ts and (last_event_ts is None or ts > last_event_ts):
+                    last_event_ts = ts
+            result["audit"] = {
+                "total_events": total_events,
+                "last_event_ts": last_event_ts,
+                "by_type": by_type,
+            }
+        except Exception:
+            logger.exception("get_privacy_dashboard: ошибка чтения privacy audit log")
+            result["audit"] = {
+                "total_events": 0,
+                "last_event_ts": None,
+                "by_type": {},
+            }
+
+        return result
 
     def _handle_clear_privacy_audit_log(self, params: dict[str, Any]) -> dict[str, Any]:
         """Удаляет файл privacy audit log. Идемпотентен.
@@ -4395,6 +4538,163 @@ class BackendService:
         status["ok"] = True
         status["migrating"] = getattr(self, "_history_migration_running", False)
         return status
+
+    # ------------------------------------------------------------------
+    # STT model download (fresh-install unblock)
+    # ------------------------------------------------------------------
+
+    def _handle_download_stt_model(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Запускает фоновую загрузку STT-модели.
+
+        params:
+            model_id (str, optional): HuggingFace repo_id.
+                Дефолт: settings.MODEL_BALANCED (mlx-community/whisper-large-v3-turbo).
+
+        Returns:
+            {"ok": True, "status": "started"|"already_cached"|"in_progress", "model_id": str}
+
+        Raises ValueError если model_id явно задан, но пустой или не строка.
+        """
+        raw_model_id = params.get("model_id")
+        if raw_model_id is not None:
+            if not isinstance(raw_model_id, str) or not raw_model_id.strip():
+                raise ValueError("Параметр 'model_id' должен быть непустой строкой")
+            model_id = raw_model_id.strip()
+        else:
+            model_id = self._get_runtime_setting("MODEL_BALANCED", "mlx-community/whisper-large-v3-turbo")
+
+        status = self._model_downloader.start_download(model_id)
+        add_breadcrumb(
+            category="stt",
+            message="download_stt_model",
+            data={"model_id": model_id, "status": status},
+        )
+        return {"ok": True, "status": status, "model_id": model_id}
+
+    def _handle_get_stt_model_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает статус кэша/загрузки STT-модели.
+
+        params:
+            model_id (str, optional): HuggingFace repo_id.
+                Дефолт: settings.MODEL_BALANCED.
+
+        Returns:
+            {
+                "ok": True,
+                "model_id": str,
+                "cached": bool,
+                "downloading": bool,
+                "status": "idle"|"downloading"|"done"|"error",
+                "pct": float (0..100),
+                "downloaded": int (bytes),
+                "total": int (bytes),
+                "error_msg": str,
+                "path": str,
+            }
+        """
+        raw_model_id = params.get("model_id")
+        if raw_model_id is not None:
+            if not isinstance(raw_model_id, str) or not raw_model_id.strip():
+                raise ValueError("Параметр 'model_id' должен быть непустой строкой")
+            model_id = raw_model_id.strip()
+        else:
+            model_id = self._get_runtime_setting("MODEL_BALANCED", "mlx-community/whisper-large-v3-turbo")
+
+        status_dict = self._model_downloader.get_status(model_id)
+        return {"ok": True, **status_dict}
+
+    # ------------------------------------------------------------------
+    # Handlers: Auto-calibration
+    # ------------------------------------------------------------------
+
+    def _handle_get_hardware_profile(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает аппаратный профиль Mac для автокалибровки STT.
+
+        Не требует параметров.  Не читает данные пользователя — только железо.
+        Нет privacy gate.
+
+        Returns::
+
+            {
+                "ok": True,
+                "chip": str,            # Apple M4 Max / Intel Core i9 / unknown
+                "ram_gb": int,          # объём памяти в ГБ
+                "cores": int,           # логических CPU-ядер
+                "is_apple_silicon": bool,
+                "tier": "low"|"mid"|"high",
+            }
+        """
+        from core.hardware_profile import detect_hardware_profile
+        profile = detect_hardware_profile()
+        return {"ok": True, **profile.to_dict()}
+
+    def _handle_get_calibration_recommendation(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Рекомендует STT-модель и движок на основе hardware tier.
+
+        Не делает запись аудио — использует кэшированный профиль шума
+        (ключи _last_mic_snr_db / _last_mic_suitable_for_stt в settings).
+        Нет privacy gate.
+
+        Returns::
+
+            {
+                "ok": True,
+                "recommended_model": "balanced"|"max",
+                "recommended_engine": str,
+                "tier": "low"|"mid"|"high",
+                "mic": {"snr_db": float, "suitable_for_stt": bool} | null,
+                "rationale": str,
+            }
+        """
+        from core.hardware_profile import detect_hardware_profile, TIER_HIGH, TIER_MID
+
+        profile = detect_hardware_profile()
+        tier = profile.tier
+
+        if tier == TIER_HIGH:
+            recommended_model = "max"
+            rationale = (
+                f"RAM {profile.ram_gb} GB (high tier) — модель max обеспечивает "
+                "максимальную точность на этом железе."
+            )
+        elif tier == TIER_MID:
+            recommended_model = "balanced"
+            rationale = (
+                f"RAM {profile.ram_gb} GB (mid tier) — модель balanced оптимальна: "
+                "достаточная точность без перегрузки памяти."
+            )
+        else:  # TIER_LOW
+            recommended_model = "balanced"
+            rationale = (
+                f"RAM {profile.ram_gb} GB (low tier) — рекомендуется balanced; "
+                "запуск max-модели может исчерпать память."
+            )
+
+        recommended_engine = "mlx_whisper" if profile.is_apple_silicon else "whisper"
+
+        mic_info: dict[str, Any] | None = None
+        try:
+            cached = self._settings_svc.cached_settings()
+            snr = cached.get("_last_mic_snr_db")
+            suitable = cached.get("_last_mic_suitable_for_stt")
+            if snr is not None:
+                mic_info = {"snr_db": float(snr), "suitable_for_stt": bool(suitable)}
+                if not mic_info["suitable_for_stt"]:
+                    rationale += (
+                        " Последняя проверка микрофона показала низкое SNR "
+                        f"({snr:.1f} dB) — рекомендуется улучшить качество записи."
+                    )
+        except Exception:  # noqa: BLE001
+            mic_info = None
+
+        return {
+            "ok": True,
+            "recommended_model": recommended_model,
+            "recommended_engine": recommended_engine,
+            "tier": tier,
+            "mic": mic_info,
+            "rationale": rationale,
+        }
 
 
 # W1768: inline-дубликат IPCServer-класса УДАЛЁН. Каноничный, закалённый класс
