@@ -35,6 +35,32 @@ def _reset_observability():
     return mod
 
 
+def _pin_real_state_store():
+    """Pin ``backend.service.StateStore`` to the REAL class for the test's lifetime.
+
+    🔴 Chunk-pollution guard (documented rest_server StateStore class in CLAUDE.md):
+    sibling rest_server tests run ``with patch("backend.state_store.StateStore",
+    return_value=<MagicMock>)`` while importing ``backend.rest_server``. In the same
+    process this can strand ``backend.service.StateStore`` as a leaked MagicMock
+    whose ``StateStore(...).load_settings()`` returns ``{}`` (the rest mock's
+    ``_import_store.load_settings.return_value = {}``). ``main()`` then reads an
+    EMPTY settings dict instead of the ``privacy_mode_enabled=True`` settings.json
+    this test wrote → the privacy gate never fires → ``sentry_sdk.init()`` is called
+    → ``init.assert_not_called()`` fails ("Called 1 times"). Passes in isolation /
+    on ubuntu (no rest sibling in the same chunk), flakes only inside the macOS
+    chunk run.
+
+    Returns an active ``patch.object`` that the caller must ``.stop()`` in tearDown
+    (or use as a context manager). It re-binds the symbol to the genuine class so
+    ``main()``'s early ``StateStore(data_dir=...)`` reads the real settings.json.
+    """
+    import backend.service as svc_mod  # noqa: PLC0415
+    import backend.state_store as ss_mod  # noqa: PLC0415
+    patcher = patch.object(svc_mod, "StateStore", ss_mod.StateStore)
+    patcher.start()
+    return patcher
+
+
 def _make_fake_sentry_sdk():
     """Return a minimal sentry_sdk stub with a callable init."""
     fake = types.ModuleType("sentry_sdk")
@@ -54,6 +80,10 @@ class TestInitSentryCalledWithSettingsDictAtStartup(unittest.TestCase):
 
     def setUp(self):
         _reset_observability()
+        self._store_pin = _pin_real_state_store()
+
+    def tearDown(self):
+        self._store_pin.stop()
 
     def test_init_sentry_called_with_settings_dict_at_startup(self):
         """main() passes a non-None settings dict to init_sentry() at startup.
@@ -133,6 +163,10 @@ class TestSentrySkippedWhenSettingsHasPrivacyModeEnabled(unittest.TestCase):
 
     def setUp(self):
         _reset_observability()
+        self._store_pin = _pin_real_state_store()
+
+    def tearDown(self):
+        self._store_pin.stop()
 
     def test_sentry_skipped_when_settings_has_privacy_mode_enabled(self):
         """Sentry SDK init() not called when settings.json has privacy_mode_enabled=True.
