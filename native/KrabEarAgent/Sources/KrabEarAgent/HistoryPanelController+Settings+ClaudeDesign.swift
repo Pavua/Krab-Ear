@@ -693,6 +693,8 @@ extension HistoryPanelController {
 
         // Section 12 — Шаблоны вывода (управление пользовательскими шаблонами)
         let s12 = cdBuildOutputTemplatesSection()
+        
+        let sCloudRewriter = cdBuildCloudRewriterSection()
 
         settingsBarCD.removeFromSuperview()
         settingsBarCD = NSStackView()
@@ -705,7 +707,7 @@ extension HistoryPanelController {
         // сразу, без скролла на длинный список секций.
         settingsBarCD.addArrangedSubview(buildDictationHeroCard())
 
-        for s in [s1, s2, s3, s4, s5, s6, s7, s7b, s8, s9, s9_5, s9_6, s10, s11, s11b, s12] {
+        for s in [s1, s2, s3, s4, s5, s6, s7, s7b, s8, s9, s9_5, s9_6, s10, s11, s11b, s12, sCloudRewriter] {
             settingsBarCD.addArrangedSubview(s)
         }
     }

@@ -113,6 +113,11 @@ struct AgentSettings {
     var smartFieldFormatEnabled: Bool
     // Streaming live paste: вставляет подтверждённые куски текста по мере диктовки.
     var streamingPasteEnabled: Bool
+    // Cloud Rewriter settings
+    var cloudRewriterEnabled: Bool
+    var cloudRewriterProvider: String
+    var openaiApiKey: String
+    var anthropicApiKey: String
 
     static let `default` = AgentSettings(
         mode: "headless",
@@ -173,7 +178,11 @@ struct AgentSettings {
         phoneticVocabEnabled: false,
         pasteUndoEnabled: false,
         smartFieldFormatEnabled: false,
-        streamingPasteEnabled: false
+        streamingPasteEnabled: false,
+        cloudRewriterEnabled: false,
+        cloudRewriterProvider: "openai",
+        openaiApiKey: "",
+        anthropicApiKey: ""
     )
 
     init(from payload: [String: Any]) {
@@ -257,6 +266,10 @@ struct AgentSettings {
         self.pasteUndoEnabled = (payload["paste_undo_enabled"] as? Bool) ?? Self.default.pasteUndoEnabled
         self.smartFieldFormatEnabled = (payload["smart_field_format_enabled"] as? Bool) ?? Self.default.smartFieldFormatEnabled
         self.streamingPasteEnabled = (payload["streaming_paste_enabled"] as? Bool) ?? Self.default.streamingPasteEnabled
+        self.cloudRewriterEnabled = (payload["cloud_rewriter_enabled"] as? Bool) ?? Self.default.cloudRewriterEnabled
+        self.cloudRewriterProvider = (payload["cloud_rewriter_provider"] as? String) ?? Self.default.cloudRewriterProvider
+        self.openaiApiKey = (payload["openai_api_key"] as? String) ?? Self.default.openaiApiKey
+        self.anthropicApiKey = (payload["anthropic_api_key"] as? String) ?? Self.default.anthropicApiKey
     }
 
     init(
@@ -315,7 +328,11 @@ struct AgentSettings {
         phoneticVocabEnabled: Bool = false,
         pasteUndoEnabled: Bool = false,
         smartFieldFormatEnabled: Bool = false,
-        streamingPasteEnabled: Bool = false
+        streamingPasteEnabled: Bool = false,
+        cloudRewriterEnabled: Bool = false,
+        cloudRewriterProvider: String = "openai",
+        openaiApiKey: String = "",
+        anthropicApiKey: String = ""
     ) {
         self.mode = mode
         self.showDockIcon = showDockIcon
@@ -373,6 +390,10 @@ struct AgentSettings {
         self.pasteUndoEnabled = pasteUndoEnabled
         self.smartFieldFormatEnabled = smartFieldFormatEnabled
         self.streamingPasteEnabled = streamingPasteEnabled
+        self.cloudRewriterEnabled = cloudRewriterEnabled
+        self.cloudRewriterProvider = cloudRewriterProvider
+        self.openaiApiKey = openaiApiKey
+        self.anthropicApiKey = anthropicApiKey
     }
 
     func toPayload() -> [String: Any] {
@@ -433,6 +454,10 @@ struct AgentSettings {
             "paste_undo_enabled": pasteUndoEnabled,
             "smart_field_format_enabled": smartFieldFormatEnabled,
             "streaming_paste_enabled": streamingPasteEnabled,
+            "cloud_rewriter_enabled": cloudRewriterEnabled,
+            "cloud_rewriter_provider": cloudRewriterProvider,
+            "openai_api_key": openaiApiKey,
+            "anthropic_api_key": anthropicApiKey,
         ]
     }
 }

@@ -167,13 +167,4 @@ extension HistoryPanelController {
         guard let appDelegate = NSApp.delegate as? AgentAppDelegate else { return }
         appDelegate.selectionTranslator?.config = config
     }
-
-    // MARK: - Separator helper (re-use from main extension)
-
-    private func makeSeparator() -> NSView {
-        let separator = NSBox()
-        separator.boxType = .separator
-        separator.translatesAutoresizingMaskIntoConstraints = false
-        return separator
-    }
 }
