@@ -600,6 +600,7 @@ extension HistoryPanelController {
             }
         }
 
+        syncCloudRewriterControls(settings: settings)
         llmRewriteButton.state = settings.llmRewriteEnabled ? .on : .off
         // Ensure current model is always visible; fetch LM Studio models async to expand dropdown.
         let currentModel = settings.llmModel
@@ -745,7 +746,7 @@ extension HistoryPanelController {
     /// Использует NSBox.separator (AppKit-managed rendering) вместо bare NSView,
     /// чтобы цвет разделителя применялся корректно до того как view добавляется в окно.
     @MainActor
-    private func makeSeparator() -> NSView {
+    func makeSeparator() -> NSView {
         let separator = NSBox()
         separator.boxType = .separator
         separator.translatesAutoresizingMaskIntoConstraints = false

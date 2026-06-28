@@ -1944,6 +1944,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         // Group: Нейросетевые функции (LLM + VA + Selection Translator + Quick Preset).
         settingsBar.addArrangedSubview(makeCategoryHeader(text: "Нейросетевые функции"))
         settingsBar.addArrangedSubview(llmSection)
+        
+        let cloudRewriterSection = buildCloudRewriterSection()
+        settingsBar.addArrangedSubview(cloudRewriterSection)
 
         // Voice Assistant — wire targets/actions.
         let vaSection = buildVoiceAssistantSection()
