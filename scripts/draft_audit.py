@@ -110,7 +110,7 @@ def main() -> int:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with urllib.request.urlopen(req, timeout=600) as resp:  # generous: reasoning models (deepseek-v4-pro etc.) think 2-5 min
             d = json.loads(resp.read().decode("utf-8"))
         msg = d.get("choices", [{}])[0].get("message", {})
         out = (msg.get("content") or msg.get("reasoning_content") or "").strip()
