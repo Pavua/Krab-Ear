@@ -728,5 +728,167 @@ class TestStatesCap(unittest.TestCase):
                           "Active (downloading) state must not be evicted (F4-LOW)")
 
 
+# ---------------------------------------------------------------------------
+# Offline-override regression test (wave2 ship-blocker fix)
+#
+# Production backend runs with HF_HUB_OFFLINE=1 / TRANSFORMERS_OFFLINE=1.
+# A user-initiated download_stt_model must transiently disable offline mode
+# for the snapshot_download call, then fully restore the original values.
+#
+# Fail-before: snapshot_download is called with HF_HUB_OFFLINE="1" in
+#              os.environ AND constants.HF_HUB_OFFLINE==True → OfflineModeIsEnabled.
+# Pass-after:  at call time both are "0"/False; after the call both are "1"/True.
+# ---------------------------------------------------------------------------
+
+class TestOfflineOverrideDuringDownload(unittest.TestCase):
+    """Offline-mode override: download overrides HF_HUB_OFFLINE for exactly one call."""
+
+    def setUp(self) -> None:
+        # Simulate production plist: set both env vars to "1" BEFORE importing
+        # huggingface_hub.constants (or after — constants may already be bound to False
+        # from earlier test runs in the same process; we force them to True here).
+        import os
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        try:
+            import huggingface_hub.constants as _c
+            _c.HF_HUB_OFFLINE = True
+        except Exception:
+            pass
+
+    def tearDown(self) -> None:
+        # Always restore env to "1" so other tests see a consistent state.
+        import os
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        try:
+            import huggingface_hub.constants as _c
+            _c.HF_HUB_OFFLINE = True
+        except Exception:
+            pass
+
+    def test_at_call_time_offline_flags_are_cleared(self) -> None:
+        """At the moment snapshot_download is called, offline mode must be OFF."""
+        import os
+
+        observed_env: list[str] = []
+        observed_const: list[bool] = []
+
+        def mock_snapshot(**kwargs: Any) -> str:
+            observed_env.append(os.environ.get("HF_HUB_OFFLINE", "MISSING"))
+            try:
+                import huggingface_hub.constants as _c
+                observed_const.append(_c.HF_HUB_OFFLINE)
+            except Exception:
+                observed_const.append(True)  # safe fallback: fail the assertion
+            return _FAKE_PATH
+
+        bus = _StubEventBus()
+        dl = ModelDownloader(event_bus=bus, stall_timeout_sec=300.0)
+
+        is_p = patch.object(dl, "_is_cached", return_value=False)
+        hf_p = patch("huggingface_hub.snapshot_download",
+                     side_effect=mock_snapshot, create=True)
+        is_p.start()
+        hf_p.start()
+        try:
+            dl.start_download(_FAKE_MODEL)
+            # Wait for background thread to complete (max 5 s).
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                internal = dl._get_or_create_state(_FAKE_MODEL).to_dict()
+                if internal["status"] in ("done", "error", "cancelled"):
+                    break
+                time.sleep(0.05)
+
+            self.assertEqual(len(observed_env), 1,
+                             "snapshot_download should have been called exactly once")
+            self.assertEqual(observed_env[0], "0",
+                             "HF_HUB_OFFLINE env var must be '0' at call time")
+            self.assertFalse(observed_const[0],
+                             "huggingface_hub.constants.HF_HUB_OFFLINE must be False at call time")
+        finally:
+            is_p.stop()
+            hf_p.stop()
+
+    def test_after_download_offline_hardening_restored(self) -> None:
+        """After the worker exits (success), offline hardening must be fully restored."""
+        import os
+
+        def mock_snapshot(**kwargs: Any) -> str:
+            return _FAKE_PATH
+
+        bus = _StubEventBus()
+        dl = ModelDownloader(event_bus=bus, stall_timeout_sec=300.0)
+
+        is_p = patch.object(dl, "_is_cached", return_value=False)
+        hf_p = patch("huggingface_hub.snapshot_download",
+                     side_effect=mock_snapshot, create=True)
+        is_p.start()
+        hf_p.start()
+        try:
+            dl.start_download(_FAKE_MODEL)
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                internal = dl._get_or_create_state(_FAKE_MODEL).to_dict()
+                if internal["status"] in ("done", "error", "cancelled"):
+                    break
+                time.sleep(0.05)
+
+            # Env var must be restored to "1".
+            self.assertEqual(os.environ.get("HF_HUB_OFFLINE"), "1",
+                             "HF_HUB_OFFLINE must be restored to '1' after download")
+            self.assertEqual(os.environ.get("TRANSFORMERS_OFFLINE"), "1",
+                             "TRANSFORMERS_OFFLINE must be restored to '1' after download")
+            # Module constant must be restored to True.
+            try:
+                import huggingface_hub.constants as _c
+                self.assertTrue(_c.HF_HUB_OFFLINE,
+                                "huggingface_hub.constants.HF_HUB_OFFLINE must be True after download")
+            except ImportError:
+                pass  # pragma: no cover — huggingface_hub always installed in prod
+        finally:
+            is_p.stop()
+            hf_p.stop()
+
+    def test_after_download_failure_offline_hardening_restored(self) -> None:
+        """After the worker exits (error), offline hardening must also be restored."""
+        import os
+
+        def bad_snapshot(**kwargs: Any) -> str:
+            raise OSError("Simulated network error")
+
+        bus = _StubEventBus()
+        dl = ModelDownloader(event_bus=bus, stall_timeout_sec=300.0)
+
+        is_p = patch.object(dl, "_is_cached", return_value=False)
+        hf_p = patch("huggingface_hub.snapshot_download",
+                     side_effect=bad_snapshot, create=True)
+        is_p.start()
+        hf_p.start()
+        try:
+            dl.start_download(_FAKE_MODEL)
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                internal = dl._get_or_create_state(_FAKE_MODEL).to_dict()
+                if internal["status"] in ("done", "error", "cancelled"):
+                    break
+                time.sleep(0.05)
+
+            self.assertEqual(os.environ.get("HF_HUB_OFFLINE"), "1",
+                             "HF_HUB_OFFLINE must be restored to '1' even after error")
+            self.assertEqual(os.environ.get("TRANSFORMERS_OFFLINE"), "1",
+                             "TRANSFORMERS_OFFLINE must be restored to '1' even after error")
+            try:
+                import huggingface_hub.constants as _c
+                self.assertTrue(_c.HF_HUB_OFFLINE,
+                                "constants.HF_HUB_OFFLINE must be True even after error")
+            except ImportError:
+                pass  # pragma: no cover
+        finally:
+            is_p.stop()
+            hf_p.stop()
+
+
 if __name__ == "__main__":
     unittest.main()
