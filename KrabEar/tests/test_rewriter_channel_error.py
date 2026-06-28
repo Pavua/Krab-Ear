@@ -129,13 +129,13 @@ class TestChannelErrorInHttpBody(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 5. Default rewriter model is qwen3-4b-abliterated
+# 5. Default rewriter model is gemma-4-e4b-it-mlx (wave5: updated from qwen3-4b-abliterated)
 # ---------------------------------------------------------------------------
 
 class TestDefaultRewriterModel(unittest.TestCase):
-    """LLM_MODEL default in config.py must be qwen3-4b-abliterated."""
+    """LLM_MODEL default in config.py must be gemma-4-e4b-it-mlx (wave5 fix)."""
 
-    def test_default_rewriter_is_qwen3_4b_abliterated(self):
+    def test_default_rewriter_is_gemma(self):
         """Check the class-level field default (not the runtime Settings instance
         which may be overridden by settings.json on disk)."""
         from core.config import Settings
@@ -143,14 +143,14 @@ class TestDefaultRewriterModel(unittest.TestCase):
         field_default = Settings.model_fields["LLM_MODEL"].default
         self.assertEqual(
             field_default,
-            "qwen3-4b-abliterated",
-            f"Expected class default 'qwen3-4b-abliterated', got '{field_default}'",
+            "gemma-4-e4b-it-mlx",
+            f"Expected class default 'gemma-4-e4b-it-mlx', got '{field_default}'",
         )
 
-    def test_default_settings_llm_model_is_qwen3(self):
+    def test_default_settings_llm_model_is_gemma(self):
         from core.config import DEFAULT_SETTINGS
         self.assertIn("llm_model", DEFAULT_SETTINGS)
-        self.assertEqual(DEFAULT_SETTINGS["llm_model"], "qwen3-4b-abliterated")
+        self.assertEqual(DEFAULT_SETTINGS["llm_model"], "gemma-4-e4b-it-mlx")
 
 
 # ---------------------------------------------------------------------------
@@ -191,14 +191,14 @@ class TestSwitchToStableRewriterAction(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 7. recommended_models starts with qwen3-4b-abliterated
+# 7. recommended_models starts with gemma-4-e4b-it-mlx (wave5: updated from qwen3)
 # ---------------------------------------------------------------------------
 
 class TestRecommendedModels(unittest.TestCase):
-    """list_llm_models (LLMOpsService) returns recommended_models with qwen3-4b-abliterated first."""
+    """list_llm_models (LLMOpsService) returns recommended_models with gemma-4-e4b-it-mlx first."""
 
-    def test_recommended_models_starts_with_qwen3(self):
-        """Mock /v1/models endpoint — recommended_models[0] must be qwen3-4b-abliterated."""
+    def test_recommended_models_starts_with_gemma(self):
+        """Mock /v1/models endpoint — recommended_models[0] must be gemma-4-e4b-it-mlx."""
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {
@@ -212,7 +212,7 @@ class TestRecommendedModels(unittest.TestCase):
         data = mock_resp.json()
         ids = [item.get("id") for item in data.get("data", []) if item.get("id")]
         recommended_models = [
-            "qwen3-4b-abliterated",
+            "gemma-4-e4b-it-mlx",
             "huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx",
             "qwen3-8b-abliterated",
         ]
@@ -222,7 +222,7 @@ class TestRecommendedModels(unittest.TestCase):
             "error": None,
         }
 
-        self.assertEqual(result["recommended_models"][0], "qwen3-4b-abliterated")
+        self.assertEqual(result["recommended_models"][0], "gemma-4-e4b-it-mlx")
         self.assertIsNone(result["error"])
 
     def test_error_code_has_correct_action_id(self):

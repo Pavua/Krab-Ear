@@ -74,6 +74,9 @@ _RANGE_FIELDS: dict[str, tuple[Any, Any, Any, type]] = {
     # wave2 F1-MED: stall watchdog for STT model download.
     # Below 30 s risks false-positive abort on slow mirrors; above 3600 s = 1 hour.
     "stt_download_stall_timeout_sec": (30.0, 3600.0, 300.0, float),
+    # wave5: self-heal model reload timeout (Fix C).
+    # Below 10 s risks false-abort on NVMe cold load; above 600 s = 10 min idle.
+    "llm_autoload_timeout_sec": (10.0, 600.0, 90.0, float),
 }
 
 # Bool-поля с дефолтными значениями

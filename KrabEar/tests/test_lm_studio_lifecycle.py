@@ -34,9 +34,15 @@ BASE_URL = "http://localhost:1234/v1"
 MODEL_ID = "qwen3.6-35b-a3b"
 
 
-def _fake_response(status: int) -> MagicMock:
+def _fake_response(status: int, body: bytes = b"") -> MagicMock:
+    """Simulate a urllib HTTP response context manager.
+
+    body defaults to empty bytes so that _rest_body_is_error() (Fix B) returns
+    False and the 2xx path continues to return True as it did before Fix B.
+    """
     resp = MagicMock()
     resp.status = status
+    resp.read.return_value = body
     resp.__enter__ = MagicMock(return_value=resp)
     resp.__exit__ = MagicMock(return_value=False)
     return resp

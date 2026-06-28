@@ -48,7 +48,7 @@ class ConfigLLMFieldsTestCase(unittest.TestCase):
             os.environ.pop("KRAB_EAR_LLM_MODEL", None)
             from core.config import Settings
             s = Settings(_env_file=())
-            self.assertEqual(s.LLM_MODEL, "qwen3-4b-abliterated")
+            self.assertEqual(s.LLM_MODEL, "gemma-4-e4b-it-mlx")
 
     def test_llm_api_key_default(self):
         """LLM_API_KEY должен быть пустой строкой по умолчанию (security-sensitive)."""

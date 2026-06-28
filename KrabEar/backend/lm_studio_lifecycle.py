@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -97,8 +98,22 @@ def _build_safe_opener() -> urllib.request.OpenerDirector:
 _SAFE_OPENER = _build_safe_opener()
 
 
+def _rest_body_is_error(raw_body: bytes) -> bool:
+    """Return True если тело ответа содержит JSON с ключом "error".
+
+    Некоторые версии LM Studio отвечают HTTP 200 на неизвестные endpoints,
+    но тело содержит {"error": "Unexpected endpoint or method. (POST /api/v0/...)"}.
+    Такой ответ — НЕ успех; нужно упасть на CLI fallback.
+    """
+    try:
+        parsed = json.loads(raw_body.decode("utf-8", errors="replace"))
+        return isinstance(parsed, dict) and "error" in parsed
+    except (ValueError, AttributeError):
+        return False
+
+
 def _try_rest_unload(base_url: str, model_id: str) -> bool:
-    """LM Studio REST: POST /api/v0/models/{model}/unload. Returns True on 2xx."""
+    """LM Studio REST: POST /api/v0/models/{model}/unload. Returns True on 2xx + no error body."""
     # SSRF guard (Wave 1768): отклоняем file://, ftp://, data:// и пр. до сети.
     if not _scheme_allowed(base_url):
         logger.warning(
@@ -112,7 +127,16 @@ def _try_rest_unload(base_url: str, model_id: str) -> bool:
     try:
         req = urllib.request.Request(url, method="POST")
         with _SAFE_OPENER.open(req, timeout=_REST_TIMEOUT_SEC) as resp:
-            return 200 <= resp.status < 300
+            if not (200 <= resp.status < 300):
+                return False
+            body = resp.read()
+            if _rest_body_is_error(body):
+                logger.debug(
+                    "LM Studio REST unload %s: HTTP 200 but body contains error — falling back to CLI",
+                    model_id,
+                )
+                return False
+            return True
     except urllib.error.HTTPError as e:
         if e.code in (404, 405):
             return False  # endpoint недоступен — silent fallback
@@ -124,7 +148,7 @@ def _try_rest_unload(base_url: str, model_id: str) -> bool:
 
 
 def _try_rest_load(base_url: str, model_id: str) -> bool:
-    """LM Studio REST: POST /api/v0/models/load. Returns True on 2xx."""
+    """LM Studio REST: POST /api/v0/models/load. Returns True on 2xx + no error body."""
     # SSRF guard (Wave 1768): отклоняем file://, ftp://, data:// и пр. до сети.
     if not _scheme_allowed(base_url):
         logger.warning(
@@ -135,13 +159,22 @@ def _try_rest_load(base_url: str, model_id: str) -> bool:
     api_root = base_url.rstrip("/").removesuffix("/v1")
     url = f"{api_root}/api/v0/models/load"
     try:
-        body = json.dumps({"model": model_id}).encode()
+        req_body = json.dumps({"model": model_id}).encode()
         req = urllib.request.Request(
-            url, data=body, method="POST",
+            url, data=req_body, method="POST",
             headers={"Content-Type": "application/json"},
         )
         with _SAFE_OPENER.open(req, timeout=_REST_TIMEOUT_SEC) as resp:
-            return 200 <= resp.status < 300
+            if not (200 <= resp.status < 300):
+                return False
+            body = resp.read()
+            if _rest_body_is_error(body):
+                logger.debug(
+                    "LM Studio REST load %s: HTTP 200 but body contains error — falling back to CLI",
+                    model_id,
+                )
+                return False
+            return True
     except urllib.error.HTTPError as e:
         if e.code in (404, 405):
             return False
@@ -183,6 +216,82 @@ def _try_cli(action: str, model_id: str) -> bool:
         return result.returncode == 0
     except Exception as exc:
         logger.debug("LM Studio CLI %s %s: %s", action, model_id, exc)
+        return False
+
+
+def load_model_sync(base_url: str, model_id: str, timeout_sec: float = 90.0) -> bool:
+    """Синхронная загрузка модели в LM Studio с ожиданием завершения.
+
+    В отличие от load_model_async (fire-and-forget), этот метод блокирует
+    вызывающий поток до фактической загрузки модели или истечения таймаута.
+
+    Стратегия:
+      1. Пробуем REST POST /api/v0/models/load — возвращает True сразу если endpoint
+         существует и тело не содержит {"error": ...}.
+      2. Fallback: `lms load -- <model_id>` (синхронный subprocess).
+         PATH может не содержать ~/.lmstudio/bin, поэтому ищем lms через shutil.which,
+         а при неудаче пробуем абсолютный путь ~/.lmstudio/bin/lms.
+
+    Args:
+        base_url: LLM_BASE_URL из settings (например "http://localhost:1234/v1").
+        model_id: идентификатор модели в LM Studio.
+        timeout_sec: максимальное ожидание subprocess `lms load` (секунды).
+
+    Returns:
+        True если модель успешно загружена (REST или CLI), False в противном случае.
+    """
+    if not model_id:
+        return False
+    if len(model_id) > _MODEL_ID_MAX_LEN:
+        logger.warning(
+            "LM Studio load_model_sync: model_id too long (%d chars) — skipped",
+            len(model_id),
+        )
+        return False
+
+    # 1. REST attempt (быстро — возвращает 200 сразу при успехе)
+    if _try_rest_load(base_url, model_id):
+        logger.info("LM Studio: load_model_sync '%s' via REST", model_id)
+        return True
+
+    # 2. CLI fallback — `lms load -- <model_id>` (синхронный, ждём завершения)
+    # PATH в launchd-процессах часто не включает ~/.lmstudio/bin
+    lms = shutil.which("lms") or os.path.expanduser("~/.lmstudio/bin/lms")
+    if not os.path.isfile(lms):
+        logger.debug("LM Studio load_model_sync: lms CLI not found — cannot load '%s'", model_id)
+        return False
+
+    # Flag-injection guard (зеркало _try_cli)
+    if model_id.startswith("-") or not _MODEL_ID_SAFE_RE.fullmatch(model_id):
+        logger.warning(
+            "LM Studio load_model_sync: model_id rejected (flag-injection guard): %r",
+            model_id,
+        )
+        return False
+
+    try:
+        result = subprocess.run(
+            [lms, "load", "--", model_id],
+            timeout=timeout_sec,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            logger.info("LM Studio: load_model_sync '%s' via CLI (returncode=0)", model_id)
+            return True
+        logger.debug(
+            "LM Studio load_model_sync CLI failed: returncode=%d stderr=%s",
+            result.returncode, result.stderr[:200],
+        )
+        return False
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "LM Studio load_model_sync: CLI timed out after %.0fs for model '%s'",
+            timeout_sec, model_id,
+        )
+        return False
+    except Exception as exc:
+        logger.debug("LM Studio load_model_sync CLI error for '%s': %s", model_id, exc)
         return False
 
 
