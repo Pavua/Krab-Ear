@@ -1835,8 +1835,17 @@ class StateStore:
 
         Data-safety guarantees:
         - Reads raw lines without decrypting (preserves ENC1: lines as-is).
-        - Creates a .bak copy BEFORE touching the live file.
+        - Creates a .bak copy BEFORE touching the live file (transient, not permanent).
         - Writes to a .migration_tmp then atomically renames (os.replace).
+        - Self-verifies: decrypts every line in the new encrypted file back to a
+          non-empty value; if any line fails, rolls back by restoring .bak as
+          history.ndjson and returns {"ok": False, "reason": "verification_failed"}.
+        - On successful verification, securely removes the .bak (best-effort overwrite
+          with zeros then unlink); a removal failure only logs a warning and does NOT
+          fail the migration — the encrypted file is already live and correct.
+        - The .bak is intentionally transient: the recovery mechanism for
+          encryption-at-rest is the Keychain key (HistoryCrypto), not a permanent
+          plaintext sidecar sitting on disk.
         - Fully idempotent: already-encrypted ENC1: lines are passed through unchanged.
         - Tombstone/delete lines are preserved exactly.
 
@@ -1910,7 +1919,50 @@ class StateStore:
                     pass
                 raise
 
-        # Step 5: reset crypto cache (file changed on disk)
+            # Step 5: self-verify — decrypt every ENC1 line back; roll back on failure
+            verification_ok = True
+            try:
+                with self.history_path.open("r", encoding="utf-8") as fh:
+                    for vline in fh:
+                        vline = vline.rstrip("\n")
+                        if not vline:
+                            continue
+                        if HistoryCrypto.is_encrypted(vline):
+                            decrypted = crypto.decrypt_line(vline)
+                            if not decrypted:
+                                verification_ok = False
+                                break
+                        # Plaintext pass-through lines (should be 0 after migration) are OK
+            except Exception:
+                verification_ok = False
+
+            if not verification_ok:
+                # Roll back: restore plaintext original from .bak
+                try:
+                    os.replace(str(bak_path), str(self.history_path))
+                except Exception as restore_exc:
+                    logger.error(
+                        "migrate_history_encryption: verification failed AND rollback failed",
+                        extra={"restore_error": str(restore_exc)},
+                    )
+                return {"ok": False, "reason": "verification_failed"}
+
+            # Step 6: verification passed — securely remove the plaintext .bak
+            try:
+                bak_size = bak_path.stat().st_size
+                with bak_path.open("r+b") as fh:
+                    fh.write(b"\x00" * bak_size)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                bak_path.unlink()
+            except Exception as wipe_exc:
+                # Non-fatal: encrypted live file is already in place; log + continue
+                logger.warning(
+                    "migrate_history_encryption: не удалось безопасно удалить .bak",
+                    extra={"bak_path": str(bak_path), "error": str(wipe_exc)},
+                )
+
+        # Step 7: reset crypto cache (file changed on disk)
         self._history_crypto_initialized = False
         self._search_index.clear()
         self._recent_search_index = []

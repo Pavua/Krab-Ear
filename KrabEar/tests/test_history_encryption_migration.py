@@ -258,7 +258,7 @@ class TestMigrateIdempotent(unittest.TestCase):
 
 
 class TestMigrateBakCreated(unittest.TestCase):
-    """.bak файл создаётся перед атомарной заменой."""
+    """.bak файл создаётся перед атомарной заменой, затем безопасно удаляется."""
 
     def setUp(self):
         self._tmpdir = tempfile.mkdtemp()
@@ -268,20 +268,183 @@ class TestMigrateBakCreated(unittest.TestCase):
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def test_bak_file_created(self):
+    def test_bak_file_removed_after_successful_migration(self):
+        """После успешной миграции .bak должен быть безопасно удалён.
+
+        Это регрессионный тест на баг: ранее .bak оставался на диске навсегда,
+        что сводило на нет смысл шифрования — plaintext лежал рядом с зашифрованным
+        файлом истории.
+        """
         store = _make_store(self.data_dir)
         _inject_crypto(store)
 
-        _write_plaintext_line(self.data_dir / "history.ndjson", _make_item_payload("id1", "Данные"))
+        secret_text = "Секретные данные пользователя"
+        _write_plaintext_line(self.data_dir / "history.ndjson", _make_item_payload("id1", secret_text))
 
         result = store.migrate_history_encryption()
-        self.assertTrue(result["ok"])
+        self.assertTrue(result["ok"], result)
 
         bak_path = self.data_dir / "history.ndjson.bak"
-        self.assertTrue(bak_path.exists(), ".bak файл должен быть создан")
-        # .bak должен содержать plaintext (оригинал до шифрования)
-        bak_content = bak_path.read_text(encoding="utf-8").strip()
-        self.assertFalse(bak_content.startswith("ENC1:"), ".bak должен содержать plaintext-оригинал")
+        # После успешной миграции .bak должен быть удалён (ключевая проверка)
+        self.assertFalse(
+            bak_path.exists(),
+            ".bak с plaintext-данными НЕ должен оставаться на диске после успешного шифрования",
+        )
+
+    def test_bak_plaintext_not_readable_after_migration(self):
+        """Ни один файл .bak не должен содержать plaintext транскрипт после миграции."""
+        store = _make_store(self.data_dir)
+        _inject_crypto(store)
+
+        secret_text = "Конфиденциальный транскрипт"
+        _write_plaintext_line(self.data_dir / "history.ndjson", _make_item_payload("id1", secret_text))
+
+        result = store.migrate_history_encryption()
+        self.assertTrue(result["ok"], result)
+
+        bak_path = self.data_dir / "history.ndjson.bak"
+        if bak_path.exists():
+            # Если .bak не удалось удалить (напр. wipe_exc) — убеждаемся,
+            # что он не содержит plaintext транскрипт в читаемом виде.
+            bak_content = bak_path.read_bytes()
+            self.assertNotIn(
+                secret_text.encode("utf-8"),
+                bak_content,
+                ".bak не должен содержать plaintext транскрипт даже если не удалось удалить",
+            )
+
+
+class TestMigrateBakPlaintextNotSurviving(unittest.TestCase):
+    """Регрессия wave-4: plaintext .bak не должен пережить успешную миграцию.
+
+    Баг: migrate_history_encryption делал shutil.copy2(history.ndjson → .bak)
+    ДО шифрования, затем never удалял .bak.  В итоге полный plaintext-дамп
+    лежал рядом с зашифрованным файлом, полностью сводя на нет encryption-at-rest.
+
+    Фикс: после успешного os.replace и self-verify — безопасный wipe+unlink .bak.
+    """
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.data_dir = Path(self._tmpdir)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_bak_does_not_exist_after_successful_migration(self):
+        """Ключевой тест: .bak не существует после успешной миграции (fail-before / pass-after)."""
+        store = _make_store(self.data_dir)
+        fixed_key = b"\x00" * 32
+        from backend.history_crypto import HistoryCrypto
+        crypto = HistoryCrypto(fixed_key)
+        _inject_crypto(store, crypto)
+
+        # Seed N plaintext items
+        n = 6
+        for i in range(n):
+            _write_plaintext_line(
+                self.data_dir / "history.ndjson",
+                _make_item_payload(f"id{i}", f"Транскрипт {i}"),
+            )
+
+        result = store.migrate_history_encryption()
+
+        # (a) migration ok=True, encrypted==N
+        self.assertTrue(result["ok"], f"Ожидался ok=True, получено: {result}")
+        self.assertEqual(result["encrypted"], n)
+        self.assertEqual(result["total"], n)
+
+        # (b) history.ndjson is all-ENC1
+        raw_lines = _read_all_raw_lines(self.data_dir / "history.ndjson")
+        self.assertEqual(len(raw_lines), n)
+        for line in raw_lines:
+            self.assertTrue(
+                HistoryCrypto.is_encrypted(line),
+                f"Все строки должны быть ENC1: после миграции, получено: {line[:40]}",
+            )
+
+        # (c) round-trip integrity: read back items are byte-identical to pre-migration baseline
+        store_post = _make_store(self.data_dir)
+        _inject_crypto(store_post, crypto)
+        items_after = []
+        with store_post._lock():
+            for item in store_post._iter_history_items_unlocked():
+                items_after.append(item.to_dict())
+        self.assertEqual(len(items_after), n, "Количество items после миграции должно совпасть")
+        texts_after = {item["id"]: item["text"] for item in items_after}
+        for i in range(n):
+            self.assertEqual(
+                texts_after.get(f"id{i}"),
+                f"Транскрипт {i}",
+                f"Текст item id{i} должен совпасть после round-trip",
+            )
+
+        # (d) .bak no longer exists — КЛЮЧЕВАЯ ПРОВЕРКА (fails before fix, passes after)
+        bak_path = self.data_dir / "history.ndjson.bak"
+        self.assertFalse(
+            bak_path.exists(),
+            "history.ndjson.bak с plaintext ДОЛЖЕН быть удалён после успешного шифрования",
+        )
+
+    def test_idempotency_second_migration_encrypts_zero(self):
+        """(e) Идемпотентность: второй запуск шифрует 0 строк."""
+        store = _make_store(self.data_dir)
+        fixed_key = b"\x42" * 32
+        from backend.history_crypto import HistoryCrypto
+        crypto = HistoryCrypto(fixed_key)
+        _inject_crypto(store, crypto)
+
+        _write_plaintext_line(
+            self.data_dir / "history.ndjson",
+            _make_item_payload("id1", "Текст"),
+        )
+
+        r1 = store.migrate_history_encryption()
+        self.assertTrue(r1["ok"])
+        self.assertEqual(r1["encrypted"], 1)
+
+        # Second run
+        store2 = _make_store(self.data_dir)
+        _inject_crypto(store2, crypto)
+        r2 = store2.migrate_history_encryption()
+        self.assertTrue(r2["ok"])
+        self.assertEqual(r2["encrypted"], 0, "Второй запуск не должен шифровать уже зашифрованные строки")
+        self.assertEqual(r2["already_encrypted"], 1)
+
+        # .bak не должен существовать после обоих запусков
+        bak_path = self.data_dir / "history.ndjson.bak"
+        self.assertFalse(bak_path.exists(), ".bak не должен существовать после повторной миграции")
+
+    def test_rollback_on_verification_failure(self):
+        """При сбое self-verify — .bak восстанавливается как live-файл."""
+        store = _make_store(self.data_dir)
+        fixed_key = b"\x11" * 32
+        from backend.history_crypto import HistoryCrypto
+        crypto = HistoryCrypto(fixed_key)
+        _inject_crypto(store, crypto)
+
+        original_text = "Оригинальный plaintext"
+        _write_plaintext_line(
+            self.data_dir / "history.ndjson",
+            _make_item_payload("id1", original_text),
+        )
+        original_content = (self.data_dir / "history.ndjson").read_text(encoding="utf-8")
+
+        # Patch decrypt_line to raise → verification fails
+        with patch.object(crypto, "decrypt_line", side_effect=Exception("ключ повреждён")):
+            result = store.migrate_history_encryption()
+
+        self.assertFalse(result["ok"], "При сбое verification должен вернуться ok=False")
+        self.assertEqual(result["reason"], "verification_failed")
+
+        # Live file должен быть восстановлен из .bak (plaintext original)
+        restored_content = (self.data_dir / "history.ndjson").read_text(encoding="utf-8")
+        self.assertEqual(
+            restored_content,
+            original_content,
+            "Live-файл должен быть восстановлен из .bak при сбое verification",
+        )
 
 
 class TestMigrateAtomicOnError(unittest.TestCase):
