@@ -90,8 +90,11 @@ def detect_hardware_profile(
             subprocess sysctl.  Инжектируется в тестах для изоляции от OS.
 
     Returns:
-        HardwareProfile с заполненными полями.  При любой ошибке возвращает
-        безопасный default (tier=mid) — автокалибровка не должна ломать запуск.
+        HardwareProfile с заполненными полями.  При успешном чтении sysctl
+        tier определяется реальным объёмом RAM (1 GB → tier=low).
+        При любой *исключительной* ошибке (sysctl недоступен, subprocess упал)
+        возвращает консервативный default: tier=mid, ram_gb=16 —
+        автокалибровка не должна ломать запуск.
     """
     reader = sysctl_reader or _default_sysctl_reader
 

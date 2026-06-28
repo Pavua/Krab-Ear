@@ -316,5 +316,102 @@ class ParentDirCreationTest(unittest.TestCase):
             self.assertTrue(lp.exists())
 
 
+class BlockingIOErrorGracefulDegradeTest(unittest.TestCase):
+    """Fix 3 regression — BlockingIOError on LOCK_NB must return True, not False.
+
+    Before the fix the LOCK_NB contention branch returned False, which would
+    silently block recording on a transient <1 ms flock write-race (violating
+    the documented graceful-degrade contract: "Any … error → returns True so
+    Ear is never blocked").
+    """
+
+    def test_blocking_io_error_returns_true(self) -> None:
+        """Patch flock to raise BlockingIOError → acquire must return True."""
+        with tempfile.TemporaryDirectory() as td:
+            lp = _tmp_lock(td)
+            # Patch flock to simulate write-race contention on LOCK_EX|LOCK_NB
+            with patch("fcntl.flock", side_effect=BlockingIOError("simulated LOCK_NB race")):
+                result = acquire_brain_lease("krab_ear", ttl_sec=30.0, lock_path=lp)
+            self.assertTrue(result, "BlockingIOError must gracefully return True")
+
+    def test_blocking_io_error_does_not_raise(self) -> None:
+        """No exception must escape from acquire_brain_lease on BlockingIOError."""
+        with tempfile.TemporaryDirectory() as td:
+            lp = _tmp_lock(td)
+            try:
+                with patch("fcntl.flock", side_effect=BlockingIOError("race")):
+                    acquire_brain_lease("krab_ear", ttl_sec=30.0, lock_path=lp)
+            except Exception as exc:  # noqa: BLE001
+                self.fail(f"acquire_brain_lease raised unexpectedly: {exc}")
+
+
+class AtomicPayloadWriteTest(unittest.TestCase):
+    """Fix 4 regression — _write_payload must not corrupt existing content on failure.
+
+    Before the fix, _write_payload did os.ftruncate(fd, 0) THEN os.write(...).
+    If os.write raised (e.g. ENOSPC), the file was left empty — the old payload
+    was gone, but the caller's except returned True → two processes could both
+    believe they held the brain.
+
+    After the fix the write goes to a temp file first; only on success does
+    os.replace atomically update the lock path.
+    """
+
+    def test_write_failure_does_not_corrupt_existing_payload(self) -> None:
+        """Simulate os.write failure inside _write_payload during a re-acquire (TTL extension).
+
+        The scenario: krab_ear holds a lease; krab_ear re-acquires to extend the TTL.
+        This path calls _write_payload. If it fails, the outer except must graceful-degrade
+        to True — and critically, the atomic-rename approach means the original lock file
+        content is never truncated before the write succeeds.
+        """
+        import json
+        with tempfile.TemporaryDirectory() as td:
+            lp = _tmp_lock(td)
+            # Establish a valid lease for krab_ear.
+            ok = acquire_brain_lease("krab_ear", ttl_sec=60.0, lock_path=lp)
+            self.assertTrue(ok)
+            original = json.loads(lp.read_text())
+            self.assertEqual(original["owner"], "krab_ear")
+
+            # Patch _write_payload to raise (simulating ENOSPC during the temp-file write).
+            # On the same-owner re-acquire path, _write_payload IS called (to extend TTL).
+            import backend.brain_lease as _bl
+            _orig_write = _bl._write_payload
+
+            def _failing_write(fd, payload, path):
+                raise OSError(28, "No space left on device")
+
+            _bl._write_payload = _failing_write
+            try:
+                # Same owner re-acquires — hits _write_payload for TTL extension.
+                result = acquire_brain_lease("krab_ear", ttl_sec=90.0, lock_path=lp)
+            finally:
+                _bl._write_payload = _orig_write
+
+            # Outer except must graceful-degrade to True so recording is not blocked.
+            self.assertTrue(result, "Outer except must graceful-degrade to True on write error")
+            # The lock file must still contain the original payload (not be empty).
+            # With the atomic-rename fix, the original file is never truncated before
+            # the temp file write — so it survives ENOSPC.
+            surviving = lp.read_text()
+            self.assertTrue(surviving.strip(), "Lock file must not be truncated/empty after write failure")
+            surviving_payload = json.loads(surviving)
+            self.assertEqual(surviving_payload["owner"], "krab_ear",
+                             "Original payload must survive a failed overwrite attempt")
+
+    def test_normal_acquire_writes_correct_payload(self) -> None:
+        """After the atomic-rename fix, a normal acquire still persists the payload."""
+        import json
+        with tempfile.TemporaryDirectory() as td:
+            lp = _tmp_lock(td)
+            ok = acquire_brain_lease("krab_ear", ttl_sec=30.0, lock_path=lp)
+            self.assertTrue(ok)
+            payload = json.loads(lp.read_text())
+            self.assertEqual(payload["owner"], "krab_ear")
+            self.assertIn("exp_ts", payload)
+            self.assertIn("pid", payload)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4678,7 +4678,8 @@ class BackendService:
             snr = cached.get("_last_mic_snr_db")
             suitable = cached.get("_last_mic_suitable_for_stt")
             if snr is not None:
-                mic_info = {"snr_db": float(snr), "suitable_for_stt": bool(suitable)}
+                _snr_f = float(snr) if math.isfinite(float(snr)) else 0.0
+                mic_info = {"snr_db": _snr_f, "suitable_for_stt": bool(suitable)}
                 if not mic_info["suitable_for_stt"]:
                     rationale += (
                         " Последняя проверка микрофона показала низкое SNR "
