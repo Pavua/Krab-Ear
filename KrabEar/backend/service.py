@@ -872,7 +872,14 @@ class BackendService:
         self._plugin_manager = PluginManager(data_dir=self.store.data_dir)
         self._hotword_detector = HotwordDetector(data_dir=self.store.data_dir)
         self._model_cache_manager = ModelCacheManager()
-        self._model_downloader = ModelDownloader(event_bus=event_bus)
+        self._model_downloader = ModelDownloader(
+            event_bus=event_bus,
+            stall_timeout_sec=float(
+                self._settings_svc.cached_settings().get(
+                    "stt_download_stall_timeout_sec", 300.0
+                )
+            ),
+        )
         # Auto-Glossary — автоматический глоссарий из истории транскрибаций
         self._auto_glossary = AutoGlossaryBuilder(
             store=self.store,
@@ -1968,6 +1975,7 @@ class BackendService:
             # --- Загрузка STT-моделей (fresh-install unblock) ---
             "download_stt_model": self._handle_download_stt_model,  # запустить фоновую загрузку STT-модели из HuggingFace
             "get_stt_model_status": self._handle_get_stt_model_status,  # статус кэша/загрузки STT-модели
+            "cancel_stt_model_download": self._handle_cancel_stt_model_download,  # отменить текущую фоновую загрузку STT-модели
             # --- Privacy Dashboard (aggregate view) ---
             "get_privacy_dashboard": self._handle_get_privacy_dashboard,  # агрегированный дашборд privacy/security: режим, шифрование, хранилище, retention, audit
             # --- Auto-calibration: hardware profile + STT recommendation ---
@@ -4553,12 +4561,17 @@ class BackendService:
         Returns:
             {"ok": True, "status": "started"|"already_cached"|"in_progress", "model_id": str}
 
-        Raises ValueError если model_id явно задан, но пустой или не строка.
+        Raises ValueError если model_id явно задан, но пустой / не строка / слишком длинный.
         """
+        from backend.model_downloader import MAX_MODEL_ID_LEN
         raw_model_id = params.get("model_id")
         if raw_model_id is not None:
             if not isinstance(raw_model_id, str) or not raw_model_id.strip():
                 raise ValueError("Параметр 'model_id' должен быть непустой строкой")
+            if len(raw_model_id) > MAX_MODEL_ID_LEN:
+                raise ValueError(
+                    f"Параметр 'model_id' слишком длинный (макс. {MAX_MODEL_ID_LEN} символов)"
+                )
             model_id = raw_model_id.strip()
         else:
             model_id = self._get_runtime_setting("MODEL_BALANCED", "mlx-community/whisper-large-v3-turbo")
@@ -4584,24 +4597,64 @@ class BackendService:
                 "model_id": str,
                 "cached": bool,
                 "downloading": bool,
-                "status": "idle"|"downloading"|"done"|"error",
+                "status": "idle"|"downloading"|"done"|"error"|"cancelled",
                 "pct": float (0..100),
                 "downloaded": int (bytes),
                 "total": int (bytes),
                 "error_msg": str,
-                "path": str,
             }
+
+        NOTE: "path" field intentionally omitted (F2-LOW privacy: no absolute FS path).
         """
+        from backend.model_downloader import MAX_MODEL_ID_LEN
         raw_model_id = params.get("model_id")
         if raw_model_id is not None:
             if not isinstance(raw_model_id, str) or not raw_model_id.strip():
                 raise ValueError("Параметр 'model_id' должен быть непустой строкой")
+            if len(raw_model_id) > MAX_MODEL_ID_LEN:
+                raise ValueError(
+                    f"Параметр 'model_id' слишком длинный (макс. {MAX_MODEL_ID_LEN} символов)"
+                )
             model_id = raw_model_id.strip()
         else:
             model_id = self._get_runtime_setting("MODEL_BALANCED", "mlx-community/whisper-large-v3-turbo")
 
         status_dict = self._model_downloader.get_status(model_id)
         return {"ok": True, **status_dict}
+
+    def _handle_cancel_stt_model_download(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Отменяет текущую фоновую загрузку STT-модели (F1-MED wave2).
+
+        params:
+            model_id (str, optional): HuggingFace repo_id.
+                Дефолт: settings.MODEL_BALANCED.
+
+        Returns:
+            {"ok": True, "cancelled": bool, "model_id": str}
+            cancelled=True означает, что загрузка активно шла и сигнал отмены отправлен.
+            cancelled=False — загрузка не шла (не было нужды отменять).
+
+        Raises ValueError если model_id явно задан, но пустой / не строка / слишком длинный.
+        """
+        from backend.model_downloader import MAX_MODEL_ID_LEN
+        raw_model_id = params.get("model_id")
+        if raw_model_id is not None:
+            if not isinstance(raw_model_id, str) or not raw_model_id.strip():
+                raise ValueError("Параметр 'model_id' должен быть непустой строкой")
+            if len(raw_model_id) > MAX_MODEL_ID_LEN:
+                raise ValueError(
+                    f"Параметр 'model_id' слишком длинный (макс. {MAX_MODEL_ID_LEN} символов)"
+                )
+            model_id = raw_model_id.strip()
+        else:
+            model_id = self._get_runtime_setting("MODEL_BALANCED", "mlx-community/whisper-large-v3-turbo")
+
+        cancelled = self._model_downloader.cancel(model_id)
+        logger.info(
+            "cancel_stt_model_download",
+            extra={"model_id": model_id, "cancelled": cancelled},
+        )
+        return {"ok": True, "cancelled": cancelled, "model_id": model_id}
 
     # ------------------------------------------------------------------
     # Handlers: Auto-calibration

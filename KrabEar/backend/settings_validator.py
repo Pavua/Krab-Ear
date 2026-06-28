@@ -71,6 +71,9 @@ _RANGE_FIELDS: dict[str, tuple[Any, Any, Any, type]] = {
     "auto_purge_retention_days": (1, 3650, 90, int),
     # auto_purge_check_interval_hours: 1 hour minimum, 1 week maximum.
     "auto_purge_check_interval_hours": (1, 168, 24, int),
+    # wave2 F1-MED: stall watchdog for STT model download.
+    # Below 30 s risks false-positive abort on slow mirrors; above 3600 s = 1 hour.
+    "stt_download_stall_timeout_sec": (30.0, 3600.0, 300.0, float),
 }
 
 # Bool-поля с дефолтными значениями

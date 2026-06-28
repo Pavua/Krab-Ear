@@ -1085,4 +1085,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # TTL одного lease в секундах. Краш процесса не «вешает» lock: следующий acquire
     # заберёт лиз по истёкшему TTL. 30 с достаточно для recording цикла.
     "llm_brain_lease_ttl_sec": 30.0,
+    # --- STT model download stall timeout (backend/model_downloader.py) ---
+    # Сколько секунд без прогресса (новых байт) считается «зависанием» загрузки.
+    # По истечении загрузка прерывается с status="error"/reason="stalled".
+    # Диапазон: 30–3600 с (wave2 fix F1-MED).
+    "stt_download_stall_timeout_sec": 300.0,
 }
