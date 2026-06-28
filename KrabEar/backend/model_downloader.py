@@ -20,6 +20,7 @@ EventBus event:
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -419,7 +420,6 @@ class ModelDownloader:
                 return
 
             try:
-                import os
                 hf_token: str | None = os.environ.get("HF_TOKEN") or None
 
                 tqdm_cls = _make_tqdm_class(self, model_id)
@@ -433,7 +433,46 @@ class ModelDownloader:
                 if tqdm_cls is not None:
                     kwargs["tqdm_class"] = tqdm_cls
 
-                local_path = snapshot_download(**kwargs)
+                # User-initiated download is an explicit network request — override the
+                # global offline hardening (HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE) for
+                # the duration of this one call only.
+                #
+                # huggingface_hub ≥ 0.14 reads the offline flag from the MODULE-LEVEL
+                # constant `huggingface_hub.constants.HF_HUB_OFFLINE` (not os.environ) at
+                # every HTTP call via constants.is_offline_mode().  Setting only os.environ
+                # is NOT sufficient once the constant is already bound at import time.
+                # We must set BOTH the env var (for any code that reads it live) and the
+                # module constant, then restore the ORIGINAL values in a finally block so
+                # the global hardening is fully intact after the download (success, failure,
+                # or cancel).
+                _prev_env_hf = os.environ.get("HF_HUB_OFFLINE")
+                _prev_env_tr = os.environ.get("TRANSFORMERS_OFFLINE")
+                try:
+                    import huggingface_hub.constants as _hf_const
+                    _prev_const = _hf_const.HF_HUB_OFFLINE
+                except Exception:  # pragma: no cover
+                    _hf_const = None  # type: ignore[assignment]
+                    _prev_const = None
+
+                os.environ["HF_HUB_OFFLINE"] = "0"
+                os.environ["TRANSFORMERS_OFFLINE"] = "0"
+                if _hf_const is not None:
+                    _hf_const.HF_HUB_OFFLINE = False
+
+                try:
+                    local_path = snapshot_download(**kwargs)
+                finally:
+                    # Restore offline hardening unconditionally.
+                    if _prev_env_hf is None:
+                        os.environ.pop("HF_HUB_OFFLINE", None)
+                    else:
+                        os.environ["HF_HUB_OFFLINE"] = _prev_env_hf
+                    if _prev_env_tr is None:
+                        os.environ.pop("TRANSFORMERS_OFFLINE", None)
+                    else:
+                        os.environ["TRANSFORMERS_OFFLINE"] = _prev_env_tr
+                    if _hf_const is not None and _prev_const is not None:
+                        _hf_const.HF_HUB_OFFLINE = _prev_const
 
                 cache_path = str(local_path)
                 state.update(status="done", pct=100.0, cache_path=cache_path)
