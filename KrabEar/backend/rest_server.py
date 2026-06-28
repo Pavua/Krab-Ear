@@ -1528,7 +1528,7 @@ def list_models():
         _s3 = store.load_settings() or {}
         _dstt = _s3.get("stt_ru_primary_model") or "mlx-community/whisper-large-v3-mlx"
         default_stt = str(_dstt).strip() or None
-        _dllm = _s3.get("llm_model") or "qwen3-4b-abliterated"
+        _dllm = _s3.get("llm_model") or "gemma-4-e4b-it-mlx"
         default_llm = str(_dllm).strip() or None
     except Exception as exc:
         logger.warning(

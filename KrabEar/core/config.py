@@ -135,7 +135,7 @@ class Settings(BaseSettings):
     LLM_ENABLED: bool = False
     LLM_BASE_URL: str = "http://localhost:1234/v1"
     LLM_API_KEY: str = ""
-    LLM_MODEL: str = "qwen3-4b-abliterated"
+    LLM_MODEL: str = "gemma-4-e4b-it-mlx"
     LLM_TIMEOUT_SEC: float = 240.0  # was 120.0 → bumped fix/lm-studio-warmup: External SSD cold-load gemma-4-26b-a4b-it-optiq ~3-4 min after 30min idle JIT eviction; 240s covers worst-case SSD cold load + queue.
     LLM_CIRCUIT_FAIL_THRESHOLD: int = 3
     LLM_CIRCUIT_INITIAL_RESET_SEC: int = 60
@@ -1012,15 +1012,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # "legacy"      = прежний порядок adapter chain из AudioEngine.
     "stt_routing": "auto_scored",
     # --- LLM rewriter model (runtime override via set_settings) ---
-    # Default: historically stable qwen3-4b-abliterated (no vision/tool_calls leakage).
-    # gemma-4-e4b-it-mlx was removed as default: vision-capable MLX emits tool_calls JSON
-    # OR triggers mlx_lm UnboundLocalError mid-stream causing LM Studio Channel Error.
-    "llm_model": "qwen3-4b-abliterated",
+    # gemma-4-e4b-it-mlx: verified working (~12s cold load, ~1.8s rewrite on M4 Max).
+    # tool_calls guard in llm_rewriter.py (step 6a) catches any tool_calls leak.
+    # mlx_lm UnboundLocalError handled by retry in step 5a.
+    "llm_model": "gemma-4-e4b-it-mlx",
     # --- LLM rewriter fallback chain ---
     # Ordered list of fallback model names to try when the primary model's circuit
     # breaker is open or the call fails. Each model has its own independent breaker.
     # Empty list = degrade straight to raw text (legacy behaviour).
-    "llm_model": "qwen3-4b-abliterated",
     # --- LLM rewriter fallback chain ---
     # Ordered list of fallback model names tried when primary fails.
     # Empty list = degrade straight to raw text.
@@ -1053,6 +1052,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Keepalive: пингуем модель каждые 25 min чтобы LM Studio не выгружал её по idle TTL.
     # Bumped False → True per fix/lm-studio-warmup: eliminates cold-load penalty after idle.
     "llm_idle_keepalive_enabled": True,
+    # Self-heal timeout: максимальное время ожидания `lms load` при автоматической
+    # перезагрузке модели после eviction LM Studio (HTTP 400 "No models loaded").
+    # 90 с — запас для холодной загрузки gemma-4-e4b-it-mlx (~12 с с NVMe).
+    # Диапазон: 10.0–600.0 с; защищён settings_validator._RANGE_FIELDS.
+    "llm_autoload_timeout_sec": 90.0,
     # --- STT startup warmup ---
     # Предварительная загрузка Whisper-модели при старте бэкенда в background thread.
     # Исключает задержку 1–3 с на первой диктовке (cold-start model load).

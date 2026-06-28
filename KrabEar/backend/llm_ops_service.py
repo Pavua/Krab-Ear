@@ -82,7 +82,7 @@ class LLMOpsService:
                 if item.get("id")
             ]
             recommended_models = [
-                "qwen3-4b-abliterated",
+                "gemma-4-e4b-it-mlx",
                 "huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx",
                 "qwen3-8b-abliterated",
             ]
