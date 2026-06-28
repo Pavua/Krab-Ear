@@ -527,6 +527,16 @@ class AudioEngine:
             return False
         return bool(self._settings_get("stt_punctuation_llm_pass_enabled", False))
 
+    def _cloud_rewrite_allowed(self) -> bool:
+        """Runtime check: включён ли cloud rewriter И не в режиме конфиденциальности.
+
+        Privacy gate: privacy_mode_enabled=True ВСЕГДА возвращает False —
+        транскрипт не должен покидать устройство в режиме приватности.
+        """
+        if self._settings_get("privacy_mode_enabled", False):
+            return False
+        return bool(self._settings_get("cloud_rewriter_enabled", False))
+
     def _is_model_unavailable(self, model_id: str) -> bool:
         """Проверяет, заблокирован ли адаптер/модель в _unavailable_models с учётом TTL.
 
@@ -1225,6 +1235,41 @@ class AudioEngine:
                         llm_result.fallback_reason,
                         llm_result.latency_ms,
                     )
+                    # 4.5a Cloud rewriter fallback: когда локальный LM Studio недоступен,
+                    # опционально полируем транскрипт через облачный LLM.
+                    # PRIVACY CONTRACT: разрешено ТОЛЬКО если cloud_rewriter_enabled=True
+                    # И privacy_mode_enabled=False (проверяется в _cloud_rewrite_allowed).
+                    if self._cloud_rewrite_allowed():
+                        try:
+                            from backend.cloud_rewriter import cloud_rewrite as _cloud_rewrite  # noqa: PLC0415
+                            _cr_lang = resolved_lang or settings.TRANSCRIBE_LANGUAGE
+                            cloud_text = _cloud_rewrite(cleaned_text, _cr_lang)
+                            if cloud_text:
+                                logger.info(
+                                    "Cloud rewrite fallback applied: %d->%d chars lang=%s",
+                                    len(cleaned_text), len(cloud_text), _cr_lang,
+                                )
+                                llm_diff = TextDiffAnalyzer().compute_diff(cleaned_text, cloud_text)
+                                self._last_llm_diff = llm_diff
+                                text = cloud_text
+                                # Privacy audit trail: данные покинули устройство.
+                                try:
+                                    from backend.privacy_audit import get_privacy_audit_logger  # noqa: PLC0415
+                                    _cr_provider = self._settings_get("cloud_rewriter_provider", "openai")
+                                    get_privacy_audit_logger().log_event(
+                                        category="cloud_rewrite",
+                                        action="cloud_rewrite_used",
+                                        details={
+                                            "provider": _cr_provider,
+                                            "input_chars": len(cleaned_text),
+                                            "output_chars": len(cloud_text),
+                                            "language": _cr_lang,
+                                        },
+                                    )
+                                except Exception:
+                                    pass  # audit trail must never break transcription
+                        except Exception as _cr_exc:
+                            logger.warning("Cloud rewrite error (ignored): %s", _cr_exc)
 
             # 5. Расчет метрик уверенности
             confidence = 0.0

@@ -1094,4 +1094,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # По истечении загрузка прерывается с status="error"/reason="stalled".
     # Диапазон: 30–3600 с (wave2 fix F1-MED).
     "stt_download_stall_timeout_sec": 300.0,
+    # --- Cloud rewriter fallback (backend/cloud_rewriter.py) ---
+    # PRIVACY-SENSITIVE: когда включён, транскрипт отправляется в облако.
+    # Opt-in: False по умолчанию — пользователь должен явно включить.
+    # privacy_mode_enabled=True ВСЕГДА блокирует (engine._cloud_rewrite_allowed).
+    "cloud_rewriter_enabled": False,
+    # Провайдер: "openai" | "anthropic"
+    "cloud_rewriter_provider": "openai",
+    # Anthropic API key (используется AnthropicRewriterProvider).
+    # Пустая строка = stub-режим (no_api_key), нет HTTP-вызовов.
+    "anthropic_api_key": "",
 }

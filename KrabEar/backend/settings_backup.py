@@ -51,6 +51,10 @@ SENSITIVE_FIELDS: frozenset[str] = frozenset({
     # same credential-class as hf_token / telnyx_api_key — must not appear
     # in backup files on disk.
     "porcupine_access_key",
+    # cloud_rewriter credentials — API keys used for cloud transcript cleanup
+    # (backend/cloud_rewriter.py); must be redacted from backup files on disk.
+    "openai_api_key",
+    "anthropic_api_key",
 })
 # Legacy alias kept for any internal references within this module.
 _SENSITIVE = SENSITIVE_FIELDS
