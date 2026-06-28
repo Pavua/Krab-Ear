@@ -292,9 +292,10 @@ class TestModelDownloaderGetStatus(unittest.TestCase):
         dl = _make_downloader()
         with patch.object(dl, "_is_cached", return_value=False):
             status = dl.get_status(_FAKE_MODEL)
+        # F2-LOW wave2: 'path' must NOT be in the response (no absolute FS path exposed).
         expected_keys = {
             "model_id", "cached", "downloading", "status",
-            "pct", "downloaded", "total", "error_msg", "path",
+            "pct", "downloaded", "total", "error_msg",
         }
         self.assertEqual(set(status.keys()), expected_keys)
         self.assertFalse(status["cached"])
@@ -434,6 +435,297 @@ class TestDispatchTableWiring(unittest.TestCase):
     def test_download_stt_model_non_string_model_id_raises(self) -> None:
         with self.assertRaises(ValueError):
             self._service._dispatch_table["download_stt_model"]({"model_id": 123})
+
+    def test_cancel_stt_model_download_in_dispatch(self) -> None:
+        """F1-MED wave2: cancel handler must be wired in dispatch table."""
+        self.assertIn("cancel_stt_model_download", self._service._dispatch_table)
+
+    def test_cancel_not_downloading_returns_false(self) -> None:
+        """cancel_stt_model_download when idle returns cancelled=False."""
+        with patch.object(
+            self._service._model_downloader, "_is_cached", return_value=False
+        ):
+            result = self._service._dispatch_table["cancel_stt_model_download"]({})
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["cancelled"])
+
+    def test_cancel_while_downloading_returns_true(self) -> None:
+        """cancel_stt_model_download while active returns cancelled=True."""
+        dl = self._service._model_downloader
+        # Force state to 'downloading'
+        state = dl._get_or_create_state(_FAKE_MODEL)
+        state.update(status="downloading")
+        result = self._service._dispatch_table["cancel_stt_model_download"](
+            {"model_id": _FAKE_MODEL}
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["cancelled"])
+
+    def test_get_stt_model_status_no_absolute_path(self) -> None:
+        """F2-LOW wave2: 'path' field must NOT appear in get_stt_model_status response."""
+        with patch.object(
+            self._service._model_downloader, "_is_cached", return_value=False
+        ):
+            result = self._service._dispatch_table["get_stt_model_status"]({})
+        self.assertNotIn("path", result,
+                         "Absolute FS path must not be exposed via IPC (F2-LOW)")
+
+    def test_download_model_id_too_long_raises(self) -> None:
+        """F4-LOW wave2: model_id > MAX_MODEL_ID_LEN must raise ValueError."""
+        from backend.model_downloader import MAX_MODEL_ID_LEN
+        long_id = "a" * (MAX_MODEL_ID_LEN + 1)
+        with self.assertRaises(ValueError):
+            self._service._dispatch_table["download_stt_model"]({"model_id": long_id})
+
+    def test_get_status_model_id_too_long_raises(self) -> None:
+        """F4-LOW wave2: model_id > MAX_MODEL_ID_LEN must raise ValueError."""
+        from backend.model_downloader import MAX_MODEL_ID_LEN
+        long_id = "x" * (MAX_MODEL_ID_LEN + 1)
+        with self.assertRaises(ValueError):
+            self._service._dispatch_table["get_stt_model_status"]({"model_id": long_id})
+
+    def test_cancel_model_id_too_long_raises(self) -> None:
+        """F4-LOW wave2: cancel also validates model_id length."""
+        from backend.model_downloader import MAX_MODEL_ID_LEN
+        long_id = "z" * (MAX_MODEL_ID_LEN + 1)
+        with self.assertRaises(ValueError):
+            self._service._dispatch_table["cancel_stt_model_download"]({"model_id": long_id})
+
+
+# ---------------------------------------------------------------------------
+# F1-MED: cancel releases _dl_lock so a new download can start after cancel
+# ---------------------------------------------------------------------------
+
+class TestCancelReleasesLock(unittest.TestCase):
+    """After a cancelled download, a NEW download for any model must be startable."""
+
+    def test_cancel_releases_lock_for_next_download(self) -> None:
+        """F1-MED wave2 regression: cancel() must not permanently hold _dl_lock.
+
+        Before fix: _dl_lock was held inside `with self._dl_lock:` — a cancel
+        raised inside the tqdm callback would propagate as an unhandled exception
+        out of the `with` block, releasing the lock correctly ONLY if Python's
+        `with` unwound the lock.  With try/finally the lock is GUARANTEED to
+        release even on BaseException subclasses.
+        """
+        bus = _StubEventBus()
+        dl = ModelDownloader(event_bus=bus, stall_timeout_sec=300.0)
+
+        download_entered = threading.Event()
+        allow_cancel = threading.Event()
+
+        def fake_snapshot_download(**kwargs: Any) -> str:
+            download_entered.set()
+            allow_cancel.wait(timeout=3.0)
+            # After cancel is signalled, simulate a progress callback that checks it.
+            dl._on_progress(_FAKE_MODEL, 0, 0, 0.0)
+            return _FAKE_PATH
+
+        is_cached_p = patch.object(dl, "_is_cached", return_value=False)
+        hf_p = patch("huggingface_hub.snapshot_download",
+                     side_effect=fake_snapshot_download, create=True)
+        is_cached_p.start()
+        hf_p.start()
+        try:
+            dl.start_download(_FAKE_MODEL)
+            download_entered.wait(timeout=3.0)
+
+            # Signal cancel while download is in progress.
+            dl.cancel(_FAKE_MODEL)
+            allow_cancel.set()
+
+            # Wait for worker to finish (cancelled state).
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                internal = dl._get_or_create_state(_FAKE_MODEL).to_dict()
+                if internal["status"] in ("cancelled", "error"):
+                    break
+                time.sleep(0.05)
+
+            # Now the lock must be free: try to acquire it with timeout.
+            acquired = dl._dl_lock.acquire(timeout=3.0)
+            if acquired:
+                dl._dl_lock.release()
+            self.assertTrue(acquired, "_dl_lock must be released after cancel (F1-MED)")
+        finally:
+            is_cached_p.stop()
+            hf_p.stop()
+
+
+# ---------------------------------------------------------------------------
+# F1-MED: stall watchdog trips error when no byte progress for timeout
+# ---------------------------------------------------------------------------
+
+class TestStallWatchdog(unittest.TestCase):
+    """Stall watchdog: no byte progress for > stall_timeout_sec → error status."""
+
+    def test_stall_triggers_error_and_releases_lock(self) -> None:
+        """F1-MED wave2: simulate stall by freezing byte count past the timeout."""
+        bus = _StubEventBus()
+        # Very short stall timeout (0.1 s) so the test is fast.
+        dl = ModelDownloader(event_bus=bus, stall_timeout_sec=0.1)
+
+        progress_fired = threading.Event()
+        allow_stall_check = threading.Event()
+
+        def fake_snapshot_download(**kwargs: Any) -> str:
+            # Fire one initial progress call to register the stall start time.
+            dl._on_progress(_FAKE_MODEL, 100, 10000, 1.0)
+            progress_fired.set()
+            allow_stall_check.wait(timeout=3.0)
+            # Fire another call with the SAME byte count (stalled) after the timeout.
+            dl._on_progress(_FAKE_MODEL, 100, 10000, 1.0)
+            # Should never reach here — _on_progress raises _DownloadCancelled.
+            return _FAKE_PATH  # pragma: no cover
+
+        is_cached_p = patch.object(dl, "_is_cached", return_value=False)
+        hf_p = patch("huggingface_hub.snapshot_download",
+                     side_effect=fake_snapshot_download, create=True)
+        is_cached_p.start()
+        hf_p.start()
+        try:
+            dl.start_download(_FAKE_MODEL)
+            progress_fired.wait(timeout=3.0)
+            # Wait slightly longer than stall timeout before the second progress call.
+            time.sleep(0.15)
+            allow_stall_check.set()
+
+            # Wait for worker to settle.
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                internal = dl._get_or_create_state(_FAKE_MODEL).to_dict()
+                if internal["status"] in ("error", "cancelled"):
+                    break
+                time.sleep(0.05)
+
+            internal = dl._get_or_create_state(_FAKE_MODEL).to_dict()
+            self.assertIn(internal["status"], ("error", "cancelled"),
+                          "Stall must trip error/cancelled (F1-MED)")
+            self.assertIn("stalled", internal["error_msg"].lower(),
+                          "error_msg must mention 'stalled' (F1-MED)")
+
+            # Lock must be released.
+            acquired = dl._dl_lock.acquire(timeout=3.0)
+            if acquired:
+                dl._dl_lock.release()
+            self.assertTrue(acquired, "_dl_lock must be released after stall (F1-MED)")
+        finally:
+            is_cached_p.stop()
+            hf_p.stop()
+
+
+# ---------------------------------------------------------------------------
+# F3-LOW: error / cancel events include error_msg in EventBus payload
+# ---------------------------------------------------------------------------
+
+class TestErrorEventIncludesErrorMsg(unittest.TestCase):
+    """F3-LOW wave2: EventBus error/cancel event must carry error_msg."""
+
+    def _wait_for_status(self, bus: _StubEventBus, status: str, timeout: float = 5.0) -> list:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            events = [
+                e for e in bus.events_by_type("model_download.progress")
+                if e.get("status") == status
+            ]
+            if events:
+                return events
+            time.sleep(0.05)
+        return []
+
+    def test_error_event_has_error_msg(self) -> None:
+        bus = _StubEventBus()
+        dl = ModelDownloader(event_bus=bus, stall_timeout_sec=300.0)
+
+        def bad_download(**kwargs: Any) -> str:
+            raise OSError("Mirror unreachable")
+
+        is_p = patch.object(dl, "_is_cached", return_value=False)
+        hf_p = patch("huggingface_hub.snapshot_download",
+                     side_effect=bad_download, create=True)
+        is_p.start()
+        hf_p.start()
+        try:
+            dl.start_download(_FAKE_MODEL)
+            events = self._wait_for_status(bus, "error")
+            self.assertTrue(events, "Expected error event")
+            self.assertIn("error_msg", events[0],
+                          "F3-LOW: error event must include error_msg key")
+            self.assertIn("Mirror unreachable", events[0]["error_msg"])
+        finally:
+            is_p.stop()
+            hf_p.stop()
+
+    def test_cancel_event_has_error_msg(self) -> None:
+        bus = _StubEventBus()
+        dl = ModelDownloader(event_bus=bus, stall_timeout_sec=300.0)
+
+        download_entered = threading.Event()
+        allow_cancel = threading.Event()
+
+        def fake_download(**kwargs: Any) -> str:
+            download_entered.set()
+            allow_cancel.wait(timeout=3.0)
+            dl._on_progress(_FAKE_MODEL, 0, 0, 0.0)
+            return _FAKE_PATH  # pragma: no cover
+
+        is_p = patch.object(dl, "_is_cached", return_value=False)
+        hf_p = patch("huggingface_hub.snapshot_download",
+                     side_effect=fake_download, create=True)
+        is_p.start()
+        hf_p.start()
+        try:
+            dl.start_download(_FAKE_MODEL)
+            download_entered.wait(timeout=3.0)
+            dl.cancel(_FAKE_MODEL)
+            allow_cancel.set()
+
+            events = self._wait_for_status(bus, "cancelled")
+            self.assertTrue(events, "Expected cancelled event")
+            self.assertIn("error_msg", events[0],
+                          "F3-LOW: cancel event must include error_msg key")
+        finally:
+            is_p.stop()
+            hf_p.stop()
+
+
+# ---------------------------------------------------------------------------
+# F4-LOW: _states cap — unbounded growth prevented
+# ---------------------------------------------------------------------------
+
+class TestStatesCap(unittest.TestCase):
+    """F4-LOW wave2: _states dict must not grow unboundedly past _MAX_STATES."""
+
+    def test_states_eviction_when_cap_exceeded(self) -> None:
+        from backend.model_downloader import _MAX_STATES
+        dl = ModelDownloader(stall_timeout_sec=300.0)
+
+        # Fill _states with idle entries up to cap + some.
+        for i in range(_MAX_STATES + 10):
+            dl._get_or_create_state(f"fake-org/model-{i}")
+
+        # After eviction _states must not exceed cap.
+        with dl._states_lock:
+            count = len(dl._states)
+        self.assertLessEqual(count, _MAX_STATES,
+                             f"_states must be capped at {_MAX_STATES} (F4-LOW)")
+
+    def test_downloading_state_not_evicted(self) -> None:
+        from backend.model_downloader import _MAX_STATES
+        dl = ModelDownloader(stall_timeout_sec=300.0)
+
+        # Mark one model as downloading.
+        active = "org/active-model"
+        state = dl._get_or_create_state(active)
+        state.update(status="downloading")
+
+        # Fill the rest with idle entries past cap.
+        for i in range(_MAX_STATES + 5):
+            dl._get_or_create_state(f"idle-org/model-{i}")
+
+        with dl._states_lock:
+            self.assertIn(active, dl._states,
+                          "Active (downloading) state must not be evicted (F4-LOW)")
 
 
 if __name__ == "__main__":
