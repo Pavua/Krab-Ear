@@ -32,6 +32,23 @@ PROVIDERS = {
     "hf": ("https://router.huggingface.co/v1/chat/completions", "__HF_SETTINGS__"),
 }
 
+# Per-provider default AUDIT model (used when --model is omitted). The global
+# default used to be gpt-oss-120b for ALL providers, which only exists on
+# cerebras → github/mistral/etc. returned 404/400. Roster-verified 2026-06-28:
+# github/hf/mistral/nvidia ALIVE; cerebras/groq=403 filter, gemini=429 quota,
+# openrouter=402 no-credits.
+DEFAULT_MODEL = {
+    "github": "openai/gpt-4o-mini",          # strong+precise, free, works for security
+    "hf": "meta-llama/Llama-3.3-70B-Instruct",
+    "mistral": "codestral-latest",            # code-specialised
+    "nvidia": "deepseek-ai/deepseek-v4-pro",  # strongest reviewer; slow → 600s timeout below
+    "cerebras": "gpt-oss-120b",
+    "groq": "llama-3.3-70b-versatile",
+    "gemini": "gemini-2.0-flash",
+    "openrouter": "meta-llama/llama-3.1-70b-instruct",
+    "zai": "glm-4.6",
+}
+
 # Krab Ear GUI settings hold the HuggingFace token (`hf_token`, write-scoped, used
 # for pyannote + reusable for the HF inference router — many models, free/credit tier).
 _KE_SETTINGS = Path.home() / "Library" / "Application Support" / "KrabEar" / "settings.json"
@@ -69,7 +86,7 @@ def load_key(var: str) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--provider", default="cerebras", choices=list(PROVIDERS))
-    ap.add_argument("--model", default="gpt-oss-120b")
+    ap.add_argument("--model", default=None)  # None → per-provider DEFAULT_MODEL
     ap.add_argument("--focus", default="security + correctness")
     ap.add_argument("--max-tokens", type=int, default=5000)
     ap.add_argument("module")
@@ -98,8 +115,9 @@ def main() -> int:
         "If the module is clean, output the single line: CLEAN\n\n"
         f"Module path: {a.module}\n\n```python\n{code}\n```"
     )
+    model = a.model or DEFAULT_MODEL.get(a.provider, "gpt-oss-120b")
     body = json.dumps({
-        "model": a.model,
+        "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": a.max_tokens,
         "temperature": 0.2,
@@ -116,7 +134,7 @@ def main() -> int:
         out = (msg.get("content") or msg.get("reasoning_content") or "").strip()
         if not out:
             out = "EMPTY_RESPONSE: " + json.dumps(d)[:300]
-        print(f"### {a.module}  [{a.provider}/{a.model}]\n{out}", flush=True)
+        print(f"### {a.module}  [{a.provider}/{model}]\n{out}", flush=True)
     except Exception as exc:
         print(f"### {a.module} ERROR: {type(exc).__name__}: {str(exc)[:200]}", flush=True)
     return 0
