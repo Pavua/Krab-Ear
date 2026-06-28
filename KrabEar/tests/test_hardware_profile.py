@@ -15,7 +15,9 @@ Covers:
 from __future__ import annotations
 
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 from typing import Callable
 
@@ -453,23 +455,94 @@ class TestGetCalibrationRecommendationPayloadShape(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestDispatchTableContainsCalibration(unittest.TestCase):
-    """Verify the 2 new methods appear in BackendService._build_dispatch_table."""
+    """Verify get_hardware_profile / get_calibration_recommendation are live in the
+    BackendService dispatch table via actual handle_request roundtrips.
 
-    def test_dispatch_table_has_get_hardware_profile(self) -> None:
-        """grep-only check: dispatch table source contains the key."""
-        svc_path = os.path.join(KRAB_EAR_ROOT, "backend", "service.py")
-        with open(svc_path, encoding="utf-8") as f:
-            source = f.read()
-        self.assertIn('"get_hardware_profile"', source)
-        self.assertIn('"get_calibration_recommendation"', source)
+    Replaces former source-string grep tests that would pass even if the entries
+    were commented out ("test-validates-the-hole" anti-pattern, see CLAUDE.md).
+    """
 
-    def test_handler_methods_defined(self) -> None:
-        """grep-only check: handler methods are defined in service.py."""
-        svc_path = os.path.join(KRAB_EAR_ROOT, "backend", "service.py")
-        with open(svc_path, encoding="utf-8") as f:
-            source = f.read()
-        self.assertIn("def _handle_get_hardware_profile", source)
-        self.assertIn("def _handle_get_calibration_recommendation", source)
+    def _make_backend(self, tmp_path: str) -> "object":
+        """Build a minimal BackendService with heavy deps patched out."""
+        from unittest.mock import patch as _patch, MagicMock as _MM
+        with _patch("backend.service.AudioRecorder"), \
+             _patch("backend.service.Transcriber"), \
+             _patch("backend.service.Translator"), \
+             _patch("backend.service.LLMRewriter", return_value=None), \
+             _patch("backend.service.ActionItemsExtractor", return_value=_MM()), \
+             _patch("backend.service.settings"):
+            from backend.state_store import StateStore
+            from backend.service import BackendService
+            store = StateStore(data_dir=tmp_path)
+            svc = BackendService(store=store)
+        return svc
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        try:
+            self._svc = self._make_backend(self._tmpdir)
+        except Exception as exc:
+            self._svc = None
+            self._skip_reason = f"BackendService init requires heavy deps: {exc}"
+
+    def tearDown(self) -> None:
+        if self._svc is not None:
+            self._svc.close()
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_get_hardware_profile_is_live_in_dispatch(self) -> None:
+        """handle_request('get_hardware_profile') must route to the real handler."""
+        if self._svc is None:
+            self.skipTest(self._skip_reason)
+        res = self._svc.handle_request(
+            {"id": "t1", "method": "get_hardware_profile", "params": {}}
+        )
+        self.assertTrue(res.get("ok"), f"unexpected response: {res}")
+        for key in ("chip", "ram_gb", "cores", "tier", "is_apple_silicon"):
+            self.assertIn(key, res, f"missing key in response: {key}")
+
+    def test_get_calibration_recommendation_is_live_in_dispatch(self) -> None:
+        """handle_request('get_calibration_recommendation') must route to the real handler."""
+        if self._svc is None:
+            self.skipTest(self._skip_reason)
+        res = self._svc.handle_request(
+            {"id": "t2", "method": "get_calibration_recommendation", "params": {}}
+        )
+        self.assertTrue(res.get("ok"), f"unexpected response: {res}")
+        for key in ("recommended_model", "recommended_engine", "tier", "rationale"):
+            self.assertIn(key, res, f"missing key in response: {key}")
+
+    def test_nan_snr_db_produces_finite_json(self) -> None:
+        """Fix 1 regression: NaN _last_mic_snr_db must NOT reach json.dumps as NaN token.
+
+        Before the fix, float("nan") passed straight through to the response dict
+        and json.dumps emitted the bare NaN literal (invalid JSON → Swift crash).
+        After the fix it is coerced to 0.0, so snr_db is a finite float and
+        json.dumps produces valid JSON.
+        """
+        import json
+        import math
+        if self._svc is None:
+            self.skipTest(self._skip_reason)
+        # Plant a NaN value into the settings cache via set_settings.
+        self._svc.handle_request({
+            "id": "setup",
+            "method": "set_settings",
+            "params": {"_last_mic_snr_db": float("nan"), "_last_mic_suitable_for_stt": True},
+        })
+        res = self._svc.handle_request(
+            {"id": "t3", "method": "get_calibration_recommendation", "params": {}}
+        )
+        self.assertTrue(res.get("ok"), f"unexpected response: {res}")
+        # The response must be JSON-serializable with no NaN tokens.
+        serialized = json.dumps(res)
+        self.assertNotIn("NaN", serialized, "NaN token must not appear in JSON output")
+        # snr_db must be a finite float.
+        if res.get("mic") is not None:
+            self.assertTrue(
+                math.isfinite(res["mic"]["snr_db"]),
+                f"snr_db must be finite, got {res['mic']['snr_db']}",
+            )
 
 
 if __name__ == "__main__":

@@ -39,6 +39,7 @@ import fcntl
 import json
 import logging
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional
@@ -84,11 +85,30 @@ def _read_payload(fd: int) -> Optional[dict]:
         return None
 
 
-def _write_payload(fd: int, payload: dict) -> None:
-    """Overwrite fd with JSON payload (truncate first)."""
-    os.ftruncate(fd, 0)
-    os.lseek(fd, 0, os.SEEK_SET)
-    os.write(fd, json.dumps(payload).encode("utf-8"))
+def _write_payload(fd: int, payload: dict, path: Path) -> None:
+    """Overwrite the lock file with JSON payload atomically via temp-file + rename.
+
+    The flock (LOCK_EX) is already held by the caller for the whole read-modify-write
+    cycle, so the rename is logically atomic with respect to other flocking processes.
+    Building the bytes BEFORE any truncation ensures the old payload survives an ENOSPC:
+    if the temp-file write fails, the original ``path`` content is untouched and ``fd``
+    still holds the flock so the caller can unlock cleanly.
+    """
+    raw = json.dumps(payload).encode("utf-8")
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".brain_lease_tmp_")
+    try:
+        os.write(tmp_fd, raw)
+        os.close(tmp_fd)
+        tmp_fd = -1
+        os.replace(tmp_path, str(path))
+    except Exception:
+        if tmp_fd != -1:
+            os.close(tmp_fd)
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def acquire_brain_lease(
@@ -123,10 +143,11 @@ def acquire_brain_lease(
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                # Another process is mid-write; treat conservatively as "blocked".
-                # This window is <1 ms in practice — caller can retry.
-                logger.debug("BrainLease: flock LOCK_NB contention for owner=%r", owner)
-                return False
+                # Another process is mid-write; this is a transient <1 ms write-race,
+                # NOT a "held by another owner" denial. Graceful-degrade → True so Ear
+                # is never blocked by flock write contention (matches outer except contract).
+                logger.debug("BrainLease: flock LOCK_NB contention for owner=%r — graceful True", owner)
+                return True
 
             now = time.time()
             payload = _read_payload(fd)
@@ -150,7 +171,7 @@ def acquire_brain_lease(
                 "acquired_ts": now,
                 "exp_ts": now + ttl_sec,
             }
-            _write_payload(fd, new_payload)
+            _write_payload(fd, new_payload, path)
             fcntl.flock(fd, fcntl.LOCK_UN)
 
             logger.info(
