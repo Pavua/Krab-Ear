@@ -1099,9 +1099,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Opt-in: False по умолчанию — пользователь должен явно включить.
     # privacy_mode_enabled=True ВСЕГДА блокирует (engine._cloud_rewrite_allowed).
     "cloud_rewriter_enabled": False,
-    # Провайдер: "openai" | "anthropic"
+    # Провайдер: "openai" | "anthropic" | "custom"
     "cloud_rewriter_provider": "openai",
     # Anthropic API key (используется AnthropicRewriterProvider).
     # Пустая строка = stub-режим (no_api_key), нет HTTP-вызовов.
     "anthropic_api_key": "",
+    # Custom (self-hosted) OpenAI-совместимый endpoint — privacy-correct вариант:
+    # укажи свой Ollama/vLLM или no-log провайдера. Транскрипт идёт ТОЛЬКО туда.
+    "cloud_rewriter_base_url": "",       # напр. http://localhost:11434/v1
+    "cloud_rewriter_custom_model": "",   # напр. qwen2.5:7b
+    "cloud_rewriter_api_key": "",        # опционально (self-hosted часто без ключа)
 }

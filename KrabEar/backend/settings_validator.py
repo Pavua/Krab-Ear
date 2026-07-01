@@ -35,7 +35,7 @@ _ENUM_FIELDS: dict[str, tuple[str, ...]] = {
     "ui_last_tab": ("dictation", "live_translation", "history"),
     "update_channel": ("stable", "beta"),
     # cloud_rewriter_provider: valid providers for cloud transcript cleanup.
-    "cloud_rewriter_provider": ("openai", "anthropic"),
+    "cloud_rewriter_provider": ("openai", "anthropic", "custom"),
 }
 
 # Диапазоны числовых полей: ключ → (min, max, default, type)
