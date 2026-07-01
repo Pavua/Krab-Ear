@@ -2411,6 +2411,7 @@ Returns: `{audio_b64?, file_path?, engine_used, duration_sec?}`
 |---|---|
 | `download_stt_model` | Запустить фоновую загрузку STT-модели из HuggingFace |
 | `get_stt_model_status` | Статус кэша/загрузки STT-модели |
+| `cancel_stt_model_download` | Отменить текущую фоновую загрузку STT-модели |
 | `get_hardware_profile` | Аппаратный профиль Mac (chip/RAM/cores/tier) |
 | `get_calibration_recommendation` | Рекомендация STT-модели/движка по tier + микрофону |
 | `get_privacy_dashboard` | Агрегированный privacy/security дашборд (только счётчики/флаги) |
@@ -2427,7 +2428,15 @@ Returns: `{ok, status, model_id}` — status: `"started"` | `"already_cached"` |
 *(service.py → model_downloader.py)*  
 Статус кэша и текущей загрузки STT-модели.  
 Params: `{model_id?}` — дефолт `settings.MODEL_BALANCED`. Пустой/не-строка `model_id` → `ValueError`.  
-Returns: `{ok, model_id, cached, downloading, status, pct, downloaded, total, error_msg, path}` — status: `"idle"` | `"downloading"` | `"done"` | `"error"`; `pct` 0..100; `downloaded`/`total` в байтах
+Returns: `{ok, model_id, cached, downloading, status, pct, downloaded, total, error_msg, path}` — status: `"idle"` | `"downloading"` | `"done"` | `"error"`; `pct` 0..100; `downloaded`/`total` в байтах. Абсолютный путь кэша НЕ раскрывается (#1814).
+
+### `cancel_stt_model_download`
+*(service.py → model_downloader.py)*  
+Отменяет текущую фоновую загрузку STT-модели (F1-hardening #1814). Идемпотентно.  
+Params: `{model_id?}` — HuggingFace repo_id; дефолт `settings.MODEL_BALANCED`. Пустой/не-строка/слишком длинный `model_id` → `ValueError`.  
+Returns: `{ok, cancelled, model_id}` — `cancelled=True` — загрузка активно шла и сигнал отмены отправлен; `cancelled=False` — загрузка не шла (отменять было нечего).
+
+> **Cloud-rewriter (опциональная облачная полировка транскрипта)** — НЕ имеет отдельного IPC-метода: управляется настройками (`cloud_rewriter_enabled` default `False`, `cloud_rewriter_provider` = `openai`|`anthropic`|`custom`, `cloud_rewriter_base_url`/`cloud_rewriter_custom_model`/`cloud_rewriter_api_key` для `custom`). Fallback в `engine.py`, когда локальный rewriter вернул `ok=False`. Privacy: `privacy_mode_enabled=True` ВСЕГДА блокирует (см. `backend/cloud_rewriter.py`, sibling `cloud_stt.py`).
 
 ### `get_hardware_profile`
 *(service.py → core/hardware_profile.py)*  
