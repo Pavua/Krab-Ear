@@ -118,6 +118,9 @@ struct AgentSettings {
     var cloudRewriterProvider: String
     var openaiApiKey: String
     var anthropicApiKey: String
+    var cloudRewriterBaseUrl: String
+    var cloudRewriterCustomModel: String
+    var cloudRewriterApiKey: String
 
     static let `default` = AgentSettings(
         mode: "headless",
@@ -182,7 +185,10 @@ struct AgentSettings {
         cloudRewriterEnabled: false,
         cloudRewriterProvider: "openai",
         openaiApiKey: "",
-        anthropicApiKey: ""
+        anthropicApiKey: "",
+        cloudRewriterBaseUrl: "http://localhost:11434/v1",
+        cloudRewriterCustomModel: "qwen2.5:7b",
+        cloudRewriterApiKey: ""
     )
 
     init(from payload: [String: Any]) {
@@ -270,6 +276,9 @@ struct AgentSettings {
         self.cloudRewriterProvider = (payload["cloud_rewriter_provider"] as? String) ?? Self.default.cloudRewriterProvider
         self.openaiApiKey = (payload["openai_api_key"] as? String) ?? Self.default.openaiApiKey
         self.anthropicApiKey = (payload["anthropic_api_key"] as? String) ?? Self.default.anthropicApiKey
+        self.cloudRewriterBaseUrl = (payload["cloud_rewriter_base_url"] as? String) ?? Self.default.cloudRewriterBaseUrl
+        self.cloudRewriterCustomModel = (payload["cloud_rewriter_custom_model"] as? String) ?? Self.default.cloudRewriterCustomModel
+        self.cloudRewriterApiKey = (payload["cloud_rewriter_api_key"] as? String) ?? Self.default.cloudRewriterApiKey
     }
 
     init(
@@ -332,7 +341,10 @@ struct AgentSettings {
         cloudRewriterEnabled: Bool = false,
         cloudRewriterProvider: String = "openai",
         openaiApiKey: String = "",
-        anthropicApiKey: String = ""
+        anthropicApiKey: String = "",
+        cloudRewriterBaseUrl: String = "http://localhost:11434/v1",
+        cloudRewriterCustomModel: String = "qwen2.5:7b",
+        cloudRewriterApiKey: String = ""
     ) {
         self.mode = mode
         self.showDockIcon = showDockIcon
@@ -394,6 +406,9 @@ struct AgentSettings {
         self.cloudRewriterProvider = cloudRewriterProvider
         self.openaiApiKey = openaiApiKey
         self.anthropicApiKey = anthropicApiKey
+        self.cloudRewriterBaseUrl = cloudRewriterBaseUrl
+        self.cloudRewriterCustomModel = cloudRewriterCustomModel
+        self.cloudRewriterApiKey = cloudRewriterApiKey
     }
 
     func toPayload() -> [String: Any] {
@@ -458,6 +473,9 @@ struct AgentSettings {
             "cloud_rewriter_provider": cloudRewriterProvider,
             "openai_api_key": openaiApiKey,
             "anthropic_api_key": anthropicApiKey,
+            "cloud_rewriter_base_url": cloudRewriterBaseUrl,
+            "cloud_rewriter_custom_model": cloudRewriterCustomModel,
+            "cloud_rewriter_api_key": cloudRewriterApiKey,
         ]
     }
 }
