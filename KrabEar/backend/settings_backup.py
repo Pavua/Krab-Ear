@@ -55,6 +55,7 @@ SENSITIVE_FIELDS: frozenset[str] = frozenset({
     # (backend/cloud_rewriter.py); must be redacted from backup files on disk.
     "openai_api_key",
     "anthropic_api_key",
+    "cloud_rewriter_api_key",
 })
 # Legacy alias kept for any internal references within this module.
 _SENSITIVE = SENSITIVE_FIELDS

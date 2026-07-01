@@ -17,6 +17,7 @@ import logging
 import urllib.error
 import urllib.request
 from typing import Any, Dict, Optional, Protocol
+from urllib.parse import urlparse
 
 from backend.state_store import StateStore
 from core.config import settings
@@ -46,6 +47,65 @@ def _err_body(exc) -> str:
         return _read_capped(exc, _MAX_ERR_BYTES).decode("utf-8", "replace")
     except Exception:
         return ""
+
+
+# -------------------------------------------------------------------------
+# SSRF guard for the CUSTOM provider (base_url is user-controlled via
+# set_settings). Mirrors backend/lm_studio_lifecycle.py: scheme allowlist +
+# a custom opener WITHOUT FileHandler/FTPHandler + a redirect handler that
+# re-validates the scheme on every 30x (blocks `302 → file://`).
+# localhost/LAN hosts are intentionally allowed — that's the whole point of a
+# self-hosted endpoint; we only block dangerous schemes (file/ftp/data).
+# -------------------------------------------------------------------------
+_ALLOWED_SCHEMES = frozenset({"http", "https"})
+
+
+def _scheme_allowed(url: str) -> bool:
+    """True если схема url входит в allowlist (http/https)."""
+    return urlparse(url).scheme.lower() in _ALLOWED_SCHEMES
+
+
+class _SchemeCheckingRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Отклоняет 30x-редиректы на запрещённую схему (напр. 302 → file://)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urlparse(newurl).scheme.lower() not in _ALLOWED_SCHEMES:
+            raise urllib.error.HTTPError(
+                newurl, code,
+                f"redirect to disallowed scheme blocked: {newurl!r}",
+                headers, fp,
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _build_safe_opener() -> urllib.request.OpenerDirector:
+    """Opener только с HTTP(S) — намеренно БЕЗ FileHandler/FTPHandler/DataHandler."""
+    opener = urllib.request.OpenerDirector()
+    opener.add_handler(urllib.request.HTTPHandler())
+    opener.add_handler(urllib.request.HTTPSHandler())
+    opener.add_handler(_SchemeCheckingRedirectHandler())
+    opener.add_handler(urllib.request.HTTPErrorProcessor())
+    return opener
+
+
+# Один разделяемый opener — потокобезопасен для конкурентных open().
+_SAFE_OPENER = _build_safe_opener()
+
+
+def _normalize_endpoint(base_url: str) -> str:
+    """Нормализует base_url к полному OpenAI-совместимому chat endpoint.
+
+    Толерантно к тому, как юзер вводит URL:
+      http://x:11434                    → http://x:11434/v1/chat/completions
+      http://x:11434/v1                 → http://x:11434/v1/chat/completions
+      http://x:11434/v1/chat/completions → без изменений
+    """
+    b = base_url.strip().rstrip("/")
+    if b.endswith("/chat/completions"):
+        return b
+    if b.endswith("/v1"):
+        return b + "/chat/completions"
+    return b + "/v1/chat/completions"
 
 
 # -------------------------------------------------------------------------
@@ -215,12 +275,87 @@ class AnthropicRewriterProvider:
 
 
 # -------------------------------------------------------------------------
+# Custom / self-hosted OpenAI-compatible provider
+# -------------------------------------------------------------------------
+
+class CustomRewriterProvider:
+    """Свой OpenAI-совместимый endpoint (self-hosted Ollama/vLLM или no-log провайдер).
+
+    Privacy-CORRECT вариант: транскрипт идёт ТОЛЬКО на указанный юзером сервер.
+    API-ключ ОПЦИОНАЛЕН (self-hosted часто без auth) — при пустом ключе
+    заголовок Authorization не отправляется. base_url защищён SSRF-гардом.
+    """
+
+    def rewrite(self, text: str, language: str) -> Dict[str, Any]:
+        s = store.load_settings()
+        base_url = s.get("cloud_rewriter_base_url", "").strip()
+        if not base_url:
+            return {
+                "error": "no_endpoint",
+                "provider": "custom",
+                "message": "cloud_rewriter_base_url not set in settings",
+            }
+        model = s.get("cloud_rewriter_custom_model", "").strip()
+        if not model:
+            return {
+                "error": "no_model",
+                "provider": "custom",
+                "message": "cloud_rewriter_custom_model not set in settings",
+            }
+        # SSRF guard: только http/https до любого сетевого вызова.
+        if not _scheme_allowed(base_url):
+            logger.warning("Custom rewriter: refusing non-http(s) base_url: %r", base_url)
+            return {
+                "error": "bad_endpoint",
+                "provider": "custom",
+                "message": "base_url scheme not allowed (http/https only)",
+            }
+
+        endpoint = _normalize_endpoint(base_url)
+
+        lang_key = (language or "ru").lower()[:2]
+        system_prompt = _CLEANUP_SYSTEM_PROMPTS.get(lang_key, _DEFAULT_SYSTEM_PROMPT)
+
+        payload = json.dumps({
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text},
+            ],
+            "temperature": 0.0,
+            "max_tokens": min(max(256, len(text.split()) * 4 + 50), 4096),
+        }).encode("utf-8")
+
+        headers = {"Content-Type": "application/json"}
+        api_key = s.get("cloud_rewriter_api_key", "").strip()
+        if api_key:  # опционально: self-hosted часто без ключа
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        req = urllib.request.Request(endpoint, data=payload, headers=headers, method="POST")
+
+        try:
+            # _SAFE_OPENER (без FileHandler) + повторная проверка схемы на редиректах.
+            with _SAFE_OPENER.open(req, timeout=30) as resp:
+                result = json.loads(_read_capped(resp).decode("utf-8", "replace"))
+                content = result["choices"][0]["message"]["content"]
+                return {"text": (content or "").strip()}
+        except urllib.error.HTTPError as e:
+            msg = _err_body(e)
+            logger.error("Custom rewriter HTTP error: %s", msg, extra={"provider": "custom"})
+            return {"error": "api_error", "provider": "custom", "message": msg}
+        except Exception as e:
+            logger.error("Custom rewriter network error: %s", e, extra={"provider": "custom"})
+            return {"error": "network_error", "provider": "custom", "message": str(e)}
+
+
+# -------------------------------------------------------------------------
 # Factory
 # -------------------------------------------------------------------------
 
 _PROVIDERS: Dict[str, type] = {
     "openai": OpenAIRewriterProvider,
     "anthropic": AnthropicRewriterProvider,
+    "custom": CustomRewriterProvider,
 }
 
 
@@ -266,7 +401,7 @@ def cloud_rewrite(text: str, language: str) -> Optional[str]:
         result = provider.rewrite(text, language)
 
         if "error" in result:
-            if result["error"] != "no_api_key":
+            if result["error"] not in ("no_api_key", "no_endpoint", "no_model"):
                 logger.warning(
                     "Cloud rewrite failed: provider=%s error=%s message=%s",
                     result.get("provider"), result.get("error"), result.get("message", ""),

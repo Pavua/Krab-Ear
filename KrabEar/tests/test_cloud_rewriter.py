@@ -499,5 +499,108 @@ class TestGetCloudRewriterFactory(unittest.TestCase):
         self.assertIsInstance(provider, cr.OpenAIRewriterProvider)
 
 
+class TestCloudRewriterCustomProvider(unittest.TestCase):
+    """Custom / self-hosted OpenAI-compatible provider + SSRF guard."""
+
+    _BASE = {
+        "cloud_rewriter_provider": "custom",
+        "cloud_rewriter_base_url": "http://localhost:11434/v1",
+        "cloud_rewriter_custom_model": "qwen2.5:7b",
+        "cloud_rewriter_api_key": "",
+    }
+
+    def test_custom_success_via_safe_opener(self):
+        import backend.cloud_rewriter as cr
+        polished = "Привет, как дела?"
+        with patch.object(cr, "store") as mock_store:
+            mock_store.load_settings.return_value = dict(self._BASE)
+            mock_resp = _MockHTTPResponse(_make_openai_response(polished))
+            with patch.object(cr._SAFE_OPENER, "open", return_value=mock_resp):
+                out = cr.cloud_rewrite("привет как дела", "ru")
+        self.assertEqual(out, polished)
+
+    def test_custom_no_base_url_returns_none_no_call(self):
+        import backend.cloud_rewriter as cr
+        s = dict(self._BASE)
+        s["cloud_rewriter_base_url"] = ""
+        with patch.object(cr, "store") as mock_store:
+            mock_store.load_settings.return_value = s
+            with patch.object(cr._SAFE_OPENER, "open") as mock_open:
+                self.assertIsNone(cr.cloud_rewrite("hi there", "en"))
+                mock_open.assert_not_called()
+
+    def test_custom_no_model_returns_none_no_call(self):
+        import backend.cloud_rewriter as cr
+        s = dict(self._BASE)
+        s["cloud_rewriter_custom_model"] = ""
+        with patch.object(cr, "store") as mock_store:
+            mock_store.load_settings.return_value = s
+            with patch.object(cr._SAFE_OPENER, "open") as mock_open:
+                self.assertIsNone(cr.cloud_rewrite("hi there", "en"))
+                mock_open.assert_not_called()
+
+    def test_custom_no_key_omits_authorization_header(self):
+        import backend.cloud_rewriter as cr
+        with patch.object(cr, "store") as mock_store:
+            mock_store.load_settings.return_value = dict(self._BASE)  # empty api_key
+            mock_resp = _MockHTTPResponse(_make_openai_response("ok"))
+            with patch.object(cr._SAFE_OPENER, "open", return_value=mock_resp) as mock_open:
+                cr.cloud_rewrite("hello world", "en")
+            req = mock_open.call_args[0][0]
+            # urllib normalises header names to Title-case
+            self.assertNotIn("Authorization", req.headers)
+
+    def test_custom_with_key_sends_authorization_header(self):
+        import backend.cloud_rewriter as cr
+        s = dict(self._BASE)
+        s["cloud_rewriter_api_key"] = "sk-custom-123"
+        with patch.object(cr, "store") as mock_store:
+            mock_store.load_settings.return_value = s
+            mock_resp = _MockHTTPResponse(_make_openai_response("ok"))
+            with patch.object(cr._SAFE_OPENER, "open", return_value=mock_resp) as mock_open:
+                cr.cloud_rewrite("hello world", "en")
+            req = mock_open.call_args[0][0]
+            self.assertEqual(req.headers.get("Authorization"), "Bearer sk-custom-123")
+
+    def test_custom_ssrf_file_scheme_rejected(self):
+        import backend.cloud_rewriter as cr
+        s = dict(self._BASE)
+        s["cloud_rewriter_base_url"] = "file:///etc/passwd"
+        with patch.object(cr, "store") as mock_store:
+            mock_store.load_settings.return_value = s
+            with patch.object(cr._SAFE_OPENER, "open") as mock_open:
+                self.assertIsNone(cr.cloud_rewrite("hi there", "en"))
+                mock_open.assert_not_called()  # rejected BEFORE any network/file access
+
+    def test_custom_ssrf_ftp_scheme_rejected(self):
+        import backend.cloud_rewriter as cr
+        s = dict(self._BASE)
+        s["cloud_rewriter_base_url"] = "ftp://evil/x"
+        with patch.object(cr, "store") as mock_store:
+            mock_store.load_settings.return_value = s
+            with patch.object(cr._SAFE_OPENER, "open") as mock_open:
+                self.assertIsNone(cr.cloud_rewrite("hi there", "en"))
+                mock_open.assert_not_called()
+
+    def test_normalize_endpoint_forms(self):
+        import backend.cloud_rewriter as cr
+        self.assertEqual(cr._normalize_endpoint("http://x:11434"),
+                         "http://x:11434/v1/chat/completions")
+        self.assertEqual(cr._normalize_endpoint("http://x:11434/v1"),
+                         "http://x:11434/v1/chat/completions")
+        self.assertEqual(cr._normalize_endpoint("http://x:11434/v1/chat/completions"),
+                         "http://x:11434/v1/chat/completions")
+        self.assertEqual(cr._normalize_endpoint("http://x:11434/v1/"),
+                         "http://x:11434/v1/chat/completions")
+
+    def test_custom_length_ratio_guard_rejects(self):
+        import backend.cloud_rewriter as cr
+        with patch.object(cr, "store") as mock_store:
+            mock_store.load_settings.return_value = dict(self._BASE)
+            mock_resp = _MockHTTPResponse(_make_openai_response("x" * 500))
+            with patch.object(cr._SAFE_OPENER, "open", return_value=mock_resp):
+                self.assertIsNone(cr.cloud_rewrite("short", "en"))  # 500/5 = 100x → rejected
+
+
 if __name__ == "__main__":
     unittest.main()
