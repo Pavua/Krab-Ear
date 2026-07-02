@@ -1912,6 +1912,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let sttVocabSection = buildSTTVocabularySection()
         settingsBar.addArrangedSubview(sttVocabSection)
 
+        // Запланированные записи
+        let schedulerSection = buildRecordingSchedulerSection()
+        settingsBar.addArrangedSubview(schedulerSection)
+
         // Голосовые команды: включить/выключить + строгий режим + справочник команд.
         let voiceCommandsSection = buildVoiceCommandsSection()
         settingsBar.addArrangedSubview(voiceCommandsSection)

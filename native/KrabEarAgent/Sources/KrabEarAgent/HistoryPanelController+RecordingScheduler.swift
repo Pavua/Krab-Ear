@@ -1,0 +1,327 @@
+/*
+ * Запланированные записи (RecordingScheduler) — секция настроек.
+ *
+ * IPC-контракты (все существуют в бэкенде):
+ *   - list_scheduled_recordings {} -> result.schedules, result.count
+ *   - schedule_recording {start_time: String, duration_sec: Int, label: String} -> result.schedule
+ *   - cancel_scheduled_recording {schedule_id: String} -> result.cancelled
+ *
+ * Правила AGENT-3: IPC строго в DispatchQueue.global, мутации UI — строго в DispatchQueue.main.
+ */
+
+import AppKit
+import Foundation
+
+// MARK: - Associated-object ключи
+
+enum RecordingSchedulerAssocKeys {
+    nonisolated(unsafe) static var sectionCard: UInt8 = 0
+    nonisolated(unsafe) static var datePicker: UInt8 = 0
+    nonisolated(unsafe) static var durationField: UInt8 = 0
+    nonisolated(unsafe) static var labelField: UInt8 = 0
+}
+
+extension HistoryPanelController {
+
+    /// Строит секцию «Запланированные записи» для Gemini-дизайна (settingsBar).
+    @MainActor
+    func buildRecordingSchedulerSection() -> CollapsibleSectionView {
+        let section = CollapsibleSectionView(
+            sectionId: "recording_scheduler",
+            title: "Запланированные записи",
+            isExpanded: false,
+            iconSymbol: "calendar.badge.clock"
+        )
+
+        let card = ThemeCardView()
+
+        // 1. Форма добавления
+
+        // Date Picker
+        let datePicker = NSDatePicker()
+        datePicker.datePickerStyle = .textFieldAndStepper
+        datePicker.datePickerElements = [.yearMonthDay, .hourMinute]
+        datePicker.dateValue = Date().addingTimeInterval(3600) // +1 час по умолчанию
+        datePicker.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        
+        objc_setAssociatedObject(self, &RecordingSchedulerAssocKeys.datePicker, datePicker, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+
+        // Duration Field (minutes)
+        let durationField = NSTextField(frame: .zero)
+        durationField.placeholderString = "30"
+        durationField.font = KrabEarTheme.Typography.body
+        durationField.bezelStyle = .roundedBezel
+        durationField.isBordered = true
+        durationField.widthAnchor.constraint(equalToConstant: 50).isActive = true
+        
+        let durationLabel = NSTextField(labelWithString: "мин")
+        durationLabel.font = KrabEarTheme.Typography.body
+        durationLabel.textColor = KrabEarTheme.Colors.textSecondary
+        
+        let durationStack = NSStackView(views: [durationField, durationLabel])
+        durationStack.orientation = .horizontal
+        durationStack.spacing = 4
+        durationStack.alignment = .centerY
+        
+        objc_setAssociatedObject(self, &RecordingSchedulerAssocKeys.durationField, durationField, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+
+        // Label Field
+        let labelField = NSTextField(frame: .zero)
+        labelField.placeholderString = "Описание (опционально)"
+        labelField.font = KrabEarTheme.Typography.body
+        labelField.bezelStyle = .roundedBezel
+        labelField.isBordered = true
+        labelField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        labelField.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
+        
+        objc_setAssociatedObject(self, &RecordingSchedulerAssocKeys.labelField, labelField, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+
+        // Submit Button
+        let submitButton = ThemePrimaryButton(title: "Запланировать", target: self, action: #selector(onScheduleRecording(_:)))
+        submitButton.setContentHuggingPriority(.required, for: .horizontal)
+
+        // Compositing form
+        let formRow1 = makeSettingRow(label: "Начало", control: datePicker)
+        let formRow2 = makeSettingRow(label: "Длительность", control: durationStack)
+        let formRow3 = makeSettingRow(label: "Метка", control: labelField)
+        
+        let submitRow = NSStackView(views: [submitButton])
+        submitRow.orientation = .horizontal
+        submitRow.alignment = .trailing
+        submitRow.edgeInsets = NSEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
+        
+        let formStack = NSStackView(views: [formRow1, formRow2, formRow3, submitRow])
+        formStack.orientation = .vertical
+        formStack.spacing = KrabEarTheme.Metrics.tight
+        formStack.alignment = .leading
+
+        let mainRow = makeSettingRow(
+            label: "Новая запись",
+            description: "Назначьте время и длительность для автоматического старта записи.",
+            control: formStack
+        )
+
+        // Загрузочная карточка
+        let loadingLabel = NSTextField(labelWithString: "Загрузка…")
+        loadingLabel.font = KrabEarTheme.Typography.caption
+        loadingLabel.textColor = KrabEarTheme.Colors.textSecondary
+
+        objc_setAssociatedObject(self, &RecordingSchedulerAssocKeys.sectionCard, card, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+
+        card.contentStackView.addArrangedSubview(mainRow)
+        card.contentStackView.addArrangedSubview(schedulerMakeSeparator())
+        card.contentStackView.addArrangedSubview(loadingLabel)
+
+        section.contentStackView.addArrangedSubview(card)
+
+        // Первоначальная загрузка списка
+        fetchAndRebuildSchedulerCard()
+
+        return section
+    }
+
+    // MARK: - Загрузка списка
+
+    func fetchAndRebuildSchedulerCard() {
+        let ipc = ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+
+            let schedules: [[String: Any]]
+            do {
+                let resp = try ipc.call(method: "list_scheduled_recordings", params: [:])
+                let result = resp["result"] as? [String: Any]
+                schedules = result?["schedules"] as? [[String: Any]] ?? []
+            } catch {
+                schedules = []
+            }
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.rebuildSchedulerCard(schedules: schedules)
+            }
+        }
+    }
+
+    @MainActor
+    private func rebuildSchedulerCard(schedules: [[String: Any]]) {
+        guard let card = objc_getAssociatedObject(self, &RecordingSchedulerAssocKeys.sectionCard) as? ThemeCardView else { return }
+
+        let arrangedViews = card.contentStackView.arrangedSubviews
+        // Сохраняем первые 2 вьюхи (форму добавления и разделитель)
+        for v in arrangedViews.dropFirst(2) {
+            card.contentStackView.removeArrangedSubview(v)
+            v.removeFromSuperview()
+        }
+
+        let subhead = makeSubhead("ОЖИДАЮЩИЕ ЗАПИСИ")
+        card.contentStackView.addArrangedSubview(subhead)
+
+        let pendingSchedules = schedules.filter { ($0["status"] as? String) == "pending" }
+
+        if pendingSchedules.isEmpty {
+            let empty = NSTextField(labelWithString: "Нет запланированных записей")
+            empty.font = KrabEarTheme.Typography.caption
+            empty.textColor = KrabEarTheme.Colors.textSecondary
+            card.contentStackView.addArrangedSubview(empty)
+        } else {
+            // Сортировка по времени (строки ISO8601 сортируются лексикографически корректно)
+            let sortedSchedules = pendingSchedules.sorted { a, b in
+                let t1 = a["start_time"] as? String ?? ""
+                let t2 = b["start_time"] as? String ?? ""
+                return t1 < t2
+            }
+
+            let dateFormatter = ISO8601DateFormatter()
+            dateFormatter.formatOptions = [.withInternetDateTime]
+            
+            let displayFormatter = DateFormatter()
+            displayFormatter.dateStyle = .medium
+            displayFormatter.timeStyle = .short
+
+            for schedule in sortedSchedules {
+                guard let id = schedule["id"] as? String,
+                      let startTimeStr = schedule["start_time"] as? String,
+                      let durationSec = schedule["duration_sec"] as? Int else { continue }
+                
+                let label = schedule["label"] as? String ?? ""
+                
+                var displayTime = startTimeStr
+                if let date = dateFormatter.date(from: startTimeStr) {
+                    displayTime = displayFormatter.string(from: date)
+                }
+                
+                let durationMin = durationSec / 60
+                let row = makeScheduleRow(id: id, displayTime: displayTime, durationMin: durationMin, label: label)
+                card.contentStackView.addArrangedSubview(row)
+            }
+        }
+    }
+
+    @MainActor
+    private func makeScheduleRow(id: String, displayTime: String, durationMin: Int, label: String) -> NSView {
+        let timeLabel = NSTextField(labelWithString: "\(displayTime) (\(durationMin) мин)")
+        timeLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        timeLabel.textColor = KrabEarTheme.Colors.textPrimary
+        timeLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let descLabel = NSTextField(labelWithString: label.isEmpty ? "Без названия" : label)
+        descLabel.font = KrabEarTheme.Typography.caption
+        descLabel.textColor = KrabEarTheme.Colors.textSecondary
+        descLabel.lineBreakMode = .byTruncatingTail
+        descLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        
+        let textStack = NSStackView(views: [timeLabel, descLabel])
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 2
+        textStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let cancelButton = NSButton(title: "Отменить", target: self, action: #selector(onCancelScheduledRecording(_:)))
+        cancelButton.bezelStyle = .inline
+        cancelButton.identifier = NSUserInterfaceItemIdentifier(id)
+        cancelButton.setContentHuggingPriority(.required, for: .horizontal)
+
+        let row = NSStackView(views: [textStack, cancelButton])
+        row.orientation = .horizontal
+        row.distribution = .fill
+        row.alignment = .centerY
+        row.spacing = KrabEarTheme.Metrics.standard
+        row.edgeInsets = NSEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
+        return row
+    }
+
+    // MARK: - Обработчики действий
+
+    @objc private func onScheduleRecording(_ sender: Any) {
+        guard let datePicker = objc_getAssociatedObject(self, &RecordingSchedulerAssocKeys.datePicker) as? NSDatePicker,
+              let durationField = objc_getAssociatedObject(self, &RecordingSchedulerAssocKeys.durationField) as? NSTextField,
+              let labelField = objc_getAssociatedObject(self, &RecordingSchedulerAssocKeys.labelField) as? NSTextField else { return }
+
+        let date = datePicker.dateValue
+        
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        let startTimeStr = formatter.string(from: date)
+        
+        let durationRaw = durationField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let durationMin = Int(durationRaw) ?? 30 // 30 минут по умолчанию
+        let durationSec = durationMin * 60
+        
+        let label = labelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let ipc = ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            do {
+                let resp = try ipc.call(method: "schedule_recording", params: [
+                    "start_time": startTimeStr,
+                    "duration_sec": durationSec,
+                    "label": label
+                ])
+                
+                if let ok = resp["ok"] as? Bool, !ok {
+                    let errorMessage = (resp["error"] as? [String: Any])?["message"] as? String ?? "Неизвестная ошибка"
+                    DispatchQueue.main.async {
+                        BackendToast.shared.show("Ошибка планирования: \(errorMessage)", duration: 4.0)
+                    }
+                    return
+                }
+                
+                DispatchQueue.main.async {
+                    // Успех, сброс полей
+                    durationField.stringValue = ""
+                    labelField.stringValue = ""
+                    datePicker.dateValue = Date().addingTimeInterval(3600)
+                    BackendToast.shared.show("Запись запланирована", duration: 2.0)
+                }
+                self.fetchAndRebuildSchedulerCard()
+            } catch {
+                DispatchQueue.main.async {
+                    BackendToast.shared.show("Сбой планирования записи: \(error.localizedDescription)", duration: 4.0)
+                }
+            }
+        }
+    }
+
+    @objc private func onCancelScheduledRecording(_ sender: NSButton) {
+        guard let scheduleId = sender.identifier?.rawValue, !scheduleId.isEmpty else { return }
+
+        let ipc = ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            do {
+                let resp = try ipc.call(method: "cancel_scheduled_recording", params: ["schedule_id": scheduleId])
+                
+                // Проверяем cancelled в result или корне
+                let cancelledInRoot = resp["cancelled"] as? Bool
+                let resultObj = resp["result"] as? [String: Any]
+                let cancelledInResult = resultObj?["cancelled"] as? Bool
+                
+                if let isCancelled = cancelledInRoot ?? cancelledInResult, isCancelled {
+                    DispatchQueue.main.async {
+                        BackendToast.shared.show("Запланированная запись отменена", duration: 2.0)
+                    }
+                } else {
+                    let errorMessage = (resp["error"] as? [String: Any])?["message"] as? String ?? "Не удалось отменить запись"
+                    DispatchQueue.main.async {
+                        BackendToast.shared.show("Ошибка отмены: \(errorMessage)", duration: 4.0)
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    BackendToast.shared.show("Сбой отмены записи: \(error.localizedDescription)", duration: 4.0)
+                }
+            }
+            self.fetchAndRebuildSchedulerCard()
+        }
+    }
+
+    @MainActor
+    private func schedulerMakeSeparator() -> NSView {
+        let separator = NSBox()
+        separator.boxType = .separator
+        separator.translatesAutoresizingMaskIntoConstraints = false
+        return separator
+    }
+}
