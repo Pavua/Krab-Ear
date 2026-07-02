@@ -226,6 +226,8 @@ extension HistoryPanelController {
         historyStack.addArrangedSubview(setupActivityCalendarSection())
         // Инсайты записей
         historyStack.addArrangedSubview(setupRecordingInsightsSection())
+        // Экспорт таймлайна (SVG/JSON/iCalendar) — TimelineExporter бэкенд.
+        historyStack.addArrangedSubview(setupTimelineExportSection())
         historyStack.addArrangedSubview(statusCard)
 
         // Width constraints для всех history children.
