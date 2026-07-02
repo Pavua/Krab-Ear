@@ -673,6 +673,9 @@ extension HistoryPanelController {
         // Section 8 — Словарь STT (hotwords + предложения из истории)
         let s8 = cdBuildSTTVocabularySection()
 
+        // Section 8.5 — Пресеты конфигурации (встроенные + кастомные шаблоны настроек)
+        let s8_5 = cdBuildConfigPresetsSection()
+
         // Section 9 — Голосовые команды (включить/строгий режим + справочник)
         let s9 = cdBuildVoiceCommandsSection()
 
@@ -707,7 +710,7 @@ extension HistoryPanelController {
         // сразу, без скролла на длинный список секций.
         settingsBarCD.addArrangedSubview(buildDictationHeroCard())
 
-        for s in [s1, s2, s3, s4, s5, s6, s7, s7b, s8, s9, s9_5, s9_6, s10, s11, s11b, s12, sCloudRewriter] {
+        for s in [s1, s2, s3, s4, s5, s6, s7, s7b, s8, s8_5, s9, s9_5, s9_6, s10, s11, s11b, s12, sCloudRewriter] {
             settingsBarCD.addArrangedSubview(s)
         }
     }

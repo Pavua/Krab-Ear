@@ -1912,6 +1912,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let sttVocabSection = buildSTTVocabularySection()
         settingsBar.addArrangedSubview(sttVocabSection)
 
+        // Пресеты конфигурации: именованные шаблоны настроек (встроенные + кастомные).
+        let configPresetsSection = buildConfigPresetsSection()
+        settingsBar.addArrangedSubview(configPresetsSection)
+
         // Запланированные записи
         let schedulerSection = buildRecordingSchedulerSection()
         settingsBar.addArrangedSubview(schedulerSection)
