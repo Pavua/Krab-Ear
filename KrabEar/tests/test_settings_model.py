@@ -159,6 +159,12 @@ class TestAllDefaultSettingsHaveDefaults(unittest.TestCase):
             "smtp_host",
             "smtp_user",
             "lm_studio_api_key",
+            # cloud_rewriter opt-in credentials/config (PR #1817/#1823) — пользователь
+            # вводит сам, пустая строка = "провайдер не настроен", не баг.
+            "anthropic_api_key",
+            "cloud_rewriter_base_url",
+            "cloud_rewriter_custom_model",
+            "cloud_rewriter_api_key",
         }
         empty_strings = [
             k
