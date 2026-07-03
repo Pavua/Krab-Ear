@@ -76,6 +76,9 @@ extension HistoryPanelController {
         addToCollectionItem.target = self
         menu.addItem(addToCollectionItem)
 
+        // Цепочки записей (RecordingChainManager) — связать выбранные записи в последовательность.
+        menu.addItem(makeAddToChainMenuItem())
+
         tableView.menu = menu
     }
 
