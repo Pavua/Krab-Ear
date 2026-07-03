@@ -1916,6 +1916,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let configPresetsSection = buildConfigPresetsSection()
         settingsBar.addArrangedSubview(configPresetsSection)
 
+        // Профили резюмирования: встроенные + кастомные стили для summarize_item.
+        let summaryProfilesSection = buildSummaryProfilesSection()
+        settingsBar.addArrangedSubview(summaryProfilesSection)
+
         // Запланированные записи
         let schedulerSection = buildRecordingSchedulerSection()
         settingsBar.addArrangedSubview(schedulerSection)
