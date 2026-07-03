@@ -396,9 +396,9 @@ class RecordingChainUnlinkTestCase(unittest.TestCase):
 class RecordingChainBackendServiceDispatchTestCase(unittest.TestCase):
     """Wave 156: verify unlink_recording_from_chain is wired in BackendService dispatch table.
 
-    Also documents that the Swift agent does NOT yet call this method directly
-    (no Swift caller exists in native/KrabEarAgent/) — the IPC method is
-    exposed for future Swift UI integration. Python-level IPC is fully wired.
+    Swift UI caller shipped in HistoryPanelController+RecordingChain.swift
+    (RecordingChainManager settings/history-tab section) — Python-level IPC
+    and Swift-level caller are both wired.
     """
 
     def setUp(self):
@@ -436,13 +436,8 @@ class RecordingChainBackendServiceDispatchTestCase(unittest.TestCase):
         """The handler is present in the service._handlers dict."""
         self.assertIn("unlink_recording_from_chain", self.service._handlers)
 
-    def test_no_swift_caller_documented(self):
-        """Documents that Swift agent has no caller for unlink_recording_from_chain yet.
-
-        The IPC method is wired Python-side (BackendService dispatch table line ~882).
-        Swift UI caller is pending — to be added in a future wave when the
-        recording chain UI is implemented in HistoryPanelController.
-        """
+    def test_swift_caller_exists(self):
+        """Swift agent calls unlink_recording_from_chain (HistoryPanelController+RecordingChain.swift)."""
         import subprocess
         result = subprocess.run(
             ["grep", "-r", "unlink_recording_from_chain",
@@ -451,9 +446,10 @@ class RecordingChainBackendServiceDispatchTestCase(unittest.TestCase):
             text=True,
             cwd=str(Path(__file__).parent.parent.parent),
         )
-        # No Swift caller found — confirmed absent
-        self.assertEqual(result.stdout.strip(), "",
-                         "Unexpected Swift caller found — update this test")
+        self.assertNotEqual(
+            result.stdout.strip(), "",
+            "Expected Swift caller in native/ — was it removed?"
+        )
 
 
 class RecordingChainW1046FixTestCase(unittest.TestCase):
