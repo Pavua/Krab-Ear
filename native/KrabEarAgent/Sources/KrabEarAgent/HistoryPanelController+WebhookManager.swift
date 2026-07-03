@@ -200,7 +200,7 @@ extension HistoryPanelController {
         }
         subtitleParts.append("Доставлено: \(deliveries), Ошибок: \(failures)")
         
-        let descLabel = NSTextField(labelWithString: subtitleParts.joined(separator: " • "))
+        let descLabel = NSTextField(labelWithString: subtitleParts.joined(separator: " · "))
         descLabel.font = KrabEarTheme.Typography.caption
         descLabel.textColor = KrabEarTheme.Colors.textSecondary
         descLabel.lineBreakMode = .byTruncatingTail
