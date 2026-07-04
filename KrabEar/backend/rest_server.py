@@ -1160,8 +1160,28 @@ def _load_settings_field(key: str, default):
         return default
 
 
+def _privacy_gate(f):
+    """Decorator: short-circuit with 403 privacy_mode BEFORE any auth check runs.
+
+    Must be applied ABOVE (outside) @require_api_key in the decorator stack so
+    privacy_mode wins first even when REST auth is also misconfigured — e.g. a
+    Voice Gateway client with a stale/wrong KRAB_EAR_REST_API_KEY would otherwise
+    get 401 (not 403) while privacy_mode is on, and VG's fallback chain treats a
+    plain "not success" 401 as retryable, falling through to cloud STT/TTS and
+    leaking privacy-mode-protected audio/text. Mirrors the codebase-wide
+    "privacy mode always wins" gate convention (see CLAUDE.md).
+    """
+    @functools.wraps(f)
+    def decorated(*args, **kwargs):
+        if _load_settings_field("privacy_mode_enabled", False):
+            return jsonify({"ok": False, "skipped": "privacy_mode"}), 403
+        return f(*args, **kwargs)
+    return decorated
+
+
 @v1_blp.route("/tts/synthesize", methods=["POST"])
 @limiter.limit("10 per minute")
+@_privacy_gate
 @require_api_key
 def synthesize_speech():
     """Synthesize speech from text.
@@ -1176,11 +1196,9 @@ def synthesize_speech():
           зависит от флага settings.TTS_ENABLED (и settings.TTS_FALLBACK_SAY).
 
     Returns 403 {"ok": false, "skipped": "privacy_mode"} when IPC privacy
-    mode is active (privacy_mode_enabled=true in settings.json).
+    mode is active (privacy_mode_enabled=true in settings.json) — enforced by
+    @_privacy_gate before this body runs (and before auth is even checked).
     """
-    if _load_settings_field("privacy_mode_enabled", False):
-        return jsonify({"ok": False, "skipped": "privacy_mode"}), 403
-
     req_data = request.get_json(silent=True)
     if not req_data:
         return jsonify({"error": "Invalid or missing JSON"}), 400
@@ -1210,6 +1228,7 @@ def synthesize_speech():
 @v1_blp.route("/stt/transcribe", methods=["POST"])
 @v1_blp.response(200, TranscribeResponseSchema)
 @limiter.limit("10 per minute")
+@_privacy_gate
 @require_api_key
 def transcribe_audio():
     """Transcribe an audio file to text.
@@ -1224,12 +1243,9 @@ def transcribe_audio():
         - chat_id + message_id: idempotency key pair (optional)
 
     Returns 403 {"ok": false, "skipped": "privacy_mode"} when IPC privacy
-    mode is active (privacy_mode_enabled=true in settings.json).
+    mode is active (privacy_mode_enabled=true in settings.json) — enforced by
+    @_privacy_gate before this body runs (and before auth is even checked).
     """
-    # F6: privacy mode guard — block transcription writes when privacy is on
-    if _load_settings_field("privacy_mode_enabled", False):
-        return jsonify({"ok": False, "skipped": "privacy_mode"}), 403
-
     chat_id = request.form.get("chat_id")
     message_id = request.form.get("message_id")
 
