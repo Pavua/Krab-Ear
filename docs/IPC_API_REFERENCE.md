@@ -2474,6 +2474,195 @@ Returns: `{ok, enabled, total, encrypted, plaintext, pct, migrating}`
 
 ---
 
+## Recording Management & Integrations (2026-07-02/03)
+
+Запланированные записи, пресеты конфигурации, экспорт таймлайна, webhook-интеграции, цепочки записей, профили резюмирования.
+
+| Метод | Описание |
+|---|---|
+| `schedule_recording` | Планирует новую запись на будущее время |
+| `cancel_scheduled_recording` | Отменяет запланированное задание |
+| `list_scheduled_recordings` | Список всех запланированных заданий |
+| `list_config_presets` | Список конфигурационных пресетов |
+| `apply_config_preset` | Применяет пресет: merge settings_patch и сохранение |
+| `create_config_preset` | Создаёт кастомный пресет |
+| `delete_config_preset` | Удаляет кастомный пресет |
+| `export_config_preset` | Экспортирует пресет в JSON |
+| `import_config_preset` | Импортирует пресет из JSON |
+| `export_timeline_svg` | Экспортирует таймлайн в SVG |
+| `export_timeline_json` | Экспортирует таймлайн в JSON |
+| `export_timeline_ical` | Экспортирует таймлайн в iCalendar (.ics) |
+| `register_webhook` | Регистрирует webhook-получателя событий |
+| `unregister_webhook` | Удаляет webhook по ID |
+| `list_webhooks` | Список зарегистрированных webhook-ов |
+| `start_chain` | Создаёт новую цепочку записей |
+| `add_to_chain` | Добавляет запись в цепочку (идемпотентно) |
+| `end_chain` | Завершает цепочку |
+| `get_chain` | Полные детали цепочки |
+| `list_chains` | Краткий список цепочек |
+| `merge_chain_text` | Конкатенирует тексты цепочки |
+| `unlink_recording_from_chain` | Убирает запись из цепочки |
+| `list_summary_profiles` | Список профилей стиля резюмирования |
+| `add_summary_profile` | Создаёт/заменяет кастомный профиль |
+
+> **RecordingScheduler** — запланировать запись на определённое время (фоновый триггер-поток каждые 30с).
+
+### `schedule_recording`
+*(service.py → recording_scheduler.py)*  
+Планирует новую запись на будущее время.  
+Params: `{start_time, duration_sec, label?}` — `start_time` (ОБЯЗАТЕЛЕН) ISO 8601 строка с таймзоной; не в прошлом; не дальше 30 дней вперёд. `duration_sec` (ОБЯЗАТЕЛЕН) диапазон 1..7200 (макс 2ч). `label` (опционально) — текстовая метка.  
+Returns: `{schedule: {id, start_time, duration_sec, label, status, created_at}}` — status: `"pending"`. Невалидные данные (диапазон/лимит 50 pending/лимит 500 всего) → `ValueError` (top-level `ok:false`/`error`).
+
+### `cancel_scheduled_recording`
+*(service.py → recording_scheduler.py)*  
+Отменяет запланированное задание.  
+Params: `{schedule_id}` (или алиас `id`) — обязателен.  
+Returns: `{cancelled: bool}` — `false` если id не найден или уже не pending.
+
+### `list_scheduled_recordings`
+*(service.py → recording_scheduler.py)*  
+Список всех запланированных заданий (все статусы).  
+Нет params.  
+Returns: `{schedules: [{id, start_time, duration_sec, label, status, created_at}], count}` — status: `"pending"|"completed"|"cancelled"`.
+
+> **ConfigPresetsLibrary** — именованные пресеты настроек (5 встроенных: interview/meeting/... + кастомные пользовательские).
+
+### `list_config_presets`
+*(service.py → config_presets_library.py)*  
+Список всех пресетов (встроенные + кастомные).  
+Нет params.  
+Returns: `{presets: [{name, description, builtin, settings_patch}]}`
+
+### `apply_config_preset`
+*(service.py → config_presets_library.py)*  
+Атомарно применяет пресет: merge settings_patch в текущие настройки + сохранение.  
+Params: `{name}` — обязателен.  
+Returns: `{name, settings_patch, applied: bool, saved}` — пресет не найден → `KeyError` (internal_error).
+
+### `create_config_preset`
+*(service.py → config_presets_library.py)*  
+Создаёт кастомный пресет.  
+Params: `{name, description, settings_patch}` — все три обязательны; `settings_patch` должен быть непустым dict.  
+Returns: `{preset: {name, description, builtin: false, settings_patch}}`
+
+### `delete_config_preset`
+*(service.py → config_presets_library.py)*  
+Удаляет кастомный пресет по имени.  
+Params: `{name}` — обязателен.  
+Returns: `{name, deleted: bool}` — `false` для встроенных пресетов (нельзя удалить) или если не найден.
+
+### `export_config_preset`
+*(service.py → config_presets_library.py)*  
+Экспортирует пресет в JSON-строку.  
+Params: `{name}` — обязателен.  
+Returns: `{name, json: string}`
+
+### `import_config_preset`
+*(service.py → config_presets_library.py)*  
+Импортирует пресет из JSON-строки (от export_config_preset).  
+Params: `{json: string}` — обязателен.  
+Returns: `{preset: {name, description, builtin: false, settings_patch}}`
+
+> **TimelineExporter** — экспорт таймлайна записей истории (группировка по часу/дню/неделе) в файл.
+
+### `export_timeline_svg`
+*(service.py)*  
+Экспортирует таймлайн в SVG-файл.  
+Params: `{output_dir?, group_by="day", limit=500, width=1200, height=400}` — group_by: `"hour"|"day"|"week"`; limit макс 5000.  
+Returns: `{path, blocks}` (успех) или `{error: {code: "privacy_mode"|"invalid_path", message}}` (бэкенд не бросает исключение — ошибка ВНУТРИ result, ok:true на верхнем уровне).
+
+### `export_timeline_json`
+*(service.py)*  
+То же для JSON (без width/height).  
+Params: `{output_dir?, group_by="day", limit=500}`  
+Returns: `{path, blocks}` или `{error: {code, message}}`
+
+### `export_timeline_ical`
+*(service.py)*  
+То же для iCalendar (.ics), blocks = число VEVENT.  
+Params: `{output_dir?, group_by="day", limit=500}`  
+Returns: `{path, blocks}` или `{error: {code, message}}`
+
+> **WebhookManager** — внешние webhook-интеграции (HMAC-подпись, SSRF-защита, retry с backoff).
+
+### `register_webhook`
+*(service.py → webhook_manager.py)*  
+Регистрирует webhook-получателя событий.  
+Params: `{url, events: [string] (пусто=все), secret? (мин 16 симв. если непустой)}` — url должен начинаться с http(s)://, проходит SSRF-проверку.  
+Returns: `{webhook_id}` (успех) или `{ok: false, reason: "webhook_limit_reached"}` (лимит 500, НЕ исключение) или top-level ValueError (пустой url/SSRF-отклонение/короткий secret).
+
+### `unregister_webhook`
+*(service.py → webhook_manager.py)*  
+Удаляет webhook по ID.  
+Params: `{webhook_id}` — обязателен.  
+Returns: `{removed: bool}`
+
+### `list_webhooks`
+*(service.py → webhook_manager.py)*  
+Список зарегистрированных webhook-ов (без секретов).  
+Нет params.  
+Returns: `{webhooks: [{webhook_id, url, events, has_secret: bool, enabled, created_at, deliveries, failures, last_status}]}`
+
+> **RecordingChainManager** — связывание нескольких записей истории в упорядоченную «цепочку» (напр. совещание, записанное по частям).
+
+### `start_chain`
+*(service.py → recording_chain.py)*  
+Создаёт новую цепочку.  
+Params: `{name}` — обязателен, не пустой, макс 200 символов.  
+Returns: `{chain_id}` (успех) или `{ok: false, error: string, reason: "limit_exceeded"}` (лимит 500 цепочек) или `{ok: false, error: string}` (ошибка записи на диск).
+
+### `add_to_chain`
+*(service.py → recording_chain.py)*  
+Добавляет запись истории в цепочку. Идемпотентно (повторное добавление того же item_id — no-op).  
+Params: `{chain_id, item_id}` — оба обязательны.  
+Returns: `{ok: true}` или `{ok: false, error: string, reason: "chain_ended"|"limit_exceeded"}` (лимит 1000 записей в цепочке) или `{ok: false, error: string}`.
+
+### `end_chain`
+*(service.py → recording_chain.py)*  
+Завершает цепочку (помечает ended_at).  
+Params: `{chain_id}` — обязателен.  
+Returns: `{ok: true}` или `{ok: false, error: string}`
+
+### `get_chain`
+*(service.py → recording_chain.py)*  
+Полные детали цепочки: элементы по порядку, суммарные duration/word_count.  
+Params: `{chain_id}` — обязателен.  
+Returns: `{chain_id, name, created_at, ended_at, item_ids: [string], items: [dict], total_duration_sec, total_word_count}`. В privacy mode — `items: []` + доп. поле `privacy_mode: true`. Цепочка не найдена → `KeyError` (internal_error).
+
+### `list_chains`
+*(service.py → recording_chain.py)*  
+Краткий список цепочек (без items/total_duration — для деталей нужен get_chain).  
+Params: `{limit=20}` — макс 1000.  
+Returns: `{chains: [{chain_id, name, created_at, ended_at, item_count}]}`
+
+### `merge_chain_text`
+*(service.py → recording_chain.py)*  
+Конкатенирует тексты всех записей цепочки по порядку добавления.  
+Params: `{chain_id}` — обязателен.  
+Returns: `{text: string}`
+
+### `unlink_recording_from_chain`
+*(service.py → recording_chain.py)*  
+Убирает запись из цепочки (не удаляет саму запись истории).  
+Params: `{chain_id, item_id}` — оба обязательны.  
+Returns: `{ok: true, removed: bool}` (removed=false если записи не было в цепочке — идемпотентно) или `{ok: false, error: string}`
+
+> **SummaryProfileManager** — профили стиля резюмирования (5 встроенных: brief/detailed/bullet_points/meeting_notes/telegram + кастомные).
+
+### `list_summary_profiles`
+*(service.py → history_service.py → summary_profiles.py)*  
+Список всех профилей.  
+Нет params.  
+Returns: `{profiles: [{name, system_prompt, max_tokens, format_instructions, builtin}]}`
+
+### `add_summary_profile`
+*(service.py → history_service.py → summary_profiles.py)*  
+Создаёт ИЛИ заменяет кастомный профиль (upsert среди кастомных; нет отдельного delete-метода). Имя не может совпадать со встроенным.  
+Params: `{name, prompt, max_tokens=300, format_instructions?}` — `name`/`prompt` обязательны, prompt попадает в поле ответа `system_prompt`. Макс 100/2000/500 символов соответственно.  
+Returns: `{profile: {name, system_prompt, max_tokens, format_instructions, builtin: false}}` — совпадение с встроенным именем → `ValueError`.
+
+---
+
 ## Misc
 
 | Метод | Описание |
