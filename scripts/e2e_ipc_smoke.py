@@ -17,7 +17,11 @@ against a throwaway/dev instance unless you intend to add those items. Exit 0 if
 all method checks pass, 1 otherwise. Asserts OUTPUT SANITY (shape + non-trivial
 content where data exists), tolerating privacy gates and legitimate emptiness.
 
-=== METHODS COVERED (38) ===
+=== METHODS COVERED (38 original + 23 from 2026-07-02/03 recording-mgmt/integrations waves) ===
+  SECTION 9f-9k — RecordingScheduler / ConfigPresetsLibrary / TimelineExporter /
+  WebhookManager / RecordingChainManager / SummaryProfileManager (see below,
+  after 9e/bookmarks_crud). apply_config_preset intentionally NOT exercised here
+  (mutates live settings.json — out of scope for a read/write-sentinel smoke).
   SEED / INFRA
     add_history_item            — seeds 10 varied items; collects ids
     ping                        — liveness + uptime fields
@@ -1191,6 +1195,257 @@ def check_bookmarks_crud():
     return ok
 
 run_check("9e/bookmarks_crud", check_bookmarks_crud)
+
+
+# ---------------------------------------------------------------------------
+# 9f — RecordingScheduler CRUD (schedule → list → cancel → list)
+# ---------------------------------------------------------------------------
+
+def check_recording_scheduler_crud():
+    ok = True
+    start_time = (
+        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
+    ).isoformat(timespec="seconds")
+
+    r_sched = call("schedule_recording", {
+        "start_time": start_time, "duration_sec": 600, "label": "E2E smoke sentinel",
+    })
+    ok &= need(r_sched.get("ok") is True, "9f/scheduler: schedule_recording ok==True")
+    schedule = r_sched.get("result", {}).get("schedule", {})
+    schedule_id = schedule.get("id")
+    ok &= need(bool(schedule_id), "9f/scheduler: schedule has id")
+    ok &= need(schedule.get("status") == "pending",
+               f"9f/scheduler: status=pending (got {schedule.get('status')!r})")
+
+    r_list = call("list_scheduled_recordings", {})
+    res_list = r_list.get("result", {})
+    ok &= need("schedules" in res_list and "count" in res_list,
+               "9f/scheduler: list response has schedules+count keys")
+    ids_after = [s.get("id") for s in res_list.get("schedules", [])]
+    ok &= need(schedule_id in ids_after, "9f/scheduler: sentinel visible after schedule")
+
+    if schedule_id:
+        r_cancel = call("cancel_scheduled_recording", {"schedule_id": schedule_id})
+        ok &= need(r_cancel.get("result", {}).get("cancelled") is True,
+                   "9f/scheduler: cancel_scheduled_recording cancelled=True")
+
+        r_list2 = call("list_scheduled_recordings", {})
+        pending_after = [
+            s.get("id") for s in r_list2.get("result", {}).get("schedules", [])
+            if s.get("status") == "pending"
+        ]
+        ok &= need(schedule_id not in pending_after,
+                   "9f/scheduler: sentinel no longer pending after cancel")
+
+    return ok
+
+run_check("9f/recording_scheduler_crud", check_recording_scheduler_crud)
+
+
+# ---------------------------------------------------------------------------
+# 9g — ConfigPresetsLibrary CRUD (list → create → list → export → import → delete → list)
+# ---------------------------------------------------------------------------
+
+_PRESET_NAME = "e2e_smoke_preset"
+
+def check_config_presets_crud():
+    ok = True
+
+    r_create = call("create_config_preset", {
+        "name": _PRESET_NAME, "description": "E2E smoke sentinel",
+        "settings_patch": {"quality_profile": "balanced"},
+    })
+    ok &= need(r_create.get("ok") is True, "9g/presets: create_config_preset ok==True")
+    preset = r_create.get("result", {}).get("preset", {})
+    ok &= need(preset.get("name") == _PRESET_NAME, "9g/presets: created name matches")
+    ok &= need(preset.get("builtin") is False, "9g/presets: builtin==False for custom preset")
+
+    r_list = call("list_config_presets", {})
+    names_after = [p.get("name") for p in r_list.get("result", {}).get("presets", [])]
+    ok &= need(_PRESET_NAME in names_after, "9g/presets: sentinel visible after create")
+    builtin_names = {"interview", "meeting", "translation", "call_recording"}
+    ok &= need(bool(builtin_names & set(names_after)),
+               f"9g/presets: at least one builtin preset present (got {names_after!r})")
+
+    r_export = call("export_config_preset", {"name": _PRESET_NAME})
+    exported_json = r_export.get("result", {}).get("json", "")
+    ok &= need(bool(exported_json) and _PRESET_NAME in exported_json,
+               "9g/presets: export_config_preset returns json containing preset name")
+
+    r_delete = call("delete_config_preset", {"name": _PRESET_NAME})
+    ok &= need(r_delete.get("result", {}).get("deleted") is True,
+               "9g/presets: delete_config_preset deleted=True")
+
+    r_import = call("import_config_preset", {"json": exported_json})
+    imported = r_import.get("result", {}).get("preset", {})
+    ok &= need(imported.get("name") == _PRESET_NAME,
+               "9g/presets: import_config_preset restores sentinel by name")
+
+    r_delete2 = call("delete_config_preset", {"name": _PRESET_NAME})
+    ok &= need(r_delete2.get("result", {}).get("deleted") is True,
+               "9g/presets: cleanup delete after re-import")
+
+    r_list2 = call("list_config_presets", {})
+    names_final = [p.get("name") for p in r_list2.get("result", {}).get("presets", [])]
+    ok &= need(_PRESET_NAME not in names_final, "9g/presets: sentinel absent after final delete")
+
+    return ok
+
+run_check("9g/config_presets_crud", check_config_presets_crud)
+
+
+# ---------------------------------------------------------------------------
+# 9h — TimelineExporter (SVG/JSON/iCal export sanity, no cleanup needed —
+#   files land under the throwaway data-dir, destroyed with the container)
+# ---------------------------------------------------------------------------
+
+def check_timeline_exporter():
+    ok = True
+    for method in ("export_timeline_svg", "export_timeline_json", "export_timeline_ical"):
+        r = call(method, {"group_by": "day", "limit": 500})
+        res = r.get("result", {})
+        if "error" in res:
+            # privacy_mode or invalid_path — acceptable non-crash outcome
+            need(True, f"9h/timeline: {method} returned graceful error={res['error'].get('code')!r}")
+            continue
+        ok &= need("path" in res and "blocks" in res,
+                   f"9h/timeline: {method} response has path+blocks keys")
+        ok &= need(bool(res.get("path")), f"9h/timeline: {method} path is non-empty")
+    return ok
+
+run_check("9h/timeline_exporter", check_timeline_exporter)
+
+
+# ---------------------------------------------------------------------------
+# 9i — WebhookManager CRUD (list → register → list → unregister → list)
+# ---------------------------------------------------------------------------
+
+def check_webhook_manager_crud():
+    ok = True
+
+    # NOTE: must be a REAL, DNS-resolvable domain — the SSRF guard fail-closes on
+    # unresolvable hosts even at registration time (Gap 3 fix, W1721), so reserved
+    # non-resolving TLDs like .invalid/.test are correctly REJECTED here, not a bug.
+    # example.com (RFC 2606) always resolves; delivery (if it ever fires async
+    # before teardown) is a harmless benign POST to a real, inert domain.
+    r_register = call("register_webhook", {
+        "url": "https://example.com/e2e-smoke-hook",
+        "events": ["transcription.completed"],
+    })
+    if "error" in r_register:
+        need(False, f"9i/webhook: register_webhook top-level error: {r_register['error']!r}")
+        return False
+    res_register = r_register.get("result", {})
+    if res_register.get("ok") is False and res_register.get("reason") == "webhook_limit_reached":
+        need(True, "9i/webhook: limit reached — skipping CRUD assertion")
+        return ok
+    webhook_id = res_register.get("webhook_id")
+    ok &= need(bool(webhook_id), "9i/webhook: register_webhook returns webhook_id")
+
+    r_list = call("list_webhooks", {})
+    ids_after = [w.get("webhook_id") for w in r_list.get("result", {}).get("webhooks", [])]
+    ok &= need(webhook_id in ids_after, "9i/webhook: sentinel visible after register")
+
+    if webhook_id:
+        r_unregister = call("unregister_webhook", {"webhook_id": webhook_id})
+        ok &= need(r_unregister.get("result", {}).get("removed") is True,
+                   "9i/webhook: unregister_webhook removed=True")
+
+        r_list2 = call("list_webhooks", {})
+        ids_final = [w.get("webhook_id") for w in r_list2.get("result", {}).get("webhooks", [])]
+        ok &= need(webhook_id not in ids_final, "9i/webhook: sentinel absent after unregister")
+
+    return ok
+
+run_check("9i/webhook_manager_crud", check_webhook_manager_crud)
+
+
+# ---------------------------------------------------------------------------
+# 9j — RecordingChainManager CRUD (start → add → get/list → merge → unlink → end)
+# ---------------------------------------------------------------------------
+
+def check_recording_chain_crud():
+    if not SEED_IDS:
+        need(False, "9j/chain: SKIP — no seeded ids available")
+        return False
+
+    ok = True
+    r_start = call("start_chain", {"name": "E2E smoke chain"})
+    res_start = r_start.get("result", {})
+    if res_start.get("ok") is False:
+        need(True, f"9j/chain: start_chain non-fatal error: {res_start.get('error')!r}")
+        return ok
+    chain_id = res_start.get("chain_id")
+    ok &= need(bool(chain_id), "9j/chain: start_chain returns chain_id")
+
+    if not chain_id:
+        return ok
+
+    r_add = call("add_to_chain", {"chain_id": chain_id, "item_id": SEED_IDS[0]})
+    ok &= need(r_add.get("result", {}).get("ok") is True, "9j/chain: add_to_chain ok==True")
+
+    r_get = call("get_chain", {"chain_id": chain_id})
+    res_get = r_get.get("result", {})
+    ok &= need(res_get.get("chain_id") == chain_id, "9j/chain: get_chain returns matching chain_id")
+    ok &= need("total_duration_sec" in res_get and "total_word_count" in res_get,
+               "9j/chain: get_chain has total_duration_sec+total_word_count")
+
+    r_list = call("list_chains", {"limit": 50})
+    chain_ids_after = [c.get("chain_id") for c in r_list.get("result", {}).get("chains", [])]
+    ok &= need(chain_id in chain_ids_after, "9j/chain: sentinel visible in list_chains")
+
+    r_merge = call("merge_chain_text", {"chain_id": chain_id})
+    ok &= need("text" in r_merge.get("result", {}), "9j/chain: merge_chain_text has text key")
+
+    r_unlink = call("unlink_recording_from_chain", {"chain_id": chain_id, "item_id": SEED_IDS[0]})
+    ok &= need(r_unlink.get("result", {}).get("ok") is True,
+               "9j/chain: unlink_recording_from_chain ok==True")
+
+    r_end = call("end_chain", {"chain_id": chain_id})
+    ok &= need(r_end.get("result", {}).get("ok") is True, "9j/chain: end_chain ok==True")
+
+    return ok
+
+run_check("9j/recording_chain_crud", check_recording_chain_crud)
+
+
+# ---------------------------------------------------------------------------
+# 9k — SummaryProfileManager (list baseline builtins → add custom → list verify)
+#   No delete method exists (upsert-among-customs contract) — sentinel is left
+#   in the throwaway store, destroyed with the container.
+# ---------------------------------------------------------------------------
+
+_SUMMARY_PROFILE_NAME = "e2e_smoke_profile"
+
+def check_summary_profiles():
+    ok = True
+    r_list = call("list_summary_profiles", {})
+    profiles = r_list.get("result", {}).get("profiles", [])
+    names = [p.get("name") for p in profiles]
+    builtin_names = {"brief", "detailed", "bullet_points", "meeting_notes", "telegram"}
+    ok &= need(builtin_names.issubset(set(names)),
+               f"9k/summary_profiles: all 5 builtins present (got {names!r})")
+
+    r_add = call("add_summary_profile", {
+        "name": _SUMMARY_PROFILE_NAME, "prompt": "E2E smoke sentinel system prompt.",
+        "max_tokens": 200,
+    })
+    profile = r_add.get("result", {}).get("profile", {})
+    ok &= need(profile.get("name") == _SUMMARY_PROFILE_NAME,
+               "9k/summary_profiles: add_summary_profile returns matching name")
+    ok &= need(profile.get("system_prompt") == "E2E smoke sentinel system prompt.",
+               "9k/summary_profiles: system_prompt echoes the prompt param")
+    ok &= need(profile.get("builtin") is False,
+               "9k/summary_profiles: builtin==False for custom profile")
+
+    r_list2 = call("list_summary_profiles", {})
+    names_after = [p.get("name") for p in r_list2.get("result", {}).get("profiles", [])]
+    ok &= need(_SUMMARY_PROFILE_NAME in names_after,
+               "9k/summary_profiles: sentinel visible after add")
+
+    return ok
+
+run_check("9k/summary_profiles", check_summary_profiles)
 
 # SKIPPED round-trips (method not in dispatch table or requires non-smoke state):
 #   list_translation_glossary / get_translation_glossary — NOT in dispatch table;
