@@ -128,14 +128,14 @@ extension ConversationViewController {
             channels: 1,
             interleaved: false
         ) else {
-            AgentLogger.shared.info("[Audio] Не удалось создать playback-формат 24kHz — downlink недоступен")
+            AgentLogger.shared.warn("[Audio] Не удалось создать playback-формат 24kHz — downlink недоступен")
             // Continue without player: uplink still works.
             audioHolder.engine = engine
             do {
                 try engine.start()
                 AgentLogger.shared.info("[Audio] Захват запущен (uplink only, no player)")
             } catch {
-                AgentLogger.shared.info("[Audio] Ошибка запуска движка: \(error.localizedDescription)")
+                AgentLogger.shared.error("[Audio] Ошибка запуска движка: \(error.localizedDescription)")
             }
             return
         }
@@ -149,7 +149,7 @@ extension ConversationViewController {
             player.play()
             AgentLogger.shared.info("[Audio] Захват запущен (PCM16 uplink + downlink player, 16kHz/24kHz)")
         } catch {
-            AgentLogger.shared.info("[Audio] Ошибка запуска движка: \(error.localizedDescription)")
+            AgentLogger.shared.error("[Audio] Ошибка запуска движка: \(error.localizedDescription)")
         }
     }
 
