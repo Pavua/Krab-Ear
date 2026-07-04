@@ -117,6 +117,14 @@ cp -R "$APP_BUNDLE_SRC" "$APP_DIST"
 # Copy freshly built binary
 cp -f "$BUILT_BINARY" "$APP_DIST/Contents/MacOS/KrabEarAgent"
 
+# Bundle backend bootstrap installer: агент подсвечивает его в Finder на чистом
+# Mac (clean-Mac guard в main.swift ищет ресурс bootstrap_backend.command).
+# Кладём ДО подписи, чтобы ресурс попал под codesign --deep.
+mkdir -p "$APP_DIST/Contents/Resources"
+cp -f "$ROOT_DIR/scripts/bootstrap_backend.command" "$APP_DIST/Contents/Resources/bootstrap_backend.command"
+chmod +x "$APP_DIST/Contents/Resources/bootstrap_backend.command"
+ok "Bootstrap installer bundled into Resources"
+
 # Update version in Info.plist if --version was specified
 if [[ -n "$VERSION" ]]; then
   /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP_DIST/Contents/Info.plist" 2>/dev/null || true

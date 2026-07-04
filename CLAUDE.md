@@ -256,7 +256,7 @@ Privacy-mode gate pattern (waves 23-30): any IPC handler that returns transcript
 ### Native agent (`native/KrabEarAgent/`):
 - Swift Package (swift-tools-version 6.0, macOS 13+). Single executable target.
 - Communicates with backend exclusively through Unix socket JSON-RPC.
-- Resolves project root by checking for `KrabEar/backend/service.py`.
+- Resolves project root by checking for `KrabEar/backend/service.py` (порядок: `--project-root` → env `KRAB_EAR_PROJECT_ROOT` → cwd → walk-up от бинаря → указатель `~/Library/Application Support/KrabEar/project_root`, который пишет `scripts/bootstrap_backend.command` — автоустановщик backend для DMG-получателей, вложен в `Contents/Resources` DMG-сборкой; clean-Mac guard в `main.swift` подсвечивает его в Finder).
 - **`KrabEarTheme.swift`** — Liquid Glass visual theme (NSVisualEffectView). ThemeCardView, CollapsibleSectionView, ThemePrimaryButton.
 - **`ThemeButton` base class** (PR #13) — общий предок для `ThemePrimaryButton` / `ThemeSecondaryButton`. Устанавливает `NSTrackingArea`, обрабатывает `mouseEntered/Exited/Down/Up` и применяет `KrabEarTheme.Interaction` токены: hover = 10% белый overlay, pressed = 15% чёрный overlay + scale 0.98×, disabled = opacity 40%. Все переходы идут через `KrabEarTheme.Motion.animate()` — Reduce Motion respected.
 - **`HistoryPanelController.swift`** + 12 extension files: `+CallAssist`, `+CallAutomation`, `+Diagnostics`, `+GlossarySuggestions`, `+History`, `+HistoryEnhancements`, `+Import`, `+LiveSubsSettings`, `+LiveTranslation`, `+Management`, `+SelectionTranslator`, `+Settings` (split for maintainability).

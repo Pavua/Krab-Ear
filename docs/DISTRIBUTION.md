@@ -96,7 +96,21 @@ bash scripts/build_distribution_dmg.command --rebuild --version 2.0.0
 
 ## Требования на целевой машине (текущая сборка)
 
-> ⚠️ **Текущий DMG содержит ТОЛЬКО нативный menu-bar агент (Swift).** Python-backend (распознавание речи, история, перевод, все IPC-функции) в бандл НЕ входит — он должен присутствовать на целевой машине отдельно. На «чистом» Mac шаги из следующего раздела приведут к сообщению «Krab Ear: backend не установлен».
+> ⚠️ **Текущий DMG содержит ТОЛЬКО нативный menu-bar агент (Swift).** Python-backend (распознавание речи, история, перевод, все IPC-функции) в бандл НЕ входит — он ставится на целевой машине **bootstrap-инсталлятором** (см. следующий подраздел) или вручную по списку ниже. На «чистом» Mac первый запуск покажет «Krab Ear: backend не установлен» и подсветит инсталлятор в Finder.
+
+### Автоустановка backend (bootstrap-инсталлятор)
+
+DMG-сборка несёт `bootstrap_backend.command` внутри `Krab Ear.app/Contents/Resources`. Когда агент на чистом Mac не находит backend, он подсвечивает этот файл в Finder — получателю достаточно:
+
+1. Дважды щёлкнуть `bootstrap_backend.command` (откроется Terminal). Если Gatekeeper блокирует скрипт из скачанного DMG — ПКМ (Ctrl+щелчок) → **Открыть**, как и с самим приложением.
+2. Дождаться окончания (скрипт скачает код, создаст venv, поставит зависимости — несколько ГБ, нужна сеть; спросит HF-токен для диаризации — Enter, чтобы пропустить).
+3. Открыть **Krab Ear** заново.
+
+Что делает скрипт (идемпотентно, без sudo): проверяет Apple Silicon → ищет Python ≥ 3.12 (Homebrew/python.org; если нет — печатает, как поставить) → клонирует репозиторий в `~/KrabEar` (git; fallback: curl-tarball) → создаёт `.venv_krab_ear` + `pip install -r requirements.txt` → пишет указатель `~/Library/Application Support/KrabEar/project_root` (по нему агент из `/Applications` находит backend) → ставит launchd-сервис backend.
+
+Переопределения через env: `KRAB_EAR_INSTALL_DIR`, `KRAB_EAR_REPO_URL`, `KRAB_EAR_BRANCH`; флаг `--dry-run` печатает план без изменений. Скрипт можно запускать и напрямую из репозитория (`scripts/bootstrap_backend.command`).
+
+### Ручная установка (эквивалент того, что делает инсталлятор)
 
 Что должно быть на Mac получателя до первого запуска:
 
@@ -109,20 +123,19 @@ bash scripts/build_distribution_dmg.command --rebuild --version 2.0.0
 
 Если backend не найден и не запущен, агент показывает целевое сообщение «Krab Ear: backend не установлен» сразу при старте (вместо прежнего 6–20-секундного таймаута с «backend недоступен»).
 
-### Дорожная карта к self-contained DMG (не реализовано)
+### Дорожная карта к self-contained DMG
 
-Зафиксированные варианты — решение за владельцем: **(a)** встроить Python-runtime + backend в `Contents/Resources` (python-build-standalone/Briefcase; +сотни МБ к DMG, нотаризация всех нативных модулей); **(b)** bootstrap-инсталлятор первого запуска — скачивает backend-payload и создаёт venv автоматически (нужна сеть, зато DMG лёгкий); **(c)** статус-кво «две части» для технических получателей по этому документу.
+Статус вариантов: **(b) bootstrap-инсталлятор первого запуска — РЕАЛИЗОВАН** (подраздел «Автоустановка backend» выше: лёгкий DMG, сеть обязательна при установке); **(c)** ручная установка «две части» — задокументирована ниже как эквивалент; **(a)** встроить Python-runtime + backend в `Contents/Resources` (python-build-standalone/Briefcase; +сотни МБ к DMG, нотаризация всех нативных модулей) — не реализовано, отложено.
 
 ---
 
 ## How recipients install Krab Ear
 
-> Предполагает выполненные «Требования на целевой машине» выше (либо запуск на той же машине, где собран проект).
-
 1. Download `Krab-Ear-vX.Y.Z.dmg`.
 2. Double-click the DMG → drag **Krab Ear** into the **Applications** folder.
 3. Eject the DMG.
 4. First launch: double-click **Krab Ear** in Applications (or Spotlight).
+   - **На чистом Mac** появится «backend не установлен», а в Finder подсветится `bootstrap_backend.command` — запустите его двойным щелчком, дождитесь окончания и откройте Krab Ear снова (см. «Автоустановка backend» выше).
 5. Grant permissions when prompted:
    - **Microphone** — required for voice recording.
    - **Accessibility** — required for auto-paste into the active app.

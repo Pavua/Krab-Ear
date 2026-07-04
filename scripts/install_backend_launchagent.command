@@ -42,10 +42,18 @@ if [ -z "${HF_TOKEN:-}" ] && [ -f "$SECRETS_FILE" ]; then
   HF_TOKEN_FROM_SECRETS="$(grep -E '^KRAB_EAR_HF_TOKEN=' "$SECRETS_FILE" | head -1 | cut -d= -f2- || true)"
   [ -n "$HF_TOKEN_FROM_SECRETS" ] && HF_TOKEN="$HF_TOKEN_FROM_SECRETS"
 fi
-if [ -z "${HF_TOKEN:-}" ]; then
-  printf '[install] HF_TOKEN не найден. Введи token (Hugging Face, нужен для pyannote diarization): '
+# Токен ОПЦИОНАЛЕН: нужен только для pyannote-диаризации говорящих. Пустой ввод
+# (или KRAB_EAR_SKIP_HF_TOKEN=1 для неинтерактивных вызовов) = пропустить —
+# HF-ключи тогда целиком вырезаются из plist. Пустую строку в env оставлять
+# НЕЛЬЗЯ: битый/пустой HF_TOKEN ломает даже анонимные загрузки моделей (401).
+if [ -z "${HF_TOKEN:-}" ] && [ "${KRAB_EAR_SKIP_HF_TOKEN:-0}" != "1" ]; then
+  printf '[install] HF-токен (Hugging Face, для диаризации говорящих — опционально).\n'
+  printf '[install] Enter = пропустить (диаризация отключится, остальное работает): '
   read -r HF_TOKEN
-  [ -n "$HF_TOKEN" ] || fail "HF_TOKEN пустой, abort"
+fi
+if [ -z "${HF_TOKEN:-}" ]; then
+  log "HF-токен пропущен — диаризация говорящих отключена"
+  HF_TOKEN=""
 fi
 
 # 1. Bootout старой версии (если загружена) — ДО записи нового plist, чтобы
@@ -63,11 +71,20 @@ log "render template → $TARGET"
 sed -e "s|__HOME__|$HOME|g" \
     -e "s|__PROJECT_ROOT__|$ROOT_DIR|g" \
     "$TEMPLATE" > "$TARGET.tmp"
-# Для HF_TOKEN используем python чтобы не зависеть от sed escaping
+# Для HF_TOKEN используем python чтобы не зависеть от sed escaping.
+# Пустой токен = диаризация пропущена: удаляем HF-ключи из plist целиком.
 python3 -c "
-import sys, pathlib
+import sys, pathlib, re
 p = pathlib.Path('$TARGET.tmp')
-p.write_text(p.read_text().replace('__HF_TOKEN__', sys.argv[1]))
+text = p.read_text()
+token = sys.argv[1]
+if token:
+    text = text.replace('__HF_TOKEN__', token)
+else:
+    text = re.sub(
+        r'\s*<key>(?:KRAB_EAR_)?HF_TOKEN</key>\s*<string>__HF_TOKEN__</string>',
+        '', text)
+p.write_text(text)
 " "$HF_TOKEN"
 mv "$TARGET.tmp" "$TARGET"
 chmod 600 "$TARGET"  # plist содержит secret, ограничиваем доступ

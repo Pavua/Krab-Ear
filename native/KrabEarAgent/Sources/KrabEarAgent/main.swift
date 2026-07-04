@@ -85,6 +85,24 @@ struct LaunchOptions {
             }
         }
 
+        // Указатель bootstrap-инсталлятора (scripts/bootstrap_backend.command
+        // пишет каталог установки в этот файл). Механизм последний намеренно:
+        // на dev/prod машинах с репозиторием срабатывают cwd/walk-up выше, и
+        // поведение не меняется; для .app из /Applications (cwd = «/», walk-up
+        // пуст, env не наследуется при запуске из Finder) указатель —
+        // единственный источник пути к backend.
+        let pointerPath = NSString(
+            string: "~/Library/Application Support/KrabEar/project_root"
+        ).expandingTildeInPath
+        if let raw = try? String(contentsOfFile: pointerPath, encoding: .utf8) {
+            let candidate = NSString(
+                string: raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            ).expandingTildeInPath
+            if !candidate.isEmpty && isProjectRoot(candidate) {
+                return candidate
+            }
+        }
+
         return cwd
     }
 }
@@ -246,9 +264,23 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
                 await MainActor.run {
                     AgentRecoveryLogger.shared.logFatal("backend_payload_missing: projectRoot=\(projectRootURL.path)")
                     self.logger.error("Backend не установлен на этом Mac: projectRoot=\(projectRootURL.path) без service.py, сокет отсутствует")
+                    var body = "Эта сборка не содержит Python-backend внутри приложения — он устанавливается отдельно.\n\nНа этом Mac не найден каталог проекта Krab Ear (KrabEar/backend/service.py), и backend-сервис не запущен."
+                    // DMG-сборка несёт инсталлятор в Resources (кладёт
+                    // build_distribution_dmg.command). Подсветка в Finder
+                    // переживает наш terminate — двойной щелчок по .command
+                    // откроет Terminal и поставит backend. Вне DMG (dev-бинарь
+                    // без Resources) ресурса нет — остаётся ссылка на доку.
+                    if let installer = Bundle.main.url(
+                        forResource: "bootstrap_backend", withExtension: "command"
+                    ) {
+                        body += "\n\nАвтоустановка: в Finder подсвечен bootstrap_backend.command — запустите его двойным щелчком, дождитесь окончания и откройте Krab Ear заново."
+                        NSWorkspace.shared.activateFileViewerSelecting([installer])
+                    } else {
+                        body += "\n\nИнструкция по установке: docs/DISTRIBUTION.md в репозитории Krab Ear (раздел «Требования на целевой машине»)."
+                    }
                     self.showFatalAndTerminate(
                         title: "Krab Ear: backend не установлен",
-                        body: "Эта сборка не содержит Python-backend внутри приложения — он устанавливается отдельно.\n\nНа этом Mac не найден каталог проекта Krab Ear (KrabEar/backend/service.py), и backend-сервис не запущен.\n\nИнструкция по установке: docs/DISTRIBUTION.md в репозитории Krab Ear (раздел «Требования на целевой машине»)."
+                        body: body
                     )
                 }
                 return
