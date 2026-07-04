@@ -231,6 +231,29 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             
             self.logger.info("BackendSupervisor режим: \(self.backendSupervisor.supervisionMode == .passive ? "passive (launchd Variant B)" : "active (standalone)")")
 
+            // Clean-Mac guard: текущая сборка НЕ несёт Python-backend внутри бандла —
+            // backend живёт в каталоге проекта на диске. Если resolveProjectRoot
+            // промахнулся (нет KrabEar/backend/service.py) И backend-сокета не
+            // существует, ждать ensureBackendRunning бессмысленно: это гарантированный
+            // 6–20-секундный timeout с загадочным «backend недоступен». Показываем
+            // целевое сообщение сразу. Оба условия обязаны выполниться одновременно —
+            // на dev/prod машинах с репозиторием guard не срабатывает никогда, а живой
+            // сокет при невалидном projectRoot (launchd Variant B) продолжает работу.
+            let backendScriptExists = FileManager.default.fileExists(
+                atPath: projectRootURL.appendingPathComponent("KrabEar/backend/service.py").path)
+            let backendSocketExists = FileManager.default.fileExists(atPath: self.backendSupervisor.socketPath)
+            if !backendScriptExists && !backendSocketExists {
+                await MainActor.run {
+                    AgentRecoveryLogger.shared.logFatal("backend_payload_missing: projectRoot=\(projectRootURL.path)")
+                    self.logger.error("Backend не установлен на этом Mac: projectRoot=\(projectRootURL.path) без service.py, сокет отсутствует")
+                    self.showFatalAndTerminate(
+                        title: "Krab Ear: backend не установлен",
+                        body: "Эта сборка не содержит Python-backend внутри приложения — он устанавливается отдельно.\n\nНа этом Mac не найден каталог проекта Krab Ear (KrabEar/backend/service.py), и backend-сервис не запущен.\n\nИнструкция по установке: docs/DISTRIBUTION.md в репозитории Krab Ear (раздел «Требования на целевой машине»)."
+                    )
+                }
+                return
+            }
+
             // Wave 656: log IPC connect attempt.
             AgentRecoveryLogger.shared.logStage("ipc_connect_attempt")
             do {
