@@ -383,6 +383,18 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     var previewTimer: Timer?
     private var historyFocusManagedRows: [NSView] = []
     var historyScrollMinHeightConstraint: NSLayoutConstraint?
+    // Явные width/height constraints текущего selected tab-item view →
+    // mainTabView. NSTabView (.noTabsNoBorder + translatesAutoresizingMaskIntoConstraints
+    // = false дочерних view) не гарантированно подгоняет ВЫСОТУ view таба,
+    // ставшего selected программно ПОСЛЕ начальной установки — таб 0
+    // (Диктовка) получает реальную высоту "бесплатно" (viewable с первого
+    // появления окна), остальные табы (silent-restore ui_last_tab ИЛИ клик
+    // tabSelector) оставались с frame.height == 0, пряча полностью корректно
+    // построенный контент (см. tabView(_:didSelect:) в +LiveTranslation.swift).
+    // Деактивируем предыдущую пару перед активацией новой — иначе стейл-
+    // constraint на view, которое NSTabView уже убрал из иерархии, кидает
+    // NSGenericException 'no common ancestor' (KRAB-EAR-AGENT-2 класс).
+    var activeTabSizeConstraints: [NSLayoutConstraint] = []
     let historyFiltersBadge = NSTextField(labelWithString: "Фильтры: 0")
     private let historyPreviewScroll = NSScrollView()
     let historyPreviewTextView = NSTextView()

@@ -37,6 +37,28 @@ extension HistoryPanelController {
 
     func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
         guard tabView == mainTabView else { return }
+        // Таб 0 (Диктовка) — единственный видимый в момент, когда mainTabView
+        // впервые получает реальный размер, поэтому его content view "бесплатно"
+        // наследует корректную высоту. Для ЛЮБОГО другого таба, ставшего
+        // selected программно (клик tabSelector ИЛИ silent-restore ui_last_tab в
+        // syncSettingsControls), NSTabView (.noTabsNoBorder + Auto-Layout-
+        // управляемые дочерние view) не гарантированно подгоняет ВЫСОТУ —
+        // диагностика подтвердила frame.height == 0 при полностью корректно
+        // построенном содержимом внутри. Пинуем size вручную вместо доверия
+        // внутренней магии NSTabView; деактивируем предыдущую пару перед новой
+        // активацией — иначе стейл-constraint на уже отсоединённом view кидает
+        // NSGenericException 'no common ancestor' (KRAB-EAR-AGENT-2 класс).
+        NSLayoutConstraint.deactivate(activeTabSizeConstraints)
+        activeTabSizeConstraints.removeAll()
+        if let contentView = tabViewItem?.view {
+            let widthC = contentView.widthAnchor.constraint(equalTo: mainTabView.widthAnchor)
+            let heightC = contentView.heightAnchor.constraint(equalTo: mainTabView.heightAnchor)
+            widthC.isActive = true
+            heightC.isActive = true
+            activeTabSizeConstraints = [widthC, heightC]
+            contentView.needsLayout = true
+            contentView.layoutSubtreeIfNeeded()
+        }
         guard !isSyncingTabs, !isSyncingSettings else { return }
         if let item = tabViewItem {
             tabSelector.selectedSegment = mainTabView.indexOfTabViewItem(item)
