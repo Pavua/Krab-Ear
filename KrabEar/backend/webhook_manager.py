@@ -143,10 +143,12 @@ def _resolve_and_check_host(host: str, strict: bool = False) -> tuple[bool, str 
       http://[::ffff:169.254.169.254]/ → IPv6-mapped metadata (caught by ipaddress)
 
     BUG 1 fix (DNS rebinding): called at both registration time and fire time
-    (_post_once).  At fire time, ``strict=True`` is passed — a DNS resolution
-    failure is treated as a hard block (cannot confirm the target is safe).
-    At registration time (``strict=False``, the default), a transient DNS failure
-    is allowed through; the fire-time check will catch rebinding when it fires.
+    (_post_once). DNS resolution failure is ALWAYS treated as unsafe (fail-closed)
+    — this holds for both callers regardless of the ``strict`` param (see Gap 3
+    fix below, which closed a registration-time fail-open gap; no caller passes
+    ``strict=True`` any more, but the parameter is kept because callers/tests
+    still exercise both values as a regression pin against a future re-opening
+    of that gap).
 
     Returns (is_safe, reason).
     """
@@ -214,8 +216,10 @@ def _is_safe_webhook_url(url: str, allow_local: bool = False, strict: bool = Fal
     Args:
         url: URL для проверки.
         allow_local: если True — пропускает проверку SSRF (для dev-режима).
-        strict: если True — DNS resolution failure блокирует (fire-time check);
-                если False — DNS failure разрешается (registration-time, fire-time проверит).
+        strict: пробрасывается в _resolve_and_check_host, но на исход НЕ влияет —
+                DNS resolution failure ВСЕГДА fail-closed (Gap 3 fix, W1721,
+                закрыл прежний registration-time fail-open путь). Ни один вызывающий
+                не передаёт strict=True; параметр сохранён ради тестов/сигнатуры.
 
     Returns:
         (is_safe, reject_reason) — is_safe=True если URL прошёл все проверки.
