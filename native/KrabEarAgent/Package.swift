@@ -32,6 +32,14 @@ let package = Package(
             url: "https://github.com/alta/swift-opus.git",
             from: "0.0.2"
         ),
+        // Sparkle 2 — автообновления .app (spec 2026-07-05-sparkle-auto-update).
+        // ДИНАМИЧЕСКИЙ framework: бинарь требует Sparkle.framework по rpath
+        // @executable_path/../Frameworks (см. linkerSettings ниже) — в бандле
+        // это Contents/Frameworks/, для dev-бинаря native/runtime — native/Frameworks/.
+        .package(
+            url: "https://github.com/sparkle-project/Sparkle",
+            from: "2.6.0"
+        ),
     ],
     targets: [
         .executableTarget(
@@ -41,6 +49,7 @@ let package = Package(
                 // .product(name: "Porcupine", package: "porcupine"),
                 .product(name: "Sentry", package: "sentry-cocoa"),
                 .product(name: "Opus", package: "swift-opus"),
+                .product(name: "Sparkle", package: "Sparkle"),
             ],
             path: "Sources/KrabEarAgent",
             swiftSettings: [
@@ -51,6 +60,12 @@ let package = Package(
                 // enforce'ят strict mode когда Package using tools 6.0. Migration
                 // tracked: docs/superpowers/specs/2026-05-XX-swift-6-migration.md (TBD)
                 .swiftLanguageMode(.v5),
+            ],
+            linkerSettings: [
+                // Sparkle.framework ищется рядом с бандлом: Contents/Frameworks.
+                // swift build дополнительно зашивает абсолютный rpath на .build —
+                // dev-бинарь на машине сборки находит framework и без копии.
+                .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"]),
             ]
         ),
         .testTarget(
