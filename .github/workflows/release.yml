@@ -1,0 +1,146 @@
+name: release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Версия релиза (X.Y.Z, без префикса v)'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  SPARKLE_TOOLS_VERSION: "2.6.4"
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout (full — нужны ветка и теги для appcast-пуша)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            || { echo "::error::версия не semver X.Y.Z: $VERSION"; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: CI-green guard (krab-ear-ci на собираемом коммите)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          CONCLUSION=$(gh run list --commit "$GITHUB_SHA" --workflow krabear-ci.yml \
+            --json conclusion --jq '.[0].conclusion // "missing"')
+          echo "krab-ear-ci @ $GITHUB_SHA: $CONCLUSION"
+          [ "$CONCLUSION" = "success" ] \
+            || { echo "::error::krab-ear-ci не зелёный ($CONCLUSION) — релиз запрещён (fail-closed)"; exit 1; }
+
+      - name: Import signing certificate
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          echo "$MACOS_CERT_P12" | base64 --decode > /tmp/cert.p12
+          security create-keychain -p ci-keychain build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p ci-keychain build.keychain
+          security import /tmp/cert.p12 -k build.keychain \
+            -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k ci-keychain build.keychain
+          # self-signed цепочка не доверена на раннере — добавляем в trust store,
+          # иначе codesign может отказаться подписывать этой identity:
+          security find-certificate -c "Krab Ear CI Release" -p build.keychain > /tmp/cert.pem
+          sudo security add-trusted-cert -d -r trustRoot \
+            -k /Library/Keychains/System.keychain /tmp/cert.pem
+          rm -f /tmp/cert.p12 /tmp/cert.pem
+
+      - name: Cache SPM
+        uses: actions/cache@v4
+        with:
+          path: native/KrabEarAgent/.build
+          key: release-spm-${{ runner.os }}-${{ hashFiles('native/KrabEarAgent/Package.resolved') }}
+
+      - name: Build Swift agent
+        run: cd native/KrabEarAgent && swift build -c release
+
+      - name: Assemble + sign .app
+        run: |
+          scripts/assemble_signed_app.sh \
+            --output dist \
+            --version "${{ steps.ver.outputs.version }}" \
+            --identity "Krab Ear CI Release"
+
+      - name: Zip (ditto — сохраняет симлинки внутри framework)
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          ditto -c -k --keepParent "dist/Krab Ear.app" "dist/Krab-Ear-v$VERSION.zip"
+          shasum -a 256 "dist/Krab-Ear-v$VERSION.zip" > "dist/Krab-Ear-v$VERSION.zip.sha256"
+
+      - name: Sparkle sign_update
+        id: sparkle
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          curl -L -o /tmp/sparkle.tar.xz \
+            "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_TOOLS_VERSION}/Sparkle-${SPARKLE_TOOLS_VERSION}.tar.xz"
+          mkdir -p /tmp/sparkle-tools && tar -xJf /tmp/sparkle.tar.xz -C /tmp/sparkle-tools
+          printf '%s' "$SPARKLE_PRIVATE_KEY" > /tmp/ed_key
+          chmod 600 /tmp/ed_key
+          SIGN_OUT=$(/tmp/sparkle-tools/bin/sign_update -f /tmp/ed_key "dist/Krab-Ear-v$VERSION.zip")
+          rm -f /tmp/ed_key
+          echo "sign_update: $SIGN_OUT"
+          ED_SIG=$(echo "$SIGN_OUT" | sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p')
+          LENGTH=$(echo "$SIGN_OUT" | sed -n 's/.*length="\([^"]*\)".*/\1/p')
+          [ -n "$ED_SIG" ] && [ -n "$LENGTH" ] \
+            || { echo "::error::не распарсили вывод sign_update"; exit 1; }
+          echo "ed_sig=$ED_SIG" >> "$GITHUB_OUTPUT"
+          echo "length=$LENGTH" >> "$GITHUB_OUTPUT"
+
+      - name: Update appcast.xml (монотонность версии проверяет сам скрипт)
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          git checkout codex/krab-ear-v2
+          python3 scripts/generate_appcast_item.py \
+            --appcast appcast.xml \
+            --version "$VERSION" \
+            --url "https://github.com/${{ github.repository }}/releases/download/v$VERSION/Krab-Ear-v$VERSION.zip" \
+            --ed-signature "${{ steps.sparkle.outputs.ed_sig }}" \
+            --length "${{ steps.sparkle.outputs.length }}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          gh release create "v$VERSION" \
+            "dist/Krab-Ear-v$VERSION.zip" \
+            "dist/Krab-Ear-v$VERSION.zip.sha256" \
+            --title "Krab Ear v$VERSION" \
+            --generate-notes
+
+      - name: Commit appcast (после успешного релиза; [skip ci])
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add appcast.xml
+          git commit -m "release: appcast v$VERSION [skip ci]"
+          git pull --rebase origin codex/krab-ear-v2
+          git push origin codex/krab-ear-v2
