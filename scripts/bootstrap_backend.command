@@ -115,6 +115,18 @@ log "Ставлю зависимости (mlx-whisper, torch и т.д. — не�
 "$VENV/bin/pip" install -r "$INSTALL_DIR/KrabEar/requirements.txt" || fail "pip install -r requirements.txt не удался"
 log "Зависимости: ок"
 
+# Опционально: openWakeWord (детектор слова-пробуждения). Сбой НЕ фатален.
+if "$VENV/bin/pip" install -r "$INSTALL_DIR/KrabEar/requirements-wakeword.txt"; then
+  # Базовые модели скачиваются один раз с GitHub (dscripka/openWakeWord) —
+  # HF_HUB_OFFLINE на них не влияет; без этого первый старт детектора упрётся
+  # в отсутствующие файлы моделей.
+  "$VENV/bin/python" -c "import openwakeword.utils as u; u.download_models()" \
+    || warn "openWakeWord: модели не скачались — детектор попробует при первом запуске"
+  log "openWakeWord: ок"
+else
+  warn "openWakeWord не установился — детектор слова-пробуждения будет недоступен (опционально)"
+fi
+
 # ── 5. Указатель project_root для агента ─────────────────────────────────────
 # Агент (resolveProjectRoot в main.swift) читает этот файл последним механизмом —
 # только он позволяет .app из /Applications найти backend без env-переменных.
