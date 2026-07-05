@@ -108,49 +108,16 @@ ok "Swift build complete"
 BUILT_BINARY="$NATIVE_DIR/.build/release/KrabEarAgent"
 [[ -f "$BUILT_BINARY" ]] || err "Built binary not found: $BUILT_BINARY"
 
-# ── Step 2: Assemble dist .app ────────────────────────────────────
-log "Assembling dist app bundle..."
-mkdir -p "$DIST_DIR"
-rm -rf "$APP_DIST"
-cp -R "$APP_BUNDLE_SRC" "$APP_DIST"
-
-# Copy freshly built binary
-cp -f "$BUILT_BINARY" "$APP_DIST/Contents/MacOS/KrabEarAgent"
-
-# Bundle backend bootstrap installer: агент подсвечивает его в Finder на чистом
-# Mac (clean-Mac guard в main.swift ищет ресурс bootstrap_backend.command).
-# Кладём ДО подписи, чтобы ресурс попал под codesign --deep.
-mkdir -p "$APP_DIST/Contents/Resources"
-cp -f "$ROOT_DIR/scripts/bootstrap_backend.command" "$APP_DIST/Contents/Resources/bootstrap_backend.command"
-chmod +x "$APP_DIST/Contents/Resources/bootstrap_backend.command"
-ok "Bootstrap installer bundled into Resources"
-
-# Update version in Info.plist if --version was specified
-if [[ -n "$VERSION" ]]; then
-  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP_DIST/Contents/Info.plist" 2>/dev/null || true
-  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$APP_DIST/Contents/Info.plist" 2>/dev/null || true
-  ok "Version set to $VERSION in Info.plist"
-fi
-
-# ── Step 3: Code signing ──────────────────────────────────────────
+# ── Step 2+3: Assemble + sign (общий ассемблер) ───────────────────
 if $DO_NOTARIZE; then
-  # Developer ID signing (required for notarization)
-  SIGNING_ID="Developer ID Application"
-  log "Signing with Developer ID (runtime hardening)..."
-  codesign --deep --force --options runtime \
-    --sign "$SIGNING_ID" \
-    --entitlements "$NATIVE_DIR/KrabEarAgent.entitlements" \
-    "$APP_DIST" 2>/dev/null || \
-  codesign --deep --force --options runtime \
-    --sign "$SIGNING_ID" \
-    "$APP_DIST" || err "Developer ID signing failed — check that 'Developer ID Application' cert is in Keychain"
-  ok "Developer ID signing complete"
+  ASSEMBLE_IDENTITY="Developer ID Application"
 else
-  # Ad-hoc signing (local use only)
-  log "Ad-hoc signing binary..."
-  codesign --deep --force -s - "$APP_DIST" || err "Ad-hoc signing failed"
-  ok "Ad-hoc signing complete"
+  ASSEMBLE_IDENTITY="-"
 fi
+"$ROOT_DIR/scripts/assemble_signed_app.sh" \
+  --output "$DIST_DIR" --version "$VERSION" --identity "$ASSEMBLE_IDENTITY" \
+  || err "assemble_signed_app.sh failed"
+ok "App assembled + signed via shared assembler"
 
 # ── Step 4: Build DMG ─────────────────────────────────────────────
 log "Building DMG: $DMG_NAME..."

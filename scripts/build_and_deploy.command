@@ -201,6 +201,24 @@ else
   echo -e "  ${YELLOW}[dry-run]${NC} cp -f $BUILD_BIN $APP_BIN"
 fi
 
+log "→ Sparkle.framework (bundle + runtime)"
+if [ "$DRY_RUN" -eq 0 ]; then
+  # Sparkle — динамический framework: без него бинарь не стартует (dyld).
+  SPARKLE_FW="$(find "$PACKAGE_DIR/.build" -type d -name "Sparkle.framework" 2>/dev/null | head -1)"
+  if [[ -n "$SPARKLE_FW" ]]; then
+    mkdir -p "$ROOT_DIR/Krab Ear.app/Contents/Frameworks" "$ROOT_DIR/native/Frameworks"
+    rm -rf "$ROOT_DIR/Krab Ear.app/Contents/Frameworks/Sparkle.framework" \
+           "$ROOT_DIR/native/Frameworks/Sparkle.framework"
+    ditto "$SPARKLE_FW" "$ROOT_DIR/Krab Ear.app/Contents/Frameworks/Sparkle.framework"
+    ditto "$SPARKLE_FW" "$ROOT_DIR/native/Frameworks/Sparkle.framework"
+    ok "Sparkle.framework synced to bundle + native/Frameworks"
+  else
+    warn "Sparkle.framework not found in .build — skipping (Swift build may need re-run)"
+  fi
+else
+  echo -e "  ${YELLOW}[dry-run]${NC} ditto <Sparkle.framework> \"Krab Ear.app/Contents/Frameworks/\" + native/Frameworks/"
+fi
+
 # ── Step 3: Code signing ──────────────────────────────────────────
 section "Step 3/5 — Code Signing"
 

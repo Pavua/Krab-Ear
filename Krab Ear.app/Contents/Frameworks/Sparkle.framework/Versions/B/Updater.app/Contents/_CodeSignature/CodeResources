@@ -4,27 +4,18 @@
 <dict>
 	<key>files</key>
 	<dict>
-		<key>Resources/AppIcon.icns</key>
+		<key>Resources/SUStatus.nib</key>
 		<data>
-		CGPdRMY/ruXBr41H9rpM2ILCPsQ=
+		GTcyeZW17TcmJWdEEfhoJMkZPyc=
 		</data>
 	</dict>
 	<key>files2</key>
 	<dict>
-		<key>Frameworks/Sparkle.framework</key>
-		<dict>
-			<key>cdhash</key>
-			<data>
-			Dmb07QsZy4tS/YBjdAuoDhSBNmo=
-			</data>
-			<key>requirement</key>
-			<string>cdhash H"0e66f4ed0b19cb8b52fd8063740ba80e1481366a" or cdhash H"fd24b696c9ddc522d2a674d2e16e5b52f4daa9d3"</string>
-		</dict>
-		<key>Resources/AppIcon.icns</key>
+		<key>Resources/SUStatus.nib</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			6kuI6NcFwo9tAjAE0UVR4Cjgw6pE0sOwmGfJbByL3og=
+			u6Fd03omr4dHYhS2iwbWRVEYzlB/13hj9JR9ZUpgRa8=
 			</data>
 		</dict>
 	</dict>
