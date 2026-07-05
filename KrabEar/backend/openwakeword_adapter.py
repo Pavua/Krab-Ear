@@ -457,7 +457,7 @@ class OpenWakeWordAdapter:
                         )
                         break
                     audio_chunk, _ = stream.read(chunk_size)
-                    flat = audio_chunk.flatten().tolist()
+                    flat = audio_chunk.flatten()
 
                     with self._lock:
                         oww = self._oww

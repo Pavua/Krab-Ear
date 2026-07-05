@@ -9,9 +9,12 @@ from __future__ import annotations
 import sys
 import threading
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
+
+import numpy as np
 
 # Resolve project root so `backend.*` imports work standalone
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -653,6 +656,83 @@ class TestOpenWakeWordAdapterWave178(unittest.TestCase):
         # _load_model с model_path != None должен передать путь в OWWModel
         mock_model_cls.assert_called_once_with(wakeword_models=[str(model_file)])
         self.assertIs(result, mock_model_instance)
+
+
+class TestOpenWakeWordAdapterListenLoopPredictType(unittest.TestCase):
+    """Regression: Sentry KRAB-EAR-BACKEND-1C / 1D.
+
+    ``openwakeword.Model.predict()`` requires a numpy array — passing a
+    Python ``list`` raises ``ValueError`` on every audio chunk while wake
+    word listening is active, so detection silently never fires (the
+    exception is swallowed by the ``except Exception`` in ``_listen_loop``).
+    Root cause was ``audio_chunk.flatten().tolist()`` converting the numpy
+    array to a list right before calling ``oww.predict()``.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp()
+
+    def _install_fake_sounddevice(self, pcm_chunk: np.ndarray) -> None:
+        """Installs a fake `sounddevice` module exercising real _listen_loop."""
+
+        class _FakeInputStream:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                self._read_count = 0
+
+            def __enter__(self) -> "_FakeInputStream":
+                return self
+
+            def __exit__(self, *exc: object) -> None:
+                return None
+
+            def read(self, frames: int) -> tuple[np.ndarray, bool]:
+                self._read_count += 1
+                return pcm_chunk, False
+
+        fake_sd = types.ModuleType("sounddevice")
+        fake_sd.InputStream = _FakeInputStream  # type: ignore[attr-defined]
+        sys.modules["sounddevice"] = fake_sd
+
+    def tearDown(self) -> None:
+        sys.modules.pop("sounddevice", None)
+
+    def test_listen_loop_calls_predict_with_numpy_array_not_list(self) -> None:
+        """_listen_loop must pass a numpy.ndarray to oww.predict(), not a list.
+
+        FAILS before the fix (predict() called with a plain Python list —
+        the exact shape openwakeword's real Model.predict() rejects with
+        `ValueError: ... must by a Numpy array, instead received ... list`).
+        PASSES after removing the stray `.tolist()` call.
+        """
+        # Real int16 PCM chunk shaped like sd.InputStream(channels=1) output.
+        pcm_chunk = np.zeros((1280, 1), dtype="int16")
+        self._install_fake_sounddevice(pcm_chunk)
+
+        adapter = OpenWakeWordAdapter(data_dir=self.tmp)
+        adapter._oww_available = True
+        mock_oww = MagicMock()
+        mock_oww.predict.return_value = {"alexa": 0.0}
+        adapter._oww = mock_oww
+
+        # Run exactly one iteration of the REAL _listen_loop body, then stop.
+        def _stop_after_first_predict(*_a: object, **_k: object) -> dict:
+            adapter._stop_event.set()
+            return {"alexa": 0.0}
+
+        mock_oww.predict.side_effect = _stop_after_first_predict
+
+        adapter._listen_loop(threshold=0.5, chunk_size=1280, sample_rate=16000)
+
+        mock_oww.predict.assert_called_once()
+        called_arg = mock_oww.predict.call_args[0][0]
+        self.assertIsInstance(
+            called_arg,
+            np.ndarray,
+            f"oww.predict() called with {type(called_arg)!r} instead of "
+            "numpy.ndarray — openwakeword.Model.predict() raises ValueError "
+            "on a plain list (Sentry KRAB-EAR-BACKEND-1C/1D).",
+        )
+        self.assertNotIsInstance(called_arg, list)
 
 
 if __name__ == "__main__":
