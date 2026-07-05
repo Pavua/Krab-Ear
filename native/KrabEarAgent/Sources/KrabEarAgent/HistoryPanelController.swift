@@ -231,6 +231,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let vaWakeWordToggle = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     let vaEngineSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let vaBrainSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    // Wake word (openWakeWord, spec 2026-07-05): статус движка, модель, порог.
+    let vaWakeWordStatusLabel = NSTextField(labelWithString: "openWakeWord: проверяю состояние")
+    let vaWakeWordModelSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    let vaWakeWordThresholdSlider = NSSlider(value: 0.5, minValue: 0.05, maxValue: 1.0, target: nil, action: nil)
 
     private let topBar = NSStackView()
     let topSearchRow = NSStackView()
@@ -1982,6 +1986,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         vaHotkeyToggle.action = #selector(onVAHotkeyToggleChanged)
         vaWakeWordToggle.target = self
         vaWakeWordToggle.action = #selector(onVAWakeWordToggleChanged)
+        vaWakeWordModelSelector.target = self
+        vaWakeWordModelSelector.action = #selector(onVAWakeWordModelChanged)
+        vaWakeWordThresholdSlider.target = self
+        vaWakeWordThresholdSlider.action = #selector(onVAWakeWordThresholdChanged)
         vaEngineSelector.target = self
         vaEngineSelector.action = #selector(onVAEngineSelectorChanged)
         vaBrainSelector.target = self
