@@ -110,7 +110,16 @@ extension AgentAppDelegate {
 
         self.healthMonitor = monitor
 
-        // Phase B.1: подписываемся на rewriter_recovered SSE events → flashGreen
+        // Phase B.1: подписываемся на rewriter_recovered SSE events → flashGreen.
+        // 🔴 ИЗВЕСТНЫЙ ГЭП (2026-07-05, не в скоупе фикса setupHealthMonitor):
+        // rewriter_recovered эмиттится LLMHttpProbe в IPC-процессе (service.py),
+        // эта подписка слушает SSE /v1/events REST-процесса (:5005) — тот же
+        // 2-EventBus гэп, что был у wake word и krab_error. Событие никогда не
+        // доходит, flashGreen никогда не триггерится этим путём. Низкая
+        // серьёзность (чисто косметический индикатор, не влияет на ping/
+        // restart-логику HealthMonitor выше) — оставлено как есть; при фиксе
+        // нужен IPC-поллинг аналог (нет готового IPC-метода статуса probe,
+        // в отличие от list_recent_errors/wake_word_status).
         let indicator = self.statusIndicatorView
         Task {
             await monitor.subscribeToProbeEvents(

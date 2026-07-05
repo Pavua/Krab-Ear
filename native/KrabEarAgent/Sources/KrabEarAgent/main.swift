@@ -334,6 +334,20 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             "Настройки загружены: mode=\(settings.mode), autoPaste=\(settings.autoPaste), quality=\(settings.qualityProfile), translation=\(settings.translationMode)"
         )
 
+        // 2026-07-05: setupHealthMonitor() существовал с Phase A, но НИКОГДА не
+        // вызывался отсюда (та же декоративная проводка, что у setupErrorBus
+        // ниже — найдено при её расследовании). BackendSupervisor умеет
+        // проверить/перезапустить backend (актуатор), но сам НЕ мониторит
+        // непрерывно — единственный continuous-ping триггер это HealthMonitor.
+        // Без вызова здесь: (1) menu-bar status dot никогда не отражал
+        // реальное здоровье backend (обновлялся только побочно при переключении
+        // privacy mode, всегда показывая дефолтный .stopped цвет); (2) не было
+        // НИКАКОГО проактивного обнаружения зависшего backend в простое —
+        // только реактивный путь (main+IPCRecovery.swift, срабатывает лишь
+        // когда пользователь САМ вызывает IPC и получает ошибку соединения).
+        // См. main+HealthMonitor.swift.
+        setupHealthMonitor()
+
         // 2026-07-05: setupErrorBus() существовал с Phase B.1, но НИКОГДА не
         // вызывался отсюда (декоративная проводка — найдено при фиксе IPC-
         // поллинга krab_error). Тосты об ошибках были мертвы в проде. См.
@@ -469,6 +483,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         hotkeyManager?.stop()
         wakeWordPoller?.deactivate()
+        tearDownHealthMonitor()
         tearDownErrorBus()
         selectionTranslator?.stop()
         pasteUndoService?.stop()

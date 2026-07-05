@@ -337,3 +337,55 @@ final class WiringTestCounter: @unchecked Sendable {
         return _count
     }
 }
+
+// MARK: - Source contract — setupHealthMonitor/tearDownHealthMonitor are
+// actually CALLED from AgentAppDelegate's real lifecycle, not just defined.
+//
+// Found 2026-07-05 while investigating the krab_error decorative-wiring bug
+// (setupErrorBus): setupHealthMonitor() had the EXACT same class of bug —
+// defined since Phase A, never invoked from completeStartupAfterBackendReady().
+// All 8 tests above (and every test in this file) construct HealthMonitor and
+// exercise its wiring in isolation — none of them call the real AgentAppDelegate
+// lifecycle, so they stayed green the whole time setupHealthMonitor() was dead
+// in production (no continuous ping/hang-detection ever ran; the menu-bar
+// status dot only ever showed the .stopped/red default).
+final class MainHealthMonitorSourceContractTests: XCTestCase {
+
+    func test_setupHealthMonitor_is_actually_called_from_startup() throws {
+        let src = try String(contentsOf: Self.mainSwiftURL, encoding: .utf8)
+        XCTAssertTrue(
+            src.contains("setupHealthMonitor()"),
+            "completeStartupAfterBackendReady() must call setupHealthMonitor() — " +
+            "found it defined but never called in main.swift once already (2026-07-05)."
+        )
+    }
+
+    func test_tearDownHealthMonitor_is_actually_called_from_shutdown() throws {
+        let src = try String(contentsOf: Self.mainSwiftURL, encoding: .utf8)
+        XCTAssertTrue(
+            src.contains("\n        tearDownHealthMonitor()\n"),
+            "applicationWillTerminate() must call tearDownHealthMonitor() to stop the ping loop on quit."
+        )
+    }
+
+    /// Resolves native/KrabEarAgent/Sources/KrabEarAgent/main.swift from the test bundle,
+    /// falling back to a #file-relative walk-up (same pattern as SFSymbolVerificationTests
+    /// / MainErrorsWiringTests).
+    private static var mainSwiftURL: URL {
+        let bundleURL = Bundle(for: MainHealthMonitorSourceContractTests.self).bundleURL
+        var url = bundleURL
+        for _ in 0..<10 {
+            let candidate = url.appendingPathComponent("Sources/KrabEarAgent/main.swift")
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+            url = url.deletingLastPathComponent()
+        }
+        let fileURL = URL(fileURLWithPath: #file)
+        return fileURL
+            .deletingLastPathComponent()  // KrabEarAgentTests
+            .deletingLastPathComponent()  // Tests
+            .deletingLastPathComponent()  // KrabEarAgent (package root)
+            .appendingPathComponent("Sources/KrabEarAgent/main.swift")
+    }
+}
