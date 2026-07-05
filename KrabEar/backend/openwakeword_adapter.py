@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -63,6 +64,9 @@ class OpenWakeWordAdapter:
         self._oww: Any = None  # openwakeword.Model instance
         self._on_detected: Callable[[str, float], None] | None = None
         self._active_model: str | None = None
+        # Последняя детекция для IPC-поллинга агента (wake_word_status).
+        # Монотонный ts — агент дебаунсит по росту, wall-clock не нужен.
+        self._last_detection: dict[str, Any] | None = None
         self._oww_available = self._check_lib_available()
         # F2: callable to read runtime settings (e.g. privacy_mode_enabled)
         self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
@@ -155,6 +159,7 @@ class OpenWakeWordAdapter:
             self._on_detected = on_detected
             self._active_model = model_name
             self._stop_event.clear()
+            self._last_detection = None  # свежая сессия — стейл-детекция не триггерит
 
             self._oww = self._load_model(model_name, model_path)
             self._thread = threading.Thread(
@@ -177,6 +182,7 @@ class OpenWakeWordAdapter:
     def stop(self) -> None:
         """Останавливает фоновый поток прослушивания."""
         with self._lock:
+            self._last_detection = None
             if self._thread is None or not self._thread.is_alive():
                 return
             self._stop_event.set()
@@ -197,6 +203,26 @@ class OpenWakeWordAdapter:
         """Имя активной модели или None."""
         with self._lock:
             return self._active_model
+
+    def _record_detection(self, model_name: str, score: float) -> None:
+        """Фиксирует последнюю детекцию для wake_word_status (IPC-поллинг)."""
+        with self._lock:
+            self._last_detection = {
+                "model": model_name,
+                "score": float(score),
+                "ts": time.monotonic(),
+            }
+
+    def _privacy_blocked(self) -> bool:
+        """True если privacy mode включён — держать микрофон wake word нельзя.
+
+        Fail-open к False: сломанный settings-провайдер не должен «ронять»
+        слушатель, за выключение отвечает и агент (setPrivacyMode → stop).
+        """
+        try:
+            return bool(self._settings_get("privacy_mode_enabled", False))
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------
     # IPC-обработчики
@@ -271,12 +297,19 @@ class OpenWakeWordAdapter:
     def handle_wake_word_status(
         self, params: dict[str, Any]
     ) -> dict[str, Any]:
-        """IPC: статус адаптера."""
+        """IPC: статус адаптера + последняя детекция для поллинга агента.
+
+        ВНИМАНИЕ: self._lock — обычный Lock; is_running()/active_model() сами
+        берут его, поэтому вызываются ВНЕ with-блока (иначе deadlock).
+        """
+        with self._lock:
+            last = dict(self._last_detection) if self._last_detection else None
         return {
             "ok": True,
             "running": self.is_running(),
             "active_model": self.active_model(),
             "engine_available": self._oww_available,
+            "last_detection": last,
         }
 
     # ------------------------------------------------------------------
@@ -417,6 +450,12 @@ class OpenWakeWordAdapter:
                 blocksize=chunk_size,
             ) as stream:
                 while not self._stop_event.is_set():
+                    if self._privacy_blocked():
+                        logger.info(
+                            "OpenWakeWordAdapter: privacy mode включён — "
+                            "слушатель остановлен"
+                        )
+                        break
                     audio_chunk, _ = stream.read(chunk_size)
                     flat = audio_chunk.flatten().tolist()
 
@@ -428,8 +467,10 @@ class OpenWakeWordAdapter:
 
                     prediction = oww.predict(flat)
                     for mdl_name, score in prediction.items():
-                        if score >= threshold and self._on_detected is not None:
-                            self._on_detected(mdl_name, float(score))
+                        if score >= threshold:
+                            self._record_detection(mdl_name, float(score))
+                            if self._on_detected is not None:
+                                self._on_detected(mdl_name, float(score))
 
         except Exception:
             logger.exception("OpenWakeWordAdapter._listen_loop: ошибка")
