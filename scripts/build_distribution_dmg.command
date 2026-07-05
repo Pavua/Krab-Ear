@@ -110,6 +110,12 @@ BUILT_BINARY="$NATIVE_DIR/.build/release/KrabEarAgent"
 
 # ── Step 2+3: Assemble + sign (общий ассемблер) ───────────────────
 if $DO_NOTARIZE; then
+  # Fail-fast (ультракод-ревью C4): нотаризация ТРЕБУЕТ hardened runtime
+  # (--options runtime + entitlements), который общий ассемблер пока не
+  # поддерживает — прежняя inline-ветка это делала, рефактор сознательно
+  # отложил до получения Apple Developer ID. Честно падаем здесь, вместо
+  # гарантированного notary-reject с рапортом «Notarized + Stapled».
+  err "Notarize-путь пока не поддержан ассемблером: нужен hardened runtime (--options runtime + entitlements). Добавьте поддержку в scripts/assemble_signed_app.sh при получении Developer ID (см. docs/DISTRIBUTION.md, TODO) или соберите с --no-notarize."
   ASSEMBLE_IDENTITY="Developer ID Application"
 else
   ASSEMBLE_IDENTITY="-"

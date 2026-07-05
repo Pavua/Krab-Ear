@@ -32,14 +32,21 @@ extension AgentAppDelegate {
 
     /// true когда бандл — установленная копия (не dev внутри репо, не голый бинарь).
     var isSparkleEligibleInstall: Bool {
-        let bundlePath = Bundle.main.bundlePath
+        // resolvingSymlinksInPath обязателен (ультракод-ревью L5): на dev-Mac
+        // существует симлинк /Applications/Krab Ear.app -> <репо>/Krab Ear.app;
+        // без резолва запуск через него давал бы bundlePath в /Applications,
+        // маркер бы не нашёлся — и Sparkle перезаписал бы git-дерево ЧЕРЕЗ
+        // симлинк, ровно то, от чего guard защищает.
+        let bundlePath = (Bundle.main.bundlePath as NSString).resolvingSymlinksInPath
         guard bundlePath.hasSuffix(".app") else { return false }  // голый dev-бинарь
         let repoMarker = (bundlePath as NSString).deletingLastPathComponent
             + "/KrabEar/backend/service.py"
         return !FileManager.default.fileExists(atPath: repoMarker)
     }
 
-    /// Вызывается из completeStartupAfterBackendReady().
+    /// Вызывается из applicationDidFinishLaunching() — ДО backend-ожидания,
+    /// чтобы обновление могло привезти фикс даже при сломанном backend
+    /// (ревью C6); Sparkle от IPC не зависит.
     func setupSparkleUpdater() {
         guard isSparkleEligibleInstall else {
             logger.info("Sparkle: пропущен (dev-запуск: бандл в каталоге проекта или голый бинарь)")

@@ -210,6 +210,14 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         // выполняются один раз сейчас, а не при первом show() в showFatalAndTerminate.
         BackendToast.shared.prewarmPanel()
 
+        // Sparkle автообновления — ДО backend-ожидания (ультракод-ревью C6):
+        // у DMG-получателя со сломанным/неготовым backend'ом приложение
+        // фатально завершается через showFatalAndTerminate; если updater
+        // стартует только после готовности backend, обновление не может
+        // привезти фикс именно тогда, когда оно нужнее всего. Sparkle не
+        // зависит от IPC; dev-guard внутри (см. main+SparkleUpdater.swift).
+        setupSparkleUpdater()
+
         logger.info("Старт агента. projectRoot=\(options.projectRoot), launchedByLaunchd=\(options.launchedByLaunchd)")
         notificationService.requestAuthorizationIfNeeded()
         DistributedNotificationCenter.default().addObserver(
@@ -353,10 +361,6 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         // поллинга krab_error). Тосты об ошибках были мертвы в проде. См.
         // main+Errors.swift.
         setupErrorBus(toastPresenter: ErrorToastPresenter())
-
-        // Sparkle автообновления (только для установленных вне репо копий —
-        // dev-guard внутри, см. main+SparkleUpdater.swift).
-        setupSparkleUpdater()
 
         // PermissionWizard удален, используем QuickStartWindowController
         historyPanel = HistoryPanelController(

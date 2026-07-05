@@ -46,14 +46,37 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: CI-green guard (krab-ear-ci на собираемом коммите)
+        id: guard
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          CONCLUSION=$(gh run list --commit "$GITHUB_SHA" --workflow krabear-ci.yml \
-            --json conclusion --jq '.[0].conclusion // "missing"')
-          echo "krab-ear-ci @ $GITHUB_SHA: $CONCLUSION"
-          [ "$CONCLUSION" = "success" ] \
-            || { echo "::error::krab-ear-ci не зелёный ($CONCLUSION) — релиз запрещён (fail-closed)"; exit 1; }
+          # Дереференс: для АННОТИРОВАННОГО тега GITHUB_SHA = tag-объект, не
+          # коммит — rev-parse ^{commit} даёт коммит в обоих случаях (и для
+          # workflow_dispatch, где HEAD = tip ветки).
+          BUILD_SHA=$(git rev-parse "HEAD^{commit}")
+          # appcast-коммиты этого же workflow идут с [skip ci] — krab-ear-ci на
+          # них НЕ бежит. Без скипа каждый успешный релиз намертво блокировал бы
+          # следующий workflow_dispatch (guard видел бы "missing"). Отматываем
+          # такие коммиты к родителю (они меняют только appcast.xml).
+          GUARD_SHA="$BUILD_SHA"
+          for _ in 1 2 3 4 5; do
+            MSG=$(git log -1 --format=%s "$GUARD_SHA")
+            # grep -F: "[skip ci]" в case-паттерне был бы character class
+            if printf '%s' "$MSG" | grep -qF "release: appcast v" \
+               && printf '%s' "$MSG" | grep -qF "[skip ci]"; then
+              GUARD_SHA=$(git rev-parse "$GUARD_SHA^")
+            else
+              break
+            fi
+          done
+          # Успешный run ищем среди ВСЕХ ранов коммита (не только последнего):
+          # in-progress/cancelled поверх старого success не должны блокировать.
+          OK=$(gh run list --commit "$GUARD_SHA" --workflow krabear-ci.yml \
+            --json conclusion --jq '[.[] | select(.conclusion == "success")] | length')
+          echo "krab-ear-ci @ $GUARD_SHA (build: $BUILD_SHA): success-ранов $OK"
+          [ "${OK:-0}" -ge 1 ] \
+            || { echo "::error::krab-ear-ci не зелёный на $GUARD_SHA — релиз запрещён (fail-closed)"; exit 1; }
+          echo "build_sha=$BUILD_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Import signing certificate
         env:
@@ -68,12 +91,12 @@ jobs:
             -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
             -s -k ci-keychain build.keychain
-          # self-signed цепочка не доверена на раннере — добавляем в trust store,
-          # иначе codesign может отказаться подписывать этой identity:
-          security find-certificate -c "Krab Ear CI Release" -p build.keychain > /tmp/cert.pem
-          sudo security add-trusted-cert -d -r trustRoot \
-            -k /Library/Keychains/System.keychain /tmp/cert.pem
-          rm -f /tmp/cert.p12 /tmp/cert.pem
+          # НЕ добавляем серт в system trust store: codesign подписывает
+          # untrusted self-signed identity нормально (проверено эмпирически),
+          # а `sudo security add-trusted-cert -d` на macOS 15+ раннерах
+          # требует GUI-авторизацию — висит до 6h job-таймаута или падает
+          # -60005 (runner-images #11893/#12116/#12438). Ультракод-ревью C1.
+          rm -f /tmp/cert.p12
 
       - name: Cache SPM
         uses: actions/cache@v4
@@ -134,11 +157,27 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${{ steps.ver.outputs.version }}"
-          gh release create "v$VERSION" \
-            "dist/Krab-Ear-v$VERSION.zip" \
-            "dist/Krab-Ear-v$VERSION.zip.sha256" \
-            --title "Krab Ear v$VERSION" \
-            --generate-notes
+          # --target: тег создаётся на ПРОВЕРЕННОМ guard'ом коммите, а не на
+          # tip'е ветки в момент API-вызова (гонка с параллельным пушем).
+          # Идемпотентность: если релиз уже существует (ре-ран после падения
+          # НА ПОСЛЕДУЮЩЕМ шаге appcast-коммита), не падаем — доливаем ассеты
+          # при их отсутствии и идём дальше чинить appcast (ревью C3/C8).
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "release v$VERSION уже существует — ре-ран; проверяю ассеты"
+            HAVE=$(gh release view "v$VERSION" --json assets --jq '.assets | length')
+            if [ "${HAVE:-0}" -lt 2 ]; then
+              gh release upload "v$VERSION" \
+                "dist/Krab-Ear-v$VERSION.zip" \
+                "dist/Krab-Ear-v$VERSION.zip.sha256" --clobber
+            fi
+          else
+            gh release create "v$VERSION" \
+              "dist/Krab-Ear-v$VERSION.zip" \
+              "dist/Krab-Ear-v$VERSION.zip.sha256" \
+              --title "Krab Ear v$VERSION" \
+              --target "${{ steps.guard.outputs.build_sha }}" \
+              --generate-notes
+          fi
 
       - name: Commit appcast (после успешного релиза; [skip ci])
         run: |
@@ -147,5 +186,14 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add appcast.xml
           git commit -m "release: appcast v$VERSION [skip ci]"
-          git pull --rebase origin codex/krab-ear-v2
-          git push origin codex/krab-ear-v2
+          # Retry: гонка с параллельным пушем в ветку не должна стрэндить
+          # опубликованный релиз без appcast-записи (ревью C8). При rebase
+          # только-appcast коммит конфликтовать может лишь с чужим appcast-
+          # коммитом — маловероятно (concurrency: group release).
+          for attempt in 1 2 3; do
+            git pull --rebase origin codex/krab-ear-v2 || { git rebase --abort || true; sleep 5; continue; }
+            git push origin codex/krab-ear-v2 && exit 0
+            sleep 5
+          done
+          echo "::error::не удалось запушить appcast после 3 попыток — релиз опубликован, appcast НЕ обновлён; повторите ре-ран workflow"
+          exit 1
