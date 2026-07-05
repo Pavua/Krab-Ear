@@ -801,7 +801,7 @@ jobs:
             -s -k ci-keychain build.keychain
           # self-signed цепочка не доверена на раннере — добавляем в trust store,
           # иначе codesign может отказаться подписывать этой identity:
-          security find-certificate -c "Krab Ear Dev Local" -p build.keychain > /tmp/cert.pem
+          security find-certificate -c "Krab Ear CI Release" -p build.keychain > /tmp/cert.pem
           sudo security add-trusted-cert -d -r trustRoot \
             -k /Library/Keychains/System.keychain /tmp/cert.pem
           rm -f /tmp/cert.p12 /tmp/cert.pem
@@ -820,7 +820,7 @@ jobs:
           scripts/assemble_signed_app.sh \
             --output dist \
             --version "${{ steps.ver.outputs.version }}" \
-            --identity "Krab Ear Dev Local"
+            --identity "Krab Ear CI Release"
 
       - name: Zip (ditto — сохраняет симлинки внутри framework)
         run: |
