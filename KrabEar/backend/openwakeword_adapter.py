@@ -457,7 +457,10 @@ class OpenWakeWordAdapter:
                         )
                         break
                     audio_chunk, _ = stream.read(chunk_size)
-                    flat = audio_chunk.flatten().tolist()
+                    # oww.predict ТРЕБУЕТ numpy ndarray (int16) — .tolist()
+                    # ронял слушатель ValueError'ом на каждом чанке (латентный
+                    # баг, пойман первым живым прогоном 2026-07-05).
+                    flat = audio_chunk.flatten()
 
                     with self._lock:
                         oww = self._oww

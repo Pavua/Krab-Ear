@@ -119,6 +119,72 @@ class TestPrivacyLoopGuard(unittest.TestCase):
         self.assertFalse(adapter._privacy_blocked())
 
 
+class TestListenLoopPassesNdarrayToPredict(unittest.TestCase):
+    """Латентный баг исходного адаптера (пойман первым ЖИВЫМ прогоном 2026-07-05):
+    _listen_loop передавал в oww.predict() python-list (.flatten().tolist()),
+    а openwakeword.Model.predict требует numpy ndarray -> ValueError на каждом
+    чанке, слушатель умирал сразу после старта. Не ловилось юнитами, потому
+    что predict мокался, и не ловилось в проде, потому что openwakeword не
+    был установлен (stub-режим)."""
+
+    def setUp(self) -> None:
+        try:
+            import numpy  # noqa: F401
+        except ImportError:
+            self.skipTest("numpy не установлен")
+        self.tmp = tempfile.mkdtemp()
+
+    def test_listen_loop_feeds_ndarray_not_list(self) -> None:
+        import numpy as np
+        import types as _types
+
+        adapter = OpenWakeWordAdapter(data_dir=self.tmp)
+
+        received: list = []
+
+        class _TypeStrictOWW:
+            """Как настоящий openwakeword: отвергает всё, что не ndarray."""
+
+            def predict(self, x):
+                if not isinstance(x, np.ndarray):
+                    raise ValueError(
+                        f"The input audio data (x) must by a Numpy array, "
+                        f"instead received an object of type {type(x)}."
+                    )
+                received.append(x.dtype)
+                return {"hey_jarvis": 0.0}
+
+        class _FakeStream:
+            def __init__(self, stop_event):
+                self._stop_event = stop_event
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self, chunk):
+                # После первого чанка останавливаем цикл.
+                self._stop_event.set()
+                return np.zeros((chunk, 1), dtype=np.int16), False
+
+        fake_sd = _types.ModuleType("sounddevice")
+        fake_sd.InputStream = (  # type: ignore[attr-defined]
+            lambda **kw: _FakeStream(adapter._stop_event)
+        )
+
+        adapter._oww = _TypeStrictOWW()
+        adapter._on_detected = None
+        adapter._stop_event.clear()
+        with patch.dict(sys.modules, {"sounddevice": fake_sd}):
+            adapter._listen_loop(threshold=0.5, chunk_size=1280, sample_rate=16000)
+
+        # На старом коде predict получал list -> ValueError -> received пуст.
+        self.assertEqual(len(received), 1, "predict не получил ndarray ни разу")
+        self.assertEqual(received[0], np.dtype(np.int16))
+
+
 class TestServiceWiringSourceContract(unittest.TestCase):
     """Гейт privacy в handle_wake_word_start работает ТОЛЬКО если service.py
     пробросил settings_get. До фикса конструкция была декоративной."""
