@@ -56,3 +56,140 @@ final class WakeWordDetectionTracker {
         baselineTs = nil
     }
 }
+
+// MARK: - Поллер
+
+@MainActor
+final class WakeWordPoller {
+    static let pollInterval: TimeInterval = 0.75
+    /// Мин. пауза между self-heal попытками wake_word_start (backend мог
+    /// перезапуститься launchd'ом — сессия адаптера пропадает).
+    static let restartMinGapSec: TimeInterval = 10.0
+
+    private let ipcProvider: () -> IPCClient?
+    private let isToggleEnabled: () -> Bool
+    private let onDetection: () -> Void
+
+    private let tracker = WakeWordDetectionTracker()
+    private var timer: Timer?
+    private var pausedReasons: Set<WakeWordPauseReason> = []
+    private var inFlight = false
+    private var lastStartAttempt: TimeInterval = 0
+    /// Последний известный engine_available (для Settings-статуса).
+    private(set) var lastEngineAvailable: Bool?
+
+    init(
+        ipcProvider: @escaping () -> IPCClient?,
+        isToggleEnabled: @escaping () -> Bool,
+        onDetection: @escaping () -> Void
+    ) {
+        self.ipcProvider = ipcProvider
+        self.isToggleEnabled = isToggleEnabled
+        self.onDetection = onDetection
+    }
+
+    var isActive: Bool { timer != nil }
+
+    /// Включить: wake_word_start в backend + периодический поллинг статуса.
+    func activate() {
+        guard timer == nil else { return }
+        tracker.reset()
+        sendStart(force: true)
+        let t = Timer.scheduledTimer(withTimeInterval: Self.pollInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.tick() }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+        AgentLogger.shared.info("[WakeWord] Поллинг запущен (интервал \(Self.pollInterval)s)")
+    }
+
+    /// Выключить: остановить поллинг + wake_word_stop в backend.
+    func deactivate() {
+        guard timer != nil else { return }
+        timer?.invalidate()
+        timer = nil
+        pausedReasons.removeAll()
+        sendStop()
+        AgentLogger.shared.info("[WakeWord] Поллинг остановлен")
+    }
+
+    /// Пауза по причине (запись/разговор/privacy). Идемпотентна по причине.
+    func pause(_ reason: WakeWordPauseReason) {
+        guard timer != nil else { return }
+        let wasEmpty = pausedReasons.isEmpty
+        pausedReasons.insert(reason)
+        if wasEmpty {
+            sendStop()
+            AgentLogger.shared.info("[WakeWord] Пауза: \(reason.rawValue)")
+        }
+    }
+
+    /// Снять паузу по причине; возобновляет только когда причин не осталось.
+    func resume(_ reason: WakeWordPauseReason) {
+        pausedReasons.remove(reason)
+        guard pausedReasons.isEmpty, timer != nil, isToggleEnabled() else { return }
+        tracker.reset()
+        sendStart(force: true)
+        AgentLogger.shared.info("[WakeWord] Возобновлён после: \(reason.rawValue)")
+    }
+
+    // MARK: - Внутренние
+
+    private func tick() {
+        guard timer != nil, pausedReasons.isEmpty, !inFlight,
+              let ipc = ipcProvider() else { return }
+        inFlight = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let resp = try? ipc.call(method: "wake_word_status", params: [:])
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.inFlight = false
+                // Backend down — nil; HealthMonitor чинит сам, мы просто ждём.
+                guard let result = resp?["result"] as? [String: Any] else { return }
+                let engineAvailable = result["engine_available"] as? Bool ?? false
+                self.lastEngineAvailable = engineAvailable
+                let running = result["running"] as? Bool ?? false
+                let ts = (result["last_detection"] as? [String: Any])?["ts"] as? Double
+                if self.tracker.shouldTrigger(lastDetectionTs: ts) {
+                    AgentLogger.shared.info("[WakeWord] Детекция — запускаю разговор")
+                    self.onDetection()
+                    return
+                }
+                // Self-heal: launchd перезапустил backend — сессия адаптера пропала.
+                if !running && engineAvailable {
+                    self.sendStart(force: false)
+                }
+            }
+        }
+    }
+
+    private func sendStart(force: Bool) {
+        let now = ProcessInfo.processInfo.systemUptime
+        if !force && now - lastStartAttempt < Self.restartMinGapSec { return }
+        lastStartAttempt = now
+        guard let ipc = ipcProvider() else { return }
+        let model = UserDefaults.standard.string(forKey: "KrabEar_WakeWordModel") ?? "hey_jarvis"
+        var threshold = UserDefaults.standard.double(forKey: "KrabEar_WakeWordThreshold")
+        if threshold <= 0 { threshold = 0.5 }
+        DispatchQueue.global(qos: .utility).async {
+            let resp = try? ipc.call(
+                method: "wake_word_start",
+                params: ["model": model, "threshold": threshold]
+            )
+            let result = resp?["result"] as? [String: Any]
+            let ok = result?["ok"] as? Bool ?? false
+            if !ok {
+                let why = (result?["error"] as? String)
+                    ?? (result?["reason"] as? String) ?? "нет ответа от backend"
+                AgentLogger.shared.warn("[WakeWord] wake_word_start не удался: \(why)")
+            }
+        }
+    }
+
+    private func sendStop() {
+        guard let ipc = ipcProvider() else { return }
+        DispatchQueue.global(qos: .utility).async {
+            _ = try? ipc.call(method: "wake_word_stop", params: [:])
+        }
+    }
+}
