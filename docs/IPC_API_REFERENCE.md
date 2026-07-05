@@ -2383,9 +2383,16 @@ Returns: `{ok}`
 
 ### `wake_word_status`
 *(openwakeword_adapter.py)*  
-Статус адаптера (active, model, last_detection_ts).  
+Статус адаптера + последняя детекция. Агент поллит этот метод (~0.75s) и
+триггерит «Разговор с AI» по росту `last_detection.ts` (spec 2026-07-05
+wake-word-openwakeword; SSE не подходит — раздельные EventBus двух процессов).  
 Нет params.  
-Returns: `{active, model?, last_detection_ts?, detections_today}`
+Returns: `{ok, running, active_model, engine_available, last_detection}`  
+— `last_detection` (object|null): `{model: str, score: float, ts: float}`;
+`ts` — МОНОТОННЫЙ (`time.monotonic`) таймстамп процесса backend, агент
+дебаунсит по росту (nil re-arm'ит baseline). Сбрасывается в null при
+`wake_word_start`/`wake_word_stop`. Поле добавлено 2026-07-05; до этого
+описание в доке дрейфовало (несуществующие `active`/`detections_today`).
 
 ---
 
