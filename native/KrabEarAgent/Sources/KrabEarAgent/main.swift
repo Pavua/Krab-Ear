@@ -354,6 +354,10 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         // main+Errors.swift.
         setupErrorBus(toastPresenter: ErrorToastPresenter())
 
+        // Sparkle автообновления (только для установленных вне репо копий —
+        // dev-guard внутри, см. main+SparkleUpdater.swift).
+        setupSparkleUpdater()
+
         // PermissionWizard удален, используем QuickStartWindowController
         historyPanel = HistoryPanelController(
             ipcClient: ipcClient,
