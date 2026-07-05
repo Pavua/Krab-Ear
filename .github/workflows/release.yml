@@ -30,9 +30,14 @@ jobs:
 
       - name: Resolve version
         id: ver
+        env:
+          # env-индирекция вместо ${{ }} прямо в run: — пользовательский ввод
+          # workflow_dispatch не должен интерполироваться в текст скрипта
+          # (классическая expression-injection поверхность GitHub Actions).
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ github.event.inputs.version }}"
+            VERSION="$INPUT_VERSION"
           else
             VERSION="${GITHUB_REF_NAME#v}"
           fi
