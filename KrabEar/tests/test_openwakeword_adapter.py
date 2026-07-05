@@ -9,9 +9,12 @@ from __future__ import annotations
 import sys
 import threading
 import tempfile
+import time
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+
+import numpy as np
 
 # Resolve project root so `backend.*` imports work standalone
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -653,6 +656,96 @@ class TestOpenWakeWordAdapterWave178(unittest.TestCase):
         # _load_model с model_path != None должен передать путь в OWWModel
         mock_model_cls.assert_called_once_with(wakeword_models=[str(model_file)])
         self.assertIs(result, mock_model_instance)
+
+
+class TestListenLoopPredictArgType(unittest.TestCase):
+    """Regression test for KRAB-EAR-BACKEND-1C / KRAB-EAR-BACKEND-1D.
+
+    ``openwakeword.model.Model.predict(x)`` requires ``x`` to be a
+    ``numpy.ndarray``. A prior version of ``_listen_loop`` called
+    ``.tolist()`` on the flattened audio chunk before passing it to
+    ``predict()``, turning it into a plain Python ``list`` — which
+    openWakeWord rejects with a ``ValueError`` on every single chunk
+    (caught by the outer ``except Exception`` in ``_listen_loop``, so
+    wake-word detection silently never worked).
+
+    This test exercises the REAL ``_listen_loop`` (not a stubbed-out
+    fake) against a fake ``sounddevice.InputStream`` that emits a real
+    numpy chunk, and asserts ``predict()`` is actually invoked with a
+    ``numpy.ndarray`` — not a ``list``.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp()
+
+    @staticmethod
+    def _make_stream_cm(chunk_size: int) -> MagicMock:
+        """Fake `sd.InputStream` context manager yielding one int16 chunk
+        then blocking (mirrors real sounddevice semantics)."""
+        stream = MagicMock()
+        call_count = {"n": 0}
+
+        def _read(n: int):
+            call_count["n"] += 1
+            if call_count["n"] > 1:
+                # Block briefly so the loop doesn't spin once the adapter
+                # sets its stop event from the main test thread.
+                time.sleep(0.01)
+            chunk = np.zeros((n, 1), dtype=np.int16)
+            return (chunk, False)
+
+        stream.read.side_effect = _read
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=stream)
+        cm.__exit__ = MagicMock(return_value=False)
+        return cm
+
+    def test_predict_called_with_ndarray_not_list(self) -> None:
+        """`_listen_loop` must pass a numpy.ndarray to oww.predict(), never a list."""
+        adapter = OpenWakeWordAdapter(data_dir=self.tmp)
+        adapter._oww_available = True
+
+        mock_oww = MagicMock()
+        mock_oww.predict.return_value = {}
+        adapter._oww = mock_oww
+
+        received_types: list[type] = []
+        predict_called = threading.Event()
+
+        def fake_predict(x):
+            received_types.append(type(x))
+            predict_called.set()
+            return {}
+
+        mock_oww.predict.side_effect = fake_predict
+
+        with patch(
+            "sounddevice.InputStream",
+            return_value=self._make_stream_cm(chunk_size=1280),
+        ):
+            thread = threading.Thread(
+                target=adapter._listen_loop,
+                kwargs={
+                    "threshold": 0.5,
+                    "chunk_size": 1280,
+                    "sample_rate": 16000,
+                },
+                daemon=True,
+            )
+            thread.start()
+            try:
+                fired = predict_called.wait(timeout=2.0)
+                self.assertTrue(fired, "oww.predict() was never called")
+            finally:
+                adapter._stop_event.set()
+                thread.join(timeout=2.0)
+
+        self.assertTrue(mock_oww.predict.called)
+        self.assertTrue(
+            len(received_types) > 0
+            and all(issubclass(t, np.ndarray) for t in received_types),
+            f"predict() must receive numpy.ndarray, got: {received_types}",
+        )
 
 
 if __name__ == "__main__":

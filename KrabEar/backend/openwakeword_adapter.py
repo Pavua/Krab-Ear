@@ -457,7 +457,10 @@ class OpenWakeWordAdapter:
                         )
                         break
                     audio_chunk, _ = stream.read(chunk_size)
-                    flat = audio_chunk.flatten().tolist()
+                    # openwakeword.Model.predict() требует numpy.ndarray —
+                    # НЕ list (см. KRAB-EAR-BACKEND-1C/1D). sounddevice уже
+                    # возвращает ndarray, поэтому просто flatten() без .tolist().
+                    flat = audio_chunk.flatten()
 
                     with self._lock:
                         oww = self._oww
