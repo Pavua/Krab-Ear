@@ -310,10 +310,26 @@ final class SFSymbolVerificationTests: XCTestCase {
 
             guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else { continue }
             let lines = content.components(separatedBy: .newlines)
+            var inBlockComment = false
             for (idx, line) in lines.enumerated() {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
+                // Track /* ... */ blocks: unlike Javadoc, Swift doesn't require a
+                // leading `*` on each continuation line, so a prose line like
+                // "НЕ runModal() — ..." inside such a block isn't caught by the
+                // `//`/`*` prefix check below and was matching as a real call site.
+                if inBlockComment {
+                    if trimmed.contains("*/") { inBlockComment = false }
+                    continue
+                }
+                if trimmed.hasPrefix("/*") && !trimmed.contains("*/") {
+                    inBlockComment = true
+                    continue
+                }
                 if trimmed.hasPrefix("//") || trimmed.hasPrefix("*") { continue }
-                if line.contains("runModal()") && line.contains("alert") || line.contains(".runModal()") {
+                // Only a real dot-call site (alert.runModal(), panel.runModal(), ...)
+                // counts — a bare "runModal()" substring also matches prose like
+                // "НЕ runModal()" or "not runModal()", which isn't a call at all.
+                if line.contains(".runModal()") {
                     violations.append((file: filename, line: idx + 1, text: trimmed))
                 }
             }
