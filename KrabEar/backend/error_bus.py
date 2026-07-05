@@ -173,6 +173,12 @@ class ErrorBus:
         self._sentry = sentry_client
         self._default_dedupe_window_sec = default_dedupe_window_sec
         self._ring: deque[KrabError] = deque(maxlen=ring_buffer_size)
+        # Parallel deque of monotonically increasing sequence numbers, one per
+        # ring entry (never reset — including across ``clear()`` — so a poller
+        # that persisted a ``since_seq`` across a ring clear never mistakes an
+        # old high seq for "already seen" once the ring refills from empty).
+        self._ring_seq: deque[int] = deque(maxlen=ring_buffer_size)
+        self._next_seq = 0
         # code -> last_emitted monotonic timestamp
         self._last_emitted: dict[str, float] = {}
         self._lock = threading.Lock()
@@ -199,9 +205,19 @@ class ErrorBus:
             if last is not None and (now - last) < window:
                 return False
             self._last_emitted[err.code] = now
+            self._next_seq += 1
             self._ring.append(err)
+            self._ring_seq.append(self._next_seq)
 
         # Emit outside the lock so event_bus callbacks can't dead-lock us.
+        # NOTE: this ``emit`` only reaches subscribers in THIS process's
+        # in-memory EventBus. Production runs the IPC backend (where every
+        # ``push()`` call happens) and the REST server (which hosts the
+        # ``/v1/events`` SSE stream) as two separate OS processes with two
+        # separate ``EventBus`` instances — there is no bridge between them,
+        # so this event never reaches an SSE subscriber. The native agent
+        # instead polls ``list_recent_since`` over the IPC socket (see
+        # WakeWordPoller for the sibling pattern; native/.../ErrorBusPoller.swift).
         payload = err.model_dump(mode="json")
         self._event_bus.emit("krab_error", payload)
         self._route_to_sentry(err)
@@ -213,11 +229,41 @@ class ErrorBus:
             items = list(self._ring)
         return items[-limit:] if limit < len(items) else items
 
+    def latest_seq(self) -> int:
+        """Return the current sequence counter (cheap; no ring copy)."""
+        with self._lock:
+            return self._next_seq
+
+    def list_recent_since(self, since_seq: int = 0, limit: int = 200) -> tuple[list[KrabError], int]:
+        """Return errors with seq > *since_seq* (oldest first), plus the current latest seq.
+
+        ``since_seq=0`` returns the full ring (same items as ``list_recent``).
+        Used for IPC poll-based delivery: a caller bootstraps with
+        ``since_seq=0`` to learn ``latest_seq`` without necessarily treating
+        the returned backlog as "new" (that policy lives in the poller, not
+        here — see ``ErrorBusTracker`` on the Swift side), then passes the
+        previously returned ``latest_seq`` on each subsequent poll.
+        """
+        with self._lock:
+            items = list(self._ring)
+            seqs = list(self._ring_seq)
+            latest = self._next_seq
+        filtered = [err for err, seq in zip(items, seqs) if seq > since_seq]
+        if limit < len(filtered):
+            filtered = filtered[-limit:]
+        return filtered, latest
+
     def clear(self) -> int:
-        """Clear the ring buffer, dedupe state, and WarnBatcher state. Returns count cleared."""
+        """Clear the ring buffer, dedupe state, and WarnBatcher state. Returns count cleared.
+
+        ``_next_seq`` is intentionally NOT reset — it must stay monotonic for
+        the life of the process so a poller's stale ``since_seq`` can never
+        be misread as "newer than" a freshly re-pushed error.
+        """
         with self._lock:
             count = len(self._ring)
             self._ring.clear()
+            self._ring_seq.clear()
             self._last_emitted.clear()
         if self._warn_batcher is not None:
             with self._warn_batcher._lock:

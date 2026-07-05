@@ -9,6 +9,9 @@
  5. MockToastPresenter: toast NOT invoked when setupErrorBus called без backend.
  6. Wave 77 error codes: paste.accessibility_denied, hotkey.conflict, ipc.reconnect
     — декодируются в KrabErrorPayload корректно.
+ 7. Source contract (2026-07-05): setupErrorBus/tearDownErrorBus реально ВЫЗЫВАЮТСЯ
+    из main.swift lifecycle, а не только определены — closes the decorative-wiring
+    gap found while fixing the krab_error IPC-poll transport.
 */
 
 import XCTest
@@ -275,5 +278,58 @@ final class MainErrorsWiringTests: XCTestCase {
         // Simulate tearDownErrorBus
         storedHandler = nil
         XCTAssertNil(storedHandler, "Handler must be nil after teardown")
+    }
+
+    // MARK: 11. Source contract — setupErrorBus/tearDownErrorBus are actually
+    // CALLED from AgentAppDelegate's real lifecycle, not just defined.
+    //
+    // Found 2026-07-05 while fixing the krab_error IPC-poll transport: the
+    // tests above (and the ones in this very file) only exercise the pieces
+    // setupErrorBus() wires together in isolation — none of them call the
+    // real AgentAppDelegate lifecycle, so they stayed green for however long
+    // setupErrorBus(toastPresenter:) was never actually invoked from
+    // completeStartupAfterBackendReady() (the doc comment at the top of
+    // main+Errors.swift claimed it was — it wasn't). The whole error-toast
+    // subsystem was dead in production despite 100% green tests. This test
+    // greps the real source file for the real call sites so a future refactor
+    // that silently drops the call fails CI instead of shipping decorative
+    // wiring again.
+
+    func test_setupErrorBus_is_actually_called_from_startup() throws {
+        let src = try String(contentsOf: Self.mainSwiftURL, encoding: .utf8)
+        XCTAssertTrue(
+            src.contains("setupErrorBus(toastPresenter:"),
+            "completeStartupAfterBackendReady() must call setupErrorBus(toastPresenter:) — " +
+            "found it defined but never called in main.swift once already (2026-07-05)."
+        )
+    }
+
+    func test_tearDownErrorBus_is_actually_called_from_shutdown() throws {
+        let src = try String(contentsOf: Self.mainSwiftURL, encoding: .utf8)
+        // Match a CALL site, not the `func tearDownErrorBus()` declaration itself.
+        XCTAssertTrue(
+            src.contains("\n        tearDownErrorBus()\n") || src.contains(" tearDownErrorBus()\n"),
+            "applicationWillTerminate() must call tearDownErrorBus() to stop the IPC poller on quit."
+        )
+    }
+
+    /// Resolves native/KrabEarAgent/Sources/KrabEarAgent/main.swift from the test bundle,
+    /// falling back to a #file-relative walk-up (same pattern as SFSymbolVerificationTests).
+    private static var mainSwiftURL: URL {
+        let bundleURL = Bundle(for: MainErrorsWiringTests.self).bundleURL
+        var url = bundleURL
+        for _ in 0..<10 {
+            let candidate = url.appendingPathComponent("Sources/KrabEarAgent/main.swift")
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+            url = url.deletingLastPathComponent()
+        }
+        let fileURL = URL(fileURLWithPath: #file)
+        return fileURL
+            .deletingLastPathComponent()  // KrabEarAgentTests
+            .deletingLastPathComponent()  // Tests
+            .deletingLastPathComponent()  // KrabEarAgent (package root)
+            .appendingPathComponent("Sources/KrabEarAgent/main.swift")
     }
 }

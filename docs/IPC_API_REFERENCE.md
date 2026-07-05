@@ -1369,8 +1369,18 @@ Returns: `{ok}`
 ### `list_recent_errors`
 *(service.py)*  
 Возвращает до `limit` последних KrabError из ring-буфера ErrorBus.  
-Params: `{limit?}` (default 50)  
-Returns: `{errors: [{code, message, component, ts, severity}, ...]}`
+Params: `{limit?}` (default 200), `since_seq?` (int)  
+Returns: `{errors: [{code, message_user, message_debug, component, timestamp, severity, ...}, ...], latest_seq: int}`
+
+**Поллинг-контракт (2026-07-05)**: SSE между IPC-бэкендом и REST-сервером не
+работает (два раздельных `EventBus`, см. `ErrorBus.push()` в `error_bus.py`) —
+native-агент вместо SSE опрашивает этот метод (`ErrorBusPoller.swift`, интервал
+2s, тот же паттерн что `wake_word_status`/`WakeWordPoller`). Передавая
+`since_seq` (последний увиденный `latest_seq`), вызывающая сторона получает
+только НОВЫЕ ошибки (`seq > since_seq`), не полный backlog. Без `since_seq`
+поведение прежнее (полный ring-буфер), `latest_seq` добавлен в ответ всегда
+(harmless addition, обратная совместимость с `DiagnosticsTabView.swift` /
+`main+StatusMenu.swift`, которые не передают `since_seq`).
 
 ### `clear_recent_errors`
 *(service.py)*  

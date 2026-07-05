@@ -334,6 +334,12 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             "Настройки загружены: mode=\(settings.mode), autoPaste=\(settings.autoPaste), quality=\(settings.qualityProfile), translation=\(settings.translationMode)"
         )
 
+        // 2026-07-05: setupErrorBus() существовал с Phase B.1, но НИКОГДА не
+        // вызывался отсюда (декоративная проводка — найдено при фиксе IPC-
+        // поллинга krab_error). Тосты об ошибках были мертвы в проде. См.
+        // main+Errors.swift.
+        setupErrorBus(toastPresenter: ErrorToastPresenter())
+
         // PermissionWizard удален, используем QuickStartWindowController
         historyPanel = HistoryPanelController(
             ipcClient: ipcClient,
@@ -463,6 +469,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         hotkeyManager?.stop()
         wakeWordPoller?.deactivate()
+        tearDownErrorBus()
         selectionTranslator?.stop()
         pasteUndoService?.stop()
         stopLiveSubsCapture()

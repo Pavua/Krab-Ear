@@ -2619,10 +2619,24 @@ class BackendService:
     # ------------------------------------------------------------------
 
     def _handle_list_recent_errors(self, params: dict) -> dict:
-        """Возвращает до *limit* последних KrabError из ring-буфера ErrorBus."""
+        """Возвращает до *limit* последних KrabError из ring-буфера ErrorBus.
+
+        ``since_seq`` (опционально) включает поллинг-контракт для агента:
+        возвращает только записи с seq > since_seq + ``latest_seq`` для
+        следующего опроса (SSE между IPC- и REST-процессами не работает —
+        см. ErrorBus.list_recent_since / native ErrorBusPoller.swift).
+        """
         limit = int(params.get("limit", 200))
-        items = self._error_bus.list_recent(limit)
-        return {"errors": [item.model_dump(mode="json") for item in items]}
+        if "since_seq" in params:
+            since_seq = int(params.get("since_seq", 0))
+            items, latest_seq = self._error_bus.list_recent_since(since_seq, limit)
+        else:
+            items = self._error_bus.list_recent(limit)
+            latest_seq = self._error_bus.latest_seq()
+        return {
+            "errors": [item.model_dump(mode="json") for item in items],
+            "latest_seq": latest_seq,
+        }
 
     def _handle_clear_recent_errors(self, params: dict) -> dict:
         """Очищает ring-буфер и dedupe-состояние ErrorBus. Возвращает количество удалённых записей."""

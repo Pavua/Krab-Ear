@@ -10,8 +10,13 @@
 
  Связи:
  - ErrorActionHandler.swift: protocol ToastPresenting (Task 10).
- - main+Errors.swift: setupErrorBus(toastPresenter:) передаёт ErrorToastPresenter.
- - Task 13: SSE wiring завершает pipeline.
+ - main+Errors.swift: setupErrorBus(toastPresenter:) конструирует presenter БЕЗ
+   actionHandler (циклическая зависимость — ErrorActionHandler требует
+   ToastPresenting при своём init), затем создаёт ErrorActionHandler и
+   присваивает его presenter.actionHandler постфактум. См. init(actionHandler:)
+   default nil + settable actionHandler property.
+ - ErrorBusPoller.swift: IPC-поллинг доставляет KrabErrorPayload в
+   ErrorActionHandler.handleErrorEvent → presenter.present(error:).
 */
 
 import AppKit
@@ -77,7 +82,14 @@ class ErrorToastPresenter: NSObject, ToastPresenting {
     // MARK: - State
 
     private let logger = Logger(subsystem: "com.antigravity.krab-ear", category: "ErrorToastPresenter")
-    private weak var actionHandler: ErrorActionHandler?
+    /// Weak + settable-after-init to break the construction cycle with
+    /// ErrorActionHandler (which itself requires a ToastPresenting at init) —
+    /// see setupErrorBus in main+Errors.swift, which constructs this presenter
+    /// first, then the handler, then wires this property. Optional chaining at
+    /// the one call site (handleActionTap dispatch) already tolerates nil, so a
+    /// presenter with no handler yet attached still displays toasts correctly;
+    /// only the actionable-button tap-through would no-op.
+    weak var actionHandler: ErrorActionHandler?
     private let panelFactory: any ToastPanelFactory
 
     /// Currently visible toast panel (nil when no toast is shown).
@@ -92,7 +104,7 @@ class ErrorToastPresenter: NSObject, ToastPresenting {
     // MARK: - Init
 
     init(
-        actionHandler: ErrorActionHandler,
+        actionHandler: ErrorActionHandler? = nil,
         panelFactory: (any ToastPanelFactory)? = nil
     ) {
         self.actionHandler = actionHandler
