@@ -87,6 +87,14 @@ launchd plist reload, дешифровка `.env` секретов и rollback-�
 - [ ] CHANGELOG дополнен
 - [ ] Коммит: `git add -A && git commit -m "release: vYYYY-MM-DD"`
 - [ ] Тег: `git tag vYYYY-MM-DD && git push origin main --tags`
+- [ ] Релиз с автообновлением (Sparkle) публикуется CI-workflow'ом по тегу `vX.Y.Z`
+  (или вручную: GitHub → Actions → **release** → Run workflow). Перед тегом
+  убедиться, что `krab-ear-ci` на этом коммите зелёный — workflow не выпустит
+  релиз без этого (fail-closed). После релиза проверить:
+  ```bash
+  gh release view vX.Y.Z
+  ```
+  и что `appcast.xml` в репозитории обновился новым коммитом `[skip ci]`.
 
 ## v2.0.5 Candidate — PRs для включения
 
