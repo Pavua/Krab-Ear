@@ -131,6 +131,10 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     let realtimeOverlay = RealtimeOverlayController()
     let logger = AgentLogger.shared
 
+    /// Wake word через IPC-поллинг backend (openWakeWord; spec 2026-07-05).
+    var wakeWordPoller: WakeWordPoller?
+    private var wakeWordConversationObservers: [NSObjectProtocol] = []
+
     /// Phase 2A: Selection translator — Cmd+Shift+T auto-translate selection.
     var selectionTranslator: SelectionTranslator?
     var pasteUndoService: PasteUndoService?
@@ -146,7 +150,6 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     /// Объявлена здесь, т.к. stored-property в extension Swift не поддерживает.
     var menuBarRecapView: MenuBarRecapView?
     // PR 1.5: Wake word listener (Porcupine)
-    private var wakeWordListener: WakeWordListener?
     private var quickStartController: QuickStartWindowController?
     var realtimeOverlayTimer: Timer?
 
@@ -459,7 +462,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         DistributedNotificationCenter.default().removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         hotkeyManager?.stop()
-        wakeWordListener?.stop()
+        wakeWordPoller?.deactivate()
         selectionTranslator?.stop()
         pasteUndoService?.stop()
         stopLiveSubsCapture()
@@ -469,42 +472,63 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         releaseFileLock(logger: logger)
     }
 
-    // MARK: - PR 1.5: Wake Word Setup
+    // MARK: - Wake Word (IPC-поллинг, spec 2026-07-05)
 
-    /// Инициализирует и запускает WakeWordListener если включён в настройках.
-    /// Дефолт: выключен (приватность). Включается в Settings → Аудио-пайплайн.
+    /// Wake word через IPC-поллинг backend'а (openWakeWord).
+    /// Дефолт: выключен (приватность). Включается в Settings → «Разговор с AI».
+    /// Имя функции сохранено для минимального диффа вызывающих мест.
     func setupWakeWordListenerIfEnabled() {
         let enabled = UserDefaults.standard.bool(forKey: "KrabEar_WakeWordEnabled")
         guard enabled else {
-            logger.info("Wake word listener: выключен (UserDefaults KrabEar_WakeWordEnabled=false)")
+            logger.info("Wake word: выключен (UserDefaults KrabEar_WakeWordEnabled=false)")
             return
         }
-
-        let listener = WakeWordListener { [weak self] in
-            DispatchQueue.main.async {
-                self?.historyPanel?.triggerConversationFromWakeWord()
-            }
+        if wakeWordPoller == nil {
+            wakeWordPoller = WakeWordPoller(
+                ipcProvider: { [weak self] in self?.ipcClient },
+                isToggleEnabled: { UserDefaults.standard.bool(forKey: "KrabEar_WakeWordEnabled") },
+                onDetection: { [weak self] in
+                    self?.historyPanel?.triggerConversationFromWakeWord()
+                }
+            )
         }
-
-        let started = listener.start()
-        if started {
-            wakeWordListener = listener
-            logger.info("Wake word listener «Краб» запущен.")
-        } else {
-            logger.warn("Wake word listener не удалось запустить. Проверьте AccessKey и .ppn файл.")
+        setupWakeWordConversationObservers()
+        wakeWordPoller?.activate()
+        // Тумблер включили, пока privacy mode активен: сразу паузим (backend
+        // всё равно отвергнет старт — гейт живой; агентская пауза убирает
+        // цикл повторных попыток и лог-шум с обеих сторон).
+        if privacyModeEnabled {
+            wakeWordPoller?.pause(.privacyMode)
         }
     }
 
-    /// Перезапустить WakeWordListener с новым значением enabled.
+    /// Перезапустить wake word с новым значением enabled.
     /// Вызывается из HistoryPanelController+Settings при изменении тогглера.
     func applyWakeWordEnabled(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: "KrabEar_WakeWordEnabled")
-        wakeWordListener?.stop()
-        wakeWordListener = nil
-
         if enabled {
             setupWakeWordListenerIfEnabled()
+        } else {
+            wakeWordPoller?.deactivate()
         }
+    }
+
+    /// Разговор занимает микрофон: пауза wake word на время разговора.
+    /// Notification'ы шлёт ConversationViewController (start/stopConversation) —
+    /// единственная воронка всех путей старта/останова разговора.
+    private func setupWakeWordConversationObservers() {
+        guard wakeWordConversationObservers.isEmpty else { return }
+        let nc = NotificationCenter.default
+        wakeWordConversationObservers.append(
+            nc.addObserver(forName: .krabConversationStarted, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.wakeWordPoller?.pause(.conversation) }
+            }
+        )
+        wakeWordConversationObservers.append(
+            nc.addObserver(forName: .krabConversationStopped, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.wakeWordPoller?.resume(.conversation) }
+            }
+        )
     }
 
     /// Включить/выключить Right Option double-tap hotkey для Разговора с AI.

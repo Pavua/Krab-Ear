@@ -969,8 +969,13 @@ class BackendService:
             auto_title_generator=self._auto_title_generator,
             get_runtime_setting=self._get_runtime_setting,
         )
-        # openWakeWord adapter (default disabled via WAKE_WORD_ENGINE setting)
-        self._oww_adapter = OpenWakeWordAdapter(data_dir=self.store.data_dir)
+        # openWakeWord adapter (default disabled via WAKE_WORD_ENGINE setting).
+        # settings_get ОБЯЗАТЕЛЕН: без него privacy-гейт в handle_wake_word_start
+        # и loop-guard читают дефолт (False) и являются декоративными.
+        self._oww_adapter = OpenWakeWordAdapter(
+            data_dir=self.store.data_dir,
+            settings_get=self._get_runtime_setting,
+        )
         # Wave 172: RecordingCoreService owns all recording lifecycle, preview worker,
         # transcription pipeline, and async job tracking.
         self._transcription_counter_ref: list[int] = [0]

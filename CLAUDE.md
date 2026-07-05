@@ -194,7 +194,7 @@ Privacy-mode gate pattern (waves 23-30): any IPC handler that returns transcript
 - **`backend/telnyx_adapter.py`** — `TelnyxAdapter`: Telnyx Call Control REST API adapter for outbound calls; Bearer-auth + exponential-retry; stub-mode when `TELNYX_API_KEY` absent.
 - **`backend/observability.py`** — `init_sentry()` / `capture_exception()` helpers; Sentry/GlitchTip SDK init; fully no-op when DSN not provided.
 - **`backend/telegram_bridge.py`** — `TelegramBridge`: send messages from Krab Ear backend to main Krab userbot via `POST /api/notify` on localhost web-panel port.
-- **`backend/openwakeword_adapter.py`** — `OpenWakeWordAdapter`: Apache-2.0 wake-word detection (openWakeWord); primary engine until Picovoice (no email/signup); custom "Краб" model requires ~15 min Jupyter training.
+- **`backend/openwakeword_adapter.py`** — `OpenWakeWordAdapter`: Apache-2.0 wake-word detection (openWakeWord, no email/signup); custom "Краб" model requires ~15 min Jupyter training. НАСТОЯЩИЙ движок wake word с 2026-07-05 (Porcupine удалён): `last_detection {model, score, ts=monotonic}` в `wake_word_status` для IPC-поллинга агента; `settings_get` проброшен из `service.py` (до этого privacy-гейт был декоративным — конструировался без него); `_privacy_blocked()` проверяется каждый чанк `_listen_loop`. Зависимость опциональна: `KrabEar/requirements-wakeword.txt` (намеренно НЕ в requirements.txt — ubuntu-CI ставит его целиком) + однократно `openwakeword.utils.download_models()` (bootstrap_backend.command делает сам).
 
 #### Twilio / provider abstraction (Phase 3 step 5):
 - **`backend/twilio_adapter.py`** — `TwilioAdapter`: Twilio REST API adapter, same interface as `TelnyxAdapter`. Active provider selected via `CALL_PROVIDER` setting (`telnyx` | `twilio`); swap at runtime without code changes.
@@ -276,7 +276,7 @@ Privacy-mode gate pattern (waves 23-30): any IPC handler that returns transcript
 - **`CallAutomationController.swift`** — manages outbound call lifecycle; integrates with `call_session_*` IPC methods; drives cost ticker, silence probe, auto-end UI.
 - **`SentryConfig.swift`** — no-op Sentry/GlitchTip initialisation; reads DSN from `settings.sentry_dsn` via IPC; fully skips SDK init when DSN absent.
 - **`SingleInstanceGuard.swift`** — kills duplicate `KrabEarAgent` processes on launch; prevents double-paste and double-hotkey issues.
-- **`WakeWordListener.swift`** — openWakeWord adapter bridge (Swift↔Python); triggers recording on wake-word detection; hotkey remains primary fallback.
+- **`WakeWordPoller.swift`** — wake word через IPC-поллинг backend (openWakeWord): агент шлёт `wake_word_start/stop`, поллит `wake_word_status` (0.75s, off-main), рост `last_detection.ts` → `triggerConversationFromWakeWord()`. Пауза Set-причинами (recording/conversation/privacyMode): хуки в `start/stopRealtimeOverlayPolling`, notification'ы `.krabConversationStarted/Stopped` из `ConversationViewController.start/stopConversation`, `setPrivacyMode`. Self-heal при перезапуске backend (rate-limit 10s). Старый Porcupine-путь (WakeWordListener, файл удалён 2026-07-05, без бэктиков — его больше нет) никогда не работал: заглушка без SDK. 🔴 SSE для wake word НЕ подходит: прод = 2 процесса (`service.py` IPC + `rest_server.py` :5005) с РАЗДЕЛЬНЫМИ EventBus без моста.
 - **`HotkeyDoubleTapDetector.swift`** — detects Right Option double-tap (300 ms window) to start Voice Assistant conversation.
 
 #### Phase A — Auto-heal (2026-05-02) Swift additions:

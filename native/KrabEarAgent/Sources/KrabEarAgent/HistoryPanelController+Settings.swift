@@ -1256,21 +1256,54 @@ extension HistoryPanelController {
             button: vaHotkeyToggle
         )
 
-        // 2. Wake word toggle
+        // 2. Wake word toggle (openWakeWord в backend, IPC-поллинг — spec 2026-07-05)
         vaWakeWordToggle.title = ""
         vaWakeWordToggle.setButtonType(.switch)
-        vaWakeWordToggle.setAccessibilityLabel("Включить детектор пробуждения «Краб» через Porcupine")
+        vaWakeWordToggle.setAccessibilityLabel("Включить детектор слова-пробуждения (openWakeWord)")
         let wakePrivacyBadge = makeBadge(
             text: "приватность",
             color: KrabEarTheme.Colors.textSecondary,
-            tooltip: "Требует Porcupine AccessKey + .ppn файл «Краб» (Picovoice Console, free tier). По умолчанию выключен.",
+            tooltip: "Слушает только слово-пробуждение локально (openWakeWord, Apache-2.0, без ключей). Ставится на паузу при записи, разговоре и в privacy mode. По умолчанию выключен.",
             symbol: "lock.fill"
         )
         let wakeWordRow = makeSwitchRow(
-            label: "Детектор пробуждения «Краб»",
-            description: "Требует Porcupine AccessKey + .ppn файл «Краб» (Picovoice Console, free tier). По умолчанию выключен — приватность.",
+            label: "Детектор слова-пробуждения",
+            description: "openWakeWord в backend — без ключей и регистраций. Скажи слово-пробуждение — откроется «Разговор с AI». По умолчанию выключен — приватность.",
             button: vaWakeWordToggle,
             statusBadge: wakePrivacyBadge
+        )
+
+        // 2a. Статус движка
+        vaWakeWordStatusLabel.font = NSFont.systemFont(ofSize: 11)
+        vaWakeWordStatusLabel.textColor = KrabEarTheme.Colors.textSecondary
+        vaWakeWordStatusLabel.lineBreakMode = .byTruncatingTail
+        let wakeStatusRow = makeSettingRow(
+            label: "Статус",
+            description: "Установлен ли openWakeWord в Python-окружении backend.",
+            control: vaWakeWordStatusLabel
+        )
+
+        // 2b. Модель (слово-пробуждение)
+        vaWakeWordModelSelector.removeAllItems()
+        vaWakeWordModelSelector.addItems(withTitles: ["hey_jarvis", "alexa", "hey_mycroft"])
+        vaWakeWordModelSelector.setAccessibilityLabel("Модель слова-пробуждения")
+        let savedWakeModel = UserDefaults.standard.string(forKey: "KrabEar_WakeWordModel") ?? "hey_jarvis"
+        vaWakeWordModelSelector.selectItem(withTitle: savedWakeModel)
+        let wakeModelRow = makeSettingRow(
+            label: "Слово-пробуждение",
+            description: "Встроенные модели openWakeWord (англ.). Кастомная «Краб» (.onnx в wake_word_models/) появится в списке автоматически.",
+            control: vaWakeWordModelSelector
+        )
+
+        // 2c. Порог уверенности
+        vaWakeWordThresholdSlider.isContinuous = false
+        vaWakeWordThresholdSlider.setAccessibilityLabel("Порог уверенности детектора слова-пробуждения")
+        let savedWakeThreshold = UserDefaults.standard.double(forKey: "KrabEar_WakeWordThreshold")
+        vaWakeWordThresholdSlider.doubleValue = savedWakeThreshold > 0 ? savedWakeThreshold : 0.5
+        let wakeThresholdRow = makeSettingRow(
+            label: "Порог уверенности",
+            description: "Ниже — чувствительнее (больше ложных срабатываний), выше — строже. По умолчанию 0.5.",
+            control: vaWakeWordThresholdSlider
         )
 
         // 3. Engine selector
@@ -1296,6 +1329,9 @@ extension HistoryPanelController {
         card.contentStackView.addArrangedSubview(hotkeyToggleRow)
         card.contentStackView.addArrangedSubview(makeSeparator())
         card.contentStackView.addArrangedSubview(wakeWordRow)
+        card.contentStackView.addArrangedSubview(wakeStatusRow)
+        card.contentStackView.addArrangedSubview(wakeModelRow)
+        card.contentStackView.addArrangedSubview(wakeThresholdRow)
         card.contentStackView.addArrangedSubview(makeSeparator())
         card.contentStackView.addArrangedSubview(engineRow)
         card.contentStackView.addArrangedSubview(makeSeparator())
@@ -1321,6 +1357,55 @@ extension HistoryPanelController {
         UserDefaults.standard.set(enabled, forKey: "KrabEar_WakeWordEnabled")
         if let appDelegate = NSApp.delegate as? AgentAppDelegate {
             appDelegate.applyWakeWordEnabled(enabled)
+        }
+        refreshWakeWordStatusRow()
+    }
+
+    @objc func onVAWakeWordModelChanged() {
+        let model = vaWakeWordModelSelector.titleOfSelectedItem ?? "hey_jarvis"
+        UserDefaults.standard.set(model, forKey: "KrabEar_WakeWordModel")
+        restartWakeWordIfEnabled()
+    }
+
+    @objc func onVAWakeWordThresholdChanged() {
+        UserDefaults.standard.set(vaWakeWordThresholdSlider.doubleValue, forKey: "KrabEar_WakeWordThreshold")
+        restartWakeWordIfEnabled()
+    }
+
+    /// Смена модели/порога на лету: пере-старт wake word сессии, если тумблер включён.
+    private func restartWakeWordIfEnabled() {
+        guard UserDefaults.standard.bool(forKey: "KrabEar_WakeWordEnabled"),
+              let appDelegate = NSApp.delegate as? AgentAppDelegate else { return }
+        appDelegate.wakeWordPoller?.deactivate()
+        appDelegate.setupWakeWordListenerIfEnabled()
+    }
+
+    /// Off-main запрос wake_word_status + wake_word_list_models для статус-строки
+    /// и актуального списка моделей (кастомные .onnx из wake_word_models/).
+    func refreshWakeWordStatusRow() {
+        let ipc = self.ipcClient
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let status = try? ipc.call(method: "wake_word_status", params: [:])
+            let models = try? ipc.call(method: "wake_word_list_models", params: [:])
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let result = status?["result"] as? [String: Any]
+                let available = result?["engine_available"] as? Bool ?? false
+                self.vaWakeWordStatusLabel.stringValue = available
+                    ? "openWakeWord: установлен"
+                    : "openWakeWord: не установлен. Установка: pip install -r KrabEar/requirements-wakeword.txt"
+                if let list = (models?["result"] as? [String: Any])?["models"] as? [[String: Any]] {
+                    let names = list.compactMap { $0["name"] as? String }
+                    if !names.isEmpty {
+                        let selected = self.vaWakeWordModelSelector.titleOfSelectedItem
+                        self.vaWakeWordModelSelector.removeAllItems()
+                        self.vaWakeWordModelSelector.addItems(withTitles: names)
+                        if let selected, names.contains(selected) {
+                            self.vaWakeWordModelSelector.selectItem(withTitle: selected)
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1356,6 +1441,7 @@ extension HistoryPanelController {
 
         let wakeWordEnabled = UserDefaults.standard.bool(forKey: "KrabEar_WakeWordEnabled")
         vaWakeWordToggle.state = wakeWordEnabled ? .on : .off
+        refreshWakeWordStatusRow()
 
         let engine = UserDefaults.standard.string(forKey: "KrabEar_ConversationEngine") ?? "auto"
         switch engine {

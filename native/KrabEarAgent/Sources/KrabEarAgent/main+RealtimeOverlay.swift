@@ -16,6 +16,9 @@ extension AgentAppDelegate {
         // Streaming live paste SSE — запускаем независимо от realtimePreviewEnabled.
         streamingPasteController?.recordingDidStart()
 
+        // Запись владеет микрофоном; иначе wake word ловит собственную диктовку.
+        wakeWordPoller?.pause(.recording)
+
         guard settings.realtimePreviewEnabled else { return }
 
         realtimeOverlay.show()
@@ -48,6 +51,7 @@ extension AgentAppDelegate {
         realtimeOverlay.hide()
         // Streaming live paste SSE — останавливаем вместе с оверлеем.
         streamingPasteController?.recordingDidStop()
+        wakeWordPoller?.resume(.recording)
     }
 
     // MARK: - A3 Adaptive backoff constants

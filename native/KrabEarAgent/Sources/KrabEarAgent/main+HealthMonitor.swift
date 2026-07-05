@@ -47,6 +47,14 @@ extension AgentAppDelegate {
         self.privacyModeEnabled = on
         self.statusIndicatorView.setPrivacyMode(on)
         self.applyHealthStateToStatusItem(self.lastHealthState)
+        // Wake word не должен держать микрофон в privacy mode. Backend тоже
+        // откажет в wake_word_start (гейт живой после проводки settings_get) —
+        // двойная защита, агентская сторона срабатывает первой.
+        if on {
+            wakeWordPoller?.pause(.privacyMode)
+        } else {
+            wakeWordPoller?.resume(.privacyMode)
+        }
     }
 
     var statusUpdateTimer: Timer? {

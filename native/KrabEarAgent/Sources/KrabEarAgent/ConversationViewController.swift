@@ -15,6 +15,15 @@
 import AppKit
 import AVFoundation
 
+// Разговор занимает микрофон: агент ставит wake word на паузу на .started
+// и возобновляет на .stopped (setupWakeWordConversationObservers в main.swift).
+// Post из start/stopConversation — единственной воронки всех путей
+// старта/останова (hotkey, кнопка, WS-close, ошибки).
+extension Notification.Name {
+    static let krabConversationStarted = Notification.Name("com.krabear.agent.conversationStarted")
+    static let krabConversationStopped = Notification.Name("com.krabear.agent.conversationStopped")
+}
+
 // MARK: - Conversation state
 
 /// Текущее состояние диалогового сеанса.
@@ -119,6 +128,7 @@ final class ConversationViewController: NSViewController {
     func startConversation() {
         guard !isSessionActive else { return }
         isSessionActive = true
+        NotificationCenter.default.post(name: .krabConversationStarted, object: nil)
         conversationState = .connecting
         transcriptBuffer = ""
         updateTranscript("")
@@ -134,6 +144,7 @@ final class ConversationViewController: NSViewController {
         closeWebSocket()
         stopAudioCapture()
         conversationState = .idle
+        NotificationCenter.default.post(name: .krabConversationStopped, object: nil)
     }
 
     /// Прервать текущее TTS-воспроизведение AI. Вызывается из кнопки «Прервать AI».

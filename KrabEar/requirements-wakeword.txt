@@ -1,0 +1,7 @@
+# Опциональная зависимость wake word (детектор слова-пробуждения, openWakeWord).
+# НАМЕРЕННО не в requirements.txt: ubuntu-CI ставит requirements.txt целиком,
+# а wake word нужен только на macOS-машине пользователя (адаптер имеет stub-режим).
+# Установка:
+#   .venv_krab_ear/bin/pip install -r KrabEar/requirements-wakeword.txt
+#   .venv_krab_ear/bin/python -c "import openwakeword.utils as u; u.download_models()"
+openwakeword>=0.6.0
