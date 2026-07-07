@@ -298,7 +298,7 @@ rm -rf "$DATADIR"
 - Modify: `KrabEar/backend/event_bus.py`
 - Create: `KrabEar/tests/test_event_bus_emit_envelope.py`
 
-- [ ] **Шаг 1: Failing-тест первым**
+- [x] **Шаг 1: Failing-тест первым**
 
 `KrabEar/tests/test_event_bus_emit_envelope.py`:
 
@@ -383,12 +383,12 @@ if __name__ == "__main__":
     unittest.main(verbosity=2)
 ```
 
-- [ ] **Шаг 2: Прогнать — убедиться что падает**
+- [x] **Шаг 2: Прогнать — убедиться что падает**
 
 Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_event_bus_emit_envelope.py -v`
 Expected: FAIL (`AttributeError: 'EventBus' object has no attribute 'emit_envelope'`)
 
-- [ ] **Шаг 3: Реализация — добавить метод в `backend/event_bus.py`**
+- [x] **Шаг 3: Реализация — добавить метод в `backend/event_bus.py`**
 
 Вставить между `emit()` (кончается строкой 188) и `emit_typed()` (строка 190):
 
@@ -428,24 +428,24 @@ Expected: FAIL (`AttributeError: 'EventBus' object has no attribute 'emit_envelo
             )
 ```
 
-- [ ] **Шаг 4: Тесты зелёные**
+- [x] **Шаг 4: Тесты зелёные**
 
 Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_event_bus_emit_envelope.py -v`
 Expected: 6 passed.
 
-- [ ] **Шаг 5: Регрессия — существующие event_bus тесты не сломаны**
+- [x] **Шаг 5: Регрессия — существующие event_bus тесты не сломаны**
 
 Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_event_bus.py KrabEar/tests/test_event_bus_extras.py KrabEar/tests/test_event_bus_max_subscribers_wave33.py KrabEar/tests/test_webhook_fire_wiring_wave1775.py -v`
 Expected: все passed (emit_envelope — чистое дополнение, не трогает emit()/add_listener()).
 
-- [ ] **Шаг 6: flake8 + ubuntu-parity**
+- [x] **Шаг 6: flake8 + ubuntu-parity**
 
 Run: `.venv_krab_ear/bin/flake8 KrabEar/backend/event_bus.py KrabEar/tests/test_event_bus_emit_envelope.py --max-line-length=150`
 Expected: пусто.
 Run: `bash scripts/pre_merge_py312_check.sh KrabEar/tests/test_event_bus_emit_envelope.py`
 Expected: ALL GREEN.
 
-- [ ] **Шаг 7: Commit**
+- [x] **Шаг 7: Commit**
 
 ```bash
 git add KrabEar/backend/event_bus.py KrabEar/tests/test_event_bus_emit_envelope.py
