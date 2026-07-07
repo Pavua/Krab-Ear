@@ -23,7 +23,6 @@ if TYPE_CHECKING:
     from backend.llm_rewriter import LLMRewriter
 
 import numpy as np
-import requests
 
 # Heavy optional dependencies — недоступны на Linux CI (mlx only Apple Silicon)
 # и/или требуют system libs (soundfile→libsndfile, pyannote→ffmpeg via torchcodec).
@@ -3401,54 +3400,97 @@ class AudioEngine:
         return turns
 
     def _transcribe_remote(self, audio_data: Any, prompt: str) -> dict[str, Any]:
-        """Обращение к внешнему OpenAI-совместимому API.
+        """Облачная (cloud) транскрибация через уже захардненную `backend.cloud_stt`.
 
-        audio_data может быть str (путь к существующему WAV файлу) или
-        numpy.ndarray (raw audio buffer из live recording). Для ndarray мы
-        сериализуем во временный WAV, отправляем, и гарантированно удаляем
-        temp-файл в finally-блоке.
+        Вызывается ТОЛЬКО из fallback chain, когда settings.NETWORK_MODE !=
+        "offline_strict" (владелец явно разрешил выход в сеть). Переиспользует
+        существующую абстракцию облачных STT-провайдеров (`get_cloud_stt_provider`
+        — rate-limits, SSRF-guards, capped reads) — тот же провайдер, что уже
+        используют WS `/v1/stream` мост Voice Gateway (`backend/rest_server.py`).
+
+        Раньше здесь был мёртвый scaffold: POST на `settings.STT_GATEWAY_URL`,
+        который указывал на локальный OpenClaw gateway (`/v1/chat/completions`
+        хост:порт) — тот НЕ реализует `/v1/audio/transcriptions` → гарантированный
+        404 на каждый вызов (см. logs/krab-ear-rest.err.log).
+
+        PRIVACY CONTRACT: privacy_mode_enabled ВСЕГДА побеждает NETWORK_MODE —
+        если включён режим приватности, аудио НИКУДА не отправляется, даже если
+        владелец уже разрешил сеть через NETWORK_MODE (симметрично
+        `_cloud_rewrite_allowed`, которая та же гарантия для облачного rewriter).
+
+        audio_data может быть str/Path (путь к существующему WAV файлу) или
+        numpy.ndarray (raw audio buffer из live recording, 16kHz mono float32,
+        см. `_audio_data_to_pcm16`). `prompt` не передаётся облачным провайдерам
+        напрямую (REST API OpenAI/Deepgram/AssemblyAI не поддерживают whisper-style
+        initial_prompt в этом виде) — параметр сохранён для совместимости с
+        вызывающим кодом (`_maybe_multipass_retry`, `_transcribe_with_fallback_impl`).
         """
-        import tempfile
-        import numpy as np
+        if self._settings_get("privacy_mode_enabled", False):
+            raise RuntimeError(
+                "Remote STT заблокирован: privacy_mode_enabled=True — аудио не "
+                "должно покидать устройство в режиме приватности"
+            )
 
-        cleanup_temp_path: str | None = None
+        from backend.cloud_stt import get_cloud_stt_provider  # noqa: PLC0415 — lazy import, mirrors _cloud_rewrite_allowed
+
+        provider_name = str(self._settings_get("cloud_stt_provider", "openai") or "openai")
+        provider = get_cloud_stt_provider(provider_name)
+        if provider is None:
+            raise RuntimeError(f"Remote STT: неизвестный cloud_stt_provider '{provider_name}'")
+
+        pcm_bytes, sample_rate = self._audio_data_to_pcm16(audio_data)
+        source_lang = settings.TRANSCRIBE_LANGUAGE or "auto"
+
+        result = provider.transcribe(pcm_bytes, sample_rate, source_lang)
+        if "error" in result:
+            logger.error(
+                "Ошибка Remote STT (провайдер=%s): %s %s",
+                provider_name, result.get("error"), result.get("message", ""),
+            )
+            raise RuntimeError(
+                f"Remote STT ({provider_name}) недоступен: {result.get('error')}"
+            )
+
+        # Privacy audit trail: аудио покинуло устройство (симметрично cloud_rewrite).
         try:
-            if isinstance(audio_data, np.ndarray):
-                # Live buffer: пишем в temp WAV (16kHz mono float32 — whisper native rate)
-                import soundfile as sf
-                with tempfile.NamedTemporaryFile(
-                    suffix=".wav", delete=False, dir=str(settings.DATA_DIR)
-                ) as tmp:
-                    cleanup_temp_path = tmp.name
-                sf.write(cleanup_temp_path, audio_data, 16000)
-                audio_path = cleanup_temp_path
-            elif isinstance(audio_data, (str, bytes, os.PathLike)):
-                audio_path = str(audio_data)
-            else:
-                raise TypeError(
-                    f"_transcribe_remote: unsupported audio_data type {type(audio_data).__name__}"
-                )
+            from backend.privacy_audit import get_privacy_audit_logger  # noqa: PLC0415
+            get_privacy_audit_logger().log_event(
+                category="cloud_stt",
+                action="cloud_stt_used",
+                details={"provider": provider_name, "language": source_lang},
+            )
+        except Exception:
+            pass  # audit trail must never break transcription
 
-            with open(audio_path, "rb") as f:
-                resp = requests.post(
-                    settings.STT_GATEWAY_URL,
-                    headers={"Authorization": "Bearer token_here"},  # Placeholder: local gateway не требует auth
-                    files={"file": (os.path.basename(audio_path), f, "audio/wav")},
-                    data={"model": settings.STT_MODEL, "prompt": prompt},
-                    timeout=settings.STT_GATEWAY_TIMEOUT_SEC,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                return {"text": data.get("text", ""), "engine": "remote"}
-        except Exception as e:
-            logger.error("Ошибка Remote STT: %s", e)
-            raise
-        finally:
-            if cleanup_temp_path is not None:
-                try:
-                    os.unlink(cleanup_temp_path)
-                except OSError:
-                    pass
+        return {"text": result.get("text", ""), "engine": "remote"}
+
+    @staticmethod
+    def _audio_data_to_pcm16(audio_data: Any) -> tuple[bytes, int]:
+        """Конвертирует audio_data (WAV-путь или live float32 ndarray) в (pcm16_bytes, sample_rate).
+
+        Live buffer уже 16kHz mono float32 в диапазоне [-1.0, 1.0] — конвертируется
+        через clip+scale (тот же паттерн, что `core/pipeline/stt_gigaam.py::_write_wav`
+        и `backend/tts_service.py`). Файловый путь читается через soundfile с
+        НАТИВНЫМ sample rate файла — без ресемплинга, т.к. `CloudSTTProvider.transcribe`
+        принимает произвольный `sample_rate` явным параметром и провайдеры (OpenAI
+        WAV-header, Deepgram query-param) корректно используют переданное значение;
+        многоканальный звук сводится в моно усреднением каналов.
+        """
+        if isinstance(audio_data, np.ndarray):
+            clipped = np.clip(audio_data, -1.0, 1.0)
+            pcm = (clipped * 32767.0).astype(np.int16)
+            return pcm.tobytes(), 16000
+
+        if isinstance(audio_data, (str, bytes, os.PathLike)):
+            import soundfile as sf
+            samples, sample_rate = sf.read(str(audio_data), dtype="int16", always_2d=False)
+            if samples.ndim > 1:
+                samples = samples.astype(np.int32).mean(axis=1).astype(np.int16)
+            return samples.tobytes(), int(sample_rate)
+
+        raise TypeError(
+            f"_transcribe_remote: unsupported audio_data type {type(audio_data).__name__}"
+        )
 
     def speak(self, text: str, rate: int = 185) -> None:
         """Озвучка текста через macOS `say`."""

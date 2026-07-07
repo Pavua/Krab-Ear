@@ -36,6 +36,8 @@ _ENUM_FIELDS: dict[str, tuple[str, ...]] = {
     "update_channel": ("stable", "beta"),
     # cloud_rewriter_provider: valid providers for cloud transcript cleanup.
     "cloud_rewriter_provider": ("openai", "anthropic", "custom"),
+    # cloud_stt_provider: valid providers for cloud STT fallback (engine.py::_transcribe_remote).
+    "cloud_stt_provider": ("openai", "deepgram", "assemblyai"),
 }
 
 # Диапазоны числовых полей: ключ → (min, max, default, type)

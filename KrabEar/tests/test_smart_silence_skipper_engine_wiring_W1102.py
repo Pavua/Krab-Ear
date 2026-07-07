@@ -92,7 +92,6 @@ def _base_mock_cfg():
     cfg.STT_DENOISE_STRENGTH = "moderate"
     cfg.STT_ROUTING = "auto_scored"
     cfg.STT_RU_FINETUNE_MODEL = "fake/ru"
-    cfg.STT_MODEL = "fake/stt"
     cfg.VOXTRAL_MODEL = "fake/voxtral"
     cfg.WHISPERX_MODEL = "fake/whisperx"
     cfg.WHISPERX_DEVICE = "cpu"
