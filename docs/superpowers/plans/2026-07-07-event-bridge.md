@@ -1887,7 +1887,7 @@ git commit -m "docs(swift): remove stale rewriter_recovered dead-gap comment (ev
 - Modify: `docs/IPC_API_REFERENCE.md`
 - Modify: `CLAUDE.md`
 
-- [ ] **Шаг 1: `docs/IPC_API_REFERENCE.md` — новая секция**
+- [x] **Шаг 1: `docs/IPC_API_REFERENCE.md` — новая секция**
 
 Добавить новую секцию `## Event-мост IPC→REST (2026-07-07)` (например, перед `## Misc`,
 ~строка 2683, или сразу после секции `## Launch Readiness (2026-06-27)`,
@@ -1929,7 +1929,7 @@ REST недоступен → экспоненциальный backoff 1→30с,
 Добавить соответствующую строку в оглавление документа (рядом с существующим
 нумерованным списком секций, ~строка 62, формат `NN. [Название](#якорь)`).
 
-- [ ] **Шаг 2: `CLAUDE.md` — одна запись в разделе Important Patterns**
+- [x] **Шаг 2: `CLAUDE.md` — одна запись в разделе Important Patterns**
 
 Добавить bullet (после существующего "IPC dispatch error contract" или рядом с
 "Voice Gateway bridge endpoints"):
@@ -1938,19 +1938,19 @@ REST недоступен → экспоненциальный backoff 1→30с,
 - **Event-мост IPC→REST (2026-07-07)**: `backend/event_bridge.py::EventBridge` закрывает класс багов «событие эмитится в IPC-процессе, подписчик слушает REST-процесс (`:5005`)» — подписывается на локальную (IPC) шину, батчами (≤20) POST-ит `POST /internal/event` (REST, loopback-only + bridge-токен `<data_dir>/event_bridge_token`, 0600, всегда требуется независимо от `REST_API_AUTH_ENABLED`) → `EventBus.emit_envelope()` доставляет конверт КАК ЕСТЬ существующим SSE/WS подписчикам без повторного вызова push-листенеров (no-echo guard). Killswitch `event_bridge_enabled`/`KRAB_EAR_EVENT_BRIDGE_ENABLED` (default `True`) — читается один раз при старте (сиблинг `DISK_MONITOR_ENABLED`, не live-toggle). Диагностика: `get_diagnostics.event_bridge`. REST недоступен → backoff 1→30с, WARN по смене состояния, эмиттеры не блокируются, deque(256) drop-oldest. `main+HealthMonitor.swift` доккомментарий про мёртвый `rewriter_recovered`-гэп удалён — подписка теперь живая.
 ```
 
-- [ ] **Шаг 3: Верификация доки**
+- [x] **Шаг 3: Верификация доки**
 
 Run: `python3 scripts/verify_claude_md.py`
 Expected: OK.
 
-- [ ] **Шаг 4: Commit доки**
+- [x] **Шаг 4: Commit доки**
 
 ```bash
 git add docs/IPC_API_REFERENCE.md CLAUDE.md
 git commit -m "docs(event-bridge): IPC_API_REFERENCE section + CLAUDE.md entry"
 ```
 
-- [ ] **Шаг 5: Финальная верификация ВСЕЙ волны разом**
+- [x] **Шаг 5: Финальная верификация ВСЕЙ волны разом**
 
 ```bash
 # Полный набор новых/изменённых тестов
