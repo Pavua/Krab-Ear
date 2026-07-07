@@ -1238,6 +1238,10 @@ final class QuickStartWindowController: NSWindowController, NSWindowDelegate {
     private let accessibilityStatusLabel = NSTextField(labelWithString: "Accessibility: ...")
     /// Шаг загрузки STT-модели — strong ref пока sheet активен.
     private var modelDownloadStep: ModelDownloadStepController?
+    /// A1: шаг превью рекомендованной настройки — strong ref пока sheet активен.
+    private var recommendedSetupStep: RecommendedSetupStepController?
+    /// Решение 9.4: отдельный consent-экран wake word — strong ref пока sheet активен.
+    private var wakeWordConsentStep: WakeWordConsentStepController?
 
     init(
         ipcClient: IPCClient,
@@ -1411,9 +1415,10 @@ final class QuickStartWindowController: NSWindowController, NSWindowDelegate {
         runModelDownloadStepThenComplete()
     }
 
-    /// Перед завершением онбординга предлагаем скачать STT-модель (если её ещё нет в кэше).
-    /// Если модель уже кэширована — шаг пропускается мгновенно (существующие пользователи
-    /// не затронуты). Любой исход (скачано / позже / уже было) → `onComplete()`.
+    /// Перед завершением онбординга: (1) STT-модель если не в кэше, (2) рекомендованная
+    /// настройка (A1, dry_run превью -> apply/skip), (3) wake word consent (решение 9.4,
+    /// отдельно от apply_recommended_setup). Любой исход каждого шага -> следующий шаг;
+    /// финал -> onComplete().
     private func runModelDownloadStepThenComplete() {
         guard let parent = self.window else {
             // Нет окна — не блокируем завершение онбординга.
@@ -1423,9 +1428,29 @@ final class QuickStartWindowController: NSWindowController, NSWindowDelegate {
         let step = ModelDownloadStepController(ipcClient: ipcClient) { [weak self] _ in
             guard let self = self else { return }
             self.modelDownloadStep = nil
-            self.onComplete()
+            self.runRecommendedSetupStepThenWakeWord(over: parent)
         }
         self.modelDownloadStep = step
+        step.start(over: parent)
+    }
+
+    private func runRecommendedSetupStepThenWakeWord(over parent: NSWindow) {
+        let step = RecommendedSetupStepController(ipcClient: ipcClient) { [weak self] _ in
+            guard let self = self else { return }
+            self.recommendedSetupStep = nil
+            self.runWakeWordConsentStep(over: parent)
+        }
+        self.recommendedSetupStep = step
+        step.start(over: parent)
+    }
+
+    private func runWakeWordConsentStep(over parent: NSWindow) {
+        let step = WakeWordConsentStepController(ipcClient: ipcClient) { [weak self] _ in
+            guard let self = self else { return }
+            self.wakeWordConsentStep = nil
+            self.onComplete()
+        }
+        self.wakeWordConsentStep = step
         step.start(over: parent)
     }
 }
