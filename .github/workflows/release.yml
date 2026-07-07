@@ -18,6 +18,9 @@ concurrency:
 
 env:
   SPARKLE_TOOLS_VERSION: "2.6.4"
+  # SHA-256 официального Sparkle-2.6.4.tar.xz — supply-chain пин: sign_update
+  # запускается рядом с EdDSA-приватником, подменённый upstream-ассет = кража ключа.
+  SPARKLE_TOOLS_SHA256: "50612a06038abc931f16011d7903b8326a362c1074dabccb718404ce8e585f0b"
 
 jobs:
   release:
@@ -64,6 +67,10 @@ jobs:
             # grep -F: "[skip ci]" в case-паттерне был бы character class
             if printf '%s' "$MSG" | grep -qF "release: appcast v" \
                && printf '%s' "$MSG" | grep -qF "[skip ci]"; then
+              # Отматываем ТОЛЬКО если коммит правда трогает один appcast.xml —
+              # мислейбл-коммит с кодом под этой подписью не должен обойти CI-гейт.
+              CHANGED=$(git diff-tree --no-commit-id --name-only -r "$GUARD_SHA")
+              [ "$CHANGED" = "appcast.xml" ] || break
               GUARD_SHA=$(git rev-parse "$GUARD_SHA^")
             else
               break
@@ -128,6 +135,8 @@ jobs:
           VERSION="${{ steps.ver.outputs.version }}"
           curl -L -o /tmp/sparkle.tar.xz \
             "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_TOOLS_VERSION}/Sparkle-${SPARKLE_TOOLS_VERSION}.tar.xz"
+          echo "${SPARKLE_TOOLS_SHA256}  /tmp/sparkle.tar.xz" | shasum -a 256 -c - \
+            || { echo "::error::SHA-256 Sparkle-тулзов не совпал с пином — supply-chain стоп"; exit 1; }
           mkdir -p /tmp/sparkle-tools && tar -xJf /tmp/sparkle.tar.xz -C /tmp/sparkle-tools
           printf '%s' "$SPARKLE_PRIVATE_KEY" > /tmp/ed_key
           chmod 600 /tmp/ed_key
@@ -163,13 +172,13 @@ jobs:
           # НА ПОСЛЕДУЮЩЕМ шаге appcast-коммита), не падаем — доливаем ассеты
           # при их отсутствии и идём дальше чинить appcast (ревью C3/C8).
           if gh release view "v$VERSION" >/dev/null 2>&1; then
-            echo "release v$VERSION уже существует — ре-ран; проверяю ассеты"
-            HAVE=$(gh release view "v$VERSION" --json assets --jq '.assets | length')
-            if [ "${HAVE:-0}" -lt 2 ]; then
-              gh release upload "v$VERSION" \
-                "dist/Krab-Ear-v$VERSION.zip" \
-                "dist/Krab-Ear-v$VERSION.zip.sha256" --clobber
-            fi
+            # Ре-ран ВСЕГДА перезаливает ассеты: zip пересобран (codesign-метки
+            # времени меняют байты), appcast-шаг уже подписал ИМЕННО новый zip —
+            # старый ассет со свежей подписью = EdDSA-мисматч у клиентов.
+            echo "release v$VERSION уже существует — ре-ран; перезаливаю ассеты под свежую подпись"
+            gh release upload "v$VERSION" \
+              "dist/Krab-Ear-v$VERSION.zip" \
+              "dist/Krab-Ear-v$VERSION.zip.sha256" --clobber
           else
             gh release create "v$VERSION" \
               "dist/Krab-Ear-v$VERSION.zip" \
