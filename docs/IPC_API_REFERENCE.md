@@ -2492,6 +2492,45 @@ Returns: `{ok, enabled, total, encrypted, plaintext, pct, migrating}`
 
 ---
 
+## A1 — Рекомендованная настройка в один тап (2026-07-07)
+
+Один IPC-метод: превью (dry_run) и применение безопасного набора настроек, подобранного
+под железо и доступность LM Studio/HF-кэша. План:
+`docs/superpowers/plans/2026-07-07-recommended-setup.md`. Спека:
+`docs/superpowers/specs/2026-07-07-recommended-setup-design.md`.
+
+| Метод | Описание |
+|---|---|
+| `apply_recommended_setup` | Превью (dry_run) или применение рекомендованного пресета настроек |
+
+### `apply_recommended_setup`
+*(service.py → settings_service.py, probe-колбэки инжектируются из service.py)*  
+Применяет (или показывает превью) рекомендованный безопасный набор настроек:
+**10 безусловных** (`smart_silence_skip_enabled`, `realtime_silence_filter_enabled`,
+`auto_dedup_enabled`, `auto_save_transcripts`, `phonetic_vocab_enabled`,
+`text_snippets_enabled`, `auto_learn_corrections_enabled`, `quick_edit_enabled`,
+`paste_undo_enabled`, `calendar_link_enabled`) + **3 условных** через probe-гейт
+(`llm_rewrite_enabled`/`action_items_auto_extract` — требуют `probe_llm_http.reachable`;
+`stt_sensevoice_enabled` — требует `ModelDownloader.get_status("FunAudioLLM/SenseVoiceSmall")["cached"]`).
+`auto_dedup_enabled`/`auto_learn_corrections_enabled`/`action_items_auto_extract`
+уходят в `skipped` при `privacy_mode_enabled=True` (транскрипт-читающие ключи).  
+**GigaAM-пара (`stt_gigaam_enabled`, `stt_language_routing_enabled`) ВСЕГДА `skipped`**
+с фиксированной причиной `"настройте GigaAM вручную в Настройках"` — без какой-либо
+probe-логики, независимо от состояния venv на диске (решение 9.7 финальной спеки).  
+**Wake word НЕ входит в этот метод** — отдельный consent-экран онбординга вызывает
+`set_settings {wake_word_engine: "openwakeword"}` напрямую (решение 9.4).  
+Params: `{dry_run?: bool = true, keys?: list[str] | null}` — `keys` фильтрует, какие из
+13 кандидатов рассматривать (v1 UI его не использует, но API поддерживает).  
+Returns: `{ok, dry_run, tier, applied: [{key, old_value, new_value, restart_required}], skipped: [{key, reason}], rationale, snapshot_id, restart_required}` —
+`tier`: `"low"` | `"mid"` | `"high"` (см. `get_hardware_profile`). `dry_run=true` НЕ пишет
+диск и `snapshot_id=null`. `dry_run=false` создаёт бэкап через существующий
+`SettingsBackup.create_backup(reason="before_recommended_setup")` ПЕРЕД записью —
+`snapshot_id` == `backup_id`, который принимает уже существующий
+`restore_settings_backup {backup_id}` (**параметр называется `backup_id`, не
+`snapshot_id`** — значение то же самое; никакого нового кода отката не написано).
+
+---
+
 ## Recording Management & Integrations (2026-07-02/03)
 
 Запланированные записи, пресеты конфигурации, экспорт таймлайна, webhook-интеграции, цепочки записей, профили резюмирования.
