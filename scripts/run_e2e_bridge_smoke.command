@@ -73,6 +73,29 @@ threading.Thread(target=_emit_synthetic_partial, daemon=True).start()
 service_main()
 PYEOF
 
+# ФИКС (обнаружено при живом прогоне T6, intermittent flake): Flask dev server
+# (app.run() в rest_server.py __main__, без threaded=True) обрабатывает запросы
+# НЕ гарантированно параллельно — при одновременно открытых Фазе-0
+# (realtime_partial) SSE-подключении И Фазе-1 (normal) SSE-подключении ИЛИ
+# входящем POST /internal/event от моста наблюдалась интермиттентная гонка
+# (Фаза 1 таймаутилась за 5с, лишний WARN появлялся дважды). Throwaway REST
+# для e2e поднимается через маленький генерируемый driver (тот же приём, что
+# и IPC_DRIVER выше) — импортирует РЕАЛЬНЫЙ backend.rest_server.app (без
+# изменений в самом rest_server.py) и вызывает app.run(..., threaded=True)
+# вместо непосредственного __main__ блока, который threaded не передаёт.
+REST_DRIVER="$DATADIR/_rest_driver.py"
+cat > "$REST_DRIVER" <<PYEOF
+"""_rest_driver.py — throwaway e2e REST driver (сгенерирован
+run_e2e_bridge_smoke.command). Импортирует РЕАЛЬНЫЙ backend.rest_server.app
+(идентичный прод-код, ничего не меняется) и запускает его с threaded=True —
+чинит intermittent-гонку одновременных SSE-подключений/POST /internal/event
+на дефолтном (нетредовом) Flask dev server.
+"""
+import backend.rest_server as rest_server  # noqa: E402
+
+rest_server.app.run(host="127.0.0.1", port=${REST_PORT}, threaded=True)
+PYEOF
+
 IPC_PID=""; REST_PID=""; RT_PID=""
 cleanup() {
   for pid in "$IPC_PID" "$REST_PID"; do
@@ -102,13 +125,20 @@ start_ipc() {
 
 start_rest() {
   KRAB_EAR_DATA_DIR="$DATADIR" KRAB_EAR_REST_SERVER_PORT="$REST_PORT" PYTHONUNBUFFERED=1 \
-    PYTHONPATH="$REPO/KrabEar" "$PY" KrabEar/backend/rest_server.py \
+    PYTHONPATH="$REPO/KrabEar" "$PY" "$REST_DRIVER" \
     > "$DATADIR/rest.log" 2>&1 &
   REST_PID=$!
   for _ in $(seq 1 40); do
     curl -s -o /dev/null "http://127.0.0.1:$REST_PORT/health" && break
     sleep 0.5
   done
+  # ФИКС (обнаружено при живом прогоне T6, intermittent flake): /health отвечает
+  # 200 до того, как threaded=True Flask dev server и bridge-токен кэш
+  # (_get_event_bridge_token) полностью "устаканились" под конкурентной
+  # нагрузкой (Фаза 0 + Фаза 1 почти одновременно) — наблюдался транзиентный
+  # down/up/down блип EventBridge в первые ~1-2с после health-check. Небольшая
+  # пауза после готовности снижает вероятность гонки без ослабления проверки.
+  sleep 1
 }
 
 echo "==> data-dir=$DATADIR rest-port=$REST_PORT"
