@@ -670,6 +670,9 @@ extension HistoryPanelController {
         // Section 7.5 — Калибровка (аппаратно-зависимая рекомендация STT-модели)
         let s7b = cdBuildCalibrationSection()
 
+        // Section 7.6 — A1: рекомендованная настройка в один тап
+        let s7c = cdBuildRecommendedSetupSection()
+
         // Section 8 — Словарь STT (hotwords + предложения из истории)
         let s8 = cdBuildSTTVocabularySection()
 
@@ -713,7 +716,7 @@ extension HistoryPanelController {
         // сразу, без скролла на длинный список секций.
         settingsBarCD.addArrangedSubview(buildDictationHeroCard())
 
-        for s in [s1, s2, s3, s4, s5, s6, s7, s7b, s8, s8_5, s8_6, s9, s9_5, s9_6, s10, s11, s11b, s12, sCloudRewriter] {
+        for s in [s1, s2, s3, s4, s5, s6, s7, s7b, s7c, s8, s8_5, s8_6, s9, s9_5, s9_6, s10, s11, s11b, s12, sCloudRewriter] {
             settingsBarCD.addArrangedSubview(s)
         }
     }
