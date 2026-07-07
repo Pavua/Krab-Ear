@@ -571,6 +571,208 @@ class SettingsService:
             # wave-36 HIGH: redact secrets before sending result over IPC socket.
             return self._redact_secrets(result)
 
+    # ------------------------------------------------------------------
+    # A1 — Рекомендованная настройка в один тап
+    # (spec docs/superpowers/specs/2026-07-07-recommended-setup-design.md)
+    # ------------------------------------------------------------------
+
+    # 10 безусловных («ДА» черновика §4) — включаются всегда, кроме privacy-скипа
+    # для трёх transcript-читающих ключей из этого набора.
+    _RECOMMENDED_UNCONDITIONAL: tuple[str, ...] = (
+        "smart_silence_skip_enabled",
+        "realtime_silence_filter_enabled",
+        "auto_dedup_enabled",
+        "auto_save_transcripts",
+        "phonetic_vocab_enabled",
+        "text_snippets_enabled",
+        "auto_learn_corrections_enabled",
+        "quick_edit_enabled",
+        "paste_undo_enabled",
+        "calendar_link_enabled",
+    )
+
+    # Транскрипт-читающие ключи из безусловного набора — skip при privacy_mode_enabled=True
+    # (финальная спека §4; см. Задача №0 плана A1 для подтверждения гейтов в местах исполнения).
+    _RECOMMENDED_PRIVACY_SENSITIVE: frozenset[str] = frozenset({
+        "auto_dedup_enabled", "auto_learn_corrections_enabled",
+    })
+
+    # 3 условных («УСЛОВНО-ДА») — probe-гейт применяется в _apply_conditional_candidates.
+    _RECOMMENDED_CONDITIONAL: tuple[str, ...] = (
+        "llm_rewrite_enabled",
+        "action_items_auto_extract",
+        "stt_sensevoice_enabled",
+    )
+
+    # GigaAM-пара — решение 9.7: ВСЕГДА skipped, без probe-логики вообще.
+    _RECOMMENDED_GIGAAM_PAIR: tuple[str, ...] = (
+        "stt_gigaam_enabled",
+        "stt_language_routing_enabled",
+    )
+    _RECOMMENDED_GIGAAM_SKIP_REASON: str = "настройте GigaAM вручную в Настройках"
+
+    def handle_apply_recommended_setup(
+        self,
+        params: dict[str, Any],
+        *,
+        probe_llm_fn: Any,
+        sensevoice_cached_fn: Any,
+    ) -> dict[str, Any]:
+        """Применяет (или показывает превью) рекомендованный безопасный набор настроек.
+
+        Скелет идентичен handle_apply_profile_preset (см. выше в этом файле):
+        old_settings = cached_settings() -> merge -> save_settings -> invalidate_cache
+        -> EventBus emit -> _reload_and_fire_hooks.
+
+        Args:
+            params: {"dry_run": bool = True, "keys": list[str] | None}.
+            probe_llm_fn: callable() -> {"reachable": bool, ...} — обычно
+                HealthCheckService.handle_probe_llm_http, инжектируется вызывающей
+                стороной (service.py) чтобы SettingsService не зависел напрямую от
+                HealthCheckService (избегаем циклических конструкторских зависимостей).
+            sensevoice_cached_fn: callable() -> bool — обычно
+                ModelDownloader.get_status("FunAudioLLM/SenseVoiceSmall")["cached"].
+
+        Returns:
+            Контракт финальной спеки §2: {ok, dry_run, tier, applied, skipped,
+            rationale, snapshot_id, restart_required}.
+        """
+        dry_run = bool(params.get("dry_run", True))
+        requested_keys = params.get("keys")
+        requested_keys_set = set(requested_keys) if requested_keys else None
+
+        with self._save_lock:  # W1437 — тот же lock, что и все остальные save-пути
+            old_settings = self.cached_settings()
+            privacy_on = bool(old_settings.get("privacy_mode_enabled", False))
+
+            applied: list[dict[str, Any]] = []
+            skipped: list[dict[str, Any]] = []
+
+            def _wants(key: str) -> bool:
+                return requested_keys_set is None or key in requested_keys_set
+
+            # 1) Безусловные «ДА»
+            for key in self._RECOMMENDED_UNCONDITIONAL:
+                if not _wants(key):
+                    continue
+                if key in self._RECOMMENDED_PRIVACY_SENSITIVE and privacy_on:
+                    skipped.append({"key": key, "reason": "privacy_mode_enabled"})
+                    continue
+                old_value = old_settings.get(key, False)
+                applied.append({
+                    "key": key, "old_value": old_value, "new_value": True,
+                    "restart_required": False,
+                })
+
+            # 2) Условные «УСЛОВНО-ДА» — probe-гейт
+            self._apply_conditional_candidates(
+                old_settings=old_settings, privacy_on=privacy_on, wants=_wants,
+                probe_llm_fn=probe_llm_fn, sensevoice_cached_fn=sensevoice_cached_fn,
+                applied=applied, skipped=skipped,
+            )
+
+            # 3) GigaAM-пара — решение 9.7, ВСЕГДА skipped, никакого probe
+            for key in self._RECOMMENDED_GIGAAM_PAIR:
+                if not _wants(key):
+                    continue
+                skipped.append({"key": key, "reason": self._RECOMMENDED_GIGAAM_SKIP_REASON})
+
+            tier = self._detect_tier_for_recommended_setup()
+            rationale = self._build_recommended_setup_rationale(tier, applied, skipped)
+            restart_required = any(a["restart_required"] for a in applied)
+
+            if dry_run:
+                return {
+                    "ok": True, "dry_run": True, "tier": tier,
+                    "applied": applied, "skipped": skipped,
+                    "rationale": rationale, "snapshot_id": None,
+                    "restart_required": restart_required,
+                }
+
+            # dry_run=False — реально применяем
+            snapshot_id = self._backup.create_backup(old_settings, reason="before_recommended_setup")
+            merged = dict(old_settings)
+            for item in applied:
+                merged[item["key"]] = item["new_value"]
+            self.store.save_settings(merged)
+            self.invalidate_cache()
+            try:
+                import backend.event_bus as _ebus  # noqa: PLC0415
+                _ebus.bus.emit("recommended_setup.applied", {
+                    "tier": tier,
+                    "applied_keys": sorted(a["key"] for a in applied),
+                    "skipped_keys": sorted(s["key"] for s in skipped),
+                })
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("handle_apply_recommended_setup: emit failed: %s", exc)
+            self._reload_and_fire_hooks(old_settings, merged)
+
+            return {
+                "ok": True, "dry_run": False, "tier": tier,
+                "applied": applied, "skipped": skipped,
+                "rationale": rationale, "snapshot_id": snapshot_id,
+                "restart_required": restart_required,
+            }
+
+    def _apply_conditional_candidates(
+        self, *, old_settings, privacy_on, wants, probe_llm_fn, sensevoice_cached_fn,
+        applied, skipped,
+    ) -> None:
+        """Probe-гейт для 3 условных кандидатов."""
+        if wants("llm_rewrite_enabled"):
+            self._apply_llm_probe_gated_key(
+                "llm_rewrite_enabled", old_settings, probe_llm_fn, applied, skipped,
+            )
+        if wants("action_items_auto_extract"):
+            if privacy_on:
+                skipped.append({"key": "action_items_auto_extract", "reason": "privacy_mode_enabled"})
+            else:
+                self._apply_llm_probe_gated_key(
+                    "action_items_auto_extract", old_settings, probe_llm_fn, applied, skipped,
+                )
+        if wants("stt_sensevoice_enabled"):
+            try:
+                cached = bool(sensevoice_cached_fn())
+            except Exception:  # noqa: BLE001
+                cached = False
+            if cached:
+                applied.append({
+                    "key": "stt_sensevoice_enabled",
+                    "old_value": old_settings.get("stt_sensevoice_enabled", False),
+                    "new_value": True, "restart_required": False,
+                })
+            else:
+                skipped.append({
+                    "key": "stt_sensevoice_enabled",
+                    "reason": "модель SenseVoice не найдена в HF-кэше",
+                })
+
+    @staticmethod
+    def _apply_llm_probe_gated_key(key, old_settings, probe_llm_fn, applied, skipped) -> None:
+        try:
+            probe = probe_llm_fn() or {}
+        except Exception:  # noqa: BLE001
+            probe = {}
+        if probe.get("reachable"):
+            applied.append({
+                "key": key, "old_value": old_settings.get(key, False),
+                "new_value": True, "restart_required": False,
+            })
+        else:
+            skipped.append({"key": key, "reason": "требует LM Studio, probe_llm_http не ответил"})
+
+    @staticmethod
+    def _detect_tier_for_recommended_setup() -> str:
+        from core.hardware_profile import detect_hardware_profile  # noqa: PLC0415
+        return detect_hardware_profile().tier
+
+    @staticmethod
+    def _build_recommended_setup_rationale(tier: str, applied: list, skipped: list) -> str:
+        return (
+            f"Железо: {tier}-класс. Включено безопасных настроек: {len(applied)}, "
+            f"пропущено: {len(skipped)}."
+        )
+
     def handle_get_notification_preferences(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает текущие настройки уведомлений из хранилища настроек."""
         settings = self.cached_settings()

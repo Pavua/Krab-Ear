@@ -1671,6 +1671,7 @@ class BackendService:
             "get_history_statistics": self._history.handle_get_history_statistics,  # агрегированная статистика по истории
             "word_frequency_analysis": self._history.handle_word_frequency_analysis,  # частотный анализ слов по истории
             "apply_profile_preset": self._settings_svc.handle_apply_profile_preset,  # применяет пресет настроек профиля
+            "apply_recommended_setup": self._handle_apply_recommended_setup,  # A1: рекомендованная настройка в один тап (dry_run превью + apply)
             "list_profile_presets": self._settings_svc.handle_list_profile_presets,  # список доступных пресетов профилей
             "get_notification_preferences": self._settings_svc.handle_get_notification_preferences,  # настройки уведомлений
             "set_notification_preferences": self._settings_svc.handle_set_notification_preferences,  # обновление настроек уведомлений
@@ -2998,6 +2999,22 @@ class BackendService:
     def _handle_probe_llm_http(self, params: dict) -> dict:
         """Делегирует к HealthCheckService.handle_probe_llm_http (W1690)."""
         return self._health_check_svc.handle_probe_llm_http(params)
+
+    def _handle_apply_recommended_setup(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Делегирует к SettingsService.handle_apply_recommended_setup, инжектируя
+        probe-колбэки (LM Studio ping + SenseVoice HF-кэш проверка) — A1 план
+        docs/superpowers/plans/2026-07-07-recommended-setup.md, Задача 1 Шаг 4.
+
+        probe_llm_fn — 0-arg callable по контракту SettingsService (см. Задача 2 плана);
+        HealthCheckService.handle_probe_llm_http требует позиционный params, поэтому
+        оборачивается лямбдой с пустым dict, а не передаётся как bound method напрямую."""
+        return self._settings_svc.handle_apply_recommended_setup(
+            params,
+            probe_llm_fn=lambda: self._health_check_svc.handle_probe_llm_http({}),
+            sensevoice_cached_fn=lambda: self._model_downloader.get_status(
+                "FunAudioLLM/SenseVoiceSmall"
+            ).get("cached", False),
+        )
 
     def _handle_get_shutdown_status(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает статус последнего graceful shutdown.
