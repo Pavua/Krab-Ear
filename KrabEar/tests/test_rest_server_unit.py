@@ -275,6 +275,114 @@ class TranscribeSuccessTest(_TranscribeBase):
 
 
 # ---------------------------------------------------------------------------
+# 1b. POST /v1/stt/transcribe — persist_history flag (2026-07-08)
+#
+# Companion to a Voice Gateway PR: VG's "Разговор с AI" conversation flow sends
+# persist_history=false on each turn so ephemeral conversational utterances
+# are transcribed and returned but never written to history.ndjson. Default
+# (field omitted) is unchanged — existing callers keep saving to history.
+# ---------------------------------------------------------------------------
+
+@unittest.skipUnless(_REST_AVAILABLE, "REST server dependencies not available")
+class TranscribePersistHistoryFlagTest(_TranscribeBase):
+    """POST /v1/stt/transcribe with persist_history form field."""
+
+    def test_persist_history_false_skips_history_save(self):
+        """persist_history=false → transcript returned but NOT saved to history."""
+        data = {
+            "file": (io.BytesIO(b"RIFF....WAVEfmt "), "audio.wav"),
+            "persist_history": "false",
+        }
+        resp = self.client.post(
+            "/v1/stt/transcribe",
+            data=data,
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(resp.status_code, 200)
+        result = resp.get_json()
+        # The transcription itself still happens and is still returned.
+        self.assertEqual(result["text"], "Привет мир")
+        self.assertEqual(result["history_id"], "")
+        self.mock_store.add_history_item.assert_not_called()
+
+    def test_persist_history_false_case_insensitive_variants(self):
+        """"0"/"no"/"FALSE" all count as false (case-insensitive)."""
+        for raw in ("0", "no", "FALSE", "False", "NO"):
+            with self.subTest(raw=raw):
+                self.mock_store.add_history_item.reset_mock()
+                data = {
+                    "file": (io.BytesIO(b"RIFF....WAVEfmt "), "audio.wav"),
+                    "persist_history": raw,
+                }
+                resp = self.client.post(
+                    "/v1/stt/transcribe",
+                    data=data,
+                    content_type="multipart/form-data",
+                )
+                self.assertEqual(resp.status_code, 200)
+                self.assertEqual(resp.get_json()["history_id"], "")
+                self.mock_store.add_history_item.assert_not_called()
+
+    def test_persist_history_explicit_true_saves_history(self):
+        """persist_history=true (explicit, case-insensitive) behaves like default."""
+        for raw in ("true", "1", "yes", "TRUE", "Yes"):
+            with self.subTest(raw=raw):
+                self.mock_store.add_history_item.reset_mock()
+                self.mock_store.add_history_item.return_value = MagicMock(id="hist-abc-123")
+                data = {
+                    "file": (io.BytesIO(b"RIFF....WAVEfmt "), "audio.wav"),
+                    "persist_history": raw,
+                }
+                resp = self.client.post(
+                    "/v1/stt/transcribe",
+                    data=data,
+                    content_type="multipart/form-data",
+                )
+                self.assertEqual(resp.status_code, 200)
+                self.assertEqual(resp.get_json()["history_id"], "hist-abc-123")
+                self.mock_store.add_history_item.assert_called_once()
+
+    def test_persist_history_omitted_defaults_to_true(self):
+        """Regression: no persist_history field → unchanged pre-existing behaviour (saves)."""
+        data = {"file": (io.BytesIO(b"RIFF....WAVEfmt "), "audio.wav")}
+        resp = self.client.post(
+            "/v1/stt/transcribe",
+            data=data,
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(resp.status_code, 200)
+        result = resp.get_json()
+        self.assertEqual(result["history_id"], "hist-abc-123")
+        self.mock_store.add_history_item.assert_called_once()
+        call_kwargs = self.mock_store.add_history_item.call_args[1]
+        self.assertEqual(call_kwargs.get("text"), "Привет мир")
+
+
+@unittest.skipUnless(_REST_AVAILABLE, "REST server dependencies not available")
+class TranscribePrivacyModeWinsOverPersistHistoryTest(_TranscribeBase):
+    """privacy_mode_enabled must ALWAYS win over persist_history (CLAUDE.md rule)."""
+
+    def setUp(self):
+        super().setUp()
+        self.mock_store.load_settings.return_value = {"privacy_mode_enabled": True}
+
+    def test_privacy_mode_blocks_request_even_with_persist_history_true(self):
+        data = {
+            "file": (io.BytesIO(b"RIFF....WAVEfmt "), "audio.wav"),
+            "persist_history": "true",
+        }
+        resp = self.client.post(
+            "/v1/stt/transcribe",
+            data=data,
+            content_type="multipart/form-data",
+        )
+        # @_privacy_gate short-circuits before the handler body ever runs.
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.get_json().get("skipped"), "privacy_mode")
+        self.mock_store.add_history_item.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # 2. POST /v1/stt/transcribe — idempotent duplicate
 # ---------------------------------------------------------------------------
 
