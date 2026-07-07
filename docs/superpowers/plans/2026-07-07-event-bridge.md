@@ -465,7 +465,7 @@ git commit -m "feat(event-bridge): EventBus.emit_envelope() — no-echo bridged 
 - Create: `KrabEar/backend/event_bridge.py`
 - Create: `KrabEar/tests/test_event_bridge.py`
 
-- [ ] **Шаг 1: Failing-тесты первыми**
+- [x] **Шаг 1: Failing-тесты первыми**
 
 `KrabEar/tests/test_event_bridge.py`:
 
@@ -638,12 +638,12 @@ if __name__ == "__main__":
     unittest.main(verbosity=2)
 ```
 
-- [ ] **Шаг 2: Прогнать — убедиться что падает**
+- [x] **Шаг 2: Прогнать — убедиться что падает**
 
 Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_event_bridge.py -v`
 Expected: FAIL (`ModuleNotFoundError: No module named 'backend.event_bridge'`)
 
-- [ ] **Шаг 3: Реализация `KrabEar/backend/event_bridge.py`**
+- [x] **Шаг 3: Реализация `KrabEar/backend/event_bridge.py`**
 
 ```python
 """EventBridge — доставляет события из IPC-процесса в REST-процесс (Krab Ear).
@@ -927,12 +927,12 @@ class EventBridge:
             }
 ```
 
-- [ ] **Шаг 4: Тесты зелёные**
+- [x] **Шаг 4: Тесты зелёные**
 
 Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_event_bridge.py -v`
 Expected: 12 passed.
 
-- [ ] **Шаг 5: flake8 + ubuntu-parity + dead-module guard**
+- [x] **Шаг 5: flake8 + ubuntu-parity + dead-module guard**
 
 Run: `.venv_krab_ear/bin/flake8 KrabEar/backend/event_bridge.py KrabEar/tests/test_event_bridge.py --max-line-length=150`
 Expected: пусто.
@@ -943,7 +943,7 @@ Expected: на этом шаге `event_bridge.py` ЕЩЁ будет висет�
 это ОЖИДАЕМО до Задачи 5 (там модуль подключается в service.py). Не блокирует эту задачу;
 финальная проверка — в Задаче 8.
 
-- [ ] **Шаг 6: Commit**
+- [x] **Шаг 6: Commit**
 
 ```bash
 git add KrabEar/backend/event_bridge.py KrabEar/tests/test_event_bridge.py
