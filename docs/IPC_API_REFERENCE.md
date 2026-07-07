@@ -60,7 +60,8 @@ Regen: Wave 745 (2026-05-26) — replaces 840-line stub doc with ~58% drift. Doc
 42. [Wake Word](#wake-word)
 43. [TTS](#tts)
 44. [Launch Readiness (2026-06-27)](#launch-readiness-2026-06-27)
-45. [Misc](#misc)
+45. [Event-мост IPC→REST (2026-07-07)](#event-мост-ipcrest-2026-07-07)
+46. [Misc](#misc)
 
 ---
 
@@ -2677,6 +2678,48 @@ Returns: `{profiles: [{name, system_prompt, max_tokens, format_instructions, bui
 Создаёт ИЛИ заменяет кастомный профиль (upsert среди кастомных; нет отдельного delete-метода). Имя не может совпадать со встроенным.  
 Params: `{name, prompt, max_tokens=300, format_instructions?}` — `name`/`prompt` обязательны, prompt попадает в поле ответа `system_prompt`. Макс 100/2000/500 символов соответственно.  
 Returns: `{profile: {name, system_prompt, max_tokens, format_instructions, builtin: false}}` — совпадение с встроенным именем → `ValueError`.
+
+---
+
+## Event-мост IPC→REST (2026-07-07)
+
+**НЕ IPC-метод** (не в dispatch table `service.py`) — REST-only внутренний
+эндпоинт. Закрывает класс багов «событие эмитится в IPC-процессе (`service.py`),
+подписчик слушает REST-процесс (`rest_server.py` :5005)» — жертвы: wake word /
+`krab_error` (чинились IPC-поллингом), `rewriter_recovered` flash-green,
+`live_subs.result` агентским путём.
+
+`backend/event_bridge.py::EventBridge` подписывается на локальную шину
+IPC-процесса (`event_bus.add_listener`), батчами (≤20 конвертов) POST-ит на
+`POST /internal/event` (REST-процесс, loopback-only + bridge-токен
+`<data_dir>/event_bridge_token`, права 0600, ВСЕГДА требуется независимо от
+`REST_API_AUTH_ENABLED`/`REST_API_KEY`) → `EventBus.emit_envelope()` на
+REST-стороне доставляет конверт КАК ЕСТЬ существующим SSE/WS подписчикам без
+повторного вызова push-листенеров (структурный no-echo guard — вебхуки не
+фаерятся дважды на одно событие).
+
+Настройка `event_bridge_enabled` (default `True`, `KRAB_EAR_EVENT_BRIDGE_ENABLED`)
+— killswitch, читается один раз при старте (как `disk_monitor_enabled`, НЕ
+live-toggle через `set_settings`).
+
+Наблюдаемость: `get_diagnostics.event_bridge` →
+`{enabled, state, queue_depth, sent, dropped, dropped_stale, failed}`
+(`state`: `"unknown"`|`"up"`|`"down"`|`"disabled"`).
+
+REST недоступен → экспоненциальный backoff 1→30с, WARN только по смене состояния
+(не на каждое событие), эмиттеры никогда не блокируются, deque(256) drop-oldest
+при переполнении. Stale-TTL: конверты старше `MAX_EVENT_AGE_SEC=30.0` при отправке
+отбрасываются (не доставляются задним числом после долгого даунтайма REST) —
+счётчик `dropped_stale`. Однонаправлено (IPC→REST) — REST-originated события
+вебхуками не форвардятся (известный пре-существующий гэп, вне скоупа этой волны).
+
+Живой двухпроцессный e2e (`scripts/run_e2e_bridge_smoke.command`) доказывает:
+нормальную доставку (мс-класс latency), хаос-кейс (REST убит → IPC не
+блокируется), восстановление (событие доходит после рестарта REST), и отдельно
+`realtime.partial_transcript` (5-я жертва гэпа — `StreamingPasteController.
+swift:121`, streaming paste) проходит через мост так же, как `krab_error`.
+`streaming_paste_enabled` теперь разблокирован мостом (кандидат обратно в
+A1-пресет, см. `2026-07-07-recommended-setup-DRAFT.md`).
 
 ---
 
