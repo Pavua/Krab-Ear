@@ -73,6 +73,7 @@ from backend.recorder import AudioRecorder
 from backend.models import DEFAULT_SETTINGS
 from backend.event_replay import EventReplayManager
 from backend.event_bus import bus as event_bus
+from backend.event_bridge import EventBridge
 from backend.system_monitor import SystemMonitor
 from backend.translation_service import TranslationService
 from backend.glossary_auto_learn import GlossaryAutoLearnService
@@ -673,6 +674,19 @@ class BackendService:
                 self._webhook_manager.set_privacy_mode(new_privacy)
         self._settings_svc.register_after_save_hook(_on_privacy_mode_webhooks)
 
+        # Event-мост IPC -> REST (spec 2026-07-07-event-bridge-design.md): доставляет
+        # события ЛОКАЛЬНОЙ (IPC-процесса) шины в REST-процесс, откуда их уже
+        # раздают существующие SSE/WS подписчики. Закрывает класс багов
+        # "эмитится в IPC, слушается REST" (wake word/krab_error чинились
+        # IPC-поллингом; rewriter_recovered/live_subs агентским путём — нет,
+        # см. Задача 1 плана волны).
+        self._event_bridge = EventBridge(settings=settings, data_dir=self.store.data_dir)
+        try:
+            event_bus.add_listener(self._event_bridge.on_event)
+        except Exception:
+            logger.exception("event-bridge: failed to wire EventBus listener")
+        self._event_bridge.start()
+
         self._sharing = SharingManager(
             store=self.store,
             privacy_mode_fn=lambda: self._get_runtime_setting("privacy_mode_enabled", False),
@@ -1041,6 +1055,7 @@ class BackendService:
             integrity_checker=self._integrity_checker,
             llm_probe=self._llm_probe,
             metrics_collector=_metrics_singleton,
+            event_bridge=self._event_bridge,
             transcriber=self.transcriber,
             llm_rewriter=self._llm_rewriter,
             settings_svc=self._settings_svc,
@@ -1413,6 +1428,16 @@ class BackendService:
                 purge_scheduler.stop()
             except Exception:
                 logger.exception("PurgeScheduler.stop() raised during close()")
+
+        # Stop EventBridge sender daemon thread — mirrors DiskSpaceMonitor/
+        # RecapScheduler/PurgeScheduler stop above (та же CI daemon-thread
+        # teardown rule, feedback_backendservice_teardown_ci.md).
+        event_bridge = getattr(self, "_event_bridge", None)
+        if event_bridge is not None:
+            try:
+                event_bridge.stop()
+            except Exception:
+                logger.exception("EventBridge.stop() raised during close()")
 
     # ------------------------------------------------------------------ #
     # Backwards-compatible proxy properties for Wave 172 migration         #

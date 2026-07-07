@@ -119,7 +119,7 @@ POST-rate ≤ ~90/мин даже на всплесках `recording.audio_level
 **Файлы:** ничего не создаёт/не коммитит постоянно — только заполняет секцию
 «Факт Шага 0» ниже, в ЭТОМ ЖЕ файле плана.
 
-- [ ] **Шаг 1: Поднять оба процесса на общий temp data-dir**
+- [x] **Шаг 1: Поднять оба процесса на общий temp data-dir**
 
 ```bash
 DATADIR="$(mktemp -d /tmp/krab_ear_bridge_audit.XXXXXX)"
@@ -147,7 +147,7 @@ done
 curl -s "http://127.0.0.1:5005/health" | head -c 200; echo
 ```
 
-- [ ] **Шаг 2: Открыть SSE-подписку на `live_subs.result` в фоне**
+- [x] **Шаг 2: Открыть SSE-подписку на `live_subs.result` в фоне**
 
 ```bash
 curl -N --max-time 15 'http://127.0.0.1:5005/v1/events?filter=live_subs.result' \
@@ -156,7 +156,7 @@ SSE_PID=$!
 sleep 1  # дать SSE-подписке зарегистрироваться в EventBus ДО ingest
 ```
 
-- [ ] **Шаг 3: `live_subs_ingest` с синтетическим PCM (3с тишины, `is_final=true`)**
+- [x] **Шаг 3: `live_subs_ingest` с синтетическим PCM (3с тишины, `is_final=true`)**
 
 Точный shape параметров подтверждён чтением `backend/live_subs_service.py::handle_ingest`
 (строка 142) — `{audio_chunk: base64 PCM16, sample_rate, target_lang, is_final}`.
@@ -193,7 +193,7 @@ print("IPC response:", buf.decode())
 PYEOF
 ```
 
-- [ ] **Шаг 4: Проверить, пришло ли событие**
+- [x] **Шаг 4: Проверить, пришло ли событие**
 
 ```bash
 sleep 3   # дать STT+SSE время (mlx-транскрипция тишины — быстрая, но не мгновенная)
@@ -206,7 +206,7 @@ cat "$DATADIR/sse_capture.txt"
 Ожидание (гипотеза спеки): `sse_capture.txt` содержит ТОЛЬКО `: keepalive` строки,
 `event: live_subs.result` НИКОГДА не появляется — подтверждает 2-EventBus гэп.
 
-- [ ] **Шаг 5: Cleanup**
+- [x] **Шаг 5: Cleanup**
 
 ```bash
 kill -TERM "$IPC_PID" "$REST_PID" 2>/dev/null; sleep 1
@@ -214,19 +214,73 @@ kill -KILL "$IPC_PID" "$REST_PID" 2>/dev/null
 rm -rf "$DATADIR"
 ```
 
-- [ ] **Шаг 6: Записать факт в этот план (заполнить секцию ниже) и закоммитить
+- [x] **Шаг 6: Записать факт в этот план (заполнить секцию ниже) и закоммитить
       ТОЛЬКО этот файл** (`git add docs/superpowers/plans/2026-07-07-event-bridge.md`)
       перед тем, как переходить к Задаче 2.
 
 #### Факт Шага 0 (заполняется исполнителем Задачи 1)
 
-> **Статус: [ЗАПОЛНИТЬ] — «событие пришло» / «событие НЕ пришло»**
+> **Статус: событие НЕ пришло — гипотеза ПОДТВЕРЖДЕНА.**
 >
-> Дата/время прогона: _______
-> Содержимое `sse_capture.txt` (вставить релевантный фрагмент или «только keepalive»): _______
-> Вывод IPC-ответа на `live_subs_ingest`: _______
-> Заключение: _______ (если «пришло» — ОСТАНОВИТЬСЯ и эскалировать контролёру,
-> НЕ продолжать Задачи 2-8 без пересмотра дизайна).
+> Дата/время прогона: 2026-07-07 22:20–22:29 (локальное время машины; точные
+> монотонные метки — ниже).
+>
+> **🔴 Методологическая находка по ходу прогона (задокументирована для
+> прозрачности):** первая попытка (буквально по команде из плана, порт 5005
+> хардкодом) дала бы ЛОЖНОЕ подтверждение — на этой машине уже запущен РЕАЛЬНЫЙ
+> прод REST-сервер на порту 5005 (launchd, PID 2825, из основного checkout, а
+> не из этого worktree). Мой тестовый REST-процесс (`KrabEar/backend/rest_server.py`
+> напрямую) тихо падал на старте с `OSError: [Errno 48] Address already in use`
+> (см. F3-guard в `rest_server.py:2066-2081`; `rest.log` содержал `Address already
+> in use`), а все curl на `127.0.0.1:5005` в первой попытке на самом деле били в
+> ЖИВОЙ прод-REST (другой data-dir, другой IPC-процесс) — "событие не пришло" в
+> той попытке было артефактом обращения не к той инстанции, а не доказательством
+> 2-EventBus гэпа. Прод-процесс НЕ был тронут (не убивался, не рестартовался) —
+> только `ps -p 2825` для диагностики.
+>
+> **Исправление и повторный чистый прогон:** REST-инстанс для аудита поднят
+> ИЗОЛИРОВАННО — тот же `KRAB_EAR_DATA_DIR=<temp>`, но на СЛУЧАЙНОМ свободном
+> порту (`50078`, тем же приёмом, что и в Задаче 6: `socket.bind(("127.0.0.1",0))`)
+> через прямой импорт модуля (`import backend.rest_server as rs;
+> rs.app.run(host="127.0.0.1", port=50078)`, минуя захардкоженный `port=5005`
+> внутри `if __name__ == "__main__":` — НИКАКИХ изменений в `rest_server.py` не
+> вносилось, это чисто runtime-обход для теста). Подтверждено: тестовый REST PID
+> (60389) ≠ прод PID (2825), тестовый процесс слушал ИМЕННО 50078
+> (`curl 127.0.0.1:50078/health` → 200, `rest.log` содержит
+> `Running on http://127.0.0.1:50078`).
+>
+> Финальный чистый прогон (один bash-вызов, без разрывов между фазами): SSE-подписка
+> на `http://127.0.0.1:50078/v1/events?filter=live_subs.result` открыта в фоне
+> (`curl -N --max-time 22`), через 2с — `live_subs_ingest` по Unix-сокету
+> тестового IPC-процесса (`is_final=true`, 3с тишины 16kHz PCM16).
+>
+> Вывод IPC-ответа на `live_subs_ingest`:
+> `{"id": "audit-live-subs-clean", "ok": true, "result": {"status": "flushed",
+> "buffer_duration_sec": 0.0, "text": "Субтитры создавал DimaTorzok",
+> "translation": null}}` (elapsed=1.005s) — `_flush()` реально отработал и, по коду
+> `live_subs_service.py:264` (`event_bus.emit_typed(EventType.LIVE_SUBS_RESULT,
+> event_payload)`, безусловный вызов, без гейта на пустой текст), событие было
+> эмитнуто на ЛОКАЛЬНУЮ шину IPC-процесса примерно на t≈3с от начала SSE-подписки.
+>
+> Содержимое `sse_capture_clean.txt` (полный 22-секундный захват, без обрывов, с
+> финальным curl-трейлером): за всё окно наблюдения (t=0…22с) на SSE пришёл РОВНО
+> ОДИН фрейм — рутинный `: keepalive\n\n` (13 байт) на отметке t≈15с (штатный
+> `_SSE_POLL_TIMEOUT_SEC=15.0` из `event_bus.py`). `event: live_subs.result` НИ
+> РАЗУ не появился, хотя событие было эмитнуто на t≈3с — то есть за ~12 секунд ДО
+> рутинного keepalive было достаточно времени для доставки, если бы мост
+> существовал. Финальная строка: `curl: (28) Operation timed out after 22004
+> milliseconds with 13 bytes received` — 13 байт = ровно длина одного
+> keepalive-фрейма, никаких других данных за всё окно.
+>
+> Заключение: **гипотеза спеки ПОДТВЕРЖДЕНА** — событие `live_subs.result`,
+> эмитнутое в IPC-процессе (`backend/live_subs_service.py` → локальный
+> `backend/event_bus.py::bus`), НЕ достигает SSE-подписчика REST-процесса
+> (отдельный Python-интерпретатор, отдельный `bus = EventBus()` синглтон, общий
+> исходный код — не общая память). Два прогона (первый — методологически
+> испорченный портовым конфликтом с прод-REST, см. находку выше; второй — на
+> чисто изолированной паре IPC+REST на случайном порту) дали ОДИНАКОВЫЙ
+> результат: событие не доходит. Продолжаю к Задачам 2-8 БЕЗ пересмотра дизайна —
+> 2-EventBus модель верна, как и предполагает план.
 
 **Критерий готовности:** секция «Факт Шага 0» заполнена реальными данными
 (не placeholder-текстом); если факт = «путь жив», задачи 2-8 приостановлены до
@@ -244,7 +298,7 @@ rm -rf "$DATADIR"
 - Modify: `KrabEar/backend/event_bus.py`
 - Create: `KrabEar/tests/test_event_bus_emit_envelope.py`
 
-- [ ] **Шаг 1: Failing-тест первым**
+- [x] **Шаг 1: Failing-тест первым**
 
 `KrabEar/tests/test_event_bus_emit_envelope.py`:
 
@@ -329,12 +383,12 @@ if __name__ == "__main__":
     unittest.main(verbosity=2)
 ```
 
-- [ ] **Шаг 2: Прогнать — убедиться что падает**
+- [x] **Шаг 2: Прогнать — убедиться что падает**
 
 Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_event_bus_emit_envelope.py -v`
 Expected: FAIL (`AttributeError: 'EventBus' object has no attribute 'emit_envelope'`)
 
-- [ ] **Шаг 3: Реализация — добавить метод в `backend/event_bus.py`**
+- [x] **Шаг 3: Реализация — добавить метод в `backend/event_bus.py`**
 
 Вставить между `emit()` (кончается строкой 188) и `emit_typed()` (строка 190):
 
@@ -374,24 +428,24 @@ Expected: FAIL (`AttributeError: 'EventBus' object has no attribute 'emit_envelo
             )
 ```
 
-- [ ] **Шаг 4: Тесты зелёные**
+- [x] **Шаг 4: Тесты зелёные**
 
 Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_event_bus_emit_envelope.py -v`
 Expected: 6 passed.
 
-- [ ] **Шаг 5: Регрессия — существующие event_bus тесты не сломаны**
+- [x] **Шаг 5: Регрессия — существующие event_bus тесты не сломаны**
 
 Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_event_bus.py KrabEar/tests/test_event_bus_extras.py KrabEar/tests/test_event_bus_max_subscribers_wave33.py KrabEar/tests/test_webhook_fire_wiring_wave1775.py -v`
 Expected: все passed (emit_envelope — чистое дополнение, не трогает emit()/add_listener()).
 
-- [ ] **Шаг 6: flake8 + ubuntu-parity**
+- [x] **Шаг 6: flake8 + ubuntu-parity**
 
 Run: `.venv_krab_ear/bin/flake8 KrabEar/backend/event_bus.py KrabEar/tests/test_event_bus_emit_envelope.py --max-line-length=150`
 Expected: пусто.
 Run: `bash scripts/pre_merge_py312_check.sh KrabEar/tests/test_event_bus_emit_envelope.py`
 Expected: ALL GREEN.
 
-- [ ] **Шаг 7: Commit**
+- [x] **Шаг 7: Commit**
 
 ```bash
 git add KrabEar/backend/event_bus.py KrabEar/tests/test_event_bus_emit_envelope.py
@@ -411,7 +465,7 @@ git commit -m "feat(event-bridge): EventBus.emit_envelope() — no-echo bridged 
 - Create: `KrabEar/backend/event_bridge.py`
 - Create: `KrabEar/tests/test_event_bridge.py`
 
-- [ ] **Шаг 1: Failing-тесты первыми**
+- [x] **Шаг 1: Failing-тесты первыми**
 
 `KrabEar/tests/test_event_bridge.py`:
 
@@ -584,12 +638,12 @@ if __name__ == "__main__":
     unittest.main(verbosity=2)
 ```
 
-- [ ] **Шаг 2: Прогнать — убедиться что падает**
+- [x] **Шаг 2: Прогнать — убедиться что падает**
 
 Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_event_bridge.py -v`
 Expected: FAIL (`ModuleNotFoundError: No module named 'backend.event_bridge'`)
 
-- [ ] **Шаг 3: Реализация `KrabEar/backend/event_bridge.py`**
+- [x] **Шаг 3: Реализация `KrabEar/backend/event_bridge.py`**
 
 ```python
 """EventBridge — доставляет события из IPC-процесса в REST-процесс (Krab Ear).
@@ -873,12 +927,12 @@ class EventBridge:
             }
 ```
 
-- [ ] **Шаг 4: Тесты зелёные**
+- [x] **Шаг 4: Тесты зелёные**
 
 Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_event_bridge.py -v`
 Expected: 12 passed.
 
-- [ ] **Шаг 5: flake8 + ubuntu-parity + dead-module guard**
+- [x] **Шаг 5: flake8 + ubuntu-parity + dead-module guard**
 
 Run: `.venv_krab_ear/bin/flake8 KrabEar/backend/event_bridge.py KrabEar/tests/test_event_bridge.py --max-line-length=150`
 Expected: пусто.
@@ -889,7 +943,7 @@ Expected: на этом шаге `event_bridge.py` ЕЩЁ будет висет�
 это ОЖИДАЕМО до Задачи 5 (там модуль подключается в service.py). Не блокирует эту задачу;
 финальная проверка — в Задаче 8.
 
-- [ ] **Шаг 6: Commit**
+- [x] **Шаг 6: Commit**
 
 ```bash
 git add KrabEar/backend/event_bridge.py KrabEar/tests/test_event_bridge.py
@@ -910,7 +964,7 @@ git commit -m "feat(event-bridge): EventBridge sender (deque+backoff+diagnostics
 - Modify: `KrabEar/backend/rest_server.py`
 - Create: `KrabEar/tests/test_rest_internal_event.py`
 
-- [ ] **Шаг 1: Failing-тесты первыми**
+- [x] **Шаг 1: Failing-тесты первыми**
 
 `KrabEar/tests/test_rest_internal_event.py`:
 
@@ -1040,12 +1094,12 @@ if __name__ == "__main__":
     unittest.main(verbosity=2)
 ```
 
-- [ ] **Шаг 2: Прогнать — убедиться что падает**
+- [x] **Шаг 2: Прогнать — убедиться что падает**
 
 Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_rest_internal_event.py -v`
 Expected: FAIL (404 — маршрут ещё не существует; либо `AttributeError` на `_get_event_bridge_token`).
 
-- [ ] **Шаг 3: Реализация в `backend/rest_server.py`**
+- [x] **Шаг 3: Реализация в `backend/rest_server.py`**
 
 Добавить СРАЗУ ПОСЛЕ блока `require_api_key` (кончается строкой 332, перед секцией
 "F1: Magic byte validation" на строке 335):
@@ -1157,26 +1211,26 @@ def internal_event():
 (`from backend.event_bus import bus as event_bus, sse_stream` на строке 30) —
 НЕ создавать новый импорт.
 
-- [ ] **Шаг 4: Тесты зелёные**
+- [x] **Шаг 4: Тесты зелёные**
 
 Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_rest_internal_event.py -v`
 Expected: 7 passed.
 
-- [ ] **Шаг 5: Регрессия — существующие REST-тесты не сломаны**
+- [x] **Шаг 5: Регрессия — существующие REST-тесты не сломаны**
 
 Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_rest_server_endpoints.py KrabEar/tests/test_rest_server_unit.py KrabEar/tests/test_rest_server.py -v`
 Expected: все passed (новый код — чистое дополнение: новые module-level имена
 `_event_bridge_token_cache`/`_get_event_bridge_token`/`_require_loopback_and_bridge_token`/`internal_event`,
 не переопределяет ничего существующего).
 
-- [ ] **Шаг 6: flake8 + ubuntu-parity**
+- [x] **Шаг 6: flake8 + ubuntu-parity**
 
 Run: `.venv_krab_ear/bin/flake8 KrabEar/backend/rest_server.py KrabEar/tests/test_rest_internal_event.py --max-line-length=150`
 Expected: пусто.
 Run: `bash scripts/pre_merge_py312_check.sh KrabEar/tests/test_rest_internal_event.py`
 Expected: ALL GREEN.
 
-- [ ] **Шаг 7: Commit**
+- [x] **Шаг 7: Commit**
 
 ```bash
 git add KrabEar/backend/rest_server.py KrabEar/tests/test_rest_internal_event.py
@@ -1202,7 +1256,7 @@ git commit -m "feat(event-bridge): POST /internal/event — loopback+token auth,
 - Modify: `scripts/purge_coverage_allowlist.txt` (условно, см. Шаг 6)
 - Create: `KrabEar/tests/test_event_bridge_wiring.py`
 
-- [ ] **Шаг 1: Failing source-контракт тест первым (урок setupErrorBus/setupHealthMonitor:
+- [x] **Шаг 1: Failing source-контракт тест первым (урок setupErrorBus/setupHealthMonitor:
       collaborator сконструирован, но не вызывается = декоративная проводка — тот же
       класс бага, что и на Swift-стороне, здесь механически проверяется через grep
       исходника, не конструируя тяжёлый `BackendService`)**
@@ -1261,12 +1315,12 @@ if __name__ == "__main__":
     unittest.main(verbosity=2)
 ```
 
-- [ ] **Шаг 2: Прогнать — убедиться что падает**
+- [x] **Шаг 2: Прогнать — убедиться что падает**
 
 Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_event_bridge_wiring.py -v`
 Expected: FAIL (все 6 assertion — ни одна строка ещё не существует в исходниках).
 
-- [ ] **Шаг 3: `core/config.py` — новые настройки**
+- [x] **Шаг 3: `core/config.py` — новые настройки**
 
 Добавить в класс `Settings` рядом с блоком `DISK_MONITOR_ENABLED` (~строка 72-76):
 
@@ -1289,7 +1343,7 @@ Expected: FAIL (все 6 assertion — ни одна строка ещё не с
     REST_SERVER_PORT: int = 5005
 ```
 
-- [ ] **Шаг 4: `rest_server.py` — использовать `settings.REST_SERVER_PORT` вместо литерала**
+- [x] **Шаг 4: `rest_server.py` — использовать `settings.REST_SERVER_PORT` вместо литерала**
 
 Заменить (строка ~2067):
 ```python
@@ -1303,7 +1357,7 @@ Expected: FAIL (все 6 assertion — ни одна строка ещё не с
 двух log-сообщениях рядом, строки ~2047/2054, на `settings.REST_SERVER_PORT` —
 косметика, не функциональность.)
 
-- [ ] **Шаг 5: `health_check_service.py` — принять `event_bridge` коллаборатора**
+- [x] **Шаг 5: `health_check_service.py` — принять `event_bridge` коллаборатора**
 
 В `TYPE_CHECKING`-блок импортов (~строка 19-27) добавить:
 ```python
@@ -1345,7 +1399,7 @@ Expected: FAIL (все 6 assertion — ни одна строка ещё не с
             "event_bridge": self._get_event_bridge_summary(),
 ```
 
-- [ ] **Шаг 6: `service.py` — проводка в `__init__` и `close()`**
+- [x] **Шаг 6: `service.py` — проводка в `__init__` и `close()`**
 
 Импорт (рядом с `from backend.event_bus import bus as event_bus`, ~строка 75):
 ```python
@@ -1390,12 +1444,12 @@ from backend.event_bridge import EventBridge
                 logger.exception("EventBridge.stop() raised during close()")
 ```
 
-- [ ] **Шаг 7: Тесты зелёные**
+- [x] **Шаг 7: Тесты зелёные**
 
 Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_event_bridge_wiring.py -v`
 Expected: 6 passed.
 
-- [ ] **Шаг 8: Регрессия — полный backend-тест-сьют (проверяет, что новый
+- [x] **Шаг 8: Регрессия — полный backend-тест-сьют (проверяет, что новый
       constructor-параметр/wiring не сломал ничего существующего)**
 
 Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_backend_service.py KrabEar/tests/ -k "health_check or diagnostics" -v`
@@ -1403,7 +1457,7 @@ Expected: все passed. Если существующие тесты конст
 напрямую без `event_bridge=` — они обязаны продолжать работать (параметр опционален,
 default `None`).
 
-- [ ] **Шаг 9: Purge-coverage — запустить гард, добавить allowlist ТОЛЬКО если он реально нашёл гэп**
+- [x] **Шаг 9: Purge-coverage — запустить гард, добавить allowlist ТОЛЬКО если он реально нашёл гэп**
 
 Run: `python3 scripts/audit_purge_coverage.py`
 
@@ -1424,20 +1478,20 @@ allowlist НЕ нужен, ничего не менять в этом файле
 Примечание (спека §5): `handle_purge_all_data` НЕ должен удалять этот файл —
 токен не пользовательские данные. Никакой код в `history_service.py` не меняется.
 
-- [ ] **Шаг 10: `make audit-wiring` (decorative-wiring guard)**
+- [x] **Шаг 10: `make audit-wiring` (decorative-wiring guard)**
 
 Run: `python3 scripts/audit_decorative_wiring.py --strict`
 Expected: `self._event_bridge` не должен всплыть как "сконструирован, но нигде
 не вызывается" — он вызывается в `close()` и передаётся в `HealthCheckService`.
 
-- [ ] **Шаг 11: flake8 + ubuntu-parity**
+- [x] **Шаг 11: flake8 + ubuntu-parity**
 
 Run: `.venv_krab_ear/bin/flake8 KrabEar/core/config.py KrabEar/backend/service.py KrabEar/backend/health_check_service.py KrabEar/backend/rest_server.py KrabEar/tests/test_event_bridge_wiring.py --max-line-length=150`
 Expected: пусто.
 Run: `bash scripts/pre_merge_py312_check.sh KrabEar/tests/test_event_bridge_wiring.py`
 Expected: ALL GREEN.
 
-- [ ] **Шаг 12: Commit**
+- [x] **Шаг 12: Commit**
 
 ```bash
 git add KrabEar/core/config.py KrabEar/backend/service.py KrabEar/backend/health_check_service.py \
@@ -1464,7 +1518,7 @@ regression suite не падает, `audit_decorative_wiring.py --strict` и
 - Create: `scripts/e2e_event_bridge_smoke.py`
 - Create: `scripts/run_e2e_bridge_smoke.command`
 
-- [ ] **Шаг 1: `scripts/e2e_event_bridge_smoke.py` — клиент**
+- [x] **Шаг 1: `scripts/e2e_event_bridge_smoke.py` — клиент**
 
 Структура (паттерн `scripts/e2e_ipc_smoke.py::call()` для IPC, `requests` для SSE-чтения):
 
@@ -1607,7 +1661,7 @@ if __name__ == "__main__":
 `phase=normal` (слушать в отдельном треде, затем эмитить), что проще и надёжнее —
 **рекомендуется** вместо описанного выше внешнего разделения.
 
-- [ ] **Шаг 2: `scripts/run_e2e_bridge_smoke.command` — оркестратор**
+- [x] **Шаг 2: `scripts/run_e2e_bridge_smoke.command` — оркестратор**
 
 ```bash
 #!/bin/bash
@@ -1720,7 +1774,7 @@ exit "$rc"
 
 `chmod +x scripts/run_e2e_bridge_smoke.command`
 
-- [ ] **Шаг 3: Прогнать полный e2e**
+- [x] **Шаг 3: Прогнать полный e2e**
 
 Run: `bash scripts/run_e2e_bridge_smoke.command`
 Expected: `EVENT BRIDGE E2E: ALL GREEN` (все 3 фазы + ровно 1 WARN на переход в down).
@@ -1730,18 +1784,18 @@ Expected: `EVENT BRIDGE E2E: ALL GREEN` (все 3 фазы + ровно 1 WARN �
 и не считать это блокером самого по себе (DoD спеки измеряет ЭТУ величину как
 подтверждение работоспособности, а не как жёсткий SLA-гейт CI).
 
-- [ ] **Шаг 4: Регрессия — существующий e2e-смок не сломан**
+- [x] **Шаг 4: Регрессия — существующий e2e-смок не сломан**
 
 Run: `bash scripts/run_e2e_smokes.command`
 Expected: `ALL E2E SMOKES GREEN` (этот план не трогает `run_e2e_smokes.command`
 и не меняет поведение существующих 37+5 проверок).
 
-- [ ] **Шаг 5: flake8 на новом скрипте**
+- [x] **Шаг 5: flake8 на новом скрипте**
 
 Run: `.venv_krab_ear/bin/flake8 scripts/e2e_event_bridge_smoke.py --max-line-length=150`
 Expected: пусто.
 
-- [ ] **Шаг 6: Commit**
+- [x] **Шаг 6: Commit**
 
 ```bash
 git add scripts/e2e_event_bridge_smoke.py scripts/run_e2e_bridge_smoke.command
@@ -1767,7 +1821,7 @@ git commit -m "test(event-bridge): two-process e2e + chaos case (REST kill/recov
 **Файлы:**
 - Modify: `native/KrabEarAgent/Sources/KrabEarAgent/main+HealthMonitor.swift`
 
-- [ ] **Шаг 1: Удалить блок строк 113-122 (проверено чтением — точный текст ниже)**
+- [x] **Шаг 1: Удалить блок строк 113-122 (проверено чтением — точный текст ниже)**
 
 Найти и удалить ЭТОТ ТОЧНЫЙ блок (10 строк, включая начальную и конечную):
 
@@ -1796,7 +1850,7 @@ git commit -m "test(event-bridge): two-process e2e + chaos case (REST kill/recov
 123-129 в исходной нумерации) **НЕ трогать** — он уже правильный, просто теперь
 реально работает.
 
-- [ ] **Шаг 2: Сборка**
+- [x] **Шаг 2: Сборка**
 
 Run: `cd native/KrabEarAgent && swift build -c release 2>&1 | tail -5`
 Expected: `Build complete!`
@@ -1805,13 +1859,13 @@ Expected: `Build complete!`
 `Krab Ear.app/Contents/MacOS/KrabEarAgent`) — `SingleInstanceGuard` убьёт
 реальный работающий прод-агент пользователя. Допустимо: `codesign --verify`/`otool`.
 
-- [ ] **Шаг 3: Тесты не сломаны**
+- [x] **Шаг 3: Тесты не сломаны**
 
 Run: `cd native/KrabEarAgent && swift test 2>&1 | tail -10`
 Expected: 0 failures (ни один существующий тест не проверяет буквальный текст
 удаляемого доккомента).
 
-- [ ] **Шаг 4: Commit**
+- [x] **Шаг 4: Commit**
 
 ```bash
 git add native/KrabEarAgent/Sources/KrabEarAgent/main+HealthMonitor.swift
@@ -1833,7 +1887,7 @@ git commit -m "docs(swift): remove stale rewriter_recovered dead-gap comment (ev
 - Modify: `docs/IPC_API_REFERENCE.md`
 - Modify: `CLAUDE.md`
 
-- [ ] **Шаг 1: `docs/IPC_API_REFERENCE.md` — новая секция**
+- [x] **Шаг 1: `docs/IPC_API_REFERENCE.md` — новая секция**
 
 Добавить новую секцию `## Event-мост IPC→REST (2026-07-07)` (например, перед `## Misc`,
 ~строка 2683, или сразу после секции `## Launch Readiness (2026-06-27)`,
@@ -1875,7 +1929,7 @@ REST недоступен → экспоненциальный backoff 1→30с,
 Добавить соответствующую строку в оглавление документа (рядом с существующим
 нумерованным списком секций, ~строка 62, формат `NN. [Название](#якорь)`).
 
-- [ ] **Шаг 2: `CLAUDE.md` — одна запись в разделе Important Patterns**
+- [x] **Шаг 2: `CLAUDE.md` — одна запись в разделе Important Patterns**
 
 Добавить bullet (после существующего "IPC dispatch error contract" или рядом с
 "Voice Gateway bridge endpoints"):
@@ -1884,19 +1938,19 @@ REST недоступен → экспоненциальный backoff 1→30с,
 - **Event-мост IPC→REST (2026-07-07)**: `backend/event_bridge.py::EventBridge` закрывает класс багов «событие эмитится в IPC-процессе, подписчик слушает REST-процесс (`:5005`)» — подписывается на локальную (IPC) шину, батчами (≤20) POST-ит `POST /internal/event` (REST, loopback-only + bridge-токен `<data_dir>/event_bridge_token`, 0600, всегда требуется независимо от `REST_API_AUTH_ENABLED`) → `EventBus.emit_envelope()` доставляет конверт КАК ЕСТЬ существующим SSE/WS подписчикам без повторного вызова push-листенеров (no-echo guard). Killswitch `event_bridge_enabled`/`KRAB_EAR_EVENT_BRIDGE_ENABLED` (default `True`) — читается один раз при старте (сиблинг `DISK_MONITOR_ENABLED`, не live-toggle). Диагностика: `get_diagnostics.event_bridge`. REST недоступен → backoff 1→30с, WARN по смене состояния, эмиттеры не блокируются, deque(256) drop-oldest. `main+HealthMonitor.swift` доккомментарий про мёртвый `rewriter_recovered`-гэп удалён — подписка теперь живая.
 ```
 
-- [ ] **Шаг 3: Верификация доки**
+- [x] **Шаг 3: Верификация доки**
 
 Run: `python3 scripts/verify_claude_md.py`
 Expected: OK.
 
-- [ ] **Шаг 4: Commit доки**
+- [x] **Шаг 4: Commit доки**
 
 ```bash
 git add docs/IPC_API_REFERENCE.md CLAUDE.md
 git commit -m "docs(event-bridge): IPC_API_REFERENCE section + CLAUDE.md entry"
 ```
 
-- [ ] **Шаг 5: Финальная верификация ВСЕЙ волны разом**
+- [x] **Шаг 5: Финальная верификация ВСЕЙ волны разом**
 
 ```bash
 # Полный набор новых/изменённых тестов

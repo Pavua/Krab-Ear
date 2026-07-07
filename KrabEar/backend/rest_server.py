@@ -333,6 +333,64 @@ def require_api_key(f):
 
 
 # ---------------------------------------------------------------------------
+# EventBridge internal endpoint (spec 2026-07-07-event-bridge-design.md §2.2).
+# Loopback-only + bridge-token auth — ВСЕГДА требуется, независимо от
+# REST_API_AUTH_ENABLED/REST_API_KEY (require_api_key выше). Fail-closed.
+# ---------------------------------------------------------------------------
+
+_event_bridge_token_cache: str | None = None
+
+
+def _get_event_bridge_token() -> str | None:
+    """Ленивый кэшируемый читатель — REST НИКОГДА не создаёт токен, только читает.
+
+    Кэшируется ТОЛЬКО успешный (непустой) результат: если IPC-процесс ещё не
+    создал файл (порядок старта процессов произволен), последующие запросы
+    продолжают проверять файл заново, а не залипают на None навсегда.
+    """
+    global _event_bridge_token_cache
+    if _event_bridge_token_cache:
+        return _event_bridge_token_cache
+    from backend.event_bridge import read_bridge_token
+    token = read_bridge_token(settings.DATA_DIR)
+    if token:
+        _event_bridge_token_cache = token
+    return _event_bridge_token_cache
+
+
+def _require_loopback_and_bridge_token(f):
+    """Декоратор: /internal/event — loopback-only (403) + bridge-токен (401).
+
+    Независим от REST_API_AUTH_ENABLED/REST_API_KEY — этот эндпоинт ВСЕГДА
+    требует токен, даже если пользовательский REST auth выключен. Fail-closed:
+    любая проверка не пройдена -> f() не вызывается.
+    """
+    @functools.wraps(f)
+    def _wrapper(*args, **kwargs):
+        remote_addr = request.remote_addr or ""
+        if remote_addr not in ("127.0.0.1", "::1"):
+            logger.warning("event_bridge: non-loopback remote_addr=%r отклонён", remote_addr)
+            return jsonify({"error": "loopback only"}), 403
+        token = _get_event_bridge_token()
+        if not token:
+            logger.warning("event_bridge: bridge-токен недоступен на REST-стороне")
+            return jsonify({"error": "bridge token unavailable"}), 401
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return jsonify({"error": "Missing or invalid Authorization header"}), 401
+        supplied = auth_header[len("Bearer "):]
+        try:
+            match = hmac.compare_digest(supplied.encode("utf-8"), token.encode("utf-8"))
+        except Exception:
+            match = False
+        if not match:
+            logger.warning("event_bridge: неверный bridge-токен")
+            return jsonify({"error": "invalid bridge token"}), 401
+        return f(*args, **kwargs)
+    return _wrapper
+
+
+# ---------------------------------------------------------------------------
 # F1: Magic byte validation (W1213)
 # Extension-only allowlists are trivially bypassed; validate actual file
 # signatures so crafted payloads don't reach libsndfile/ffmpeg/mlx-whisper.
@@ -1599,6 +1657,44 @@ def events_stream():
     )
 
 
+@monitoring_blp.route("/internal/event", methods=["POST"])
+@limiter.limit("600 per minute")  # щедрый лимит — легитимные батчи моста могут быть частыми
+@_require_loopback_and_bridge_token
+def internal_event():
+    """Приём батча событий от EventBridge (IPC-процесс) -> re-emit в REST-шину.
+
+    Body: {"events": [{"type": str, "ts": str, "data": dict}, ...]}
+    Невалидный элемент — скип + WARN, не 500 (один плохой элемент не должен
+    ронять весь батч).
+    """
+    body = request.get_json(silent=True) or {}
+    events = body.get("events")
+    if not isinstance(events, list):
+        return jsonify({"error": "events must be a list"}), 400
+
+    accepted = 0
+    skipped = 0
+    for env in events:
+        if not isinstance(env, dict):
+            skipped += 1
+            continue
+        etype = env.get("type")
+        ts = env.get("ts")
+        data = env.get("data")
+        if not isinstance(etype, str) or not isinstance(ts, str) or not isinstance(data, dict):
+            skipped += 1
+            logger.warning("event_bridge: malformed envelope skipped: %r", env)
+            continue
+        try:
+            event_bus.emit_envelope({"type": etype, "ts": ts, "data": data, "origin": "ipc"})
+            accepted += 1
+        except Exception:
+            skipped += 1
+            logger.warning("event_bridge: emit_envelope failed for type=%s", etype, exc_info=True)
+
+    return jsonify({"ok": True, "accepted": accepted, "skipped": skipped}), 200
+
+
 # ---------------------------------------------------------------------------
 # Compatibility shim: keep /v1/vocabulary working for GET+POST on the same
 # path without duplicate-route errors from flask-smorest
@@ -2044,14 +2140,15 @@ if __name__ == "__main__":
     )
     if _auth_mode == "DISABLED":
         logger.warning(
-            "REST server starting on 127.0.0.1:5005 with NO auth "
+            "REST server starting on 127.0.0.1:%s with NO auth "
             "(Wave 47 B2 HIGH-1). Any local process can call /api/*. "
             "To enable auth: set REST_API_AUTH_ENABLED=true OR populate "
             "REST_API_KEY in settings.json. Localhost-only bind prevents "
-            "remote attack."
+            "remote attack.",
+            settings.REST_SERVER_PORT,
         )
     else:
-        logger.info("REST server starting on 127.0.0.1:5005 with auth=%s", _auth_mode)
+        logger.info("REST server starting on 127.0.0.1:%s with auth=%s", settings.REST_SERVER_PORT, _auth_mode)
 
     # F3 MED fix (W1674 / W1684): guard against EADDRINUSE.
     #
@@ -2064,14 +2161,15 @@ if __name__ == "__main__":
     # krab-ear-rest.err.log), Sentry captures the event if a DSN is wired,
     # and sys.exit(1) terminates cleanly so launchd does NOT tight-loop.
     try:
-        app.run(host="127.0.0.1", port=5005)
+        app.run(host="127.0.0.1", port=settings.REST_SERVER_PORT)
     except OSError as _e:
         if _e.errno == _errno.EADDRINUSE:
             logger.error(
-                "REST server failed to start: port 5005 is already in use "
+                "REST server failed to start: port %s is already in use "
                 "(EADDRINUSE). Another instance may be running. "
-                "Stop it first: lsof -ti :5005 | xargs kill -9",
-                extra={"errno": _e.errno, "port": 5005},
+                "Stop it first: lsof -ti :%s | xargs kill -9",
+                settings.REST_SERVER_PORT, settings.REST_SERVER_PORT,
+                extra={"errno": _e.errno, "port": settings.REST_SERVER_PORT},
             )
             try:
                 from backend.observability import capture_exception

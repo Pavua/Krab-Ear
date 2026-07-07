@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from backend.event_bridge import EventBridge
     from backend.health_checker import HealthChecker
     from backend.integrity_checker import IntegrityChecker
     from backend.llm_probe import LLMHttpProbe
@@ -42,6 +43,7 @@ class HealthCheckService:
         integrity_checker: "IntegrityChecker",
         llm_probe: "LLMHttpProbe | None" = None,
         metrics_collector: "MetricsCollector | None" = None,
+        event_bridge: "EventBridge | None" = None,
         # Optional collaborators for get_diagnostics
         transcriber: "Transcriber | None" = None,
         llm_rewriter: "LLMRewriter | None" = None,
@@ -57,6 +59,7 @@ class HealthCheckService:
         self._integrity_checker = integrity_checker
         self._llm_probe = llm_probe
         self._metrics_collector = metrics_collector
+        self._event_bridge = event_bridge
         self._transcriber = transcriber
         self._llm_rewriter = llm_rewriter
         self._settings_svc = settings_svc
@@ -184,7 +187,28 @@ class HealthCheckService:
             # W1685 F5: use injected MetricsCollector (was dead injection — never read).
             # Returns a brief summary for diagnostics panels; safe when collector is None.
             "metrics_summary": self._get_metrics_summary(),
+            # Event-мост IPC->REST (spec 2026-07-07-event-bridge-design.md) diagnostics.
+            "event_bridge": self._get_event_bridge_summary(),
         }
+
+    def _get_event_bridge_summary(self) -> dict[str, Any]:
+        """Возвращает EventBridge.get_diagnostics() либо schema-parity fallback.
+
+        Никогда не роняет get_diagnostics (аналог _get_metrics_summary, W1685 F5).
+        """
+        if self._event_bridge is None:
+            return {
+                "enabled": False, "state": "disabled",
+                "queue_depth": 0, "sent": 0, "dropped": 0, "dropped_stale": 0, "failed": 0,
+            }
+        try:
+            return self._event_bridge.get_diagnostics()
+        except Exception:
+            logger.warning("HealthCheckService: EventBridge.get_diagnostics() упал", exc_info=True)
+            return {
+                "enabled": False, "state": "error",
+                "queue_depth": 0, "sent": 0, "dropped": 0, "dropped_stale": 0, "failed": 0,
+            }
 
     def _get_metrics_summary(self) -> dict[str, Any]:
         """Возвращает краткий снимок MetricsCollector для диагностического вывода.

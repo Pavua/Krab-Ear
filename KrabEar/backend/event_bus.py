@@ -187,6 +187,40 @@ class EventBus:
             except Exception:
                 logger.warning("EventBus: листенер бросил исключение на событии %s", event_type, exc_info=True)
 
+    def emit_envelope(self, envelope: dict[str, Any]) -> None:
+        """Доставляет УЖЕ ГОТОВЫЙ конверт подписчикам (SSE/WS) КАК ЕСТЬ.
+
+        Используется REST-стороной event-моста (backend/event_bridge.py,
+        docs/superpowers/specs/2026-07-07-event-bridge-design.md §2.3) для
+        ре-эмита событий, доставленных из IPC-процесса. В отличие от emit():
+          - НЕ вызывает push-листенеров self._listeners (структурный no-echo
+            guard — исходный emit() в IPC-процессе их уже вызвал; повторный
+            вызов здесь задвоил бы доставку, например, вебхуков).
+          - НЕ перештамповывает envelope["ts"] — конверт передаётся как есть.
+          - НЕ пишет в self._event_replay (реплей — забота IPC-процесса,
+            где _event_replay реально wired; на REST-стороне он всегда None).
+
+        Args:
+            envelope: {"type": str, "ts": str, "data": dict, ...} — форма
+                уже провалидирована вызывающей стороной (REST /internal/event).
+        """
+        if "type" not in envelope:
+            logger.warning("EventBus.emit_envelope: конверт без 'type' проигнорирован: %r", envelope)
+            return
+        with self._lock:
+            active = list(self._subscribers)
+        dropped = 0
+        for q in active:
+            try:
+                q.put_nowait(envelope)
+            except queue.Full:
+                dropped += 1
+        if dropped:
+            logger.warning(
+                "EventBus: %d подписчик(ов) пропустили bridged-событие %s (очередь полна)",
+                dropped, envelope.get("type"),
+            )
+
     def emit_typed(self, event_type: EventType, payload: BaseModel) -> None:
         """Типизированный emit — валидирует payload через Pydantic модель."""
         self.emit(event_type.value, payload.model_dump(mode="json"))
