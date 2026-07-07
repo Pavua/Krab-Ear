@@ -964,7 +964,7 @@ git commit -m "feat(event-bridge): EventBridge sender (deque+backoff+diagnostics
 - Modify: `KrabEar/backend/rest_server.py`
 - Create: `KrabEar/tests/test_rest_internal_event.py`
 
-- [ ] **Шаг 1: Failing-тесты первыми**
+- [x] **Шаг 1: Failing-тесты первыми**
 
 `KrabEar/tests/test_rest_internal_event.py`:
 
@@ -1094,12 +1094,12 @@ if __name__ == "__main__":
     unittest.main(verbosity=2)
 ```
 
-- [ ] **Шаг 2: Прогнать — убедиться что падает**
+- [x] **Шаг 2: Прогнать — убедиться что падает**
 
 Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_rest_internal_event.py -v`
 Expected: FAIL (404 — маршрут ещё не существует; либо `AttributeError` на `_get_event_bridge_token`).
 
-- [ ] **Шаг 3: Реализация в `backend/rest_server.py`**
+- [x] **Шаг 3: Реализация в `backend/rest_server.py`**
 
 Добавить СРАЗУ ПОСЛЕ блока `require_api_key` (кончается строкой 332, перед секцией
 "F1: Magic byte validation" на строке 335):
@@ -1211,26 +1211,26 @@ def internal_event():
 (`from backend.event_bus import bus as event_bus, sse_stream` на строке 30) —
 НЕ создавать новый импорт.
 
-- [ ] **Шаг 4: Тесты зелёные**
+- [x] **Шаг 4: Тесты зелёные**
 
 Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_rest_internal_event.py -v`
 Expected: 7 passed.
 
-- [ ] **Шаг 5: Регрессия — существующие REST-тесты не сломаны**
+- [x] **Шаг 5: Регрессия — существующие REST-тесты не сломаны**
 
 Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_rest_server_endpoints.py KrabEar/tests/test_rest_server_unit.py KrabEar/tests/test_rest_server.py -v`
 Expected: все passed (новый код — чистое дополнение: новые module-level имена
 `_event_bridge_token_cache`/`_get_event_bridge_token`/`_require_loopback_and_bridge_token`/`internal_event`,
 не переопределяет ничего существующего).
 
-- [ ] **Шаг 6: flake8 + ubuntu-parity**
+- [x] **Шаг 6: flake8 + ubuntu-parity**
 
 Run: `.venv_krab_ear/bin/flake8 KrabEar/backend/rest_server.py KrabEar/tests/test_rest_internal_event.py --max-line-length=150`
 Expected: пусто.
 Run: `bash scripts/pre_merge_py312_check.sh KrabEar/tests/test_rest_internal_event.py`
 Expected: ALL GREEN.
 
-- [ ] **Шаг 7: Commit**
+- [x] **Шаг 7: Commit**
 
 ```bash
 git add KrabEar/backend/rest_server.py KrabEar/tests/test_rest_internal_event.py
