@@ -1256,7 +1256,7 @@ git commit -m "feat(event-bridge): POST /internal/event — loopback+token auth,
 - Modify: `scripts/purge_coverage_allowlist.txt` (условно, см. Шаг 6)
 - Create: `KrabEar/tests/test_event_bridge_wiring.py`
 
-- [ ] **Шаг 1: Failing source-контракт тест первым (урок setupErrorBus/setupHealthMonitor:
+- [x] **Шаг 1: Failing source-контракт тест первым (урок setupErrorBus/setupHealthMonitor:
       collaborator сконструирован, но не вызывается = декоративная проводка — тот же
       класс бага, что и на Swift-стороне, здесь механически проверяется через grep
       исходника, не конструируя тяжёлый `BackendService`)**
@@ -1315,12 +1315,12 @@ if __name__ == "__main__":
     unittest.main(verbosity=2)
 ```
 
-- [ ] **Шаг 2: Прогнать — убедиться что падает**
+- [x] **Шаг 2: Прогнать — убедиться что падает**
 
 Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_event_bridge_wiring.py -v`
 Expected: FAIL (все 6 assertion — ни одна строка ещё не существует в исходниках).
 
-- [ ] **Шаг 3: `core/config.py` — новые настройки**
+- [x] **Шаг 3: `core/config.py` — новые настройки**
 
 Добавить в класс `Settings` рядом с блоком `DISK_MONITOR_ENABLED` (~строка 72-76):
 
@@ -1343,7 +1343,7 @@ Expected: FAIL (все 6 assertion — ни одна строка ещё не с
     REST_SERVER_PORT: int = 5005
 ```
 
-- [ ] **Шаг 4: `rest_server.py` — использовать `settings.REST_SERVER_PORT` вместо литерала**
+- [x] **Шаг 4: `rest_server.py` — использовать `settings.REST_SERVER_PORT` вместо литерала**
 
 Заменить (строка ~2067):
 ```python
@@ -1357,7 +1357,7 @@ Expected: FAIL (все 6 assertion — ни одна строка ещё не с
 двух log-сообщениях рядом, строки ~2047/2054, на `settings.REST_SERVER_PORT` —
 косметика, не функциональность.)
 
-- [ ] **Шаг 5: `health_check_service.py` — принять `event_bridge` коллаборатора**
+- [x] **Шаг 5: `health_check_service.py` — принять `event_bridge` коллаборатора**
 
 В `TYPE_CHECKING`-блок импортов (~строка 19-27) добавить:
 ```python
@@ -1399,7 +1399,7 @@ Expected: FAIL (все 6 assertion — ни одна строка ещё не с
             "event_bridge": self._get_event_bridge_summary(),
 ```
 
-- [ ] **Шаг 6: `service.py` — проводка в `__init__` и `close()`**
+- [x] **Шаг 6: `service.py` — проводка в `__init__` и `close()`**
 
 Импорт (рядом с `from backend.event_bus import bus as event_bus`, ~строка 75):
 ```python
@@ -1444,12 +1444,12 @@ from backend.event_bridge import EventBridge
                 logger.exception("EventBridge.stop() raised during close()")
 ```
 
-- [ ] **Шаг 7: Тесты зелёные**
+- [x] **Шаг 7: Тесты зелёные**
 
 Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_event_bridge_wiring.py -v`
 Expected: 6 passed.
 
-- [ ] **Шаг 8: Регрессия — полный backend-тест-сьют (проверяет, что новый
+- [x] **Шаг 8: Регрессия — полный backend-тест-сьют (проверяет, что новый
       constructor-параметр/wiring не сломал ничего существующего)**
 
 Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_backend_service.py KrabEar/tests/ -k "health_check or diagnostics" -v`
@@ -1457,7 +1457,7 @@ Expected: все passed. Если существующие тесты конст
 напрямую без `event_bridge=` — они обязаны продолжать работать (параметр опционален,
 default `None`).
 
-- [ ] **Шаг 9: Purge-coverage — запустить гард, добавить allowlist ТОЛЬКО если он реально нашёл гэп**
+- [x] **Шаг 9: Purge-coverage — запустить гард, добавить allowlist ТОЛЬКО если он реально нашёл гэп**
 
 Run: `python3 scripts/audit_purge_coverage.py`
 
@@ -1478,20 +1478,20 @@ allowlist НЕ нужен, ничего не менять в этом файле
 Примечание (спека §5): `handle_purge_all_data` НЕ должен удалять этот файл —
 токен не пользовательские данные. Никакой код в `history_service.py` не меняется.
 
-- [ ] **Шаг 10: `make audit-wiring` (decorative-wiring guard)**
+- [x] **Шаг 10: `make audit-wiring` (decorative-wiring guard)**
 
 Run: `python3 scripts/audit_decorative_wiring.py --strict`
 Expected: `self._event_bridge` не должен всплыть как "сконструирован, но нигде
 не вызывается" — он вызывается в `close()` и передаётся в `HealthCheckService`.
 
-- [ ] **Шаг 11: flake8 + ubuntu-parity**
+- [x] **Шаг 11: flake8 + ubuntu-parity**
 
 Run: `.venv_krab_ear/bin/flake8 KrabEar/core/config.py KrabEar/backend/service.py KrabEar/backend/health_check_service.py KrabEar/backend/rest_server.py KrabEar/tests/test_event_bridge_wiring.py --max-line-length=150`
 Expected: пусто.
 Run: `bash scripts/pre_merge_py312_check.sh KrabEar/tests/test_event_bridge_wiring.py`
 Expected: ALL GREEN.
 
-- [ ] **Шаг 12: Commit**
+- [x] **Шаг 12: Commit**
 
 ```bash
 git add KrabEar/core/config.py KrabEar/backend/service.py KrabEar/backend/health_check_service.py \
