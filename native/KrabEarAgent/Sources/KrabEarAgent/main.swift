@@ -210,6 +210,14 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         // выполняются один раз сейчас, а не при первом show() в showFatalAndTerminate.
         BackendToast.shared.prewarmPanel()
 
+        // Sparkle автообновления — ДО backend-ожидания (ультракод-ревью C6):
+        // у DMG-получателя со сломанным/неготовым backend'ом приложение
+        // фатально завершается через showFatalAndTerminate; если updater
+        // стартует только после готовности backend, обновление не может
+        // привезти фикс именно тогда, когда оно нужнее всего. Sparkle не
+        // зависит от IPC; dev-guard внутри (см. main+SparkleUpdater.swift).
+        setupSparkleUpdater()
+
         logger.info("Старт агента. projectRoot=\(options.projectRoot), launchedByLaunchd=\(options.launchedByLaunchd)")
         notificationService.requestAuthorizationIfNeeded()
         DistributedNotificationCenter.default().addObserver(

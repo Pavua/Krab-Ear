@@ -1,0 +1,199 @@
+name: release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Версия релиза (X.Y.Z, без префикса v)'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  SPARKLE_TOOLS_VERSION: "2.6.4"
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout (full — нужны ветка и теги для appcast-пуша)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: ver
+        env:
+          # env-индирекция вместо ${{ }} прямо в run: — пользовательский ввод
+          # workflow_dispatch не должен интерполироваться в текст скрипта
+          # (классическая expression-injection поверхность GitHub Actions).
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_VERSION"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            || { echo "::error::версия не semver X.Y.Z: $VERSION"; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: CI-green guard (krab-ear-ci на собираемом коммите)
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Дереференс: для АННОТИРОВАННОГО тега GITHUB_SHA = tag-объект, не
+          # коммит — rev-parse ^{commit} даёт коммит в обоих случаях (и для
+          # workflow_dispatch, где HEAD = tip ветки).
+          BUILD_SHA=$(git rev-parse "HEAD^{commit}")
+          # appcast-коммиты этого же workflow идут с [skip ci] — krab-ear-ci на
+          # них НЕ бежит. Без скипа каждый успешный релиз намертво блокировал бы
+          # следующий workflow_dispatch (guard видел бы "missing"). Отматываем
+          # такие коммиты к родителю (они меняют только appcast.xml).
+          GUARD_SHA="$BUILD_SHA"
+          for _ in 1 2 3 4 5; do
+            MSG=$(git log -1 --format=%s "$GUARD_SHA")
+            # grep -F: "[skip ci]" в case-паттерне был бы character class
+            if printf '%s' "$MSG" | grep -qF "release: appcast v" \
+               && printf '%s' "$MSG" | grep -qF "[skip ci]"; then
+              GUARD_SHA=$(git rev-parse "$GUARD_SHA^")
+            else
+              break
+            fi
+          done
+          # Успешный run ищем среди ВСЕХ ранов коммита (не только последнего):
+          # in-progress/cancelled поверх старого success не должны блокировать.
+          OK=$(gh run list --commit "$GUARD_SHA" --workflow krabear-ci.yml \
+            --json conclusion --jq '[.[] | select(.conclusion == "success")] | length')
+          echo "krab-ear-ci @ $GUARD_SHA (build: $BUILD_SHA): success-ранов $OK"
+          [ "${OK:-0}" -ge 1 ] \
+            || { echo "::error::krab-ear-ci не зелёный на $GUARD_SHA — релиз запрещён (fail-closed)"; exit 1; }
+          echo "build_sha=$BUILD_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Import signing certificate
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          echo "$MACOS_CERT_P12" | base64 --decode > /tmp/cert.p12
+          security create-keychain -p ci-keychain build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p ci-keychain build.keychain
+          security import /tmp/cert.p12 -k build.keychain \
+            -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k ci-keychain build.keychain
+          # НЕ добавляем серт в system trust store: codesign подписывает
+          # untrusted self-signed identity нормально (проверено эмпирически),
+          # а `sudo security add-trusted-cert -d` на macOS 15+ раннерах
+          # требует GUI-авторизацию — висит до 6h job-таймаута или падает
+          # -60005 (runner-images #11893/#12116/#12438). Ультракод-ревью C1.
+          rm -f /tmp/cert.p12
+
+      - name: Cache SPM
+        uses: actions/cache@v4
+        with:
+          path: native/KrabEarAgent/.build
+          key: release-spm-${{ runner.os }}-${{ hashFiles('native/KrabEarAgent/Package.resolved') }}
+
+      - name: Build Swift agent
+        run: cd native/KrabEarAgent && swift build -c release
+
+      - name: Assemble + sign .app
+        run: |
+          scripts/assemble_signed_app.sh \
+            --output dist \
+            --version "${{ steps.ver.outputs.version }}" \
+            --identity "Krab Ear CI Release"
+
+      - name: Zip (ditto — сохраняет симлинки внутри framework)
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          ditto -c -k --keepParent "dist/Krab Ear.app" "dist/Krab-Ear-v$VERSION.zip"
+          shasum -a 256 "dist/Krab-Ear-v$VERSION.zip" > "dist/Krab-Ear-v$VERSION.zip.sha256"
+
+      - name: Sparkle sign_update
+        id: sparkle
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          curl -L -o /tmp/sparkle.tar.xz \
+            "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_TOOLS_VERSION}/Sparkle-${SPARKLE_TOOLS_VERSION}.tar.xz"
+          mkdir -p /tmp/sparkle-tools && tar -xJf /tmp/sparkle.tar.xz -C /tmp/sparkle-tools
+          printf '%s' "$SPARKLE_PRIVATE_KEY" > /tmp/ed_key
+          chmod 600 /tmp/ed_key
+          SIGN_OUT=$(/tmp/sparkle-tools/bin/sign_update -f /tmp/ed_key "dist/Krab-Ear-v$VERSION.zip")
+          rm -f /tmp/ed_key
+          echo "sign_update: $SIGN_OUT"
+          ED_SIG=$(echo "$SIGN_OUT" | sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p')
+          LENGTH=$(echo "$SIGN_OUT" | sed -n 's/.*length="\([^"]*\)".*/\1/p')
+          [ -n "$ED_SIG" ] && [ -n "$LENGTH" ] \
+            || { echo "::error::не распарсили вывод sign_update"; exit 1; }
+          echo "ed_sig=$ED_SIG" >> "$GITHUB_OUTPUT"
+          echo "length=$LENGTH" >> "$GITHUB_OUTPUT"
+
+      - name: Update appcast.xml (монотонность версии проверяет сам скрипт)
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          git checkout codex/krab-ear-v2
+          python3 scripts/generate_appcast_item.py \
+            --appcast appcast.xml \
+            --version "$VERSION" \
+            --url "https://github.com/${{ github.repository }}/releases/download/v$VERSION/Krab-Ear-v$VERSION.zip" \
+            --ed-signature "${{ steps.sparkle.outputs.ed_sig }}" \
+            --length "${{ steps.sparkle.outputs.length }}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          # --target: тег создаётся на ПРОВЕРЕННОМ guard'ом коммите, а не на
+          # tip'е ветки в момент API-вызова (гонка с параллельным пушем).
+          # Идемпотентность: если релиз уже существует (ре-ран после падения
+          # НА ПОСЛЕДУЮЩЕМ шаге appcast-коммита), не падаем — доливаем ассеты
+          # при их отсутствии и идём дальше чинить appcast (ревью C3/C8).
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "release v$VERSION уже существует — ре-ран; проверяю ассеты"
+            HAVE=$(gh release view "v$VERSION" --json assets --jq '.assets | length')
+            if [ "${HAVE:-0}" -lt 2 ]; then
+              gh release upload "v$VERSION" \
+                "dist/Krab-Ear-v$VERSION.zip" \
+                "dist/Krab-Ear-v$VERSION.zip.sha256" --clobber
+            fi
+          else
+            gh release create "v$VERSION" \
+              "dist/Krab-Ear-v$VERSION.zip" \
+              "dist/Krab-Ear-v$VERSION.zip.sha256" \
+              --title "Krab Ear v$VERSION" \
+              --target "${{ steps.guard.outputs.build_sha }}" \
+              --generate-notes
+          fi
+
+      - name: Commit appcast (после успешного релиза; [skip ci])
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add appcast.xml
+          git commit -m "release: appcast v$VERSION [skip ci]"
+          # Retry: гонка с параллельным пушем в ветку не должна стрэндить
+          # опубликованный релиз без appcast-записи (ревью C8). При rebase
+          # только-appcast коммит конфликтовать может лишь с чужим appcast-
+          # коммитом — маловероятно (concurrency: group release).
+          for attempt in 1 2 3; do
+            git pull --rebase origin codex/krab-ear-v2 || { git rebase --abort || true; sleep 5; continue; }
+            git push origin codex/krab-ear-v2 && exit 0
+            sleep 5
+          done
+          echo "::error::не удалось запушить appcast после 3 попыток — релиз опубликован, appcast НЕ обновлён; повторите ре-ран workflow"
+          exit 1

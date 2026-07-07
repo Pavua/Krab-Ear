@@ -15,9 +15,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>2.3.0</string>
+	<string>2.4.0</string>
 	<key>CFBundleVersion</key>
-	<string>2.3.0</string>
+	<string>2.4.0</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
 	<key>LSUIElement</key>
@@ -28,5 +28,11 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Krab Ear uses the microphone to transcribe your speech offline.</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://raw.githubusercontent.com/Pavua/Krab-Ear/codex/krab-ear-v2/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>EScWG2OB7+UqlgB3qb/K4JmvoiLLBr4FMoL2vvf1lfY=</string>
 </dict>
 </plist>

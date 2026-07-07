@@ -129,6 +129,36 @@ DMG-сборка несёт `bootstrap_backend.command` внутри `Krab Ear.a
 
 ---
 
+## Автообновления (Sparkle)
+
+Krab Ear использует [Sparkle 2](https://sparkle-project.org/) (SPM-зависимость) для автообновлений установленных копий — GitHub Releases служит бэкендом, `appcast.xml` в корне репозитория описывает доступные версии.
+
+**Как выпустить релиз:**
+
+```bash
+git tag v2.4.1 && git push origin v2.4.1
+```
+
+Либо вручную: GitHub → **Actions** → workflow **release** → **Run workflow** с вводом номера версии. В обоих случаях workflow **не выпустит релиз без зелёного `krab-ear-ci`** на собираемом коммите — гейт fail-closed, а не предупреждение.
+
+**Что делает workflow:** сборка Swift-агента → ассемблирование `.app` через общий `scripts/assemble_signed_app.sh` → codesign выделенным CI-сертификатом «Krab Ear CI Release» → упаковка в zip → EdDSA-подпись архива через Sparkle (`generate_appcast`/`sign_update`) → публикация GitHub Release с ассетами (zip + подпись) → коммит обновлённого `appcast.xml` с меткой `[skip ci]` (чтобы не гонять CI повторно на докс-коммите).
+
+**Что получает пользователь установленной копии:** приложение раз в сутки проверяет `appcast.xml` (`SUEnableAutomaticChecks`), при найденной новой версии показывает стандартный диалог Sparkle с release notes; в меню статус-бара также есть пункт «Проверить обновления…» для ручной проверки.
+
+**Dev-машина владельца:** на машине, где собран Krab Ear из этого репозитория, автообновления **отключены guard'ом** — `.app` лежит внутри git-рабочего дерева, и Sparkle, переписав бандл, испортил бы рабочую копию. Путь обновления для dev-машины — обычный `build_and_deploy.command` (пересборка + codesign локальной identity), не Sparkle.
+
+**Секреты CI** (GitHub repo secrets, использует `.github/workflows/release.yml`):
+- `MACOS_CERT_P12` / `MACOS_CERT_PASSWORD` — выделенный CI-сертификат «Krab Ear CI Release» в формате `.p12` (это НЕ локальный `Krab Ear Dev Local` — ключи владельца не покидают его машину).
+- `SPARKLE_PRIVATE_KEY` — приватный EdDSA-ключ для подписи update-архивов.
+
+Ротация: сертификат — сгенерировать заново через `openssl` и экспортировать новый `.p12`; Sparkle-ключ — перегенерировать через `generate_keys` (инструмент Sparkle) и обновить публичный ключ в `Info.plist` (`SUPublicEDKey`). После генерации — перезаписать соответствующие GitHub secrets.
+
+**Ограничение:** репозиторий обязан оставаться публичным — GitHub отдаёт release-ассеты приватного репо только авторизованным запросам, а Sparkle делает анонимный HTTP-запрос за zip-архивом; на приватном репо загрузка обновления будет молча падать.
+
+**TODO при получении Apple Developer ID:** вернуть `--options runtime --entitlements` в `scripts/assemble_signed_app.sh` (сейчас отключено вместе с notarize-путём) — правка на одну строку, включает hardened runtime обратно.
+
+---
+
 ## How recipients install Krab Ear
 
 1. Download `Krab-Ear-vX.Y.Z.dmg`.

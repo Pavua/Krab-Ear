@@ -481,6 +481,16 @@ extension AgentAppDelegate {
         updateChannelSubmenu.addItem(betaChannelItem)
         menu.setSubmenu(updateChannelSubmenu, for: updateChannelItem)
 
+        let checkUpdatesItem = NSMenuItem(
+            title: "Проверить обновления…",
+            action: #selector(onCheckForUpdates),
+            keyEquivalent: ""
+        )
+        checkUpdatesItem.target = self
+        // Dev-запуск (бандл в репо): Sparkle не инициализирован — пункт серый.
+        checkUpdatesItem.isEnabled = sparkleUpdaterController != nil
+        menu.addItem(checkUpdatesItem)
+
         let quickActionsItem = NSMenuItem(title: "Быстрые действия", action: nil, keyEquivalent: "")
         menu.addItem(quickActionsItem)
 
