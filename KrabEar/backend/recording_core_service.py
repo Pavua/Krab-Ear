@@ -1641,7 +1641,12 @@ class RecordingCoreService:
             except Exception:
                 logger.exception("Не удалось автосохранить транскрибацию в .md")
 
-        if self._coerce_bool(settings.get("action_items_auto_extract", False), default=False):
+        # privacy-gate (recording_core_service #1911): action_items_auto_extract sends
+        # display_text (full transcript) to an LLM and persists the result — must be
+        # skipped in privacy_mode, same as the STT_FINAL emit above (line ~1602) and the
+        # semantic auto-index guard above (line ~1561). _privacy_mode is already resolved
+        # above (line ~1418) in this same function.
+        if not _privacy_mode and self._coerce_bool(settings.get("action_items_auto_extract", False), default=False):
             min_dur = float(settings.get("action_items_min_duration_sec", 60.0))
             if self._action_items_extractor is not None and (duration_sec or 0.0) >= min_dur:
                 try:
