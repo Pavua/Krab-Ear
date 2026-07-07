@@ -39,6 +39,7 @@ plugins/                 # W1770: installed plugin code + plugin.json manifests 
 
 # --- Compliance / security infrastructure ---------------------------------
 privacy_audit.key        # AES key for the compliance audit log (privacy_audit.log is the W957 trail); deleting it would corrupt the audit record. The log itself is home-rooted, not under the configurable data dir, so it is not discovered.
+event_bridge_token/      # HMAC bridge-auth секрет между IPC/REST процессами (localhost-only trust boundary); не пользовательские данные, аналог privacy_audit.key. Фактически ОДИН файл (не директория) — сканер помечает его directory-style, т.к. имя ссылается через переменную EVENT_BRIDGE_TOKEN_FILENAME, а не строковый литерал с расширением.
 
 # --- ID-only resurrection registry (no PII) -------------------------------
 history_purged_ids.ndjson  # W1756: append-only list of deleted item IDs (no text) to block re-import resurrection; intentionally retained across purge

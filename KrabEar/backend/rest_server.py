@@ -2140,14 +2140,15 @@ if __name__ == "__main__":
     )
     if _auth_mode == "DISABLED":
         logger.warning(
-            "REST server starting on 127.0.0.1:5005 with NO auth "
+            "REST server starting on 127.0.0.1:%s with NO auth "
             "(Wave 47 B2 HIGH-1). Any local process can call /api/*. "
             "To enable auth: set REST_API_AUTH_ENABLED=true OR populate "
             "REST_API_KEY in settings.json. Localhost-only bind prevents "
-            "remote attack."
+            "remote attack.",
+            settings.REST_SERVER_PORT,
         )
     else:
-        logger.info("REST server starting on 127.0.0.1:5005 with auth=%s", _auth_mode)
+        logger.info("REST server starting on 127.0.0.1:%s with auth=%s", settings.REST_SERVER_PORT, _auth_mode)
 
     # F3 MED fix (W1674 / W1684): guard against EADDRINUSE.
     #
@@ -2160,14 +2161,15 @@ if __name__ == "__main__":
     # krab-ear-rest.err.log), Sentry captures the event if a DSN is wired,
     # and sys.exit(1) terminates cleanly so launchd does NOT tight-loop.
     try:
-        app.run(host="127.0.0.1", port=5005)
+        app.run(host="127.0.0.1", port=settings.REST_SERVER_PORT)
     except OSError as _e:
         if _e.errno == _errno.EADDRINUSE:
             logger.error(
-                "REST server failed to start: port 5005 is already in use "
+                "REST server failed to start: port %s is already in use "
                 "(EADDRINUSE). Another instance may be running. "
-                "Stop it first: lsof -ti :5005 | xargs kill -9",
-                extra={"errno": _e.errno, "port": 5005},
+                "Stop it first: lsof -ti :%s | xargs kill -9",
+                settings.REST_SERVER_PORT, settings.REST_SERVER_PORT,
+                extra={"errno": _e.errno, "port": settings.REST_SERVER_PORT},
             )
             try:
                 from backend.observability import capture_exception

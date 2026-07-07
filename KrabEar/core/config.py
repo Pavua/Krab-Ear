@@ -85,6 +85,12 @@ class Settings(BaseSettings):
     # Удалять записи старше N дней при авто-очистке.
     AUTO_CLEANUP_AFTER_DAYS: int = 365
 
+    # --- Event-мост IPC->REST (backend/event_bridge.py, spec 2026-07-07) -------
+    # True = EventBridge доставляет события из IPC-процесса в REST-процесс.
+    # Killswitch, читается ОДИН РАЗ при старте (как DISK_MONITOR_ENABLED) —
+    # НЕ live-toggle через set_settings.
+    EVENT_BRIDGE_ENABLED: bool = True
+
     model_config = SettingsConfigDict(
         env_prefix="KRAB_EAR_",
         env_file=(".env", str(_SECRETS_FILE)),
@@ -93,6 +99,11 @@ class Settings(BaseSettings):
 
     # Директории
     DATA_DIR: Path = Path.home() / ".krab_ear_data"
+
+    # --- REST server bind port (backend/rest_server.py) -------------------------
+    # ОДИН источник правды для порта REST — event_bridge.py читает то же самое
+    # значение, чтобы не дублировать литерал 5005 в двух модулях.
+    REST_SERVER_PORT: int = 5005
 
     # Модели STT
     MODEL_BALANCED: str = "mlx-community/whisper-large-v3-turbo"
