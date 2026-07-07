@@ -1299,6 +1299,12 @@ def transcribe_audio():
         - lang_hint: ISO 639-1 code (optional, auto-detected when omitted)
         - vocabulary: comma-separated hint words (optional)
         - chat_id + message_id: idempotency key pair (optional)
+        - persist_history: "true"/"1"/"yes" (case-insensitive) or "false"/"0"/"no"
+          (default: true). When false, the transcription is still performed and
+          returned in the response, but is NOT written to history.ndjson. Intended
+          for callers streaming ephemeral utterances (e.g. Voice Gateway's
+          "Разговор с AI" conversation turns) that should not pollute permanent
+          history. privacy_mode_enabled ALWAYS wins over this flag — see below.
 
     Returns 403 {"ok": false, "skipped": "privacy_mode"} when IPC privacy
     mode is active (privacy_mode_enabled=true in settings.json) — enforced by
@@ -1306,6 +1312,7 @@ def transcribe_audio():
     """
     chat_id = request.form.get("chat_id")
     message_id = request.form.get("message_id")
+    persist_history = request.form.get("persist_history", "true").strip().lower() in ("true", "1", "yes")
 
     # Идемпотентность
     if chat_id and message_id and store.is_idempotent(chat_id, message_id):
@@ -1421,8 +1428,11 @@ def transcribe_audio():
         text = result.get("text", "")
 
         # F3: Respect privacy_mode_enabled — skip history persistence when active.
+        # privacy_mode_enabled ALWAYS wins over persist_history (see CLAUDE.md
+        # "privacy_mode_enabled ВСЕГДА побеждает"): a caller cannot use
+        # persist_history=true to force a save while global privacy mode is on.
         _privacy_mode = _load_settings_field("privacy_mode_enabled", False)
-        if _privacy_mode:
+        if _privacy_mode or not persist_history:
             history_item_id = ""
         else:
             history_item = store.add_history_item(
