@@ -1821,7 +1821,7 @@ git commit -m "test(event-bridge): two-process e2e + chaos case (REST kill/recov
 **Файлы:**
 - Modify: `native/KrabEarAgent/Sources/KrabEarAgent/main+HealthMonitor.swift`
 
-- [ ] **Шаг 1: Удалить блок строк 113-122 (проверено чтением — точный текст ниже)**
+- [x] **Шаг 1: Удалить блок строк 113-122 (проверено чтением — точный текст ниже)**
 
 Найти и удалить ЭТОТ ТОЧНЫЙ блок (10 строк, включая начальную и конечную):
 
@@ -1850,7 +1850,7 @@ git commit -m "test(event-bridge): two-process e2e + chaos case (REST kill/recov
 123-129 в исходной нумерации) **НЕ трогать** — он уже правильный, просто теперь
 реально работает.
 
-- [ ] **Шаг 2: Сборка**
+- [x] **Шаг 2: Сборка**
 
 Run: `cd native/KrabEarAgent && swift build -c release 2>&1 | tail -5`
 Expected: `Build complete!`
@@ -1859,13 +1859,13 @@ Expected: `Build complete!`
 `Krab Ear.app/Contents/MacOS/KrabEarAgent`) — `SingleInstanceGuard` убьёт
 реальный работающий прод-агент пользователя. Допустимо: `codesign --verify`/`otool`.
 
-- [ ] **Шаг 3: Тесты не сломаны**
+- [x] **Шаг 3: Тесты не сломаны**
 
 Run: `cd native/KrabEarAgent && swift test 2>&1 | tail -10`
 Expected: 0 failures (ни один существующий тест не проверяет буквальный текст
 удаляемого доккомента).
 
-- [ ] **Шаг 4: Commit**
+- [x] **Шаг 4: Commit**
 
 ```bash
 git add native/KrabEarAgent/Sources/KrabEarAgent/main+HealthMonitor.swift
