@@ -55,11 +55,12 @@
 ### Волна 0 — Релизная колея v2.4.0 [в процессе 2026-07-07]
 Закрыть хвост Sparkle-волны и убедиться, что конвейер живой end-to-end.
 - [x] Мерж PR #1847 (`364b75c7`), деплой в прод (UUID 559D4E15), parity-коммит `efeccb6e`.
-- [ ] Смок-релиз: `gh workflow run release.yml -f version=2.4.0` → зелёный ран.
-- [ ] Верификация: `gh release view v2.4.0` (zip + appcast-item), `codesign --verify` распакованного,
-      appcast.xml парсится, EdDSA-подпись валидна.
-- [ ] Security-вычит release.yml финальным взглядом (Fable, пока доступна).
-- [ ] Чистка: worktree `sparkle-auto-update` + 2 осиротевших (`agent-ac14ded...`, `agent-ae50339...`).
+- [x] Смок-релиз: ран `28887347730` зелёный с ПЕРВОЙ живой попытки (guard/cert/sign/release/appcast).
+- [x] Верификация: v2.4.0 на guard-SHA `14e6bfbd`, 2 ассета, sha256 совпал, `codesign --deep --strict`
+      OK, Info.plist 2.4.0 + SUFeedURL, Sparkle.framework в бандле, appcast length=asset size.
+- [x] Security-вычит release.yml (Fable): 3 находки исправлены ДО прогона (`13578d5b`) —
+      clobber-ассеты при ре-ране, SHA-пин Sparkle-тулзов, diff-tree guard walker'а. + basename в .sha256.
+- [x] Чистка: 3 worktree + 3 ветки удалены.
 - [ ] Owner-assisted (опционально, не блокирует): живой Sparkle-диалог на копии .app ВНЕ репо
       (dev-guard блокирует Sparkle внутри репо — это by design).
 DoD: релиз v2.4.0 опубликован, конвейер воспроизводим одной командой, мусор убран.
@@ -233,3 +234,6 @@ S63 bilingual conversation mode, S64 inline correction loop, S65 import queue v2
 ### Журнал
 - 2026-07-07 — документ создан (Fable 5, финальная сессия доступности). Волна 0 в процессе:
   #1847 смёрджен, деплой UUID 559D4E15, parity `efeccb6e`, смок-релиз v2.4.0 запускается.
+- 2026-07-07 (вечер) — **Волна 0 закрыта** (кроме опционального owner-e2e): релиз v2.4.0 прошёл
+  end-to-end с первого прогона, артефакт верифицирован. Наперёд готовы: спека Волны 2 (event-мост),
+  скетч слияния (§3.1); черновики плана Волны 2 и спеки A1 — Sonnet-воркерами (гейт при приёмке).

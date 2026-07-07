@@ -125,7 +125,8 @@ jobs:
         run: |
           VERSION="${{ steps.ver.outputs.version }}"
           ditto -c -k --keepParent "dist/Krab Ear.app" "dist/Krab-Ear-v$VERSION.zip"
-          shasum -a 256 "dist/Krab-Ear-v$VERSION.zip" > "dist/Krab-Ear-v$VERSION.zip.sha256"
+          # basename в .sha256 — иначе `shasum -c` у скачавшего ищет dist/… и падает
+          ( cd dist && shasum -a 256 "Krab-Ear-v$VERSION.zip" > "Krab-Ear-v$VERSION.zip.sha256" )
 
       - name: Sparkle sign_update
         id: sparkle
