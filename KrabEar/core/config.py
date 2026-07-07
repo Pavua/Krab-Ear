@@ -107,14 +107,15 @@ class Settings(BaseSettings):
 
     # Сетевые настройки
     # "offline_strict" — локальный MLX only, без Remote STT fallback.
-    # "offline_default" / "online_preferred" — разрешают fallback на Voice Gateway STT.
-    # Дефолт strict: Voice Gateway STT endpoint пока не реализован, fallback давал 404.
+    # "offline_default" / "online_preferred" — разрешают fallback на Cloud STT
+    # (backend/cloud_stt.py: openai|deepgram|assemblyai, провайдер — см.
+    # DEFAULT_SETTINGS["cloud_stt_provider"]). Дефолт strict: это явный opt-in,
+    # т.к. отправляет аудио за пределы устройства (privacy_mode_enabled
+    # ВСЕГДА побеждает даже если NETWORK_MODE разрешает сеть — engine.py
+    # AudioEngine._transcribe_remote).
     NETWORK_MODE: str = "offline_strict"
     GATEWAY_URL: str = "http://127.0.0.1:18789/v1/chat/completions"
-    STT_GATEWAY_URL: str = "http://127.0.0.1:18789/v1/audio/transcriptions"
-    STT_GATEWAY_TIMEOUT_SEC: int = 60
     AI_MODEL: str = "google/gemini-2.0-flash"
-    STT_MODEL: str = "whisper-1"
 
     # Лимиты
     MAX_AUDIO_MB: int = 1000
@@ -1109,4 +1110,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "cloud_rewriter_base_url": "",       # напр. http://localhost:11434/v1
     "cloud_rewriter_custom_model": "",   # напр. qwen2.5:7b
     "cloud_rewriter_api_key": "",        # опционально (self-hosted часто без ключа)
+    # --- Cloud STT fallback provider (core/engine.py::_transcribe_remote) ---
+    # Используется ТОЛЬКО когда NETWORK_MODE != "offline_strict" И локальные
+    # STT-модели все недоступны (последнее звено fallback-цепочки). Провайдер:
+    # "openai" | "deepgram" | "assemblyai" — реализация в backend/cloud_stt.py,
+    # ключи — openai_api_key/deepgram_api_key/assemblyai_api_key.
+    # privacy_mode_enabled=True ВСЕГДА блокирует (см. _transcribe_remote).
+    "cloud_stt_provider": "openai",
 }
