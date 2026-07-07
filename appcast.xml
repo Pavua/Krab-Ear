@@ -5,5 +5,16 @@
     <link>https://raw.githubusercontent.com/Pavua/Krab-Ear/codex/krab-ear-v2/appcast.xml</link>
     <description>Krab Ear updates</description>
     <language>ru</language>
+  <item>
+    <title>Krab Ear 2.4.0</title>
+    <pubDate>Tue, 07 Jul 2026 17:57:48 +0000</pubDate>
+    <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+    <enclosure url="https://github.com/Pavua/Krab-Ear/releases/download/v2.4.0/Krab-Ear-v2.4.0.zip"
+               sparkle:version="2.4.0"
+               sparkle:shortVersionString="2.4.0"
+               length="3770700"
+               sparkle:edSignature="wfnU4GRpkOwGkubu3heW5bdvQgcBFlRDlghZBg2QEXaGsbLqMJEnKpnUYviDMp1wrQkqs7aTlMc49OaFx02qBg=="
+               type="application/octet-stream"/>
+  </item>
   </channel>
 </rss>
