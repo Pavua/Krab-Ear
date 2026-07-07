@@ -1518,7 +1518,7 @@ regression suite не падает, `audit_decorative_wiring.py --strict` и
 - Create: `scripts/e2e_event_bridge_smoke.py`
 - Create: `scripts/run_e2e_bridge_smoke.command`
 
-- [ ] **Шаг 1: `scripts/e2e_event_bridge_smoke.py` — клиент**
+- [x] **Шаг 1: `scripts/e2e_event_bridge_smoke.py` — клиент**
 
 Структура (паттерн `scripts/e2e_ipc_smoke.py::call()` для IPC, `requests` для SSE-чтения):
 
@@ -1661,7 +1661,7 @@ if __name__ == "__main__":
 `phase=normal` (слушать в отдельном треде, затем эмитить), что проще и надёжнее —
 **рекомендуется** вместо описанного выше внешнего разделения.
 
-- [ ] **Шаг 2: `scripts/run_e2e_bridge_smoke.command` — оркестратор**
+- [x] **Шаг 2: `scripts/run_e2e_bridge_smoke.command` — оркестратор**
 
 ```bash
 #!/bin/bash
@@ -1774,7 +1774,7 @@ exit "$rc"
 
 `chmod +x scripts/run_e2e_bridge_smoke.command`
 
-- [ ] **Шаг 3: Прогнать полный e2e**
+- [x] **Шаг 3: Прогнать полный e2e**
 
 Run: `bash scripts/run_e2e_bridge_smoke.command`
 Expected: `EVENT BRIDGE E2E: ALL GREEN` (все 3 фазы + ровно 1 WARN на переход в down).
@@ -1784,18 +1784,18 @@ Expected: `EVENT BRIDGE E2E: ALL GREEN` (все 3 фазы + ровно 1 WARN �
 и не считать это блокером самого по себе (DoD спеки измеряет ЭТУ величину как
 подтверждение работоспособности, а не как жёсткий SLA-гейт CI).
 
-- [ ] **Шаг 4: Регрессия — существующий e2e-смок не сломан**
+- [x] **Шаг 4: Регрессия — существующий e2e-смок не сломан**
 
 Run: `bash scripts/run_e2e_smokes.command`
 Expected: `ALL E2E SMOKES GREEN` (этот план не трогает `run_e2e_smokes.command`
 и не меняет поведение существующих 37+5 проверок).
 
-- [ ] **Шаг 5: flake8 на новом скрипте**
+- [x] **Шаг 5: flake8 на новом скрипте**
 
 Run: `.venv_krab_ear/bin/flake8 scripts/e2e_event_bridge_smoke.py --max-line-length=150`
 Expected: пусто.
 
-- [ ] **Шаг 6: Commit**
+- [x] **Шаг 6: Commit**
 
 ```bash
 git add scripts/e2e_event_bridge_smoke.py scripts/run_e2e_bridge_smoke.command
