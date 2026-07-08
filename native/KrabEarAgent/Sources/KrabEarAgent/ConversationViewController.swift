@@ -91,6 +91,9 @@ final class ConversationViewController: NSViewController {
     let langHintSelector    = NSPopUpButton(frame: .zero, pullsDown: false)
     let engineSelector      = NSPopUpButton(frame: .zero, pullsDown: false)
     let brainSelector       = NSPopUpButton(frame: .zero, pullsDown: false)
+    let brainModeControl    = NSSegmentedControl(labels: ["Быстро", "Краб", "Авто"], trackingMode: .selectOne, target: nil, action: nil)
+    let setBrainModeDefault = ThemeSecondaryButton(title: "Сделать дефолтом", target: nil, action: nil)
+    let brainModeHintLabel  = NSTextField(labelWithString: "")
     let settingsDisclosure  = NSButton(checkboxWithTitle: "Настройки", target: nil, action: nil)
 
     // MARK: Internal
@@ -119,6 +122,8 @@ final class ConversationViewController: NSViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         buildUI()
+        let savedIdx = ConversationViewController.brainModeSegmentValues.firstIndex(of: config.brainMode) ?? 2
+        brainModeControl.selectedSegment = savedIdx
         applyState(.idle)
     }
 

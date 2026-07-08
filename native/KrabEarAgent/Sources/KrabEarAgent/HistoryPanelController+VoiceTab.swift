@@ -26,12 +26,17 @@ extension HistoryPanelController {
     /// Вызывается из HistoryPanelController.setupUI() после существующих трёх табов.
     func setupConversationTab(contentView voiceContentView: NSView) {
         let settings = settingsProvider()
+        let httpBase = settings.voiceGatewayURL
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let config = ConversationConfig(
-            wsURLString: buildConversationWSURL(from: settings),
+            wsURLString:  buildConversationWSURL(from: settings),
             apiKey:       settings.voiceGatewayAPIKey,
             languageHint: "auto",
             engine:       "auto",
-            brain:        "auto"
+            brain:        "auto",
+            brainMode:    ConversationViewController.savedBrainMode,
+            httpBaseURLString: httpBase
         )
         let vc = ConversationViewController(config: config)
         conversationVC = vc

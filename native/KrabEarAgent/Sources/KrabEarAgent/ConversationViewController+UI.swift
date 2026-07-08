@@ -155,6 +155,28 @@ extension ConversationViewController {
         controlsCard.contentStackView.addArrangedSubview(controlsRow)
         root.addArrangedSubview(controlsCard)
 
+        // --- Brain mode row (Волна 3b) ---
+        let brainModeCard = makeCard(title: "Мозг разговора")
+        let brainModeRow  = hStack()
+
+        brainModeControl.target = self
+        brainModeControl.action = #selector(onBrainModeSegmentChanged)
+        brainModeRow.addArrangedSubview(brainModeControl)
+
+        setBrainModeDefault.target = self
+        setBrainModeDefault.action = #selector(onSetBrainModeDefaultTapped)
+        setBrainModeDefault.heightAnchor.constraint(equalToConstant: 28).isActive = true
+        brainModeRow.addArrangedSubview(setBrainModeDefault)
+        brainModeRow.addArrangedSubview(NSView()) // spacer
+
+        brainModeCard.contentStackView.addArrangedSubview(brainModeRow)
+
+        styleLabel(brainModeHintLabel, font: KrabEarTheme.Typography.caption)
+        brainModeHintLabel.textColor = KrabEarTheme.Colors.textSecondary
+        brainModeCard.contentStackView.addArrangedSubview(brainModeHintLabel)
+
+        root.addArrangedSubview(brainModeCard)
+
         // --- Settings drawer ---
         let settingsCard = makeCard()
         let disclosureRow = hStack()
@@ -224,7 +246,7 @@ extension ConversationViewController {
 
         // Brain row
         let brainRow = hStack()
-        let brainLabel = NSTextField(labelWithString: "Мозг:")
+        let brainLabel = NSTextField(labelWithString: "LLM-модель:")
         styleLabel(brainLabel, font: KrabEarTheme.Typography.body)
         brainLabel.textColor = KrabEarTheme.Colors.textSecondary
         brainLabel.widthAnchor.constraint(equalToConstant: 120).isActive = true

@@ -29,8 +29,17 @@ struct ConversationConfig {
     /// Движок AI: "auto" | "moshi" | "seamless".
     var engine: String
 
-    /// LLM-мозг: "auto" | "qwen3-4b" | "llama-3.2-3b".
+    /// LLM-мозг (конкретная модель): "auto" | "qwen3-4b" | "llama-3.2-3b".
     var brain: String
+
+    /// Режим приоритета мозга (Волна 3b): "fast" | "krab" | "auto".
+    /// В отличие от `brain`, всегда передаётся в WS query-param `brain_mode`
+    /// (даже при значении "auto") — контракт с Voice Gateway требует явности.
+    var brainMode: String = "auto"
+
+    /// HTTP-база Voice Gateway (без ws-схемы), например "http://127.0.0.1:8090".
+    /// Используется для не-WS запросов (напр. PUT /v1/settings/conversation).
+    var httpBaseURLString: String = "http://127.0.0.1:8090"
 
     static let `default` = ConversationConfig(
         wsURLString:  "ws://127.0.0.1:8090/v1/conversation",
