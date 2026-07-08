@@ -41,6 +41,13 @@ _THRESHOLD_MAX: float = 1.0
 # Таймаут загрузки модели OWW (секунды) — F4 download timeout guard
 _MODEL_LOAD_TIMEOUT_SEC: float = 30.0
 
+# Circuit breaker для повторных ошибок открытия микрофона (KRAB-EAR-BACKEND-1J):
+# без этого Swift WakeWordPoller self-heal (restartMinGapSec=10s) бесконечно
+# респавнит поток каждые ~10s, если sd.InputStream() падает синхронно
+# (мик занят/недоступен) — 2376 событий Sentry за 7 часов.
+_MAX_CONSECUTIVE_STREAM_FAILURES: int = 3
+_STREAM_FAILURE_COOLDOWN_SEC: float = 60.0
+
 
 class OpenWakeWordAdapter:
     """Адаптер openWakeWord для Krab Ear.
@@ -70,6 +77,10 @@ class OpenWakeWordAdapter:
         self._oww_available = self._check_lib_available()
         # F2: callable to read runtime settings (e.g. privacy_mode_enabled)
         self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
+        # KRAB-EAR-BACKEND-1J: circuit breaker state for repeated immediate
+        # sd.InputStream() open failures — protected by self._lock.
+        self._consecutive_stream_failures: int = 0
+        self._stream_failure_cooldown_until: float = 0.0
 
     # ------------------------------------------------------------------
     # Проверка наличия библиотеки
@@ -137,6 +148,20 @@ class OpenWakeWordAdapter:
             ValueError: Если модель не найдена.
         """
         with self._lock:
+            now = time.monotonic()
+            if now < self._stream_failure_cooldown_until:
+                remaining = self._stream_failure_cooldown_until - now
+                logger.warning(
+                    "OpenWakeWordAdapter: старт заблокирован — %d подряд ошибок "
+                    "открытия микрофона, охлаждение ещё %.0fs",
+                    self._consecutive_stream_failures,
+                    remaining,
+                )
+                raise RuntimeError(
+                    "Микрофон недоступен (повторные ошибки открытия потока), "
+                    "повторите позже"
+                )
+
             if self._thread is not None and self._thread.is_alive():
                 logger.warning(
                     "OpenWakeWordAdapter: уже запущен (модель %r), сначала stop()",
@@ -449,6 +474,9 @@ class OpenWakeWordAdapter:
                 dtype="int16",
                 blocksize=chunk_size,
             ) as stream:
+                with self._lock:
+                    self._consecutive_stream_failures = 0
+                    self._stream_failure_cooldown_until = 0.0
                 while not self._stop_event.is_set():
                     if self._privacy_blocked():
                         logger.info(
@@ -477,3 +505,15 @@ class OpenWakeWordAdapter:
 
         except Exception:
             logger.exception("OpenWakeWordAdapter._listen_loop: ошибка")
+            with self._lock:
+                self._consecutive_stream_failures += 1
+                if self._consecutive_stream_failures >= _MAX_CONSECUTIVE_STREAM_FAILURES:
+                    self._stream_failure_cooldown_until = (
+                        time.monotonic() + _STREAM_FAILURE_COOLDOWN_SEC
+                    )
+                    logger.warning(
+                        "OpenWakeWordAdapter: %d подряд ошибок открытия микрофона — "
+                        "охлаждение %.0fs перед следующей попыткой",
+                        self._consecutive_stream_failures,
+                        _STREAM_FAILURE_COOLDOWN_SEC,
+                    )
