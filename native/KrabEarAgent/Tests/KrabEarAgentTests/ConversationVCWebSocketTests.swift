@@ -215,7 +215,7 @@ final class ConversationVCURLBuildingTests: XCTestCase {
 
     // MARK: engine/brain/lang добавляются только если не "auto"
 
-    func test_buildWSRequest_autoValues_noQueryParams() {
+    func test_buildWSRequest_autoValues_onlyBrainModeParam() {
         let config = ConversationConfig(
             wsURLString: "ws://localhost:8090/v1/conversation",
             apiKey: "",
@@ -226,9 +226,11 @@ final class ConversationVCURLBuildingTests: XCTestCase {
         let vc = makeVC(config: config)
         let req = vc._buildWSRequest(for: config.wsURLString)
         XCTAssertNotNil(req)
-        let url = req!.url!
-        XCTAssertNil(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first,
-                     "При auto-значениях query params не должны добавляться")
+        let items = URLComponents(url: req!.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        XCTAssertEqual(items.count, 1,
+                       "При auto-значениях engine/brain/lang опускаются, но brain_mode остаётся")
+        XCTAssertEqual(items.first?.name, "brain_mode")
+        XCTAssertEqual(items.first?.value, "auto")
     }
 
     func test_buildWSRequest_nonAutoEngine_addsEngineParam() {
@@ -276,6 +278,39 @@ final class ConversationVCURLBuildingTests: XCTestCase {
         XCTAssertTrue(names.contains("engine"), "engine param должен присутствовать")
         XCTAssertTrue(names.contains("brain"),  "brain param должен присутствовать")
         XCTAssertTrue(names.contains("lang"),   "lang param должен присутствовать")
+    }
+
+    // MARK: brain_mode — ВСЕГДА присутствует (в отличие от engine/brain/lang)
+
+    func test_buildWSRequest_brainModeAuto_stillIncludesParam() {
+        var config = ConversationConfig.default
+        config.brainMode = "auto"
+        let vc = makeVC(config: config)
+        let req = vc._buildWSRequest(for: config.wsURLString)!
+        let items = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let brainModeParam = items.first(where: { $0.name == "brain_mode" })
+        XCTAssertEqual(brainModeParam?.value, "auto",
+                       "brain_mode должен передаваться явно, даже если равен auto")
+    }
+
+    func test_buildWSRequest_brainModeKrab_includesParam() {
+        var config = ConversationConfig.default
+        config.brainMode = "krab"
+        let vc = makeVC(config: config)
+        let req = vc._buildWSRequest(for: config.wsURLString)!
+        let items = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let brainModeParam = items.first(where: { $0.name == "brain_mode" })
+        XCTAssertEqual(brainModeParam?.value, "krab")
+    }
+
+    func test_buildWSRequest_brainModeFast_includesParam() {
+        var config = ConversationConfig.default
+        config.brainMode = "fast"
+        let vc = makeVC(config: config)
+        let req = vc._buildWSRequest(for: config.wsURLString)!
+        let items = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let brainModeParam = items.first(where: { $0.name == "brain_mode" })
+        XCTAssertEqual(brainModeParam?.value, "fast")
     }
 
     // MARK: Authorization header

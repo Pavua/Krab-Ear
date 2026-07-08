@@ -57,6 +57,9 @@ extension ConversationViewController {
             if config.engine != "auto" { items.append(URLQueryItem(name: "engine", value: config.engine)) }
             if config.brain  != "auto" { items.append(URLQueryItem(name: "brain",  value: config.brain))  }
             if config.languageHint != "auto" { items.append(URLQueryItem(name: "lang", value: config.languageHint)) }
+            // brain_mode (Волна 3b) — ВСЕГДА передаём явно, даже "auto":
+            // Voice Gateway полагается на явный сигнал от клиента, не на умолчание сервера.
+            items.append(URLQueryItem(name: "brain_mode", value: config.brainMode))
             if !items.isEmpty {
                 components.queryItems = items
                 if let newURL = components.url {
@@ -194,6 +197,7 @@ extension ConversationViewController {
             if config.engine != "auto" { items.append(URLQueryItem(name: "engine", value: config.engine)) }
             if config.brain  != "auto" { items.append(URLQueryItem(name: "brain",  value: config.brain))  }
             if config.languageHint != "auto" { items.append(URLQueryItem(name: "lang", value: config.languageHint)) }
+            items.append(URLQueryItem(name: "brain_mode", value: config.brainMode))
             if !items.isEmpty {
                 components.queryItems = items
                 if let newURL = components.url { request.url = newURL }
