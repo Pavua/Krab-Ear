@@ -246,7 +246,7 @@ extension ConversationViewController {
 
         // Brain row
         let brainRow = hStack()
-        let brainLabel = NSTextField(labelWithString: "Мозг:")
+        let brainLabel = NSTextField(labelWithString: "LLM-модель:")
         styleLabel(brainLabel, font: KrabEarTheme.Typography.body)
         brainLabel.textColor = KrabEarTheme.Colors.textSecondary
         brainLabel.widthAnchor.constraint(equalToConstant: 120).isActive = true
