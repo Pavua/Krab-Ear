@@ -38,6 +38,20 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(config.brain, "qwen3-4b")
     }
 
+    func test_conversationConfig_defaultValues_includesBrainModeAndHttpBase() {
+        let config = ConversationConfig.default
+        XCTAssertEqual(config.brainMode, "auto")
+        XCTAssertEqual(config.httpBaseURLString, "http://127.0.0.1:8090")
+    }
+
+    func test_conversationConfig_customInit_brainModeAndHttpBase() {
+        var config = ConversationConfig.default
+        config.brainMode = "krab"
+        config.httpBaseURLString = "http://127.0.0.1:9090"
+        XCTAssertEqual(config.brainMode, "krab")
+        XCTAssertEqual(config.httpBaseURLString, "http://127.0.0.1:9090")
+    }
+
     // MARK: - AgentSettings.init(from payload:)
 
     func test_agentSettings_initFromPayload_happyPath() {
