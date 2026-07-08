@@ -441,7 +441,9 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         logger.info("PasteUndoService запущен (Cmd+Ctrl+Z). enabled=\(settings.pasteUndoEnabled)")
 
         // Streaming live paste: создаём контроллер, применяем начальный флаг из настроек.
-        streamingPasteController = StreamingPasteController(pasteService: pasteService)
+        streamingPasteController = StreamingPasteController(
+            pasteService: PasteServiceStreamingAdapter(pasteService: pasteService)
+        )
         streamingPasteController?.isEnabled = settings.streamingPasteEnabled
         logger.info("StreamingPasteController ready. enabled=\(settings.streamingPasteEnabled)")
 

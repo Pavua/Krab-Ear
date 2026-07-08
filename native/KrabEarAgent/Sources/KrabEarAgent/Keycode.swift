@@ -15,6 +15,9 @@ enum Keycode: UInt16 {
     case v = 9       // V key (used for Cmd+V paste)
     case escape = 53 // Escape key
 
+    // Editing keys
+    case delete = 51 // Backspace/Delete key (removes the character before the caret)
+
     // Modifier keys (virtual keyCodes)
     case leftOption = 58      // Left Option/Alt key
     case rightOption = 61     // Right Option/Alt key
