@@ -77,13 +77,17 @@ extension AgentAppDelegate {
                 let ok = result["ok"] as? Bool ?? false
                 let count = result["replaced_count"] as? Int ?? 0
                 let error = result["error"] as? String
+                let autoLearned = result["auto_learned"] as? Bool ?? false
 
                 if ok {
                     let noun = count == 1 ? "вхождение" : (count < 5 ? "вхождения" : "вхождений")
-                    self.showReplaceResult(
-                        success: true,
-                        message: "Заменено \(count) \(noun): «\(oldWord)» → «\(newWord)»."
-                    )
+                    var message = "Заменено \(count) \(noun): «\(oldWord)» → «\(newWord)»."
+                    if autoLearned {
+                        // Closed-loop STT auto-learn (backend/llm_ops_service.py) реально
+                        // добавил новое слово в stt_hotwords — сообщаем явно, а не молчим.
+                        message += " Слово «\(newWord)» выучено в словарь STT."
+                    }
+                    self.showReplaceResult(success: true, message: message)
                 } else {
                     let reason: String
                     switch error {
