@@ -51,7 +51,8 @@ extension ConversationViewController {
             showBrainModeHint("✗ Неверный адрес Voice Gateway")
             return
         }
-        Task {
+        Task { [weak self] in
+            guard let self else { return }
             do {
                 let (_, response) = try await URLSession.shared.data(for: request)
                 let ok = (response as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } ?? false
@@ -74,9 +75,11 @@ extension ConversationViewController {
         }
     }
 
-    // MARK: - DEBUG test hook
+    // MARK: - Request builder (shared by production + tests)
 
-    /// Строит PUT-запрос к Voice Gateway settings API без выполнения (для тестов).
+    /// Строит PUT-запрос к Voice Gateway settings API. Используется и продакшен-кодом
+    /// (onSetBrainModeDefaultTapped), и тестами напрямую — НЕ debug-only, не гейтить
+    /// #if DEBUG.
     func _buildSetDefaultRequest() -> URLRequest? {
         let base = config.httpBaseURLString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard !base.isEmpty, let url = URL(string: base + "/v1/settings/conversation") else {
