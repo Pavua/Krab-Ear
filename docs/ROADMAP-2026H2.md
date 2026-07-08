@@ -123,6 +123,20 @@ local LLM/Gemini/NVIDIA (решение VG, июнь 2026) — секцию "Voi
 поправить при следующей ревизии доков. Второстепенные Swift-баги (не исправлены, низкий приоритет):
 hotkey-тоггл «Разговор по двойному тапу» не переживает рестарт агента; захардкоженный
 `downlinkSampleRate=16000` в `ConversationViewController+Audio.swift:41`.
+
+**Krab Ear-сторона Волны 3b (brain_mode тоггл) ЗАКРЫТА 2026-07-08**: PR #1855 смёрджен (`107a43dc`),
+задеплоен, живой агент перезапущен (UUID 5BCED1D7). Спека —
+`docs/superpowers/specs/2026-07-08-conversation-brain-mode-design.md`, план — 7 задач
+subagent-driven (`docs/superpowers/plans/2026-07-08-conversation-brain-mode.md`), каждая с
+независимым spec-compliance + code-quality ревью (2 воркера на задачу), все находки закрыты
+(actor-isolation баг, naming-коллизия «Мозг»/«Мозг разговора», misleading DEBUG-hook label).
+Сегмент-тоггл Быстро/Краб/Авто + персистентность + «Сделать дефолтом» — 1104 теста, 0 фейлов.
+VG-сторона (settings API + timeout/fallback-логика) и Main-Krab-сторона (voice-style ответы,
+подтверждение доступа к памяти) — переданы в параллельные сессии владельца через
+`docs/design-briefs/2026-07-08-vg-conversation-brain-mode.md` и
+`docs/design-briefs/2026-07-08-main-krab-voice-mode.md`, статус на момент закрытия Krab Ear-части
+неизвестен. **Живой смок реального разговора в каждом из 3 режимов — не проведён**, требует
+голосового взаимодействия владельца И готовности VG-стороны; следующий шаг волны.
 - **3a — Русская wake-модель «Краб»** (S-M): обучение .onnx (openwakeword, Jupyter ~15 мин,
   инструкция в `wake_word_models/`; owner-assisted — нужен голос владельца для валидации),
   подключение через существующий `wake_word_status`-поллинг, бюджет ложных срабатываний
