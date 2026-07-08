@@ -90,6 +90,9 @@ extension ConversationViewController {
         var request = URLRequest(url: url)
         request.httpMethod = "PUT"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !config.apiKey.isEmpty {
+            request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+        }
         request.httpBody = try? JSONSerialization.data(withJSONObject: ["brain_mode": config.brainMode])
         return request
     }
