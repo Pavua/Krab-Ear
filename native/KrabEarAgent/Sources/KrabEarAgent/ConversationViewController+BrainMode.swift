@@ -18,19 +18,21 @@ extension ConversationViewController {
     /// Сегменты тоггла в порядке индекса: 0=fast, 1=krab, 2=auto. Единственный источник
     /// правды для маппинга индекс↔значение — используется и здесь, и в viewDidLoad()
     /// (ConversationViewController.swift) при восстановлении сохранённого выбора.
-    static let brainModeSegmentValues = ["fast", "krab", "auto"]
+    /// nonisolated: используется из nonisolated savedBrainMode/saveBrainMode ниже —
+    /// без этого Swift 6 strict concurrency отказывается компилировать этот доступ.
+    nonisolated static let brainModeSegmentValues = ["fast", "krab", "auto"]
 
     // MARK: - UserDefaults persistence (static — доступно до создания VC)
 
     /// Последний сохранённый выбор пользователя. "auto" если ключ не задан или
     /// содержит неизвестное значение.
-    static var savedBrainMode: String {
+    nonisolated static var savedBrainMode: String {
         let raw = UserDefaults.standard.string(forKey: kBrainModeUserDefaultsKey) ?? "auto"
         return brainModeSegmentValues.contains(raw) ? raw : "auto"
     }
 
     /// Сохранить выбор пользователя.
-    static func saveBrainMode(_ mode: String) {
+    nonisolated static func saveBrainMode(_ mode: String) {
         UserDefaults.standard.set(mode, forKey: kBrainModeUserDefaultsKey)
     }
 
