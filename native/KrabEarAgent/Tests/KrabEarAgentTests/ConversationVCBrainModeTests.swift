@@ -118,4 +118,25 @@ final class ConversationBrainModeSetDefaultRequestTests: XCTestCase {
         let vc = ConversationViewController(config: config)
         XCTAssertNil(vc._buildSetDefaultRequest())
     }
+
+    // MARK: Authorization header (живой e2e 2026-07-08 обнаружил: VG требует Bearer-токен
+    // на /v1/settings/conversation так же, как на WS-эндпоинте conversation; без этого
+    // заголовка запрос падает с 401 missing_auth_token на любом VG с настроенным api_key).
+
+    func test_buildSetDefaultRequest_withApiKey_setsAuthorizationHeader() {
+        var config = ConversationConfig.default
+        config.apiKey = "tok-secret"
+        let vc = ConversationViewController(config: config)
+        let req = vc._buildSetDefaultRequest()
+        XCTAssertEqual(req?.value(forHTTPHeaderField: "Authorization"), "Bearer tok-secret")
+    }
+
+    func test_buildSetDefaultRequest_emptyApiKey_noAuthorizationHeader() {
+        var config = ConversationConfig.default
+        config.apiKey = ""
+        let vc = ConversationViewController(config: config)
+        let req = vc._buildSetDefaultRequest()
+        XCTAssertNil(req?.value(forHTTPHeaderField: "Authorization"),
+                     "Пустой apiKey не должен добавлять заголовок Authorization")
+    }
 }
