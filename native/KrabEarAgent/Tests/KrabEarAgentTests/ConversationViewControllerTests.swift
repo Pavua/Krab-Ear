@@ -181,6 +181,21 @@ final class ConversationViewControllerTests: XCTestCase {
                        "transcriptView.string должен совпадать с transcriptBuffer")
     }
 
+    // MARK: - 6b. test_final_transcript_sets_thinking_state
+
+    /// sttPartial с isFinal=true должен перевести state в .thinking (не только добавить текст) —
+    /// это и есть визуальный сигнал «Думаю…» на время ожидания ответа мозга (Волна 3b §5).
+    func test_final_transcript_sets_thinking_state() {
+        vc.transcriptBuffer = ""
+        vc.isSessionActive = true
+        vc.conversationState = .listening
+
+        vc.handleDownlinkEvent(.sttPartial(text: "Который час?", lang: "ru", isFinal: true))
+
+        XCTAssertEqual(vc.conversationState, .thinking,
+                       "Финальный STT должен переводить state в .thinking (статус «Думает» на время ответа мозга)")
+    }
+
     // MARK: - 7. test_assistant_message_appended
 
     /// replyFinal → строка «AI: <text>» добавляется в буфер + state → .speaking.
