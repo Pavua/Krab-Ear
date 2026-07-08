@@ -29,6 +29,7 @@ from backend.openwakeword_adapter import (  # noqa: E402
     OpenWakeWordAdapter,
     _BUILTIN_MODELS,
     _CUSTOM_MODELS_DIR,
+    _MAX_CONSECUTIVE_STREAM_FAILURES,
 )
 
 
@@ -746,6 +747,131 @@ class TestListenLoopPredictArgType(unittest.TestCase):
             and all(issubclass(t, np.ndarray) for t in received_types),
             f"predict() must receive numpy.ndarray, got: {received_types}",
         )
+
+
+class _FakePortAudioError(Exception):
+    """Stand-in for ``sounddevice.PortAudioError`` — the code path doesn't
+    care about the exact exception type, only that opening the stream fails.
+    """
+
+
+class TestStreamFailureCircuitBreaker(unittest.TestCase):
+    """Regression test for KRAB-EAR-BACKEND-1J.
+
+    When ``sd.InputStream(...)`` fails to open (e.g. mic busy/unavailable),
+    the background thread used to just log-and-exit with no cooldown —
+    Swift's ``WakeWordPoller`` self-heal (rate-limited to once per 10s) would
+    then respawn the listener thread forever, producing an infinite loop of
+    immediate open-failures (2376 Sentry events over ~7 hours). This test
+    proves the in-adapter circuit breaker: after
+    ``_MAX_CONSECUTIVE_STREAM_FAILURES`` consecutive immediate failures,
+    ``start()`` must fail fast with ``RuntimeError`` instead of spawning yet
+    another doomed thread.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp()
+
+    @staticmethod
+    def _make_failing_stream_cm() -> MagicMock:
+        """Fake `sd.InputStream` context manager whose __enter__ always
+        raises, simulating a PortAudio open failure (mic busy/unavailable)."""
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(
+            side_effect=_FakePortAudioError(
+                "Error opening InputStream: Internal PortAudio error"
+            )
+        )
+        cm.__exit__ = MagicMock(return_value=False)
+        return cm
+
+    def test_consecutive_failures_open_the_circuit(self) -> None:
+        """N consecutive immediate stream-open failures arm the cooldown."""
+        adapter = OpenWakeWordAdapter(data_dir=self.tmp)
+        adapter._oww_available = True
+
+        with patch(
+            "sounddevice.InputStream",
+            return_value=self._make_failing_stream_cm(),
+        ):
+            for _ in range(_MAX_CONSECUTIVE_STREAM_FAILURES):
+                thread = threading.Thread(
+                    target=adapter._listen_loop,
+                    kwargs={
+                        "threshold": 0.5,
+                        "chunk_size": 1280,
+                        "sample_rate": 16000,
+                    },
+                    daemon=True,
+                )
+                thread.start()
+                thread.join(timeout=2.0)
+                self.assertFalse(thread.is_alive())
+
+        self.assertEqual(
+            adapter._consecutive_stream_failures,
+            _MAX_CONSECUTIVE_STREAM_FAILURES,
+        )
+        self.assertGreater(
+            adapter._stream_failure_cooldown_until, time.monotonic()
+        )
+
+    def test_start_raises_runtime_error_while_circuit_open(self) -> None:
+        """start() must fail fast (no new thread) while the cooldown is active."""
+        adapter = OpenWakeWordAdapter(data_dir=self.tmp)
+        adapter._oww_available = True
+        mock_oww = MagicMock()
+        adapter._load_model = MagicMock(return_value=mock_oww)
+
+        # Simulate the circuit already being open from prior failures.
+        adapter._consecutive_stream_failures = _MAX_CONSECUTIVE_STREAM_FAILURES
+        adapter._stream_failure_cooldown_until = time.monotonic() + 60.0
+
+        with self.assertRaises(RuntimeError):
+            adapter.start("alexa", lambda n, s: None)
+
+        self.assertIsNone(adapter._thread)
+
+    def test_successful_stream_open_resets_failure_counter(self) -> None:
+        """A clean stream-open resets the consecutive-failure counter to 0."""
+        adapter = OpenWakeWordAdapter(data_dir=self.tmp)
+        adapter._oww_available = True
+        mock_oww = MagicMock()
+        mock_oww.predict.return_value = {}
+        adapter._oww = mock_oww
+        # Pretend there were prior (non-tripping) failures.
+        adapter._consecutive_stream_failures = _MAX_CONSECUTIVE_STREAM_FAILURES - 1
+
+        with patch(
+            "sounddevice.InputStream",
+            return_value=TestListenLoopPredictArgType._make_stream_cm(
+                chunk_size=1280
+            ),
+        ):
+            thread = threading.Thread(
+                target=adapter._listen_loop,
+                kwargs={
+                    "threshold": 0.5,
+                    "chunk_size": 1280,
+                    "sample_rate": 16000,
+                },
+                daemon=True,
+            )
+            thread.start()
+            try:
+                # Give the loop a moment to enter the stream and reset state.
+                deadline = time.monotonic() + 2.0
+                while (
+                    adapter._consecutive_stream_failures != 0
+                    and time.monotonic() < deadline
+                ):
+                    time.sleep(0.01)
+            finally:
+                adapter._stop_event.set()
+                thread.join(timeout=2.0)
+
+        self.assertEqual(adapter._consecutive_stream_failures, 0)
+        self.assertEqual(adapter._stream_failure_cooldown_until, 0.0)
 
 
 if __name__ == "__main__":
