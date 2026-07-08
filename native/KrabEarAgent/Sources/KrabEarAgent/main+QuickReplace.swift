@@ -77,9 +77,9 @@ extension AgentAppDelegate {
                 let ok = result["ok"] as? Bool ?? false
                 let count = result["replaced_count"] as? Int ?? 0
                 let error = result["error"] as? String
-                let autoLearned = result["auto_learned"] as? Bool ?? false
 
                 if ok {
+                    let autoLearned = result["auto_learned"] as? Bool ?? false
                     let noun = count == 1 ? "вхождение" : (count < 5 ? "вхождения" : "вхождений")
                     var message = "Заменено \(count) \(noun): «\(oldWord)» → «\(newWord)»."
                     if autoLearned {
@@ -110,11 +110,15 @@ extension AgentAppDelegate {
     @MainActor
     private func showReplaceResult(success: Bool, message: String) {
         if success {
-            // Мигаем иконкой в menu bar вместо модального alert'а — ненавязчиво
+            // Показываем реальный текст результата в menu bar вместо статичного "✓" —
+            // тот же паттерн, что и main+Bookmarks.swift::showTemporaryBookmarkMessage,
+            // иначе auto-learn ("Слово «X» выучено в словарь STT.") виден только в логе,
+            // а не пользователю. Дольше 1.5с у Bookmarks (2.0с на короткий "📌 M:SS"),
+            // т.к. это предложение — нужно больше времени, чтобы прочитать.
             if let btn = statusItem?.button {
                 let original = btn.title
-                btn.title = "✓"
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                btn.title = message
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
                     btn.title = original
                 }
             }
