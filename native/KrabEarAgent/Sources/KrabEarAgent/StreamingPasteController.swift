@@ -40,6 +40,13 @@
    state НЕ продвигается — иначе внутренняя модель "что на экране" разошлась бы с
    реальностью, и следующая ревизия откатила бы неверное количество символов (в т.ч.
    чужой текст, который эта сессия никогда не вставляла).
+ - 🔴 Провал paste/delete продвигает ОТДЕЛЬНЫЙ `lastFailureAt` (НЕ `lastFlushAt`) — backoff-
+   таймер, гейтящий retry в maybeFlush И в performRevision (обе точки перевызываются на каждое
+   handlePartial, пока условие держится). Без этого разделения провал одной вставки замораживал
+   бы `lastFlushAt` навсегда → `elapsedEnough` всегда true → синхронный main-thread
+   `pasteService.pasteToFrontmostApp` (до 2.5с worst-case `waitForModifierRelease`) ретраился
+   бы на КАЖДОЕ последующее partial-событие до конца записи вместо соблюдения
+   `debounceIntervalSec` (review Important, 2026-07-09).
 
  Ограничения (известные артефакты):
  - Настоящий атомарный "один Cmd+Z отменяет вообще всё" в ЛЮБОМ стороннем macOS-приложении
@@ -164,6 +171,15 @@ final class StreamingPasteController {
     /// Момент последней фактической вставки чанка. nil = ещё не вставляли в этой сессии
     /// (первый доступный chunk вставляется без ожидания debounce).
     private var lastFlushAt: Date?
+
+    /// Момент последней НЕУДАЧНОЙ попытки paste/delete — ОТДЕЛЬНО от `lastFlushAt`
+    /// (который означает "последний РЕАЛЬНЫЙ успешный флаш" и используется для diff'а
+    /// committedText). Используется ТОЛЬКО для backoff: без него провал вставки замораживает
+    /// `lastFlushAt`, из-за чего `elapsedEnough` в maybeFlush навсегда остаётся true и КАЖДОЕ
+    /// следующее partial-событие ретраит синхронный main-thread `pasteService.pasteToFrontmostApp`
+    /// (waitForModifierRelease — до 2.5с worst-case) — шторм блокирующих попыток до конца
+    /// записи вместо соблюдения debounceIntervalSec (review Important, 2026-07-09).
+    private var lastFailureAt: Date?
 
     // MARK: - SSE connection state
 
@@ -350,6 +366,14 @@ final class StreamingPasteController {
         let tail = String(latestStable.dropFirst(committedText.count))
         guard !tail.isEmpty else { return }
 
+        // Backoff после провала: если предыдущая попытка вставки провалилась < debounceIntervalSec
+        // назад — не ретраим. Без этого guard'а lastFlushAt замирает на провале (Critical #2 fix
+        // намеренно НЕ продвигает его), elapsedEnough остаётся навсегда true, и КАЖДОЕ следующее
+        // partial-событие бьёт в синхронный main-thread paste — шторм retry (review Important, 2026-07-09).
+        if let lastFailureAt, now().timeIntervalSince(lastFailureAt) < debounceIntervalSec {
+            return
+        }
+
         let elapsedEnough: Bool
         if let lastFlushAt {
             elapsedEnough = now().timeIntervalSince(lastFlushAt) >= debounceIntervalSec
@@ -365,14 +389,17 @@ final class StreamingPasteController {
             // accessibility_not_granted) — экран, скорее всего, НЕ изменился. НЕ продвигаем
             // committedText/lastFlushAt, иначе следующая ревизия/флаш посчитает diff против
             // текста, которого физически нет на экране, и может откатить чужой контент.
-            // latestStable уже обновлён в handlePartial (последний известный кандидат от
-            // backend) — на следующем событии maybeFlush просто попробует снова с тем же
-            // (или бОльшим) хвостом относительно неизменённого committedText.
+            // lastFailureAt продвигаем — это backoff-таймер (см. guard выше), а НЕ "последний
+            // успешный флаш". latestStable уже обновлён в handlePartial (последний известный
+            // кандидат от backend) — после истечения backoff maybeFlush попробует снова с тем
+            // же (или бОльшим) хвостом относительно неизменённого committedText.
+            lastFailureAt = now()
             logger.warn("[StreamingPaste] Chunk paste failed, state НЕ продвинут: \(result.reason)")
             return
         }
         committedText = latestStable
         lastFlushAt = now()
+        lastFailureAt = nil
         didStreamThisRecording = true
         logger.info("[StreamingPaste] Chunk вставлен (debounce): len=\(tail.count), total committed=\(committedText.count)")
     }
@@ -401,7 +428,17 @@ final class StreamingPasteController {
     ///    (т.е. `common`) — именно это и фиксируем как новое state, новый (невставленный)
     ///    суффикс НЕ добавляем ни в committedText, ни в latestStable.
     ///  - оба прошли → state = correctedStable целиком, как и раньше.
+    ///
+    /// 🔴 Backoff (review Important, 2026-07-09): performRevision вызывается НАПРЯМУЮ из
+    /// handlePartial БЕЗ debounce-гейта — пока условие ревизии держится (committedText не
+    /// совпадает с новым stable), она перевызывалась бы на КАЖДОЕ последующее partial-событие.
+    /// Провал delete раньше НЕ продвигал ничего (включая lastFlushAt), поэтому без отдельного
+    /// backoff-таймера тот же "шторм синхронных retry" класс бага, что и в maybeFlush.
     private func performRevision(correctedStable: String) {
+        if let lastFailureAt, now().timeIntervalSince(lastFailureAt) < debounceIntervalSec {
+            return
+        }
+
         let common = longestCommonPrefix(committedText, correctedStable)
         let removeCount = committedText.count - common.count
         let newSuffix = String(correctedStable.dropFirst(common.count))
@@ -411,6 +448,9 @@ final class StreamingPasteController {
         if removeCount > 0 {
             let deleteResult = pasteService.deleteBackward(count: removeCount)
             guard deleteResult.ok else {
+                // Ничего реально не изменилось на экране — backoff-таймер, НЕ lastFlushAt
+                // (см. doc-комментарий lastFailureAt и guard в начале этого метода).
+                lastFailureAt = now()
                 logger.warn("[StreamingPaste] Revision delete failed, state НЕ продвинут: \(deleteResult.reason)")
                 return
             }
@@ -420,10 +460,12 @@ final class StreamingPasteController {
             let insertResult = appendChunk(newSuffix)
             guard insertResult.ok else {
                 // Delete (если был) уже реально прошёл — фиксируем экран как `common`,
-                // НЕ как полный correctedStable (новый хвост физически не вставлен).
+                // НЕ как полный correctedStable (новый хвост физически не вставлен). Реальное
+                // изменение экрана произошло → это lastFlushAt (успех), а не lastFailureAt.
                 committedText = common
                 latestStable = common
                 lastFlushAt = now()
+                lastFailureAt = nil
                 didStreamThisRecording = true
                 logger.warn("[StreamingPaste] Revision insert failed, откат зафиксирован без нового текста: \(insertResult.reason)")
                 return
@@ -433,6 +475,7 @@ final class StreamingPasteController {
         committedText = correctedStable
         latestStable = correctedStable
         lastFlushAt = now()
+        lastFailureAt = nil
         didStreamThisRecording = true
     }
 
@@ -494,5 +537,6 @@ final class StreamingPasteController {
         committedText = ""
         latestStable = ""
         lastFlushAt = nil
+        lastFailureAt = nil
     }
 }

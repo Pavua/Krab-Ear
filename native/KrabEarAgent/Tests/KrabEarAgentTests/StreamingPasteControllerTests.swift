@@ -16,6 +16,9 @@
     с авторитетным текстом из IPC-ответа — SSE realtime.final_transcript путь структурно
     недостижим в реальном recording-stop flow (SSE закрывается ДО того как backend успевает
     его эмиттировать внутри stop_recording).
+ 8. (review 2026-07-09, Important) провалившаяся вставка/откат НЕ ретраится на каждое
+    следующее partial-событие — backoff (lastFailureAt, отдельно от lastFlushAt) ограничивает
+    retry раз в debounceIntervalSec, и в maybeFlush, и в performRevision.
 
  Паттерн: FakeStreamingPasteTarget — protocol-based test double (StreamingPasteTarget),
  записывает вызовы без реальных keystroke side-effects (тот же паттерн, что
@@ -297,6 +300,69 @@ final class StreamingPasteControllerTests: XCTestCase {
             controller.didStreamThisRecording,
             "успешный delete — это уже реальное изменение экрана, должно считаться активностью"
         )
+    }
+
+    // MARK: - (g) Important review (2026-07-09): failed paste/delete backs off, doesn't retry-storm
+
+    /// Провал вставки в maybeFlush НЕ должен ретраиться на КАЖДОЕ следующее partial-событие —
+    /// только после того как пройдёт debounceIntervalSec с МОМЕНТА ПРОВАЛА (lastFailureAt),
+    /// а не безусловно (как было бы, если бы lastFlushAt просто оставался "старым" и
+    /// elapsedEnough был бы навсегда true). Без этого backoff'а провал вставки (напр.
+    /// Accessibility не выдан, фокус временно на панели самого Krab Ear) превращается в
+    /// шторм синхронных main-thread paste-попыток до конца диктовки.
+    func testFailedPasteDoesNotRetryBeforeBackoffIntervalElapsed() {
+        controller.handlePartial("Привет ")
+        controller.handlePartial("Привет мир ")
+        XCTAssertEqual(target.pasteCalls, ["Привет "], "baseline: первый чанк вставлен успешно")
+
+        fakeNow = fakeNow.addingTimeInterval(controller.debounceIntervalSec + 0.05)
+        target.pasteShouldFail = true
+        controller.handlePartial("Привет мир как ")
+        XCTAssertEqual(target.pasteCalls, ["Привет ", "мир "], "первая попытка произошла (и провалилась)")
+
+        // Следующее partial-событие приходит СРАЗУ (fakeNow НЕ продвинут) — до фикса
+        // lastFlushAt остался бы "старым" (из первого успешного флаша), elapsedEnough был бы
+        // навсегда true, и retry произошёл бы немедленно. С backoff'ом retry должен быть
+        // заблокирован до истечения debounceIntervalSec с момента ПРОВАЛА.
+        controller.handlePartial("Привет мир как дела ")
+        XCTAssertEqual(
+            target.pasteCalls.count, 2,
+            "провалившаяся попытка НЕ должна ретраиться раньше debounce-интервала от момента провала"
+        )
+
+        target.pasteShouldFail = false
+        fakeNow = fakeNow.addingTimeInterval(controller.debounceIntervalSec + 0.05)
+        controller.handlePartial("Привет мир как дела сегодня ")
+        XCTAssertEqual(
+            target.pasteCalls.count, 3,
+            "после истечения backoff-интервала retry обязан пройти"
+        )
+        XCTAssertEqual(target.pasteCalls.last, "мир как дела ")
+    }
+
+    /// Та же характеристика в performRevision (review отдельно отметил: delete-failure ветка
+    /// тоже не продвигала lastFlushAt, а сам performRevision вызывается БЕЗ debounce-гейта на
+    /// каждое handlePartial пока условие ревизии держится — без backoff'а провалившийся delete
+    /// ретраился бы синхронно на каждое последующее partial-событие.
+    func testFailedRevisionDeleteDoesNotRetryBeforeBackoffIntervalElapsed() {
+        commitPrivetMir() // committedText = "Привет мир " (11)
+
+        target.deleteShouldFail = true
+        controller.handlePartial("Привет там ")
+        XCTAssertEqual(target.deleteCalls, [4], "первая попытка отката произошла (и провалилась)")
+
+        // Немедленно следующее partial с тем же условием ревизии (fakeNow не продвинут) —
+        // backoff должен заблокировать retry до того, как performRevision вообще посчитает diff.
+        controller.handlePartial("Привет там ")
+        XCTAssertEqual(
+            target.deleteCalls, [4],
+            "повторная попытка отката НЕ должна была произойти раньше backoff-интервала"
+        )
+
+        target.deleteShouldFail = false
+        fakeNow = fakeNow.addingTimeInterval(controller.debounceIntervalSec + 0.05)
+        controller.handlePartial("Привет там ")
+        XCTAssertEqual(target.deleteCalls, [4, 4], "после истечения backoff-интервала retry должен пройти")
     }
 }
 
