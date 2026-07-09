@@ -284,6 +284,11 @@ final class ConversationViewController: NSViewController {
             stopConversation()
 
         case .error(let code, let message):
+            // Гонка со «Стоп»: conv.error может быть уже в полёте (receive-callback
+            // принял байты), когда юзер остановил сессию — Task исполняется ПОСЛЕ
+            // stopConversation(). Инвариант: юзерская остановка не озвучивается,
+            // UI не откатывается в .error после осознанного Стоп.
+            guard isSessionActive else { return }
             appendTranscriptLine("— Ошибка [\(code)]: \(message)")
             errorAnnouncer.announce(.serverError)
             conversationState = .error(message)

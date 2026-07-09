@@ -110,6 +110,21 @@ final class ConversationErrorAnnouncerWiringTests: XCTestCase {
         XCTAssertTrue(spoken.isEmpty, "штатная остановка пользователем не озвучивается")
     }
 
+    func test_convError_afterUserStop_notAnnounced_noErrorState() {
+        // Гонка: conv.error уже в полёте (receive-callback принял байты) в момент,
+        // когда юзер жмёт «Стоп» — Task из callback встаёт в очередь MainActor
+        // ПОСЛЕ stopConversation(). Инвариант спеки: юзерская остановка НЕ
+        // озвучивается никогда; UI не должен застрять в «Ошибка» вместо «Готов».
+        vc.isSessionActive = false  // stopConversation() уже отработал
+        vc.conversationState = .idle
+        vc.handleDownlinkEvent(.error(code: "conv.error", message: "boom"))
+        XCTAssertTrue(spoken.isEmpty, "in-flight conv.error после юзерского Стоп не озвучивается")
+        XCTAssertEqual(vc.conversationState, .idle,
+                       "состояние не должно откатиться в .error после юзерского Стоп")
+        XCTAssertFalse(vc.transcriptBuffer.contains("Ошибка"),
+                       "transcript не должен пополниться строкой ошибки после Стоп")
+    }
+
     func test_sourceContract_receiveLoopFailureBranch_callsClassifier() throws {
         // Receive-failure ветка в +WebSocket.swift обязана вызывать классификатор —
         // иначе озвучка «шлюз недоступен/связь потеряна» мертва в проде
@@ -117,6 +132,22 @@ final class ConversationErrorAnnouncerWiringTests: XCTestCase {
         let src = try String(contentsOf: Self.wsSwiftURL, encoding: .utf8)
         XCTAssertTrue(src.contains("classifyAndAnnounceWSFailure()"),
                       "startReceiveLoop failure-ветка должна вызывать classifyAndAnnounceWSFailure()")
+    }
+
+    func test_sourceContract_receiveLoopSuccessBranch_gatedByIsSessionActive() throws {
+        // .success-ветка receive-цикла обязана гейтиться isSessionActive симметрично
+        // .failure: без гейта in-flight событие, принятое в момент юзерского «Стоп»,
+        // диспатчится в handleDownlinkEvent уже после остановки сессии.
+        let src = try String(contentsOf: Self.wsSwiftURL, encoding: .utf8)
+        guard let successRange = src.range(of: "case .success(let message):"),
+              let failureRange = src.range(of: "case .failure(let error):"),
+              successRange.lowerBound < failureRange.lowerBound
+        else {
+            return XCTFail("Не нашли ветки .success/.failure в startReceiveLoop")
+        }
+        let successBranch = src[successRange.upperBound..<failureRange.lowerBound]
+        XCTAssertTrue(successBranch.contains("self.isSessionActive"),
+                      ".success-ветка receive-цикла должна гейтиться isSessionActive")
     }
 
     private static var wsSwiftURL: URL {

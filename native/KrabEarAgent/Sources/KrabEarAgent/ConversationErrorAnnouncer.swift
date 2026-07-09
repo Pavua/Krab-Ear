@@ -76,6 +76,8 @@ final class ConversationErrorAnnouncer {
             return
         }
         activePlayer = player
-        player.play()
+        if !player.play() {
+            AgentLogger.shared.info("[ErrorAnnouncer] AVAudioPlayer.play() вернул false — воспроизведение не стартовало (\(data.count) bytes)")
+        }
     }
 }

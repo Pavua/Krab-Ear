@@ -96,7 +96,10 @@ extension ConversationViewController {
             switch result {
             case .success(let message):
                 Task { @MainActor [weak self] in
-                    guard let self else { return }
+                    // isSessionActive-гейт симметрично .failure: in-flight сообщение,
+                    // принятое в момент юзерского «Стоп», не должно диспатчиться
+                    // после stopConversation() (слышимая «ошибка» после остановки).
+                    guard let self, self.isSessionActive else { return }
                     self.handleWSMessage(message)
                     // Планируем следующий receive — WebSocketTask не авто-повторяет.
                     self.startReceiveLoop()
