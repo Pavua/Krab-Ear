@@ -91,7 +91,11 @@ final class ConversationInterruptHandlingTests: XCTestCase {
         XCTAssertTrue(vc.transcriptBuffer.contains("— Прервано"))
     }
 
-    func test_serverConfirmation_cancelsFallback_noDoubleLine() {
+    /// Гонка «подтверждение ПЕРВЫМ»: сервер подтвердил мгновенно, ДО того как
+    /// fallback-таймер успел выстрелить — handleInterrupted снимает таймер,
+    /// строка одна. Обратный порядок (fallback первым, ЗАПОЗДАВШЕЕ подтверждение)
+    /// этот тест НЕ покрывает — см. test_lateServerConfirmation_afterFallback_isNoop.
+    func test_instantServerConfirmation_winsRace_noDoubleLine() {
         vc.interruptFallbackInterval = 0.05
         vc.conversationState = .speaking
         vc.interruptAI()
@@ -101,6 +105,32 @@ final class ConversationInterruptHandlingTests: XCTestCase {
         wait(for: [exp], timeout: 2.0)
         let occurrences = vc.transcriptBuffer.components(separatedBy: "— Прервано").count - 1
         XCTAssertEqual(occurrences, 1, "fallback не должен продублировать обработку")
+    }
+
+    /// Гонка «fallback ПЕРВЫМ»: сервер молчал дольше interruptFallbackInterval —
+    /// fallback уже применил прерывание локально (строка + .listening); ЗАПОЗДАВШЕЕ
+    /// conv.interrupted обязано стать no-op. Идемпотентность обеспечивает state-гард
+    /// в handleInterrupted (после fallback состояние .listening → повтор отсечён).
+    func test_lateServerConfirmation_afterFallback_isNoop() {
+        vc.interruptFallbackInterval = 0.05
+        vc.conversationState = .speaking
+        vc.interruptAI()
+
+        // Дать fallback-таймеру (0.05с) гарантированно выстрелить.
+        let exp = expectation(description: "fallback window elapsed")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { exp.fulfill() }
+        wait(for: [exp], timeout: 2.0)
+        XCTAssertEqual(vc.conversationState, .listening, "fallback должен был сработать")
+        var occurrences = vc.transcriptBuffer.components(separatedBy: "— Прервано").count - 1
+        XCTAssertEqual(occurrences, 1, "после fallback строка ровно одна")
+
+        // Запоздавшее серверное подтверждение — второй вход в handleInterrupted.
+        vc.handleDownlinkEvent(.interrupted(reason: "late"))
+
+        occurrences = vc.transcriptBuffer.components(separatedBy: "— Прервано").count - 1
+        XCTAssertEqual(occurrences, 1,
+                       "запоздавшее подтверждение не должно продублировать «— Прервано»")
+        XCTAssertEqual(vc.conversationState, .listening)
     }
 
     func test_flushDownlinkPlayback_nilPlayer_noCrash() {

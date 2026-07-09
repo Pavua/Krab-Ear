@@ -181,8 +181,15 @@ final class ConversationViewController: NSViewController {
 
     /// Единая точка обработки прерывания — из серверного conv.interrupted
     /// (голосовой barge-in ИЛИ подтверждение кнопки) и из локального fallback.
+    /// Идемпотентна по состоянию: прерывание осмысленно ТОЛЬКО пока ассистент
+    /// реально отвечает (.speaking/.thinking). После fallback состояние уже
+    /// .listening — запоздавшее серверное подтверждение (или двойное
+    /// conv.interrupted подряд) отсекается гардом, без дубля «— Прервано».
+    /// Голосовой barge-in от VG приходит только в compute/playback-фазах
+    /// (= клиентские .thinking/.speaking) — штатный путь гард не ломает.
     func handleInterrupted(reason: String) {
-        guard isSessionActive else { return }
+        guard isSessionActive,
+              conversationState == .speaking || conversationState == .thinking else { return }
         interruptFallbackTimer?.invalidate()
         interruptFallbackTimer = nil
         flushDownlinkPlayback()
