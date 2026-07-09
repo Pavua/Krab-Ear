@@ -261,3 +261,62 @@ final class LiveSubtitlesOverlayWave190Tests: XCTestCase {
         XCTAssertEqual(overlay._testEntryCount, 0, "clearAll должен обнулять все записи")
     }
 }
+
+// MARK: - Off-screen guard в restorePosition() (fix/livesubs-offscreen-guard)
+
+/// Портировано из RealtimeOverlayController.restoreSavedPosition() (M2, ~строки 757-782) /
+/// ConversationStatusOverlay.isOnScreen(_:) (Волна 3c): сохранённая позиция применяется,
+/// только если ≥80% frame пересекается с visibleFrame какого-нибудь ТЕКУЩЕГО экрана. Без
+/// этой проверки юзер, перетащивший HUD на второй монитор и затем отключивший его, теряет
+/// панель за экраном навсегда — restorePosition() применял UserDefaults безусловно.
+@MainActor
+final class LiveSubtitlesOverlayPositionGuardTests: XCTestCase {
+
+    private let positionKey = "KrabEar_LiveSubsHUDPosition"
+
+    override func tearDown() async throws {
+        UserDefaults.standard.removeObject(forKey: positionKey)
+        try await super.tearDown()
+    }
+
+    private func savePosition(x: CGFloat, y: CGFloat) {
+        let dict: [String: CGFloat] = ["x": x, "y": y]
+        guard let data = try? JSONSerialization.data(withJSONObject: dict),
+              let str = String(data: data, encoding: .utf8) else {
+            return XCTFail("не удалось сериализовать тестовую позицию")
+        }
+        UserDefaults.standard.set(str, forKey: positionKey)
+    }
+
+    /// Заведомо off-screen сохранённая позиция (например после отключения второго
+    /// монитора) НЕ должна применяться безусловно. Инвариант держится независимо от
+    /// headless-среды CI: (99999, 99999) не может пересекаться ни с одним реальным
+    /// экраном ≥80%, поэтому кандидат никогда не проходит guard — panel либо падает
+    /// на placeAtBottom() (есть NSScreen.main), либо остаётся на дефолтном contentRect
+    /// панели (экранов нет вовсе). Ни один из исходов не равен (99999, 99999).
+    func test_restorePosition_offScreen_doesNotApplyBogusOrigin() {
+        savePosition(x: 99999, y: 99999)
+
+        let overlay = LiveSubtitlesOverlay()
+
+        XCTAssertNotEqual(overlay._testPanelOrigin.x, 99999)
+        XCTAssertNotEqual(overlay._testPanelOrigin.y, 99999)
+    }
+
+    /// Позитивный кейс: позиция внутри видимой области реального экрана восстанавливается
+    /// как есть. Пропускается в headless-среде без NSScreen.main (нечего проверять).
+    func test_restorePosition_onScreen_appliesSavedOrigin() throws {
+        guard let screen = NSScreen.main else {
+            throw XCTSkip("нет NSScreen.main в этой среде — позитивный кейс непроверяем headless")
+        }
+        let vf = screen.visibleFrame
+        let x = vf.minX + 40
+        let y = vf.minY + 40
+        savePosition(x: x, y: y)
+
+        let overlay = LiveSubtitlesOverlay()
+
+        XCTAssertEqual(overlay._testPanelOrigin.x, x, accuracy: 0.5)
+        XCTAssertEqual(overlay._testPanelOrigin.y, y, accuracy: 0.5)
+    }
+}
