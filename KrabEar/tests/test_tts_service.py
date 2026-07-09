@@ -11,6 +11,7 @@ import sys
 import unittest
 import wave
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -503,24 +504,183 @@ class TorchHubTrustRepoTestCase(unittest.TestCase):
         )
 
 
-class SileroVoiceAllowlistTestCase(unittest.TestCase):
-    """W1215 F2: Silero voice must be validated against the v4 speaker allowlist."""
+# ── Silero v4 version-agnostic load/synthesis regression (fix/tts-silero-v4-api) ──
 
-    def _make_silero_tuple(self) -> tuple:
-        """Build a fake Silero tuple for injecting into TTSService."""
-        import io
-        import wave
+class SileroV4TwoTupleLoadTestCase(unittest.TestCase):
+    """Прод-баг (найден живым прогоном 2026-07-09; эталон фикса --
+    wake_word_models/train_krab.py::_load_silero_tts, commit e89e6e37):
+    _load_silero распаковывал результат torch.hub.load как ЛЕГАСИ 5-кортеж
+    ``(model, symbols, sample_rate, example_text, apply_tts)``. Дефолтный
+    TTS_SILERO_MODEL="v4_ru" (core/config.py) на современных пакетах
+    snakers4/silero-models возвращает 2-кортеж ``(model, example_text)`` --
+    синтез идёт МЕТОДОМ ``model.apply_tts(...)``. До фикса КАЖДАЯ загрузка
+    падала ``ValueError: not enough values to unpack (expected 5, got 2)``
+    внутри загрузочного треда (перехватывается, возвращает None) -- заявленный
+    primary RU TTS-движок был фактически мёртв, прод тихо деградировал на
+    macOS `say` без единого явного сообщения об ошибке в логах пользователя.
+    """
 
-        def fake_apply_tts(**kwargs):
-            import unittest.mock as um
-            tensor = um.MagicMock()
-            tensor.squeeze.return_value.cpu.return_value.numpy.return_value = __import__(
-                "array"
-            ).array("f", [0.0] * 100)
+    def _mock_torch_with_hub_result(self, hub_result: Any) -> MagicMock:
+        mock_torch = MagicMock()
+        mock_torch.device.return_value = "cpu"
+        mock_torch.hub.load.return_value = hub_result
+        return mock_torch
+
+    @patch("backend.tts_service.settings")
+    def test_two_tuple_hub_result_does_not_raise(self, mock_settings: MagicMock) -> None:
+        """Fail-before: 2-кортеж (как реальный v4_ru) ломал unpacking -> None."""
+        fake_model = MagicMock()
+        fake_model.to.return_value = fake_model
+        mock_torch = self._mock_torch_with_hub_result((fake_model, "example text"))
+
+        import backend.tts_service as tts_mod
+        with patch.dict("sys.modules", {"torch": mock_torch}):
+            result = tts_mod._load_silero("v4_ru")
+
+        self.assertIsNotNone(
+            result,
+            "_load_silero вернул None для валидного 2-кортежа v4_ru -- должен "
+            "успешно построить v4-контекст (было: ValueError not enough values "
+            "to unpack, expected 5, got 2, перехваченный внутри loader-треда)",
+        )
+
+    @patch("backend.tts_service.settings")
+    def test_two_tuple_hub_result_trust_repo_still_passed(self, mock_settings: MagicMock) -> None:
+        """W1215 F1 регрессия: version-agnostic ветка тоже обязана передавать trust_repo=True."""
+        fake_model = MagicMock()
+        fake_model.to.return_value = fake_model
+        mock_torch = self._mock_torch_with_hub_result((fake_model, "example text"))
+
+        import backend.tts_service as tts_mod
+        with patch.dict("sys.modules", {"torch": mock_torch}):
+            tts_mod._load_silero("v4_ru")
+
+        call_kwargs = mock_torch.hub.load.call_args
+        self.assertIsNotNone(call_kwargs)
+        kwargs = call_kwargs[1] if call_kwargs[1] else {}
+        self.assertTrue(kwargs.get("trust_repo") is True)
+
+    @patch("backend.tts_service.settings")
+    def test_five_tuple_legacy_hub_result_still_works(self, mock_settings: MagicMock) -> None:
+        """Регрессия: старые per-speaker пакеты (легаси 5-кортеж) не должны сломаться."""
+        fake_model = MagicMock()
+        fake_model.to.return_value = fake_model
+        hub_result = (fake_model, ["a", "b"], 22050, "example", MagicMock())
+        mock_torch = self._mock_torch_with_hub_result(hub_result)
+
+        import backend.tts_service as tts_mod
+        with patch.dict("sys.modules", {"torch": mock_torch}):
+            result = tts_mod._load_silero("v3_1_ru")
+
+        self.assertIsNotNone(result)
+
+
+class SileroV4SynthesisTestCase(unittest.TestCase):
+    """Синтез на v4-контексте (2-кортеж загрузки) должен вызывать МЕТОД
+    ``model.apply_tts(text=..., speaker=..., sample_rate=...)`` -- НЕ свободную
+    функцию 5-аргументного легаси apply_tts. Мирроит
+    wake_word_models/train_krab.py::_synthesize_one (v4-ветка)."""
+
+    @patch("backend.tts_service.settings")
+    def test_v4_synthesis_calls_model_apply_tts_method(self, mock_settings: MagicMock) -> None:
+        """model.apply_tts должен получить text=, speaker=, sample_rate= kwargs."""
+        import numpy as np
+
+        mock_settings.TTS_SILERO_VOICE = "baya"
+
+        captured_kwargs: list[dict] = []
+
+        def fake_model_apply_tts(**kwargs):
+            captured_kwargs.append(kwargs)
+            tensor = MagicMock()
+            tensor.squeeze.return_value.cpu.return_value.numpy.return_value = np.zeros(
+                100, dtype=np.float32
+            )
             return tensor
 
         fake_model = MagicMock()
-        return (fake_model, [], 22050, "", fake_apply_tts, "cpu")
+        fake_model.apply_tts.side_effect = fake_model_apply_tts
+
+        svc = TTSService()
+        svc._silero_attempted = True
+        svc._silero = {"api": "v4", "model": fake_model, "sample_rate": 24000, "device": "cpu"}
+
+        result = svc._synthesize_silero("Привет", voice="baya")
+
+        self.assertTrue(len(captured_kwargs) > 0, "model.apply_tts не был вызван")
+        self.assertEqual(captured_kwargs[0].get("speaker"), "baya")
+        self.assertEqual(captured_kwargs[0].get("sample_rate"), 24000)
+        self.assertEqual(captured_kwargs[0].get("text"), "Привет")
+        self.assertIsNotNone(result)
+
+    @patch("backend.tts_service.settings")
+    def test_v4_synthesis_returns_wav_with_correct_sample_rate(
+        self, mock_settings: MagicMock
+    ) -> None:
+        """WAV-заголовок должен нести реальный sample_rate v4-контекста (24000)."""
+        import numpy as np
+
+        mock_settings.TTS_SILERO_VOICE = "baya"
+
+        def fake_model_apply_tts(**kwargs):
+            tensor = MagicMock()
+            tensor.squeeze.return_value.cpu.return_value.numpy.return_value = np.zeros(
+                100, dtype=np.float32
+            )
+            return tensor
+
+        fake_model = MagicMock()
+        fake_model.apply_tts.side_effect = fake_model_apply_tts
+
+        svc = TTSService()
+        svc._silero_attempted = True
+        svc._silero = {"api": "v4", "model": fake_model, "sample_rate": 24000, "device": "cpu"}
+
+        result = svc._synthesize_silero("Тест", voice="baya")
+
+        self.assertIsNotNone(result)
+        with wave.open(io.BytesIO(result), "rb") as wf:
+            self.assertEqual(wf.getframerate(), 24000)
+
+    @patch("backend.tts_service.settings")
+    def test_v4_synthesis_validates_voice_allowlist(self, mock_settings: MagicMock) -> None:
+        """W1215 F2 должен сохраняться и на v4-ветке: неизвестный голос -> 'xenia'."""
+        import numpy as np
+
+        mock_settings.TTS_SILERO_VOICE = "baya"
+
+        captured_kwargs: list[dict] = []
+
+        def fake_model_apply_tts(**kwargs):
+            captured_kwargs.append(kwargs)
+            tensor = MagicMock()
+            tensor.squeeze.return_value.cpu.return_value.numpy.return_value = np.zeros(
+                100, dtype=np.float32
+            )
+            return tensor
+
+        fake_model = MagicMock()
+        fake_model.apply_tts.side_effect = fake_model_apply_tts
+
+        svc = TTSService()
+        svc._silero_attempted = True
+        svc._silero = {"api": "v4", "model": fake_model, "sample_rate": 24000, "device": "cpu"}
+
+        with patch("backend.tts_service.logger") as mock_logger:
+            svc._synthesize_silero("Привет", voice="totally_unknown_voice")
+
+        self.assertEqual(captured_kwargs[0].get("speaker"), "xenia")
+        mock_logger.warning.assert_called()
+
+
+class SileroVoiceAllowlistTestCase(unittest.TestCase):
+    """W1215 F2: Silero voice must be validated against the v4 speaker allowlist.
+
+    Uses the legacy dict-context shape (``api="legacy"``) to exercise the
+    free-function ``apply_tts(texts=, model=, sample_rate=, symbols=,
+    device=, speaker=)`` call signature -- see SileroV4SynthesisTestCase for
+    the equivalent v4 (``model.apply_tts`` method) coverage.
+    """
 
     @patch("backend.tts_service.settings")
     def test_invalid_silero_voice_rejected(self, mock_settings: MagicMock) -> None:
@@ -545,7 +705,10 @@ class SileroVoiceAllowlistTestCase(unittest.TestCase):
             return tensor
 
         fake_model = MagicMock()
-        svc._silero = (fake_model, [], 22050, "", fake_apply_tts, "cpu")
+        svc._silero = {
+            "api": "legacy", "model": fake_model, "symbols": [],
+            "sample_rate": 22050, "apply_tts": fake_apply_tts, "device": "cpu",
+        }
 
         with patch("backend.tts_service.logger") as mock_logger:
             result = svc._synthesize_silero("Hello", voice="totally_unknown_voice")
@@ -555,6 +718,7 @@ class SileroVoiceAllowlistTestCase(unittest.TestCase):
         self.assertEqual(captured_speaker[0], "xenia")
         # A warning must have been logged
         mock_logger.warning.assert_called()
+        self.assertIsNotNone(result)
 
     @patch("backend.tts_service.settings")
     def test_valid_silero_voice_accepted(self, mock_settings: MagicMock) -> None:
@@ -577,7 +741,10 @@ class SileroVoiceAllowlistTestCase(unittest.TestCase):
                 return tensor
 
             fake_model = MagicMock()
-            svc._silero = (fake_model, [], 22050, "", fake_apply_tts, "cpu")
+            svc._silero = {
+                "api": "legacy", "model": fake_model, "symbols": [],
+                "sample_rate": 22050, "apply_tts": fake_apply_tts, "device": "cpu",
+            }
 
             svc._synthesize_silero("Тест", voice=valid_voice)
 
@@ -613,7 +780,10 @@ class SileroTextLengthCapTestCase(unittest.TestCase):
             return tensor
 
         fake_model = MagicMock()
-        svc._silero = (fake_model, [], 22050, "", fake_apply_tts, "cpu")
+        svc._silero = {
+            "api": "legacy", "model": fake_model, "symbols": [],
+            "sample_rate": 22050, "apply_tts": fake_apply_tts, "device": "cpu",
+        }
 
         long_text = "а" * 6000  # 6000 chars > 5000 limit
         with patch("backend.tts_service.logger") as mock_logger:
@@ -625,6 +795,7 @@ class SileroTextLengthCapTestCase(unittest.TestCase):
         self.assertEqual(len(captured_texts[0][0]), 5000)
         # A warning must have been logged about truncation
         mock_logger.warning.assert_called()
+        self.assertIsNotNone(result)
 
 
 # ── W1739 security regression: say option-injection via text argument ─────────
