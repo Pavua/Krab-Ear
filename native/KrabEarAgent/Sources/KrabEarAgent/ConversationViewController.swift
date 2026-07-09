@@ -110,6 +110,11 @@ final class ConversationViewController: NSViewController {
     /// без инжекции — тихая text-only деградация.
     let errorAnnouncer = ConversationErrorAnnouncer()
 
+    /// Плавающий статус-HUD (Волна 3c). Создаётся лениво при старте сессии.
+    var statusOverlay: ConversationStatusOverlay?
+    /// Токены наблюдателей фокуса окна (живут до конца жизни VC — таб постоянный).
+    private var windowFocusObservers: [NSObjectProtocol] = []
+
     // MARK: - Init
 
     init(config: ConversationConfig) {
@@ -135,6 +140,17 @@ final class ConversationViewController: NSViewController {
         let savedIdx = ConversationViewController.brainModeSegmentValues.firstIndex(of: config.brainMode) ?? 2
         brainModeControl.selectedSegment = savedIdx
         applyState(.idle)
+
+        // Волна 3c: HUD показывается, когда окно теряет фокус во время сессии.
+        // VC живёт всю жизнь приложения (постоянный таб) — наблюдатели не снимаем.
+        let nc = NotificationCenter.default
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
+            windowFocusObservers.append(
+                nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                    Task { @MainActor in self?.updateOverlayVisibility() }
+                }
+            )
+        }
     }
 
     // MARK: - Public API (for PR 1.5: triggers — hotkey / wake word)
@@ -143,6 +159,8 @@ final class ConversationViewController: NSViewController {
     func startConversation() {
         guard !isSessionActive else { return }
         isSessionActive = true
+        ensureStatusOverlay()
+        updateOverlayVisibility()
         NotificationCenter.default.post(name: .krabConversationStarted, object: nil)
         conversationState = .connecting
         transcriptBuffer = ""
@@ -161,6 +179,7 @@ final class ConversationViewController: NSViewController {
         closeWebSocket()
         stopAudioCapture()
         conversationState = .idle
+        updateOverlayVisibility()
         NotificationCenter.default.post(name: .krabConversationStopped, object: nil)
     }
 
@@ -209,10 +228,37 @@ final class ConversationViewController: NSViewController {
         errorAnnouncer.announce(cls)
     }
 
+    // MARK: - Status overlay (Волна 3c)
+
+    /// Правило видимости HUD: сессия активна И окно не в фокусе.
+    static func shouldShowOverlay(sessionActive: Bool, windowIsKey: Bool) -> Bool {
+        sessionActive && !windowIsKey
+    }
+
+    /// Создать overlay при первом обращении и подвязать кнопку «Прервать».
+    func ensureStatusOverlay() {
+        guard statusOverlay == nil else { return }
+        let overlay = ConversationStatusOverlay()
+        overlay.onInterrupt = { [weak self] in self?.interruptAI() }
+        statusOverlay = overlay
+    }
+
+    /// Пересчитать видимость HUD (вызывается из start/stop, applyState и фокус-наблюдателей).
+    func updateOverlayVisibility() {
+        guard let overlay = statusOverlay else { return }
+        let windowIsKey = view.window?.isKeyWindow ?? false
+        if ConversationViewController.shouldShowOverlay(sessionActive: isSessionActive, windowIsKey: windowIsKey) {
+            if !overlay.isVisible { overlay.show() }
+        } else {
+            if overlay.isVisible { overlay.hide() }
+        }
+    }
+
     // MARK: - State application
 
     private func applyState(_ state: ConversationState) {
         statusLabel.stringValue = state.localizedLabel
+        statusOverlay?.update(state: state)
 
         switch state {
         case .idle, .error:

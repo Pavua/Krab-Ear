@@ -258,6 +258,7 @@ extension ConversationViewController {
         // Нормализация: RMS mic обычно очень мал; ×8 даёт приятную чувствительность.
         let normalized = CGFloat(min(1.0, rms * 8.0))
         micLevelMeter?.updateLevel(normalized)
+        statusOverlay?.pushLevel(normalized)
     }
 
     // MARK: - Reset on stop
