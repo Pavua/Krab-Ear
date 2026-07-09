@@ -173,3 +173,102 @@ final class ConversationStatusOverlayPositionGuardTests: XCTestCase {
         XCTAssertEqual(overlay._testPanelOrigin.y, y, accuracy: 0.5)
     }
 }
+
+// MARK: - Укрепление 2 (code-review батч 3): явный willClose-наблюдатель overlay
+
+/// Defence-in-depth: спека называла наблюдатель `willClose` обязанностью ЭТОГО класса,
+/// но проводка полагалась только на транзитивный путь
+/// HistoryPanelController.windowWillClose() → conversationVC?.stopConversation().
+/// Эти тесты бьют по явному NSWindow.willCloseNotification-наблюдателю ВНУТРИ
+/// ConversationViewController — независимо от HistoryPanelController.
+@MainActor
+final class ConversationWindowWillCloseTests: XCTestCase {
+
+    private var vc: ConversationViewController!
+    private var window: NSWindow!
+
+    override func setUp() async throws {
+        try await super.setUp()
+        vc = ConversationViewController(config: .default)
+        vc.loadView()
+        vc.viewDidLoad()
+        // Реальное NSWindow вокруг view — иначе view.window остаётся nil и
+        // identity-проверка в хендлере (закрытое окно === наше) никогда не пройдёт.
+        window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = vc.view
+    }
+
+    override func tearDown() async throws {
+        vc.statusOverlay?.hide()
+        vc.interruptFallbackTimer?.invalidate()
+        vc = nil
+        window = nil
+        try await super.tearDown()
+    }
+
+    /// Хендлер зарегистрирован через `queue: .main` + `Task { @MainActor in … }`
+    /// (Swift 6: closure NotificationCenter не MainActor-isolated, вызов
+    /// self.stopConversation() требует хопа) — минимум ДВА асинхронных хопа после
+    /// post(), синхронный assert сразу после post() гонится с ними. Паттерн — тот же
+    /// asyncAfter+wait, что уже проверен в ConversationInterruptHandlingTests
+    /// (test_interruptAI_fallbackFires_whenNoServerConfirmation, Task 2).
+    private func drainMainQueue() {
+        let exp = expectation(description: "main queue drain")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { exp.fulfill() }
+        wait(for: [exp], timeout: 2.0)
+    }
+
+    func test_ourWindowWillClose_stopsSessionAndHidesOverlay() {
+        vc.isSessionActive = true
+        vc.ensureStatusOverlay()
+        vc.statusOverlay?.show()
+
+        NotificationCenter.default.post(name: NSWindow.willCloseNotification, object: window)
+        drainMainQueue()
+
+        XCTAssertFalse(vc.isSessionActive, "willClose ОБЯЗАН остановить активную сессию")
+        XCTAssertFalse(vc.statusOverlay?.isVisible ?? true, "overlay должен спрятаться при закрытии окна")
+    }
+
+    func test_foreignWindowWillClose_isIgnored() {
+        vc.isSessionActive = true
+        let foreignWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        NotificationCenter.default.post(name: NSWindow.willCloseNotification, object: foreignWindow)
+        drainMainQueue()
+        XCTAssertTrue(vc.isSessionActive, "закрытие ЧУЖОГО окна не должно останавливать сессию")
+    }
+
+    /// Регрессия «nil == nil»: у VC без window (view нигде не встроен) сравнение
+    /// closedWindow === self.view.window через force-cast двух optional был бы true,
+    /// если оба nil (Swift: nil === nil == true) — ложно триггеря stopConversation на
+    /// ЛЮБОЕ willClose где-либо в приложении. Хендлер обязан требовать non-nil С ОБЕИХ
+    /// сторон ДО identity-сравнения.
+    func test_nilObjectNotification_isIgnored_noFalseTrigger() {
+        let bareVC = ConversationViewController(config: .default)
+        bareVC.loadView()
+        bareVC.viewDidLoad()
+        bareVC.isSessionActive = true
+        NotificationCenter.default.post(name: NSWindow.willCloseNotification, object: nil)
+        drainMainQueue()
+        XCTAssertTrue(bareVC.isSessionActive,
+                      "notification без object/window не должна триггерить stopConversation")
+    }
+
+    func test_repeatedWillClose_isIdempotent_noCrash() {
+        vc.isSessionActive = true
+        NotificationCenter.default.post(name: NSWindow.willCloseNotification, object: window)
+        // Повторная доставка того же уведомления не должна падать — stopConversation
+        // идемпотентен (guard isSessionActive), дублирования эффекта нет.
+        NotificationCenter.default.post(name: NSWindow.willCloseNotification, object: window)
+        drainMainQueue()
+        XCTAssertFalse(vc.isSessionActive)
+    }
+}

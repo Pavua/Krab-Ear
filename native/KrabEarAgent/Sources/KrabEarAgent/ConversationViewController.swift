@@ -151,6 +151,29 @@ final class ConversationViewController: NSViewController {
                 }
             )
         }
+
+        // Укрепление code-review батча 3: явный willClose-наблюдатель — defence-in-depth,
+        // НАМЕРЕННО дублирующий транзитивный путь HistoryPanelController.windowWillClose()
+        // (~строка 2520) → conversationVC?.stopConversation(). Тот путь работает сегодня,
+        // но спека называла наблюдатель `willClose` обязанностью ИМЕННО этого класса, а
+        // транзитивный путь недокументирован и хрупок к будущему рефакторингу той строки.
+        // stopConversation() идемпотентен (guard isSessionActive) — если транзитивный путь
+        // сработал первым, повторный вызов отсюда безопасен, дублирования эффекта не будет.
+        windowFocusObservers.append(
+            nc.addObserver(forName: NSWindow.willCloseNotification, object: nil, queue: .main) { [weak self] note in
+                Task { @MainActor in
+                    guard let self else { return }
+                    // Обе стороны ОБЯЗАНЫ быть non-nil ДО identity-сравнения: у двух optional
+                    // nil === nil истинно в Swift, а значит закрытие ЛЮБОГО чужого окна в
+                    // приложении ложно триггернуло бы stopConversation, пока у этого VC ещё
+                    // нет собственного window (например до вставки view в иерархию).
+                    guard let ourWindow = self.view.window,
+                          let closedWindow = note.object as? NSWindow,
+                          closedWindow === ourWindow else { return }
+                    self.stopConversation()
+                }
+            }
+        )
     }
 
     // MARK: - Public API (for PR 1.5: triggers — hotkey / wake word)
