@@ -100,6 +100,21 @@ final class ConversationViewController: NSViewController {
     var transcriptBuffer = ""
     var isSessionActive  = false
 
+    /// Fallback-таймер ручного прерывания: если сервер не подтвердил conv.interrupted
+    /// за interruptFallbackInterval — применяем прерывание локально.
+    var interruptFallbackTimer: Timer?
+    /// Интервал fallback (инжектируется в тестах; прод — 2с).
+    var interruptFallbackInterval: TimeInterval = 2.0
+
+    /// Локальная озвучка ошибок (Волна 3c). Реальный speak инжектится из +VoiceTab;
+    /// без инжекции — тихая text-only деградация.
+    let errorAnnouncer = ConversationErrorAnnouncer()
+
+    /// Плавающий статус-HUD (Волна 3c). Создаётся лениво при старте сессии.
+    var statusOverlay: ConversationStatusOverlay?
+    /// Токены наблюдателей фокуса окна (живут до конца жизни VC — таб постоянный).
+    private var windowFocusObservers: [NSObjectProtocol] = []
+
     // MARK: - Init
 
     init(config: ConversationConfig) {
@@ -125,6 +140,40 @@ final class ConversationViewController: NSViewController {
         let savedIdx = ConversationViewController.brainModeSegmentValues.firstIndex(of: config.brainMode) ?? 2
         brainModeControl.selectedSegment = savedIdx
         applyState(.idle)
+
+        // Волна 3c: HUD показывается, когда окно теряет фокус во время сессии.
+        // VC живёт всю жизнь приложения (постоянный таб) — наблюдатели не снимаем.
+        let nc = NotificationCenter.default
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
+            windowFocusObservers.append(
+                nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                    Task { @MainActor in self?.updateOverlayVisibility() }
+                }
+            )
+        }
+
+        // Укрепление code-review батча 3: явный willClose-наблюдатель — defence-in-depth,
+        // НАМЕРЕННО дублирующий транзитивный путь HistoryPanelController.windowWillClose()
+        // (~строка 2520) → conversationVC?.stopConversation(). Тот путь работает сегодня,
+        // но спека называла наблюдатель `willClose` обязанностью ИМЕННО этого класса, а
+        // транзитивный путь недокументирован и хрупок к будущему рефакторингу той строки.
+        // stopConversation() идемпотентен (guard isSessionActive) — если транзитивный путь
+        // сработал первым, повторный вызов отсюда безопасен, дублирования эффекта не будет.
+        windowFocusObservers.append(
+            nc.addObserver(forName: NSWindow.willCloseNotification, object: nil, queue: .main) { [weak self] note in
+                Task { @MainActor in
+                    guard let self else { return }
+                    // Обе стороны ОБЯЗАНЫ быть non-nil ДО identity-сравнения: у двух optional
+                    // nil === nil истинно в Swift, а значит закрытие ЛЮБОГО чужого окна в
+                    // приложении ложно триггернуло бы stopConversation, пока у этого VC ещё
+                    // нет собственного window (например до вставки view в иерархию).
+                    guard let ourWindow = self.view.window,
+                          let closedWindow = note.object as? NSWindow,
+                          closedWindow === ourWindow else { return }
+                    self.stopConversation()
+                }
+            }
+        )
     }
 
     // MARK: - Public API (for PR 1.5: triggers — hotkey / wake word)
@@ -133,6 +182,8 @@ final class ConversationViewController: NSViewController {
     func startConversation() {
         guard !isSessionActive else { return }
         isSessionActive = true
+        ensureStatusOverlay()
+        updateOverlayVisibility()
         NotificationCenter.default.post(name: .krabConversationStarted, object: nil)
         conversationState = .connecting
         transcriptBuffer = ""
@@ -145,24 +196,92 @@ final class ConversationViewController: NSViewController {
     func stopConversation() {
         guard isSessionActive else { return }
         isSessionActive = false
+        interruptFallbackTimer?.invalidate()
+        interruptFallbackTimer = nil
         sendControlMessage(.end)
         closeWebSocket()
         stopAudioCapture()
         conversationState = .idle
+        updateOverlayVisibility()
         NotificationCenter.default.post(name: .krabConversationStopped, object: nil)
     }
 
-    /// Прервать текущее TTS-воспроизведение AI. Вызывается из кнопки «Прервать AI».
+    /// Прервать текущее TTS-воспроизведение AI. Вызывается из кнопки «Прервать AI»
+    /// (окно и overlay). Состояние переключает НЕ сам — ждёт серверного
+    /// conv.interrupted (единая точка handleInterrupted); fallback через
+    /// interruptFallbackInterval, если подтверждение не пришло.
     func interruptAI() {
         guard isSessionActive else { return }
         sendControlMessage(.interrupt)
+        interruptFallbackTimer?.invalidate()
+        interruptFallbackTimer = Timer.scheduledTimer(
+            withTimeInterval: interruptFallbackInterval, repeats: false
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.isSessionActive else { return }
+                AgentLogger.shared.info("[ConversationVC] Interrupt: сервер не подтвердил за \(self.interruptFallbackInterval)s — локальный fallback")
+                self.handleInterrupted(reason: "local_fallback")
+            }
+        }
+    }
+
+    /// Единая точка обработки прерывания — из серверного conv.interrupted
+    /// (голосовой barge-in ИЛИ подтверждение кнопки) и из локального fallback.
+    /// Идемпотентна по состоянию: прерывание осмысленно ТОЛЬКО пока ассистент
+    /// реально отвечает (.speaking/.thinking). После fallback состояние уже
+    /// .listening — запоздавшее серверное подтверждение (или двойное
+    /// conv.interrupted подряд) отсекается гардом, без дубля «— Прервано».
+    /// Голосовой barge-in от VG приходит только в compute/playback-фазах
+    /// (= клиентские .thinking/.speaking) — штатный путь гард не ломает.
+    func handleInterrupted(reason: String) {
+        guard isSessionActive,
+              conversationState == .speaking || conversationState == .thinking else { return }
+        interruptFallbackTimer?.invalidate()
+        interruptFallbackTimer = nil
+        flushDownlinkPlayback()
+        appendTranscriptLine("— Прервано")
         conversationState = .listening
+    }
+
+    /// Классифицировать провал WS по текущему состоянию и озвучить.
+    /// .connecting = не смогли подключиться; иначе — обрыв посреди сессии.
+    func classifyAndAnnounceWSFailure() {
+        let cls: ConversationErrorAnnouncer.ErrorClass =
+            (conversationState == .connecting) ? .gatewayUnreachable : .connectionLost
+        errorAnnouncer.announce(cls)
+    }
+
+    // MARK: - Status overlay (Волна 3c)
+
+    /// Правило видимости HUD: сессия активна И окно не в фокусе.
+    static func shouldShowOverlay(sessionActive: Bool, windowIsKey: Bool) -> Bool {
+        sessionActive && !windowIsKey
+    }
+
+    /// Создать overlay при первом обращении и подвязать кнопку «Прервать».
+    func ensureStatusOverlay() {
+        guard statusOverlay == nil else { return }
+        let overlay = ConversationStatusOverlay()
+        overlay.onInterrupt = { [weak self] in self?.interruptAI() }
+        statusOverlay = overlay
+    }
+
+    /// Пересчитать видимость HUD (вызывается из start/stop, applyState и фокус-наблюдателей).
+    func updateOverlayVisibility() {
+        guard let overlay = statusOverlay else { return }
+        let windowIsKey = view.window?.isKeyWindow ?? false
+        if ConversationViewController.shouldShowOverlay(sessionActive: isSessionActive, windowIsKey: windowIsKey) {
+            if !overlay.isVisible { overlay.show() }
+        } else {
+            if overlay.isVisible { overlay.hide() }
+        }
     }
 
     // MARK: - State application
 
     private func applyState(_ state: ConversationState) {
         statusLabel.stringValue = state.localizedLabel
+        statusOverlay?.update(state: state)
 
         switch state {
         case .idle, .error:
@@ -234,13 +353,22 @@ final class ConversationViewController: NSViewController {
             stopConversation()
 
         case .error(let code, let message):
+            // Гонка со «Стоп»: conv.error может быть уже в полёте (receive-callback
+            // принял байты), когда юзер остановил сессию — Task исполняется ПОСЛЕ
+            // stopConversation(). Инвариант: юзерская остановка не озвучивается,
+            // UI не откатывается в .error после осознанного Стоп.
+            guard isSessionActive else { return }
             appendTranscriptLine("— Ошибка [\(code)]: \(message)")
+            errorAnnouncer.announce(.serverError)
             conversationState = .error(message)
             stopConversation()
 
+        case .interrupted(let reason):
+            AgentLogger.shared.info("[ConversationVC] conv.interrupted (\(reason))")
+            handleInterrupted(reason: reason)
+
         case .unknown(let type, _):
-            // Неизвестный тип события (conv.interrupted, conv.vad_*, conv.audio_chunk)
-            // — логируем, не падаем.
+            // Неизвестный тип события (conv.vad_*, conv.audio_chunk) — логируем, не падаем.
             AgentLogger.shared.info("[ConversationVC] Неизвестное событие: \(type)")
         }
     }

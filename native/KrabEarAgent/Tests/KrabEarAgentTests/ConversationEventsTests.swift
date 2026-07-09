@@ -245,12 +245,14 @@ final class ConversationEventsTests: XCTestCase {
         }
     }
 
-    func test_convInterrupted_returnsUnknown() {
+    func test_convInterrupted_returnsInterrupted() {
+        // Волна 3c: conv.interrupted больше не .unknown — типизированное событие
+        // с reason (см. ConversationInterruptedDecodeTests для полного покрытия).
         let event = decode(["type": "conv.interrupted"])
-        guard case .unknown(let type, _) = event else {
-            return XCTFail("Expected unknown for conv.interrupted")
+        guard case .interrupted(let reason) = event else {
+            return XCTFail("Expected .interrupted for conv.interrupted, got \(String(describing: event))")
         }
-        XCTAssertEqual(type, "conv.interrupted")
+        XCTAssertEqual(reason, "")
     }
 
     func test_convVadSpeech_returnsUnknown() {
