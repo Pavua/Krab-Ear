@@ -224,6 +224,22 @@ extension ConversationViewController {
         }
         player.scheduleBuffer(buf, completionHandler: nil)
     }
+
+    // MARK: - Interrupt support (Волна 3c)
+
+    /// Сбросить уже запланированные downlink-буферы (прерывание ответа).
+    /// AVAudioPlayerNode.stop() снимает все scheduled buffers; play() возвращает
+    /// узел в играющее состояние для следующих буферов. Engine и захват не трогаем —
+    /// сессия продолжается. Безопасно при nil (аудио не стартовало) и при
+    /// не-запущенном engine (play() на attached-node у остановленного engine
+    /// не вызывается — guard по isRunning).
+    func flushDownlinkPlayback() {
+        guard let player = audioHolder.playerNode else { return }
+        player.stop()
+        if audioHolder.engine?.isRunning == true {
+            player.play()
+        }
+    }
 }
 
 // MARK: - AudioHolder

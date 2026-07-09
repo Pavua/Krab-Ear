@@ -417,15 +417,22 @@ final class ConversationVCStateTransitionTests: XCTestCase {
         XCTAssertEqual(vc.conversationState, .idle)
     }
 
-    /// interruptAI при активной сессии переводит в .listening.
-    func test_interruptAI_whenActive_setsListening() {
+    /// interruptAI при активной сессии (Волна 3c): состояние сам НЕ переключает —
+    /// ждёт серверного conv.interrupted (единая точка handleInterrupted), только
+    /// шлёт control-команду и взводит fallback-таймер. Раньше переключал в .listening
+    /// синхронно — то поведение осознанно изменено (см. план 2026-07-09 Task 2).
+    /// Полное покрытие handleInterrupted/fallback-таймера: ConversationInterruptHandlingTests.
+    func test_interruptAI_whenActive_awaitsServerConfirmation() {
         let vc = makeVC()
         vc.isSessionActive = true
         vc.conversationState = .speaking
 
         vc.interruptAI()
 
-        XCTAssertEqual(vc.conversationState, .listening)
+        XCTAssertEqual(vc.conversationState, .speaking,
+                       "interruptAI больше не переключает state сам — ждёт conv.interrupted")
+        XCTAssertNotNil(vc.interruptFallbackTimer, "fallback-таймер должен быть взведён")
+        vc.interruptFallbackTimer?.invalidate()
     }
 
     /// sendAudioFrame при неактивной сессии не крашит (guard isSessionActive).

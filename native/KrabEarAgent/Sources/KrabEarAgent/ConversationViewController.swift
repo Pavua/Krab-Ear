@@ -100,6 +100,12 @@ final class ConversationViewController: NSViewController {
     var transcriptBuffer = ""
     var isSessionActive  = false
 
+    /// Fallback-таймер ручного прерывания: если сервер не подтвердил conv.interrupted
+    /// за interruptFallbackInterval — применяем прерывание локально.
+    var interruptFallbackTimer: Timer?
+    /// Интервал fallback (инжектируется в тестах; прод — 2с).
+    var interruptFallbackInterval: TimeInterval = 2.0
+
     // MARK: - Init
 
     init(config: ConversationConfig) {
@@ -145,6 +151,8 @@ final class ConversationViewController: NSViewController {
     func stopConversation() {
         guard isSessionActive else { return }
         isSessionActive = false
+        interruptFallbackTimer?.invalidate()
+        interruptFallbackTimer = nil
         sendControlMessage(.end)
         closeWebSocket()
         stopAudioCapture()
@@ -152,10 +160,33 @@ final class ConversationViewController: NSViewController {
         NotificationCenter.default.post(name: .krabConversationStopped, object: nil)
     }
 
-    /// Прервать текущее TTS-воспроизведение AI. Вызывается из кнопки «Прервать AI».
+    /// Прервать текущее TTS-воспроизведение AI. Вызывается из кнопки «Прервать AI»
+    /// (окно и overlay). Состояние переключает НЕ сам — ждёт серверного
+    /// conv.interrupted (единая точка handleInterrupted); fallback через
+    /// interruptFallbackInterval, если подтверждение не пришло.
     func interruptAI() {
         guard isSessionActive else { return }
         sendControlMessage(.interrupt)
+        interruptFallbackTimer?.invalidate()
+        interruptFallbackTimer = Timer.scheduledTimer(
+            withTimeInterval: interruptFallbackInterval, repeats: false
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.isSessionActive else { return }
+                AgentLogger.shared.info("[ConversationVC] Interrupt: сервер не подтвердил за \(self.interruptFallbackInterval)s — локальный fallback")
+                self.handleInterrupted(reason: "local_fallback")
+            }
+        }
+    }
+
+    /// Единая точка обработки прерывания — из серверного conv.interrupted
+    /// (голосовой barge-in ИЛИ подтверждение кнопки) и из локального fallback.
+    func handleInterrupted(reason: String) {
+        guard isSessionActive else { return }
+        interruptFallbackTimer?.invalidate()
+        interruptFallbackTimer = nil
+        flushDownlinkPlayback()
+        appendTranscriptLine("— Прервано")
         conversationState = .listening
     }
 
@@ -238,13 +269,12 @@ final class ConversationViewController: NSViewController {
             conversationState = .error(message)
             stopConversation()
 
-        case .interrupted:
-            // TODO(Волна 3c, Task 2): заменить на handleInterrupted(reason:).
-            break
+        case .interrupted(let reason):
+            AgentLogger.shared.info("[ConversationVC] conv.interrupted (\(reason))")
+            handleInterrupted(reason: reason)
 
         case .unknown(let type, _):
-            // Неизвестный тип события (conv.interrupted, conv.vad_*, conv.audio_chunk)
-            // — логируем, не падаем.
+            // Неизвестный тип события (conv.vad_*, conv.audio_chunk) — логируем, не падаем.
             AgentLogger.shared.info("[ConversationVC] Неизвестное событие: \(type)")
         }
     }
