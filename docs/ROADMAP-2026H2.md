@@ -149,9 +149,23 @@ Ear. Фикс PR #1858, доказан curl без токена (401) / с то�
   текущий стек VG `/v1/sessions/{id}/conversation` WS + qwen3-30b routing — что из этого живо,
   что дрейфануло (метод стыков-аудита, он в этом проекте окупался 53 находками). TTS-ответ через
   `tts_service` (Silero RU). Privacy: разговор не пишется в history без явного флага.
-- **3c — UX-полировка** (S-M): прерывание ответа голосом/клавишей, статусы в overlay (слушаю/думаю/говорю),
-  error-paths (мозг недоступен → честный голосовой отказ), автопауза wake-поллера в звонках/записи (есть) —
-  проверить взаимодействие с conversation-режимом.
+- **3c — UX-полировка** — **Krab Ear-сторона ЗАКРЫТА 2026-07-09** (PR #1861, сквош `2eceef37`; спека
+  `docs/superpowers/specs/2026-07-09-conversation-ux-polish-design.md`, план 8 задач, 4 батча subagent-driven,
+  каждый с отдельным code-quality ревью). (1) Barge-in: `conv.interrupted` → typed `.interrupted(reason:)`
+  (раньше — `.unknown`, молча логировалось, хвост аудио доигрывал); единая `handleInterrupted()` — flush
+  AVAudioPlayerNode-очереди, «— Прервано», → `.listening`, идемпотентный state-гард против позднего
+  серверного подтверждения после 2с-fallback. (2) Озвучка ошибок: `ConversationErrorAnnouncer` (3 класса,
+  дебаунс 30с per-class, TTS через IPC `synthesize_speech` off-main, privacy — только фиксированные фразы);
+  ревью поймало реальную гонку «conv.error в полёте vs юзерский Стоп» → `isSessionActive`-гейты на in-flight
+  события (инвариант «Стоп не озвучивается никогда» держится против обеих гонок). (3) `ConversationStatusOverlay`
+  — плавающий HUD (статус + mic level-meter + «Прервать»), виден когда окно не key; off-screen guard позиции
+  (порт ≥80%-паттерна RealtimeOverlayController) + явный willClose-наблюдатель (defence-in-depth к транзитивному
+  пути через `HistoryPanelController.windowWillClose`). (4) Source-contract пины проводки wake-поллер↔conversation.
+  Итог: 1164 теста / 0 фейлов (+42 за волну). Сиблинг-хвост закрыт следом: PR #1862 — тот же off-screen guard
+  в `LiveSubtitlesOverlay` (третий и последний overlay этого класса). VG-сторона (barge-in по VAD на сервере,
+  error-коды в `conv.error`) — по брифу `docs/design-briefs/2026-07-09-vg-conversation-ux-polish.md`, статус
+  за параллельной VG-сессией. Не сделано из исходной формулировки: прерывание ГОЛОСОМ (VAD barge-in) — это
+  VG-сторона; клавиша/кнопка — есть.
 DoD волны: сценарий «сказал „Краб, …“ — получил голосовой ответ мозга» работает end-to-end без рук,
 демонстрируем живым смоком. Релизы v2.7.x по подволнам.
 
