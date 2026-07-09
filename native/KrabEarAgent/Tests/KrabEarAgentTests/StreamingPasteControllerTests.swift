@@ -9,6 +9,13 @@
  4. Ревизия (final/partial переосмысливает уже вставленный диапазон) вызывает РЕАЛЬНУЮ
     замену — deleteBackward + (при наличии) новая вставка, а не silent skip.
  5. didStreamThisRecording корректно отражает факт вставки/отката.
+ 6. (review 2026-07-09, Critical #2) state (committedText/latestStable) НЕ продвигается
+    оптимистично, когда реальная paste/delete операция вернула ok == false.
+ 7. (review 2026-07-09, Critical #1, source-contract) handleTranscriptionResult
+    (main+PasteHandling.swift) реально вызывает streamingPasteController?.handleFinal(...)
+    с авторитетным текстом из IPC-ответа — SSE realtime.final_transcript путь структурно
+    недостижим в реальном recording-stop flow (SSE закрывается ДО того как backend успевает
+    его эмиттировать внутри stop_recording).
 
  Паттерн: FakeStreamingPasteTarget — protocol-based test double (StreamingPasteTarget),
  записывает вызовы без реальных keystroke side-effects (тот же паттерн, что
@@ -34,14 +41,24 @@ final class FakeStreamingPasteTarget: StreamingPasteTarget {
 
     private(set) var calls: [Call] = []
 
+    /// Тесты выставляют перед конкретным вызовом, чтобы симулировать провал paste/delete
+    /// (Critical #2 review: PasteAttemptResult.ok == false не должен продвигать state).
+    var pasteShouldFail = false
+    var deleteShouldFail = false
+    var failureReason = "simulated_failure"
+
     func pasteToFrontmostApp(_ text: String) -> PasteAttemptResult {
         calls.append(.paste(text))
-        return PasteAttemptResult(ok: true, reason: "ok")
+        return pasteShouldFail
+            ? PasteAttemptResult(ok: false, reason: failureReason)
+            : PasteAttemptResult(ok: true, reason: "ok")
     }
 
     func deleteBackward(count: Int) -> PasteAttemptResult {
         calls.append(.deleteBackward(count))
-        return PasteAttemptResult(ok: true, reason: "ok")
+        return deleteShouldFail
+            ? PasteAttemptResult(ok: false, reason: failureReason)
+            : PasteAttemptResult(ok: true, reason: "ok")
     }
 
     var pasteCalls: [String] {
@@ -207,5 +224,142 @@ final class StreamingPasteControllerTests: XCTestCase {
         controller.handlePartial("Привет ")
         XCTAssertEqual(target.pasteCalls.count, 1, "не должно быть новой вставки, если стабильный хвост не вырос")
         XCTAssertTrue(target.deleteCalls.isEmpty, "не должно быть и отката — это не ревизия, а просто отсутствие роста")
+    }
+
+    // MARK: - (f) Critical #2 review (2026-07-09): state does NOT advance on paste/delete failure
+
+    /// Провал вставки в maybeFlush НЕ должен продвигать committedText. Доказываем это
+    /// косвенно (committedText приватен): после провала следующая УСПЕШНАЯ попытка обязана
+    /// содержать ПОЛНЫЙ непроглоченный хвост (включая слово из провалившейся попытки), а не
+    /// только новый прирост — если бы committedText продвинулся оптимистично при провале,
+    /// retry содержал бы только "как ", а не "мир как ".
+    func testMaybeFlushDoesNotAdvanceStateOnPasteFailure() {
+        controller.handlePartial("Привет ")
+        controller.handlePartial("Привет мир ")
+        XCTAssertEqual(target.pasteCalls, ["Привет "], "baseline: первый чанк вставлен успешно")
+
+        fakeNow = fakeNow.addingTimeInterval(controller.debounceIntervalSec + 0.05)
+        target.pasteShouldFail = true
+        controller.handlePartial("Привет мир как ")
+        // Попытка ДОЛЖНА была произойти (записана), но провалиться.
+        XCTAssertEqual(target.pasteCalls, ["Привет ", "мир "], "попытка вставки произошла, хоть и провалилась")
+
+        target.pasteShouldFail = false
+        fakeNow = fakeNow.addingTimeInterval(controller.debounceIntervalSec + 0.05)
+        controller.handlePartial("Привет мир как дела ")
+        // Если бы committedText продвинулся при провале, здесь вставился бы только "дела ".
+        // Раз committedText остался "Привет " — retry содержит ПОЛНЫЙ хвост "мир как ".
+        XCTAssertEqual(
+            target.pasteCalls.last, "мир как ",
+            "после провала committedText НЕ должен был продвинуться — retry обязан содержать весь непроглоченный хвост"
+        )
+    }
+
+    /// Провал deleteBackward в ревизии НЕ должен приводить к попытке вставки исправленного
+    /// хвоста — экран, скорее всего, не тронут, и продолжать "вслепую" (вставлять новый текст
+    /// поверх неизвестного состояния) опасно.
+    func testRevisionDeleteFailureDoesNotAttemptInsertOrAdvanceActivity() {
+        commitPrivetMir()
+        controller.resetAfterFinalPaste()
+        XCTAssertFalse(controller.didStreamThisRecording)
+        let pasteCallsBeforeRevision = target.pasteCalls
+
+        target.deleteShouldFail = true
+        controller.handleFinal("Привет там сегодня")
+
+        XCTAssertEqual(target.deleteCalls, [4], "откат был затребован (хоть и провалился)")
+        XCTAssertEqual(
+            target.pasteCalls, pasteCallsBeforeRevision,
+            "insert НЕ должен был случиться — delete провалился, дальше в ревизии не идём"
+        )
+        XCTAssertFalse(
+            controller.didStreamThisRecording,
+            "провалившаяся ревизия (delete failed) НЕ должна выставлять флаг активности"
+        )
+    }
+
+    /// Delete в ревизии проходит успешно, но последующая вставка исправленного хвоста
+    /// проваливается. Delete — это уже реальное изменение экрана, поэтому попытка вставки
+    /// корректно происходит (не блокируется чем-то посторонним) и активность фиксируется.
+    func testRevisionInsertFailureAfterSuccessfulDeleteStillAttemptsInsertAndMarksActivity() {
+        commitPrivetMir()
+        controller.resetAfterFinalPaste()
+
+        target.pasteShouldFail = true
+        controller.handleFinal("Привет там сегодня")
+
+        XCTAssertEqual(target.deleteCalls, [4], "откат должен был реально пройти (deleteShouldFail не выставлен)")
+        XCTAssertEqual(
+            target.pasteCalls.last, "там сегодня",
+            "вставка исправленного хвоста должна была быть ПОПЫТАНА после успешного отката"
+        )
+        XCTAssertTrue(
+            controller.didStreamThisRecording,
+            "успешный delete — это уже реальное изменение экрана, должно считаться активностью"
+        )
+    }
+}
+
+// MARK: - Source contract (Critical #1 review, 2026-07-09) — handleTranscriptionResult
+// actually calls streamingPasteController?.handleFinal(...) with the authoritative IPC text.
+//
+// Root cause found in review of commit 29461a53: stopRecording() (main+HotkeyRecording.swift)
+// calls stopRealtimeOverlayPolling() -> recordingDidStop() -> stopSSE() SYNCHRONOUSLY and
+// BEFORE the IPC call to "stop_recording" is even sent. The backend only emits
+// realtime.final_transcript from INSIDE handle_stop_recording's processing of that same RPC —
+// i.e. strictly AFTER Swift already closed the SSE connection. So StreamingPasteController's
+// SSE case "realtime.final_transcript" handler is structurally unreachable in the real
+// recording-stop flow: the tail accumulated since the last debounce/sentence-boundary flush
+// would be silently lost, and since didStreamThisRecording was already true from earlier
+// chunks, performAutoPaste's fallback full-paste is skipped too — no safety net.
+//
+// Same "test-validates-the-hole" class of bug as setupErrorBus/setupHealthMonitor
+// (see MainErrorsWiringTests.swift / MainHealthMonitorWiringTests.swift): unit tests that
+// only exercise StreamingPasteController.handleFinal() in isolation (see tests above) stay
+// green whether or not it's ever actually CALLED from the real transcription-result flow.
+final class StreamingPasteFinalWiringSourceContractTests: XCTestCase {
+
+    func test_handleTranscriptionResult_calls_streamingPasteController_handleFinal_with_authoritative_text() throws {
+        let src = try String(contentsOf: Self.pasteHandlingSwiftURL, encoding: .utf8)
+        XCTAssertTrue(
+            src.contains("streamingPasteController?.handleFinal(cleanText)"),
+            "handleTranscriptionResult() must call streamingPasteController?.handleFinal(cleanText) " +
+            "with the authoritative IPC text — SSE realtime.final_transcript is structurally " +
+            "unreachable in the real stopRecording() flow (SSE closes before backend emits it)."
+        )
+    }
+
+    func test_handleFinal_call_is_gated_on_streamingPasteEnabled() throws {
+        let src = try String(contentsOf: Self.pasteHandlingSwiftURL, encoding: .utf8)
+        // Без гейта handleFinal("") никогда не вызовется вхолостую, а без гейта на
+        // streamingPasteEnabled — вставит ВЕСЬ текст напрямую (committedText начинается
+        // пустым), задваивая обычную (нестриминговую) полную вставку ниже по цепочке.
+        XCTAssertTrue(
+            src.contains("if settings.streamingPasteEnabled {\n            streamingPasteController?.handleFinal(cleanText)"),
+            "Вызов handleFinal должен быть гейтнут settings.streamingPasteEnabled — иначе при " +
+            "выключенном стриминге handleFinal вставит текст напрямую (committedText пуст) и " +
+            "задвоит обычную полную вставку в performAutoPaste."
+        )
+    }
+
+    /// Resolves native/KrabEarAgent/Sources/KrabEarAgent/main+PasteHandling.swift from the
+    /// test bundle, falling back to a #file-relative walk-up (same pattern as
+    /// MainHealthMonitorWiringTests.mainSwiftURL / SFSymbolVerificationTests).
+    private static var pasteHandlingSwiftURL: URL {
+        let bundleURL = Bundle(for: StreamingPasteFinalWiringSourceContractTests.self).bundleURL
+        var url = bundleURL
+        for _ in 0..<10 {
+            let candidate = url.appendingPathComponent("Sources/KrabEarAgent/main+PasteHandling.swift")
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+            url = url.deletingLastPathComponent()
+        }
+        let fileURL = URL(fileURLWithPath: #file)
+        return fileURL
+            .deletingLastPathComponent()  // KrabEarAgentTests
+            .deletingLastPathComponent()  // Tests
+            .deletingLastPathComponent()  // KrabEarAgent (package root)
+            .appendingPathComponent("Sources/KrabEarAgent/main+PasteHandling.swift")
     }
 }

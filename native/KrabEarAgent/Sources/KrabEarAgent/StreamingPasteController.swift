@@ -4,8 +4,18 @@
  Потоковая вставка текста по мере диктовки (opt-in, streaming_paste_enabled).
 
  Архитектура:
- - Подписывается на SSE /v1/events (realtime.partial_transcript + realtime.final_transcript),
-   используя тот же паттерн PartialSSEDelegate, что и RealtimeOverlayController+PartialSSE.swift.
+ - Подписывается на SSE /v1/events (realtime.partial_transcript + realtime.final_transcript)
+   для partial-событий, используя тот же паттерн PartialSSEDelegate, что и
+   RealtimeOverlayController+PartialSSE.swift.
+ - 🔴 Финализация сессии НЕ полагается на SSE realtime.final_transcript — этот путь
+   структурно недостижим в реальном recording-stop flow: `stopRecording()`
+   (main+HotkeyRecording.swift) вызывает `stopRealtimeOverlayPolling()` →
+   `recordingDidStop()` → `stopSSE()` СИНХРОННО и ДО IPC-вызова `stop_recording`, а backend
+   эмиттит `realtime.final_transcript` ТОЛЬКО ВНУТРИ обработки этого самого IPC-вызова
+   (recording_core_service.py, handle_stop_recording) — то есть строго ПОСЛЕ того как SSE
+   уже закрыт. Вместо этого `handleFinal()` вызывается НАПРЯМУЮ из `handleTranscriptionResult`
+   (main+PasteHandling.swift) с АВТОРИТЕТНЫМ текстом из результата IPC-ответа. Case
+   "realtime.final_transcript" в `handleSSEEvent` оставлен как безвредный defensive fallback.
  - Алгоритм stable-prefix commit с debounce-укрупнением чанков:
      1. На каждый partial P вычисляем longestCommonPrefix(lastPartial, P), затем откатываем
         к последней границе слова (не вставляем полуслова) → `stable`.
@@ -23,6 +33,13 @@
  - Каждый чанк вставляется через clipboard + Cmd+V (appendChunk → StreamingPasteTarget.pasteToFrontmostApp).
  - Если за текущую запись было вставлено/откачено ≥1 чанк, didStreamThisRecording = true.
    main+PasteHandling.swift читает это свойство и пропускает финальную полную вставку.
+ - 🔴 State (committedText/latestStable) продвигается ТОЛЬКО когда реальная paste/delete
+   операция вернула `ok == true` (maybeFlush/performRevision/handleFinal все проверяют
+   `PasteAttemptResult.ok` перед мутацией state). Если вставка/удаление провалились
+   (no_external_target/modifiers_stuck/accessibility_not_granted/event_post_failed),
+   state НЕ продвигается — иначе внутренняя модель "что на экране" разошлась бы с
+   реальностью, и следующая ревизия откатила бы неверное количество символов (в т.ч.
+   чужой текст, который эта сессия никогда не вставляла).
 
  Ограничения (известные артефакты):
  - Настоящий атомарный "один Cmd+Z отменяет вообще всё" в ЛЮБОМ стороннем macOS-приложении
@@ -31,6 +48,12 @@
  - Поведение (тайминг, курсор, ревизии) можно верифицировать только на реальном Mac с
    живой записью — unit-тесты покрывают debounce/revision-логику через инжектируемый
    StreamingPasteTarget + clock, но не реальный SSE latency/cursor position.
+ - `PasteServiceStreamingAdapter` всегда резолвит `targetPID: nil` (frontmost app заново на
+   каждый вызов) — если фокус сместится МЕЖДУ чанками одной стриминг-сессии, следующий
+   чанк/delete уйдёт в другое приложение. Обычный (нестримингового) путь вставки пиннит
+   target ОДИН раз через `resolvePreferredPasteTargetApp()`/`activateTargetForPaste()`
+   (main+PasteHandling.swift). Известное ограничение, НЕ исправлено в этой сессии —
+   см. review Important #3 (2026-07-09).
 */
 
 import AppKit
@@ -281,14 +304,30 @@ final class StreamingPasteController {
 
     /// Обрабатывает финальный transcript — вставляет оставшийся хвост (форсированно, без debounce),
     /// либо, если final тоже ревизует уже вставленное, выполняет полную замену диапазона.
+    ///
+    /// Вызывается напрямую из `handleTranscriptionResult` (main+PasteHandling.swift) с
+    /// АВТОРИТЕТНЫМ текстом из ответа IPC `stop_recording` — НЕ полагается на SSE
+    /// `realtime.final_transcript`: backend эмиттит это событие ВНУТРИ обработки самого
+    /// `stop_recording`, строго ПОСЛЕ того как `stopRecording()` уже закрыл SSE-соединение
+    /// (`stopRealtimeOverlayPolling()` вызывается синхронно ДО IPC-вызова, см.
+    /// `main+HotkeyRecording.swift`). Поэтому SSE-путь (case "realtime.final_transcript" в
+    /// `handleSSEEvent`) в реальном recording-stop flow структурно недостижим — оставлен как
+    /// безвредный defensive fallback на случай, если SSE когда-нибудь останется живым дольше.
     func handleFinal(_ finalText: String) {
         if finalText.hasPrefix(committedText) {
             let tail = String(finalText.dropFirst(committedText.count))
             if !tail.isEmpty {
-                appendChunk(tail)
-                committedText = finalText
-                didStreamThisRecording = true
-                logger.info("[StreamingPaste] Final tail вставлен: len=\(tail.count)")
+                let result = appendChunk(tail)
+                if result.ok {
+                    committedText = finalText
+                    didStreamThisRecording = true
+                    logger.info("[StreamingPaste] Final tail вставлен: len=\(tail.count)")
+                } else {
+                    // Вставка провалилась — экран НЕ изменился, committedText НЕ продвигаем.
+                    // Сессия всё равно завершается ниже (resetSessionState) — это последнее
+                    // событие записи, повторять попытку в рамках ЭТОЙ сессии больше негде.
+                    logger.warn("[StreamingPaste] Final tail paste failed, state НЕ продвинут: \(result.reason)")
+                }
             }
         } else {
             // Final короче/другой относительно committedText — та же ревизия, что и для partial.
@@ -320,7 +359,18 @@ final class StreamingPasteController {
 
         guard force || elapsedEnough || endsWithSentenceBoundary(tail) else { return }
 
-        appendChunk(tail)
+        let result = appendChunk(tail)
+        guard result.ok else {
+            // Вставка провалилась (например no_external_target/modifiers_stuck/
+            // accessibility_not_granted) — экран, скорее всего, НЕ изменился. НЕ продвигаем
+            // committedText/lastFlushAt, иначе следующая ревизия/флаш посчитает diff против
+            // текста, которого физически нет на экране, и может откатить чужой контент.
+            // latestStable уже обновлён в handlePartial (последний известный кандидат от
+            // backend) — на следующем событии maybeFlush просто попробует снова с тем же
+            // (или бОльшим) хвостом относительно неизменённого committedText.
+            logger.warn("[StreamingPaste] Chunk paste failed, state НЕ продвинут: \(result.reason)")
+            return
+        }
         committedText = latestStable
         lastFlushAt = now()
         didStreamThisRecording = true
@@ -340,6 +390,17 @@ final class StreamingPasteController {
     /// через `pasteService.deleteBackward()` (симулированные Backspace), затем вставляет
     /// исправленный хвост `correctedStable`. Вызывается когда backend прислал partial/final,
     /// который переосмыслил (укоротил/изменил) уже вставленный диапазон.
+    ///
+    /// State (committedText/latestStable) продвигается ТОЛЬКО по факту реально выполненной
+    /// операции — delete и insert проверяются раздельно, поскольку это две независимые
+    /// keystroke-операции и одна может провалиться, а другая пройти:
+    ///  - delete провалился → экран, скорее всего, не тронут вовсе → state остаётся прежним,
+    ///    дальше в ЭТОЙ ревизии не идём (иначе следующий diff посчитается против текста,
+    ///    которого нет на экране и может откатить чужой контент).
+    ///  - delete прошёл, insert провалился → экран = committedText БЕЗ откаченного хвоста
+    ///    (т.е. `common`) — именно это и фиксируем как новое state, новый (невставленный)
+    ///    суффикс НЕ добавляем ни в committedText, ни в latestStable.
+    ///  - оба прошли → state = correctedStable целиком, как и раньше.
     private func performRevision(correctedStable: String) {
         let common = longestCommonPrefix(committedText, correctedStable)
         let removeCount = committedText.count - common.count
@@ -349,12 +410,24 @@ final class StreamingPasteController {
 
         if removeCount > 0 {
             let deleteResult = pasteService.deleteBackward(count: removeCount)
-            if !deleteResult.ok {
-                logger.warn("[StreamingPaste] Revision delete failed: \(deleteResult.reason)")
+            guard deleteResult.ok else {
+                logger.warn("[StreamingPaste] Revision delete failed, state НЕ продвинут: \(deleteResult.reason)")
+                return
             }
         }
+
         if !newSuffix.isEmpty {
-            appendChunk(newSuffix)
+            let insertResult = appendChunk(newSuffix)
+            guard insertResult.ok else {
+                // Delete (если был) уже реально прошёл — фиксируем экран как `common`,
+                // НЕ как полный correctedStable (новый хвост физически не вставлен).
+                committedText = common
+                latestStable = common
+                lastFlushAt = now()
+                didStreamThisRecording = true
+                logger.warn("[StreamingPaste] Revision insert failed, откат зафиксирован без нового текста: \(insertResult.reason)")
+                return
+            }
         }
 
         committedText = correctedStable
@@ -366,7 +439,9 @@ final class StreamingPasteController {
     // MARK: - Chunk paste
 
     /// Вставляет чанк текста через clipboard + Cmd+V (добавление в текущую позицию курсора).
-    private func appendChunk(_ text: String) {
+    /// Возвращает результат — вызывающая сторона решает, продвигать ли committedText/latestStable
+    /// (см. Critical #2 review: state НЕ должен коммититься оптимистично при провале paste).
+    private func appendChunk(_ text: String) -> PasteAttemptResult {
         // pasteToFrontmostApp кладёт текст в clipboard и шлёт Cmd+V в frontmost app.
         // Это тот же механизм, что и для полной вставки — cursor position зависит от
         // target app (обычно в конце последнего paste). Дополнительная обёртка не нужна.
@@ -374,6 +449,7 @@ final class StreamingPasteController {
         if !result.ok {
             logger.warn("[StreamingPaste] Chunk paste failed: \(result.reason)")
         }
+        return result
     }
 
     // MARK: - String helpers

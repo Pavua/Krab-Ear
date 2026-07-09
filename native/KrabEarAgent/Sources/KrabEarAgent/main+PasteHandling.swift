@@ -17,6 +17,17 @@ extension AgentAppDelegate {
             notify(title: "Krab Ear", body: "Пустой текст после транскрибации")
             return
         }
+
+        // Финализируем streaming-paste сессию АВТОРИТЕТНЫМ текстом из ответа IPC (не через
+        // SSE realtime.final_transcript — тот структурно недостижим здесь: SSE уже закрыт
+        // к моменту, когда backend успевает его эмиттировать внутри stop_recording; см.
+        // doc-комментарий StreamingPasteController.swift). Коммитит хвост, накопленный за
+        // время записи, и выставляет didStreamThisRecording — performAutoPaste читает его
+        // ниже по цепочке (continueTranscriptionResult → performAutoPaste).
+        if settings.streamingPasteEnabled {
+            streamingPasteController?.handleFinal(cleanText)
+        }
+
         // Resolve history_id асинхронно — раньше тут sync IPC на main thread с 5s timeout
         // вешал AppHang (Sentry KRAB-EAR-AGENT-8). Continuation запускает полный paste flow
         // только после того, как IPC ответил (или не ответил → id == nil, fallback path).
