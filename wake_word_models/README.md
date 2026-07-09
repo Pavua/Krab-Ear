@@ -42,12 +42,14 @@ source .venv_krab_ear/bin/activate   # python3.14, из корня репози�
 (они тянутся на уровне модуля пакета, до любого вызова функции):
 
 ```bash
-pip install pronouncing audiomentations speechbrain mutagen acoustics
+pip install pronouncing audiomentations speechbrain mutagen acoustics torchinfo
 ```
 
 Это нужно для этапов `negatives` (опционально, только если используется
-`generate_adversarial_texts`), `features` и `train`. `torchinfo` **не нужен** —
-`train_krab.py` никогда не вызывает `Model.summary()`.
+`generate_adversarial_texts`), `features` и `train`. `torchinfo` нужен тоже:
+`openwakeword/train.py` делает `import torchinfo` безусловно на уровне модуля,
+поэтому `from openwakeword.train import Model` (этапы `train`/`export`) падает
+без него — хотя `train_krab.py` сам никогда не вызывает `Model.summary()`.
 
 ⚠️ **Риск (см. §5 спеки, риск #3):** `.venv_krab_ear` — Python 3.14, очень
 свежий; часть из пяти пакетов выше может ещё не иметь официальных wheels под
@@ -62,7 +64,7 @@ pip install pronouncing audiomentations speechbrain mutagen acoustics
 /opt/homebrew/bin/python3.11 -m venv .venv_wake_training
 source .venv_wake_training/bin/activate
 pip install torch torchaudio openwakeword huggingface_hub scipy \
-    pronouncing audiomentations speechbrain mutagen acoustics torch_audiomentations \
+    pronouncing audiomentations speechbrain mutagen acoustics torchinfo torch_audiomentations \
     torchmetrics pytorch_lightning onnxruntime
 python wake_word_models/train_krab.py --stage features ...
 ```
@@ -355,7 +357,7 @@ wake_word_models/
 
 - **`ImportError: openwakeword.data недоступен` на `features`/`negatives`/`train`** —
   доустановите пакеты из §1.1 (`pronouncing audiomentations speechbrain
-  mutagen acoustics`). Если это упирается в несовместимость с Python 3.14 —
+  mutagen acoustics torchinfo`). Если это упирается в несовместимость с Python 3.14 —
   см. fallback-venv в §1.1.
 - **`--stage corpora` падает на скачивании** — см. риск #7 в §5, датасеты
   могли переехать; проверьте URL вручную на HuggingFace.

@@ -27,9 +27,10 @@ helpers_W3a.py) гоняются на ubuntu-parity py3.12 БЕЗ этого с�
 
 Известные риски (подробнее — README «Известные риски»):
   - openwakeword.data / openwakeword.train требуют доп. пакеты, НЕ входящие в
-    KrabEar/requirements.txt (torchinfo не нужен -- .summary() не вызываем;
-    но pronouncing/audiomentations/speechbrain/mutagen/acoustics ОБЯЗАТЕЛЬНЫ
-    даже для одного лишь augment_clips()). Проверено 2026-07-09 в .venv_krab_ear.
+    KrabEar/requirements.txt: pronouncing/audiomentations/speechbrain/mutagen/
+    acoustics (обязательны даже для одного лишь augment_clips()) + torchinfo
+    (openwakeword/train.py импортирует его безусловно на уровне модуля, хотя
+    .summary() мы не вызываем). Проверено 2026-07-09 в .venv_krab_ear.
   - openwakeword.data.generate_adversarial_texts официально документирован как
     English-only (CMUdict/pronouncing); для кириллицы уходит в OOV-ветку с
     англоязычным DeepPhonemizer — используется best-effort, никогда не роняет
@@ -1155,6 +1156,9 @@ def stage_features(args: argparse.Namespace, paths: ProjectPaths) -> None:
     neg_train, neg_test = deterministic_train_test_split(
         neg_paths, test_ratio=args.test_ratio, seed=args.seed,
     )
+    # Защита от вырожденного сплита при крошечных --limit (сплит форсирует
+    # n_test>=1 и может опустошить train) -- тот же паттерн, что у combos_train.
+    neg_train = neg_train or neg_paths[:1]
 
     total_length = _resolve_total_length(pos_test, args.total_length)
 
@@ -1307,7 +1311,8 @@ def stage_train(args: argparse.Namespace, paths: ProjectPaths) -> None:
         raise RuntimeError(
             f"Тренировочный стек недоступен ({exc}). Требуются: torch, "
             "openwakeword + доп. пакеты (pronouncing, audiomentations, "
-            "speechbrain, mutagen, acoustics) -- см. README «Пререквизиты»."
+            "speechbrain, mutagen, acoustics, torchinfo) -- см. README "
+            "«Пререквизиты»."
         ) from exc
 
     required = [
