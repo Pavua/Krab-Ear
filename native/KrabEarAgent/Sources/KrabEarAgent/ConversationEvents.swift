@@ -44,6 +44,11 @@ enum ConversationEvent {
     /// Сессия закрыта сервером штатно (conv.closed) — завершаем диалог без ошибки.
     case closed
 
+    /// AI прерван (barge-in голосом ИЛИ подтверждение ручного control-interrupt).
+    /// conv.interrupted — с Волны 3c означает ПОДТВЕРЖДЁННУЮ осмысленную речь
+    /// (VG фильтрует шум/кашель на своей стороне, см. бриф 2026-07-09-vg-barge-in-resume).
+    case interrupted(reason: String)
+
     /// Ошибка от сервера (conv.error / conv.fatal).
     case error(code: String, message: String)
 
@@ -109,8 +114,8 @@ extension ConversationEvent {
             return .closed
 
         case "conv.interrupted":
-            // AI прерван баржом-ин — клиент уже отправил interrupt; просто логируем.
-            return .unknown(type: type, raw: raw)
+            let reason = (payload["reason"] as? String) ?? ""
+            return .interrupted(reason: reason)
 
         case "conv.vad_speech", "conv.vad_silence":
             // VAD-маркеры состояния пользователя — обрабатываем молча.

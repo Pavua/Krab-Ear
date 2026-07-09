@@ -238,6 +238,10 @@ final class ConversationViewController: NSViewController {
             conversationState = .error(message)
             stopConversation()
 
+        case .interrupted:
+            // TODO(Волна 3c, Task 2): заменить на handleInterrupted(reason:).
+            break
+
         case .unknown(let type, _):
             // Неизвестный тип события (conv.interrupted, conv.vad_*, conv.audio_chunk)
             // — логируем, не падаем.
