@@ -82,7 +82,22 @@ def _detect_language(text: str) -> str:
 def _load_silero(model_id: str) -> Any | None:
     """Ленивая загрузка Silero TTS через torch.hub.
 
-    Returns tuple (model, symbols, sample_rate, example_text, apply_tts, device) или None.
+    Version-agnostic (сиблинг-фикс к wake_word_models/train_krab.py::
+    _load_silero_tts, commit e89e6e37): старые per-speaker пакеты Silero
+    (v1/v2) возвращают ЛЕГАСИ 5-кортеж ``(model, symbols, sample_rate,
+    example_text, apply_tts)`` -- синтез свободной функцией ``apply_tts``.
+    Современные v3/v4 (дефолт ``TTS_SILERO_MODEL="v4_ru"``, core/config.py)
+    возвращают 2-кортеж ``(model, example_text)`` -- синтез МЕТОДОМ
+    ``model.apply_tts(...)``. До этого фикса unpacking ЛЮБОГО 2-кортежного
+    результата падал ``ValueError: not enough values to unpack (expected 5,
+    got 2)`` внутри loader-треда (перехватывалось, тихая деградация на say) --
+    т.е. дефолтная модель ``v4_ru`` не грузилась НИКОГДА (найдено живым
+    прогоном 2026-07-09).
+
+    Returns:
+        dict-контекст ``{"api": "legacy"|"v4", "model", "sample_rate",
+        "device", + "symbols"/"apply_tts" только для "legacy"}`` или None
+        при ошибке/таймауте загрузки.
     """
     _LOAD_TIMEOUT = 30  # seconds — slow network / cold HuggingFace hub must not block forever
     result_box: list[Any] = []
@@ -92,15 +107,40 @@ def _load_silero(model_id: str) -> Any | None:
         try:
             import torch  # type: ignore[import-untyped]
             _device = torch.device("cpu")
-            _model, _symbols, _sample_rate, _example_text, _apply_tts = torch.hub.load(
+            hub_result = torch.hub.load(
                 repo_or_dir="snakers4/silero-models",
                 model="silero_tts",
                 language="ru",
                 speaker=model_id,
                 trust_repo=True,  # W1215 F1
             )
-            _model = _model.to(_device)
-            result_box.append((_model, _symbols, _sample_rate, _example_text, _apply_tts, _device))
+            if isinstance(hub_result, tuple) and len(hub_result) >= 5:
+                # Легаси per-speaker пакет: (model, symbols, sample_rate, example_text, apply_tts)
+                _model, _symbols, _sample_rate, _example_text, _apply_tts = hub_result[:5]
+                _model = _model.to(_device)
+                result_box.append({
+                    "api": "legacy",
+                    "model": _model,
+                    "symbols": _symbols,
+                    "sample_rate": _sample_rate,
+                    "apply_tts": _apply_tts,
+                    "device": _device,
+                })
+            else:
+                # v3/v4: (model, example_text) -- синтез методом model.apply_tts(...).
+                # Нативная сетка v4 -- 8000/24000/48000 (не задаётся torch.hub.load,
+                # выбирается на синтезе); 24000 -- тот же дефолт, что и в сиблинге
+                # train_krab.py::_load_silero_tts. WAV-заголовок несёт реальный
+                # sample_rate, потребители (VG tts_engines.wav_to_pcm16) читают
+                # его из заголовка и ресемплят сами при необходимости.
+                _model = hub_result[0] if isinstance(hub_result, tuple) else hub_result
+                _model = _model.to(_device)
+                result_box.append({
+                    "api": "v4",
+                    "model": _model,
+                    "sample_rate": 24000,
+                    "device": _device,
+                })
         except ImportError:
             exc_box.append(ImportError("torch не установлен"))
         except Exception as _exc:  # noqa: BLE001
@@ -127,9 +167,12 @@ def _load_silero(model_id: str) -> Any | None:
         return None
 
     if result_box:
-        model, symbols, sample_rate, example_text, apply_tts, device = result_box[0]
-        logger.info("Silero TTS загружен: model=%s sample_rate=%s", model_id, sample_rate)
-        return model, symbols, sample_rate, example_text, apply_tts, device
+        ctx = result_box[0]
+        logger.info(
+            "Silero TTS загружен: model=%s api=%s sample_rate=%s",
+            model_id, ctx["api"], ctx["sample_rate"],
+        )
+        return ctx
 
     return None
 
@@ -236,7 +279,7 @@ class TTSService:
     """
 
     def __init__(self) -> None:
-        self._silero: Any | None = None  # tuple или None
+        self._silero: Any | None = None  # dict-контекст (см. _load_silero) или None
         self._kokoro: Any | None = None  # KPipeline или None
         self._silero_lock = threading.Lock()
         self._kokoro_lock = threading.Lock()
@@ -268,11 +311,17 @@ class TTSService:
     # Synthesis backends
 
     def _synthesize_silero(self, text: str, voice: str | None = None) -> bytes | None:
-        """Синтез через Silero. Возвращает WAV-байты или None при ошибке."""
+        """Синтез через Silero. Возвращает WAV-байты или None при ошибке.
+
+        Version-agnostic: ``silero["api"] == "legacy"`` -- синтез свободной
+        функцией ``apply_tts(texts=[...], model=, symbols=, device=, ...)``;
+        ``"v4"`` (дефолт ``v4_ru``) -- синтез МЕТОДОМ ``model.apply_tts(text=,
+        speaker=, sample_rate=, ...)``. См. _load_silero docstring.
+        """
         silero = self._get_silero()
         if silero is None:
             return None
-        model, symbols, sample_rate, _example_text, apply_tts, device = silero
+        sample_rate = silero["sample_rate"]
         try:
             import numpy as np
             raw_voice = voice or settings.TTS_SILERO_VOICE
@@ -292,15 +341,28 @@ class TTSService:
                     _SILERO_MAX_TEXT_LEN,
                 )
                 text = text[:_SILERO_MAX_TEXT_LEN]
-            audio_tensor = apply_tts(
-                texts=[text],
-                model=model,
-                sample_rate=sample_rate,
-                symbols=symbols,
-                device=device,
-                speaker=speaker,
-            )
-            # audio_tensor: shape [1, samples], float32 in [-1, 1]
+
+            if silero.get("api") == "legacy":
+                audio_tensor = silero["apply_tts"](
+                    texts=[text],
+                    model=silero["model"],
+                    sample_rate=sample_rate,
+                    symbols=silero["symbols"],
+                    device=silero["device"],
+                    speaker=speaker,
+                )
+            else:
+                # v3/v4 (сиблинг train_krab.py::_synthesize_one, v4-ветка):
+                # put_accent/put_yo -- Silero-опции качества (авторасстановка
+                # ударений и буквы «ё»), безопасный дефолт для RU-текста.
+                audio_tensor = silero["model"].apply_tts(
+                    text=text,
+                    speaker=speaker,
+                    sample_rate=sample_rate,
+                    put_accent=True,
+                    put_yo=True,
+                )
+            # audio_tensor: shape [1, samples] or [samples], float32 in [-1, 1]
             samples = audio_tensor.squeeze().cpu().numpy()
 
             # Encode to WAV bytes (PCM 16-bit mono)
