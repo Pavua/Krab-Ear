@@ -19,6 +19,10 @@
  8. (review 2026-07-09, Important) провалившаяся вставка/откат НЕ ретраится на каждое
     следующее partial-событие — backoff (lastFailureAt, отдельно от lastFlushAt) ограничивает
     retry раз в debounceIntervalSec, и в maybeFlush, и в performRevision.
+ 9. (review 2026-07-09, Important #2) тот же backoff НЕ должен глушить единственный вызов
+    ревизии из handleFinal — performRevision(bypassBackoff: true) там игнорирует
+    lastFailureAt, даже если недавний revision-delete на handlePartial провалился в том же
+    debounce-окне.
 
  Паттерн: FakeStreamingPasteTarget — protocol-based test double (StreamingPasteTarget),
  записывает вызовы без реальных keystroke side-effects (тот же паттерн, что
@@ -300,6 +304,35 @@ final class StreamingPasteControllerTests: XCTestCase {
             controller.didStreamThisRecording,
             "успешный delete — это уже реальное изменение экрана, должно считаться активностью"
         )
+    }
+
+    /// Провал revision-delete на handlePartial, СРАЗУ (в пределах debounce-окна) за которым
+    /// следует handleFinal с другим текстом — финальная ревизия ВСЁ РАВНО должна попытаться
+    /// выполниться, а не быть заглушена backoff-таймером `lastFailureAt`. handleFinal — это
+    /// единственный вызов ревизии за сессию (не storm) и последняя возможность поправить экран
+    /// перед resetSessionState(); backoff тут не нужен и вреден (review Important, 2026-07-09,
+    /// найдено в ревизии предыдущего фикса — точка ~ строка "performRevision" в handleFinal).
+    func testRevisionOnHandleFinalBypassesBackoffFromEarlierFailedPartialRevision() {
+        commitPrivetMir() // committedText = "Привет мир " (11)
+
+        target.deleteShouldFail = true
+        controller.handlePartial("Привет там ")
+        XCTAssertEqual(target.deleteCalls, [4], "первая попытка отката (через handlePartial) произошла и провалилась")
+
+        // handleFinal приходит СРАЗУ, БЕЗ продвижения fakeNow — в пределах того же
+        // debounceIntervalSec-окна, что и провал выше. Delete на этот раз проходит успешно.
+        target.deleteShouldFail = false
+        controller.handleFinal("Привет иначе")
+
+        XCTAssertEqual(
+            target.deleteCalls, [4, 4],
+            "ревизия в handleFinal НЕ должна быть заглушена backoff'ом от недавнего провала на partial"
+        )
+        XCTAssertEqual(
+            target.pasteCalls.last, "иначе",
+            "после успешного отката в handleFinal исправленный хвост должен быть вставлен"
+        )
+        XCTAssertTrue(controller.didStreamThisRecording)
     }
 
     // MARK: - (g) Important review (2026-07-09): failed paste/delete backs off, doesn't retry-storm

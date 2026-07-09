@@ -347,7 +347,12 @@ final class StreamingPasteController {
             }
         } else {
             // Final короче/другой относительно committedText — та же ревизия, что и для partial.
-            performRevision(correctedStable: finalText)
+            // bypassBackoff: true — это ЕДИНСТВЕННЫЙ вызов ревизии за сессию (не storm), и
+            // последняя возможность поправить экран перед resetSessionState() ниже. Если ей
+            // помешает backoff, оставшийся от недавнего провалившегося partial-revision (тот
+            // же 300мс debounce-окна), коррекция не случится вообще — session заканчивается
+            // здесь безвозвратно (review Important, 2026-07-09).
+            performRevision(correctedStable: finalText, bypassBackoff: true)
         }
 
         // Сбрасываем сессию (запись завершена).
@@ -434,8 +439,17 @@ final class StreamingPasteController {
     /// совпадает с новым stable), она перевызывалась бы на КАЖДОЕ последующее partial-событие.
     /// Провал delete раньше НЕ продвигал ничего (включая lastFlushAt), поэтому без отдельного
     /// backoff-таймера тот же "шторм синхронных retry" класс бага, что и в maybeFlush.
-    private func performRevision(correctedStable: String) {
-        if let lastFailureAt, now().timeIntervalSince(lastFailureAt) < debounceIntervalSec {
+    ///
+    /// - Parameter bypassBackoff: `true` только для вызова из `handleFinal` — это ЕДИНСТВЕННЫЙ
+    ///   вызов ревизии за сессию (не может быть storm), и последняя возможность поправить экран
+    ///   перед `resetSessionState()`. Гейтить его тем же backoff'ом, что защищает от retry-storm
+    ///   на `handlePartial`, было бы регрессом другого рода: провал revision-delete на
+    ///   `handlePartial`, за которым СРАЗУ (в пределах того же debounce-окна) следует
+    ///   `handleFinal`, глушил бы финальную коррекцию целиком — узкое окно (300мс), но реальный
+    ///   сценарий (провал paste прямо перед остановкой записи из-за смены фокуса/Accessibility).
+    ///   Вызов из `handlePartial` (обычный путь ревизии на лету) оставляет default `false`.
+    private func performRevision(correctedStable: String, bypassBackoff: Bool = false) {
+        if !bypassBackoff, let lastFailureAt, now().timeIntervalSince(lastFailureAt) < debounceIntervalSec {
             return
         }
 
