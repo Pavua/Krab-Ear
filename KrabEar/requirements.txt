@@ -49,3 +49,9 @@ cryptography>=42,<50
 
 # --- Test parallelization (CI speedup via -n auto) ---
 pytest-xdist>=3.5
+
+# --- Silero TTS (primary RU-движок tts_service) ---
+# hubconf snakers4/silero-models требует omegaconf при torch.hub.load;
+# без него _load_silero падает ModuleNotFoundError -> тихий фоллбэк на say
+# (второй слой прод-бага, найден живой загрузкой v4_ru 2026-07-09).
+omegaconf>=2.3

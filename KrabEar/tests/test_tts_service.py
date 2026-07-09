@@ -486,11 +486,7 @@ class TorchHubTrustRepoTestCase(unittest.TestCase):
 
         import backend.tts_service as tts_mod
         with patch.dict("sys.modules", {"torch": mock_torch}):
-            # Re-import so the lazy import inside the function picks up our mock
-            from importlib import import_module
-            import importlib
-            # Call _load_silero directly
-            result = tts_mod._load_silero("v4_ru")
+            tts_mod._load_silero("v4_ru")
 
         # Verify trust_repo=True was passed
         call_kwargs = mock_torch.hub.load.call_args
@@ -542,6 +538,29 @@ class SileroV4TwoTupleLoadTestCase(unittest.TestCase):
             "_load_silero вернул None для валидного 2-кортежа v4_ru -- должен "
             "успешно построить v4-контекст (было: ValueError not enough values "
             "to unpack, expected 5, got 2, перехваченный внутри loader-треда)",
+        )
+
+    @patch("backend.tts_service.settings")
+    def test_v4_model_to_returning_none_keeps_original_model(self, mock_settings: MagicMock) -> None:
+        """Второй слой прод-бага (живая загрузка v4_ru 2026-07-09): v4-обёртка
+        Silero -- НЕ nn.Module, её .to(device) двигает модель IN-PLACE и
+        возвращает None. Переприсваивание ``_model = _model.to(_device)``
+        обнуляло модель -- ctx['model'] становился None, синтез падал.
+        MagicMock это скрывал (.to() у него truthy), поэтому мок здесь
+        воспроизводит реальное поведение обёртки: .to() -> None."""
+        fake_model = MagicMock()
+        fake_model.to.return_value = None  # реальное поведение v4-обёртки
+        mock_torch = self._mock_torch_with_hub_result((fake_model, "example text"))
+
+        import backend.tts_service as tts_mod
+        with patch.dict("sys.modules", {"torch": mock_torch}):
+            result = tts_mod._load_silero("v4_ru")
+
+        self.assertIsNotNone(result)
+        self.assertIs(
+            result["model"], fake_model,
+            "ctx['model'] обязан остаться исходным объектом модели, когда "
+            ".to(device) вернул None (in-place move v4-обёртки)",
         )
 
     @patch("backend.tts_service.settings")

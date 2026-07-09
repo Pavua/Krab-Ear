@@ -134,7 +134,13 @@ def _load_silero(model_id: str) -> Any | None:
                 # sample_rate, потребители (VG tts_engines.wav_to_pcm16) читают
                 # его из заголовка и ресемплят сами при необходимости.
                 _model = hub_result[0] if isinstance(hub_result, tuple) else hub_result
-                _model = _model.to(_device)
+                # 🔴 v4-обёртка Silero (не nn.Module!) делает .to(device)
+                # IN-PLACE и возвращает None -- переприсваивание обнуляло
+                # модель (mock в тестах это скрывал: у MagicMock .to() truthy;
+                # найдено живой загрузкой v4_ru 2026-07-09).
+                _moved = _model.to(_device)
+                if _moved is not None:
+                    _model = _moved
                 result_box.append({
                     "api": "v4",
                     "model": _model,
