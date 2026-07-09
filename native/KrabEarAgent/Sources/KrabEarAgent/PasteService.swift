@@ -78,6 +78,9 @@ final class PasteService {
     private let prePasteDelayUs: useconds_t = 120_000
     /// Delay between Cmd+V key-down and key-up events (µs)
     private let cmdVKeypressDelayUs: useconds_t = 30_000
+    private let backspaceKeyCode: CGKeyCode = Keycode.delete.rawValue
+    /// Delay between individual Backspace key-down/key-up pairs when deleting a run (µs)
+    private let backspaceKeypressDelayUs: useconds_t = 15_000
     private let logger = AgentLogger.shared
     /// Throttle для Accessibility prompt'ов: показываем dialog не чаще чем раз
     /// в 10 минут per app launch. Без этого каждый paste при missing AX = новый
@@ -241,6 +244,96 @@ final class PasteService {
         }
 
         return PasteAttemptResult(ok: true, reason: resultReason)
+    }
+
+    // MARK: - Streaming paste revision (delete-back)
+
+    /// Удаляет `count` символов ПЕРЕД курсором в целевом приложении через симулированные
+    /// Backspace-нажатия. В отличие от `pasteToFrontmostApp` НЕ трогает буфер обмена.
+    /// Используется `StreamingPasteController` для отката ранее вставленного текста,
+    /// когда backend "ревизует" уже вставленный partial (переосмысление сказанного).
+    func deleteBackward(count: Int, targetPID: pid_t? = nil) -> PasteAttemptResult {
+        guard count > 0 else {
+            return PasteAttemptResult(ok: false, reason: "empty_count")
+        }
+
+        let axTrusted = isAccessibilityTrusted()
+
+        guard waitForModifierRelease(timeoutMs: modifierReleaseTimeoutMs) else {
+            logger.warn("Откат вставки отменён: модификаторы не отпущены в таймаут")
+            return PasteAttemptResult(ok: false, reason: "modifiers_stuck")
+        }
+        usleep(prePasteDelayUs)
+
+        let resolvedPID: pid_t
+        if let targetPID {
+            resolvedPID = targetPID
+        } else if let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                  frontmostPID != ProcessInfo.processInfo.processIdentifier {
+            resolvedPID = frontmostPID
+        } else {
+            return PasteAttemptResult(ok: false, reason: "no_external_target")
+        }
+
+        let removed: Bool
+        let resultReason: String
+        if axTrusted {
+            removed = postBackspacesToPid(resolvedPID, count: count)
+            resultReason = removed ? "ok" : "event_post_failed"
+        } else {
+            removed = runAppleScriptBackspace(count: count)
+            if removed {
+                logger.info("Откат вставки выполнен через osascript fallback (AX=false)")
+                resultReason = "ok_via_osascript"
+            } else {
+                requestAccessibilityPromptIfNeeded()
+                logger.warn("Откат вставки недоступен: AX=false и fallback osascript не сработал")
+                resultReason = "accessibility_not_granted"
+            }
+        }
+
+        guard removed else {
+            return PasteAttemptResult(ok: false, reason: resultReason)
+        }
+        return PasteAttemptResult(ok: true, reason: resultReason)
+    }
+
+    private func postBackspacesToPid(_ targetPID: pid_t, count: Int) -> Bool {
+        guard let source = CGEventSource(stateID: .hidSystemState) else { return false }
+        for _ in 0..<count {
+            guard
+                let keyDown = CGEvent(keyboardEventSource: source, virtualKey: backspaceKeyCode, keyDown: true),
+                let keyUp = CGEvent(keyboardEventSource: source, virtualKey: backspaceKeyCode, keyDown: false)
+            else {
+                return false
+            }
+            keyDown.postToPid(targetPID)
+            usleep(backspaceKeypressDelayUs)
+            keyUp.postToPid(targetPID)
+            usleep(backspaceKeypressDelayUs)
+        }
+        return true
+    }
+
+    private func runAppleScriptBackspace(count: Int) -> Bool {
+        let scriptSource = """
+        tell application "System Events"
+            repeat \(count) times
+                key code 51
+            end repeat
+        end tell
+        """
+        guard let script = NSAppleScript(source: scriptSource) else {
+            return false
+        }
+
+        var errorDict: NSDictionary?
+        _ = script.executeAndReturnError(&errorDict)
+        if let errorDict {
+            logger.warn("AppleScript fallback отката вернул ошибку: \(errorDict)")
+            return false
+        }
+        return true
     }
 
     private func postCommandVToPid(_ targetPID: pid_t) -> Bool {
