@@ -1,0 +1,22 @@
+# wake_word_models/ -- в репозитории живёт только КОД (train_krab.py),
+# ИНСТРУКЦИЯ (README.md) и офлайн-ОТЧЁТЫ (report_*.md, см. main README).
+# Датасеты, синтезированные клипы, промежуточные .npy-фичи и обученные
+# артефакты (веса, ONNX) НЕ коммитятся -- см. решение §3.6 спеки
+# (docs/superpowers/specs/2026-07-09-wake-model-krab-training-design.md).
+
+# Рабочие директории пайплайна (создаются train_krab.py --stage ...)
+/corpora/
+/positives/
+/negatives/
+/features/
+/artifacts/
+
+# На случай ручных экспериментов / нестандартного --work-dir рядом со скриптом
+*.wav
+*.npy
+*.onnx
+*.pt
+*.pth
+
+# Resume-маркеры этапов (обычно уже покрыты игнором директорий выше)
+.done_*.json
