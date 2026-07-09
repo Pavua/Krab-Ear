@@ -42,8 +42,19 @@ source .venv_krab_ear/bin/activate   # python3.14, из корня репози�
 (они тянутся на уровне модуля пакета, до любого вызова функции):
 
 ```bash
-pip install pronouncing audiomentations speechbrain mutagen acoustics torchinfo
+pip install pronouncing audiomentations speechbrain mutagen acoustics torchinfo \
+    omegaconf 'scipy<1.15'
 ```
+
+Уроки живого прогона T2 (2026-07-09), без которых этапы падают:
+- `omegaconf` — требуется hubconf'ом silero-models при `torch.hub.load`
+  (этапы `positives`/`negatives`): `No module named 'omegaconf'`.
+- `scipy<1.15` — пакет `acoustics` (зависимость `openwakeword.data`) использует
+  `scipy.special.sph_harm`, удалённый в scipy 1.15+: `cannot import name 'sph_harm'`.
+- Однократно скачать feature-экстракторы openwakeword (melspectrogram/embedding
+  ONNX кладутся ВНУТРЬ site-packages пакета — свежий venv их не содержит):
+  `python -c "import openwakeword.utils as u; u.download_models()"` — иначе
+  `features` падает `NO_SUCHFILE .../resources/models/melspectrogram.onnx`.
 
 Это нужно для этапов `negatives` (опционально, только если используется
 `generate_adversarial_texts`), `features` и `train`. `torchinfo` нужен тоже:

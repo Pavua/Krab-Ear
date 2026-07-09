@@ -692,6 +692,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     train_g = parser.add_argument_group("train")
     train_g.add_argument("--steps", type=int, default=50000)
+    train_g.add_argument("--batch-composition", default="512,256,256",
+                         help="Примеры на батч: positive,adversarial,general "
+                              "(авто-расчёт генератора с 17GB-ACAV даёт 0.78%% "
+                              "позитивов -- модель вырождается)")
     train_g.add_argument("--max-negative-weight", type=int, default=1000)
     train_g.add_argument("--target-fp-per-hour", type=float, default=0.2,
                          help="Внутренняя адаптивная цель auto_train")
@@ -957,8 +961,25 @@ def _synthesize_one(
         from math import gcd
         g = gcd(int(native_sr), TARGET_SAMPLE_RATE)
         samples = resample_poly(samples, TARGET_SAMPLE_RATE // g, int(native_sr) // g)
+    samples = _trim_silence(samples, TARGET_SAMPLE_RATE)
     pcm = (samples * 32767).clip(-32768, 32767).astype(np.int16)
     return pcm, TARGET_SAMPLE_RATE
+
+
+def _trim_silence(samples: Any, sr: int, threshold: float = 0.01, pad_ms: int = 120) -> Any:
+    """Обрезает тихие голову/хвост клипа. SSML-просодия v4-Silero дописывает
+    паузы до секунд -- клипы «Краб» доходили до 6с при 2с-окне тренировки
+    (p90=5.4с, живой прогон T2 2026-07-09), слово вылетало за окно augment'а
+    и позитивы превращались в шум. Порог -- по абсолютной амплитуде float32
+    [-1,1]; полностью «тихий» клип возвращается как есть (не роняем синтез)."""
+    import numpy as np
+    idx = np.where(np.abs(samples) > threshold)[0]
+    if not len(idx):
+        return samples
+    pad = int(sr * pad_ms / 1000)
+    start = max(0, int(idx[0]) - pad)
+    end = min(len(samples), int(idx[-1]) + pad)
+    return samples[start:end]
 
 
 def _write_wav(path: Path, pcm: Any, sample_rate: int) -> None:
@@ -1167,6 +1188,24 @@ def _resolve_total_length(positive_test_clips: Sequence[Path], override: int | N
     return compute_total_length_samples(durations)
 
 
+def _assert_features_sane(path: Path) -> None:
+    """Гард от отравленных артефактов: сломанное аудио-декодирование (например,
+    отсутствующий torchcodec у torchaudio>=2.9) даёт .npy из одних нулей,
+    который per-file resume потом честно пропустит как «готовый» -- модель
+    вырождается (recall=0, живой прогон T2 2026-07-09). Нулевая дисперсия
+    ловится сразу, файл удаляется, чтобы resume не подхватил отраву."""
+    import numpy as np
+    arr = np.load(path, mmap_mode="r")
+    sample = np.asarray(arr[: min(len(arr), 256)]) if len(arr) else None
+    if sample is None or float(sample.std()) == 0.0:
+        path.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"features: {path.name} вырожден (пустой или std=0) -- "
+            "аудио-декодирование сломано (README «Пререквизиты»: torchcodec). "
+            "Файл удалён."
+        )
+
+
 def stage_features(args: argparse.Namespace, paths: ProjectPaths) -> None:
     """Аугментация (``openwakeword.data.augment_clips``) + featurization
     (``openwakeword.utils.compute_features_from_generator``) позитивов и
@@ -1247,6 +1286,7 @@ def stage_features(args: argparse.Namespace, paths: ProjectPaths) -> None:
             gen, n_total=len(clips), clip_duration=total_length,
             output_file=str(out_path), device="cpu", ncpu=args.feature_ncpu,
         )
+        _assert_features_sane(out_path)
 
     write_marker(paths.features, "features", {
         "total_length_samples": total_length, "test_ratio": args.test_ratio,
@@ -1414,10 +1454,24 @@ def stage_train(args: argparse.Namespace, paths: ProjectPaths) -> None:
         for k in feature_files
     }
 
-    # n_per_class намеренно НЕ передаём -- mmap_batch_generator сам вычисляет
-    # пропорциональные размеры по фактическим shape массивов (см. data.py).
+    # 🔴 n_per_class ОБЯЗАТЕЛЕН: авто-расчёт mmap_batch_generator делает размеры
+    # пропорциональными ЧИСЛУ ПРИМЕРОВ в массивах -- с 17GB ACAV (5.6M окон)
+    # против 7.2k позитивов выходило {positive: 1, general_negative: 127}
+    # (0.78% позитивов на батч) -- модель коллапсировала в константный «нет»
+    # (recall=0, accuracy=доля негативов val; живой прогон T3 2026-07-09).
+    parts = [max(0, int(p)) for p in str(args.batch_composition).split(",")]
+    while len(parts) < 3:
+        parts.append(0)
+    n_per_class = {"positive": parts[0], "adversarial_negative": parts[1]}
+    if "general_negative" in feature_files:
+        n_per_class["general_negative"] = parts[2]
+    else:
+        # Без общего корпуса его долю отдаём adversarial-негативам.
+        n_per_class["adversarial_negative"] += parts[2]
+    logger.info("train: композиция батча n_per_class=%s", n_per_class)
     batch_gen = mmap_batch_generator(
-        feature_files, data_transform_funcs=data_transforms, label_transform_funcs=label_transforms,
+        feature_files, n_per_class=n_per_class,
+        data_transform_funcs=data_transforms, label_transform_funcs=label_transforms,
     )
 
     class _IterDataset(torch.utils.data.IterableDataset):
@@ -1500,7 +1554,13 @@ def stage_train(args: argparse.Namespace, paths: ProjectPaths) -> None:
 
     checkpoint_path = paths.artifacts / f"{args.model_name}_checkpoint.pt"
     oww.model = selected_model
-    oww.save_model(str(checkpoint_path))
+    # НЕ oww.save_model(): та сериализует ЦЕЛИКОМ nn.Module, а класс Net
+    # объявлен ЛОКАЛЬНО внутри Model.__init__ -- сериализация падает «Can't
+    # get local object 'Model.__init__.<locals>.Net'» и оставляет битый файл
+    # (живой прогон T2 2026-07-09). Сохраняем state_dict (веса) -- export
+    # пересобирает архитектуру теми же гиперпараметрами из train-маркера,
+    # и загрузка идёт безопасным weights_only=True.
+    torch.save(selected_model.state_dict(), str(checkpoint_path))
 
     report_path = paths.report_path(args.model_name)
     _write_training_report(
@@ -1511,6 +1571,7 @@ def stage_train(args: argparse.Namespace, paths: ProjectPaths) -> None:
     write_marker(paths.artifacts, "train", {
         "checkpoint_path": str(checkpoint_path), "report_path": str(report_path),
         "gate_satisfied": gated_model is not None,
+        "model_type": args.model_type, "layer_size": args.layer_size,
     })
     logger.info("train: этап завершён -- чекпоинт %s, отчёт %s", checkpoint_path, report_path)
 
@@ -1544,25 +1605,43 @@ def stage_export(args: argparse.Namespace, paths: ProjectPaths) -> None:
     audio_features = AudioFeatures(device="cpu")
     input_shape = audio_features.get_embedding_shape(total_length / 16000)
 
-    # torch >= 2.6 меняет дефолт weights_only=True для torch.load. Наш чекпоинт
-    # -- результат Model.save_model(), которая сериализует ЦЕЛИКОМ объект
-    # nn.Module (не только state_dict), поэтому явно просим weights_only=False.
-    # Это доверенный локальный файл, созданный этим же скриптом на предыдущем
-    # этапе (--stage train), а не сторонний/скачанный источник.
-    loaded_module = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    # Чекпоинт -- state_dict (см. stage_train: целиком nn.Module не пиклится,
+    # класс Net локален внутри Model.__init__). Пересобираем архитектуру теми
+    # же гиперпараметрами и грузим веса -- weights_only=True (безопасный
+    # дефолт torch>=2.6) для state_dict снова работает.
+    train_meta = read_marker(paths.artifacts, "train") or {}
+    model_type = train_meta.get("model_type", args.model_type)
+    layer_size = int(train_meta.get("layer_size", args.layer_size))
+    if model_type != args.model_type or layer_size != args.layer_size:
+        logger.warning(
+            "export: гиперпараметры train-маркера (%s/%d) отличаются от CLI "
+            "(%s/%d) -- использую маркер (архитектура обязана совпасть с весами)",
+            model_type, layer_size, args.model_type, args.layer_size,
+        )
+    state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
 
-    # model_type/layer_size здесь нужны только чтобы создать валидный объект
-    # Model (input_shape/n_classes) -- реальная архитектура приходит из
-    # чекпоинта через model=loaded_module (export_model делает deepcopy).
     oww = TrainableModel(
-        n_classes=1, input_shape=input_shape, model_type=args.model_type,
-        layer_dim=args.layer_size, seconds_per_example=1280 * input_shape[0] / 16000,
+        n_classes=1, input_shape=input_shape, model_type=model_type,
+        layer_dim=layer_size, seconds_per_example=1280 * input_shape[0] / 16000,
     )
-    oww.export_model(model=loaded_module, model_name=args.model_name, output_dir=str(paths.artifacts))
+    oww.model.load_state_dict(state_dict)
+    oww.export_model(model=oww.model, model_name=args.model_name, output_dir=str(paths.artifacts))
 
     onnx_path = paths.artifacts / f"{args.model_name}.onnx"
     if not onnx_path.exists():
         raise RuntimeError(f"export_model не создал {onnx_path} -- см. лог выше")
+
+    # torch>=2.11 dynamo-экспортёр пишет веса во ВНЕШНИЙ файл (<name>.onnx.data)
+    # -- install копировал только граф (15K), onnxruntime падал «External data
+    # path does not exist» (живой прогон T3). Сшиваем в самодостаточный .onnx
+    # (веса крошечные, ~1MB) и убираем companion-файл.
+    external_data = onnx_path.with_suffix(".onnx.data")
+    if external_data.exists():
+        import onnx
+        merged = onnx.load(str(onnx_path))  # подтягивает external data сам
+        onnx.save(merged, str(onnx_path))   # по умолчанию -- всё в одном файле
+        external_data.unlink(missing_ok=True)
+        logger.info("export: внешние веса вшиты в %s (companion удалён)", onnx_path.name)
 
     write_marker(paths.artifacts, "export", {"onnx_path": str(onnx_path)})
     logger.info("export: готово -- %s", onnx_path)
