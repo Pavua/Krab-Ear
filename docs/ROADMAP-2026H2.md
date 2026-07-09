@@ -163,7 +163,7 @@ Ear. Фикс PR #1858, доказан curl без токена (401) / с то�
   пути через `HistoryPanelController.windowWillClose`). (4) Source-contract пины проводки wake-поллер↔conversation.
   Итог: 1164 теста / 0 фейлов (+42 за волну). Сиблинг-хвост закрыт следом: PR #1862 — тот же off-screen guard
   в `LiveSubtitlesOverlay` (третий и последний overlay этого класса). VG-сторона (barge-in по VAD на сервере,
-  error-коды в `conv.error`) — по брифу `docs/design-briefs/2026-07-09-vg-conversation-ux-polish.md`, статус
+  error-коды в `conv.error`) — по брифу `docs/design-briefs/2026-07-09-vg-barge-in-resume.md`, статус
   за параллельной VG-сессией. Не сделано из исходной формулировки: прерывание ГОЛОСОМ (VAD barge-in) — это
   VG-сторона; клавиша/кнопка — есть.
 DoD волны: сценарий «сказал „Краб, …“ — получил голосовой ответ мозга» работает end-to-end без рук,
