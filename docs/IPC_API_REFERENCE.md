@@ -2260,10 +2260,12 @@ Params: `{text?, id?}`
 Returns: `{terms: [{term, frequency, weight}]}`
 
 ### `replace_word_in_last_transcript`
-*(service.py)*  
-Заменяет слово в последней (или указанной) записи истории без перезаписи всего текста.  
-Params: `{old_word, new_word, id?}`  
-Returns: `{ok, id, replacements}`
+*(llm_ops_service.py)*  
+Заменяет слово в последней (или указанной) записи истории без перезаписи всего текста.
+Если `auto_learn_corrections_enabled=True`, новое слово также добавляется в
+`stt_hotwords` (closed-loop STT vocabulary) — см. `auto_learned` в ответе.  
+Params: `{old_word, new_word, history_id?}`  
+Returns: `{ok, replaced_count, history_id, new_text, auto_learned}`
 
 ---
 

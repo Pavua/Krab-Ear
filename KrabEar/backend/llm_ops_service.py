@@ -137,7 +137,13 @@ class LLMOpsService:
           - history_id: str | None — ID записи; если не указан, берётся последняя запись.
 
         Возвращает:
-            {"ok": bool, "replaced_count": int, "history_id": str | None, "new_text": str | None}
+            {"ok": bool, "replaced_count": int, "history_id": str | None, "new_text": str | None,
+             "auto_learned": bool}
+
+            auto_learned=True означает, что new_word реально был добавлен в
+            stt_hotwords (closed-loop STT vocabulary). False — auto-learn выключен
+            настройкой, слово не прошло sanity-проверки, или уже было в словаре.
+            Присутствует только при ok=True (при ok=False auto-learn не запускается).
 
         Ошибки (ok=False):
           - "privacy_mode_active" — privacy mode включён, операция запрещена.
@@ -189,9 +195,15 @@ class LLMOpsService:
         # Closed-loop STT auto-learn: add corrected word to stt_hotwords so
         # Whisper stops mishearing it next time. Non-fatal — vocab add failure
         # must never break the replace itself.
-        self._maybe_auto_learn_word(new, old)
+        auto_learned = self._maybe_auto_learn_word(new, old)
 
-        return {"ok": True, "replaced_count": replaced_count, "history_id": history_id, "new_text": new_text}
+        return {
+            "ok": True,
+            "replaced_count": replaced_count,
+            "history_id": history_id,
+            "new_text": new_text,
+            "auto_learned": auto_learned,
+        }
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -200,7 +212,7 @@ class LLMOpsService:
     # Maximum token budget for stt_hotwords (mirrors STTManagementService limit).
     _STT_HOTWORDS_MAX: int = 100
 
-    def _maybe_auto_learn_word(self, new_word: str, old_word: str) -> None:
+    def _maybe_auto_learn_word(self, new_word: str, old_word: str) -> bool:
         """Добавляет исправленное слово в stt_hotwords если auto_learn_corrections_enabled.
 
         Non-fatal: любая ошибка логируется на уровне debug, replace продолжается.
@@ -209,31 +221,35 @@ class LLMOpsService:
           - new_word не совпадает с old_word (нечего учить)
           - new_word не пустой, разумной длины (≤60 символов)
           - new_word — одно слово или короткая фраза (≤4 токена по пробелам)
+
+        Возвращает True только если слово реально было добавлено в stt_hotwords
+        (используется для поля "auto_learned" в ответе IPC-обработчика, чтобы
+        Swift-сторона могла явно показать пользователю "слово выучено в словарь STT").
         """
         try:
             cached = self._settings_svc.cached_settings() if self._settings_svc is not None else {}
             if not cached.get("auto_learn_corrections_enabled", False):
-                return
+                return False
 
             # Sanity checks: non-empty, short, and meaningfully different from old word
             word = new_word.strip()
             if not word:
-                return
+                return False
             if word.lower() == old_word.strip().lower():
-                return
+                return False
             if len(word) > 60:
                 logger.debug("auto_learn: skipping long token %r (len=%d)", word, len(word))
-                return
+                return False
             if len(word.split()) > 4:
                 logger.debug("auto_learn: skipping multi-token phrase %r", word)
-                return
+                return False
 
             current: list = cached.get("stt_hotwords", [])
             if not isinstance(current, list):
                 current = []
             if word in current:
                 logger.debug("auto_learn: %r already in stt_hotwords, skip", word)
-                return
+                return False
 
             updated = current + [word]
             if len(updated) > self._STT_HOTWORDS_MAX:
@@ -243,5 +259,7 @@ class LLMOpsService:
             logger.debug(
                 "auto_learn: added %r to stt_hotwords (total=%d)", word, len(updated)
             )
+            return True
         except Exception as exc:  # noqa: BLE001
             logger.debug("auto_learn_correction failed (non-fatal): %s", exc)
+            return False
