@@ -113,3 +113,63 @@ final class ConversationOverlayWiringTests: XCTestCase {
         vc.computeAndPushLevel([0.4, 0.5, 0.6])  // smoke: пуш в meter overlay не падает
     }
 }
+
+// MARK: - Укрепление 1 (code-review батч 3): off-screen guard в restorePosition()
+
+/// Портировано из RealtimeOverlayController.restoreSavedPosition() (M2): сохранённая
+/// позиция применяется, только если ≥80% frame пересекается с visibleFrame какого-нибудь
+/// ТЕКУЩЕГО экрана. Без этой проверки отключение второго монитора навсегда прячет
+/// панель за экраном (сохранённая позиция ссылалась на уже не существующий экран).
+@MainActor
+final class ConversationStatusOverlayPositionGuardTests: XCTestCase {
+
+    private let positionKey = "KrabEar_ConversationStatusHUDPosition"
+
+    override func tearDown() async throws {
+        UserDefaults.standard.removeObject(forKey: positionKey)
+        try await super.tearDown()
+    }
+
+    private func savePosition(x: CGFloat, y: CGFloat) {
+        let dict: [String: CGFloat] = ["x": x, "y": y]
+        guard let data = try? JSONSerialization.data(withJSONObject: dict),
+              let str = String(data: data, encoding: .utf8) else {
+            return XCTFail("не удалось сериализовать тестовую позицию")
+        }
+        UserDefaults.standard.set(str, forKey: positionKey)
+    }
+
+    /// Заведомо off-screen сохранённая позиция (например после отключения второго
+    /// монитора) НЕ должна применяться безусловно. Инвариант держится независимо от
+    /// headless-среды CI: (99999, 99999) не может пересекаться ни с одним реальным
+    /// экраном ≥80%, поэтому кандидат никогда не проходит guard — panel либо падает
+    /// на placeTopRight() (есть NSScreen.main), либо остаётся на дефолтном contentRect
+    /// панели (экранов нет вовсе). Ни один из исходов не равен (99999, 99999).
+    func test_restorePosition_offScreen_doesNotApplyBogusOrigin() {
+        savePosition(x: 99999, y: 99999)
+
+        let overlay = ConversationStatusOverlay()
+        defer { overlay.hide() }
+
+        XCTAssertNotEqual(overlay._testPanelOrigin.x, 99999)
+        XCTAssertNotEqual(overlay._testPanelOrigin.y, 99999)
+    }
+
+    /// Позитивный кейс: позиция внутри видимой области реального экрана восстанавливается
+    /// как есть. Пропускается в headless-среде без NSScreen.main (нечего проверять).
+    func test_restorePosition_onScreen_appliesSavedOrigin() throws {
+        guard let screen = NSScreen.main else {
+            throw XCTSkip("нет NSScreen.main в этой среде — позитивный кейс непроверяем headless")
+        }
+        let vf = screen.visibleFrame
+        let x = vf.minX + 40
+        let y = vf.minY + 40
+        savePosition(x: x, y: y)
+
+        let overlay = ConversationStatusOverlay()
+        defer { overlay.hide() }
+
+        XCTAssertEqual(overlay._testPanelOrigin.x, x, accuracy: 0.5)
+        XCTAssertEqual(overlay._testPanelOrigin.y, y, accuracy: 0.5)
+    }
+}

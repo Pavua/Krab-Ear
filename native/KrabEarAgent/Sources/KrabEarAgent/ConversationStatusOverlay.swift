@@ -36,6 +36,7 @@ final class ConversationStatusOverlay: NSObject {
     var _testPanelLevel: NSWindow.Level { panel.level }
     var _testPanelIsDraggable: Bool { panel.isMovableByWindowBackground }
     var _testStatusText: String { statusLabel.stringValue }
+    var _testPanelOrigin: NSPoint { panel.frame.origin }
 
     // MARK: - Init
 
@@ -141,7 +142,7 @@ final class ConversationStatusOverlay: NSObject {
         onInterrupt?()
     }
 
-    // MARK: - Position persistence (паттерн LiveSubtitlesOverlay)
+    // MARK: - Position persistence (паттерн LiveSubtitlesOverlay + M2-guard RealtimeOverlayController)
 
     private func placeTopRight() {
         guard let screen = NSScreen.main else { return }
@@ -152,16 +153,35 @@ final class ConversationStatusOverlay: NSObject {
         panel.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: true)
     }
 
+    /// Валидна ли candidate-позиция — хотя бы 80% площади пересекается с visibleFrame
+    /// какого-нибудь ТЕКУЩЕГО экрана. Портировано из
+    /// RealtimeOverlayController.restoreSavedPosition() (M2, ~строки 757-782): без этой
+    /// проверки отключение второго монитора навсегда прячет панель за экраном — сохранённая
+    /// позиция ссылается на уже не существующий экран, а UserDefaults применяется безусловно.
+    private func isOnScreen(_ candidate: NSRect) -> Bool {
+        let totalArea = candidate.width * candidate.height
+        guard totalArea > 0 else { return false }
+        return NSScreen.screens.contains { screen in
+            let intersection = candidate.intersection(screen.visibleFrame)
+            let coveredArea = intersection.width * intersection.height
+            return coveredArea / totalArea >= 0.80
+        }
+    }
+
     private func restorePosition() {
         if let saved = UserDefaults.standard.string(forKey: positionKey),
            let data = saved.data(using: .utf8),
            let dict = try? JSONSerialization.jsonObject(with: data) as? [String: CGFloat],
            let x = dict["x"], let y = dict["y"] {
             let size = panel.frame.size
-            panel.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: false)
-        } else {
-            placeTopRight()
+            let candidate = NSRect(x: x, y: y, width: size.width, height: size.height)
+            if isOnScreen(candidate) {
+                panel.setFrame(candidate, display: false)
+                return
+            }
         }
+        // Нет сохранённой позиции ИЛИ она вне видимых экранов (guard выше) — дефолт.
+        placeTopRight()
     }
 
     private func savePosition() {
