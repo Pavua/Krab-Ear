@@ -75,6 +75,10 @@ DEFAULT_SPEAKERS: tuple[str, ...] = ("aidar", "baya", "kseniya", "xenia", "eugen
 SILERO_REPO = "snakers4/silero-models"
 DEFAULT_SILERO_MODEL_ID = "v4_ru"
 
+# Фичи openwakeword (melspectrogram/embedding ONNX) ожидают строго 16 кГц;
+# v4-Silero синтезирует на 24/48 кГц -- _synthesize_one ресемплит сюда.
+TARGET_SAMPLE_RATE = 16000
+
 STAGES: tuple[str, ...] = (
     "corpora", "positives", "negatives", "features", "train", "export", "install",
 )
@@ -849,24 +853,43 @@ def _load_silero_tts(model_id: str) -> dict[str, Any]:
     """Ленивая загрузка Silero TTS через torch.hub (self-contained, НЕ зависит
     от запущенного backend'а -- см. решение §3.2 спеки).
 
-    Тот же repo_or_dir/паттерн распаковки, что и backend/tts_service.py::_load_silero,
-    для консистентности с production-кодом (хотя сам скрипт независим от него).
+    Version-agnostic: старые per-speaker пакеты Silero (v1/v2) возвращают
+    5-кортеж ``(model, symbols, sample_rate, example_text, apply_tts)``;
+    современные v3/v4 (``v4_ru`` -- наш дефолт) возвращают 2-кортеж
+    ``(model, example_text)``, и синтез идёт МЕТОДОМ ``model.apply_tts``.
+    backend/tts_service.py::_load_silero распаковывает только legacy-форму --
+    с ``v4_ru`` это падает ``not enough values to unpack`` (найдено живым
+    прогоном 2026-07-09; сиблинг-фикс прод-кода -- отдельным PR).
     """
     import torch  # noqa: F401 -- проверка доступности до torch.hub.load
     device = torch.device("cpu")
-    model, symbols, sample_rate, _example_text, apply_tts = torch.hub.load(
+    hub_result = torch.hub.load(
         repo_or_dir=SILERO_REPO,
         model="silero_tts",
         language="ru",
         speaker=model_id,
         trust_repo=True,
     )
-    model = model.to(device)
+    if isinstance(hub_result, tuple) and len(hub_result) >= 5:
+        model, symbols, sample_rate, _example_text, apply_tts = hub_result[:5]
+        model = model.to(device)
+        return {
+            "api": "legacy",
+            "model": model,
+            "symbols": symbols,
+            "sample_rate": sample_rate,
+            "apply_tts": apply_tts,
+            "device": device,
+        }
+    model = hub_result[0] if isinstance(hub_result, tuple) else hub_result
+    model.to(device)
+    # v3/v4: синтезируем на 24 кГц (нативная сетка v4: 8000/24000/48000),
+    # даунсемпл до 16 кГц делает вызывающий (_synthesize_one) -- фичи
+    # openwakeword ожидают строго 16 кГц.
     return {
+        "api": "v4",
         "model": model,
-        "symbols": symbols,
-        "sample_rate": sample_rate,
-        "apply_tts": apply_tts,
+        "sample_rate": 24000,
         "device": device,
     }
 
@@ -881,19 +904,15 @@ def _synthesize_one(
     """Синтезирует один клип. При заданных rate/pitch пробует SSML
     (best-effort); при несовместимости текущей версии Silero-хаба -- graceful
     fallback на обычный текст (см. риски в докстроке модуля)."""
-    global _SSML_UNSUPPORTED_WARNED
     import numpy as np
 
-    apply_tts = silero_ctx["apply_tts"]
-    kwargs = dict(
-        model=silero_ctx["model"], sample_rate=silero_ctx["sample_rate"],
-        symbols=silero_ctx["symbols"], device=silero_ctx["device"], speaker=speaker,
-    )
-    audio_tensor = None
-    if rate_pct is not None or pitch_pct is not None:
+    def _try_ssml(synth_fn) -> Any | None:
+        """SSML best-effort: TypeError = версия без ssml_text (варнинг один
+        раз), прочее -- debug + fallback на обычный текст."""
+        global _SSML_UNSUPPORTED_WARNED
         ssml = build_ssml(text, rate_pct, pitch_pct)
         try:
-            audio_tensor = apply_tts(ssml_text=ssml, **kwargs)
+            return synth_fn(ssml)
         except TypeError:
             if not _SSML_UNSUPPORTED_WARNED:
                 logger.warning(
@@ -903,14 +922,43 @@ def _synthesize_one(
                 )
                 _SSML_UNSUPPORTED_WARNED = True
         except Exception as exc:  # noqa: BLE001 -- SSML best-effort, не роняем клип
-            logger.debug("positives: SSML-синтез не удался (%s) -- fallback на texts=[]", exc)
+            logger.debug("positives: SSML-синтез не удался (%s) -- fallback на текст", exc)
+        return None
 
-    if audio_tensor is None:
-        audio_tensor = apply_tts(texts=[text], **kwargs)
+    want_ssml = rate_pct is not None or pitch_pct is not None
+    native_sr = silero_ctx["sample_rate"]
 
-    samples = audio_tensor.squeeze().cpu().numpy()
+    if silero_ctx.get("api") == "v4":
+        model = silero_ctx["model"]
+        audio_tensor = None
+        if want_ssml:
+            audio_tensor = _try_ssml(lambda s: model.apply_tts(
+                ssml_text=s, speaker=speaker, sample_rate=native_sr))
+        if audio_tensor is None:
+            audio_tensor = model.apply_tts(
+                text=text, speaker=speaker, sample_rate=native_sr,
+                put_accent=True, put_yo=True)
+    else:
+        apply_tts = silero_ctx["apply_tts"]
+        kwargs = dict(
+            model=silero_ctx["model"], sample_rate=native_sr,
+            symbols=silero_ctx["symbols"], device=silero_ctx["device"],
+            speaker=speaker,
+        )
+        audio_tensor = None
+        if want_ssml:
+            audio_tensor = _try_ssml(lambda s: apply_tts(ssml_text=s, **kwargs))
+        if audio_tensor is None:
+            audio_tensor = apply_tts(texts=[text], **kwargs)
+
+    samples = audio_tensor.squeeze().cpu().numpy().astype(np.float32)
+    if native_sr != TARGET_SAMPLE_RATE:
+        from scipy.signal import resample_poly
+        from math import gcd
+        g = gcd(int(native_sr), TARGET_SAMPLE_RATE)
+        samples = resample_poly(samples, TARGET_SAMPLE_RATE // g, int(native_sr) // g)
     pcm = (samples * 32767).clip(-32768, 32767).astype(np.int16)
-    return pcm, silero_ctx["sample_rate"]
+    return pcm, TARGET_SAMPLE_RATE
 
 
 def _write_wav(path: Path, pcm: Any, sample_rate: int) -> None:
