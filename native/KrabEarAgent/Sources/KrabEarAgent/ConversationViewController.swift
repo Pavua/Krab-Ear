@@ -106,6 +106,10 @@ final class ConversationViewController: NSViewController {
     /// Интервал fallback (инжектируется в тестах; прод — 2с).
     var interruptFallbackInterval: TimeInterval = 2.0
 
+    /// Локальная озвучка ошибок (Волна 3c). Реальный speak инжектится из +VoiceTab;
+    /// без инжекции — тихая text-only деградация.
+    let errorAnnouncer = ConversationErrorAnnouncer()
+
     // MARK: - Init
 
     init(config: ConversationConfig) {
@@ -197,6 +201,14 @@ final class ConversationViewController: NSViewController {
         conversationState = .listening
     }
 
+    /// Классифицировать провал WS по текущему состоянию и озвучить.
+    /// .connecting = не смогли подключиться; иначе — обрыв посреди сессии.
+    func classifyAndAnnounceWSFailure() {
+        let cls: ConversationErrorAnnouncer.ErrorClass =
+            (conversationState == .connecting) ? .gatewayUnreachable : .connectionLost
+        errorAnnouncer.announce(cls)
+    }
+
     // MARK: - State application
 
     private func applyState(_ state: ConversationState) {
@@ -273,6 +285,7 @@ final class ConversationViewController: NSViewController {
 
         case .error(let code, let message):
             appendTranscriptLine("— Ошибка [\(code)]: \(message)")
+            errorAnnouncer.announce(.serverError)
             conversationState = .error(message)
             stopConversation()
 

@@ -41,6 +41,26 @@ extension HistoryPanelController {
         let vc = ConversationViewController(config: config)
         conversationVC = vc
 
+        // Волна 3c: локальная озвучка ошибок — синтез через IPC synthesize_speech
+        // (строго off-main, AGENT-3), воспроизведение через AVAudioPlayer.
+        // Пустой wav_bytes_b64 (privacy mode / TTS недоступен) → тихая text-only деградация.
+        let ipcClient = self.ipcClient
+        vc.errorAnnouncer.speak = { phrase in
+            DispatchQueue.global(qos: .userInitiated).async {
+                nonisolated(unsafe) let response = try? ipcClient.call(
+                    method: "synthesize_speech",
+                    params: ["text": phrase, "language": "ru"]
+                )
+                guard let result = response?["result"] as? [String: Any],
+                      let b64 = result["wav_bytes_b64"] as? String, !b64.isEmpty,
+                      let wav = Data(base64Encoded: b64)
+                else { return }
+                Task { @MainActor in
+                    ConversationErrorAnnouncer.playWav(wav)
+                }
+            }
+        }
+
         // Встроить view VC в content view таба.
         vc.view.translatesAutoresizingMaskIntoConstraints = false
         voiceContentView.addSubview(vc.view)

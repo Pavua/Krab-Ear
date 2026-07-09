@@ -107,6 +107,7 @@ extension ConversationViewController {
                     guard let self, self.isSessionActive else { return }
                     let desc = (error as NSError).localizedDescription
                     AgentLogger.shared.info("[WS] Receive error: \(desc)")
+                    self.classifyAndAnnounceWSFailure()
                     self.conversationState = .error(desc)
                     self.stopConversation()
                 }

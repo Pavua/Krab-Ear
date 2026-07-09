@@ -62,3 +62,69 @@ final class ConversationErrorAnnouncerTests: XCTestCase {
         }
     }
 }
+
+// MARK: - Task 4: проводка триггеров в ConversationViewController
+
+@MainActor
+final class ConversationErrorAnnouncerWiringTests: XCTestCase {
+
+    private var vc: ConversationViewController!
+    private var spoken: [String] = []
+
+    override func setUp() async throws {
+        try await super.setUp()
+        spoken = []
+        vc = ConversationViewController(config: .default)
+        vc.loadView()
+        vc.viewDidLoad()
+        vc.errorAnnouncer.speak = { [weak self] phrase in self?.spoken.append(phrase) }
+        vc.isSessionActive = true
+    }
+
+    override func tearDown() async throws {
+        vc.interruptFallbackTimer?.invalidate()
+        vc = nil
+        try await super.tearDown()
+    }
+
+    func test_wsFailure_whileConnecting_announcesGatewayUnreachable() {
+        vc.conversationState = .connecting
+        vc.classifyAndAnnounceWSFailure()
+        XCTAssertEqual(spoken, ["Голосовой шлюз недоступен."])
+    }
+
+    func test_wsFailure_midSession_announcesConnectionLost() {
+        vc.conversationState = .listening
+        vc.classifyAndAnnounceWSFailure()
+        XCTAssertEqual(spoken, ["Связь с голосовым шлюзом потеряна."])
+    }
+
+    func test_convError_announcesServerError() {
+        vc.handleDownlinkEvent(.error(code: "conv.error", message: "brain exploded"))
+        XCTAssertEqual(spoken, ["Произошла ошибка. Попробуй ещё раз."])
+    }
+
+    func test_userStop_neverAnnounces() {
+        vc.conversationState = .listening
+        vc.stopConversation()
+        XCTAssertTrue(spoken.isEmpty, "штатная остановка пользователем не озвучивается")
+    }
+
+    func test_sourceContract_receiveLoopFailureBranch_callsClassifier() throws {
+        // Receive-failure ветка в +WebSocket.swift обязана вызывать классификатор —
+        // иначе озвучка «шлюз недоступен/связь потеряна» мертва в проде
+        // (класс test-validates-the-hole: setupErrorBus/setupHealthMonitor).
+        let src = try String(contentsOf: Self.wsSwiftURL, encoding: .utf8)
+        XCTAssertTrue(src.contains("classifyAndAnnounceWSFailure()"),
+                      "startReceiveLoop failure-ветка должна вызывать classifyAndAnnounceWSFailure()")
+    }
+
+    private static var wsSwiftURL: URL {
+        var url = URL(fileURLWithPath: #filePath)  // .../Tests/KrabEarAgentTests/<этот файл>
+        url.deleteLastPathComponent()              // Tests/KrabEarAgentTests
+        url.deleteLastPathComponent()              // Tests
+        url.deleteLastPathComponent()              // native/KrabEarAgent
+        return url
+            .appendingPathComponent("Sources/KrabEarAgent/ConversationViewController+WebSocket.swift")
+    }
+}
