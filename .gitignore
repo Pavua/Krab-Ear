@@ -88,3 +88,6 @@ docs/llm-bench-results-*.json
 # (fixed to env-read, but files may regress). Keep local only — not in repo.
 scripts/r*_bench.py
 worktrees/
+
+# Visual-companion брейнсторм-сессии (runtime, не коммитить)
+.superpowers/
