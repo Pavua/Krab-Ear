@@ -212,6 +212,41 @@ class AudioRecorder:
             audio = audio[-max_samples:]
         return audio, duration
 
+    def snapshot_range(self, from_sec: float, to_sec: float) -> np.ndarray:
+        """Срез сырого буфера по диапазону секунд ОТ НАЧАЛА записи.
+
+        Для meeting-аккумулятора (C2a): непересекающиеся чанки по курсору —
+        полный транскрипт без дедупа. O(число чанков) на скан + O(диапазона)
+        на копирование; полной конкатенации буфера нет (урок snapshot_audio).
+        Диапазон за пределами буфера обрезается; вырожденный → пустой массив.
+        """
+        if to_sec <= from_sec:
+            return np.array([], dtype=np.float32)
+        from_sample = max(0, int(from_sec * self.sample_rate))
+        to_sample = int(to_sec * self.sample_rate)
+
+        with self._lock:
+            chunks = list(self._chunks)
+
+        collected: list[np.ndarray] = []
+        offset = 0
+        for chunk in chunks:
+            flat = chunk.reshape(-1)
+            chunk_end = offset + flat.size
+            if chunk_end <= from_sample:
+                offset = chunk_end
+                continue
+            if offset >= to_sample:
+                break
+            start = max(0, from_sample - offset)
+            end = min(flat.size, to_sample - offset)
+            collected.append(flat[start:end])
+            offset = chunk_end
+
+        if not collected:
+            return np.array([], dtype=np.float32)
+        return np.concatenate(collected, axis=0).astype(np.float32)
+
     def snapshot_rms(self) -> float:
         """Возвращает RMS последнего записанного чанка (0.0-1.0) без остановки записи."""
         with self._lock:
