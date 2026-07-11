@@ -111,6 +111,7 @@ class RealtimePartialTranscriber:
         self._sample_rate = sample_rate
         self._stop_event.clear()
         self._stop_requested = False
+        self._pause_event.clear()  # C2a: сбрасываем паузу для изоляции новой сессии
         new_thread = threading.Thread(
             target=self._worker,
             name="RealtimePartialTranscriber",
