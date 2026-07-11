@@ -71,6 +71,7 @@ class RealtimePartialTranscriber:
         self._privacy_getter = privacy_getter
 
         self._stop_event = threading.Event()
+        self._pause_event = threading.Event()  # C2a: пауза на время LLM/диар (Metal)
         self._stop_requested: bool = False
         self._thread: threading.Thread | None = None
         self._thread_lock = threading.Lock()  # W1746: protect _thread access
@@ -152,6 +153,20 @@ class RealtimePartialTranscriber:
             self._thread = None
         logger.debug("RealtimePartialTranscriber остановлен: session=%s", self._session_id)
 
+    def pause(self) -> None:
+        """Приостановить снапшоты/эмиты без остановки треда (C2a, Metal-констрейнт).
+
+        Idempotent. Текущая итерация (если уже в STT) дорабатывает — вызывающий
+        GPU-слот сериализован, короткое перекрытие исключено его очередью.
+        """
+        self._pause_event.set()
+        logger.debug("RealtimePartialTranscriber: pause (session=%s)", self._session_id)
+
+    def resume(self) -> None:
+        """Снять паузу. Idempotent."""
+        self._pause_event.clear()
+        logger.debug("RealtimePartialTranscriber: resume (session=%s)", self._session_id)
+
     # ------------------------------------------------------------------
     # Worker
     # ------------------------------------------------------------------
@@ -170,6 +185,9 @@ class RealtimePartialTranscriber:
             self._stop_event.wait(self._interval_sec)
             if self._stop_event.is_set():
                 break
+
+            if self._pause_event.is_set():
+                continue  # пауза: пропускаем итерацию, тред жив
 
             try:
                 audio, duration_sec = self._recorder.snapshot_audio(
