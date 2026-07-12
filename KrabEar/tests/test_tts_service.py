@@ -467,6 +467,161 @@ class TTSEngineRoutingTestCase(unittest.TestCase):
         self.assertEqual(len(results), 5)
 
 
+# ── fix/tts-ru-accent-routing regression: RU say-fallback voice + no-Kokoro ────
+
+class RuSayFallbackVoiceTestCase(unittest.TestCase):
+    """2026-07-12 incident: ConversationErrorAnnouncer speaks RU text with a
+    noticeable foreign accent. Root cause found: for RU text falling back to
+    macOS `say` (Silero unavailable, or TTS_ENABLED=False -- both true in the
+    reported prod launchd config, which had no TTS_ENABLED env var set),
+    ``synthesize_speech`` called ``_say_to_wav`` with ``voice=None`` whenever
+    neither the IPC caller nor ``settings.SAY_VOICE`` supplied a voice.
+    ``_say_to_wav``'s ``if voice:`` guard then skips the ``-v`` flag entirely,
+    so macOS `say` speaks with the SYSTEM DEFAULT voice (commonly English on
+    this machine), not the intended RU voice ``_SAY_DEFAULT_VOICE="Milena"``
+    -- exactly matching the reported symptom. The Kokoro-before-say hypothesis
+    (EN engine getting RU text) was checked and is NOT present: the RU branch
+    of ``synthesize_speech`` never calls ``_synthesize_kokoro``. Fix: the say
+    fallback now defaults an unset voice to ``_SAY_DEFAULT_VOICE`` for RU
+    text specifically, without touching EN behaviour or an explicit
+    SAY_VOICE/voice override.
+    """
+
+    def _make_service(self) -> TTSService:
+        svc = TTSService()
+        svc._silero_attempted = True
+        svc._silero = None
+        svc._kokoro_attempted = True
+        svc._kokoro = None
+        return svc
+
+    @patch("backend.tts_service.settings")
+    @patch("backend.tts_service._say_to_wav")
+    def test_ru_say_fallback_defaults_to_milena_when_tts_disabled(
+        self, mock_say: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Prod launchd config (TTS_ENABLED unset -> False), SAY_VOICE unset,
+        no explicit voice (exactly ConversationErrorAnnouncer's call shape):
+        RU text via say MUST use the Milena RU voice, not the macOS system
+        default voice (often English)."""
+        mock_settings.TTS_ENABLED = False
+        mock_settings.TTS_FALLBACK_SAY = True
+        mock_settings.TTS_SILERO_MODEL = "v4_ru"
+        mock_settings.TTS_SILERO_VOICE = "baya"
+        mock_settings.TTS_KOKORO_MODEL = "hexgrad/Kokoro-82M"
+        mock_settings.SAY_VOICE = ""
+        fake_wav = _make_wav_bytes()
+        mock_say.return_value = fake_wav
+
+        svc = self._make_service()
+        result = svc.synthesize_speech("Голосовой шлюз недоступен.", language="ru")
+
+        self.assertEqual(result, fake_wav)
+        mock_say.assert_called_once()
+        _call_args, call_kwargs = mock_say.call_args
+        self.assertEqual(
+            call_kwargs.get("voice"),
+            "Milena",
+            "RU say-fallback must default to the Milena RU voice when no "
+            "voice/SAY_VOICE is configured — got "
+            f"{call_kwargs.get('voice')!r} (system default, likely non-RU, "
+            "explains the reported foreign accent)",
+        )
+
+    @patch("backend.tts_service.settings")
+    @patch("backend.tts_service._say_to_wav")
+    def test_ru_say_fallback_defaults_to_milena_when_silero_unavailable(
+        self, mock_say: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """TTS_ENABLED=True but Silero failed to load (or timed out): the
+        same Milena default must apply on the say fallback for RU text."""
+        mock_settings.TTS_ENABLED = True
+        mock_settings.TTS_FALLBACK_SAY = True
+        mock_settings.TTS_SILERO_MODEL = "v4_ru"
+        mock_settings.TTS_SILERO_VOICE = "baya"
+        mock_settings.TTS_KOKORO_MODEL = "hexgrad/Kokoro-82M"
+        mock_settings.SAY_VOICE = ""
+        fake_wav = _make_wav_bytes()
+        mock_say.return_value = fake_wav
+
+        svc = self._make_service()
+        result = svc.synthesize_speech("Связь с голосовым шлюзом потеряна.", language="ru")
+
+        self.assertEqual(result, fake_wav)
+        _call_args, call_kwargs = mock_say.call_args
+        self.assertEqual(call_kwargs.get("voice"), "Milena")
+
+    @patch("backend.tts_service.settings")
+    @patch("backend.tts_service._say_to_wav")
+    def test_ru_say_fallback_respects_explicit_say_voice_setting(
+        self, mock_say: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """If the user explicitly configured SAY_VOICE, it must win over the
+        Milena default — the fix must not override a deliberate user choice."""
+        mock_settings.TTS_ENABLED = False
+        mock_settings.TTS_FALLBACK_SAY = True
+        mock_settings.TTS_SILERO_MODEL = "v4_ru"
+        mock_settings.TTS_SILERO_VOICE = "baya"
+        mock_settings.TTS_KOKORO_MODEL = "hexgrad/Kokoro-82M"
+        mock_settings.SAY_VOICE = "Yuri"
+        fake_wav = _make_wav_bytes()
+        mock_say.return_value = fake_wav
+
+        svc = self._make_service()
+        svc.synthesize_speech("Произошла ошибка.", language="ru")
+
+        _call_args, call_kwargs = mock_say.call_args
+        self.assertEqual(call_kwargs.get("voice"), "Yuri")
+
+    @patch("backend.tts_service.settings")
+    @patch("backend.tts_service._say_to_wav")
+    def test_en_say_fallback_voice_selection_unaffected(
+        self, mock_say: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """The RU-only Milena default must NOT leak into the EN say-fallback
+        path — EN text with no voice configured still passes voice=None
+        (macOS system default) through unchanged."""
+        mock_settings.TTS_ENABLED = False
+        mock_settings.TTS_FALLBACK_SAY = True
+        mock_settings.TTS_SILERO_MODEL = "v4_ru"
+        mock_settings.TTS_SILERO_VOICE = "baya"
+        mock_settings.TTS_KOKORO_MODEL = "hexgrad/Kokoro-82M"
+        mock_settings.SAY_VOICE = ""
+        fake_wav = _make_wav_bytes()
+        mock_say.return_value = fake_wav
+
+        svc = self._make_service()
+        svc.synthesize_speech("Hello, this is English text.", language="en")
+
+        _call_args, call_kwargs = mock_say.call_args
+        self.assertIsNone(call_kwargs.get("voice"))
+
+    @patch("backend.tts_service.settings")
+    def test_ru_text_never_reaches_kokoro(self, mock_settings: MagicMock) -> None:
+        """Contract regression (task b): Kokoro (EN-only phonemizer) must
+        NEVER receive RU text, regardless of Silero availability. Mocks
+        Silero unavailable + Kokoro available/would-succeed to prove the RU
+        branch structurally cannot call it -- verified NOT already broken,
+        kept as a permanent contract guard."""
+        mock_settings.TTS_ENABLED = True
+        mock_settings.TTS_FALLBACK_SAY = True
+        mock_settings.TTS_SILERO_MODEL = "v4_ru"
+        mock_settings.TTS_SILERO_VOICE = "baya"
+        mock_settings.TTS_KOKORO_MODEL = "hexgrad/Kokoro-82M"
+        mock_settings.SAY_VOICE = ""
+
+        fake_wav = _make_wav_bytes()
+        svc = self._make_service()
+
+        with patch.object(svc, "_synthesize_silero", return_value=None) as mock_silero, \
+             patch.object(svc, "_synthesize_kokoro", return_value=fake_wav) as mock_kokoro, \
+             patch("backend.tts_service._say_to_wav", return_value=fake_wav):
+            svc.synthesize_speech("Привет, это русский текст для регрессии.", language="ru")
+
+        mock_silero.assert_called_once()
+        mock_kokoro.assert_not_called()
+
+
 # ── W1221 / W1215 F1+F2+F3 regression tests ───────────────────────────────────
 
 class TorchHubTrustRepoTestCase(unittest.TestCase):

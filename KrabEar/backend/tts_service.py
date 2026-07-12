@@ -1,13 +1,24 @@
 """Двухрежимный TTS-сервис: Silero (RU primary) + Kokoro (EN fallback) + macOS say.
 
 Архитектура fallback chain:
-1. RU-текст -> Silero (если загружен и TTS_ENABLED), иначе macOS say
+1. RU-текст -> Silero (если загружен и TTS_ENABLED), иначе macOS say с
+              русским голосом (voice/SAY_VOICE, иначе _SAY_DEFAULT_VOICE=
+              "Milena") -- НИКОГДА не Kokoro (EN-only движок).
 2. EN-текст -> Kokoro (если загружен и TTS_ENABLED), иначе Silero (умеет EN),
               иначе macOS say
 3. Auto-detect -> определяем язык по доле кириллицы, затем chain выше
 
 Все ML-импорты -- ленивые (lazy): тесты проходят без torch/kokoro в окружении.
 Lazy load без прямых method calls на nn.Module (нет train/eval mode switching).
+
+🔴 fix/tts-ru-accent-routing (2026-07-12): RU say-fallback voice must never be
+left unset. ``_say_to_wav`` only adds the ``-v`` flag when ``voice`` is
+truthy -- an unset voice/SAY_VOICE silently falls through to the macOS
+SYSTEM DEFAULT voice (commonly English), producing RU speech with a
+noticeable foreign accent instead of the intended Milena RU voice. The RU
+branch of ``synthesize_speech`` defaults an unset voice to
+``_SAY_DEFAULT_VOICE`` before calling ``_say_to_wav`` -- see
+RuSayFallbackVoiceTestCase in tests/test_tts_service.py.
 """
 
 from __future__ import annotations
@@ -482,6 +493,12 @@ class TTSService:
         # Последний резерв: macOS say
         if settings.TTS_FALLBACK_SAY:
             say_voice = voice or (settings.SAY_VOICE or None)
+            if say_voice is None and lang == "ru":
+                # RU-текст без явно заданного голоса ДОЛЖЕН звучать русским
+                # голосом (Milena), а не системным дефолтом macOS `say`
+                # (часто английский) -- см. module docstring
+                # fix/tts-ru-accent-routing.
+                say_voice = _SAY_DEFAULT_VOICE
             return _say_to_wav(text, voice=say_voice)
 
         return b""

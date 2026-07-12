@@ -49,6 +49,14 @@
     <!-- D.7 dictation prompt. -->
     <key>KRAB_EAR_TRANSCRIBE_PROMPT</key>
     <string>Ты транскрибируешь русскую речь владельца по имени Pablito. Пиши грамотно и с пунктуацией. Ставь точки в конце предложений, запятые перед "что", "который", "если", "но", "потому что", "чтобы", "когда". Вопросы заканчивай знаком вопроса. Числа всегда пиши цифрами (47 евро, 30 минут). Время пиши в формате ЧЧ:ММ (15:00, 14:30), не 15.00. Названия брендов и продуктов пиши латиницей: Mercadona, Krab, Krab Ear, Krab Voice Gateway, Antigravity, OpenClaw, Hammerspoon, Pyannote, Pyrofork, Telegram, GitHub, FastAPI, Claude, Anthropic, MacBook, Python, Whisper, MLX. Имена: Pablito, yung_nagato, p0lrd. Сохраняй смысл и естественные паузы. Не добавляй слов которых нет, не повторяй фразы.</string>
+
+    <!-- fix/tts-ru-accent-routing (2026-07-12): REST-процесс тоже вызывает
+         tts_service.handle_synthesize_speech (POST /v1/tts/synthesize, Voice
+         Gateway bridge) -- тот же Silero-primary флаг, что и в
+         ai.krab.ear.backend.plist.template, для консистентности между двумя
+         процессами. См. тот template за полным обоснованием. -->
+    <key>KRAB_EAR_TTS_ENABLED</key>
+    <string>1</string>
   </dict>
 
   <key>StandardOutPath</key>
