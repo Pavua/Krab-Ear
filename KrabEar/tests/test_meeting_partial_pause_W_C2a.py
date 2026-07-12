@@ -83,5 +83,42 @@ class PartialPauseTestCase(unittest.TestCase):
         self.assertTrue(True)
 
 
+class RecordingCorePauseAccessorsTestCase(unittest.TestCase):
+    """Аксессоры RecordingCoreService: доступ к _rt_partial строго под _rt_lock."""
+
+    def test_pause_resume_accessors_delegate(self) -> None:
+        from backend.recording_core_service import RecordingCoreService
+
+        svc = RecordingCoreService.__new__(RecordingCoreService)  # без полного __init__
+        svc._rt_lock = threading.Lock()
+
+        class _FakeRT:
+            def __init__(self) -> None:
+                self.paused = 0
+                self.resumed = 0
+
+            def pause(self) -> None:
+                self.paused += 1
+
+            def resume(self) -> None:
+                self.resumed += 1
+
+        fake = _FakeRT()
+        svc._rt_partial = fake
+        svc.pause_realtime_partials()
+        svc.resume_realtime_partials()
+        self.assertEqual((fake.paused, fake.resumed), (1, 1))
+
+    def test_accessors_are_noop_without_instance(self) -> None:
+        from backend.recording_core_service import RecordingCoreService
+
+        svc = RecordingCoreService.__new__(RecordingCoreService)
+        svc._rt_lock = threading.Lock()
+        svc._rt_partial = None
+        svc.pause_realtime_partials()  # не должно бросить
+        svc.resume_realtime_partials()
+        self.assertTrue(True)
+
+
 if __name__ == "__main__":
     unittest.main()
