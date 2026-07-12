@@ -2764,6 +2764,117 @@ A1-пресет, см. `2026-07-07-recommended-setup-DRAFT.md`).
 
 ---
 
+## Live Meeting (C2a, 2026-07-11)
+
+Backend-ядро живой панели встречи: старт/повышение активной записи в
+meeting-сессию, фоновый воркер-«GPU-слот» (последовательные CHUNK_STT/
+ITEMS_LLM тики, не более одной тяжёлой операции одновременно на Metal),
+поллинг снимка состояния для UI-панели. Спека:
+`docs/superpowers/specs/2026-07-10-c2-live-meeting-overlay-design.md`.
+Модуль: `backend/meeting_session_service.py::MeetingSessionService`
+(18-я сервис-экстракция).
+
+Пока встреча активна, воркер каждые `meeting_chunk_stt_interval_sec` секунд
+снимает новый диапазон аудио (`AudioRecorder.snapshot_range`) и STT-транскрибирует
+его превью-профилем, накапливая транскрипт; каждые `meeting_items_interval_sec`
+(адаптивно растягивается на длинных встречах) — если текст вырос минимум на
+200 символов с прошлого вызова — прогоняет `ActionItemsExtractor` за items/
+decisions/questions, на время LLM-вызова ставя realtime-партиалы записи на паузу
+(`RecordingCoreService.pause_realtime_partials()`/`resume_realtime_partials()`).
+На время сессии удерживается brain-lease (`llm_brain_lease_enabled`, см. F5
+Launch Readiness) — продлевается каждые 15 с, освобождается при остановке.
+Приоритет задач слота при одновременной готовности: CHUNK_STT > ITEMS_LLM >
+DIAR_WINDOW (диаризационный тип объявлен, исполнитель придёт в C2b).
+
+Privacy: все три метода гейтятся `privacy_mode_enabled`. Включение privacy
+**посреди** активной встречи глушит live-обработку изнутри воркера (сессия
+помечается `privacy_stopped`, воркер завершается) — остановка самой записи
+идёт обычным privacy-путём `handle_stop_recording`.
+
+| Метод | Описание |
+|---|---|
+| `meeting_start` | Старт живой meeting-сессии (или повышение уже идущей записи) |
+| `meeting_stop` | Финализация сессии + обычная остановка записи |
+| `get_meeting_live_state` | Снимок состояния для поллинга UI-панели |
+
+### `meeting_start`
+*(service.py → meeting_session_service.py)*  
+Стартует запись (`RecordingCoreService.handle_start_recording`) и meeting-сессию
+поверх неё. Если запись уже идёт (например, начата обычной кнопкой записи) —
+**повышает** её в meeting-режим вместо повторного старта (`promoted=true`),
+курсор транскрипции стартует с текущей длительности записи вместо нуля.
+Повторный вызов при уже активной (не privacy-остановленной) сессии — идемпотентен,
+возвращает `already_active=true` без побочных эффектов.  
+Params: `{language?}` — язык для `ActionItemsExtractor`; по умолчанию настройка
+`meeting_items_language` (дефолт `"ru"`).  
+Returns (успех): `{ok: true, promoted, started_at}`  
+Returns (уже активна): `{ok: true, already_active: true, started_at, promoted}`  
+Returns (privacy): `{ok: false, skipped: "privacy_mode"}`
+
+**Пример:**
+```json
+Request:  {"id":"m1","method":"meeting_start","params":{"language":"ru"}}
+Response: {"id":"m1","ok":true,"result":{"ok":true,"promoted":false,"started_at":1752230400.12}}
+```
+
+### `meeting_stop`
+*(service.py → meeting_session_service.py)*  
+Гасит live-обработку воркера (CHUNK_STT/ITEMS_LLM, brain-lease) и останавливает
+запись обычным путём (`RecordingCoreService.handle_stop_recording`), если она ещё
+идёт — стандартная финализация истории (сохранение записи и т.д.) идёт этим
+существующим путём, meeting-сервис никакой дополнительной персистентности не
+создаёт. Эмитит `meeting.finalizing` перед остановкой и `meeting.finished` после
+(EventBus, payload `{item_id}`). Если сессии не было — no-op.  
+Нет params.  
+Returns (была сессия): `{ok: true, item_id}` — `item_id` = `history_id` от
+`handle_stop_recording` (может быть `null`, если запись уже была остановлена
+в обход `meeting_stop`, например ручной кнопкой).  
+Returns (сессии не было): `{ok: true, active: false}`  
+Returns (privacy): `{ok: true, skipped: "privacy_mode"}` — сессия всё равно
+закрывается изнутри (`_teardown_session`), но `meeting.finished` НЕ эмитится
+(запись останавливает обычный privacy-путь записи, не этот метод).
+
+**Пример:**
+```json
+Request:  {"id":"m2","method":"meeting_stop","params":{}}
+Response: {"id":"m2","ok":true,"result":{"ok":true,"item_id":"a1b2c3d4"}}
+```
+
+### `get_meeting_live_state`
+*(service.py → meeting_session_service.py)*  
+Снимок текущей meeting-сессии для поллинга UI-панели. Транскрипт-читающий —
+privacy-гейтится.  
+Нет params.  
+Returns (активна): `{ok: true, active: true, started_at, promoted, transcript_len,
+transcript_tail, items, decisions, questions, speakers: [], degraded: {llm, diarization},
+last_updated_ts}`
+- `transcript_tail` — последние 600 символов накопленного транскрипта
+- `items` — `[{text, assignee, due, priority}, ...]` от `ActionItemsExtractor`
+- `speakers` — всегда `[]` в C2a (диаризация приходит в C2b)
+- `degraded.llm` — `true`, если extractor недоступен/последний вызов вернул `ok=false`
+- `degraded.diarization` — зарезервировано для C2b, сейчас всегда `false`
+
+Returns (нет сессии): `{ok: true, active: false}`  
+Returns (privacy): `{ok: true, active: false, privacy_mode_active: true}`
+
+**Пример:**
+```json
+Request:  {"id":"m3","method":"get_meeting_live_state","params":{}}
+Response: {"id":"m3","ok":true,"result":{"ok":true,"active":true,"started_at":1752230400.12,
+  "promoted":false,"transcript_len":842,"transcript_tail":"...обсудили сроки релиза...",
+  "items":[{"text":"подготовить отчёт","assignee":"Паша","due":null,"priority":"medium"}],
+  "decisions":["перенести релиз на пятницу"],"questions":[],"speakers":[],
+  "degraded":{"llm":false,"diarization":false},"last_updated_ts":1752230458.9}}
+```
+
+Настройки (`DEFAULT_SETTINGS` + `settings_validator._RANGE_FIELDS`):
+`meeting_chunk_stt_interval_sec` (default `25.0`, диапазон `10.0`–`120.0`),
+`meeting_items_interval_sec` (default `60.0`, диапазон `30.0`–`600.0`,
+адаптивно растягивается на длинных встречах), `meeting_items_language`
+(default `"ru"`).
+
+---
+
 ## Misc
 
 | Метод | Описание |
