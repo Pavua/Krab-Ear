@@ -38,6 +38,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 _PROJECT_ROOT = Path(__file__).parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
@@ -304,6 +305,115 @@ class TestCrossThreadExclusivityPreserved(unittest.TestCase):
             timestamps["b_enter"], timestamps["a_exit"],
             "Thread B вошёл в критическую секцию ДО того, как Thread A "
             "освободил лок",
+        )
+
+
+# ---------------------------------------------------------------------------
+# 5. Acquisition-phase failure rolls back the depth counter (HIGH finding —
+#    Sonnet code-review + Fable adversarial-verify independently confirmed).
+# ---------------------------------------------------------------------------
+
+class TestAcquisitionFailureRollsBackDepth(unittest.TestCase):
+    """If touch()/open()/flock() raises during the OUTER (first) entry into
+    ``_lock()`` — e.g. ENOSPC/EMFILE/EACCES, all realistic on a project that
+    ships its own ``DiskSpaceMonitor`` — the depth-counter increment that
+    already happened at the top of ``_lock()`` must be rolled back.
+
+    Before this fix, that increment was NOT covered by the try/finally (it
+    started only at ``try: yield``), so an exception during acquisition left
+    ``_lock_depth[tid] == 1`` forever with no matching ``_lock_fileobj[tid]``.
+    Every SUBSEQUENT ``_lock()`` call from that same thread then silently
+    believed it was a harmless reentrant no-op (``depth != 0`` →
+    ``acquired_here = False``) and skipped ``fcntl.flock`` entirely — a
+    silent, permanent bypass of mutual exclusion for that thread, worse than
+    the loud deadlock the reentrancy fix itself was meant to cure (that one
+    was noisy and self-healed via HealthMonitor; this one is silent and
+    lives for the rest of the process's life).
+    """
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.data_dir = Path(self._tmpdir)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_acquisition_failure_propagates_and_depth_resets(self):
+        store = _make_store(self.data_dir)
+
+        with patch(
+            "backend.state_store.fcntl.flock",
+            side_effect=OSError(28, "simulated ENOSPC"),
+        ):
+            with self.assertRaises(OSError):
+                with store._lock():
+                    self.fail(
+                        "тело with не должно выполниться — flock() падает "
+                        "до yield"
+                    )
+
+        # No leaked per-thread bookkeeping after the failed acquisition —
+        # this is exactly what the buggy code got wrong (depth stuck at 1).
+        self.assertEqual(len(store._lock_depth), 0, store._lock_depth)
+        self.assertEqual(len(store._lock_fileobj), 0, store._lock_fileobj)
+
+    def test_lock_actually_acquired_after_prior_acquisition_failure(self):
+        """After the failure above, the SAME thread's next ``_lock()`` call
+        must take a REAL OS-level flock — proven by contending against a
+        SECOND ``StateStore`` instance on the same path from another
+        thread, which must block until the first releases (racing through
+        instantly would prove the real flock was silently skipped)."""
+        store = _make_store(self.data_dir)
+
+        with patch(
+            "backend.state_store.fcntl.flock",
+            side_effect=OSError(28, "simulated ENOSPC"),
+        ):
+            with self.assertRaises(OSError):
+                with store._lock():
+                    pass
+
+        self.assertEqual(len(store._lock_depth), 0, store._lock_depth)
+        self.assertEqual(len(store._lock_fileobj), 0, store._lock_fileobj)
+
+        # Real (unpatched) fcntl.flock from here on — same thread as the
+        # failed acquisition above.
+        store2 = _make_store(self.data_dir)  # second instance, same path
+
+        b_entered = threading.Event()
+        b_done = threading.Event()
+        timestamps: dict[str, float] = {}
+
+        def _thread_b():
+            with store2._lock():
+                timestamps["b_enter"] = time.monotonic()
+                b_entered.set()
+            b_done.set()
+
+        with store._lock():
+            tb = threading.Thread(target=_thread_b, daemon=True)
+            tb.start()
+
+            # Give thread B a real chance to attempt (and, if the fix is
+            # correct, block on) the OS-level lock.
+            time.sleep(0.2)
+            self.assertFalse(
+                b_entered.is_set(),
+                "Второй StateStore-инстанс на том же пути вошёл в "
+                "критическую секцию, пока первый ещё держит _lock() — "
+                "значит реальный fcntl.flock молча пропущен (регрессия из "
+                "HIGH-находки)",
+            )
+            timestamps["a_still_holding"] = time.monotonic()
+
+        tb.join(timeout=5.0)
+        self.assertTrue(b_done.is_set(), "Thread B так и не завершился")
+        self.assertIn("b_enter", timestamps)
+        self.assertGreaterEqual(
+            timestamps["b_enter"], timestamps["a_still_holding"],
+            "Thread B вошёл в критическую секцию до освобождения лока — "
+            "эксклюзивность нарушена",
         )
 
 
