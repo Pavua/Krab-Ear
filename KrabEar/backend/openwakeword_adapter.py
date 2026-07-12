@@ -71,6 +71,11 @@ class OpenWakeWordAdapter:
         self._oww: Any = None  # openwakeword.Model instance
         self._on_detected: Callable[[str, float], None] | None = None
         self._active_model: str | None = None
+        # 2026-07-12: threshold of the active listening session (mirrors
+        # _active_model) — lets AudioSelfHealer restore the exact configured
+        # threshold after a stop()/start() reinit cycle instead of silently
+        # falling back to the start() default.
+        self._active_threshold: float | None = None
         # Последняя детекция для IPC-поллинга агента (wake_word_status).
         # Монотонный ts — агент дебаунсит по росту, wall-clock не нужен.
         self._last_detection: dict[str, Any] | None = None
@@ -183,6 +188,7 @@ class OpenWakeWordAdapter:
             model_path = self._resolve_model_path(model_name)
             self._on_detected = on_detected
             self._active_model = model_name
+            self._active_threshold = threshold
             self._stop_event.clear()
             self._last_detection = None  # свежая сессия — стейл-детекция не триггерит
 
@@ -215,6 +221,7 @@ class OpenWakeWordAdapter:
             self._thread = None
             self._oww = None
             self._active_model = None
+            self._active_threshold = None
 
         thread.join(timeout=3.0)
         logger.info("OpenWakeWordAdapter: остановлен")
@@ -228,6 +235,12 @@ class OpenWakeWordAdapter:
         """Имя активной модели или None."""
         with self._lock:
             return self._active_model
+
+    def active_threshold(self) -> float | None:
+        """Порог уверенности активной сессии прослушивания или None, если
+        сейчас не запущен (2026-07-12, см. AudioSelfHealer)."""
+        with self._lock:
+            return self._active_threshold
 
     def _record_detection(self, model_name: str, score: float) -> None:
         """Фиксирует последнюю детекцию для wake_word_status (IPC-поллинг)."""

@@ -100,6 +100,7 @@ from backend.stt_management_service import STTManagementService
 from backend.text_scoring_service import TextScoringService
 from backend.call_session_service import CallSessionService
 from backend.recording_core_service import RecordingCoreService
+from backend.audio_selfheal import AudioSelfHealer
 from backend.text_processing_service import TextProcessingService
 from backend.call_session_store import CallSessionStore
 from backend.live_subs_service import LiveSubsService
@@ -1017,6 +1018,28 @@ class BackendService:
         # W1776: late-inject _bookmarks so phase_e can rebind live-recording bookmarks.
         # _bookmarks is created earlier in __init__ (line ~396).
         self._recording_core_svc._bookmarks = self._bookmarks
+        # 2026-07-12: AudioSelfHealer — passive self-heal for a wedged PortAudio
+        # stack (root-cause: prod incident 2026-07-12, streams open without error
+        # but return silence; see backend/audio_selfheal.py). Late-injected into
+        # RecordingCoreService the same way as _bookmarks/_error_bus above.
+
+        def _reinit_audio_backend() -> None:
+            try:
+                import sounddevice as _sd  # type: ignore
+            except Exception:
+                logger.warning("AudioSelfHealer: sounddevice недоступен, reinit пропущен")
+                return
+            _sd._terminate()
+            _sd._initialize()
+
+        self._audio_selfheal = AudioSelfHealer(
+            reinit_audio_backend=_reinit_audio_backend,
+            is_recording=lambda: bool(getattr(self.recorder, "is_recording", False)),
+            wake_word_adapter=self._oww_adapter,
+            error_bus=self._error_bus,
+            settings_get=self._get_runtime_setting,
+        )
+        self._recording_core_svc._audio_selfheal = self._audio_selfheal
         # Wave-22: wire RecordingCoreService._job_tracker into HistoryService so
         # handle_purge_all_data can call clear() — terminal jobs hold transcript
         # text in items[].text (full PII) and survive privacy-purge without this wire.

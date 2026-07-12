@@ -129,6 +129,9 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             # crypto-audit (2026-06-20) — encryption enabled but encrypt_line failed →
             # record written in plaintext; loud event so the silent downgrade is visible.
             "history.encrypt_fail",
+            # Added 2026-07-12 — AudioSelfHealer escalation: PortAudio stack wedged
+            # (all-zero frames) and a soft reinit didn't fix it.
+            "audio.stack_wedged",
         }
         self.assertEqual(set(ERROR_REGISTRY.keys()), expected)
 
@@ -194,6 +197,21 @@ class ErrorRegistryShapeTests(unittest.TestCase):
         self.assertEqual(entry["dedupe_seconds"], 600)
         self.assertIn("GPU", entry["user_msg_ru"])
 
+    def test_audio_stack_wedged_in_registry(self):
+        """2026-07-12: audio.stack_wedged must be registered with correct shape.
+
+        Pushed by AudioSelfHealer when a soft PortAudio reinit didn't clear a
+        wedged audio stack — loud, non-actionable (recommend a manual backend
+        restart), deduped 5 min so a stuck stack doesn't spam toasts."""
+        code = "audio.stack_wedged"
+        self.assertIn(code, ERROR_REGISTRY, f"{code} missing from ERROR_REGISTRY")
+        entry = ERROR_REGISTRY[code]
+        self.assertEqual(entry["severity"], "error")
+        self.assertFalse(entry["actionable"])
+        self.assertIsNone(entry["action_id"])
+        self.assertEqual(entry["dedupe_seconds"], 300)
+        self.assertTrue(entry["user_msg_ru"])
+
     def test_error_registry_count_matches_documentation(self):
         """Registry must contain exactly the documented number of codes.
 
@@ -209,7 +227,8 @@ class ErrorRegistryShapeTests(unittest.TestCase):
         + audio.max_duration_reached (new) = 58;
         W1759 merge-train added history.purge_incomplete = 59;
         crypto-audit (2026-06-20) added history.encrypt_fail = 60;
+        2026-07-12 mic-watchdog self-heal added audio.stack_wedged = 61;
         test_expected_codes_present guards the exact set so this count test is a
         redundant but cheap invariant.
         """
-        self.assertEqual(len(ERROR_REGISTRY), 60)
+        self.assertEqual(len(ERROR_REGISTRY), 61)
