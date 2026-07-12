@@ -95,6 +95,7 @@ from backend.analytics_service import AnalyticsService
 from backend.apple_integration_service import AppleIntegrationService
 from backend.llm_ops_service import LLMOpsService
 from backend.search_and_analysis_service import SearchAndAnalysisService
+from backend.meeting_session_service import MeetingSessionService
 from backend.stt_management_service import STTManagementService
 from backend.text_scoring_service import TextScoringService
 from backend.call_session_service import CallSessionService
@@ -1047,6 +1048,16 @@ class BackendService:
         # clear_search_history() (clears in-memory _entries) instead of just unlinking
         # the file (which left RAM entries returning stale queries until restart).
         self._history._search_history_mgr = self._search_history
+        # C2a: MeetingSessionService — live meeting overlay backend-ядро.
+        # Требует recording_core (уже сконструирован выше) + action_items_extractor.
+        self._meeting_svc = MeetingSessionService(
+            recorder=self.recorder,
+            transcriber=self.transcriber,
+            recording_core=self._recording_core_svc,
+            action_items_extractor=self._action_items_extractor,
+            settings_get=self._get_runtime_setting,
+            event_bus=event_bus,
+        )
         self._calendar_linker = CalendarLinker(
             cache_minutes=int(settings.CALENDAR_LINK_CACHE_MIN)
         )
@@ -1462,6 +1473,13 @@ class BackendService:
             except Exception:
                 logger.exception("EventBridge.stop() raised during close()")
 
+        # Stop MeetingSessionService worker thread (C2a) — mirrors the
+        # EventBridge/PurgeScheduler stop above (same CI daemon-thread rule).
+        try:
+            self._meeting_svc.close()
+        except Exception:
+            logger.exception("MeetingSessionService.close() raised during close()")
+
     # ------------------------------------------------------------------ #
     # Backwards-compatible proxy properties for Wave 172 migration         #
     # Tests and any code that read/write these attrs on BackendService     #
@@ -1687,6 +1705,9 @@ class BackendService:
             "extract_action_items": self._search_and_analysis_svc.handle_extract_action_items,  # LLM извлечение задач/решений/вопросов по item_id
             "batch_extract_action_items": self._search_and_analysis_svc.handle_batch_extract_action_items,  # пакетное извлечение для нескольких item_id
             "get_pending_action_items": self._search_and_analysis_svc.handle_get_pending_action_items,  # все items у которых action_items=None
+            "meeting_start": self._meeting_svc.handle_meeting_start,  # C2a: старт/повышение live-встречи
+            "meeting_stop": self._meeting_svc.handle_meeting_stop,  # C2a: финализация live-встречи
+            "get_meeting_live_state": self._meeting_svc.handle_get_meeting_live_state,  # C2a: снимок для панели
             "get_last_llm_diff": self._llm_ops_svc.handle_get_last_llm_diff,  # последний word-level diff от LLM rewriter'а
 
             "get_vocabulary_suggestions": self._translation.handle_get_vocabulary_suggestions,

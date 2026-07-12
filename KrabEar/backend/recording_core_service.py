@@ -440,6 +440,31 @@ class RecordingCoreService:
             settings=settings,
         )
 
+    def pause_realtime_partials(self) -> None:
+        """Пауза партиалов на время тяжёлой операции meeting-слота (C2a).
+
+        Доступ к _rt_partial — под _rt_lock (конвенция lifecycle-лока);
+        сам pause() зовётся вне лока (короткий, но чужой код).
+        Нет активного инстанса → no-op.
+        """
+        with self._rt_lock:
+            rt = self._rt_partial
+        if rt is not None:
+            try:
+                rt.pause()
+            except Exception:
+                logger.warning("pause_realtime_partials: pause() упал", exc_info=True)
+
+    def resume_realtime_partials(self) -> None:
+        """Снять паузу партиалов (C2a). Нет инстанса → no-op."""
+        with self._rt_lock:
+            rt = self._rt_partial
+        if rt is not None:
+            try:
+                rt.resume()
+            except Exception:
+                logger.warning("resume_realtime_partials: resume() упал", exc_info=True)
+
     def handle_get_recording_state(self, params: dict[str, Any]) -> dict[str, Any]:
         with self._preview_lock:
             preview_text = self._preview_text

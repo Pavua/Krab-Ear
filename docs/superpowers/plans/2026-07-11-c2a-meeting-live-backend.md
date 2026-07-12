@@ -1079,6 +1079,8 @@ git add KrabEar/backend/meeting_session_service.py KrabEar/tests/test_meeting_se
 git commit -m "feat(meeting): MeetingSessionService — GPU-слот, аккумулятор, CHUNK_STT, события (C2a)"
 ```
 
+**Примечание (2026-07-12, spec-compliance-ревью, находка 1):** сразу вслед за коммитом Step 6 (`32c762cb`) в ветку попал внеплановый коммит `dc53176798f5` («fix(meeting): гонка старта + privacy mid-meeting не глушит запись (C2a-ревью)») — формально за буквальной границей Task 5 (должен был попасть в Task 6 или отдельный ревью-таск, см. `Files:` Task 6 ниже: «найденные расхождения чинить в `meeting_session_service.py`»). Оба фикса — CONFIRMED-регрессии, независимо воспроизведены red→green (гонка check-then-act в `handle_meeting_start`, и `handle_meeting_stop` не останавливал запись под privacy) — оставлены как есть, не ревертились. Практическое следствие: **Step 4 "Expected: 8 passed" верно только для кода сразу после Step 3**; после `dc53176798f5` файл содержит 10 тестов (все зелёные — 2 новых регрессионных класса `MeetingStartConcurrencyTestCase`/`MeetingStopPrivacyTestCase`, плюс существующие 8 переведены с inline `svc.close()` на `addCleanup(svc.close)`).
+
 ---
 
 ### Task 6: ITEMS_LLM + пауза партиалов + lease + meeting_stop (тесты поведения)

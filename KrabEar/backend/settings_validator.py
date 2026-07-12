@@ -32,7 +32,22 @@ _ENUM_FIELDS: dict[str, tuple[str, ...]] = {
     "history_policy": ("unlimited",),
     "history_text_density": ("normal", "compact"),
     "capture_source_mode": ("mic", "system_audio", "mic_plus_system"),
-    "ui_last_tab": ("dictation", "live_translation", "history"),
+    # Must mirror every PanelTab rawValue the Swift agent can persist
+    # (native/KrabEarAgent/Sources/KrabEarAgent/HistoryPanelController.swift
+    # enum PanelTab, written back in HistoryPanelController+LiveTranslation.swift
+    # tabView(_:didSelect:) via tab.rawValue). A tab id missing here is silently
+    # rewritten to 'dictation' on every set_settings call for that tab — spamming
+    # a WARNING and breaking tab-restore-on-relaunch (e.g. "conversation" on every
+    # "Разговор с AI" start via wake word / double Right Option).
+    "ui_last_tab": (
+        "dictation",
+        "live_translation",
+        "history",
+        "conversation",
+        "call_automation",
+        "diagnostics",
+        "archive",
+    ),
     "update_channel": ("stable", "beta"),
     # cloud_rewriter_provider: valid providers for cloud transcript cleanup.
     "cloud_rewriter_provider": ("openai", "anthropic", "custom"),
@@ -60,6 +75,9 @@ _RANGE_FIELDS: dict[str, tuple[Any, Any, Any, type]] = {
     "rt_silence_window_sec": (1.0, 30.0, 10.0, float),
     "realtime_silence_threshold_db": (-80.0, -10.0, -55.0, float),
     "rt_partial_interval_sec": (0.1, 30.0, 1.0, float),
+    # --- Live meeting overlay (C2a, спека 2026-07-10) ---
+    "meeting_chunk_stt_interval_sec": (10.0, 120.0, 25.0, float),
+    "meeting_items_interval_sec": (30.0, 600.0, 60.0, float),
     # wave-1770 MED: rt_silence_max_sec was missing from _RANGE_FIELDS — NaN/Inf
     # caused silence detection to permanently suppress or behave unpredictably.
     "rt_silence_max_sec": (0.5, 60.0, 8.0, float),

@@ -967,6 +967,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "realtime_partial_enabled": True,
     "rt_partial_interval_sec": 3.0,
     "rt_partial_buffer_sec": 8.0,
+    # --- Live meeting overlay (C2a, спека 2026-07-10) ---
+    "meeting_chunk_stt_interval_sec": 25.0,
+    "meeting_items_interval_sec": 60.0,
+    "meeting_items_language": "ru",
     # --- Quick Preset Switcher ---
     # Текущий активный профиль пресета (default/meeting/translation/call_recording).
     # Отражается в иконке строки меню как буква (D/M/T/C).
