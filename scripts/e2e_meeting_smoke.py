@@ -18,7 +18,12 @@ import time
 
 def call(sock_path: str, method: str, params: dict | None = None) -> dict:
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(600)
+    # 90s: comfortably above the 30s worst-case internal wait
+    # (MeetingSessionService._stop_worker()'s thread join), but still fails
+    # fast instead of hanging the operator for up to 10 minutes on a genuine
+    # backend deadlock. Mirrors scripts/e2e_ipc_smoke.py's 30s default for the
+    # same kind of local Unix-socket round trip.
+    s.settimeout(90)
     s.connect(sock_path)
     s.sendall(json.dumps({"id": "e2e", "method": method,
                           "params": params or {}}).encode() + b"\n")
@@ -41,23 +46,39 @@ def main() -> int:
         if not cond:
             fails.append(name)
 
-    r = call(sock, "meeting_start")
-    res = r.get("result", {})
-    check("meeting_start ok", r.get("ok") and res.get("ok"), str(r)[:200])
+    # Everything from here on runs against a LIVE meeting session (open mic +
+    # meeting-gpu-slot worker thread + held brain-lease). try/finally
+    # guarantees a best-effort meeting_stop even if a transient socket error,
+    # a malformed/truncated response, or Ctrl-C during the sleep interrupts
+    # us before the real meeting_stop call below — otherwise the session
+    # would keep recording indefinitely on the target backend.
+    stopped = False
+    try:
+        r = call(sock, "meeting_start")
+        res = r.get("result", {})
+        check("meeting_start ok", r.get("ok") and res.get("ok"), str(r)[:200])
 
-    time.sleep(30)  # один CHUNK_STT-такт (default 25с)
-    st = call(sock, "get_meeting_live_state").get("result", {})
-    check("state active", st.get("active") is True, str(st)[:200])
-    check("no crash in degraded", isinstance(st.get("degraded"), dict))
-    print(f"    transcript_len={st.get('transcript_len')} tail={st.get('transcript_tail', '')[:80]!r}")
+        time.sleep(30)  # один CHUNK_STT-такт (default 25с)
+        st = call(sock, "get_meeting_live_state").get("result", {})
+        check("state active", st.get("active") is True, str(st)[:200])
+        check("no crash in degraded", isinstance(st.get("degraded"), dict))
+        print(f"    transcript_len={st.get('transcript_len')} tail={st.get('transcript_tail', '')[:80]!r}")
 
-    r = call(sock, "meeting_stop")
-    res = r.get("result", {})
-    check("meeting_stop ok", r.get("ok") and res.get("ok"), str(r)[:200])
-    print(f"    item_id={res.get('item_id')}")
+        r = call(sock, "meeting_stop")
+        res = r.get("result", {})
+        check("meeting_stop ok", r.get("ok") and res.get("ok"), str(r)[:200])
+        print(f"    item_id={res.get('item_id')}")
+        stopped = True
 
-    st2 = call(sock, "get_meeting_live_state").get("result", {})
-    check("inactive after stop", st2.get("active") is False)
+        st2 = call(sock, "get_meeting_live_state").get("result", {})
+        check("inactive after stop", st2.get("active") is False)
+    finally:
+        if not stopped:
+            print("!!  interrupted before a confirmed meeting_stop — issuing best-effort cleanup stop")
+            try:
+                call(sock, "meeting_stop")
+            except Exception as exc:  # noqa: BLE001 — best-effort cleanup, must not mask the original error
+                print(f"!!  cleanup meeting_stop failed (session may still be live): {exc}")
 
     print("\n" + ("ALL GREEN" if not fails else f"FAILS: {fails}"))
     return 0 if not fails else 1
