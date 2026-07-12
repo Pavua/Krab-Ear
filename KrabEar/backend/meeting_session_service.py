@@ -96,11 +96,29 @@ class MeetingSessionService:
                 return {"ok": True, "already_active": True,
                         "started_at": self._session.started_at,
                         "promoted": self._session.promoted}
+            # C2a-ревью находка 1: резервируем слот placeholder-сессией ПОД
+            # ТЕМ ЖЕ локом, что и guard-проверка выше — атомарно, до
+            # невзаперти I/O-вызова handle_start_recording (может быть
+            # медленным). Иначе конкурентные meeting_start (двойной клик
+            # UI, параллельные IPC-подключения) все проходят guard, пока
+            # первый вызов ещё не выставил self._session, и порождают
+            # несколько живых meeting-gpu-slot тредов одновременно —
+            # нарушение инварианта единого GPU-слота. Racing-вызовы теперь
+            # сразу видят already_active вместо гонки.
+            placeholder = _MeetingSession()
+            self._session = placeholder
 
-        start_resp = self._recording_core.handle_start_recording({})
+        try:
+            start_resp = self._recording_core.handle_start_recording({})
+        except Exception:
+            with self._lock:
+                if self._session is placeholder:
+                    self._session = None
+            raise
         promoted = start_resp.get("status") == "already_recording"
 
         session = _MeetingSession(
+            started_at=placeholder.started_at,
             promoted=promoted,
             language=str(params.get("language", self._settings_get(
                 "meeting_items_language", "ru")) or "ru"),
@@ -122,8 +140,19 @@ class MeetingSessionService:
     def handle_meeting_stop(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC meeting_stop: гасит live-сессию и останавливает запись обычным путём."""
         if self._settings_get("privacy_mode_enabled", False):
-            # privacy включили посреди встречи: сессию всё равно закрываем,
-            # но запись останавливает обычный privacy-путь записи.
+            # C2a-ревью находка 2: privacy включили посреди встречи — сессию
+            # закрываем, И запись ВСЁ РАВНО останавливаем через
+            # handle_stop_recording (сам по себе privacy-safe: более поздние
+            # фазы гейтят persisted/возвращаемые transcript-поля на
+            # privacy_mode_enabled). Раньше запись НЕ останавливалась здесь
+            # вовсе — комментарий про "обычный privacy-путь записи" был
+            # неверен (такого механизма нет), микрофон писал бы бесконечно
+            # без способа остановить его через meeting API. Ответ наружу не
+            # меняем — transcript-производные поля (item_id/text) не
+            # возвращаем.
+            self._stop_worker()
+            if getattr(self._recorder, "is_recording", False):
+                self._recording_core.handle_stop_recording({})
             self._teardown_session(emit_finished=False)
             return {"ok": True, "skipped": "privacy_mode"}
 
