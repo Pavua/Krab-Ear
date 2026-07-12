@@ -83,6 +83,10 @@ class MeetingSessionService:
         self._next_due: dict[Any, float] = {}
         self._worker: threading.Thread | None = None
         self._stop_event = threading.Event()
+        # C2a Task 10 (Фикс 2): гейт идемпотентности handle_meeting_stop —
+        # конкурентный/повторный вызов не должен звать handle_stop_recording
+        # и эмиттить meeting.finished дважды.
+        self._stopping = False
 
     # ------------------------------------------------------------------ IPC
 
@@ -96,6 +100,13 @@ class MeetingSessionService:
                 return {"ok": True, "already_active": True,
                         "started_at": self._session.started_at,
                         "promoted": self._session.promoted}
+            # C2a Task 10 (аудит HIGH): предыдущий GPU-слот-воркер ещё жив
+            # (застрявший MLX-вызов пережил 30с join в _stop_worker) —
+            # второй воркер параллельно недопустим (см. докстринг модуля).
+            # _stop_event старого НЕ очищаем: разблокировавшись, он выйдет сам.
+            w = self._worker
+            if w is not None and w.is_alive() and self._stop_event.is_set():
+                return {"ok": False, "error": "gpu_slot_busy"}
             # C2a-фикс гонки (Task 5b): резервируем слот ДО unlocked I/O ниже —
             # иначе конкурентный handle_meeting_start() тоже проходит
             # None-проверку и стартует запись/воркер второй раз (двойной
@@ -104,6 +115,7 @@ class MeetingSessionService:
             reservation = _MeetingSession()
             self._session = reservation
 
+        session: _MeetingSession | None = None
         try:
             start_resp = self._recording_core.handle_start_recording({})
             promoted = start_resp.get("status") == "already_recording"
@@ -121,39 +133,61 @@ class MeetingSessionService:
                     MeetingJob.CHUNK_STT: now + self._chunk_interval(),
                     MeetingJob.ITEMS_LLM: now + self._items_interval(),
                 }
+            # C2a Task 10 (Фикс 4): внутри try — исключение из _start_worker()
+            # (защитный пояс Фикс 1в: второй живой воркер) обязано откатить
+            # сессию и освободить lease через except-ветку ниже, а не утечь
+            # с "полу-стартованной" сессией без воркера.
+            self._acquire_lease()
+            self._start_worker()
         except Exception:
             with self._lock:
-                if self._session is reservation:
+                if self._session is reservation or self._session is session:
                     self._session = None
+                    self._next_due = {}
+            self._release_lease()
             raise
 
-        self._acquire_lease()
-        self._start_worker()
         logger.info("meeting: сессия запущена", extra={
             "promoted": promoted, "language": session.language})
         return {"ok": True, "promoted": promoted, "started_at": session.started_at}
 
     def handle_meeting_stop(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC meeting_stop: гасит live-сессию и останавливает запись обычным путём."""
-        if self._settings_get("privacy_mode_enabled", False):
-            # privacy включили посреди встречи: сессию всё равно закрываем,
-            # но запись останавливает обычный privacy-путь записи.
-            self._teardown_session(emit_finished=False)
-            return {"ok": True, "skipped": "privacy_mode"}
+        """IPC meeting_stop: гасит live-сессию и останавливает запись обычным путём.
 
+        C2a Task 10 (аудит MED): идемпотентен — дабл-клик в UI / два
+        IPC-клиента, вызвавшие stop конкурентно, НЕ должны привести к
+        двойному handle_stop_recording()/meeting.finished. Гейт _stopping
+        под тем же self._lock, что и остальное состояние сессии; сбрасывается
+        в finally, так что независимые ПОСЛЕДОВАТЕЛЬНЫЕ вызовы (новая сессия
+        после предыдущего stop) не залипают.
+        """
         with self._lock:
-            had_session = self._session is not None
-        if not had_session:
-            return {"ok": True, "active": False}
+            if self._stopping:
+                return {"ok": True, "already_stopping": True}
+            self._stopping = True
+        try:
+            if self._settings_get("privacy_mode_enabled", False):
+                # privacy включили посреди встречи: сессию всё равно закрываем,
+                # но запись останавливает обычный privacy-путь записи.
+                self._teardown_session(emit_finished=False)
+                return {"ok": True, "skipped": "privacy_mode"}
 
-        self._stop_worker()
-        self._emit("meeting.finalizing", {})
-        stop_resp: dict[str, Any] = {}
-        if getattr(self._recorder, "is_recording", False):
-            stop_resp = self._recording_core.handle_stop_recording({})
-        item_id = stop_resp.get("history_id")
-        self._teardown_session(emit_finished=True, item_id=item_id)
-        return {"ok": True, "item_id": item_id}
+            with self._lock:
+                had_session = self._session is not None
+            if not had_session:
+                return {"ok": True, "active": False}
+
+            self._stop_worker()
+            self._emit("meeting.finalizing", {})
+            stop_resp: dict[str, Any] = {}
+            if getattr(self._recorder, "is_recording", False):
+                stop_resp = self._recording_core.handle_stop_recording({})
+            item_id = stop_resp.get("history_id")
+            self._teardown_session(emit_finished=True, item_id=item_id)
+            return {"ok": True, "item_id": item_id}
+        finally:
+            with self._lock:
+                self._stopping = False
 
     def handle_get_meeting_live_state(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC get_meeting_live_state: снимок для панели/поллинга."""
@@ -184,10 +218,20 @@ class MeetingSessionService:
     def close(self) -> None:
         """Останов воркера (BackendService.close())."""
         self._stop_worker()
+        self._release_lease()  # C2a Task 10 (Фикс 3): зеркально остальным teardown-путям
         with self._lock:
             self._session = None
 
     def _start_worker(self) -> None:
+        # C2a Task 10 (Фикс 1в): защитный пояс. Основной гард — в
+        # handle_meeting_start (условие self._stop_event.is_set()); сюда
+        # можно попасть в обход него — например, self-finalize путь
+        # _run_due_job_once, где старый воркер физически ещё не успел
+        # завершиться, а self._stop_event не взводился вовсе.
+        w = self._worker
+        if w is not None and w.is_alive():
+            raise RuntimeError(
+                "meeting: предыдущий воркер ещё жив — второй GPU-слот запрещён")
         self._stop_event.clear()
         t = threading.Thread(
             target=self._worker_loop, name="meeting-gpu-slot", daemon=True)
@@ -201,6 +245,12 @@ class MeetingSessionService:
             t.join(timeout=30.0)
             if t.is_alive():
                 logger.warning("meeting: воркер не завершился за 30с")
+                # C2a Task 10 (аудит HIGH): handle НЕ обнуляем — тред может
+                # быть ещё жив после таймаута join. Обнуление здесь "теряло"
+                # бы его: следующий handle_meeting_start() решил бы, что
+                # слот свободен, и заспавнил бы второй воркер параллельно
+                # со старым (двойной GPU-доступ + чужие pause/resume/события).
+                return
         self._worker = None
 
     def _teardown_session(self, emit_finished: bool,

@@ -405,5 +405,236 @@ class BrainLeaseTestCase(unittest.TestCase):
         del mss  # noqa: F821 -- использован только для читаемости импорта
 
 
+# ------------------------------------------------------------------------
+# C2a Task 10 — фиксы 4 находок security-аудита (см. докстринг модуля):
+# Фикс 1 (HIGH) гард двойного GPU-слот-воркера, Фикс 2 (MED) идемпотентный
+# stop, Фикс 3 (LOW) lease в close(), Фикс 4 (LOW) rollback-зона накрывает
+# _acquire_lease()/_start_worker().
+# ------------------------------------------------------------------------
+
+
+class StaleWorkerGuardTestCase(unittest.TestCase):
+    def test_start_refused_while_stale_worker_alive(self) -> None:
+        svc, bus, _ = _make_svc()
+
+        # имитация: стоп запрошен, но старый воркер завис в MLX и пережил join
+        class _StuckThread:
+            def is_alive(self) -> bool:
+                return True
+
+        svc._worker = _StuckThread()
+        svc._stop_event.set()
+        resp = svc.handle_meeting_start({})
+        self.assertFalse(resp["ok"])
+        self.assertEqual(resp.get("error"), "gpu_slot_busy")
+        self.assertEqual(len(svc._recording_core.started), 0,
+                         "запись НЕ должна стартовать при занятом GPU-слоте")
+        state = svc.handle_get_meeting_live_state({})
+        self.assertFalse(state["active"], "reservation не должна остаться")
+
+    def test_live_worker_without_stop_requested_is_not_stale(self) -> None:
+        """Живой воркер БЕЗ взведённого stop_event — обычная активная сессия
+        (её отсекает already_active-проверка выше), а НЕ авария Фикс 1."""
+        svc, _, _ = _make_svc()
+        svc.handle_meeting_start({})
+        self.assertFalse(svc._stop_event.is_set())
+        resp = svc.handle_meeting_start({})
+        self.assertTrue(resp["ok"])
+        self.assertTrue(resp.get("already_active"))
+        self.assertNotEqual(resp.get("error"), "gpu_slot_busy")
+        svc.close()
+
+    def test_stop_worker_keeps_handle_when_join_times_out(self) -> None:
+        svc, _, _ = _make_svc()
+
+        class _NeverJoinsThread:
+            def is_alive(self) -> bool:
+                return True
+
+            def join(self, timeout=None) -> None:
+                return None  # имитация: поток пережил join-таймаут
+
+        stuck = _NeverJoinsThread()
+        svc._worker = stuck
+        svc._stop_worker()
+        self.assertIsNotNone(
+            svc._worker, "handle воркера должен сохраниться при таймауте join")
+        self.assertIs(svc._worker, stuck)
+
+    def test_stop_worker_clears_handle_when_thread_actually_dead(self) -> None:
+        """Контроль: нормальный случай (тред реально умер) по-прежнему
+        обнуляет self._worker — регрессия не должна навечно "залипать"."""
+        svc, _, _ = _make_svc()
+
+        class _DeadThread:
+            def __init__(self) -> None:
+                self._joined = False
+
+            def is_alive(self) -> bool:
+                return not self._joined
+
+            def join(self, timeout=None) -> None:
+                self._joined = True
+
+        svc._worker = _DeadThread()
+        svc._stop_worker()
+        self.assertIsNone(svc._worker)
+
+
+class _SlowStopFakeRecordingCore(_FakeRecordingCore):
+    """Как _FakeRecordingCore, но handle_stop_recording искусственно
+    медленный — расширяет окно гонки для теста идемпотентности
+    handle_meeting_stop (Фикс 2)."""
+
+    def __init__(self, delay_sec: float = 0.2) -> None:
+        super().__init__()
+        self._delay_sec = delay_sec
+
+    def handle_stop_recording(self, params):
+        time.sleep(self._delay_sec)
+        return super().handle_stop_recording(params)
+
+
+class MeetingStopIdempotencyTestCase(unittest.TestCase):
+    def test_concurrent_stop_calls_stop_recording_once(self) -> None:
+        settings = {
+            "privacy_mode_enabled": False,
+            "meeting_chunk_stt_interval_sec": 25.0,
+            "meeting_items_interval_sec": 60.0,
+            "meeting_items_language": "ru",
+            "llm_brain_lease_enabled": False,
+        }
+        bus = _SpyBus()
+        core = _SlowStopFakeRecordingCore(delay_sec=0.2)
+        svc = MeetingSessionService(
+            recorder=_FakeRecorder(),
+            transcriber=_FakeTranscriber(),
+            recording_core=core,
+            action_items_extractor=None,
+            settings_get=lambda k, d=None: settings.get(k, d),
+            event_bus=bus,
+        )
+        svc.handle_meeting_start({})
+
+        results: list[dict] = []
+        results_lock = threading.Lock()
+
+        def _call() -> None:
+            resp = svc.handle_meeting_stop({})
+            with results_lock:
+                results.append(resp)
+
+        threads = [threading.Thread(target=_call) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5.0)
+
+        self.assertEqual(
+            len(core.stopped), 1,
+            "конкурентные handle_meeting_stop НЕ должны звать stop_recording дважды",
+        )
+        self.assertEqual(bus.types().count("meeting.finished"), 1)
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(r.get("ok") for r in results))
+
+    def test_sequential_stop_calls_are_each_independent(self) -> None:
+        """_stopping обязан сброситься в finally — второй, ПОСЛЕДОВАТЕЛЬНЫЙ
+        (не конкурентный) стоп новой сессии не должен залипнуть в
+        already_stopping навсегда."""
+        svc, _, _ = _make_svc()
+        svc.handle_meeting_start({})
+        resp1 = svc.handle_meeting_stop({})
+        self.assertTrue(resp1["ok"])
+        self.assertNotIn("already_stopping", resp1)
+
+        svc.handle_meeting_start({})
+        resp2 = svc.handle_meeting_stop({})
+        self.assertTrue(resp2["ok"])
+        self.assertNotIn("already_stopping", resp2)
+        svc.close()
+
+
+class CloseReleasesLeaseTestCase(unittest.TestCase):
+    def test_close_releases_lease(self) -> None:
+        import sys as _sys
+        calls: list[tuple[str, Any]] = []
+
+        class _FakeLeaseModule:
+            @staticmethod
+            def acquire_brain_lease(owner, ttl_sec=30.0, lock_path=None):
+                calls.append(("acquire", owner))
+                return True
+
+            @staticmethod
+            def release_brain_lease(owner, lock_path=None):
+                calls.append(("release", owner))
+
+        svc, _, _ = _make_svc(settings_extra={"llm_brain_lease_enabled": True})
+        real = _sys.modules.get("backend.brain_lease")
+        _sys.modules["backend.brain_lease"] = _FakeLeaseModule()  # type: ignore[assignment]
+        try:
+            svc.handle_meeting_start({})
+            svc.close()
+        finally:
+            if real is not None:
+                _sys.modules["backend.brain_lease"] = real
+            else:
+                _sys.modules.pop("backend.brain_lease", None)
+        self.assertIn(("release", "krab_ear"), calls)
+
+
+class StartWorkerRollbackTestCase(unittest.TestCase):
+    def test_start_worker_failure_rolls_back_session_and_releases_lease(self) -> None:
+        import sys as _sys
+        calls: list[tuple[str, Any]] = []
+
+        class _FakeLeaseModule:
+            @staticmethod
+            def acquire_brain_lease(owner, ttl_sec=30.0, lock_path=None):
+                calls.append(("acquire", owner))
+                return True
+
+            @staticmethod
+            def release_brain_lease(owner, lock_path=None):
+                calls.append(("release", owner))
+
+        svc, _, _ = _make_svc(settings_extra={"llm_brain_lease_enabled": True})
+
+        def _boom() -> None:
+            raise RuntimeError("meeting: предыдущий воркер ещё жив")
+
+        svc._start_worker = _boom  # имитирует провал защитного пояса Фикс 1в
+
+        real = _sys.modules.get("backend.brain_lease")
+        _sys.modules["backend.brain_lease"] = _FakeLeaseModule()  # type: ignore[assignment]
+        try:
+            with self.assertRaises(RuntimeError):
+                svc.handle_meeting_start({})
+        finally:
+            if real is not None:
+                _sys.modules["backend.brain_lease"] = real
+            else:
+                _sys.modules.pop("backend.brain_lease", None)
+
+        self.assertIsNone(
+            svc._session, "сессия обязана откатиться при провале _start_worker")
+        self.assertIn(("acquire", "krab_ear"), calls)
+        self.assertIn(("release", "krab_ear"), calls)
+
+    def test_start_recording_failure_still_rolls_back_reservation(self) -> None:
+        """Регрессия: провал ДО создания session (ещё есть только reservation)
+        не должен ломаться на UnboundLocalError в except-ветке."""
+        svc, _, _ = _make_svc()
+
+        def _boom(params):
+            raise RuntimeError("recording start boom")
+
+        svc._recording_core.handle_start_recording = _boom
+        with self.assertRaises(RuntimeError):
+            svc.handle_meeting_start({})
+        self.assertIsNone(svc._session)
+
+
 if __name__ == "__main__":
     unittest.main()
