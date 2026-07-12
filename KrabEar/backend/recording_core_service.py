@@ -127,6 +127,12 @@ class RecordingCoreService:
         # bookmarks from the temp session_tracker UUID to the final HistoryItem id.
         self._bookmarks: Any = None
 
+        # 2026-07-12: late-inject AudioSelfHealer (same pattern as _error_bus /
+        # _bookmarks above). handle_stop_recording feeds it every empty-result
+        # outcome; None-guarded at every call site so tests that don't care
+        # about self-heal need not construct one. See backend/audio_selfheal.py.
+        self._audio_selfheal: Any = None
+
         # Serializes history persistence in phase_e to prevent double-write races
         self._persist_lock = threading.Lock()
 
@@ -379,6 +385,13 @@ class RecordingCoreService:
         # Phase B: audio quality guards (silence + background)
         phase_b = self._stop_recording_phase_b(audio, duration_sec, stop_tail_trim_ms, sr)
         if "early_return" in phase_b:
+            # 2026-07-12 self-heal: an RMS-below-threshold silence-guard trip is
+            # the passive "audio came back empty" signal (see audio_selfheal.py).
+            # Background-guard rejections are a DIFFERENT heuristic (distant/
+            # uniform speech) and must NOT feed this counter — only the
+            # silence_detected branch of _build_empty_audio_response does.
+            if self._audio_selfheal is not None and phase_b["early_return"].get("silence_detected"):
+                self._audio_selfheal.record_empty_result()
             return phase_b["early_return"]
 
         silence_detected = phase_b["silence_detected"]
@@ -401,7 +414,17 @@ class RecordingCoreService:
             background_guard_rejected=background_guard_rejected,
         )
         if "early_return" in phase_d:
+            # 2026-07-12 self-heal: STT ran but produced no text at nonzero
+            # duration — second passive empty-result signal (silence guard can
+            # miss a noise floor that still confuses Whisper into silence).
+            if self._audio_selfheal is not None:
+                self._audio_selfheal.record_empty_result()
             return phase_d["early_return"]
+
+        # A real, non-empty transcript came back — audio pipeline just proved
+        # itself healthy. Reset the self-heal empty streak (2026-07-12).
+        if self._audio_selfheal is not None:
+            self._audio_selfheal.record_success()
 
         # Phase E: history persistence + response assembly
         return self._stop_recording_phase_e(

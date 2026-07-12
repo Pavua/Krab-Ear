@@ -769,4 +769,23 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "severity": "warn",
         "dedupe_seconds": 600,
     },
+
+    # audio.stack_wedged — AudioSelfHealer (backend/audio_selfheal.py) escalation.
+    # Root cause: prod incident 2026-07-12 — a long-lived backend ended up with
+    # PortAudio streams that opened without error but returned all-zero frames
+    # for 9 days (dictation always "empty audio", wake word silent). The
+    # self-heal already tried a soft reinit (sd._terminate()/_initialize()) once
+    # and the very next recording came back empty again, so this fires instead
+    # of reinit-looping. No automated action — the recommendation is a full
+    # backend restart. Dedupe 300s: at most one toast per 5 min while wedged.
+    "audio.stack_wedged": {
+        "user_msg_ru": (
+            "Аудио-стек завис (микрофон отдаёт тишину) — перезапустите Krab Ear."
+        ),
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "error",
+        "dedupe_seconds": 300,
+    },
 }

@@ -1,0 +1,236 @@
+"""Wiring tests: RecordingCoreService.handle_stop_recording <-> AudioSelfHealer.
+
+2026-07-12 mic-watchdog self-heal. AudioSelfHealer itself is unit-tested in
+isolation in test_audio_selfheal.py; this file only verifies the three call
+sites inside handle_stop_recording feed it correctly:
+
+  - silence-guard trip (RMS below threshold)      -> record_empty_result()
+  - empty transcript at nonzero duration            -> record_empty_result()
+  - real non-empty transcript                       -> record_success()
+  - background-guard rejection (different heuristic) -> NEITHER (must not count)
+
+Uses a bare RecordingCoreService (no BackendService, no daemon threads at
+construction — see feedback_backendservice_teardown_ci.md, which only applies
+to BackendService instantiation) with a lightweight call-recording fake
+standing in for AudioSelfHealer, matching the fixture pattern already
+established in test_recording_core_service.py.
+"""
+
+from __future__ import annotations
+
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import numpy as np
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from backend.recording_core_service import RecordingCoreService  # noqa: E402
+from backend.state_store import StateStore  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Fakes (mirrors test_recording_core_service.py's shared fixtures)
+# ---------------------------------------------------------------------------
+
+class _FakeRecorder:
+    """Recording that stops with normal, non-silent speech-like audio."""
+
+    is_recording = False
+    sample_rate = 16000
+
+    def start(self) -> bool:
+        if self.is_recording:
+            return False
+        self.is_recording = True
+        return True
+
+    def stop(self, timeout_sec=3.0, trim_tail_ms=0):
+        if not self.is_recording:
+            return None
+        self.is_recording = False
+        t = np.linspace(0.0, 1.0, 16000, endpoint=False, dtype=np.float32)
+        audio = (np.sin(2.0 * np.pi * 440.0 * t) * 0.3).astype(np.float32)
+        return audio, 1.0
+
+    def snapshot_rms(self):
+        return 0.05
+
+    def snapshot_audio(self):
+        return None
+
+
+class _SilentRecorder(_FakeRecorder):
+    """Recorder whose captured audio is all-zero — the PortAudio-wedged shape."""
+
+    def stop(self, timeout_sec=3.0, trim_tail_ms=0):
+        if not self.is_recording:
+            return None
+        self.is_recording = False
+        return np.zeros(32000, dtype=np.float32), 1.0
+
+
+class _FakeTranscriber:
+    """Always returns a real, non-empty transcript."""
+
+    def transcribe(self, audio, **kwargs):
+        return {"text": "hello world", "confidence": 0.9, "engine": "fake"}
+
+
+class _EmptyTextTranscriber:
+    """STT ran but produced nothing — the second empty-result shape."""
+
+    def transcribe(self, audio, **kwargs):
+        return {"text": "", "confidence": 0.0, "engine": "fake"}
+
+
+class _FakeTranslator:
+    def translate(self, text, **kwargs):
+        from backend.translator import TranslationResult
+        return TranslationResult(
+            text=text, status="skipped", source_lang="auto",
+            target_lang="ru", mode="auto", engine="fake",
+        )
+
+
+class _FakeSettingsSvc:
+    def cached_settings(self):
+        return {}
+
+    def invalidate_cache(self):
+        pass
+
+
+class _FakeSemanticSearcher:
+    is_enabled = False
+
+    def index_item(self, item_id, text):
+        pass
+
+
+class _CallRecordingSelfHealer:
+    """Stand-in for AudioSelfHealer that just counts which method fired."""
+
+    def __init__(self):
+        self.empty_calls = 0
+        self.success_calls = 0
+
+    def record_empty_result(self):
+        self.empty_calls += 1
+
+    def record_success(self):
+        self.success_calls += 1
+
+
+def _make_service(tmp_dir, recorder=None, transcriber=None):
+    store = StateStore(data_dir=Path(tmp_dir))
+    vocab = MagicMock()
+    vocab.get_words.return_value = []
+    session_tracker = MagicMock()
+    session_tracker._active_session = None
+    return RecordingCoreService(
+        recorder=recorder or _FakeRecorder(),
+        transcriber=transcriber or _FakeTranscriber(),
+        translator=_FakeTranslator(),
+        store=store,
+        vocabulary=vocab,
+        settings_svc=_FakeSettingsSvc(),
+        llm_rewriter=None,
+        auto_glossary=None,
+        semantic_searcher=_FakeSemanticSearcher(),
+        context_memory=None,
+        clipboard_history=[],
+        auto_backup=MagicMock(),
+        session_tracker=session_tracker,
+        action_items_extractor=None,
+        transcription_counter_ref=[0],
+        last_stt_engine_ref=[None],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+class AudioSelfHealWiringTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+
+    def test_defaults_to_none_when_not_wired(self):
+        """A service that never got _audio_selfheal injected must behave
+        exactly as before (no attribute error, no side effect)."""
+        svc = _make_service(self._tmp)
+        self.assertIsNone(svc._audio_selfheal)
+        svc.handle_start_recording({})
+        result = svc.handle_stop_recording({"quality_profile": "balanced"})
+        self.assertEqual(result["status"], "ok")
+
+    def test_silence_guard_trip_calls_record_empty_result(self):
+        healer = _CallRecordingSelfHealer()
+        svc = _make_service(self._tmp, recorder=_SilentRecorder())
+        svc._audio_selfheal = healer
+        svc.handle_start_recording({})
+        result = svc.handle_stop_recording({"quality_profile": "balanced"})
+        self.assertEqual(result["status"], "empty_audio")
+        self.assertTrue(result["silence_detected"])
+        self.assertEqual(healer.empty_calls, 1)
+        self.assertEqual(healer.success_calls, 0)
+
+    def test_empty_transcript_at_nonzero_duration_calls_record_empty_result(self):
+        healer = _CallRecordingSelfHealer()
+        svc = _make_service(self._tmp, transcriber=_EmptyTextTranscriber())
+        svc._audio_selfheal = healer
+        svc.handle_start_recording({})
+        result = svc.handle_stop_recording({"quality_profile": "balanced"})
+        self.assertEqual(result["status"], "empty_text")
+        self.assertGreater(result["duration_sec"], 0.0)
+        self.assertEqual(healer.empty_calls, 1)
+        self.assertEqual(healer.success_calls, 0)
+
+    def test_successful_transcript_calls_record_success(self):
+        healer = _CallRecordingSelfHealer()
+        svc = _make_service(self._tmp)
+        svc._audio_selfheal = healer
+        svc.handle_start_recording({})
+        result = svc.handle_stop_recording({"quality_profile": "balanced"})
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(healer.success_calls, 1)
+        self.assertEqual(healer.empty_calls, 0)
+
+    def test_background_guard_rejection_does_not_count_as_empty(self):
+        """Background-guard rejection is a DIFFERENT heuristic (distant/uniform
+        speech, e.g. a TV in the room) — must not feed the wedged-hardware
+        counter alongside the RMS silence guard."""
+        healer = _CallRecordingSelfHealer()
+        svc = _make_service(self._tmp)
+        svc._looks_like_distant_background_speech = lambda **kwargs: True
+        svc._audio_selfheal = healer
+        svc.handle_start_recording({})
+        result = svc.handle_stop_recording({"quality_profile": "balanced"})
+        self.assertEqual(result["status"], "empty_audio")
+        self.assertTrue(result["background_guard_rejected"])
+        self.assertFalse(result["silence_detected"])
+        self.assertEqual(healer.empty_calls, 0)
+        self.assertEqual(healer.success_calls, 0)
+
+    def test_multiple_stops_accumulate_on_the_same_healer_instance(self):
+        """Confirms the SAME AudioSelfHealer instance persists across
+        recordings (it is constructed once in BackendService.__init__, not
+        per-recording) — a fresh instance every call would make the streak
+        counter meaningless."""
+        healer = _CallRecordingSelfHealer()
+        svc = _make_service(self._tmp, recorder=_SilentRecorder())
+        svc._audio_selfheal = healer
+        for _ in range(3):
+            svc.handle_start_recording({})
+            svc.handle_stop_recording({"quality_profile": "balanced"})
+        self.assertEqual(healer.empty_calls, 3)
+
+
+if __name__ == "__main__":
+    unittest.main()

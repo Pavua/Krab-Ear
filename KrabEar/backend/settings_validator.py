@@ -81,6 +81,10 @@ _RANGE_FIELDS: dict[str, tuple[Any, Any, Any, type]] = {
     # wave5: self-heal model reload timeout (Fix C).
     # Below 10 s risks false-abort on NVMe cold load; above 600 s = 10 min idle.
     "llm_autoload_timeout_sec": (10.0, 600.0, 90.0, float),
+    # 2026-07-12: audio self-heal empty-recording streak threshold (see
+    # backend/audio_selfheal.py). Below 2 a single false-positive silence-guard
+    # trip would reinit PortAudio; above 10 the self-heal would rarely fire.
+    "audio_selfheal_empty_threshold": (2, 10, 3, int),
 }
 
 # Bool-поля с дефолтными значениями
@@ -107,6 +111,7 @@ _BOOL_FIELDS: dict[str, bool] = {
     "notify_sound_enabled": True,
     "privacy_mode_enabled": False,
     "stt_hotwords_enabled": True,
+    "audio_selfheal_enabled": True,
 }
 
 # Миграционные таблицы: (from_version, to_version) → список операций

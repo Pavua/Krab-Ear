@@ -808,6 +808,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "background_guard_min_rms": 0.0040,
     "background_guard_uniform_frame_threshold": 0.0060,
     "background_guard_max_uniform_active_ratio": 0.92,
+    # Пассивное само-восстановление залипшего аудио-стека (PortAudio открывает
+    # поток без ошибок, но отдаёт тишину; прод-инцидент 2026-07-12, см.
+    # backend/audio_selfheal.py). Триггер — N подряд идущих пустых записей.
+    "audio_selfheal_enabled": True,
+    "audio_selfheal_empty_threshold": 3,
     "overlay_opacity_percent": 45,
     "voice_gateway_url": "http://127.0.0.1:8090",
     "voice_gateway_api_key": "",
