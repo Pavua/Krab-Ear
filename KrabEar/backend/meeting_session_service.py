@@ -229,7 +229,13 @@ class MeetingSessionService:
                     break
 
     def _run_due_job_once(self, now: float) -> MeetingJob | None:
-        """Одна итерация слота: приоритетная созревшая задача. Тестируется напрямую."""
+        """Одна итерация слота: выполняет ВСЕ созревшие задачи по приоритету
+        (строго последовательно — GPU-слот запрещает ТОЛЬКО одновременность,
+        не последовательность в одном тике), возвращает последнюю выполненную.
+        Без этого CHUNK_STT (короткий интервал) вечно "перевыставляет" свой
+        due раньше ITEMS_LLM (длинный интервал) при прыжке `now` далеко вперёд
+        одним вызовом — ITEMS_LLM никогда не получает слот. Тестируется напрямую.
+        """
         with self._lock:
             s = self._session
         if s is None or s.privacy_stopped:
@@ -255,6 +261,7 @@ class MeetingSessionService:
 
         self._renew_lease_if_due(now)
 
+        ran: MeetingJob | None = None
         for job in (MeetingJob.CHUNK_STT, MeetingJob.ITEMS_LLM, MeetingJob.DIAR_WINDOW):
             due = self._next_due.get(job)
             if due is None or now < due:
@@ -269,8 +276,8 @@ class MeetingSessionService:
             finally:
                 # skip-tick: перепланируем от завершения, без лавины
                 self._next_due[job] = time.monotonic() + self._job_interval(job)
-            return job
-        return None
+            ran = job
+        return ran
 
     # ------------------------------------------------------------------ jobs
 

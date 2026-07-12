@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -259,6 +260,149 @@ class MeetingStartRaceTestCase(unittest.TestCase):
         self.assertEqual(len(results), 5)
         self.assertTrue(all(r.get("ok") for r in results))
         svc.close()
+
+
+class ItemsLlmJobTestCase(unittest.TestCase):
+    def _grow_transcript(self, svc, chars: int = 300) -> None:
+        with svc._lock:
+            svc._session.chunks.append("х" * chars)
+            svc._session.transcript_len += chars
+
+    def test_items_llm_pauses_partials_and_replaces_list(self) -> None:
+        extractor = _FakeExtractor(ok=True)
+        svc, bus, _ = _make_svc(extractor=extractor)
+        svc.handle_meeting_start({})
+        self._grow_transcript(svc)
+        ran = svc._run_due_job_once(now=svc._next_due[MeetingJob.ITEMS_LLM] + 0.1)
+        self.assertEqual(ran, MeetingJob.ITEMS_LLM)
+        core = svc._recording_core
+        self.assertEqual((core.paused, core.resumed), (1, 1),
+                         "LLM-вызов обязан паузить и резюмить партиалы")
+        self.assertIn("meeting.items_updated", bus.types())
+        state = svc.handle_get_meeting_live_state({})
+        self.assertEqual(state["decisions"], ["решение"])
+        self.assertFalse(state["degraded"]["llm"])
+        svc.close()
+
+    def test_items_llm_resumes_partials_even_on_crash(self) -> None:
+        class _BoomExtractor:
+            def extract(self, transcript, language="ru"):
+                raise RuntimeError("boom")
+
+        svc, _, _ = _make_svc(extractor=_BoomExtractor())
+        svc.handle_meeting_start({})
+        self._grow_transcript(svc)
+        with self.assertRaises(RuntimeError):
+            svc._job_items_llm(svc._session)
+        core = svc._recording_core
+        self.assertEqual(core.resumed, core.paused, "resume обязан быть в finally")
+        svc.close()
+
+    def test_items_llm_skips_without_growth(self) -> None:
+        extractor = _FakeExtractor(ok=True)
+        svc, _, _ = _make_svc(extractor=extractor)
+        svc.handle_meeting_start({})
+        self._grow_transcript(svc, chars=300)
+        svc._run_due_job_once(now=svc._next_due[MeetingJob.ITEMS_LLM] + 0.1)
+        # рост < 200 симв. -> extract не зовётся второй раз
+        svc._run_due_job_once(now=svc._next_due[MeetingJob.ITEMS_LLM] + 0.1)
+        self.assertEqual(len(extractor.texts), 1)
+        svc.close()
+
+    def test_no_extractor_sets_degraded(self) -> None:
+        svc, _, _ = _make_svc(extractor=None)
+        svc.handle_meeting_start({})
+        self._grow_transcript(svc)
+        svc._run_due_job_once(now=svc._next_due[MeetingJob.ITEMS_LLM] + 0.1)
+        state = svc.handle_get_meeting_live_state({})
+        self.assertTrue(state["degraded"]["llm"])
+        svc.close()
+
+    def test_extract_failure_sets_degraded_keeps_old_items(self) -> None:
+        extractor = _FakeExtractor(ok=True)
+        svc, _, _ = _make_svc(extractor=extractor)
+        svc.handle_meeting_start({})
+        self._grow_transcript(svc)
+        svc._run_due_job_once(now=svc._next_due[MeetingJob.ITEMS_LLM] + 0.1)
+        extractor.ok = False
+        self._grow_transcript(svc)
+        svc._run_due_job_once(now=svc._next_due[MeetingJob.ITEMS_LLM] + 0.1)
+        state = svc.handle_get_meeting_live_state({})
+        self.assertTrue(state["degraded"]["llm"])
+        self.assertEqual(state["decisions"], ["решение"], "старые items сохраняются")
+        svc.close()
+
+
+class MeetingStopTestCase(unittest.TestCase):
+    def test_stop_delegates_and_returns_history_id(self) -> None:
+        svc, bus, _ = _make_svc()
+        svc.handle_meeting_start({})
+        resp = svc.handle_meeting_stop({})
+        self.assertTrue(resp["ok"])
+        self.assertEqual(resp["item_id"], "hist-1")
+        self.assertEqual(bus.types().count("meeting.finalizing"), 1)
+        self.assertEqual(bus.types().count("meeting.finished"), 1)
+        self.assertEqual(len(svc._recording_core.stopped), 1)
+        state = svc.handle_get_meeting_live_state({})
+        self.assertFalse(state["active"])
+
+    def test_stop_without_session_is_noop(self) -> None:
+        svc, _, _ = _make_svc()
+        resp = svc.handle_meeting_stop({})
+        self.assertTrue(resp["ok"])
+        self.assertFalse(resp.get("active", False))
+
+    def test_privacy_mid_meeting_stops_processing(self) -> None:
+        settings_box = {"privacy": False}
+        svc, bus, _ = _make_svc()
+        svc._settings_get = lambda k, d=None: (
+            settings_box["privacy"] if k == "privacy_mode_enabled"
+            else {"meeting_chunk_stt_interval_sec": 25.0,
+                  "meeting_items_interval_sec": 60.0,
+                  "meeting_items_language": "ru",
+                  "llm_brain_lease_enabled": False}.get(k, d))
+        svc.handle_meeting_start({})
+        settings_box["privacy"] = True
+        ran = svc._run_due_job_once(now=svc._next_due[MeetingJob.CHUNK_STT] + 0.1)
+        self.assertIsNone(ran)
+        events_after = len(bus.events)
+        svc._run_due_job_once(now=svc._next_due[MeetingJob.CHUNK_STT] + 99.0)
+        self.assertEqual(len(bus.events), events_after, "после privacy событий нет")
+        state = svc.handle_get_meeting_live_state({})
+        self.assertFalse(state["active"])
+        svc.close()
+
+
+class BrainLeaseTestCase(unittest.TestCase):
+    def test_meeting_acquires_and_releases_lease(self) -> None:
+        import backend.meeting_session_service as mss
+        calls: list[tuple[str, Any]] = []
+
+        class _FakeLeaseModule:
+            @staticmethod
+            def acquire_brain_lease(owner, ttl_sec=30.0, lock_path=None):
+                calls.append(("acquire", owner))
+                return True
+
+            @staticmethod
+            def release_brain_lease(owner, lock_path=None):
+                calls.append(("release", owner))
+
+        svc, _, _ = _make_svc(settings_extra={"llm_brain_lease_enabled": True})
+        import sys as _sys
+        real = _sys.modules.get("backend.brain_lease")
+        _sys.modules["backend.brain_lease"] = _FakeLeaseModule()  # type: ignore[assignment]
+        try:
+            svc.handle_meeting_start({})
+            svc.handle_meeting_stop({})
+        finally:
+            if real is not None:
+                _sys.modules["backend.brain_lease"] = real
+            else:
+                _sys.modules.pop("backend.brain_lease", None)
+        self.assertIn(("acquire", "krab_ear"), calls)
+        self.assertIn(("release", "krab_ear"), calls)
+        del mss  # noqa: F821 -- использован только для читаемости импорта
 
 
 if __name__ == "__main__":
