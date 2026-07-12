@@ -60,6 +60,9 @@ _RANGE_FIELDS: dict[str, tuple[Any, Any, Any, type]] = {
     "rt_silence_window_sec": (1.0, 30.0, 10.0, float),
     "realtime_silence_threshold_db": (-80.0, -10.0, -55.0, float),
     "rt_partial_interval_sec": (0.1, 30.0, 1.0, float),
+    # --- Live meeting overlay (C2a, спека 2026-07-10) ---
+    "meeting_chunk_stt_interval_sec": (10.0, 120.0, 25.0, float),
+    "meeting_items_interval_sec": (30.0, 600.0, 60.0, float),
     # wave-1770 MED: rt_silence_max_sec was missing from _RANGE_FIELDS — NaN/Inf
     # caused silence detection to permanently suppress or behave unpredictably.
     "rt_silence_max_sec": (0.5, 60.0, 8.0, float),
