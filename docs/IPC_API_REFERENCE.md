@@ -2862,7 +2862,7 @@ Returns (privacy): `{ok: true, active: false, privacy_mode_active: true}`
 Request:  {"id":"m3","method":"get_meeting_live_state","params":{}}
 Response: {"id":"m3","ok":true,"result":{"ok":true,"active":true,"started_at":1752230400.12,
   "promoted":false,"transcript_len":842,"transcript_tail":"...обсудили сроки релиза...",
-  "items":[{"text":"подготовить отчёт","assignee":"Паша","due":null,"priority":"medium"}],
+  "items":[{"text":"подготовить отчёт","assignee":"Паша","due":"","priority":"medium"}],
   "decisions":["перенести релиз на пятницу"],"questions":[],"speakers":[],
   "degraded":{"llm":false,"diarization":false},"last_updated_ts":1752230458.9}}
 ```

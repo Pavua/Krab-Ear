@@ -68,7 +68,14 @@ def main() -> int:
         res = r.get("result", {})
         check("meeting_stop ok", r.get("ok") and res.get("ok"), str(r)[:200])
         print(f"    item_id={res.get('item_id')}")
-        stopped = True
+        # Reuse the exact condition just checked above — not a bare literal.
+        # If meeting_stop's RPC round-trip succeeds but the handler raises
+        # AFTER _stop_worker() (worker already dead) and BEFORE
+        # _teardown_session(...) (e.g. handle_stop_recording() blows up during
+        # finalization), handle_request returns {"ok": false, "error": {...}}
+        # with no "result" key — check() correctly reports FAIL, and stopped
+        # must stay False so the finally block retries the cleanup stop.
+        stopped = bool(r.get("ok")) and bool(res.get("ok"))
 
         st2 = call(sock, "get_meeting_live_state").get("result", {})
         check("inactive after stop", st2.get("active") is False)
