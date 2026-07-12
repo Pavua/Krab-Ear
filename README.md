@@ -112,11 +112,33 @@ Roadmap: [`ROADMAP_ECOSYSTEM.md`](ROADMAP_ECOSYSTEM.md)
 
 Двухрежимная система синтеза речи:
 
-- **Silero** — русский, быстрый, качественный
-- **Kokoro** — английский, натуральный
-- **Fallback** — macOS `say` (всегда доступна)
+- **Silero** — русский, быстрый, качественный (primary для RU)
+- **Kokoro** — английский, натуральный (primary для EN)
+- **Fallback** — macOS `say` (всегда доступна; для RU-текста без явного
+  голоса использует русский голос `Milena`, а не системный дефолт — иначе
+  речь звучит с заметным иностранным акцентом)
 
-Включение: `TTS_ENABLED=True` в окружении или UI-настройки.
+Включение: `KRAB_EAR_TTS_ENABLED=1` в окружении (env-var-only — `TTS_ENABLED`
+не входит в `DEFAULT_SETTINGS`, поэтому у него нет `set_settings` IPC/UI
+переключателя; менять можно только через окружение процесса, `.env`/`.secrets`
+или launchd plist). Для launchd-инсталляций (`scripts/install_backend_launchagent.command`,
+`scripts/install_rest_launchagent.command`) флаг `KRAB_EAR_TTS_ENABLED=1`
+теперь зашит в оба plist-шаблона (`KrabEar/launchagents/ai.krab.ear.backend.plist.template`,
+`KrabEar/launchagents/ai.krab.ear.rest.plist.template`) — новые установки
+включают Silero/Kokoro как primary автоматически. Существующие launchd-сервисы
+нужно переустановить (`scripts/install_backend_launchagent.command` /
+`scripts/install_rest_launchagent.command`) или прописать переменную в
+`~/Library/LaunchAgents/ai.krab.ear.*.plist` вручную, чтобы подхватить флаг.
+
+**После любого TTS-фикса или изменения `TTS_ENABLED` оба процесса нужно
+перезапустить** (backend держит IPC `synthesize_speech`, REST — `POST
+/v1/tts/synthesize` для Voice Gateway; правки кода/env не подхватываются на
+лету):
+
+```bash
+launchctl kickstart -k gui/$UID/ai.krab.ear.backend
+launchctl kickstart -k gui/$UID/ai.krab.ear.rest
+```
 
 ---
 
