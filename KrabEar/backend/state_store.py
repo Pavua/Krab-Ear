@@ -103,6 +103,14 @@ class StateStore:
         self._history_crypto_initialized: bool = False
         self._history_crypto_instance = None  # HistoryCrypto | None
 
+        # fix/statestore-lock-reentrancy-deadlock: per-thread reentrancy guard
+        # for _lock() (см. докстринг _lock ниже) — НЕ файловый lock, чисто
+        # in-memory защита словарей depth/fileobj. Прецедент: core/mlx_lock.py
+        # (RLock — реентерабельный по той же причине).
+        self._lock_reentry_guard = threading.Lock()
+        self._lock_depth: dict[int, int] = {}
+        self._lock_fileobj: dict[int, Any] = {}
+
         # Phase B.2 — error_bus late-injection
 
     def _get_history_crypto(self):
@@ -229,14 +237,71 @@ class StateStore:
 
     @contextmanager
     def _lock(self) -> Iterator[None]:
-        """Глобальный lock для журналов истории и настроек."""
-        self.lock_path.touch(exist_ok=True)
-        with self.lock_path.open("r+", encoding="utf-8") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        """Глобальный lock для журналов истории и настроек.
+
+        Реентерабелен ПО ТРЕДУ (per-thread depth-counter): повторный вход с
+        того же треда — no-op поверх уже взятого лока, вместо самозаклина на
+        fcntl.flock (у каждого open() — свой open file description; flock не
+        привязан к треду, поэтому вложенный вызов с того же треда раньше
+        блокировался навечно). Реальный OS-level flock физически берётся и
+        отпускается РОВНО ОДИН РАЗ — на самом внешнем входе/выходе — так что
+        кросс-тредовая и кросс-процессная эксклюзивность (см.
+        test_state_store_lock_invariants.py) не меняется.
+
+        Откат при сбое фазы захвата (адверсариальный гейт Sonnet+Fable,
+        HIGH): если touch()/open()/flock() бросает исключение (ENOSPC/
+        EMFILE/EACCES — реалистично, у проекта есть DiskSpaceMonitor именно
+        под low-disk сценарии) — инкремент depth-счётчика, уже сделанный
+        выше, откатывается под тем же guard-локом, а частично открытый файл
+        (open() прошёл, flock() упал) закрывается БЕЗ вызова LOCK_UN (лок
+        не был взят — unlock незанятого лока не делаем). Без этого отката
+        КАЖДЫЙ последующий вызов _lock() с этого же треда молча решал бы,
+        что лок уже держится (depth != 0), и навсегда пропускал бы реальный
+        fcntl.flock — тихий обход взаимоисключения хуже громкого дедлока,
+        который чинил сам реентерабельный фикс.
+        """
+        tid = threading.get_ident()
+        with self._lock_reentry_guard:
+            depth = self._lock_depth.get(tid, 0)
+            acquired_here = depth == 0
+            self._lock_depth[tid] = depth + 1
+        if acquired_here:
+            lock_file = None
             try:
-                yield
-            finally:
+                self.lock_path.touch(exist_ok=True)
+                lock_file = self.lock_path.open("r+", encoding="utf-8")
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            except BaseException:
+                with self._lock_reentry_guard:
+                    depth = self._lock_depth[tid] - 1
+                    if depth == 0:
+                        del self._lock_depth[tid]
+                    else:
+                        self._lock_depth[tid] = depth
+                    self._lock_fileobj.pop(tid, None)
+                if lock_file is not None:
+                    try:
+                        lock_file.close()
+                    except OSError:
+                        pass
+                raise
+            with self._lock_reentry_guard:
+                self._lock_fileobj[tid] = lock_file
+        try:
+            yield
+        finally:
+            with self._lock_reentry_guard:
+                depth = self._lock_depth[tid] - 1
+                if depth == 0:
+                    del self._lock_depth[tid]
+                    lock_file = self._lock_fileobj.pop(tid)
+                    release_now = True
+                else:
+                    self._lock_depth[tid] = depth
+                    release_now = False
+            if release_now:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                lock_file.close()
 
     def reset_search_caches(self) -> None:
         """Сбрасывает все in-memory поисковые кэши (privacy-purge / wipe-all).
