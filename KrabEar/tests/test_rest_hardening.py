@@ -70,7 +70,18 @@ _rest_mod = None
 
 
 def _ensure_stubs():
-    """Register all heavy-module stubs before importing rest_server."""
+    """Register all heavy-module stubs before importing rest_server.
+
+    Returns the list of module names actually INSERTED into sys.modules
+    (only those not already present — see the `if mod_name not in
+    sys.modules` guard below). The caller pops exactly these names again
+    once backend.rest_server has been imported: a stray fake module left
+    in sys.modules poisons every later test file in the same pytest
+    chunk that imports backend.state_store/backend.service directly
+    (sibling of the red CI 2026-07-12 chunk-pollution class fixed in
+    test_rest_server_w1212.py / test_rest_wave31_hardening.py — same
+    unguarded stub pattern, see CLAUDE.md).
+    """
     stub_specs = {
         "core.engine": {
             "AudioEngine": type("_FE", (), {
@@ -135,22 +146,31 @@ def _ensure_stubs():
             })(),
         },
     }
+    inserted = []
     for mod_name, attrs in stub_specs.items():
         if mod_name not in sys.modules:
             m = types.ModuleType(mod_name)
             for k, v in attrs.items():
                 setattr(m, k, v)
             sys.modules[mod_name] = m
+            inserted.append(mod_name)
+    return inserted
 
 
+_inserted_stub_modules: list = []
 try:
     import flask  # noqa: F401
-    _ensure_stubs()
+    _inserted_stub_modules = _ensure_stubs()
     with patch("pathlib.Path.mkdir"):
         import backend.rest_server as _rest_mod
     _REST_AVAILABLE = True
 except Exception:
     pass
+finally:
+    # Снимаем ВСТАВЛЕННЫЕ НАМИ фейки из sys.modules — иначе фейк _FBS/_FSS
+    # отравляет все последующие тест-файлы чанка (см. test_rest_server_w1212.py).
+    for _name in _inserted_stub_modules:
+        sys.modules.pop(_name, None)
 
 
 def _make_client():
