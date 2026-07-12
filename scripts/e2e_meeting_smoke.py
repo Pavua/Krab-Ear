@@ -42,19 +42,21 @@ def main() -> int:
             fails.append(name)
 
     r = call(sock, "meeting_start")
-    check("meeting_start ok", r.get("ok") and r["result"].get("ok"), str(r)[:200])
+    res = r.get("result", {})
+    check("meeting_start ok", r.get("ok") and res.get("ok"), str(r)[:200])
 
     time.sleep(30)  # один CHUNK_STT-такт (default 25с)
-    st = call(sock, "get_meeting_live_state")["result"]
+    st = call(sock, "get_meeting_live_state").get("result", {})
     check("state active", st.get("active") is True, str(st)[:200])
     check("no crash in degraded", isinstance(st.get("degraded"), dict))
     print(f"    transcript_len={st.get('transcript_len')} tail={st.get('transcript_tail', '')[:80]!r}")
 
     r = call(sock, "meeting_stop")
-    check("meeting_stop ok", r.get("ok") and r["result"].get("ok"), str(r)[:200])
-    print(f"    item_id={r['result'].get('item_id')}")
+    res = r.get("result", {})
+    check("meeting_stop ok", r.get("ok") and res.get("ok"), str(r)[:200])
+    print(f"    item_id={res.get('item_id')}")
 
-    st2 = call(sock, "get_meeting_live_state")["result"]
+    st2 = call(sock, "get_meeting_live_state").get("result", {})
     check("inactive after stop", st2.get("active") is False)
 
     print("\n" + ("ALL GREEN" if not fails else f"FAILS: {fails}"))
