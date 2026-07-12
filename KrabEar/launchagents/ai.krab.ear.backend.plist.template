@@ -95,6 +95,19 @@
          cold load под нагрузкой. -->
     <key>KRAB_EAR_LLM_TIMEOUT_SEC</key>
     <string>120.0</string>
+
+    <!-- fix/tts-ru-accent-routing (2026-07-12): включает Silero (RU primary
+         neural TTS, voice=Milena-quality) + Kokoro (EN fallback) вместо
+         дефолтного TTS_ENABLED=False (только macOS `say`). Двухслойный
+         Silero-баг (v4 API tuple-unpack + in-place .to() возвращал None)
+         исправлен в 491a3a2e — Silero теперь грузится и синтезирует
+         корректно, поэтому новые установки должны включать его как primary.
+         Без этого флага RU-озвучка (например ConversationErrorAnnouncer)
+         шла напрямую через macOS `say`, что само по себе не баг (см. фикс
+         RU-voice-default в tts_service.py), но лишает RU-речь качества
+         нейросетевого Silero-голоса. -->
+    <key>KRAB_EAR_TTS_ENABLED</key>
+    <string>1</string>
   </dict>
 
   <key>StandardOutPath</key>
