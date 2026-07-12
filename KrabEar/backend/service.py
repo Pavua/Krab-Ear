@@ -1455,7 +1455,7 @@ class BackendService:
         try:
             self._meeting_svc.close()
         except Exception:
-            logger.debug("close: meeting_svc.close() error (ignored)", exc_info=True)
+            logger.exception("MeetingSessionService.close() raised during close()")
 
     # ------------------------------------------------------------------ #
     # Backwards-compatible proxy properties for Wave 172 migration         #
