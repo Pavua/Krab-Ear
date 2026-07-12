@@ -32,7 +32,22 @@ _ENUM_FIELDS: dict[str, tuple[str, ...]] = {
     "history_policy": ("unlimited",),
     "history_text_density": ("normal", "compact"),
     "capture_source_mode": ("mic", "system_audio", "mic_plus_system"),
-    "ui_last_tab": ("dictation", "live_translation", "history"),
+    # Must mirror every PanelTab rawValue the Swift agent can persist
+    # (native/KrabEarAgent/Sources/KrabEarAgent/HistoryPanelController.swift
+    # enum PanelTab, written back in HistoryPanelController+LiveTranslation.swift
+    # tabView(_:didSelect:) via tab.rawValue). A tab id missing here is silently
+    # rewritten to 'dictation' on every set_settings call for that tab — spamming
+    # a WARNING and breaking tab-restore-on-relaunch (e.g. "conversation" on every
+    # "Разговор с AI" start via wake word / double Right Option).
+    "ui_last_tab": (
+        "dictation",
+        "live_translation",
+        "history",
+        "conversation",
+        "call_automation",
+        "diagnostics",
+        "archive",
+    ),
     "update_channel": ("stable", "beta"),
     # cloud_rewriter_provider: valid providers for cloud transcript cleanup.
     "cloud_rewriter_provider": ("openai", "anthropic", "custom"),

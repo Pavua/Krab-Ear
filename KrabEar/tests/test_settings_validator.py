@@ -74,6 +74,70 @@ class TestValidateEnumFields(unittest.TestCase):
         self.assertEqual(len(result.warnings), 3)
 
 
+class TestValidateUiLastTabField(unittest.TestCase):
+    """ui_last_tab allowlist must cover every PanelTab rawValue the Swift agent
+    actually sends (native/KrabEarAgent/Sources/KrabEarAgent/HistoryPanelController.swift
+    enum PanelTab), not just the three tabs that shipped first.  A value missing
+    from the allowlist is silently rewritten to 'dictation' every time the user
+    switches to that tab, spamming a WARNING on every launch of a mismatched
+    feature (e.g. every "Разговор с AI" / wake-word start) and permanently
+    breaking tab-restore-on-relaunch for that tab.
+    """
+
+    def setUp(self):
+        self.v = SettingsValidator()
+
+    def test_valid_ui_last_tab_conversation_not_rewritten(self):
+        result = self.v.validate({"ui_last_tab": "conversation"})
+        self.assertTrue(result.valid)
+        self.assertEqual(result.fixed["ui_last_tab"], "conversation")
+        self.assertEqual(result.warnings, [])
+
+    def test_valid_ui_last_tab_call_automation_not_rewritten(self):
+        result = self.v.validate({"ui_last_tab": "call_automation"})
+        self.assertTrue(result.valid)
+        self.assertEqual(result.fixed["ui_last_tab"], "call_automation")
+        self.assertEqual(result.warnings, [])
+
+    def test_valid_ui_last_tab_diagnostics_not_rewritten(self):
+        result = self.v.validate({"ui_last_tab": "diagnostics"})
+        self.assertTrue(result.valid)
+        self.assertEqual(result.fixed["ui_last_tab"], "diagnostics")
+        self.assertEqual(result.warnings, [])
+
+    def test_valid_ui_last_tab_archive_not_rewritten(self):
+        result = self.v.validate({"ui_last_tab": "archive"})
+        self.assertTrue(result.valid)
+        self.assertEqual(result.fixed["ui_last_tab"], "archive")
+        self.assertEqual(result.warnings, [])
+
+    def test_valid_ui_last_tab_dictation_still_valid(self):
+        """Pre-existing allowed value must keep working after the allowlist grows."""
+        result = self.v.validate({"ui_last_tab": "dictation"})
+        self.assertTrue(result.valid)
+        self.assertEqual(result.fixed["ui_last_tab"], "dictation")
+        self.assertEqual(result.warnings, [])
+
+    def test_valid_ui_last_tab_live_translation_still_valid(self):
+        result = self.v.validate({"ui_last_tab": "live_translation"})
+        self.assertTrue(result.valid)
+        self.assertEqual(result.fixed["ui_last_tab"], "live_translation")
+        self.assertEqual(result.warnings, [])
+
+    def test_valid_ui_last_tab_history_still_valid(self):
+        result = self.v.validate({"ui_last_tab": "history"})
+        self.assertTrue(result.valid)
+        self.assertEqual(result.fixed["ui_last_tab"], "history")
+        self.assertEqual(result.warnings, [])
+
+    def test_invalid_ui_last_tab_still_rewritten_to_dictation(self):
+        """A genuinely unknown tab id must still be auto-fixed (regression guard)."""
+        result = self.v.validate({"ui_last_tab": "not_a_real_tab"})
+        self.assertTrue(result.valid)
+        self.assertEqual(result.fixed["ui_last_tab"], "dictation")
+        self.assertEqual(len(result.warnings), 1)
+
+
 class TestValidateRangeFields(unittest.TestCase):
     def setUp(self):
         self.v = SettingsValidator()
