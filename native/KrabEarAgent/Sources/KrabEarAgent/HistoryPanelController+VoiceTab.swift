@@ -125,7 +125,28 @@ extension HistoryPanelController {
     }
 
     /// Вызывается из wake-word detector (PR 1.5) для старта разговора.
+    ///
+    /// 🔴 2026-07-12 фикс живого инцидента: раньше делегировал в triggerConversationStart(),
+    /// который showPanel() → NSApp.activate(ignoringOtherApps: true) +
+    /// window?.makeKeyAndOrderFront(nil) — детекция "Краб" воровала фокус клавиатуры из
+    /// текущего приложения пользователя (при шторме ложных срабатываний печать становилась
+    /// невозможной; но и единичная легитимная детекция не должна воровать фокус — голосовой
+    /// канал не требует фокуса окна, микрофон слушает и ответ звучит голосом).
+    ///
+    /// Сессия стартует БЕЗ показа/активации окна: conversationVC.view уже встроен в
+    /// иерархию окна с момента setupConversationTab() (при HistoryPanelController.init()),
+    /// поэтому startConversation() работает независимо от того, показано ли окно.
+    /// Обратная связь идёт через ConversationStatusOverlay — non-activating NSPanel HUD
+    /// (.nonactivatingPanel, см. ConversationStatusOverlay.swift), который
+    /// updateOverlayVisibility()/shouldShowOverlay уже показывают именно в этом случае:
+    /// sessionActive == true && windowIsKey == false. Guard-состояние Волны 3c
+    /// (isSessionActive, .krabConversationStarted/Stopped пауза wake-поллера) не меняется —
+    /// это тот же единственный startConversation()/stopConversation() что и у ручных путей.
+    ///
+    /// Ручные пути (кнопка «Начать разговор» в открытом окне, двойной Right Option через
+    /// triggerConversationStart()) остаются активирующими — там пользователь сам
+    /// инициировал действие из нашего окна или явным хоткеем.
     func triggerConversationFromWakeWord() {
-        triggerConversationStart()
+        conversationVC?.startConversation()
     }
 }
