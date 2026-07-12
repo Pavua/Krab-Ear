@@ -96,23 +96,37 @@ class MeetingSessionService:
                 return {"ok": True, "already_active": True,
                         "started_at": self._session.started_at,
                         "promoted": self._session.promoted}
+            # C2a-фикс гонки (Task 5b): резервируем слот ДО unlocked I/O ниже —
+            # иначе конкурентный handle_meeting_start() тоже проходит
+            # None-проверку и стартует запись/воркер второй раз (двойной
+            # клик в UI / два IPC-клиента). Резервация снимается в finally
+            # при ошибке или заменяется реальной сессией при успехе.
+            reservation = _MeetingSession()
+            self._session = reservation
 
-        start_resp = self._recording_core.handle_start_recording({})
-        promoted = start_resp.get("status") == "already_recording"
+        try:
+            start_resp = self._recording_core.handle_start_recording({})
+            promoted = start_resp.get("status") == "already_recording"
 
-        session = _MeetingSession(
-            promoted=promoted,
-            language=str(params.get("language", self._settings_get(
-                "meeting_items_language", "ru")) or "ru"),
-            cursor_sec=float(self._recorder.get_duration_sec()) if promoted else 0.0,
-        )
-        now = time.monotonic()
-        with self._lock:
-            self._session = session
-            self._next_due = {
-                MeetingJob.CHUNK_STT: now + self._chunk_interval(),
-                MeetingJob.ITEMS_LLM: now + self._items_interval(),
-            }
+            session = _MeetingSession(
+                promoted=promoted,
+                language=str(params.get("language", self._settings_get(
+                    "meeting_items_language", "ru")) or "ru"),
+                cursor_sec=float(self._recorder.get_duration_sec()) if promoted else 0.0,
+            )
+            now = time.monotonic()
+            with self._lock:
+                self._session = session
+                self._next_due = {
+                    MeetingJob.CHUNK_STT: now + self._chunk_interval(),
+                    MeetingJob.ITEMS_LLM: now + self._items_interval(),
+                }
+        except Exception:
+            with self._lock:
+                if self._session is reservation:
+                    self._session = None
+            raise
+
         self._acquire_lease()
         self._start_worker()
         logger.info("meeting: сессия запущена", extra={

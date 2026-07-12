@@ -4,6 +4,7 @@
 """
 import sys
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -202,6 +203,61 @@ class ChunkSttJobTestCase(unittest.TestCase):
         self.assertIn("meeting.finished", bus.types())
         state = svc.handle_get_meeting_live_state({})
         self.assertFalse(state["active"])
+        svc.close()
+
+
+class _SlowFakeRecordingCore(_FakeRecordingCore):
+    """Как _FakeRecordingCore, но handle_start_recording искусственно медленный —
+    расширяет окно гонки, чтобы тест надёжно ловил check-then-act баг."""
+
+    def __init__(self, delay_sec: float = 0.2) -> None:
+        super().__init__()
+        self._delay_sec = delay_sec
+
+    def handle_start_recording(self, params):
+        time.sleep(self._delay_sec)
+        return super().handle_start_recording(params)
+
+
+class MeetingStartRaceTestCase(unittest.TestCase):
+    def test_concurrent_start_calls_start_recording_once(self) -> None:
+        settings = {
+            "privacy_mode_enabled": False,
+            "meeting_chunk_stt_interval_sec": 25.0,
+            "meeting_items_interval_sec": 60.0,
+            "meeting_items_language": "ru",
+            "llm_brain_lease_enabled": False,
+        }
+        bus = _SpyBus()
+        core = _SlowFakeRecordingCore(delay_sec=0.2)
+        svc = MeetingSessionService(
+            recorder=_FakeRecorder(),
+            transcriber=_FakeTranscriber(),
+            recording_core=core,
+            action_items_extractor=None,
+            settings_get=lambda k, d=None: settings.get(k, d),
+            event_bus=bus,
+        )
+        results: list[dict] = []
+        results_lock = threading.Lock()
+
+        def _call() -> None:
+            resp = svc.handle_meeting_start({})
+            with results_lock:
+                results.append(resp)
+
+        threads = [threading.Thread(target=_call) for _ in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5.0)
+
+        self.assertEqual(
+            len(core.started), 1,
+            "конкурентные handle_meeting_start НЕ должны стартовать запись дважды",
+        )
+        self.assertEqual(len(results), 5)
+        self.assertTrue(all(r.get("ok") for r in results))
         svc.close()
 
 
