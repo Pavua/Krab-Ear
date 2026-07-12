@@ -168,6 +168,18 @@ class TestRestAuthFilePermissions(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 def _ensure_rest_server_stubs():
+    """Register all heavy-module stubs before importing rest_server.
+
+    Returns the list of module names actually INSERTED into sys.modules
+    (only those not already present — see the `if mod_name not in
+    sys.modules` guard below). The caller pops exactly these names again
+    once backend.rest_server has been imported: a stray fake module left
+    in sys.modules poisons every later test file in the same pytest
+    chunk that imports backend.state_store/backend.service directly
+    (sibling of the red CI 2026-07-12 chunk-pollution class fixed in
+    test_rest_server_w1212.py / test_rest_wave31_hardening.py — same
+    unguarded stub pattern, see CLAUDE.md).
+    """
     stubs = {
         "core.engine": {"AudioEngine": type("FE", (), {
             "__init__": lambda s, *a, **k: None,
@@ -202,18 +214,27 @@ def _ensure_rest_server_stubs():
             "record": lambda s, *a, **k: None,
         })()},
     }
+    inserted = []
     for mod_name, attrs in stubs.items():
         if mod_name not in sys.modules:
             m = _types.ModuleType(mod_name)
             for k, v in attrs.items():
                 setattr(m, k, v)
             sys.modules[mod_name] = m
+            inserted.append(mod_name)
+    return inserted
 
 
-_ensure_rest_server_stubs()
+_inserted_stub_modules = _ensure_rest_server_stubs()
 
-with patch("pathlib.Path.mkdir"):
-    from backend.rest_server import app as _rest_app, require_api_key as _require_api_key  # noqa: E402
+try:
+    with patch("pathlib.Path.mkdir"):
+        from backend.rest_server import app as _rest_app, require_api_key as _require_api_key  # noqa: E402
+finally:
+    # Снимаем ВСТАВЛЕННЫЕ НАМИ фейки из sys.modules — иначе фейк FBS/FSS
+    # отравляет все последующие тест-файлы чанка (см. test_rest_server_w1212.py).
+    for _name in _inserted_stub_modules:
+        sys.modules.pop(_name, None)
 
 
 class TestRequireApiKeyAuthEnabled(unittest.TestCase):
