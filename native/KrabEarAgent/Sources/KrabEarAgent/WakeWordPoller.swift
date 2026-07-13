@@ -22,6 +22,7 @@ enum WakeWordPauseReason: String, CaseIterable, Sendable {
     case recording      // идёт диктовка — слушатель поймал бы её же
     case conversation   // идёт «Разговор с AI» — микрофон занят разговором
     case privacyMode    // privacy mode — микрофон wake word держать нельзя
+    case ttsPlayback     // собственный TTS звучит через колонки — эхо триггерит детекцию (T5b)
 }
 
 // MARK: - Чистая логика дебаунса

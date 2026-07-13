@@ -156,3 +156,114 @@ final class WakeWordNoFocusStealTests: XCTestCase {
         sourcesDir.appendingPathComponent("HistoryPanelController+VoiceTab.swift")
     }
 }
+
+// MARK: - TTS-self-echo pause fix (T5b architectural follow-up, 2026-07-13)
+//
+// ConversationErrorAnnouncer озвучивает ошибки уже ПОСЛЕ stopConversation()
+// (.krabConversationStopped снимает .conversation-паузу синхронно), а сам
+// AVAudioPlayer.play() стартует асинхронно (round-trip synthesize_speech IPC) —
+// wake word уже слушал, когда колонки только начинали проигрывать фразу, и
+// триггерился на собственное эхо. Фикс: отдельная причина паузы .ttsPlayback,
+// завязанная на реальное начало/конец воспроизведения, а не границы разговора.
+final class WakeWordTTSPauseWiringTests: XCTestCase {
+
+    // MARK: 1. Причина паузы существует в enum
+
+    func test_ttsPlayback_pauseReason_exists() throws {
+        let src = try String(contentsOf: Self.wakeWordPollerSwiftURL, encoding: .utf8)
+        XCTAssertTrue(src.contains("case ttsPlayback"),
+            "WakeWordPauseReason обязан содержать case ttsPlayback")
+    }
+
+    // MARK: 2. setupWakeWordTTSPlaybackObservers реально вызывается (не только определён)
+
+    func test_setupWakeWordTTSPlaybackObservers_is_actually_called() throws {
+        let src = try String(contentsOf: Self.mainSwiftURL, encoding: .utf8)
+        let callSites = src.components(separatedBy: "setupWakeWordTTSPlaybackObservers()").count - 1
+        XCTAssertGreaterThanOrEqual(callSites, 2,
+            "setupWakeWordTTSPlaybackObservers() должен быть и определён, и вызван в main.swift")
+    }
+
+    // MARK: 3. Обе подписки живы и дёргают правильные методы
+
+    func test_ttsPlaybackStarted_pausesPoller() throws {
+        let src = try String(contentsOf: Self.mainSwiftURL, encoding: .utf8)
+        XCTAssertTrue(src.contains(".krabTTSPlaybackStarted"),
+                      "подписка на .krabTTSPlaybackStarted обязана существовать")
+        XCTAssertTrue(src.contains("pause(.ttsPlayback)"),
+                      "обработчик started обязан вызывать pause(.ttsPlayback)")
+    }
+
+    func test_ttsPlaybackFinished_resumesPoller() throws {
+        let src = try String(contentsOf: Self.mainSwiftURL, encoding: .utf8)
+        XCTAssertTrue(src.contains(".krabTTSPlaybackFinished"),
+                      "подписка на .krabTTSPlaybackFinished обязана существовать")
+        XCTAssertTrue(src.contains("resume(.ttsPlayback)"),
+                      "обработчик finished обязан вызывать resume(.ttsPlayback)")
+    }
+
+    // MARK: 4. ConversationErrorAnnouncer реально постит обе нотификации вокруг playWav
+
+    func test_errorAnnouncer_postsBothNotifications() throws {
+        let body = try Self.functionBody(named: "playWav", in: Self.errorAnnouncerSwiftURL)
+        XCTAssertTrue(body.contains("post(name: .krabTTSPlaybackStarted"),
+                      "playWav обязан постить .krabTTSPlaybackStarted перед/при старте воспроизведения")
+        XCTAssertTrue(body.contains("post(name: .krabTTSPlaybackFinished"),
+                      "playWav обязан явно закрывать TTS-паузу при перекрытии предыдущего плеера " +
+                      "или неудачном play() — иначе пауза может зависнуть")
+    }
+
+    // MARK: 5. Завершение реально отслеживается через делегата, а не completionHandler:nil
+
+    func test_errorAnnouncer_tracksPlaybackCompletion_viaDelegate() throws {
+        let src = try String(contentsOf: Self.errorAnnouncerSwiftURL, encoding: .utf8)
+        XCTAssertTrue(src.contains("AVAudioPlayerDelegate"),
+            "воспроизведение обязано отслеживать реальное завершение через AVAudioPlayerDelegate " +
+            "(didFinishPlaying), а не оставаться fire-and-forget")
+        XCTAssertTrue(src.contains("audioPlayerDidFinishPlaying"),
+            "делегат обязан реализовывать audioPlayerDidFinishPlaying и постить .krabTTSPlaybackFinished")
+    }
+
+    // MARK: - Source URLs
+
+    private static var sourcesDir: URL {
+        var url = URL(fileURLWithPath: #filePath)
+        url.deleteLastPathComponent()
+        url.deleteLastPathComponent()
+        url.deleteLastPathComponent()
+        return url.appendingPathComponent("Sources/KrabEarAgent")
+    }
+
+    private static var mainSwiftURL: URL { sourcesDir.appendingPathComponent("main.swift") }
+    private static var wakeWordPollerSwiftURL: URL { sourcesDir.appendingPathComponent("WakeWordPoller.swift") }
+    private static var errorAnnouncerSwiftURL: URL { sourcesDir.appendingPathComponent("ConversationErrorAnnouncer.swift") }
+
+    /// Извлекает тело функции по имени (тот же паттерн, что WakeWordNoFocusStealTests).
+    private static func functionBody(named name: String, in url: URL) throws -> String {
+        let src = try String(contentsOf: url, encoding: .utf8)
+        guard let sigRange = src.range(of: "func \(name)(") else {
+            XCTFail("func \(name)( не найдена в \(url.lastPathComponent)")
+            return ""
+        }
+        guard let openBrace = src.range(of: "{", range: sigRange.upperBound..<src.endIndex) else {
+            XCTFail("Открывающая { не найдена после сигнатуры \(name)")
+            return ""
+        }
+        var depth = 0
+        var idx = openBrace.lowerBound
+        var closeIdx: String.Index?
+        while idx < src.endIndex {
+            let ch = src[idx]
+            if ch == "{" { depth += 1 } else if ch == "}" {
+                depth -= 1
+                if depth == 0 { closeIdx = idx; break }
+            }
+            idx = src.index(after: idx)
+        }
+        guard let close = closeIdx else {
+            XCTFail("Не нашли парную закрывающую } для \(name)")
+            return ""
+        }
+        return String(src[openBrace.lowerBound...close])
+    }
+}

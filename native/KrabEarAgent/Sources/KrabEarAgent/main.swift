@@ -134,6 +134,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     /// Wake word через IPC-поллинг backend (openWakeWord; spec 2026-07-05).
     var wakeWordPoller: WakeWordPoller?
     private var wakeWordConversationObservers: [NSObjectProtocol] = []
+    private var wakeWordTTSPlaybackObservers: [NSObjectProtocol] = []
 
     /// Phase 2A: Selection translator — Cmd+Shift+T auto-translate selection.
     var selectionTranslator: SelectionTranslator?
@@ -525,6 +526,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             )
         }
         setupWakeWordConversationObservers()
+        setupWakeWordTTSPlaybackObservers()
         wakeWordPoller?.activate()
         // Тумблер включили, пока privacy mode активен: сразу паузим (backend
         // всё равно отвергнет старт — гейт живой; агентская пауза убирает
@@ -559,6 +561,27 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         wakeWordConversationObservers.append(
             nc.addObserver(forName: .krabConversationStopped, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in self?.wakeWordPoller?.resume(.conversation) }
+            }
+        )
+    }
+
+    /// Собственный TTS (озвучка ошибки «Разговора с AI») звучит через те же
+    /// колонки, что слушает микрофон — пауза wake word на РЕАЛЬНОЕ время
+    /// воспроизведения, а не на границы conversation-сессии: ошибка озвучивается
+    /// уже ПОСЛЕ stopConversation()/.krabConversationStopped, когда .conversation-
+    /// пауза уже снята (живой инцидент ложных срабатываний на своё же эхо, T5b).
+    /// Notification'ы шлёт ConversationErrorAnnouncer.playWav().
+    private func setupWakeWordTTSPlaybackObservers() {
+        guard wakeWordTTSPlaybackObservers.isEmpty else { return }
+        let nc = NotificationCenter.default
+        wakeWordTTSPlaybackObservers.append(
+            nc.addObserver(forName: .krabTTSPlaybackStarted, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.wakeWordPoller?.pause(.ttsPlayback) }
+            }
+        )
+        wakeWordTTSPlaybackObservers.append(
+            nc.addObserver(forName: .krabTTSPlaybackFinished, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.wakeWordPoller?.resume(.ttsPlayback) }
             }
         )
     }
