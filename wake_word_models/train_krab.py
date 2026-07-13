@@ -717,6 +717,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "проверяется, при отсутствии train использует только RU-синтетику"
         ),
     )
+    train_g.add_argument(
+        "--init-checkpoint", default=None,
+        help=(
+            "Путь к существующему checkpoint (state_dict, формат stage_train) "
+            "для FINE-TUNE вместо обучения с нуля -- веса грузятся в свежепостроенную "
+            "Model ПЕРЕД auto_train(). Архитектура (model-type/layer-size/input_shape) "
+            "должна совпадать с чекпоинтом, иначе load_state_dict упадёт с явной ошибкой "
+            "(input_shape зависит только от positives -- не трогайте positives между "
+            "прогонами, чтобы это оставалось совместимым). См. T5b hard-negatives волну."
+        ),
+    )
 
     install_g = parser.add_argument_group("install")
     install_g.add_argument(
@@ -1231,9 +1242,22 @@ def stage_features(args: argparse.Namespace, paths: ProjectPaths) -> None:
 
     pos_train = sorted((paths.positives / "train").glob("*.wav"))
     pos_test = sorted((paths.positives / "test").glob("*.wav"))
+    # hard_real/ -- реальные записи владельца (клавиатура, TTS через колонки)
+    # для инцидент-фикса T5b (шторм ложных срабатываний krab_ru на клики
+    # клавиатуры). Не создаётся этим скриптом -- заполняется отдельным сбором
+    # (см. wake_word_models/report_krab_ru.md, секция v2), но glob безопасен
+    # на отсутствующую директорию (Path.glob не бросает на несуществующий путь).
+    hard_real_paths = sorted((paths.negatives / "hard_real").glob("*.wav"))
+    if hard_real_paths:
+        logger.info(
+            "features: подключены hard-negative записи владельца: %d клипов "
+            "(negatives/hard_real/) -- войдут в adversarial_negative класс",
+            len(hard_real_paths),
+        )
     neg_paths = (
         sorted((paths.negatives / "ru_synthetic").glob("*.wav"))
         + sorted((paths.negatives / "adversarial").glob("*.wav"))
+        + hard_real_paths
     )
     if not pos_train or not pos_test:
         raise RuntimeError("Нет позитивных клипов -- запустите --stage positives")
@@ -1337,6 +1361,7 @@ def _read_marker_total_length(features_dir: Path) -> int | None:
 def _write_training_report(
     report_path: Path, *, args: argparse.Namespace, input_shape: Any,
     gate_note: str, history: dict[str, Any], checkpoint_path: Path,
+    fine_tune_source: str | None = None,
 ) -> None:
     lines = [
         f"# Отчёт обучения wake-word модели «{args.phrase}» ({args.model_name})",
@@ -1345,6 +1370,7 @@ def _write_training_report(
         f"- input_shape: {input_shape}",
         f"- steps: {args.steps}, model_type: {args.model_type}, layer_size: {args.layer_size}",
         f"- device: {args.device}",
+        f"- Режим: {'FINE-TUNE от ' + fine_tune_source if fine_tune_source else 'с нуля'}",
         f"- Гейт: max_fp_per_hour<={args.max_fp_per_hour}, "
         f"min_recall>={args.min_recall}, val_set_hrs={args.val_set_hrs}",
         "",
@@ -1518,6 +1544,19 @@ def stage_train(args: argparse.Namespace, paths: ProjectPaths) -> None:
     )
     oww.device = device  # см. _resolve_torch_device -- пакет не автоопределяет MPS
 
+    fine_tune_source = None
+    if args.init_checkpoint:
+        init_path = Path(args.init_checkpoint)
+        if not init_path.exists():
+            raise RuntimeError(f"--init-checkpoint указан, но файл не найден: {init_path}")
+        init_state = torch.load(init_path, map_location="cpu", weights_only=True)
+        oww.model.load_state_dict(init_state)
+        fine_tune_source = str(init_path)
+        logger.info(
+            "train: инициализирован чекпоинтом %s -- это FINE-TUNE, не обучение с нуля "
+            "(auto_train продолжит с этих весов)", init_path,
+        )
+
     logger.info("train: запускаю auto_train (steps=%d) -- это может занять часы", args.steps)
     combined_model = oww.auto_train(
         X_train=x_train, X_val=x_val, false_positive_val_data=x_val_fp,
@@ -1566,12 +1605,14 @@ def stage_train(args: argparse.Namespace, paths: ProjectPaths) -> None:
     _write_training_report(
         report_path, args=args, input_shape=input_shape, gate_note=gate_note,
         history=dict(oww.history), checkpoint_path=checkpoint_path,
+        fine_tune_source=fine_tune_source,
     )
 
     write_marker(paths.artifacts, "train", {
         "checkpoint_path": str(checkpoint_path), "report_path": str(report_path),
         "gate_satisfied": gated_model is not None,
         "model_type": args.model_type, "layer_size": args.layer_size,
+        "fine_tune_source": fine_tune_source,
     })
     logger.info("train: этап завершён -- чекпоинт %s, отчёт %s", checkpoint_path, report_path)
 
