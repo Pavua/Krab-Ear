@@ -368,3 +368,23 @@ S63 bilingual conversation mode, S64 inline correction loop, S65 import queue v2
   а не границ conversation-сессии — ошибка озвучивается уже после stopConversation, когда .conversation-
   пауза снята). 6 source-contract тестов RED→GREEN, полный набор 1175 зелёных, fail-safe направление отказа.
   Урок закреплён в CLAUDE.md. Путь к `krab_ru` в проде: реальные позитивы голоса владельца — отдельная волна.
+  PR #1876 смёржен (`c2a4b585`), задеплоен и живо верифицирован в ЭТОЙ сессии: билд+подпись+dSYM→Sentry,
+  `launchctl kickstart` (PID 47054→57226, UUID `0DA58401...` сверен dwarfdump'ом), parity-коммит `cf97e3d9`.
+  T5b-ветка (`feat/wake-word-hard-negatives`, PR #1875) осталась открытой намеренно — задокументированный
+  отрицательный результат, не мержится.
+- 2026-07-13 (продолжение) — **живой инцидент: wake word не отвечал вообще** (ни `hey_jarvis`, ни ранее
+  откаченный `Краб`), микрофон не загорался в menu bar. Диагностика цепочкой: VG действительно упал
+  (SIGTERM, самовосстановился через launchd `ThrottleInterval`) — отдельная, уже закрытая причина
+  «шлюз недоступен»; но сам wake-word молчал даже после ручного `wake_word_stop`+`wake_word_start`
+  (рестарт только нити). Sentry вскрыл культрита: `KRAB-EAR-BACKEND-1J` `PortAudioError [PaErrorCode
+  -9986]` в `openwakeword_adapter._listen_loop`, 4747 исторических — новый класс, независимый от
+  `AudioSelfHealer` (тот покрывает только пайплайн диктовки, НЕ независимый поток wake-word). Лечит
+  только полный `launchctl kickstart -k ai.krab.ear.backend` — после него Swift `WakeWordPoller`
+  сам самовосстановил `wake_word_start`. Урок закреплён в CLAUDE.md (§ Wake-word `_listen_loop`).
+  **Открытый долг**: постоянный код-фикс не сделан — нужен heartbeat/watchdog на независимый поток
+  wake-word, симметричный `AudioSelfHealer`; кандидат для архитектурной волны с Fable (не мех.
+  правка — нужно решить: расширять `AudioSelfHealer` или отдельный watchdog с той же семантикой).
+  Попутно (read-only, без единого изменения): сверил чужой параллельной сессии на Krab-openclaw —
+  её самоотчёт о «3 коммита впереди origin + чужой WIP 44 файла нетронут» подтверждён живой проверкой
+  git-статуса общего чекаута; решение «безопасно ли застешить» оставлено владельцу (не моя территория).
+  Sentry/рутины/логи Krab Ear — чисто, ничего нового не всплыло от рестартов.
