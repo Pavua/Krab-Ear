@@ -56,8 +56,9 @@ content where data exists), tolerating privacy gates and legitimate emptiness.
     export_history              — full Markdown export
     export_history_srt          — SRT for one item
   DIAGNOSTICS
-    get_diagnostics             — system/stt/llm/history/settings_cache
+    get_diagnostics             — system/stt/llm/history/settings_cache/wake_word_watchdog
     get_metrics_dashboard       — real-time metrics snapshot
+    wake_word_status            — openWakeWord adapter status + heartbeat fields
   MISC
     analyze_speech_pace         — wpm/cpm/pace_category from text+duration
     get_recording_stats         — cumulative recording stats
@@ -734,9 +735,33 @@ def check_get_diagnostics():
     ok &= need("history" in res, "get_diagnostics: history key present")
     ok &= need("settings_cache" in res, "get_diagnostics: settings_cache key present")
     ok &= need(isinstance(res.get("system"), dict), "get_diagnostics: system is dict")
+    # wake-word-watchdog spec (2026-07-15): heartbeat watchdog snapshot
+    ok &= need("wake_word_watchdog" in res, "get_diagnostics: wake_word_watchdog key present")
+    watchdog = res.get("wake_word_watchdog", {})
+    ok &= need(isinstance(watchdog, dict), "get_diagnostics: wake_word_watchdog is dict")
+    ok &= need("enabled" in watchdog, "get_diagnostics: wake_word_watchdog.enabled present")
+    ok &= need(isinstance(watchdog.get("enabled"), bool),
+               "get_diagnostics: wake_word_watchdog.enabled is bool")
+    ok &= need("wedged" in watchdog, "get_diagnostics: wake_word_watchdog.wedged present")
     return ok
 
 run_check("get_diagnostics", check_get_diagnostics)
+
+
+def check_wake_word_status():
+    r = call("wake_word_status", {})
+    res = r.get("result", {})
+    ok = r.get("ok") is True
+    # last_chunk_ts/listen_started_ts may legitimately be None — the wake-word
+    # engine is never started on a throwaway smoke instance. Assert key
+    # presence, not truthiness.
+    ok &= need("wedged" in res, "wake_word_status: wedged key present")
+    ok &= need(isinstance(res.get("wedged"), bool), "wake_word_status: wedged is bool")
+    ok &= need("last_chunk_ts" in res, "wake_word_status: last_chunk_ts key present")
+    ok &= need("listen_started_ts" in res, "wake_word_status: listen_started_ts key present")
+    return ok
+
+run_check("wake_word_status", check_wake_word_status)
 
 
 def check_get_metrics_dashboard():
