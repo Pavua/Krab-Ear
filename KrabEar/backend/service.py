@@ -101,6 +101,8 @@ from backend.text_scoring_service import TextScoringService
 from backend.call_session_service import CallSessionService
 from backend.recording_core_service import RecordingCoreService
 from backend.audio_selfheal import AudioSelfHealer
+from backend.audio_reinit import AudioReinitCoordinator
+from backend.wake_word_watchdog import WakeWordWatchdog
 from backend.text_processing_service import TextProcessingService
 from backend.call_session_store import CallSessionStore
 from backend.live_subs_service import LiveSubsService
@@ -1027,19 +1029,36 @@ class BackendService:
             try:
                 import sounddevice as _sd  # type: ignore
             except Exception:
-                logger.warning("AudioSelfHealer: sounddevice недоступен, reinit пропущен")
+                logger.warning("AudioReinit: sounddevice недоступен, reinit пропущен")
                 return
             _sd._terminate()
             _sd._initialize()
 
-        self._audio_selfheal = AudioSelfHealer(
+        # 2026-07-15 (спека wake-word-watchdog): единый single-flight владелец
+        # танца reinit — им пользуются пассивный AudioSelfHealer (пустые
+        # диктовки) и активный WakeWordWatchdog (stale heartbeat).
+        self._audio_reinit_coordinator = AudioReinitCoordinator(
             reinit_audio_backend=_reinit_audio_backend,
             is_recording=lambda: bool(getattr(self.recorder, "is_recording", False)),
             wake_word_adapter=self._oww_adapter,
+        )
+        self._audio_selfheal = AudioSelfHealer(
+            reinit_coordinator=self._audio_reinit_coordinator,
             error_bus=self._error_bus,
             settings_get=self._get_runtime_setting,
         )
         self._recording_core_svc._audio_selfheal = self._audio_selfheal
+        # Активный сторож wake-word потока (живой инцидент 2026-07-13):
+        # heartbeat staleness → мягкий reinit → wedged:true (эскалация на
+        # Swift-agent, который выполняет kickstart -k). Останавливается в
+        # close() — правило #1782 про daemon-треды в chunked CI.
+        self._wake_word_watchdog = WakeWordWatchdog(
+            adapter=self._oww_adapter,
+            reinit_coordinator=self._audio_reinit_coordinator,
+            error_bus=self._error_bus,
+            settings_get=self._get_runtime_setting,
+        )
+        self._wake_word_watchdog.start()
         # Wave-22: wire RecordingCoreService._job_tracker into HistoryService so
         # handle_purge_all_data can call clear() — terminal jobs hold transcript
         # text in items[].text (full PII) and survive privacy-purge without this wire.
@@ -1097,6 +1116,7 @@ class BackendService:
             app_version=APP_VERSION,
             recorder=self.recorder,
             last_stt_engine_ref=self._last_stt_engine_ref,
+            wake_word_watchdog=self._wake_word_watchdog,
         )
 
         logger.info("Krab Ear backend version %s starting up", APP_VERSION)
@@ -1479,6 +1499,15 @@ class BackendService:
             self._meeting_svc.close()
         except Exception:
             logger.exception("MeetingSessionService.close() raised during close()")
+
+        # Stop WakeWordWatchdog daemon thread — same CI daemon-thread teardown
+        # rule (feedback_backendservice_teardown_ci.md).
+        watchdog = getattr(self, "_wake_word_watchdog", None)
+        if watchdog is not None:
+            try:
+                watchdog.stop()
+            except Exception:
+                logger.exception("WakeWordWatchdog.stop() raised during close()")
 
     # ------------------------------------------------------------------ #
     # Backwards-compatible proxy properties for Wave 172 migration         #

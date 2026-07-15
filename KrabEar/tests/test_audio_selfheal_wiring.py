@@ -31,6 +31,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.recording_core_service import RecordingCoreService  # noqa: E402
+from backend.service import BackendService  # noqa: E402
 from backend.state_store import StateStore  # noqa: E402
 
 
@@ -230,6 +231,86 @@ class AudioSelfHealWiringTests(unittest.TestCase):
             svc.handle_start_recording({})
             svc.handle_stop_recording({"quality_profile": "balanced"})
         self.assertEqual(healer.empty_calls, 3)
+
+
+class _FakeDiagnosticsEngine:
+    """Минимальный stub AudioEngine — HealthCheckService.handle_get_diagnostics
+    читает transcriber.engine.* напрямую (без try/except вокруг самого
+    dict-литерала "stt"), в отличие от RecordingCoreService, которому
+    достаточно голого _FakeTranscriber.transcribe()."""
+
+    quality_profile = "balanced"
+    current_model = "fake-model"
+
+    def _resolve_diarization_device(self) -> str:
+        return "cpu"
+
+
+class _FakeTranscriberWithEngine(_FakeTranscriber):
+    """_FakeTranscriber + .engine — нужен только для полноценного BackendService
+    (см. _FakeDiagnosticsEngine)."""
+
+    def __init__(self) -> None:
+        self.engine = _FakeDiagnosticsEngine()
+
+
+class BackendServiceWakeWordWatchdogWiringTests(unittest.TestCase):
+    """Проверяет проводку AudioReinitCoordinator + WakeWordWatchdog внутри
+    полного BackendService (2026-07-15, спека wake-word-watchdog-design.md
+    §4.2/§4.3).
+
+    Классы выше конструируют голый RecordingCoreService — координатор и
+    watchdog живут на уровень выше, в BackendService.__init__, поэтому эти
+    тесты конструируют настоящий BackendService (тот же паттерн, что
+    BackendServiceTestCase в test_backend_service.py: FakeRecorder/
+    FakeTranscriber/FakeTranslator + обязательный service.close() в
+    tearDown — правило #1782 про daemon-треды в chunked CI).
+    """
+
+    def setUp(self) -> None:
+        # ignore_cleanup_errors=True: BackendService плодит фоновые треды,
+        # которые могут писать в data dir уже после конца теста -> OSError
+        # при очистке в CI (см. BackendServiceTestCase).
+        self._tmp_ctx = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self._tmp_ctx.cleanup)
+        store = StateStore(data_dir=Path(self._tmp_ctx.name) / "data")
+        self.service = BackendService(
+            store=store,
+            recorder=_FakeRecorder(),
+            transcriber=_FakeTranscriberWithEngine(),
+            translator=_FakeTranslator(),
+        )
+
+    def tearDown(self) -> None:
+        # Правило #1782: BackendService(...) без close() в tearDown роняет
+        # весь файл чанка на daemon-тредах при завершении интерпретатора.
+        self.service.close()
+
+    def test_reinit_coordinator_wired(self):
+        coord = self.service._audio_reinit_coordinator
+        self.assertIsNotNone(coord)
+        self.assertIs(coord._wake_word_adapter, self.service._oww_adapter)
+        self.assertIs(self.service._audio_selfheal._reinit_coordinator, coord)
+
+    def test_watchdog_wired_and_running(self):
+        wd = self.service._wake_word_watchdog
+        self.assertIsNotNone(wd)
+        self.assertIs(wd._adapter, self.service._oww_adapter)
+        self.assertIs(wd._coordinator, self.service._audio_reinit_coordinator)
+        self.assertTrue(wd._thread is not None and wd._thread.is_alive())
+
+    def test_close_stops_watchdog_thread(self):
+        wd = self.service._wake_word_watchdog
+        self.service.close()
+        self.assertFalse(wd._thread is not None and wd._thread.is_alive())
+
+    def test_diagnostics_contains_watchdog_section(self):
+        diag = self.service.handle_request(
+            {"id": "t", "method": "get_diagnostics", "params": {}},
+        )
+        section = diag["result"]["wake_word_watchdog"]
+        self.assertIn("enabled", section)
+        self.assertIn("wedged", section)
 
 
 if __name__ == "__main__":
