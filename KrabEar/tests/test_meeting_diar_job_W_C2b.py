@@ -245,6 +245,23 @@ class DiarJobTests(_SfPatchMixin):
             finally:
                 svc.close()
 
+    def test_stale_session_tick_drops_mutation_and_event(self):
+        # Fable-гейт Finding 2: воркер, переживший _stop_worker (join-таймаут на
+        # лок-контеншене), не должен эмиттить meeting.speakers_updated ПОСЛЕ
+        # meeting.finished и мутировать снятую сессию.
+        with tempfile.TemporaryDirectory() as tmp:
+            svc, bus, core = self._started(tmp, diarize=lambda p: _diar_result())
+            try:
+                stale = svc._session
+                svc.handle_meeting_stop({})
+                before = [e for e in bus.events if e[0] == "meeting.speakers_updated"]
+                svc._job_diar_window(stale)  # протухший in-flight тик
+                after = [e for e in bus.events if e[0] == "meeting.speakers_updated"]
+                self.assertEqual(before, after)
+                self.assertEqual(stale.speakers, [])
+            finally:
+                svc.close()
+
     def test_cross_window_stitching_accumulates(self):
         with tempfile.TemporaryDirectory() as tmp:
             results = [_diar_result("SPEAKER_00", 0), _diar_result("SPEAKER_03", 0)]

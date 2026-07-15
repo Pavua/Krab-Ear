@@ -50,8 +50,12 @@ class LiveSpeakerTracker:
     снапшот для IPC копируется в состояние сессии под её локом.
     """
 
-    def __init__(self, threshold: float) -> None:
+    def __init__(self, threshold: float, max_speakers: int = 16) -> None:
         self._threshold = float(threshold)
+        # Верхняя граница реестра: шумная многочасовая встреча (эхо, наложения,
+        # короткие реплики) иначе плодит фантомных «Спикеров N» без предела —
+        # растёт O(n)-матчинг каждого тика и payload state/событий.
+        self._max_speakers = int(max_speakers)
         # список спикеров: label, centroid (unit-norm np.ndarray), n_windows,
         # talk_sec, last_active_ts
         self._speakers: list[dict[str, Any]] = []
@@ -92,6 +96,8 @@ class LiveSpeakerTracker:
                 best["talk_sec"] += talk
                 best["last_active_ts"] = now_ts
             else:
+                if len(self._speakers) >= self._max_speakers:
+                    continue  # реестр полон — не-сматчившееся окно не создаёт нового
                 self._speakers.append({
                     "label": f"Спикер {len(self._speakers) + 1}",
                     "centroid": emb,
@@ -439,6 +445,8 @@ class MeetingSessionService:
         text = payload.get("text") if isinstance(payload, dict) else str(payload or "")
         text = (text or "").strip()
         with self._lock:
+            if self._session is not s:  # протухший тик после stop (см. _job_diar_window)
+                return
             s.cursor_sec = upto
             if text:
                 s.chunks.append(text + " ")
@@ -463,6 +471,8 @@ class MeetingSessionService:
         finally:
             self._recording_core.resume_realtime_partials()
         with self._lock:
+            if self._session is not s:  # протухший тик после stop (см. _job_diar_window)
+                return
             s.degraded_llm = not result.ok
             if result.ok:
                 s.items = [ai.to_dict() if hasattr(ai, "to_dict") else dict(ai)
@@ -526,6 +536,12 @@ class MeetingSessionService:
                 now_ts=time.time())
             snap = s.tracker.snapshot()
             with self._lock:
+                # Fable-гейт Finding 2: воркер мог пережить _stop_worker
+                # (join-таймаут на лок-контеншене диаризации) — протухший тик
+                # не должен мутировать снятую сессию и эмиттить
+                # speakers_updated ПОСЛЕ meeting.finished.
+                if self._session is not s:
+                    return
                 s.speakers = snap
                 s.degraded_diarization = False
                 s.last_updated_ts = time.time()

@@ -83,6 +83,16 @@ class LiveSpeakerTrackerTests(unittest.TestCase):
                        embeddings={"A": [0.0] * 8}, now_ts=1.0)
         self.assertEqual(self.tr.snapshot(), [])
 
+    def test_registry_capped_at_max_speakers(self):
+        # Fable-гейт Finding 1: шумная многочасовая встреча не должна плодить
+        # фантомных «Спикеров N» без предела — реестр ограничен сверху.
+        for i in range(20):
+            self.tr.ingest(
+                segments=[{"start": 0.0, "end": 1.0, "speaker": "S"}],
+                embeddings={"S": _emb(i, dim=32)},  # 20 попарно ортогональных голосов
+                now_ts=float(i))
+        self.assertEqual(len(self.tr.snapshot()), 16)
+
     def test_snapshot_returns_copies(self):
         self.tr.ingest(segments=[{"start": 0.0, "end": 1.0, "speaker": "A"}],
                        embeddings={"A": _emb(0)}, now_ts=1.0)
