@@ -103,6 +103,7 @@ class AudioReinitCoordinator:
         was_running = False
         deferred_mid_dance = False
         reinit_failed = False
+        epoch_snapshot: int | None = None
         adapter = self._wake_word_adapter
 
         # Fix A (Critical, ревью Task 4): окно обслуживания. Пока открыто,
@@ -116,6 +117,13 @@ class AudioReinitCoordinator:
             maintenance_guard()
         try:
             if adapter is not None:
+                # Chip Finding 5: базовое значение stop-epoch ДО танца.
+                # Ожидание = base + 1 (наш собственный stop ниже); любой
+                # ВНЕШНИЙ stop (toggle-off/pause) в ЛЮБОЙ фазе танца —
+                # включая конкурентный с нашим stop-join — сдвигает счётчик
+                # мимо ожидания и отменяет restore.
+                get_epoch = getattr(adapter, "stop_epoch", None)
+                epoch_before = get_epoch() if callable(get_epoch) else None
                 try:
                     was_running = bool(adapter.is_running())
                 except Exception:
@@ -145,6 +153,9 @@ class AudioReinitCoordinator:
                             "Pa_Terminate небезопасен, THREAD_HUNG"
                         )
                         return ReinitOutcome.THREAD_HUNG
+                    if epoch_before is not None:
+                        # Наш stop() выше двинул счётчик ровно на 1.
+                        epoch_snapshot = epoch_before + 1
 
             # TOCTOU-окно: между первым чеком и этим местом лежал adapter.stop()
             # с join до 3с — диктовка могла стартовать. Pa_Terminate под живым
@@ -183,10 +194,14 @@ class AudioReinitCoordinator:
                 end_guard()
 
         if deferred_mid_dance:
-            self._restore_listener(adapter, was_running, saved_model, saved_threshold)
+            self._restore_listener(
+                adapter, was_running, saved_model, saved_threshold, epoch_snapshot,
+            )
             return ReinitOutcome.DEFERRED_RECORDING
 
-        if not self._restore_listener(adapter, was_running, saved_model, saved_threshold):
+        if not self._restore_listener(
+            adapter, was_running, saved_model, saved_threshold, epoch_snapshot,
+        ):
             reinit_failed = True
 
         return ReinitOutcome.FAILED if reinit_failed else ReinitOutcome.OK
@@ -197,6 +212,7 @@ class AudioReinitCoordinator:
         was_running: bool,
         saved_model: str | None,
         saved_threshold: float | None,
+        epoch_snapshot: int | None = None,
     ) -> bool:
         """Восстановить wake-word слушатель после танца.
 
@@ -204,6 +220,24 @@ class AudioReinitCoordinator:
         True — восстановлен либо восстанавливать было нечего.
         """
         if adapter is None or not was_running or not saved_model:
+            return True
+        # Chip Finding 5 (Fable-гейт волны watchdog): внешний stop во время
+        # танца (владелец выключил тумблер / поллер послал pause) не должен
+        # «включаться обратно» restore'ом — иначе микрофон wake word слушал
+        # бы при выключенном тумблере до следующего рестарта backend.
+        # Остаточное µс-окно между этим чеком и start() принято (симметрично
+        # is_recording re-check танца).
+        get_epoch = getattr(adapter, "stop_epoch", None)
+        if (
+            epoch_snapshot is not None
+            and callable(get_epoch)
+            and get_epoch() != epoch_snapshot
+        ):
+            logger.info(
+                "AudioReinitCoordinator: слушатель остановлен снаружи во время "
+                "танца (stop-epoch %s -> %s) — restore пропущен",
+                epoch_snapshot, get_epoch(),
+            )
             return True
         try:
             adapter.start(

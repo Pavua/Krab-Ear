@@ -217,6 +217,15 @@ class StopReturnsBoolTests(unittest.TestCase):
         self.assertFalse(self.adapter.stop())
         self.assertEqual(fake.join_timeout, 3.0)
 
+    def test_stop_bumps_epoch_even_when_not_running(self):
+        # Chip Finding 5: во время танца слушатель остановлен координатором,
+        # и toggle-off приходит именно no-op stop'ом — он ОБЯЗАН двигать epoch.
+        e0 = self.adapter.stop_epoch()
+        self.assertTrue(self.adapter.stop())
+        self.assertEqual(self.adapter.stop_epoch(), e0 + 1)
+        self.assertTrue(self.adapter.stop())
+        self.assertEqual(self.adapter.stop_epoch(), e0 + 2)
+
     def test_stop_on_self_died_thread_clears_session_state(self):
         # Тред умер сам (exception-путь не чистит model) → штатный stop()
         # обязан снять сигнатуру «мёртвой сессии», иначе watchdog ложно
