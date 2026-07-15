@@ -195,6 +195,20 @@ class StopReturnsBoolTests(unittest.TestCase):
         self.assertFalse(self.adapter.stop())
         self.assertEqual(fake.join_timeout, 3.0)
 
+    def test_stop_on_self_died_thread_clears_session_state(self):
+        # Тред умер сам (exception-путь не чистит model) → штатный stop()
+        # обязан снять сигнатуру «мёртвой сессии», иначе watchdog ложно
+        # эскалирует dead_session на выключенном тумблере (re-review Task 4).
+        dead = _FakeThreadCleanExit()
+        dead._alive = False              # уже мёртв ДО stop()
+        self.adapter._thread = dead
+        self.adapter._active_model = "hey_jarvis"
+        self.adapter._active_threshold = 0.5
+        self.assertTrue(self.adapter.stop())
+        self.assertIsNone(self.adapter.active_model())
+        self.assertIsNone(self.adapter.active_threshold())
+        self.assertFalse(self.adapter.is_running())
+
 
 class StatusFieldsTests(unittest.TestCase):
     def setUp(self):

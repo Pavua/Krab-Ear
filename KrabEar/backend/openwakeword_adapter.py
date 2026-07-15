@@ -252,14 +252,22 @@ class OpenWakeWordAdapter:
             # watchdog по свежему чанку или start() новой сессии.
             self._last_chunk_ts = None
             self._listen_started_ts = None
-            if self._thread is None or not self._thread.is_alive():
-                return True
-            self._stop_event.set()
             thread = self._thread
+            # Сессионные поля чистим ВСЕГДА, включая мёртвый/отсутствующий
+            # тред: тред мог умереть сам (exception-путь _listen_loop не
+            # чистит _active_model), и старый early-return без очистки
+            # оставлял сигнатуру «мёртвой сессии» (running=False, model≠None)
+            # на легитимно выключенном слушателе → ложная dead_session-
+            # эскалация watchdog'а (re-review Task 4). Целевой случай
+            # dead_session (упавший restore) не затронут — там stop() после
+            # провала никто не зовёт.
             self._thread = None
             self._oww = None
             self._active_model = None
             self._active_threshold = None
+            if thread is None or not thread.is_alive():
+                return True
+            self._stop_event.set()
 
         thread.join(timeout=timeout)
         exited = not thread.is_alive()
