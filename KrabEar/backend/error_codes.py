@@ -796,9 +796,11 @@ ERROR_REGISTRY: dict[str, _Entry] = {
     # (тред застрял внутри PortAudio) или не помог — Swift-агент по этому коду
     # и по wedged:true в wake_word_status выполняет принудительный рестарт
     # backend (launchctl kickstart -k, rate-limit 30 мин на стороне агента).
+    # user_msg НЕ обещает немедленный рестарт: агент может отложить его
+    # (rate-limit 30 мин / cap подряд-эскалаций).
     "audio.wakeword_wedged": {
         "user_msg_ru": (
-            "Wake word завис — перезапускаю Krab Ear…"
+            "Wake word завис — требуется перезапуск Krab Ear…"
         ),
         "actionable": False,
         "action_id": None,

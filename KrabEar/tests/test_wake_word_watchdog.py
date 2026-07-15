@@ -333,6 +333,80 @@ class HealStormTests(unittest.TestCase):
             self.assertIsNone(wd.check_once())
         self.assertEqual(coord.calls, 5)          # ретраи не задушены штормом
 
+    def test_thread_hung_dances_count_toward_storm(self):
+        # Fable-гейт Finding 1b: персистентный клин + respawn-циклы —
+        # каждый THREAD_HUNG-танец должен тратить шторм-бюджет.
+        bus = _FakeErrorBus()
+
+        class _HungCoordinator(_FakeCoordinator):
+            def __init__(self, adapter):
+                super().__init__()
+                self._adapter = adapter
+
+            def reinit_with_wake_word_restore(self):
+                self.calls += 1
+                # Реальная пост-THREAD_HUNG семантика адаптера (Fix E):
+                # stop() внутри танца чистит model даже при таймауте join.
+                self._adapter.running = False
+                self._adapter.model = None
+                return ReinitOutcome.THREAD_HUNG
+
+        adapter = _FakeAdapter()
+        coord = _HungCoordinator(adapter)
+        wd, _, _, clock = _make(adapter=adapter, coordinator=coord, bus=bus)
+
+        def _respawn():
+            # Поллер/resume переиздал wake_word_start: start() чистит wedged
+            # и поднимает свежую сессию (стейл — клин персистентный).
+            adapter.running = True
+            adapter.model = "hey_jarvis"
+            adapter.wedged = False
+            adapter.hb = {"last_chunk_ts": None,
+                          "listen_started_ts": clock.t - 60.0}
+
+        for i in range(3):
+            _respawn()
+            self.assertEqual(wd.check_once(), "escalated", f"цикл {i}")
+            self.assertTrue(adapter.wedged)
+            clock.t += 45.0
+            # Тик во время мёртвого окна между respawn'ами (в реальности
+            # 5с-тик всегда попадает в паузу диктовки): watchdog наблюдает
+            # чисто-остановленный адаптер → эпизод закрыт. Без этого
+            # наблюдения _escalated_this_episode глушил бы циклы 1-2 и
+            # respawn-цикл вообще не воспроизводился бы.
+            self.assertIsNone(wd.check_once())
+
+        # 4-й цикл внутри 600с-окна: шторм-гейт срабатывает ДО танца.
+        _respawn()
+        self.assertEqual(wd.check_once(), "escalated")
+        self.assertEqual(coord.calls, 3)   # 4-го танца (зомби-треда) НЕ было
+
+    def test_no_redance_after_thread_hung_without_respawn(self):
+        # Пин: без внешнего respawn'а THREAD_HUNG не зацикливает танцы —
+        # сессия мертва (model=None после Fix E), watchdog молчит.
+        class _HungCoordinator(_FakeCoordinator):
+            def __init__(self, adapter):
+                super().__init__()
+                self._adapter = adapter
+
+            def reinit_with_wake_word_restore(self):
+                self.calls += 1
+                self._adapter.running = False
+                self._adapter.model = None
+                return ReinitOutcome.THREAD_HUNG
+
+        adapter = _FakeAdapter()
+        coord = _HungCoordinator(adapter)
+        bus = _FakeErrorBus()
+        wd, _, _, clock = _make(adapter=adapter, coordinator=coord, bus=bus)
+        adapter.hb = {"last_chunk_ts": None, "listen_started_ts": clock.t - 60.0}
+        self.assertEqual(wd.check_once(), "escalated")
+        for _ in range(10):
+            clock.t += 5.0
+            self.assertIsNone(wd.check_once())
+        self.assertEqual(coord.calls, 1)
+        self.assertEqual(len(bus.pushed), 1)
+
 
 class DeadSessionAnomalyTests(unittest.TestCase):
     def _dead(self, adapter):

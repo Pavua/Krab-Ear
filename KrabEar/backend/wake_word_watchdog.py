@@ -33,7 +33,8 @@ _STALE_SEC_DEFAULT = 30.0
 _CHECK_INTERVAL_SEC_DEFAULT = 5.0
 # Анти-голодание (ревью Task 4): частые легитимные паузы (диктовки)
 # сбрасывают эпизод раньше второй stale-проверки — без окна поверх эпизодов
-# сломанный навсегда поток лечился бы вечно, не эскалируя.
+# сломанный навсегда поток лечился бы вечно, не эскалируя. THREAD_HUNG-танцы
+# тоже учитываются в окне (каждый стоит stop-join и зомби-тред).
 _HEAL_STORM_WINDOW_SEC = 600.0
 _HEAL_STORM_MAX = 3
 
@@ -218,6 +219,12 @@ class WakeWordWatchdog:
             if outcome in (ReinitOutcome.DEFERRED_RECORDING, ReinitOutcome.BUSY):
                 return None  # попытка отложена, не потрачена
             if outcome == ReinitOutcome.THREAD_HUNG:
+                # THREAD_HUNG-танец тоже стоил 3с stop-join и оставил
+                # зомби-тред — анти-шторм обязан видеть и такие танцы
+                # (Fable-гейт волны, Finding 1b), иначе цикл
+                # respawn→hang→dance не капится никогда.
+                with self._lock:
+                    self._heal_history.append(now)
                 self._escalate(staleness, str(getattr(outcome, "value", outcome)))
                 return "escalated"
             with self._lock:
@@ -288,7 +295,7 @@ class WakeWordWatchdog:
                 component="audio",
                 code="audio.wakeword_wedged",
                 message_user=entry.get(
-                    "user_msg_ru", "Wake word завис — перезапускаю Krab Ear…",
+                    "user_msg_ru", "Wake word завис — требуется перезапуск Krab Ear…",
                 ),
                 message_debug=(
                     f"wake-word heartbeat stale {staleness:.1f}s, reason={reason}"
