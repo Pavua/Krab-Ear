@@ -91,3 +91,6 @@ worktrees/
 
 # Visual-companion брейнсторм-сессии (runtime, не коммитить)
 .superpowers/
+
+# Worktrees для subagent-driven исполнения (superpowers:using-git-worktrees)
+.worktrees/
