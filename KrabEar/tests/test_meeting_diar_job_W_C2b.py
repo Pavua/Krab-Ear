@@ -228,7 +228,18 @@ class DiarJobTests(_SfPatchMixin):
         with tempfile.TemporaryDirectory() as tmp:
             svc, bus, core = self._started(tmp, diarize=None)
             try:
-                svc._job_diar_window(svc._session)
+                # Первый тик — громкий WARN о недоступном коллаборатора
+                # (анти-декоративная-проводка): тихо сломавшийся getattr в
+                # service.py не должен деградировать спикеров без следа в логах.
+                with self.assertLogs("krab_ear.backend", level="WARNING") as cm:
+                    svc._job_diar_window(svc._session)
+                self.assertIn("DIAR_WINDOW недоступен", cm.output[0])
+                self.assertTrue(
+                    svc.handle_get_meeting_live_state({})["degraded"]["diarization"])
+                # Повторный тик той же сессии — БЕЗ повторного WARN
+                # (лог только на переходе флага, не каждые 90с).
+                with self.assertNoLogs("krab_ear.backend", level="WARNING"):
+                    svc._job_diar_window(svc._session)
                 self.assertTrue(
                     svc.handle_get_meeting_live_state({})["degraded"]["diarization"])
             finally:

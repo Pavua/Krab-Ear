@@ -484,6 +484,18 @@ class MeetingSessionService:
             return
         if self._diarize_window is None or _sf is None or self._data_dir is None:
             with self._lock:
+                # Громкий WARN ровно один раз на сессию (тик каждые ~90с) —
+                # иначе тихо сломавшаяся проводка (getattr в service.py вернул
+                # None после переименования) деградирует спикеров навсегда без
+                # единой строчки в логах (класс «декоративная проводка»).
+                if not s.degraded_diarization:
+                    logger.warning(
+                        "meeting: DIAR_WINDOW недоступен (diarize_window=%s, "
+                        "sf=%s, data_dir=%s) — спикеры деградированы",
+                        self._diarize_window is not None,
+                        _sf is not None,
+                        self._data_dir is not None,
+                    )
                 s.degraded_diarization = True
             return
         try:
