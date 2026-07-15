@@ -15,11 +15,18 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
+
+try:  # ubuntu-CI без libsndfile: деградация, не падение импорта модуля
+    import soundfile as _sf  # type: ignore
+except Exception:  # pragma: no cover
+    _sf = None
 
 logger = logging.getLogger("krab_ear.backend")
 
@@ -28,6 +35,7 @@ _ITEMS_MIN_GROWTH = 200    # симв.: минимальный прирост т
 _LEASE_RENEW_SEC = 15.0    # период продления brain-lease
 _LEASE_TTL_SEC = 45.0      # TTL lease (перекрывает период продления с запасом)
 _WORKER_WAIT_SEC = 0.5     # шаг ожидания воркера
+_DIAR_MIN_AUDIO_SEC = 5.0  # окно короче — эмбеддинги шумные, тик пропускаем
 
 
 class LiveSpeakerTracker:
@@ -123,6 +131,9 @@ class _MeetingSession:
     degraded_diarization: bool = False
     privacy_stopped: bool = False
     last_updated_ts: float = field(default_factory=time.time)
+    speakers_enabled: bool = False
+    tracker: Any = None                       # LiveSpeakerTracker | None
+    speakers: list = field(default_factory=list)  # снапшот для IPC/событий
 
     def tail(self) -> str:
         return "".join(self.chunks)[-_TAIL_CHARS:]
@@ -139,6 +150,8 @@ class MeetingSessionService:
         action_items_extractor: Any,
         settings_get: Callable[[str, Any], Any],
         event_bus: Any,
+        diarize_window: Callable[[str], dict[str, Any]] | None = None,
+        data_dir: Any = None,
     ) -> None:
         self._recorder = recorder
         self._transcriber = transcriber
@@ -146,6 +159,8 @@ class MeetingSessionService:
         self._extractor = action_items_extractor
         self._settings_get = settings_get
         self._bus = event_bus
+        self._diarize_window = diarize_window
+        self._data_dir = Path(data_dir) if data_dir is not None else None
 
         # RLock (не Lock): _items_interval() зовёт self._lock изнутри блока,
         # уже удерживаемого handle_meeting_start (dict-литерал _next_due
@@ -193,12 +208,18 @@ class MeetingSessionService:
             start_resp = self._recording_core.handle_start_recording({})
             promoted = start_resp.get("status") == "already_recording"
 
+            speakers_enabled = bool(self._settings_get(
+                "meeting_live_speakers_enabled", True))
             session = _MeetingSession(
                 promoted=promoted,
                 language=str(params.get("language", self._settings_get(
                     "meeting_items_language", "ru")) or "ru"),
                 cursor_sec=float(self._recorder.get_duration_sec()) if promoted else 0.0,
+                speakers_enabled=speakers_enabled,
             )
+            if speakers_enabled:
+                session.tracker = LiveSpeakerTracker(threshold=float(
+                    self._settings_get("meeting_speaker_match_threshold", 0.72)))
             now = time.monotonic()
             with self._lock:
                 self._session = session
@@ -206,6 +227,8 @@ class MeetingSessionService:
                     MeetingJob.CHUNK_STT: now + self._chunk_interval(),
                     MeetingJob.ITEMS_LLM: now + self._items_interval(),
                 }
+                if speakers_enabled:
+                    self._next_due[MeetingJob.DIAR_WINDOW] = now + self._diar_interval()
             # C2a Task 10 (Фикс 4): внутри try — исключение из _start_worker()
             # (защитный пояс Фикс 1в: второй живой воркер) обязано откатить
             # сессию и освободить lease через except-ветку ниже, а не утечь
@@ -280,7 +303,7 @@ class MeetingSessionService:
                 "items": list(s.items),
                 "decisions": list(s.decisions),
                 "questions": list(s.questions),
-                "speakers": [],  # C2b
+                "speakers": [dict(x) for x in s.speakers],
                 "degraded": {"llm": s.degraded_llm or self._extractor is None,
                              "diarization": s.degraded_diarization},
                 "last_updated_ts": s.last_updated_ts,
@@ -394,8 +417,8 @@ class MeetingSessionService:
                     self._job_chunk_stt(s)
                 elif job is MeetingJob.ITEMS_LLM:
                     self._job_items_llm(s)
-                else:  # DIAR_WINDOW: исполнитель придёт в C2b
-                    pass
+                else:
+                    self._job_diar_window(s)
             finally:
                 # skip-tick: перепланируем от завершения, без лавины
                 self._next_due[job] = time.monotonic() + self._job_interval(job)
@@ -453,6 +476,53 @@ class MeetingSessionService:
                 "items": list(s.items), "decisions": list(s.decisions),
                 "questions": list(s.questions)})
 
+    def _job_diar_window(self, s: _MeetingSession) -> None:
+        """DIAR_WINDOW-тик (C2b, спека §2.5a): окно → WAV → диаризация+эмбеддинги
+        одним прогоном → сшивка в сессионный реестр. Исключения гасятся в
+        degraded-флаг — воркер и встреча живут дальше."""
+        if s.tracker is None:
+            return
+        if self._diarize_window is None or _sf is None or self._data_dir is None:
+            with self._lock:
+                s.degraded_diarization = True
+            return
+        try:
+            upto = float(self._recorder.get_duration_sec())
+            window = float(self._settings_get("meeting_diar_window_sec", 90.0))
+            start = max(0.0, upto - window)
+            if upto - start < _DIAR_MIN_AUDIO_SEC:
+                return
+            audio = self._recorder.snapshot_range(start, upto)
+            if getattr(audio, "size", 0) == 0:
+                return
+            tmp_dir = self._data_dir / "tmp_meeting"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            wav_path = tmp_dir / f"diar_{uuid.uuid4().hex}.wav"
+            try:
+                _sf.write(str(wav_path), audio,
+                          int(getattr(self._recorder, "sample_rate", 16000)))
+                self._recording_core.pause_realtime_partials()
+                try:
+                    result = self._diarize_window(str(wav_path))
+                finally:
+                    self._recording_core.resume_realtime_partials()
+            finally:
+                wav_path.unlink(missing_ok=True)
+            s.tracker.ingest(
+                segments=result.get("segments", []),
+                embeddings=result.get("speaker_embeddings", {}),
+                now_ts=time.time())
+            snap = s.tracker.snapshot()
+            with self._lock:
+                s.speakers = snap
+                s.degraded_diarization = False
+                s.last_updated_ts = time.time()
+            self._emit("meeting.speakers_updated", {"speakers": list(snap)})
+        except Exception:
+            logger.warning("meeting: DIAR_WINDOW-тик упал", exc_info=True)
+            with self._lock:
+                s.degraded_diarization = True
+
     # ------------------------------------------------------------ intervals
 
     def _chunk_interval(self) -> float:
@@ -465,12 +535,15 @@ class MeetingSessionService:
         # адаптив (спека §2.2): на длинной встрече вызовы реже
         return max(base, total / 120.0)
 
+    def _diar_interval(self) -> float:
+        return float(self._settings_get("meeting_diar_interval_sec", 90.0))
+
     def _job_interval(self, job: MeetingJob) -> float:
         if job is MeetingJob.CHUNK_STT:
             return self._chunk_interval()
         if job is MeetingJob.ITEMS_LLM:
             return self._items_interval()
-        return 120.0  # DIAR_WINDOW (C2b уточнит из настроек)
+        return self._diar_interval()
 
     # ---------------------------------------------------------------- lease
 
