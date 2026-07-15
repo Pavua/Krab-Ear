@@ -975,6 +975,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "meeting_chunk_stt_interval_sec": 25.0,
     "meeting_items_interval_sec": 60.0,
     "meeting_items_language": "ru",
+    # --- C2b: спикеры-лайт (спека §2.5 + амендмент §2.5a) ---
+    "meeting_diar_interval_sec": 90.0,        # тик DIAR_WINDOW; §2.5a: 90 = сплошное покрытие
+    "meeting_diar_window_sec": 90.0,          # длина диаризуемого окна
+    "meeting_speaker_match_threshold": 0.72,  # cosine-порог сшивки спикеров между окнами
+    "meeting_live_speakers_enabled": True,    # рубильник C2b; False = байт-в-байт C2a
     # --- Quick Preset Switcher ---
     # Текущий активный профиль пресета (default/meeting/translation/call_recording).
     # Отражается в иконке строки меню как буква (D/M/T/C).
