@@ -58,6 +58,26 @@ final class WakeWordDetectionTracker {
     }
 }
 
+// MARK: - Решение об эскалации wedged (чистая логика, без таймеров/IPC)
+
+/// Backend сообщил wedged:true (wake-word поток заклинил, мягкое лечение
+/// невозможно/не помогло — спека 2026-07-15). Разрешаем принудительный
+/// рестарт backend не чаще раза в minGapSec.
+struct WedgedEscalationTracker {
+    static let minGapSec: TimeInterval = 1800  // 30 минут
+
+    private var lastEscalationAt: TimeInterval?
+
+    mutating func shouldEscalate(wedged: Bool, now: TimeInterval) -> Bool {
+        guard wedged else { return false }
+        if let last = lastEscalationAt, now - last < Self.minGapSec { return false }
+        lastEscalationAt = now
+        return true
+    }
+
+    mutating func reset() { lastEscalationAt = nil }
+}
+
 // MARK: - Поллер
 
 @MainActor
@@ -84,8 +104,10 @@ final class WakeWordPoller {
     private let ipcProvider: () -> IPCClient?
     private let isToggleEnabled: () -> Bool
     private let onDetection: () -> Void
+    private let onWedgedEscalation: (() -> Void)?
 
     private let tracker = WakeWordDetectionTracker()
+    private var wedgedTracker = WedgedEscalationTracker()
     private var timer: Timer?
     private var pausedReasons: Set<WakeWordPauseReason> = []
     private var inFlight = false
@@ -98,11 +120,13 @@ final class WakeWordPoller {
     init(
         ipcProvider: @escaping () -> IPCClient?,
         isToggleEnabled: @escaping () -> Bool,
-        onDetection: @escaping () -> Void
+        onDetection: @escaping () -> Void,
+        onWedgedEscalation: (() -> Void)? = nil
     ) {
         self.ipcProvider = ipcProvider
         self.isToggleEnabled = isToggleEnabled
         self.onDetection = onDetection
+        self.onWedgedEscalation = onWedgedEscalation
     }
 
     var isActive: Bool { timer != nil }
@@ -111,6 +135,7 @@ final class WakeWordPoller {
     func activate() {
         guard timer == nil else { return }
         tracker.reset()
+        wedgedTracker.reset()
         consecutiveEngineUnavailable = 0
         failedStartAttempts = 0
         sendStart(force: true)
@@ -191,6 +216,17 @@ final class WakeWordPoller {
                 if self.tracker.shouldTrigger(lastDetectionTs: ts) {
                     AgentLogger.shared.info("[WakeWord] Детекция — запускаю разговор")
                     self.onDetection()
+                    return
+                }
+                // Эскалация wedged: backend сам не смог вылечить wake-word
+                // поток (спека 2026-07-15) — просим принудительный рестарт.
+                let wedged = result["wedged"] as? Bool ?? false
+                if self.wedgedTracker.shouldEscalate(
+                    wedged: wedged, now: ProcessInfo.processInfo.systemUptime
+                ) {
+                    AgentLogger.shared.warn(
+                        "[WakeWord] backend сообщил wedged — эскалация: принудительный рестарт backend")
+                    self.onWedgedEscalation?()
                     return
                 }
                 // Self-heal: launchd перезапустил backend — сессия адаптера пропала.

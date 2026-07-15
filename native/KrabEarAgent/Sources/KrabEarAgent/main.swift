@@ -522,6 +522,22 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
                 isToggleEnabled: { UserDefaults.standard.bool(forKey: "KrabEar_WakeWordEnabled") },
                 onDetection: { [weak self] in
                     self?.historyPanel?.triggerConversationFromWakeWord()
+                },
+                onWedgedEscalation: { [weak self] in
+                    guard let self else { return }
+                    self.logger.warn("Wake word: backend wedged — принудительный рестарт backend")
+                    BackendToast.shared.show("Wake word завис — перезапускаю backend...", duration: 5.0)
+                    DispatchQueue.global(qos: .utility).async { [weak self] in
+                        guard let self else { return }
+                        let ok = self.backendSupervisor.forceRestartBackend()
+                        DispatchQueue.main.async {
+                            BackendToast.shared.show(
+                                ok ? "Backend перезапущен (wake word)"
+                                   : "⚠ Рестарт backend не удался — перезапустите Krab Ear вручную",
+                                duration: ok ? 3.0 : 10.0
+                            )
+                        }
+                    }
                 }
             )
         }

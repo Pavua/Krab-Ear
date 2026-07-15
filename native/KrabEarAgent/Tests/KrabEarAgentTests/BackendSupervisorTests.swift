@@ -165,4 +165,13 @@ final class BackendSupervisorTests: XCTestCase {
 
         XCTAssertFalse(r3, "4-й restart до cooldown должен оставаться заблокированным")
     }
+
+    // MARK: kickstartArguments — чистая функция для forceRestartBackend
+
+    func test_kickstartArguments_shape() {
+        XCTAssertEqual(
+            BackendSupervisor.kickstartArguments(uid: 501),
+            ["kickstart", "-k", "gui/501/ai.krab.ear.backend"]
+        )
+    }
 }

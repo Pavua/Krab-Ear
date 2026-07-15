@@ -286,6 +286,44 @@ final class BackendSupervisor: @unchecked Sendable {
         }
     }
 
+    /// launchd-label backend-сервиса (scripts/install_backend_launchagent.command).
+    static let backendLaunchdLabel = "ai.krab.ear.backend"
+
+    /// Аргументы launchctl для принудительного рестарта launchd-owned backend.
+    /// Выделено в чистую функцию для юнит-тестов.
+    static func kickstartArguments(uid: uid_t) -> [String] {
+        ["kickstart", "-k", "gui/\(uid)/\(backendLaunchdLabel)"]
+    }
+
+    /// Принудительный рестарт ЗАВЕДОМО ЖИВОГО backend-процесса (audio-wedge:
+    /// жив по IPC, мёртв по аудио — спека 2026-07-15). НЕ смешивать с
+    /// restartIfDead(): тот short-circuit'ится на живом процессе, а
+    /// stopBackend() в passive-режиме — no-op. В passive это ровно ручной
+    /// рецепт живого инцидента 13-07: launchctl kickstart -k.
+    func forceRestartBackend() -> Bool {
+        switch supervisionMode {
+        case .passive:
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            p.arguments = Self.kickstartArguments(uid: getuid())
+            do {
+                try p.run()
+            } catch {
+                return false
+            }
+            p.waitUntilExit()
+            return p.terminationStatus == 0
+        case .active:
+            stopBackend()
+            do {
+                try ensureBackendRunning()
+                return true
+            } catch {
+                return false
+            }
+        }
+    }
+
     func stopBackend() {
         switch supervisionMode {
         case .passive:
