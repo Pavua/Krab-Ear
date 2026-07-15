@@ -22,6 +22,7 @@ class _FakeAdapter:
         self._model = model if running else None
         self._threshold = threshold if running else None
         self._stop_result = stop_result
+        self._stop_epoch = 0
         self.calls: list[str] = []
         self.start_args: list[tuple] = []
 
@@ -36,9 +37,13 @@ class _FakeAdapter:
 
     def stop(self):
         self.calls.append("stop")
+        self._stop_epoch += 1
         if self._stop_result:
             self._running = False
         return self._stop_result
+
+    def stop_epoch(self):
+        return self._stop_epoch
 
     def start(self, model_name, on_detected, threshold=0.5, **kw):
         self.calls.append("start")
@@ -244,6 +249,68 @@ class GuardTests(unittest.TestCase):
         self.assertGreater(
             adapter.calls.index("start"), adapter.calls.index("end_maintenance"),
         )
+
+    def test_external_stop_during_dance_skips_restore(self):
+        # Chip Finding 5: владелец выключил тумблер (wake_word_stop) в окно
+        # танца — restore НЕ должен включать микрофон обратно.
+        adapter = _FakeAdapter(running=True, model="krab_ru", threshold=0.42)
+        calls: list[str] = []
+
+        def _reinit():
+            calls.append("reinit")
+            adapter.stop()   # внешний stop во время reinit-фазы
+
+        coord = AudioReinitCoordinator(
+            reinit_audio_backend=_reinit,
+            is_recording=lambda: False,
+            wake_word_adapter=adapter,
+        )
+        self.assertEqual(coord.reinit_with_wake_word_restore(), ReinitOutcome.OK)
+        self.assertEqual(calls, ["reinit"])
+        self.assertNotIn("start", adapter.calls)   # restore пропущен
+
+    def test_no_external_stop_restores_listener(self):
+        # Симметричный пин: без внешнего stop epoch-механика не мешает
+        # штатному restore.
+        adapter = _FakeAdapter(running=True, model="krab_ru", threshold=0.42)
+        coord, _ = _make(adapter=adapter)
+        self.assertEqual(coord.reinit_with_wake_word_restore(), ReinitOutcome.OK)
+        self.assertIn("start", adapter.calls)
+        self.assertEqual(adapter.start_args, [("krab_ru", 0.42)])
+
+    def test_external_stop_during_stop_join_skips_restore_on_deferred_path(self):
+        # Тот же гард на mid-dance-defer пути: toggle-off, пока шёл
+        # stop-join, а затем re-check увидел запись.
+        answers = [False, True]
+        adapter = _FakeAdapter(running=True, model="krab_ru", threshold=0.42)
+
+        def _recording():
+            v = answers.pop(0)
+            if v:
+                # запись «увидена» на re-check; toggle-off случился раньше
+                pass
+            return v
+
+        coord = AudioReinitCoordinator(
+            reinit_audio_backend=lambda: None,
+            is_recording=_recording,
+            wake_word_adapter=adapter,
+        )
+        # внешний stop между стопом координатора и re-check: эмулируем,
+        # обернув is_recording — проще инжектнуть через сам адаптер:
+        orig_stop = adapter.stop
+
+        def _stop_and_external():
+            r = orig_stop()          # стоп координатора
+            orig_stop()              # и сразу внешний toggle-off
+            return r
+
+        adapter.stop = _stop_and_external
+        self.assertEqual(
+            coord.reinit_with_wake_word_restore(),
+            ReinitOutcome.DEFERRED_RECORDING,
+        )
+        self.assertNotIn("start", adapter.calls)   # restore пропущен и тут
 
 
 if __name__ == "__main__":

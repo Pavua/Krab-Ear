@@ -91,6 +91,11 @@ class OpenWakeWordAdapter:
         self._generation: int = 0
         # Выставляется watchdog'ом, когда мягкое лечение невозможно/не помогло.
         self._wedged: bool = False
+        # Chip Finding 5: монотонный счётчик публичных stop() — координатор
+        # снапшотит его после СВОЕГО stop() в танце и перепроверяет перед
+        # restore; внешний stop (toggle-off/pause) во время танца отменяет
+        # восстановление слушателя.
+        self._stop_epoch: int = 0
         # 2026-07-15 (Fix A, ревью Task 4): окно обслуживания координатора.
         # Пока True — start() отказывает (и IPC wake_word_start вернёт
         # ok:false): между adapter.stop() и sd._terminate() чужой старт
@@ -245,6 +250,7 @@ class OpenWakeWordAdapter:
             2026-07-15, вариант клина 13-07).
         """
         with self._lock:
+            self._stop_epoch += 1
             self._last_detection = None
             # Спека §4.1: heartbeat сбрасывается и в start(), и в stop().
             # wedged здесь НЕ трогаем — флаг обязан пережить pause/resume
@@ -321,6 +327,13 @@ class OpenWakeWordAdapter:
     def end_maintenance(self) -> None:
         with self._lock:
             self._maintenance = False
+
+    def stop_epoch(self) -> int:
+        """Монотонный счётчик публичных stop() (chip Finding 5) — растёт и на
+        no-op stop'ах (слушатель уже остановлен): во время танца координатора
+        слушатель как раз остановлен, и именно такой stop сигналит toggle-off."""
+        with self._lock:
+            return self._stop_epoch
 
     def _reset_session_state(self) -> None:
         """Чистое состояние новой сессии. Вызывать ТОЛЬКО под self._lock

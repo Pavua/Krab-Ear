@@ -151,6 +151,14 @@ class AudioReinitCoordinator:
   restore-фазы: там гонка стартов вырождается в benign no-op
   («уже запущен»-гард; поллер и restore берут model/threshold из одного
   источника).
+- **Stop-epoch гард restore (chip Finding 5)**: `stop_epoch` — монотонный
+  счётчик публичных `stop()` адаптера (растёт и на no-op stop'ах). Танец
+  снапшотит базу ДО своего stop() и ожидает ровно `+1`; любой ВНЕШНИЙ stop
+  (toggle-off владельца / pause поллера) в любой фазе танца — включая
+  конкурентный со stop-join — сдвигает счётчик мимо ожидания, и restore
+  пропускается с INFO-логом: авто-восстановление не смеет включать микрофон
+  обратно после явного «выключить». Остаточное µс-окно между epoch-чеком
+  и `start()` принято (симметрично is_recording re-check).
 - Порядок танца (как в текущем `_perform_reinit`): снять
   `active_model`/`active_threshold` → `adapter.stop()` → если тред не вышел →
   `THREAD_HUNG` (без `sd._terminate`!) → иначе `reinit_audio_backend()`
