@@ -538,6 +538,14 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
                             )
                         }
                     }
+                },
+                onWedgedGiveUp: { [weak self] in
+                    guard let self else { return }
+                    self.logger.warn("Wake word: авто-рестарты исчерпаны (wedged держится) — нужно ручное вмешательство")
+                    BackendToast.shared.show(
+                        "⚠ Wake word не оживает после 3 рестартов — проверьте микрофон (громкость входа) или выключите тумблер wake word",
+                        duration: 12.0
+                    )
                 }
             )
         }
