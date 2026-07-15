@@ -2882,8 +2882,11 @@ Response: {"id":"m3","ok":true,"result":{"ok":true,"active":true,"started_at":17
 `meeting_chunk_stt_interval_sec` (default `25.0`, диапазон `10.0`–`120.0`),
 `meeting_items_interval_sec` (default `60.0`, диапазон `30.0`–`600.0`,
 адаптивно растягивается на длинных встречах), `meeting_items_language`
-(default `"ru"`), `meeting_diar_interval_sec` (default `90.0`, C2b DIAR_WINDOW-тик),
-`meeting_live_speakers_enabled` (default `true`, рубильник C2b).
+(default `"ru"`), `meeting_diar_interval_sec` (default `90.0`, диапазон `60.0`–`600.0`,
+C2b DIAR_WINDOW-тик), `meeting_diar_window_sec` (default `90.0`, диапазон `30.0`–`180.0`,
+длина диаризуемого окна), `meeting_speaker_match_threshold` (default `0.72`, диапазон
+`0.5`–`0.95`, cosine-порог сшивки спикеров), `meeting_live_speakers_enabled`
+(default `true`, рубильник C2b).
 
 ---
 
