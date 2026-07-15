@@ -154,21 +154,33 @@ class AudioSelfHealer:
                 action = "escalate"
             else:
                 action = "reinit"
+                # Eager-set ПОД ТЕМ ЖЕ локом, что и решение (атомарность
+                # старого кода): поздняя запись после долгого танца (до
+                # ~30с из-за _load_model в adapter.start()) перетирала бы
+                # сброс от конкурентного record_success() — залипший True
+                # крал у следующего эпизода его законную попытку reinit.
+                self._reinit_attempted_since_last_success = True
 
         if action == "reinit":
             from backend.audio_reinit import ReinitOutcome
 
+            logger.warning(
+                "AudioSelfHealer: %d пустых записей подряд (>= %d) — "
+                "запрашиваю переинициализацию аудио-стека",
+                self._empty_streak, threshold,
+            )
             outcome = self._reinit_coordinator.reinit_with_wake_word_restore()
             if outcome in (ReinitOutcome.DEFERRED_RECORDING, ReinitOutcome.BUSY):
-                # Попытка отложена, не потрачена — следующий пустой результат
-                # переоценит streak (семантика прежнего is_recording-defer).
+                # Попытка отложена, не потрачена — откатываем eager-флаг.
+                # Rollback пишет False (то же направление, что record_success)
+                # — конкурентный сброс не перетирается.
+                with self._lock:
+                    self._reinit_attempted_since_last_success = False
                 logger.info(
                     "AudioSelfHealer: reinit отложен координатором (%s)",
                     getattr(outcome, "value", outcome),
                 )
                 return
-            with self._lock:
-                self._reinit_attempted_since_last_success = True
         elif action == "escalate":
             self._escalate()
             with self._lock:

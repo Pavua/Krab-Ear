@@ -186,6 +186,31 @@ class OutcomeDelegationTests(unittest.TestCase):
         self.assertEqual(len(bus.pushed), 1)
         self.assertEqual(bus.pushed[0].code, "audio.stack_wedged")
 
+    def test_record_success_during_dance_is_not_clobbered(self):
+        # Repro гонки: танец идёт долго, за это время record_success()
+        # легитимно сбрасывает состояние. Поздний flag=True не должен
+        # красть попытку reinit у следующего эпизода.
+        healer_ref: list = []
+
+        class _SlowCoordinator(_FakeCoordinator):
+            def reinit_with_wake_word_restore(self):
+                # «Посреди танца» штатно завершилась успешная диктовка.
+                healer_ref[0].record_success()
+                return super().reinit_with_wake_word_restore()
+
+        coord = _SlowCoordinator()
+        healer, _ = _make_healer(
+            settings={"audio_selfheal_empty_threshold": 2}, coordinator=coord,
+        )
+        healer_ref.append(healer)
+        healer.record_empty_result()
+        healer.record_empty_result()   # threshold → танец → внутри record_success
+        self.assertEqual(coord.calls, 1)
+        # Новый эпизод: обязан получить СВОЮ попытку reinit, не эскалацию.
+        healer.record_empty_result()
+        healer.record_empty_result()
+        self.assertEqual(coord.calls, 2)
+
 
 # ---------------------------------------------------------------------------
 # Escalation — second empty cycle right after a reinit attempt
