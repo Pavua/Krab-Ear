@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
+import numpy as np
+
 logger = logging.getLogger("krab_ear.backend")
 
 _TAIL_CHARS = 600          # transcript_tail в get_meeting_live_state
@@ -26,6 +28,77 @@ _ITEMS_MIN_GROWTH = 200    # симв.: минимальный прирост т
 _LEASE_RENEW_SEC = 15.0    # период продления brain-lease
 _LEASE_TTL_SEC = 45.0      # TTL lease (перекрывает период продления с запасом)
 _WORKER_WAIT_SEC = 0.5     # шаг ожидания воркера
+
+
+class LiveSpeakerTracker:
+    """Сессионный реестр спикеров C2b (спека §2.5 + §2.5a).
+
+    Локальные метки pyannote внутри окна анонимны и нестабильны между
+    прогонами — идентичность спикеров держится ТОЛЬКО на эмбеддингах:
+    cosine центроида окна против скользящего среднего центроида спикера.
+    Реестр живёт в памяти сессии, на диск не пишется.
+
+    Потокобезопасность НЕ нужна: все вызовы — из одного GPU-слот-треда;
+    снапшот для IPC копируется в состояние сессии под её локом.
+    """
+
+    def __init__(self, threshold: float) -> None:
+        self._threshold = float(threshold)
+        # список спикеров: label, centroid (unit-norm np.ndarray), n_windows,
+        # talk_sec, last_active_ts
+        self._speakers: list[dict[str, Any]] = []
+
+    @staticmethod
+    def _unit(vec: Any) -> "np.ndarray | None":
+        arr = np.asarray(vec, dtype=np.float32).flatten()
+        norm = float(np.linalg.norm(arr))
+        if not np.isfinite(norm) or norm < 1e-8:
+            return None
+        return arr / norm
+
+    def ingest(self, segments: list[dict[str, Any]],
+               embeddings: dict[str, Any], now_ts: float) -> None:
+        """Одно окно диаризации: сегменты + центроиды локальных меток."""
+        talk_by_label: dict[str, float] = {}
+        for seg in segments:
+            dur = max(0.0, float(seg.get("end", 0.0)) - float(seg.get("start", 0.0)))
+            talk_by_label[str(seg.get("speaker"))] = (
+                talk_by_label.get(str(seg.get("speaker")), 0.0) + dur)
+
+        for label, raw in embeddings.items():
+            emb = self._unit(raw)
+            if emb is None:
+                continue
+            talk = talk_by_label.get(str(label), 0.0)
+            best, best_cos = None, -1.0
+            for sp in self._speakers:
+                cos = float(np.dot(sp["centroid"], emb))
+                if cos > best_cos:
+                    best, best_cos = sp, cos
+            if best is not None and best_cos >= self._threshold:
+                n = best["n_windows"]
+                merged = self._unit(best["centroid"] * n + emb)
+                if merged is not None:
+                    best["centroid"] = merged
+                best["n_windows"] = n + 1
+                best["talk_sec"] += talk
+                best["last_active_ts"] = now_ts
+            else:
+                self._speakers.append({
+                    "label": f"Спикер {len(self._speakers) + 1}",
+                    "centroid": emb,
+                    "n_windows": 1,
+                    "talk_sec": talk,
+                    "last_active_ts": now_ts,
+                })
+
+    def snapshot(self) -> list[dict[str, Any]]:
+        """Снимок для get_meeting_live_state / события (без numpy-объектов)."""
+        return [{
+            "label": sp["label"],
+            "talk_sec": round(float(sp["talk_sec"]), 1),
+            "last_active_ts": sp["last_active_ts"],
+        } for sp in self._speakers]
 
 
 class MeetingJob(str, Enum):
