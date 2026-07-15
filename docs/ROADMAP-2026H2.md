@@ -388,3 +388,24 @@ S63 bilingual conversation mode, S64 inline correction loop, S65 import queue v2
   её самоотчёт о «3 коммита впереди origin + чужой WIP 44 файла нетронут» подтверждён живой проверкой
   git-статуса общего чекаута; решение «безопасно ли застешить» оставлено владельцу (не моя территория).
   Sentry/рутины/логи Krab Ear — чисто, ничего нового не всплыло от рестартов.
+- 2026-07-15 — **волна wake-word watchdog ЗАКРЫТА: открытый долг 13-07 починен на код-уровне**
+  (PR #1879, squash `8046f038`, parity `5e9287ed`; задеплоено и живо верифицировано: backend PID 96410,
+  агент UUID `525742A9`, прод отдаёт `wake_word_watchdog` в diagnostics со staleness 0.04с и живым
+  `last_chunk_ts`). Первая волна с Fable как основной сессионной моделью (доступ продлён до 19-го;
+  один транзиентный провал доступности — сессия слетала на Opus, вернулась без последствий).
+  Архитектура: heartbeat ненулевых чанков + generation-токен + `stop()->bool` (THREAD_HUNG) +
+  maintenance-окно в адаптере; `AudioReinitCoordinator` (single-flight танец, общий хилер+watchdog);
+  `WakeWordWatchdog` (эпизоды, анти-шторм 3/600с вкл. THREAD_HUNG, dead-session аномалия);
+  Swift `WedgedEscalationTracker` (30 мин rate-limit + give-up cap 3 без здорового `last_chunk_ts`)
+  → `forceRestartBackend()` (`kickstart -k`), self-heal подавлен при wedged. Процесс: subagent-driven
+  (Sonnet-воркеры), 8 задач × двухступенчатое ревью = 10 находок починено ДО финального гейта
+  (Critical: гонка poller-start vs `Pa_Terminate`); финальный adversarial Fable-гейт целого диффа:
+  FIX_FIRST (зомби-цикл THREAD_HUNG + отсутствие give-up = единственная регрессия против baseline
+  на restart-immune микрофоне + 4 Minor) → 3 фикса → повторный гейт SHIP, причём гейт признал моё
+  отклонение от его рецепта 1a корректным (немой угол через `resume`-байпас). Гейты: 165+ pytest,
+  1184 Swift, 6 audit-скриптов, ubuntu-parity, e2e 44/44 + privacy 21/21, живая проверка цепочки
+  (wedged за 25с на dev-инстансе с заглушенным heartbeat). Хвосты chips'ами: dead_session vs
+  circuit-breaker класс (Finding 3), restore-при-выключенном-тумблере (Finding 5, pre-existing).
+  Урок процесса: «двухступенчатое ревью каждой задачи + личный гейт КАЖДОЙ находки + финальный
+  Fable-гейт целого диффа» окупился десятикратно — почти все находки были невидимы на уровне
+  отдельных задач.
