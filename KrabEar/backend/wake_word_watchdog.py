@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import deque
 from typing import Any, Callable
 
 logger = logging.getLogger("KrabEar.Backend.WakeWordWatchdog")
@@ -30,6 +31,11 @@ _STALE_SEC_MIN = 10.0
 _STALE_SEC_MAX = 120.0
 _STALE_SEC_DEFAULT = 30.0
 _CHECK_INTERVAL_SEC_DEFAULT = 5.0
+# Анти-голодание (ревью Task 4): частые легитимные паузы (диктовки)
+# сбрасывают эпизод раньше второй stale-проверки — без окна поверх эпизодов
+# сломанный навсегда поток лечился бы вечно, не эскалируя.
+_HEAL_STORM_WINDOW_SEC = 600.0
+_HEAL_STORM_MAX = 3
 
 
 class WakeWordWatchdog:
@@ -67,6 +73,12 @@ class WakeWordWatchdog:
         self._thread: threading.Thread | None = None
         self._heal_attempted_this_episode = False
         self._escalated_this_episode = False
+        # Скользящее окно успешно ВЫДАННЫХ heal'ов поверх эпизодов (Fix C):
+        # DEFERRED/BUSY-ретраи сюда не попадают.
+        self._heal_history: deque[float] = deque(maxlen=32)
+        # Момент первого наблюдения dead-session аномалии (Fix D):
+        # model выставлен, но тред не жив — сигнатура упавшего restore.
+        self._anomaly_since: float | None = None
 
     # ------------------------------------------------------------------
     # Settings
@@ -109,6 +121,12 @@ class WakeWordWatchdog:
         self._stop_event.set()
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
+            if thread.is_alive():
+                logger.warning(
+                    "WakeWordWatchdog: тред не завершился за 2.0с (вероятно, "
+                    "тик внутри reinit-танца) — daemon доработает текущий тик "
+                    "и выйдет по stop_event"
+                )
 
     def _run(self) -> None:
         while not self._stop_event.wait(self._check_interval_sec):
@@ -127,18 +145,30 @@ class WakeWordWatchdog:
             return None
 
         try:
-            session_active = bool(self._adapter.is_running()) and (
-                self._adapter.active_model() is not None
-            )
+            running = bool(self._adapter.is_running())
+            model = self._adapter.active_model()
         except Exception:
             logger.exception("WakeWordWatchdog: опрос адаптера упал")
             return None
+        session_active = running and model is not None
 
         if not session_active:
-            # Легитимные паузы (recording/conversation/TTS/privacy) выглядят
-            # именно так — Swift шлёт wake_word_stop. Эпизод сбрасывается.
+            if model is not None and not running:
+                # Мёртвая сессия: слушатель ДОЛЖЕН жить (model выставлен —
+                # чистый stop() его зануляет), но треда нет. Сигнатура
+                # упавшего restore / умершего цикла. Эпизод НЕ сбрасываем —
+                # иначе полностью мёртвый слушатель маскировался бы под паузу
+                # (worst case ревью Task 4).
+                return self._handle_dead_session()
+            # Чистая пауза (recording/conversation/TTS/privacy): Swift снял
+            # слушатель через stop(). Эпизод и аномалия сбрасываются.
+            with self._lock:
+                self._anomaly_since = None
             self._reset_episode()
             return None
+
+        with self._lock:
+            self._anomaly_since = None
 
         hb = self._adapter.heartbeat()
         started = hb.get("listen_started_ts")
@@ -165,6 +195,18 @@ class WakeWordWatchdog:
             return None
 
         if not heal_tried:
+            # Анти-шторм (Fix C): >= _HEAL_STORM_MAX выданных heal'ов за
+            # окно — поток сломан навсегда, а частые легитимные паузы
+            # сбрасывают эпизод раньше эскалации; эскалируем поверх эпизодов.
+            with self._lock:
+                while (self._heal_history
+                       and now - self._heal_history[0] > _HEAL_STORM_WINDOW_SEC):
+                    self._heal_history.popleft()
+                storm = len(self._heal_history) >= _HEAL_STORM_MAX
+            if storm:
+                self._escalate(staleness, "heal_storm")
+                return "escalated"
+
             from backend.audio_reinit import ReinitOutcome
 
             logger.warning(
@@ -180,12 +222,30 @@ class WakeWordWatchdog:
                 return "escalated"
             with self._lock:
                 self._heal_attempted_this_episode = True
+                self._heal_history.append(now)
             return "healed"
 
         self._escalate(staleness, "stale_after_reinit")
         return "escalated"
 
     # ------------------------------------------------------------------
+
+    def _handle_dead_session(self) -> str | None:
+        """Сессия должна жить, но треда нет: даём поллер-self-heal'у
+        stale_sec на оживление, затем эскалируем (heal бессмыслен —
+        координаторский restore сам только что не смог поднять сессию)."""
+        now = self._clock()
+        with self._lock:
+            if self._escalated_this_episode:
+                return None
+            if self._anomaly_since is None:
+                self._anomaly_since = now
+                return None
+            elapsed = now - self._anomaly_since
+        if elapsed < self._stale_sec():
+            return None
+        self._escalate(elapsed, "dead_session")
+        return "escalated"
 
     def _reset_episode(self) -> None:
         with self._lock:

@@ -100,8 +100,10 @@ class CheckOnceGuardTests(unittest.TestCase):
         clock.t = 1000.0
         self.assertEqual(wd.check_once(), "healed")   # эпизод открыт
         adapter.running = False
+        adapter.model = None  # чистая пауза: stop() зануляет model (Fix D)
         self.assertIsNone(wd.check_once())            # сессии нет → сброс
         adapter.running = True
+        adapter.model = "hey_jarvis"
         adapter.hb = {"last_chunk_ts": None, "listen_started_ts": clock.t}
         clock.t += 40.0
         self.assertEqual(wd.check_once(), "healed")   # новый эпизод: heal снова доступен
@@ -246,6 +248,129 @@ class LifecycleTests(unittest.TestCase):
         done.wait(0.1)
         self.assertTrue(wd._thread.is_alive())
         wd.stop()
+
+
+class SlowTickStopTests(unittest.TestCase):
+    def test_stop_times_out_and_warns_when_tick_in_flight(self):
+        import time as _time
+        entered = threading.Event()
+        release = threading.Event()
+
+        class _BlockingCoordinator:
+            def reinit_with_wake_word_restore(self):
+                entered.set()
+                release.wait(5.0)
+                return ReinitOutcome.OK
+
+        adapter = _FakeAdapter()
+        adapter.hb = {"last_chunk_ts": None, "listen_started_ts": 0.0}
+        wd = WakeWordWatchdog(
+            adapter=adapter,
+            reinit_coordinator=_BlockingCoordinator(),
+            settings_get=lambda k, d: d,
+            clock=lambda: 1000.0,
+        )
+        wd._check_interval_sec = 0.01
+        wd.start()
+        thread = None
+        try:
+            self.assertTrue(entered.wait(2.0))
+            thread = wd._thread
+            t0 = _time.monotonic()
+            with self.assertLogs(
+                "KrabEar.Backend.WakeWordWatchdog", level="WARNING",
+            ) as cm:
+                wd.stop()
+            self.assertLess(_time.monotonic() - t0, 3.5)
+            self.assertTrue(any("не завершился" in m for m in cm.output))
+            self.assertTrue(thread.is_alive())  # тик ещё дорабатывает
+        finally:
+            release.set()
+            if thread is not None:
+                thread.join(timeout=2.0)
+        self.assertFalse(thread.is_alive())
+
+
+class HealStormTests(unittest.TestCase):
+    def _cycle_episode(self, wd, adapter, clock):
+        adapter.hb = {"last_chunk_ts": None, "listen_started_ts": clock.t - 60.0}
+        self.assertEqual(wd.check_once(), "healed")
+        adapter.running = False
+        adapter.model = None          # чистая пауза → сброс эпизода
+        self.assertIsNone(wd.check_once())
+        adapter.running = True
+        adapter.model = "hey_jarvis"
+
+    def test_three_heals_in_window_escalate_on_fourth_stale(self):
+        bus = _FakeErrorBus()
+        wd, adapter, coord, clock = _make(bus=bus)
+        for _ in range(3):
+            self._cycle_episode(wd, adapter, clock)
+            clock.t += 60.0
+        adapter.hb = {"last_chunk_ts": None, "listen_started_ts": clock.t - 60.0}
+        self.assertEqual(wd.check_once(), "escalated")
+        self.assertEqual(coord.calls, 3)          # 4-й heal НЕ выдан
+        self.assertTrue(adapter.wedged)
+        self.assertEqual(len(bus.pushed), 1)
+
+    def test_storm_window_expiry_allows_heal_again(self):
+        wd, adapter, coord, clock = _make()
+        for _ in range(3):
+            self._cycle_episode(wd, adapter, clock)
+            clock.t += 60.0
+        clock.t += 601.0
+        adapter.hb = {"last_chunk_ts": None, "listen_started_ts": clock.t - 60.0}
+        self.assertEqual(wd.check_once(), "healed")
+        self.assertEqual(coord.calls, 4)
+
+    def test_deferred_heals_do_not_count_toward_storm(self):
+        coord = _FakeCoordinator(
+            outcomes=[ReinitOutcome.DEFERRED_RECORDING] * 5,
+        )
+        wd, adapter, _, clock = _make(coordinator=coord)
+        adapter.hb = {"last_chunk_ts": None, "listen_started_ts": clock.t - 60.0}
+        for _ in range(5):
+            self.assertIsNone(wd.check_once())
+        self.assertEqual(coord.calls, 5)          # ретраи не задушены штормом
+
+
+class DeadSessionAnomalyTests(unittest.TestCase):
+    def _dead(self, adapter):
+        adapter.running = False
+        adapter.model = "hey_jarvis"   # стейл: чистый stop() занулил бы
+
+    def test_dead_session_arms_then_escalates_after_grace(self):
+        bus = _FakeErrorBus()
+        wd, adapter, coord, clock = _make(bus=bus)
+        self._dead(adapter)
+        self.assertIsNone(wd.check_once())      # аномалия взведена
+        clock.t += 31.0
+        self.assertEqual(wd.check_once(), "escalated")
+        self.assertTrue(adapter.wedged)
+        self.assertEqual(coord.calls, 0)        # heal не дёргался
+        self.assertEqual(len(bus.pushed), 1)
+        self.assertIsNone(wd.check_once())      # однократно на эпизод
+
+    def test_poller_revival_clears_anomaly(self):
+        wd, adapter, coord, clock = _make()
+        self._dead(adapter)
+        self.assertIsNone(wd.check_once())
+        adapter.running = True                   # поллер оживил сессию
+        adapter.hb = {"last_chunk_ts": clock.t - 1.0, "listen_started_ts": clock.t - 5.0}
+        self.assertIsNone(wd.check_once())
+        clock.t += 40.0
+        self._dead(adapter)
+        self.assertIsNone(wd.check_once())      # таймер стартует заново
+        self.assertFalse(adapter.wedged)
+
+    def test_clean_pause_never_arms_anomaly(self):
+        wd, adapter, coord, clock = _make()
+        adapter.running = False
+        adapter.model = None
+        self.assertIsNone(wd.check_once())
+        clock.t += 100.0
+        self.assertIsNone(wd.check_once())
+        self.assertFalse(adapter.wedged)
 
 
 if __name__ == "__main__":
