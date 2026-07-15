@@ -10,6 +10,11 @@ stale heartbeat) делили ОДИН путь лечения с single-flight 
 внутри PortAudio-вызова — сигнатура живого инцидента 2026-07-13), звать
 sd._terminate() НЕЛЬЗЯ (Pa_Terminate при заблокированном в библиотеке треде —
 риск сегфолта) — возвращаем THREAD_HUNG, лечение уходит на уровень процесса.
+
+Второй инвариант: is_recording re-check непосредственно перед Pa_Terminate
+(спека §4.2) — запись, стартовавшая за время adapter.stop() (join до 3с),
+не должна попасть под Pa_Terminate; остаточное µс-окно между re-check и
+_terminate принято (неустранимо без лока на уровне рекордера).
 """
 
 from __future__ import annotations
@@ -80,7 +85,11 @@ class AudioReinitCoordinator:
                 )
                 return ReinitOutcome.DEFERRED_RECORDING
         except Exception:
+            # fail-closed: неизвестное состояние рекордера трактуем как идущую
+            # запись — DEFERRED (попытка отложена, не потрачена), а не танец
+            # дальше в сторону Pa_Terminate.
             logger.exception("AudioReinitCoordinator: is_recording() упал")
+            return ReinitOutcome.DEFERRED_RECORDING
 
         saved_model: str | None = None
         saved_threshold: float | None = None
@@ -116,6 +125,24 @@ class AudioReinitCoordinator:
                     )
                     return ReinitOutcome.THREAD_HUNG
 
+        # TOCTOU-окно: между первым чеком и этим местом лежал adapter.stop()
+        # с join до 3с — диктовка могла стартовать. Pa_Terminate под живым
+        # стримом рекордера — тот же crash-класс, что и THREAD_HUNG-инвариант.
+        # Остаточное окно (µс между этим чеком и _terminate) неустранимо без
+        # лока на уровне рекордера — принято.
+        try:
+            recording_started_mid_dance = bool(self._is_recording())
+        except Exception:
+            logger.exception("AudioReinitCoordinator: is_recording() упал (re-check)")
+            recording_started_mid_dance = True  # fail-closed
+        if recording_started_mid_dance:
+            logger.info(
+                "AudioReinitCoordinator: запись стартовала во время танца — "
+                "reinit отложен, слушатель восстанавливается"
+            )
+            self._restore_listener(adapter, was_running, saved_model, saved_threshold)
+            return ReinitOutcome.DEFERRED_RECORDING
+
         reinit_failed = False
         logger.warning(
             "AudioReinitCoordinator: переинициализация аудио-стека (PortAudio)"
@@ -128,25 +155,42 @@ class AudioReinitCoordinator:
             )
             reinit_failed = True
 
-        if adapter is not None and was_running and saved_model:
-            try:
-                adapter.start(
-                    saved_model,
-                    self._on_wake_word_detected_after_reinit,
-                    threshold=(
-                        saved_threshold
-                        if saved_threshold is not None
-                        else _WAKE_WORD_THRESHOLD_DEFAULT
-                    ),
-                )
-            except Exception:
-                logger.exception(
-                    "AudioReinitCoordinator: не удалось перезапустить wake word "
-                    "после reinit"
-                )
-                reinit_failed = True
+        if not self._restore_listener(adapter, was_running, saved_model, saved_threshold):
+            reinit_failed = True
 
         return ReinitOutcome.FAILED if reinit_failed else ReinitOutcome.OK
+
+    def _restore_listener(
+        self,
+        adapter: Any,
+        was_running: bool,
+        saved_model: str | None,
+        saved_threshold: float | None,
+    ) -> bool:
+        """Восстановить wake-word слушатель после танца.
+
+        False — adapter.start() упал (вызывающий решает, фатально ли это),
+        True — восстановлен либо восстанавливать было нечего.
+        """
+        if adapter is None or not was_running or not saved_model:
+            return True
+        try:
+            adapter.start(
+                saved_model,
+                self._on_wake_word_detected_after_reinit,
+                threshold=(
+                    saved_threshold
+                    if saved_threshold is not None
+                    else _WAKE_WORD_THRESHOLD_DEFAULT
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "AudioReinitCoordinator: не удалось перезапустить wake word "
+                "после reinit"
+            )
+            return False
+        return True
 
     @staticmethod
     def _on_wake_word_detected_after_reinit(model_name: str, score: float) -> None:

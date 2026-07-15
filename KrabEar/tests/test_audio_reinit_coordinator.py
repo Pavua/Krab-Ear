@@ -139,6 +139,55 @@ class GuardTests(unittest.TestCase):
         )
         self.assertEqual(adapter.calls, ["stop", "start"])
 
+    def test_sequential_calls_release_flight_lock(self):
+        # Регрессия-гард: сломанный try/finally в reinit_with_wake_word_restore
+        # превратил бы ВСЕ вызовы после первого в вечный BUSY.
+        coord, calls = _make(adapter=None)
+        self.assertEqual(coord.reinit_with_wake_word_restore(), ReinitOutcome.OK)
+        self.assertEqual(coord.reinit_with_wake_word_restore(), ReinitOutcome.OK)
+        self.assertEqual(calls, ["reinit", "reinit"])
+
+    def test_recording_started_mid_dance_defers_and_restores_listener(self):
+        # is_recording: False на первом чеке, True на re-check (запись
+        # стартовала, пока шёл adapter.stop()).
+        answers = [False, True]
+        adapter = _FakeAdapter(running=True, model="krab_ru", threshold=0.42)
+        calls: list[str] = []
+
+        def _reinit():
+            calls.append("reinit")
+
+        coord = AudioReinitCoordinator(
+            reinit_audio_backend=_reinit,
+            is_recording=lambda: answers.pop(0),
+            wake_word_adapter=adapter,
+        )
+        self.assertEqual(
+            coord.reinit_with_wake_word_restore(),
+            ReinitOutcome.DEFERRED_RECORDING,
+        )
+        self.assertEqual(calls, [])  # Pa_Terminate НЕ вызывался
+        self.assertEqual(adapter.calls, ["stop", "start"])  # слушатель восстановлен
+        self.assertEqual(adapter.start_args, [("krab_ru", 0.42)])
+
+    def test_is_recording_exception_fails_closed(self):
+        def _boom():
+            raise RuntimeError("recorder broken")
+
+        adapter = _FakeAdapter()
+        calls: list[str] = []
+        coord = AudioReinitCoordinator(
+            reinit_audio_backend=lambda: calls.append("reinit"),
+            is_recording=_boom,
+            wake_word_adapter=adapter,
+        )
+        self.assertEqual(
+            coord.reinit_with_wake_word_restore(),
+            ReinitOutcome.DEFERRED_RECORDING,
+        )
+        self.assertEqual(calls, [])
+        self.assertEqual(adapter.calls, [])  # до stop() даже не дошли
+
 
 if __name__ == "__main__":
     unittest.main()
