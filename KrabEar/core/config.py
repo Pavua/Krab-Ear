@@ -813,6 +813,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # backend/audio_selfheal.py). Триггер — N подряд идущих пустых записей.
     "audio_selfheal_enabled": True,
     "audio_selfheal_empty_threshold": 3,
+    # Wake-word watchdog (спека 2026-07-15): активный сторож независимого
+    # wake-word потока — heartbeat staleness → мягкий reinit → wedged-эскалация.
+    "wake_word_watchdog_enabled": True,
+    "wake_word_stale_sec": 30.0,
     "overlay_opacity_percent": 45,
     "voice_gateway_url": "http://127.0.0.1:8090",
     "voice_gateway_api_key": "",

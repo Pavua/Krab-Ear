@@ -132,6 +132,10 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             # Added 2026-07-12 — AudioSelfHealer escalation: PortAudio stack wedged
             # (all-zero frames) and a soft reinit didn't fix it.
             "audio.stack_wedged",
+            # Added 2026-07-15 — WakeWordWatchdog escalation: independent
+            # wake-word _listen_loop wedged (thread alive, no frames, no
+            # exception) and a soft reinit didn't fix it either.
+            "audio.wakeword_wedged",
         }
         self.assertEqual(set(ERROR_REGISTRY.keys()), expected)
 
@@ -228,7 +232,8 @@ class ErrorRegistryShapeTests(unittest.TestCase):
         W1759 merge-train added history.purge_incomplete = 59;
         crypto-audit (2026-06-20) added history.encrypt_fail = 60;
         2026-07-12 mic-watchdog self-heal added audio.stack_wedged = 61;
+        2026-07-15 wake-word watchdog added audio.wakeword_wedged = 62;
         test_expected_codes_present guards the exact set so this count test is a
         redundant but cheap invariant.
         """
-        self.assertEqual(len(ERROR_REGISTRY), 61)
+        self.assertEqual(len(ERROR_REGISTRY), 62)
