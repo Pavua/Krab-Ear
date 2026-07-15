@@ -139,7 +139,18 @@ class AudioReinitCoordinator:
   `DEFERRED_RECORDING`-подобный быстрый выход (non-blocking `acquire`) —
   повтор придёт со следующего триггера.
 - `is_recording()` проверяется под локом непосредственно перед reinit —
-  PortAudio никогда не дёргается под живой диктовкой.
+  PortAudio никогда не дёргается под живой диктовкой (двойная проверка:
+  на входе в танец fail-closed + re-check после `stop()`-join с
+  восстановлением слушателя и `DEFERRED_RECORDING`).
+- **Maintenance-окно (Critical ревью Task 4)**: на опасный участок танца
+  (stop → `Pa_Terminate`) координатор помечает адаптер
+  `begin_maintenance()`/`end_maintenance()` — чужой `start()` (в т.ч. IPC
+  `wake_word_start` от поллер-self-heal, который видит `running:false` уже
+  во время `stop()`-join) получает `ok:false` вместо спавна второго треда,
+  под которым исполнился бы `Pa_Terminate`. Окно снимается в `finally` ДО
+  restore-фазы: там гонка стартов вырождается в benign no-op
+  («уже запущен»-гард; поллер и restore берут model/threshold из одного
+  источника).
 - Порядок танца (как в текущем `_perform_reinit`): снять
   `active_model`/`active_threshold` → `adapter.stop()` → если тред не вышел →
   `THREAD_HUNG` (без `sd._terminate`!) → иначе `reinit_audio_backend()`
@@ -177,12 +188,22 @@ class WakeWordWatchdog:
 Логика тика (`check_once`), в порядке гардов:
 
 1. `wake_word_watchdog_enabled` False → no-op.
-2. Сессия адаптера не активна (`is_running()` False ИЛИ `active_model()` None)
-   → сброс эпизода, no-op. Легитимные паузы (recording/conversation/TTS/privacy)
-   снаружи выглядят именно так — Swift шлёт `wake_word_stop` → ложных
-   срабатываний нет структурно. (Пометка: `is_running()` при зависшем треде
-   врёт `true` — поэтому гард именно «не активна → молчим», а решение о клине
-   принимает следующий шаг по heartbeat.)
+2. Сессия адаптера не активна — ДВЕ разные ветки (уточнение ревью Task 4,
+   Important №4):
+   - **Чистая пауза** (`active_model()` is None — чистый `stop()` его
+     зануляет): recording/conversation/TTS/privacy, Swift снял слушатель →
+     сброс эпизода и anomaly-таймера, no-op. Ложных срабатываний нет
+     структурно.
+   - **Мёртвая сессия** (`active_model()` НЕ None при `is_running()` False —
+     сигнатура упавшего restore/умершего цикла: слушатель должен жить, но
+     треда нет): эпизод НЕ сбрасывается; взводится anomaly-таймер, поллеру
+     даётся grace `wake_word_stale_sec` на оживление (его self-heal видит
+     правдивый `running:false`), затем эскалация `dead_session` (однократно
+     на эпизод). Без этой ветки полностью мёртвый слушатель (например,
+     `_load_model` упал в restore) маскировался бы под паузу навсегда.
+   (Пометка: `is_running()` при зависшем треде врёт `true` — поэтому решение
+   о КЛИНЕ принимает heartbeat-шаг ниже, а эта ветка ловит именно МЁРТВУЮ
+   сессию.)
 3. `listen_started_ts` ещё `None` (тред спавнут, но не вошёл в цикл —
    микросекундное окно) → считается свежим, no-op.
    Иначе — два РАЗНЫХ условия (уточнение против ловушки heal-цикла,
@@ -196,8 +217,14 @@ class WakeWordWatchdog:
    - **alarm-условие**: `staleness = clock() - max(listen_started_ts,
      last_chunk_ts or 0)`; если `staleness < wake_word_stale_sec` —
      grace-окно прогрева: не алармим И НЕ закрываем эпизод, no-op.
-4. Stale, heal в этом эпизоде ещё не пробовали →
-   `coordinator.reinit_with_wake_word_restore()`:
+4. Stale, heal в этом эпизоде ещё не пробовали → сначала **анти-шторм гейт**
+   (ревью Task 4, Important №3): скользящее окно heal-попыток ПОВЕРХ
+   эпизодов (`_heal_history`, константы 3 попытки / 600с) — если владелец
+   диктует чаще, чем раз в ~(stale+tick), легитимные паузы сбрасывали бы
+   эпизод раньше второй stale-проверки, и сломанный навсегда поток лечился
+   бы вечно без эскалации. ≥3 heal'ов в окне → эскалация `heal_storm`
+   вместо четвёртого heal'а (DEFERRED/BUSY-ретраи в историю не попадают).
+   Иначе → `coordinator.reinit_with_wake_word_restore()`:
    - `OK` → пометить «heal попробован», ждать следующего тика (если heartbeat
      ожил — эпизод закроется в п.3; если снова stale → п.5).
    - `DEFERRED_RECORDING` → ничего не помечать, повтор на следующем тике.
@@ -217,7 +244,10 @@ class WakeWordWatchdog:
 
 Жизненный цикл: конструируется в `service.py` рядом с `AudioSelfHealer`
 (см. 4.5), `start()` сразу же (тред дешёвый: один лок-рид каждые 5с),
-`stop()` — в `BackendService.close()`. К `RecordingCoreService._rt_lock`
+`stop()` — в `BackendService.close()`. Тик в heal-пути может длиться до
+~35с (stop-join 3с + `_load_model` до 30с) — `stop().join(2с)` при этом
+таймаутится: логируется WARN, daemon дорабатывает текущий тик и выходит
+по `stop_event` (направление отказа принято, #1782-класс задокументирован). К `RecordingCoreService._rt_lock`
 НЕ привязывается: watchdog не участвует в recording start/stop, он
 самогейтится по состоянию сессии адаптера (правило `_rt_lock` касается
 демонов, стартуемых/стопаемых синхронно с записью — не наш случай).
