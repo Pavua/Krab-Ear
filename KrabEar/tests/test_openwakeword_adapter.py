@@ -730,6 +730,7 @@ class TestListenLoopPredictArgType(unittest.TestCase):
                     "threshold": 0.5,
                     "chunk_size": 1280,
                     "sample_rate": 16000,
+                    "generation": adapter._generation,
                 },
                 daemon=True,
             )
@@ -801,6 +802,7 @@ class TestStreamFailureCircuitBreaker(unittest.TestCase):
                         "threshold": 0.5,
                         "chunk_size": 1280,
                         "sample_rate": 16000,
+                        "generation": adapter._generation,
                     },
                     daemon=True,
                 )
@@ -854,6 +856,7 @@ class TestStreamFailureCircuitBreaker(unittest.TestCase):
                     "threshold": 0.5,
                     "chunk_size": 1280,
                     "sample_rate": 16000,
+                    "generation": adapter._generation,
                 },
                 daemon=True,
             )

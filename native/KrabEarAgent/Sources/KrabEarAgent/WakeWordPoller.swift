@@ -58,6 +58,43 @@ final class WakeWordDetectionTracker {
     }
 }
 
+// MARK: - Решение об эскалации wedged (чистая логика, без таймеров/IPC)
+
+/// Backend сообщил wedged:true (wake-word поток заклинил, мягкое лечение
+/// невозможно/не помогло — спека 2026-07-15). Разрешаем принудительный
+/// рестарт backend не чаще раза в minGapSec.
+struct WedgedEscalationTracker {
+    static let minGapSec: TimeInterval = 1800  // 30 минут
+    /// Give-up (Fable-гейт волны): restart-immune состояние микрофона
+    /// (громкость входа 0 / hardware mute / TCC-нули) не лечится рестартом —
+    /// без капа kickstart повторялся бы каждые 30 минут навсегда, каждый раз
+    /// убивая in-flight работу backend'а.
+    static let maxConsecutive = 3
+
+    private var lastEscalationAt: TimeInterval?
+    private(set) var consecutiveEscalations = 0
+
+    var exhausted: Bool { consecutiveEscalations >= Self.maxConsecutive }
+
+    /// Реально захваченный чанк (last_chunk_ts != nil) — микрофон жив,
+    /// кап перевзводится. wedged-флап (start() временно сбрасывает флаг)
+    /// здоровым сигналом НЕ считается.
+    mutating func noteHealthy() { consecutiveEscalations = 0 }
+
+    mutating func shouldEscalate(wedged: Bool, now: TimeInterval) -> Bool {
+        guard wedged, !exhausted else { return false }
+        if let last = lastEscalationAt, now - last < Self.minGapSec { return false }
+        lastEscalationAt = now
+        consecutiveEscalations += 1
+        return true
+    }
+
+    mutating func reset() {
+        lastEscalationAt = nil
+        consecutiveEscalations = 0
+    }
+}
+
 // MARK: - Поллер
 
 @MainActor
@@ -84,8 +121,13 @@ final class WakeWordPoller {
     private let ipcProvider: () -> IPCClient?
     private let isToggleEnabled: () -> Bool
     private let onDetection: () -> Void
+    private let onWedgedEscalation: (() -> Void)?
+    private let onWedgedGiveUp: (() -> Void)?
 
     private let tracker = WakeWordDetectionTracker()
+    private var wedgedTracker = WedgedEscalationTracker()
+    /// Give-up уведомление показываем один раз на эпизод исчерпания капа.
+    private var gaveUpNotified = false
     private var timer: Timer?
     private var pausedReasons: Set<WakeWordPauseReason> = []
     private var inFlight = false
@@ -98,11 +140,15 @@ final class WakeWordPoller {
     init(
         ipcProvider: @escaping () -> IPCClient?,
         isToggleEnabled: @escaping () -> Bool,
-        onDetection: @escaping () -> Void
+        onDetection: @escaping () -> Void,
+        onWedgedEscalation: (() -> Void)? = nil,
+        onWedgedGiveUp: (() -> Void)? = nil
     ) {
         self.ipcProvider = ipcProvider
         self.isToggleEnabled = isToggleEnabled
         self.onDetection = onDetection
+        self.onWedgedEscalation = onWedgedEscalation
+        self.onWedgedGiveUp = onWedgedGiveUp
     }
 
     var isActive: Bool { timer != nil }
@@ -111,6 +157,8 @@ final class WakeWordPoller {
     func activate() {
         guard timer == nil else { return }
         tracker.reset()
+        wedgedTracker.reset()
+        gaveUpNotified = false
         consecutiveEngineUnavailable = 0
         failedStartAttempts = 0
         sendStart(force: true)
@@ -187,14 +235,48 @@ final class WakeWordPoller {
                 }
                 self.consecutiveEngineUnavailable = 0
                 let running = result["running"] as? Bool ?? false
+                let wedged = result["wedged"] as? Bool ?? false
+                // Наблюдённая живая сессия освежает self-heal бюджет:
+                // отказы старта из-за maintenance-окна танца (ok:false)
+                // не должны навсегда выжигать 3 попытки (Fable-гейт, F4).
+                if running { self.failedStartAttempts = 0 }
+                // Реально захваченный чанк — микрофон жив: перевзводим
+                // give-up кап (wedged-флап здоровьем не считается).
+                if (result["last_chunk_ts"] as? Double) != nil {
+                    self.wedgedTracker.noteHealthy()
+                    self.gaveUpNotified = false
+                }
                 let ts = (result["last_detection"] as? [String: Any])?["ts"] as? Double
                 if self.tracker.shouldTrigger(lastDetectionTs: ts) {
                     AgentLogger.shared.info("[WakeWord] Детекция — запускаю разговор")
                     self.onDetection()
                     return
                 }
-                // Self-heal: launchd перезапустил backend — сессия адаптера пропала.
-                if !running {
+                // Эскалация wedged: backend сам не смог вылечить wake-word
+                // поток (спека 2026-07-15) — просим принудительный рестарт.
+                if self.wedgedTracker.shouldEscalate(
+                    wedged: wedged, now: ProcessInfo.processInfo.systemUptime
+                ) {
+                    AgentLogger.shared.warn(
+                        "[WakeWord] backend сообщил wedged — эскалация: принудительный рестарт backend")
+                    self.onWedgedEscalation?()
+                    return
+                }
+                // Give-up: кап подряд-эскалаций исчерпан, wedged держится —
+                // рестарты не лечат (restart-immune микрофон), уведомляем
+                // один раз и ждём ручного вмешательства.
+                if wedged && self.wedgedTracker.exhausted && !self.gaveUpNotified {
+                    self.gaveUpNotified = true
+                    AgentLogger.shared.warn(
+                        "[WakeWord] wedged держится после \(WedgedEscalationTracker.maxConsecutive) рестартов — авто-рестарты остановлены до ручного вмешательства")
+                    self.onWedgedGiveUp?()
+                    return
+                }
+                // Пока backend объявил wedged — НЕ респавним слушатель:
+                // start() сбросил бы wedged и замаскировал эскалацию, а
+                // рестарт треда этот класс клина не лечит (живое
+                // свидетельство 13-07). Лечение — kickstart по эскалации.
+                if !running && !wedged {
                     self.sendStart(force: false)
                 }
             }

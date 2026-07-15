@@ -103,6 +103,10 @@ _RANGE_FIELDS: dict[str, tuple[Any, Any, Any, type]] = {
     # backend/audio_selfheal.py). Below 2 a single false-positive silence-guard
     # trip would reinit PortAudio; above 10 the self-heal would rarely fire.
     "audio_selfheal_empty_threshold": (2, 10, 3, int),
+    # Wake-word watchdog (спека 2026-07-15): heartbeat staleness порог перед
+    # мягким reinit. Below 10 s risks false-positive reinit on a busy STT
+    # inference chunk; above 120 s the watchdog would rarely fire.
+    "wake_word_stale_sec": (10.0, 120.0, 30.0, float),
 }
 
 # Bool-поля с дефолтными значениями
@@ -130,6 +134,7 @@ _BOOL_FIELDS: dict[str, bool] = {
     "privacy_mode_enabled": False,
     "stt_hotwords_enabled": True,
     "audio_selfheal_enabled": True,
+    "wake_word_watchdog_enabled": True,
 }
 
 # Миграционные таблицы: (from_version, to_version) → список операций

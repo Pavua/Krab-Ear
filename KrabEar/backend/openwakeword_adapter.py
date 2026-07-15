@@ -79,6 +79,23 @@ class OpenWakeWordAdapter:
         # Последняя детекция для IPC-поллинга агента (wake_word_status).
         # Монотонный ts — агент дебаунсит по росту, wall-clock не нужен.
         self._last_detection: dict[str, Any] | None = None
+        # 2026-07-15 (спека wake-word-watchdog): heartbeat живого захвата.
+        # last_chunk_ts штампуется ТОЛЬКО ненулевыми чанками (живой микрофон
+        # никогда не отдаёт секунды идеальных int16-нулей; шторм нулей 12-07 и
+        # зависшее чтение 13-07 оба оставляют его stale). Всё под self._lock.
+        self._last_chunk_ts: float | None = None
+        self._listen_started_ts: float | None = None
+        # Поколение сессии: отвисший «зомби»-тред старой сессии видит чужое
+        # поколение и выходит, не публикуя heartbeat/детекции чужой сессии
+        # (один bounded read до проверки — принятый остаточный риск, спека §6).
+        self._generation: int = 0
+        # Выставляется watchdog'ом, когда мягкое лечение невозможно/не помогло.
+        self._wedged: bool = False
+        # 2026-07-15 (Fix A, ревью Task 4): окно обслуживания координатора.
+        # Пока True — start() отказывает (и IPC wake_word_start вернёт
+        # ok:false): между adapter.stop() и sd._terminate() чужой старт
+        # спавнил бы тред, под которым исполнится Pa_Terminate (crash-класс).
+        self._maintenance: bool = False
         self._oww_available = self._check_lib_available()
         # F2: callable to read runtime settings (e.g. privacy_mode_enabled)
         self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
@@ -153,6 +170,11 @@ class OpenWakeWordAdapter:
             ValueError: Если модель не найдена.
         """
         with self._lock:
+            if self._maintenance:
+                raise RuntimeError(
+                    "wake word занят обслуживанием аудио-стека (reinit) — "
+                    "повторите позже"
+                )
             now = time.monotonic()
             if now < self._stream_failure_cooldown_until:
                 remaining = self._stream_failure_cooldown_until - now
@@ -191,6 +213,8 @@ class OpenWakeWordAdapter:
             self._active_threshold = threshold
             self._stop_event.clear()
             self._last_detection = None  # свежая сессия — стейл-детекция не триггерит
+            self._reset_session_state()
+            self._generation += 1
 
             self._oww = self._load_model(model_name, model_path)
             self._thread = threading.Thread(
@@ -199,6 +223,7 @@ class OpenWakeWordAdapter:
                     "threshold": threshold,
                     "chunk_size": chunk_size,
                     "sample_rate": sample_rate,
+                    "generation": self._generation,
                 },
                 daemon=True,
                 name="OpenWakeWordListener",
@@ -210,21 +235,51 @@ class OpenWakeWordAdapter:
                 threshold,
             )
 
-    def stop(self) -> None:
-        """Останавливает фоновый поток прослушивания."""
+    def stop(self, timeout: float = 3.0) -> bool:
+        """Останавливает поток прослушивания.
+
+        Returns:
+            True — тред вышел (или не был запущен); False — тред НЕ вышел за
+            timeout (застрял внутри PortAudio-вызова). Вызывающий обязан
+            считать False сигналом «мягкий reinit небезопасен» (спека
+            2026-07-15, вариант клина 13-07).
+        """
         with self._lock:
             self._last_detection = None
-            if self._thread is None or not self._thread.is_alive():
-                return
-            self._stop_event.set()
+            # Спека §4.1: heartbeat сбрасывается и в start(), и в stop().
+            # wedged здесь НЕ трогаем — флаг обязан пережить pause/resume
+            # циклы поллера (wake_word_stop при паузе), его снимает только
+            # watchdog по свежему чанку или start() новой сессии.
+            self._last_chunk_ts = None
+            self._listen_started_ts = None
             thread = self._thread
+            # Сессионные поля чистим ВСЕГДА, включая мёртвый/отсутствующий
+            # тред: тред мог умереть сам (exception-путь _listen_loop не
+            # чистит _active_model), и старый early-return без очистки
+            # оставлял сигнатуру «мёртвой сессии» (running=False, model≠None)
+            # на легитимно выключенном слушателе → ложная dead_session-
+            # эскалация watchdog'а (re-review Task 4). Целевой случай
+            # dead_session (упавший restore) не затронут — там stop() после
+            # провала никто не зовёт.
             self._thread = None
             self._oww = None
             self._active_model = None
             self._active_threshold = None
+            if thread is None or not thread.is_alive():
+                return True
+            self._stop_event.set()
 
-        thread.join(timeout=3.0)
-        logger.info("OpenWakeWordAdapter: остановлен")
+        thread.join(timeout=timeout)
+        exited = not thread.is_alive()
+        if exited:
+            logger.info("OpenWakeWordAdapter: остановлен")
+        else:
+            logger.error(
+                "OpenWakeWordAdapter: тред слушателя не вышел за %.1fs — "
+                "вероятно завис внутри PortAudio (класс инцидента 13-07)",
+                timeout,
+            )
+        return exited
 
     def is_running(self) -> bool:
         """True если поток прослушивания активен."""
@@ -241,6 +296,38 @@ class OpenWakeWordAdapter:
         сейчас не запущен (2026-07-12, см. AudioSelfHealer)."""
         with self._lock:
             return self._active_threshold
+
+    def heartbeat(self) -> dict[str, float | None]:
+        """Снапшот heartbeat'а для watchdog/status (спека 2026-07-15)."""
+        with self._lock:
+            return {
+                "last_chunk_ts": self._last_chunk_ts,
+                "listen_started_ts": self._listen_started_ts,
+            }
+
+    def set_wedged(self, value: bool) -> None:
+        with self._lock:
+            self._wedged = bool(value)
+
+    def is_wedged(self) -> bool:
+        with self._lock:
+            return self._wedged
+
+    def begin_maintenance(self) -> None:
+        """Координатор помечает опасное окно танца (stop → Pa_Terminate)."""
+        with self._lock:
+            self._maintenance = True
+
+    def end_maintenance(self) -> None:
+        with self._lock:
+            self._maintenance = False
+
+    def _reset_session_state(self) -> None:
+        """Чистое состояние новой сессии. Вызывать ТОЛЬКО под self._lock
+        (start()) или в тестах без конкуренции."""
+        self._last_chunk_ts = None
+        self._listen_started_ts = None
+        self._wedged = False
 
     def _record_detection(self, model_name: str, score: float) -> None:
         """Фиксирует последнюю детекцию для wake_word_status (IPC-поллинг)."""
@@ -342,12 +429,16 @@ class OpenWakeWordAdapter:
         """
         with self._lock:
             last = dict(self._last_detection) if self._last_detection else None
+        hb = self.heartbeat()
         return {
             "ok": True,
             "running": self.is_running(),
             "active_model": self.active_model(),
             "engine_available": self._oww_available,
             "last_detection": last,
+            "last_chunk_ts": hb["last_chunk_ts"],
+            "listen_started_ts": hb["listen_started_ts"],
+            "wedged": self.is_wedged(),
         }
 
     # ------------------------------------------------------------------
@@ -462,8 +553,11 @@ class OpenWakeWordAdapter:
         threshold: float,
         chunk_size: int,
         sample_rate: int,
+        generation: int,
     ) -> None:
         """Фоновый поток: читает аудио с микрофона и передаёт в openWakeWord."""
+        with self._lock:
+            self._listen_started_ts = time.monotonic()
         try:
             import sounddevice as sd  # type: ignore[import]
         except ImportError:
@@ -504,7 +598,16 @@ class OpenWakeWordAdapter:
                     flat = audio_chunk.flatten()
 
                     with self._lock:
+                        if self._generation != generation:
+                            logger.info(
+                                "OpenWakeWordAdapter: сессия устарела "
+                                "(generation %d != %d) — зомби-тред выходит",
+                                generation, self._generation,
+                            )
+                            break
                         oww = self._oww
+                        if flat.any():
+                            self._last_chunk_ts = time.monotonic()
 
                     if oww is None:
                         break

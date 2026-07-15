@@ -788,4 +788,24 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "severity": "error",
         "dedupe_seconds": 300,
     },
+
+    # audio.wakeword_wedged — WakeWordWatchdog (backend/wake_word_watchdog.py).
+    # Root cause: живой инцидент 2026-07-13 — wake-word _listen_loop тихо завис
+    # до активации CoreAudio (тред жив, кадров нет, исключений нет; Sentry
+    # KRAB-EAR-BACKEND-1J, PaErrorCode -9986). Мягкий reinit невозможен
+    # (тред застрял внутри PortAudio) или не помог — Swift-агент по этому коду
+    # и по wedged:true в wake_word_status выполняет принудительный рестарт
+    # backend (launchctl kickstart -k, rate-limit 30 мин на стороне агента).
+    # user_msg НЕ обещает немедленный рестарт: агент может отложить его
+    # (rate-limit 30 мин / cap подряд-эскалаций).
+    "audio.wakeword_wedged": {
+        "user_msg_ru": (
+            "Wake word завис — требуется перезапуск Krab Ear…"
+        ),
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "error",
+        "dedupe_seconds": 300,
+    },
 }

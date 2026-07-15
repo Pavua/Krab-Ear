@@ -19,20 +19,27 @@ Design (MVP — one shape only, do not add alternate strategies):
   ``RecordingCoreService.handle_stop_recording`` already classifies for
   other reasons — an RMS-below-threshold silence-guard trip, or an empty
   transcript at nonzero duration. ``audio_selfheal_empty_threshold``
-  (default 3) consecutive empty outcomes trigger a soft self-heal: stop the
-  wake-word listener (if one is running), reinitialize PortAudio in-process
-  (``sd._terminate()`` / ``sd._initialize()``), restart the wake-word
-  listener with its previous model/threshold. A single non-empty result at
-  any point resets the streak — the pipeline has proven itself healthy.
+  (default 3) consecutive empty outcomes trigger a soft self-heal by
+  delegating to ``AudioReinitCoordinator.reinit_with_wake_word_restore()``
+  (see ``backend.audio_reinit``) — the coordinator owns the full dance
+  (stop the wake-word listener if running, reinitialize PortAudio
+  in-process, restore the listener with its previous model/threshold) plus
+  the is_recording-guard and the single-flight lock. A single non-empty
+  result at any point resets the streak — the pipeline has proven itself
+  healthy.
 
-  If the streak reaches threshold again right after a reinit attempt (i.e.
-  the very next recording is *also* empty — the soft fix did not help),
-  this escalates loudly via ErrorBus (``audio.stack_wedged``) instead of
-  reinit-looping forever, and resets its own state so it can try the whole
-  cycle again rather than going silent for the rest of the process
-  lifetime. It never restarts the backend process itself — that stays a
-  human call (or BackendSupervisor/HealthMonitor on the Swift side, which
-  already own process-level restarts).
+  A ``DEFERRED_RECORDING``/``BUSY`` outcome from the coordinator means the
+  attempt was deferred, not spent: the streak is left as-is (still >=
+  threshold) so the very next empty result re-evaluates and retries it. Any
+  other outcome (``OK``/``THREAD_HUNG``/``FAILED``) counts as a spent
+  attempt. If the streak reaches threshold again right after a spent
+  attempt (i.e. the very next recording is *also* empty — the soft fix did
+  not help), this escalates loudly via ErrorBus (``audio.stack_wedged``)
+  instead of reinit-looping forever, and resets its own state so it can
+  try the whole cycle again rather than going silent for the rest of the
+  process lifetime. It never restarts the backend process itself — that
+  stays a human call (or BackendSupervisor/HealthMonitor on the Swift
+  side, which already own process-level restarts).
 
 Every collaborator is injected so this class is fully unit-testable with
 plain fakes — no real audio, no real sounddevice, no real
@@ -50,7 +57,6 @@ logger = logging.getLogger("KrabEar.Backend.AudioSelfHeal")
 _THRESHOLD_MIN = 2
 _THRESHOLD_MAX = 10
 _THRESHOLD_DEFAULT = 3
-_WAKE_WORD_THRESHOLD_DEFAULT = 0.5
 
 
 class AudioSelfHealer:
@@ -58,22 +64,13 @@ class AudioSelfHealer:
 
     Parameters
     ----------
-    reinit_audio_backend:
-        Zero-arg callable that reinitializes the audio backend (production:
-        ``sd._terminate(); sd._initialize()``). Only ever called when
-        ``is_recording()`` reports idle.
-    is_recording:
-        Zero-arg callable returning whether a recording is currently active.
-        Consulted at the moment the empty-streak crosses the threshold so a
-        reinit attempt never interrupts live capture; if recording is
-        active the attempt is deferred (not dropped) — the next empty
-        result re-evaluates it.
-    wake_word_adapter:
-        Duck-typed collaborator exposing ``is_running() -> bool``,
-        ``active_model() -> str | None``, ``active_threshold() -> float | None``,
-        ``stop() -> None`` and ``start(model_name, on_detected, threshold=...)``
-        (see ``backend.openwakeword_adapter.OpenWakeWordAdapter``). Optional
-        — pass ``None`` when wake-word wiring is not available.
+    reinit_coordinator:
+        ``backend.audio_reinit.AudioReinitCoordinator`` (or a duck-typed
+        equivalent) exposing ``reinit_with_wake_word_restore() ->
+        ReinitOutcome``. Owns the whole reinit dance — stop/restore the
+        wake-word listener, the is_recording-guard, PortAudio reinit, and
+        the single-flight lock. This class never talks to sounddevice or
+        OpenWakeWordAdapter directly.
     error_bus:
         Duck-typed collaborator exposing ``push(KrabError) -> bool`` (see
         ``backend.error_bus.ErrorBus``). Optional — escalation is skipped
@@ -88,15 +85,11 @@ class AudioSelfHealer:
     def __init__(
         self,
         *,
-        reinit_audio_backend: Callable[[], None],
-        is_recording: Callable[[], bool],
-        wake_word_adapter: Any = None,
+        reinit_coordinator: Any,
         error_bus: Any = None,
         settings_get: Callable[[str, Any], Any] | None = None,
     ) -> None:
-        self._reinit_audio_backend = reinit_audio_backend
-        self._is_recording = is_recording
-        self._wake_word_adapter = wake_word_adapter
+        self._reinit_coordinator = reinit_coordinator
         self._error_bus = error_bus
         self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda _k, d: d)
 
@@ -142,7 +135,11 @@ class AudioSelfHealer:
 
         Passive — never opens/reads a real audio stream itself, only
         inspects an in-memory counter. No-ops entirely (no state mutation)
-        when ``audio_selfheal_enabled`` is False.
+        when ``audio_selfheal_enabled`` is False. When the empty-streak
+        crosses threshold, delegates to
+        ``AudioReinitCoordinator.reinit_with_wake_word_restore()``; a
+        ``DEFERRED_RECORDING``/``BUSY`` outcome means the attempt is
+        deferred (not spent) — the next empty result re-evaluates it.
         """
         if not self._enabled():
             return
@@ -155,24 +152,35 @@ class AudioSelfHealer:
                 return
             if self._reinit_attempted_since_last_success:
                 action = "escalate"
-            elif self._is_recording():
-                # A new recording started in the gap between the empty result
-                # completing and us evaluating the streak here. Never reinit
-                # while audio is actively flowing. Streak is left as-is (still
-                # >= threshold) so the very next empty result re-evaluates —
-                # the attempt is deferred, not dropped.
-                logger.info(
-                    "AudioSelfHealer: streak=%d >= %d, но идёт активная запись — "
-                    "reinit отложен",
-                    self._empty_streak, threshold,
-                )
-                return
             else:
                 action = "reinit"
+                # Eager-set ПОД ТЕМ ЖЕ локом, что и решение (атомарность
+                # старого кода): поздняя запись после долгого танца (до
+                # ~30с из-за _load_model в adapter.start()) перетирала бы
+                # сброс от конкурентного record_success() — залипший True
+                # крал у следующего эпизода его законную попытку reinit.
                 self._reinit_attempted_since_last_success = True
 
         if action == "reinit":
-            self._perform_reinit()
+            from backend.audio_reinit import ReinitOutcome
+
+            logger.warning(
+                "AudioSelfHealer: %d пустых записей подряд (>= %d) — "
+                "запрашиваю переинициализацию аудио-стека",
+                self._empty_streak, threshold,
+            )
+            outcome = self._reinit_coordinator.reinit_with_wake_word_restore()
+            if outcome in (ReinitOutcome.DEFERRED_RECORDING, ReinitOutcome.BUSY):
+                # Попытка отложена, не потрачена — откатываем eager-флаг.
+                # Rollback пишет False (то же направление, что record_success)
+                # — конкурентный сброс не перетирается.
+                with self._lock:
+                    self._reinit_attempted_since_last_success = False
+                logger.info(
+                    "AudioSelfHealer: reinit отложен координатором (%s)",
+                    getattr(outcome, "value", outcome),
+                )
+                return
         elif action == "escalate":
             self._escalate()
             with self._lock:
@@ -180,72 +188,8 @@ class AudioSelfHealer:
                 self._reinit_attempted_since_last_success = False
 
     # ------------------------------------------------------------------
-    # Internal — soft self-heal (reinit) and loud escalation
+    # Internal — loud escalation
     # ------------------------------------------------------------------
-
-    def _perform_reinit(self) -> None:
-        logger.warning(
-            "AudioSelfHealer: %d пустых записей подряд — переинициализация "
-            "аудио-стека (PortAudio)",
-            self._empty_streak,
-        )
-        saved_model: str | None = None
-        saved_threshold: float | None = None
-        wake_word_was_running = False
-
-        if self._wake_word_adapter is not None:
-            try:
-                wake_word_was_running = bool(self._wake_word_adapter.is_running())
-            except Exception:
-                logger.exception("AudioSelfHealer: wake_word_adapter.is_running() упал")
-                wake_word_was_running = False
-            if wake_word_was_running:
-                try:
-                    saved_model = self._wake_word_adapter.active_model()
-                    get_threshold = getattr(self._wake_word_adapter, "active_threshold", None)
-                    saved_threshold = get_threshold() if callable(get_threshold) else None
-                except Exception:
-                    logger.exception(
-                        "AudioSelfHealer: не удалось прочитать состояние wake word перед reinit"
-                    )
-                try:
-                    self._wake_word_adapter.stop()
-                except Exception:
-                    logger.exception("AudioSelfHealer: wake_word_adapter.stop() перед reinit упал")
-
-        try:
-            self._reinit_audio_backend()
-        except Exception:
-            logger.exception("AudioSelfHealer: reinit_audio_backend завершился с исключением")
-
-        if self._wake_word_adapter is not None and wake_word_was_running and saved_model:
-            try:
-                self._wake_word_adapter.start(
-                    saved_model,
-                    self._on_wake_word_detected_after_reinit,
-                    threshold=(
-                        saved_threshold
-                        if saved_threshold is not None
-                        else _WAKE_WORD_THRESHOLD_DEFAULT
-                    ),
-                )
-            except Exception:
-                logger.exception(
-                    "AudioSelfHealer: не удалось перезапустить wake word после reinit"
-                )
-
-    def _on_wake_word_detected_after_reinit(self, model_name: str, score: float) -> None:
-        """Default on_detected callback for the post-reinit wake-word restart.
-
-        Detection propagation to the Swift agent happens via
-        ``OpenWakeWordAdapter._record_detection()`` (called unconditionally
-        inside the listener loop before this callback runs), so this only
-        needs to log.
-        """
-        logger.info(
-            "AudioSelfHealer: wake word обнаружен после reinit (model=%r, score=%.3f)",
-            model_name, score,
-        )
 
     def _escalate(self) -> None:
         logger.error(

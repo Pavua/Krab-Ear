@@ -52,6 +52,7 @@ class HealthCheckService:
         app_version: str = "",
         recorder: Any = None,
         last_stt_engine_ref: list[str] | None = None,
+        wake_word_watchdog: Any = None,
     ) -> None:
         self.store = store
         self._health_checker = health_checker
@@ -69,6 +70,9 @@ class HealthCheckService:
         # last_stt_engine_ref: mutable single-element list updated by BackendService on each transcription.
         # BackendService должен обновлять last_stt_engine_ref[0] при каждом stop_recording.
         self._last_stt_engine_ref: list[str] = last_stt_engine_ref if last_stt_engine_ref is not None else [""]
+        # 2026-07-15 (спека wake-word-watchdog): опциональный — get_diagnostics
+        # деградирует до schema-parity fallback, если watchdog не подключён.
+        self._wake_word_watchdog = wake_word_watchdog
 
     # ------------------------------------------------------------------
     # handle_ping
@@ -171,6 +175,14 @@ class HealthCheckService:
                 "last_engine": self._last_stt_engine_ref[0] if self._last_stt_engine_ref else "",
             },
             "llm": self._llm_rewriter.status() if self._llm_rewriter else {"enabled": False},
+            # 2026-07-15 (спека wake-word-watchdog §4.3): heartbeat-сторож
+            # независимого wake-word аудио-потока. Schema-parity fallback,
+            # если watchdog не подключён (не роняет get_diagnostics).
+            "wake_word_watchdog": (
+                self._wake_word_watchdog.state()
+                if self._wake_word_watchdog is not None
+                else {"enabled": False, "wired": False}
+            ),
             # wave-1770 HIGH: suppress transcript count in privacy mode;
             # data_dir paths are always included (needed for diagnostics tooling
             # and don't expose transcript content).
