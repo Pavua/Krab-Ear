@@ -11,6 +11,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -123,6 +124,36 @@ class HeartbeatTests(unittest.TestCase):
         self.assertIsNone(hb["last_chunk_ts"])
         self.assertIsNone(hb["listen_started_ts"])
         self.assertFalse(self.adapter.is_wedged())
+
+    def test_real_start_wires_reset_session_state(self):
+        # Интеграционная проводка: НАСТОЯЩИЙ start() обязан звать
+        # _reset_session_state() (класс «test-validates-the-hole» —
+        # хелпер-тест выше зелёный, даже если вызов из start() удалить).
+        self.adapter._last_chunk_ts = 123.0
+        self.adapter._listen_started_ts = 120.0
+        self.adapter.set_wedged(True)
+        self.adapter._oww_available = True  # обходим проверку установленности либы
+        # Пустой фейковый стрим: первый read() взводит stop_event и отдаёт
+        # нули — спавнутый тред выходит сам, не штампуя last_chunk_ts.
+        self.fake_sd.InputStream = lambda **kw: _FakeStream(
+            [], self.adapter._stop_event
+        )
+        with patch.object(self.adapter, "_load_model", return_value=_FakeOWW()):
+            self.adapter.start("hey_jarvis", on_detected=lambda n, s: None)
+        try:
+            thread = self.adapter._thread
+            if thread is not None:
+                thread.join(timeout=2.0)
+                self.assertFalse(thread.is_alive())
+            hb = self.adapter.heartbeat()
+            # Стейл 123.0 обязан быть сброшен; нулевой стрим не штампует.
+            self.assertIsNone(hb["last_chunk_ts"])
+            # Стейл 120.0 сброшен start(), затем перештампован свежим
+            # monotonic самим циклом.
+            self.assertNotEqual(hb["listen_started_ts"], 120.0)
+            self.assertFalse(self.adapter.is_wedged())
+        finally:
+            self.adapter.stop()  # не утекаем тред в tearDown/соседние тесты
 
 
 class _FakeThreadCleanExit:

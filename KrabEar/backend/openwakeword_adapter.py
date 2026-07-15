@@ -86,7 +86,8 @@ class OpenWakeWordAdapter:
         self._last_chunk_ts: float | None = None
         self._listen_started_ts: float | None = None
         # Поколение сессии: отвисший «зомби»-тред старой сессии видит чужое
-        # поколение и выходит, не захватывая микрофон параллельно с новым.
+        # поколение и выходит, не публикуя heartbeat/детекции чужой сессии
+        # (один bounded read до проверки — принятый остаточный риск, спека §6).
         self._generation: int = 0
         # Выставляется watchdog'ом, когда мягкое лечение невозможно/не помогло.
         self._wedged: bool = False
