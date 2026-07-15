@@ -91,6 +91,11 @@ class OpenWakeWordAdapter:
         self._generation: int = 0
         # Выставляется watchdog'ом, когда мягкое лечение невозможно/не помогло.
         self._wedged: bool = False
+        # 2026-07-15 (Fix A, ревью Task 4): окно обслуживания координатора.
+        # Пока True — start() отказывает (и IPC wake_word_start вернёт
+        # ok:false): между adapter.stop() и sd._terminate() чужой старт
+        # спавнил бы тред, под которым исполнится Pa_Terminate (crash-класс).
+        self._maintenance: bool = False
         self._oww_available = self._check_lib_available()
         # F2: callable to read runtime settings (e.g. privacy_mode_enabled)
         self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
@@ -165,6 +170,11 @@ class OpenWakeWordAdapter:
             ValueError: Если модель не найдена.
         """
         with self._lock:
+            if self._maintenance:
+                raise RuntimeError(
+                    "wake word занят обслуживанием аудио-стека (reinit) — "
+                    "повторите позже"
+                )
             now = time.monotonic()
             if now < self._stream_failure_cooldown_until:
                 remaining = self._stream_failure_cooldown_until - now
@@ -294,6 +304,15 @@ class OpenWakeWordAdapter:
     def is_wedged(self) -> bool:
         with self._lock:
             return self._wedged
+
+    def begin_maintenance(self) -> None:
+        """Координатор помечает опасное окно танца (stop → Pa_Terminate)."""
+        with self._lock:
+            self._maintenance = True
+
+    def end_maintenance(self) -> None:
+        with self._lock:
+            self._maintenance = False
 
     def _reset_session_state(self) -> None:
         """Чистое состояние новой сессии. Вызывать ТОЛЬКО под self._lock

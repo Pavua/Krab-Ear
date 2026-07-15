@@ -46,6 +46,12 @@ class _FakeAdapter:
         self._running = True
         on_detected("smoke", 0.99)
 
+    def begin_maintenance(self):
+        self.calls.append("begin_maintenance")
+
+    def end_maintenance(self):
+        self.calls.append("end_maintenance")
+
 
 def _make(adapter=None, recording=False, reinit_exc=None):
     calls: list[str] = []
@@ -69,7 +75,11 @@ class DanceTests(unittest.TestCase):
         coord, calls = _make(adapter=adapter)
         outcome = coord.reinit_with_wake_word_restore()
         self.assertEqual(outcome, ReinitOutcome.OK)
-        self.assertEqual(adapter.calls, ["stop", "start"])
+        # Порядок stop→start; полная последовательность с maintenance-окном
+        # пинится отдельно в test_maintenance_window_covers_stop_and_reinit_only.
+        self.assertEqual(
+            [c for c in adapter.calls if c in ("stop", "start")], ["stop", "start"],
+        )
         self.assertEqual(calls, ["reinit"])
         self.assertEqual(adapter.start_args, [("krab_ru", 0.42)])
 
@@ -82,7 +92,7 @@ class DanceTests(unittest.TestCase):
         adapter = _FakeAdapter(running=False)
         coord, calls = _make(adapter=adapter)
         self.assertEqual(coord.reinit_with_wake_word_restore(), ReinitOutcome.OK)
-        self.assertEqual(adapter.calls, [])
+        self.assertEqual([c for c in adapter.calls if c in ("stop", "start")], [])
         self.assertEqual(calls, ["reinit"])
 
     def test_threshold_none_falls_back_to_default(self):
@@ -110,7 +120,9 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(
             coord.reinit_with_wake_word_restore(), ReinitOutcome.THREAD_HUNG,
         )
-        self.assertEqual(adapter.calls, ["stop"])
+        self.assertEqual(
+            [c for c in adapter.calls if c in ("stop", "start")], ["stop"],
+        )
         self.assertEqual(calls, [])  # sd._terminate НЕ вызывался
 
     def test_legacy_stop_returning_none_is_success(self):
@@ -137,7 +149,9 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(
             coord.reinit_with_wake_word_restore(), ReinitOutcome.FAILED,
         )
-        self.assertEqual(adapter.calls, ["stop", "start"])
+        self.assertEqual(
+            [c for c in adapter.calls if c in ("stop", "start")], ["stop", "start"],
+        )
 
     def test_sequential_calls_release_flight_lock(self):
         # Регрессия-гард: сломанный try/finally в reinit_with_wake_word_restore
@@ -167,7 +181,11 @@ class GuardTests(unittest.TestCase):
             ReinitOutcome.DEFERRED_RECORDING,
         )
         self.assertEqual(calls, [])  # Pa_Terminate НЕ вызывался
-        self.assertEqual(adapter.calls, ["stop", "start"])  # слушатель восстановлен
+        # Слушатель восстановлен; maintenance-порядок пинится отдельно
+        # в test_maintenance_cleared_on_mid_dance_defer.
+        self.assertEqual(
+            [c for c in adapter.calls if c in ("stop", "start")], ["stop", "start"],
+        )
         self.assertEqual(adapter.start_args, [("krab_ru", 0.42)])
 
     def test_is_recording_exception_fails_closed(self):
@@ -187,6 +205,45 @@ class GuardTests(unittest.TestCase):
         )
         self.assertEqual(calls, [])
         self.assertEqual(adapter.calls, [])  # до stop() даже не дошли
+
+    def test_maintenance_window_covers_stop_and_reinit_only(self):
+        adapter = _FakeAdapter(running=True, model="krab_ru", threshold=0.42)
+        coord, calls = _make(adapter=adapter)
+        self.assertEqual(coord.reinit_with_wake_word_restore(), ReinitOutcome.OK)
+        # Окно: begin → stop → (reinit) → end → restore-start ПОСЛЕ end.
+        self.assertEqual(
+            adapter.calls,
+            ["begin_maintenance", "stop", "end_maintenance", "start"],
+        )
+
+    def test_maintenance_cleared_on_thread_hung(self):
+        adapter = _FakeAdapter(stop_result=False)
+        coord, _ = _make(adapter=adapter)
+        self.assertEqual(
+            coord.reinit_with_wake_word_restore(), ReinitOutcome.THREAD_HUNG,
+        )
+        self.assertEqual(
+            adapter.calls, ["begin_maintenance", "stop", "end_maintenance"],
+        )
+
+    def test_maintenance_cleared_on_mid_dance_defer(self):
+        answers = [False, True]
+        adapter = _FakeAdapter(running=True)
+        coord = AudioReinitCoordinator(
+            reinit_audio_backend=lambda: None,
+            is_recording=lambda: answers.pop(0),
+            wake_word_adapter=adapter,
+        )
+        self.assertEqual(
+            coord.reinit_with_wake_word_restore(),
+            ReinitOutcome.DEFERRED_RECORDING,
+        )
+        self.assertEqual(adapter.calls[0], "begin_maintenance")
+        self.assertIn("end_maintenance", adapter.calls)
+        # restore-start (оживление слушателя) идёт ПОСЛЕ снятия окна
+        self.assertGreater(
+            adapter.calls.index("start"), adapter.calls.index("end_maintenance"),
+        )
 
 
 if __name__ == "__main__":

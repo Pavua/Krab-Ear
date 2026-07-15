@@ -15,6 +15,13 @@ sd._terminate() НЕЛЬЗЯ (Pa_Terminate при заблокированном
 (спека §4.2) — запись, стартовавшая за время adapter.stop() (join до 3с),
 не должна попасть под Pa_Terminate; остаточное µс-окно между re-check и
 _terminate принято (неустранимо без лока на уровне рекордера).
+
+Третий инвариант: maintenance-окно stop→Pa_Terminate закрыто для чужих
+start() через begin_maintenance()/end_maintenance() адаптера — иначе
+Swift-поллер (self-heal, тик 0.75с), увидев running:false после нашего
+stop(), спавнит НОВЫЙ тред слушателя, под которым исполнится Pa_Terminate
+(гонка с поллер-self-heal — Critical ревью Task 4). Окно закрывается ДО
+restore-фазы: там терминейт уже позади, гонка стартов — benign no-op.
 """
 
 from __future__ import annotations
@@ -94,66 +101,90 @@ class AudioReinitCoordinator:
         saved_model: str | None = None
         saved_threshold: float | None = None
         was_running = False
+        deferred_mid_dance = False
+        reinit_failed = False
         adapter = self._wake_word_adapter
 
-        if adapter is not None:
-            try:
-                was_running = bool(adapter.is_running())
-            except Exception:
-                logger.exception("AudioReinitCoordinator: is_running() упал")
-                was_running = False
-            if was_running:
+        # Fix A (Critical, ревью Task 4): окно обслуживания. Пока открыто,
+        # adapter.start() отказывает — иначе Swift-поллер (тик 0.75с), увидев
+        # running:false после нашего stop(), спавнит НОВЫЙ тред слушателя,
+        # под которым исполнится Pa_Terminate (crash-класс). finally закрывает
+        # окно ДО _restore_listener: в restore-фазе терминейт уже позади,
+        # гонка стартов там вырождается в benign no-op («уже запущен»-гард).
+        maintenance_guard = getattr(adapter, "begin_maintenance", None)
+        if callable(maintenance_guard):
+            maintenance_guard()
+        try:
+            if adapter is not None:
                 try:
-                    saved_model = adapter.active_model()
-                    get_thr = getattr(adapter, "active_threshold", None)
-                    saved_threshold = get_thr() if callable(get_thr) else None
+                    was_running = bool(adapter.is_running())
+                except Exception:
+                    logger.exception("AudioReinitCoordinator: is_running() упал")
+                    was_running = False
+                if was_running:
+                    try:
+                        saved_model = adapter.active_model()
+                        get_thr = getattr(adapter, "active_threshold", None)
+                        saved_threshold = get_thr() if callable(get_thr) else None
+                    except Exception:
+                        logger.exception(
+                            "AudioReinitCoordinator: не удалось прочитать "
+                            "состояние wake word перед reinit"
+                        )
+                    try:
+                        stopped = adapter.stop()
+                    except Exception:
+                        logger.exception(
+                            "AudioReinitCoordinator: adapter.stop() упал"
+                        )
+                        stopped = False
+                    # None — легаси duck-type без возврата: трактуем как успех.
+                    if stopped is False:
+                        logger.error(
+                            "AudioReinitCoordinator: тред слушателя не вышел — "
+                            "Pa_Terminate небезопасен, THREAD_HUNG"
+                        )
+                        return ReinitOutcome.THREAD_HUNG
+
+            # TOCTOU-окно: между первым чеком и этим местом лежал adapter.stop()
+            # с join до 3с — диктовка могла стартовать. Pa_Terminate под живым
+            # стримом рекордера — тот же crash-класс, что и THREAD_HUNG-инвариант.
+            # Остаточное окно (µс между этим чеком и _terminate) неустранимо без
+            # лока на уровне рекордера — принято.
+            try:
+                recording_started_mid_dance = bool(self._is_recording())
+            except Exception:
+                logger.exception(
+                    "AudioReinitCoordinator: is_recording() упал (re-check)"
+                )
+                recording_started_mid_dance = True  # fail-closed
+            if recording_started_mid_dance:
+                logger.info(
+                    "AudioReinitCoordinator: запись стартовала во время танца — "
+                    "reinit отложен, слушатель восстанавливается"
+                )
+                deferred_mid_dance = True
+            else:
+                logger.warning(
+                    "AudioReinitCoordinator: переинициализация аудио-стека "
+                    "(PortAudio)"
+                )
+                try:
+                    self._reinit_audio_backend()
                 except Exception:
                     logger.exception(
-                        "AudioReinitCoordinator: не удалось прочитать "
-                        "состояние wake word перед reinit"
+                        "AudioReinitCoordinator: reinit_audio_backend завершился "
+                        "с исключением"
                     )
-                try:
-                    stopped = adapter.stop()
-                except Exception:
-                    logger.exception("AudioReinitCoordinator: adapter.stop() упал")
-                    stopped = False
-                # None — легаси duck-type без возврата: трактуем как успех.
-                if stopped is False:
-                    logger.error(
-                        "AudioReinitCoordinator: тред слушателя не вышел — "
-                        "Pa_Terminate небезопасен, THREAD_HUNG"
-                    )
-                    return ReinitOutcome.THREAD_HUNG
+                    reinit_failed = True
+        finally:
+            end_guard = getattr(adapter, "end_maintenance", None)
+            if callable(end_guard):
+                end_guard()
 
-        # TOCTOU-окно: между первым чеком и этим местом лежал adapter.stop()
-        # с join до 3с — диктовка могла стартовать. Pa_Terminate под живым
-        # стримом рекордера — тот же crash-класс, что и THREAD_HUNG-инвариант.
-        # Остаточное окно (µс между этим чеком и _terminate) неустранимо без
-        # лока на уровне рекордера — принято.
-        try:
-            recording_started_mid_dance = bool(self._is_recording())
-        except Exception:
-            logger.exception("AudioReinitCoordinator: is_recording() упал (re-check)")
-            recording_started_mid_dance = True  # fail-closed
-        if recording_started_mid_dance:
-            logger.info(
-                "AudioReinitCoordinator: запись стартовала во время танца — "
-                "reinit отложен, слушатель восстанавливается"
-            )
+        if deferred_mid_dance:
             self._restore_listener(adapter, was_running, saved_model, saved_threshold)
             return ReinitOutcome.DEFERRED_RECORDING
-
-        reinit_failed = False
-        logger.warning(
-            "AudioReinitCoordinator: переинициализация аудио-стека (PortAudio)"
-        )
-        try:
-            self._reinit_audio_backend()
-        except Exception:
-            logger.exception(
-                "AudioReinitCoordinator: reinit_audio_backend завершился с исключением"
-            )
-            reinit_failed = True
 
         if not self._restore_listener(adapter, was_running, saved_model, saved_threshold):
             reinit_failed = True

@@ -217,5 +217,33 @@ class StatusFieldsTests(unittest.TestCase):
         self.assertFalse(self.adapter.is_wedged())
 
 
+class MaintenanceGuardTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.adapter = OpenWakeWordAdapter(data_dir=self.tmp)
+
+    def test_start_refused_during_maintenance(self):
+        self.adapter._oww_available = True
+        self.adapter.begin_maintenance()
+        with self.assertRaises(RuntimeError) as ctx:
+            self.adapter.start("hey_jarvis", lambda n, s: None)
+        self.assertIn("обслуживанием", str(ctx.exception))
+
+    def test_handle_start_returns_ok_false_during_maintenance(self):
+        self.adapter._oww_available = True
+        self.adapter.begin_maintenance()
+        result = self.adapter.handle_wake_word_start({"model": "hey_jarvis"})
+        self.assertFalse(result["ok"])
+
+    def test_end_maintenance_reopens_start(self):
+        self.adapter.begin_maintenance()
+        self.adapter.end_maintenance()
+        # без библиотеки start() падает ПО ДРУГОЙ причине (oww не установлен)
+        self.adapter._oww_available = False
+        with self.assertRaises(RuntimeError) as ctx:
+            self.adapter.start("hey_jarvis", lambda n, s: None)
+        self.assertIn("openwakeword", str(ctx.exception).lower())
+
+
 if __name__ == "__main__":
     unittest.main()
