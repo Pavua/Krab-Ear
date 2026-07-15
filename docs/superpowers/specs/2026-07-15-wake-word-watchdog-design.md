@@ -185,9 +185,17 @@ class WakeWordWatchdog:
    принимает следующий шаг по heartbeat.)
 3. `listen_started_ts` ещё `None` (тред спавнут, но не вошёл в цикл —
    микросекундное окно) → считается свежим, no-op.
-   Иначе `staleness = clock() - max(listen_started_ts, last_chunk_ts or 0)`;
-   если `staleness < wake_word_stale_sec` → heartbeat свежий → сброс эпизода
-   (включая `wedged=False`, если был выставлен), no-op.
+   Иначе — два РАЗНЫХ условия (уточнение против ловушки heal-цикла,
+   найдено при written-plans self-review):
+   - **close-условие**: `last_chunk_ts` не `None` И `clock() - last_chunk_ts
+     < wake_word_stale_sec` → эпизод закрывается (включая `wedged=False`,
+     если был выставлен), no-op. Эпизод закрывает ТОЛЬКО реальный свежий
+     чанк — НЕ свежий `listen_started_ts`: иначе после heal новая сессия
+     закрывала бы эпизод своим grace-окном, и watchdog зациклился бы
+     heal'ом каждые ~35с, никогда не эскалируя.
+   - **alarm-условие**: `staleness = clock() - max(listen_started_ts,
+     last_chunk_ts or 0)`; если `staleness < wake_word_stale_sec` —
+     grace-окно прогрева: не алармим И НЕ закрываем эпизод, no-op.
 4. Stale, heal в этом эпизоде ещё не пробовали →
    `coordinator.reinit_with_wake_word_restore()`:
    - `OK` → пометить «heal попробован», ждать следующего тика (если heartbeat
@@ -198,11 +206,14 @@ class WakeWordWatchdog:
    - `FAILED` → пометить «heal попробован» (эквивалент неудачной попытки).
 5. Эскалация (однократно на эпизод): `adapter.set_wedged(True)` + ErrorBus
    `audio.wakeword_wedged` + `logger.error`. Дальше watchdog молчит до
-   закрытия эпизода (свежий heartbeat / новая сессия / рестарт процесса) —
-   реакция переходит на Swift-сторону.
+   закрытия эпизода (реальный свежий чанк / неактивная сессия / рестарт
+   процесса) — реакция переходит на Swift-сторону.
 
 «Эпизод» = непрерывный интервал staleness внутри одной сессии слушателя.
-Закрывается свежим heartbeat, стартом новой сессии или рестартом процесса.
+Закрывается ТОЛЬКО реальным свежим чанком (`last_chunk_ts`), неактивной
+сессией (Swift снял слушатель — паузы recording/conversation/TTS/privacy)
+или рестартом процесса. Свежий `listen_started_ts` сам по себе эпизод НЕ
+закрывает (см. close-условие в шаге 3).
 
 Жизненный цикл: конструируется в `service.py` рядом с `AudioSelfHealer`
 (см. 4.5), `start()` сразу же (тред дешёвый: один лок-рид каждые 5с),
