@@ -1079,8 +1079,8 @@ class BackendService:
             # Двойной getattr, не прямой доступ: десятки тестовых фейков
             # transcriber (test_backend_service.py и сиблинги) не несут ни
             # .engine, ни тем более .engine.diarize_window —
-            # MeetingSessionService уже умеет None (Task 4, DIAR_WINDOW-тик
-            # молча не планируется), это НЕ костыль, а использование
+            # MeetingSessionService уже умеет None (DIAR_WINDOW-тик деградирует
+            # с одним громким WARN на сессию), это НЕ костыль, а использование
             # существующего контракта.
             diarize_window=getattr(
                 getattr(self.transcriber, "engine", None), "diarize_window", None
