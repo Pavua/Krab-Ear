@@ -1076,6 +1076,16 @@ class BackendService:
             action_items_extractor=self._action_items_extractor,
             settings_get=self._get_runtime_setting,
             event_bus=event_bus,
+            # Двойной getattr, не прямой доступ: десятки тестовых фейков
+            # transcriber (test_backend_service.py и сиблинги) не несут ни
+            # .engine, ни тем более .engine.diarize_window —
+            # MeetingSessionService уже умеет None (Task 4, DIAR_WINDOW-тик
+            # молча не планируется), это НЕ костыль, а использование
+            # существующего контракта.
+            diarize_window=getattr(
+                getattr(self.transcriber, "engine", None), "diarize_window", None
+            ),
+            data_dir=self.store.data_dir,
         )
         self._calendar_linker = CalendarLinker(
             cache_minutes=int(settings.CALENDAR_LINK_CACHE_MIN)

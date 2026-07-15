@@ -62,6 +62,8 @@ def main() -> int:
         st = call(sock, "get_meeting_live_state").get("result", {})
         check("state active", st.get("active") is True, str(st)[:200])
         check("no crash in degraded", isinstance(st.get("degraded"), dict))
+        check("live_state: speakers — список",
+              isinstance(st.get("speakers"), list), str(st.get("speakers"))[:120])
         print(f"    transcript_len={st.get('transcript_len')} tail={st.get('transcript_tail', '')[:80]!r}")
 
         r = call(sock, "meeting_stop")
