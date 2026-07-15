@@ -78,29 +78,51 @@ class HeartbeatTests(unittest.TestCase):
         else:
             sys.modules.pop("sounddevice", None)
 
-    def _run_loop(self, chunks, generation=None):
+    def _run_loop(self, chunks, generation=None, oww=None):
         """Синхронный прогон _listen_loop с фейковым стримом."""
         self.adapter._stop_event.clear()
         stream = _FakeStream(chunks, self.adapter._stop_event)
         self.fake_sd.InputStream = lambda **kw: stream
-        self.adapter._oww = _FakeOWW()
+        self.adapter._oww = oww if oww is not None else _FakeOWW()
         gen = generation if generation is not None else self.adapter._generation
         self.adapter._listen_loop(
             threshold=0.5, chunk_size=4, sample_rate=16000, generation=gen,
         )
         return stream
 
+    def _snapshotting_oww(self):
+        """Heartbeat читается ВО ВРЕМЯ работы цикла (watchdog/status);
+        после выхода цикл легитимно чистит сессию (chip Finding 3) —
+        поэтому наблюдаем штампы снапшотами из predict()."""
+        adapter = self.adapter
+
+        class _SnapshottingOWW:
+            snapshots: list = []
+
+            def predict(self, arr):
+                type(self).snapshots.append(adapter.heartbeat())
+                return {}
+
+        _SnapshottingOWW.snapshots = []
+        return _SnapshottingOWW()
+
     def test_nonzero_chunk_stamps_heartbeat(self):
-        self._run_loop([_nonzero_chunk()])
+        oww = self._snapshotting_oww()
+        self._run_loop([_nonzero_chunk()], oww=oww)
+        during = oww.snapshots[0]
+        self.assertIsNotNone(during["listen_started_ts"])
+        self.assertIsNotNone(during["last_chunk_ts"])
+        # После выхода цикла сессия зачищена (post-exit cleanup, Finding 3).
         hb = self.adapter.heartbeat()
-        self.assertIsNotNone(hb["listen_started_ts"])
-        self.assertIsNotNone(hb["last_chunk_ts"])
+        self.assertIsNone(hb["last_chunk_ts"])
+        self.assertIsNone(hb["listen_started_ts"])
 
     def test_zero_chunks_do_not_stamp_heartbeat(self):
-        self._run_loop([_zero_chunk(), _zero_chunk()])
-        hb = self.adapter.heartbeat()
-        self.assertIsNotNone(hb["listen_started_ts"])
-        self.assertIsNone(hb["last_chunk_ts"])
+        oww = self._snapshotting_oww()
+        self._run_loop([_zero_chunk(), _zero_chunk()], oww=oww)
+        for during in oww.snapshots:
+            self.assertIsNotNone(during["listen_started_ts"])
+            self.assertIsNone(during["last_chunk_ts"])
 
     def test_stale_generation_exits_loop_early(self):
         # Поколение адаптера ушло вперёд — «зомби»-тред обязан выйти,
@@ -257,6 +279,113 @@ class MaintenanceGuardTests(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             self.adapter.start("hey_jarvis", lambda n, s: None)
         self.assertIn("openwakeword", str(ctx.exception).lower())
+
+
+class _RaisingStream:
+    """Контекст-менеджер, падающий на входе — синхронная ошибка открытия
+    микрофона (класс circuit breaker'а, KRAB-EAR-BACKEND-1J)."""
+
+    def __enter__(self):
+        raise RuntimeError("mic busy")
+
+    def __exit__(self, *exc):
+        return False
+
+
+class LoopExitCleanupTests(unittest.TestCase):
+    """Chip Finding 3 (Fable-гейт волны watchdog): смерть цикла не должна
+    оставлять сигнатуру «мёртвой сессии» (running=False, model!=None) —
+    иначе класс мгновенных падений старта, который до волны тихо гасился
+    circuit-breaker'ом, получает kickstart вместо cooldown."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.adapter = OpenWakeWordAdapter(data_dir=self.tmp)
+        self._sd_was_present = "sounddevice" in sys.modules
+        self._sd_saved = sys.modules.get("sounddevice")
+        self.fake_sd = types.ModuleType("sounddevice")
+        sys.modules["sounddevice"] = self.fake_sd
+
+    def tearDown(self):
+        if self._sd_was_present:
+            sys.modules["sounddevice"] = self._sd_saved
+        else:
+            sys.modules.pop("sounddevice", None)
+
+    def _seed_session(self, generation=1, model="hey_jarvis"):
+        """Состояние, которое start() оставляет перед спавном треда."""
+        self.adapter._generation = generation
+        self.adapter._active_model = model
+        self.adapter._active_threshold = 0.5
+        self.adapter._oww = _FakeOWW()
+        self.adapter._stop_event.clear()
+
+    def _assert_session_cleared(self):
+        self.assertIsNone(self.adapter.active_model())
+        self.assertIsNone(self.adapter.active_threshold())
+        self.assertIsNone(self.adapter._oww)
+        hb = self.adapter.heartbeat()
+        self.assertIsNone(hb["last_chunk_ts"])
+        self.assertIsNone(hb["listen_started_ts"])
+
+    def test_exception_death_clears_session_state(self):
+        self._seed_session()
+        self.fake_sd.InputStream = lambda **kw: _RaisingStream()
+        self.adapter._listen_loop(
+            threshold=0.5, chunk_size=4, sample_rate=16000, generation=1,
+        )
+        self._assert_session_cleared()
+        # Существующая circuit-breaker семантика не потеряна.
+        self.assertEqual(self.adapter._consecutive_stream_failures, 1)
+        # wedged — домен watchdog'а, cleanup его не трогает.
+        self.assertFalse(self.adapter.is_wedged())
+
+    def test_zombie_exception_death_does_not_clobber_new_session(self):
+        # Новая сессия (generation=5) владеет полями; зомби старого
+        # поколения умирает с исключением — поля новой сессии целы.
+        self._seed_session(generation=5, model="krab_ru")
+        self.adapter._last_chunk_ts = 111.0
+        self.adapter._listen_started_ts = 110.0
+        self.fake_sd.InputStream = lambda **kw: _RaisingStream()
+        self.adapter._listen_loop(
+            threshold=0.5, chunk_size=4, sample_rate=16000, generation=4,
+        )
+        self.assertEqual(self.adapter.active_model(), "krab_ru")
+        self.assertEqual(self.adapter.active_threshold(), 0.5)
+        self.assertIsNotNone(self.adapter._oww)
+        # listen_started_ts перештампован зомби на входе в цикл — известная
+        # косметика (стартовый штамп идёт до generation-проверки); несущие
+        # поля сессии зомби не тронул.
+        self.assertEqual(self.adapter._last_chunk_ts, 111.0)
+
+    def test_privacy_break_clears_session_state(self):
+        # Backend-side privacy-флип (без Swift-stop): цикл выходит по
+        # _privacy_blocked — сигнатуры «мёртвой сессии» остаться не должно,
+        # иначе watchdog эскалировал бы kickstart при ВКЛЮЧЁННОМ privacy.
+        adapter = OpenWakeWordAdapter(
+            data_dir=self.tmp,
+            settings_get=lambda k, d: True if k == "privacy_mode_enabled" else d,
+        )
+        adapter._generation = 1
+        adapter._active_model = "hey_jarvis"
+        adapter._active_threshold = 0.5
+        adapter._oww = _FakeOWW()
+        stream = _FakeStream([_nonzero_chunk()], adapter._stop_event)
+        self.fake_sd.InputStream = lambda **kw: stream
+        adapter._listen_loop(
+            threshold=0.5, chunk_size=4, sample_rate=16000, generation=1,
+        )
+        self.assertIsNone(adapter.active_model())
+        self.assertIsNone(adapter._oww)
+        self.assertEqual(stream.reads, 0)  # privacy-гард сработал до чтения
+
+    def test_import_error_path_clears_session_state(self):
+        self._seed_session()
+        sys.modules["sounddevice"] = None  # import поднимет ImportError
+        self.adapter._listen_loop(
+            threshold=0.5, chunk_size=4, sample_rate=16000, generation=1,
+        )
+        self._assert_session_cleared()
 
 
 if __name__ == "__main__":

@@ -548,6 +548,26 @@ class OpenWakeWordAdapter:
         logger.info("OpenWakeWordAdapter: встроенная модель %r загружена", model_name)
         return result[0]
 
+    def _cleanup_session_after_loop_exit(self, generation: int) -> None:
+        """Смерть цикла (exception/ImportError/privacy-break) раньше оставляла
+        `_active_model` выставленным — для watchdog'а это сигнатура «мёртвой
+        сессии» (chip по Finding 3 Fable-гейта волны watchdog): класс
+        мгновенных падений старта, который до волны тихо гасился
+        circuit-breaker'ом, получал бы kickstart вместо cooldown; backend-side
+        privacy-break — тем более. Чистим generation-guarded: зомби-тред
+        старого поколения не смеет затирать поля НОВОЙ сессии (start() бампит
+        поколение под этим же локом). Штатный stop()-выход даёт здесь no-op
+        (поля уже занулены), wedged — домен watchdog'а, не трогаем."""
+        with self._lock:
+            if self._generation != generation:
+                return
+            self._oww = None
+            self._active_model = None
+            self._active_threshold = None
+            self._last_detection = None
+            self._last_chunk_ts = None
+            self._listen_started_ts = None
+
     def _listen_loop(
         self,
         threshold: float,
@@ -564,6 +584,7 @@ class OpenWakeWordAdapter:
             logger.error(
                 "OpenWakeWordAdapter: sounddevice не установлен"
             )
+            self._cleanup_session_after_loop_exit(generation)
             return
 
         logger.debug(
@@ -633,3 +654,8 @@ class OpenWakeWordAdapter:
                         self._consecutive_stream_failures,
                         _STREAM_FAILURE_COOLDOWN_SEC,
                     )
+        finally:
+            # Любой выход цикла (exception, privacy-break, oww-None,
+            # generation-break, штатный stop) — сессия либо чистится, либо
+            # generation-гард защищает поля новой сессии.
+            self._cleanup_session_after_loop_exit(generation)
