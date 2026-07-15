@@ -223,8 +223,10 @@ class WakeWordWatchdog:
    диктует чаще, чем раз в ~(stale+tick), легитимные паузы сбрасывали бы
    эпизод раньше второй stale-проверки, и сломанный навсегда поток лечился
    бы вечно без эскалации. ≥3 heal'ов в окне → эскалация `heal_storm`
-   вместо четвёртого heal'а (DEFERRED/BUSY-ретраи в историю не попадают).
-   Иначе → `coordinator.reinit_with_wake_word_restore()`:
+   вместо четвёртого heal'а. DEFERRED/BUSY-ретраи в историю не попадают;
+   THREAD_HUNG-танцы ПОПАДАЮТ (Fable-гейт, 1b: каждый стоил 3с stop-join
+   и оставил зомби-тред — respawn-циклы при персистентном клине обязаны
+   капиться). Иначе → `coordinator.reinit_with_wake_word_restore()`:
    - `OK` → пометить «heal попробован», ждать следующего тика (если heartbeat
      ожил — эпизод закроется в п.3; если снова stale → п.5).
    - `DEFERRED_RECORDING` → ничего не помечать, повтор на следующем тике.
@@ -257,7 +259,9 @@ class WakeWordWatchdog:
 В `ERROR_REGISTRY` (`backend/error_codes.py`), компонент `audio` — рядом с
 существующим `audio.stack_wedged` (категории `wakeword` в реестре нет,
 не заводим ради одного кода): severity `error`, `user_msg_ru` вида
-«Wake word завис — перезапускаю Krab Ear…», `actionable=False`. Пуш идёт через существующий
+«Wake word завис — требуется перезапуск Krab Ear…» (текст НЕ обещает
+немедленный рестарт — агент может отложить его по rate-limit/give-up cap),
+`actionable=False`. Пуш идёт через существующий
 `ErrorBus.push` → дедуп/ring buffer/Sentry-tier бесплатно; toast у
 владельца появится через живой `ErrorBusPoller`-путь.
 
@@ -287,19 +291,46 @@ class WakeWordWatchdog:
 
 ```swift
 struct WedgedEscalationTracker {
-    static let minGapSec: TimeInterval = 1800  // ≥30 мин между рестартами
+    static let minGapSec: TimeInterval = 1800   // ≥30 мин между рестартами
+    static let maxConsecutive = 3               // give-up cap (Fable-гейт, F2)
     private var lastEscalationAt: TimeInterval?
+    private(set) var consecutiveEscalations = 0
+    var exhausted: Bool                          // >= maxConsecutive
+    mutating func noteHealthy()                  // реальный чанк → cap перевзведён
     mutating func shouldEscalate(wedged: Bool, now: TimeInterval) -> Bool
-    // true ровно когда: wedged && (lastEscalationAt == nil ||
+    // true ровно когда: wedged && !exhausted && (lastEscalationAt == nil ||
     //                              now - lastEscalationAt >= minGapSec)
 }
 ```
 
-- `WakeWordPoller.tick()`: парсит `wedged` из `wake_word_status`; решение
-  `tracker.shouldEscalate` → лог + injected callback
-  `onWedgedEscalation: () -> Void` (конструктор поллера получает его так же,
-  как `onDetection`). Гонки in-flight покрыты существующим гардом
-  (`timer != nil, pausedReasons.isEmpty`).
+- **Give-up cap (Fable-гейт волны, Finding 2)**: restart-immune состояния
+  микрофона (громкость входа 0 / hardware mute / TCC-нули) рестарт процесса
+  НЕ лечит — без капа kickstart повторялся бы каждые 30 минут навсегда
+  (48/сутки, каждый убивает in-flight работу backend'а — регрессия против
+  baseline «тихо молчащий wake word»). После `maxConsecutive` эскалаций
+  без единого здорового сигнала между ними — авто-рестарты прекращаются,
+  однократный actionable-тост «проверьте микрофон / выключите тумблер»
+  (callback `onWedgedGiveUp`). Здоровый сигнал = ПРИСУТСТВИЕ
+  `last_chunk_ts` в status (реально захваченный чанк сессии); wedged-флап
+  (start() временно сбрасывает флаг) здоровьем не считается. Принятая
+  граница семантики: цикл «kickstart реально оживил мик на время → снова
+  клин» перевзводит cap каждый цикл — это осознанно (каждый рестарт
+  доказуемо доставил ценность), freshness-порог не вводим (YAGNI).
+- `WakeWordPoller.tick()`: парсит `wedged` из `wake_word_status`; порядок
+  блоков: healthy-note (`last_chunk_ts != nil` → `noteHealthy`) → детекция →
+  wedged-эскалация (`tracker.shouldEscalate` → лог + injected callback
+  `onWedgedEscalation: () -> Void`) → однократный give-up
+  (`wedged && exhausted`) → self-heal. Гонки in-flight покрыты существующим
+  гардом (`timer != nil, pausedReasons.isEmpty`).
+- **Self-heal подавлен при wedged (Fable-гейт, Finding 1c)**: ветка
+  респавна — `if !running && !wedged`; пока backend объявил wedged,
+  `sendStart` НЕ шлётся: `start()` сбросил бы wedged и замаскировал
+  эскалацию, а рестарт треда этот класс клина не лечит (живое свидетельство
+  13-07). Это же убивает цикл «respawn → новый тред виснет → THREAD_HUNG →
+  эскалация» каждые ~40с с утечкой зомби-треда за цикл.
+- **Бюджет self-heal освежается наблюдённой живой сессией** (`running:true`
+  → `failedStartAttempts = 0`): отказы старта из-за maintenance-окна танца
+  не выжигают 3 попытки навсегда (Fable-гейт, F4).
 - `main.swift` проводка: `onWedgedEscalation` → toast «Wake word завис —
   перезапускаю backend…» → `supervisor.forceRestartBackend()` (off-main,
   как остальные IPC/Process-вызовы) → toast результата (успех/провал),
@@ -341,9 +372,15 @@ struct WedgedEscalationTracker {
    Swift шлёт stop → сессия не активна → watchdog молчит; эскалация
    невозможна структурно.
 6. **Рестарт-шторм невозможен**: одна эскалация на эпизод (Python) ×
-   rate-limit 30 мин (Swift) × launchd ThrottleInterval. Ложный staleness
-   стоит максимум один цикл stop/reinit/start (~1-2с тишины микрофона) раз
-   в эпизод.
+   rate-limit 30 мин (Swift) × give-up cap 3 подряд-эскалаций без здорового
+   сигнала (Swift) × launchd ThrottleInterval. Ложный staleness стоит
+   максимум один цикл stop/reinit/start (~1-2с тишины микрофона) раз
+   в эпизод; THREAD_HUNG-танцы тоже тратят шторм-окно (3/600с) — цикл
+   «respawn → hang → dance» не может плодить зомби-треды бесконечно.
+7. **Restart-immune микрофон** (громкость входа 0 / TCC-нули): heal
+   «успешен», чанков нет → wedged → до 3 kickstart'ов (каждый — шанс, что
+   лечилось процессом), затем give-up + actionable-тост; wake word молчит
+   с честным `wedged:true` в диагностике до ручного вмешательства.
 
 ## 6. Направления отказов (fail-safe)
 
