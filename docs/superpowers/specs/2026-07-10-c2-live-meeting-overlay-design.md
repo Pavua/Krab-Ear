@@ -197,6 +197,36 @@ Milena+Yuri 118с, 16 кГц mono; `.venv_krab_ear`, torch 2.11 + pyannote 4.0.x
   запись идёт без сессии → «повысить»; сессия активна → показать панель.
 - Дисциплина: IPC строго off-main (AGENT-3), никаких `runModal()`, KrabEarTheme-токены.
 
+#### §2.7a Амендмент C2c (2026-07-16, брейнсторм перед реализацией панели)
+
+Решения владельца: канал — **SSE + poll по §2.6** (подтверждено при мёртвом мосте; пререквизит
+закрыт тут же: `KRAB_EAR_DATA_DIR` добавлен в rest-plist, мост живой — `state: up`, коммит
+`87ae84db`); rest.plist-фикс — отдельным коммитом, не гейтит панель.
+
+Привязки §2.7 к реальным прецедентам кодовой базы (для плана):
+
+1. **Панель**: паттерн `ConversationStatusOverlay` — `.nonactivatingPanel/.hudWindow/.utilityWindow`,
+   `level = .floating`, `isMovableByWindowBackground` + pan-gesture, позиция в UserDefaults
+   (`KrabEar_MeetingLivePanelPosition`), off-screen guard ≥80% пересечения c visibleFrame.
+2. **SSE**: общий `SSESessionDelegate` (как `LiveSubtitlesOverlay`), endpoint
+   `/v1/events` REST-процесса, обработка строк на `@MainActor`. У LiveSubs авто-реконнекта
+   нет — для панели фоллбэк ИЗ §2.6 и есть реконнект: SSE молчит >15с при активной сессии →
+   poll 5с + пересоздание SSE-стрима. Разовый poll `get_meeting_live_state` при каждом
+   открытии панели (initial state).
+3. **Точки входа**: пункт меню-бара «Встреча» (`rebuildStatusMenu` + `@objc`-хендлер в
+   `main+MeetingPanel.swift`) и `ThemeSecondaryButton` в `topActionsRow` панели истории.
+   Обе: `meeting_start` идемпотентен на backend-стороне (already_active/promoted) —
+   Swift-логика тонкая: вызвал → показал панель.
+4. **Финализация**: `meeting_stop` → «Финализирую…» → `meeting.finished {item_id}` (или poll
+   показал inactive) → `get_meeting_report {id}` → существующий `MeetingReportViewController`
+   в ОТДЕЛЬНОМ titled-окне (сейчас умеет только sheet поверх окна истории — добавляется
+   standalone-презентация; sheet-путь `+MeetingMode.swift` не меняется).
+5. **Граница труда**: поведение/раскладка на KrabEarTheme-токенах — Claude/Sonnet;
+   визуальная полировка панели — отдельный agy/Gemini-бриф ПОСЛЕ мержа поведения
+   (в скоуп волны не входит). Глифы — только SF Symbols, уже встречающиеся в кодовой базе.
+6. **IPC из панели** — строго off-main (канон `+ExportSelection.swift`:
+   `DispatchQueue.global` → `ipcClient.call` → `nonisolated(unsafe)` → `main.async`).
+
 ### 2.8 Настройки
 
 `meeting_chunk_stt_interval_sec` (25, 10–120), `meeting_items_interval_sec` (60, 30–600),
