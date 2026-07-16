@@ -419,3 +419,21 @@ S63 bilingual conversation mode, S64 inline correction loop, S65 import queue v2
   голосовая валидация владельцем при следующем реальном клине. Урок: `cmd 2>&1 | tail -1` съедает
   exit-код — гейтовые git-операции проверять по `$?` до пайпа (rebase «прошёл» при грязном дереве,
   PR создался со стековой историей; починено force-with-lease после честного stash-танца).
+- 2026-07-16 — **Волна C2b «спикеры-лайт» закрыта** (PR #1883, squash `67094b4d` + пост-мерж
+  hardening `1ecdb791`; вторая полная Fable-волна). Живой микробенчмарк ПЕРЕД спекой поменял
+  дизайн (амендмент §2.5a): `pyannote/embedding` из спящего SpeakerManager — gated 403, вместо
+  него эмбеддинги БЕСПЛАТНО из `DiarizeOutput.speaker_embeddings` одного диар-прогона (wespeaker
+  256-dim); скейл диаризации ~0.05-0.07 с/с аудио (90с-окно = 6.2с warm) → тик 90с/окно 90с =
+  сплошное покрытие. Доставлено: `engine.diarize_window` + общий `_diarization_run_lock` с phase C
+  (закрыт класс конкурентных Pipeline-инференсов на MPS), `LiveSpeakerTracker` (cosine-сшивка
+  скользящих центроидов, cap 16), DIAR_WINDOW-тик за рубильником `meeting_live_speakers_enabled`
+  (off = байт-в-байт C2a, пинится тестом), `speakers` в state + `meeting.speakers_updated`.
+  Гейты волны нашли и починили: privacy-гэп `tmp_meeting/` в purge (audit_purge_coverage),
+  тихий fail-open декоративной проводки (WARN на переход флага), identity-guard протухшего тика
+  во всех ТРЁХ job'ах (адверсариальное ревью: «speakers_updated после meeting.finished» — C2a-класс,
+  которому C2b дал реальный триггер лок-контеншеном), телеметрия pyannote 4.x ВЫКЛЮЧЕНА до импорта
+  (privacy + её track_pipeline_apply крашился на duration=None — поймал ТОЛЬКО живой
+  e2e_speakers_smoke, unit/CI не видели). Живые гейты: run_e2e_smokes 21/21, meeting-смок,
+  speakers-смок на реальном pyannote (2 голоса → ровно 2 спикера после сшивки окон). Деплой:
+  kickstart backend+REST, uptime/watchdog/state верифицированы. Дальше: C2c (Swift-панель) —
+  последняя подволна C2; релиз v2.9.0 после неё.
