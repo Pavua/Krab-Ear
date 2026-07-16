@@ -437,3 +437,19 @@ S63 bilingual conversation mode, S64 inline correction loop, S65 import queue v2
   speakers-смок на реальном pyannote (2 голоса → ровно 2 спикера после сшивки окон). Деплой:
   kickstart backend+REST, uptime/watchdog/state верифицированы. Дальше: C2c (Swift-панель) —
   последняя подволна C2; релиз v2.9.0 после неё.
+- 2026-07-16 (вечер) — **Волна C2c закрыта — C2 Live Meeting Overlay ГОТОВ ЦЕЛИКОМ** (PR #1884,
+  squash `25d535a8`, parity `03b11805`; третья Fable-волна подряд). Пререквизитом закрыт блокер
+  12-07: `KRAB_EAR_DATA_DIR` в rest-plist (`87ae84db`) — split-brain StateStore устранён,
+  event-мост ожил (`state: up`; решение владельца: канал панели = SSE+poll по спеке, мост чинится
+  сейчас). Доставлено: `MeetingLivePanelController` (floating NSPanel по паттерну
+  ConversationStatusOverlay, чипы спикеров со staleness, items/решения/вопросы, хвост транскрипта,
+  idle/live/finalizing-sticky/privacy), SSE `/v1/events` (5 meeting.*-событий) + silence-watchdog
+  → poll-фоллбэк, финализация → standalone-окно существующего отчёта, точки входа: меню-бар
+  «Встреча» + кнопка истории. Гейты волны починили до прода: one-shot гард двойного onFinished
+  (SSE+IPC-ответ оба несут item_id — нашёл сам до ревьюера) + 5 находок adversarial-ревью
+  (незакрываемая панель — .closable/delegate/isReleasedWhenClosed=false; watchdog вне finalizing
+  → вечное «Финализирую…» при потере finished; SSE-тесты кормили формат, которого event_bus не
+  шлёт — test-validates-the-hole; таймер за закрытой панелью; утечка willClose-observer'а).
+  Swift-сьюта 1207/0, 18+8 новых тестов, глиф/runModal-гейты чистые. Агент задеплоен (UUID
+  3C01092D). Хвосты: owner-смок панели живой встречей; agy-бриф на визуальную полировку
+  (§2.7a п.5); релиз v2.9.0 — по сигналу владельца.
