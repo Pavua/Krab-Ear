@@ -39,11 +39,18 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
 
     // --- секции UI (все на KrabEarTheme-токенах) ---
     private let headerTimerLabel = NSTextField(labelWithString: "00:00")
+    private let recordIndicator = RecordingIndicator()
+    private let degradedBadgeContainer = NSStackView()
     private let degradedBadge = NSTextField(labelWithString: "деградация")
     private let speakersRow = NSStackView()
     private let itemsStack = NSStackView()
     private let transcriptTailLabel = NSTextField(wrappingLabelWithString: "")
+    private let transcriptContainer = NSView()
     private let stopButton = ThemeSecondaryButton(title: "Завершить встречу", target: nil, action: nil)
+    
+    private let statusContainer = NSStackView()
+    private let statusIcon = NSImageView()
+    private let statusSpinner = NSProgressIndicator()
     private let statusLabel = NSTextField(labelWithString: "")
 
     private(set) var uiState: UIState = .idle
@@ -98,7 +105,7 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
     var _testUIState: UIState { uiState }
     var _testSpeakerChipCount: Int { speakersRow.arrangedSubviews.count }
     var _testSpeakerChipTitles: [String] {
-        speakersRow.arrangedSubviews.compactMap { ($0 as? NSTextField)?.stringValue }
+        speakersRow.arrangedSubviews.compactMap { ($0 as? SpeakerChipView)?.testTitle }
     }
     var _testItemRowCount: Int { itemsStack.arrangedSubviews.count }
     var _testTranscriptTailText: String { transcriptTailLabel.stringValue }
@@ -195,8 +202,9 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
                     questions: state["questions"] as? [String] ?? [])
         transcriptTailLabel.stringValue = state["transcript_tail"] as? String ?? ""
         let degraded = state["degraded"] as? [String: Any] ?? [:]
-        degradedBadge.isHidden = !((degraded["llm"] as? Bool ?? false)
-                                   || (degraded["diarization"] as? Bool ?? false))
+        let isDegraded = ((degraded["llm"] as? Bool ?? false) || (degraded["diarization"] as? Bool ?? false))
+        degradedBadge.isHidden = !isDegraded
+        degradedBadgeContainer.isHidden = !isDegraded
     }
 
     func enterFinalizing() { setUIState(.finalizing) }
@@ -239,7 +247,12 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
         transientErrorTimer?.invalidate()
         transientErrorActive = true
         statusLabel.stringValue = text
-        statusLabel.isHidden = false
+        statusIcon.image = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil)
+        statusIcon.contentTintColor = KrabEarTheme.Colors.error
+        statusIcon.isHidden = false
+        statusSpinner.stopAnimation(nil)
+        statusSpinner.isHidden = true
+        statusContainer.isHidden = false
         transientErrorTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -254,16 +267,24 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
     private func renderSpeakers(_ speakers: [[String: Any]]) {
         speakersRow.arrangedSubviews.forEach { speakersRow.removeArrangedSubview($0); $0.removeFromSuperview() }
         let now = Date().timeIntervalSince1970
-        for speaker in speakers {
+        for (index, speaker) in speakers.enumerated() {
             let label = speaker["label"] as? String ?? "?"
             let talkSec = Self.doubleValue(speaker["talk_sec"]) ?? 0
             let lastActive = Self.doubleValue(speaker["last_active_ts"]) ?? now
             let staleSec = max(0, now - lastActive)
-            let chip = NSTextField(labelWithString: Self.speakerChipTitle(label: label, talkSec: talkSec, staleSec: staleSec))
-            chip.font = KrabEarTheme.Typography.caption
-            chip.textColor = KrabEarTheme.Colors.textSecondary
-            chip.isBordered = false
-            chip.drawsBackground = false
+            
+            let fullTitle = Self.speakerChipTitle(label: label, talkSec: talkSec, staleSec: staleSec)
+            
+            let totalTalk = max(0, Int(talkSec))
+            let mins = totalTalk / 60
+            let secs = totalTalk % 60
+            let talkStr = mins > 0 ? "\(mins)м \(secs)с" : "\(secs)с"
+            
+            let totalStale = max(0, Int(staleSec))
+            let staleStr = totalStale < 60 ? "\(totalStale)с назад" : "\(totalStale / 60)мин назад"
+            
+            let isActive = staleSec < 5.0
+            let chip = SpeakerChipView(testTitle: fullTitle, labelStr: label, talkStr: talkStr, staleStr: staleStr, isActive: isActive, colorIndex: index)
             speakersRow.addArrangedSubview(chip)
         }
     }
@@ -282,11 +303,42 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
     }
 
     private func addItemRow(prefix: String, text: String) {
-        let row = NSTextField(wrappingLabelWithString: "\(prefix) \(text)")
-        row.font = KrabEarTheme.Typography.body
-        row.textColor = KrabEarTheme.Colors.textPrimary
-        row.isBordered = false
-        row.drawsBackground = false
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.spacing = KrabEarTheme.Metrics.tight
+        row.alignment = .top
+        
+        let iconView = NSImageView()
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        
+        let symbolName: String
+        let tint: NSColor
+        if prefix == "→" {
+            symbolName = "arrow.right"
+            tint = KrabEarTheme.Colors.accent
+        } else if prefix == "✓" {
+            symbolName = "checkmark"
+            tint = KrabEarTheme.Colors.success
+        } else {
+            symbolName = "questionmark"
+            tint = KrabEarTheme.Colors.warning
+        }
+        
+        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)
+        iconView.image = image
+        iconView.contentTintColor = tint
+        iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
+        
+        let label = NSTextField(wrappingLabelWithString: text)
+        label.font = KrabEarTheme.Typography.body
+        label.textColor = KrabEarTheme.Colors.textPrimary
+        label.isBordered = false
+        label.drawsBackground = false
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        
+        row.addArrangedSubview(iconView)
+        row.addArrangedSubview(label)
+        
         itemsStack.addArrangedSubview(row)
     }
 
@@ -320,8 +372,14 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
         let contentVisible = (newState == .live) || (newState == .finalizing)
         speakersRow.isHidden = !contentVisible
         itemsStack.isHidden = !contentVisible
-        transcriptTailLabel.isHidden = !contentVisible
+        transcriptContainer.isHidden = !contentVisible
         headerTimerLabel.isHidden = !contentVisible
+        recordIndicator.isHidden = !contentVisible
+        if newState == .live {
+            recordIndicator.startPulsing()
+        } else {
+            recordIndicator.stopPulsing()
+        }
 
         // Активная transient-ошибка (showTransientError) переживает переключение
         // состояния — её собственный таймер решает, когда вернуть штатный текст.
@@ -338,18 +396,28 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
     }
 
     private func applyStatusText(for state: UIState) {
+        statusSpinner.stopAnimation(nil)
+        statusIcon.isHidden = false
+        statusSpinner.isHidden = true
+        statusIcon.contentTintColor = KrabEarTheme.Colors.textSecondary
+        
         switch state {
         case .idle:
             statusLabel.stringValue = "Встреча не идёт"
-            statusLabel.isHidden = false
+            statusIcon.image = NSImage(systemSymbolName: "mic.slash", accessibilityDescription: nil)
+            statusContainer.isHidden = false
         case .privacy:
             statusLabel.stringValue = "Privacy-режим"
-            statusLabel.isHidden = false
+            statusIcon.image = NSImage(systemSymbolName: "hand.raised.fill", accessibilityDescription: nil)
+            statusContainer.isHidden = false
         case .finalizing:
             statusLabel.stringValue = "Финализирую…"
-            statusLabel.isHidden = false
+            statusIcon.isHidden = true
+            statusSpinner.isHidden = false
+            statusSpinner.startAnimation(nil)
+            statusContainer.isHidden = false
         case .live:
-            statusLabel.isHidden = true
+            statusContainer.isHidden = true
         }
     }
 
@@ -540,7 +608,7 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
     }
 
     private func buildLayout() {
-        headerTimerLabel.font = KrabEarTheme.Typography.display
+        headerTimerLabel.font = KrabEarTheme.Typography.display.tabular()
         headerTimerLabel.textColor = KrabEarTheme.Colors.textPrimary
         headerTimerLabel.isBordered = false
         headerTimerLabel.drawsBackground = false
@@ -549,9 +617,16 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
         degradedBadge.textColor = KrabEarTheme.Colors.warning
         degradedBadge.isBordered = false
         degradedBadge.drawsBackground = false
-        degradedBadge.isHidden = true
 
-        let headerRow = NSStackView(views: [headerTimerLabel, degradedBadge, NSView()])
+        degradedBadgeContainer.orientation = .horizontal
+        degradedBadgeContainer.wantsLayer = true
+        degradedBadgeContainer.layer?.cornerRadius = 4
+        degradedBadgeContainer.layer?.backgroundColor = KrabEarTheme.Colors.warning.withAlphaComponent(0.15).cgColor
+        degradedBadgeContainer.edgeInsets = NSEdgeInsets(top: 2, left: 6, bottom: 2, right: 6)
+        degradedBadgeContainer.addArrangedSubview(degradedBadge)
+        degradedBadgeContainer.isHidden = true
+
+        let headerRow = NSStackView(views: [recordIndicator, headerTimerLabel, degradedBadgeContainer, NSView()])
         headerRow.orientation = .horizontal
         headerRow.spacing = KrabEarTheme.Metrics.standard
         headerRow.alignment = .centerY
@@ -578,16 +653,50 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
         transcriptTailLabel.drawsBackground = false
         transcriptTailLabel.maximumNumberOfLines = 3
 
-        statusLabel.font = KrabEarTheme.Typography.caption
+        transcriptContainer.wantsLayer = true
+        transcriptContainer.layer?.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
+        transcriptContainer.layer?.backgroundColor = KrabEarTheme.Colors.cardBackground.cgColor
+        transcriptContainer.layer?.borderColor = KrabEarTheme.Colors.border.cgColor
+        transcriptContainer.layer?.borderWidth = 1.0
+        
+        transcriptContainer.addSubview(transcriptTailLabel)
+        transcriptTailLabel.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            transcriptTailLabel.topAnchor.constraint(equalTo: transcriptContainer.topAnchor, constant: KrabEarTheme.Metrics.standard),
+            transcriptTailLabel.bottomAnchor.constraint(equalTo: transcriptContainer.bottomAnchor, constant: -KrabEarTheme.Metrics.standard),
+            transcriptTailLabel.leadingAnchor.constraint(equalTo: transcriptContainer.leadingAnchor, constant: KrabEarTheme.Metrics.standard),
+            transcriptTailLabel.trailingAnchor.constraint(equalTo: transcriptContainer.trailingAnchor, constant: -KrabEarTheme.Metrics.standard),
+        ])
+
+        statusContainer.orientation = .vertical
+        statusContainer.alignment = .centerX
+        statusContainer.spacing = KrabEarTheme.Metrics.standard
+        statusContainer.wantsLayer = true
+        statusContainer.layer?.backgroundColor = KrabEarTheme.Colors.cardBackground.cgColor
+        statusContainer.layer?.cornerRadius = KrabEarTheme.Metrics.cardCornerRadius
+        statusContainer.edgeInsets = NSEdgeInsets(top: 24, left: 32, bottom: 24, right: 32)
+        
+        statusSpinner.style = .spinning
+        statusSpinner.controlSize = .small
+        statusSpinner.isDisplayedWhenStopped = false
+        
+        statusIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 24, weight: .regular)
+        statusIcon.contentTintColor = KrabEarTheme.Colors.textSecondary
+        
+        statusLabel.font = KrabEarTheme.Typography.body
         statusLabel.textColor = KrabEarTheme.Colors.textSecondary
         statusLabel.isBordered = false
         statusLabel.drawsBackground = false
+        
+        statusContainer.addArrangedSubview(statusIcon)
+        statusContainer.addArrangedSubview(statusSpinner)
+        statusContainer.addArrangedSubview(statusLabel)
 
         stopButton.target = self
         stopButton.action = #selector(onStopTapped)
 
         let contentStack = NSStackView(views: [
-            headerRow, speakersRow, itemsScroll, transcriptTailLabel, statusLabel, stopButton,
+            headerRow, speakersRow, itemsScroll, transcriptContainer, stopButton,
         ])
         contentStack.orientation = .vertical
         contentStack.spacing = KrabEarTheme.Metrics.comfortable
@@ -610,13 +719,19 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
         backdrop.layer?.masksToBounds = true
 
         backdrop.addSubview(contentStack)
+        backdrop.addSubview(statusContainer)
+        
+        statusContainer.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             contentStack.topAnchor.constraint(equalTo: backdrop.topAnchor),
             contentStack.leadingAnchor.constraint(equalTo: backdrop.leadingAnchor),
             contentStack.trailingAnchor.constraint(equalTo: backdrop.trailingAnchor),
             contentStack.bottomAnchor.constraint(lessThanOrEqualTo: backdrop.bottomAnchor),
-            itemsScroll.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
+            itemsScroll.widthAnchor.constraint(equalTo: contentStack.widthAnchor, constant: -(KrabEarTheme.Metrics.spacious * 2)),
             itemsStack.widthAnchor.constraint(equalTo: itemsScroll.widthAnchor),
+            transcriptContainer.widthAnchor.constraint(equalTo: contentStack.widthAnchor, constant: -(KrabEarTheme.Metrics.spacious * 2)),
+            statusContainer.centerXAnchor.constraint(equalTo: backdrop.centerXAnchor),
+            statusContainer.centerYAnchor.constraint(equalTo: backdrop.centerYAnchor)
         ])
 
         backdrop.frame = panel.contentView!.bounds
@@ -685,5 +800,102 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
         if gr.state == .ended || gr.state == .changed {
             savePosition()
         }
+    }
+}
+
+class SpeakerChipView: NSView {
+    let testTitle: String
+    private let label = NSTextField(labelWithString: "")
+    private let dot = NSView()
+    
+    init(testTitle: String, labelStr: String, talkStr: String, staleStr: String, isActive: Bool, colorIndex: Int) {
+        self.testTitle = testTitle
+        super.init(frame: .zero)
+        
+        wantsLayer = true
+        layer?.cornerRadius = 10
+        layer?.cornerCurve = .continuous
+        layer?.borderWidth = 1.0
+        
+        let colors = [
+            NSColor.systemBlue, NSColor.systemPurple, NSColor.systemTeal, NSColor.systemOrange, NSColor.systemPink, NSColor.systemGreen
+        ]
+        let tint = colors[colorIndex % colors.count]
+        
+        layer?.backgroundColor = KrabEarTheme.Colors.cardBackground.cgColor
+        layer?.borderColor = KrabEarTheme.Colors.border.cgColor
+        
+        dot.wantsLayer = true
+        dot.layer?.cornerRadius = 3
+        dot.layer?.backgroundColor = isActive ? tint.cgColor : NSColor.clear.cgColor
+        dot.translatesAutoresizingMaskIntoConstraints = false
+        
+        let attrStr = NSMutableAttributedString()
+        attrStr.append(NSAttributedString(string: labelStr, attributes: [
+            .font: KrabEarTheme.Typography.captionMedium,
+            .foregroundColor: KrabEarTheme.Colors.textPrimary
+        ]))
+        attrStr.append(NSAttributedString(string: " · \(talkStr)", attributes: [
+            .font: KrabEarTheme.Typography.caption,
+            .foregroundColor: KrabEarTheme.Colors.textPrimary
+        ]))
+        attrStr.append(NSAttributedString(string: " · \(staleStr)", attributes: [
+            .font: KrabEarTheme.Typography.caption,
+            .foregroundColor: KrabEarTheme.Colors.textSecondary
+        ]))
+        
+        label.attributedStringValue = attrStr
+        label.isBordered = false
+        label.drawsBackground = false
+        label.translatesAutoresizingMaskIntoConstraints = false
+        
+        let stack = NSStackView(views: [dot, label])
+        stack.orientation = .horizontal
+        stack.spacing = 6
+        stack.alignment = .centerY
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            dot.widthAnchor.constraint(equalToConstant: 6),
+            dot.heightAnchor.constraint(equalToConstant: 6),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8)
+        ])
+    }
+    required init?(coder: NSCoder) { fatalError() }
+}
+
+class RecordingIndicator: NSView {
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = KrabEarTheme.Colors.error.cgColor
+        layer?.cornerRadius = 4
+        translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 8),
+            heightAnchor.constraint(equalToConstant: 8)
+        ])
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    
+    func startPulsing() {
+        layer?.removeAllAnimations()
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { return }
+        let anim = CABasicAnimation(keyPath: "opacity")
+        anim.fromValue = 1.0
+        anim.toValue = 0.2
+        anim.duration = KrabEarTheme.Motion.Duration.long
+        anim.autoreverses = true
+        anim.repeatCount = .infinity
+        anim.timingFunction = KrabEarTheme.Motion.Easing.easeInOut
+        layer?.add(anim, forKey: "pulse")
+    }
+    func stopPulsing() {
+        layer?.removeAllAnimations()
+        layer?.opacity = 1.0
     }
 }
