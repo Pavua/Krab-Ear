@@ -34,4 +34,25 @@ final class MeetingPanelWiringTests: XCTestCase {
             XCTAssertTrue(src.contains(ev), "SSE-фильтр без \(ev)")
         }
     }
+
+    // === Task 3: точки входа — меню-бар + кнопка истории + проводка ===
+
+    func test_menu_item_wired_in_rebuildStatusMenu() throws {
+        let src = try source("main+StatusMenu.swift")
+        XCTAssertTrue(src.contains("onMeetingPanelToggle"),
+                      "пункт меню «Встреча» обязан быть реально добавлен в rebuildStatusMenu")
+    }
+
+    func test_meeting_panel_handler_calls_meeting_start() throws {
+        let src = try source("main+MeetingPanel.swift")
+        XCTAssertTrue(src.contains("\"meeting_start\""))
+        XCTAssertTrue(src.contains("DispatchQueue.global"),
+                      "IPC строго off-main (AGENT-3)")
+    }
+
+    func test_history_panel_button_routes_to_delegate() throws {
+        let src = try source("HistoryPanelController.swift")
+        XCTAssertTrue(src.contains("onOpenMeetingPanel") || src.contains("meetingPanelButton"),
+                      "кнопка «Встреча» в topActionsRow обязана существовать и роутить в делегат")
+    }
 }

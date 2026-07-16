@@ -249,6 +249,12 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         b.isTransparentStyle = true
         return b
     }()
+    /// C2c: открывает/показывает живую панель встречи через AgentAppDelegate.
+    let meetingPanelButton: ThemeSecondaryButton = {
+        let b = ThemeSecondaryButton(title: "Встреча", target: nil, action: nil)
+        b.isTransparentStyle = true
+        return b
+    }()
     let filterRow1 = NSStackView()
     let filterRow2 = NSStackView()
     let historyQuickPresetRow = NSStackView()
@@ -807,6 +813,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         liveTranslatePresetButton.target = self
         liveTranslatePresetButton.action = #selector(onEnableLiveTranslationPreset)
         topActionsRow.addArrangedSubview(liveTranslatePresetButton)
+
+        meetingPanelButton.target = self
+        meetingPanelButton.action = #selector(onOpenMeetingPanel)
+        topActionsRow.addArrangedSubview(meetingPanelButton)
+
         topActionsRow.addArrangedSubview(NSTextField(labelWithString: "Страница:"))
         historyPageSizeSelector.addItems(withTitles: ["25", "50", "100", "200"])
         historyPageSizeSelector.controlSize = .small
@@ -2200,6 +2211,12 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         historyFromDateField.stringValue = ""
         historyToDateField.stringValue = ""
         loadInitial()
+    }
+
+    /// C2c: кнопка «Встреча» в topActionsRow — роутит в единственную точку входа
+    /// панели встречи на AgentAppDelegate (та же, что и пункт меню-бара).
+    @objc private func onOpenMeetingPanel() {
+        (NSApp.delegate as? AgentAppDelegate)?.onMeetingPanelToggle()
     }
 
     @objc private func onHelp() {
