@@ -1,0 +1,96 @@
+/*
+ MeetingLivePanelTests — C2c Task 1: панель встречи, чистый рендер live-state.
+
+ Прецедент: ConversationStatusOverlayTests (panel headless в тестах безопасен без
+ NSApp.run). Task 1 покрывает ТОЛЬКО panel-boilerplate + render(state:) — без IPC/SSE
+ (данные придут в Task 2).
+*/
+
+import XCTest
+@testable import KrabEarAgent
+
+@MainActor
+final class MeetingLivePanelTests: XCTestCase {
+
+    private func makeState(
+        active: Bool = true,
+        transcriptTail: String = "обсуждаем релиз ",
+        items: [[String: Any]] = [["text": "подготовить документацию", "priority": "high"]],
+        decisions: [String] = ["релиз в четверг"],
+        questions: [String] = [],
+        speakers: [[String: Any]] = [
+            ["label": "Спикер 1", "talk_sec": 17.1, "last_active_ts": Date().timeIntervalSince1970],
+            ["label": "Спикер 2", "talk_sec": 14.8, "last_active_ts": Date().timeIntervalSince1970 - 95],
+        ],
+        degradedLLM: Bool = false,
+        degradedDiar: Bool = false
+    ) -> [String: Any] {
+        [
+            "ok": true, "active": active,
+            "started_at": Date().timeIntervalSince1970 - 120,
+            "transcript_len": 640, "transcript_tail": transcriptTail,
+            "items": items, "decisions": decisions, "questions": questions,
+            "speakers": speakers,
+            "degraded": ["llm": degradedLLM, "diarization": degradedDiar],
+            "last_updated_ts": Date().timeIntervalSince1970,
+        ]
+    }
+
+    func test_panel_is_nonactivating_floating_draggable() {
+        let c = MeetingLivePanelController()
+        XCTAssertEqual(c._testPanelLevel, .floating)
+        XCTAssertTrue(c._testPanelIsDraggable)
+    }
+
+    func test_render_active_state_populates_sections() {
+        let c = MeetingLivePanelController()
+        c.render(state: makeState())
+        XCTAssertEqual(c._testSpeakerChipCount, 2)
+        XCTAssertEqual(c._testItemRowCount, 2)  // 1 item + 1 decision (questions пусто)
+        XCTAssertTrue(c._testTranscriptTailText.contains("обсуждаем релиз"))
+        XCTAssertFalse(c._testDegradedBadgeVisible)
+        XCTAssertEqual(c._testUIState, .live)
+    }
+
+    func test_render_degraded_flags_show_badge() {
+        let c = MeetingLivePanelController()
+        c.render(state: makeState(degradedDiar: true))
+        XCTAssertTrue(c._testDegradedBadgeVisible)
+    }
+
+    func test_render_inactive_state_switches_to_idle() {
+        let c = MeetingLivePanelController()
+        c.render(state: makeState())
+        c.render(state: ["ok": true, "active": false])
+        XCTAssertEqual(c._testUIState, .idle)
+    }
+
+    func test_render_privacy_state() {
+        let c = MeetingLivePanelController()
+        c.render(state: ["ok": true, "active": false, "privacy_mode_active": true])
+        XCTAssertEqual(c._testUIState, .privacy)
+    }
+
+    func test_finalizing_state_is_sticky_until_finished() {
+        let c = MeetingLivePanelController()
+        c.render(state: makeState())
+        c.enterFinalizing()
+        XCTAssertEqual(c._testUIState, .finalizing)
+        // Пока финализация не завершена, обычный active-рендер её НЕ сбивает
+        c.render(state: makeState())
+        XCTAssertEqual(c._testUIState, .finalizing)
+        // inactive (запись остановлена) — тоже остаёмся в finalizing до finished/отчёта
+        c.render(state: ["ok": true, "active": false])
+        XCTAssertEqual(c._testUIState, .finalizing)
+    }
+
+    func test_speaker_chip_shows_staleness() {
+        let c = MeetingLivePanelController()
+        let old = Date().timeIntervalSince1970 - 200
+        c.render(state: makeState(speakers: [["label": "Спикер 1", "talk_sec": 60.0,
+                                              "last_active_ts": old]]))
+        XCTAssertTrue(c._testSpeakerChipTitles[0].contains("Спикер 1"))
+        // возраст данных отображается (точный формат не пинится — только факт наличия «с» или «мин»)
+        XCTAssertTrue(c._testSpeakerChipTitles[0].contains("с") || c._testSpeakerChipTitles[0].contains("мин"))
+    }
+}
