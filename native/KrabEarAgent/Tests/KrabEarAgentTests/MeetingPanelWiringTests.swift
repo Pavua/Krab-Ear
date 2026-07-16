@@ -50,6 +50,14 @@ final class MeetingPanelWiringTests: XCTestCase {
                       "IPC строго off-main (AGENT-3)")
     }
 
+    func test_toggle_repolls_after_meeting_start_success() throws {
+        // Живой смок 2026-07-16: без немедленного re-poll после успешного
+        // meeting_start панель ждала бы 15с watchdog'а, чтобы выйти из idle.
+        let src = try source("main+MeetingPanel.swift")
+        XCTAssertTrue(src.contains("pollNow()"),
+                      "успешный meeting_start обязан немедленно перечитать состояние")
+    }
+
     func test_history_panel_button_routes_to_delegate() throws {
         let src = try source("HistoryPanelController.swift")
         XCTAssertTrue(src.contains("onOpenMeetingPanel") || src.contains("meetingPanelButton"),

@@ -32,7 +32,10 @@ extension AgentAppDelegate {
                         controller.render(state: ["ok": true, "active": false,
                                                   "privacy_mode_active": true])
                     }
-                    // успех/already_active: ближайший poll/SSE наполнит панель
+                    // успех/already_active: немедленно перечитываем состояние —
+                    // initial poll из startUpdates() мог опередить meeting_start
+                    // (живой смок 16-07: панель залипала в idle при живой сессии).
+                    controller.pollNow()
                 }
             } catch {
                 DispatchQueue.main.async {

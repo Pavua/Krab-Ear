@@ -385,6 +385,10 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
 
     func _testHandlePollState(_ state: [String: Any]) { handlePollState(state) }
 
+    /// Немедленный внеплановый poll (владелец зовёт после успешного meeting_start —
+    /// иначе панель, открытая до старта сессии, ждала бы 15с watchdog'а в idle).
+    func pollNow() { pollOnce() }
+
     // MARK: - SSE (общий SSESessionDelegate, паттерн LiveSubtitlesOverlay)
 
     private func startSSE() {
@@ -471,9 +475,10 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
     /// Тикает каждые 5с (или напрямую из _testSimulateSSESilence). SSE молчит >15с
     /// при активной сессии → включаем poll-фоллбэк и пересоздаём SSE-стрим.
     private func checkSilenceWatchdog() {
-        // Ревью №2: и .live, и .finalizing — потерянный SSE meeting.finished
-        // иначе вешает «Финализирую…» навечно (poll-фоллбэка там не было).
-        guard uiState == .live || uiState == .finalizing else { return }
+        // Ревью №2 + живой смок 16-07: watchdog работает в ЛЮБОМ состоянии,
+        // пока обновления запущены. .finalizing — потерянный meeting.finished
+        // вешал «Финализирую…» навечно; .idle — панель, открытая до завершения
+        // meeting_start, залипала в «Встреча не идёт» при живой сессии.
         let now = Date().timeIntervalSince1970
         if now - lastSSEActivity > 15 {
             activatePollFallback()

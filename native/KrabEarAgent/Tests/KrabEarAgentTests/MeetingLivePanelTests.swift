@@ -146,6 +146,16 @@ final class MeetingLivePanelTests: XCTestCase {
         XCTAssertEqual(received, ["flat-1"])
     }
 
+    func test_watchdog_polls_while_idle_too() {
+        // Живой смок 2026-07-16: панель, открытая ДО завершения meeting_start,
+        // залипала в «Встреча не идёт» навсегда — initial poll видел idle,
+        // watchdog гейтился на .live, SSE-партиалы состояние не поднимают.
+        let c = MeetingLivePanelController()
+        c.render(state: ["ok": true, "active": false])  // .idle
+        c._testSimulateSSESilence(seconds: 16)
+        XCTAssertTrue(c._testPollFallbackActive)
+    }
+
     func test_speaker_chip_shows_staleness() {
         let c = MeetingLivePanelController()
         let old = Date().timeIntervalSince1970 - 200
