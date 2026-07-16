@@ -11,7 +11,6 @@ import json
 import math
 import os
 import queue
-import sys
 import time
 import uuid
 import logging
@@ -30,12 +29,15 @@ from werkzeug.utils import secure_filename
 
 from core.config import settings
 from core.engine import AudioEngine
-from backend.event_bus import bus as event_bus, sse_stream
+# M1: event_bus/sse_stream/metrics (below) are read exclusively through
+# _deps() (deps.event_bus / deps.sse_stream / deps.metrics) — the bare names
+# stay live module attributes for _ModuleGlobalsDeps.__getattr__ to resolve.
+from backend.event_bus import bus as event_bus, sse_stream  # noqa: F401
 from backend.rest_auth import RestAuth
 from backend.service import BackendService
 from backend.state_store import StateStore
 from backend.transcriber import Transcriber
-from backend.metrics_collector import metrics
+from backend.metrics_collector import metrics  # noqa: F401
 from backend.api_versioning import api_version_header, get_api_info
 from backend.translator import Translator
 from backend.live_subs_service import LiveSubsService
@@ -83,10 +85,28 @@ class StaticDeps:
 
 
 class _ModuleGlobalsDeps:
-    """Standalone-путь: живое чтение module-атрибутов (имена совпадают 1:1)."""
+    """Standalone-путь: живое чтение module-атрибутов (имена совпадают 1:1).
+
+    Читает через globals() — ФИКСИРОВАННЫЙ словарь namespace ЭТОГО модуля,
+    захваченный при определении класса — а НЕ через sys.modules[__name__]
+    (переоценивается при КАЖДОМ обращении). Разница критична при reload:
+    сиблинг-тест-файл в том же чанке может `sys.modules.pop("backend.rest_server")`
+    + заново `import` (см. CLAUDE.md "rest_server module-level store chunk
+    pollution" / reload-вариант), подменяя запись в sys.modules на НОВЫЙ
+    объект модуля. Обращение через sys.modules[__name__] в этот момент тихо
+    съезжает на НОВЫЙ модуль, а все patch.object(rest_server, "store", ...)
+    в тестах остаются приколоты к СТАРОМУ объекту — привет из reload-класса
+    багов. globals() всегда возвращает namespace ИМЕННО ЭТОГО экземпляра
+    модуля, то есть воспроизводит поведение голого module-level имени
+    (`store`, `engine`, ...) до M1-свипа — оно тоже читалось через
+    __globals__ функции, а не через sys.modules.
+    """
 
     def __getattr__(self, name):
-        return getattr(sys.modules[__name__], name)
+        try:
+            return globals()[name]
+        except KeyError:
+            raise AttributeError(name) from None
 
 
 _MODULE_DEPS = _ModuleGlobalsDeps()
@@ -734,7 +754,8 @@ def api_info():
 @limiter.limit("120 per minute")
 def health():
     """Liveness check — verifies the server process is running."""
-    return {"status": "ok", "service": "krab-ear", "profile": engine.quality_profile}
+    deps = _deps()
+    return {"status": "ok", "service": "krab-ear", "profile": deps.engine.quality_profile}
 
 
 @monitoring_blp.route("/metrics", methods=["GET"])
@@ -742,7 +763,8 @@ def health():
 @require_api_key
 def get_metrics():
     """Return aggregated performance and quality metrics."""
-    return metrics.get_summary()
+    deps = _deps()
+    return deps.metrics.get_summary()
 
 
 # ---------------------------------------------------------------------------
@@ -840,7 +862,8 @@ def get_metrics_prometheus():
     No external dependencies — format generated manually.
     Content-Type: text/plain; version=0.0.4; charset=utf-8
     """
-    summary = metrics.get_summary()
+    deps = _deps()
+    summary = deps.metrics.get_summary()
     body = _build_prometheus_text(summary)
     return Response(
         body,
@@ -868,6 +891,8 @@ def _build_dashboard_html() -> str:
     """Строит самодостаточную HTML-страницу дашборда состояния."""
     import platform
 
+    deps = _deps()
+
     try:
         import psutil  # type: ignore
         cpu_pct = psutil.cpu_percent(interval=None)
@@ -887,7 +912,7 @@ def _build_dashboard_html() -> str:
     # Health checks
     try:
         from backend.health_checker import HealthChecker
-        checker = HealthChecker(store=store, transcriber=transcriber)
+        checker = HealthChecker(store=deps.store, transcriber=deps.transcriber)
         health_data = checker.check_all()
     except Exception as exc:
         health_data = {
@@ -900,7 +925,7 @@ def _build_dashboard_html() -> str:
 
     # Metrics summary
     try:
-        metrics_summary = metrics.get_summary()
+        metrics_summary = deps.metrics.get_summary()
     except Exception:
         metrics_summary = {}
 
@@ -1119,7 +1144,7 @@ def _build_dashboard_html() -> str:
       <table>
         <tr><td>Uptime</td><td>{uptime_str}</td></tr>
         <tr><td>Platform</td><td class="detail" style="font-size:11px">{platform_str}</td></tr>
-        <tr><td>Quality profile</td><td>{engine.quality_profile}</td></tr>
+        <tr><td>Quality profile</td><td>{deps.engine.quality_profile}</td></tr>
       </table>
     </div>
 
@@ -1229,7 +1254,8 @@ MAX_WORD_LENGTH = 100
 @_block_cross_origin_reads
 def get_vocabulary():
     """Return the current persistent user vocabulary."""
-    return {"words": store.load_vocabulary()}
+    deps = _deps()
+    return {"words": deps.store.load_vocabulary()}
 
 
 @v1_blp.route("/vocabulary", methods=["POST"])
@@ -1243,14 +1269,15 @@ def add_vocabulary(args):
     Duplicates are silently ignored.
     Maximum vocabulary size: 500 words; maximum word length: 100 characters.
     """
+    deps = _deps()
     new_words = args["words"]
     new_words = [str(w).strip()[:MAX_WORD_LENGTH] for w in new_words if str(w).strip()]
-    current = store.load_vocabulary()
+    current = deps.store.load_vocabulary()
     updated = list(set(current + new_words))
     if len(updated) > MAX_VOCABULARY_SIZE:
         from flask_smorest import abort
         abort(400, message=f"Vocabulary limit exceeded ({MAX_VOCABULARY_SIZE} words max)")
-    store.save_vocabulary(updated)
+    deps.store.save_vocabulary(updated)
     return {"status": "ok", "count": len(updated)}
 
 
@@ -1261,7 +1288,7 @@ def _load_settings_field(key: str, default):
     callers are never blocked by a corrupt settings file.
     """
     try:
-        s = store.load_settings()
+        s = _deps().store.load_settings()
         return s.get(key, default)
     except Exception:
         return default
@@ -1306,6 +1333,7 @@ def synthesize_speech():
     mode is active (privacy_mode_enabled=true in settings.json) — enforced by
     @_privacy_gate before this body runs (and before auth is even checked).
     """
+    deps = _deps()
     req_data = request.get_json(silent=True)
     if not req_data:
         return jsonify({"error": "Invalid or missing JSON"}), 400
@@ -1319,7 +1347,7 @@ def synthesize_speech():
         "voice": req_data.get("voice"),
     }
 
-    result = tts_service.handle_synthesize_speech(params)
+    result = deps.tts_service.handle_synthesize_speech(params)
 
     if not result.get("ok", True):
         return jsonify({"error": result.get("error", "Unknown TTS error")}), 400
@@ -1359,12 +1387,13 @@ def transcribe_audio():
     mode is active (privacy_mode_enabled=true in settings.json) — enforced by
     @_privacy_gate before this body runs (and before auth is even checked).
     """
+    deps = _deps()
     chat_id = request.form.get("chat_id")
     message_id = request.form.get("message_id")
     persist_history = request.form.get("persist_history", "true").strip().lower() in ("true", "1", "yes")
 
     # Идемпотентность
-    if chat_id and message_id and store.is_idempotent(chat_id, message_id):
+    if chat_id and message_id and deps.store.is_idempotent(chat_id, message_id):
         return jsonify({"status": "skipped", "reason": "duplicate"}), 200
 
     if "file" not in request.files:
@@ -1413,7 +1442,7 @@ def transcribe_audio():
             # the file is truly unreadable.
             pass
 
-        engine.normalize_audio(str(temp_path))
+        deps.engine.normalize_audio(str(temp_path))
 
         quality = request.form.get("quality_profile", "balanced")
         if quality not in VALID_QUALITY:
@@ -1430,7 +1459,7 @@ def transcribe_audio():
 
         req_vocab_raw = request.form.get("vocabulary", "")
         req_vocab = [w.strip() for w in req_vocab_raw.split(",") if w.strip()] if req_vocab_raw else []
-        full_vocabulary = list(set(store.load_vocabulary() + req_vocab))
+        full_vocabulary = list(set(deps.store.load_vocabulary() + req_vocab))
 
         # F2: Wrap transcription in a thread pool with a wall-clock timeout so a
         # hung decoder cannot occupy a worker forever.
@@ -1454,7 +1483,7 @@ def transcribe_audio():
         )
         _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
-            _future = _pool.submit(transcriber.transcribe, _transcribe_path, **_transcribe_kwargs)
+            _future = _pool.submit(deps.transcriber.transcribe, _transcribe_path, **_transcribe_kwargs)
             try:
                 result = _future.result(timeout=_TRANSCRIBE_TIMEOUT_SEC)
             except concurrent.futures.TimeoutError:
@@ -1484,7 +1513,7 @@ def transcribe_audio():
         if _privacy_mode or not persist_history:
             history_item_id = ""
         else:
-            history_item = store.add_history_item(
+            history_item = deps.store.add_history_item(
                 text=text,
                 chat_id=chat_id or "",
                 message_id=message_id or "",
@@ -1492,7 +1521,7 @@ def transcribe_audio():
             )
             history_item_id = history_item.id
 
-        metrics.record(
+        deps.metrics.record(
             latency_ms=result.get("duration_ms", int(elapsed_sec * 1000)),
             confidence=result.get("confidence", 0.0),
         )
@@ -1512,7 +1541,7 @@ def transcribe_audio():
 
     except Exception:
         logger.exception("Ошибка при обработке аудио-запроса")
-        metrics.record(0, 0, is_error=True)
+        deps.metrics.record(0, 0, is_error=True)
         return jsonify({"error": "Internal processing error"}), 500
 
     finally:
@@ -1549,13 +1578,14 @@ def list_models():
     Voice Gateway bridge: third pillar alongside POST /v1/stt/transcribe
     and POST /v1/tts/synthesize (Phase 1.4 foundation, 2026-06-18).
     """
+    deps = _deps()
     # ------------------------------------------------------------------
     # 1. STT engines via stt_router_factory
     # ------------------------------------------------------------------
     stt_engines = []
     try:
         from core.pipeline.stt_router_factory import build_router as _build_router
-        _cur_settings = store.load_settings() or {}
+        _cur_settings = deps.store.load_settings() or {}
         _router = _build_router(settings_dict=_cur_settings)
         # Canonical language codes we probe per adapter (conservative list).
         _PROBE_LANGS = ("ru", "en", "es", "zh", "ja", "ko", "de", "fr")
@@ -1592,7 +1622,7 @@ def list_models():
     # ------------------------------------------------------------------
     cloud_stt = []
     try:
-        _s = store.load_settings() or {}
+        _s = deps.store.load_settings() or {}
         _cloud_providers = [
             ("openai", "openai_api_key"),
             ("deepgram", "deepgram_api_key"),
@@ -1621,7 +1651,7 @@ def list_models():
         import re as _re
         import urllib.request as _urlreq
         import urllib.parse as _urlparse
-        _s2 = store.load_settings() or {}
+        _s2 = deps.store.load_settings() or {}
         _llm_base = str(_s2.get("llm_base_url", "http://127.0.0.1:1234/v1")).rstrip("/")
         _llm_key = str(_s2.get("llm_api_key", "")).strip()
         # Strip trailing /v<N> segment (Wave 68 pattern: /api/v1/models is the
@@ -1658,7 +1688,7 @@ def list_models():
     default_stt = None
     default_llm = None
     try:
-        _s3 = store.load_settings() or {}
+        _s3 = deps.store.load_settings() or {}
         _dstt = _s3.get("stt_ru_primary_model") or "mlx-community/whisper-large-v3-mlx"
         default_stt = str(_dstt).strip() or None
         _dllm = _s3.get("llm_model") or "gemma-4-e4b-it-mlx"
@@ -1705,9 +1735,10 @@ def events_stream():
 
         event: stt.failed →  {reason, duration_sec}
     """
+    deps = _deps()
     event_filter = request.args.get("filter")
     return Response(
-        stream_with_context(sse_stream(event_bus, event_filter=event_filter)),
+        stream_with_context(deps.sse_stream(deps.event_bus, event_filter=event_filter)),
         mimetype="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -1726,6 +1757,7 @@ def internal_event():
     Невалидный элемент — скип + WARN, не 500 (один плохой элемент не должен
     ронять весь батч).
     """
+    deps = _deps()
     body = request.get_json(silent=True) or {}
     events = body.get("events")
     if not isinstance(events, list):
@@ -1745,7 +1777,7 @@ def internal_event():
             logger.warning("event_bridge: malformed envelope skipped: %r", env)
             continue
         try:
-            event_bus.emit_envelope({"type": etype, "ts": ts, "data": data, "origin": "ipc"})
+            deps.event_bus.emit_envelope({"type": etype, "ts": ts, "data": data, "origin": "ipc"})
             accepted += 1
         except Exception:
             skipped += 1
@@ -1954,13 +1986,14 @@ def ws_events(ws):
         return
     raw_types = request.args.get("types", "")
     type_filter = {t.strip() for t in raw_types.split(",") if t.strip()} if raw_types else None
-    _handle_ws_connection(ws, event_bus, type_filter)
+    _handle_ws_connection(ws, _deps().event_bus, type_filter)
 
 
 def _ws_stream_handler(ws):
     """WebSocket endpoint для потоковой транскрипции/перевода (Stage 1)."""
+    deps = _deps()
     # 🔴 Privacy-gate
-    if store.load_settings().get("privacy_mode_enabled", False):
+    if deps.store.load_settings().get("privacy_mode_enabled", False):
         try:
             ws.send(json.dumps({"type": "error", "code": "privacy_mode_active", "message": "Privacy mode active"}))
             ws.close(message=b"privacy_mode_active")
@@ -2013,9 +2046,9 @@ def _ws_stream_handler(ws):
 
     # Instantiate the streaming service for this connection
     live_subs = LiveSubsService(
-        transcriber=transcriber,
-        translator=translator,
-        settings_get=lambda k, d=None: store.load_settings().get(k, d)
+        transcriber=deps.transcriber,
+        translator=deps.translator,
+        settings_get=lambda k, d=None: deps.store.load_settings().get(k, d)
     )
 
     cloud_audio_buffer = bytearray()
@@ -2030,7 +2063,7 @@ def _ws_stream_handler(ws):
                 break
 
             # Privacy gate on each chunk
-            if store.load_settings().get("privacy_mode_enabled", False):
+            if deps.store.load_settings().get("privacy_mode_enabled", False):
                 ws.send(json.dumps({"type": "error", "code": "privacy_mode_active", "message": "Privacy mode active"}))
                 break
 
@@ -2064,7 +2097,7 @@ def _ws_stream_handler(ws):
                                         "confidence": res.get("confidence", 0.0),
                                     }
                                     if mode == "translate" and text and target_lang != "off":
-                                        resp["translation"] = translator.translate(text, target_lang)
+                                        resp["translation"] = deps.translator.translate(text, target_lang)
                                     ws.send(json.dumps(resp))
                 else:
                     result = live_subs.ingest(audio_bytes=b"", sample_rate=16000, target_lang=target_lang, is_final=True)
@@ -2122,7 +2155,7 @@ def _ws_stream_handler(ws):
                                             "confidence": res.get("confidence", 0.0),
                                         }
                                         if mode == "translate" and text and target_lang != "off":
-                                            resp["translation"] = translator.translate(text, target_lang)
+                                            resp["translation"] = deps.translator.translate(text, target_lang)
                                         ws.send(json.dumps(resp))
                         break
                 else:

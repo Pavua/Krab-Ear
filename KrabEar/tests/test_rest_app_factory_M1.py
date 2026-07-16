@@ -81,10 +81,7 @@ class CreateAppFactoryTest(unittest.TestCase):
         self.assertIs(app1.config["REST_DEPS"], d1)
         self.assertIs(app2.config["REST_DEPS"], d2)
 
-    @unittest.expectedFailure
     def test_factory_app_health_uses_injected_engine(self):
-        # M1 Task 3 снимет маркер: до свипа хендлеров /health читает
-        # module-глобал `engine`, не инжектированный deps.engine.
         deps = _fresh_static_deps()
         deps.engine.quality_profile = "max"
         client = rs.create_app(deps).test_client()
