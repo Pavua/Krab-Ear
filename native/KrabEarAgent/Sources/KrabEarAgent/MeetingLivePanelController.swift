@@ -5,8 +5,11 @@
  live-состояние meeting-сессии backend'а; закрытие панели саму сессию НЕ трогает
  (meeting_start/meeting_stop управляются отдельно).
 
- Task 1 — только каркас панели + чистый рендер `render(state:)` (dict → UI, БЕЗ
- IPC/сети). Данные (SSE + poll-фоллбэк + финализация в отчёт) — Task 2.
+ Task 1 — каркас панели + чистый рендер `render(state:)` (dict → UI, БЕЗ IPC/сети).
+
+ Task 2 — данные: SSE (общий SSESessionDelegate, паттерн LiveSubtitlesOverlay) +
+ silence-watchdog + poll-фоллбэк + meeting_stop (IPC строго off-main, AGENT-3) +
+ финализация через onFinished колбэк владельца.
 
  Panel-boilerplate — портирован 1-в-1 из ConversationStatusOverlay (styleMask/level/
  collectionBehavior/drag/savePosition/restorePosition/isOnScreen≥80%) с новым
@@ -19,6 +22,7 @@
 */
 
 import AppKit
+import Foundation
 
 @MainActor
 final class MeetingLivePanelController: NSObject {
@@ -46,6 +50,37 @@ final class MeetingLivePanelController: NSObject {
     private var startedAt: TimeInterval?
     private var timerTick: Timer?
 
+    // MARK: - Данные (Task 2)
+
+    /// Инжектируется владельцем (main+MeetingPanel.swift, Task 3). Опционален — панель
+    /// не крашится, если её показали до готовности AgentAppDelegate.
+    var ipcClient: IPCClient?
+    /// item_id финализированной встречи (может быть nil при отчёте без id) — владелец
+    /// панели решает, как открыть/показать отчёт (главный или standalone путь).
+    var onFinished: ((String?) -> Void)?
+
+    private let restBaseURL = "http://127.0.0.1:5005"
+    private var sseTask: URLSessionDataTask?
+    private var pendingSSEEventType: String?
+    private var lastSSEActivity: TimeInterval = 0
+    private var pollTimer: Timer?
+    private var silenceTimer: Timer?
+    private(set) var pollFallbackActive = false
+    private var transientErrorActive = false
+    private var transientErrorTimer: Timer?
+
+    /// SSE-фильтр — ровно ПЯТЬ meeting.*-событий backend'а (C2a/C2b контракт).
+    private static let meetingEventTypes: Set<String> = [
+        "meeting.transcript_appended", "meeting.items_updated",
+        "meeting.speakers_updated", "meeting.finalizing", "meeting.finished",
+    ]
+
+    private lazy var sseDelegate = SSESessionDelegate { [weak self] line in
+        Task { @MainActor [weak self] in self?.handleSSELine(line) }
+    }
+    private lazy var sseSession = URLSession(configuration: .default,
+                                             delegate: sseDelegate, delegateQueue: nil)
+
     // MARK: - Test hooks (паттерн ConversationStatusOverlay)
 
     var _testPanelLevel: NSWindow.Level { panel.level }
@@ -58,6 +93,17 @@ final class MeetingLivePanelController: NSObject {
     var _testItemRowCount: Int { itemsStack.arrangedSubviews.count }
     var _testTranscriptTailText: String { transcriptTailLabel.stringValue }
     var _testDegradedBadgeVisible: Bool { !degradedBadge.isHidden }
+    var _testPollFallbackActive: Bool { pollFallbackActive }
+
+    /// Прямой вызов SSE-парсера строки — без реального сетевого стрима.
+    func _testHandleSSELine(_ line: String) { handleSSELine(line) }
+
+    /// Сдвигает `lastSSEActivity` в прошлое и дёргает watchdog-тик напрямую —
+    /// БЕЗ реального ожидания (тест не крутит RunLoop 15+ секунд).
+    func _testSimulateSSESilence(seconds: TimeInterval) {
+        lastSSEActivity = Date().timeIntervalSince1970 - seconds
+        checkSilenceWatchdog()
+    }
 
     // MARK: - Init
 
@@ -82,7 +128,26 @@ final class MeetingLivePanelController: NSObject {
     }
 
     func hide() {
+        stopUpdates()
         panel.orderOut(nil)
+    }
+
+    /// Разовый off-main poll (get_meeting_live_state → render), затем SSE+watchdog.
+    /// Владелец зовёт после show(); повторный show() → снова startUpdates().
+    func startUpdates() {
+        lastSSEActivity = Date().timeIntervalSince1970
+        pollOnce()
+        startSSE()
+        armSilenceWatchdog()
+    }
+
+    /// Снимает SSE-стрим и все таймеры. Сессию backend'а НЕ трогает — вызывается
+    /// из hide(), панель просто перестаёт тянуть данные, пока скрыта.
+    func stopUpdates() {
+        stopSSE()
+        pollTimer?.invalidate(); pollTimer = nil
+        silenceTimer?.invalidate(); silenceTimer = nil
+        deactivatePollFallback()
     }
 
     /// Единственная точка входа данных: полный снапшот get_meeting_live_state
@@ -106,9 +171,52 @@ final class MeetingLivePanelController: NSObject {
     func enterFinalizing() { setUIState(.finalizing) }
     func resetToIdle() { setUIState(.idle) }   // после показа отчёта/ошибки
 
-    /// Task 1 — пустая заглушка. Реальный meeting_stop IPC (off-main, AGENT-3)
-    /// придёт в Task 2.
-    func requestStop() { }
+    /// meeting_stop IPC (off-main, AGENT-3). item_id в ответе → onFinished сразу
+    /// (не ждём SSE); без item_id — остаёмся в .finalizing до meeting.finished по SSE.
+    func requestStop() {
+        enterFinalizing()
+        guard let client = ipcClient else {
+            showTransientError("Нет соединения с backend'ом")
+            resetToIdle()
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                nonisolated(unsafe) let response = try client.call(method: "meeting_stop", params: [:])
+                nonisolated(unsafe) let result = response["result"] as? [String: Any] ?? [:]
+                let itemID = result["item_id"] as? String
+                DispatchQueue.main.async {
+                    if let itemID, !itemID.isEmpty {
+                        self?.onFinished?(itemID)
+                    }
+                    // без item_id — ждём meeting.finished по SSE, состояние остаётся .finalizing
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self?.showTransientError("Не удалось завершить встречу: \(error.localizedDescription)")
+                    self?.resetToIdle()
+                }
+            }
+        }
+    }
+
+    /// Временное сообщение об ошибке в statusLabel (~5с). Не переключает uiState —
+    /// переживает setUIState()/render()/resetToIdle(), пока не истечёт свой таймер
+    /// (иначе resetToIdle(), вызванный сразу следом на ошибочных путях, немедленно
+    /// стёр бы текст ошибки штатным «Встреча не идёт»).
+    func showTransientError(_ text: String) {
+        transientErrorTimer?.invalidate()
+        transientErrorActive = true
+        statusLabel.stringValue = text
+        statusLabel.isHidden = false
+        transientErrorTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.transientErrorActive = false
+                self.applyStatusText(for: self.uiState)
+            }
+        }
+    }
 
     // MARK: - Render helpers (чистые — без IPC/сети)
 
@@ -181,29 +289,164 @@ final class MeetingLivePanelController: NSObject {
         transcriptTailLabel.isHidden = !contentVisible
         headerTimerLabel.isHidden = !contentVisible
 
-        switch newState {
-        case .idle:
-            statusLabel.stringValue = "Встреча не идёт"
-            statusLabel.isHidden = false
-            stopButton.isEnabled = false
-        case .privacy:
-            statusLabel.stringValue = "Privacy-режим"
-            statusLabel.isHidden = false
-            stopButton.isEnabled = false
-        case .finalizing:
-            statusLabel.stringValue = "Финализирую…"
-            statusLabel.isHidden = false
-            stopButton.isEnabled = false
-        case .live:
-            statusLabel.isHidden = true
-            stopButton.isEnabled = true
+        // Активная transient-ошибка (showTransientError) переживает переключение
+        // состояния — её собственный таймер решает, когда вернуть штатный текст.
+        if !transientErrorActive {
+            applyStatusText(for: newState)
         }
+        stopButton.isEnabled = (newState == .live)
 
         if newState == .live {
             startTimer()
         } else {
             stopTimer()
         }
+    }
+
+    private func applyStatusText(for state: UIState) {
+        switch state {
+        case .idle:
+            statusLabel.stringValue = "Встреча не идёт"
+            statusLabel.isHidden = false
+        case .privacy:
+            statusLabel.stringValue = "Privacy-режим"
+            statusLabel.isHidden = false
+        case .finalizing:
+            statusLabel.stringValue = "Финализирую…"
+            statusLabel.isHidden = false
+        case .live:
+            statusLabel.isHidden = true
+        }
+    }
+
+    // MARK: - Poll (get_meeting_live_state)
+
+    private func pollOnce() {
+        guard let client = ipcClient else { return }
+        // AGENT-3: ipcClient.call строго off-main.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                nonisolated(unsafe) let response = try client.call(
+                    method: "get_meeting_live_state", params: [:])
+                nonisolated(unsafe) let result = response["result"] as? [String: Any] ?? response
+                DispatchQueue.main.async { self?.render(state: result) }
+            } catch {
+                // Poll — best-effort фоллбэк; SSE остаётся основным каналом,
+                // одиночная неудача poll'а не показывается пользователю.
+            }
+        }
+    }
+
+    // MARK: - SSE (общий SSESessionDelegate, паттерн LiveSubtitlesOverlay)
+
+    private func startSSE() {
+        stopSSE()
+        let filter = Self.meetingEventTypes.sorted().joined(separator: ",")
+        // sorted() — детерминированный URL для тестов/логов; backend принимает
+        // comma-list в любом порядке (rest_server.py:1649).
+        guard let url = URL(string: "\(restBaseURL)/v1/events?filter=\(filter)") else { return }
+        var request = URLRequest(url: url, timeoutInterval: 600)
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        let task = sseSession.dataTask(with: request)
+        sseTask = task
+        task.resume()
+    }
+
+    private func stopSSE() {
+        sseTask?.cancel()
+        sseTask = nil
+        pendingSSEEventType = nil
+    }
+
+    /// Паттерн LiveSubtitlesOverlay.handleSSELine: `event: ` трекает тип, `data: `
+    /// диспатчит по нему. lastSSEActivity обновляется на КАЖДОЙ строке (в т.ч.
+    /// строках-разделителях) — это единственный сигнал watchdog'а о живом стриме.
+    private func handleSSELine(_ line: String) {
+        lastSSEActivity = Date().timeIntervalSince1970
+        if pollFallbackActive { deactivatePollFallback() }
+
+        if line.hasPrefix("event: ") {
+            pendingSSEEventType = String(line.dropFirst(7)).trimmingCharacters(in: .whitespaces)
+        } else if line.hasPrefix("data: ") {
+            let type = pendingSSEEventType
+            pendingSSEEventType = nil
+            guard let type, Self.meetingEventTypes.contains(type) else { return }
+            dispatchSSEEvent(type: type, json: String(line.dropFirst(6)))
+        } else if line.isEmpty {
+            pendingSSEEventType = nil
+        }
+    }
+
+    private func dispatchSSEEvent(type: String, json: String) {
+        guard let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        // Конверт {type, data: {...}} ИЛИ плоский {...} — как parseSSEData в LiveSubs.
+        let eventData = obj["data"] as? [String: Any] ?? obj
+        switch type {
+        case "meeting.transcript_appended":
+            appendTranscriptChunk(eventData["chunk_text"] as? String ?? "")
+        case "meeting.items_updated":
+            renderItems(items: eventData["items"] as? [[String: Any]] ?? [],
+                        decisions: eventData["decisions"] as? [String] ?? [],
+                        questions: eventData["questions"] as? [String] ?? [])
+        case "meeting.speakers_updated":
+            renderSpeakers(eventData["speakers"] as? [[String: Any]] ?? [])
+        case "meeting.finalizing":
+            enterFinalizing()
+        case "meeting.finished":
+            onFinished?(eventData["item_id"] as? String)
+        default:
+            break  // недостижимо — фильтр handleSSELine уже отсёк чужие типы
+        }
+    }
+
+    /// Хвост транскрипта копится инкрементально по SSE-чанкам; обрезаем спереди,
+    /// чтобы label не рос неограниченно на длинной встрече.
+    private func appendTranscriptChunk(_ chunk: String) {
+        guard !chunk.isEmpty else { return }
+        transcriptTailLabel.stringValue += chunk + " "
+        let maxLen = 600
+        if transcriptTailLabel.stringValue.count > maxLen {
+            transcriptTailLabel.stringValue = String(transcriptTailLabel.stringValue.suffix(maxLen))
+        }
+    }
+
+    // MARK: - Silence watchdog + poll-фоллбэк
+
+    private func armSilenceWatchdog() {
+        silenceTimer?.invalidate()
+        silenceTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.checkSilenceWatchdog() }
+        }
+    }
+
+    /// Тикает каждые 5с (или напрямую из _testSimulateSSESilence). SSE молчит >15с
+    /// при активной сессии → включаем poll-фоллбэк и пересоздаём SSE-стрим.
+    private func checkSilenceWatchdog() {
+        guard uiState == .live else { return }
+        let now = Date().timeIntervalSince1970
+        if now - lastSSEActivity > 15 {
+            activatePollFallback()
+        }
+    }
+
+    private func activatePollFallback() {
+        guard !pollFallbackActive else { return }
+        pollFallbackActive = true
+        stopSSE()
+        startSSE()
+        pollTimer?.invalidate()
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.pollOnce() }
+        }
+    }
+
+    /// Любая живая SSE-строка (см. handleSSELine) снимает фоллбэк.
+    private func deactivatePollFallback() {
+        guard pollFallbackActive else { return }
+        pollFallbackActive = false
+        pollTimer?.invalidate()
+        pollTimer = nil
     }
 
     // MARK: - Header-таймер (mm:ss от started_at, только в .live)

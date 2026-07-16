@@ -93,4 +93,53 @@ final class MeetingLivePanelTests: XCTestCase {
         // возраст данных отображается (точный формат не пинится — только факт наличия «с» или «мин»)
         XCTAssertTrue(c._testSpeakerChipTitles[0].contains("с") || c._testSpeakerChipTitles[0].contains("мин"))
     }
+
+    // === Task 2: SSE/poll/финализация ===
+
+    func test_sse_event_updates_partial_sections() {
+        let c = MeetingLivePanelController()
+        c.render(state: makeState())
+        c._testHandleSSELine("event: meeting.speakers_updated")
+        c._testHandleSSELine(#"data: {"type":"meeting.speakers_updated","data":{"speakers":[{"label":"Спикер 1","talk_sec":5.0,"last_active_ts":0}]}}"#)
+        XCTAssertEqual(c._testSpeakerChipCount, 1)
+    }
+
+    func test_sse_transcript_appended_appends_tail() {
+        let c = MeetingLivePanelController()
+        c.render(state: makeState(transcriptTail: "начало. "))
+        c._testHandleSSELine("event: meeting.transcript_appended")
+        c._testHandleSSELine(#"data: {"data":{"chunk_text":"продолжение","total_len":700}}"#)
+        XCTAssertTrue(c._testTranscriptTailText.hasSuffix("продолжение "))
+    }
+
+    func test_foreign_sse_event_ignored() {
+        let c = MeetingLivePanelController()
+        c.render(state: makeState())
+        let before = c._testSpeakerChipCount
+        c._testHandleSSELine("event: live_subs.result")
+        c._testHandleSSELine(#"data: {"data":{"speakers":[]}}"#)
+        XCTAssertEqual(c._testSpeakerChipCount, before)
+    }
+
+    func test_sse_finished_triggers_report_callback() {
+        let c = MeetingLivePanelController()
+        var received: String?
+        c.onFinished = { itemID in received = itemID }
+        c.render(state: makeState())
+        c.enterFinalizing()
+        c._testHandleSSELine("event: meeting.finished")
+        c._testHandleSSELine(#"data: {"data":{"item_id":"abc-123"}}"#)
+        XCTAssertEqual(received, "abc-123")
+    }
+
+    func test_silence_watchdog_arms_poll_fallback() {
+        let c = MeetingLivePanelController()
+        c.render(state: makeState())
+        c._testSimulateSSESilence(seconds: 16)
+        XCTAssertTrue(c._testPollFallbackActive)
+        // Любая живая SSE-строка снимает фоллбэк
+        c._testHandleSSELine("event: meeting.items_updated")
+        c._testHandleSSELine(#"data: {"data":{"items":[],"decisions":[],"questions":[]}}"#)
+        XCTAssertFalse(c._testPollFallbackActive)
+    }
 }
