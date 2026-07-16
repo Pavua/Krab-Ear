@@ -2375,6 +2375,20 @@ class HistoryService:
             logger.warning("purge_all_data: удаление shares/ не удалось", exc_info=True)
             secondary_errors.append("shares")
 
+        # --- 13b. C2b: удалить tmp_meeting/ (временные диар-окна встречи) ---
+        # _job_diar_window пишет WAV-окно (голос пользователя) в
+        # <data_dir>/tmp_meeting/ и удаляет его в finally того же тика; после
+        # краха backend посреди тика файл пережил бы purge без этого шага.
+        try:
+            import shutil as _shutil
+            _tmp_meeting_dir = Path(self.store.data_dir) / "tmp_meeting"
+            if _tmp_meeting_dir.is_dir():
+                _shutil.rmtree(_tmp_meeting_dir, ignore_errors=True)
+                logger.info("purge_all_data: удалена директория tmp_meeting/")
+        except Exception:
+            logger.warning("purge_all_data: удаление tmp_meeting/ не удалось", exc_info=True)
+            secondary_errors.append("tmp_meeting")
+
         # --- 14. W1767 #7 (MED): очистить translation_cache.json ---
         # TranslationCache хранит хэш→переведённый_текст (LRU до 5000 записей).
         # Переводы транскрипций содержат PII и переживают purge без этого шага.

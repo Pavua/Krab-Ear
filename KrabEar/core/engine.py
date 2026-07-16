@@ -385,6 +385,9 @@ class AudioEngine:
         self._diarization_pipeline: Pipeline | None = None
         self._diarization_load_error: str | None = None
         self._diarization_load_lock: threading.RLock = threading.RLock()
+        # C2b: сериализация САМИХ инференсов pyannote (полная диаризация phase C
+        # vs DIAR_WINDOW-тик meeting-сессии). Load-lock выше защищает только загрузку.
+        self._diarization_run_lock: threading.Lock = threading.Lock()
 
         # SenseVoice adapter state (lazy-loaded FunASR pipeline).
         # Если funasr не установлен или модель не грузится — адаптер навсегда
@@ -3282,7 +3285,8 @@ class AudioEngine:
         pipeline = self._load_diarization_pipeline()
         prepared_audio_path, should_cleanup = self._prepare_audio_for_diarization(audio_path)
         try:
-            diarization = pipeline(prepared_audio_path)
+            with self._diarization_run_lock:
+                diarization = pipeline(prepared_audio_path)
         except Exception:
             logger.exception("FATAL: Unhandled exception in diarization pipeline")
             raise
@@ -3310,6 +3314,48 @@ class AudioEngine:
                 }
             )
         return speaker_segments
+
+    def diarize_window(self, audio_path: str) -> dict[str, Any]:
+        """Узкий хелпер C2b (спека §2.5a): диаризация КОРОТКОГО окна встречи.
+
+        Один прогон pipeline даёт и сегменты, и центроиды спикеров окна
+        (pyannote 4.x: DiarizeOutput.speaker_embeddings, wespeaker 256-dim,
+        порядок строк = diarization.labels()). NaN-строки (спикер без чистых
+        фреймов) отбрасываются. НЕ трогает _maybe_run_diarization/phase C.
+
+        Returns: {"segments": [{start, end, speaker}], "speaker_embeddings":
+        {label: list[float]}} — времена относительны начала окна.
+        """
+        import gc
+        pipeline = self._load_diarization_pipeline()
+        try:
+            with self._diarization_run_lock:
+                out = pipeline(audio_path)
+        finally:
+            # Паттерн утечки MPS — как в _run_diarization_impl.
+            gc.collect()
+            if torch is not None and hasattr(torch, "mps") and torch.backends.mps.is_available():
+                try:
+                    torch.mps.empty_cache()
+                except Exception:
+                    pass
+        diarization = getattr(out, "speaker_diarization", out)
+        labels = list(diarization.labels())
+        raw_emb = getattr(out, "speaker_embeddings", None)
+        embeddings: dict[str, list[float]] = {}
+        if raw_emb is not None:
+            arr = np.asarray(raw_emb, dtype=np.float32)
+            for i, label in enumerate(labels):
+                if i < arr.shape[0] and not np.isnan(arr[i]).any():
+                    embeddings[str(label)] = arr[i].tolist()
+        segments: list[dict[str, Any]] = []
+        for turn, _, speaker in diarization.itertracks(yield_label=True):
+            segments.append({
+                "start": round(float(turn.start), 3),
+                "end": round(float(turn.end), 3),
+                "speaker": str(speaker),
+            })
+        return {"segments": segments, "speaker_embeddings": embeddings}
 
     def _prepare_audio_for_diarization(self, audio_path: str) -> tuple[str, bool]:
         """Подготавливает совместимый WAV для pyannote.

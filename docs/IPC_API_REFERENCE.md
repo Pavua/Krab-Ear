@@ -2852,9 +2852,13 @@ transcript_tail, items, decisions, questions, speakers: [], degraded: {llm, diar
 last_updated_ts}`
 - `transcript_tail` — последние 600 символов накопленного транскрипта
 - `items` — `[{text, assignee, due, priority}, ...]` от `ActionItemsExtractor`
-- `speakers` — всегда `[]` в C2a (диаризация приходит в C2b)
+- `speakers` — список чипов спикеров (C2b): `[{label: "Спикер N", talk_sec: float,
+  last_active_ts: float}]`. Пустой, пока диар-тик не отработал или
+  `meeting_live_speakers_enabled=false`. Метки сессионные (без кросс-сессионной
+  идентичности); live-данные — черновик, финальный отчёт пересчитывает начисто.
 - `degraded.llm` — `true`, если extractor недоступен/последний вызов вернул `ok=false`
-- `degraded.diarization` — зарезервировано для C2b, сейчас всегда `false`
+- `degraded.diarization` — `true`, если последний DIAR_WINDOW-тик упал (pyannote
+  недоступен/исключение); не блокирует сессию, следующий тик пробует снова
 
 Returns (нет сессии): `{ok: true, active: false}`  
 Returns (privacy): `{ok: true, active: false, privacy_mode_active: true}`
@@ -2869,11 +2873,20 @@ Response: {"id":"m3","ok":true,"result":{"ok":true,"active":true,"started_at":17
   "degraded":{"llm":false,"diarization":false},"last_updated_ts":1752230458.9}}
 ```
 
+События: `meeting.finalizing`/`meeting.finished` — см. `meeting_stop` выше.
+- `meeting.speakers_updated` — `{speakers: [{label, talk_sec, last_active_ts}]}` —
+  после каждого успешного DIAR_WINDOW-тика (интервал `meeting_diar_interval_sec`,
+  деф. 90с).
+
 Настройки (`DEFAULT_SETTINGS` + `settings_validator._RANGE_FIELDS`):
 `meeting_chunk_stt_interval_sec` (default `25.0`, диапазон `10.0`–`120.0`),
 `meeting_items_interval_sec` (default `60.0`, диапазон `30.0`–`600.0`,
 адаптивно растягивается на длинных встречах), `meeting_items_language`
-(default `"ru"`).
+(default `"ru"`), `meeting_diar_interval_sec` (default `90.0`, диапазон `60.0`–`600.0`,
+C2b DIAR_WINDOW-тик), `meeting_diar_window_sec` (default `90.0`, диапазон `30.0`–`180.0`,
+длина диаризуемого окна), `meeting_speaker_match_threshold` (default `0.72`, диапазон
+`0.5`–`0.95`, cosine-порог сшивки спикеров), `meeting_live_speakers_enabled`
+(default `true`, рубильник C2b).
 
 ---
 

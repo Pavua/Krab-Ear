@@ -107,6 +107,10 @@ _RANGE_FIELDS: dict[str, tuple[Any, Any, Any, type]] = {
     # мягким reinit. Below 10 s risks false-positive reinit on a busy STT
     # inference chunk; above 120 s the watchdog would rarely fire.
     "wake_word_stale_sec": (10.0, 120.0, 30.0, float),
+    # --- C2b: спикеры-лайт (спека §2.5 + амендмент §2.5a) ---
+    "meeting_diar_interval_sec": (60.0, 600.0, 90.0, float),
+    "meeting_diar_window_sec": (30.0, 180.0, 90.0, float),
+    "meeting_speaker_match_threshold": (0.5, 0.95, 0.72, float),
 }
 
 # Bool-поля с дефолтными значениями
@@ -135,6 +139,7 @@ _BOOL_FIELDS: dict[str, bool] = {
     "stt_hotwords_enabled": True,
     "audio_selfheal_enabled": True,
     "wake_word_watchdog_enabled": True,
+    "meeting_live_speakers_enabled": True,
 }
 
 # Миграционные таблицы: (from_version, to_version) → список операций
