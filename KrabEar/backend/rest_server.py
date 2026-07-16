@@ -100,22 +100,18 @@ def _deps() -> "RestDeps":
     return _MODULE_DEPS
 
 
-app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500 MB max
-
-# flask-smorest / OpenAPI 3.0 configuration
-app.config["API_TITLE"] = "Krab Ear REST API"
-app.config["API_VERSION"] = "v1"
-app.config["OPENAPI_VERSION"] = "3.0.3"
-app.config["OPENAPI_URL_PREFIX"] = "/api"
-app.config["OPENAPI_SWAGGER_UI_PATH"] = "/docs"
-app.config["OPENAPI_SWAGGER_UI_URL"] = "https://cdn.jsdelivr.net/npm/swagger-ui-dist/"
-
-api = Api(app)
-sock = Sock(app)
-
-# Attach API version header to every response.
-app.after_request(api_version_header())
+def _base_config() -> dict:
+    """Flask config values shared by every create_app() instance (M1)."""
+    return {
+        "MAX_CONTENT_LENGTH": 500 * 1024 * 1024,  # 500 MB max
+        # flask-smorest / OpenAPI 3.0 configuration
+        "API_TITLE": "Krab Ear REST API",
+        "API_VERSION": "v1",
+        "OPENAPI_VERSION": "3.0.3",
+        "OPENAPI_URL_PREFIX": "/api",
+        "OPENAPI_SWAGGER_UI_PATH": "/docs",
+        "OPENAPI_SWAGGER_UI_URL": "https://cdn.jsdelivr.net/npm/swagger-ui-dist/",
+    }
 
 # ---------------------------------------------------------------------------
 # CORS — разрешает кросс-доменные запросы из браузера.
@@ -157,14 +153,17 @@ if _cors_origins == "*":
         "Set CORS_ORIGINS to an explicit list to enable credentialed requests."
     )
 
-CORS(
-    app,
-    origins=_cors_origins,
-    supports_credentials=_cors_credentials,
-    allow_headers=["Content-Type", "Authorization", "X-Request-ID"],
-    expose_headers=["X-Request-ID", "Retry-After"],
-    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-)
+
+def _init_cors(app):
+    """Attach the CORS policy computed above to *app* (M1: per-instance)."""
+    CORS(
+        app,
+        origins=_cors_origins,
+        supports_credentials=_cors_credentials,
+        allow_headers=["Content-Type", "Authorization", "X-Request-ID"],
+        expose_headers=["X-Request-ID", "Retry-After"],
+        methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -284,14 +283,11 @@ if (
 
 limiter = Limiter(
     key_func=get_remote_address,
-    app=app,
     default_limits=["60 per minute"] if settings.RATE_LIMIT_ENABLED else [],
     storage_uri=_RATE_LIMIT_STORAGE_URI,
     enabled=settings.RATE_LIMIT_ENABLED,
     headers_enabled=True,
 )
-
-app.register_error_handler(429, _rate_limit_exceeded_handler)
 
 
 def _request_entity_too_large_handler(e):
@@ -311,13 +307,12 @@ def _request_entity_too_large_handler(e):
 def _rest_mod_max_content_mb() -> int:
     """Return MAX_CONTENT_LENGTH as MB for the 413 error body."""
     try:
-        limit = app.config.get("MAX_CONTENT_LENGTH", 500 * 1024 * 1024)
+        cfg = current_app.config if has_app_context() else app.config
+        limit = cfg.get("MAX_CONTENT_LENGTH", 500 * 1024 * 1024)
         return int(limit) // (1024 * 1024)
     except Exception:
         return 500
 
-
-app.register_error_handler(413, _request_entity_too_large_handler)
 
 # WebSocket heartbeat interval (seconds)
 _WS_HEARTBEAT_SEC = 30
@@ -671,7 +666,6 @@ TEMP_DIR.mkdir(parents=True, exist_ok=True)
 _VOCABULARY_POST_MAX_BYTES = 512 * 1024  # 512 KB
 
 
-@app.before_request
 def _check_vocabulary_post_size():
     """Reject oversized POST /v1/vocabulary bodies before JSON parse (H1 MED)."""
     if request.path == "/v1/vocabulary" and request.method == "POST":
@@ -680,13 +674,11 @@ def _check_vocabulary_post_size():
             return jsonify({"error": "Request too large"}), 413
 
 
-@app.before_request
 def start_timer():
     g._request_start = time.time()
     g._request_id = str(uuid.uuid4())
 
 
-@app.after_request
 def log_request(response):
     duration_ms = int((time.time() - g.get('_request_start', time.time())) * 1000)
     request_id = g.get('_request_id', str(uuid.uuid4()))
@@ -1785,11 +1777,6 @@ _V2_PLANNED_ROUTES = [
 ]
 
 
-# Register blueprints
-api.register_blueprint(monitoring_blp)
-api.register_blueprint(v1_blp)
-
-
 # ---------------------------------------------------------------------------
 # API v2 stub — 501 Not Implemented
 #
@@ -1800,8 +1787,6 @@ api.register_blueprint(v1_blp)
 # request but has not implemented the requested API version.
 # ---------------------------------------------------------------------------
 
-@app.route("/v2/", defaults={"p": ""}, methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
-@app.route("/v2/<path:p>", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 @require_api_key
 @limiter.limit("60 per minute")
 def v2_not_implemented(p):
@@ -1929,7 +1914,6 @@ def _ws_check_auth(ws) -> bool:
     return True
 
 
-@sock.route("/ws/events")
 def ws_events(ws):
     """WebSocket endpoint для стриминга событий транскрибации в реальном времени.
 
@@ -2176,14 +2160,51 @@ def _ws_stream_handler(ws):
         logger.info("WS /v1/stream: Client disconnected")
 
 
-def create_app(config_mapping=None):
-    """Factory для создания Flask-приложения."""
-    return app
+def create_app(deps: "RestDeps | None" = None, config_mapping=None) -> Flask:
+    """Настоящая фабрика (M1). deps=None → standalone module-глобалы."""
+    flask_app = Flask(__name__)
+    flask_app.config.update(_base_config())
+    if config_mapping:
+        flask_app.config.update(config_mapping)
+    flask_app.config["REST_DEPS"] = deps if deps is not None else _MODULE_DEPS
+
+    api_local = Api(flask_app)
+    flask_app.after_request(api_version_header())
+    _init_cors(flask_app)
+    limiter.init_app(flask_app)
+    flask_app.register_error_handler(429, _rate_limit_exceeded_handler)
+    flask_app.register_error_handler(413, _request_entity_too_large_handler)
+    flask_app.before_request(_check_vocabulary_post_size)
+    flask_app.before_request(start_timer)
+    flask_app.after_request(log_request)
+
+    api_local.register_blueprint(monitoring_blp)
+    api_local.register_blueprint(v1_blp)
+
+    flask_app.add_url_rule(
+        "/v2/", "v2_catchall_root", v2_not_implemented,
+        defaults={"p": ""},
+        methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
+    flask_app.add_url_rule(
+        "/v2/<path:p>", "v2_catchall", v2_not_implemented,
+        methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
+
+    sock_local = Sock(flask_app)
+    sock_local.route("/ws/events")(ws_events)
+    sock_local.route("/v1/stream")(_block_cross_origin_reads(_ws_stream_handler))
+    flask_app.extensions["krab_sock"] = sock_local
+    return flask_app
 
 
-# Регистрация WebSocket роута
+# --- standalone module-level путь (контракт категорий A/B/C: 752 теста) ---
+app = create_app()
+sock = app.extensions["krab_sock"]
 ws_stream = _ws_stream_handler
-sock.route("/v1/stream")(_block_cross_origin_reads(_ws_stream_handler))
+# api: grep-проверка (KrabEar/backend/rest_server.py, KrabEar/tests/) подтвердила
+# 0 обращений к `api.` вне фабрики и 0 импортов `rest_server.api` в тестах — Api
+# создаётся per-app внутри create_app(), module-level алиас не нужен для чего-то,
+# кроме hasattr()-контракта теста test_module_level_aliases_preserved.
+api = None
 
 
 if __name__ == "__main__":
