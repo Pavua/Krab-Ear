@@ -27,5 +27,16 @@
                sparkle:edSignature="SbQIfc9ND6EV1p9yY+oQu8+pbiyZ3nOiFF/Fx08tEYWN+t8fjUxX+ulMInQt6DXAqLsZAWnajJ6CGGM+9EBuAw=="
                type="application/octet-stream"/>
   </item>
+  <item>
+    <title>Krab Ear 2.9.0</title>
+    <pubDate>Thu, 16 Jul 2026 08:12:47 +0000</pubDate>
+    <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+    <enclosure url="https://github.com/Pavua/Krab-Ear/releases/download/v2.9.0/Krab-Ear-v2.9.0.zip"
+               sparkle:version="2.9.0"
+               sparkle:shortVersionString="2.9.0"
+               length="3857184"
+               sparkle:edSignature="pD87IoIIWouXpeLJ38qz/FBXh98LzeYxR+7/Hgzu8vJ3kn62+gLN2ZNH0c+Fo3hjsKzUIO59HYSCumEkbRG7Ag=="
+               type="application/octet-stream"/>
+  </item>
   </channel>
 </rss>
