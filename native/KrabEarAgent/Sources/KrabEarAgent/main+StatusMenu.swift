@@ -211,6 +211,16 @@ extension AgentAppDelegate {
         historyItem.keyEquivalentModifierMask = [.command, .option]
         menu.addItem(historyItem)
 
+        // C2c: живая панель встречи — старт/показ одним пунктом (backend идемпотентен).
+        let meetingItem = NSMenuItem(
+            title: "Встреча",
+            action: #selector(onMeetingPanelToggle),
+            keyEquivalent: "")
+        meetingItem.target = self
+        meetingItem.image = NSImage(systemSymbolName: "person.2.fill",
+                                    accessibilityDescription: nil)  // уже используется в +MeetingMode
+        menu.addItem(meetingItem)
+
         let showPanelItem = NSMenuItem(
             title: "Показать панель",
             action: #selector(onOpenHistory),

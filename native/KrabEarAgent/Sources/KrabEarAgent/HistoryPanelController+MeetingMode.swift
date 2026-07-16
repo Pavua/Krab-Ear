@@ -580,6 +580,29 @@ extension HistoryPanelController {
             return
         }
 
+        guard let vc = HistoryPanelController.makeMeetingReportVC(from: result) else { return }
+
+        let sheetWindow = NSWindow(contentViewController: vc)
+        sheetWindow.styleMask = [.titled, .closable, .resizable]
+        sheetWindow.title = "Встреча"
+        sheetWindow.setContentSize(NSSize(width: 640, height: 580))
+
+        if let hostWindow = self.window {
+            hostWindow.beginSheet(sheetWindow, completionHandler: nil)
+        }
+    }
+
+    // MARK: - VC factory (C2c: переиспользуется sheet-путём выше и standalone-путём
+    // панели встречи, у которой нет host-окна для beginSheet)
+
+    /// Чистое построение VC отчёта из IPC-результата get_meeting_report — без
+    /// sheet/window-обвязки. Парсинг полей — точная копия прежнего тела
+    /// presentMeetingReport(_:), только вынесена в static. nil при ok=false —
+    /// вызывающий код сам решает, как сообщить об ошибке (sheet-путь показывает
+    /// alert ДО вызова этого хелпера, см. presentMeetingReport выше).
+    static func makeMeetingReportVC(from result: [String: Any]) -> MeetingReportViewController? {
+        guard result["ok"] as? Bool ?? false else { return nil }
+
         let summary        = result["summary"]        as? String        ?? ""
         let summaryIsLLM   = result["summary_is_llm"] as? Bool          ?? false
         let actionItems    = result["action_items"]   as? [String]      ?? []
@@ -591,7 +614,7 @@ extension HistoryPanelController {
         let ts             = result["ts"]             as? String        ?? ""
         let markdown       = result["markdown"]       as? String        ?? ""
 
-        let vc = MeetingReportViewController(
+        return MeetingReportViewController(
             summary: summary,
             summaryIsLLM: summaryIsLLM,
             actionItems: actionItems,
@@ -603,16 +626,36 @@ extension HistoryPanelController {
             ts: ts,
             markdown: markdown
         )
+    }
 
-        let sheetWindow = NSWindow(contentViewController: vc)
-        sheetWindow.styleMask = [.titled, .closable, .resizable]
-        sheetWindow.title = "Встреча"
-        sheetWindow.setContentSize(NSSize(width: 640, height: 580))
+    // MARK: - Standalone presentation (C2c: панель встречи — не NSWindowController-хост)
 
-        if let hostWindow = self.window {
-            hostWindow.beginSheet(sheetWindow, completionHandler: nil)
+    /// C2c: отчёт встречи в отдельном titled-окне (панель — не NSWindowController-хост,
+    /// поэтому beginSheet недоступен как для sheet-пути onOpenMeeting).
+    @MainActor
+    static func presentMeetingReportStandalone(result: [String: Any]) {
+        guard let vc = makeMeetingReportVC(from: result) else { return }
+        let window = NSWindow(contentViewController: vc)
+        window.styleMask = [.titled, .closable, .resizable]
+        window.title = "Встреча"
+        window.setContentSize(NSSize(width: 640, height: 580))
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        // держим ссылку до закрытия (иначе ARC закроет окно немедленно)
+        _standaloneReportWindows.append(window)
+        // Ревью №5: block-based observer обязан сниматься, иначе регистрация
+        // течёт на каждое открытое окно отчёта за долгую сессию.
+        var token: NSObjectProtocol?
+        token = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: window, queue: .main
+        ) { note in
+            MainActor.assumeIsolated {
+                _standaloneReportWindows.removeAll { $0 === note.object as? NSWindow }
+                if let token { NotificationCenter.default.removeObserver(token) }
+            }
         }
     }
+    @MainActor private static var _standaloneReportWindows: [NSWindow] = []
 }
 
 // NOTE: NSMenuItemValidation conformance lives in +QuickActions.swift.

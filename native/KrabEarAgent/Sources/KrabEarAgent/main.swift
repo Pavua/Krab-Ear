@@ -145,6 +145,8 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     // Phase 2B live-subs state moved to main+LiveSubs.swift (associated objects).
 
     var historyPanel: HistoryPanelController?
+    /// C2c: живая панель встречи (единственный инстанс, main+MeetingPanel.swift).
+    var meetingPanelController: MeetingLivePanelController?
     var hotkeyManager: HotkeyManager?
     var statusItem: NSStatusItem?
     /// Ссылка на карточку «Сводка дня» в status-меню — хранится для refresh в NSMenuDelegate.
