@@ -643,11 +643,15 @@ extension HistoryPanelController {
         window.makeKeyAndOrderFront(nil)
         // держим ссылку до закрытия (иначе ARC закроет окно немедленно)
         _standaloneReportWindows.append(window)
-        NotificationCenter.default.addObserver(
+        // Ревью №5: block-based observer обязан сниматься, иначе регистрация
+        // течёт на каждое открытое окно отчёта за долгую сессию.
+        var token: NSObjectProtocol?
+        token = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification, object: window, queue: .main
         ) { note in
             MainActor.assumeIsolated {
                 _standaloneReportWindows.removeAll { $0 === note.object as? NSWindow }
+                if let token { NotificationCenter.default.removeObserver(token) }
             }
         }
     }

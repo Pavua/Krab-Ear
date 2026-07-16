@@ -84,6 +84,68 @@ final class MeetingLivePanelTests: XCTestCase {
         XCTAssertEqual(c._testUIState, .finalizing)
     }
 
+    // === Fable-гейт волны: находки адверсариального ревью ===
+
+    func test_panel_is_closable_and_reusable() {
+        // Ревью №1: панель обязана закрываться крестиком и переживать закрытие
+        // (isReleasedWhenClosed=false — иначе крэш при повторном show).
+        let c = MeetingLivePanelController()
+        XCTAssertTrue(c._testPanelStyleMask.contains(.closable))
+        XCTAssertFalse(c._testIsReleasedWhenClosed)
+        XCTAssertTrue(c._testPanelDelegateIsController)
+    }
+
+    func test_window_close_stops_updates_and_timers() {
+        // Ревью №1+№4: закрытие панели глушит poll/SSE/header-таймер
+        // (сессия backend'а при этом ПРОДОЛЖАЕТСЯ — спека §3).
+        let c = MeetingLivePanelController()
+        c.render(state: makeState())
+        XCTAssertTrue(c._testHeaderTimerActive)
+        c._testSimulateWindowWillClose()
+        XCTAssertFalse(c._testHeaderTimerActive)
+        XCTAssertFalse(c._testPollFallbackActive)
+    }
+
+    func test_silence_watchdog_active_during_finalizing() {
+        // Ревью №2: потерянный SSE meeting.finished не должен вешать
+        // «Финализирую…» навечно — watchdog обязан работать и в .finalizing.
+        let c = MeetingLivePanelController()
+        c.render(state: makeState())
+        c.enterFinalizing()
+        c._testSimulateSSESilence(seconds: 16)
+        XCTAssertTrue(c._testPollFallbackActive)
+    }
+
+    func test_finalizing_poll_inactive_delivers_nil_finish() {
+        // Ревью №2: poll в finalizing увидел active:false (finished потерян) →
+        // deliverFinished(nil) — панель выходит из вечного «Финализирую…».
+        let c = MeetingLivePanelController()
+        var calls: [String?] = []
+        c.onFinished = { calls.append($0) }
+        c.render(state: makeState())
+        c.enterFinalizing()
+        c._testHandlePollState(["ok": true, "active": false])
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertNil(calls[0])
+    }
+
+    func test_sse_flat_payload_without_envelope_is_parsed() {
+        // Ревью №3 (test-validates-the-hole): реальный event_bus шлёт ПЛОСКИЙ
+        // payload (data: {"speakers":[...]}), без обёртки {type,data} —
+        // fallback `?? obj` обязан быть покрыт тестом.
+        let c = MeetingLivePanelController()
+        c.render(state: makeState())
+        c._testHandleSSELine("event: meeting.speakers_updated")
+        c._testHandleSSELine(#"data: {"speakers":[{"label":"Спикер 1","talk_sec":5.0,"last_active_ts":0}]}"#)
+        XCTAssertEqual(c._testSpeakerChipCount, 1)
+        c.enterFinalizing()
+        var received: [String?] = []
+        c.onFinished = { received.append($0) }
+        c._testHandleSSELine("event: meeting.finished")
+        c._testHandleSSELine(#"data: {"item_id":"flat-1"}"#)
+        XCTAssertEqual(received, ["flat-1"])
+    }
+
     func test_speaker_chip_shows_staleness() {
         let c = MeetingLivePanelController()
         let old = Date().timeIntervalSince1970 - 200

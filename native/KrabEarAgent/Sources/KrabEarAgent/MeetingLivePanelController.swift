@@ -25,7 +25,7 @@ import AppKit
 import Foundation
 
 @MainActor
-final class MeetingLivePanelController: NSObject {
+final class MeetingLivePanelController: NSObject, NSWindowDelegate {
 
     enum UIState: Equatable {
         case idle        // сессии нет
@@ -103,6 +103,13 @@ final class MeetingLivePanelController: NSObject {
     var _testItemRowCount: Int { itemsStack.arrangedSubviews.count }
     var _testTranscriptTailText: String { transcriptTailLabel.stringValue }
     var _testDegradedBadgeVisible: Bool { !degradedBadge.isHidden }
+    var _testPanelStyleMask: NSWindow.StyleMask { panel.styleMask }
+    var _testIsReleasedWhenClosed: Bool { panel.isReleasedWhenClosed }
+    var _testPanelDelegateIsController: Bool { panel.delegate === self }
+    var _testHeaderTimerActive: Bool { timerTick != nil }
+    func _testSimulateWindowWillClose() {
+        windowWillClose(Notification(name: NSWindow.willCloseNotification, object: panel))
+    }
     var _testPollFallbackActive: Bool { pollFallbackActive }
 
     /// Прямой вызов SSE-парсера строки — без реального сетевого стрима.
@@ -124,6 +131,12 @@ final class MeetingLivePanelController: NSObject {
             backing: .buffered, defer: false)
         super.init()
         setupPanel()
+        // Ревью №1: панель закрываема крестиком и переиспользуема —
+        // isReleasedWhenClosed=false обязателен, иначе повторный show()
+        // после закрытия обращается к деаллоцированному окну (крэш).
+        panel.styleMask.insert(.closable)
+        panel.isReleasedWhenClosed = false
+        panel.delegate = self
         buildLayout()
         setUIState(.idle)
     }
@@ -142,6 +155,13 @@ final class MeetingLivePanelController: NSObject {
         panel.orderOut(nil)
     }
 
+    /// Ревью №1: закрытие панели крестиком глушит обновления и таймеры;
+    /// сессия backend'а ПРОДОЛЖАЕТСЯ (спека §3) — панель переоткрывается
+    /// из меню с полным состоянием.
+    func windowWillClose(_ notification: Notification) {
+        stopUpdates()
+    }
+
     /// Разовый off-main poll (get_meeting_live_state → render), затем SSE+watchdog.
     /// Владелец зовёт после show(); повторный show() → снова startUpdates().
     func startUpdates() {
@@ -158,6 +178,7 @@ final class MeetingLivePanelController: NSObject {
         pollTimer?.invalidate(); pollTimer = nil
         silenceTimer?.invalidate(); silenceTimer = nil
         deactivatePollFallback()
+        stopTimer()  // ревью №4: header-таймер не должен тикать за закрытой панелью
     }
 
     /// Единственная точка входа данных: полный снапшот get_meeting_live_state
@@ -342,13 +363,27 @@ final class MeetingLivePanelController: NSObject {
                 nonisolated(unsafe) let response = try client.call(
                     method: "get_meeting_live_state", params: [:])
                 nonisolated(unsafe) let result = response["result"] as? [String: Any] ?? response
-                DispatchQueue.main.async { self?.render(state: result) }
+                DispatchQueue.main.async { self?.handlePollState(result) }
             } catch {
                 // Poll — best-effort фоллбэк; SSE остаётся основным каналом,
                 // одиночная неудача poll'а не показывается пользователю.
             }
         }
     }
+
+    /// Ревью №2: единая обработка poll-снапшота. В .finalizing render — no-op
+    /// (sticky), но inactive-снапшот означает «meeting.finished потерян» —
+    /// доставляем финализацию с nil (отчёт без item_id не построить; запись
+    /// доступна в истории), выводя панель из вечного «Финализирую…».
+    private func handlePollState(_ state: [String: Any]) {
+        if uiState == .finalizing && (state["active"] as? Bool) != true {
+            deliverFinished(state["item_id"] as? String)  // почти всегда nil
+            return
+        }
+        render(state: state)
+    }
+
+    func _testHandlePollState(_ state: [String: Any]) { handlePollState(state) }
 
     // MARK: - SSE (общий SSESessionDelegate, паттерн LiveSubtitlesOverlay)
 
@@ -436,7 +471,9 @@ final class MeetingLivePanelController: NSObject {
     /// Тикает каждые 5с (или напрямую из _testSimulateSSESilence). SSE молчит >15с
     /// при активной сессии → включаем poll-фоллбэк и пересоздаём SSE-стрим.
     private func checkSilenceWatchdog() {
-        guard uiState == .live else { return }
+        // Ревью №2: и .live, и .finalizing — потерянный SSE meeting.finished
+        // иначе вешает «Финализирую…» навечно (poll-фоллбэка там не было).
+        guard uiState == .live || uiState == .finalizing else { return }
         let now = Date().timeIntervalSince1970
         if now - lastSSEActivity > 15 {
             activatePollFallback()
