@@ -11,12 +11,15 @@ import json
 import math
 import os
 import queue
+import sys
 import time
 import uuid
 import logging
 import functools
+from dataclasses import dataclass as _dataclass
 from datetime import datetime, timezone
-from flask import Flask, Response, request, jsonify, stream_with_context, g
+from typing import Any as _Any, Protocol as _Protocol
+from flask import Flask, Response, request, jsonify, stream_with_context, g, current_app, has_app_context
 from flask_smorest import Api, Blueprint
 from flask_sock import Sock
 from flask_limiter import Limiter
@@ -42,6 +45,60 @@ from backend.tts_service import TTSService
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("KrabEar.REST")
+
+# ---------------------------------------------------------------------------
+# M1 (спека 2026-07-16-m-series-rest-merge-design §3): DI-зависимости фабрики.
+#
+# Хендлеры читают коллабораторов ТОЛЬКО через _deps():
+#   - внутри app-контекста — из app.config["REST_DEPS"] (у каждого app свои);
+#   - вне контекста (прямой вызов хендлера из тестов) — module-глобалы,
+#     как и до фабрики.
+# _ModuleGlobalsDeps читает module-атрибуты ЖИВЬЁМ при каждом обращении —
+# это контракт для patch.object(rest_server, "store", ...) в 12 тест-файлах.
+# ---------------------------------------------------------------------------
+
+
+class RestDeps(_Protocol):
+    engine: _Any
+    store: _Any
+    transcriber: _Any
+    translator: _Any
+    tts_service: _Any
+    metrics: _Any
+    event_bus: _Any
+    sse_stream: _Any
+
+
+@_dataclass
+class StaticDeps:
+    """Путь M2: BackendService собирает deps из своих коллабораторов."""
+    engine: _Any
+    store: _Any
+    transcriber: _Any
+    translator: _Any
+    tts_service: _Any
+    metrics: _Any
+    event_bus: _Any
+    sse_stream: _Any
+
+
+class _ModuleGlobalsDeps:
+    """Standalone-путь: живое чтение module-атрибутов (имена совпадают 1:1)."""
+
+    def __getattr__(self, name):
+        return getattr(sys.modules[__name__], name)
+
+
+_MODULE_DEPS = _ModuleGlobalsDeps()
+
+
+def _deps() -> "RestDeps":
+    if has_app_context():
+        d = current_app.config.get("REST_DEPS")
+        if d is not None:
+            return d
+    return _MODULE_DEPS
+
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500 MB max
