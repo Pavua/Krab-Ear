@@ -132,6 +132,28 @@ final class MeetingLivePanelTests: XCTestCase {
         XCTAssertEqual(received, "abc-123")
     }
 
+    func test_finished_delivered_exactly_once() {
+        // Fable-гейт: SSE meeting.finished и IPC-ответ meeting_stop оба несут
+        // item_id — без one-shot гарда открылись бы ДВА окна отчёта.
+        let c = MeetingLivePanelController()
+        var calls: [String?] = []
+        c.onFinished = { calls.append($0) }
+        c.render(state: makeState())
+        c.enterFinalizing()
+        c._testHandleSSELine("event: meeting.finished")
+        c._testHandleSSELine(#"data: {"data":{"item_id":"abc-123"}}"#)
+        c._testHandleSSELine("event: meeting.finished")
+        c._testHandleSSELine(#"data: {"data":{"item_id":"abc-123"}}"#)
+        XCTAssertEqual(calls.count, 1)
+        // Новая сессия (render active после resetToIdle) взводит гард заново.
+        c.resetToIdle()
+        c.render(state: makeState())
+        c.enterFinalizing()
+        c._testHandleSSELine("event: meeting.finished")
+        c._testHandleSSELine(#"data: {"data":{"item_id":"def-456"}}"#)
+        XCTAssertEqual(calls.count, 2)
+    }
+
     func test_silence_watchdog_arms_poll_fallback() {
         let c = MeetingLivePanelController()
         c.render(state: makeState())

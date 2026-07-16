@@ -58,6 +58,16 @@ final class MeetingLivePanelController: NSObject {
     /// item_id финализированной встречи (может быть nil при отчёте без id) — владелец
     /// панели решает, как открыть/показать отчёт (главный или standalone путь).
     var onFinished: ((String?) -> Void)?
+    /// One-shot гард финализации: SSE meeting.finished и IPC-ответ meeting_stop
+    /// оба несут item_id — без гарда владелец открыл бы ДВА окна отчёта.
+    /// Взводится заново при входе в новую live-сессию (setUIState).
+    private var finishedDelivered = false
+
+    private func deliverFinished(_ itemID: String?) {
+        guard !finishedDelivered else { return }
+        finishedDelivered = true
+        onFinished?(itemID)
+    }
 
     private let restBaseURL = "http://127.0.0.1:5005"
     private var sseTask: URLSessionDataTask?
@@ -187,7 +197,7 @@ final class MeetingLivePanelController: NSObject {
                 let itemID = result["item_id"] as? String
                 DispatchQueue.main.async {
                     if let itemID, !itemID.isEmpty {
-                        self?.onFinished?(itemID)
+                        self?.deliverFinished(itemID)
                     }
                     // без item_id — ждём meeting.finished по SSE, состояние остаётся .finalizing
                 }
@@ -282,6 +292,9 @@ final class MeetingLivePanelController: NSObject {
     // MARK: - UI state machine
 
     private func setUIState(_ newState: UIState) {
+        if newState == .live && uiState != .live && uiState != .finalizing {
+            finishedDelivered = false  // новая сессия — гард финализации заново
+        }
         uiState = newState
         let contentVisible = (newState == .live) || (newState == .finalizing)
         speakersRow.isHidden = !contentVisible
@@ -394,7 +407,7 @@ final class MeetingLivePanelController: NSObject {
         case "meeting.finalizing":
             enterFinalizing()
         case "meeting.finished":
-            onFinished?(eventData["item_id"] as? String)
+            deliverFinished(eventData["item_id"] as? String)
         default:
             break  // недостижимо — фильтр handleSSELine уже отсёк чужие типы
         }
