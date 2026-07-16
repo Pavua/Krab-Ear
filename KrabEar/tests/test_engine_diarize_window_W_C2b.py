@@ -109,6 +109,15 @@ class DiarizeWindowTests(unittest.TestCase):
         self.assertEqual(result["speaker_embeddings"], {})
         self.assertEqual(len(result["segments"]), 1)
 
+    def test_pyannote_telemetry_disabled_by_engine_import(self):
+        # Privacy-first: импорт engine выключает телеметрию pyannote ДО её
+        # импорта (плюс её track_pipeline_apply крашился на duration=None —
+        # живой репро e2e_speakers_smoke 2026-07-16). setdefault: явный
+        # пользовательский opt-in через env уважается.
+        import os
+        import core.engine  # noqa: F401
+        self.assertIn("PYANNOTE_METRICS_ENABLED", os.environ)
+
     def test_run_lock_held_during_inference(self):
         eng = _make_engine()
         held = []

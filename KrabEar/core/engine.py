@@ -50,6 +50,14 @@ try:
 except Exception:
     torch = None  # type: ignore[assignment]
 
+# Телеметрия pyannote 4.x (OpenTelemetry-метрики) — выключаем ДО импорта:
+# privacy-first продукт не шлёт usage-метрики, плюс её track_pipeline_apply
+# крашится TypeError на файлах с неопределяемой длительностью
+# (record(duration=None) — живой репро e2e_speakers_smoke 2026-07-16).
+# Явный пользовательский opt-in через env уважается (только default).
+if "PYANNOTE_METRICS_ENABLED" not in os.environ:
+    os.environ["PYANNOTE_METRICS_ENABLED"] = "false"
+
 try:
     from pyannote.audio import Pipeline  # type: ignore
 except Exception:

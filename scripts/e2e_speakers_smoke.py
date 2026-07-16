@@ -46,11 +46,13 @@ def build_wavs(tmp: Path) -> list[Path]:
     full = tmp / "meeting.wav"
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0",
                     "-i", str(lst), "-ar", "16000", "-ac", "1", str(full)], check=True)
+    # Два ПЕРЕКРЫВАЮЩИХСЯ окна (корпус ~30-35с; "-ss 30" дал бы ПУСТОЙ w2 —
+    # torchcodec падает на нуле кадров; живой урок 2026-07-16).
     half1, half2 = tmp / "w1.wav", tmp / "w2.wav"
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(full),
-                    "-t", "30", str(half1)], check=True)
+                    "-t", "20", str(half1)], check=True)
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(full),
-                    "-ss", "30", str(half2)], check=True)
+                    "-ss", "15", str(half2)], check=True)
     return [half1, half2]
 
 
@@ -81,4 +83,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    rc = main()
+    # os._exit: AudioEngine спавнит фоновые адаптеры (gigaam и др.), чей
+    # __del__-teardown на выходе интерпретатора шумит fatal'ом (#1782-класс);
+    # для ручного CLI-смока честный rc важнее graceful shutdown.
+    import os
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(rc)
