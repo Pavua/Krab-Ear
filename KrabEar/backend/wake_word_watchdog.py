@@ -58,6 +58,7 @@ class WakeWordWatchdog:
         adapter: Any,
         reinit_coordinator: Any,
         error_bus: Any = None,
+        is_recording: Callable[[], bool] | None = None,
         settings_get: Callable[[str, Any], Any] | None = None,
         clock: Callable[[], float] = time.monotonic,
         check_interval_sec: float = _CHECK_INTERVAL_SEC_DEFAULT,
@@ -65,6 +66,12 @@ class WakeWordWatchdog:
         self._adapter = adapter
         self._coordinator = reinit_coordinator
         self._error_bus = error_bus
+        # Живой инцидент 2026-07-16: meeting-запись не снимает wake-word
+        # слушатель (хоткейный путь снимает через WakeWordPoller) — адаптер
+        # легитимно голодает по чанкам всю запись. Без этого чека staleness-
+        # шторм доводил до wedged-эскалации и kickstart'а backend'а ПОСРЕДИ
+        # финальной транскрипции встречи.
+        self._is_recording = is_recording
         self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda _k, d: d)
         self._clock = clock
         self._check_interval_sec = check_interval_sec
@@ -90,6 +97,18 @@ class WakeWordWatchdog:
             return bool(self._settings_get("wake_word_watchdog_enabled", True))
         except Exception:
             return True
+
+    def _recording_active(self) -> bool:
+        if self._is_recording is None:
+            return False
+        try:
+            return bool(self._is_recording())
+        except Exception:
+            # fail-open в сторону РАБОТАЮЩЕГО watchdog'а: ошибочный пропуск
+            # лечения хуже лишнего deferred-танца (координатор сам
+            # перепроверяет is_recording перед Pa_Terminate).
+            logger.exception("WakeWordWatchdog: is_recording() упал")
+            return False
 
     def _stale_sec(self) -> float:
         try:
@@ -143,6 +162,16 @@ class WakeWordWatchdog:
     def check_once(self) -> str | None:
         """Возвращает выполненное действие: "healed" | "escalated" | None."""
         if not self._enabled():
+            return None
+
+        if self._recording_active():
+            # Активная запись = легитимная пауза источника чанков: ни heal,
+            # ни эскалация; эпизод/аномалия сбрасываются (симметрия чистой
+            # паузе ниже). После записи адаптер либо оживёт сам, либо watchdog
+            # снова возьмёт его в работу со свежим эпизодом.
+            with self._lock:
+                self._anomaly_since = None
+            self._reset_episode()
             return None
 
         try:

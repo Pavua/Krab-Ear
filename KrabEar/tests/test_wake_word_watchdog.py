@@ -69,7 +69,8 @@ class _Clock:
         return self.t
 
 
-def _make(adapter=None, coordinator=None, bus=None, settings=None, clock=None):
+def _make(adapter=None, coordinator=None, bus=None, settings=None, clock=None,
+          is_recording=None):
     settings = dict(settings or {})
     adapter = adapter or _FakeAdapter()
     coordinator = coordinator or _FakeCoordinator()
@@ -78,6 +79,7 @@ def _make(adapter=None, coordinator=None, bus=None, settings=None, clock=None):
         adapter=adapter,
         reinit_coordinator=coordinator,
         error_bus=bus,
+        is_recording=is_recording,
         settings_get=lambda k, d: settings.get(k, d),
         clock=clock,
     )
@@ -85,6 +87,34 @@ def _make(adapter=None, coordinator=None, bus=None, settings=None, clock=None):
 
 
 class CheckOnceGuardTests(unittest.TestCase):
+    def test_active_recording_is_legitimate_pause(self):
+        # Живой инцидент 2026-07-16 (первая длинная встреча C2): meeting-запись
+        # не снимает wake-word слушатель (в отличие от хоткейного пути через
+        # WakeWordPoller) → адаптер голодает по чанкам всю запись → staleness-
+        # шторм → THREAD_HUNG → wedged → Swift kickstart'нул backend ПОСРЕДИ
+        # финальной транскрипции встречи (item потерян). Активная запись —
+        # легитимная пауза: ни heal, ни эскалация, эпизод сброшен.
+        rec = {"on": True}
+        wd, adapter, coord, clock = _make(is_recording=lambda: rec["on"])
+        adapter.hb = {"last_chunk_ts": 100.0, "listen_started_ts": 50.0}
+        clock.t = 1000.0  # staleness 900с >> порога
+        self.assertIsNone(wd.check_once())
+        self.assertEqual(coord.calls, 0)
+        # Запись кончилась, адаптер по-прежнему голодает → watchdog снова в деле
+        rec["on"] = False
+        self.assertEqual(wd.check_once(), "healed")
+        self.assertEqual(coord.calls, 1)
+
+    def test_is_recording_failure_fails_open_to_watchdog(self):
+        # is_recording() упал → считаем, что записи НЕТ (watchdog работает):
+        # ошибочный пропуск лечения хуже лишнего deferred-танца (координатор
+        # сам перепроверяет is_recording перед Pa_Terminate).
+        wd, adapter, coord, clock = _make(
+            is_recording=lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+        adapter.hb = {"last_chunk_ts": 100.0, "listen_started_ts": 50.0}
+        clock.t = 1000.0
+        self.assertEqual(wd.check_once(), "healed")
+
     def test_disabled_noop(self):
         wd, adapter, coord, clock = _make(
             settings={"wake_word_watchdog_enabled": False},

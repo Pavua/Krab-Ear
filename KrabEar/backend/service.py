@@ -1056,6 +1056,9 @@ class BackendService:
             adapter=self._oww_adapter,
             reinit_coordinator=self._audio_reinit_coordinator,
             error_bus=self._error_bus,
+            # Инцидент 2026-07-16: активная запись (meeting-путь не снимает
+            # слушатель) — легитимная пауза, не staleness-эпизод.
+            is_recording=lambda: bool(getattr(self.recorder, "is_recording", False)),
             settings_get=self._get_runtime_setting,
         )
         self._wake_word_watchdog.start()
