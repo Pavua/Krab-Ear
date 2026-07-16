@@ -40,6 +40,15 @@
     <key>PYTHONPATH</key>
     <string>__PROJECT_ROOT__/KrabEar</string>
 
+    <!-- 2026-07-16 (блокер 2026-07-12): без явного data-dir REST жил в
+         dev-директории ~/.krab_ear_data (дефолт config.DATA_DIR), а backend —
+         в канонической (через <hyphen><hyphen>data-dir в своём plist): split-brain StateStore
+         (две разные history.ndjson) + мёртвый event-мост (bridge-токен
+         читался не из той директории → failed/dropped). Канон — как у
+         ai.krab.ear.backend. -->
+    <key>KRAB_EAR_DATA_DIR</key>
+    <string>__HOME__/Library/Application Support/KrabEar</string>
+
     <!-- Diarization (pyannote/speaker-diarization-3.1) требует HF token. -->
     <key>HF_TOKEN</key>
     <string>__HF_TOKEN__</string>
