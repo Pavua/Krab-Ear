@@ -772,7 +772,13 @@ class BackendService:
         )
         # wave-1770 MED: inject settings_get for privacy gates on text analysis handlers.
         self._text_processing_svc._settings_get = self._get_runtime_setting
-        self._obsidian_sync = ObsidianSyncManager(data_dir=self.store.data_dir, event_bus=event_bus)
+        # C3a wave: privacy gate for run_obsidian_sync (sibling-gate asymmetry —
+        # handle_create_apple_note already gated, handle_sync did not).
+        self._obsidian_sync = ObsidianSyncManager(
+            data_dir=self.store.data_dir,
+            event_bus=event_bus,
+            settings_get=self._get_runtime_setting,
+        )
         self._speaker_manager = SpeakerManager(
             data_dir=self.store.data_dir,
             settings_fn=self._settings_svc.cached_settings,  # wave-1770 HIGH: privacy gate for PII handlers

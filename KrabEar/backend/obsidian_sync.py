@@ -15,7 +15,7 @@ import threading
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 def _sanitize_md_body_text(text: str) -> str:
@@ -230,13 +230,22 @@ class ObsidianSyncManager:
     - Персистентность состояния в {data_dir}/obsidian_sync.json
     """
 
-    def __init__(self, data_dir: Path | None = None, event_bus=None) -> None:
+    def __init__(
+        self,
+        data_dir: Path | None = None,
+        event_bus=None,
+        settings_get: Callable[[str, Any], Any] | None = None,
+    ) -> None:
         self._data_dir: Path | None = Path(data_dir) if data_dir is not None else None
         self._vault_path: Path | None = None
         self._folder: str = _DEFAULT_FOLDER
         self._last_sync_ts: str | None = None
         self._lock = threading.Lock()
         self._event_bus = event_bus
+        # Optional runtime settings provider (e.g. BackendService._get_runtime_setting).
+        # Falls back to always returning the default when not provided (same
+        # pattern as AppleIntegrationService).
+        self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda key, default: default)
 
         if self._data_dir is not None:
             self._state_path = self._data_dir / _SYNC_STATE_FILE
@@ -540,6 +549,16 @@ class ObsidianSyncManager:
 
         Принимает items (список dict) и опциональный force (bool).
         """
+        # C3a wave (sibling-gate asymmetry): handle_create_apple_note уже гейтит
+        # privacy_mode_enabled (apple_integration_service.py) — sync() пишет
+        # transcript-текст в файлы vault'а тем же классом риска и обязана
+        # гейтиться идентично, ДО любой записи на диск.
+        if self._settings_get("privacy_mode_enabled", False):
+            return {
+                "ok": False,
+                "error": "privacy_mode_active",
+                "user_msg": "Приватный режим включён — синхронизация с Obsidian запрещена.",
+            }
         raw_items = params.get("items")
         if raw_items is None or not isinstance(raw_items, list):
             raise ValueError("Параметр items (список) обязателен")
