@@ -18,6 +18,20 @@ extension AgentAppDelegate {
     static let quickCaptureCollectionName = "Быстрые заметки"
 
     @objc func onQuickCaptureToggle() {
+        // C3a ревью F2a: debounce переиспользует ТО ЖЕ поле, что диктовка
+        // (main+HotkeyRecording.swift:handleRecordToggleRequest) — оба хоткея
+        // переключают состояние ОДНОГО общего recorder'а (см. F1 NOTES), так что
+        // общий таймер защищает от гонки старт/стоп независимо от того, какой
+        // именно "переключатель записи" сработал повторно (не только авто-repeat
+        // ОДНОГО и того же хоткея — двойной тап Cmd+Shift+N сразу после Right
+        // Option тоже гасится, что логично при общем recorder'е).
+        let now = Date().timeIntervalSince1970
+        if now - lastToggleRequestAt < toggleDebounceSec {
+            logger.warn("Игнорирую повторный quick capture toggle (debounce)")
+            return
+        }
+        lastToggleRequestAt = now
+
         if quickCaptureActive { stopQuickCapture(); return }
         // Взаимное исключение: диктовка/обработка. Встреча отсекается своим
         // собственным гардом (main+MeetingPanel.swift); чужая активная запись
@@ -39,18 +53,45 @@ extension AgentAppDelegate {
                 // main+HotkeyRecording.swift:startRecording()).
                 let result = resp["result"] as? [String: Any] ?? [:]
                 // Успешный статус start_recording — "recording" (НЕ "ok"; сверено
-                // с recording_core_service.py:367). "already_recording" —
-                // идемпотентный повтор, тоже успех.
+                // с recording_core_service.py:367). C3a ревью F1: "already_recording"
+                // — идемпотентный ответ recorder'а, УЖЕ занятого чужой записью
+                // (например meeting, который не выставляет Swift-флаг isRecording
+                // и потому не отсекается гардом выше) — это ОТКАЗ, а не успех:
+                // трактовать его как успех означало бы угнать чужую запись (второе
+                // нажатие шлёт stop_recording на ОБЩИЙ recorder — see
+                // meeting_session_service.py:403-410 self-finalize с item_id=None).
                 let status = result["status"] as? String ?? ""
                 await MainActor.run {
-                    if status == "recording" || status == "already_recording" {
+                    if status == "recording" {
+                        // C3a ревью F2b: этот completion мог доехать ПОСЛЕ того,
+                        // как stopQuickCapture() (двойной тап/гонка) уже сбросил
+                        // quickCaptureActive и отправил свой собственный
+                        // stop_recording — backend в этот момент мог быть ещё
+                        // idle и потому теперь стартовал запись, которую больше
+                        // некому остановить. Если состояние уже не совпадает с
+                        // тем, что ожидал этот старт, — не применяем success-эффекты,
+                        // а сами останавливаем осиротевшую запись fire-and-forget.
+                        guard self.quickCaptureActive else {
+                            // Локальный `let` вместо self.ipcClient внутри замыкания —
+                            // тот же приём, что startQuickCaptureHotkeyMonitor(): IPCClient
+                            // сам Sendable, а AgentAppDelegate (self) — нет.
+                            let orphanIpc = self.ipcClient
+                            Task.detached {
+                                _ = try? await orphanIpc.callAsync(
+                                    method: "stop_recording", params: [:], timeoutSec: 120)
+                            }
+                            return
+                        }
                         // wake-word пауза + оверлей; streaming-paste подавлен гардом.
                         self.startRealtimeOverlayPolling()
                         BackendToast.shared.show("Быстрая заметка: запись…")
                     } else {
                         self.quickCaptureActive = false
                         self.rebuildStatusMenu()
-                        BackendToast.shared.show("Не удалось начать заметку")
+                        let message = status == "already_recording"
+                            ? "Микрофон занят другой записью"
+                            : "Не удалось начать заметку"
+                        BackendToast.shared.show(message)
                     }
                 }
             } catch {
@@ -231,6 +272,10 @@ extension AgentAppDelegate {
         guard quickCaptureHotkeyMonitor == nil else { return }
         let (modifiers, keyCode) = AgentAppDelegate.quickCaptureHotkeyCombo(for: hotkeyId)
         quickCaptureHotkeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            // C3a ревью F2a: OS auto-repeat (зажатая клавиша) шлёт keyDown-события
+            // без реального повторного нажатия пользователем — проверяем ПЕРВОЙ,
+            // до модификаторов/keyCode, чтобы не тратить на неё дальнейшую логику.
+            guard !event.isARepeat else { return }
             guard let self,
                   event.modifierFlags.intersection(.deviceIndependentFlagsMask) == modifiers,
                   event.keyCode == keyCode else { return }
