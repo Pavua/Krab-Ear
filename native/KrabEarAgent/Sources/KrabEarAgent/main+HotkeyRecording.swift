@@ -11,6 +11,12 @@ extension AgentAppDelegate {
     // MARK: - Hotkey recording
 
     func handleRecordToggleRequest() {
+        // C3a: во время быстрой заметки диктовка отвергается (взаимное
+        // исключение — спека 2026-07-16-c3-quick-capture-design.md §2a).
+        if quickCaptureActive {
+            BackendToast.shared.show("Идёт быстрая заметка — сначала завершите её")
+            return
+        }
         if isProcessing {
             return
         }

@@ -159,6 +159,10 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     var settings: AgentSettings = .default
     var isRecording = false
     var isProcessing = false
+    /// C3a: активна быстрая заметка (запись без вставки в активное окно, спека
+    /// 2026-07-16-c3-quick-capture-design.md §2a). Подавляет streaming-paste
+    /// и взаимно исключается с диктовкой/встречей.
+    var quickCaptureActive = false
     var lastToggleRequestAt: TimeInterval = 0
     let toggleDebounceSec: TimeInterval = 0.35
     var recordingTargetApp: NSRunningApplication?

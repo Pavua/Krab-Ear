@@ -17,6 +17,12 @@ extension AgentAppDelegate {
     /// Единый вход: сессии нет → meeting_start (backend идемпотентен:
     /// already_active/promoted) → показать панель; сессия есть → просто показать.
     @objc func onMeetingPanelToggle() {
+        // C3a: во время быстрой заметки встреча отвергается (взаимное
+        // исключение — спека 2026-07-16-c3-quick-capture-design.md §2a).
+        if quickCaptureActive {
+            BackendToast.shared.show("Идёт быстрая заметка — сначала завершите её")
+            return
+        }
         let controller = ensureMeetingPanelController()
         controller.show()
         controller.startUpdates()

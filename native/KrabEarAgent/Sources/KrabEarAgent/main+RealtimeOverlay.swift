@@ -14,7 +14,9 @@ extension AgentAppDelegate {
         stopRealtimeOverlayPolling()
 
         // Streaming live paste SSE — запускаем независимо от realtimePreviewEnabled.
-        streamingPasteController?.recordingDidStart()
+        // C3a: подавлен для быстрой заметки — партиалы не должны печататься в
+        // активное окно (спека 2026-07-16-c3-quick-capture-design.md §2a).
+        if !quickCaptureActive { streamingPasteController?.recordingDidStart() }
 
         // Запись владеет микрофоном; иначе wake word ловит собственную диктовку.
         wakeWordPoller?.pause(.recording)
@@ -50,7 +52,8 @@ extension AgentAppDelegate {
         realtimeOverlay.stopPartialSSE()
         realtimeOverlay.hide()
         // Streaming live paste SSE — останавливаем вместе с оверлеем.
-        streamingPasteController?.recordingDidStop()
+        // C3a: тот же гард, что на старте — симметрия обязательна.
+        if !quickCaptureActive { streamingPasteController?.recordingDidStop() }
         wakeWordPoller?.resume(.recording)
     }
 

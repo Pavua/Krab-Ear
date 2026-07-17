@@ -1168,6 +1168,11 @@ extension HistoryPanelController {
         case "pending":
             statusColor = KrabEarTheme.Colors.warning
             statusSymbol = "arrow.triangle.2.circlepath"
+        case "skipped":
+            // C3a: быстрая заметка — вставка намеренно не выполнялась, это не
+            // сбой (спека 2026-07-16-c3-quick-capture-design.md §2a).
+            statusColor = KrabEarTheme.Colors.textSecondary
+            statusSymbol = "note.text"
         default:
             statusColor = KrabEarTheme.Colors.textSecondary
             statusSymbol = "questionmark.circle"
