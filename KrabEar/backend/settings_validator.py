@@ -53,6 +53,9 @@ _ENUM_FIELDS: dict[str, tuple[str, ...]] = {
     "cloud_rewriter_provider": ("openai", "anthropic", "custom"),
     # cloud_stt_provider: valid providers for cloud STT fallback (engine.py::_transcribe_remote).
     "cloud_stt_provider": ("openai", "deepgram", "assemblyai"),
+    # quick_capture_hotkey: fixed set of hotkey combos for C3a Quick Capture
+    # (NOT free text entry — see main+QuickCapture.swift startQuickCaptureHotkeyMonitor).
+    "quick_capture_hotkey": ("cmd_shift_n", "cmd_opt_n", "ctrl_shift_n"),
 }
 
 # Диапазоны числовых полей: ключ → (min, max, default, type)
@@ -140,6 +143,10 @@ _BOOL_FIELDS: dict[str, bool] = {
     "audio_selfheal_enabled": True,
     "wake_word_watchdog_enabled": True,
     "meeting_live_speakers_enabled": True,
+    # --- C3a Quick Capture ---
+    "quick_capture_send_to_notes": False,
+    "quick_capture_obsidian_sync": False,
+    "quick_capture_show_panel": False,
 }
 
 # Миграционные таблицы: (from_version, to_version) → список операций

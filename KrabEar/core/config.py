@@ -1146,4 +1146,18 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # ключи — openai_api_key/deepgram_api_key/assemblyai_api_key.
     # privacy_mode_enabled=True ВСЕГДА блокирует (см. _transcribe_remote).
     "cloud_stt_provider": "openai",
+    # --- C3a Quick Capture (быстрая голосовая заметка, backend/service.py + Swift
+    #     main+QuickCapture.swift) ---
+    # Opt-in дублирование сохранённой заметки в Apple Notes через create_apple_note
+    # (privacy-гейт уже внутри handle_create_apple_note). False по умолчанию.
+    "quick_capture_send_to_notes": False,
+    # Opt-in форс-синк заметки в Obsidian vault через run_obsidian_sync (нет
+    # смысла без предварительно настроенного vault — configure_obsidian_sync).
+    "quick_capture_obsidian_sync": False,
+    # Задел под C3b (плавающее мини-окно скретчпада) — авто-показ панели при
+    # старте заметки. Пока панели нет, флаг ни на что не влияет.
+    "quick_capture_show_panel": False,
+    # Глобальная комбинация хоткея для старт/стоп заметки — фиксированный набор
+    # из трёх вариантов (НЕ свободный ввод, см. _ENUM_FIELDS в settings_validator.py).
+    "quick_capture_hotkey": "cmd_shift_n",
 }
