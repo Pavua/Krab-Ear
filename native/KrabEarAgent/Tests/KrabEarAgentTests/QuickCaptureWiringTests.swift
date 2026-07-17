@@ -52,4 +52,25 @@ final class QuickCaptureWiringTests: XCTestCase {
         XCTAssertTrue(src.contains("set_paste_status"))
         XCTAssertTrue(src.contains("add_to_collection"))
     }
+
+    // MARK: - Task 2: хоткей + пункт меню + подменю заметок
+
+    func test_hotkey_monitor_is_stored_and_stoppable() throws {
+        let src = try source("main+QuickCapture.swift")
+        // урок main+QuickPresets.swift: монитор ОБЯЗАН сохраняться
+        XCTAssertTrue(src.contains("quickCaptureHotkeyMonitor"))
+        XCTAssertTrue(src.contains("removeMonitor"))
+    }
+
+    func test_status_menu_has_quick_capture_items() throws {
+        let src = try source("main+StatusMenu.swift")
+        XCTAssertTrue(src.contains("onQuickCaptureToggle"))
+        XCTAssertTrue(src.contains("Быстрые заметки"))
+    }
+
+    func test_menu_open_refreshes_quick_notes() throws {
+        let src = try source("main+MenuBarRecap.swift")
+        XCTAssertTrue(src.contains("refreshQuickNotesSubmenu"),
+                      "menuWillOpen обязан обновлять подменю заметок")
+    }
 }

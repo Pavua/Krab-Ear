@@ -305,5 +305,7 @@ final class MenuBarRecapView: NSView {
 extension AgentAppDelegate: NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         menuBarRecapView?.refresh(ipcClient: ipcClient)
+        // C3a Task 2: подменю «Быстрые заметки» — тот же паттерн, свой IPC off-main.
+        refreshQuickNotesSubmenu()
     }
 }

@@ -163,6 +163,12 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     /// 2026-07-16-c3-quick-capture-design.md §2a). Подавляет streaming-paste
     /// и взаимно исключается с диктовкой/встречей.
     var quickCaptureActive = false
+    /// C3a Task 2: глобальный хоткей-монитор Cmd+Shift+N — ОБЯЗАН сохраняться
+    /// (урок main+QuickPresets.swift: несохранённый монитор не снять в teardown).
+    var quickCaptureHotkeyMonitor: Any?
+    /// C3a Task 2: подменю «Быстрые заметки» в status-меню — ссылка для refresh
+    /// из menuWillOpen (stored property не поддерживается в extension Swift).
+    var quickNotesSubmenu: NSMenu?
     var lastToggleRequestAt: TimeInterval = 0
     let toggleDebounceSec: TimeInterval = 0.35
     var recordingTargetApp: NSRunningApplication?
@@ -442,6 +448,9 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         selectionTranslator?.start()
         logger.info("SelectionTranslator запущен (Cmd+Shift+T)")
 
+        startQuickCaptureHotkeyMonitor()
+        logger.info("Quick Capture hotkey активирован (Cmd+Shift+N)")
+
         pasteUndoService = PasteUndoService()
         pasteUndoService?.pasteUndoEnabled = settings.pasteUndoEnabled
         pasteUndoService?.start()
@@ -503,6 +512,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         tearDownHealthMonitor()
         tearDownErrorBus()
         selectionTranslator?.stop()
+        stopQuickCaptureHotkeyMonitor()
         pasteUndoService?.stop()
         stopLiveSubsCapture()
         stopRealtimeOverlayPolling()

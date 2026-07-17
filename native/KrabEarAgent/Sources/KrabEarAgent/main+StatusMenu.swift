@@ -202,6 +202,24 @@ extension AgentAppDelegate {
         recordItem.isEnabled = !isProcessing
         menu.addItem(recordItem)
 
+        // C3a: быстрая голосовая заметка (Cmd+Shift+N) — запись БЕЗ вставки
+        // в активное окно, результат уходит в коллекцию «Быстрые заметки».
+        let quickCaptureItem = NSMenuItem(
+            title: quickCaptureActive ? "Остановить заметку" : "Быстрая заметка",
+            action: #selector(onQuickCaptureToggle),
+            keyEquivalent: "n"
+        )
+        quickCaptureItem.target = self
+        quickCaptureItem.keyEquivalentModifierMask = [.command, .shift]
+        quickCaptureItem.isEnabled = !isProcessing && !(isRecording && !quickCaptureActive)
+        menu.addItem(quickCaptureItem)
+
+        let quickNotesMenuItem = NSMenuItem(title: "Быстрые заметки", action: nil, keyEquivalent: "")
+        menu.addItem(quickNotesMenuItem)
+        let quickNotesMenu = NSMenu()
+        menu.setSubmenu(quickNotesMenu, for: quickNotesMenuItem)
+        self.quickNotesSubmenu = quickNotesMenu
+
         let historyItem = NSMenuItem(
             title: "Открыть историю",
             action: #selector(onOpenHistory),
