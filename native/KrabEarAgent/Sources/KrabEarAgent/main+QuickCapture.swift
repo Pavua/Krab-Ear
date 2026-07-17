@@ -117,19 +117,123 @@ extension AgentAppDelegate {
         await MainActor.run { BackendToast.shared.show("Заметка сохранена") }
     }
 
-    /// Наполняется в Task 3 (авто-отправка в Apple Notes / Obsidian).
-    func sendQuickCaptureCopies(text: String, historyId: String) async {}
+    /// C3a Task 3 (спека §3.3): opt-in дублирование сохранённой заметки в Apple
+    /// Notes / Obsidian. Настройки читаются ЖИВЬЁМ через get_settings (НЕ кэш
+    /// агента `settings`) — чекбокс в Settings должен действовать сразу после
+    /// переключения, без ожидания следующего цикла обновления кэша.
+    func sendQuickCaptureCopies(text: String, historyId: String) async {
+        var liveSettings: [String: Any] = [:]
+        if let resp = try? await ipcClient.callAsync(method: "get_settings", params: [:], timeoutSec: 10),
+           let result = resp["result"] as? [String: Any] {
+            liveSettings = result
+        }
 
-    // MARK: - Task 2: глобальный хоткей Cmd+Shift+N
+        if (liveSettings["quick_capture_send_to_notes"] as? Bool) == true {
+            await sendQuickCaptureNoteToAppleNotes(text: text)
+        }
+        if (liveSettings["quick_capture_obsidian_sync"] as? Bool) == true {
+            await syncQuickCaptureNoteToObsidian(text: text, historyId: historyId)
+        }
+    }
+
+    /// title — первые ~60 символов ПЕРВОЙ строки текста (не всего текста целиком —
+    /// длинная заметка без переводов строк не должна порождать гигантский заголовок).
+    /// Приватный режим и сам осечка osascript уже гейтятся внутри
+    /// handle_create_apple_note (apple_integration_service.py) — здесь только
+    /// разворачиваем ok:false в toast с текстом ответа backend'а.
+    private func sendQuickCaptureNoteToAppleNotes(text: String) async {
+        let firstLine = text.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+            .first.map(String.init) ?? text
+        let trimmedFirstLine = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = trimmedFirstLine.count > 60
+            ? String(trimmedFirstLine.prefix(60)) + "…"
+            : trimmedFirstLine
+        guard let resp = try? await ipcClient.callAsync(
+            method: "create_apple_note",
+            params: ["title": title.isEmpty ? "Быстрая заметка" : title, "body": text, "folder": "Krab Ear"],
+            timeoutSec: 15
+        ), let result = resp["result"] as? [String: Any] else {
+            await MainActor.run { BackendToast.shared.show("Не удалось сохранить заметку в Notes") }
+            return
+        }
+        if (result["ok"] as? Bool) != true {
+            // Ответ backend'а несёт user_msg (человекочитаемо, напр. privacy-гейт)
+            // либо error (техническое сообщение osascript) — сверено с
+            // apple_integration_service.py::handle_create_apple_note.
+            let message = (result["user_msg"] as? String)
+                ?? (result["error"] as? String)
+                ?? "Не удалось сохранить заметку в Notes"
+            await MainActor.run { BackendToast.shared.show(message) }
+        }
+    }
+
+    /// Obsidian: per-item IPC-метода НЕТ — ObsidianSyncManager.sync(items, force)
+    /// (backend/obsidian_sync.py) принимает СПИСОК items, поэтому форс-синк
+    /// заметки собирает минимальный item-словарь {id, ts, text} из данных, уже
+    /// имеющихся в этом флоу (см. NOTES отчёта Task 3 — точное имя IPC-метода:
+    /// run_obsidian_sync → ObsidianSyncManager.handle_sync). Нет настроенного
+    /// vault → sync() кидает RuntimeError → IPC-диспетчер отдаёт тихий
+    /// invalid_request (ok:false) — здесь молча игнорируем (спека §3.3: "иначе
+    /// чекбокс disabled с подсказкой"; v1 упрощение — тихий no-op, без тоста).
+    private func syncQuickCaptureNoteToObsidian(text: String, historyId: String) async {
+        let ts = ISO8601DateFormatter().string(from: Date())
+        _ = try? await ipcClient.callAsync(
+            method: "run_obsidian_sync",
+            params: ["items": [["id": historyId, "ts": ts, "text": text]], "force": true],
+            timeoutSec: 15
+        )
+    }
+
+    // MARK: - Task 2/3: глобальный хоткей (настраиваемая комбинация)
+
+    /// Три фиксированные комбинации (спека §3.2, план Task 3) — allowlist сверен
+    /// с settings_validator.py _ENUM_FIELDS["quick_capture_hotkey"]. Все три
+    /// используют N = keyCode 45 (kVK_ANSI_N). cmd_shift_n — дефолт/фоллбэк для
+    /// неизвестного/пустого значения.
+    static func quickCaptureHotkeyCombo(for hotkeyId: String) -> (modifiers: NSEvent.ModifierFlags, keyCode: UInt16) {
+        switch hotkeyId {
+        case "cmd_opt_n": return ([.command, .option], 45)
+        case "ctrl_shift_n": return ([.control, .shift], 45)
+        default: return ([.command, .shift], 45)
+        }
+    }
 
     /// Образец — SelectionTranslator.swift:126, но с СОХРАНЕНИЕМ монитора
     /// (урок main+QuickPresets.swift: несохранённый монитор не снять в teardown).
+    /// Комбинация читается ЖИВЬЁМ (get_settings, НЕ кэш `settings`) ДО регистрации
+    /// монитора — чтобы пере-арм после смены в дропдауне (Task 3, см.
+    /// HistoryPanelController+Settings.swift::onQuickCaptureHotkeyChanged) сразу
+    /// подхватывал новое значение, а не устаревший кэш.
     func startQuickCaptureHotkeyMonitor() {
         guard quickCaptureHotkeyMonitor == nil else { return }
+        let ipc = self.ipcClient
+        Task.detached { [weak self] in
+            var hotkeyId = "cmd_shift_n"
+            if let resp = try? await ipc.callAsync(method: "get_settings", params: [:], timeoutSec: 10),
+               let result = resp["result"] as? [String: Any],
+               let value = result["quick_capture_hotkey"] as? String, !value.isEmpty {
+                hotkeyId = value
+            }
+            // Rebind to a fresh `let` right before crossing the actor boundary —
+            // a captured `var` (even unmutated at this point) trips the Swift 6
+            // Sendable-closure-capture checker.
+            let resolvedHotkeyId = hotkeyId
+            await MainActor.run { [weak self] in
+                self?.installQuickCaptureHotkeyMonitor(hotkeyId: resolvedHotkeyId)
+            }
+        }
+    }
+
+    /// Регистрирует NSEvent-монитор на main-потоке. Повторный guard-чек — защита
+    /// от гонки: startQuickCaptureHotkeyMonitor() мог быть вызван дважды подряд,
+    /// пока первый async-запрос настроек ещё не вернулся.
+    private func installQuickCaptureHotkeyMonitor(hotkeyId: String) {
+        guard quickCaptureHotkeyMonitor == nil else { return }
+        let (modifiers, keyCode) = AgentAppDelegate.quickCaptureHotkeyCombo(for: hotkeyId)
         quickCaptureHotkeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self,
-                  event.modifierFlags.intersection(.deviceIndependentFlagsMask) == [.command, .shift],
-                  event.keyCode == 45 /* kVK_ANSI_N */ else { return }
+                  event.modifierFlags.intersection(.deviceIndependentFlagsMask) == modifiers,
+                  event.keyCode == keyCode else { return }
             DispatchQueue.main.async { self.onQuickCaptureToggle() }
         }
     }

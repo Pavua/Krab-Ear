@@ -1496,6 +1496,135 @@ extension HistoryPanelController {
         return section
     }
 
+    // MARK: - Quick Capture Section (C3a Task 3)
+
+    /// Настройки «Быстрые заметки» (спека 2026-07-16-c3-quick-capture-design.md §3.3):
+    /// opt-in дублирование сохранённой заметки в Apple Notes / Obsidian + выбор
+    /// комбинации хоткея старт/стоп. Ни один из трёх ключей НЕ хранится в
+    /// кэшируемой AgentSettings — main+QuickCapture.swift читает их живьём через
+    /// get_settings (чекбокс должен действовать сразу, без ожидания следующего
+    /// цикла обновления кэша), поэтому эта секция сама гидратирует свои контролы
+    /// отдельным off-main запросом (refreshQuickCaptureSectionState, образец
+    /// refreshWakeWordStatusRow).
+    func buildQuickCaptureSection() -> CollapsibleSectionView {
+        let section = CollapsibleSectionView(
+            sectionId: "settings_quick_capture",
+            title: "Быстрые заметки",
+            isExpanded: true,
+            iconSymbol: "note.text.badge.plus"
+        )
+        let card = ThemeCardView()
+
+        quickCaptureNotesButton.title = ""
+        quickCaptureNotesButton.setButtonType(.switch)
+        quickCaptureNotesButton.target = self
+        quickCaptureNotesButton.action = #selector(onQuickCaptureNotesChanged)
+        quickCaptureNotesButton.setAccessibilityLabel("Дублировать сохранённую быструю заметку в Apple Notes")
+        let notesRow = makeSwitchRow(
+            label: "Дублировать в Apple Notes",
+            description: "После сохранения заметки создаёт копию в Notes.app (папка «Krab Ear»). "
+                + "Режим приватности блокирует отправку.",
+            button: quickCaptureNotesButton
+        )
+
+        quickCaptureObsidianButton.title = ""
+        quickCaptureObsidianButton.setButtonType(.switch)
+        quickCaptureObsidianButton.target = self
+        quickCaptureObsidianButton.action = #selector(onQuickCaptureObsidianChanged)
+        quickCaptureObsidianButton.setAccessibilityLabel("Синхронизировать сохранённую быструю заметку с Obsidian vault")
+        let obsidianRow = makeSwitchRow(
+            label: "Синхронизировать в Obsidian",
+            description: "Форс-синк заметки в настроенный Obsidian vault. Без настроенного vault синк молча пропускается.",
+            button: quickCaptureObsidianButton
+        )
+
+        // Глиф-гейт (feedback_glyph_gate_swift_workers): символ Command и символ
+        // Option уже рендерятся в проекте (DictationHeroCard "⌥ Right",
+        // LiveSubsSettings "Cmd+⌥+Shift+L"), но символы Shift и Control — 0
+        // вхождений во всём native/ до этого коммита → НЕ вводим их, используем
+        // ASCII "Shift"/"Ctrl" по прецеденту "Cmd+Shift+P" (buildQuickPresetSection)
+        // и "Cmd+Ctrl+Z" (pasteUndoButton title).
+        quickCaptureHotkeySelector.addItems(withTitles: ["Cmd+Shift+N", "Cmd+⌥+N", "Ctrl+Shift+N"])
+        quickCaptureHotkeySelector.target = self
+        quickCaptureHotkeySelector.action = #selector(onQuickCaptureHotkeyChanged)
+        quickCaptureHotkeySelector.setAccessibilityLabel("Комбинация хоткея старт/стоп быстрой заметки")
+        let hotkeyRow = makeSettingRow(
+            label: "Хоткей заметки",
+            description: "Cmd+Shift+N по умолчанию затеняет «Новую папку» в Finder — при конфликте выберите другую комбинацию.",
+            control: quickCaptureHotkeySelector
+        )
+
+        card.contentStackView.addArrangedSubview(notesRow)
+        card.contentStackView.addArrangedSubview(makeSeparator())
+        card.contentStackView.addArrangedSubview(obsidianRow)
+        card.contentStackView.addArrangedSubview(makeSeparator())
+        card.contentStackView.addArrangedSubview(hotkeyRow)
+
+        section.contentStackView.addArrangedSubview(card)
+        refreshQuickCaptureSectionState()
+        return section
+    }
+
+    /// Фиксированный порядок ID хоткеев — индекс совпадает с порядком пунктов
+    /// дропдауна (Cmd+Shift+N / Cmd+⌥+N / Ctrl+Shift+N) и с allowlist в
+    /// settings_validator.py _ENUM_FIELDS["quick_capture_hotkey"].
+    private static let quickCaptureHotkeyIds = ["cmd_shift_n", "cmd_opt_n", "ctrl_shift_n"]
+
+    @objc func onQuickCaptureNotesChanged() {
+        let isOn = quickCaptureNotesButton.state == .on
+        let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = try? ipcClient.call(method: "set_settings", params: ["quick_capture_send_to_notes": isOn])
+        }
+    }
+
+    @objc func onQuickCaptureObsidianChanged() {
+        let isOn = quickCaptureObsidianButton.state == .on
+        let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = try? ipcClient.call(method: "set_settings", params: ["quick_capture_obsidian_sync": isOn])
+        }
+    }
+
+    /// Смена комбинации → set_settings off-main → пере-арм монитора на новую
+    /// комбинацию (stop затем start; start сам живьём перечитает
+    /// quick_capture_hotkey через get_settings — см. main+QuickCapture.swift).
+    @objc func onQuickCaptureHotkeyChanged() {
+        let ids = HistoryPanelController.quickCaptureHotkeyIds
+        let idx = quickCaptureHotkeySelector.indexOfSelectedItem
+        guard idx >= 0, idx < ids.count else { return }
+        let hotkeyId = ids[idx]
+        let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = try? ipcClient.call(method: "set_settings", params: ["quick_capture_hotkey": hotkeyId])
+            DispatchQueue.main.async {
+                guard let appDelegate = NSApp.delegate as? AgentAppDelegate else { return }
+                appDelegate.stopQuickCaptureHotkeyMonitor()
+                appDelegate.startQuickCaptureHotkeyMonitor()
+            }
+        }
+    }
+
+    /// Гидратирует чекбоксы/дропдаун реальным состоянием backend'а (get_settings
+    /// живьём, off-main) — без этого шага контролы показывали бы стейл дефолт
+    /// (off / Cmd+Shift+N) после каждого пересоздания панели, даже если
+    /// пользователь ранее включил чекбокс в предыдущей сессии.
+    func refreshQuickCaptureSectionState() {
+        let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let resp = try? ipcClient.call(method: "get_settings", params: [:]),
+                  let result = resp["result"] as? [String: Any] else { return }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.quickCaptureNotesButton.state = ((result["quick_capture_send_to_notes"] as? Bool) == true) ? .on : .off
+                self.quickCaptureObsidianButton.state = ((result["quick_capture_obsidian_sync"] as? Bool) == true) ? .on : .off
+                let hotkeyId = (result["quick_capture_hotkey"] as? String) ?? "cmd_shift_n"
+                let idx = HistoryPanelController.quickCaptureHotkeyIds.firstIndex(of: hotkeyId) ?? 0
+                self.quickCaptureHotkeySelector.selectItem(at: idx)
+            }
+        }
+    }
+
     // MARK: - Privacy & Security Section (Phase D.5)
 
     /// Секция «Безопасность и приватность» в Dictation tab.

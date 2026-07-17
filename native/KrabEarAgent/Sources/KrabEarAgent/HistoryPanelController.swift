@@ -175,6 +175,13 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let gigaamEnabledButton = NSButton(checkboxWithTitle: "GigaAM-RNNT v2 (RU, опционально)", target: nil, action: nil)
     /// Показывает имя последнего использованного STT движка (из get_diagnostics stt.last_engine).
     let sttEngineLabel = NSTextField(labelWithString: "—")
+    // --- C3a Quick Capture (быстрая голосовая заметка) Settings section, Task 3 ---
+    // Ни один из трёх контролов не входит в кэшируемую AgentSettings — main+QuickCapture.swift
+    // читает эти ключи ЖИВЬЁМ через get_settings (см. HistoryPanelController+Settings.swift
+    // buildQuickCaptureSection / refreshQuickCaptureSectionState).
+    let quickCaptureNotesButton = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    let quickCaptureObsidianButton = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    let quickCaptureHotkeySelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let llmModelSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let overlayOpacitySlider = NSSlider(value: 45, minValue: 15, maxValue: 90, target: nil, action: nil)
     let overlayOpacityValueLabel = NSTextField(labelWithString: "45%")
@@ -2016,6 +2023,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
         let quickPresetSection = buildQuickPresetSection()
         settingsBar.addArrangedSubview(quickPresetSection)
+
+        // Быстрые заметки (C3a Task 3): opt-in Notes/Obsidian + хоткей-дропдаун.
+        let quickCaptureSection = buildQuickCaptureSection()
+        settingsBar.addArrangedSubview(quickCaptureSection)
 
         // Group: Разработчик / Отладка (diagnostics, clipboard).
         settingsBar.addArrangedSubview(makeCategoryHeader(text: "Разработчик / Отладка"))

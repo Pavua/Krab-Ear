@@ -73,4 +73,61 @@ final class QuickCaptureWiringTests: XCTestCase {
         XCTAssertTrue(src.contains("refreshQuickNotesSubmenu"),
                       "menuWillOpen обязан обновлять подменю заметок")
     }
+
+    // MARK: - Task 3: настройки + отправка Notes/Obsidian
+
+    func test_sendQuickCaptureCopies_calls_create_apple_note_and_obsidian() throws {
+        let src = try source("main+QuickCapture.swift")
+        XCTAssertTrue(src.contains("create_apple_note"),
+                      "sendQuickCaptureCopies обязан звать create_apple_note при включённом чекбоксе")
+        XCTAssertTrue(src.contains("run_obsidian_sync"),
+                      "sendQuickCaptureCopies обязан звать run_obsidian_sync при включённом чекбоксе")
+        XCTAssertTrue(src.contains("quick_capture_send_to_notes"))
+        XCTAssertTrue(src.contains("quick_capture_obsidian_sync"))
+    }
+
+    func test_sendQuickCaptureCopies_reads_settings_live_not_cache() throws {
+        let src = try source("main+QuickCapture.swift")
+        // "живое чтение" — get_settings внутри самой функции, а не self.settings (кэш).
+        guard let range = src.range(of: "func sendQuickCaptureCopies") else {
+            XCTFail("sendQuickCaptureCopies not found")
+            return
+        }
+        let body = src[range.lowerBound...]
+        XCTAssertTrue(body.contains("get_settings"),
+                      "sendQuickCaptureCopies обязан читать настройки живьём через get_settings")
+    }
+
+    func test_hotkey_monitor_reads_hotkey_combo_from_settings() throws {
+        let src = try source("main+QuickCapture.swift")
+        XCTAssertTrue(src.contains("quick_capture_hotkey"))
+        XCTAssertTrue(src.contains("cmd_opt_n"))
+        XCTAssertTrue(src.contains("ctrl_shift_n"))
+        XCTAssertTrue(src.contains("quickCaptureHotkeyCombo"))
+    }
+
+    func test_quickCaptureSection_exists_and_wired() throws {
+        let src = try source("HistoryPanelController+Settings.swift")
+        XCTAssertTrue(src.contains("func buildQuickCaptureSection"))
+        XCTAssertTrue(src.contains("quick_capture_send_to_notes"))
+        XCTAssertTrue(src.contains("quick_capture_obsidian_sync"))
+        XCTAssertTrue(src.contains("quick_capture_hotkey"))
+    }
+
+    func test_quickCaptureSection_is_wired_into_settings_stack() throws {
+        let src = try source("HistoryPanelController.swift")
+        XCTAssertTrue(src.contains("buildQuickCaptureSection()"),
+                      "buildQuickCaptureSection обязана вызываться и добавляться в settingsBar")
+    }
+
+    func test_hotkey_dropdown_change_rearms_monitor() throws {
+        let src = try source("HistoryPanelController+Settings.swift")
+        guard let range = src.range(of: "func onQuickCaptureHotkeyChanged") else {
+            XCTFail("onQuickCaptureHotkeyChanged not found")
+            return
+        }
+        let body = src[range.lowerBound...]
+        XCTAssertTrue(body.contains("stopQuickCaptureHotkeyMonitor"))
+        XCTAssertTrue(body.contains("startQuickCaptureHotkeyMonitor"))
+    }
 }
