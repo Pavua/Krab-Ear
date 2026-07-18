@@ -401,6 +401,15 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
         panel.hasShadow = true
         panel.isOpaque = false
         panel.alphaValue = 0.97
+        // Живой смок волны C3b: `.closable` во flags БЕЗ `.titled` не рендерит
+        // никакой видимый крестик (AX на реальной панели — 0 кнопок с
+        // subrole AXCloseButton), у пользователя физически нет способа закрыть
+        // панель кликом. `.titled` даёт нативную рабочую кнопку закрытия;
+        // titlebarAppearsTransparent + titleVisibility=.hidden убирают саму
+        // полосу тайтлбара визуально — стандартный приём безрамочных HUD-окон.
+        panel.styleMask.insert(.titled)
+        panel.titlebarAppearsTransparent = true
+        panel.titleVisibility = .hidden
     }
 
     private func buildLayout() {

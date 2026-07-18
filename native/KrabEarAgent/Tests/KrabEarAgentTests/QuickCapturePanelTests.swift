@@ -16,6 +16,18 @@ final class QuickCapturePanelTests: XCTestCase {
         XCTAssertFalse(c.window?.isReleasedWhenClosed ?? true)
         XCTAssertEqual(c.window?.level, .floating)
     }
+
+    /// C3b живой смок: `.closable` во flags без `.titled` не рендерит НИКАКОЙ
+    /// видимый крестик — AX-проверка на реальной панели подтвердила 0 кнопок
+    /// с subrole AXCloseButton. `.titled` + titlebarAppearsTransparent +
+    /// titleVisibility=.hidden даёт рабочую нативную кнопку без видимого
+    /// тайтлбара (стандартный приём для «безрамочных» HUD-окон в AppKit).
+    @MainActor func test_panel_has_visible_close_button() {
+        let c = QuickCapturePanelController()
+        XCTAssertTrue(c.window?.styleMask.contains(.titled) ?? false)
+        XCTAssertTrue(c.window?.titlebarAppearsTransparent ?? false)
+        XCTAssertEqual(c.window?.titleVisibility, .hidden)
+    }
     @MainActor func test_render_idle_and_recording() {
         let c = QuickCapturePanelController()
         c._testSetRecording(false)
