@@ -73,6 +73,7 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
     private let recordIndicator = RecordingIndicator()
     private let headerTimerLabel = NSTextField(labelWithString: "00:00")
     private let statusLabel = NSTextField(labelWithString: "")
+    private let placeholderLabel = NSTextField(labelWithString: "Говорите — текст появится здесь")
     private let liveTextView = NSTextView()
     private let liveTextContainer = NSView()
     private let notesStack = NSStackView()
@@ -169,6 +170,7 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
         if recording {
             startedAt = Date().timeIntervalSince1970
             liveTextView.string = ""
+            placeholderLabel.isHidden = false
             recordIndicator.startPulsing()
             startTimer()
         } else {
@@ -207,6 +209,7 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
     func ingestPartial(_ text: String) {
         guard !text.isEmpty else { return }
         liveTextView.string = text
+        placeholderLabel.isHidden = true
     }
 
     // MARK: - SSE (общий SSESessionDelegate, паттерн MeetingLivePanelController)
@@ -268,12 +271,37 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
         notesStack.arrangedSubviews.forEach { notesStack.removeArrangedSubview($0); $0.removeFromSuperview() }
         let latest = notes.prefix(Self.maxNoteRows)
         if latest.isEmpty {
+            let emptyStack = NSStackView()
+            emptyStack.orientation = .vertical
+            emptyStack.alignment = .centerX
+            emptyStack.spacing = KrabEarTheme.Metrics.tight
+
+            let iconConfig = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
+            let icon = NSImage(systemSymbolName: "doc.text", accessibilityDescription: nil)?.withSymbolConfiguration(iconConfig)
+            let iconView = NSImageView(image: icon ?? NSImage())
+            iconView.contentTintColor = KrabEarTheme.Colors.textDisabled
+
             let emptyLabel = NSTextField(labelWithString: "Заметок пока нет")
             emptyLabel.font = KrabEarTheme.Typography.caption
             emptyLabel.textColor = KrabEarTheme.Colors.textSecondary
             emptyLabel.isBordered = false
             emptyLabel.drawsBackground = false
-            notesStack.addArrangedSubview(emptyLabel)
+
+            emptyStack.addArrangedSubview(iconView)
+            emptyStack.addArrangedSubview(emptyLabel)
+            
+            let container = NSView()
+            container.translatesAutoresizingMaskIntoConstraints = false
+            emptyStack.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(emptyStack)
+            NSLayoutConstraint.activate([
+                emptyStack.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+                emptyStack.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+                emptyStack.topAnchor.constraint(equalTo: container.topAnchor, constant: KrabEarTheme.Metrics.spacious),
+                emptyStack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -KrabEarTheme.Metrics.spacious)
+            ])
+            notesStack.addArrangedSubview(container)
+            container.widthAnchor.constraint(equalTo: notesStack.widthAnchor).isActive = true
             return
         }
         for note in latest {
@@ -418,7 +446,7 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
         headerTimerLabel.isBordered = false
         headerTimerLabel.drawsBackground = false
 
-        statusLabel.font = KrabEarTheme.Typography.body
+        statusLabel.font = KrabEarTheme.Typography.caption
         statusLabel.textColor = KrabEarTheme.Colors.textSecondary
         statusLabel.isBordered = false
         statusLabel.drawsBackground = false
@@ -447,18 +475,28 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
 
         // Карточка-обрамление под live-текст — тот же приём, что
         // transcriptContainer в MeetingLivePanelController.
+        placeholderLabel.font = KrabEarTheme.Typography.body
+        placeholderLabel.textColor = KrabEarTheme.Colors.textSecondary
+        placeholderLabel.isBordered = false
+        placeholderLabel.drawsBackground = false
+        placeholderLabel.alignment = .center
+        placeholderLabel.translatesAutoresizingMaskIntoConstraints = false
+
         liveTextContainer.wantsLayer = true
         liveTextContainer.layer?.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
         liveTextContainer.layer?.backgroundColor = KrabEarTheme.Colors.cardBackground.cgColor
         liveTextContainer.layer?.borderColor = KrabEarTheme.Colors.border.cgColor
         liveTextContainer.layer?.borderWidth = 1.0
         liveTextContainer.translatesAutoresizingMaskIntoConstraints = false
+        liveTextContainer.addSubview(placeholderLabel)
         liveTextContainer.addSubview(liveScroll)
         NSLayoutConstraint.activate([
-            liveScroll.topAnchor.constraint(equalTo: liveTextContainer.topAnchor, constant: KrabEarTheme.Metrics.tight),
-            liveScroll.bottomAnchor.constraint(equalTo: liveTextContainer.bottomAnchor, constant: -KrabEarTheme.Metrics.tight),
-            liveScroll.leadingAnchor.constraint(equalTo: liveTextContainer.leadingAnchor, constant: KrabEarTheme.Metrics.tight),
-            liveScroll.trailingAnchor.constraint(equalTo: liveTextContainer.trailingAnchor, constant: -KrabEarTheme.Metrics.tight),
+            placeholderLabel.centerXAnchor.constraint(equalTo: liveTextContainer.centerXAnchor),
+            placeholderLabel.centerYAnchor.constraint(equalTo: liveTextContainer.centerYAnchor),
+            liveScroll.topAnchor.constraint(equalTo: liveTextContainer.topAnchor, constant: KrabEarTheme.Metrics.standard),
+            liveScroll.bottomAnchor.constraint(equalTo: liveTextContainer.bottomAnchor, constant: -KrabEarTheme.Metrics.standard),
+            liveScroll.leadingAnchor.constraint(equalTo: liveTextContainer.leadingAnchor, constant: KrabEarTheme.Metrics.standard),
+            liveScroll.trailingAnchor.constraint(equalTo: liveTextContainer.trailingAnchor, constant: -KrabEarTheme.Metrics.standard),
         ])
 
         notesStack.orientation = .vertical
@@ -487,7 +525,15 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
         // quick_capture_send_to_notes из настроек.
         sendToNotesButton.isHidden = true
 
-        let buttonsRow = NSStackView(views: [toggleButton, copyAllButton, sendToNotesButton])
+        let rightButtons = NSStackView(views: [copyAllButton, sendToNotesButton])
+        rightButtons.orientation = .horizontal
+        rightButtons.spacing = KrabEarTheme.Metrics.standard
+        
+        let spacer = NSView()
+        spacer.translatesAutoresizingMaskIntoConstraints = false
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let buttonsRow = NSStackView(views: [toggleButton, spacer, rightButtons])
         buttonsRow.orientation = .horizontal
         buttonsRow.spacing = KrabEarTheme.Metrics.standard
         buttonsRow.alignment = .centerY
@@ -600,8 +646,14 @@ private final class QuickNoteRowView: NSView {
         self.onCopy = onCopy
         super.init(frame: .zero)
 
+        self.wantsLayer = true
+        self.layer?.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
+        self.layer?.backgroundColor = KrabEarTheme.Colors.cardBackground.cgColor
+        self.layer?.borderColor = KrabEarTheme.Colors.border.cgColor
+        self.layer?.borderWidth = 1.0
+
         let label = NSTextField(labelWithString: previewText)
-        label.font = KrabEarTheme.Typography.body
+        label.font = KrabEarTheme.Typography.caption
         label.textColor = KrabEarTheme.Colors.textPrimary
         label.isBordered = false
         label.drawsBackground = false
@@ -609,7 +661,9 @@ private final class QuickNoteRowView: NSView {
         label.maximumNumberOfLines = 1
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let copyButton = ThemeSecondaryButton(title: "Копировать", target: self, action: #selector(handleCopyTap))
+        let copyButton = ThemeSecondaryButton(title: "", target: self, action: #selector(handleCopyTap))
+        copyButton.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Копировать")
+        copyButton.imagePosition = .imageOnly
         copyButton.controlSize = .small
         copyButton.setContentHuggingPriority(.required, for: .horizontal)
 
@@ -621,10 +675,10 @@ private final class QuickNoteRowView: NSView {
 
         addSubview(row)
         NSLayoutConstraint.activate([
-            row.topAnchor.constraint(equalTo: topAnchor),
-            row.bottomAnchor.constraint(equalTo: bottomAnchor),
-            row.leadingAnchor.constraint(equalTo: leadingAnchor),
-            row.trailingAnchor.constraint(equalTo: trailingAnchor),
+            row.topAnchor.constraint(equalTo: topAnchor, constant: KrabEarTheme.Metrics.tight),
+            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -KrabEarTheme.Metrics.tight),
+            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: KrabEarTheme.Metrics.standard),
+            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -KrabEarTheme.Metrics.standard),
         ])
     }
 
