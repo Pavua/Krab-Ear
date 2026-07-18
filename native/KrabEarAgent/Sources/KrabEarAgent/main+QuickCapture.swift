@@ -141,12 +141,16 @@ extension AgentAppDelegate {
     }
 
     private func handleQuickCaptureResult(_ result: [String: Any]) async {
-        // C3b Task 2: запись физически остановлена независимо от исхода
-        // сохранения (дубликат/ошибка/успех) — панель, если создана И видима,
-        // больше не должна показывать «Идёт запись…».
-        if let panel = quickCapturePanelController, panel.window?.isVisible == true {
-            panel.setRecording(false)
-        }
+        // C3b ревью F1 (sibling-gate asymmetry): запись физически остановлена
+        // независимо от исхода сохранения (дубликат/ошибка/успех) И независимо
+        // от того, видима ли панель СЕЙЧАС — isRecording обязан быть источником
+        // правды всегда, иначе после закрытия панели мид-записи он застревает
+        // true навсегда (setRecording(true) на следующем старте молча не
+        // применяется — guard в setRecording трактует состояние как уже
+        // синхронизированное). Раньше здесь был `isVisible`-гейт — сам этот
+        // гейт и был багом (панель, ЗАКРЫТАЯ во время записи, никогда не
+        // получала свой setRecording(false)).
+        quickCapturePanelController?.setRecording(false)
         let status = result["status"] as? String ?? ""
         if result["skipped"] as? String == "duplicate" {
             await MainActor.run { BackendToast.shared.show("Заметка совпала с недавней записью — пропущена") }
@@ -270,6 +274,17 @@ extension AgentAppDelegate {
     /// при записи» должен действовать сразу после переключения, без ожидания
     /// следующего цикла обновления кэша.
     func showQuickCapturePanelIfEnabled() async {
+        // C3b ревью F1 (sibling-gate asymmetry): уже существующая панель
+        // (например открытая вручную из меню, см. onOpenQuickCapturePanel)
+        // обязана узнать о реальном старте записи БЕЗУСЛОВНО — настройка
+        // quick_capture_show_panel решает только "показывать ли панель
+        // САМОСТОЯТЕЛЬНО", не "врать ли уже открытой панели о состоянии
+        // записи". Раньше setRecording(true) был доступен ТОЛЬКО за этим
+        // гейтом — при дефолтной (выключенной) настройке вручную открытая
+        // панель никогда не отражала собственный успешный старт записи.
+        // Nil-safe: если панель ещё не создана, optional chaining — no-op.
+        quickCapturePanelController?.setRecording(true)
+
         guard let resp = try? await ipcClient.callAsync(method: "get_settings", params: [:], timeoutSec: 10),
               let result = resp["result"] as? [String: Any],
               (result["quick_capture_show_panel"] as? Bool) == true else { return }

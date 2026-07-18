@@ -21,8 +21,12 @@
  и `realtime.final_transcript` оба несут `{session_id, text, is_partial, ts}` —
  ОДНО поле "text" для обоих типов, поэтому dispatch единообразно зовёт
  ingestPartial(text) без ветвления по типу события. SSE стартует в show() и
- останавливается в windowWillClose (панель, открытая вручную до старта записи,
- просто не получает событий — сервер их и не эмиттит вне активной сессии).
+ останавливается в windowWillClose. C3b ревью F3 (изначальный комментарий тут
+ был неверен): сервер эмиттит эти события для ЛЮБОЙ активной записи общего
+ recorder'а (обычная диктовка Right Option — тот же backend-пайплайн, что
+ быстрая заметка), не только во время заметки — поэтому ingestPartial сама
+ фильтрует по isRecording, иначе панель, открытая вручную вне заметки, рисовала
+ бы live-текст чужой диктовки.
 
  Владельцем оставлен подход main+QuickCapture.swift (НЕ main+QuickCapturePanel.swift —
  план предполагал отдельный файл, реально проще встроить точки входа в уже
@@ -111,6 +115,9 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
     func _testSetRecording(_ recording: Bool) { setRecording(recording) }
     func _testIngestPartial(_ text: String) { ingestPartial(text) }
     func _testSetNotes(_ notes: [[String: Any]]) { renderNotes(notes) }
+    /// C3b ревью F2 — прямой вызов ресинхронизации без реальной сети/окна
+    /// (show() трогает URLSession/NSScreen, что нежелательно в headless-тестах).
+    func _testResyncTimerAndPulse() { resyncTimerAndPulseIfNeeded() }
     /// Прямой вызов SSE-парсера строки — без реального сетевого стрима (образец
     /// MeetingLivePanelController._testHandleSSELine).
     func _testHandleSSELine(_ line: String) { handleSSELine(line) }
@@ -143,11 +150,17 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
     func show() {
         restorePosition()
         panel.orderFront(nil)
+        resyncTimerAndPulseIfNeeded()
         startSSE()
     }
 
+    /// C3b ревью F4: 0 живых вызывающих сейчас (взведённая мина для будущего
+    /// вызова) — зеркалит windowWillClose, иначе скрытая панель тянула бы
+    /// таймер/SSE вечно за кадром.
     func hide() {
         panel.orderOut(nil)
+        stopTimer()
+        stopSSE()
     }
 
     /// Ревью-урок C2c №4: header-таймер не должен тикать за закрытой панелью;
@@ -174,11 +187,28 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
             recordIndicator.startPulsing()
             startTimer()
         } else {
+            // C3b ревью F6a: плейсхолдер «Говорите — текст появится здесь»
+            // не должен маячить в idle-состоянии (запись не идёт вовсе) —
+            // только пока запись реально активна и живой текст ещё не пришёл.
+            placeholderLabel.isHidden = true
             recordIndicator.stopPulsing()
             stopTimer()
         }
         applyStatusText()
         updateToggleButton()
+    }
+
+    /// C3b ревью F2: панель, закрытую крестиком мид-записи, windowWillClose уже
+    /// заглушил (таймер/пульс остановлены), но isRecording остаётся true — сама
+    /// запись продолжается за кадром (закрытие панели ≠ стоп заметки, см.
+    /// windowWillClose). Без ресинхронизации при повторном показе таймер/пульс
+    /// висят замороженными до следующего реального перехода состояния recording
+    /// (которого может и не быть до самого стопа) — setRecording(true) при уже
+    /// isRecording=true молча не делает ничего (guard выше).
+    private func resyncTimerAndPulseIfNeeded() {
+        guard isRecording, timerTick == nil else { return }
+        startTimer()
+        recordIndicator.startPulsing()
     }
 
     private func applyStatusText() {
@@ -207,7 +237,13 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
     /// заметки приходит из результата stop_recording (main+QuickCapture.swift),
     /// этой панели не касается — здесь только живое превью.
     func ingestPartial(_ text: String) {
-        guard !text.isEmpty else { return }
+        // C3b ревью F3: realtime.partial_transcript эмитится ЛЮБОЙ активной
+        // записью общего recorder'а (обычная диктовка Right Option — тот же
+        // backend-пайплайн, что быстрая заметка, см. main+QuickCapture.swift
+        // onQuickCaptureToggle), а не только быстрой заметкой. Панель, открытая
+        // вручную вне активной заметки, не должна показывать live-текст чужой
+        // диктовки поверх статуса «Запись не идёт».
+        guard isRecording, !text.isEmpty else { return }
         liveTextView.string = text
         placeholderLabel.isHidden = true
     }
@@ -306,7 +342,12 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
         }
         for note in latest {
             let text = note["text"] as? String ?? ""
-            notesStack.addArrangedSubview(makeNoteRow(text: text))
+            let row = makeNoteRow(text: text)
+            notesStack.addArrangedSubview(row)
+            // C3b ревью F6b: без явного пина строки не растягивались на всю
+            // ширину стека (в отличие от emptyStack-контейнера выше) — разной
+            // ширины карточки выглядели прижатыми к leading-краю.
+            row.widthAnchor.constraint(equalTo: notesStack.widthAnchor).isActive = true
         }
     }
 
@@ -571,6 +612,11 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
             liveTextContainer.widthAnchor.constraint(equalTo: contentStack.widthAnchor, constant: -(KrabEarTheme.Metrics.spacious * 2)),
             notesScroll.widthAnchor.constraint(equalTo: contentStack.widthAnchor, constant: -(KrabEarTheme.Metrics.spacious * 2)),
             notesStack.widthAnchor.constraint(equalTo: notesScroll.widthAnchor),
+            // C3b ревью F6c: без пина ширины buttonsRow (contentStack.alignment
+            // = .leading) стек хуг'ает контент — spacer между toggleButton и
+            // rightButtons коллапсировал до ~0, вторичные кнопки не уезжали
+            // вправо, как задумывал бриф полировки.
+            buttonsRow.widthAnchor.constraint(equalTo: contentStack.widthAnchor, constant: -(KrabEarTheme.Metrics.spacious * 2)),
         ])
 
         backdrop.frame = panel.contentView!.bounds

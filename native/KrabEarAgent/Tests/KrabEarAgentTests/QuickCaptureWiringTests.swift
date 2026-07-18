@@ -183,19 +183,46 @@ final class QuickCaptureWiringTests: XCTestCase {
                       "успешный старт заметки обязан пробовать показать панель")
     }
 
-    func test_handleQuickCaptureResult_updates_panel_state() throws {
+    /// C3b ревью F1 (sibling-gate asymmetry): старая версия этого теста ПИНИЛА
+    /// `isVisible`-гейт на setRecording(false) как обязательное поведение —
+    /// это и был живой баг (test-validates-the-hole). Реально: запись физически
+    /// останавливается независимо от того, видима ли панель СЕЙЧАС — если
+    /// закрыть панель мид-записи, isRecording обязан сброситься на стопе, иначе
+    /// он застревает true навсегда (guard в setRecording молча блокирует
+    /// следующий setRecording(true) как «уже применённое» состояние).
+    func test_handleQuickCaptureResult_updates_panel_state_unconditionally() throws {
         let src = try source("main+QuickCapture.swift")
         guard let range = src.range(of: "func handleQuickCaptureResult") else {
             XCTFail("handleQuickCaptureResult not found")
             return
         }
         let body = src[range.lowerBound...]
-        XCTAssertTrue(body.contains("quickCapturePanelController") && body.contains("setRecording(false)"),
-                      "остановка заметки обязана снимать recording-состояние панели")
-        XCTAssertTrue(body.contains("isVisible"),
-                      "панель обновляется только если она видима (план Task 2)")
+        XCTAssertTrue(body.contains("quickCapturePanelController?.setRecording(false)"),
+                      "остановка заметки обязана БЕЗУСЛОВНО (не только когда видима) снимать recording-состояние панели")
         XCTAssertTrue(body.contains("refreshQuickCapturePanelNotes"),
                       "успешное сохранение обязано обновлять список заметок панели")
+    }
+
+    /// C3b ревью F1 (сценарий 1): панель, открытая вручную из меню при
+    /// ВЫКЛЮЧЕННОЙ (дефолт) настройке автопоказа, обязана узнать о реальном
+    /// старте записи из своей же кнопки «Начать запись» — иначе показывает
+    /// «Запись не идёт» всю запись. Гейт на quick_capture_show_panel обязан
+    /// решать только «показывать ли панель САМОСТОЯТЕЛЬНО», не «синхронизировать
+    /// ли состояние уже существующей».
+    func test_showQuickCapturePanelIfEnabled_syncs_state_before_settings_gate() throws {
+        let src = try source("main+QuickCapture.swift")
+        guard let range = src.range(of: "func showQuickCapturePanelIfEnabled") else {
+            XCTFail("showQuickCapturePanelIfEnabled not found")
+            return
+        }
+        let body = src[range.lowerBound...]
+        guard let guardRange = body.range(of: "guard let resp") else {
+            XCTFail("settings-guard not found in showQuickCapturePanelIfEnabled")
+            return
+        }
+        let beforeGuard = body[body.startIndex..<guardRange.lowerBound]
+        XCTAssertTrue(beforeGuard.contains("quickCapturePanelController?.setRecording(true)"),
+                      "уже существующая панель обязана синхронизироваться ДО гейта на настройку автопоказа")
     }
 
     func test_status_menu_has_open_scratchpad_item() throws {

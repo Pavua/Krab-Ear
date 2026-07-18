@@ -84,9 +84,63 @@ final class QuickCapturePanelTests: XCTestCase {
     /// (тот же приём, что MeetingLivePanelController.dispatchSSEEvent).
     @MainActor func test_sse_wrapped_envelope_also_parsed() {
         let c = QuickCapturePanelController()
+        c._testSetRecording(true)
         c._testHandleSSELine("event: realtime.partial_transcript")
         c._testHandleSSELine(#"data: {"data":{"text":"обёрнутый текст"}}"#)
         XCTAssertTrue(c._testLiveText.contains("обёрнутый текст"))
+    }
+
+    /// C3b ревью F3: realtime.partial_transcript эмитится ЛЮБОЙ активной записью
+    /// (тот же общий recorder, что обычная диктовка Right Option — не только
+    /// быстрая заметка), поэтому панель, открытая вручную но НЕ записывающая
+    /// сейчас, не должна отображать чужие партиалы как свой live-текст.
+    @MainActor func test_ingestPartial_ignored_when_not_recording() {
+        let c = QuickCapturePanelController()
+        c._testIngestPartial("чужая диктовка")
+        XCTAssertEqual(c._testLiveText, "")
+    }
+
+    @MainActor func test_sse_partial_ignored_when_not_recording() {
+        let c = QuickCapturePanelController()
+        c._testHandleSSELine("event: realtime.partial_transcript")
+        c._testHandleSSELine(#"data: {"session_id":"s1","text":"чужая диктовка","is_partial":true,"ts":123.0}"#)
+        XCTAssertEqual(c._testLiveText, "")
+    }
+
+    // === C3b ревью F2/F4: ресинхронизация таймера/пульса, hide() ===
+
+    /// C3b ревью F2: панель, закрытую крестиком мид-записи, windowWillClose уже
+    /// заглушил (таймер остановлен), но isRecording остаётся true — сама запись
+    /// продолжается за кадром (закрытие панели ≠ стоп заметки). При повторном
+    /// показе таймер/пульс обязаны ресинхронизироваться, иначе висят
+    /// замороженными до следующего реального перехода состояния (которого
+    /// может и не быть до самого стопа) — see resyncTimerAndPulseIfNeeded(),
+    /// зовётся из show() без реальной сети/окна (test hook — headless-безопасно).
+    @MainActor func test_resync_restarts_timer_after_windowWillClose_while_still_recording() {
+        let c = QuickCapturePanelController()
+        c._testSetRecording(true)
+        XCTAssertTrue(c._testHeaderTimerActive)
+        c.windowWillClose(Notification(name: NSWindow.willCloseNotification))
+        XCTAssertFalse(c._testHeaderTimerActive)
+        c._testResyncTimerAndPulse()
+        XCTAssertTrue(c._testHeaderTimerActive)
+    }
+
+    @MainActor func test_resync_does_nothing_when_not_recording() {
+        let c = QuickCapturePanelController()
+        c._testResyncTimerAndPulse()
+        XCTAssertFalse(c._testHeaderTimerActive)
+    }
+
+    /// C3b ревью F4: hide() — 0 живых вызывающих сейчас, но взведённая мина для
+    /// будущего вызова (сиблинг MeetingLivePanelController.hide() глушит
+    /// таймер) — скрытая панель не должна вечно тикать за кадром.
+    @MainActor func test_hide_stops_timer() {
+        let c = QuickCapturePanelController()
+        c._testSetRecording(true)
+        XCTAssertTrue(c._testHeaderTimerActive)
+        c.hide()
+        XCTAssertFalse(c._testHeaderTimerActive)
     }
 
     /// Событие вне allowlist (например meeting.finished) обязано игнорироваться —
