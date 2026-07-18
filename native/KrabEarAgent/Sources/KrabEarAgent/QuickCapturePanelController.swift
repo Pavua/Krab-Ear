@@ -191,15 +191,22 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
         toggleButton.title = isRecording ? "Остановить" : "Начать запись"
     }
 
-    // MARK: - Live text (партиалы — Task 2 поставляет через SSE/poll)
+    // MARK: - Live text (партиалы — Task 2 поставляет через SSE)
 
-    /// Копится инкрементально; setRecording(true) сбрасывает буфер под новую
-    /// заметку (тот же приём, что transcriptTailLabel в MeetingLivePanelController,
-    /// но здесь весь текст, а не хвост — заметки короткие).
+    /// Заменяет live-текст последним партиалом, НЕ копит инкрементально.
+    /// realtime.partial_transcript/realtime.final_transcript оба несут
+    /// ре-транскрипцию СКОЛЬЗЯЩЕГО окна последних buffer_sec секунд аудио
+    /// (backend/realtime_partial.py, ре-эмит каждые interval_sec) — append
+    /// здесь дал бы дублирующийся/наслаивающийся текст на любой заметке
+    /// длиннее ~3с ("привет" → "привет привет мир"). Тот же приём, что
+    /// established потребитель ЭТИХ ЖЕ событий — RealtimeOverlayController.
+    /// showPartialText/showFinalText (оба тоже replace). setRecording(true)
+    /// сбрасывает буфер под новую заметку. Финальный сохранённый текст
+    /// заметки приходит из результата stop_recording (main+QuickCapture.swift),
+    /// этой панели не касается — здесь только живое превью.
     func ingestPartial(_ text: String) {
         guard !text.isEmpty else { return }
-        if !liveTextView.string.isEmpty { liveTextView.string += " " }
-        liveTextView.string += text
+        liveTextView.string = text
     }
 
     // MARK: - SSE (общий SSESessionDelegate, паттерн MeetingLivePanelController)

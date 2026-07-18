@@ -23,11 +23,23 @@ final class QuickCapturePanelTests: XCTestCase {
         c._testSetRecording(true)
         XCTAssertTrue(c._testHeaderTimerActive)
     }
-    @MainActor func test_partial_appends_to_live_text() {
+    @MainActor func test_partial_replaces_live_text() {
         let c = QuickCapturePanelController()
         c._testSetRecording(true)
         c._testIngestPartial("привет мир")
         XCTAssertTrue(c._testLiveText.contains("привет мир"))
+    }
+
+    /// realtime.partial_transcript ре-транскрибирует СКОЛЬЗЯЩЕЕ окно последних
+    /// buffer_sec секунд аудио (realtime_partial.py) — каждый партиал ЗАМЕНЯЕТ
+    /// предыдущий, а не дописывается к нему (иначе на заметке длиннее ~3с
+    /// live-текст дублировался бы: "привет привет мир как дела").
+    @MainActor func test_second_partial_replaces_first_not_appends() {
+        let c = QuickCapturePanelController()
+        c._testSetRecording(true)
+        c._testIngestPartial("привет")
+        c._testIngestPartial("привет мир как дела")
+        XCTAssertEqual(c._testLiveText, "привет мир как дела")
     }
     @MainActor func test_notes_list_renders() {
         let c = QuickCapturePanelController()
@@ -81,5 +93,17 @@ final class QuickCapturePanelTests: XCTestCase {
         c._testHandleSSELine("event: realtime.partial_transcript")
         c._testHandleSSELine(#"data: {"session_id":"s1","text":"","is_partial":true,"ts":123.0}"#)
         XCTAssertEqual(c._testLiveText, "")
+    }
+
+    /// Тот же баг на уровне SSE-потока: два партиала подряд из скользящего
+    /// окна не должны наслаиваться друг на друга в отображаемом тексте.
+    @MainActor func test_sse_consecutive_partials_replace_not_duplicate() {
+        let c = QuickCapturePanelController()
+        c._testSetRecording(true)
+        c._testHandleSSELine("event: realtime.partial_transcript")
+        c._testHandleSSELine(#"data: {"session_id":"s1","text":"hello world","is_partial":true,"ts":123.0}"#)
+        c._testHandleSSELine("event: realtime.partial_transcript")
+        c._testHandleSSELine(#"data: {"session_id":"s1","text":"hello world how are you","is_partial":true,"ts":126.0}"#)
+        XCTAssertEqual(c._testLiveText, "hello world how are you")
     }
 }
