@@ -10,6 +10,13 @@
  Финальный paste НЕ вызывается — заметка никогда не входит в обычный
  paste-пайплайн диктовки (см. main+PasteHandling.swift), streaming-paste
  подавлен отдельным гардом в main+RealtimeOverlay.swift.
+
+ C3b Task 2 (спека 2026-07-16-c3b-scratchpad-panel.md): точки входа панели-
+ скретчпада (QuickCapturePanelController) живут ЗДЕСЬ, не в отдельном
+ main+QuickCapturePanel.swift (план предполагал такой файл — на практике
+ проще встроить в уже существующий main+QuickCapture.swift, см. отчёт волны).
+ Единственный владелец панели — quickCapturePanelController (main.swift),
+ лениво создаётся ensureQuickCapturePanelController().
 */
 
 import AppKit
@@ -61,7 +68,10 @@ extension AgentAppDelegate {
                 // нажатие шлёт stop_recording на ОБЩИЙ recorder — see
                 // meeting_session_service.py:403-410 self-finalize с item_id=None).
                 let status = result["status"] as? String ?? ""
-                await MainActor.run {
+                // Возвращает true только на настоящем успешном старте (не на
+                // осиротевшем/отвергнутом) — только тогда имеет смысл живьём
+                // проверять quick_capture_show_panel и показывать панель ниже.
+                let started: Bool = await MainActor.run {
                     if status == "recording" {
                         // C3a ревью F2b: этот completion мог доехать ПОСЛЕ того,
                         // как stopQuickCapture() (двойной тап/гонка) уже сбросил
@@ -80,11 +90,12 @@ extension AgentAppDelegate {
                                 _ = try? await orphanIpc.callAsync(
                                     method: "stop_recording", params: [:], timeoutSec: 120)
                             }
-                            return
+                            return false
                         }
                         // wake-word пауза + оверлей; streaming-paste подавлен гардом.
                         self.startRealtimeOverlayPolling()
                         BackendToast.shared.show("Быстрая заметка: запись…")
+                        return true
                     } else {
                         self.quickCaptureActive = false
                         self.rebuildStatusMenu()
@@ -92,7 +103,11 @@ extension AgentAppDelegate {
                             ? "Микрофон занят другой записью"
                             : "Не удалось начать заметку"
                         BackendToast.shared.show(message)
+                        return false
                     }
+                }
+                if started {
+                    await self.showQuickCapturePanelIfEnabled()
                 }
             } catch {
                 await MainActor.run {
@@ -126,6 +141,12 @@ extension AgentAppDelegate {
     }
 
     private func handleQuickCaptureResult(_ result: [String: Any]) async {
+        // C3b Task 2: запись физически остановлена независимо от исхода
+        // сохранения (дубликат/ошибка/успех) — панель, если создана И видима,
+        // больше не должна показывать «Идёт запись…».
+        if let panel = quickCapturePanelController, panel.window?.isVisible == true {
+            panel.setRecording(false)
+        }
         let status = result["status"] as? String ?? ""
         if result["skipped"] as? String == "duplicate" {
             await MainActor.run { BackendToast.shared.show("Заметка совпала с недавней записью — пропущена") }
@@ -155,6 +176,10 @@ extension AgentAppDelegate {
             method: "set_paste_status",
             params: ["id": historyId, "paste_status": "skipped"], timeoutSec: 10)
         await sendQuickCaptureCopies(text: result["text"] as? String ?? "", historyId: historyId)
+        // Свежая заметка должна появиться в списке панели, если она открыта.
+        if quickCapturePanelController?.window?.isVisible == true {
+            refreshQuickCapturePanelNotes()
+        }
         await MainActor.run { BackendToast.shared.show("Заметка сохранена") }
     }
 
@@ -223,6 +248,68 @@ extension AgentAppDelegate {
             params: ["items": [["id": historyId, "ts": ts, "text": text]], "force": true],
             timeoutSec: 15
         )
+    }
+
+    // MARK: - C3b Task 2: панель-скретчпад (QuickCapturePanelController)
+
+    /// Единственный инстанс панели: создаётся лениво, инжектится ipcClient и
+    /// onToggleRecording-колбэк (тот же паттерн, что ensureMeetingPanelController
+    /// в main+MeetingPanel.swift).
+    func ensureQuickCapturePanelController() -> QuickCapturePanelController {
+        if let existing = quickCapturePanelController { return existing }
+        let c = QuickCapturePanelController()
+        c.ipcClient = ipcClient
+        c.onToggleRecording = { [weak self] in self?.onQuickCaptureToggle() }
+        quickCapturePanelController = c
+        return c
+    }
+
+    /// Вызывается ТОЛЬКО после настоящего успешного старта записи (см.
+    /// onQuickCaptureToggle). Настройка читается ЖИВЬЁМ через get_settings —
+    /// тот же приём, что sendQuickCaptureCopies — чекбокс «Показывать скретчпад
+    /// при записи» должен действовать сразу после переключения, без ожидания
+    /// следующего цикла обновления кэша.
+    func showQuickCapturePanelIfEnabled() async {
+        guard let resp = try? await ipcClient.callAsync(method: "get_settings", params: [:], timeoutSec: 10),
+              let result = resp["result"] as? [String: Any],
+              (result["quick_capture_show_panel"] as? Bool) == true else { return }
+        let controller = ensureQuickCapturePanelController()
+        controller.setRecording(true)
+        controller.show()
+        refreshQuickCapturePanelNotes()
+    }
+
+    /// Обновляет список заметок панели тем же IPC-контрактом, что и подменю
+    /// «Быстрые заметки» (refreshQuickNotesSubmenu, get_collection_items +
+    /// suffix(7).reversed()) — продублировано минимально, сигнатура
+    /// refreshQuickNotesSubmenu не меняется.
+    func refreshQuickCapturePanelNotes() {
+        guard let controller = quickCapturePanelController else { return }
+        let ipc = self.ipcClient
+        let collectionName = Self.quickCaptureCollectionName
+        DispatchQueue.global(qos: .userInitiated).async {
+            var items: [[String: Any]] = []
+            if let resp = try? ipc.call(
+                method: "get_collection_items",
+                params: ["collection_name": collectionName]),
+               let result = resp["result"] as? [String: Any],
+               let fetched = result["items"] as? [[String: Any]] {
+                items = fetched
+            }
+            let latest = Array(items.suffix(7).reversed())
+            DispatchQueue.main.async { controller.renderNotes(latest) }
+        }
+    }
+
+    /// Пункт меню-бара «Открыть скретчпад» (main+StatusMenu.swift) — показывает
+    /// панель независимо от состояния записи (ручной вызов, план Task 2).
+    /// Простой вариант «всегда показать» (симметрично onOpenHistory), а не
+    /// toggle — план допускал оба варианта на усмотрение исполнителя.
+    @objc func onOpenQuickCapturePanel() {
+        let controller = ensureQuickCapturePanelController()
+        controller.setRecording(quickCaptureActive)
+        controller.show()
+        refreshQuickCapturePanelNotes()
     }
 
     // MARK: - Task 2/3: глобальный хоткей (настраиваемая комбинация)

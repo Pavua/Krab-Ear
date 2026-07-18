@@ -130,4 +130,100 @@ final class QuickCaptureWiringTests: XCTestCase {
         XCTAssertTrue(body.contains("stopQuickCaptureHotkeyMonitor"))
         XCTAssertTrue(body.contains("startQuickCaptureHotkeyMonitor"))
     }
+
+    // MARK: - C3b Task 2: панель-скретчпад — SSE + точки входа + настройка
+
+    func test_quickCapturePanel_subscribes_to_realtime_sse() throws {
+        let src = try source("QuickCapturePanelController.swift")
+        XCTAssertTrue(src.contains("/v1/events?filter="),
+                      "панель обязана подписываться на REST SSE-эндпоинт")
+        XCTAssertTrue(src.contains("realtime.partial_transcript"))
+        XCTAssertTrue(src.contains("realtime.final_transcript"))
+        XCTAssertTrue(src.contains("func windowWillClose"),
+                      "windowWillClose обязан существовать (уже есть с Task 1)")
+    }
+
+    func test_quickCapturePanel_show_starts_sse() throws {
+        let src = try source("QuickCapturePanelController.swift")
+        guard let range = src.range(of: "func show()") else {
+            XCTFail("show() not found")
+            return
+        }
+        let body = src[range.lowerBound...]
+        XCTAssertTrue(body.contains("startSSE()"), "show() обязан запускать SSE-подписку")
+    }
+
+    func test_quickCapturePanel_windowWillClose_stops_sse() throws {
+        let src = try source("QuickCapturePanelController.swift")
+        guard let range = src.range(of: "func windowWillClose") else {
+            XCTFail("windowWillClose not found")
+            return
+        }
+        let body = src[range.lowerBound...]
+        XCTAssertTrue(body.contains("stopSSE()"),
+                      "закрытие панели обязано останавливать SSE-подписку")
+    }
+
+    func test_quickCapture_shows_panel_guarded_by_setting() throws {
+        let src = try source("main+QuickCapture.swift")
+        XCTAssertTrue(src.contains("quick_capture_show_panel"),
+                      "показ панели обязан читать quick_capture_show_panel живьём")
+        XCTAssertTrue(src.contains("ensureQuickCapturePanelController"))
+        XCTAssertTrue(src.contains("QuickCapturePanelController"))
+    }
+
+    func test_quickCapture_toggle_shows_panel_only_on_real_start() throws {
+        let src = try source("main+QuickCapture.swift")
+        guard let range = src.range(of: "func onQuickCaptureToggle") else {
+            XCTFail("onQuickCaptureToggle not found")
+            return
+        }
+        let body = src[range.lowerBound...]
+        XCTAssertTrue(body.contains("showQuickCapturePanelIfEnabled()"),
+                      "успешный старт заметки обязан пробовать показать панель")
+    }
+
+    func test_handleQuickCaptureResult_updates_panel_state() throws {
+        let src = try source("main+QuickCapture.swift")
+        guard let range = src.range(of: "func handleQuickCaptureResult") else {
+            XCTFail("handleQuickCaptureResult not found")
+            return
+        }
+        let body = src[range.lowerBound...]
+        XCTAssertTrue(body.contains("quickCapturePanelController") && body.contains("setRecording(false)"),
+                      "остановка заметки обязана снимать recording-состояние панели")
+        XCTAssertTrue(body.contains("isVisible"),
+                      "панель обновляется только если она видима (план Task 2)")
+        XCTAssertTrue(body.contains("refreshQuickCapturePanelNotes"),
+                      "успешное сохранение обязано обновлять список заметок панели")
+    }
+
+    func test_status_menu_has_open_scratchpad_item() throws {
+        let src = try source("main+StatusMenu.swift")
+        XCTAssertTrue(src.contains("Открыть скретчпад"))
+        XCTAssertTrue(src.contains("onOpenQuickCapturePanel"))
+    }
+
+    func test_main_has_quickCapturePanelController_property() throws {
+        let src = try source("main.swift")
+        XCTAssertTrue(src.contains("var quickCapturePanelController: QuickCapturePanelController?"))
+    }
+
+    func test_quickCaptureSection_has_show_panel_checkbox() throws {
+        let src = try source("HistoryPanelController+Settings.swift")
+        XCTAssertTrue(src.contains("quick_capture_show_panel"))
+        XCTAssertTrue(src.contains("quickCaptureShowPanelButton"))
+        XCTAssertTrue(src.contains("onQuickCaptureShowPanelChanged"))
+    }
+
+    func test_quickCaptureSection_hydrates_show_panel_checkbox() throws {
+        let src = try source("HistoryPanelController+Settings.swift")
+        guard let range = src.range(of: "func refreshQuickCaptureSectionState") else {
+            XCTFail("refreshQuickCaptureSectionState not found")
+            return
+        }
+        let body = src[range.lowerBound...]
+        XCTAssertTrue(body.contains("quickCaptureShowPanelButton.state"),
+                      "гидратация обязана читать quick_capture_show_panel в чекбокс")
+    }
 }

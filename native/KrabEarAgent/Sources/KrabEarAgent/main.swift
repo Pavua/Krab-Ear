@@ -169,6 +169,10 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     /// C3a Task 2: подменю «Быстрые заметки» в status-меню — ссылка для refresh
     /// из menuWillOpen (stored property не поддерживается в extension Swift).
     var quickNotesSubmenu: NSMenu?
+    /// C3b Task 2: единственный инстанс панели-скретчпада (лениво создаётся
+    /// ensureQuickCapturePanelController() в main+QuickCapture.swift) — тот же
+    /// паттерн, что meetingPanelController выше.
+    var quickCapturePanelController: QuickCapturePanelController?
     var lastToggleRequestAt: TimeInterval = 0
     let toggleDebounceSec: TimeInterval = 0.35
     var recordingTargetApp: NSRunningApplication?

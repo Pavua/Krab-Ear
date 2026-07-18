@@ -13,6 +13,21 @@
  владельцем ПОСЛЕ конструирования, паттерн идентичен `ipcClient`/`onFinished`
  в MeetingLivePanelController.
 
+ Task 2 (C3b) — SSE: подписка на REST `/v1/events?filter=realtime.partial_transcript,
+ realtime.final_transcript` тем же приёмом (`SSESessionDelegate`, sorted-filter URL,
+ `event: `/`data: ` построчный парсинг, `obj["data"] ?? obj` фоллбэк на плоский
+ payload), что MeetingLivePanelController. Формат payload'а СВЕРЕН с реальным
+ event_bus.py/rest_server.py (не угадан, урок C2c): `realtime.partial_transcript`
+ и `realtime.final_transcript` оба несут `{session_id, text, is_partial, ts}` —
+ ОДНО поле "text" для обоих типов, поэтому dispatch единообразно зовёт
+ ingestPartial(text) без ветвления по типу события. SSE стартует в show() и
+ останавливается в windowWillClose (панель, открытая вручную до старта записи,
+ просто не получает событий — сервер их и не эмиттит вне активной сессии).
+
+ Владельцем оставлен подход main+QuickCapture.swift (НЕ main+QuickCapturePanel.swift —
+ план предполагал отдельный файл, реально проще встроить точки входа в уже
+ существующий main+QuickCapture.swift, см. отчёт волны C3b Task 2).
+
  Panel-boilerplate — портирован ≥80% из MeetingLivePanelController.swift
  (styleMask/level/collectionBehavior/isReleasedWhenClosed/drag/savePosition/
  restorePosition/isOnScreen≥80%, включая ревью №4 «header-таймер не должен
@@ -67,6 +82,24 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
 
     private static let maxNoteRows = 7
 
+    // MARK: - SSE (Task 2 — партиалы записи, паттерн MeetingLivePanelController)
+
+    private let restBaseURL = "http://127.0.0.1:5005"
+    private var sseTask: URLSessionDataTask?
+    private var pendingSSEEventType: String?
+
+    /// Ровно ДВА типа события — сверены с realtime_partial.py/recording_core_service.py,
+    /// оба несут одинаковую форму payload'а {session_id, text, is_partial, ts}.
+    private static let quickCaptureEventTypes: Set<String> = [
+        "realtime.partial_transcript", "realtime.final_transcript",
+    ]
+
+    private lazy var sseDelegate = SSESessionDelegate { [weak self] line in
+        Task { @MainActor [weak self] in self?.handleSSELine(line) }
+    }
+    private lazy var sseSession = URLSession(configuration: .default,
+                                             delegate: sseDelegate, delegateQueue: nil)
+
     // MARK: - Test hooks (паттерн MeetingLivePanelController)
 
     var _testStatusText: String { statusLabel.stringValue }
@@ -77,6 +110,9 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
     func _testSetRecording(_ recording: Bool) { setRecording(recording) }
     func _testIngestPartial(_ text: String) { ingestPartial(text) }
     func _testSetNotes(_ notes: [[String: Any]]) { renderNotes(notes) }
+    /// Прямой вызов SSE-парсера строки — без реального сетевого стрима (образец
+    /// MeetingLivePanelController._testHandleSSELine).
+    func _testHandleSSELine(_ line: String) { handleSSELine(line) }
 
     // MARK: - Init
 
@@ -100,21 +136,25 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
 
     // MARK: - Public API
 
-    /// Показывает панель на сохранённой (или дефолтной топ-правой) позиции.
-    /// nonactivatingPanel — НЕ активирует приложение, фокус остаётся у текущего.
+    /// Показывает панель на сохранённой (или дефолтной топ-правой) позиции и
+    /// запускает SSE-подписку на партиалы записи. nonactivatingPanel — НЕ
+    /// активирует приложение, фокус остаётся у текущего.
     func show() {
         restorePosition()
         panel.orderFront(nil)
+        startSSE()
     }
 
     func hide() {
         panel.orderOut(nil)
     }
 
-    /// Ревью-урок C2c №4: header-таймер не должен тикать за закрытой панелью.
+    /// Ревью-урок C2c №4: header-таймер не должен тикать за закрытой панелью;
+    /// тот же принцип применён к SSE — закрытая панель не тянет партиалы.
     /// Сама запись (backend) закрытием панели НЕ останавливается.
     func windowWillClose(_ notification: Notification) {
         stopTimer()
+        stopSSE()
     }
 
     // MARK: - Recording state (чистая функция состояния → UI)
@@ -160,6 +200,56 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
         guard !text.isEmpty else { return }
         if !liveTextView.string.isEmpty { liveTextView.string += " " }
         liveTextView.string += text
+    }
+
+    // MARK: - SSE (общий SSESessionDelegate, паттерн MeetingLivePanelController)
+
+    private func startSSE() {
+        stopSSE()
+        let filter = Self.quickCaptureEventTypes.sorted().joined(separator: ",")
+        // sorted() — детерминированный URL для тестов/логов; backend принимает
+        // comma-list в любом порядке (rest_server.py:1649).
+        guard let url = URL(string: "\(restBaseURL)/v1/events?filter=\(filter)") else { return }
+        var request = URLRequest(url: url, timeoutInterval: 600)
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        let task = sseSession.dataTask(with: request)
+        sseTask = task
+        task.resume()
+    }
+
+    private func stopSSE() {
+        sseTask?.cancel()
+        sseTask = nil
+        pendingSSEEventType = nil
+    }
+
+    /// Паттерн MeetingLivePanelController.handleSSELine: `event: ` трекает тип,
+    /// `data: ` диспатчит по нему.
+    private func handleSSELine(_ line: String) {
+        if line.hasPrefix("event: ") {
+            pendingSSEEventType = String(line.dropFirst(7)).trimmingCharacters(in: .whitespaces)
+        } else if line.hasPrefix("data: ") {
+            let type = pendingSSEEventType
+            pendingSSEEventType = nil
+            guard let type, Self.quickCaptureEventTypes.contains(type) else { return }
+            dispatchSSEEvent(json: String(line.dropFirst(6)))
+        } else if line.isEmpty {
+            pendingSSEEventType = nil
+        }
+    }
+
+    /// Конверт {type, data: {...}} ИЛИ плоский {...} — реальный event_bus.py
+    /// сериализует SSE data-строку как `json.dumps(event['data'])`, т.е. ПЛОСКИЙ
+    /// payload (rest_server.py::sse_stream) — фоллбэк `?? obj` покрывает и его.
+    /// realtime.partial_transcript/realtime.final_transcript оба несут одно и то
+    /// же поле "text" (session_id/is_partial/ts не нужны панели-скретчпаду),
+    /// поэтому единая точка диспатча без ветвления по типу события.
+    private func dispatchSSEEvent(json: String) {
+        guard let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        let eventData = obj["data"] as? [String: Any] ?? obj
+        let text = (eventData["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        ingestPartial(text)
     }
 
     // MARK: - Notes list (до 7 строк: текст-превью + «Копировать»)

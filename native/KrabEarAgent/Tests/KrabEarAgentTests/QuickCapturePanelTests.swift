@@ -34,4 +34,52 @@ final class QuickCapturePanelTests: XCTestCase {
         c._testSetNotes([["text": "первая заметка", "ts": "2026-07-16T10:00:00"]])
         XCTAssertEqual(c._testNoteRowCount, 1)
     }
+
+    // === C3b Task 2: SSE-партиалы ===
+
+    /// Реальный формат события (event_bus.py::emit + rest_server.py::sse_stream —
+    /// `data: json.dumps(event['data'])`) — ПЛОСКИЙ payload, без обёртки {type,data}.
+    /// realtime.partial_transcript и realtime.final_transcript оба несут поле "text".
+    @MainActor func test_sse_partial_event_ingests_into_live_text() {
+        let c = QuickCapturePanelController()
+        c._testSetRecording(true)
+        c._testHandleSSELine("event: realtime.partial_transcript")
+        c._testHandleSSELine(#"data: {"session_id":"s1","text":"привет мир","is_partial":true,"ts":123.0}"#)
+        XCTAssertTrue(c._testLiveText.contains("привет мир"))
+    }
+
+    @MainActor func test_sse_final_event_ingests_into_live_text() {
+        let c = QuickCapturePanelController()
+        c._testSetRecording(true)
+        c._testHandleSSELine("event: realtime.final_transcript")
+        c._testHandleSSELine(#"data: {"session_id":"s1","text":"итоговый текст","is_partial":false,"ts":124.0}"#)
+        XCTAssertTrue(c._testLiveText.contains("итоговый текст"))
+    }
+
+    /// Толерантность к обёрнутому конверту {type,data:{...}} — фоллбэк `?? obj`
+    /// (тот же приём, что MeetingLivePanelController.dispatchSSEEvent).
+    @MainActor func test_sse_wrapped_envelope_also_parsed() {
+        let c = QuickCapturePanelController()
+        c._testHandleSSELine("event: realtime.partial_transcript")
+        c._testHandleSSELine(#"data: {"data":{"text":"обёрнутый текст"}}"#)
+        XCTAssertTrue(c._testLiveText.contains("обёрнутый текст"))
+    }
+
+    /// Событие вне allowlist (например meeting.finished) обязано игнорироваться —
+    /// панель-скретчпад не подписана на meeting.*-события.
+    @MainActor func test_sse_foreign_event_ignored() {
+        let c = QuickCapturePanelController()
+        c._testSetRecording(true)
+        c._testHandleSSELine("event: meeting.finished")
+        c._testHandleSSELine(#"data: {"item_id":"x"}"#)
+        XCTAssertEqual(c._testLiveText, "")
+    }
+
+    @MainActor func test_sse_empty_text_does_not_append_separator() {
+        let c = QuickCapturePanelController()
+        c._testSetRecording(true)
+        c._testHandleSSELine("event: realtime.partial_transcript")
+        c._testHandleSSELine(#"data: {"session_id":"s1","text":"","is_partial":true,"ts":123.0}"#)
+        XCTAssertEqual(c._testLiveText, "")
+    }
 }

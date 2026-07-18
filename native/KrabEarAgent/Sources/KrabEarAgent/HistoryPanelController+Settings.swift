@@ -1496,16 +1496,16 @@ extension HistoryPanelController {
         return section
     }
 
-    // MARK: - Quick Capture Section (C3a Task 3)
+    // MARK: - Quick Capture Section (C3a Task 3 + C3b Task 2)
 
-    /// Настройки «Быстрые заметки» (спека 2026-07-16-c3-quick-capture-design.md §3.3):
-    /// opt-in дублирование сохранённой заметки в Apple Notes / Obsidian + выбор
-    /// комбинации хоткея старт/стоп. Ни один из трёх ключей НЕ хранится в
-    /// кэшируемой AgentSettings — main+QuickCapture.swift читает их живьём через
-    /// get_settings (чекбокс должен действовать сразу, без ожидания следующего
-    /// цикла обновления кэша), поэтому эта секция сама гидратирует свои контролы
-    /// отдельным off-main запросом (refreshQuickCaptureSectionState, образец
-    /// refreshWakeWordStatusRow).
+    /// Настройки «Быстрые заметки» (спека 2026-07-16-c3-quick-capture-design.md §3.3
+    /// + 2026-07-16-c3b-scratchpad-panel.md): opt-in дублирование сохранённой заметки
+    /// в Apple Notes / Obsidian, выбор комбинации хоткея старт/стоп, автопоказ
+    /// панели-скретчпада. Ни один из четырёх ключей НЕ хранится в кэшируемой
+    /// AgentSettings — main+QuickCapture.swift читает их живьём через get_settings
+    /// (чекбокс должен действовать сразу, без ожидания следующего цикла обновления
+    /// кэша), поэтому эта секция сама гидратирует свои контролы отдельным off-main
+    /// запросом (refreshQuickCaptureSectionState, образец refreshWakeWordStatusRow).
     func buildQuickCaptureSection() -> CollapsibleSectionView {
         let section = CollapsibleSectionView(
             sectionId: "settings_quick_capture",
@@ -1554,11 +1554,28 @@ extension HistoryPanelController {
             control: quickCaptureHotkeySelector
         )
 
+        // C3b Task 2: плавающая панель-скретчпад — визуальная обратная связь
+        // (статус записи, live-текст партиалов, список последних заметок) во
+        // время быстрой заметки. Панель всегда доступна вручную из меню-бара
+        // («Открыть скретчпад») — этот чекбокс только про АВТОПОКАЗ на старте.
+        quickCaptureShowPanelButton.title = ""
+        quickCaptureShowPanelButton.setButtonType(.switch)
+        quickCaptureShowPanelButton.target = self
+        quickCaptureShowPanelButton.action = #selector(onQuickCaptureShowPanelChanged)
+        quickCaptureShowPanelButton.setAccessibilityLabel("Показывать плавающую панель-скретчпад при старте быстрой заметки")
+        let showPanelRow = makeSwitchRow(
+            label: "Показывать скретчпад при записи",
+            description: "Плавающая панель с live-текстом и списком последних заметок появляется автоматически при старте заметки.",
+            button: quickCaptureShowPanelButton
+        )
+
         card.contentStackView.addArrangedSubview(notesRow)
         card.contentStackView.addArrangedSubview(makeSeparator())
         card.contentStackView.addArrangedSubview(obsidianRow)
         card.contentStackView.addArrangedSubview(makeSeparator())
         card.contentStackView.addArrangedSubview(hotkeyRow)
+        card.contentStackView.addArrangedSubview(makeSeparator())
+        card.contentStackView.addArrangedSubview(showPanelRow)
 
         section.contentStackView.addArrangedSubview(card)
         refreshQuickCaptureSectionState()
@@ -1583,6 +1600,17 @@ extension HistoryPanelController {
         let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async {
             _ = try? ipcClient.call(method: "set_settings", params: ["quick_capture_obsidian_sync": isOn])
+        }
+    }
+
+    /// C3b Task 2: живьё читается из main+QuickCapture.swift::showQuickCapturePanelIfEnabled
+    /// на каждом старте заметки — здесь только персист значения (тот же паттерн,
+    /// что onQuickCaptureNotesChanged/onQuickCaptureObsidianChanged выше).
+    @objc func onQuickCaptureShowPanelChanged() {
+        let isOn = quickCaptureShowPanelButton.state == .on
+        let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = try? ipcClient.call(method: "set_settings", params: ["quick_capture_show_panel": isOn])
         }
     }
 
@@ -1618,6 +1646,7 @@ extension HistoryPanelController {
                 guard let self else { return }
                 self.quickCaptureNotesButton.state = ((result["quick_capture_send_to_notes"] as? Bool) == true) ? .on : .off
                 self.quickCaptureObsidianButton.state = ((result["quick_capture_obsidian_sync"] as? Bool) == true) ? .on : .off
+                self.quickCaptureShowPanelButton.state = ((result["quick_capture_show_panel"] as? Bool) == true) ? .on : .off
                 let hotkeyId = (result["quick_capture_hotkey"] as? String) ?? "cmd_shift_n"
                 let idx = HistoryPanelController.quickCaptureHotkeyIds.firstIndex(of: hotkeyId) ?? 0
                 self.quickCaptureHotkeySelector.selectItem(at: idx)

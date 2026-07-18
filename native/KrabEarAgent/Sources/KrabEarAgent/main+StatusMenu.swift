@@ -220,6 +220,16 @@ extension AgentAppDelegate {
         menu.setSubmenu(quickNotesMenu, for: quickNotesMenuItem)
         self.quickNotesSubmenu = quickNotesMenu
 
+        // C3b Task 2: панель-скретчпад — ручной показ независимо от состояния
+        // записи (авто-показ по настройке живёт в onQuickCaptureToggle).
+        let openScratchpadItem = NSMenuItem(
+            title: "Открыть скретчпад",
+            action: #selector(onOpenQuickCapturePanel),
+            keyEquivalent: ""
+        )
+        openScratchpadItem.target = self
+        menu.addItem(openScratchpadItem)
+
         let historyItem = NSMenuItem(
             title: "Открыть историю",
             action: #selector(onOpenHistory),

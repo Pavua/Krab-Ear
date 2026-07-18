@@ -182,6 +182,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let quickCaptureNotesButton = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     let quickCaptureObsidianButton = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     let quickCaptureHotkeySelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    /// C3b Task 2: показывать плавающую панель-скретчпад автоматически при
+    /// старте быстрой заметки — quick_capture_show_panel (тот же live-паттерн,
+    /// что и три соседних выше).
+    let quickCaptureShowPanelButton = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     let llmModelSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let overlayOpacitySlider = NSSlider(value: 45, minValue: 15, maxValue: 90, target: nil, action: nil)
     let overlayOpacityValueLabel = NSTextField(labelWithString: "45%")
