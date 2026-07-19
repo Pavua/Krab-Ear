@@ -1232,6 +1232,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         clipboardModeSelector.addItems(withTitles: ["Always copy", "Copy on fail", "Never copy"])
         clipboardModeSelector.target = self
         clipboardModeSelector.action = #selector(onClipboardModeChanged)
+        // S34: риск-предупреждение — режим управляет автозаменой системного буфера.
+        clipboardModeSelector.toolTip = "Always copy: каждая диктовка заменяет буфер обмена "
+            + "транскриптом (пароли и другой защищённый контент не затираются). "
+            + "Copy on fail: буфер заменяется только если вставка в приложение не удалась "
+            + "(пароли не затираются). Never copy: буфер обмена диктовкой не используется."
         settingsRow5.addArrangedSubview(clipboardModeSelector)
         settingsRow5.addArrangedSubview(NSView())
 

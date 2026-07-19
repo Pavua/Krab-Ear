@@ -478,6 +478,14 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         }
         logger.info("SmartFieldPaste ready. enabled=\(settings.smartFieldFormatEnabled)")
 
+        // S34: буфер обмена защищён (пароль/секрет) — не через handlePasteFailure
+        // (та сама зовёт putToClipboard при clipboardMode != never_copy — повторный
+        // вызов снова упёрся бы в guard и вернулся сюда же, цикл). Прямой notify.
+        pasteService.onConcealedClipboardSkipped = { [weak self] in
+            self?.notify(title: "Krab Ear",
+                          body: "Буфер обмена защищён (пароль/секрет) — текст не скопирован, доступен в истории")
+        }
+
         if UserDefaults.standard.string(forKey: "KrabEar_ActivePreset") == nil {
             UserDefaults.standard.set("default", forKey: "KrabEar_ActivePreset")
         }

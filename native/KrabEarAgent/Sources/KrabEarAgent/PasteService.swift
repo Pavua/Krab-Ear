@@ -29,6 +29,12 @@ final class PasteService {
     /// от NotificationService напрямую в PasteService.
     var onSecureFieldSkipped: (() -> Void)?
 
+    /// Уведомительный хук для пропуска записи в буфер обмена из-за защищённого
+    /// содержимого (S34, org.nspasteboard.ConcealedType). Тот же паттерн, что
+    /// onSecureFieldSkipped — вызывается синхронно, вызывающий код сам решает,
+    /// как уведомить пользователя.
+    var onConcealedClipboardSkipped: (() -> Void)?
+
     /// AX-роль сфокусированного элемента для указанного PID.
     /// Зеркалит паттерн из `inspectFocusedElementState(pid:)` и `collapseSelectionIfNeeded(pid:)`.
     private func focusedElementRole(pid: pid_t) -> String? {
@@ -131,8 +137,21 @@ final class PasteService {
 
     func putToClipboard(_ text: String) {
         let pasteboard = NSPasteboard.general
+        guard !pasteboardHoldsConcealedContent(pasteboard) else {
+            logger.warn("[Clipboard] Overwrite skipped — pasteboard holds concealed content")
+            onConcealedClipboardSkipped?()
+            return
+        }
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
+    }
+
+    /// S34: org.nspasteboard.ConcealedType — де-факто стандарт (nspasteboard.org),
+    /// менеджеры паролей (1Password, Bitwarden, Keychain Access и др.) помечают
+    /// этим типом чувствительный контент рядом с .string, чтобы clipboard-утилиты
+    /// его не логировали/не затирали.
+    private func pasteboardHoldsConcealedContent(_ pasteboard: NSPasteboard) -> Bool {
+        pasteboard.types?.contains(NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")) ?? false
     }
 
     func pasteToFrontmostApp(_ text: String, targetPID: pid_t? = nil) -> PasteAttemptResult {

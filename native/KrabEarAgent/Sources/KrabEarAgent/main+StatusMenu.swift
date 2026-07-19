@@ -451,10 +451,15 @@ extension AgentAppDelegate {
         let clipAlways = NSMenuItem(title: "Always copy", action: #selector(onClipboardModeAlways), keyEquivalent: "")
         clipAlways.target = self
         clipAlways.state = settings.clipboardMode == "always_copy" ? .on : .off
+        // S34: риск-предупреждение — пароли и другой защищённый контент не затираются.
+        clipAlways.toolTip = "Каждая диктовка заменяет буфер обмена транскриптом. "
+            + "Пароли и другой защищённый контент не затираются."
         clipboardSubmenu.addItem(clipAlways)
         let clipOnFail = NSMenuItem(title: "Copy on fail", action: #selector(onClipboardModeOnFail), keyEquivalent: "")
         clipOnFail.target = self
         clipOnFail.state = settings.clipboardMode == "copy_on_fail" ? .on : .off
+        clipOnFail.toolTip = "Буфер заменяется только если вставка в приложение не удалась. "
+            + "Пароли и другой защищённый контент не затираются."
         clipboardSubmenu.addItem(clipOnFail)
         let clipNever = NSMenuItem(title: "Never copy", action: #selector(onClipboardModeNever), keyEquivalent: "")
         clipNever.target = self
