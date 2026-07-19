@@ -93,6 +93,42 @@ final class PasteServiceClipboardSafetyTests: XCTestCase {
         XCTAssertEqual(NSPasteboard.general.string(forType: .string), "first write")
     }
 
+    // MARK: - 4b. Fable-ревью F1: pasteToFrontmostApp НЕ синтезирует Cmd+V, если
+    // запись в буфер пропущена — иначе в frontmost app вставится СТАРОЕ (возможно
+    // защищённое) содержимое буфера вместо тихого отказа.
+
+    func test_pasteToFrontmostApp_aborts_before_key_events_when_concealed() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.declareTypes([.string, concealedType], owner: nil)
+        NSPasteboard.general.setString("super-secret-password", forType: .string)
+        NSPasteboard.general.setData(Data(), forType: concealedType)
+
+        // Гард срабатывает ДО resolvePreferredPasteTargetApp/waitForModifierRelease —
+        // детерминированно и без зависимости от реального frontmost app в CI.
+        let result = service.pasteToFrontmostApp("dictated text")
+
+        XCTAssertFalse(result.ok)
+        XCTAssertEqual(result.reason, "concealed_clipboard_skipped")
+        XCTAssertEqual(
+            NSPasteboard.general.string(forType: .string), "super-secret-password",
+            "буфер не должен быть тронут — Cmd+V не должен был синтезироваться")
+    }
+
+    // MARK: - 4c. Fable-ревью F3: explicit user-initiated copy обходит guard
+
+    func test_putToClipboardUserInitiated_bypasses_concealed_guard() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.declareTypes([.string, concealedType], owner: nil)
+        NSPasteboard.general.setString("secret", forType: .string)
+        NSPasteboard.general.setData(Data(), forType: concealedType)
+
+        service.putToClipboardUserInitiated("explicit copy")
+
+        XCTAssertEqual(
+            NSPasteboard.general.string(forType: .string), "explicit copy",
+            "явное действие «Копировать» обязано писать безусловно")
+    }
+
     // MARK: - 5. Source-contract: проводка в main.swift + защита от реентерабельности
 
     func test_onConcealedClipboardSkipped_is_wired_in_main() throws {
@@ -117,6 +153,39 @@ final class PasteServiceClipboardSafetyTests: XCTestCase {
         let closureBody = tail[..<closingBrace]
         XCTAssertFalse(closureBody.contains("handlePasteFailure"),
                         "closure не должна вести обратно в handlePasteFailure (реентерабельность)")
+        // Fable-ревью (double-notify, после F1-фикса): closure НЕ должна сама звать
+        // notify() — единственный источник пользовательского уведомления теперь
+        // явная Bool-проверка на каждом call site + handlePasteFailure. Второй notify
+        // отсюда дублировал бы то же событие.
+        XCTAssertFalse(closureBody.contains("notify("),
+                        "closure не должна сама уведомлять — иначе дублирует handlePasteFailure/call-site notify")
+    }
+
+    func test_explicit_copy_sites_use_user_initiated_bypass() throws {
+        // Fable-ревью F3: три explicit-copy call site'а должны звать
+        // putToClipboardUserInitiated, НЕ putToClipboard (который теперь блокирует
+        // запись при защищённом буфере) — иначе «Копировать последний»/«Копировать
+        // заметку»/QuickReplace тихо перестают работать при заблокированном буфере.
+        let sites: [(file: String, marker: String)] = [
+            ("main.swift", "func onCopyLastResult"),
+            ("main+QuickCapture.swift", "func onQuickNoteItemClicked(_ sender: NSMenuItem)"),
+            ("main+QuickReplace.swift", "newText"),
+        ]
+        for site in sites {
+            let url = URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/KrabEarAgent/\(site.file)")
+            let src = try String(contentsOf: url, encoding: .utf8)
+            guard let markerRange = src.range(of: site.marker) else {
+                return XCTFail("marker \(site.marker) not found in \(site.file)")
+            }
+            // Ищем ближайший putToClipboard*-вызов после маркера (в пределах ~500 символов).
+            let window = src[markerRange.upperBound...].prefix(500)
+            XCTAssertTrue(window.contains("putToClipboardUserInitiated"),
+                          "\(site.file): explicit-copy обязан идти через putToClipboardUserInitiated")
+        }
     }
 
     // MARK: - 6. Risk-warning tooltip-тексты присутствуют

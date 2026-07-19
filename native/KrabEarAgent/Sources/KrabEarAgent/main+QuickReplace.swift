@@ -120,7 +120,8 @@ extension AgentAppDelegate {
             // на ошибках. Privacy: backend в privacy mode отказывает ДО
             // чтения истории, new_text сюда не доходит.
             if let newText = result["new_text"] as? String, !newText.isEmpty {
-                pasteService.putToClipboard(newText)
+                // S34 / Fable-ревью F3: explicit user-initiated copy — не через concealed-guard.
+                pasteService.putToClipboardUserInitiated(newText)
                 message += " Скопировано — ⌘V."
             }
             if autoLearned {

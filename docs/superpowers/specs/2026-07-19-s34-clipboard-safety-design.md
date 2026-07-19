@@ -148,3 +148,35 @@ Worktree `feature/s34-clipboard-safety`, база свежий `codex/krab-ear-v
 `org.nspasteboard.ConcealedType`-помеченный контент, продиктовать что-то с
 `always_copy` — убедиться, что буфер не тронут и notify показался; затем обычный
 smoke без concealed-маркера — буфер заменяется как раньше.
+
+## 6. Ревизия после Fable-ревью (2026-07-19/20) — BLOCK → фикс → мерж
+
+Fable нашёл **HIGH (F1)**: дизайн §2.2 сделал `putToClipboard` void — `pasteToFrontmostApp`
+не знал о пропуске записи и безусловно слал синтетический Cmd+V. При защищённом буфере это
+вставляло СТАРОЕ содержимое (пароль) в frontmost app открытым текстом — фикс оказался строго
+хуже исходного бага (потеря данных → раскрытие секрета). Амплификация через
+`StreamingPasteController.appendChunk` (per-chunk paste во время всей диктовки).
+
+Плюс **F2** (5 call sites лгали «скопировано» при тихом пропуске) и **F3** (3 explicit-copy
+действия — `onCopyLastResult`/заметки/QuickReplace — оказались заблокированы вместо защищённых
+«бесплатно», вразрез с §2.4).
+
+**Финальный дизайн** (пересмотр §2.2, сигнатура ИЗМЕНЕНА относительно исходного плана):
+- `putToClipboard(_:) -> Bool` (`@discardableResult`) — вызывающая сторона ОБЯЗАНА проверять
+  результат там, где от него зависит дальнейшая логика (транспортные пути к Cmd+V).
+- `pasteToFrontmostApp` прерывается ДО key events при `false`.
+- Новый отдельный `putToClipboardUserInitiated(_:)` — безусловная запись для explicit-copy
+  (F3): пользователь сам инициирует действие, минуя guard.
+- `handlePasteFailure` — тихая ранняя ветка `concealed_clipboard_skipped` (паттерн
+  `secure_field_skipped`), БЕЗ повторного `putToClipboard`.
+- `onConcealedClipboardSkipped` closure переведён на чистый лог (НЕ notify) — во избежание
+  double-notify, обнаруженного при личной перепроверке после фикса F1 (closure стреляла
+  параллельно с notify() на каждом call site, дублируя одно и то же событие).
+- Дебаунс-таймер (изначально добавленный против streaming-шторма) удалён как мёртвый код —
+  амплификация закрылась самим F1-фиксом (guard прерывает ДО Cmd+V, closure больше не шлёт
+  notify вообще, storm не формируется).
+
+3 новых регрессионных теста (composite `pasteToFrontmostApp`+concealed, explicit-copy bypass,
+source-contract на отсутствие `notify(` в closure) — итог 9/9 в файле, 1274/1274 в полном
+swift test. Мерж — после этого раунда, БЕЗ повторного полного Fable-прохода (личная
+построчная перепроверка каждой находки против кода + узкий скоуп фикса).

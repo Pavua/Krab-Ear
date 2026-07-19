@@ -461,7 +461,8 @@ extension AgentAppDelegate {
     /// paste-пайплайн активного окна).
     @objc func onQuickNoteItemClicked(_ sender: NSMenuItem) {
         guard let text = sender.representedObject as? String, !text.isEmpty else { return }
-        pasteService.putToClipboard(text)
+        // S34 / Fable-ревью F3: explicit user-initiated copy — не через concealed-guard.
+        pasteService.putToClipboardUserInitiated(text)
         BackendToast.shared.show("Скопировано")
     }
 

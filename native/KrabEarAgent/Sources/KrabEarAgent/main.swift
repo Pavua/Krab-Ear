@@ -478,12 +478,16 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         }
         logger.info("SmartFieldPaste ready. enabled=\(settings.smartFieldFormatEnabled)")
 
-        // S34: буфер обмена защищён (пароль/секрет) — не через handlePasteFailure
-        // (та сама зовёт putToClipboard при clipboardMode != never_copy — повторный
-        // вызов снова упёрся бы в guard и вернулся сюда же, цикл). Прямой notify.
+        // S34 / Fable-ревью (double-notify): пользовательское уведомление НЕ отсюда —
+        // каждый вызывающий putToClipboard(_:) уже проверяет Bool-результат и сам решает,
+        // что сказать пользователю (continueTranscriptionResult always_copy-ветка,
+        // handlePasteFailure — и напрямую, и через pasteToFrontmostApp → propagated
+        // reason "concealed_clipboard_skipped"). Второй notify отсюда дублировал бы их.
+        // Closure — только для телеметрии/дебага по путям, которые сами не решают
+        // (напр. streaming per-chunk — там намеренно тихо, как и для любых других
+        // причин провала чанка, см. StreamingPasteController.appendChunk).
         pasteService.onConcealedClipboardSkipped = { [weak self] in
-            self?.notify(title: "Krab Ear",
-                          body: "Буфер обмена защищён (пароль/секрет) — текст не скопирован, доступен в истории")
+            self?.logger.info("[Clipboard] Concealed content skip signalled (handled by caller)")
         }
 
         if UserDefaults.standard.string(forKey: "KrabEar_ActivePreset") == nil {
@@ -986,7 +990,8 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             notify(title: "Krab Ear", body: "Пока нет последнего результата для копирования")
             return
         }
-        pasteService.putToClipboard(lastResult.finalText)
+        // S34 / Fable-ревью F3: explicit user-initiated copy — не через concealed-guard.
+        pasteService.putToClipboardUserInitiated(lastResult.finalText)
         notify(title: "Krab Ear", body: "Последний результат скопирован в буфер")
     }
 

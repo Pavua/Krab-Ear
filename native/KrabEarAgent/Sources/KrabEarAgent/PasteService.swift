@@ -135,13 +135,33 @@ final class PasteService {
         case unknown
     }
 
-    func putToClipboard(_ text: String) {
+    /// - Returns: true если буфер реально записан, false если пропущен из-за
+    ///   защищённого содержимого (S34) — вызывающая сторона ОБЯЗАНА проверять
+    ///   результат, если дальнейшая логика зависит от факта записи (напр.
+    ///   `pasteToFrontmostApp` не должен слать синтетический Cmd+V поверх СТАРОГО
+    ///   содержимого буфера, если новая запись была пропущена — Fable-ревью F1).
+    @discardableResult
+    func putToClipboard(_ text: String) -> Bool {
         let pasteboard = NSPasteboard.general
         guard !pasteboardHoldsConcealedContent(pasteboard) else {
             logger.warn("[Clipboard] Overwrite skipped — pasteboard holds concealed content")
             onConcealedClipboardSkipped?()
-            return
+            return false
         }
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+        return true
+    }
+
+    /// Явное пользовательское действие «Копировать» (кнопка/пункт меню) — пишет
+    /// БЕЗУСЛОВНО, минуя concealed-guard. Пользователь сам инициирует затирание
+    /// осознанно (спека S34 §2.4) — держать этот путь заблокированным было бы
+    /// хуже, чем не иметь guard'а вовсе, тем более что ~10 других explicit-copy
+    /// мест в проекте пишут в NSPasteboard напрямую мимо putToClipboard и этим
+    /// guard'ом не защищены вообще (Fable-ревью F3 — оставлять их непоследовательными
+    /// было бы хуже, чем дать всем explicit-copy местам единый предсказуемый bypass).
+    func putToClipboardUserInitiated(_ text: String) {
+        let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
     }
@@ -196,7 +216,13 @@ final class PasteService {
             }
         }
 
-        putToClipboard(textToInsert)
+        // S34 / Fable-ревью F1: если запись пропущена (буфер защищён), НЕ синтезируем
+        // Cmd+V — иначе в frontmost app вставится СТАРОЕ содержимое буфера (пароль)
+        // открытым текстом вместо просто «текст не скопирован». Прерываем ДО любых
+        // key events, до проверки модификаторов и до резолва целевого PID.
+        guard putToClipboard(textToInsert) else {
+            return PasteAttemptResult(ok: false, reason: "concealed_clipboard_skipped")
+        }
         let axTrusted = isAccessibilityTrusted()
 
         guard waitForModifierRelease(timeoutMs: modifierReleaseTimeoutMs) else {
