@@ -47,10 +47,19 @@ backend отказывает ДО чтения истории — транскр
    алерта. Комментарий «< 50 ms» покрывает только happy path: на
    деградированном пути внутри — sync IPC → `backendSupervisor.
    restartIfDead()` (полный цикл рестарта backend) → повторный sync IPC,
-   всё на главном потоке = AppHang. Перенести вызов в
-   `DispatchQueue.global(qos: .userInitiated)`, результат (тост/алерт и
-   `putToClipboard`) — обратно на main. Мы редактируем ровно эту ветку —
-   это направленный hardening, не посторонний рефакторинг.
+   всё на главном потоке = AppHang. Механизм переноса — НЕ
+   `DispatchQueue.global` + `callWithRecovery` (`AgentAppDelegate` —
+   `@MainActor`, вызов его метода из фоновой очереди не пройдёт Swift 6
+   isolation), а канонический паттерн Wave 188 из сиблинга
+   `main+Bookmarks.swift::createBookmarkDuringRecording`: локальный
+   `let ipc = self.ipcClient` (IPCClient — Sendable) → `Task.detached` →
+   `await ipc.callAsync(...)` → UI-результат (тост/алерт и
+   `putToClipboard`) через `await MainActor.run`. Осознанный трейд-офф
+   паттерна (уже принят кодовой базой в миграциях Bookmarks/
+   HotkeyRecording): `callAsync` не несёт `restartIfDead`-recovery —
+   при мёртвом backend разовое действие показывает ошибку, самолечение
+   остаётся за BackendSupervisor/HealthMonitor. Мы редактируем ровно эту
+   ветку — это направленный hardening, не посторонний рефакторинг.
 
 ## Ошибочные пути
 
@@ -66,8 +75,8 @@ Source-contract тест (образец `QuickCaptureWiringTests`) в ново�
   `new_text` (оба грепа в теле функции);
 - тост содержит подстроку «Скопировано»;
 - IPC-вызов внутри `onReplaceWordRequested` уходит off-main: тело содержит
-  `DispatchQueue.global` (и НЕ содержит прямого sync `callWithRecovery` вне
-  него — формулировка грепа уточняется при написании RED-теста).
+  `Task.detached` + `callAsync` и НЕ содержит `callWithRecovery`
+  (sync-путь из функции удалён целиком).
 
 ## Вне скоупа
 
