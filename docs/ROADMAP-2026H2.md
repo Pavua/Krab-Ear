@@ -272,7 +272,14 @@ GH Release + appcast `ca01b4fb`; релизный ран с 1-й попытки 
 Из карты идей: **C3 menu-bar quick capture** (M) — быстрый диктофон-скретчпад; **C2 live meeting
 overlay** (M-L) — action items/спикеры по ходу встречи (сейчас только post-hoc `get_meeting_report`).
 Живые кандидаты из старого S-бэклога (§4): S34 clipboard safety modes, S56 accessibility/keyboard UX,
-S63 bilingual conversation mode, S64 inline correction loop, S65 import queue v2.
+S63 bilingual conversation mode, S64 inline correction loop (**закрыта** — см. журнал 2026-07-19).
+**S65 import queue v2 — закрыта БЕЗ КОДА 2026-07-19** (скаут-инвентаризация, анти-rebuild): drag-drop
+очередь/прогресс/отмена/сводка ошибок/pause-resume/безопасная обработка больших папок — всё уже в
+проде через client-side flow (`HistoryPanelController+Import.swift` + `transcribe_paths_async`).
+Backend-заготовка `TranscriptionQueue` (приоритеты+персистентность) — намеренно невключённый задел
+(её собственный докстринг честно предупреждает: `process_next()` не вызывается ни одним потоком,
+Swift не зовёт её 4 IPC-метода); дублировать рабочий flow ради неё сочтено ненужным — оставлена как
+есть, код не тронут.
 Правило отбора: сначала то, что владелец сам ждёт в ежедневке (критерий фронта A).
 
 ### 3.5 Ритуалы (не волны — календарь)
@@ -644,3 +651,9 @@ S63 bilingual conversation mode, S64 inline correction loop, S65 import queue v2
   безвозвратно затирает скопированное юзером, вкл. пароли — `org.nspasteboard.
   ConcealedType` нигде не проверяется; эталон save/restore существует в
   `SelectionTranslator`, но не переиспользован) — кандидат в отдельную волну.
+- 2026-07-19 (продолжение, после B3) — **S65 import queue v2 закрыта БЕЗ КОДА** (см. §3.4):
+  анти-rebuild урок S64 подтвердился в третий раз за день — формулировка тикета на ~85%
+  уже реализована в проде (client-side flow), реальный незакрытый компонент оказался
+  сознательно невключённым бэкенд-заделом с честным докстрингом «process_next() не
+  вызывается» — дублировать рабочий путь ради его оживления решено не строить.
+  S34 clipboard safety взята в работу следующей волной (см. отдельную запись).
