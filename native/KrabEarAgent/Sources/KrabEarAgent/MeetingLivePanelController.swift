@@ -111,6 +111,8 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
     var _testTranscriptTailText: String { transcriptTailLabel.stringValue }
     var _testDegradedBadgeVisible: Bool { !degradedBadge.isHidden }
     var _testPanelStyleMask: NSWindow.StyleMask { panel.styleMask }
+    var _testTitlebarAppearsTransparent: Bool { panel.titlebarAppearsTransparent }
+    var _testTitleVisibility: NSWindow.TitleVisibility { panel.titleVisibility }
     var _testIsReleasedWhenClosed: Bool { panel.isReleasedWhenClosed }
     var _testPanelDelegateIsController: Bool { panel.delegate === self }
     var _testHeaderTimerActive: Bool { timerTick != nil }
@@ -142,6 +144,15 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
         // isReleasedWhenClosed=false обязателен, иначе повторный show()
         // после закрытия обращается к деаллоцированному окну (крэш).
         panel.styleMask.insert(.closable)
+        // C3b Fable-ревью (2026-07-19, унаследованный баг): `.closable` БЕЗ
+        // `.titled` не рендерит НИКАКОЙ видимый крестик закрытия (AX на живой
+        // QuickCapturePanelController подтвердил 0 кнопок AXCloseButton, тот
+        // же panel-boilerplate портирован сюда 1-в-1). `.titled` даёт реальную
+        // нативную кнопку; titlebarAppearsTransparent + titleVisibility=.hidden
+        // убирают саму полосу тайтлбара визуально (безрамочный HUD).
+        panel.styleMask.insert(.titled)
+        panel.titlebarAppearsTransparent = true
+        panel.titleVisibility = .hidden
         panel.isReleasedWhenClosed = false
         panel.delegate = self
         buildLayout()

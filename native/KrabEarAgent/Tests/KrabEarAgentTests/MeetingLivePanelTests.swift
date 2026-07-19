@@ -95,6 +95,20 @@ final class MeetingLivePanelTests: XCTestCase {
         XCTAssertTrue(c._testPanelDelegateIsController)
     }
 
+    /// C3b Fable-ревью (2026-07-19, вне скоупа ветки, отдельный chip): `.closable`
+    /// во styleMask БЕЗ `.titled` не рендерит НИКАКОЙ видимый крестик закрытия —
+    /// живой смок волны C3b подтвердил это на QuickCapturePanelController
+    /// (AX — 0 кнопок с subrole AXCloseButton), и та же панель-заготовка
+    /// портирована 1-в-1 сюда, значит баг унаследован. `.titled` даёт реальную
+    /// нативную кнопку; titlebarAppearsTransparent + titleVisibility=.hidden
+    /// убирают саму полосу тайтлбара визуально (безрамочный HUD).
+    func test_panel_has_visible_close_button() {
+        let c = MeetingLivePanelController()
+        XCTAssertTrue(c._testPanelStyleMask.contains(.titled))
+        XCTAssertTrue(c._testTitlebarAppearsTransparent)
+        XCTAssertEqual(c._testTitleVisibility, .hidden)
+    }
+
     func test_window_close_stops_updates_and_timers() {
         // Ревью №1+№4: закрытие панели глушит poll/SSE/header-таймер
         // (сессия backend'а при этом ПРОДОЛЖАЕТСЯ — спека §3).
