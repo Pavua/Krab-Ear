@@ -261,8 +261,11 @@ GH Release + appcast `ca01b4fb`; релизный ран с 1-й попытки 
 - **B2 assisted call mode** (live-перевод + подсказки в звонке): владелец — Voice Gateway;
   Krab Ear отдаёт STT/TTS через уже готовые `/v1/stt`, `/v1/tts`, `/v1/stream` WS. Ear-волна не нужна,
   пока VG не запросит контракт-изменения (тогда — стыков-аудит перед изменением).
-- **B3 brain-lease видимость**: доделать F5 до видимого «кто держит LM Studio» (menu-bar индикатор
-  или строка в диагностике). S-волна, кандидат в окно между Волнами 3 и 4.
+- **B3 brain-lease видимость** — **ЗАКРЫТА 2026-07-19** (окно перед M2): IPC
+  `get_brain_lease_status` + секция `brain_lease` в `get_diagnostics` (общий билдер,
+  HealthCheckService) + строка «LM Studio: свободен/Krab Ear/Краб · ещё Nс» в status-меню
+  (`main+BrainLease.swift`, refresh в menuWillOpen — без фонового поллинга). Спека
+  `docs/superpowers/specs/2026-07-19-b3-brain-lease-visibility-design.md`.
 - Telegram `/api/notify` reply_to — владелец Main Krab (открытый chip там).
 
 ### 3.4 Продуктовые кандидаты (пост-Волна 4, переприоритизировать по факту)
@@ -618,3 +621,26 @@ S63 bilingual conversation mode, S64 inline correction loop, S65 import queue v2
   (PID 95608, IPC ping ok). Живой смок хоткея — за владельцем при первом использовании
   (синтетический keystroke не триггерит global monitor, меню-пункта у QuickReplace нет). S64
   в реконсиляции §4 можно считать закрытой.
+- 2026-07-19 (поздний вечер) — **релиз v2.10.0 + волна B3 закрыта + скаут-разведка S65/S34**.
+  (1) **Sparkle-релиз v2.10.0 ВЫШЕЛ** (кумулятивно: C3a + C3b скретчпад + фикс крестика
+  meeting-панели + S64 re-paste; ран `29703016463` зелёный с первой попытки, appcast
+  length=asset size 3901947, EdDSA на месте). Утренний свип: Sentry 0 unresolved за 24ч,
+  агент перезапущен владельцем на корректном parity-бинаре (MD5 сверен с committed),
+  ошибки в rest.err.log — исторические (09-07, до фиксов). (2) **B3 brain-lease видимость
+  ЗАКРЫТА** (см. §3.3): полный TDD-цикл лично (6 py-тестов + 10 Swift, RED→GREEN),
+  все гейты (dispatch-инварианты 24/24, полный swift test 1265/1265, ubuntu-parity,
+  `make audit-all` чист, глиф-гейт: только установленные «·»/«—» + SF Symbol
+  `brain.head.profile`). Счётчик IPC-хендлеров 365. (3) **Скаут-инвентаризация S65/S34**
+  (2 параллельных Sonnet read-only агента, анти-rebuild урок S64 подтвердился ОБА раза):
+  **S65 import queue** — ~85% уже в проде (drag-drop очередь, прогресс/отмена/сводка
+  ошибок/pause-resume все живые); реальный гэп: `TranscriptionQueue` (backend, 638 строк,
+  приоритеты+персистентность) — **orphaned execution engine**: `process_next()` не
+  вызывается никаким потоком, Swift не зовёт его 4 живых IPC-метода — декоративен
+  с точки зрения продукта; рекомендация — пометить «в основном закрыта», решить судьбу
+  заготовки отдельно. **S34 clipboard safety** — 3 режима (`always_copy`/`copy_on_fail`/
+  `never_copy`) полностью реализованы (backend+UI+hotkey-профили); незакрыт только
+  deliverable «предупреждение о риске» (S) + НАЙДЕН реальный гэп ШИРЕ тикета: ни один
+  paste-путь не делает save/restore системного буфера (каждая диктовка при `always_copy`
+  безвозвратно затирает скопированное юзером, вкл. пароли — `org.nspasteboard.
+  ConcealedType` нигде не проверяется; эталон save/restore существует в
+  `SelectionTranslator`, но не переиспользован) — кандидат в отдельную волну.

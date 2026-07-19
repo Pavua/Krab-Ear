@@ -1027,6 +1027,7 @@ Returns: `{jobs: [{job_id, path, status, priority, created_at}, ...]}`
 |---|---|
 | `list_llm_models` | Список моделей из LM Studio |
 | `probe_llm_http` | Ping LM Studio HTTP endpoint |
+| `get_brain_lease_status` | Кто держит LM Studio brain-лиз (B3) |
 | `get_last_llm_diff` | Последний word-level diff от rewriter'а |
 | `extract_action_items` | Извлечение задач из транскрипта |
 | `batch_extract_action_items` | Пакетное извлечение |
@@ -1045,6 +1046,17 @@ Returns: `{models: [{id, name, ...}]}`
 Однократный ping LM Studio HTTP endpoint. Возвращает `reachable`, `latency_ms`, `model`.  
 Нет params.  
 Returns: `{reachable, latency_ms, model?, error?}`
+
+### `get_brain_lease_status`
+*(service.py → health_check_service.py)*  
+B3 (2026-07-19): кто держит кросс-процессный LM Studio brain-лиз
+(`~/.openclaw/lm_studio_brain.lock`, см. `backend/brain_lease.py`). Только
+флаги/числа — без privacy-гейта; абсолютный lock_path наружу не отдаётся.
+Все ключи присутствуют в обоих состояниях (schema-parity); при `held=false`
+поля владельца — null. Та же сводка доступна как секция `brain_lease`
+в `get_diagnostics`.  
+Нет params.  
+Returns: `{ok, enabled, held, owner|null, pid|null, acquired_ts|null, exp_ts|null, seconds_left|null}`
 
 ### `get_last_llm_diff`
 *(service.py)*  

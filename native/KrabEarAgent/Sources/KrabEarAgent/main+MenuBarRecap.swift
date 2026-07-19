@@ -307,5 +307,7 @@ extension AgentAppDelegate: NSMenuDelegate {
         menuBarRecapView?.refresh(ipcClient: ipcClient)
         // C3a Task 2: подменю «Быстрые заметки» — тот же паттерн, свой IPC off-main.
         refreshQuickNotesSubmenu()
+        // B3: строка «кто держит LM Studio» — тот же паттерн (main+BrainLease.swift).
+        refreshBrainLeaseMenuItem()
     }
 }

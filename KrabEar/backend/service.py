@@ -1823,6 +1823,7 @@ class BackendService:
             "get_audit_log": self._handle_get_audit_log,  # последние записи IPC audit log; privacy_mode блокирует
             "handle_error_action": self._handle_handle_error_action,  # выполнить actionable-действие из toast/diagnostics
             "probe_llm_http": self._handle_probe_llm_http,  # однократный ping LM Studio HTTP endpoint
+            "get_brain_lease_status": self._health_check_svc.handle_get_brain_lease_status,  # B3: кто держит LM Studio brain-лиз
             "warmup_stt": self._stt_mgmt_svc.handle_warmup_stt,  # ручной запуск STT warmup (после смены профиля/модели)
             "warmup_rewriter": self._text_scoring_svc.handle_warmup_rewriter,  # явный warmup-probe для "Load Model" кнопки
             "analyze_audio_quality": self._audio_analytics_svc.handle_analyze_audio_quality,  # pre-flight анализ качества аудиофайла

@@ -187,10 +187,19 @@ extension AgentAppDelegate {
         let recapItem = NSMenuItem()
         recapItem.view = recapView
         menu.addItem(recapItem)           // первый пункт меню
+        // B3: инфо-строка «кто держит LM Studio» (main+BrainLease.swift) —
+        // disabled-пункт (action nil), скрыт при llm_brain_lease_enabled=false,
+        // обновляется в menuWillOpen. Иконка — SF Symbol (класс AGENT-J/M).
+        let brainItem = NSMenuItem(title: "LM Studio: —", action: nil, keyEquivalent: "")
+        brainItem.image = NSImage(
+            systemSymbolName: "brain.head.profile", accessibilityDescription: nil)
+        menu.addItem(brainItem)
+        self.brainLeaseMenuItem = brainItem
         menu.addItem(.separator())
         self.menuBarRecapView = recapView
         menu.delegate = self
         recapView.refresh(ipcClient: ipcClient)   // первичный fetch при построении меню
+        refreshBrainLeaseMenuItem()               // первичный fetch brain-lease строки
         // ─────────────────────────────────────────────────────────────────────
 
         let recordItem = NSMenuItem(

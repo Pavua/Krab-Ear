@@ -173,6 +173,9 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     /// ensureQuickCapturePanelController() в main+QuickCapture.swift) — тот же
     /// паттерн, что meetingPanelController выше.
     var quickCapturePanelController: QuickCapturePanelController?
+    /// B3: инфо-строка «кто держит LM Studio» в status-меню — создаётся в
+    /// rebuildStatusMenu, обновляется из menuWillOpen (main+BrainLease.swift).
+    var brainLeaseMenuItem: NSMenuItem?
     var lastToggleRequestAt: TimeInterval = 0
     let toggleDebounceSec: TimeInterval = 0.35
     var recordingTargetApp: NSRunningApplication?

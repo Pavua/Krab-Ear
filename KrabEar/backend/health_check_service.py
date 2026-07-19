@@ -201,7 +201,79 @@ class HealthCheckService:
             "metrics_summary": self._get_metrics_summary(),
             # Event-мост IPC->REST (spec 2026-07-07-event-bridge-design.md) diagnostics.
             "event_bridge": self._get_event_bridge_summary(),
+            # B3 (spec 2026-07-19-b3-brain-lease-visibility): кто держит LM Studio.
+            "brain_lease": self._build_brain_lease_summary(),
         }
+
+    # ------------------------------------------------------------------
+    # handle_get_brain_lease_status (B3, spec 2026-07-19)
+    # ------------------------------------------------------------------
+
+    def _build_brain_lease_summary(self) -> dict[str, Any]:
+        """Снимок brain-lease «кто держит LM Studio» (backend/brain_lease.py).
+
+        Общий билдер для handle_get_brain_lease_status и секции ``brain_lease``
+        в get_diagnostics. Никогда не роняет вызывающих: current_lease_holder()
+        NEVER raises по контракту модуля, чтение настроек обёрнуто отдельно.
+        Payload lock-файла пишет ЧУЖОЙ процесс (Krab userbot) — схеме не
+        доверяем, каждое поле коэрсим с fallback null.
+        """
+        enabled = True
+        try:
+            if self._settings_svc is not None:
+                enabled = bool(
+                    self._settings_svc.cached_settings().get("llm_brain_lease_enabled", True)
+                )
+        except Exception:
+            pass
+
+        from backend.brain_lease import current_lease_holder
+
+        summary: dict[str, Any] = {
+            "enabled": enabled,
+            "held": False,
+            "owner": None,
+            "pid": None,
+            "acquired_ts": None,
+            "exp_ts": None,
+            "seconds_left": None,
+        }
+        payload = current_lease_holder()
+        if payload is None:
+            return summary
+
+        def _as_float(value: Any) -> float | None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        def _as_int(value: Any) -> int | None:
+            # bool — подкласс int; «pid: true» от чужого писателя — мусор, не pid.
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return None
+            return int(value)
+
+        exp_ts = _as_float(payload.get("exp_ts"))
+        owner = payload.get("owner")
+        summary["held"] = True
+        summary["owner"] = str(owner) if owner is not None else None
+        summary["pid"] = _as_int(payload.get("pid"))
+        summary["acquired_ts"] = _as_float(payload.get("acquired_ts"))
+        summary["exp_ts"] = exp_ts
+        summary["seconds_left"] = (
+            max(0.0, exp_ts - time.time()) if exp_ts is not None else None
+        )
+        return summary
+
+    def handle_get_brain_lease_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Кто держит LM Studio «brain» (кросс-процессный лиз ~/.openclaw).
+
+        Только флаги/числа/имя процесса-владельца — privacy-гейт не нужен
+        (класс get_privacy_dashboard). Абсолютный lock_path наружу не отдаём
+        (урок get_stt_model_status #1814).
+        """
+        return {"ok": True, **self._build_brain_lease_summary()}
 
     def _get_event_bridge_summary(self) -> dict[str, Any]:
         """Возвращает EventBridge.get_diagnostics() либо schema-parity fallback.
