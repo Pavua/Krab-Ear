@@ -592,3 +592,29 @@ S63 bilingual conversation mode, S64 inline correction loop, S65 import queue v2
   тот смок тестировал панель, открытую АВТО-показом (`quick_capture_show_panel` включена вручную для
   теста), а не дефолтный путь (выключена + открыта вручную из меню), в котором и жил F1. C3 (спека
   `2026-07-16-c3-quick-capture-design.md`) закрыта целиком (§2-3 = C3a, §4 = C3b).
+- 2026-07-19 (той же сессией, после C3b) — **три мелких закрытия + мини-волна S64**. (1) Крестик
+  `MeetingLivePanelController` (`.closable` без `.titled`, унаследованный сиблинг бага C3b, F7
+  Fable-ревью / chip `task_98184510`) — TDD-фикс, смёржен, задеплоен. При редеплое пойман живой
+  worktree-shadow инцидент: `open "Krab Ear.app"` голым именем запустил копию бандла из
+  `.claude/worktrees/` вместо основного чекаута — правило «только абсолютный путь + сверка
+  `ps -p <pid> -o comm=`» зафиксировано в памяти; `scripts/cleanup_worktree_shadows.command`
+  прогнан (1 shadow разрегистрирован). (2) Кросс-сессионный репорт VPN-сессии о выеденной квоте
+  Sentry org po-zm (~08 июля) — корень подтверждён данными: историческая `KRAB-EAR-BACKEND-1J`
+  (PortAudioError `_listen_loop`, 4747 событий = 94.6% объёма окна) — тот самый wake-word
+  mic-wedge, уже устранённый фиксом #1879 (15 июля), новой утечки нет (0 unresolved, счётчик
+  заморожен 13+ свипов); defense-in-depth: per-key rate-limit 100 событий/час выставлен на DSN
+  `krab-ear-backend` через Sentry MCP. (3) **Мини-волна S64 re-paste ЗАКРЫТА** (спека
+  `2026-07-19-s64-quickreplace-repaste-design.md`, план `2026-07-19-s64-quickreplace-repaste.md`):
+  инвентаризация показала, что S64 Inline Correction Loop уже ~80% закрыта существующими
+  `QuickEditOverlay`+`main+QuickReplace` (анти-rebuild урок — беклог-лейблы не сверялись с реально
+  отгруженными фичами); добит последний пункт — после успешного Cmd+Shift+R исправленный `new_text`
+  (поле backend-ответа уже существовало) копируется в буфер, тост «Скопировано — ⌘V»; попутный
+  AGENT-3 hardening той же функции: sync `callWithRecovery` на main (внутри — полный цикл рестарта
+  backend на деградированном пути) заменён паттерном Wave 188 (`Task.detached`+`callAsync`).
+  Fable-самопроверка спеки поймала неисполнимое предписание ДО кода (`DispatchQueue.global` +
+  метод `@MainActor`-класса не прошёл бы Swift 6 isolation) — заменено канонным сиблинг-паттерном
+  Bookmarks. TDD 3 source-contract теста (греп по сигнатуре вызова, не подстроке — честный
+  комментарий не реддит реализацию), полный swift test 1255/1255, ff-мерж, parity-деплой живьём
+  (PID 95608, IPC ping ok). Живой смок хоткея — за владельцем при первом использовании
+  (синтетический keystroke не триггерит global monitor, меню-пункта у QuickReplace нет). S64
+  в реконсиляции §4 можно считать закрытой.
