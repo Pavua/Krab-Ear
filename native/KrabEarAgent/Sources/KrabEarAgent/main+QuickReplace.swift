@@ -3,6 +3,8 @@
 // Быстрое исправление слов без перезаписи — например, GigaAM написал «код»
 // вместо «кот». Hotkey открывает NSAlert с двумя полями: старое и новое слово.
 // Вызывает IPC replace_word_in_last_transcript, показывает подтверждение.
+// После успешной замены исправленный полный текст копируется в буфер обмена
+// («Скопировано — ⌘V») — S64 re-paste, спека 2026-07-19.
 
 import AppKit
 import Foundation
@@ -67,41 +69,76 @@ extension AgentAppDelegate {
                 return
             }
 
-            // IPC call: word replacement is fast (< 50 ms) — call synchronously like QuickPresets.
-            do {
-                let response = try self.callWithRecovery(
-                    method: "replace_word_in_last_transcript",
-                    params: ["old_word": oldWord, "new_word": newWord]
-                )
-                let result = response["result"] as? [String: Any] ?? [:]
-                let ok = result["ok"] as? Bool ?? false
-                let count = result["replaced_count"] as? Int ?? 0
-                let error = result["error"] as? String
-
-                if ok {
-                    let autoLearned = result["auto_learned"] as? Bool ?? false
-                    let noun = count == 1 ? "вхождение" : (count < 5 ? "вхождения" : "вхождений")
-                    var message = "Заменено \(count) \(noun): «\(oldWord)» → «\(newWord)»."
-                    if autoLearned {
-                        // Closed-loop STT auto-learn (backend/llm_ops_service.py) реально
-                        // добавил новое слово в stt_hotwords — сообщаем явно, а не молчим.
-                        message += " Слово «\(newWord)» выучено в словарь STT."
+            // Off-main IPC (AGENT-3, паттерн Wave 188 из main+Bookmarks.swift):
+            // прежний sync callWithRecovery на main из completion алерта на
+            // деградированном пути (restartIfDead = полный цикл рестарта
+            // backend внутри recovery) блокировал главный поток. IPCClient —
+            // Sendable, AgentAppDelegate (@MainActor self) — нет, поэтому
+            // локальный `let`. Трейд-офф паттерна (принят в миграциях
+            // Bookmarks/HotkeyRecording): без restartIfDead-recovery — при
+            // мёртвом backend разовое действие показывает ошибку, самолечение
+            // остаётся за BackendSupervisor/HealthMonitor.
+            let ipc = self.ipcClient
+            Task.detached { [weak self] in
+                do {
+                    let response = try await ipc.callAsync(
+                        method: "replace_word_in_last_transcript",
+                        params: ["old_word": oldWord, "new_word": newWord],
+                        timeoutSec: 10
+                    )
+                    let result = response["result"] as? [String: Any] ?? [:]
+                    await MainActor.run { [weak self] in
+                        self?.handleReplaceWordResponse(result, oldWord: oldWord, newWord: newWord)
                     }
-                    self.showReplaceResult(success: true, message: message)
-                } else {
-                    let reason: String
-                    switch error {
-                    case "word_not_found":    reason = "Слово «\(oldWord)» не найдено в последней записи."
-                    case "no_recent_history": reason = "История пуста."
-                    case "item_not_found":    reason = "Запись не найдена."
-                    case "missing_words":     reason = "Укажите оба слова."
-                    default:                  reason = error ?? "Неизвестная ошибка."
+                } catch {
+                    await MainActor.run { [weak self] in
+                        self?.showReplaceResult(success: false, message: "Ошибка IPC: \(error.localizedDescription)")
                     }
-                    self.showReplaceResult(success: false, message: reason)
                 }
-            } catch {
-                self.showReplaceResult(success: false, message: "Ошибка IPC: \(error.localizedDescription)")
             }
+        }
+    }
+
+    /// Обработка ответа replace_word_in_last_transcript на main. Вынесена из
+    /// completion алерта при переводе IPC off-main (S64 re-paste, спека
+    /// 2026-07-19): success/failure-маппинг прежний, добавлено копирование
+    /// new_text в буфер.
+    @MainActor
+    private func handleReplaceWordResponse(_ result: [String: Any], oldWord: String, newWord: String) {
+        let ok = result["ok"] as? Bool ?? false
+        let count = result["replaced_count"] as? Int ?? 0
+        let error = result["error"] as? String
+
+        if ok {
+            let autoLearned = result["auto_learned"] as? Bool ?? false
+            let noun = count == 1 ? "вхождение" : (count < 5 ? "вхождения" : "вхождений")
+            var message = "Заменено \(count) \(noun): «\(oldWord)» → «\(newWord)»."
+            // S64 re-paste: исправленный ПОЛНЫЙ текст — в буфер, чтобы
+            // пользователь мог сразу вставить его в целевое приложение
+            // (выделив там старый текст), без ручного похода в историю.
+            // Только success-ветка — буфер пользователя не перезаписывается
+            // на ошибках. Privacy: backend в privacy mode отказывает ДО
+            // чтения истории, new_text сюда не доходит.
+            if let newText = result["new_text"] as? String, !newText.isEmpty {
+                pasteService.putToClipboard(newText)
+                message += " Скопировано — ⌘V."
+            }
+            if autoLearned {
+                // Closed-loop STT auto-learn (backend/llm_ops_service.py) реально
+                // добавил новое слово в stt_hotwords — сообщаем явно, а не молчим.
+                message += " Слово «\(newWord)» выучено в словарь STT."
+            }
+            showReplaceResult(success: true, message: message)
+        } else {
+            let reason: String
+            switch error {
+            case "word_not_found":    reason = "Слово «\(oldWord)» не найдено в последней записи."
+            case "no_recent_history": reason = "История пуста."
+            case "item_not_found":    reason = "Запись не найдена."
+            case "missing_words":     reason = "Укажите оба слова."
+            default:                  reason = error ?? "Неизвестная ошибка."
+            }
+            showReplaceResult(success: false, message: reason)
         }
     }
 
