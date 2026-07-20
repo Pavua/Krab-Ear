@@ -49,13 +49,18 @@ final class HotkeyManager {
     /// Минимальная длительность удержания для hold-режима (мс).
     let holdMinDurationMs: Int
 
-    /// Момент нажатия — для фильтрации коротких (<holdMinDurationMs) нажатий.
-    private var holdPressedAt: Date?
+    /// Отложенный старт hold-записи. Короткое нажатие отменяет таймер и поэтому
+    /// вообще не открывает обычную диктовку.
+    private var pendingHoldStartTimer: DispatchSourceTimer?
 
-    /// Callback на старт записи в hold-режиме (DOWN).
+    /// Успел ли отложенный hold реально вызвать onHoldStart. Нужен, чтобы UP
+    /// вызывал onHoldStop только для действительно начатой записи.
+    private var holdActionStarted = false
+
+    /// Обработчик старта записи после подтверждённого удержания клавиши.
     var onHoldStart: (@MainActor () -> Void)?
 
-    /// Callback на стоп записи в hold-режиме (UP после достаточной длительности).
+    /// Обработчик остановки записи на UP после состоявшегося старта.
     var onHoldStop: (@MainActor () -> Void)?
 
     // MARK: PR 1.5 — double-tap detector для Разговора с AI
@@ -67,32 +72,44 @@ final class HotkeyManager {
     /// Колбэк на double-tap (задаётся при запуске из main.swift).
     var onConversationDoubleTap: (@MainActor () -> Void)?
 
-    /// Pending single-tap action — ждёт окно double-tap. Cancelled когда
-    /// detector ловит second tap. Если timer истёк — fires onToggle().
+    /// Отложенное действие одиночного тапа ждёт окно double-tap. Детектор
+    /// отменяет его на втором тапе; после тайм-аута вызывается onToggle().
     private var pendingSingleTapTimer: DispatchSourceTimer?
 
-    /// Timestamp последнего double-tap consumed event. Manager использует чтобы
-    /// **не запускать второй timer** на второй tap события (race fix):
-    /// detector может зарегистрировать double-tap раньше или позже Manager
-    /// processKeyEvent для второго нажатия. Если recent — skip schedule.
+    /// Момент последнего поглощённого double-tap. Нужен, чтобы не поставить новый
+    /// таймер на второй DOWN, если detector обработал событие раньше менеджера.
     private var recentDoubleTapAt: Date?
-    /// Окно после double-tap в течении которого Manager игнорирует tap event.
+    /// Окно после double-tap, в течение которого менеджер игнорирует tap event.
     private static let doubleTapDebounceMs: Double = 500
+    /// Окно detector 300 мс + 10 мс на порядок доставки независимых мониторов.
+    private static let doubleTapDecisionDelayMs = 310
+
+    /// Double-tap поддерживается только вариантами, для которых реально создаётся
+    /// HotkeyDoubleTapDetector. Left/Any Option не должны платить задержкой 310 мс.
+    static func supportsConversationDoubleTap(variant rawVariant: String) -> Bool {
+        let parsed = HotkeyVariant(rawValue: rawVariant) ?? .rightOption
+        return parsed == .rightOption || parsed == .rightOptionToggle
+    }
+
+    private var conversationDoubleTapIsActive: Bool {
+        onConversationDoubleTap != nil
+            && Self.supportsConversationDoubleTap(variant: variant.rawValue)
+    }
+
+    private var isInsideConsumedDoubleTapWindow: Bool {
+        guard let recentDoubleTapAt else { return false }
+        return Date().timeIntervalSince(recentDoubleTapAt) * 1000 < Self.doubleTapDebounceMs
+    }
 
     private func schedulePendingSingleTap() {
-        // Если только что был double-tap — second tap event приходит сюда тоже
-        // (через independent NSEvent monitor), но мы НЕ должны re-schedule timer.
-        if let lastDT = recentDoubleTapAt,
-           Date().timeIntervalSince(lastDT) * 1000 < Self.doubleTapDebounceMs {
-            return
-        }
-        // Cancel предыдущий если был — типичный case при rapid taps.
+        // Второй DOWN может прийти сюда после detector callback — не вооружаем
+        // одиночный тап повторно внутри окна уже поглощённого double-tap.
+        guard !isInsideConsumedDoubleTapWindow else { return }
         cancelPendingSingleTap()
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now() + .milliseconds(310))  // 300ms detector window + 10ms slack
+        timer.schedule(deadline: .now() + .milliseconds(Self.doubleTapDecisionDelayMs))
         timer.setEventHandler { [weak self] in
-            self?.pendingSingleTapTimer = nil
-            self?.onToggle()
+            self?.completePendingSingleTap()
         }
         timer.resume()
         pendingSingleTapTimer = timer
@@ -101,7 +118,50 @@ final class HotkeyManager {
     private func cancelPendingSingleTap() {
         pendingSingleTapTimer?.cancel()
         pendingSingleTapTimer = nil
-        recentDoubleTapAt = Date()  // mark consumed → debounce next 500ms
+    }
+
+    private func completePendingSingleTap() {
+        guard pendingSingleTapTimer != nil else { return }
+        cancelPendingSingleTap()
+        onToggle()
+    }
+
+    private func schedulePendingHoldStart() {
+        guard !isInsideConsumedDoubleTapWindow else { return }
+        cancelPendingHoldStart()
+        let delayMs = conversationDoubleTapIsActive
+            ? max(holdMinDurationMs, Self.doubleTapDecisionDelayMs)
+            : holdMinDurationMs
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + .milliseconds(delayMs))
+        timer.setEventHandler { [weak self] in
+            self?.completePendingHoldStart()
+        }
+        timer.resume()
+        pendingHoldStartTimer = timer
+    }
+
+    private func cancelPendingHoldStart() {
+        pendingHoldStartTimer?.cancel()
+        pendingHoldStartTimer = nil
+    }
+
+    private func completePendingHoldStart() {
+        guard pendingHoldStartTimer != nil else { return }
+        cancelPendingHoldStart()
+        guard isPressed, !holdActionStarted else { return }
+        holdActionStarted = true
+        onHoldStart?()
+    }
+
+    /// Единая точка поглощения double-tap для реального detector и тест-хука.
+    /// Отменяет обе возможные обычные операции ДО запуска conversation callback.
+    private func consumeConversationDoubleTap() {
+        guard conversationDoubleTapIsActive else { return }
+        cancelPendingSingleTap()
+        cancelPendingHoldStart()
+        recentDoubleTapAt = Date()
+        onConversationDoubleTap?()
     }
 
     // MARK: Quick replay — Cmd+Option+V
@@ -154,12 +214,11 @@ final class HotkeyManager {
 
         // PR 1.5: Запустить детектор двойного нажатия Right Option
         // (только для right_option и right_option_toggle вариантов).
-        // При detection — отменяем pending single-tap action и запускаем
-        // conversation. См. processKeyEvent .toggle case.
-        if variant == .rightOption || variant == .rightOptionToggle {
+        // При detection единая точка consumeConversationDoubleTap отменяет и
+        // одиночный toggle, и ещё не начавшийся hold.
+        if Self.supportsConversationDoubleTap(variant: variant.rawValue) {
             let detector = HotkeyDoubleTapDetector(windowMs: 0.3) { [weak self] in
-                self?.cancelPendingSingleTap()
-                self?.onConversationDoubleTap?()
+                self?.consumeConversationDoubleTap()
             }
             detector.start()
             doubleTapDetector = detector
@@ -219,6 +278,13 @@ final class HotkeyManager {
 
     func stop() {
         cancelPendingSingleTap()
+        cancelPendingHoldStart()
+        recentDoubleTapAt = nil
+        isPressed = false
+        if holdActionStarted {
+            holdActionStarted = false
+            onHoldStop?()
+        }
         if let globalMonitor {
             NSEvent.removeMonitor(globalMonitor)
             self.globalMonitor = nil
@@ -260,13 +326,9 @@ final class HotkeyManager {
         case .toggle:
             if isDown && !isPressed {
                 isPressed = true
-                // Defer single-tap action when conversation double-tap is wired —
-                // даём 300ms окно чтобы detector мог cancel single-tap если
-                // user сделал double-tap. Иначе single-tap toggle'ит запись
-                // до того как detector видит второй нажим (ранее эта race
-                // делала double-tap "невидимым" — user видел только recording
-                // start/stop).
-                if onConversationDoubleTap != nil {
+                // Задерживаем одиночный тап только когда для текущего варианта
+                // действительно есть detector и назначен conversation callback.
+                if conversationDoubleTapIsActive {
                     schedulePendingSingleTap()
                 } else {
                     onToggle()
@@ -278,17 +340,18 @@ final class HotkeyManager {
         case .hold:
             if isDown && !isPressed {
                 isPressed = true
-                holdPressedAt = Date()
-                onHoldStart?()
+                holdActionStarted = false
+                // До порога удержания не начинаем запись. Для Right Option с
+                // conversation callback ждём всё 300-мс окно double-tap: тогда
+                // короткий первый тап не оставляет параллельную диктовку.
+                schedulePendingHoldStart()
             } else if !isDown && isPressed {
                 isPressed = false
-                let pressDuration = holdPressedAt.map { Date().timeIntervalSince($0) * 1000 } ?? 0
-                holdPressedAt = nil
-                guard pressDuration >= Double(holdMinDurationMs) else {
-                    // Слишком короткое нажатие — игнорируем, останавливаем запись без результата
-                    return
+                cancelPendingHoldStart()
+                if holdActionStarted {
+                    holdActionStarted = false
+                    onHoldStop?()
                 }
-                onHoldStop?()
             }
         }
     }
@@ -327,42 +390,37 @@ final class HotkeyManager {
         processKeyEvent(isDown: isOptionDown)
     }
 
-    /// Тест-хук: симулировать DOWN с явным overrideПрессTime — позволяет тестировать 200ms debounce.
-    /// После simulateHoldDown используй simulateHoldUp с нужным releaseTime.
+    /// Тест-хук: симулировать DOWN через ту же production-ветку hold lifecycle.
     @MainActor
-    func simulateHoldDown(keyCode: UInt16, overridePressTime: Date = Date()) {
-        let isTargetKey: Bool
-        switch variant {
-        case .rightOption, .rightOptionToggle:
-            isTargetKey = (keyCode == Keycode.rightOption.rawValue)
-        case .leftOption:
-            isTargetKey = (keyCode == Keycode.leftOption.rawValue)
-        case .anyOption:
-            isTargetKey = (keyCode == Keycode.rightOption.rawValue || keyCode == Keycode.leftOption.rawValue)
-        }
-        guard isTargetKey, !isPressed else { return }
-        isPressed = true
-        holdPressedAt = overridePressTime
-        onHoldStart?()
+    func simulateHoldDown(keyCode: UInt16) {
+        injectEventLogic(keyCode: keyCode, isOptionDown: true)
     }
 
     @MainActor
-    func simulateHoldUp(keyCode: UInt16, overrideReleaseTime: Date = Date()) {
-        let isTargetKey: Bool
-        switch variant {
-        case .rightOption, .rightOptionToggle:
-            isTargetKey = (keyCode == Keycode.rightOption.rawValue)
-        case .leftOption:
-            isTargetKey = (keyCode == Keycode.leftOption.rawValue)
-        case .anyOption:
-            isTargetKey = (keyCode == Keycode.rightOption.rawValue || keyCode == Keycode.leftOption.rawValue)
-        }
-        guard isTargetKey, isPressed else { return }
-        isPressed = false
-        let pressDuration = holdPressedAt.map { overrideReleaseTime.timeIntervalSince($0) * 1000 } ?? 0
-        holdPressedAt = nil
-        guard pressDuration >= Double(holdMinDurationMs) else { return }
-        onHoldStop?()
+    func simulateHoldUp(keyCode: UInt16) {
+        injectEventLogic(keyCode: keyCode, isOptionDown: false)
+    }
+
+    /// Тест-хук: синхронно завершить вооружённый одиночный тап без ожидания 310 мс.
+    var hasPendingSingleTapForTests: Bool { pendingSingleTapTimer != nil }
+
+    @MainActor
+    func firePendingSingleTapForTests() {
+        completePendingSingleTap()
+    }
+
+    /// Тест-хуки для hold-таймера: проверяют тот же объект, что production callback.
+    var hasPendingHoldStartForTests: Bool { pendingHoldStartTimer != nil }
+
+    @MainActor
+    func firePendingHoldStartForTests() {
+        completePendingHoldStart()
+    }
+
+    /// Тест-хук double-tap использует единую production-точку поглощения.
+    @MainActor
+    func injectConversationDoubleTapLogic() {
+        consumeConversationDoubleTap()
     }
 
     /// Инжектировать синтетическое keyDown событие — для тестирования быстрого повтора.

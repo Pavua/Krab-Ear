@@ -632,7 +632,9 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
 
     /// Включить/выключить Right Option double-tap hotkey для Разговора с AI.
     func applyConversationHotkeyEnabled(_ enabled: Bool) {
-        if enabled {
+        let supported = HotkeyManager.supportsConversationDoubleTap(variant: settings.hotkey)
+        let effectiveEnabled = enabled && supported
+        if effectiveEnabled {
             hotkeyManager?.onConversationDoubleTap = { [weak self] in
                 DispatchQueue.main.async {
                     self?.historyPanel?.triggerConversationToggle()
@@ -641,7 +643,10 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         } else {
             hotkeyManager?.onConversationDoubleTap = nil
         }
-        logger.info("Conversation hotkey double-tap: \(enabled ? "включён" : "выключен")")
+        let state = effectiveEnabled
+            ? "включён"
+            : (enabled ? "не поддерживается вариантом \(settings.hotkey)" : "выключен")
+        logger.info("Conversation hotkey double-tap: \(state)")
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -1140,7 +1145,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             mode: settings.hotkeyMode,
             holdMinDurationMs: 200
         )
-        // Hold-режим: DOWN → startRecording, UP (после >200ms) → stopRecording
+        // Hold-режим: DOWN вооружает отложенный старт, UP после порога останавливает запись.
         manager.onHoldStart = { [weak self] in
             DispatchQueue.main.async {
                 guard let self, !self.isRecording else { return }
@@ -1155,7 +1160,8 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         }
         // Явно сохранённый false обязан переживать restart. Если ключ ещё не
         // создан, ConversationHotkeyPolicy сохраняет исторический дефолт ON.
-        if ConversationHotkeyPolicy.isEnabled(in: .standard) {
+        if ConversationHotkeyPolicy.isEnabled(in: .standard)
+            && HotkeyManager.supportsConversationDoubleTap(variant: settings.hotkey) {
             manager.onConversationDoubleTap = { [weak self] in
                 DispatchQueue.main.async {
                     self?.historyPanel?.triggerConversationToggle()

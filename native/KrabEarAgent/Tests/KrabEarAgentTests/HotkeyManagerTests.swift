@@ -192,14 +192,91 @@ final class HotkeyManagerTests: XCTestCase {
         XCTAssertEqual(stopCount, 0, "Toggle mode не должен вызывать onHoldStop")
     }
 
+    // MARK: - Совместимость вариантов с conversation double-tap
+
+    func test_rightOption_supportsConversationDoubleTap() {
+        XCTAssertTrue(HotkeyManager.supportsConversationDoubleTap(variant: "right_option"))
+        XCTAssertTrue(HotkeyManager.supportsConversationDoubleTap(variant: "right_option_toggle"))
+    }
+
+    func test_leftAndAnyOption_doNotSupportConversationDoubleTap() {
+        XCTAssertFalse(HotkeyManager.supportsConversationDoubleTap(variant: "left_option"))
+        XCTAssertFalse(HotkeyManager.supportsConversationDoubleTap(variant: "any_option"))
+    }
+
+    func test_leftOptionConversationCallback_doesNotDelaySingleTap() {
+        var toggleCount = 0
+        let manager = HotkeyManager(
+            variant: "left_option",
+            onToggle: { toggleCount += 1 },
+            mode: "toggle"
+        )
+        // Защита в самом менеджере обязательна: даже ошибочно назначенный
+        // callback не должен задерживать вариант без double-tap detector.
+        manager.onConversationDoubleTap = {}
+
+        manager.injectEventLogic(
+            keyCode: Keycode.leftOption.rawValue,
+            isOptionDown: true
+        )
+
+        XCTAssertEqual(toggleCount, 1)
+        XCTAssertFalse(manager.hasPendingSingleTapForTests)
+    }
+
+    func test_anyOptionConversationCallback_doesNotDelaySingleTap() {
+        var toggleCount = 0
+        let manager = HotkeyManager(
+            variant: "any_option",
+            onToggle: { toggleCount += 1 },
+            mode: "toggle"
+        )
+        manager.onConversationDoubleTap = {}
+
+        manager.injectEventLogic(
+            keyCode: Keycode.rightOption.rawValue,
+            isOptionDown: true
+        )
+
+        XCTAssertEqual(toggleCount, 1)
+        XCTAssertFalse(manager.hasPendingSingleTapForTests)
+    }
+
+    func test_startAfterStop_doesNotDebounceFirstTapAsConsumedDoubleTap() {
+        var toggleCount = 0
+        let manager = HotkeyManager(
+            variant: "right_option",
+            onToggle: { toggleCount += 1 },
+            mode: "toggle"
+        )
+        manager.onConversationDoubleTap = {}
+
+        // start() внутри вызывает stop(); раньше stop() записывал recentDoubleTapAt,
+        // поэтому первое реальное нажатие после startup/reinstall терялось на 500 мс.
+        manager.start()
+        manager.injectEventLogic(
+            keyCode: Keycode.rightOption.rawValue,
+            isOptionDown: true
+        )
+
+        XCTAssertTrue(manager.hasPendingSingleTapForTests)
+        manager.firePendingSingleTapForTests()
+        XCTAssertEqual(toggleCount, 1)
+        manager.stop()
+    }
+
     // MARK: - Hold mode: DOWN → onHoldStart, UP (≥200ms) → onHoldStop
 
-    func test_holdMode_downFiresHoldStart() {
+    func test_holdMode_downDefersStartUntilThreshold() {
         var startCount = 0
         let manager = HotkeyManager(variant: "right_option", onToggle: {}, mode: "hold", holdMinDurationMs: 200)
         manager.onHoldStart = { startCount += 1 }
 
         manager.simulateHoldDown(keyCode: Keycode.rightOption.rawValue)
+        XCTAssertEqual(startCount, 0, "DOWN не должен начинать запись до порога удержания")
+        XCTAssertTrue(manager.hasPendingHoldStartForTests)
+
+        manager.firePendingHoldStartForTests()
         XCTAssertEqual(startCount, 1, "Hold DOWN должен вызывать onHoldStart")
     }
 
@@ -208,10 +285,9 @@ final class HotkeyManagerTests: XCTestCase {
         let manager = HotkeyManager(variant: "right_option", onToggle: {}, mode: "hold", holdMinDurationMs: 200)
         manager.onHoldStop = { stopCount += 1 }
 
-        let pressTime = Date(timeIntervalSinceNow: -0.3)  // 300ms ago
-        let releaseTime = Date()
-        manager.simulateHoldDown(keyCode: Keycode.rightOption.rawValue, overridePressTime: pressTime)
-        manager.simulateHoldUp(keyCode: Keycode.rightOption.rawValue, overrideReleaseTime: releaseTime)
+        manager.simulateHoldDown(keyCode: Keycode.rightOption.rawValue)
+        manager.firePendingHoldStartForTests()
+        manager.simulateHoldUp(keyCode: Keycode.rightOption.rawValue)
 
         XCTAssertEqual(stopCount, 1, "Удержание ≥200ms должно вызывать onHoldStop")
     }
@@ -221,12 +297,14 @@ final class HotkeyManagerTests: XCTestCase {
         let manager = HotkeyManager(variant: "right_option", onToggle: {}, mode: "hold", holdMinDurationMs: 200)
         manager.onHoldStop = { stopCount += 1 }
 
-        let pressTime = Date(timeIntervalSinceNow: -0.05)  // 50ms ago — слишком короткое
-        let releaseTime = Date()
-        manager.simulateHoldDown(keyCode: Keycode.rightOption.rawValue, overridePressTime: pressTime)
-        manager.simulateHoldUp(keyCode: Keycode.rightOption.rawValue, overrideReleaseTime: releaseTime)
+        var startCount = 0
+        manager.onHoldStart = { startCount += 1 }
+        manager.simulateHoldDown(keyCode: Keycode.rightOption.rawValue)
+        manager.simulateHoldUp(keyCode: Keycode.rightOption.rawValue)
 
+        XCTAssertEqual(startCount, 0, "Короткий тап не должен даже начинать запись")
         XCTAssertEqual(stopCount, 0, "Удержание <200ms должно игнорироваться (не вызывать onHoldStop)")
+        XCTAssertFalse(manager.hasPendingHoldStartForTests)
     }
 
     func test_holdMode_doesNotFireOnToggle() {
@@ -234,9 +312,8 @@ final class HotkeyManagerTests: XCTestCase {
         let manager = HotkeyManager(variant: "right_option", onToggle: { toggleCount += 1 }, mode: "hold")
 
         manager.simulateHoldDown(keyCode: Keycode.rightOption.rawValue)
-        let pressTime = Date(timeIntervalSinceNow: -0.3)
-        manager.simulateHoldUp(keyCode: Keycode.rightOption.rawValue, overrideReleaseTime: Date())
-        _ = pressTime  // suppress warning
+        manager.firePendingHoldStartForTests()
+        manager.simulateHoldUp(keyCode: Keycode.rightOption.rawValue)
 
         XCTAssertEqual(toggleCount, 0, "Hold mode не должен вызывать onToggle")
     }
@@ -248,7 +325,89 @@ final class HotkeyManagerTests: XCTestCase {
 
         manager.simulateHoldDown(keyCode: Keycode.rightOption.rawValue)
         manager.simulateHoldDown(keyCode: Keycode.rightOption.rawValue)  // второй DOWN — должен игнорироваться
+        manager.firePendingHoldStartForTests()
 
         XCTAssertEqual(startCount, 1, "Повторный DOWN во время удержания должен игнорироваться")
+    }
+
+    func test_holdMode_doubleTapCancelsDictationBeforeConversationStarts() {
+        var startCount = 0
+        var stopCount = 0
+        var conversationCount = 0
+        let manager = HotkeyManager(
+            variant: "right_option",
+            onToggle: {},
+            mode: "hold",
+            holdMinDurationMs: 200
+        )
+        manager.onHoldStart = { startCount += 1 }
+        manager.onHoldStop = { stopCount += 1 }
+        manager.onConversationDoubleTap = { conversationCount += 1 }
+
+        // Первый короткий тап только вооружает hold, но не начинает диктовку.
+        manager.injectEventLogic(
+            keyCode: Keycode.rightOption.rawValue,
+            isOptionDown: true
+        )
+        manager.injectEventLogic(
+            keyCode: Keycode.rightOption.rawValue,
+            isOptionDown: false
+        )
+
+        // Второй DOWN снова создаёт pending hold; double-tap обязан поглотить его
+        // до запуска conversation, независимо от порядка NSEvent-мониторов.
+        manager.injectEventLogic(
+            keyCode: Keycode.rightOption.rawValue,
+            isOptionDown: true
+        )
+        XCTAssertTrue(manager.hasPendingHoldStartForTests)
+        manager.injectConversationDoubleTapLogic()
+        manager.injectEventLogic(
+            keyCode: Keycode.rightOption.rawValue,
+            isOptionDown: false
+        )
+
+        XCTAssertEqual(startCount, 0, "Double-tap не должен параллельно запускать диктовку")
+        XCTAssertEqual(stopCount, 0, "Несуществующую hold-запись не нужно останавливать")
+        XCTAssertEqual(conversationCount, 1)
+        XCTAssertFalse(manager.hasPendingHoldStartForTests)
+    }
+
+    func test_holdMode_detectorFirstOrder_doesNotRearmDictationOnSecondDown() {
+        var startCount = 0
+        var conversationCount = 0
+        let manager = HotkeyManager(
+            variant: "right_option",
+            onToggle: {},
+            mode: "hold",
+            holdMinDurationMs: 200
+        )
+        manager.onHoldStart = { startCount += 1 }
+        manager.onConversationDoubleTap = { conversationCount += 1 }
+
+        manager.injectEventLogic(
+            keyCode: Keycode.rightOption.rawValue,
+            isOptionDown: true
+        )
+        manager.injectEventLogic(
+            keyCode: Keycode.rightOption.rawValue,
+            isOptionDown: false
+        )
+
+        // Реальные NSEvent-мониторы независимы: detector может первым увидеть
+        // второй DOWN. Последующий вызов manager не должен заново вооружить hold.
+        manager.injectConversationDoubleTapLogic()
+        manager.injectEventLogic(
+            keyCode: Keycode.rightOption.rawValue,
+            isOptionDown: true
+        )
+        manager.injectEventLogic(
+            keyCode: Keycode.rightOption.rawValue,
+            isOptionDown: false
+        )
+
+        XCTAssertEqual(conversationCount, 1)
+        XCTAssertEqual(startCount, 0)
+        XCTAssertFalse(manager.hasPendingHoldStartForTests)
     }
 }

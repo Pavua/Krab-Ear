@@ -82,11 +82,23 @@ final class ConversationHotkeyWiringSourceContractTests: XCTestCase {
         let body = try Self.functionBody(named: "makeHotkeyManager", in: Self.mainSwiftURL)
 
         XCTAssertTrue(body.contains("ConversationHotkeyPolicy.isEnabled"))
+        XCTAssertTrue(body.contains("supportsConversationDoubleTap"))
         XCTAssertTrue(body.contains("triggerConversationToggle"))
         XCTAssertFalse(
             body.contains("triggerConversationStart()"),
             "Фабрика не должна превращать double-tap в безусловный старт"
         )
+    }
+
+    func test_runtimePreferenceChange_usesVariantSupportGate() throws {
+        let body = try Self.functionBody(
+            named: "applyConversationHotkeyEnabled",
+            in: Self.mainSwiftURL
+        )
+
+        XCTAssertTrue(body.contains("supportsConversationDoubleTap"))
+        XCTAssertTrue(body.contains("effectiveEnabled"))
+        XCTAssertTrue(body.contains("onConversationDoubleTap = nil"))
     }
 
     func test_manualDoubleTapEntryPoint_hasBothLifecycleBranches() throws {
