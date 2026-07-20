@@ -80,6 +80,10 @@ final class BackendToastShowTests: XCTestCase {
 
         XCTAssertLessThanOrEqual(secondElapsed, max(firstElapsed, 0.005),
             "Second show() (\(secondElapsed * 1000)ms) must not be slower than first (\(firstElapsed * 1000)ms)")
+        XCTAssertEqual(
+            panelOrdering.orderFrontCallCount, 1,
+            "Повторный show видимого toast должен обновлять его без нового orderFront"
+        )
     }
 
     // MARK: - 3. show() с Unicode/emoji не крашит
@@ -157,6 +161,10 @@ final class BackendToastShowTests: XCTestCase {
 
         // Второй show() должен сбросить таймер
         toast.show("Второй", duration: 5.0)
+        XCTAssertEqual(
+            panelOrdering.orderFrontCallCount, 1,
+            "Сброс dismiss-таймера должен проходить через ветку уже видимого toast"
+        )
 
         // Ждём 0.5s — если бы первый таймер не был отменён, панель бы скрылась через 0.3s
         let waitExp = expectation(description: "wait 0.5s after reset")

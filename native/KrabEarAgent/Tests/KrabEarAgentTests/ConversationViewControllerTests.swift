@@ -86,8 +86,16 @@ final class ConversationViewControllerTests: XCTestCase {
     func test_runtimeOptions_profilesHaveExpectedSystemIOPolicy() {
         XCTAssertTrue(ConversationRuntimeOptions.production.opensWebSocket)
         XCTAssertTrue(ConversationRuntimeOptions.production.capturesAudio)
+        XCTAssertTrue(
+            ConversationRuntimeOptions.production.statusPanelOrdering is AppKitPanelOrdering,
+            "Production-профиль должен сохранять прямой AppKit ordering"
+        )
         XCTAssertFalse(ConversationRuntimeOptions.isolatedTests.opensWebSocket)
         XCTAssertFalse(ConversationRuntimeOptions.isolatedTests.capturesAudio)
+        XCTAssertTrue(
+            ConversationRuntimeOptions.isolatedTests.statusPanelOrdering is NoOpPanelOrdering,
+            "Изолированный профиль не должен создавать HUD с AppKit ordering"
+        )
 
         let defaultController = ConversationViewController(config: .default)
         XCTAssertTrue(defaultController.runtimeOptions.opensWebSocket,
@@ -134,6 +142,10 @@ final class ConversationViewControllerTests: XCTestCase {
         // Проверяем что transcriptBuffer обнуляется при старте нового сеанса.
         XCTAssertEqual(vc.transcriptBuffer, "",
                        "transcriptBuffer должен сбрасываться при старте нового сеанса")
+        XCTAssertFalse(
+            vc.statusOverlay?._testUsesAppKitPanelOrdering ?? true,
+            "startConversation в isolated runtime не должен создавать production HUD"
+        )
     }
 
     // MARK: - 4. test_stop_session

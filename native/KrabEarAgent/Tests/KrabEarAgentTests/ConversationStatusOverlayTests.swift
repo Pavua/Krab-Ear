@@ -80,7 +80,11 @@ final class ConversationOverlayWiringTests: XCTestCase {
 
     override func setUp() async throws {
         try await super.setUp()
-        vc = ConversationViewController(config: .default, userDefaults: defaultsDomain.defaults)
+        vc = ConversationViewController(
+            config: .default,
+            runtimeOptions: .isolatedTests,
+            userDefaults: defaultsDomain.defaults
+        )
         vc.loadView()
         vc.viewDidLoad()
     }
@@ -114,7 +118,6 @@ final class ConversationOverlayWiringTests: XCTestCase {
         vc.isSessionActive = true
         vc.conversationState = .speaking
         vc.ensureStatusOverlay()
-        vc.statusOverlay?._testReplacePanelOrdering(panelOrdering)
         vc.statusOverlay?.onInterrupt?()
         // interruptAI НЕ переключает состояние сам (Task 2) — но взводит fallback-таймер.
         XCTAssertNotNil(vc.interruptFallbackTimer,
@@ -216,7 +219,11 @@ final class ConversationWindowWillCloseTests: XCTestCase {
 
     override func setUp() async throws {
         try await super.setUp()
-        vc = ConversationViewController(config: .default, userDefaults: defaultsDomain.defaults)
+        vc = ConversationViewController(
+            config: .default,
+            runtimeOptions: .isolatedTests,
+            userDefaults: defaultsDomain.defaults
+        )
         vc.loadView()
         vc.viewDidLoad()
         // Реальное NSWindow вокруг view — иначе view.window остаётся nil и

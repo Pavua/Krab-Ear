@@ -73,24 +73,38 @@ enum ConversationState: Equatable {
 /// Политика доступа разговорного контроллера к системному вводу-выводу.
 ///
 /// Машину состояний и согласование аудиоконтракта полезно проверять в unit-тестах,
-/// но создание `URLSessionWebSocketTask` и `AVAudioEngine` затрагивает живую сеть,
-/// микрофон и TCC. Явный профиль сохраняет продовое поведение по умолчанию и даёт
-/// тестам физическую гарантию, что системные ресурсы не будут открыты.
+/// но создание `URLSessionWebSocketTask`, `AVAudioEngine` и вывод HUD затрагивают
+/// живую сеть, микрофон, TCC и рабочий стол. Явный профиль сохраняет продовое
+/// поведение по умолчанию и даёт тестам физическую гарантию изоляции.
 struct ConversationRuntimeOptions: Sendable {
     let opensWebSocket: Bool
     let capturesAudio: Bool
+    let statusPanelOrdering: any PanelOrdering
 
-    init(opensWebSocket: Bool, capturesAudio: Bool) {
+    init(
+        opensWebSocket: Bool,
+        capturesAudio: Bool,
+        statusPanelOrdering: any PanelOrdering
+    ) {
         self.opensWebSocket = opensWebSocket
         self.capturesAudio = capturesAudio
+        self.statusPanelOrdering = statusPanelOrdering
     }
 
     /// Полный режим приложения: живой Voice Gateway и аудиоустройства.
-    static let production = ConversationRuntimeOptions(opensWebSocket: true, capturesAudio: true)
+    static let production = ConversationRuntimeOptions(
+        opensWebSocket: true,
+        capturesAudio: true,
+        statusPanelOrdering: AppKitPanelOrdering()
+    )
 
     /// Детерминированный тестовый режим:
-    /// только состояние и чистая логика протокола.
-    static let isolatedTests = ConversationRuntimeOptions(opensWebSocket: false, capturesAudio: false)
+    /// только состояние, чистая логика протокола и невидимый HUD.
+    static let isolatedTests = ConversationRuntimeOptions(
+        opensWebSocket: false,
+        capturesAudio: false,
+        statusPanelOrdering: NoOpPanelOrdering()
+    )
 }
 
 // MARK: - ConversationViewController
@@ -328,7 +342,10 @@ final class ConversationViewController: NSViewController {
     /// Создать overlay при первом обращении и подвязать кнопку «Прервать».
     func ensureStatusOverlay() {
         guard statusOverlay == nil else { return }
-        let overlay = ConversationStatusOverlay(userDefaults: userDefaults)
+        let overlay = ConversationStatusOverlay(
+            userDefaults: userDefaults,
+            panelOrdering: runtimeOptions.statusPanelOrdering
+        )
         overlay.onInterrupt = { [weak self] in self?.interruptAI() }
         statusOverlay = overlay
     }

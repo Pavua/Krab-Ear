@@ -99,7 +99,7 @@ final class BackendToast {
         else { return }
 
         // Если панель уже видима (repeat show) — только обновляем текст.
-        if panel.isVisible {
+        if panelOrdering.isVisible(panel) {
             updateLabelAndScheduleDismiss(panel: panel, message: message, duration: duration)
             return
         }

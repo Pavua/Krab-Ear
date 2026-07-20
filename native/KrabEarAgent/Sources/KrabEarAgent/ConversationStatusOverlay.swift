@@ -33,7 +33,7 @@ final class ConversationStatusOverlay: NSObject {
     /// Хранилище позиции панели; `.standard` остаётся production-дефолтом.
     private let userDefaults: UserDefaults
     /// Граница видимости окна: production вызывает AppKit, тесты используют no-op.
-    private var panelOrdering: PanelOrdering
+    private let panelOrdering: PanelOrdering
 
     // MARK: - Test hooks
 
@@ -41,12 +41,7 @@ final class ConversationStatusOverlay: NSObject {
     var _testPanelIsDraggable: Bool { panel.isMovableByWindowBackground }
     var _testStatusText: String { statusLabel.stringValue }
     var _testPanelOrigin: NSPoint { panel.frame.origin }
-
-    /// Позволяет тесту VC сохранить настоящую factory-проводку, а затем отключить
-    /// только экранный эффект до первого show/hide.
-    func _testReplacePanelOrdering(_ panelOrdering: PanelOrdering) {
-        self.panelOrdering = panelOrdering
-    }
+    var _testUsesAppKitPanelOrdering: Bool { panelOrdering is AppKitPanelOrdering }
 
     // MARK: - Init
 
