@@ -42,7 +42,9 @@ class _FakePopen:
         self._stdin_closed = False
         self.stdout = MagicMock()
         self.stdout.readline.side_effect = lambda: self._responses.pop(0) if self._responses else ""
-        self.stderr = MagicMock()
+        # Пустой конечный поток важен для реалистичной модели Popen: безнастроенный
+        # MagicMock.readline() всегда truthy и превращает stderr-drain в бесконечный цикл.
+        self.stderr = io.StringIO()
         self.terminate_called = False
         self.kill_called = False
         self.wait_called = False
@@ -55,6 +57,7 @@ class _FakePopen:
 
     def wait(self, timeout=None):
         self.wait_called = True
+        self._poll_value = 0
         return 0
 
     def terminate(self):
@@ -106,8 +109,16 @@ class TestSubprocessSessionLifecycle(unittest.TestCase):
         fake_popen = _FakePopen([_ok_load_response()])
         with patch("core.pipeline.stt_gigaam.subprocess.Popen", return_value=fake_popen):
             sess = _GigaAMSubprocessSession("/fake/py", "/fake/w.py", "rnnt", "cpu")
+            self.addCleanup(sess.close)
             sess.start()
         self.assertTrue(sess.is_loaded())
+        drain_thread = sess._stderr_drain_thread
+        self.assertIsNotNone(drain_thread)
+        drain_thread.join(timeout=1.0)
+        self.assertFalse(
+            drain_thread.is_alive(),
+            "stderr-drain обязан завершиться после конца тестового stderr",
+        )
         # Stdin должен содержать команду load.
         sent = fake_popen.stdin.getvalue()
         self.assertIn('"op": "load"', sent)
@@ -119,6 +130,7 @@ class TestSubprocessSessionLifecycle(unittest.TestCase):
         fake_popen = _FakePopen([_err_response("gigaam_not_installed: ...")])
         with patch("core.pipeline.stt_gigaam.subprocess.Popen", return_value=fake_popen):
             sess = _GigaAMSubprocessSession("/fake/py", "/fake/w.py", "rnnt", "cpu")
+            self.addCleanup(sess.close)
             with self.assertRaises(RuntimeError) as ctx:
                 sess.start()
         self.assertIn("load failed", str(ctx.exception))
@@ -129,6 +141,7 @@ class TestSubprocessSessionLifecycle(unittest.TestCase):
         fake_popen = _FakePopen([_ok_load_response()])
         with patch("core.pipeline.stt_gigaam.subprocess.Popen", return_value=fake_popen) as p:
             sess = _GigaAMSubprocessSession("/fake/py", "/fake/w.py", "rnnt", "cpu")
+            self.addCleanup(sess.close)
             sess.start()
             sess.start()  # второй вызов не должен спавнить ещё один процесс
         self.assertEqual(p.call_count, 1)
@@ -159,6 +172,7 @@ class TestSubprocessTranscribe(unittest.TestCase):
         ])
         with patch("core.pipeline.stt_gigaam.subprocess.Popen", return_value=fake_popen):
             sess = _GigaAMSubprocessSession("/fake/py", "/fake/w.py", "rnnt", "cpu")
+            self.addCleanup(sess.close)
             sess.start()
             result = sess.transcribe("/tmp/audio.wav")
         self.assertEqual(result["text"], "Тестовый текст")
@@ -176,6 +190,7 @@ class TestSubprocessTranscribe(unittest.TestCase):
         ])
         with patch("core.pipeline.stt_gigaam.subprocess.Popen", return_value=fake_popen):
             sess = _GigaAMSubprocessSession("/fake/py", "/fake/w.py", "rnnt", "cpu")
+            self.addCleanup(sess.close)
             sess.start()
             with self.assertRaises(RuntimeError) as ctx:
                 sess.transcribe("/tmp/bad.wav")
@@ -189,6 +204,7 @@ class TestSubprocessTranscribe(unittest.TestCase):
         ])
         with patch("core.pipeline.stt_gigaam.subprocess.Popen", return_value=fake_popen):
             sess = _GigaAMSubprocessSession("/fake/py", "/fake/w.py", "rnnt", "cpu")
+            self.addCleanup(sess.close)
             sess.start()
             with self.assertRaises(RuntimeError) as ctx:
                 sess.transcribe("/tmp/x.wav")
@@ -199,6 +215,7 @@ class TestSubprocessTranscribe(unittest.TestCase):
         fake_popen = _FakePopen([_ok_load_response()])
         with patch("core.pipeline.stt_gigaam.subprocess.Popen", return_value=fake_popen):
             sess = _GigaAMSubprocessSession("/fake/py", "/fake/w.py", "rnnt", "cpu")
+            self.addCleanup(sess.close)
             sess.start()
             sess.close()
         sent = fake_popen.stdin.getvalue()
@@ -371,6 +388,7 @@ class TestAdapterTranscribeViaSubprocess(unittest.TestCase):
             transport="subprocess",
             venv_python_path="/usr/bin/python3",  # путь существует — guard пропустит
         )
+        self.addCleanup(a.close)
 
         # Моки: Popen + проверка существования worker_path.
         with patch("core.pipeline.stt_gigaam.subprocess.Popen", return_value=fake_popen):
@@ -464,6 +482,7 @@ class TestGigaAMSessionReceivesErrorBus(unittest.TestCase):
             transport="subprocess",
             venv_python_path="/usr/bin/python3",
         )
+        self.addCleanup(adapter.close)
         adapter._error_bus = fake_error_bus  # late-inject, as service.py does
 
         with patch("core.pipeline.stt_gigaam.subprocess.Popen", return_value=fake_popen):
@@ -485,6 +504,7 @@ class TestGigaAMSessionReceivesErrorBus(unittest.TestCase):
             transport="subprocess",
             venv_python_path="/usr/bin/python3",
         )
+        self.addCleanup(adapter.close)
         # adapter._error_bus == None by default
 
         with patch("core.pipeline.stt_gigaam.subprocess.Popen", return_value=fake_popen):
@@ -507,6 +527,7 @@ class TestGigaAMWorkerTimeoutPushesError(unittest.TestCase):
 
         with patch("core.pipeline.stt_gigaam.subprocess.Popen", return_value=fake_popen):
             sess = _GigaAMSubprocessSession("/fake/py", "/fake/w.py", "rnnt", "cpu")
+            self.addCleanup(sess.close)
             sess.start()
 
         # Late-inject error_bus (as GigaAMAdapter does after W1688 fix)
@@ -572,6 +593,7 @@ class TestGigaAMSubprocessFfmpegPath(unittest.TestCase):
                 sess = _GigaAMSubprocessSession(
                     "/fake/py", "/fake/w.py", "rnnt", "cpu"
                 )
+                self.addCleanup(sess.close)
                 sess.start()
 
         return captured_env
@@ -599,6 +621,7 @@ class TestGigaAMSubprocessFfmpegPath(unittest.TestCase):
                     sess = _GigaAMSubprocessSession(
                         "/fake/py", "/fake/w.py", "rnnt", "cpu"
                     )
+                    self.addCleanup(sess.close)
                     sess.start()
 
         worker_path_dirs = captured_env.get("PATH", "").split(os.pathsep)
@@ -630,6 +653,7 @@ class TestGigaAMSubprocessFfmpegPath(unittest.TestCase):
                     sess = _GigaAMSubprocessSession(
                         "/fake/py", "/fake/w.py", "rnnt", "cpu"
                     )
+                    self.addCleanup(sess.close)
                     sess.start()
 
         worker_path = captured_env.get("PATH", "")
@@ -666,6 +690,7 @@ class TestGigaAMSubprocessFfmpegPath(unittest.TestCase):
                     sess = _GigaAMSubprocessSession(
                         "/fake/py", "/fake/w.py", "rnnt", "cpu"
                     )
+                    self.addCleanup(sess.close)
                     sess.start()
 
         worker_path = captured_env.get("PATH", "")
@@ -698,6 +723,7 @@ class TestGigaAMSubprocessFfmpegPath(unittest.TestCase):
                     sess = _GigaAMSubprocessSession(
                         "/fake/py", "/fake/w.py", "rnnt", "cpu"
                     )
+                    self.addCleanup(sess.close)
                     sess.start()
 
         # PATH should still be set (from os.environ.copy()) but not modified.

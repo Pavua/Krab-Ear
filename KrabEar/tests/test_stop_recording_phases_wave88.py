@@ -108,17 +108,20 @@ class _FakeTranslator:
                                  mode=mode, engine="fake")
 
 
-def _make_service(recorder=None, transcriber=None, translator=None, tmp_dir=None):
-    """Create a minimal BackendService with fake collaborators."""
+def _make_service(test_case, recorder=None, transcriber=None, translator=None, tmp_dir=None):
+    """Создать сервис и гарантированно закрыть его до временного каталога."""
     if tmp_dir is None:
         tmp_dir = tempfile.mkdtemp()
     store = StateStore(Path(tmp_dir) / "data")
-    return BackendService(
+    service = BackendService(
         store=store,
         recorder=recorder or _FakeRecorderRecording(),
         transcriber=transcriber or _FakeTranscriber(),
         translator=translator or _FakeTranslator(),
     )
+    # Cleanup добавлен позже TemporaryDirectory.cleanup, поэтому выполнится первым.
+    test_case.addCleanup(service.close)
+    return service
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +137,7 @@ class TestPhaseA(unittest.TestCase):
 
     def test_returns_early_when_already_stopped(self):
         """Phase A returns early_return with status=already_stopped when recorder is idle."""
-        svc = _make_service(recorder=_FakeRecorderIdle(), tmp_dir=self.tmp.name)
+        svc = _make_service(self, recorder=_FakeRecorderIdle(), tmp_dir=self.tmp.name)
         settings = svc._cached_settings()
         result = svc._stop_recording_phase_a({}, settings)
         self.assertIn("early_return", result)
@@ -144,7 +147,7 @@ class TestPhaseA(unittest.TestCase):
         """Phase A returns audio/duration_sec/sr when recorder is active."""
         rec = _FakeRecorderRecording()
         rec.start()  # ensure recording state
-        svc = _make_service(recorder=rec, tmp_dir=self.tmp.name)
+        svc = _make_service(self, recorder=rec, tmp_dir=self.tmp.name)
         settings = svc._cached_settings()
         result = svc._stop_recording_phase_a({}, settings)
         self.assertNotIn("early_return", result)
@@ -157,7 +160,7 @@ class TestPhaseA(unittest.TestCase):
         """Phase A returns early_return with status=empty_text when audio has size 0."""
         rec = _EmptyAudioRecorder()
         rec.start()
-        svc = _make_service(recorder=rec, tmp_dir=self.tmp.name)
+        svc = _make_service(self, recorder=rec, tmp_dir=self.tmp.name)
         settings = svc._cached_settings()
         result = svc._stop_recording_phase_a({}, settings)
         self.assertIn("early_return", result)
@@ -167,7 +170,7 @@ class TestPhaseA(unittest.TestCase):
         """Phase A coerces stop_tail_trim_ms to [0, 1200]."""
         rec = _FakeRecorderRecording()
         rec.start()
-        svc = _make_service(recorder=rec, tmp_dir=self.tmp.name)
+        svc = _make_service(self, recorder=rec, tmp_dir=self.tmp.name)
         settings = svc._cached_settings()
         result = svc._stop_recording_phase_a({"stop_tail_trim_ms": -50}, settings)
         if "early_return" not in result:
@@ -177,7 +180,7 @@ class TestPhaseA(unittest.TestCase):
         """Phase A stops and clears _rt_partial if set."""
         rec = _FakeRecorderRecording()
         rec.start()
-        svc = _make_service(recorder=rec, tmp_dir=self.tmp.name)
+        svc = _make_service(self, recorder=rec, tmp_dir=self.tmp.name)
         fake_partial = MagicMock()
         svc._rt_partial = fake_partial
         settings = svc._cached_settings()
@@ -189,7 +192,7 @@ class TestPhaseA(unittest.TestCase):
         """Phase A result sr dict has all keys needed by downstream phases."""
         rec = _FakeRecorderRecording()
         rec.start()
-        svc = _make_service(recorder=rec, tmp_dir=self.tmp.name)
+        svc = _make_service(self, recorder=rec, tmp_dir=self.tmp.name)
         settings = svc._cached_settings()
         result = svc._stop_recording_phase_a({}, settings)
         if "early_return" in result:
@@ -239,7 +242,7 @@ class TestPhaseB(unittest.TestCase):
 
     def test_speech_audio_passes_both_guards(self):
         """Normal speech audio passes silence guard and background guard."""
-        svc = _make_service(tmp_dir=self.tmp.name)
+        svc = _make_service(self, tmp_dir=self.tmp.name)
         sr = self._make_sr()
         # Generate speech-like audio with amplitude peaks
         audio = np.sin(2 * np.pi * 440 * np.linspace(0, 1, 16000)).astype(np.float32) * 0.3
@@ -250,7 +253,7 @@ class TestPhaseB(unittest.TestCase):
 
     def test_silence_audio_triggers_silence_guard(self):
         """All-zeros audio triggers silence guard and returns early_return."""
-        svc = _make_service(tmp_dir=self.tmp.name)
+        svc = _make_service(self, tmp_dir=self.tmp.name)
         sr = self._make_sr(silence_guard=True)
         audio = np.zeros(32000, dtype=np.float32)
         result = svc._stop_recording_phase_b(audio, 1.0, 180, sr)
@@ -258,7 +261,7 @@ class TestPhaseB(unittest.TestCase):
 
     def test_silence_guard_disabled_skips_check(self):
         """When silence_guard_enabled=False, silent audio is NOT rejected."""
-        svc = _make_service(tmp_dir=self.tmp.name)
+        svc = _make_service(self, tmp_dir=self.tmp.name)
         sr = self._make_sr(silence_guard=False, background_guard=False)
         audio = np.zeros(32000, dtype=np.float32)
         result = svc._stop_recording_phase_b(audio, 1.0, 180, sr)
@@ -266,7 +269,7 @@ class TestPhaseB(unittest.TestCase):
 
     def test_background_guard_disabled_skips_check(self):
         """When background_guard_enabled=False, uniform background is NOT rejected."""
-        svc = _make_service(tmp_dir=self.tmp.name)
+        svc = _make_service(self, tmp_dir=self.tmp.name)
         sr = self._make_sr(silence_guard=False, background_guard=False)
         # Uniform low amplitude (would trigger background guard if enabled)
         audio = np.full(32000, 0.0025, dtype=np.float32)
@@ -275,7 +278,7 @@ class TestPhaseB(unittest.TestCase):
 
     def test_returns_guard_flags(self):
         """Phase B result includes silence_detected and background_guard_rejected."""
-        svc = _make_service(tmp_dir=self.tmp.name)
+        svc = _make_service(self, tmp_dir=self.tmp.name)
         sr = self._make_sr()
         audio = np.sin(2 * np.pi * 440 * np.linspace(0, 1, 16000)).astype(np.float32) * 0.3
         result = svc._stop_recording_phase_b(audio, 1.0, 180, sr)
@@ -303,7 +306,7 @@ class TestPhaseC(unittest.TestCase):
 
     def test_returns_transcribe_payload(self):
         """Phase C returns dict with transcribe_payload key."""
-        svc = _make_service(tmp_dir=self.tmp.name)
+        svc = _make_service(self, tmp_dir=self.tmp.name)
         audio = np.zeros(16000, dtype=np.float32)
         result = svc._stop_recording_phase_c(audio, 1.0, self._make_sr())
         self.assertIn("transcribe_payload", result)
@@ -313,7 +316,7 @@ class TestPhaseC(unittest.TestCase):
         transcriber = MagicMock()
         transcriber.transcribe.return_value = {"text": "hello", "confidence": 0.9}
         transcriber.engine = MagicMock(quality_profile="balanced")
-        svc = _make_service(transcriber=transcriber, tmp_dir=self.tmp.name)
+        svc = _make_service(self, transcriber=transcriber, tmp_dir=self.tmp.name)
         audio = np.zeros(16000, dtype=np.float32)
         sr = {"quality_profile": "max", "cleanup_profile": "strict", "lang_hint": "ru"}
         svc._stop_recording_phase_c(audio, 1.0, sr)
@@ -327,7 +330,7 @@ class TestPhaseC(unittest.TestCase):
         transcriber = MagicMock()
         transcriber.transcribe.return_value = {"text": "привет"}
         transcriber.engine = MagicMock(quality_profile="balanced")
-        svc = _make_service(transcriber=transcriber, tmp_dir=self.tmp.name)
+        svc = _make_service(self, transcriber=transcriber, tmp_dir=self.tmp.name)
         sr = {"quality_profile": "balanced", "cleanup_profile": "soft", "lang_hint": "es"}
         svc._stop_recording_phase_c(np.zeros(16000, dtype=np.float32), 1.0, sr)
         call_kwargs = transcriber.transcribe.call_args[1]
@@ -335,7 +338,7 @@ class TestPhaseC(unittest.TestCase):
 
     def test_auto_glossary_error_does_not_propagate(self):
         """Phase C catches auto_glossary errors and continues without them."""
-        svc = _make_service(tmp_dir=self.tmp.name)
+        svc = _make_service(self, tmp_dir=self.tmp.name)
         svc._auto_glossary = MagicMock()
         svc._auto_glossary.build.side_effect = RuntimeError("glossary exploded")
         audio = np.zeros(16000, dtype=np.float32)
@@ -348,7 +351,7 @@ class TestPhaseC(unittest.TestCase):
         transcriber = MagicMock()
         transcriber.transcribe.return_value = {"text": "ok"}
         transcriber.engine = MagicMock(quality_profile="balanced")
-        svc = _make_service(transcriber=transcriber, tmp_dir=self.tmp.name)
+        svc = _make_service(self, transcriber=transcriber, tmp_dir=self.tmp.name)
         # Inject overlapping hotwords
         svc._settings_svc._settings_cache = {
             "stt_hotwords_enabled": True,
@@ -399,7 +402,7 @@ class TestPhaseD(unittest.TestCase):
 
     def test_returns_text_and_translation_fields(self):
         """Phase D returns expected keys on normal transcription."""
-        svc = _make_service(tmp_dir=self.tmp.name)
+        svc = _make_service(self, tmp_dir=self.tmp.name)
         result = self._call_phase_d(svc, {"text": "Привет, мир.", "confidence": 0.9})
         self.assertNotIn("early_return", result)
         for key in ("text", "display_text", "translated_text", "final_text",
@@ -409,7 +412,7 @@ class TestPhaseD(unittest.TestCase):
 
     def test_empty_text_returns_early_return(self):
         """Phase D returns early_return with status=empty_text when STT yields nothing."""
-        svc = _make_service(tmp_dir=self.tmp.name)
+        svc = _make_service(self, tmp_dir=self.tmp.name)
         result = self._call_phase_d(svc, {"text": "", "confidence": 0.0})
         self.assertIn("early_return", result)
         self.assertEqual(result["early_return"]["status"], "empty_text")
@@ -421,7 +424,7 @@ class TestPhaseD(unittest.TestCase):
             text="ES: hola", status="ok", source_lang="ru", target_lang="es",
             mode="ru_to_es", engine="fake",
         )
-        svc = _make_service(translator=translator, tmp_dir=self.tmp.name)
+        svc = _make_service(self, translator=translator, tmp_dir=self.tmp.name)
         sr = self._make_sr(translation_mode="ru_to_es")
         result = self._call_phase_d(svc, {"text": "Привет.", "confidence": 0.9}, sr=sr)
         translator.translate.assert_called_once()
@@ -435,7 +438,7 @@ class TestPhaseD(unittest.TestCase):
             text="ES: hola", status="ok", source_lang="ru", target_lang="es",
             mode="ru_to_es", engine="fake",
         )
-        svc = _make_service(translator=translator, tmp_dir=self.tmp.name)
+        svc = _make_service(self, translator=translator, tmp_dir=self.tmp.name)
         sr = self._make_sr(translation_mode="ru_to_es")
         sr["translate_and_paste"] = True
         result = self._call_phase_d(svc, {"text": "Привет.", "confidence": 0.9}, sr=sr)
@@ -443,7 +446,7 @@ class TestPhaseD(unittest.TestCase):
 
     def test_soft_retry_recovers_long_transcript(self):
         """Phase D retries with soft cleanup when postprocess drops long raw text."""
-        svc = _make_service(tmp_dir=self.tmp.name)
+        svc = _make_service(self, tmp_dir=self.tmp.name)
         # Postprocess would normally strip everything; simulate by returning empty
         # but raw text is long (>30 chars) and duration > 8s
         raw_long = "а " * 20  # 40 chars of borderline text
@@ -457,7 +460,7 @@ class TestPhaseD(unittest.TestCase):
 
     def test_low_confidence_does_not_fail(self):
         """Phase D logs warning for low confidence but does not fail."""
-        svc = _make_service(tmp_dir=self.tmp.name)
+        svc = _make_service(self, tmp_dir=self.tmp.name)
         result = self._call_phase_d(
             svc, {"text": "Привет.", "confidence": 0.2}
         )
@@ -466,7 +469,7 @@ class TestPhaseD(unittest.TestCase):
 
     def test_diarization_data_forwarded(self):
         """Phase D forwards diarization dict from transcribe_payload."""
-        svc = _make_service(tmp_dir=self.tmp.name)
+        svc = _make_service(self, tmp_dir=self.tmp.name)
         fake_diar = {"speakers": [{"id": "SPEAKER_00", "segments": []}]}
         result = self._call_phase_d(
             svc, {"text": "Привет.", "confidence": 0.9, "diarization": fake_diar}
@@ -529,34 +532,34 @@ class TestPhaseE(unittest.TestCase):
 
     def test_returns_ok_status(self):
         """Phase E returns status=ok."""
-        svc = _make_service(tmp_dir=self.tmp.name)
+        svc = _make_service(self, tmp_dir=self.tmp.name)
         result = self._call_phase_e(svc, self._make_phase_d_dict())
         self.assertEqual(result["status"], "ok")
 
     def test_saves_item_to_history(self):
         """Phase E writes a history item (history_id is non-empty)."""
-        svc = _make_service(tmp_dir=self.tmp.name)
+        svc = _make_service(self, tmp_dir=self.tmp.name)
         result = self._call_phase_e(svc, self._make_phase_d_dict())
         self.assertIsNotNone(result.get("history_id"))
         self.assertTrue(len(result["history_id"]) > 0)
 
     def test_clipboard_history_updated(self):
         """Phase E appends entry to _clipboard_history."""
-        svc = _make_service(tmp_dir=self.tmp.name)
+        svc = _make_service(self, tmp_dir=self.tmp.name)
         before = len(svc._clipboard_history)
         self._call_phase_e(svc, self._make_phase_d_dict())
         self.assertEqual(len(svc._clipboard_history), before + 1)
 
     def test_clipboard_history_capped_at_20(self):
         """Phase E keeps at most 20 clipboard history entries."""
-        svc = _make_service(tmp_dir=self.tmp.name)
+        svc = _make_service(self, tmp_dir=self.tmp.name)
         svc._clipboard_history = [{"text": f"x{i}", "ts": "", "history_id": str(i)} for i in range(25)]
         self._call_phase_e(svc, self._make_phase_d_dict())
         self.assertLessEqual(len(svc._clipboard_history), 20)
 
     def test_response_shape_includes_required_fields(self):
         """Phase E result dict has all fields expected by Swift client."""
-        svc = _make_service(tmp_dir=self.tmp.name)
+        svc = _make_service(self, tmp_dir=self.tmp.name)
         result = self._call_phase_e(svc, self._make_phase_d_dict())
         required = {
             "status", "duration_sec", "quality_profile", "cleanup_profile",
@@ -568,7 +571,7 @@ class TestPhaseE(unittest.TestCase):
 
     def test_realtime_event_emitted_when_rt_session_id_set(self):
         """Phase E emits realtime.final_transcript event when rt_session_id is present."""
-        svc = _make_service(tmp_dir=self.tmp.name)
+        svc = _make_service(self, tmp_dir=self.tmp.name)
         emitted_events = []
 
         original_emit = svc._stop_recording_phase_e.__func__  # noqa: F841 — just confirming
@@ -601,7 +604,7 @@ class TestPhaseE(unittest.TestCase):
 
     def test_transcription_counter_incremented(self):
         """Phase E increments _transcription_counter after each save."""
-        svc = _make_service(tmp_dir=self.tmp.name)
+        svc = _make_service(self, tmp_dir=self.tmp.name)
         before = svc._transcription_counter
         self._call_phase_e(svc, self._make_phase_d_dict())
         self.assertEqual(svc._transcription_counter, before + 1)
@@ -617,7 +620,7 @@ class TestOrchestrator(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.svc = _make_service(tmp_dir=self.tmp.name)
+        self.svc = _make_service(self, tmp_dir=self.tmp.name)
 
     def _req(self, method, params=None):
         return self.svc.handle_request({"id": "t1", "method": method, "params": params or {}})

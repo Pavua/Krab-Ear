@@ -102,6 +102,8 @@ class TermExtractorIPCTestCase(unittest.TestCase):
             transcriber=MagicMock(),
             translator=MagicMock(),
         )
+        # Регистрируем после cleanup каталога: unittest выполнит закрытие первым.
+        self.addCleanup(self.svc.close)
 
     def test_extract_terms_handler(self) -> None:
         """IPC-хэндлер extract_terms возвращает список терминов."""

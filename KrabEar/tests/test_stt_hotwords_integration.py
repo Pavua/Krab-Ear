@@ -136,14 +136,17 @@ class FakeTranslator:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def make_service(tmp_dir: str, transcriber=None) -> BackendService:
+def make_service(test_case, tmp_dir: str, transcriber=None) -> BackendService:
+    """Создать сервис и зарегистрировать закрытие раньше очистки каталога."""
     store = StateStore(Path(tmp_dir) / "data")
-    return BackendService(
+    service = BackendService(
         store=store,
         recorder=FakeRecorder(),
         transcriber=transcriber or FakeTranscriber(),
         translator=FakeTranslator(),
     )
+    test_case.addCleanup(service.close)
+    return service
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +158,7 @@ class SttHotwordsIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.svc = make_service(self.tmp.name)
+        self.svc = make_service(self, self.tmp.name)
 
     def req(self, method: str, params: dict | None = None) -> dict:
         return self.svc.handle_request(
@@ -246,7 +249,7 @@ class SttHotwordsIntegrationTests(unittest.TestCase):
         self.req("add_stt_hotword", {"word": "Персистент"})
 
         # Создаём НОВЫЙ сервис с той же директорией данных
-        svc2 = make_service(self.tmp.name)
+        svc2 = make_service(self, self.tmp.name)
         resp = svc2.handle_request(
             {"id": "t2", "method": "list_stt_hotwords", "params": {}}
         )
@@ -260,7 +263,7 @@ class SttHotwordsIntegrationTests(unittest.TestCase):
     def test_hotwords_passed_to_whisper_initial_prompt(self):
         """Добавленные hotwords передаются в transcriber.transcribe() как stt_hotwords."""
         capturing = CapturingTranscriber()
-        svc = make_service(self.tmp.name + "_cap", transcriber=capturing)
+        svc = make_service(self, self.tmp.name + "_cap", transcriber=capturing)
 
         # Добавляем hotword
         svc.handle_request(

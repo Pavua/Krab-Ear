@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -226,13 +227,13 @@ class TestBackendServiceWarmupStartup(unittest.TestCase):
             orig = _cfg.DEFAULT_SETTINGS.get("stt_warmup_on_startup", True)
             _cfg.DEFAULT_SETTINGS["stt_warmup_on_startup"] = True
             try:
-                _ = make_service(tmp, transcriber=TrackingTranscriber())
+                with closing(make_service(tmp, transcriber=TrackingTranscriber())):
+                    self.assertTrue(
+                        warmup_called.wait(timeout=2.0),
+                        "warmup() должен быть вызван в background thread",
+                    )
             finally:
                 _cfg.DEFAULT_SETTINGS["stt_warmup_on_startup"] = orig
-
-        # Give background thread time to run
-        warmup_called.wait(timeout=2.0)
-        self.assertTrue(warmup_called.is_set(), "warmup() должен быть вызван в background thread")
 
     def test_warmup_not_started_when_disabled(self):
         """BackendService НЕ запускает STT warmup если stt_warmup_on_startup=False."""
@@ -253,13 +254,13 @@ class TestBackendServiceWarmupStartup(unittest.TestCase):
             orig = _cfg.DEFAULT_SETTINGS.get("stt_warmup_on_startup", True)
             _cfg.DEFAULT_SETTINGS["stt_warmup_on_startup"] = False
             try:
-                _ = make_service(tmp, transcriber=TrackingTranscriber())
+                with closing(make_service(tmp, transcriber=TrackingTranscriber())):
+                    self.assertFalse(
+                        warmup_called.wait(timeout=0.5),
+                        "warmup() не должен вызываться когда настройка False",
+                    )
             finally:
                 _cfg.DEFAULT_SETTINGS["stt_warmup_on_startup"] = orig
-
-        # Should NOT be set within 0.5 s
-        warmup_called.wait(timeout=0.5)
-        self.assertFalse(warmup_called.is_set(), "warmup() не должен вызываться когда настройка False")
 
 
 # ---------------------------------------------------------------------------
@@ -279,12 +280,12 @@ class TestHandleWarmupStt(unittest.TestCase):
             from backend.service import BackendService
 
             store = StateStore(Path(tmp) / "data")
-            svc = BackendService(
+            with closing(BackendService(
                 store=store,
                 recorder=FakeRecorder(),
                 translator=FakeTranslator(),
-            )
-            result = svc._stt_mgmt_svc.handle_warmup_stt({})
+            )) as svc:
+                result = svc._stt_mgmt_svc.handle_warmup_stt({})
 
         self.assertIn("loaded", result)
         self.assertIn("latency_ms", result)
@@ -298,14 +299,14 @@ class TestHandleWarmupStt(unittest.TestCase):
             from backend.service import BackendService
 
             store = StateStore(Path(tmp) / "data")
-            svc = BackendService(
+            with closing(BackendService(
                 store=store,
                 recorder=FakeRecorder(),
                 transcriber=FakeTranscriber(),  # no .engine attribute with warmup
                 translator=FakeTranslator(),
-            )
-            # FakeTranscriber has no .engine — engine check should fail gracefully
-            result = svc._stt_mgmt_svc.handle_warmup_stt({})
+            )) as svc:
+                # FakeTranscriber has no .engine — engine check should fail gracefully
+                result = svc._stt_mgmt_svc.handle_warmup_stt({})
 
         # Either success (if service fell back) or error with useful message
         self.assertIn("loaded", result)
