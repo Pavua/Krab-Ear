@@ -80,6 +80,53 @@ class TestBookmarkManagerDosCap(unittest.TestCase):
         self.assertEqual(last.get("ok"), False, f"Expected limit_exceeded, got: {last}")
         self.assertEqual(last.get("reason"), "limit_exceeded")
 
+    def test_cap_observes_write_from_second_manager(self):
+        """Последовательная запись второго менеджера не обходит общий лимит файла."""
+        mgr, data_dir = self._make_mgr()
+        second_mgr = BookmarkManager(data_dir)
+
+        with patch("backend.bookmarks.MAX_BOOKMARKS", 2):
+            self.assertIn("id", mgr.add("first", 1.0))
+            self.assertIn("id", second_mgr.add("second", 2.0))
+            result = mgr.add("over-limit", 3.0)
+
+        self.assertEqual(result.get("ok"), False)
+        self.assertEqual(result.get("reason"), "limit_exceeded")
+
+    def test_add_survives_signature_refresh_error_after_append(self):
+        """Сбой служебного stat после append не отменяет сохранённую закладку."""
+        mgr, _ = self._make_mgr()
+        signature = mgr._file_signature_unlocked()
+
+        with patch.object(
+            mgr,
+            "_file_signature_unlocked",
+            side_effect=[signature, signature, OSError("stat failed")],
+        ):
+            result = mgr.add("sess", 1.0)
+
+        self.assertIn("id", result)
+        self.assertEqual(len(mgr.list_all()), 1)
+
+    def test_cap_survives_signature_refresh_error_during_reload(self):
+        """Сбой stat после reload не подменяет загруженный cap нулевым кэшем."""
+        mgr, data_dir = self._make_mgr()
+        with patch("backend.bookmarks.MAX_BOOKMARKS", 1):
+            self.assertIn("id", mgr.add("first", 1.0))
+            reloaded_mgr = BookmarkManager(data_dir)
+            signature = reloaded_mgr._file_signature_unlocked()
+
+            with patch.object(
+                reloaded_mgr,
+                "_file_signature_unlocked",
+                side_effect=[signature, OSError("stat failed"), signature],
+            ):
+                result = reloaded_mgr.add("over-limit", 2.0)
+
+        self.assertEqual(result.get("ok"), False)
+        self.assertEqual(result.get("reason"), "limit_exceeded")
+        self.assertEqual(len(reloaded_mgr.list_all()), 1)
+
     def test_after_delete_space_freed(self):
         """Deleting a bookmark frees a slot so the next add succeeds."""
         mgr, _ = self._make_mgr()

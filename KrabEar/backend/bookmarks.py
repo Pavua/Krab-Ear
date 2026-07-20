@@ -39,6 +39,8 @@ class BookmarkManager:
         self._path = self._data_dir / "bookmarks.ndjson"
         self._path.touch(exist_ok=True)
         self._lock = threading.Lock()
+        self._active_count: int | None = None
+        self._active_file_signature: tuple[int, int, int] | None = None
         # wave-1770: privacy gate callable — settings_get("privacy_mode_enabled", False)
         self._settings_get = settings_get or (lambda k, d: d)
 
@@ -56,6 +58,22 @@ class BookmarkManager:
         """Дописывает одну JSON-запись в журнал — вызывать только внутри self._lock."""
         with self._path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _file_signature_unlocked(self) -> tuple[int, int, int]:
+        """Возвращает подпись файла для обнаружения записи другим менеджером."""
+        stat = self._path.stat()
+        return stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+    def _remember_active_count_unlocked(self, active_count: int) -> None:
+        """Запоминает счётчик; при сбое служебного stat инвалидирует кэш."""
+        try:
+            signature = self._file_signature_unlocked()
+        except OSError:
+            self._active_count = None
+            self._active_file_signature = None
+            return
+        self._active_count = active_count
+        self._active_file_signature = signature
 
     def _parse_active(self, raw: str) -> list[dict[str, Any]]:
         """Разбирает NDJSON-текст и возвращает активные закладки (без tombstone'ов)."""
@@ -124,6 +142,7 @@ class BookmarkManager:
                     self._compact_unlocked(active)
                 except Exception:
                     logger.warning("bookmarks: компакция не удалась", exc_info=True)
+            self._remember_active_count_unlocked(len(active))
         return active
 
     def _load_active_unlocked(self) -> list[dict[str, Any]]:
@@ -138,6 +157,7 @@ class BookmarkManager:
                 self._compact_unlocked(active)
             except Exception:
                 logger.warning("bookmarks: компакция не удалась", exc_info=True)
+        self._remember_active_count_unlocked(len(active))
         return active
 
     # ------------------------------------------------------------------
@@ -163,8 +183,17 @@ class BookmarkManager:
         from datetime import datetime
 
         with self._lock:
-            active = self._load_active_unlocked()
-            if len(active) >= MAX_BOOKMARKS:
+            # Повторное чтение растущего NDJSON на каждом add давало O(n²) до лимита.
+            # Подпись файла сохраняет быстрый путь, но замечает запись другого экземпляра.
+            current_signature = self._file_signature_unlocked()
+            if (
+                self._active_count is None
+                or current_signature != self._active_file_signature
+            ):
+                active_count = len(self._load_active_unlocked())
+            else:
+                active_count = self._active_count or 0
+            if active_count >= MAX_BOOKMARKS:
                 logger.warning(
                     "bookmarks: лимит %d превышен — add_bookmark отклонён", MAX_BOOKMARKS
                 )
@@ -187,6 +216,7 @@ class BookmarkManager:
                 "deleted": False,
             }
             self._append_unlocked(bookmark)
+            self._remember_active_count_unlocked(active_count + 1)
 
         logger.info(
             "Закладка создана: id=%s session=%s offset=%.1fs",
@@ -306,6 +336,7 @@ class BookmarkManager:
             try:
                 tmp.write_text("", encoding="utf-8")
                 tmp.replace(self._path)
+                self._remember_active_count_unlocked(0)
             except Exception:
                 tmp.unlink(missing_ok=True)
                 raise
