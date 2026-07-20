@@ -47,26 +47,35 @@ def _literal_strings(call: ast.Call) -> list[str]:
 
 
 def _strip_shell_comment(line: str) -> str:
-    """Обрезает первый неэкранированный ``#`` вне shell-кавычек."""
+    """Обрезает ``#`` вне кавычек только в начале shell-слова."""
     quote: str | None = None
     escaped = False
+    word_started = False
 
     for index, character in enumerate(line):
         if escaped:
             escaped = False
+            word_started = True
             continue
         if character == "\\" and quote != "'":
             escaped = True
+            word_started = True
             continue
         if quote is not None:
             if character == quote:
                 quote = None
+            word_started = True
             continue
         if character in {"'", '"'}:
             quote = character
+            word_started = True
             continue
-        if character == "#":
+        if character == "#" and not word_started:
             return line[:index].rstrip()
+        if character.isspace() or character in ";&|()<>":
+            word_started = False
+        else:
+            word_started = True
     return line.rstrip()
 
 
@@ -88,6 +97,8 @@ def test_shell_code_strips_only_real_comments() -> None:
         ("echo '# kill'", "echo '# kill'"),
         ('echo "# pkill"', 'echo "# pkill"'),
         (r"echo \# kill", r"echo \# kill"),
+        ("echo foo#bar", "echo foo#bar"),
+        ("echo ok;# kill worker", "echo ok;"),
     )
 
     for source, expected in cases:
@@ -107,6 +118,7 @@ def test_shell_termination_detection_uses_command_position() -> None:
         assert not _has_shell_termination(source)
     assert _has_shell_termination("kill 123")
     assert _has_shell_termination("pkill -f x")
+    assert _has_shell_termination("echo foo#bar; kill 123")
 
 
 def test_conftest_has_no_global_process_termination() -> None:
