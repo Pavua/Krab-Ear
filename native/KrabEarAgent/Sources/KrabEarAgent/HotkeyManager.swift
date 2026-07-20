@@ -3,7 +3,7 @@
 
  Связи модуля:
  1) main.swift: получает callback toggle записи.
- 2) HotkeyDoubleTapDetector: детект двойного тапа → triggerConversationStart() (PR 1.5).
+ 2) HotkeyDoubleTapDetector: детект двойного тапа → triggerConversationToggle().
 
  Режимы hotkey (hotkeyMode):
  - "toggle": однократное нажатие — старт, следующее — стоп (существующее поведение).

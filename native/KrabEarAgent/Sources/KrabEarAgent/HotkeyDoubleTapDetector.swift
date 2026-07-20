@@ -10,7 +10,7 @@
 
  Связи:
  - HotkeyManager.swift: создаёт экземпляр и передаёт onDoubleTap-callback.
- - HistoryPanelController+VoiceTab.swift: получает вызов triggerConversationStart().
+ - HistoryPanelController+VoiceTab.swift: получает вызов triggerConversationToggle().
 */
 
 import AppKit

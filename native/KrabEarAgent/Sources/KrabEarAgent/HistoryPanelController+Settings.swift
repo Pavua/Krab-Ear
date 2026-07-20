@@ -1345,7 +1345,7 @@ extension HistoryPanelController {
 
     @objc func onVAHotkeyToggleChanged() {
         let enabled = vaHotkeyToggle.state == .on
-        UserDefaults.standard.set(enabled, forKey: "KrabEar_ConversationHotkeyEnabled")
+        UserDefaults.standard.set(enabled, forKey: ConversationHotkeyPolicy.defaultsKey)
         // Применить немедленно через applyConversationHotkeyEnabled
         if let appDelegate = NSApp.delegate as? AgentAppDelegate {
             appDelegate.applyConversationHotkeyEnabled(enabled)
@@ -1433,11 +1433,9 @@ extension HistoryPanelController {
 
     /// Синхронизировать состояние VA-контролей с UserDefaults.
     func syncVoiceAssistantControls() {
-        let hotkeyEnabled = UserDefaults.standard.bool(forKey: "KrabEar_ConversationHotkeyEnabled")
-        // Если ключ не установлен → дефолт ON (удобно для первого запуска)
-        let hotkeyEnabledDefault = UserDefaults.standard.object(forKey: "KrabEar_ConversationHotkeyEnabled") != nil
-            ? hotkeyEnabled : true
-        vaHotkeyToggle.state = hotkeyEnabledDefault ? .on : .off
+        // Та же политика, что применяет startup-фабрика HotkeyManager: отсутствующий
+        // ключ означает ON, а явно сохранённый false обязан остаться OFF.
+        vaHotkeyToggle.state = ConversationHotkeyPolicy.isEnabled(in: .standard) ? .on : .off
 
         let wakeWordEnabled = UserDefaults.standard.bool(forKey: "KrabEar_WakeWordEnabled")
         vaWakeWordToggle.state = wakeWordEnabled ? .on : .off

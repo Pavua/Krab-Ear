@@ -412,24 +412,9 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             }
         )
 
+        // Фабрика подключает ВСЕ callback'и. Тот же путь используется при
+        // смене клавиши/режима, поэтому runtime-reinstall не обедняет менеджер.
         hotkeyManager = makeHotkeyManager(settings: settings)
-        hotkeyManager?.onQuickReplay = { [weak self] in
-            DispatchQueue.main.async {
-                self?.handleQuickReplayPaste()
-            }
-        }
-        // Phase B.2 F9: fire-and-forget IPC when RegisterEventHotKey returns
-        // eventHotKeyExistsErr — another app holds the chord.
-        let ipcClientForHotkey = self.ipcClient
-        hotkeyManager?.reportHotkeyConflictHandler = { chord in
-            DispatchQueue.global(qos: .utility).async {
-                _ = try? ipcClientForHotkey.call(
-                    method: "report_hotkey_conflict",
-                    params: ["chord": chord],
-                    timeoutSec: IPCClient.quickTimeoutSec
-                )
-            }
-        }
         // 2026-05-09: Pre-flight Accessibility check. CGEventTap silently fails
         // (returns nil) если AX permission not granted → hotkey monitor не работает,
         // user не понимает что произошло. Explicitly ask via AXIsProcessTrustedWithOptions
@@ -650,7 +635,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         if enabled {
             hotkeyManager?.onConversationDoubleTap = { [weak self] in
                 DispatchQueue.main.async {
-                    self?.historyPanel?.triggerConversationStart()
+                    self?.historyPanel?.triggerConversationToggle()
                 }
             }
         } else {
@@ -1141,7 +1126,11 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Hotkey recording (see main+HotkeyRecording.swift)
 
-    /// Фабрика HotkeyManager: конфигурирует toggle или hold-режим.
+    /// Фабрика HotkeyManager: конфигурирует режим и полный набор callback'ов.
+    ///
+    /// Это единственная точка создания менеджера и на startup, и при runtime-
+    /// смене клавиши/режима. Так новый экземпляр не теряет quick replay,
+    /// conflict-reporting и сохранённый флаг conversation hotkey.
     func makeHotkeyManager(settings: AgentSettings) -> HotkeyManager {
         let manager = HotkeyManager(
             variant: settings.hotkey,
@@ -1164,9 +1153,33 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
                 self.stopRecording()
             }
         }
-        // PR 1.5: Wire Right Option double-tap → Разговор с AI trigger
-        manager.onConversationDoubleTap = { [weak self] in
-            DispatchQueue.main.async { self?.historyPanel?.triggerConversationStart() }
+        // Явно сохранённый false обязан переживать restart. Если ключ ещё не
+        // создан, ConversationHotkeyPolicy сохраняет исторический дефолт ON.
+        if ConversationHotkeyPolicy.isEnabled(in: .standard) {
+            manager.onConversationDoubleTap = { [weak self] in
+                DispatchQueue.main.async {
+                    self?.historyPanel?.triggerConversationToggle()
+                }
+            }
+        }
+
+        manager.onQuickReplay = { [weak self] in
+            DispatchQueue.main.async {
+                self?.handleQuickReplayPaste()
+            }
+        }
+
+        // Phase B.2 F9: fire-and-forget IPC when RegisterEventHotKey возвращает
+        // eventHotKeyExistsErr — chord уже занят другим приложением.
+        let ipcClientForHotkey = ipcClient
+        manager.reportHotkeyConflictHandler = { chord in
+            DispatchQueue.global(qos: .utility).async {
+                _ = try? ipcClientForHotkey.call(
+                    method: "report_hotkey_conflict",
+                    params: ["chord": chord],
+                    timeoutSec: IPCClient.quickTimeoutSec
+                )
+            }
         }
         return manager
     }

@@ -105,7 +105,19 @@ extension HistoryPanelController {
 
     // MARK: - PR 1.5 hook points
 
-    /// Вызывается из HotkeyManager (PR 1.5) для старта разговора по hotkey.
+    /// Вызывается из HotkeyManager для toggle разговора по двойному Right Option.
+    /// Активную сессию останавливаем без показа окна; idle-сессию запускаем через
+    /// ручной UI-путь ниже, чтобы пользователь увидел вкладку разговора.
+    func triggerConversationToggle() {
+        guard let conversationVC else { return }
+        ConversationHotkeyPolicy.performToggle(
+            isSessionActive: conversationVC.isSessionActive,
+            onStart: { self.triggerConversationStart() },
+            onStop: { conversationVC.stopConversation() }
+        )
+    }
+
+    /// Вызывается из ручного пути для старта разговора по hotkey или из меню.
     /// При menu-bar mode panel может быть закрытым — открываем + tab switch.
     /// showPanel() имеет async block который сбрасывает selection на History.
     /// Поэтому tab switch + startConversation deferred через main.async чтобы

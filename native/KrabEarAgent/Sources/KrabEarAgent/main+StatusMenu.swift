@@ -110,14 +110,14 @@ extension AgentAppDelegate {
         if previous.overlayOpacityPercent != current.overlayOpacityPercent {
             realtimeOverlay.setOpacityPercent(current.overlayOpacityPercent)
         }
-        if previous.hotkey != current.hotkey {
-            logger.info("Перезапуск hotkey manager с вариантом: \(current.hotkey)")
+        if previous.hotkey != current.hotkey || previous.hotkeyMode != current.hotkeyMode {
+            logger.info(
+                "Перезапуск hotkey manager: вариант=\(current.hotkey), режим=\(current.hotkeyMode)"
+            )
             hotkeyManager?.stop()
-            hotkeyManager = HotkeyManager(variant: current.hotkey, onToggle: { [weak self] in
-                DispatchQueue.main.async {
-                    self?.handleRecordToggleRequest()
-                }
-            })
+            // Та же фабрика, что на startup: не теряем hold/toggle-режим,
+            // conversation hotkey, quick replay и conflict-reporting.
+            hotkeyManager = makeHotkeyManager(settings: current)
             hotkeyManager?.start()
         }
     }
