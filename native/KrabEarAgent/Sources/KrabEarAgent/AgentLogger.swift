@@ -4,6 +4,8 @@
  Связи модуля:
  1) main.swift: пишет диагностику жизненного цикла записи/вставки/истории.
  2) Логи сохраняются в ~/Library/Application Support/KrabEar/agent.log.
+ 3) XCTest-процессы получают NullAgentLogger через общий AgentLogging-контракт,
+    поэтому raw `swift test` не касается пользовательского Application Support.
 
  Архитектура (после fix/agent-logger-resilience):
  - Хранит persistent FileHandle, открытый один раз при инициализации.
@@ -15,9 +17,35 @@
 
 import Foundation
 
+/// Узкий контракт логирования нужен, чтобы unit-тесты могли полностью отключить
+/// файловый побочный эффект, не меняя production-вызовы `AgentLogger.shared`.
+protocol AgentLogging: Sendable {
+    func info(_ message: String)
+    func warn(_ message: String)
+    func error(_ message: String)
+}
+
+/// No-op реализация для XCTest runner: сообщения намеренно отбрасываются.
+/// Это безопаснее временного HOME, потому что работает и для raw `swift test`.
+struct NullAgentLogger: AgentLogging {
+    static let shared = NullAgentLogger()
+
+    private init() {}
+
+    func info(_ message: String) {}
+    func warn(_ message: String) {}
+    func error(_ message: String) {}
+}
+
 /// Потокобезопасный минималистичный логгер агента в отдельный файл.
-final class AgentLogger: @unchecked Sendable {
-    static let shared = AgentLogger()
+final class AgentLogger: AgentLogging, @unchecked Sendable {
+    /// Production сохраняет файловый singleton и исторический путь. Только
+    /// XCTest runner получает no-op реализацию до первого consumer.
+    static let shared: any AgentLogging = AgentLoggerRuntime.makeShared()
+
+    static let defaultDataDirPath = NSString(
+        string: "~/Library/Application Support/KrabEar"
+    ).expandingTildeInPath
 
     private let queue = DispatchQueue(label: "krabear.agent.logger", qos: .utility)
     private let fileURL: URL
@@ -26,7 +54,7 @@ final class AgentLogger: @unchecked Sendable {
     // Persistent handle — открывается один раз, переоткрывается при сбое.
     private var handle: FileHandle?
 
-    init(dataDirPath: String = NSString(string: "~/Library/Application Support/KrabEar").expandingTildeInPath) {
+    init(dataDirPath: String = AgentLogger.defaultDataDirPath) {
         let dataDirURL = URL(fileURLWithPath: dataDirPath, isDirectory: true)
         self.fileURL = dataDirURL.appendingPathComponent("agent.log")
 
@@ -65,6 +93,13 @@ final class AgentLogger: @unchecked Sendable {
 
     func error(_ message: String) {
         write(level: "ERROR", message: message)
+    }
+
+    /// Дожидается уже поставленных в serial queue записей. Основной код пишет
+    /// асинхронно, а тестам и controlled shutdown нужна точная граница перед
+    /// удалением временного каталога или закрытием процесса.
+    func waitForPendingWrites() {
+        queue.sync {}
     }
 
     // MARK: - Private
@@ -200,5 +235,41 @@ final class AgentLogger: @unchecked Sendable {
                 }
             }
         }
+    }
+}
+
+/// Чистая граница выбора общей реализации. Параметры оставлены инъецируемыми,
+/// чтобы обе ветки проверялись без записи в пользовательский каталог.
+enum AgentLoggerRuntime {
+    static func isUnitTestProcess(
+        bundlePath: String = Bundle.main.bundlePath,
+        executablePath: String = CommandLine.arguments.first ?? ""
+    ) -> Bool {
+        let hasXCTestBundle = [bundlePath, executablePath].contains { path in
+            URL(fileURLWithPath: path).pathComponents.contains {
+                $0.lowercased().hasSuffix(".xctest")
+            }
+        }
+        // SwiftPM на macOS запускает пакет через системный `/usr/bin/xctest`,
+        // поэтому test bundle находится в аргументах host-процесса, а не в
+        // `Bundle.main`. Имя системного host — стабильная вторая граница.
+        let isXCTestHost = URL(fileURLWithPath: executablePath)
+            .lastPathComponent
+            .lowercased() == "xctest"
+        return hasXCTestBundle || isXCTestHost
+    }
+
+    static func makeShared(
+        bundlePath: String = Bundle.main.bundlePath,
+        executablePath: String = CommandLine.arguments.first ?? "",
+        dataDirPath: String = AgentLogger.defaultDataDirPath
+    ) -> any AgentLogging {
+        guard !isUnitTestProcess(
+            bundlePath: bundlePath,
+            executablePath: executablePath
+        ) else {
+            return NullAgentLogger.shared
+        }
+        return AgentLogger(dataDirPath: dataDirPath)
     }
 }

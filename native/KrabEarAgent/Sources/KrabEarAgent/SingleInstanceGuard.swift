@@ -30,7 +30,7 @@ import Foundation
 ///   - processRunner: Замена для Process-запуска lsregister (инъекция для тестов).
 func cleanupWorktreeShadows(
     projectRoot: URL,
-    logger: AgentLogger? = nil,
+    logger: (any AgentLogging)? = nil,
     processRunner: (_ executable: String, _ arguments: [String]) -> Void = defaultProcessRunner
 ) {
     let lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
@@ -94,7 +94,7 @@ nonisolated(unsafe) private var _agentLockFD: Int32 = -1
 /// - Returns: `true` если lock захвачен (первый экземпляр или lock file недоступен —
 ///   permissive fallback). `false` если другой экземпляр уже держит lock.
 @discardableResult
-func acquireFileLock(logger: AgentLogger? = nil) -> Bool {
+func acquireFileLock(logger: (any AgentLogging)? = nil) -> Bool {
     let lockDir = (NSString("~/Library/Application Support/KrabEar").expandingTildeInPath)
     let lockPath = (lockDir as NSString).appendingPathComponent("agent.lock")
 
@@ -126,7 +126,7 @@ func acquireFileLock(logger: AgentLogger? = nil) -> Bool {
 
 /// Освобождает file lock. Вызывается при штатном завершении агента.
 /// Идемпотентен — safe при повторном вызове.
-func releaseFileLock(logger: AgentLogger? = nil) {
+func releaseFileLock(logger: (any AgentLogging)? = nil) {
     let fd = _agentLockFD
     guard fd >= 0 else { return }
     flock(fd, LOCK_UN)

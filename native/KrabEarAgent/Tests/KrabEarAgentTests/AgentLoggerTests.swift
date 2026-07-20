@@ -3,6 +3,7 @@
 
  Стратегия:
  - Создаём AgentLogger с временным каталогом (FileManager.temporaryDirectory).
+ - Проверяем, что общий logger XCTest-процесса заменён на NullAgentLogger.
  - После каждого вызова log-метода синхронизируемся через expectation + sleep,
    так как запись происходит асинхронно на внутренней queue.
  - Проверяем содержимое лог-файла напрямую.
@@ -118,12 +119,65 @@ final class AgentLoggerTests: XCTestCase {
         XCTAssertTrue(contents.contains("third"),  "Третье сообщение должно быть в логе")
     }
 
-    /// AgentLogger.shared существует и не падает при вызове.
-    func test_shared_singleton_accessible() {
-        // Просто убеждаемся что shared не nil и не крашится
-        let shared = AgentLogger.shared
-        XCTAssertNotNil(shared)
-        // Не пишем в shared — его logFile живёт в реальном Application Support
+    /// Raw `swift test` использует `.xctest` bundle либо системный xctest-host:
+    /// оба признака отделяют unit-тесты от production `.app` без env-флагов.
+    func test_runtimeBoundary_detectsXCTestRunnerOnly() {
+        XCTAssertTrue(AgentLoggerRuntime.isUnitTestProcess(
+            bundlePath: "/tmp/KrabEarAgentTests.xctest",
+            executablePath: "/tmp/KrabEarAgentTests.xctest/Contents/MacOS/KrabEarAgentTests"
+        ))
+        XCTAssertTrue(AgentLoggerRuntime.isUnitTestProcess(
+            bundlePath: "/Applications/Xcode.app/Contents/Developer/usr/bin",
+            executablePath: "/Applications/Xcode.app/Contents/Developer/usr/bin/xctest"
+        ))
+        XCTAssertFalse(AgentLoggerRuntime.isUnitTestProcess(
+            bundlePath: "/Applications/Krab Ear.app",
+            executablePath: "/Applications/Krab Ear.app/Contents/MacOS/Krab Ear"
+        ))
+        XCTAssertTrue(
+            AgentLoggerRuntime.isUnitTestProcess(),
+            "SwiftPM runner не распознан: bundle=\(Bundle.main.bundlePath), " +
+            "executable=\(CommandLine.arguments.first ?? "<нет>")"
+        )
+    }
+
+    /// Общий logger внутри raw `swift test` обязан быть no-op: любой косвенный
+    /// вызов из тестируемого объекта не должен открывать пользовательский файл.
+    func test_shared_usesNullLoggerInsideXCTestProcess() {
+        XCTAssertTrue(AgentLogger.shared is NullAgentLogger)
+        AgentLogger.shared.info("unit-test message must stay in memory")
+    }
+
+    /// Фабрика unit-test ветки игнорирует даже явно переданный dataDir и не
+    /// создаёт `agent.log`, поэтому тест проверяет герметичность безопасно.
+    func test_factory_xctestBranchDoesNotCreateLogFile() {
+        let logger = AgentLoggerRuntime.makeShared(
+            bundlePath: "/tmp/KrabEarAgentTests.xctest",
+            executablePath: "/tmp/KrabEarAgentTests.xctest/Contents/MacOS/KrabEarAgentTests",
+            dataDirPath: tmpDir.path
+        )
+
+        logger.warn("this message must be discarded")
+        Thread.sleep(forTimeInterval: 0.2)
+
+        XCTAssertTrue(logger is NullAgentLogger)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: logFile.path))
+    }
+
+    /// За пределами XCTest фабрика сохраняет прежний файловый logger и путь,
+    /// переданный production-конфигурацией.
+    func test_factory_appBranchKeepsFileLogger() {
+        let logger = AgentLoggerRuntime.makeShared(
+            bundlePath: "/Applications/Krab Ear.app",
+            executablePath: "/Applications/Krab Ear.app/Contents/MacOS/Krab Ear",
+            dataDirPath: tmpDir.path
+        )
+
+        logger.info("production branch marker")
+        waitForLog()
+
+        XCTAssertTrue(logger is AgentLogger)
+        XCTAssertTrue(logContents().contains("production branch marker"))
     }
 
     // MARK: - Rotation tests
@@ -139,15 +193,17 @@ final class AgentLoggerTests: XCTestCase {
         for _ in 0..<12_000 {
             logger.info(bigChunk)
         }
+        // Маркер поставлен после всех больших записей в той же serial queue:
+        // его появление не даёт tearDown удалить каталог под живым writer.
+        let drainMarker = "ROTATION_CREATE_DRAIN_MARKER"
+        logger.info(drainMarker)
+        logger.waitForPendingWrites()
 
-        let deadline = Date().addingTimeInterval(5.0)
         let backup = tmpDir.appendingPathComponent("agent.log.1")
-        while Date() < deadline {
-            if FileManager.default.fileExists(atPath: backup.path) { break }
-            Thread.sleep(forTimeInterval: 0.1)
-        }
         XCTAssertTrue(FileManager.default.fileExists(atPath: backup.path),
                       "agent.log.1 должен появиться после превышения 5 MB")
+        XCTAssertTrue(logContents().contains(drainMarker),
+                      "Очередь logger должна завершить записи до очистки каталога")
     }
 
     /// После ротации основной файл agent.log продолжает существовать и принимает записи.
@@ -161,13 +217,7 @@ final class AgentLoggerTests: XCTestCase {
         }
         // Пишем финальный маркер после ротации.
         logger.info("POST_ROTATION_MARKER")
-
-        let deadline = Date().addingTimeInterval(5.0)
-        while Date() < deadline {
-            if let c = try? String(contentsOf: logFile, encoding: .utf8),
-               c.contains("POST_ROTATION_MARKER") { break }
-            Thread.sleep(forTimeInterval: 0.1)
-        }
+        logger.waitForPendingWrites()
         XCTAssertTrue(FileManager.default.fileExists(atPath: logFile.path),
                       "agent.log должен существовать после ротации")
         let contents = (try? String(contentsOf: logFile, encoding: .utf8)) ?? ""
@@ -185,10 +235,13 @@ final class AgentLoggerTests: XCTestCase {
         for _ in 0..<60_000 {
             logger.info(bigChunk)
         }
-
-        Thread.sleep(forTimeInterval: 3.0)
+        let drainMarker = "BACKUP_COUNT_DRAIN_MARKER"
+        logger.info(drainMarker)
+        logger.waitForPendingWrites()
 
         let backup4 = tmpDir.appendingPathComponent("agent.log.4")
+        XCTAssertTrue(logContents().contains(drainMarker),
+                      "Очередь logger должна завершить записи до очистки каталога")
         XCTAssertFalse(FileManager.default.fileExists(atPath: backup4.path),
                        "agent.log.4 не должен существовать при backupCount=3")
     }
