@@ -30,6 +30,69 @@ private func makeSilentNotificationService() -> NotificationService {
     NotificationService(processRunner: SilentNotificationProcessRunner())
 }
 
+/// Ничего не регистрирует в AppKit, но возвращает токен для штатного удаления.
+@MainActor
+private final class NoopSelectionEventMonitor: SelectionEventMonitoring {
+    private final class Token {}
+
+    nonisolated init() {}
+
+    func installKeyDownMonitor(
+        handler: @escaping @Sendable (NSEvent) -> Void
+    ) -> Any? {
+        Token()
+    }
+
+    func removeMonitor(_ monitor: Any) {}
+}
+
+/// Записывает жизненный цикл monitor'а без обращения к глобальному NSEvent API.
+@MainActor
+private final class RecordingSelectionEventMonitor: SelectionEventMonitoring {
+    private final class Token {}
+
+    private(set) var installCount = 0
+    private(set) var removeCount = 0
+
+    nonisolated init() {}
+
+    func installKeyDownMonitor(
+        handler: @escaping @Sendable (NSEvent) -> Void
+    ) -> Any? {
+        installCount += 1
+        return Token()
+    }
+
+    func removeMonitor(_ monitor: Any) {
+        removeCount += 1
+    }
+}
+
+/// Создаёт translator с уникальным набором UserDefaults и безопасным event monitor.
+/// Домен очищается после чтения: значения конфигурации уже скопированы в translator.
+@MainActor
+private func makeIsolatedSelectionTranslator(
+    ipcClient: IPCClient,
+    notificationService: NotificationService = makeSilentNotificationService(),
+    config: SelectionTranslatorConfig = .default,
+    eventMonitor: any SelectionEventMonitoring = NoopSelectionEventMonitor()
+) -> SelectionTranslator {
+    let suiteName = "KrabEar.SelectionTranslatorFixture.\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: suiteName) else {
+        preconditionFailure("Не удалось создать изолированный UserDefaults suite")
+    }
+    defaults.removePersistentDomain(forName: suiteName)
+    config.save(to: defaults)
+    let translator = SelectionTranslator(
+        ipcClient: ipcClient,
+        notificationService: notificationService,
+        defaults: defaults,
+        eventMonitor: eventMonitor
+    )
+    defaults.removePersistentDomain(forName: suiteName)
+    return translator
+}
+
 /// Минимальный Unix-socket сервер для одного IPC-вызова.
 /// Принимает 1 соединение, читает запрос (до \n) и отвечает `responseJSON`.
 private func runIPCEchoServer(
@@ -81,64 +144,62 @@ private func tempSocketPath() -> String {
 
 final class SelectionTranslatorConfigTests: XCTestCase {
 
-    private let testEnabledKey  = SelectionTranslatorConfig.enabledKey
-    private let testHotkeyKey   = SelectionTranslatorConfig.hotkeyKey
-    private let testTargetKey   = SelectionTranslatorConfig.targetKey
+    private var defaults: UserDefaults!
+    private var suiteName: String!
 
     override func setUp() {
         super.setUp()
-        // Очищаем UserDefaults перед каждым тестом
-        UserDefaults.standard.removeObject(forKey: testEnabledKey)
-        UserDefaults.standard.removeObject(forKey: testHotkeyKey)
-        UserDefaults.standard.removeObject(forKey: testTargetKey)
+        suiteName = "KrabEar.SelectionTranslatorTests.\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)
+        defaults.removePersistentDomain(forName: suiteName)
     }
 
     override func tearDown() {
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults = nil
+        suiteName = nil
         super.tearDown()
-        UserDefaults.standard.removeObject(forKey: testEnabledKey)
-        UserDefaults.standard.removeObject(forKey: testHotkeyKey)
-        UserDefaults.standard.removeObject(forKey: testTargetKey)
     }
 
     func test_defaultConfig_enabled_isFalse() {
-        let config = SelectionTranslatorConfig.load()
+        let config = SelectionTranslatorConfig.load(from: defaults)
         XCTAssertFalse(config.enabled, "По умолчанию selection translate должен быть выключен")
     }
 
     func test_defaultConfig_hotkey_isCmdShiftT() {
-        let config = SelectionTranslatorConfig.load()
+        let config = SelectionTranslatorConfig.load(from: defaults)
         XCTAssertEqual(config.hotkey, "cmd_shift_t")
     }
 
     func test_defaultConfig_targetLang_isAuto() {
-        let config = SelectionTranslatorConfig.load()
+        let config = SelectionTranslatorConfig.load(from: defaults)
         XCTAssertEqual(config.targetLang, "auto")
     }
 
     func test_save_and_load_enabled_true() {
         var config = SelectionTranslatorConfig.default
         config.enabled = true
-        config.save()
+        config.save(to: defaults)
 
-        let loaded = SelectionTranslatorConfig.load()
+        let loaded = SelectionTranslatorConfig.load(from: defaults)
         XCTAssertTrue(loaded.enabled, "Флаг enabled должен сохраняться и загружаться")
     }
 
     func test_save_and_load_hotkey_cmdOptT() {
         var config = SelectionTranslatorConfig.default
         config.hotkey = "cmd_opt_t"
-        config.save()
+        config.save(to: defaults)
 
-        let loaded = SelectionTranslatorConfig.load()
+        let loaded = SelectionTranslatorConfig.load(from: defaults)
         XCTAssertEqual(loaded.hotkey, "cmd_opt_t")
     }
 
     func test_save_and_load_targetLang_ru() {
         var config = SelectionTranslatorConfig.default
         config.targetLang = "ru"
-        config.save()
+        config.save(to: defaults)
 
-        let loaded = SelectionTranslatorConfig.load()
+        let loaded = SelectionTranslatorConfig.load(from: defaults)
         XCTAssertEqual(loaded.targetLang, "ru")
     }
 
@@ -147,9 +208,9 @@ final class SelectionTranslatorConfigTests: XCTestCase {
         config.enabled    = true
         config.hotkey     = "cmd_opt_t"
         config.targetLang = "es"
-        config.save()
+        config.save(to: defaults)
 
-        let loaded = SelectionTranslatorConfig.load()
+        let loaded = SelectionTranslatorConfig.load(from: defaults)
         XCTAssertTrue(loaded.enabled)
         XCTAssertEqual(loaded.hotkey,     "cmd_opt_t")
         XCTAssertEqual(loaded.targetLang, "es")
@@ -167,9 +228,11 @@ final class SelectionTranslatorHotkeyTests: XCTestCase {
         let ns = makeSilentNotificationService()
         var cfg = SelectionTranslatorConfig.default
         cfg.hotkey = hotkey
-        let t = SelectionTranslator(ipcClient: client, notificationService: ns)
-        t.config = cfg
-        return t
+        return makeIsolatedSelectionTranslator(
+            ipcClient: client,
+            notificationService: ns,
+            config: cfg
+        )
     }
 
     // MARK: Synthetic NSEvent helpers
@@ -212,7 +275,7 @@ final class SelectionTranslatorAXTests: XCTestCase {
         let socketPath = "/tmp/krabear_noop_\(Int.random(in: 0...999_999)).sock"
         let client = IPCClient(socketPath: socketPath)
         let ns = makeSilentNotificationService()
-        return SelectionTranslator(ipcClient: client, notificationService: ns)
+        return makeIsolatedSelectionTranslator(ipcClient: client, notificationService: ns)
     }
 
     func test_readSelectionViaAX_whenNotTrusted_returnsNil() {
@@ -257,8 +320,11 @@ final class SelectionTranslatorIPCTests: XCTestCase {
         let ns = makeSilentNotificationService()
         var cfg = SelectionTranslatorConfig.default
         cfg.targetLang = "es"
-        let t = SelectionTranslator(ipcClient: client, notificationService: ns)
-        t.config = cfg
+        let t = makeIsolatedSelectionTranslator(
+            ipcClient: client,
+            notificationService: ns,
+            config: cfg
+        )
 
         let result = await t.callTranslateIPC(text: "Привет мир")
         XCTAssertEqual(result, "Hola mundo")
@@ -279,7 +345,7 @@ final class SelectionTranslatorIPCTests: XCTestCase {
 
         let client = IPCClient(socketPath: socketPath)
         let ns = makeSilentNotificationService()
-        let t = SelectionTranslator(ipcClient: client, notificationService: ns)
+        let t = makeIsolatedSelectionTranslator(ipcClient: client, notificationService: ns)
 
         let result = await t.callTranslateIPC(text: "Hello")
         XCTAssertNil(result, "Пустой перевод должен возвращать nil и показывать error HUD")
@@ -299,7 +365,7 @@ final class SelectionTranslatorIPCTests: XCTestCase {
 
         let client = IPCClient(socketPath: socketPath)
         let ns = makeSilentNotificationService()
-        let t = SelectionTranslator(ipcClient: client, notificationService: ns)
+        let t = makeIsolatedSelectionTranslator(ipcClient: client, notificationService: ns)
 
         let result = await t.callTranslateIPC(text: "test")
         XCTAssertNil(result, "При ошибке backend callTranslateIPC должен возвращать nil")
@@ -309,7 +375,7 @@ final class SelectionTranslatorIPCTests: XCTestCase {
         // Сокет недоступен — должен вернуть nil (не крашиться)
         let client = IPCClient(socketPath: "/tmp/krabear_nonexistent_\(Int.random(in: 0...999_999)).sock")
         let ns = makeSilentNotificationService()
-        let t = SelectionTranslator(ipcClient: client, notificationService: ns)
+        let t = makeIsolatedSelectionTranslator(ipcClient: client, notificationService: ns)
         let result = await t.callTranslateIPC(text: "Hello")
         XCTAssertNil(result)
     }
@@ -329,7 +395,7 @@ final class SelectionTranslatorIPCTests: XCTestCase {
 
         let client = IPCClient(socketPath: socketPath)
         let ns = makeSilentNotificationService()
-        let t = SelectionTranslator(ipcClient: client, notificationService: ns)
+        let t = makeIsolatedSelectionTranslator(ipcClient: client, notificationService: ns)
 
         let result = await t.callTranslateIPC(text: "original")
         XCTAssertEqual(result, "Translated via text field")
@@ -344,7 +410,7 @@ final class SelectionTranslatorHUDTests: XCTestCase {
     func test_showErrorHUD_doesNotCrash() {
         let client = IPCClient(socketPath: "/tmp/noop.sock")
         let ns = makeSilentNotificationService()
-        let t = SelectionTranslator(ipcClient: client, notificationService: ns)
+        let t = makeIsolatedSelectionTranslator(ipcClient: client, notificationService: ns)
         // Не должен крашиться
         t.showErrorHUD(reason: "Тестовая ошибка")
     }
@@ -355,66 +421,90 @@ final class SelectionTranslatorHUDTests: XCTestCase {
 @MainActor
 final class SelectionTranslatorLifecycleTests: XCTestCase {
 
-    private func makeTranslator(enabled: Bool = false) -> SelectionTranslator {
+    private func makeTranslator(
+        enabled: Bool = false
+    ) -> (translator: SelectionTranslator, monitor: RecordingSelectionEventMonitor) {
         let client = IPCClient(socketPath: "/tmp/noop_\(Int.random(in: 0...999_999)).sock")
-        let ns = makeSilentNotificationService()
         var cfg = SelectionTranslatorConfig.default
         cfg.enabled = enabled
-        let t = SelectionTranslator(ipcClient: client, notificationService: ns)
-        t.config = cfg
-        return t
+        let monitor = RecordingSelectionEventMonitor()
+        let translator = makeIsolatedSelectionTranslator(
+            ipcClient: client,
+            config: cfg,
+            eventMonitor: monitor
+        )
+        return (translator, monitor)
     }
 
     func test_start_doesNotCrash() {
-        let t = makeTranslator(enabled: true)
+        let (t, monitor) = makeTranslator(enabled: true)
         t.start()
         t.stop()
+
+        XCTAssertEqual(monitor.installCount, 1)
+        XCTAssertEqual(monitor.removeCount, 1)
     }
 
     func test_stop_withoutStart_doesNotCrash() {
-        let t = makeTranslator()
+        let (t, monitor) = makeTranslator()
         t.stop()
+
+        XCTAssertEqual(monitor.installCount, 0)
+        XCTAssertEqual(monitor.removeCount, 0)
     }
 
     func test_stopCalledTwice_doesNotCrash() {
-        let t = makeTranslator(enabled: true)
+        let (t, monitor) = makeTranslator(enabled: true)
         t.start()
         t.stop()
         t.stop()
+
+        XCTAssertEqual(monitor.installCount, 1)
+        XCTAssertEqual(monitor.removeCount, 1)
     }
 
     func test_startCalledTwice_doesNotCrash() {
-        let t = makeTranslator(enabled: true)
+        let (t, monitor) = makeTranslator(enabled: true)
         t.start()
         t.start()
         t.stop()
+
+        XCTAssertEqual(monitor.installCount, 2)
+        XCTAssertEqual(monitor.removeCount, 2)
     }
 
     func test_configDisabled_doesNotInstallMonitor() {
         // enabled=false → installMonitor не вызывается → start безопасен
-        let t = makeTranslator(enabled: false)
+        let (t, monitor) = makeTranslator(enabled: false)
         t.start()
         t.stop()
+
+        XCTAssertEqual(monitor.installCount, 0)
+        XCTAssertEqual(monitor.removeCount, 0)
     }
 
     func test_setConfig_enabled_true_appliesChange() {
-        let t = makeTranslator(enabled: false)
+        let (t, monitor) = makeTranslator(enabled: false)
         t.start()
         var cfg = t.config
         cfg.enabled = true
         t.config = cfg
-        // Не крашиться, monitor установлен
         t.stop()
+
+        XCTAssertEqual(monitor.installCount, 1)
+        XCTAssertEqual(monitor.removeCount, 1)
     }
 
     func test_setConfig_disabled_removesMonitor() {
-        let t = makeTranslator(enabled: true)
+        let (t, monitor) = makeTranslator(enabled: true)
         t.start()
         var cfg = t.config
         cfg.enabled = false
         t.config = cfg
-        // monitor должен быть удалён
         t.stop()
+
+        XCTAssertEqual(monitor.installCount, 1)
+        XCTAssertEqual(monitor.removeCount, 1)
     }
 }
 
@@ -441,8 +531,11 @@ final class SelectionTranslatorWave191Tests: XCTestCase {
         var cfg = SelectionTranslatorConfig.default
         cfg.targetLang = targetLang
         cfg.enabled = true
-        let t = SelectionTranslator(ipcClient: client, notificationService: ns)
-        t.config = cfg
+        let t = makeIsolatedSelectionTranslator(
+            ipcClient: client,
+            notificationService: ns,
+            config: cfg
+        )
         return (t, socketPath)
     }
 
@@ -465,7 +558,7 @@ final class SelectionTranslatorWave191Tests: XCTestCase {
     func test_readSelectionViaAX_returns_text() {
         let client = IPCClient(socketPath: "/tmp/noop.sock")
         let ns = makeSilentNotificationService()
-        let t = SelectionTranslator(ipcClient: client, notificationService: ns)
+        let t = makeIsolatedSelectionTranslator(ipcClient: client, notificationService: ns)
 
         let result = t.readSelectionViaAX()
         // В test sandbox без AX permission — nil. Тест проверяет что нет краша.
@@ -486,7 +579,7 @@ final class SelectionTranslatorWave191Tests: XCTestCase {
         // Симулируем сценарий: AX недоступен (test sandbox) → clipboard пуст → translate не должен вызываться
         let client = IPCClient(socketPath: "/tmp/krabear_noop_fallback.sock")
         let ns = makeSilentNotificationService()
-        let t = SelectionTranslator(ipcClient: client, notificationService: ns)
+        let t = makeIsolatedSelectionTranslator(ipcClient: client, notificationService: ns)
 
         // Если AX недоступен — readSelectionViaAX вернёт nil
         let axResult = t.readSelectionViaAX()
@@ -503,7 +596,7 @@ final class SelectionTranslatorWave191Tests: XCTestCase {
     func test_writeResultViaAX_replaces_selection() {
         let client = IPCClient(socketPath: "/tmp/noop.sock")
         let ns = makeSilentNotificationService()
-        let t = SelectionTranslator(ipcClient: client, notificationService: ns)
+        let t = makeIsolatedSelectionTranslator(ipcClient: client, notificationService: ns)
 
         // В test sandbox без AX permission — запись должна вернуть false (не краш)
         let appElement = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
@@ -523,7 +616,7 @@ final class SelectionTranslatorWave191Tests: XCTestCase {
     func test_writeResultViaAX_fallback_to_paste() {
         let client = IPCClient(socketPath: "/tmp/noop.sock")
         let ns = makeSilentNotificationService()
-        let t = SelectionTranslator(ipcClient: client, notificationService: ns)
+        let t = makeIsolatedSelectionTranslator(ipcClient: client, notificationService: ns)
 
         // pid=0 создаёт невалидный element → AX write fails → в реальном flow это триггерит clipboard paste fallback
         let invalidElement = AXUIElementCreateApplication(0)
@@ -548,7 +641,7 @@ final class SelectionTranslatorWave191Tests: XCTestCase {
 
         let client = IPCClient(socketPath: socketPath)
         let ns = makeSilentNotificationService()
-        let t = SelectionTranslator(ipcClient: client, notificationService: ns)
+        let t = makeIsolatedSelectionTranslator(ipcClient: client, notificationService: ns)
 
         let result = await t.callTranslateIPC(text: "   ")
         XCTAssertNil(result, "Пробельный перевод должен вернуть nil — empty selection защита")
@@ -560,7 +653,7 @@ final class SelectionTranslatorWave191Tests: XCTestCase {
     func test_handles_translation_failure_graceful() async {
         let client = IPCClient(socketPath: "/tmp/krabear_missing_\(Int.random(in: 0...999_999)).sock")
         let ns = makeSilentNotificationService()
-        let t = SelectionTranslator(ipcClient: client, notificationService: ns)
+        let t = makeIsolatedSelectionTranslator(ipcClient: client, notificationService: ns)
 
         // Должен вернуть nil без crash, showErrorHUD вызван внутри callTranslateIPC
         let result = await t.callTranslateIPC(text: "Тест отказа перевода")
@@ -585,7 +678,7 @@ final class SelectionTranslatorWave191Tests: XCTestCase {
 
         let client = IPCClient(socketPath: socketPath)
         let ns = makeSilentNotificationService()
-        let t = SelectionTranslator(ipcClient: client, notificationService: ns)
+        let t = makeIsolatedSelectionTranslator(ipcClient: client, notificationService: ns)
 
         // Unicode input: кириллица + emoji + латиница
         let result = await t.callTranslateIPC(text: "Привет мир 🌍 — Hello world")
@@ -601,7 +694,7 @@ final class SelectionTranslatorWave191Tests: XCTestCase {
         // требует синтетических Cmd+C/V событий к реальному приложению, что не работает в тесте.
         let client = IPCClient(socketPath: "/tmp/noop.sock")
         let ns = makeSilentNotificationService()
-        let t = SelectionTranslator(ipcClient: client, notificationService: ns)
+        let t = makeIsolatedSelectionTranslator(ipcClient: client, notificationService: ns)
 
         // Проверяем baseline: showErrorHUD не крашится (clipboard restore path)
         t.showErrorHUD(reason: "Тест восстановления clipboard")
@@ -630,8 +723,11 @@ final class SelectionTranslatorWave191Tests: XCTestCase {
         let ns = makeSilentNotificationService()
         var cfg = SelectionTranslatorConfig.default
         cfg.enabled = true
-        let t = SelectionTranslator(ipcClient: client, notificationService: ns)
-        t.config = cfg
+        let t = makeIsolatedSelectionTranslator(
+            ipcClient: client,
+            notificationService: ns,
+            config: cfg
+        )
 
         // Один вызов проходит через, второй — сокет уже закрыт → nil (graceful)
         let result1 = await t.callTranslateIPC(text: "Первый")

@@ -42,20 +42,52 @@ struct SelectionTranslatorConfig {
     static let hotkeyKey   = "KrabEar_SelectionHotkey"
     static let targetKey   = "KrabEar_SelectionTargetLang"
 
-    static func load() -> SelectionTranslatorConfig {
-        let ud = UserDefaults.standard
+    static func load(from defaults: UserDefaults = .standard) -> SelectionTranslatorConfig {
         return SelectionTranslatorConfig(
-            enabled:    ud.object(forKey: enabledKey)  != nil ? ud.bool(forKey: enabledKey) : Self.default.enabled,
-            hotkey:     ud.string(forKey: hotkeyKey)   ?? Self.default.hotkey,
-            targetLang: ud.string(forKey: targetKey)   ?? Self.default.targetLang
+            enabled: defaults.object(forKey: enabledKey) != nil
+                ? defaults.bool(forKey: enabledKey)
+                : Self.default.enabled,
+            hotkey: defaults.string(forKey: hotkeyKey) ?? Self.default.hotkey,
+            targetLang: defaults.string(forKey: targetKey) ?? Self.default.targetLang
         )
     }
 
-    func save() {
-        let ud = UserDefaults.standard
-        ud.set(enabled,    forKey: Self.enabledKey)
-        ud.set(hotkey,     forKey: Self.hotkeyKey)
-        ud.set(targetLang, forKey: Self.targetKey)
+    func save(to defaults: UserDefaults = .standard) {
+        defaults.set(enabled, forKey: Self.enabledKey)
+        defaults.set(hotkey, forKey: Self.hotkeyKey)
+        defaults.set(targetLang, forKey: Self.targetKey)
+    }
+}
+
+// MARK: - Global event monitor
+
+/// Контракт системного наблюдателя за глобальным нажатием клавиш.
+///
+/// Изоляция на MainActor сохраняет прежний жизненный цикл AppKit и позволяет
+/// unit-тестам подставить счётчик, не регистрируя настоящий глобальный NSEvent monitor.
+@MainActor
+protocol SelectionEventMonitoring {
+    func installKeyDownMonitor(
+        handler: @escaping @Sendable (NSEvent) -> Void
+    ) -> Any?
+
+    func removeMonitor(_ monitor: Any)
+}
+
+/// Системная реализация для рабочего приложения, напрямую делегирующая NSEvent API.
+@MainActor
+struct SystemSelectionEventMonitor: SelectionEventMonitoring {
+    /// Инициализатор без состояния безопасен как аргумент по умолчанию до входа в MainActor.
+    nonisolated init() {}
+
+    func installKeyDownMonitor(
+        handler: @escaping @Sendable (NSEvent) -> Void
+    ) -> Any? {
+        NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: handler)
+    }
+
+    func removeMonitor(_ monitor: Any) {
+        NSEvent.removeMonitor(monitor)
     }
 }
 
@@ -76,6 +108,7 @@ final class SelectionTranslator {
 
     private let ipcClient: IPCClient
     private let notificationService: NotificationService
+    private let eventMonitor: any SelectionEventMonitoring
     private let logger = AgentLogger.shared
 
     // MARK: - State
@@ -89,10 +122,16 @@ final class SelectionTranslator {
 
     // MARK: - Init
 
-    init(ipcClient: IPCClient, notificationService: NotificationService) {
+    init(
+        ipcClient: IPCClient,
+        notificationService: NotificationService,
+        defaults: UserDefaults = .standard,
+        eventMonitor: any SelectionEventMonitoring = SystemSelectionEventMonitor()
+    ) {
         self.ipcClient = ipcClient
         self.notificationService = notificationService
-        self.config = SelectionTranslatorConfig.load()
+        self.eventMonitor = eventMonitor
+        self.config = SelectionTranslatorConfig.load(from: defaults)
     }
 
     // MARK: - Lifecycle
@@ -117,13 +156,13 @@ final class SelectionTranslator {
 
     private func removeMonitor() {
         if let m = globalMonitor {
-            NSEvent.removeMonitor(m)
+            eventMonitor.removeMonitor(m)
             globalMonitor = nil
         }
     }
 
     private func installMonitor() {
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        globalMonitor = eventMonitor.installKeyDownMonitor { [weak self] event in
             Task { @MainActor [weak self] in
                 self?.handleKeyEvent(event)
             }

@@ -33,10 +33,17 @@ actor HealthMonitor {
 
     // Phase B.1: хранит Task подписки на probe events чтобы можно было отменить.
     private var probeSubscriptionTask: Task<Void, Never>?
+    /// Тестовая граница подписки. nil сохраняет рабочий путь через ProbeSSEBox.
+    private let probeSubscriptionOperation: (@Sendable (URL) async -> Void)?
 
-    init(pingInterval: TimeInterval = 3.0, hangThreshold: Int = 2) {
+    init(
+        pingInterval: TimeInterval = 3.0,
+        hangThreshold: Int = 2,
+        probeSubscriptionOperation: (@Sendable (URL) async -> Void)? = nil
+    ) {
         self.pingInterval = pingInterval
         self.hangThreshold = hangThreshold
+        self.probeSubscriptionOperation = probeSubscriptionOperation
     }
 
     // MARK: - Phase A: ping loop
@@ -139,9 +146,17 @@ extension HealthMonitor {
             return
         }
 
-        // Используем ProbeSSEBox для lifecycle без Sendable нарушений
-        let box = ProbeSSEBox(statusIndicator: statusIndicator)
+        if let operation = probeSubscriptionOperation {
+            // Инъекция оставляет Task под тем же контрактом отмены HealthMonitor,
+            // но не открывает URLSession в unit-тестах.
+            probeSubscriptionTask = Task.detached {
+                await operation(url)
+            }
+            return
+        }
 
+        // Рабочее приложение по-прежнему использует ProbeSSEBox без нарушений Sendable.
+        let box = ProbeSSEBox(statusIndicator: statusIndicator)
         // Держим box сильной ссылкой, чтобы он жил на время работы Task
         probeSubscriptionTask = Task.detached {
             await box.startStreaming(url: url)

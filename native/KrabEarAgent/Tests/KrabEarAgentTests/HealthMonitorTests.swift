@@ -10,7 +10,7 @@
  Phase B.1 coverage (3 тесты — Task 13):
    5. subscribeToProbeEvents вызывает flashGreen при rewriter_recovered событии.
    6. subscribeToProbeEvents не вызывает flashGreen на другие события.
-   7. Task отменяется при stop() (weak self guard).
+   7. Инъецированная Task получает точный URL и отменяется при stop().
 */
 
 import XCTest
@@ -121,23 +121,35 @@ final class HealthMonitorProbeTests: XCTestCase {
 
     // MARK: - Test 7: Task отменяется при stop()
 
-    /// После stop() probeSubscriptionTask должен быть отменён.
-    /// Проверяем что stop() не оставляет background Task'ов.
+    /// После stop() probeSubscriptionTask должна передать cancellation инъецированной операции.
     @MainActor
     func test_subscribe_cancels_on_stop() async {
-        let monitor = HealthMonitor(pingInterval: 999.0, hangThreshold: 2)
+        let recorder = ProbeSubscriptionRecorder()
+        let monitor = HealthMonitor(
+            pingInterval: 999.0,
+            hangThreshold: 2,
+            probeSubscriptionOperation: { url in
+                await recorder.run(url)
+            }
+        )
         let view = StatusIndicatorView(frame: NSRect(x: 0, y: 0, width: 12, height: 12))
 
-        // Подписываемся с несуществующим сервером (Task стартует, но не получает данных)
         await monitor.subscribeToProbeEvents(
-            restBaseURL: "http://127.0.0.1:9999",
+            restBaseURL: "https://probe.invalid",
             statusIndicator: view
         )
+        await fulfillment(of: [recorder.startedExpectation], timeout: 2.0)
 
-        // Останавливаем — должно отменить probe task без crash
         await monitor.stop()
+        await fulfillment(of: [recorder.cancelledExpectation], timeout: 2.0)
 
-        // Проверяем что state переключился в stopped
+        let snapshot = recorder.snapshot()
+        XCTAssertEqual(
+            snapshot.urls,
+            [URL(string: "https://probe.invalid/v1/events?filter=rewriter_recovered")!]
+        )
+        XCTAssertEqual(snapshot.cancellationCount, 1)
+
         let state = await monitor.currentState()
         XCTAssertEqual(state, .stopped, "После stop() state должен быть .stopped")
     }
@@ -153,6 +165,50 @@ final class TestCounter: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         calls += 1
         return calls >= 2
+    }
+}
+
+/// Тестовый двойник probe-подписки, который обрабатывает отмену без URLSession и сети.
+private final class ProbeSubscriptionRecorder: @unchecked Sendable {
+    let startedExpectation = XCTestExpectation(description: "операция probe-подписки запущена")
+    let cancelledExpectation = XCTestExpectation(description: "операция probe-подписки отменена")
+
+    private let lock = NSLock()
+    private var recordedURLs: [URL] = []
+    private var recordedCancellationCount = 0
+
+    func run(_ url: URL) async {
+        recordStart(url)
+        startedExpectation.fulfill()
+
+        await withTaskCancellationHandler {
+            do {
+                try await Task.sleep(nanoseconds: UInt64.max)
+            } catch {
+                // Отмена штатно завершает тестовую операцию.
+            }
+        } onCancel: {
+            self.recordCancellation()
+            self.cancelledExpectation.fulfill()
+        }
+    }
+
+    private func recordStart(_ url: URL) {
+        lock.lock()
+        recordedURLs.append(url)
+        lock.unlock()
+    }
+
+    private func recordCancellation() {
+        lock.lock()
+        recordedCancellationCount += 1
+        lock.unlock()
+    }
+
+    func snapshot() -> (urls: [URL], cancellationCount: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (recordedURLs, recordedCancellationCount)
     }
 }
 
