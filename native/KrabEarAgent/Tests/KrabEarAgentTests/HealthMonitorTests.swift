@@ -7,10 +7,12 @@
    3. counter сбрасывается при success после fail.
    4. onHangDetected callback вызывается ровно один раз.
 
- Phase B.1 coverage (3 тесты — Task 13):
+ Phase B.1 coverage (5 тестов):
    5. subscribeToProbeEvents вызывает flashGreen при rewriter_recovered событии.
    6. subscribeToProbeEvents не вызывает flashGreen на другие события.
    7. Инъецированная Task получает точный URL и отменяется при stop().
+   8. Рабочий ProbeSSEBox закрывает транспорт и завершает startStreaming.
+   9. Шлюз завершается при отмене до регистрации продолжения.
 */
 
 import XCTest
@@ -153,6 +155,52 @@ final class HealthMonitorProbeTests: XCTestCase {
         let state = await monitor.currentState()
         XCTAssertEqual(state, .stopped, "После stop() state должен быть .stopped")
     }
+
+    /// Рабочий ProbeSSEBox после отмены закрывает транспорт и завершает startStreaming.
+    @MainActor
+    func test_probeSSEBox_cancellation_closes_transport_and_returns() async {
+        let dataTask = TrackingProbeSSETask()
+        let session = TrackingProbeSSESession(dataTask: dataTask)
+        let view = StatusIndicatorView(frame: NSRect(x: 0, y: 0, width: 12, height: 12))
+        let box = ProbeSSEBox(
+            statusIndicator: view,
+            sessionFactory: { _ in session }
+        )
+        let finishedExpectation = expectation(description: "startStreaming завершён")
+        let url = URL(string: "https://probe.invalid/v1/events?filter=rewriter_recovered")!
+
+        let streamingTask = Task {
+            await box.startStreaming(url: url)
+            finishedExpectation.fulfill()
+        }
+        await fulfillment(of: [dataTask.resumeExpectation], timeout: 2.0)
+
+        streamingTask.cancel()
+        await fulfillment(
+            of: [dataTask.cancelExpectation, session.invalidateExpectation, finishedExpectation],
+            timeout: 2.0
+        )
+        await streamingTask.value
+
+        XCTAssertEqual(dataTask.snapshot(), .init(resumeCount: 1, cancelCount: 1))
+        XCTAssertEqual(session.snapshot().requests.map(\.url), [url])
+        XCTAssertEqual(session.snapshot().invalidateCount, 1)
+    }
+
+    /// Шлюз обязан завершить ожидание, даже если отмена пришла до регистрации продолжения.
+    @MainActor
+    func test_probeSSECancellationGate_cancel_before_wait_returns() async {
+        let gate = ProbeSSECancellationGate()
+        gate.cancel()
+        let finishedExpectation = expectation(description: "ожидание gate завершено")
+
+        Task {
+            await gate.wait()
+            finishedExpectation.fulfill()
+        }
+
+        await fulfillment(of: [finishedExpectation], timeout: 2.0)
+    }
 }
 
 // MARK: - Test helpers
@@ -209,6 +257,80 @@ private final class ProbeSubscriptionRecorder: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return (recordedURLs, recordedCancellationCount)
+    }
+}
+
+/// Отслеживает жизненный цикл задачи данных без сетевого запроса.
+private final class TrackingProbeSSETask: ProbeSSETask, @unchecked Sendable {
+    struct Snapshot: Equatable {
+        let resumeCount: Int
+        let cancelCount: Int
+    }
+
+    let resumeExpectation = XCTestExpectation(description: "data task запущена")
+    let cancelExpectation = XCTestExpectation(description: "data task отменена")
+
+    private let lock = NSLock()
+    private var resumeCount = 0
+    private var cancelCount = 0
+
+    func resume() {
+        lock.lock()
+        resumeCount += 1
+        lock.unlock()
+        resumeExpectation.fulfill()
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelCount += 1
+        lock.unlock()
+        cancelExpectation.fulfill()
+    }
+
+    func snapshot() -> Snapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return Snapshot(resumeCount: resumeCount, cancelCount: cancelCount)
+    }
+}
+
+/// Возвращает тестовую задачу и фиксирует инвалидацию вместо создания URLSession.
+private final class TrackingProbeSSESession: ProbeSSESession, @unchecked Sendable {
+    struct Snapshot {
+        let requests: [URLRequest]
+        let invalidateCount: Int
+    }
+
+    let invalidateExpectation = XCTestExpectation(description: "session инвалидирована")
+
+    private let lock = NSLock()
+    private let dataTask: TrackingProbeSSETask
+    private var requests: [URLRequest] = []
+    private var invalidateCount = 0
+
+    init(dataTask: TrackingProbeSSETask) {
+        self.dataTask = dataTask
+    }
+
+    func makeDataTask(with request: URLRequest) -> any ProbeSSETask {
+        lock.lock()
+        requests.append(request)
+        lock.unlock()
+        return dataTask
+    }
+
+    func invalidateAndCancel() {
+        lock.lock()
+        invalidateCount += 1
+        lock.unlock()
+        invalidateExpectation.fulfill()
+    }
+
+    func snapshot() -> Snapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return Snapshot(requests: requests, invalidateCount: invalidateCount)
     }
 }
 

@@ -163,68 +163,137 @@ extension HealthMonitor {
         }
     }
 
-    /// Cancels the probe subscription (e.g. from tests or stop()).
+    /// Отменяет probe-подписку, в том числе из тестов или при stop().
     func cancelProbeSubscription() {
         probeSubscriptionTask?.cancel()
         probeSubscriptionTask = nil
     }
 }
 
-// MARK: - ProbeSSEBox (NSObject wrapper для URLSession delegate)
+// MARK: - Транспорт probe SSE
 
-/// Ref-counted box для SSE подписки probe событий.
-/// Изолирован от actor чтобы соответствовать Swift 6 Sendable требованиям.
-private final class ProbeSSEBox: @unchecked Sendable {
+/// Минимальная граница URLSessionDataTask для unit-тестов без сетевого запроса.
+protocol ProbeSSETask: Sendable {
+    func resume()
+    func cancel()
+}
+
+extension URLSessionDataTask: ProbeSSETask {}
+
+/// Минимальная граница URLSession для создания и завершения probe SSE запроса.
+protocol ProbeSSESession: Sendable {
+    func makeDataTask(with request: URLRequest) -> any ProbeSSETask
+    func invalidateAndCancel()
+}
+
+extension URLSession: ProbeSSESession {
+    func makeDataTask(with request: URLRequest) -> any ProbeSSETask {
+        dataTask(with: request)
+    }
+}
+
+typealias ProbeSSESessionFactory = @Sendable (SSESessionDelegate) -> any ProbeSSESession
+
+/// Одноразовый шлюз ожидания, корректный при отмене до регистрации продолжения.
+final class ProbeSSECancellationGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var isCancelled = false
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            let shouldResumeImmediately: Bool
+            lock.lock()
+            if isCancelled {
+                shouldResumeImmediately = true
+            } else {
+                self.continuation = continuation
+                shouldResumeImmediately = false
+            }
+            lock.unlock()
+
+            if shouldResumeImmediately {
+                continuation.resume()
+            }
+        }
+    }
+
+    func cancel() {
+        let pendingContinuation: CheckedContinuation<Void, Never>?
+        lock.lock()
+        guard !isCancelled else {
+            lock.unlock()
+            return
+        }
+        isCancelled = true
+        pendingContinuation = continuation
+        continuation = nil
+        lock.unlock()
+
+        pendingContinuation?.resume()
+    }
+}
+
+// MARK: - ProbeSSEBox
+
+/// Владелец SSE-подписки probe-событий, изолированный от actor для Swift 6 Sendable.
+/// Внутренняя видимость нужна только `@testable` тестам рабочего пути без реальной сети.
+final class ProbeSSEBox: @unchecked Sendable {
     private let statusIndicator: StatusIndicatorView
-    private var session: URLSession?
-    private var task: URLSessionDataTask?
+    private let sessionFactory: ProbeSSESessionFactory
+    private var session: (any ProbeSSESession)?
+    private var task: (any ProbeSSETask)?
     private var sseDelegate: SSESessionDelegate?
 
     /// Для парсинга SSE event name
     private var pendingEventType = ""
 
-    init(statusIndicator: StatusIndicatorView) {
+    init(
+        statusIndicator: StatusIndicatorView,
+        sessionFactory: @escaping ProbeSSESessionFactory = { delegate in
+            URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+        }
+    ) {
         self.statusIndicator = statusIndicator
+        self.sessionFactory = sessionFactory
     }
 
     deinit {
-        task?.cancel()
-        session?.invalidateAndCancel()
+        cancelTransport()
     }
 
     func startStreaming(url: URL) async {
-        let weakSelf = self
-        let delegate = SSESessionDelegate { line in
-            weakSelf.handleSSELine(line)
+        let delegate = SSESessionDelegate { [weak self] line in
+            self?.handleSSELine(line)
         }
         self.sseDelegate = delegate
-        let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+        let session = sessionFactory(delegate)
         self.session = session
 
         var request = URLRequest(url: url, timeoutInterval: 600)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        let dataTask = session.dataTask(with: request)
+        let dataTask = session.makeDataTask(with: request)
         self.task = dataTask
         dataTask.resume()
 
-        // Держим alive пока Task не отменён
+        let cancellationGate = ProbeSSECancellationGate()
         await withTaskCancellationHandler {
-            // await indefinitely — SSESessionDelegate handles the stream
-            // Using continuation to wait for cancellation
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                // Store continuation to resume on cancel
-                // We use a polling approach since SSE is callback-based
-                Task {
-                    while !Task.isCancelled {
-                        try? await Task.sleep(nanoseconds: 1_000_000_000)
-                    }
-                    continuation.resume()
-                }
-            }
+            // SSESessionDelegate обрабатывает поток, шлюз удерживает метод до отмены.
+            await cancellationGate.wait()
         } onCancel: {
-            weakSelf.task?.cancel()
-            weakSelf.session?.invalidateAndCancel()
+            self.cancelTransport()
+            cancellationGate.cancel()
         }
+    }
+
+    private func cancelTransport() {
+        let activeTask = task
+        let activeSession = session
+        task = nil
+        session = nil
+        sseDelegate = nil
+        activeTask?.cancel()
+        activeSession?.invalidateAndCancel()
     }
 
     private func handleSSELine(_ line: String) {
