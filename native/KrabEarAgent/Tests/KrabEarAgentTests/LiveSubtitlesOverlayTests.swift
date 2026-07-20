@@ -23,6 +23,11 @@
   19. test_restBaseURL_default             — содержит 5005
   20. test_clearAll_after_multiple_entries — 5 entries → clearAll → count = 0
   21. test_showHideShow_replacesSSETaskWithoutAccumulation — жизненный цикл SSE без дублей
+  22. test_completionReconnectsForEOFAndErrorWhileVisible — восстановление после EOF/ошибки
+  23. test_staleConnectionCallbacksIgnoredAfterReconnect — старые обработчики отбрасываются
+  24. test_partialBufferDoesNotCrossConnectionGeneration — буфер не смешивает поколения
+  25. test_reconnectStopsAfterBoundedAttempts — ограничение серии переподключений
+  26. test_deinitCancelsTaskAndInvalidatesSession — освобождение URLSession
 */
 
 import XCTest
@@ -44,6 +49,44 @@ private final class TrackingLiveSubtitlesSSETask: LiveSubtitlesSSETask {
     }
 }
 
+/// Тестовая SSE-сессия сохраняет делегат и позволяет вручную подать данные,
+/// EOF или ошибку без сокетов и ожиданий реального тайм-аута.
+private final class TrackingLiveSubtitlesSSESession: LiveSubtitlesSSESession {
+    let delegate: SSESessionDelegate
+    let task = TrackingLiveSubtitlesSSETask()
+    private(set) var invalidateCount = 0
+
+    init(delegate: SSESessionDelegate) {
+        self.delegate = delegate
+    }
+
+    func makeLiveSubtitlesTask(with request: URLRequest) -> LiveSubtitlesSSETask {
+        task
+    }
+
+    func invalidateAndCancel() {
+        invalidateCount += 1
+    }
+
+    func receive(_ text: String) {
+        delegate._testReceive(text)
+    }
+
+    func complete(error: Error? = nil) {
+        delegate._testComplete(error: error)
+    }
+}
+
+/// Синтетическая ошибка соединения для проверки ветки ошибки при переподключении.
+private struct SyntheticSSEError: Error {}
+
+/// Ссылочный контейнер позволяет сохраняющимся тестовым замыканиям записывать
+/// созданные сессии и отложенные работы без запрещённого захвата `inout`.
+private final class TrackingSSEEnvironment {
+    var sessions: [TrackingLiveSubtitlesSSESession] = []
+    var scheduledReconnects: [DispatchWorkItem] = []
+}
+
 // MARK: - LiveSubtitlesOverlayWave190Tests
 
 @MainActor
@@ -53,6 +96,26 @@ final class LiveSubtitlesOverlayWave190Tests: XCTestCase {
 
     private func makeOverlay() -> LiveSubtitlesOverlay {
         LiveSubtitlesOverlay()
+    }
+
+    /// Даёт задачам, поставленным через `Task { @MainActor }`, отработать без ожидания по времени.
+    private func drainSSECallbacks() async {
+        for _ in 0..<3 {
+            await Task.yield()
+        }
+    }
+
+    private func makeTrackedOverlay(environment: TrackingSSEEnvironment) -> LiveSubtitlesOverlay {
+        LiveSubtitlesOverlay(
+            sseSessionFactory: { delegate in
+                let session = TrackingLiveSubtitlesSSESession(delegate: delegate)
+                environment.sessions.append(session)
+                return session
+            },
+            reconnectScheduler: { _, workItem in
+                environment.scheduledReconnects.append(workItem)
+            }
+        )
     }
 
     // MARK: 1. test_initial_state_empty
@@ -226,36 +289,145 @@ final class LiveSubtitlesOverlayWave190Tests: XCTestCase {
     /// show → hide → show не должен оставлять старое SSE-соединение живым:
     /// скрытие отменяет именно активную задачу и освобождает ссылку на неё.
     func test_showHideShow_replacesSSETaskWithoutAccumulation() {
-        var createdTasks: [TrackingLiveSubtitlesSSETask] = []
-        let overlay = LiveSubtitlesOverlay(sseTaskFactory: { _ in
-            let task = TrackingLiveSubtitlesSSETask()
-            createdTasks.append(task)
-            return task
-        })
+        let environment = TrackingSSEEnvironment()
+        let overlay = makeTrackedOverlay(environment: environment)
 
         overlay.show()
 
-        XCTAssertEqual(createdTasks.count, 1)
-        XCTAssertEqual(createdTasks[0].resumeCount, 1)
-        XCTAssertEqual(createdTasks[0].cancelCount, 0)
+        XCTAssertEqual(environment.sessions.count, 1)
+        XCTAssertEqual(environment.sessions[0].task.resumeCount, 1)
+        XCTAssertEqual(environment.sessions[0].task.cancelCount, 0)
         XCTAssertTrue(overlay._testHasActiveSSETask)
 
         overlay.hide()
 
-        XCTAssertEqual(createdTasks[0].cancelCount, 1)
+        XCTAssertEqual(environment.sessions[0].task.cancelCount, 1)
+        XCTAssertEqual(environment.sessions[0].invalidateCount, 1)
         XCTAssertFalse(overlay._testHasActiveSSETask)
 
         overlay.show()
 
-        XCTAssertEqual(createdTasks.count, 2, "Повторный show должен создать ровно одну новую задачу")
-        XCTAssertEqual(createdTasks[0].cancelCount, 1, "Старая задача не должна ожить или отменяться повторно")
-        XCTAssertEqual(createdTasks[1].resumeCount, 1)
-        XCTAssertEqual(createdTasks[1].cancelCount, 0)
+        XCTAssertEqual(environment.sessions.count, 2, "Повторный show должен создать ровно одну новую задачу")
+        XCTAssertEqual(environment.sessions[0].task.cancelCount, 1, "Старая задача не должна ожить или отменяться повторно")
+        XCTAssertEqual(environment.sessions[1].task.resumeCount, 1)
+        XCTAssertEqual(environment.sessions[1].task.cancelCount, 0)
         XCTAssertTrue(overlay._testHasActiveSSETask)
 
         overlay.hide()
-        XCTAssertEqual(createdTasks[1].cancelCount, 1)
+        XCTAssertEqual(environment.sessions[1].task.cancelCount, 1)
+        XCTAssertEqual(environment.sessions[1].invalidateCount, 1)
         XCTAssertFalse(overlay._testHasActiveSSETask)
+    }
+
+    func test_completionReconnectsForEOFAndErrorWhileVisible() async {
+        let environment = TrackingSSEEnvironment()
+        let overlay = makeTrackedOverlay(environment: environment)
+        overlay.show()
+
+        environment.sessions[0].complete()
+        await drainSSECallbacks()
+
+        XCTAssertFalse(overlay._testHasActiveSSETask)
+        XCTAssertEqual(environment.sessions[0].invalidateCount, 1)
+        XCTAssertEqual(environment.scheduledReconnects.count, 1)
+
+        environment.scheduledReconnects.removeFirst().perform()
+        await drainSSECallbacks()
+        XCTAssertEqual(environment.sessions.count, 2)
+        XCTAssertTrue(overlay._testHasActiveSSETask)
+
+        environment.sessions[1].complete(error: SyntheticSSEError())
+        await drainSSECallbacks()
+        XCTAssertEqual(environment.scheduledReconnects.count, 1)
+
+        overlay.hide()
+        environment.scheduledReconnects.removeFirst().perform()
+        await drainSSECallbacks()
+        XCTAssertEqual(environment.sessions.count, 2, "После hide() отложенное переподключение не должно создавать сессию")
+    }
+
+    func test_staleConnectionCallbacksIgnoredAfterReconnect() async {
+        let environment = TrackingSSEEnvironment()
+        let overlay = makeTrackedOverlay(environment: environment)
+        overlay.show()
+        environment.sessions[0].complete()
+        await drainSSECallbacks()
+        environment.scheduledReconnects.removeFirst().perform()
+        await drainSSECallbacks()
+
+        environment.sessions[0].complete(error: SyntheticSSEError())
+        await drainSSECallbacks()
+        XCTAssertTrue(overlay._testHasActiveSSETask, "Позднее завершение старой сессии не должно закрыть новую")
+        XCTAssertTrue(environment.scheduledReconnects.isEmpty)
+
+        environment.sessions[0].receive("event: live_subs.result\n")
+        environment.sessions[0].receive(#"data: {"text":"Старое","translation":"Old"}"# + "\n")
+        await drainSSECallbacks()
+        XCTAssertEqual(overlay._testEntryCount, 0, "Поздний обработчик старой сессии должен быть отброшен")
+
+        environment.sessions[1].receive("event: live_subs.result\n")
+        environment.sessions[1].receive(#"data: {"text":"Новое","translation":"New"}"# + "\n")
+        await drainSSECallbacks()
+        XCTAssertEqual(overlay._testEntryCount, 1)
+        overlay.hide()
+    }
+
+    func test_partialBufferDoesNotCrossConnectionGeneration() async {
+        let environment = TrackingSSEEnvironment()
+        let overlay = makeTrackedOverlay(environment: environment)
+        overlay.show()
+        environment.sessions[0].receive("event: live_subs.")
+        environment.sessions[0].complete(error: SyntheticSSEError())
+        await drainSSECallbacks()
+        environment.scheduledReconnects.removeFirst().perform()
+        await drainSSECallbacks()
+
+        // Если старый незавершённый буфер протёк, `result` завершит корректную строку
+        // события, и следующая строка данных ошибочно добавит субтитр.
+        environment.sessions[1].receive("result\n")
+        environment.sessions[1].receive(#"data: {"text":"Смешано","translation":"Mixed"}"# + "\n")
+        await drainSSECallbacks()
+        XCTAssertEqual(overlay._testEntryCount, 0)
+
+        environment.sessions[1].receive("event: live_subs.result\n")
+        environment.sessions[1].receive(#"data: {"text":"Чисто","translation":"Clean"}"# + "\n")
+        await drainSSECallbacks()
+        XCTAssertEqual(overlay._testEntryCount, 1)
+        overlay.hide()
+    }
+
+    func test_reconnectStopsAfterBoundedAttempts() async {
+        let environment = TrackingSSEEnvironment()
+        let overlay = makeTrackedOverlay(environment: environment)
+        overlay.show()
+
+        for _ in 0..<overlay._testMaximumReconnectAttempts {
+            environment.sessions.last!.complete(error: SyntheticSSEError())
+            await drainSSECallbacks()
+            XCTAssertEqual(environment.scheduledReconnects.count, 1)
+            environment.scheduledReconnects.removeFirst().perform()
+            await drainSSECallbacks()
+        }
+
+        environment.sessions.last!.complete(error: SyntheticSSEError())
+        await drainSSECallbacks()
+        XCTAssertTrue(environment.scheduledReconnects.isEmpty)
+        XCTAssertFalse(overlay._testHasActiveSSETask)
+        overlay.hide()
+    }
+
+    func test_deinitCancelsTaskAndInvalidatesSession() async {
+        let environment = TrackingSSEEnvironment()
+        var overlay: LiveSubtitlesOverlay? = makeTrackedOverlay(environment: environment)
+        weak let weakOverlay = overlay
+        overlay?.show()
+
+        overlay = nil
+        await drainSSECallbacks()
+
+        XCTAssertNil(weakOverlay)
+        XCTAssertEqual(environment.sessions[0].task.cancelCount, 1)
+        XCTAssertEqual(environment.sessions[0].invalidateCount, 1)
     }
 
     // MARK: 17. test_showOriginal_toggle_no_crash
@@ -310,6 +482,44 @@ final class LiveSubtitlesOverlayWave190Tests: XCTestCase {
         XCTAssertEqual(overlay._testEntryCount, 3, "Должно быть 3 записи (cap enforced)")
         overlay.clearAll()
         XCTAssertEqual(overlay._testEntryCount, 0, "clearAll должен обнулять все записи")
+    }
+}
+
+// MARK: - Изоляция буфера общего SSE-делегата
+
+/// Общий делегат используется несколькими экранами, поэтому незавершённые строки
+/// разных URLSessionTask не должны склеиваться даже при повторном использовании.
+final class SSESessionDelegateLifecycleTests: XCTestCase {
+
+    func test_partialBuffersAreSeparatedByTask() {
+        var lines: [String] = []
+        let delegate = SSESessionDelegate { lines.append($0) }
+
+        delegate._testReceive("event: old", taskIdentifier: 11)
+        delegate._testReceive("event: new\n", taskIdentifier: 22)
+
+        XCTAssertEqual(lines, ["event: new"])
+
+        delegate._testReceive(".tail\n", taskIdentifier: 11)
+        XCTAssertEqual(lines, ["event: new", "event: old.tail"])
+    }
+
+    func test_completionClearsOnlyCompletedTaskBuffer() {
+        var lines: [String] = []
+        var completionCount = 0
+        let delegate = SSESessionDelegate(
+            onLine: { lines.append($0) },
+            onComplete: { _ in completionCount += 1 }
+        )
+
+        delegate._testReceive("discard-me", taskIdentifier: 11)
+        delegate._testReceive("keep-me", taskIdentifier: 22)
+        delegate._testComplete(taskIdentifier: 11)
+        delegate._testReceive("fresh\n", taskIdentifier: 11)
+        delegate._testReceive("-tail\n", taskIdentifier: 22)
+
+        XCTAssertEqual(completionCount, 1)
+        XCTAssertEqual(lines, ["fresh", "keep-me-tail"])
     }
 }
 

@@ -30,6 +30,19 @@ protocol LiveSubtitlesSSETask: AnyObject {
 
 extension URLSessionDataTask: LiveSubtitlesSSETask {}
 
+/// Контракт SSE-сессии отделяет владение URLSession от панели и позволяет
+/// детерминированно проверять её инвалидизацию при hide/deinit.
+protocol LiveSubtitlesSSESession: AnyObject {
+    func makeLiveSubtitlesTask(with request: URLRequest) -> LiveSubtitlesSSETask
+    func invalidateAndCancel()
+}
+
+extension URLSession: LiveSubtitlesSSESession {
+    func makeLiveSubtitlesTask(with request: URLRequest) -> LiveSubtitlesSSETask {
+        dataTask(with: request)
+    }
+}
+
 // MARK: - SubtitleEntry
 
 private struct SubtitleEntry: Identifiable {
@@ -76,7 +89,10 @@ final class LiveSubtitlesOverlay: NSObject {
     var _testPanelOrigin: NSPoint { panel.frame.origin }
 
     /// Есть ли ровно одна принадлежащая панели активная SSE-задача.
-    var _testHasActiveSSETask: Bool { sseStreamTask != nil }
+    var _testHasActiveSSETask: Bool { sseConnection != nil }
+
+    /// Верхняя граница последовательных переподключений без полученных строк.
+    var _testMaximumReconnectAttempts: Int { maxReconnectAttempts }
 
     /// Текущий event type из SSE (из строки "event: ..."), чтобы фильтровать data-строки.
     private var pendingSSEEventType: String? = nil
@@ -93,8 +109,26 @@ final class LiveSubtitlesOverlay: NSObject {
 
     // MARK: - SSE
 
-    private var sseStreamTask: LiveSubtitlesSSETask?
-    private let sseTaskFactory: ((URLRequest) -> LiveSubtitlesSSETask)?
+    private struct SSEConnection {
+        let id: UUID
+        let generation: UInt64
+        // Явное владение делегатом делает его срок жизни равным сроку соединения
+        // даже для тестовых реализаций сессии, которые не обязаны его удерживать.
+        let delegate: SSESessionDelegate
+        let session: LiveSubtitlesSSESession
+        let task: LiveSubtitlesSSETask
+    }
+
+    private var sseConnection: SSEConnection?
+    private var sseGeneration: UInt64 = 0
+    private var reconnectAttempts = 0
+    private let maxReconnectAttempts = 5
+    private let reconnectBaseDelay: TimeInterval = 0.5
+    private let reconnectMaximumDelay: TimeInterval = 8.0
+    private var reconnectWorkItem: DispatchWorkItem?
+    private var reconnectToken: UUID?
+    private let sseSessionFactory: ((SSESessionDelegate) -> LiveSubtitlesSSESession)?
+    private let reconnectScheduler: ((TimeInterval, DispatchWorkItem) -> Void)?
 
     // MARK: - UserDefaults keys
 
@@ -104,11 +138,15 @@ final class LiveSubtitlesOverlay: NSObject {
     // MARK: - Init
 
     override convenience init() {
-        self.init(sseTaskFactory: nil)
+        self.init(sseSessionFactory: nil, reconnectScheduler: nil)
     }
 
-    /// Фабрика подменяется только в тестах; обычный путь создаёт URLSessionDataTask.
-    init(sseTaskFactory: ((URLRequest) -> LiveSubtitlesSSETask)?) {
+    /// Фабрики подменяются только в тестах; обычный путь использует URLSession
+    /// и ограниченную экспоненциальную задержку на главной очереди.
+    init(
+        sseSessionFactory: ((SSESessionDelegate) -> LiveSubtitlesSSESession)?,
+        reconnectScheduler: ((TimeInterval, DispatchWorkItem) -> Void)? = nil
+    ) {
         // Создаём плавающий NSPanel
         let initialFrame = NSRect(x: 0, y: 0, width: 680, height: 120)
         panel = NSPanel(
@@ -117,7 +155,8 @@ final class LiveSubtitlesOverlay: NSObject {
             backing: .buffered,
             defer: false
         )
-        self.sseTaskFactory = sseTaskFactory
+        self.sseSessionFactory = sseSessionFactory
+        self.reconnectScheduler = reconnectScheduler
         super.init()
         setupPanel()
         restorePosition()
@@ -126,6 +165,12 @@ final class LiveSubtitlesOverlay: NSObject {
         if UserDefaults.standard.object(forKey: showOrigKey) != nil {
             showOriginalAndTranslation = UserDefaults.standard.bool(forKey: showOrigKey)
         }
+    }
+
+    deinit {
+        reconnectWorkItem?.cancel()
+        sseConnection?.task.cancel()
+        sseConnection?.session.invalidateAndCancel()
     }
 
     // MARK: - Public API
@@ -402,32 +447,143 @@ final class LiveSubtitlesOverlay: NSObject {
 
     private func startSSE() {
         stopSSE()
-        guard let url = URL(string: "\(restBaseURL)/v1/events?filter=live_subs.result") else { return }
-        // Реальный SSE через delegate-based session
-        startSSEStream(url: url)
+        reconnectAttempts = 0
+        connectSSE()
     }
 
     private func stopSSE() {
-        sseStreamTask?.cancel()
-        sseStreamTask = nil
+        // Новое поколение инвалидирует уже поставленные в MainActor обработчики.
+        sseGeneration &+= 1
+        reconnectWorkItem?.cancel()
+        reconnectWorkItem = nil
+        reconnectToken = nil
+        reconnectAttempts = 0
+        closeCurrentSSEConnection()
         pendingSSEEventType = nil
     }
 
     // MARK: - SSE Stream (URLSession streaming)
 
-    private lazy var sseDelegate: SSESessionDelegate = SSESessionDelegate { [weak self] line in
-        Task { @MainActor [weak self] in
-            self?.handleSSELine(line)
-        }
-    }
-    private lazy var sseStreamSession = URLSession(configuration: .default, delegate: sseDelegate, delegateQueue: nil)
+    private func connectSSE() {
+        guard isVisible, sseConnection == nil else { return }
+        guard let url = URL(string: "\(restBaseURL)/v1/events?filter=live_subs.result") else { return }
 
-    private func startSSEStream(url: URL) {
+        sseGeneration &+= 1
+        let generation = sseGeneration
+        let connectionID = UUID()
+        let delegate = SSESessionDelegate(
+            onLine: { [weak self] line in
+                Task { @MainActor [weak self] in
+                    self?.receiveSSELine(
+                        line,
+                        connectionID: connectionID,
+                        generation: generation
+                    )
+                }
+            },
+            onComplete: { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.completeSSEConnection(
+                        connectionID: connectionID,
+                        generation: generation
+                    )
+                }
+            }
+        )
+
+        let session: LiveSubtitlesSSESession
+        if let sseSessionFactory {
+            session = sseSessionFactory(delegate)
+        } else {
+            session = URLSession(
+                configuration: .default,
+                delegate: delegate,
+                delegateQueue: nil
+            )
+        }
+
         var request = URLRequest(url: url, timeoutInterval: 600)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        let task = sseTaskFactory?(request) ?? sseStreamSession.dataTask(with: request)
-        sseStreamTask = task
+        let task = session.makeLiveSubtitlesTask(with: request)
+        sseConnection = SSEConnection(
+            id: connectionID,
+            generation: generation,
+            delegate: delegate,
+            session: session,
+            task: task
+        )
+        pendingSSEEventType = nil
         task.resume()
+    }
+
+    private func receiveSSELine(
+        _ line: String,
+        connectionID: UUID,
+        generation: UInt64
+    ) {
+        guard isVisible,
+              let connection = sseConnection,
+              connection.id == connectionID,
+              connection.generation == generation,
+              sseGeneration == generation else { return }
+
+        // Любая полная строка доказывает, что подключение ожило: следующая серия
+        // ошибок снова получает весь бюджет переподключений.
+        reconnectAttempts = 0
+        handleSSELine(line)
+    }
+
+    private func completeSSEConnection(connectionID: UUID, generation: UInt64) {
+        guard let connection = sseConnection,
+              connection.id == connectionID,
+              connection.generation == generation,
+              sseGeneration == generation else { return }
+
+        closeCurrentSSEConnection()
+        pendingSSEEventType = nil
+        guard isVisible else { return }
+        scheduleSSEReconnect(afterGeneration: generation)
+    }
+
+    private func closeCurrentSSEConnection() {
+        guard let connection = sseConnection else { return }
+        // Сначала убираем идентификатор: синхронное завершение после отмены уже устарело.
+        sseConnection = nil
+        connection.task.cancel()
+        connection.session.invalidateAndCancel()
+    }
+
+    private func scheduleSSEReconnect(afterGeneration generation: UInt64) {
+        guard reconnectAttempts < maxReconnectAttempts else { return }
+
+        let exponent = min(reconnectAttempts, 4)
+        let delay = min(
+            reconnectBaseDelay * pow(2.0, Double(exponent)),
+            reconnectMaximumDelay
+        )
+        reconnectAttempts += 1
+
+        let token = UUID()
+        reconnectToken = token
+        let workItem = DispatchWorkItem { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.reconnectToken == token,
+                      self.sseGeneration == generation,
+                      self.isVisible,
+                      self.sseConnection == nil else { return }
+                self.reconnectToken = nil
+                self.reconnectWorkItem = nil
+                self.connectSSE()
+            }
+        }
+        reconnectWorkItem = workItem
+
+        if let reconnectScheduler {
+            reconnectScheduler(delay, workItem)
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+        }
     }
 
     // MARK: - SSE Line Parsing
