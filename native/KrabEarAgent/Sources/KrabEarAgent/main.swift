@@ -217,8 +217,8 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        // Точечная legacy-очистка и LaunchServices cleanup вынесены в фон,
-        // чтобы синхронные Process-вызовы не блокировали applicationDidFinishLaunching.
+        // Только LaunchServices cleanup вынесен в фон, чтобы синхронный Process-вызов
+        // не блокировал applicationDidFinishLaunching. PID-based cleanup запрещён.
 
         // Sentry / GlitchTip telemetry — no-op если DSN не задан в settings
         let sentryDsn = UserDefaults.standard.string(forKey: "KrabEar_SentryDSN") ?? ""
@@ -260,18 +260,14 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         let projectRootURL = URL(fileURLWithPath: options.projectRoot)
         Task.detached { [weak self] in
             guard let self else { return }
-            
-            // Очистка legacy-runtime проверяет точный канонический путь и identity;
-            // production/dev/worktree app-бинарники по одному имени не затрагиваются.
-            let killedOrphans = killOrphanRuntimeProcesses(projectRoot: projectRootURL, logger: self.logger)
-            if killedOrphans > 0 {
-                self.logger.warn("Phase C C.6.2: Killed \(killedOrphans) orphan native/runtime/KrabEarAgent process(es)")
-            } else {
-                self.logger.info("Phase C C.6.2: No orphan native/runtime/KrabEarAgent processes found")
-            }
-            
+
+            // POSIX flock остаётся единственной автоматической защитой экземпляра.
+            // Legacy-процессы не завершаем по PID: macOS не даёт атомарного process
+            // handle, а проверенный PID может быть переиспользован до отправки сигнала.
+            self.logger.info("Single-instance guard: flock active, legacy PID cleanup disabled")
+
             cleanupWorktreeShadows(projectRoot: projectRootURL, logger: self.logger)
-            
+
             self.logger.info("BackendSupervisor режим: \(self.backendSupervisor.supervisionMode == .passive ? "passive (launchd Variant B)" : "active (standalone)")")
 
             // Clean-Mac guard: текущая сборка НЕ несёт Python-backend внутри бандла —
