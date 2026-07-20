@@ -93,8 +93,44 @@ final class ConversationVCAudioTests: XCTestCase {
         )
         XCTAssertFalse(vc._testHasAudioEngine,
                        "Изолированный режим не должен создавать engine после conv.ready")
-        XCTAssertEqual(vc.pendingAudioPrebufferSampleCount, 1_280,
-                       "Без захвата аудио поздний ready не должен дренировать prebuffer")
+        XCTAssertEqual(vc.pendingAudioPrebufferSampleCount, 0,
+                       "Изоляция устройств не должна отключать дренирование prebuffer")
+    }
+
+    /// Повторный ready с той же частотой не должен терять неполный хвост сборщика.
+    func test_activateNegotiatedAudio_repeatedReadyPreservesPartialFrame() {
+        vc.isSessionActive = true
+        vc.prepareAudioNegotiation()
+        _ = vc.assembleUplinkFrames(
+            Array(repeating: 0.25, count: 640),
+            sourceSampleRate: 16_000
+        )
+
+        vc.activateNegotiatedAudio(sampleRate: 24_000)
+        vc.activateNegotiatedAudio(sampleRate: 24_000)
+        let completedFrames = vc.assembleUplinkFrames(
+            Array(repeating: 0.5, count: 960),
+            sourceSampleRate: 24_000
+        )
+
+        XCTAssertEqual(completedFrames.count, 1,
+                       "Повторный ready не должен сбрасывать 960 накопленных сэмплов")
+        XCTAssertEqual(completedFrames.first?.count, 1_920)
+        XCTAssertFalse(vc._testHasAudioEngine)
+    }
+
+    /// Даже прямой вызов обеих публичных границ не должен открыть аудиоустройство.
+    func test_directAudioBoundaryCalls_isolatedRuntimeDoesNotCreateEngine() {
+        vc.prepareAudioNegotiation()
+
+        vc.startAudioPrebufferCapture()
+        XCTAssertFalse(vc._testHasAudioEngine,
+                       "Прямой запуск prebuffer обязан учитывать изолированный профиль")
+
+        vc.configureNegotiatedAudio(sampleRate: 24_000)
+        vc.startAudioCapture()
+        XCTAssertFalse(vc._testHasAudioEngine,
+                       "Прямой запуск negotiated capture обязан учитывать профиль")
     }
 
     /// stopConversation() сбрасывает isSessionActive и переводит в .idle.

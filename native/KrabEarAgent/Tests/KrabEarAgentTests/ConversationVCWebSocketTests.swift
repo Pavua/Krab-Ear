@@ -381,16 +381,40 @@ final class ConversationVCStateTransitionTests: XCTestCase {
 
     /// startConversation при пустом URL (URL(string: "") == nil) → state = .error.
     func test_startConversation_emptyURL_setsErrorState() {
-        let vc = makeVC(
-            wsURL: "",
-            runtimeOptions: ConversationRuntimeOptions(opensWebSocket: true, capturesAudio: false)
-        )
+        let vc = makeVC(wsURL: "")
         vc.startConversation()
         if case .error(_) = vc.conversationState {
             // ожидаемое поведение
         } else {
             XCTFail("Ожидался .error при пустом URL, получено: \(vc.conversationState)")
         }
+    }
+
+    /// Прямой вызов границы с валидным URL не должен создавать задачу в изоляции.
+    func test_startWebSocketSession_directIsolatedCallDoesNotCreateTask() {
+        let vc = makeVC()
+        vc.isSessionActive = true
+        let generation = vc.beginConversationGeneration()
+
+        vc.startWebSocketSession(generation: generation)
+
+        XCTAssertFalse(vc._testHasWebSocketTask,
+                       "Прямой вызов границы WebSocket обязан учитывать профиль")
+    }
+
+    /// Валидация URL выполняется до гейта ввода-вывода
+    /// и остаётся доступна изолированным тестам.
+    func test_startWebSocketSession_directInvalidURLSetsErrorWithoutTask() {
+        let vc = makeVC(wsURL: "")
+        vc.isSessionActive = true
+        let generation = vc.beginConversationGeneration()
+
+        vc.startWebSocketSession(generation: generation)
+
+        guard case .error = vc.conversationState else {
+            return XCTFail("Прямая граница должна сохранить чистую валидацию URL")
+        }
+        XCTAssertFalse(vc._testHasWebSocketTask)
     }
 
     /// stopConversation сбрасывает isSessionActive и возвращает state в .idle.

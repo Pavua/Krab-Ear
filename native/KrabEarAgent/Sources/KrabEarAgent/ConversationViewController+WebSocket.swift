@@ -41,6 +41,9 @@ extension ConversationViewController {
             conversationState = .error("Невалидный Gateway URL")
             return
         }
+        // URL-валидация выше остаётся чистой семантикой протокола. Ниже начинается
+        // системный сетевой ввод-вывод, запрещённый изолированным unit-тестам.
+        guard runtimeOptions.opensWebSocket else { return }
 
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = 30

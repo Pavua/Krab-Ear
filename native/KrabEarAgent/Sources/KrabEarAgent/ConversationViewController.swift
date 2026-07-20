@@ -88,7 +88,8 @@ struct ConversationRuntimeOptions: Sendable {
     /// Полный режим приложения: живой Voice Gateway и аудиоустройства.
     static let production = ConversationRuntimeOptions(opensWebSocket: true, capturesAudio: true)
 
-    /// Детерминированный тестовый режим: только состояние и чистая логика протокола.
+    /// Детерминированный тестовый режим:
+    /// только состояние и чистая логика протокола.
     static let isolatedTests = ConversationRuntimeOptions(opensWebSocket: false, capturesAudio: false)
 }
 
@@ -242,14 +243,12 @@ final class ConversationViewController: NSViewController {
         // Сразу начинаем bounded prebuffer в 16 кГц, но до `conv.ready` ничего
         // не отправляем: Moshi требует 24 кГц, старый pipeline — 16 кГц.
         prepareAudioNegotiation()
-        if runtimeOptions.opensWebSocket {
-            startWebSocketSession(generation: generation)
-        }
+        // Границы сами запрещают системный ввод-вывод. Вызов здесь остаётся
+        // безусловным, чтобы чистая валидация URL работала и в тестовом режиме.
+        startWebSocketSession(generation: generation)
         // Невалидный URL выставляет error синхронно; микрофон в таком случае не нужен.
         if case .error = conversationState { return }
-        if runtimeOptions.capturesAudio {
-            startAudioPrebufferCapture()
-        }
+        startAudioPrebufferCapture()
     }
 
     /// Остановить сессию. Вызывается из hotkey-toggle или кнопки «Прервать».

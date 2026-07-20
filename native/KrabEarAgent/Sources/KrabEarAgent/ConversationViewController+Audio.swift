@@ -86,7 +86,7 @@ extension ConversationViewController {
         let normalized = ConversationAudioContract.normalizedSampleRate(sampleRate)
         let alreadyConfigured = audioHolder.negotiationReady
             && audioHolder.sampleRate == normalized
-            && audioHolder.playerNode != nil
+            && (!runtimeOptions.capturesAudio || audioHolder.playerNode != nil)
         guard !alreadyConfigured else { return }
 
         if audioHolder.engine != nil {
@@ -94,10 +94,11 @@ extension ConversationViewController {
         }
         configureNegotiatedAudio(sampleRate: normalized)
         guard isSessionActive else { return }
-        // `conv.ready` может прийти поздно; тестовый режим не должен из-за этого
-        // обойти запрет и открыть микрофон после безопасного старта сессии.
-        guard runtimeOptions.capturesAudio else { return }
-        startAudioCapture()
+        // Изоляция отключает только устройство. Протокольные дренирование и отправка
+        // выполняются и без микрофона: иначе тестовый режим проверял бы другую логику.
+        if runtimeOptions.capturesAudio {
+            startAudioCapture()
+        }
 
         let dropped = audioHolder.prebuffer.droppedSampleCount
         let bufferedFrames = drainAudioPrebufferFrames()
@@ -164,6 +165,7 @@ extension ConversationViewController {
     /// Запускает provisional 16-кГц захват сразу после открытия WebSocket.
     /// Player до ready не создаётся, а все сэмплы остаются только в памяти клиента.
     func startAudioPrebufferCapture() {
+        guard runtimeOptions.capturesAudio else { return }
         startAudioEngine(
             captureSampleRate: ConversationAudioContract.fallbackSampleRate,
             enablePlayback: false
@@ -172,6 +174,7 @@ extension ConversationViewController {
 
     /// Запустить negotiated-захват и player-node после ready.
     func startAudioCapture() {
+        guard runtimeOptions.capturesAudio else { return }
         guard audioHolder.negotiationReady else {
             AgentLogger.shared.warn("[Audio] Захват отложен до conv.ready")
             return
@@ -181,6 +184,8 @@ extension ConversationViewController {
 
     /// Общий конструктор графа: до ready только input, после ready input + player.
     private func startAudioEngine(captureSampleRate sampleRate: Double, enablePlayback: Bool) {
+        // Последняя линия защиты перед созданием AVAudioEngine и обращением к inputNode.
+        guard runtimeOptions.capturesAudio else { return }
         guard audioHolder.engine == nil else { return }
 
         let engine      = AVAudioEngine()
