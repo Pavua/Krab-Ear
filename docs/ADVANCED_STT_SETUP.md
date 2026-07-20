@@ -1,115 +1,102 @@
-# Продвинутая настройка STT — GigaAM-RNNT v2
+# Продвинутая настройка STT — GigaAM v3
 
-> Это приложение к [Руководству пользователя](USER_MANUAL.md) для профессиональных пользователей русскоязычной диктовки. Если вы только начинаете — базовой настройки из руководства (раздел 10) более чем достаточно.
+> Это приложение к [Руководству пользователя](USER_MANUAL.md) для активной
+> русскоязычной диктовки. Для EN/ES основным движком остаётся Whisper.
 
-## GigaAM-RNNT v2 (RU-специализированная модель)
+## Что даёт GigaAM
 
-GigaAM — модель распознавания русскоязычной речи от Sber (salute-developers, лицензия MIT). На стандартном тесте Common Voice RU даёт **WER ~3.8%** против ~9.8% у whisper-large-v3 — то есть **в 2.5 раза меньше ошибок** на русском. По умолчанию выключена; включается опционально, для пользователей с активной русскоязычной диктовкой.
+GigaAM — специализированная модель русской речи от Sber/Salute Developers
+(MIT). Продовый режим Krab Ear — `v3_e2e_rnnt`: он возвращает пунктуацию,
+капитализацию и числа сразу из модели. GigaAM запускается в отдельном Python
+3.12-окружении, поэтому его PyTorch-зависимости не смешиваются с основным
+backend.
 
-### Когда включать
+Подключать его разумно, если большая часть диктовок на русском и важны имена,
+термины или разговорная речь. Для преимущественно EN/ES и минимального размера
+установки достаточно Whisper.
 
-- 80%+ диктовок на русском
-- Часто диктуете имена/термины/специальную лексику (Whisper их часто слышит «как в литературе»)
-- Готовы потратить ~630 МБ диска под изолированный venv + ~1 ГБ под веса модели
+## Установка одним запуском
 
-### Когда НЕ включать
+1. Установи Python 3.12, если его ещё нет:
 
-- Преимущественно EN/ES — GigaAM работает только с русским
-- Хотите идеально lightweight setup (whisper-large-v3 уже есть и работает)
-
-### Установка (одноразово, ~3-5 мин)
-
-GigaAM нельзя поставить в основной Krab Ear venv: пакет требует `torch<=2.5.1`, что несовместимо с Python 3.14 + torch 2.11. Поэтому используется изолированный venv с Python 3.12 (~/.venv_krab_ear_gigaam).
-
-1. **Убедись что Python 3.12 установлен:**
    ```bash
-   /opt/homebrew/bin/python3.12 --version
-   # Если нет — установи: brew install python@3.12
+   brew install python@3.12
    ```
 
-2. **Запусти one-click installer:**
+2. Дважды нажми в Finder на `scripts/install_gigaam_venv.command` или запусти
+   тот же `.command` из Terminal:
+
    ```bash
-   bash scripts/install_gigaam_venv.command
-   ```
-   Скрипт создаст `~/.venv_krab_ear_gigaam`, поставит torch 2.5.1 + onnxruntime 1.23 + gigaam, и проверит smoke import. На M4 Max занимает ~3 мин (зависит от скорости сети).
-
-3. **Включи движок:** в приложении — «Настройки → STT-движки» → тумблер GigaAM-RNNT. Альтернатива без GUI — через IPC:
-   ```bash
-   python3 -c "
-   import socket, json, os
-   sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-   sock.connect(os.path.expanduser('~/Library/Application Support/KrabEar/krabear.sock'))
-   sock.sendall(json.dumps({'id':'1','method':'set_settings','params':{'stt_gigaam_enabled':True}}).encode()+b'\n')
-   print(sock.recv(4096).decode())
-   "
+   ./scripts/install_gigaam_venv.command
    ```
 
-### Как работает
+Installer создаёт `~/.venv_krab_ear_gigaam`, checkout'ит пинованный commit
+GigaAM, устанавливает полный extra `longform` и проверяет импорты GigaAM,
+PyTorch, pyannote, Hugging Face Hub и torchcodec. Повторный запуск не удаляет
+существующее окружение без явного подтверждения.
 
-Когда `STT_GIGAAM_ENABLED=true` и detected_lang == "ru":
-1. AudioEngine помещает GigaAM первым в STT chain
-2. Аудио уходит в worker subprocess (запущен из venv_gigaam, держит модель в памяти)
-3. Worker возвращает текст через JSON по stdin/stdout (~50–200 мс на короткую фразу после первой загрузки)
-4. При любой ошибке (worker crash, timeout, недоступность venv) — fallback на whisper-large-v3 без потери транскрипции
+3. В приложении открой «Настройки → STT-движки» и включи GigaAM.
 
-Первая транскрипция после старта backend будет **медленнее** (~5-15 сек на загрузку модели в worker'е). Все последующие — быстрые.
+Первая фраза после старта backend включает загрузку модели и будет медленнее.
+Следующие запросы используют уже прогретый worker.
 
-### Параметры (в config.py / env vars)
+## Как устроен fallback
 
-| Setting (env: `KRAB_EAR_<NAME>`) | Default | Описание |
-|---|---|---|
-| `STT_GIGAAM_ENABLED` | `False` | Включить GigaAM в STT chain |
-| `STT_GIGAAM_MODE` | `"rnnt"` | `"rnnt"` (выше качество) или `"ctc"` (быстрее) |
-| `STT_GIGAAM_DEVICE` | `"cpu"` | `"cpu"` (default, рекомендуется по bench 2026-04-26) или `"mps"` |
-| `STT_GIGAAM_TRANSPORT` | `"auto"` | `"auto"` / `"in_process"` / `"subprocess"` |
-| `STT_GIGAAM_VENV_PYTHON` | `""` | Путь к venv-Python (пусто = `~/.venv_krab_ear_gigaam/bin/python`) |
-| `STT_GIGAAM_HF_TOKEN` | `""` | HuggingFace API token для longform (см. ниже) |
+Когда GigaAM включён и язык — русский:
 
-### Длинные аудио (> 30 сек) — `transcribe_longform`
+1. `AudioEngine` ставит GigaAM первым в STT-chain.
+2. Аудио уходит в долгоживущий worker из изолированного venv.
+3. Worker возвращает один JSON-ответ через stdin/stdout.
+4. Пустой ответ, crash, timeout или ошибка модели не считаются успехом — chain
+   продолжает распознавание через Whisper.
 
-GigaAM `transcribe()` имеет hard limit ~25–30 сек на одну операцию. Для длинных файлов (импорт звонков, диктовка > 30 сек) используется `transcribe_longform()`, который через `pyannote.audio` нарезает аудио по VAD-сегментам и склеивает результат.
+У GigaAM shortform есть точная граница: не более `25 * 16000` сэмплов, то есть
+25,0 секунды при 16 кГц. Любая запись длиннее 25 секунд сначала режется
+`AudioChunker` на безопасные фрагменты до 20 секунд и склеивается обратно.
+Если chunker недоступен, используется `transcribe_longform()` с pyannote VAD.
 
-**Setup (one-time):**
+## Параметры
 
-1. **Доустановить зависимости в venv_gigaam:**
-   ```bash
-   ~/.venv_krab_ear_gigaam/bin/pip install "gigaam[longform]"
-   # huggingface_hub 1.x несовместим с pyannote 3.4 (deprecated `use_auth_token` API):
-   ~/.venv_krab_ear_gigaam/bin/pip install "huggingface_hub<0.26"
-   ```
+| Setting (`KRAB_EAR_<NAME>`) | Default | Назначение |
+|---|---:|---|
+| `STT_GIGAAM_ENABLED` | `False` | Добавить GigaAM в русский STT-chain |
+| `STT_GIGAAM_MODE` | `v3_e2e_rnnt` | Модель; полное имя исключает неоднозначный alias `rnnt` |
+| `STT_GIGAAM_DEVICE` | `cpu` | `cpu` или `mps` |
+| `STT_GIGAAM_TRANSPORT` | `auto` | `auto`, `in_process` или `subprocess` |
+| `STT_GIGAAM_VENV_PYTHON` | пусто | Пусто означает `~/.venv_krab_ear_gigaam/bin/python` |
+| `STT_GIGAAM_HF_TOKEN` | пусто | Токен для загрузки gated-модели pyannote при cache miss |
 
-2. **Принять TOS на HuggingFace** (`pyannote/voice-activity-detection` — gated repo):
-   - Открой https://hf.co/pyannote/voice-activity-detection (потребуется HF аккаунт)
-   - Нажми **"Agree and access repository"**
-   - Опционально: то же для `pyannote/segmentation-3.0` если попросит
+## Longform и Hugging Face
 
-3. **HF token** уже должен быть в `~/.cache/huggingface/token` (от предыдущей `huggingface-cli login`). Проверь:
-   ```bash
-   ~/.venv_krab_ear_gigaam/bin/python -c "from huggingface_hub import HfApi; print(HfApi().whoami()['name'])"
-   ```
-   Если token нет — `huggingface-cli login` с тем же интерпретатором.
+Новый installer уже ставит longform-зависимости; вручную доустанавливать
+`gigaam[longform]` или откатывать `huggingface_hub` не нужно. Для основного
+`AudioChunker`-пути HF token также не нужен.
 
-4. **Активировать longform в backend** (опционально — установи свой token):
-   ```python
-   set_settings({"stt_gigaam_hf_token": "hf_..."})  # пусто = используется cached
-   ```
+Pyannote-fallback сначала ищет `pyannote/segmentation-3.0` в локальном HF-кэше.
+Если модели там нет:
 
-После этого `GigaAMAdapter.transcribe(audio, longform=True, hf_token=settings.STT_GIGAAM_HF_TOKEN)` будет работать. В транскрибированной записи поле `engine` станет `gigaam-rnnt-longform`.
+1. Прими условия доступа на странице модели Hugging Face.
+2. Укажи token в настройках Krab Ear (`hf_token` или
+   `stt_gigaam_hf_token`). Значение применяется без рестарта и никогда не
+   выводится в лог.
 
-### Проверка после включения
+Успешный fallback имеет engine `gigaam-rnnt-longform`; обычный chunker-путь —
+`gigaam-rnnt-chunked`.
 
-После того как enable + первая диктовка на русском прошла:
-```bash
-log show --last 5m --predicate 'eventMessage CONTAINS "GigaAM"' --style compact 2>/dev/null | head -20
-```
-Должна быть строка `GigaAM-RNNT добавлен в chain первым` и `GigaAM транскрибация завершена`.
+## Проверка
 
-В транскрибированной записи поле `engine` будет `gigaam-rnnt` (вместо `mlx-whisper-large-v3`).
+После включения продиктуй одну короткую и одну запись длиннее 25 секунд. В
+диагностике backend должны появиться сообщения о добавлении GigaAM в chain и
+завершённой транскрибации, а не `gigaam-error` или пустой текст.
 
-### Откат
+Для просмотра недавних локальных сообщений:
 
 ```bash
-# Выключить: «Настройки → STT-движки» → тумблер GigaAM, или через IPC: stt_gigaam_enabled = false
-# Венв можно удалить если больше не нужен:
-rm -rf ~/.venv_krab_ear_gigaam
+log show --last 5m --predicate 'eventMessage CONTAINS "GigaAM"' --style compact
 ```
+
+## Откат
+
+Выключи GigaAM в «Настройки → STT-движки»: Whisper сразу снова станет первым
+движком. Если окружение больше не нужно, после выключения backend его можно
+переместить в Корзину через Finder; удалять его во время активного worker нельзя.

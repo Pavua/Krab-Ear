@@ -20,13 +20,13 @@
 - Wake word «hey jarvis» ЖИВОЙ в проде (openWakeWord, IPC-поллинг) — A2 карты идей закрыт 2026-07-05.
 - Sparkle auto-update ЖИВОЙ: CI-релиз по тегу/dispatch, EdDSA, GitHub Releases, appcast на ветке —
   C1 закрыт 2026-07-07 (PR #1847, первый релиз v2.4.0).
-- ~360 IPC-методов, 17 извлечённых сервисов, ~6500+ тестов, набор CI-guard'ов (8+ аудит-скриптов) против классов регрессий.
+- ~360 IPC-методов, 18 извлечённых сервисов, ~6500+ тестов, набор CI-guard'ов (8+ аудит-скриптов) против классов регрессий.
 - Экосистема: Voice Gateway (сосед-проект, WS/REST мост готов), Main Krab (мозг, Telegram userbot).
 
-Ключевые известные долги:
-1. **2-EventBus гэп** — IPC-процесс (`service.py`) и REST-процесс (`rest_server.py`, :5005) имеют
-   раздельные шины без моста. Жертвы: wake word (починен поллингом), krab_error (починен поллингом),
-   `rewriter_recovered` (открыт, косметика), live subs SSE-путь агента (под подозрением — проверить в Волне 2).
+Ключевые архитектурные состояния и известные долги:
+1. **2-EventBus гэп ЗАКРЫТ Волной 2** — IPC- и REST-процессы по-прежнему имеют разные шины,
+   но production `EventBridge` переносит события через loopback/HMAC и переживает недоступность REST.
+   Не восстанавливать старый polling и не строить второй мост; оставшийся долг — само слияние процессов (M2).
 2. **Дубль тяжёлого состояния**: `rest_server.py:472-476` держит собственные AudioEngine/StateStore/
    Transcriber/TTSService → лишняя RAM, межпроцессные MLX-локи, два launchd-агента.
 3. Нотарификации нет (самоподпись «Krab Ear Dev Local») — для владельца ок, для внешних юзеров трение.
@@ -62,7 +62,7 @@
 
 ## 2. Уровень 1 — исполняемые волны (июль → середина августа)
 
-### Волна 0 — Релизная колея v2.4.0 [в процессе 2026-07-07]
+### Волна 0 — Релизная колея v2.4.0 [закрыта 2026-07-07]
 Закрыть хвост Sparkle-волны и убедиться, что конвейер живой end-to-end.
 - [x] Мерж PR #1847 (`364b75c7`), деплой в прод (UUID 559D4E15), parity-коммит `efeccb6e`.
 - [x] Смок-релиз: ран `28887347730` зелёный с ПЕРВОЙ живой попытки (guard/cert/sign/release/appcast).
@@ -274,8 +274,9 @@ GH Release + appcast `ca01b4fb`; релизный ран с 1-й попытки 
 ### 3.4 Продуктовые кандидаты (пост-Волна 4, переприоритизировать по факту)
 Из карты идей: **C3 menu-bar quick capture** (M) — быстрый диктофон-скретчпад; **C2 live meeting
 overlay** (M-L) — action items/спикеры по ходу встречи (сейчас только post-hoc `get_meeting_report`).
-Живые кандидаты из старого S-бэклога (§4): S34 clipboard safety modes, S56 accessibility/keyboard UX,
-S63 bilingual conversation mode, S64 inline correction loop (**закрыта** — см. журнал 2026-07-19).
+Живые кандидаты из старого S-бэклога (§4): S56 accessibility/keyboard UX и S63 bilingual
+conversation mode — обе волны начинать с closure-аудита, потому что большая часть уже реализована.
+**S34 clipboard safety и S64 inline correction loop закрыты** — см. журнал 2026-07-19/20.
 **S65 import queue v2 — закрыта БЕЗ КОДА 2026-07-19** (скаут-инвентаризация, анти-rebuild): drag-drop
 очередь/прогресс/отмена/сводка ошибок/pause-resume/безопасная обработка больших папок — всё уже в
 проде через client-side flow (`HistoryPanelController+Import.swift` + `transcribe_paths_async`).
@@ -704,3 +705,17 @@ Swift не зовёт её 4 IPC-метода); дублировать рабо�
   **Qwen3-ASR (MLX) забенчен, в прод НЕ введён** (медленнее v3, смысловые ошибки на техжаргоне) —
   кандидат на будущее (§5 спеки). Известные хвосты: longform torch-пин (импорт длинных звонков —
   проверить отдельно), RU casing-правила fixer'а под lowercase-v2 (маскируется LLM-полировкой).
+- 2026-07-20 (Codex runtime-hardening checkpoint, **БЕЗ ДЕПЛОЯ**) — в изолированную ветку
+  `codex/runtime-hardening-20260720` собраны семь независимо проверенных коммитов поверх ранних
+  фиксов этой же волны: полный mono/16-кГц контракт GigaAM→Whisper/всех fallback-кандидатов
+  (ревью поймало P1: 15с @48кГц после пустого GigaAM воспринимались Whisper как 45с), SSE
+  HTTP/MIME + split-UTF-8, generation/task guards разговора, физические маски Left/Right Option,
+  а также single-instance без автоматического PID-signal. Второй P1 найден в тестовой инфраструктуре:
+  `LaunchAgentManagerTests` и `PermissionWizardTests` писали/удаляли живой
+  `~/Library/LaunchAgents/com.antigravity.krab-ear.plist` и вызывали настоящий `launchctl`;
+  теперь каталог и process runner инъецируются, wizard зависит от `AutostartManaging`, все тесты
+  используют UUID-temp + spy. Checkpoint-гейты: Python 34/34, ubuntu-parity 34/34 (Py3.12 без MLX),
+  Swift 47/47, CI-flake8, diff-check и независимые повторные ревью — зелёные; release build DI-ветки
+  зелёный. Полный безопасный Swift/Python chunk-гейт, `make audit-all`, push/merge/parity/deploy и
+  живой голосовой smoke трёх brain-режимов оставлены следующей сессии. Тестом созданный live plist
+  намеренно не удалялся и агент не загружался: любые live launchd-изменения — только по явному «да».
