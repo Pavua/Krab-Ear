@@ -188,10 +188,13 @@ final class ConversationViewController: NSViewController {
         conversationState = .connecting
         transcriptBuffer = ""
         updateTranscript("")
-        // Микрофон запускается только после `conv.ready`: Moshi требует 24 кГц,
-        // а старый pipeline — 16 кГц. До согласования отправлять фреймы нельзя.
+        // Сразу начинаем bounded prebuffer в 16 кГц, но до `conv.ready` ничего
+        // не отправляем: Moshi требует 24 кГц, старый pipeline — 16 кГц.
         prepareAudioNegotiation()
         startWebSocketSession()
+        // Невалидный URL выставляет error синхронно; микрофон в таком случае не нужен.
+        if case .error = conversationState { return }
+        startAudioPrebufferCapture()
     }
 
     /// Остановить сессию. Вызывается из hotkey-toggle или кнопки «Прервать».

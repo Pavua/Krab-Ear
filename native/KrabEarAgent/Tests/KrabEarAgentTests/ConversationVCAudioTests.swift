@@ -64,8 +64,8 @@ final class ConversationVCAudioTests: XCTestCase {
         XCTAssertTrue(vc.isSessionActive, "После startConversation isSessionActive должен быть true")
         XCTAssertEqual(vc.conversationState, .connecting,
                        "startConversation должен переводить в .connecting")
-        XCTAssertFalse(ConversationViewController._rtSessionActive,
-                       "До conv.ready real-time uplink-гейт должен оставаться закрыт")
+        XCTAssertFalse(vc.isAudioNegotiationReady,
+                       "До conv.ready сетевой uplink-гейт должен оставаться закрыт")
         // Cleanup
         vc.isSessionActive = false
     }

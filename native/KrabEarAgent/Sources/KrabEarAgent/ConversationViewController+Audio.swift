@@ -6,9 +6,10 @@
  - downlink: PCM16 LE → Float32 → AVAudioPlayerNode на согласованной частоте.
 
  Moshi использует 24 кГц и требует ровно 1920 сэмплов на фрейм; старый pipeline
- использует 16 кГц и 1280 сэмплов. До `conv.ready` захват не запускается, поэтому
- сервер никогда не получает фрейм неверной длины. Для legacy `engine.loaded` и
- `conv.ready` без `sample_rate` действует fallback 16 кГц.
+ использует 16 кГц и 1280 сэмплов. Захват начинается сразу в 16 кГц prebuffer,
+ но сеть остаётся закрыта до `conv.ready`. После ready сохранённая первая реплика
+ ресемплируется, фреймируется и отправляется до живого продолжения. Для legacy
+ `engine.loaded` и `conv.ready` без `sample_rate` действует fallback 16 кГц.
 
  Tap AVAudioNode вызывается в real-time потоке Core Audio, а контроллер изолирован
  главным актором. Поэтому tap читает только nonisolated-зеркало активности, копирует
@@ -36,6 +37,14 @@ extension ConversationViewController {
         return h
     }
 
+    var isAudioNegotiationReady: Bool {
+        audioHolder.negotiationReady
+    }
+
+    var pendingAudioPrebufferSampleCount: Int {
+        audioHolder.prebuffer.bufferedSampleCount
+    }
+
     // MARK: - Согласование контракта
 
     /// Сбрасывает состояние предыдущей сессии. До ready сборщик намеренно закрыт.
@@ -43,6 +52,8 @@ extension ConversationViewController {
         ConversationViewController._rtSessionActive = false
         audioHolder.negotiationReady = false
         audioHolder.sampleRate = ConversationAudioContract.fallbackSampleRate
+        audioHolder.captureSampleRate = nil
+        audioHolder.prebuffer.reset()
         audioHolder.frameAssembler = ConversationAudioFrameAssembler(
             frameLength: ConversationAudioContract.samplesPerFrame(
                 sampleRate: ConversationAudioContract.fallbackSampleRate
@@ -61,21 +72,30 @@ extension ConversationViewController {
         audioHolder.negotiationReady = true
     }
 
-    /// Активирует аудио после ready. Повторное идентичное событие не рвёт поток;
-    /// изменение частоты приводит к контролируемой перенастройке одного engine.
+    /// Активирует аудио после ready, перенастраивает provisional engine и только
+    /// затем отправляет накопленную первую реплику через тот же frame assembler.
     func activateNegotiatedAudio(sampleRate: Double?) {
         let normalized = ConversationAudioContract.normalizedSampleRate(sampleRate)
         let alreadyConfigured = audioHolder.negotiationReady
             && audioHolder.sampleRate == normalized
-            && audioHolder.engine != nil
+            && audioHolder.playerNode != nil
         guard !alreadyConfigured else { return }
 
         if audioHolder.engine != nil {
-            stopAudioCapture()
+            stopAudioCapture(resetSessionState: false)
         }
         configureNegotiatedAudio(sampleRate: normalized)
         guard isSessionActive else { return }
         startAudioCapture()
+
+        let dropped = audioHolder.prebuffer.droppedSampleCount
+        let bufferedFrames = drainAudioPrebufferFrames()
+        sendUplinkFrames(bufferedFrames)
+        if dropped > 0 {
+            AgentLogger.shared.warn(
+                "[Audio] Cold-start prebuffer достиг лимита; отброшено \(dropped) сэмплов после первых 60 с"
+            )
+        }
     }
 
     /// Единый playback-формат: downlink интерпретируется на той же частоте, что ready.
@@ -88,30 +108,73 @@ extension ConversationViewController {
         )
     }
 
-    /// Добавляет ресемплированный чанк и возвращает только полные 80-мс фреймы.
-    /// До согласования возвращает пустой массив — это основной uplink-гейт.
-    func assembleUplinkFrames(_ samples: [Float]) -> [[Float]] {
+    /// До ready сохраняет mono-сэмплы в bounded prebuffer и возвращает пустой массив.
+    /// После ready приводит источник к negotiated rate и возвращает полные 80 мс.
+    func assembleUplinkFrames(
+        _ samples: [Float],
+        sourceSampleRate: Double? = nil
+    ) -> [[Float]] {
+        let sourceRate = ConversationAudioContract.normalizedSampleRate(
+            sourceSampleRate ?? audioHolder.captureSampleRate
+        )
+        guard audioHolder.negotiationReady else {
+            let prebufferSamples = ConversationAudioResampler.resample(
+                samples,
+                sourceSampleRate: sourceRate,
+                targetSampleRate: ConversationAudioContract.fallbackSampleRate
+            )
+            audioHolder.prebuffer.append(prebufferSamples)
+            return []
+        }
+
+        let negotiatedSamples = ConversationAudioResampler.resample(
+            samples,
+            sourceSampleRate: sourceRate,
+            targetSampleRate: audioHolder.sampleRate
+        )
+        return audioHolder.frameAssembler.append(negotiatedSamples)
+    }
+
+    /// Дренирует prebuffer ровно один раз. Неполный хвост остаётся в assembler
+    /// и объединяется с первым живым чанком, поэтому граница ready не теряет звук.
+    func drainAudioPrebufferFrames() -> [[Float]] {
         guard audioHolder.negotiationReady else { return [] }
-        return audioHolder.frameAssembler.append(samples)
+        let buffered = audioHolder.prebuffer.drain()
+        let resampled = ConversationAudioResampler.resample(
+            buffered,
+            sourceSampleRate: ConversationAudioContract.fallbackSampleRate,
+            targetSampleRate: audioHolder.sampleRate
+        )
+        return audioHolder.frameAssembler.append(resampled)
     }
 
     // MARK: - Захват (микрофон → uplink)
 
-    /// Запустить захват микрофона и подключить player-node для воспроизведения downlink.
-    /// Один AVAudioEngine обслуживает input-tap и player-node на частоте из ready.
+    /// Запускает provisional 16-кГц захват сразу после открытия WebSocket.
+    /// Player до ready не создаётся, а все сэмплы остаются только в памяти клиента.
+    func startAudioPrebufferCapture() {
+        startAudioEngine(
+            captureSampleRate: ConversationAudioContract.fallbackSampleRate,
+            enablePlayback: false
+        )
+    }
+
+    /// Запустить negotiated-захват и player-node после ready.
     func startAudioCapture() {
         guard audioHolder.negotiationReady else {
             AgentLogger.shared.warn("[Audio] Захват отложен до conv.ready")
             return
         }
+        startAudioEngine(captureSampleRate: audioHolder.sampleRate, enablePlayback: true)
+    }
 
-        // Зеркало выставляется до старта engine, чтобы первый tap не потерял сессию.
-        ConversationViewController._rtSessionActive = isSessionActive
+    /// Общий конструктор графа: до ready только input, после ready input + player.
+    private func startAudioEngine(captureSampleRate sampleRate: Double, enablePlayback: Bool) {
+        guard audioHolder.engine == nil else { return }
 
         let engine      = AVAudioEngine()
         let inputNode   = engine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
-        let sampleRate  = audioHolder.sampleRate
 
         // Конвертер приводит аппаратную частоту микрофона к контракту текущего движка.
         guard let targetFormat = AVAudioFormat(
@@ -128,6 +191,11 @@ extension ConversationViewController {
             AgentLogger.shared.info("[Audio] Не удалось создать ресемплер микрофона")
             return
         }
+
+        // Состояние публикуется только после успешной подготовки форматов. Иначе
+        // следующий ready получил бы ложный активный RT-гейт без живого engine.
+        audioHolder.captureSampleRate = sampleRate
+        ConversationViewController._rtSessionActive = isSessionActive
 
         // Размер tap задан в аппаратных сэмплах; итоговую точность обеспечивает assembler.
         let tapBufferSize = AVAudioFrameCount(max(
@@ -166,11 +234,23 @@ extension ConversationViewController {
 
             // Сборка фреймов, WebSocket и UI принадлежат главному актору.
             Task { @MainActor [weak self] in
-                self?.processAudioSamples(samples)
+                self?.processAudioSamples(samples, sourceSampleRate: sampleRate)
             }
         }
 
         inputNode.installTap(onBus: 0, bufferSize: tapBufferSize, format: inputFormat, block: tapBlock)
+
+        audioHolder.engine = engine
+        guard enablePlayback else {
+            do {
+                try engine.start()
+                AgentLogger.shared.info("[Audio] Cold-start prebuffer запущен: 16 кГц, сеть закрыта")
+            } catch {
+                tearDownFailedAudioEngine(engine: engine, inputNode: inputNode, player: nil)
+                AgentLogger.shared.error("[Audio] Ошибка запуска prebuffer: \(error.localizedDescription)")
+            }
+            return
+        }
 
         // Тот же engine обслуживает playback, чтобы не было двух конкурирующих графов.
         let player = AVAudioPlayerNode()
@@ -179,11 +259,11 @@ extension ConversationViewController {
         guard let playbackFormat = makeDownlinkPlaybackFormat() else {
             AgentLogger.shared.warn("[Audio] Не удалось создать playback-формат \(Int(sampleRate)) Гц")
             // Uplink остаётся полезен даже без устройства воспроизведения.
-            audioHolder.engine = engine
             do {
                 try engine.start()
                 AgentLogger.shared.info("[Audio] Захват запущен только для uplink")
             } catch {
+                tearDownFailedAudioEngine(engine: engine, inputNode: inputNode, player: nil)
                 AgentLogger.shared.error("[Audio] Ошибка запуска движка: \(error.localizedDescription)")
             }
             return
@@ -191,7 +271,6 @@ extension ConversationViewController {
 
         engine.connect(player, to: engine.mainMixerNode, format: playbackFormat)
         audioHolder.playerNode = player
-        audioHolder.engine = engine
 
         do {
             try engine.start()
@@ -201,12 +280,29 @@ extension ConversationViewController {
                 "[Audio] Контракт активен: \(Int(sampleRate)) Гц, \(frameLength) сэмплов/80 мс"
             )
         } catch {
+            tearDownFailedAudioEngine(engine: engine, inputNode: inputNode, player: player)
             AgentLogger.shared.error("[Audio] Ошибка запуска движка: \(error.localizedDescription)")
         }
     }
 
+    /// Откатывает частично собранный граф, чтобы повторный ready мог безопасно
+    /// попробовать запуск ещё раз и не получил ложный `engine != nil`.
+    private func tearDownFailedAudioEngine(
+        engine: AVAudioEngine,
+        inputNode: AVAudioInputNode,
+        player: AVAudioPlayerNode?
+    ) {
+        ConversationViewController._rtSessionActive = false
+        inputNode.removeTap(onBus: 0)
+        player?.stop()
+        engine.stop()
+        audioHolder.playerNode = nil
+        audioHolder.engine = nil
+        audioHolder.captureSampleRate = nil
+    }
+
     /// Остановить захват микрофона и player node.
-    func stopAudioCapture() {
+    func stopAudioCapture(resetSessionState: Bool = true) {
         // Сначала закрываем RT-гейт, затем разбираем граф.
         ConversationViewController._rtSessionActive = false
         audioHolder.engine?.inputNode.removeTap(onBus: 0)
@@ -214,8 +310,12 @@ extension ConversationViewController {
         audioHolder.playerNode = nil
         audioHolder.engine?.stop()
         audioHolder.engine = nil
-        audioHolder.frameAssembler.reset()
-        audioHolder.negotiationReady = false
+        audioHolder.captureSampleRate = nil
+        if resetSessionState {
+            audioHolder.frameAssembler.reset()
+            audioHolder.prebuffer.reset()
+            audioHolder.negotiationReady = false
+        }
         resetMicLevelMeter()
         AgentLogger.shared.info("[Audio] Захват остановлен")
     }
@@ -223,12 +323,18 @@ extension ConversationViewController {
     /// Обработать PCM-сэмплы на главном акторе.
     /// Float32 → точные 80-мс фреймы → PCM16 LE + level-meter.
     /// Вызывается только из Task { @MainActor } внутри installTap-блока.
-    func processAudioSamples(_ samples: [Float]) {
+    func processAudioSamples(_ samples: [Float], sourceSampleRate: Double? = nil) {
         // Индикатор получает каждый чанк, а сеть — только полные контрактные фреймы.
         computeAndPushLevel(samples)
 
         guard isSessionActive, !samples.isEmpty else { return }
-        for frame in assembleUplinkFrames(samples) {
+        let frames = assembleUplinkFrames(samples, sourceSampleRate: sourceSampleRate)
+        sendUplinkFrames(frames)
+    }
+
+    /// Единственная точка кодирования Float32-фреймов в wire PCM16 LE.
+    private func sendUplinkFrames(_ frames: [[Float]]) {
+        for frame in frames {
             var pcm = Data(capacity: frame.count * 2)
             for sample in frame {
                 // Не-числовые значения превращаем в тишину, чтобы не портить PCM.
@@ -324,7 +430,11 @@ private final class AudioHolder: NSObject {
     var engine: AVAudioEngine?
     var playerNode: AVAudioPlayerNode?
     var sampleRate = ConversationAudioContract.fallbackSampleRate
+    var captureSampleRate: Double?
     var negotiationReady = false
+    var prebuffer = ConversationAudioPrebuffer(
+        maxSampleCount: ConversationAudioContract.prebufferMaxSampleCount
+    )
     var frameAssembler = ConversationAudioFrameAssembler(
         frameLength: ConversationAudioContract.samplesPerFrame(
             sampleRate: ConversationAudioContract.fallbackSampleRate

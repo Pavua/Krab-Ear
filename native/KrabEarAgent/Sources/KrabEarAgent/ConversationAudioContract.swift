@@ -2,9 +2,9 @@
  ConversationAudioContract — чистая модель аудиоконтракта «Разговора с AI».
 
  Voice Gateway сообщает частоту PCM в `conv.ready.data.sample_rate`. Этот файл
- нормализует значение и собирает произвольные чанки после ресемплинга в точные
- 80-миллисекундные фреймы. Чистая реализация не зависит от AVAudioEngine, поэтому
- граничные случаи split/merge проверяются XCTest без микрофона и колонок.
+ нормализует значение, ограниченно хранит звук холодного старта, ресемплирует его
+ и собирает произвольные чанки в точные 80-миллисекундные фреймы. Чистая реализация
+ не зависит от AVAudioEngine, поэтому все границы проверяются без аудиоустройств.
 */
 
 import Foundation
@@ -12,6 +12,11 @@ import Foundation
 enum ConversationAudioContract {
     static let fallbackSampleRate: Double = 16_000
     static let frameDurationSeconds: Double = 0.080
+    static let prebufferDurationSeconds: Double = 60
+
+    static var prebufferMaxSampleCount: Int {
+        Int(fallbackSampleRate * prebufferDurationSeconds)
+    }
 
     /// Защищает AVAudioFormat и размер буфера от испорченного серверного значения.
     /// Диапазон оставлен шире текущих 16/24 кГц для совместимости с будущими движками.
@@ -28,6 +33,76 @@ enum ConversationAudioContract {
     /// Количество mono-сэмплов в одном обязательном 80-миллисекундном WS-фрейме.
     static func samplesPerFrame(sampleRate: Double) -> Int {
         max(1, Int((normalizedSampleRate(sampleRate) * frameDurationSeconds).rounded()))
+    }
+}
+
+struct ConversationAudioPrebuffer {
+    let maxSampleCount: Int
+    private var bufferedSamples: [Float] = []
+    private(set) var droppedSampleCount = 0
+
+    init(maxSampleCount: Int) {
+        self.maxSampleCount = max(1, maxSampleCount)
+    }
+
+    var bufferedSampleCount: Int {
+        bufferedSamples.count
+    }
+
+    /// Сохраняет самые ранние сэмплы сессии: цель prebuffer — не потерять именно
+    /// первую реплику во время холодной загрузки движка. После лимита новые сэмплы
+    /// учитываются как отброшенные, но память больше не растёт.
+    mutating func append(_ samples: [Float]) {
+        guard !samples.isEmpty else { return }
+        let available = max(0, maxSampleCount - bufferedSamples.count)
+        let acceptedCount = min(available, samples.count)
+        if acceptedCount > 0 {
+            bufferedSamples.append(contentsOf: samples.prefix(acceptedCount))
+        }
+        droppedSampleCount += samples.count - acceptedCount
+    }
+
+    /// Передаёт владение накопленным звуком flush-пути и переоткрывает буфер.
+    mutating func drain() -> [Float] {
+        let drained = bufferedSamples
+        bufferedSamples.removeAll(keepingCapacity: true)
+        droppedSampleCount = 0
+        return drained
+    }
+
+    /// Полная очистка на stop/error освобождает и зарезервированную память.
+    mutating func reset() {
+        bufferedSamples.removeAll(keepingCapacity: false)
+        droppedSampleCount = 0
+    }
+}
+
+enum ConversationAudioResampler {
+    /// Линейный ресемплер нужен только для ограниченного cold-start prebuffer.
+    /// Живой поток после ready продолжает использовать AVAudioConverter.
+    static func resample(
+        _ samples: [Float],
+        sourceSampleRate: Double,
+        targetSampleRate: Double
+    ) -> [Float] {
+        guard !samples.isEmpty else { return [] }
+        let sourceRate = ConversationAudioContract.normalizedSampleRate(sourceSampleRate)
+        let targetRate = ConversationAudioContract.normalizedSampleRate(targetSampleRate)
+        guard sourceRate != targetRate else { return samples }
+
+        let outputCount = max(1, Int((Double(samples.count) * targetRate / sourceRate).rounded()))
+        var output = [Float](repeating: 0, count: outputCount)
+        let sourceStep = sourceRate / targetRate
+
+        for outputIndex in 0..<outputCount {
+            let sourcePosition = Double(outputIndex) * sourceStep
+            let lowerIndex = min(Int(sourcePosition), samples.count - 1)
+            let upperIndex = min(lowerIndex + 1, samples.count - 1)
+            let fraction = Float(sourcePosition - Double(lowerIndex))
+            output[outputIndex] = samples[lowerIndex]
+                + (samples[upperIndex] - samples[lowerIndex]) * fraction
+        }
+        return output
     }
 }
 

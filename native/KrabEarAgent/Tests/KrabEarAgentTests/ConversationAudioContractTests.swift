@@ -18,6 +18,34 @@ final class ConversationAudioFrameAssemblerTests: XCTestCase {
         XCTAssertEqual(ConversationAudioContract.samplesPerFrame(sampleRate: 24_000), 1_920)
     }
 
+    func test_prebuffer_keepsEarliestSamplesAndHonorsMemoryLimit() {
+        var prebuffer = ConversationAudioPrebuffer(maxSampleCount: 5)
+
+        prebuffer.append([0, 1, 2])
+        prebuffer.append([3, 4, 5, 6])
+
+        XCTAssertEqual(prebuffer.bufferedSampleCount, 5)
+        XCTAssertEqual(prebuffer.droppedSampleCount, 2)
+        XCTAssertEqual(prebuffer.drain(), [0, 1, 2, 3, 4])
+        XCTAssertEqual(prebuffer.bufferedSampleCount, 0)
+    }
+
+    func test_resampler_sixteenToTwentyFourK_preservesDurationAndOrder() {
+        let source: [Float] = [0, 1, 2, 3]
+
+        let result = ConversationAudioResampler.resample(
+            source,
+            sourceSampleRate: 16_000,
+            targetSampleRate: 24_000
+        )
+
+        XCTAssertEqual(result.count, 6)
+        XCTAssertEqual(result[0], 0, accuracy: 0.0001)
+        XCTAssertEqual(result[1], 2.0 / 3.0, accuracy: 0.0001)
+        XCTAssertEqual(result[3], 2, accuracy: 0.0001)
+        XCTAssertEqual(result[5], 3, accuracy: 0.0001)
+    }
+
     func test_exactBoundary_emitsOneFrameWithoutRemainder() {
         var assembler = ConversationAudioFrameAssembler(frameLength: 1_280)
         let samples = (0..<1_280).map(Float.init)
@@ -72,7 +100,31 @@ final class ConversationAudioNegotiationTests: XCTestCase {
         let vc = makeVC()
         vc.prepareAudioNegotiation()
 
-        XCTAssertTrue(vc.assembleUplinkFrames(Array(repeating: 0.25, count: 1_280)).isEmpty)
+        XCTAssertTrue(
+            vc.assembleUplinkFrames(
+                Array(repeating: 0.25, count: 1_280),
+                sourceSampleRate: 16_000
+            ).isEmpty
+        )
+        XCTAssertEqual(vc.pendingAudioPrebufferSampleCount, 1_280)
+    }
+
+    func test_prebufferedSixteenK_flushesAsExactTwentyFourKFrameAfterReady() {
+        let vc = makeVC()
+        vc.prepareAudioNegotiation()
+        let firstUtterance = (0..<1_280).map(Float.init)
+
+        XCTAssertTrue(
+            vc.assembleUplinkFrames(firstUtterance, sourceSampleRate: 16_000).isEmpty
+        )
+        vc.configureNegotiatedAudio(sampleRate: 24_000)
+        let frames = vc.drainAudioPrebufferFrames()
+
+        XCTAssertEqual(frames.count, 1)
+        XCTAssertEqual(frames[0].count, 1_920)
+        XCTAssertEqual(frames[0].first, firstUtterance.first)
+        XCTAssertEqual(frames[0].last, firstUtterance.last)
+        XCTAssertEqual(vc.pendingAudioPrebufferSampleCount, 0)
     }
 
     func test_moshiReady_configuresTwentyFourKDownlinkAndFrameSize() {
@@ -82,7 +134,10 @@ final class ConversationAudioNegotiationTests: XCTestCase {
 
         XCTAssertEqual(vc.makeDownlinkPlaybackFormat()?.sampleRate, 24_000)
         XCTAssertEqual(
-            vc.assembleUplinkFrames(Array(repeating: 0.25, count: 1_920)).first?.count,
+            vc.assembleUplinkFrames(
+                Array(repeating: 0.25, count: 1_920),
+                sourceSampleRate: 24_000
+            ).first?.count,
             1_920
         )
     }
@@ -108,5 +163,21 @@ final class ConversationAudioNegotiationTests: XCTestCase {
         }
         XCTAssertEqual(name, "moshi")
         XCTAssertEqual(sampleRate, 24_000)
+    }
+
+    func test_stopAndServerError_clearPrebuffer() {
+        let stoppedVC = makeVC()
+        stoppedVC.prepareAudioNegotiation()
+        _ = stoppedVC.assembleUplinkFrames([1, 2, 3], sourceSampleRate: 16_000)
+        stoppedVC.isSessionActive = true
+        stoppedVC.stopConversation()
+        XCTAssertEqual(stoppedVC.pendingAudioPrebufferSampleCount, 0)
+
+        let failedVC = makeVC()
+        failedVC.prepareAudioNegotiation()
+        _ = failedVC.assembleUplinkFrames([4, 5, 6], sourceSampleRate: 16_000)
+        failedVC.isSessionActive = true
+        failedVC.handleDownlinkEvent(.error(code: "test", message: "ошибка"))
+        XCTAssertEqual(failedVC.pendingAudioPrebufferSampleCount, 0)
     }
 }
