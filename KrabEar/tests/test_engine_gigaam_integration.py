@@ -404,6 +404,52 @@ class TestGigaAMFallbackOnTranscribeError(unittest.TestCase):
         self.assertEqual(result["text"], "whisper после тишины")
         self.assertNotIn(engine._GIGAAM_MARKER, engine._unavailable_models)
 
+    def test_empty_gigaam_at_48k_resamples_whisper_fallback_to_16k(self):
+        """Один 48-кГц массив нормализуется для всего fallback-chain."""
+        fake_settings = _make_settings(STT_GIGAAM_ENABLED=True)
+        fake_router = _make_fake_router(adapter=_make_fake_adapter())
+        source_audio = _audio(seconds=15.0, sr=48_000)
+        whisper_inputs: list[np.ndarray] = []
+
+        def whisper_transcribe(audio: np.ndarray, **_kwargs):
+            whisper_inputs.append(audio)
+            return {
+                "text": "whisper после тишины",
+                "language": "ru",
+                "segments": [],
+            }
+
+        mlx_stub = MagicMock()
+        mlx_stub.transcribe.side_effect = whisper_transcribe
+
+        with patch("core.engine.settings", fake_settings), \
+             patch("core.engine.mlx_whisper", mlx_stub):
+            engine = _make_audio_engine_without_warmup()
+            engine._router = fake_router
+            engine._transcribe_gigaam = MagicMock(return_value={
+                "text": "",
+                "confidence": 0.9,
+                "engine": "gigaam-rnnt",
+            })
+
+            result = engine._transcribe_with_fallback(
+                source_audio,
+                prompt="",
+                language="ru",
+                audio_sample_rate=48_000,
+            )
+
+        self.assertEqual(result["text"], "whisper после тишины")
+        self.assertEqual(len(whisper_inputs), 1)
+        self.assertEqual(whisper_inputs[0].shape, (15 * 16_000,))
+        self.assertEqual(whisper_inputs[0].dtype, np.float32)
+        gigaam_audio = engine._transcribe_gigaam.call_args.args[0]
+        self.assertEqual(gigaam_audio.shape, (15 * 16_000,))
+        self.assertEqual(
+            engine._transcribe_gigaam.call_args.kwargs["sample_rate"],
+            16_000,
+        )
+
 
 class TestGigaAMConfidence(unittest.TestCase):
     """Confidence из GigaAM попадает в result["confidence"]."""

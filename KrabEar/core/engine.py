@@ -1938,6 +1938,19 @@ class AudioEngine:
     ) -> dict[str, Any]:
         """Внутренняя реализация fallback chain. Отделена от публичной _transcribe_with_fallback
         чтобы обернуть весь chain одним span'ом без изменения retry/timeout логики."""
+        # Все локальные STT-адаптеры принимают голый ndarray как mono/16 кГц.
+        # Поэтому файловый chunked-путь обязан нормализовать массив ДО выбора
+        # кандидата, а не только внутри GigaAM: иначе его пустой результат
+        # передаст, например, 15 секунд @48 кГц в Whisper как 45 секунд @16 кГц.
+        chain_audio_data = audio_data
+        chain_sample_rate = audio_sample_rate
+        if audio_sample_rate is not None and isinstance(audio_data, np.ndarray):
+            chain_audio_data = self._resample_audio_to_mono_16k(
+                audio_data,
+                audio_sample_rate,
+            )
+            chain_sample_rate = 16000
+
         candidates = [self.current_model]
         if self.quality_profile == "max":
             candidates = list(dict.fromkeys(settings.model_max_list))
@@ -2048,14 +2061,14 @@ class AudioEngine:
         _ru_finetune_model = settings.STT_RU_FINETUNE_MODEL
         _gigaam_mode = getattr(settings, "STT_GIGAAM_MODE", "rnnt")
         _gigaam_model_label = f"gigaam-{_gigaam_mode}"
-        _gigaam_source_rate = 16000 if audio_sample_rate is None else audio_sample_rate
+        _gigaam_source_rate = 16000 if chain_sample_rate is None else chain_sample_rate
         _adapter_dispatch = [
             (
                 self._GIGAAM_MARKER,
                 "stt_gigaam",
                 _gigaam_model_label,
                 lambda: self._transcribe_gigaam(
-                    audio_data,
+                    chain_audio_data,
                     language=language,
                     sample_rate=_gigaam_source_rate,
                 ),
@@ -2064,31 +2077,33 @@ class AudioEngine:
                 self._RU_FINETUNE_MARKER,
                 "stt_ru_finetune",
                 _ru_finetune_model,
-                lambda: self._transcribe_model(audio_data, _ru_finetune_model, prompt, language),
+                lambda: self._transcribe_model(
+                    chain_audio_data, _ru_finetune_model, prompt, language,
+                ),
             ),
             (
                 self._PARAKEET_MARKER,
                 "stt_parakeet",
                 settings.PARAKEET_MODEL,
-                lambda: self._transcribe_parakeet(audio_data, language=language),
+                lambda: self._transcribe_parakeet(chain_audio_data, language=language),
             ),
             (
                 self._SENSEVOICE_MARKER,
                 "stt_sensevoice",
                 settings.SENSEVOICE_MODEL,
-                lambda: self._transcribe_sensevoice(audio_data, language=language),
+                lambda: self._transcribe_sensevoice(chain_audio_data, language=language),
             ),
             (
                 self._WHISPERX_MARKER,
                 "stt_whisperx",
                 settings.WHISPERX_MODEL,
-                lambda: self._transcribe_whisperx(audio_data, language=language),
+                lambda: self._transcribe_whisperx(chain_audio_data, language=language),
             ),
             (
                 self._VOXTRAL_MARKER,
                 "stt_voxtral",
                 settings.VOXTRAL_MODEL,
-                lambda: self._transcribe_voxtral(audio_data, language=language),
+                lambda: self._transcribe_voxtral(chain_audio_data, language=language),
             ),
         ]
         _adapter_map = {marker: (span_pfx, model, fn) for marker, span_pfx, model, fn in _adapter_dispatch}
@@ -2158,7 +2173,13 @@ class AudioEngine:
                 with _profiler.start_span(span_name):
                     _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
                     try:
-                        future = _executor.submit(self._transcribe_model, audio_data, model_name, prompt, language)
+                        future = _executor.submit(
+                            self._transcribe_model,
+                            chain_audio_data,
+                            model_name,
+                            prompt,
+                            language,
+                        )
                         result = future.result(timeout=timeout)
                     except (concurrent.futures.TimeoutError, concurrent.futures.CancelledError):
                         _executor.shutdown(wait=False, cancel_futures=True)
@@ -2225,7 +2246,7 @@ class AudioEngine:
         if settings.NETWORK_MODE != "offline_strict":
             logger.info("Локальные модели недоступны, переключаюсь на Remote STT...")
             with _profiler.start_span("stt_remote"):
-                return self._transcribe_remote(audio_data, prompt)
+                return self._transcribe_remote(chain_audio_data, prompt)
 
         raise RuntimeError("Все доступные STT-движки вышли из строя.")
 
@@ -2820,15 +2841,15 @@ class AudioEngine:
         return self._voxtral_model
 
     @staticmethod
-    def _resample_gigaam_audio_to_16k(
+    def _resample_audio_to_mono_16k(
         audio: np.ndarray,
         source_sample_rate: int | float,
     ) -> np.ndarray:
-        """Приводит mono float32 сигнал к реальным 16 кГц ровно один раз.
+        """Приводит float32 сигнал к mono/16 кГц ровно один раз.
 
-        GigaAM, его 25-секундный лимит и AudioChunker должны видеть один и тот
-        же массив. Поэтому ресемплинг выполняется до выбора short/longform, а в
-        адаптер дальше всегда передаётся уже каноническая частота 16 кГц.
+        Голый ndarray не несёт метаданных о частоте, поэтому GigaAM, Whisper и
+        остальные адаптеры должны видеть один и тот же канонический массив.
+        Для stereo soundfile-входа каналы сводятся до ресемплинга.
         """
         try:
             source_rate = float(source_sample_rate)
@@ -2842,8 +2863,10 @@ class AudioEngine:
             )
 
         mono = np.asarray(audio, dtype=np.float32)
-        if mono.ndim != 1:
-            raise ValueError(f"GigaAM ожидает mono-массив, получена shape={mono.shape}")
+        if mono.ndim == 2:
+            mono = mono.mean(axis=1, dtype=np.float32)
+        elif mono.ndim != 1:
+            raise ValueError(f"STT ожидает mono/stereo-массив, получена shape={mono.shape}")
         if mono.size == 0 or source_rate == 16000.0:
             return np.ascontiguousarray(mono, dtype=np.float32)
 
@@ -2951,7 +2974,7 @@ class AudioEngine:
         # Критический инвариант: duration, chunker и адаптер работают с одним
         # каноническим mono/16k массивом. Адаптер получает sample_rate=16000 и
         # потому не выполняет второй реальный ресемплинг.
-        audio_data_np = self._resample_gigaam_audio_to_16k(
+        audio_data_np = self._resample_audio_to_mono_16k(
             audio_data_np,
             source_sample_rate,
         )
