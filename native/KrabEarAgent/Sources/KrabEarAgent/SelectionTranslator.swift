@@ -91,6 +91,88 @@ struct SystemSelectionEventMonitor: SelectionEventMonitoring {
     }
 }
 
+// MARK: - Accessibility access
+
+/// Непрозрачный токен выделенного AX-элемента.
+/// Модульные тесты используют пустой токен, поэтому им не нужно активное приложение.
+@MainActor
+final class SelectionAXElement {
+    fileprivate let systemElement: AXUIElement?
+
+    /// Безопасный токен для подменных адаптеров и модульных тестов.
+    init() {
+        systemElement = nil
+    }
+
+    fileprivate init(systemElement: AXUIElement) {
+        self.systemElement = systemElement
+    }
+}
+
+/// Прочитанный текст вместе с токеном элемента, куда затем возвращается перевод.
+@MainActor
+struct SelectionAXSelection {
+    let text: String
+    let element: SelectionAXElement
+}
+
+/// Контракт чтения и записи выделения через Accessibility API.
+/// Вынесен отдельно, чтобы обычные unit-тесты не трогали реальное активное приложение.
+@MainActor
+protocol SelectionAccessibilityAccess: AnyObject {
+    func readSelection() -> SelectionAXSelection?
+    func writeSelection(element: SelectionAXElement, text: String) -> Bool
+}
+
+/// Рабочая реализация пути AX. Все прежние системные вызовы остаются здесь
+/// и подключаются к SelectionTranslator как зависимость по умолчанию.
+@MainActor
+final class SystemSelectionAccessibilityAccess: SelectionAccessibilityAccess {
+    nonisolated init() {}
+
+    func readSelection() -> SelectionAXSelection? {
+        guard AXIsProcessTrusted() else { return nil }
+        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else {
+            return nil
+        }
+        let appElement = AXUIElementCreateApplication(pid)
+
+        var focusedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            appElement,
+            kAXFocusedUIElementAttribute as CFString,
+            &focusedRef
+        ) == .success, let focusedRef else { return nil }
+        guard CFGetTypeID(focusedRef) == AXUIElementGetTypeID() else { return nil }
+        let focusedElement = focusedRef as! AXUIElement
+
+        var selectedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            focusedElement,
+            kAXSelectedTextAttribute as CFString,
+            &selectedRef
+        ) == .success,
+        let selectedRef,
+        let selected = selectedRef as? String,
+        !selected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+
+        return SelectionAXSelection(
+            text: selected,
+            element: SelectionAXElement(systemElement: focusedElement)
+        )
+    }
+
+    func writeSelection(element: SelectionAXElement, text: String) -> Bool {
+        guard let systemElement = element.systemElement else { return false }
+        return AXUIElementSetAttributeValue(
+            systemElement,
+            kAXSelectedTextAttribute as CFString,
+            text as CFTypeRef
+        ) == .success
+    }
+}
+
 // MARK: - SelectionTranslator
 
 /// Глобальный hotkey Cmd+Shift+T → перевод выделенного текста in-place.
@@ -109,6 +191,7 @@ final class SelectionTranslator {
     private let ipcClient: IPCClient
     private let notificationService: NotificationService
     private let eventMonitor: any SelectionEventMonitoring
+    private let accessibilityAccess: any SelectionAccessibilityAccess
     private let logger = AgentLogger.shared
 
     // MARK: - State
@@ -126,11 +209,13 @@ final class SelectionTranslator {
         ipcClient: IPCClient,
         notificationService: NotificationService,
         defaults: UserDefaults = .standard,
-        eventMonitor: any SelectionEventMonitoring = SystemSelectionEventMonitor()
+        eventMonitor: any SelectionEventMonitoring = SystemSelectionEventMonitor(),
+        accessibilityAccess: any SelectionAccessibilityAccess = SystemSelectionAccessibilityAccess()
     ) {
         self.ipcClient = ipcClient
         self.notificationService = notificationService
         self.eventMonitor = eventMonitor
+        self.accessibilityAccess = accessibilityAccess
         self.config = SelectionTranslatorConfig.load(from: defaults)
     }
 
@@ -248,49 +333,15 @@ final class SelectionTranslator {
 
     /// Пытается прочитать kAXSelectedTextAttribute из focused element.
     /// Возвращает (selectedText, element) или nil если не удалось.
-    func readSelectionViaAX() -> (String, AXUIElement)? {
-        guard AXIsProcessTrusted() else { return nil }
-
-        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else {
-            return nil
-        }
-        let appElement = AXUIElementCreateApplication(pid)
-
-        // Получаем focused element
-        var focusedRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            appElement,
-            kAXFocusedUIElementAttribute as CFString,
-            &focusedRef
-        ) == .success, let focusedRef else { return nil }
-
-        guard CFGetTypeID(focusedRef) == AXUIElementGetTypeID() else { return nil }
-        let focusedElement = focusedRef as! AXUIElement
-
-        // Читаем selected text
-        var selectedRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            focusedElement,
-            kAXSelectedTextAttribute as CFString,
-            &selectedRef
-        ) == .success,
-        let selectedRef,
-        let selected = selectedRef as? String,
-        !selected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else { return nil }
-
-        return (selected, focusedElement)
+    func readSelectionViaAX() -> (String, SelectionAXElement)? {
+        guard let selection = accessibilityAccess.readSelection() else { return nil }
+        return (selection.text, selection.element)
     }
 
     /// Записывает translated text в AX element через kAXSelectedTextAttribute.
     /// Returns true если успешно.
-    func writeSelectionViaAX(element: AXUIElement, text: String) -> Bool {
-        let status = AXUIElementSetAttributeValue(
-            element,
-            kAXSelectedTextAttribute as CFString,
-            text as CFTypeRef
-        )
-        return status == .success
+    func writeSelectionViaAX(element: SelectionAXElement, text: String) -> Bool {
+        accessibilityAccess.writeSelection(element: element, text: text)
     }
 
     // MARK: - Clipboard fallback path

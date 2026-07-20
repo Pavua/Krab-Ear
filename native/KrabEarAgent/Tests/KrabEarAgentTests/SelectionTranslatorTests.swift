@@ -68,6 +68,35 @@ private final class RecordingSelectionEventMonitor: SelectionEventMonitoring {
     }
 }
 
+/// AX-адаптер по умолчанию для модульных тестов: не читает и не меняет активное приложение.
+@MainActor
+private final class NoopSelectionAccessibilityAccess: SelectionAccessibilityAccess {
+    func readSelection() -> SelectionAXSelection? { nil }
+
+    func writeSelection(element: SelectionAXElement, text: String) -> Bool { false }
+}
+
+/// Записывает AX-вызовы на безопасном токене, не создавая системный AXUIElement.
+@MainActor
+private final class RecordingSelectionAccessibilityAccess: SelectionAccessibilityAccess {
+    var selectionToRead: SelectionAXSelection?
+    var writeResult = false
+    private(set) var readCount = 0
+    private(set) var writtenElement: SelectionAXElement?
+    private(set) var writtenText: String?
+
+    func readSelection() -> SelectionAXSelection? {
+        readCount += 1
+        return selectionToRead
+    }
+
+    func writeSelection(element: SelectionAXElement, text: String) -> Bool {
+        writtenElement = element
+        writtenText = text
+        return writeResult
+    }
+}
+
 /// Создаёт translator с уникальным набором UserDefaults и безопасным event monitor.
 /// Домен очищается после чтения: значения конфигурации уже скопированы в translator.
 @MainActor
@@ -75,7 +104,8 @@ private func makeIsolatedSelectionTranslator(
     ipcClient: IPCClient,
     notificationService: NotificationService = makeSilentNotificationService(),
     config: SelectionTranslatorConfig = .default,
-    eventMonitor: any SelectionEventMonitoring = NoopSelectionEventMonitor()
+    eventMonitor: any SelectionEventMonitoring = NoopSelectionEventMonitor(),
+    accessibilityAccess: any SelectionAccessibilityAccess = NoopSelectionAccessibilityAccess()
 ) -> SelectionTranslator {
     let suiteName = "KrabEar.SelectionTranslatorFixture.\(UUID().uuidString)"
     guard let defaults = UserDefaults(suiteName: suiteName) else {
@@ -87,7 +117,8 @@ private func makeIsolatedSelectionTranslator(
         ipcClient: ipcClient,
         notificationService: notificationService,
         defaults: defaults,
-        eventMonitor: eventMonitor
+        eventMonitor: eventMonitor,
+        accessibilityAccess: accessibilityAccess
     )
     defaults.removePersistentDomain(forName: suiteName)
     return translator
@@ -271,31 +302,28 @@ final class SelectionTranslatorHotkeyTests: XCTestCase {
 @MainActor
 final class SelectionTranslatorAXTests: XCTestCase {
 
-    private func makeTranslator() -> SelectionTranslator {
-        let socketPath = "/tmp/krabear_noop_\(Int.random(in: 0...999_999)).sock"
-        let client = IPCClient(socketPath: socketPath)
-        let ns = makeSilentNotificationService()
-        return makeIsolatedSelectionTranslator(ipcClient: client, notificationService: ns)
-    }
-
-    func test_readSelectionViaAX_whenNotTrusted_returnsNil() {
-        // AXIsProcessTrusted() вернёт false в test sandbox → метод должен вернуть nil
-        // (не крашиться, не запрашивать AX prompt).
-        let t = makeTranslator()
+    func test_readSelectionViaAX_whenAdapterReturnsNil_returnsNil() {
+        let access = RecordingSelectionAccessibilityAccess()
+        let t = makeIsolatedSelectionTranslator(
+            ipcClient: IPCClient(socketPath: "/tmp/noop.sock"),
+            accessibilityAccess: access
+        )
         let result = t.readSelectionViaAX()
-        // В тестовом окружении AX недоступен — ожидаем nil
-        // (если AX вдруг доступен — результат может быть non-nil, тест пропускаем)
-        if !AXIsProcessTrusted() {
-            XCTAssertNil(result, "Без AX permission readSelectionViaAX должен возвращать nil")
-        }
+        XCTAssertNil(result)
+        XCTAssertEqual(access.readCount, 1)
     }
 
-    func test_writeSelectionViaAX_invalidElement_returnsFalse() {
-        // Создаём невалидный AXUIElement (pid=0) — запись должна завершиться ошибкой
-        let t = makeTranslator()
-        let fakeElement = AXUIElementCreateApplication(0)
-        let ok = t.writeSelectionViaAX(element: fakeElement, text: "test")
-        XCTAssertFalse(ok, "writeSelectionViaAX с невалидным элементом должен возвращать false")
+    func test_writeSelectionViaAX_adapterFailure_returnsFalse() {
+        let access = RecordingSelectionAccessibilityAccess()
+        let t = makeIsolatedSelectionTranslator(
+            ipcClient: IPCClient(socketPath: "/tmp/noop.sock"),
+            accessibilityAccess: access
+        )
+        let element = SelectionAXElement()
+        let ok = t.writeSelectionViaAX(element: element, text: "test")
+        XCTAssertFalse(ok)
+        XCTAssertTrue(access.writtenElement === element)
+        XCTAssertEqual(access.writtenText, "test")
     }
 }
 
@@ -553,22 +581,20 @@ final class SelectionTranslatorWave191Tests: XCTestCase {
 
     // MARK: 2. test_readSelectionViaAX_returns_text
 
-    /// readSelectionViaAX возвращает nil (без AX permission в test sandbox) или non-nil если доверенный.
-    /// Тест документирует поведение, не падает при обоих исходах.
+    /// readSelectionViaAX делегирует чтение адаптеру и возвращает его текст с токеном.
     func test_readSelectionViaAX_returns_text() {
-        let client = IPCClient(socketPath: "/tmp/noop.sock")
-        let ns = makeSilentNotificationService()
-        let t = makeIsolatedSelectionTranslator(ipcClient: client, notificationService: ns)
+        let access = RecordingSelectionAccessibilityAccess()
+        let element = SelectionAXElement()
+        access.selectionToRead = SelectionAXSelection(text: "Выделенный текст", element: element)
+        let t = makeIsolatedSelectionTranslator(
+            ipcClient: IPCClient(socketPath: "/tmp/noop.sock"),
+            accessibilityAccess: access
+        )
 
         let result = t.readSelectionViaAX()
-        // В test sandbox без AX permission — nil. Тест проверяет что нет краша.
-        if AXIsProcessTrusted() {
-            // Если AX доступен — результат может быть nil (нет focusable элемента) или (String, AXUIElement)
-            // В обоих случаях тест проходит
-            _ = result
-        } else {
-            XCTAssertNil(result, "Без AX permission readSelectionViaAX должен вернуть nil")
-        }
+        XCTAssertEqual(result?.0, "Выделенный текст")
+        XCTAssertTrue(result?.1 === element)
+        XCTAssertEqual(access.readCount, 1)
     }
 
     // MARK: 3. test_readSelectionViaAX_fallback_to_clipboard
@@ -576,52 +602,45 @@ final class SelectionTranslatorWave191Tests: XCTestCase {
     /// При недоступном AX translate flow должен использовать clipboard fallback.
     /// Проверяем, что callTranslateIPC не вызывается с пустым текстом при пустом clipboard.
     func test_readSelectionViaAX_fallback_to_clipboard() async {
-        // Симулируем сценарий: AX недоступен (test sandbox) → clipboard пуст → translate не должен вызываться
-        let client = IPCClient(socketPath: "/tmp/krabear_noop_fallback.sock")
-        let ns = makeSilentNotificationService()
-        let t = makeIsolatedSelectionTranslator(ipcClient: client, notificationService: ns)
+        let access = RecordingSelectionAccessibilityAccess()
+        let t = makeIsolatedSelectionTranslator(
+            ipcClient: IPCClient(socketPath: "/tmp/krabear_noop_fallback.sock"),
+            accessibilityAccess: access
+        )
 
-        // Если AX недоступен — readSelectionViaAX вернёт nil
         let axResult = t.readSelectionViaAX()
-        if !AXIsProcessTrusted() {
-            XCTAssertNil(axResult, "AX должен быть недоступен в тесте — fallback path активен")
-        }
-        // Тест документирует логику: AX path → fallback clipboard → если clipboard пуст → showErrorHUD.
-        // Полное end-to-end невозможно без реального frontmost app, поэтому тест проверяет guard condition.
+        XCTAssertNil(axResult, "Пустой AX-адаптер должен активировать fallback path")
+        XCTAssertEqual(access.readCount, 1)
     }
 
     // MARK: 4. test_writeResultViaAX_replaces_selection
 
-    /// writeSelectionViaAX с реальным элементом (pid процесса тестов) — ожидаем false без Accessibility permission.
+    /// writeSelectionViaAX передаёт перевод тому же токену выделения.
     func test_writeResultViaAX_replaces_selection() {
-        let client = IPCClient(socketPath: "/tmp/noop.sock")
-        let ns = makeSilentNotificationService()
-        let t = makeIsolatedSelectionTranslator(ipcClient: client, notificationService: ns)
-
-        // В test sandbox без AX permission — запись должна вернуть false (не краш)
-        let appElement = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
-        let ok = t.writeSelectionViaAX(element: appElement, text: "Translated text")
-        // Метод возвращает Bool без exception — это главная проверка
-        if AXIsProcessTrusted() {
-            // Если AX доступен — результат может быть true или false (зависит от focusable element)
-            _ = ok
-        } else {
-            XCTAssertFalse(ok, "Без AX permission writeSelectionViaAX должен вернуть false")
-        }
+        let access = RecordingSelectionAccessibilityAccess()
+        access.writeResult = true
+        let t = makeIsolatedSelectionTranslator(
+            ipcClient: IPCClient(socketPath: "/tmp/noop.sock"),
+            accessibilityAccess: access
+        )
+        let element = SelectionAXElement()
+        let ok = t.writeSelectionViaAX(element: element, text: "Translated text")
+        XCTAssertTrue(ok)
+        XCTAssertTrue(access.writtenElement === element)
+        XCTAssertEqual(access.writtenText, "Translated text")
     }
 
     // MARK: 5. test_writeResultViaAX_fallback_to_paste
 
-    /// Если writeSelectionViaAX возвращает false для невалидного элемента — это подтверждает fallback логику.
+    /// Отказ AX-адаптера подтверждает условие перехода на clipboard fallback.
     func test_writeResultViaAX_fallback_to_paste() {
-        let client = IPCClient(socketPath: "/tmp/noop.sock")
-        let ns = makeSilentNotificationService()
-        let t = makeIsolatedSelectionTranslator(ipcClient: client, notificationService: ns)
-
-        // pid=0 создаёт невалидный element → AX write fails → в реальном flow это триггерит clipboard paste fallback
-        let invalidElement = AXUIElementCreateApplication(0)
-        let ok = t.writeSelectionViaAX(element: invalidElement, text: "Fallback text")
-        XCTAssertFalse(ok, "Невалидный AXUIElement должен заставить writeSelectionViaAX вернуть false → clipboard paste fallback")
+        let access = RecordingSelectionAccessibilityAccess()
+        let t = makeIsolatedSelectionTranslator(
+            ipcClient: IPCClient(socketPath: "/tmp/noop.sock"),
+            accessibilityAccess: access
+        )
+        let ok = t.writeSelectionViaAX(element: SelectionAXElement(), text: "Fallback text")
+        XCTAssertFalse(ok, "Отказ адаптера должен заставить production flow перейти на clipboard fallback")
     }
 
     // MARK: 6. test_handles_empty_selection
