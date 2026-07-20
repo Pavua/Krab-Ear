@@ -319,8 +319,15 @@ class TestSSEEventStreamEndpoint(_Base):
 
     def setUp(self):
         super().setUp()
-        # Patch sse_stream to a finite stub — see _fake_sse_stream docstring.
-        self._p_sse = patch("backend.rest_server.sse_stream", side_effect=_fake_sse_stream)
+        # Патчим тот же объект модуля, к которому привязан Flask-клиент.
+        # Соседний тест может перезагрузить backend.rest_server и заменить запись
+        # в sys.modules; строковый target тогда попадёт в новый модуль, а старый
+        # endpoint уйдёт в бесконечный настоящий SSE-generator.
+        self._p_sse = patch.object(
+            _rest_mod,
+            "sse_stream",
+            side_effect=_fake_sse_stream,
+        )
         self._p_sse.start()
 
     def tearDown(self):
