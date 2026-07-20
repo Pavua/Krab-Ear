@@ -43,6 +43,7 @@ Scored selection (D.2.3):
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checkable
 
 import numpy as np
@@ -303,6 +304,14 @@ class STTRouter:
         # subprocess spawn + model load на каждый chunk. Now cache + warm-up
         # support через `warmup_gigaam()`.
         self._gigaam_adapter: Optional[Any] = None
+        # Fingerprint не даёт hot reload вернуть адаптер со старой моделью,
+        # устройством, транспортом или уже изменившимся Python-окружением.
+        self._gigaam_adapter_fingerprint: Optional[
+            tuple[Any, Any, str, Optional[str]]
+        ] = None
+        # UI-настройки и транскрипция могут запросить адаптер одновременно.
+        # Один lock исключает двойной subprocess и гонку close/create.
+        self._gigaam_adapter_lock = threading.RLock()
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -380,31 +389,20 @@ class STTRouter:
     def get_gigaam_adapter(self) -> Optional[Any]:
         """Возвращает инициализированный GigaAMAdapter если STT_GIGAAM_ENABLED=True.
 
-        Cached singleton — same instance reused между transcribe calls (раньше
-        new instance каждый раз → subprocess spawn × N). На toggle off/on
-        adapter recreated automatically.
+        Один экземпляр переиспользуется, пока совпадает fingerprint из mode,
+        device, transport и проверенного venv-пути. Изменение любого поля
+        закрывает старый subprocess и атомарно создаёт адаптер с новым конфигом.
         """
+        with self._gigaam_adapter_lock:
+            return self._get_gigaam_adapter_locked()
+
+    def _get_gigaam_adapter_locked(self) -> Optional[Any]:
+        """Реализует получение GigaAM-адаптера под удерживаемым lock."""
         if not getattr(self._settings, "STT_GIGAAM_ENABLED", False):
-            # Toggle off — close cached adapter (если был) для cleanup.
-            if self._gigaam_adapter is not None:
-                try:
-                    self._gigaam_adapter.close()
-                except Exception:
-                    pass
-                self._gigaam_adapter = None
+            # Toggle off очищает и объект, и fingerprint, иначе последующее
+            # включение может ошибочно принять новый конфиг за старый.
+            self._close_cached_gigaam_adapter()
             logger.debug("STTRouter.get_gigaam_adapter: STT_GIGAAM_ENABLED=False → None")
-            return None
-
-        # Return cached instance (если есть) — same subprocess reused.
-        if self._gigaam_adapter is not None:
-            return self._gigaam_adapter
-
-        try:
-            from core.pipeline.stt_gigaam import GigaAMAdapter  # type: ignore[import]
-        except ImportError:
-            logger.warning(
-                "STTRouter.get_gigaam_adapter: core.pipeline.stt_gigaam не найден"
-            )
             return None
 
         mode = getattr(self._settings, "STT_GIGAAM_MODE", "rnnt")
@@ -417,9 +415,34 @@ class STTRouter:
                 venv_python_raw.strip()
             )
             if venv_python is None:
+                # Нельзя продолжать со старым адаптером после невалидного hot
+                # reload: он больше не соответствует выбранным настройкам.
+                self._close_cached_gigaam_adapter()
                 return None
         else:
             venv_python = None
+
+        fingerprint = (mode, device, transport, venv_python)
+        if (
+            self._gigaam_adapter is not None
+            and self._gigaam_adapter_fingerprint == fingerprint
+        ):
+            return self._gigaam_adapter
+
+        if self._gigaam_adapter is not None:
+            logger.info(
+                "STTRouter.get_gigaam_adapter: конфигурация изменилась — "
+                "пересоздаём адаптер"
+            )
+            self._close_cached_gigaam_adapter()
+
+        try:
+            from core.pipeline.stt_gigaam import GigaAMAdapter  # type: ignore[import]
+        except ImportError:
+            logger.warning(
+                "STTRouter.get_gigaam_adapter: core.pipeline.stt_gigaam не найден"
+            )
+            return None
 
         try:
             adapter = GigaAMAdapter(
@@ -428,7 +451,8 @@ class STTRouter:
                 transport=transport,
                 venv_python_path=venv_python,
             )
-            self._gigaam_adapter = adapter  # cache
+            self._gigaam_adapter = adapter
+            self._gigaam_adapter_fingerprint = fingerprint
             logger.info(
                 "STTRouter.get_gigaam_adapter: адаптер создан (mode=%s, device=%s, transport=%s)",
                 mode,
@@ -439,6 +463,23 @@ class STTRouter:
         except Exception as exc:
             logger.warning("STTRouter.get_gigaam_adapter: ошибка создания адаптера: %s", exc)
             return None
+
+    def _close_cached_gigaam_adapter(self) -> None:
+        """Закрывает кэшированный адаптер и безусловно сбрасывает fingerprint."""
+        adapter = self._gigaam_adapter
+        # Сначала очищаем ссылки: даже ошибка close не должна оставлять в кэше
+        # уже недействительный адаптер или его конфигурацию.
+        self._gigaam_adapter = None
+        self._gigaam_adapter_fingerprint = None
+        if adapter is None:
+            return
+        try:
+            adapter.close()
+        except Exception as exc:
+            logger.warning(
+                "STTRouter.get_gigaam_adapter: ошибка закрытия старого адаптера: %s",
+                exc,
+            )
 
     def warmup_gigaam(self) -> bool:
         """Force-load GigaAM model в background чтобы избежать cold-start latency.

@@ -370,6 +370,42 @@ class TestSTTRouterConfigDefaults(unittest.TestCase):
 class TestSTTRouterGetGigaamAdapter(unittest.TestCase):
     """get_gigaam_adapter: enabled (adapter returned) / disabled (None returned)."""
 
+    @staticmethod
+    def _fake_gigaam_module():
+        """Создаёт модуль-заглушку и записывает параметры всех адаптеров."""
+        import types
+
+        class FakeGigaAMAdapter:
+            """Минимальный адаптер-заглушка с наблюдаемым закрытием."""
+
+            instances = []
+
+            def __init__(self, *, device, mode, transport, venv_python_path):
+                self.device = device
+                self.mode = mode
+                self.transport = transport
+                self.venv_python_path = venv_python_path
+                self.close = MagicMock()
+                self.__class__.instances.append(self)
+
+        module = types.ModuleType("core.pipeline.stt_gigaam")
+        module.GigaAMAdapter = FakeGigaAMAdapter
+        return module, FakeGigaAMAdapter
+
+    @staticmethod
+    def _gigaam_settings(**overrides):
+        """Возвращает включённые настройки GigaAM с явной конфигурацией."""
+        settings = _make_settings(
+            STT_GIGAAM_ENABLED=True,
+            STT_GIGAAM_MODE="rnnt",
+            STT_GIGAAM_DEVICE="cpu",
+            STT_GIGAAM_TRANSPORT="subprocess",
+            STT_GIGAAM_VENV_PYTHON="",
+        )
+        for key, value in overrides.items():
+            setattr(settings, key, value)
+        return settings
+
     def test_get_gigaam_adapter_disabled_returns_none(self):
         """Когда STT_GIGAAM_ENABLED=False → get_gigaam_adapter() возвращает None."""
         settings = _make_settings()
@@ -395,6 +431,113 @@ class TestSTTRouterGetGigaamAdapter(unittest.TestCase):
 
         # ImportError внутри get_gigaam_adapter → None, не exception
         self.assertIsNone(result)
+
+    def test_unchanged_fingerprint_reuses_cached_adapter(self):
+        """Неизменная конфигурация переиспользует один адаптер и subprocess."""
+        import unittest.mock as _mock
+
+        module, adapter_class = self._fake_gigaam_module()
+        router = STTRouter(self._gigaam_settings())
+
+        with _mock.patch.dict("sys.modules", {"core.pipeline.stt_gigaam": module}):
+            first = router.get_gigaam_adapter()
+            second = router.get_gigaam_adapter()
+
+        self.assertIs(first, second)
+        self.assertEqual(len(adapter_class.instances), 1)
+        first.close.assert_not_called()
+
+    def test_mode_change_recreates_adapter_and_closes_old_one(self):
+        """Hot reload rnnt→ctc закрывает старый адаптер и создаёт новый."""
+        import unittest.mock as _mock
+
+        module, adapter_class = self._fake_gigaam_module()
+        settings = self._gigaam_settings()
+        router = STTRouter(settings)
+
+        with _mock.patch.dict("sys.modules", {"core.pipeline.stt_gigaam": module}):
+            first = router.get_gigaam_adapter()
+            settings.STT_GIGAAM_MODE = "ctc"
+            second = router.get_gigaam_adapter()
+
+        self.assertIsNot(first, second)
+        self.assertEqual([item.mode for item in adapter_class.instances], ["rnnt", "ctc"])
+        first.close.assert_called_once_with()
+
+    def test_device_and_transport_changes_recreate_adapter(self):
+        """Device и transport входят в fingerprint кэшированного адаптера."""
+        import unittest.mock as _mock
+
+        module, adapter_class = self._fake_gigaam_module()
+        settings = self._gigaam_settings()
+        router = STTRouter(settings)
+
+        with _mock.patch.dict("sys.modules", {"core.pipeline.stt_gigaam": module}):
+            first = router.get_gigaam_adapter()
+            settings.STT_GIGAAM_DEVICE = "mps"
+            second = router.get_gigaam_adapter()
+            settings.STT_GIGAAM_TRANSPORT = "in_process"
+            third = router.get_gigaam_adapter()
+
+        self.assertEqual(len(adapter_class.instances), 3)
+        self.assertEqual((second.device, second.transport), ("mps", "subprocess"))
+        self.assertEqual((third.device, third.transport), ("mps", "in_process"))
+        first.close.assert_called_once_with()
+        second.close.assert_called_once_with()
+
+    def test_fingerprint_uses_validated_venv_path(self):
+        """Кэш сравнивает проверенный venv-путь, а не исходную строку настроек."""
+        import unittest.mock as _mock
+
+        module, adapter_class = self._fake_gigaam_module()
+        settings = self._gigaam_settings(STT_GIGAAM_VENV_PYTHON="alias-a")
+        router = STTRouter(settings)
+        validated_paths = {
+            "alias-a": "/Users/test/.venvs/gigaam/bin/python3.12",
+            "alias-a-equivalent": "/Users/test/.venvs/gigaam/bin/python3.12",
+            "alias-b": "/Users/test/.venvs/gigaam-v2/bin/python3.12",
+        }
+
+        with (
+            _mock.patch.dict("sys.modules", {"core.pipeline.stt_gigaam": module}),
+            _mock.patch.object(
+                router,
+                "_validate_gigaam_venv_python",
+                side_effect=lambda raw: validated_paths[raw],
+            ),
+        ):
+            first = router.get_gigaam_adapter()
+            settings.STT_GIGAAM_VENV_PYTHON = "alias-a-equivalent"
+            same = router.get_gigaam_adapter()
+            settings.STT_GIGAAM_VENV_PYTHON = "alias-b"
+            second = router.get_gigaam_adapter()
+
+        self.assertIs(first, same)
+        self.assertIsNot(first, second)
+        self.assertEqual(len(adapter_class.instances), 2)
+        self.assertEqual(
+            second.venv_python_path,
+            "/Users/test/.venvs/gigaam-v2/bin/python3.12",
+        )
+        first.close.assert_called_once_with()
+
+    def test_toggle_off_closes_adapter_and_clears_fingerprint(self):
+        """Выключение GigaAM освобождает адаптер и полностью сбрасывает кэш."""
+        import unittest.mock as _mock
+
+        module, _ = self._fake_gigaam_module()
+        settings = self._gigaam_settings()
+        router = STTRouter(settings)
+
+        with _mock.patch.dict("sys.modules", {"core.pipeline.stt_gigaam": module}):
+            adapter = router.get_gigaam_adapter()
+            settings.STT_GIGAAM_ENABLED = False
+            result = router.get_gigaam_adapter()
+
+        self.assertIsNone(result)
+        adapter.close.assert_called_once_with()
+        self.assertIsNone(router._gigaam_adapter)
+        self.assertIsNone(router._gigaam_adapter_fingerprint)
 
 
 # ---------------------------------------------------------------------------
