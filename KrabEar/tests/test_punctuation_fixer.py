@@ -48,9 +48,20 @@ class TestPunctuationFixerRussian(unittest.TestCase):
         # "второе" должно стать "Второе"
         self.assertIn("Второе", result, f"Ожидается капитализация после точки: {result!r}")
 
-    def test_capitalize_standalone_ya(self):
-        result = self.fixer.fix("я думаю, что я прав.", language="ru")
-        self.assertNotIn(" я ", result, f"Одиночное 'я' должно быть 'Я': {result!r}")
+    def test_pronoun_ya_inside_sentence_stays_lowercase(self):
+        """Местоимение «я» внутри предложения остаётся строчным."""
+        result = self.fixer.fix("Сегодня я работаю", language="ru")
+        self.assertEqual(result, "Сегодня я работаю.")
+
+    def test_pronoun_ya_at_text_start_is_capitalized(self):
+        """Местоимение «я» в начале текста получает заглавную букву."""
+        result = self.fixer.fix("я работаю", language="ru")
+        self.assertEqual(result, "Я работаю.")
+
+    def test_pronoun_ya_after_sentence_end_is_capitalized(self):
+        """Местоимение «я» после конца предложения получает заглавную букву."""
+        result = self.fixer.fix("Мы закончили. я ушёл", language="ru")
+        self.assertEqual(result, "Мы закончили. Я ушёл.")
 
     def test_fix_ascii_quotes_to_russian(self):
         result = self.fixer.fix('он сказал "привет" мне.', language="ru")

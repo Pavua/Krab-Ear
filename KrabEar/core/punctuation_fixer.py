@@ -54,9 +54,6 @@ _MISSING_PERIOD_RE = re.compile(r"([А-Яа-яA-Za-zЁё0-9\)])$")
 # Капитализация после конца предложения
 _CAPITALIZE_AFTER_SENT_RE = re.compile(r"([.!?…]\s+)([а-яёa-z])")
 
-# Одиночное «я» (личное местоимение) должно быть с большой буквы
-_STANDALONE_YA_RE = re.compile(r"(?<!\w)(я)(?!\w)")
-
 # Кавычки ASCII вокруг русского текста → «»
 _ASCII_QUOTE_BLOCK_RE = re.compile(r'"([^"]{1,80})"')
 
@@ -180,9 +177,6 @@ class PunctuationFixer:
         """Правила, специфичные для русского языка."""
         result = text
 
-        # «я» как самостоятельное слово → «Я»
-        result = _STANDALONE_YA_RE.sub("Я", result)
-
         # ASCII-кавычки вокруг текста → «»
         result = _ASCII_QUOTE_BLOCK_RE.sub(r"«\1»", result)
 
@@ -297,9 +291,6 @@ class PunctuationFixer:
 
         if original and original[0].islower() and fixed and fixed[0].isupper():
             fixes.append("capitalized first letter")
-
-        if _STANDALONE_YA_RE.search(original) and "Я" not in original:
-            fixes.append("capitalized standalone 'я'")
 
         if '"' in original and "«" in fixed:
             fixes.append("fixed quotation marks to «»")
