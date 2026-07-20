@@ -11,8 +11,10 @@
 from __future__ import annotations
 
 import sys
+import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -110,7 +112,7 @@ class SpeakerPromptIntegrationTestCase(unittest.TestCase):
 
     def _make_engine(self):
         from core.engine import AudioEngine
-        return AudioEngine()
+        return AudioEngine(skip_gigaam_warmup=True)
 
     # --- Existing prompt preserved + hint appended ---
 
@@ -289,7 +291,7 @@ class EstimateNumSpeakersCacheTestCase(unittest.TestCase):
     def test_cache_returns_cached_value(self):
         """Кеш возвращает ранее сохранённое значение без вызова pipeline."""
         from core.engine import AudioEngine
-        engine = AudioEngine()
+        engine = AudioEngine(skip_gigaam_warmup=True)
         cache: dict = {"_estimated_num_speakers": 3}
         # Даже если бы pipeline вызвался — он бы упал (нет реального аудио).
         # С кешем — должен вернуть 3 без попытки запустить pyannote.
@@ -299,7 +301,7 @@ class EstimateNumSpeakersCacheTestCase(unittest.TestCase):
     def test_cache_written_on_failure(self):
         """При ошибке pipeline результат None записывается в кеш."""
         from core.engine import AudioEngine
-        engine = AudioEngine()
+        engine = AudioEngine(skip_gigaam_warmup=True)
         cache: dict = {}
         # Патчим _resolve_audio_path чтобы вернуть путь, и _load_diarization_pipeline чтобы упасть.
         with patch.object(engine, "_resolve_audio_path", return_value="/fake/audio.wav"), \
@@ -308,6 +310,39 @@ class EstimateNumSpeakersCacheTestCase(unittest.TestCase):
         self.assertIsNone(result)
         self.assertIn("_estimated_num_speakers", cache)
         self.assertIsNone(cache["_estimated_num_speakers"])
+
+    def test_pipeline_runs_under_shared_diarization_lock(self):
+        """Оценка спикеров не пересекается с meeting-диаризацией на MPS."""
+        from core.engine import AudioEngine
+
+        engine = AudioEngine(skip_gigaam_warmup=True)
+        engine._diarization_run_lock = threading.Lock()
+        lock_states: list[bool] = []
+        load_lock_states: list[bool] = []
+        annotation = SimpleNamespace(
+            itertracks=lambda yield_label: [(None, None, "SPEAKER_00")],
+        )
+
+        def pipeline(_audio_path):
+            lock_states.append(engine._diarization_run_lock.locked())
+            return annotation
+
+        def load_pipeline():
+            load_lock_states.append(engine._diarization_run_lock.locked())
+            return pipeline
+
+        with patch.object(engine, "_resolve_audio_path", return_value="/fake/audio.wav"), \
+             patch.object(engine, "_load_diarization_pipeline", side_effect=load_pipeline), \
+             patch.object(
+                 engine,
+                 "_prepare_audio_for_diarization",
+                 return_value=("/fake/audio.wav", False),
+             ):
+            result = engine._estimate_num_speakers("/fake/audio.wav")
+
+        self.assertEqual(result, 1)
+        self.assertEqual(lock_states, [True])
+        self.assertEqual(load_lock_states, [True])
 
 
 if __name__ == "__main__":

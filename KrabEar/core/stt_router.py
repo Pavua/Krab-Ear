@@ -48,6 +48,8 @@ from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checka
 
 import numpy as np
 
+from core.gigaam_compat import GIGAAM_SHORTFORM_MAX_SEC
+
 logger = logging.getLogger("KrabEar.STTRouter")
 
 # ---------------------------------------------------------------------------
@@ -97,8 +99,8 @@ _QUALITY_BONUS: Dict[str, int] = {
     _PARAKEET_ADAPTER_NAME: 10,
 }
 
-# Threshold (секунды) для duration penalty на GigaAM (hard limit ~25s on single pass)
-_GIGAAM_DURATION_PENALTY_THRESHOLD_S = 30.0
+# Штраф начинается сразу после точного upstream shortform limit.
+_GIGAAM_DURATION_PENALTY_THRESHOLD_S = GIGAAM_SHORTFORM_MAX_SEC
 _GIGAAM_DURATION_PENALTY = -50
 
 

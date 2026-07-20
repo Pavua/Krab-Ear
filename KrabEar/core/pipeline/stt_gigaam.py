@@ -1,4 +1,4 @@
-"""GigaAM-RNNT v2 адаптер для Krab Ear — специализированная RU-модель от Sber.
+"""Адаптер GigaAM v1-v3 для специализированного распознавания русской речи.
 
 GigaAM (Giga Audio Model) — Conformer-based SSL модель, дообученная на 50 000 часах
 русскоязычной речи. Версия v2-RNNT достигает WER ~3.8% на Common Voice RU
@@ -6,7 +6,7 @@ GigaAM (Giga Audio Model) — Conformer-based SSL модель, дообучен
 
 Лицензия: MIT — коммерческое использование разрешено.
 Источник: https://github.com/salute-developers/GigaAM
-PyPI: pip install gigaam
+Версия v3 устанавливается из пинованного git-исходника отдельным launcher-скриптом.
 
 Паттерн адаптера следует тому же интерфейсу, что и другие STT-адаптеры проекта:
 - Lazy-load модели (не в __init__)
@@ -39,6 +39,12 @@ from collections import deque
 from typing import Optional
 
 import numpy as np
+
+from core.gigaam_compat import (
+    SUPPORTED_GIGAAM_ASR_MODES,
+    engine_name_from_mode,
+    extract_longform_text,
+)
 
 logger = logging.getLogger("KrabEar.GigaAM")
 
@@ -73,8 +79,9 @@ def _resolve_ffmpeg_dir() -> str | None:
     return None
 
 
-# Модели, поддерживаемые адаптером
-_VALID_MODES = frozenset({"rnnt", "ctc", "v2_rnnt", "v2_ctc", "v1_rnnt", "v1_ctc"})
+# ASR-модели, поддерживаемые адаптером. SSL/эмоциональные модели сюда не
+# входят: у них другой контракт результата и они не являются STT-движками.
+_VALID_MODES = frozenset(SUPPORTED_GIGAAM_ASR_MODES)
 
 # Допустимые значения transport-параметра.
 _VALID_TRANSPORTS = frozenset({"auto", "in_process", "subprocess"})
@@ -89,15 +96,14 @@ _SUBPROCESS_LOAD_TIMEOUT_SEC = 180.0
 
 
 class GigaAMAdapter:
-    """Адаптер GigaAM-RNNT v2 для распознавания русскоязычной речи.
+    """Адаптер GigaAM v1-v3 для распознавания русскоязычной речи.
 
     Аргументы:
         device: устройство для инференса — "mps" (Apple Silicon MPS) или "cpu".
                 GigaAM использует PyTorch, поэтому MPS работает через torch.mps,
                 а не через MLX. mlx_lock НЕ требуется.
-        mode:   вариант модели — "rnnt" (по умолчанию, выше качество),
-                "ctc" (быстрее, чуть ниже WER).
-                Также поддерживаются полные имена: "v2_rnnt", "v2_ctc", "v1_rnnt", "v1_ctc".
+        mode: вариант модели. Продовый дефолт ``v3_e2e_rnnt`` даёт нативную
+              пунктуацию; также поддерживаются v3/v2/v1 RNNT и CTC.
 
     Паттерн использования::
 
@@ -292,7 +298,7 @@ class GigaAMAdapter:
                     _prev_hf[_k] = os.environ.get(_k)
                     os.environ[_k] = hf_token
             try:
-                segments = model.transcribe_longform(audio_path)
+                longform_result = model.transcribe_longform(audio_path)
             finally:
                 # Restore original values (None → remove entirely).
                 for _k, _v in _prev_hf.items():
@@ -300,11 +306,7 @@ class GigaAMAdapter:
                         os.environ.pop(_k, None)
                     else:
                         os.environ[_k] = _v
-            text = "\n\n".join(
-                (seg.get("transcription") or "").strip()
-                for seg in (segments or [])
-                if isinstance(seg, dict) and seg.get("transcription")
-            )
+            text, _segments_count = extract_longform_text(longform_result)
             return text, f"{self._engine_name()}-longform"
         transcription = model.transcribe(audio_path)
         if isinstance(transcription, str):
@@ -506,8 +508,7 @@ class GigaAMAdapter:
 
     def _engine_name(self) -> str:
         """Возвращает строку-идентификатор движка для result dict."""
-        mode_base = self._mode.replace("v2_", "").replace("v1_", "")
-        return f"gigaam-{mode_base}"
+        return engine_name_from_mode(self._mode)
 
 
 # ---------------------------------------------------------------------------

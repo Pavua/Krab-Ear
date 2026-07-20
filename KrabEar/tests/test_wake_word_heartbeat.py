@@ -11,7 +11,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
@@ -216,6 +216,35 @@ class StopReturnsBoolTests(unittest.TestCase):
         self.adapter._thread = fake
         self.assertFalse(self.adapter.stop())
         self.assertEqual(fake.join_timeout, 3.0)
+
+    def test_hung_thread_reference_is_preserved_and_restart_is_rejected(self):
+        """Зависший CFFI-тред нельзя потерять и заменить новым listener'ом."""
+        fake = _FakeThreadHung()
+        self.adapter._thread = fake
+        self.adapter._active_model = "hey_jarvis"
+        self.adapter._oww_available = True
+        self.adapter._load_model = MagicMock()
+
+        self.assertFalse(self.adapter.stop(timeout=0.01))
+        self.assertIs(self.adapter._thread, fake)
+        self.assertTrue(self.adapter.is_running())
+        self.assertTrue(self.adapter.is_wedged())
+
+        with self.assertRaisesRegex(RuntimeError, "предыдущий поток"):
+            self.adapter.start("hey_jarvis", lambda _name, _score: None)
+        self.adapter._load_model.assert_not_called()
+        self.assertIs(self.adapter._thread, fake)
+
+    def test_late_exit_of_previously_hung_thread_can_be_reaped(self):
+        """Повторный stop очищает ссылку, если PortAudio всё же отвис позже."""
+        fake = _FakeThreadHung()
+        self.adapter._thread = fake
+
+        self.assertFalse(self.adapter.stop(timeout=0.01))
+        fake._alive = False
+
+        self.assertTrue(self.adapter.stop(timeout=0.01))
+        self.assertIsNone(self.adapter._thread)
 
     def test_stop_bumps_epoch_even_when_not_running(self):
         # Chip Finding 5: во время танца слушатель остановлен координатором,

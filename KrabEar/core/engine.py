@@ -111,6 +111,7 @@ except Exception:
 
 from .config import settings
 from .confidence_calibrator import ConfidenceCalibrator
+from .gigaam_compat import GIGAAM_SHORTFORM_MAX_SEC, engine_name_from_mode
 from .text_diff import TextDiffAnalyzer
 from .utils import TextUtils, is_likely_repetition_loop
 
@@ -2075,6 +2076,19 @@ class AudioEngine:
                                 )
                         finally:
                             _pool.shutdown(wait=False)
+                    if model_name == self._GIGAAM_MARKER:
+                        _gigaam_text = str(adapter_result.get("text", "")).strip()
+                        _gigaam_engine = str(adapter_result.get("engine", ""))
+                        _gigaam_error = adapter_result.get("error")
+                        if (
+                            not _gigaam_text
+                            or _gigaam_error
+                            or _gigaam_engine.endswith("-error")
+                        ):
+                            raise RuntimeError(
+                                "GigaAM вернул аварийный или пустой результат: "
+                                f"{_gigaam_error or _gigaam_engine or 'empty_text'}"
+                            )
                     adapter_result["model_used"] = adapter_model
                     return adapter_result
                 except Exception as exc:
@@ -2763,7 +2777,7 @@ class AudioEngine:
         return self._voxtral_model
 
     def _transcribe_gigaam(self, audio_data: Any, language: str | None = None) -> dict[str, Any]:
-        """Транскрибация через GigaAM-RNNT v2 (русскоязычный STT, Sber).
+        """Транскрибация через GigaAM v1-v3 (русскоязычный STT, Sber).
 
         Args:
             audio_data: путь к wav-файлу (str/Path), numpy.ndarray (любая частота),
@@ -2844,10 +2858,11 @@ class AudioEngine:
         #   2. transcribe_longform() (fallback): pyannote VAD — требует HF token
         #      + принятие TOS на huggingface.co/pyannote/segmentation-3.0.
         #      Используется только если AudioChunker недоступен.
-        # Threshold 30s: GigaAM shortform limit ~30s. Clips 24-30s stay shortform.
+        # Граница точная: upstream отвергает любой массив длиннее 25 * 16000.
+        # Старый приблизительный порог 30s терял реальные записи 25–30s.
         _GIGAAM_MAX_CHUNK_SEC = 20.0  # с 5s запасом до hard limit ~25s
         duration_sec = len(audio_data_np) / 16000.0
-        use_longform = duration_sec > 30.0
+        use_longform = duration_sec > GIGAAM_SHORTFORM_MAX_SEC
         hf_token = settings.STT_GIGAAM_HF_TOKEN or ""
 
         try:
@@ -2876,7 +2891,10 @@ class AudioEngine:
                         "text": merged["text"],
                         "language": "ru",
                         "confidence": merged["confidence"],
-                        "engine": "gigaam-rnnt-chunked",
+                        "engine": (
+                            f"{engine_name_from_mode(getattr(settings, 'STT_GIGAAM_MODE', 'rnnt'))}"
+                            "-chunked"
+                        ),
                     }
                 except Exception as chunker_exc:
                     # AudioChunker failed — fallback на transcribe_longform() (pyannote path).
@@ -2893,7 +2911,9 @@ class AudioEngine:
             else:
                 result = adapter.transcribe(audio_data_np)
         except Exception as exc:
-            # Оба пути упали. Возвращаем error dict чтобы fallback chain переключился на Whisper.
+            # Оба пути упали. Исключение — единственный однозначный сигнал
+            # fallback-chain перейти к Whisper; error-dict раньше считался
+            # успешным и молча сохранял пустую транскрипцию.
             logger.warning(
                 "GigaAM transcribe failed (duration=%.1fs, longform=%s): %s",
                 duration_sec, use_longform, str(exc)[:200],
@@ -2912,12 +2932,9 @@ class AudioEngine:
                     f"GigaAM HF cache miss (duration={duration_sec:.1f}s): {str(exc)[:300]}",
                     severity="warn",
                 )
-            return {
-                "text": "",
-                "confidence": 0.0,
-                "engine": "gigaam-error",
-                "error": str(exc)[:300],
-            }
+            raise RuntimeError(
+                f"GigaAM transcribe failed: {str(exc)[:300]}"
+            ) from exc
 
         # Нормализуем формат ответа адаптера
         text = result.get("text", "") if isinstance(result, dict) else str(result)
@@ -3135,10 +3152,29 @@ class AudioEngine:
                 return None
 
             import gc
-            pipeline = self._load_diarization_pipeline()
             prepared_path, should_cleanup = self._prepare_audio_for_diarization(audio_path)
             try:
-                annotation = pipeline(prepared_path)
+                # Тот же pyannote pipeline используется полной диаризацией и
+                # meeting-окнами. Все три точки инференса обязаны делить один
+                # lock, иначе два MPS-вызова могут пересечься и уронить Metal.
+                # Pipeline получаем уже ВНУТРИ lock: hot reload HF-токена берёт
+                # locks в том же порядке run → load и не оставляет нам старый
+                # объект между invalidation и реальным вызовом.
+                with self._diarization_run_lock:
+                    pipeline = self._load_diarization_pipeline()
+                    try:
+                        annotation = pipeline(prepared_path)
+                    finally:
+                        gc.collect()
+                        if (
+                            torch is not None
+                            and hasattr(torch, "mps")
+                            and torch.backends.mps.is_available()
+                        ):
+                            try:
+                                torch.mps.empty_cache()
+                            except Exception:
+                                pass
                 if hasattr(annotation, "speaker_diarization"):
                     annotation = annotation.speaker_diarization
                 speakers: set[str] = set()
@@ -3148,12 +3184,6 @@ class AudioEngine:
             finally:
                 if should_cleanup:
                     Path(prepared_path).unlink(missing_ok=True)
-                gc.collect()
-                if torch is not None and hasattr(torch, "mps") and torch.backends.mps.is_available():
-                    try:
-                        torch.mps.empty_cache()
-                    except Exception:
-                        pass
 
         except Exception as exc:
             logger.debug("_estimate_num_speakers: не удалось оценить спикеров: %s", exc)
@@ -3290,26 +3320,32 @@ class AudioEngine:
         """Внутренняя реализация diarization. Вынесена чтобы обернуть весь chain
         одним span'ом без изменения обработки ошибок."""
         import gc
-        pipeline = self._load_diarization_pipeline()
         prepared_audio_path, should_cleanup = self._prepare_audio_for_diarization(audio_path)
         try:
             with self._diarization_run_lock:
-                diarization = pipeline(prepared_audio_path)
+                pipeline = self._load_diarization_pipeline()
+                try:
+                    diarization = pipeline(prepared_audio_path)
+                finally:
+                    # Очистка MPS остаётся частью той же critical section:
+                    # следующий pyannote-вызов не должен стартовать посреди
+                    # освобождения общих Metal-ресурсов.
+                    gc.collect()
+                    if (
+                        torch is not None
+                        and hasattr(torch, "mps")
+                        and torch.backends.mps.is_available()
+                    ):
+                        try:
+                            torch.mps.empty_cache()
+                        except Exception:
+                            pass
         except Exception:
             logger.exception("FATAL: Unhandled exception in diarization pipeline")
             raise
         finally:
             if should_cleanup:
                 Path(prepared_audio_path).unlink(missing_ok=True)
-            # Освобождаем MPS-кэш PyTorch после каждого запуска pyannote.
-            # Без этого torch.mps аллокатор держит speaker embedding тензоры
-            # бесконечно — память растёт с каждой записью (утечка 30 GB за ночь).
-            gc.collect()
-            if torch is not None and hasattr(torch, "mps") and torch.backends.mps.is_available():
-                try:
-                    torch.mps.empty_cache()
-                except Exception:
-                    pass
         if hasattr(diarization, "speaker_diarization"):
             diarization = diarization.speaker_diarization
         speaker_segments: list[dict[str, Any]] = []
@@ -3335,18 +3371,22 @@ class AudioEngine:
         {label: list[float]}} — времена относительны начала окна.
         """
         import gc
-        pipeline = self._load_diarization_pipeline()
-        try:
-            with self._diarization_run_lock:
+        with self._diarization_run_lock:
+            pipeline = self._load_diarization_pipeline()
+            try:
                 out = pipeline(audio_path)
-        finally:
-            # Паттерн утечки MPS — как в _run_diarization_impl.
-            gc.collect()
-            if torch is not None and hasattr(torch, "mps") and torch.backends.mps.is_available():
-                try:
-                    torch.mps.empty_cache()
-                except Exception:
-                    pass
+            finally:
+                # Паттерн утечки MPS — как в _run_diarization_impl.
+                gc.collect()
+                if (
+                    torch is not None
+                    and hasattr(torch, "mps")
+                    and torch.backends.mps.is_available()
+                ):
+                    try:
+                        torch.mps.empty_cache()
+                    except Exception:
+                        pass
         diarization = getattr(out, "speaker_diarization", out)
         labels = list(diarization.labels())
         raw_emb = getattr(out, "speaker_embeddings", None)

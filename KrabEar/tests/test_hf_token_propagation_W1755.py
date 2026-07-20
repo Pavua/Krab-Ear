@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -312,6 +314,54 @@ class HfTokenOverwriteTestCase(unittest.TestCase):
         # env не должен содержать мусор
         for k in _ENV_KEYS:
             self.assertNotEqual(os.environ.get(k), "hf_" + chr(0) + "invalid")
+
+    def test_overwrite_clears_pipeline_and_cached_load_error_under_real_locks(self):
+        """Новый токен обязан восстановить pyannote после закешированного 401."""
+        engine = SimpleNamespace(
+            _diarization_pipeline=object(),
+            _diarization_load_error="старый 401",
+            _diarization_run_lock=threading.Lock(),
+            _diarization_load_lock=threading.RLock(),
+        )
+        svc = _StubService({"hf_token": "hf_RECOVERY"})
+        svc.transcriber = SimpleNamespace(engine=engine)
+
+        svc._propagate_hf_token_to_env(overwrite=True)
+
+        self.assertIsNone(engine._diarization_pipeline)
+        self.assertIsNone(engine._diarization_load_error)
+
+    def test_invalidation_waits_until_active_inference_releases_run_lock(self):
+        """Hot reload не должен обнулить pipeline во время активного инференса."""
+        engine = SimpleNamespace(
+            _diarization_pipeline=object(),
+            _diarization_load_error="старый 401",
+            _diarization_run_lock=threading.Lock(),
+            _diarization_load_lock=threading.RLock(),
+        )
+        svc = _StubService({"hf_token": "hf_AFTER_INFERENCE"})
+        svc.transcriber = SimpleNamespace(engine=engine)
+        finished = threading.Event()
+
+        engine._diarization_run_lock.acquire()
+        worker = threading.Thread(
+            target=lambda: (
+                svc._propagate_hf_token_to_env(overwrite=True),
+                finished.set(),
+            ),
+            daemon=True,
+        )
+        worker.start()
+        try:
+            self.assertFalse(finished.wait(0.05))
+            self.assertIsNotNone(engine._diarization_pipeline)
+            self.assertEqual(engine._diarization_load_error, "старый 401")
+        finally:
+            engine._diarization_run_lock.release()
+        self.assertTrue(finished.wait(1.0))
+        worker.join(timeout=1.0)
+        self.assertIsNone(engine._diarization_pipeline)
+        self.assertIsNone(engine._diarization_load_error)
 
 
 if __name__ == "__main__":

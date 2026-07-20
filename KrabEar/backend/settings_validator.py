@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
 
+from core.gigaam_compat import SUPPORTED_GIGAAM_ASR_MODES
+
 
 CURRENT_SCHEMA_VERSION = "2.0"
 
@@ -56,6 +58,9 @@ _ENUM_FIELDS: dict[str, tuple[str, ...]] = {
     # quick_capture_hotkey: fixed set of hotkey combos for C3a Quick Capture
     # (NOT free text entry — see main+QuickCapture.swift startQuickCaptureHotkeyMonitor).
     "quick_capture_hotkey": ("cmd_shift_n", "cmd_opt_n", "ctrl_shift_n"),
+    # Порядок начинается с продуктового v3 default: валидатор использует
+    # первый элемент как безопасное значение при повреждённой настройке.
+    "stt_gigaam_mode": SUPPORTED_GIGAAM_ASR_MODES,
 }
 
 # Диапазоны числовых полей: ключ → (min, max, default, type)

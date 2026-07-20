@@ -274,12 +274,19 @@ class TestGigaAMMemoryHygiene(unittest.TestCase):
         fake_mps = types.SimpleNamespace(empty_cache=lambda: empty_cache_calls.append(1))
         fake_torch = types.SimpleNamespace(mps=fake_mps)
 
-        # Patch sys.modules so `import torch` inside _free_mps_pool finds our stub
+        # Подменяем модуль с обязательным восстановлением: удаление уже
+        # импортированного настоящего torch заставляет соседний тест повторно
+        # инициализировать C-extension и даёт SIGSEGV при завершении Python.
+        missing = object()
+        saved_torch = sys.modules.get("torch", missing)
         sys.modules["torch"] = fake_torch  # type: ignore[assignment]
         try:
             mod._free_mps_pool()
         finally:
-            sys.modules.pop("torch", None)
+            if saved_torch is missing:
+                sys.modules.pop("torch", None)
+            else:
+                sys.modules["torch"] = saved_torch  # type: ignore[assignment]
 
         self.assertEqual(
             len(empty_cache_calls),
@@ -393,17 +400,24 @@ class TestGigaAMMemoryHygiene(unittest.TestCase):
         )
 
     def test_free_mps_pool_no_raise_without_torch(self) -> None:
-        """_free_mps_pool() must never raise even when torch is absent."""
+        """_free_mps_pool() не бросает исключение, когда torch отсутствует."""
         mod = _reload_worker_module({"KRAB_EAR_TRACE_GIGAAM_MEM": None})
 
-        # Remove torch from sys.modules to simulate missing torch
-        saved_torch = sys.modules.pop("torch", None)
-        try:
-            # Must not raise
+        # Простого удаления из sys.modules недостаточно: следующий import загрузит
+        # настоящий PyTorch, а torch 2.13 после таких reimport-тестов падает SIGSEGV
+        # уже при завершении процесса. Блокируем только этот импорт явно.
+        import builtins
+        from unittest.mock import patch
+
+        real_import = builtins.__import__
+
+        def _import_without_torch(name, *args, **kwargs):
+            if name == "torch":
+                raise ImportError("torch намеренно отсутствует в тесте")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=_import_without_torch):
             mod._free_mps_pool()
-        finally:
-            if saved_torch is not None:
-                sys.modules["torch"] = saved_torch
 
     def test_free_mps_pool_no_raise_when_empty_cache_missing(self) -> None:
         """_free_mps_pool() must not raise if torch.mps lacks empty_cache attribute."""
@@ -413,11 +427,16 @@ class TestGigaAMMemoryHygiene(unittest.TestCase):
         fake_mps = types.SimpleNamespace()  # no empty_cache attribute
         fake_torch = types.SimpleNamespace(mps=fake_mps)
 
+        missing = object()
+        saved_torch = sys.modules.get("torch", missing)
         sys.modules["torch"] = fake_torch  # type: ignore[assignment]
         try:
             mod._free_mps_pool()  # must not raise
         finally:
-            sys.modules.pop("torch", None)
+            if saved_torch is missing:
+                sys.modules.pop("torch", None)
+            else:
+                sys.modules["torch"] = saved_torch  # type: ignore[assignment]
 
 
 class TestH2GcCollectAfterLongform(unittest.TestCase):
@@ -477,7 +496,7 @@ class TestH2GcCollectAfterLongform(unittest.TestCase):
         )
 
     def test_h2_gc_collect_path_exists_in_worker(self) -> None:
-        """Verify the H2 code path (del segments + gc.collect) is present in worker source."""
+        """Проверяет явное освобождение v3 longform-контейнера и запуск GC."""
         import os
 
         worker_path = os.path.normpath(
@@ -486,7 +505,11 @@ class TestH2GcCollectAfterLongform(unittest.TestCase):
         with open(worker_path, "r") as fh:
             source = fh.read()
 
-        self.assertIn("del segments", source, "H2: 'del segments' must appear in gigaam_worker.py")
+        self.assertIn(
+            "del longform_result",
+            source,
+            "H2: v3 longform-контейнер должен освобождаться явно",
+        )
         self.assertIn(
             "gc.collect()",
             source,

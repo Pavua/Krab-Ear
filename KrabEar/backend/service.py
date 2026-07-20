@@ -170,6 +170,30 @@ if str(PROJECT_ROOT) not in sys.path:
 logger = logging.getLogger("KrabEar.Backend.Service")
 
 
+def _exit_without_python_finalize_if_wake_word_hung(
+    wake_word_stopped: bool | None,
+    *,
+    exit_fn: Callable[[int], None] | None = None,
+) -> None:
+    """Завершает уже остановленный backend без `_Py_Finalize` при CFFI-клине.
+
+    PortAudio может навсегда оставить listener внутри `ffi_call`. Обычная
+    финализация модулей в таком состоянии трижды приводила к SIGSEGV. К этому
+    моменту IPC, хранилище и остальные фоновые сервисы уже закрыты, поэтому
+    контролируемый `_exit` безопаснее повторного входа в CFFI teardown.
+    """
+    # Hard-exit допустим только по ЯВНОМУ False от нового close-контракта.
+    # Legacy/test double может вернуть None; считать его доказанным CFFI-клином
+    # нельзя, иначе обычный тест main() или старый embedder внезапно завершится 70.
+    if wake_word_stopped is not False:
+        return
+    logger.critical(
+        "Wake-word listener завис: завершаем процесс без Python-finalize, "
+        "чтобы launchd поднял чистый экземпляр"
+    )
+    (exit_fn or os._exit)(os.EX_SOFTWARE)
+
+
 # wave1775: which EventBus events are forwarded to registered webhooks.
 # Kept deliberately narrow — only genuinely-meaningful, low-frequency lifecycle
 # events, NEVER high-frequency ones (recording.audio_level @ ~30 Hz,
@@ -1310,26 +1334,35 @@ class BackendService:
         if overwrite and _propagated:
             _engine = getattr(getattr(self, "transcriber", None), "engine", None)
             if _engine is not None:
-                _diar_lock = getattr(_engine, "_diarization_lock", None)
-                if _diar_lock is not None:
+                _run_lock = getattr(_engine, "_diarization_run_lock", None)
+                _load_lock = getattr(_engine, "_diarization_load_lock", None)
+                if _run_lock is not None and _load_lock is not None:
                     try:
-                        with _diar_lock:
-                            _engine._diarization_pipeline = None
-                            logger.info(
-                                "diarization pipeline invalidated after hf_token change",
-                                extra={"token_source": _token_source},
-                            )
+                        # Единый порядок во всём AudioEngine: run → load.
+                        # Так invalidation ждёт текущий инференс и не оставляет
+                        # ожидающему потоку заранее захваченный старый pipeline.
+                        with _run_lock:
+                            with _load_lock:
+                                _engine._diarization_pipeline = None
+                                _engine._diarization_load_error = None
+                                logger.info(
+                                    "diarization pipeline and cached load error "
+                                    "invalidated after hf_token change",
+                                    extra={"token_source": _token_source},
+                                )
                     except Exception as exc2:  # noqa: BLE001
                         logger.warning(
                             "diarization pipeline invalidation failed",
                             extra={"error": type(exc2).__name__},
                         )
                 else:
-                    # TODO(W1755): engine._diarization_lock absent — invalidate without lock
+                    # Совместимость с лёгкими test doubles/старыми engine:
+                    # сбрасываем оба поля, но громко фиксируем отсутствие locks.
                     try:
                         _engine._diarization_pipeline = None
+                        _engine._diarization_load_error = None
                         logger.info(
-                            "diarization pipeline invalidated (no lock) after hf_token change",
+                            "diarization pipeline invalidated without locks after hf_token change",
                             extra={"token_source": _token_source},
                         )
                     except Exception as exc2:  # noqa: BLE001
@@ -1455,12 +1488,14 @@ class BackendService:
                 logger.exception("export_scheduler tick failed")
             stop.wait(self._EXPORT_SCHEDULER_INTERVAL_SEC)
 
-    def close(self) -> None:
+    def close(self) -> bool:
         """Graceful shutdown: останавливает фоновые потоки (LLM probe и др.).
 
         Идемпотентен — безопасно вызывать несколько раз. Используется в
-        signal handler run_server() и в finally serve_forever().
+        signal handler run_server() и в finally serve_forever(). Возвращает
+        False только когда wake-word listener нельзя безопасно завершить.
         """
+        wake_word_stopped = True
         # Stop export-scheduler worker thread.
         stop_event = getattr(self, "_export_scheduler_stop", None)
         if stop_event is not None:
@@ -1527,6 +1562,23 @@ class BackendService:
                 watchdog.stop()
             except Exception:
                 logger.exception("WakeWordWatchdog.stop() raised during close()")
+
+        # Listener обязан завершиться ДО выгрузки CFFI/PortAudio. Раньше close()
+        # останавливал только watchdog, оставляя OpenWakeWordListener живым до
+        # teardown интерпретатора; три последовательных kickstart завершились
+        # SIGSEGV внутри cffi/libffi уже после сообщения о чистом shutdown.
+        wake_word_adapter = getattr(self, "_oww_adapter", None)
+        if wake_word_adapter is not None:
+            try:
+                if not wake_word_adapter.stop():
+                    wake_word_stopped = False
+                    logger.error(
+                        "OpenWakeWordAdapter не завершился при остановке backend"
+                    )
+            except Exception:
+                wake_word_stopped = False
+                logger.exception("OpenWakeWordAdapter.stop() raised during close()")
+        return wake_word_stopped
 
     # ------------------------------------------------------------------ #
     # Backwards-compatible proxy properties for Wave 172 migration         #
@@ -5073,11 +5125,12 @@ def main() -> None:
         # W1633: run graceful shutdown first so final events are captured.
         service._shutdown_handler.shutdown()
         server.stop()
-        service.close()
+        wake_word_stopped = service.close()
         # W1640: flush Sentry AFTER shutdown so any errors raised during
         # shutdown are captured before the buffer is flushed.
         # No-op when Sentry is not initialized (DSN absent).
         flush_sentry()
+        _exit_without_python_finalize_if_wake_word_hung(wake_word_stopped)
 
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -5086,7 +5139,9 @@ def main() -> None:
         server.serve_forever()
     finally:
         service._shutdown_handler.shutdown()
-        service.close()
+        wake_word_stopped = service.close()
+        flush_sentry()
+        _exit_without_python_finalize_if_wake_word_hung(wake_word_stopped)
 
 
 if __name__ == "__main__":

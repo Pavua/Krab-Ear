@@ -1,9 +1,8 @@
 """GigaAM-RNNT subprocess worker для Krab Ear.
 
-Запускается из изолированного venv (~/.venv_krab_ear_gigaam) — потому что
-пакет gigaam пинит torch<=2.5.1 / onnxruntime<=1.23.x, что несовместимо с
-main Krab Ear venv (Python 3.14 + torch 2.11). Worker сам импортирует gigaam,
-держит модель в памяти и отвечает на JSON-команды через stdin/stdout.
+Запускается из изолированного venv (~/.venv_krab_ear_gigaam), чтобы зависимости
+GigaAM v3 не конфликтовали с основным Python-окружением Krab Ear. Worker держит
+модель в памяти и отвечает на JSON-команды через stdin/stdout.
 
 Protocol (одна JSON строка на запрос, одна на ответ):
 
@@ -37,7 +36,18 @@ import json
 import os
 import sys
 import traceback
+from contextlib import redirect_stdout
+from pathlib import Path
 from typing import Any, Optional
+
+
+# При прямом запуске файла Python добавляет в sys.path каталог workers, но не
+# корень пакета KrabEar. Явная привязка нужна для общего compatibility-слоя.
+_KRAB_EAR_ROOT = Path(__file__).resolve().parents[2]
+if str(_KRAB_EAR_ROOT) not in sys.path:
+    sys.path.insert(0, str(_KRAB_EAR_ROOT))
+
+from core.gigaam_compat import engine_name_from_mode, extract_longform_text  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -52,14 +62,7 @@ def _engine_name_from_mode(mode: Optional[str]) -> str:
     v3_e2e_rnnt / v3_rnnt / v2_rnnt / v1_rnnt → "gigaam-rnnt" (движок один
     независимо от версии). Порядок replace важен: v3_e2e_ ДО v3_.
     """
-    mode_base = (
-        (mode or "rnnt")
-        .replace("v3_e2e_", "")
-        .replace("v3_", "")
-        .replace("v2_", "")
-        .replace("v1_", "")
-    )
-    return f"gigaam-{mode_base}"
+    return engine_name_from_mode(mode)
 
 
 def _acquire_singleton_lock() -> None:
@@ -231,7 +234,10 @@ def _handle_load(params: dict) -> dict:
         return _err(f"gigaam_not_installed: {exc}")
 
     try:
-        model = gigaam.load_model(mode)
+        # stdout зарезервирован под однострочный JSON-протокол. Любые progress-
+        # сообщения сторонней библиотеки должны уходить в уже дренируемый stderr.
+        with redirect_stdout(sys.stderr):
+            model = gigaam.load_model(mode)
     except Exception as exc:
         return _err(f"load_failed: {type(exc).__name__}: {exc}")
 
@@ -259,7 +265,7 @@ def _handle_transcribe(params: dict) -> dict:
     Параметры:
         audio_path: str (required) — путь к WAV/M4A/MP3 файлу.
         longform:   bool (optional, default=False) — использовать
-                    `model.transcribe_longform()` для аудио > 30 сек. Требует
+                    `model.transcribe_longform()` для аудио > 25 сек. Требует
                     pyannote.audio + HF token (берётся из ~/.cache/huggingface/token
                     или передаётся в `hf_token` параметре).
         hf_token:   str (optional) — HuggingFace API token для pyannote VAD.
@@ -287,25 +293,20 @@ def _handle_transcribe(params: dict) -> dict:
 
     try:
         if longform and hasattr(_MODEL, "transcribe_longform"):
-            # Возвращает list[dict] с `transcription`, `boundaries` (start, end).
-            segments = _MODEL.transcribe_longform(audio_path)
-            # Склеиваем в единый текст (с двойным переводом строк между сегментами).
-            text = "\n\n".join(
-                (seg.get("transcription") or "").strip()
-                for seg in (segments or [])
-                if isinstance(seg, dict) and seg.get("transcription")
-            )
+            # pyannote выводит строку ``filtered by duration`` через print().
+            # Без перенаправления она становится первой строкой stdout и ломает
+            # JSON-декодирование в родительском процессе.
+            with redirect_stdout(sys.stderr):
+                longform_result = _MODEL.transcribe_longform(audio_path)
+            text, segments_count = extract_longform_text(longform_result)
             result_meta = {
                 "longform": True,
-                "segments_count": len(segments) if segments else 0,
+                "segments_count": segments_count,
             }
-            # H2: free pyannote segments + pyannote intermediates held in segments list.
-            # pyannote.audio stores diarization output (embeddings, numpy arrays) inside
-            # each segment dict — these are not freed until GC sweeps the list.
-            # del + gc.collect() immediately releases ~tens of MB per longform call.
-            # Wrapped in try/except so naming mismatches never raise.
+            # Освобождаем контейнер сегментов и промежуточные объекты pyannote
+            # сразу после сборки текста, а не ждём следующего цикла GC.
             try:
-                del segments
+                del longform_result
             except NameError:
                 pass
             try:
@@ -313,7 +314,8 @@ def _handle_transcribe(params: dict) -> dict:
             except Exception:
                 pass
         else:
-            result = _MODEL.transcribe(audio_path)
+            with redirect_stdout(sys.stderr):
+                result = _MODEL.transcribe(audio_path)
             # gigaam.transcribe() может вернуть строку или объект с .text — адаптируем.
             if isinstance(result, str):
                 text = result

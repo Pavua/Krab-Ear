@@ -13,8 +13,8 @@
 
 from __future__ import annotations
 
-import sys
 import os
+import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -24,43 +24,6 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_HERE)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
-
-
-# ---------------------------------------------------------------------------
-# Стабы тяжёлых зависимостей
-# ---------------------------------------------------------------------------
-
-def _patch_heavy_imports():
-    stubs = {
-        "mlx_whisper": MagicMock(),
-        "soundfile": MagicMock(),
-        "torch": MagicMock(),
-        "pyannote": MagicMock(),
-        "pyannote.audio": MagicMock(),
-        "funasr": MagicMock(),
-        "nemo": MagicMock(),
-        "nemo.collections": MagicMock(),
-        "nemo.collections.asr": MagicMock(),
-        "whisperx": MagicMock(),
-        "mistral_inference": MagicMock(),
-        "mistral_inference.transformer": MagicMock(),
-        "mistral_inference.generate": MagicMock(),
-        "mistral_common": MagicMock(),
-        "mistral_common.tokens": MagicMock(),
-        "mistral_common.tokens.tokenizers": MagicMock(),
-        "mistral_common.tokens.tokenizers.mistral": MagicMock(),
-        "mistral_common.audio": MagicMock(),
-        "mistral_common.protocol": MagicMock(),
-        "mistral_common.protocol.instruct": MagicMock(),
-        "mistral_common.protocol.instruct.messages": MagicMock(),
-        "mistral_common.protocol.instruct.request": MagicMock(),
-    }
-    for name, stub in stubs.items():
-        if name not in sys.modules:
-            sys.modules[name] = stub
-
-
-_patch_heavy_imports()
 
 
 # ---------------------------------------------------------------------------
@@ -109,12 +72,24 @@ def _make_chunk_transcribe_response(chunk_index: int) -> dict:
     }
 
 
+def _make_audio_engine_without_warmup():
+    """Создаёт GigaAM-engine без запуска фонового процесса прогрева.
+
+    Флаг ``skip_gigaam_warmup`` здесь использовать нельзя: он обозначает
+    REST-engine и намеренно запрещает любые вызовы GigaAM.
+    """
+    from core.engine import AudioEngine
+
+    with patch("core.engine.threading.Thread.start", autospec=True):
+        return AudioEngine()
+
+
 # ---------------------------------------------------------------------------
 # Тесты
 # ---------------------------------------------------------------------------
 
 class TestShortAudioNoChunking(unittest.TestCase):
-    """Аудио <= 24s → один transcribe() вызов, AudioChunker не используется."""
+    """Аудио <= 25s → один transcribe() вызов, AudioChunker не используется."""
 
     def test_5s_single_transcribe_call(self):
         """5s аудио → адаптер вызван ровно 1 раз без chunking."""
@@ -131,8 +106,7 @@ class TestShortAudioNoChunking(unittest.TestCase):
 
         fake_settings = _make_fake_settings()
         with patch("core.engine.settings", fake_settings):
-            from core.engine import AudioEngine
-            engine = AudioEngine()
+            engine = _make_audio_engine_without_warmup()
             engine._router = fake_router
 
             result = engine._transcribe_gigaam(audio, language="ru")
@@ -145,9 +119,9 @@ class TestShortAudioNoChunking(unittest.TestCase):
             self.assertNotEqual(call_kwargs.kwargs.get("longform"), True)
         self.assertEqual(result["text"], "короткое аудио")
 
-    def test_24s_boundary_single_call(self):
-        """24s ровно → один transcribe() (граница threshold 24.0)."""
-        audio = _audio(24.0)
+    def test_25s_boundary_single_call(self):
+        """Ровно 25s допустимы upstream shortform-контрактом GigaAM."""
+        audio = _audio(25.0)
         fake_adapter = MagicMock()
         fake_adapter.transcribe.return_value = {
             "text": "граница",
@@ -160,8 +134,7 @@ class TestShortAudioNoChunking(unittest.TestCase):
 
         fake_settings = _make_fake_settings()
         with patch("core.engine.settings", fake_settings):
-            from core.engine import AudioEngine
-            engine = AudioEngine()
+            engine = _make_audio_engine_without_warmup()
             engine._router = fake_router
 
             result = engine._transcribe_gigaam(audio, language="ru")
@@ -171,7 +144,53 @@ class TestShortAudioNoChunking(unittest.TestCase):
 
 
 class TestLongAudioChunked(unittest.TestCase):
-    """Аудио > 24s → несколько transcribe() вызовов через AudioChunker."""
+    """Аудио > 25s → несколько transcribe() вызовов через AudioChunker."""
+
+    def test_25_1s_uses_chunker_before_upstream_shortform_limit(self):
+        """25.1s не должны попадать в shortform, который отвергает >25s."""
+        audio = _audio(25.1)
+        chunk_durations: list[float] = []
+
+        def side_effect(chunk_audio, sample_rate=16000, **kwargs):
+            chunk_durations.append(len(chunk_audio) / _SR)
+            return {
+                "text": f"часть{len(chunk_durations)}",
+                "confidence": 0.9,
+                "engine": "gigaam-rnnt",
+            }
+
+        fake_adapter = MagicMock()
+        fake_adapter.transcribe.side_effect = side_effect
+        fake_router = MagicMock()
+        fake_router.get_gigaam_adapter.return_value = fake_adapter
+
+        with patch("core.engine.settings", _make_fake_settings()):
+            engine = _make_audio_engine_without_warmup()
+            engine._router = fake_router
+            result = engine._transcribe_gigaam(audio, language="ru")
+
+        self.assertGreater(fake_adapter.transcribe.call_count, 1)
+        self.assertTrue(all(duration <= 20.1 for duration in chunk_durations))
+        self.assertEqual(result["engine"], "gigaam-rnnt-chunked")
+
+    def test_29_9s_also_uses_chunker(self):
+        """Весь ранее потерянный диапазон 25–30s обязан идти через chunker."""
+        audio = _audio(29.9)
+        fake_adapter = MagicMock()
+        fake_adapter.transcribe.return_value = {
+            "text": "часть",
+            "confidence": 0.9,
+            "engine": "gigaam-rnnt",
+        }
+        fake_router = MagicMock()
+        fake_router.get_gigaam_adapter.return_value = fake_adapter
+
+        with patch("core.engine.settings", _make_fake_settings()):
+            engine = _make_audio_engine_without_warmup()
+            engine._router = fake_router
+            engine._transcribe_gigaam(audio, language="ru")
+
+        self.assertGreater(fake_adapter.transcribe.call_count, 1)
 
     def test_60s_audio_multiple_calls(self):
         """60s аудио → адаптер вызывается N раз, каждый чанк <= 20s."""
@@ -202,8 +221,7 @@ class TestLongAudioChunked(unittest.TestCase):
 
         fake_settings = _make_fake_settings()
         with patch("core.engine.settings", fake_settings):
-            from core.engine import AudioEngine
-            engine = AudioEngine()
+            engine = _make_audio_engine_without_warmup()
             engine._router = fake_router
 
             result = engine._transcribe_gigaam(audio, language="ru")
@@ -234,8 +252,7 @@ class TestLongAudioChunked(unittest.TestCase):
 
         fake_settings = _make_fake_settings()
         with patch("core.engine.settings", fake_settings):
-            from core.engine import AudioEngine
-            engine = AudioEngine()
+            engine = _make_audio_engine_without_warmup()
             engine._router = fake_router
 
             engine._transcribe_gigaam(audio, language="ru")
@@ -273,8 +290,7 @@ class TestChunkedResultsConcatenated(unittest.TestCase):
 
         fake_settings = _make_fake_settings()
         with patch("core.engine.settings", fake_settings):
-            from core.engine import AudioEngine
-            engine = AudioEngine()
+            engine = _make_audio_engine_without_warmup()
             engine._router = fake_router
 
             result = engine._transcribe_gigaam(audio, language="ru")
@@ -301,8 +317,7 @@ class TestChunkedResultsConcatenated(unittest.TestCase):
 
         fake_settings = _make_fake_settings()
         with patch("core.engine.settings", fake_settings):
-            from core.engine import AudioEngine
-            engine = AudioEngine()
+            engine = _make_audio_engine_without_warmup()
             engine._router = fake_router
 
             result = engine._transcribe_gigaam(audio, language="ru")
@@ -331,8 +346,7 @@ class TestChunkedResultsConcatenated(unittest.TestCase):
 
         fake_settings = _make_fake_settings()
         with patch("core.engine.settings", fake_settings):
-            from core.engine import AudioEngine
-            engine = AudioEngine()
+            engine = _make_audio_engine_without_warmup()
             engine._router = fake_router
 
             result = engine._transcribe_gigaam(audio, language="ru")
@@ -349,7 +363,7 @@ class TestChunkerFallbackToLongform(unittest.TestCase):
 
     def test_chunker_import_error_falls_back_to_longform(self):
         """Если core.audio_chunker недоступен → engine не падает (graceful fallback)."""
-        audio = _audio(30.0)
+        audio = _audio(25.1)
         fake_adapter = MagicMock()
         fake_adapter.transcribe.return_value = {
             "text": "longform результат",
@@ -368,8 +382,7 @@ class TestChunkerFallbackToLongform(unittest.TestCase):
         fake_settings = _make_fake_settings()
         try:
             with patch("core.engine.settings", fake_settings):
-                from core.engine import AudioEngine
-                engine = AudioEngine()
+                engine = _make_audio_engine_without_warmup()
                 engine._router = fake_router
 
                 # Должен либо вернуть результат (longform fallback) либо error dict
@@ -386,7 +399,7 @@ class TestChunkerFallbackToLongform(unittest.TestCase):
 
     def test_chunker_exception_falls_back_to_longform(self):
         """RuntimeError внутри AudioChunker → fallback на longform path."""
-        audio = _audio(30.0)
+        audio = _audio(25.1)
         fake_adapter = MagicMock()
         fake_adapter.transcribe.return_value = {
             "text": "longform текст",
@@ -406,8 +419,7 @@ class TestChunkerFallbackToLongform(unittest.TestCase):
         fake_settings = _make_fake_settings()
         with patch("core.engine.settings", fake_settings), \
              patch("core.audio_chunker.AudioChunker", broken_chunker):
-            from core.engine import AudioEngine
-            engine = AudioEngine()
+            engine = _make_audio_engine_without_warmup()
             engine._router = fake_router
 
             # При ошибке chunker должен произойти fallback, не exception
@@ -439,8 +451,7 @@ class TestVeryLongAudioAllChunksUnderLimit(unittest.TestCase):
 
         fake_settings = _make_fake_settings()
         with patch("core.engine.settings", fake_settings):
-            from core.engine import AudioEngine
-            engine = AudioEngine()
+            engine = _make_audio_engine_without_warmup()
             engine._router = fake_router
 
             result = engine._transcribe_gigaam(audio, language="ru")

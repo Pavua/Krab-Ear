@@ -195,6 +195,15 @@ class OpenWakeWordAdapter:
                 )
 
             if self._thread is not None and self._thread.is_alive():
+                # Если stop() уже взвёл событие, но PortAudio не вернул
+                # управление, это не активная сессия, а CFFI-клин. Ложный
+                # success здесь раньше позволял поллеру считать новый listener
+                # запущенным, а обнулённая ссылка — плодить новые zombie-треды.
+                if self._stop_event.is_set() or self._active_model is None:
+                    raise RuntimeError(
+                        "предыдущий поток wake word завис внутри PortAudio; "
+                        "требуется перезапуск backend"
+                    )
                 logger.warning(
                     "OpenWakeWordAdapter: уже запущен (модель %r), сначала stop()",
                     self._active_model,
@@ -267,19 +276,28 @@ class OpenWakeWordAdapter:
             # эскалация watchdog'а (re-review Task 4). Целевой случай
             # dead_session (упавший restore) не затронут — там stop() после
             # провала никто не зовёт.
-            self._thread = None
             self._oww = None
             self._active_model = None
             self._active_threshold = None
             if thread is None or not thread.is_alive():
+                self._thread = None
                 return True
             self._stop_event.set()
 
         thread.join(timeout=timeout)
         exited = not thread.is_alive()
         if exited:
+            with self._lock:
+                if self._thread is thread:
+                    self._thread = None
             logger.info("OpenWakeWordAdapter: остановлен")
         else:
+            with self._lock:
+                # Ссылка намеренно остаётся в self._thread: start() увидит
+                # живой клин и не создаст второй CFFI/PortAudio listener.
+                # Обычный Python-finalize для такого треда небезопасен;
+                # process-level policy в service.py завершит процесс без него.
+                self._wedged = True
             logger.error(
                 "OpenWakeWordAdapter: тред слушателя не вышел за %.1fs — "
                 "вероятно завис внутри PortAudio (класс инцидента 13-07)",

@@ -13,8 +13,8 @@
 
 from __future__ import annotations
 
-import sys
 import os
+import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -24,44 +24,6 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_HERE)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
-
-
-# ---------------------------------------------------------------------------
-# Стабы тяжёлых зависимостей — позволяют импортировать engine без mlx/torch
-# ---------------------------------------------------------------------------
-
-def _patch_heavy_imports():
-    """Заменяет тяжёлые модули заглушками чтобы engine.py мог быть импортирован."""
-    stubs = {
-        "mlx_whisper": MagicMock(),
-        "soundfile": MagicMock(),
-        "torch": MagicMock(),
-        "pyannote": MagicMock(),
-        "pyannote.audio": MagicMock(),
-        "funasr": MagicMock(),
-        "nemo": MagicMock(),
-        "nemo.collections": MagicMock(),
-        "nemo.collections.asr": MagicMock(),
-        "whisperx": MagicMock(),
-        "mistral_inference": MagicMock(),
-        "mistral_inference.transformer": MagicMock(),
-        "mistral_inference.generate": MagicMock(),
-        "mistral_common": MagicMock(),
-        "mistral_common.tokens": MagicMock(),
-        "mistral_common.tokens.tokenizers": MagicMock(),
-        "mistral_common.tokens.tokenizers.mistral": MagicMock(),
-        "mistral_common.audio": MagicMock(),
-        "mistral_common.protocol": MagicMock(),
-        "mistral_common.protocol.instruct": MagicMock(),
-        "mistral_common.protocol.instruct.messages": MagicMock(),
-        "mistral_common.protocol.instruct.request": MagicMock(),
-    }
-    for name, stub in stubs.items():
-        if name not in sys.modules:
-            sys.modules[name] = stub
-
-
-_patch_heavy_imports()
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +89,18 @@ def _make_fake_router(adapter=None) -> MagicMock:
     return router
 
 
+def _make_audio_engine_without_warmup():
+    """Создаёт рабочий GigaAM-engine, не запуская фоновый поток прогрева.
+
+    ``skip_gigaam_warmup=True`` является контрактом REST-engine и полностью
+    запрещает GigaAM, поэтому для этих интеграционных тестов он неприменим.
+    """
+    from core.engine import AudioEngine
+
+    with patch("core.engine.threading.Thread.start", autospec=True):
+        return AudioEngine()
+
+
 # ---------------------------------------------------------------------------
 # Тесты
 # ---------------------------------------------------------------------------
@@ -143,8 +117,7 @@ class TestGigaAMEnabledRuAdapterOK(unittest.TestCase):
         fake_settings = _make_settings(STT_GIGAAM_ENABLED=True)
 
         with patch("core.engine.settings", fake_settings):
-            from core.engine import AudioEngine
-            engine = AudioEngine()
+            engine = _make_audio_engine_without_warmup()
             engine._router = self.fake_router
             # Симулируем успешный вызов адаптера через _transcribe_gigaam
             engine._transcribe_gigaam = MagicMock(return_value={
@@ -173,8 +146,7 @@ class TestGigaAMEnabledRuAdapterOK(unittest.TestCase):
         fake_settings = _make_settings(STT_GIGAAM_ENABLED=True)
 
         with patch("core.engine.settings", fake_settings):
-            from core.engine import AudioEngine
-            engine = AudioEngine()
+            engine = _make_audio_engine_without_warmup()
             engine._router = self.fake_router
             engine._transcribe_gigaam = MagicMock(return_value={
                 "text": "привет мир",
@@ -206,8 +178,7 @@ class TestGigaAMEnabledNonRuLanguage(unittest.TestCase):
         fake_settings = _make_settings(STT_GIGAAM_ENABLED=True)
 
         # Mock mlx_whisper чтобы вернуть результат для Whisper
-        import sys
-        mlx_stub = sys.modules.get("mlx_whisper", MagicMock())
+        mlx_stub = MagicMock()
         mlx_stub.transcribe.return_value = {
             "text": "hola mundo",
             "language": "es",
@@ -216,8 +187,7 @@ class TestGigaAMEnabledNonRuLanguage(unittest.TestCase):
 
         with patch("core.engine.settings", fake_settings), \
              patch("core.engine.mlx_whisper", mlx_stub):
-            from core.engine import AudioEngine
-            engine = AudioEngine()
+            engine = _make_audio_engine_without_warmup()
             engine._router = self.fake_router
             engine._transcribe_gigaam = MagicMock()
 
@@ -235,8 +205,7 @@ class TestGigaAMEnabledNonRuLanguage(unittest.TestCase):
         fake_settings = _make_settings(STT_GIGAAM_ENABLED=True)
 
         with patch("core.engine.settings", fake_settings):
-            from core.engine import AudioEngine
-            engine = AudioEngine()
+            engine = _make_audio_engine_without_warmup()
             engine._router = self.fake_router
             engine._transcribe_gigaam = MagicMock()
 
@@ -262,8 +231,7 @@ class TestGigaAMAdapterImportError(unittest.TestCase):
         fake_settings = _make_settings(STT_GIGAAM_ENABLED=True)
         fake_router = _make_fake_router(adapter=None)  # None = не установлен
 
-        import sys
-        mlx_stub = sys.modules.get("mlx_whisper", MagicMock())
+        mlx_stub = MagicMock()
         mlx_stub.transcribe.return_value = {
             "text": "fallback текст",
             "language": "ru",
@@ -272,8 +240,7 @@ class TestGigaAMAdapterImportError(unittest.TestCase):
 
         with patch("core.engine.settings", fake_settings), \
              patch("core.engine.mlx_whisper", mlx_stub):
-            from core.engine import AudioEngine
-            engine = AudioEngine()
+            engine = _make_audio_engine_without_warmup()
             engine._router = fake_router
             engine._transcribe_gigaam = MagicMock()
 
@@ -291,8 +258,7 @@ class TestGigaAMAdapterImportError(unittest.TestCase):
         fake_adapter = _make_fake_adapter()
         fake_router = _make_fake_router(adapter=fake_adapter)
 
-        import sys
-        mlx_stub = sys.modules.get("mlx_whisper", MagicMock())
+        mlx_stub = MagicMock()
         mlx_stub.transcribe.return_value = {
             "text": "whisper fallback",
             "language": "ru",
@@ -301,8 +267,7 @@ class TestGigaAMAdapterImportError(unittest.TestCase):
 
         with patch("core.engine.settings", fake_settings), \
              patch("core.engine.mlx_whisper", mlx_stub):
-            from core.engine import AudioEngine
-            engine = AudioEngine()
+            engine = _make_audio_engine_without_warmup()
             engine._router = fake_router
             engine._transcribe_gigaam = MagicMock(
                 side_effect=RuntimeError("GigaAM модель не загрузилась")
@@ -331,8 +296,7 @@ class TestGigaAMDisabled(unittest.TestCase):
         fake_settings = _make_settings(STT_GIGAAM_ENABLED=False)
         fake_router = _make_fake_router(adapter=_make_fake_adapter())
 
-        import sys
-        mlx_stub = sys.modules.get("mlx_whisper", MagicMock())
+        mlx_stub = MagicMock()
         mlx_stub.transcribe.return_value = {
             "text": "whisper text",
             "language": "ru",
@@ -341,8 +305,7 @@ class TestGigaAMDisabled(unittest.TestCase):
 
         with patch("core.engine.settings", fake_settings), \
              patch("core.engine.mlx_whisper", mlx_stub):
-            from core.engine import AudioEngine
-            engine = AudioEngine()
+            engine = _make_audio_engine_without_warmup()
             engine._router = fake_router
             engine._transcribe_gigaam = MagicMock()
 
@@ -373,8 +336,7 @@ class TestGigaAMFallbackOnTranscribeError(unittest.TestCase):
 
         with patch("core.engine.settings", fake_settings), \
              patch("core.engine.mlx_whisper", mlx_stub):
-            from core.engine import AudioEngine
-            engine = AudioEngine()
+            engine = _make_audio_engine_without_warmup()
             engine._router = fake_router
             engine._transcribe_gigaam = MagicMock(
                 side_effect=Exception("CUDA error simulation")
@@ -383,6 +345,34 @@ class TestGigaAMFallbackOnTranscribeError(unittest.TestCase):
             result = engine._transcribe_with_fallback(_audio(), prompt="", language="ru")
             # Whisper должен был вернуть результат
             self.assertEqual(result.get("text"), "whisper fallback result")
+
+    def test_error_dict_and_empty_text_continue_to_whisper(self):
+        """Аварийный dict GigaAM не является успешным результатом chain."""
+        fake_settings = _make_settings(STT_GIGAAM_ENABLED=True)
+        fake_router = _make_fake_router(adapter=_make_fake_adapter())
+        mlx_stub = MagicMock()
+        mlx_stub.transcribe.return_value = {
+            "text": "whisper после ошибки",
+            "language": "ru",
+            "segments": [],
+        }
+
+        with patch("core.engine.settings", fake_settings), \
+             patch("core.engine.mlx_whisper", mlx_stub):
+            engine = _make_audio_engine_without_warmup()
+            engine._router = fake_router
+            engine._transcribe_gigaam = MagicMock(return_value={
+                "text": "",
+                "confidence": 0.0,
+                "engine": "gigaam-error",
+                "error": "Too long wav",
+            })
+
+            result = engine._transcribe_with_fallback(
+                _audio(), prompt="", language="ru",
+            )
+
+        self.assertEqual(result["text"], "whisper после ошибки")
 
 
 class TestGigaAMConfidence(unittest.TestCase):
@@ -396,8 +386,7 @@ class TestGigaAMConfidence(unittest.TestCase):
         fake_router = _make_fake_router(adapter=fake_adapter)
 
         with patch("core.engine.settings", fake_settings):
-            from core.engine import AudioEngine
-            engine = AudioEngine()
+            engine = _make_audio_engine_without_warmup()
             engine._router = fake_router
             engine._transcribe_gigaam = MagicMock(return_value={
                 "text": "тест уверенности",
@@ -421,8 +410,7 @@ class TestGigaAMEngineName(unittest.TestCase):
         fake_adapter = _make_fake_adapter(engine="gigaam-rnnt")
 
         with patch("core.engine.settings", fake_settings):
-            from core.engine import AudioEngine
-            engine = AudioEngine()
+            engine = _make_audio_engine_without_warmup()
             engine._router = _make_fake_router(adapter=fake_adapter)
 
             # Вызываем _transcribe_gigaam напрямую с numpy
@@ -454,8 +442,7 @@ class TestGigaAMTranscribeGigaamMethod(unittest.TestCase):
 
         fake_settings = _make_settings(STT_GIGAAM_ENABLED=True)
         with patch("core.engine.settings", fake_settings):
-            from core.engine import AudioEngine
-            engine = AudioEngine()
+            engine = _make_audio_engine_without_warmup()
             engine._router = fake_router
 
             result = engine._transcribe_gigaam(_audio(), language="ru")
@@ -470,8 +457,7 @@ class TestGigaAMTranscribeGigaamMethod(unittest.TestCase):
 
         fake_settings = _make_settings(STT_GIGAAM_ENABLED=False)
         with patch("core.engine.settings", fake_settings):
-            from core.engine import AudioEngine
-            engine = AudioEngine()
+            engine = _make_audio_engine_without_warmup()
             engine._router = fake_router
 
             with self.assertRaises(RuntimeError):
@@ -491,8 +477,7 @@ class TestGigaAMAndFinetuneBothEnabled(unittest.TestCase):
         fake_router = _make_fake_router(adapter=fake_adapter)
 
         with patch("core.engine.settings", fake_settings):
-            from core.engine import AudioEngine
-            engine = AudioEngine()
+            engine = _make_audio_engine_without_warmup()
             engine._router = fake_router
 
             # Захватываем кандидатов через патч внутреннего impl
@@ -531,63 +516,54 @@ class TestGigaAMAndFinetuneBothEnabled(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Wave 359 — regression: GigaAM longform threshold at 30s (not 24s)
+# Регрессия: GigaAM upstream допускает shortform не длиннее 25 секунд
 # ---------------------------------------------------------------------------
 
 class TestWave359LongformThreshold(unittest.TestCase):
-    """Regression: use_longform threshold должен быть >30.0, не >24.0.
-
-    Bug: audio 24-30s отправлялось по longform path (chunking), хотя GigaAM
-    shortform limit ~30s — это вызывало ненужный overhead и порождало пустые
-    trailing chunks на boundary clips.
-
-    Fix: порог поднят с 24.0 → 30.0 (engine.py:2418).
-    """
+    """Граница обязана совпадать с точным upstream limit: 25 * 16000."""
 
     def test_24_8s_uses_shortform(self):
-        """24.8s audio → use_longform=False (порог 30.0 не превышен)."""
+        """24.8s остаются shortform."""
         sr = 16000
         duration = 24.8
         audio = _audio(duration, sr)
-        use_longform = len(audio) / sr > 30.0
+        use_longform = len(audio) / sr > 25.0
         self.assertFalse(
             use_longform,
-            f"24.8s audio должен use_longform=False, но threshold={len(audio)/sr:.2f}>30.0",
+            f"24.8s audio должен use_longform=False, duration={len(audio)/sr:.2f}",
         )
 
-    def test_30_5s_uses_longform(self):
-        """30.5s audio → use_longform=True (порог 30.0 превышен)."""
+    def test_25_1s_uses_longform(self):
+        """25.1s уже превышают upstream shortform limit."""
         sr = 16000
-        duration = 30.5
+        duration = 25.1
         audio = _audio(duration, sr)
-        use_longform = len(audio) / sr > 30.0
+        use_longform = len(audio) / sr > 25.0
         self.assertTrue(
             use_longform,
-            f"30.5s audio должен use_longform=True, но threshold={len(audio)/sr:.2f}>30.0",
+            f"25.1s audio должен use_longform=True, duration={len(audio)/sr:.2f}",
         )
 
-    def test_exactly_30s_uses_shortform(self):
-        """Ровно 30.0s — граничный случай, остаётся shortform (строгое >)."""
+    def test_exactly_25s_uses_shortform(self):
+        """Ровно 25.0s остаются shortform, потому что upstream проверяет >."""
         sr = 16000
-        duration = 30.0
+        duration = 25.0
         audio = _audio(duration, sr)
-        use_longform = len(audio) / sr > 30.0
+        use_longform = len(audio) / sr > 25.0
         self.assertFalse(
             use_longform,
-            "Ровно 30.0s должен быть shortform (>30.0 строго)",
+            "Ровно 25.0s должен быть shortform (>25.0 строго)",
         )
 
-    def test_old_threshold_24_would_have_failed(self):
-        """Проверяем что старый порог 24.0 давал неправильный результат для 24.8s."""
+    def test_old_threshold_30_lost_25_to_30_seconds(self):
+        """Старый порог 30.0 ошибочно оставлял 25.1s в shortform."""
         sr = 16000
-        duration = 24.8
+        duration = 25.1
         audio = _audio(duration, sr)
-        # OLD wrong behavior: would have been True with 24.0 threshold
-        old_longform = len(audio) / sr > 24.0
-        # NEW correct behavior: should be False with 30.0 threshold
-        new_longform = len(audio) / sr > 30.0
-        self.assertTrue(old_longform, "Старый порог 24.0 → True для 24.8s (подтверждение бага)")
-        self.assertFalse(new_longform, "Новый порог 30.0 → False для 24.8s (исправлен)")
+        old_longform = len(audio) / sr > 30.0
+        new_longform = len(audio) / sr > 25.0
+        self.assertFalse(old_longform)
+        self.assertTrue(new_longform)
 
 
 if __name__ == "__main__":

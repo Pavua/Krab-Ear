@@ -151,15 +151,15 @@ class TestQualityBonus(unittest.TestCase):
 class TestLongAudioPenalty(unittest.TestCase):
 
     def test_long_audio_penalty_for_gigaam(self):
-        """GigaAM gets -50 penalty when audio > 30s."""
+        """GigaAM получает штраф сразу после upstream-границы 25 секунд."""
         short_score = score_adapter(GIGAAM, "ru", audio_duration_s=20.0)
-        long_score = score_adapter(GIGAAM, "ru", audio_duration_s=35.0)
+        long_score = score_adapter(GIGAAM, "ru", audio_duration_s=25.1)
         self.assertEqual(short_score - long_score, 50)
 
     def test_no_penalty_for_gigaam_at_threshold(self):
-        """GigaAM does NOT get penalty at exactly 30s."""
-        score_at_threshold = score_adapter(GIGAAM, "ru", audio_duration_s=30.0)
-        score_below = score_adapter(GIGAAM, "ru", audio_duration_s=25.0)
+        """Ровно 25 секунд ещё допустимы shortform-контрактом GigaAM."""
+        score_at_threshold = score_adapter(GIGAAM, "ru", audio_duration_s=25.0)
+        score_below = score_adapter(GIGAAM, "ru", audio_duration_s=24.9)
         self.assertEqual(score_at_threshold, score_below)
 
     def test_no_long_audio_penalty_for_whisper(self):

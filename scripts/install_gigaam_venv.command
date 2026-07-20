@@ -7,13 +7,14 @@
 #
 # 2026-07-20 (спека docs/superpowers/specs/2026-07-20-gigaam-v3-upgrade-design.md):
 # апгрейд v2 → v3. Пакет gigaam==0.1.0 (PyPI) содержит ТОЛЬКО v1/v2 — v3-модели
-# есть только в git-исходнике. Новый пакет ослабил torch-пин до torch>=2.6
-# (extra [torch]). Ставим с ПИНОВАННОГО коммита (воспроизводимость для DMG-получателей).
+# есть только в git-исходнике. Extra [longform] фиксирует совместимый комплект
+# torch/torchaudio/torchcodec/pyannote; без него заявленный fallback длинных
+# записей падает уже на импорте huggingface_hub. Ставим с ПИНОВАННОГО коммита.
 # Прод-mode = v3_e2e_rnnt (нативная пунктуация/капитализация/числа; забенчено быстрее v2).
 #
 # После install: см. memory/reference_gigaam_install_working.md для интеграции в Krab Ear.
 
-set -e
+set -euo pipefail
 
 VENV_PATH="$HOME/.venv_krab_ear_gigaam"
 PYTHON_BIN="/opt/homebrew/bin/python3.12"
@@ -50,7 +51,7 @@ echo "→ Создаю venv…"
 echo "→ Активирую и обновляю pip…"
 # shellcheck disable=SC1091
 source "$VENV_PATH/bin/activate"
-pip install --upgrade pip
+python -m pip install --upgrade pip
 
 echo "→ Клонирую GigaAM (git, пиновано на $GIGAAM_COMMIT)…"
 SRC_DIR="$VENV_PATH/src/GigaAM"
@@ -61,13 +62,16 @@ fi
 git -C "$SRC_DIR" fetch --all --quiet
 git -C "$SRC_DIR" checkout --quiet "$GIGAAM_COMMIT"
 
-echo "→ Ставлю gigaam v3 из исходника с extra [torch] (torch>=2.6)…"
-pip install -e "$SRC_DIR"'[torch]'
+echo "→ Ставлю gigaam v3 из исходника с extra [longform]…"
+python -m pip install -e "${SRC_DIR}[longform]"
 
 echo ""
 echo "→ Smoke import + проверка v3-модели в реестре…"
 "$VENV_PATH/bin/python" -c "
 import gigaam, inspect
+import huggingface_hub
+import pyannote.audio
+import torchcodec
 print('✓ gigaam загружается')
 print('  load_model signature:', inspect.signature(gigaam.load_model))
 names = getattr(gigaam, '_MODEL_HASHES', {})
@@ -75,6 +79,7 @@ assert 'v3_e2e_rnnt' in names, 'v3_e2e_rnnt отсутствует в реест
 print('  ✓ v3_e2e_rnnt в реестре моделей')
 import torch
 print('  torch:', torch.__version__, 'mps:', torch.backends.mps.is_available())
+print('  ✓ longform imports: huggingface_hub, pyannote.audio, torchcodec')
 "
 
 echo ""
@@ -82,6 +87,6 @@ echo "✅ Готово! venv: $VENV_PATH"
 echo "Размер: $(du -sh "$VENV_PATH" | awk '{print $1}')"
 echo ""
 echo "Следующие шаги:"
-echo "  1. set_settings { 'stt_gigaam_enabled': true } через IPC"
-echo "  2. Запустить smoke transcribe (см. memory/reference_gigaam_install_working.md)"
-echo "  3. Создать backend/workers/gigaam_worker.py + adapter (B-3)"
+echo "  1. Включить GigaAM в Настройки → STT-движки"
+echo "  2. Продиктовать короткую и длинную русскую запись"
+echo "  3. При gated-cache miss указать HF token в настройках"

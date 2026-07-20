@@ -1,19 +1,9 @@
-"""Wiring tests: RecordingCoreService.handle_stop_recording <-> AudioSelfHealer.
+"""Проверки проводки RecordingCoreService, AudioSelfHealer и wake-word watchdog.
 
-2026-07-12 mic-watchdog self-heal. AudioSelfHealer itself is unit-tested in
-isolation in test_audio_selfheal.py; this file only verifies the three call
-sites inside handle_stop_recording feed it correctly:
-
-  - silence-guard trip (RMS below threshold)      -> record_empty_result()
-  - empty transcript at nonzero duration            -> record_empty_result()
-  - real non-empty transcript                       -> record_success()
-  - background-guard rejection (different heuristic) -> NEITHER (must not count)
-
-Uses a bare RecordingCoreService (no BackendService, no daemon threads at
-construction — see feedback_backendservice_teardown_ci.md, which only applies
-to BackendService instantiation) with a lightweight call-recording fake
-standing in for AudioSelfHealer, matching the fixture pattern already
-established in test_recording_core_service.py.
+AudioSelfHealer отдельно покрыт в test_audio_selfheal.py. Здесь проверяются
+реальные точки вызова из handle_stop_recording, а также полный жизненный цикл
+BackendService: фоновые watchdog и wake-word listener обязаны завершаться до
+выгрузки CFFI/PortAudio при остановке процесса.
 """
 
 from __future__ import annotations
@@ -31,7 +21,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.recording_core_service import RecordingCoreService  # noqa: E402
-from backend.service import BackendService  # noqa: E402
+from backend.service import (  # noqa: E402
+    BackendService,
+    _exit_without_python_finalize_if_wake_word_hung,
+)
 from backend.state_store import StateStore  # noqa: E402
 
 
@@ -303,6 +296,32 @@ class BackendServiceWakeWordWatchdogWiringTests(unittest.TestCase):
         wd = self.service._wake_word_watchdog
         self.service.close()
         self.assertFalse(wd._thread is not None and wd._thread.is_alive())
+
+    def test_close_stops_wake_word_listener(self):
+        """Shutdown останавливает listener до выгрузки CFFI/PortAudio."""
+        stop = MagicMock(return_value=True)
+        self.service._oww_adapter.stop = stop
+
+        self.assertTrue(self.service.close())
+
+        stop.assert_called_once_with()
+
+    def test_close_reports_hung_wake_word_listener(self):
+        """False от listener должен дойти до process-level shutdown policy."""
+        self.service._oww_adapter.stop = MagicMock(return_value=False)
+
+        self.assertFalse(self.service.close())
+
+    def test_hung_listener_uses_controlled_exit_without_python_finalize(self):
+        """CFFI-клин обходит небезопасный _Py_Finalize, но только при клине."""
+        exit_fn = MagicMock()
+
+        _exit_without_python_finalize_if_wake_word_hung(True, exit_fn=exit_fn)
+        _exit_without_python_finalize_if_wake_word_hung(None, exit_fn=exit_fn)
+        exit_fn.assert_not_called()
+
+        _exit_without_python_finalize_if_wake_word_hung(False, exit_fn=exit_fn)
+        exit_fn.assert_called_once_with(70)
 
     def test_diagnostics_contains_watchdog_section(self):
         diag = self.service.handle_request(
