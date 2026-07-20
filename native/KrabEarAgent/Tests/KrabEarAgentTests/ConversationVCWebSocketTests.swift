@@ -210,7 +210,7 @@ final class ConversationStateTests: XCTestCase {
 final class ConversationVCURLBuildingTests: XCTestCase {
 
     private func makeVC(config: ConversationConfig) -> ConversationViewController {
-        ConversationViewController(config: config)
+        ConversationViewController(config: config, runtimeOptions: .isolatedTests)
     }
 
     // MARK: engine/brain/lang добавляются только если не "auto"
@@ -346,7 +346,10 @@ final class ConversationVCURLBuildingTests: XCTestCase {
 @MainActor
 final class ConversationVCStateTransitionTests: XCTestCase {
 
-    private func makeVC(wsURL: String = "ws://127.0.0.1:9999/v1/conversation") -> ConversationViewController {
+    private func makeVC(
+        wsURL: String = "ws://127.0.0.1:9999/v1/conversation",
+        runtimeOptions: ConversationRuntimeOptions = .isolatedTests
+    ) -> ConversationViewController {
         let config = ConversationConfig(
             wsURLString: wsURL,
             apiKey: "",
@@ -354,7 +357,7 @@ final class ConversationVCStateTransitionTests: XCTestCase {
             engine: "auto",
             brain: "auto"
         )
-        return ConversationViewController(config: config)
+        return ConversationViewController(config: config, runtimeOptions: runtimeOptions)
     }
 
     /// startConversation → устанавливает isSessionActive = true и state = .connecting.
@@ -370,11 +373,18 @@ final class ConversationVCStateTransitionTests: XCTestCase {
         // Состояние .connecting устанавливается до открытия сокета.
         XCTAssertEqual(vc.conversationState, .connecting,
                        "startConversation должен немедленно перевести в .connecting")
+        XCTAssertFalse(vc._testHasWebSocketTask,
+                       "Изолированный state-тест не должен создавать WebSocket task")
+        XCTAssertFalse(vc._testHasAudioEngine,
+                       "Изолированный state-тест не должен создавать AVAudioEngine")
     }
 
     /// startConversation при пустом URL (URL(string: "") == nil) → state = .error.
     func test_startConversation_emptyURL_setsErrorState() {
-        let vc = makeVC(wsURL: "")
+        let vc = makeVC(
+            wsURL: "",
+            runtimeOptions: ConversationRuntimeOptions(opensWebSocket: true, capturesAudio: false)
+        )
         vc.startConversation()
         if case .error(_) = vc.conversationState {
             // ожидаемое поведение

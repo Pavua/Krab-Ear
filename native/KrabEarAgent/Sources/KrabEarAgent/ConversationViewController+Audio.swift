@@ -45,6 +45,14 @@ extension ConversationViewController {
         audioHolder.prebuffer.bufferedSampleCount
     }
 
+#if DEBUG
+    /// Тестовый признак доказывает отсутствие системного аудиоввода,
+    /// не раскрывая сам `AVAudioEngine`.
+    var _testHasAudioEngine: Bool {
+        audioHolder.engine != nil
+    }
+#endif
+
     // MARK: - Согласование контракта
 
     /// Сбрасывает состояние предыдущей сессии. До ready сборщик намеренно закрыт.
@@ -86,6 +94,9 @@ extension ConversationViewController {
         }
         configureNegotiatedAudio(sampleRate: normalized)
         guard isSessionActive else { return }
+        // `conv.ready` может прийти поздно; тестовый режим не должен из-за этого
+        // обойти запрет и открыть микрофон после безопасного старта сессии.
+        guard runtimeOptions.capturesAudio else { return }
         startAudioCapture()
 
         let dropped = audioHolder.prebuffer.droppedSampleCount

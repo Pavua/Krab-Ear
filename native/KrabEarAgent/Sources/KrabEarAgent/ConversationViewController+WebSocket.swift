@@ -182,6 +182,11 @@ private final class WSHolder: NSObject {
 #if DEBUG
 extension ConversationViewController {
 
+    /// Тестовый признак подтверждает, что изолированный режим не создал WebSocket task.
+    var _testHasWebSocketTask: Bool {
+        wsHolder.task != nil
+    }
+
     /// Список JSON-строк, которые были отправлены через sendControlMessage в тестовом режиме.
     /// Используется в XCTest для проверки содержимого uplink-сообщений без реального сокета.
     nonisolated(unsafe) static var _testSentMessages: [String] = []

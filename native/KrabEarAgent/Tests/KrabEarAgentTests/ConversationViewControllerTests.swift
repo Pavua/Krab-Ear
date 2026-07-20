@@ -30,7 +30,8 @@ final class ConversationViewControllerTests: XCTestCase {
 
     private var vc: ConversationViewController!
 
-    /// Создаёт VC с недостижимым WS-URL, чтобы startWebSocketSession() падала тихо.
+    /// Создаёт VC в изолированном режиме: URL остаётся реалистичным,
+    /// но сокет не открывается.
     private func makeVC(wsURL: String = "ws://127.0.0.1:19999/v1/conversation") -> ConversationViewController {
         let config = ConversationConfig(
             wsURLString: wsURL,
@@ -39,7 +40,7 @@ final class ConversationViewControllerTests: XCTestCase {
             engine:       "auto",
             brain:        "auto"
         )
-        let vc = ConversationViewController(config: config)
+        let vc = ConversationViewController(config: config, runtimeOptions: .isolatedTests)
         vc.loadView()
         vc.viewDidLoad()
         return vc
@@ -78,6 +79,21 @@ final class ConversationViewControllerTests: XCTestCase {
                       "startButton должна быть доступна в .idle")
         XCTAssertTrue(vc.interruptButton.isHidden,
                       "interruptButton должна быть скрыта в .idle")
+    }
+
+    /// Продовый и тестовый профили явно фиксируют границу системного ввода-вывода.
+    /// Этот тест проверяет контракт профилей, не запуская сокет или микрофон.
+    func test_runtimeOptions_profilesHaveExpectedSystemIOPolicy() {
+        XCTAssertTrue(ConversationRuntimeOptions.production.opensWebSocket)
+        XCTAssertTrue(ConversationRuntimeOptions.production.capturesAudio)
+        XCTAssertFalse(ConversationRuntimeOptions.isolatedTests.opensWebSocket)
+        XCTAssertFalse(ConversationRuntimeOptions.isolatedTests.capturesAudio)
+
+        let defaultController = ConversationViewController(config: .default)
+        XCTAssertTrue(defaultController.runtimeOptions.opensWebSocket,
+                      "Инициализатор без профиля должен сохранять продовый WebSocket")
+        XCTAssertTrue(defaultController.runtimeOptions.capturesAudio,
+                      "Инициализатор без профиля должен сохранять продовый захват аудио")
     }
 
     // MARK: - 2. test_start_session_via_button

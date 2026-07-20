@@ -68,6 +68,30 @@ enum ConversationState: Equatable {
     }
 }
 
+// MARK: - Граница среды выполнения
+
+/// Политика доступа разговорного контроллера к системному вводу-выводу.
+///
+/// Машину состояний и согласование аудиоконтракта полезно проверять в unit-тестах,
+/// но создание `URLSessionWebSocketTask` и `AVAudioEngine` затрагивает живую сеть,
+/// микрофон и TCC. Явный профиль сохраняет продовое поведение по умолчанию и даёт
+/// тестам физическую гарантию, что системные ресурсы не будут открыты.
+struct ConversationRuntimeOptions: Sendable {
+    let opensWebSocket: Bool
+    let capturesAudio: Bool
+
+    init(opensWebSocket: Bool, capturesAudio: Bool) {
+        self.opensWebSocket = opensWebSocket
+        self.capturesAudio = capturesAudio
+    }
+
+    /// Полный режим приложения: живой Voice Gateway и аудиоустройства.
+    static let production = ConversationRuntimeOptions(opensWebSocket: true, capturesAudio: true)
+
+    /// Детерминированный тестовый режим: только состояние и чистая логика протокола.
+    static let isolatedTests = ConversationRuntimeOptions(opensWebSocket: false, capturesAudio: false)
+}
+
 // MARK: - ConversationViewController
 
 @MainActor
@@ -80,6 +104,9 @@ final class ConversationViewController: NSViewController {
 
     /// Конфигурация текущей сессии (URL, движок, язык).
     var config: ConversationConfig
+
+    /// Неизменяемая граница системного ввода-вывода для всей жизни контроллера.
+    let runtimeOptions: ConversationRuntimeOptions
 
     // MARK: UI elements (constructed in +UI extension)
     let statusLabel         = NSTextField(labelWithString: "⚪ Готов")
@@ -135,13 +162,18 @@ final class ConversationViewController: NSViewController {
 
     // MARK: - Init
 
-    init(config: ConversationConfig) {
+    init(
+        config: ConversationConfig,
+        runtimeOptions: ConversationRuntimeOptions = .production
+    ) {
         self.config = config
+        self.runtimeOptions = runtimeOptions
         super.init(nibName: nil, bundle: nil)
     }
 
     required init?(coder: NSCoder) {
         self.config = .default
+        self.runtimeOptions = .production
         super.init(coder: coder)
     }
 
@@ -210,10 +242,14 @@ final class ConversationViewController: NSViewController {
         // Сразу начинаем bounded prebuffer в 16 кГц, но до `conv.ready` ничего
         // не отправляем: Moshi требует 24 кГц, старый pipeline — 16 кГц.
         prepareAudioNegotiation()
-        startWebSocketSession(generation: generation)
+        if runtimeOptions.opensWebSocket {
+            startWebSocketSession(generation: generation)
+        }
         // Невалидный URL выставляет error синхронно; микрофон в таком случае не нужен.
         if case .error = conversationState { return }
-        startAudioPrebufferCapture()
+        if runtimeOptions.capturesAudio {
+            startAudioPrebufferCapture()
+        }
     }
 
     /// Остановить сессию. Вызывается из hotkey-toggle или кнопки «Прервать».

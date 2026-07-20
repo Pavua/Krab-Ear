@@ -2,7 +2,8 @@
  ConversationVCAudioTests — тесты аудиологики ConversationViewController+Audio.
 
  Стратегия:
- Реальный AVAudioEngine не инициализируем (требует железо / entitlements).
+ Реальный AVAudioEngine не инициализируем: фикстура использует `.isolatedTests`,
+ поэтому ни стартовый prebuffer, ни поздний `conv.ready` не включают микрофон.
  Тестируем доступную логику:
    1. handleDownlinkAudio() → переход в .speaking при получении аудио-фрейма.
    2. Повторный вызов handleDownlinkAudio() не дублирует смену состояния.
@@ -23,7 +24,7 @@ final class ConversationVCAudioTests: XCTestCase {
     override func setUp() async throws {
         try await super.setUp()
         // viewDidLoad вызывает buildUI() + applyState(.idle)
-        vc = ConversationViewController(config: .default)
+        vc = ConversationViewController(config: .default, runtimeOptions: .isolatedTests)
         vc.loadView()
         vc.viewDidLoad()
         vc.prepareAudioNegotiation()
@@ -56,18 +57,44 @@ final class ConversationVCAudioTests: XCTestCase {
     // MARK: - startConversation / stopConversation: isSessionActive flag
 
     /// startConversation() устанавливает isSessionActive = true и переводит в .connecting.
-    /// (WS + AVAudioEngine не запустятся в тестах, но флаг и состояние должны выставиться.)
+    /// Изолированный режим не запускает WS и AVAudioEngine, но сохраняет машину состояний.
     func test_startConversation_setsSessionActiveAndConnecting() {
         XCTAssertFalse(vc.isSessionActive)
-        // До ready открывается только WebSocket; микрофон не должен стартовать заранее.
+        // До ready чистая логика только закрывает uplink-гейт;
+        // системный ввод-вывод запрещён.
         vc.startConversation()
         XCTAssertTrue(vc.isSessionActive, "После startConversation isSessionActive должен быть true")
         XCTAssertEqual(vc.conversationState, .connecting,
                        "startConversation должен переводить в .connecting")
         XCTAssertFalse(vc.isAudioNegotiationReady,
                        "До conv.ready сетевой uplink-гейт должен оставаться закрыт")
+        XCTAssertFalse(vc._testHasWebSocketTask,
+                       "Изолированный unit-тест не должен создавать WebSocket task")
+        XCTAssertFalse(vc._testHasAudioEngine,
+                       "Изолированный unit-тест не должен создавать AVAudioEngine")
         // Cleanup
         vc.isSessionActive = false
+    }
+
+    /// Поздний `conv.ready` не должен обходить тестовый запрет и включать микрофон.
+    func test_activateNegotiatedAudio_isolatedRuntimeDoesNotCreateAudioEngine() {
+        vc.isSessionActive = true
+        vc.prepareAudioNegotiation()
+        _ = vc.assembleUplinkFrames(
+            Array(repeating: 0.25, count: 1_280),
+            sourceSampleRate: 16_000
+        )
+
+        vc.activateNegotiatedAudio(sampleRate: 24_000)
+
+        XCTAssertTrue(
+            vc.isAudioNegotiationReady,
+            "Чистое согласование формата должно работать без системного аудиоввода"
+        )
+        XCTAssertFalse(vc._testHasAudioEngine,
+                       "Изолированный режим не должен создавать engine после conv.ready")
+        XCTAssertEqual(vc.pendingAudioPrebufferSampleCount, 1_280,
+                       "Без захвата аудио поздний ready не должен дренировать prebuffer")
     }
 
     /// stopConversation() сбрасывает isSessionActive и переводит в .idle.
