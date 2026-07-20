@@ -18,7 +18,12 @@ _HARNESS_PATH = _REPO_ROOT / "scripts" / "pre_merge_py312_check.sh"
 _TERMINATION_METHODS = {"kill", "pkill", "send_signal", "terminate"}
 _TERMINATION_LITERAL_RE = re.compile(r"(?:^|[\s/])(?:p?kill)(?:\s|$)")
 _SHELL_TERMINATION_RE = re.compile(
-    r"(?<![A-Za-z0-9_])(?:pkill|kill)(?![A-Za-z0-9_])"
+    r"(?:^|[;&|()])[\t ]*"
+    r"(?:(?:if|then|do|else|elif|while|until)[\t ]+)?"
+    r"(?:(?:command|env|sudo)[\t ]+)*"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|()]+[\t ]+)*"
+    r"(?:[^\s;&|()]*/)?(?:pkill|kill)(?=[\t ]|$|[;&|()])",
+    re.MULTILINE,
 )
 
 
@@ -41,13 +46,67 @@ def _literal_strings(call: ast.Call) -> list[str]:
     return values
 
 
+def _strip_shell_comment(line: str) -> str:
+    """Обрезает первый неэкранированный ``#`` вне shell-кавычек."""
+    quote: str | None = None
+    escaped = False
+
+    for index, character in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\" and quote != "'":
+            escaped = True
+            continue
+        if quote is not None:
+            if character == quote:
+                quote = None
+            continue
+        if character in {"'", '"'}:
+            quote = character
+            continue
+        if character == "#":
+            return line[:index].rstrip()
+    return line.rstrip()
+
+
 def _shell_code(source: str) -> str:
-    """Удаляет пустые и чисто комментирующие строки shell-скрипта."""
-    return "\n".join(
-        line
-        for line in source.splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
+    """Удаляет пустые строки и настоящие shell-комментарии."""
+    code_lines = (_strip_shell_comment(line) for line in source.splitlines())
+    return "\n".join(line for line in code_lines if line.strip())
+
+
+def _has_shell_termination(source: str) -> bool:
+    """Проверяет наличие исполняемой команды завершения в shell-фрагменте."""
+    return _SHELL_TERMINATION_RE.search(_shell_code(source)) is not None
+
+
+def test_shell_code_strips_only_real_comments() -> None:
+    """Inline-комментарий обрезается, а кавычки и escaped hash сохраняются."""
+    cases = (
+        ("echo ok # kill worker", "echo ok"),
+        ("echo '# kill'", "echo '# kill'"),
+        ('echo "# pkill"', 'echo "# pkill"'),
+        (r"echo \# kill", r"echo \# kill"),
     )
+
+    for source, expected in cases:
+        assert _shell_code(source) == expected
+
+
+def test_shell_termination_detection_uses_command_position() -> None:
+    """Текстовый аргумент не равен команде, а реальные kill/pkill находятся."""
+    harmless_sources = (
+        "echo ok # kill worker",
+        "echo '# kill'",
+        'echo "# pkill"',
+        r"echo \# kill",
+    )
+
+    for source in harmless_sources:
+        assert not _has_shell_termination(source)
+    assert _has_shell_termination("kill 123")
+    assert _has_shell_termination("pkill -f x")
 
 
 def test_conftest_has_no_global_process_termination() -> None:
