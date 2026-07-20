@@ -27,6 +27,23 @@ import Foundation
 
 // MARK: - Helpers
 
+/// Пустая SSE-задача не создаёт сокет: она нужна для unit-проверок состояния overlay.
+private final class NoOpLiveSubtitlesSSETask: LiveSubtitlesSSETask {
+    func resume() {}
+    func cancel() {}
+}
+
+/// Пустая SSE-сессия сохраняет смысл show/hide, не обращаясь к backend на localhost.
+private final class NoOpLiveSubtitlesSSESession: LiveSubtitlesSSESession {
+    private let task = NoOpLiveSubtitlesSSETask()
+
+    func makeLiveSubtitlesTask(with request: URLRequest) -> LiveSubtitlesSSETask {
+        task
+    }
+
+    func invalidateAndCancel() {}
+}
+
 /// Создаёт минимальный CMSampleBuffer с Float32 audio данными.
 private func makeSampleBuffer(
     samples: [Float32],
@@ -208,7 +225,10 @@ final class LiveSubtitlesOverlayTests: XCTestCase {
     // MARK: 10. show/hide toggles isVisible
 
     func testShowHideTogglesIsVisible() {
-        let overlay = LiveSubtitlesOverlay()
+        // Production-фабрика создаёт URLSession; unit-тест подменяет её no-op сессией.
+        let overlay = LiveSubtitlesOverlay(
+            sseSessionFactory: { _ in NoOpLiveSubtitlesSSESession() }
+        )
         overlay.show()
         XCTAssertTrue(overlay.isVisible)
         overlay.hide()

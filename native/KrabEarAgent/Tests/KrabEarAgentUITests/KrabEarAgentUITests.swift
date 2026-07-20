@@ -14,10 +14,10 @@
     AgentSettings model defaults, overlayOpacityPercent clamp, tab switching.
     Полностью headless, 100% pass через `swift test --filter KrabEarAgentUITests`.
 
- 2) `KrabEarXCUIFlowTests` (требует Xcode UI Testing — помечены как skip через
-    `XCTSkipIf` когда нет app bundle). Содержат полные XCUITest сценарии
-    которые запускаются из Xcode Product → Test с таргетом KrabEarAgentUITests.
-    При запуске через `swift test` тесты корректно skip с понятным сообщением.
+ 2) `KrabEarXCUIFlowTests` (требует Xcode UI Testing) — запускается только при
+    явных KRAB_RUN_SYSTEM_TESTS=1 и KRAB_EAR_APP_PATH. Содержит полные XCUITest
+    сценарии, которые запускаются из Xcode Product → Test с таргетом
+    KrabEarAgentUITests. Обычный `swift test` пассивно пропускает весь класс.
 
  Запуск через swift test:
    cd native/KrabEarAgent && swift test --filter KrabEarAgentUITests
@@ -42,6 +42,25 @@ private func makeTempDefaults() -> UserDefaults {
     let d = UserDefaults(suiteName: kTestSuiteName)!
     d.removePersistentDomain(forName: kTestSuiteName)
     return d
+}
+
+/// Потокобезопасно переносит точный результат callback запуска в тестовый поток.
+/// `@unchecked Sendable` допустим здесь, потому что каждое чтение и запись защищены lock.
+private final class RunningApplicationHolder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var application: NSRunningApplication?
+
+    func store(_ application: NSRunningApplication?) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.application = application
+    }
+
+    func load() -> NSRunningApplication? {
+        lock.lock()
+        defer { lock.unlock() }
+        return application
+    }
 }
 
 // MARK: - 1. Settings Logic Tests (headless, SPM-compatible)
@@ -222,8 +241,9 @@ final class KrabEarSettingsLogicTests: XCTestCase {
 // MARK: - 2. XCUITest Flow Tests (требует Xcode UI Testing host)
 
 /// Полные E2E сценарии через XCUIApplication.
-/// При запуске через `swift test` все тесты skip с пояснением.
-/// При запуске через Xcode UITest bundle — исполняются полностью.
+/// При обычном `swift test` все тесты skip с пояснением.
+/// При запуске через Xcode UITest bundle нужны явные KRAB_RUN_SYSTEM_TESTS=1
+/// и KRAB_EAR_APP_PATH, после чего сценарии исполняются полностью.
 ///
 /// Инструкция для Xcode:
 /// 1. File → New → Target → UI Testing Bundle
@@ -236,35 +256,54 @@ final class KrabEarSettingsLogicTests: XCTestCase {
 /// убедитесь что "Krab Ear" в списке, затем `tccutil reset Accessibility com.antigravity.krab-ear`.
 final class KrabEarXCUIFlowTests: XCTestCase {
 
-    // Путь к .app bundle (относительно репо root).
-    // В CI выставляется через KRAB_EAR_APP_PATH env var.
+    private let bundleIdentifier = "com.antigravity.krab-ear"
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+
+        // Эти сценарии управляют настоящим приложением и TCC/AX API. Обычный
+        // `swift test` обязан оставаться полностью пассивным для живого Krab Ear.
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["KRAB_RUN_SYSTEM_TESTS"] == "1",
+            "XCUI-сценарии требуют явного KRAB_RUN_SYSTEM_TESTS=1"
+        )
+    }
+
+    // Путь принимается только явно: автопоиск мог подобрать production-приложение
+    // из системного каталога и запустить либо завершить его во время unit-прогона.
     private var appBundlePath: String? {
-        if let env = ProcessInfo.processInfo.environment["KRAB_EAR_APP_PATH"] {
-            return env
+        guard let path = ProcessInfo.processInfo.environment["KRAB_EAR_APP_PATH"],
+              !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
         }
-        // Стандартный путь в dev layout
-        let candidates = [
-            // Относительно tests binary (worktree layout)
-            "../../../../Krab Ear.app",
-            "/Applications/Krab Ear.app",
-        ]
-        let fm = FileManager.default
-        for c in candidates {
-            let expanded = (c as NSString).expandingTildeInPath
-            if fm.fileExists(atPath: expanded) { return expanded }
-        }
-        return nil
+        return path
     }
 
     private func requireAppPath(function: String = #function) throws -> String {
+        let configuredPath = appBundlePath
         try XCTSkipIf(
-            appBundlePath == nil,
+            configuredPath == nil,
             """
-            \(function): Krab Ear.app не найден. Установите KRAB_EAR_APP_PATH или запустите \
-            через Xcode UITest bundle. Для swift test — используйте KrabEarSettingsLogicTests.
+            \(function): задайте явный KRAB_EAR_APP_PATH к тестовому Krab Ear.app. \
+            Для обычного swift test используйте KrabEarSettingsLogicTests.
             """
         )
-        return appBundlePath!
+
+        // После XCTSkipIf значение гарантировано существует; отдельно проверяем,
+        // что опечатка не превратится в ошибку launch и путь не ведёт к чужому app.
+        let path = configuredPath!
+        var isDirectory = ObjCBool(false)
+        let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+        try XCTSkipUnless(
+            exists && isDirectory.boolValue,
+            "\(function): KRAB_EAR_APP_PATH не существует или не является app-bundle: \(path)"
+        )
+        try XCTSkipUnless(
+            URL(fileURLWithPath: path).pathExtension.lowercased() == "app" &&
+                Bundle(path: path)?.bundleIdentifier == bundleIdentifier,
+            "\(function): KRAB_EAR_APP_PATH должен указывать на Krab Ear.app с bundle ID \(bundleIdentifier)"
+        )
+        return path
     }
 
     // MARK: testApplicationLaunches
@@ -272,6 +311,13 @@ final class KrabEarXCUIFlowTests: XCTestCase {
     /// E2E: .app запускается, menu bar icon появляется (NSStatusItem).
     func testApplicationLaunches() throws {
         let appPath = try requireAppPath()
+
+        // Нельзя определять «свой» процесс только по bundle ID после запуска:
+        // если production уже жив, последующий terminate() способен закрыть его.
+        try XCTSkipIf(
+            !NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).isEmpty,
+            "Krab Ear уже запущен; launch-тест не должен вмешиваться в живой экземпляр"
+        )
 
         // В Xcode UITest контексте: XCUIApplication запускает bundle напрямую.
         // Через CGEvent/NSWorkspace мы симулируем запуск и проверяем наличие process.
@@ -281,26 +327,36 @@ final class KrabEarXCUIFlowTests: XCTestCase {
 
         let appURL = URL(fileURLWithPath: appPath)
         let expectation = XCTestExpectation(description: "App launched")
+        let launchedApplicationHolder = RunningApplicationHolder()
 
         workspace.openApplication(at: appURL, configuration: config) { app, error in
+            defer { expectation.fulfill() }
             if let error {
                 XCTFail("Не удалось запустить app: \(error.localizedDescription)")
             } else {
                 XCTAssertNotNil(app, "NSRunningApplication должен быть non-nil")
-                expectation.fulfill()
+                launchedApplicationHolder.store(app)
             }
         }
         wait(for: [expectation], timeout: 10)
 
+        guard let launchedApplication = launchedApplicationHolder.load() else {
+            XCTFail("Callback запуска не вернул NSRunningApplication")
+            return
+        }
+        // Завершаем исключительно экземпляр, который создал этот callback. Поиск
+        // другого процесса по bundle ID здесь намеренно запрещён.
+        defer { _ = launchedApplication.terminate() }
+
         // Даём время на инициализацию NSStatusItem
         Thread.sleep(forTimeInterval: 1.5)
 
-        // Проверяем что процесс запущен
-        let running = NSWorkspace.shared.runningApplications.first {
-            $0.bundleIdentifier == "com.antigravity.krab-ear"
-        }
-        XCTAssertNotNil(running, "Krab Ear должен быть в списке runningApplications")
-        running?.terminate()
+        XCTAssertEqual(
+            launchedApplication.bundleIdentifier,
+            bundleIdentifier,
+            "Callback должен вернуть именно Krab Ear"
+        )
+        XCTAssertFalse(launchedApplication.isTerminated, "Запущенный тестом Krab Ear должен быть активен")
     }
 
     // MARK: testOpenSettingsFromMenuBar
@@ -312,7 +368,7 @@ final class KrabEarXCUIFlowTests: XCTestCase {
     /// Accessibility permission. Тест упадёт с "не удалось получить AX ref"
     /// если permission не выдан — запустите PermissionWizard сначала.
     func testOpenSettingsFromMenuBar() throws {
-        try requireAppPath()
+        _ = try requireAppPath()
 
         // Проверяем наличие Accessibility permission
         let axEnabled = AXIsProcessTrusted()
@@ -358,7 +414,7 @@ final class KrabEarXCUIFlowTests: XCTestCase {
     /// E2E: переключение между вкладками "Диктовка"/"Live перевод"/"История"/"Разговор с AI".
     /// Использует AXUIElement для поиска NSTabView и смены selectedTab.
     func testTabSwitcher() throws {
-        try requireAppPath()
+        _ = try requireAppPath()
 
         let axEnabled = AXIsProcessTrusted()
         try XCTSkipIf(!axEnabled,
@@ -385,7 +441,7 @@ final class KrabEarXCUIFlowTests: XCTestCase {
 
     /// E2E: двигаем slider opacity, закрываем окно, открываем снова — value persisted.
     func testOpacitySliderPersists() throws {
-        try requireAppPath()
+        _ = try requireAppPath()
 
         try XCTSkipIf(true,
             """
@@ -399,7 +455,7 @@ final class KrabEarXCUIFlowTests: XCTestCase {
 
     /// E2E: меняем Right Option → Left Option через NSPopUpButton в Settings, проверяем saved.
     func testHotkeyPickerChange() throws {
-        try requireAppPath()
+        _ = try requireAppPath()
 
         try XCTSkipIf(true,
             """
@@ -413,7 +469,7 @@ final class KrabEarXCUIFlowTests: XCTestCase {
 
     /// E2E: секция "Глоссарий" visible в Settings.
     func testGlossarySectionPresent() throws {
-        try requireAppPath()
+        _ = try requireAppPath()
 
         try XCTSkipIf(true,
             """

@@ -70,8 +70,15 @@ final class Sequoia26TCCMicrophoneTests: XCTestCase {
     }
 
     /// AVCaptureDevice.requestAccess(for:) — API доступен, не крашит при вызове.
-    /// Тест НЕ ожидает реального разрешения (нет Info.plist в тестовом хосте).
-    func test_TCC_microphone_requestAccess_API_is_callable() {
+    /// Запускается только с KRAB_RUN_SYSTEM_TESTS=1, потому что может показать TCC-диалог.
+    func test_TCC_microphone_requestAccess_API_is_callable() throws {
+        // requestAccess способен показать системный TCC-диалог и изменить живое
+        // разрешение, поэтому такой тест запускается только как явная системная проверка.
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["KRAB_RUN_SYSTEM_TESTS"] == "1",
+            "Запрос TCC микрофона требует явного KRAB_RUN_SYSTEM_TESTS=1"
+        )
+
         // Вызываем в тестовой среде — ожидаем что callback придёт без crash.
         let exp = expectation(description: "requestAccess callback")
         exp.isInverted = false

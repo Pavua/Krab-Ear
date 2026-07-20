@@ -286,7 +286,10 @@ final class LiveSubtitlesOverlayWave190Tests: XCTestCase {
     // MARK: 16. test_show_hide_isVisible
 
     func test_show_hide_isVisible() {
-        let overlay = makeOverlay()
+        // show() открывает SSE-соединение, поэтому даже простая проверка флага
+        // использует тестовую сессию и никогда не обращается к localhost.
+        let environment = TrackingSSEEnvironment()
+        let overlay = makeTrackedOverlay(environment: environment)
         overlay.show()
         XCTAssertTrue(overlay.isVisible, "show() должен устанавливать isVisible = true")
         overlay.hide()
