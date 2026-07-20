@@ -101,6 +101,7 @@ private final class TrackingSSEEnvironment {
 final class LiveSubtitlesOverlayWave190Tests: XCTestCase {
 
     private let defaultsDomain = IsolatedUserDefaultsDomain(scope: "LiveSubtitlesOverlayWave190Tests")
+    private let panelOrdering = RecordingPanelOrdering()
 
     override func tearDown() async throws {
         defaultsDomain.removePersistentDomain()
@@ -110,7 +111,10 @@ final class LiveSubtitlesOverlayWave190Tests: XCTestCase {
     // MARK: - Helpers
 
     private func makeOverlay() -> LiveSubtitlesOverlay {
-        LiveSubtitlesOverlay(userDefaults: defaultsDomain.defaults)
+        LiveSubtitlesOverlay(
+            userDefaults: defaultsDomain.defaults,
+            panelOrdering: panelOrdering
+        )
     }
 
     /// Даёт задачам, поставленным через `Task { @MainActor }`, отработать без ожидания по времени.
@@ -130,7 +134,8 @@ final class LiveSubtitlesOverlayWave190Tests: XCTestCase {
             reconnectScheduler: { _, workItem in
                 environment.scheduledReconnects.append(workItem)
             },
-            userDefaults: defaultsDomain.defaults
+            userDefaults: defaultsDomain.defaults,
+            panelOrdering: panelOrdering
         )
     }
 
@@ -301,8 +306,10 @@ final class LiveSubtitlesOverlayWave190Tests: XCTestCase {
         let overlay = makeTrackedOverlay(environment: environment)
         overlay.show()
         XCTAssertTrue(overlay.isVisible, "show() должен устанавливать isVisible = true")
+        XCTAssertEqual(panelOrdering.orderFrontCallCount, 1)
         overlay.hide()
         XCTAssertFalse(overlay.isVisible, "hide() должен устанавливать isVisible = false")
+        XCTAssertEqual(panelOrdering.orderOutCallCount, 1)
     }
 
     /// show → hide → show не должен оставлять старое SSE-соединение живым:
@@ -700,6 +707,7 @@ final class LiveSubtitlesOverlayPositionGuardTests: XCTestCase {
 
     private let positionKey = "KrabEar_LiveSubsHUDPosition"
     private let defaultsDomain = IsolatedUserDefaultsDomain(scope: "LiveSubtitlesOverlayPositionGuardTests")
+    private let panelOrdering = RecordingPanelOrdering()
 
     override func tearDown() async throws {
         defaultsDomain.removePersistentDomain()
@@ -724,7 +732,10 @@ final class LiveSubtitlesOverlayPositionGuardTests: XCTestCase {
     func test_restorePosition_offScreen_doesNotApplyBogusOrigin() {
         savePosition(x: 99999, y: 99999)
 
-        let overlay = LiveSubtitlesOverlay(userDefaults: defaultsDomain.defaults)
+        let overlay = LiveSubtitlesOverlay(
+            userDefaults: defaultsDomain.defaults,
+            panelOrdering: panelOrdering
+        )
 
         XCTAssertNotEqual(overlay._testPanelOrigin.x, 99999)
         XCTAssertNotEqual(overlay._testPanelOrigin.y, 99999)
@@ -741,7 +752,10 @@ final class LiveSubtitlesOverlayPositionGuardTests: XCTestCase {
         let y = vf.minY + 40
         savePosition(x: x, y: y)
 
-        let overlay = LiveSubtitlesOverlay(userDefaults: defaultsDomain.defaults)
+        let overlay = LiveSubtitlesOverlay(
+            userDefaults: defaultsDomain.defaults,
+            panelOrdering: panelOrdering
+        )
 
         XCTAssertEqual(overlay._testPanelOrigin.x, x, accuracy: 0.5)
         XCTAssertEqual(overlay._testPanelOrigin.y, y, accuracy: 0.5)

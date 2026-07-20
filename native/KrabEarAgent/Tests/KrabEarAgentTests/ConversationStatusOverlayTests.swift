@@ -1,7 +1,7 @@
 /*
  ConversationStatusOverlayTests — Волна 3c, плавающий статус-HUD разговора.
- Панель headless (orderFront в тестах не вызываем на show? вызываем — NSPanel
- без NSApp.run безопасен, прецедент LiveSubtitlesOverlay-тесты).
+ Реальный layout NSPanel сохраняется, а команды orderFront/orderOut перехватывает
+ записывающий no-op: штатный unit-прогон не показывает окна пользователю.
 */
 
 import XCTest
@@ -13,10 +13,14 @@ final class ConversationStatusOverlayTests: XCTestCase {
 
     private var overlay: ConversationStatusOverlay!
     private let defaultsDomain = IsolatedUserDefaultsDomain(scope: "ConversationStatusOverlayTests")
+    private let panelOrdering = RecordingPanelOrdering()
 
     override func setUp() async throws {
         try await super.setUp()
-        overlay = ConversationStatusOverlay(userDefaults: defaultsDomain.defaults)
+        overlay = ConversationStatusOverlay(
+            userDefaults: defaultsDomain.defaults,
+            panelOrdering: panelOrdering
+        )
     }
 
     override func tearDown() async throws {
@@ -46,8 +50,10 @@ final class ConversationStatusOverlayTests: XCTestCase {
     func test_showHide_togglesIsVisible() {
         overlay.show()
         XCTAssertTrue(overlay.isVisible)
+        XCTAssertEqual(panelOrdering.orderFrontCallCount, 1)
         overlay.hide()
         XCTAssertFalse(overlay.isVisible)
+        XCTAssertEqual(panelOrdering.orderOutCallCount, 1)
     }
 
     func test_interruptButton_firesCallback() {
@@ -70,6 +76,7 @@ final class ConversationOverlayWiringTests: XCTestCase {
 
     private var vc: ConversationViewController!
     private let defaultsDomain = IsolatedUserDefaultsDomain(scope: "ConversationOverlayWiringTests")
+    private let panelOrdering = RecordingPanelOrdering()
 
     override func setUp() async throws {
         try await super.setUp()
@@ -94,7 +101,10 @@ final class ConversationOverlayWiringTests: XCTestCase {
     }
 
     func test_applyState_updatesOverlayText() {
-        let overlay = ConversationStatusOverlay(userDefaults: defaultsDomain.defaults)
+        let overlay = ConversationStatusOverlay(
+            userDefaults: defaultsDomain.defaults,
+            panelOrdering: panelOrdering
+        )
         vc.statusOverlay = overlay
         vc.conversationState = .speaking
         XCTAssertEqual(overlay._testStatusText, "🔴 Говорит")
@@ -104,6 +114,7 @@ final class ConversationOverlayWiringTests: XCTestCase {
         vc.isSessionActive = true
         vc.conversationState = .speaking
         vc.ensureStatusOverlay()
+        vc.statusOverlay?._testReplacePanelOrdering(panelOrdering)
         vc.statusOverlay?.onInterrupt?()
         // interruptAI НЕ переключает состояние сам (Task 2) — но взводит fallback-таймер.
         XCTAssertNotNil(vc.interruptFallbackTimer,
@@ -111,7 +122,10 @@ final class ConversationOverlayWiringTests: XCTestCase {
     }
 
     func test_computeAndPushLevel_feedsOverlay_noCrash() {
-        let overlay = ConversationStatusOverlay(userDefaults: defaultsDomain.defaults)
+        let overlay = ConversationStatusOverlay(
+            userDefaults: defaultsDomain.defaults,
+            panelOrdering: panelOrdering
+        )
         vc.statusOverlay = overlay
         vc.computeAndPushLevel([0.4, 0.5, 0.6])  // smoke: пуш в meter overlay не падает
     }
@@ -128,6 +142,7 @@ final class ConversationStatusOverlayPositionGuardTests: XCTestCase {
 
     private let positionKey = "KrabEar_ConversationStatusHUDPosition"
     private let defaultsDomain = IsolatedUserDefaultsDomain(scope: "ConversationStatusOverlayPositionGuardTests")
+    private let panelOrdering = RecordingPanelOrdering()
 
     override func tearDown() async throws {
         defaultsDomain.removePersistentDomain()
@@ -152,7 +167,10 @@ final class ConversationStatusOverlayPositionGuardTests: XCTestCase {
     func test_restorePosition_offScreen_doesNotApplyBogusOrigin() {
         savePosition(x: 99999, y: 99999)
 
-        let overlay = ConversationStatusOverlay(userDefaults: defaultsDomain.defaults)
+        let overlay = ConversationStatusOverlay(
+            userDefaults: defaultsDomain.defaults,
+            panelOrdering: panelOrdering
+        )
         defer { overlay.hide() }
 
         XCTAssertNotEqual(overlay._testPanelOrigin.x, 99999)
@@ -170,7 +188,10 @@ final class ConversationStatusOverlayPositionGuardTests: XCTestCase {
         let y = vf.minY + 40
         savePosition(x: x, y: y)
 
-        let overlay = ConversationStatusOverlay(userDefaults: defaultsDomain.defaults)
+        let overlay = ConversationStatusOverlay(
+            userDefaults: defaultsDomain.defaults,
+            panelOrdering: panelOrdering
+        )
         defer { overlay.hide() }
 
         XCTAssertEqual(overlay._testPanelOrigin.x, x, accuracy: 0.5)
@@ -191,6 +212,7 @@ final class ConversationWindowWillCloseTests: XCTestCase {
     private var vc: ConversationViewController!
     private var window: NSWindow!
     private let defaultsDomain = IsolatedUserDefaultsDomain(scope: "ConversationWindowWillCloseTests")
+    private let panelOrdering = RecordingPanelOrdering()
 
     override func setUp() async throws {
         try await super.setUp()
@@ -206,6 +228,10 @@ final class ConversationWindowWillCloseTests: XCTestCase {
             defer: false
         )
         window.contentView = vc.view
+        vc.statusOverlay = ConversationStatusOverlay(
+            userDefaults: defaultsDomain.defaults,
+            panelOrdering: panelOrdering
+        )
     }
 
     override func tearDown() async throws {

@@ -32,6 +32,8 @@ final class ConversationStatusOverlay: NSObject {
     private let positionKey = "KrabEar_ConversationStatusHUDPosition"
     /// Хранилище позиции панели; `.standard` остаётся production-дефолтом.
     private let userDefaults: UserDefaults
+    /// Граница видимости окна: production вызывает AppKit, тесты используют no-op.
+    private var panelOrdering: PanelOrdering
 
     // MARK: - Test hooks
 
@@ -40,10 +42,20 @@ final class ConversationStatusOverlay: NSObject {
     var _testStatusText: String { statusLabel.stringValue }
     var _testPanelOrigin: NSPoint { panel.frame.origin }
 
+    /// Позволяет тесту VC сохранить настоящую factory-проводку, а затем отключить
+    /// только экранный эффект до первого show/hide.
+    func _testReplacePanelOrdering(_ panelOrdering: PanelOrdering) {
+        self.panelOrdering = panelOrdering
+    }
+
     // MARK: - Init
 
-    init(userDefaults: UserDefaults = .standard) {
+    init(
+        userDefaults: UserDefaults = .standard,
+        panelOrdering: PanelOrdering = AppKitPanelOrdering()
+    ) {
         self.userDefaults = userDefaults
+        self.panelOrdering = panelOrdering
         panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 280, height: 64),
             styleMask: [.nonactivatingPanel, .hudWindow, .utilityWindow],
@@ -58,12 +70,12 @@ final class ConversationStatusOverlay: NSObject {
     // MARK: - Public API
 
     func show() {
-        panel.orderFront(nil)
+        panelOrdering.orderFront(panel)
         isVisible = true
     }
 
     func hide() {
-        panel.orderOut(nil)
+        panelOrdering.orderOut(panel)
         isVisible = false
     }
 

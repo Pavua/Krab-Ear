@@ -136,6 +136,8 @@ final class LiveSubtitlesOverlay: NSObject {
     private let showOrigKey = "KrabEar_LiveSubsShowOriginal"
     /// Хранилище настроек HUD; production использует `.standard`, тесты — UUID-suite.
     private let userDefaults: UserDefaults
+    /// Граница видимости окна: production вызывает AppKit, тесты используют no-op.
+    private let panelOrdering: PanelOrdering
 
     // MARK: - Init
 
@@ -144,8 +146,16 @@ final class LiveSubtitlesOverlay: NSObject {
     }
 
     /// Упрощённая тестовая точка входа без создания собственной SSE-фабрики.
-    convenience init(userDefaults: UserDefaults) {
-        self.init(sseSessionFactory: nil, reconnectScheduler: nil, userDefaults: userDefaults)
+    convenience init(
+        userDefaults: UserDefaults,
+        panelOrdering: PanelOrdering = AppKitPanelOrdering()
+    ) {
+        self.init(
+            sseSessionFactory: nil,
+            reconnectScheduler: nil,
+            userDefaults: userDefaults,
+            panelOrdering: panelOrdering
+        )
     }
 
     /// Фабрики подменяются только в тестах; обычный путь использует URLSession
@@ -153,7 +163,8 @@ final class LiveSubtitlesOverlay: NSObject {
     init(
         sseSessionFactory: ((SSESessionDelegate) -> LiveSubtitlesSSESession)?,
         reconnectScheduler: ((TimeInterval, DispatchWorkItem) -> Void)? = nil,
-        userDefaults: UserDefaults = .standard
+        userDefaults: UserDefaults = .standard,
+        panelOrdering: PanelOrdering = AppKitPanelOrdering()
     ) {
         // Создаём плавающий NSPanel
         let initialFrame = NSRect(x: 0, y: 0, width: 680, height: 120)
@@ -166,6 +177,7 @@ final class LiveSubtitlesOverlay: NSObject {
         self.sseSessionFactory = sseSessionFactory
         self.reconnectScheduler = reconnectScheduler
         self.userDefaults = userDefaults
+        self.panelOrdering = panelOrdering
         super.init()
         setupPanel()
         restorePosition()
@@ -185,7 +197,7 @@ final class LiveSubtitlesOverlay: NSObject {
     // MARK: - Public API
 
     func show() {
-        panel.orderFront(nil)
+        panelOrdering.orderFront(panel)
         isVisible = true
         showListeningIndicator()
         startSSE()
@@ -193,7 +205,7 @@ final class LiveSubtitlesOverlay: NSObject {
     }
 
     func hide() {
-        panel.orderOut(nil)
+        panelOrdering.orderOut(panel)
         isVisible = false
         stopSSE()
         cancelNoResultsTimer()

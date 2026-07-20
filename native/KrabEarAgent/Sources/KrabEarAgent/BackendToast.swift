@@ -32,8 +32,17 @@ final class BackendToast {
 
     private var panel: NSPanel?
     private var dismissTimer: Timer?
+    private let panelOrdering: PanelOrdering
 
-    private init() {}
+    /// Singleton всегда использует прямые AppKit-команды.
+    private init() {
+        panelOrdering = AppKitPanelOrdering()
+    }
+
+    /// Отдельный экземпляр нужен unit-тестам для подмены только экранного эффекта.
+    init(panelOrdering: PanelOrdering) {
+        self.panelOrdering = panelOrdering
+    }
 
     /// Pre-warm NSWindow + NSVisualEffectView + CoreText font cache при app init.
     ///
@@ -67,8 +76,8 @@ final class BackendToast {
         // orderFrontRegardless + немедленный orderOut заставляет AppKit
         // выполнить NSVisualEffectView layout и ColorSync transform,
         // после чего скрываем панель.
-        panel.orderFrontRegardless()
-        panel.orderOut(nil)
+        panelOrdering.orderFrontRegardless(panel)
+        panelOrdering.orderOut(panel)
     }
 
     /// Показывает toast с заданным текстом на `duration` секунд.
@@ -106,7 +115,7 @@ final class BackendToast {
         panel.alphaValue = 1.0
         // orderFront после позиционирования: _doOrderWindow только композитирует
         // уже готовый CALayer, не делает layout заново.
-        panel.orderFront(nil)
+        panelOrdering.orderFront(panel)
 
         scheduleDismiss(duration: duration)
     }
@@ -173,12 +182,13 @@ final class BackendToast {
 
     private func fadeOutAndHide() {
         guard let panel = panel, panel.contentView?.window != nil else { return }
+        let panelOrdering = panelOrdering
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.25
             panel.animator().alphaValue = 0.0
         }, completionHandler: {
             MainActor.assumeIsolated {
-                panel.orderOut(nil)
+                panelOrdering.orderOut(panel)
             }
         })
     }

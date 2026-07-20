@@ -217,6 +217,7 @@ final class SystemAudioCaptureTests: XCTestCase {
 final class LiveSubtitlesOverlayTests: XCTestCase {
 
     private let defaultsDomain = IsolatedUserDefaultsDomain(scope: "LiveSubsOverlayTests")
+    private let panelOrdering = RecordingPanelOrdering()
 
     override func tearDown() async throws {
         defaultsDomain.removePersistentDomain()
@@ -224,7 +225,10 @@ final class LiveSubtitlesOverlayTests: XCTestCase {
     }
 
     private func makeOverlay() -> LiveSubtitlesOverlay {
-        LiveSubtitlesOverlay(userDefaults: defaultsDomain.defaults)
+        LiveSubtitlesOverlay(
+            userDefaults: defaultsDomain.defaults,
+            panelOrdering: panelOrdering
+        )
     }
 
     // MARK: 9. isVisible starts false
@@ -239,12 +243,15 @@ final class LiveSubtitlesOverlayTests: XCTestCase {
         // Production-фабрика создаёт URLSession; unit-тест подменяет её no-op сессией.
         let overlay = LiveSubtitlesOverlay(
             sseSessionFactory: { _ in NoOpLiveSubtitlesSSESession() },
-            userDefaults: defaultsDomain.defaults
+            userDefaults: defaultsDomain.defaults,
+            panelOrdering: panelOrdering
         )
         overlay.show()
         XCTAssertTrue(overlay.isVisible)
+        XCTAssertEqual(panelOrdering.orderFrontCallCount, 1)
         overlay.hide()
         XCTAssertFalse(overlay.isVisible)
+        XCTAssertEqual(panelOrdering.orderOutCallCount, 1)
     }
 
     // MARK: 11. addEntry + clearAll no crash

@@ -203,8 +203,17 @@ final class Sequoia26CoreTextPrewarmTests: XCTestCase {
 @MainActor
 final class Sequoia26BackendToastMainThreadTests: XCTestCase {
 
+    /// Реальный orderFront относится к системной проверке: штатный unit-прогон
+    /// не должен показывать toast поверх рабочего стола пользователя.
+    private func requireSystemPanelChecks() throws {
+        guard ProcessInfo.processInfo.environment["KRAB_RUN_SYSTEM_TESTS"] == "1" else {
+            throw XCTSkip("реальный BackendToast включается только при KRAB_RUN_SYSTEM_TESTS=1")
+        }
+    }
+
     /// show() после prewarm должен занимать <16ms (один frame budget).
-    func test_BackendToast_show_does_not_block_main_thread_more_than_16ms() {
+    func test_BackendToast_show_does_not_block_main_thread_more_than_16ms() throws {
+        try requireSystemPanelChecks()
         guard NSScreen.main != nil else {
             // Headless CI: нет экрана — пропускаем тест orderFront.
             return
@@ -222,7 +231,8 @@ final class Sequoia26BackendToastMainThreadTests: XCTestCase {
 
     /// prewarmPanel() должен кэшировать CoreText glyph metrics.
     /// После prewarm повторный show() не должен занимать больше первого.
-    func test_BackendToast_prewarm_caches_CoreText_metrics() {
+    func test_BackendToast_prewarm_caches_CoreText_metrics() throws {
+        try requireSystemPanelChecks()
         guard NSScreen.main != nil else { return }
         let toast = BackendToast.shared
         toast.prewarmPanel()
@@ -243,7 +253,8 @@ final class Sequoia26BackendToastMainThreadTests: XCTestCase {
     }
 
     /// Cyrillic + emoji строка не вызывает CoreText hang.
-    func test_BackendToast_cyrillic_emoji_no_hang() {
+    func test_BackendToast_cyrillic_emoji_no_hang() throws {
+        try requireSystemPanelChecks()
         guard NSScreen.main != nil else { return }
         let toast = BackendToast.shared
         toast.prewarmPanel()
