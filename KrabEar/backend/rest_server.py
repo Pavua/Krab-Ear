@@ -476,6 +476,46 @@ _MAX_AUDIO_DURATION_SEC = 3600  # 1 hour
 # Wall-clock timeout for a single transcription call at the REST layer.
 _TRANSCRIBE_TIMEOUT_SEC = 600  # 10 minutes
 
+# EX_SOFTWARE из sysexits.h. Отдельный код отличает намеренный fail-fast после
+# зависшей транскрибации от обычного исключения приложения в launchd/gunicorn.
+_TRANSCRIBE_TIMEOUT_EXIT_CODE = 70
+
+
+def _exit_poisoned_rest_process(exit_code: int) -> None:
+    """Немедленно завершает только REST-процесс, не запуская Python-finalize.
+
+    После таймаута MLX-вызов может навсегда удерживать lock в non-daemon потоке.
+    Обычный ``sys.exit`` тогда зависнет на финализации, поэтому здесь намеренно
+    используется ``os._exit``. Функция выделена отдельно для безопасной подмены
+    в тестах; production-вызов не возвращается.
+    """
+    os._exit(exit_code)
+
+
+def _arm_timeout_exit(response: Response, temp_path: _Any) -> Response:
+    """Ставит очистку upload и fail-fast на момент закрытия готового 504-ответа.
+
+    ``call_on_close`` вызывается WSGI-сервером после выдачи тела ответа. До этой
+    границы временный файл остаётся на месте и зависший decoder не получает путь,
+    удалённый из-под него. После закрытия ответа файл удаляется непосредственно
+    перед невозвратным завершением poisoned REST-процесса.
+    """
+
+    def _cleanup_and_exit() -> None:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.warning(
+                "Не удалось удалить временный файл перед fail-fast %s: %s",
+                temp_path,
+                exc,
+            )
+        finally:
+            _exit_poisoned_rest_process(_TRANSCRIBE_TIMEOUT_EXIT_CODE)
+
+    response.call_on_close(_cleanup_and_exit)
+    return response
+
 
 def _validate_audio_magic_bytes(data: bytes) -> bool:
     """Return True if *data* starts with a recognised audio file signature.
@@ -1416,6 +1456,7 @@ def transcribe_audio():
         safe_base = os.path.splitext(safe_base)[0] + original_ext
 
     temp_path = TEMP_DIR / f"{uuid.uuid4().hex[:12]}_{safe_base}"
+    temp_cleanup_deferred = False
 
     try:
         # F3 (W1766): file.save перемещён ВНУТРЬ try, чтобы finally-блок гарантированно
@@ -1464,17 +1505,11 @@ def transcribe_audio():
         req_vocab = [w.strip() for w in req_vocab_raw.split(",") if w.strip()] if req_vocab_raw else []
         full_vocabulary = list(set(deps.store.load_vocabulary() + req_vocab))
 
-        # F2: Wrap transcription in a thread pool with a wall-clock timeout so a
-        # hung decoder cannot occupy a worker forever.
-        #
-        # W1755: Исправление — НЕ использовать контекст-менеджер as _pool как
-        # единственную точку очистки. При TimeoutError вызов with-блока __exit__
-        # запускает shutdown(wait=True) без cancel_futures=True, что блокирует
-        # поток запроса до завершения зависшего воркера (504 задерживается).
-        # Решение: создаём пул явно и на ветке таймаута немедленно вызываем
-        # shutdown(wait=False, cancel_futures=True) перед возвратом 504.
-        # Ветки успеха/ошибки очищаются через finally shutdown(wait=False) —
-        # daemon-поток воркера завершится сам после отработки MLX watchdog.
+        # F2: ограничиваем весь вызов транскрайбера wall-clock таймаутом.
+        # ThreadPoolExecutor создаёт non-daemon worker, поэтому cancel_futures
+        # не может остановить уже начавшийся MLX-вызов. На таймауте сначала
+        # отдаём 504, а после закрытия ответа завершаем отдельный REST-процесс;
+        # launchd/gunicorn поднимет чистый экземпляр без poisoned MLX lock.
         start_ts = time.monotonic()
         _transcribe_path = str(temp_path)
         _transcribe_kwargs = dict(
@@ -1485,25 +1520,38 @@ def transcribe_audio():
             lang_hint=lang_hint,
         )
         _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        _pool_timed_out = False
         try:
             _future = _pool.submit(deps.transcriber.transcribe, _transcribe_path, **_transcribe_kwargs)
             try:
                 result = _future.result(timeout=_TRANSCRIBE_TIMEOUT_SEC)
             except concurrent.futures.TimeoutError:
-                # cancel_futures=True signals the executor not to start pending
-                # work; wait=False lets the request thread return 504 immediately
-                # without blocking on the hung worker.
-                _pool.shutdown(wait=False, cancel_futures=True)
-                logger.error(
-                    "Transcription timed out after %ss for %s",
-                    _TRANSCRIBE_TIMEOUT_SEC,
-                    safe_base,
-                )
-                return jsonify({"error": "Transcription timeout"}), 504
+                if _future.done():
+                    # Сам транскрайбер тоже может завершиться исключением
+                    # TimeoutError. Это обычная завершившаяся error-ветка, а не
+                    # зависший executor; повторный result() вернёт результат
+                    # гонки либо пробросит исходное исключение в общий 500.
+                    result = _future.result()
+                else:
+                    _pool_timed_out = True
+                    # Отменяем только ещё не начавшиеся задачи и не ждём running
+                    # worker: ожидание снова превратило бы быстрый 504 в зависание.
+                    _pool.shutdown(wait=False, cancel_futures=True)
+                    logger.error(
+                        "Transcription timed out after %ss for %s",
+                        _TRANSCRIBE_TIMEOUT_SEC,
+                        safe_base,
+                    )
+                    timeout_response = jsonify({"error": "Transcription timeout"})
+                    timeout_response.status_code = 504
+                    _arm_timeout_exit(timeout_response, temp_path)
+                    temp_cleanup_deferred = True
+                    return timeout_response
         finally:
-            # Не блокируем request-поток: daemon-воркер завершится сам когда
-            # внутренний MLX-subprocess watchdog отработает.
-            _pool.shutdown(wait=False)
+            if not _pool_timed_out:
+                # На success/error Future уже завершён, поэтому wait=True не
+                # добавляет latency и гарантирует отсутствие executor-хвоста.
+                _pool.shutdown(wait=True)
         elapsed_sec = time.monotonic() - start_ts
 
         text = result.get("text", "")
@@ -1548,7 +1596,7 @@ def transcribe_audio():
         return jsonify({"error": "Internal processing error"}), 500
 
     finally:
-        if temp_path.exists():
+        if not temp_cleanup_deferred and temp_path.exists():
             try:
                 temp_path.unlink()
             except Exception as e:

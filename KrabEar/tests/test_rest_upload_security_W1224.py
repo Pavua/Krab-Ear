@@ -158,11 +158,18 @@ class _Base(unittest.TestCase):
             "window_size": 1,
         }
 
+        # Реальный callback использует os._exit(70), поэтому все REST-тесты
+        # подменяют только терминальную границу процесса. Сам response-close
+        # контракт и очистка временного файла продолжают выполняться реально.
+        self.real_process_exit = _rest_mod._exit_poisoned_rest_process
+        self.process_exit = MagicMock(name="process_exit")
+
         self._patches = [
             patch.object(_rest_mod, "engine", self.engine),
             patch.object(_rest_mod, "store", self.store),
             patch.object(_rest_mod, "transcriber", self.transcriber),
             patch.object(_rest_mod, "metrics", self.metrics),
+            patch.object(_rest_mod, "_exit_poisoned_rest_process", self.process_exit),
         ]
         for p in self._patches:
             p.start()
@@ -352,6 +359,11 @@ class TestTranscribeTimeoutKillsLongRunning(_Base):
         self.assertEqual(resp.status_code, 504)
         body = resp.get_json()
         self.assertIn("timeout", body.get("error", "").lower())
+        self.process_exit.assert_not_called()
+        resp.close()
+        self.process_exit.assert_called_once_with(
+            _rest_mod._TRANSCRIBE_TIMEOUT_EXIT_CODE,
+        )
 
 
 # ===========================================================================
@@ -360,29 +372,11 @@ class TestTranscribeTimeoutKillsLongRunning(_Base):
 
 @unittest.skipUnless(_REST_AVAILABLE, "REST server dependencies not available")
 class TestTranscribeTimeoutDoesNotBlockOnHungWorker(_Base):
-    """W1755 regression: shutdown(wait=False, cancel_futures=True) on timeout path.
+    """Регрессия: 504 приходит быстро, а hard-exit ждёт закрытия ответа.
 
-    Before the fix the `with ThreadPoolExecutor as _pool:` context-manager
-    __exit__ called shutdown(wait=True) WITHOUT cancel_futures, so the request
-    thread blocked until the hung decoder returned, even though TimeoutError had
-    already fired.  The 504 was eventually returned but only after the full
-    decode delay — not promptly.
-
-    After the fix the request thread calls
-    _pool.shutdown(wait=False, cancel_futures=True) and returns 504 immediately;
-    the hung worker runs out in its own daemon thread.
-
-    We verify this by:
-    1. Patching _TRANSCRIBE_TIMEOUT_SEC to a tiny value (0.3 s).
-    2. Patching transcriber.transcribe to block for LONG_SLEEP seconds (3 s),
-       much longer than the timeout, using a threading.Event that never fires.
-    3. Measuring wall-clock elapsed for the Flask test-client call.
-    4. Asserting elapsed < LONG_SLEEP - 1 s  (i.e. we did NOT wait for the
-       blocked worker to finish).
-    5. Asserting the response is 504 with the expected JSON body.
-
-    FAIL-BEFORE: with the buggy `with _pool:` pattern, elapsed ≈ LONG_SLEEP.
-    PASS-AFTER:  with the fix, elapsed ≈ timeout (≪ LONG_SLEEP).
+    Блокирующий decoder дольше таймаута держит executor worker. Обработчик не
+    ждёт этот поток, но и не завершает процесс до того, как WSGI закрыл уже
+    сформированный 504-ответ.
     """
 
     TIMEOUT_SEC = 0.3    # патчим константу на короткое значение
@@ -390,7 +384,7 @@ class TestTranscribeTimeoutDoesNotBlockOnHungWorker(_Base):
     EPSILON = 1.5        # допуск: ответ должен прийти за timeout + epsilon
 
     def test_504_arrives_before_hung_worker_finishes(self):
-        """504 returned promptly (< timeout+epsilon), NOT after LONG_SLEEP."""
+        """504 приходит за timeout+epsilon, не после полного LONG_SLEEP."""
         import threading
         import time as _time
 
@@ -400,6 +394,7 @@ class TestTranscribeTimeoutDoesNotBlockOnHungWorker(_Base):
 
         # Вечно-блокирующий transcribe — имитирует зависший MLX decoder.
         _never = threading.Event()
+        self.addCleanup(_never.set)
 
         def _hung_transcribe(*_a, **_kw):
             # Ждём LONG_SLEEP секунд (или до timeout теста, что наступит раньше)
@@ -417,37 +412,196 @@ class TestTranscribeTimeoutDoesNotBlockOnHungWorker(_Base):
 
         self.transcriber.transcribe.side_effect = _hung_transcribe
 
-        t0 = _time.monotonic()
-        with patch("soundfile.info", return_value=mock_info), \
-                patch.object(_rest_mod, "_TRANSCRIBE_TIMEOUT_SEC", self.TIMEOUT_SEC):
-            resp = self.client.post(
-                "/v1/stt/transcribe",
-                data={"file": (io.BytesIO(wav_data), "hung.wav")},
-                content_type="multipart/form-data",
+        resp = None
+        response_closed = False
+        try:
+            t0 = _time.monotonic()
+            with patch("soundfile.info", return_value=mock_info), \
+                    patch.object(_rest_mod, "_TRANSCRIBE_TIMEOUT_SEC", self.TIMEOUT_SEC):
+                resp = self.client.post(
+                    "/v1/stt/transcribe",
+                    data={"file": (io.BytesIO(wav_data), "hung.wav")},
+                    content_type="multipart/form-data",
+                )
+            elapsed = _time.monotonic() - t0
+
+            # Убеждаемся что получили 504 с правильным телом
+            self.assertEqual(resp.status_code, 504,
+                             f"Expected 504, got {resp.status_code} in {elapsed:.3f}s")
+            body = resp.get_json()
+            self.assertIn("timeout", body.get("error", "").lower(),
+                          f"Unexpected body: {body}")
+
+            # КЛЮЧЕВАЯ проверка: ответ пришёл ДО того как воркер завершился.
+            # Без исправления elapsed ≈ LONG_SLEEP (shutdown(wait=True) блокирует).
+            # С исправлением elapsed ≈ TIMEOUT_SEC (быстрый возврат).
+            max_allowed = self.TIMEOUT_SEC + self.EPSILON
+            self.assertLess(
+                elapsed,
+                max_allowed,
+                f"Request took {elapsed:.3f}s — handler BLOCKED on hung worker "
+                f"(expected < {max_allowed:.3f}s). "
+                f"W1755: shutdown(wait=False, cancel_futures=True) not enforced.",
             )
-        elapsed = _time.monotonic() - t0
 
-        # Убеждаемся что получили 504 с правильным телом
-        self.assertEqual(resp.status_code, 504,
-                         f"Expected 504, got {resp.status_code} in {elapsed:.3f}s")
-        body = resp.get_json()
-        self.assertIn("timeout", body.get("error", "").lower(),
-                      f"Unexpected body: {body}")
+            # Тело доступно клиенту до терминального callback процесса.
+            self.process_exit.assert_not_called()
+            resp.close()
+            response_closed = True
+            self.process_exit.assert_called_once_with(
+                _rest_mod._TRANSCRIBE_TIMEOUT_EXIT_CODE,
+            )
+        finally:
+            # Пока patch exit-boundary ещё активен, закрываем ответ даже при
+            # раннем assertion failure; затем отпускаем реальный worker.
+            if resp is not None and not response_closed:
+                resp.close()
+            _never.set()
 
-        # КЛЮЧЕВАЯ проверка: ответ пришёл ДО того как воркер завершился.
-        # Без исправления elapsed ≈ LONG_SLEEP (т.к. shutdown(wait=True) блокирует).
-        # С исправлением elapsed ≈ TIMEOUT_SEC (быстрый возврат).
-        max_allowed = self.TIMEOUT_SEC + self.EPSILON
-        self.assertLess(
-            elapsed,
-            max_allowed,
-            f"Request took {elapsed:.3f}s — handler BLOCKED on hung worker "
-            f"(expected < {max_allowed:.3f}s). "
-            f"W1755: shutdown(wait=False, cancel_futures=True) not enforced.",
-        )
 
-        # Unblock the daemon thread so it doesn't leak into subsequent tests.
-        _never.set()
+# ===========================================================================
+# P1 — зависший executor не должен переживать закрытый 504-ответ
+# ===========================================================================
+
+@unittest.skipUnless(_REST_AVAILABLE, "REST server dependencies not available")
+class TestTranscribeTimeoutProcessRecovery(_Base):
+    """Проверяет fail-fast, порядок очистки и обычные ветки REST upload."""
+
+    TIMEOUT_SEC = 0.05
+
+    def test_process_boundary_uses_non_finalizing_exit_code_70(self):
+        """Терминальная граница вызывает os._exit(70), а не sys.exit."""
+        with patch.object(_rest_mod.os, "_exit") as raw_exit:
+            self.real_process_exit(
+                _rest_mod._TRANSCRIBE_TIMEOUT_EXIT_CODE,
+            )
+
+        raw_exit.assert_called_once_with(70)
+
+    def test_blocked_transcriber_defers_cleanup_and_exit_until_response_close(self):
+        """Upload жив до выдачи 504; close удаляет его и вызывает exit(70)."""
+        import threading
+        import time as _time
+
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        def _blocked_transcribe(*_args, **_kwargs):
+            started.set()
+            try:
+                release.wait(timeout=5.0)
+                return {"text": "поздний результат"}
+            finally:
+                finished.set()
+
+        self.transcriber.transcribe.side_effect = _blocked_transcribe
+        wav_data = _make_wav_bytes()
+        mock_info = MagicMock(duration=5.0)
+
+        with tempfile.TemporaryDirectory(prefix="krab-rest-timeout-") as root:
+            upload_dir = Path(root) / "temp_uploads"
+            upload_dir.mkdir()
+            unrelated = upload_dir / "не-чужой-файл.keep"
+            unrelated.write_bytes(b"keep")
+            response = None
+            response_closed = False
+            try:
+                started_at = _time.monotonic()
+                with patch.object(_rest_mod, "TEMP_DIR", upload_dir), \
+                        patch.object(_rest_mod, "_TRANSCRIBE_TIMEOUT_SEC", self.TIMEOUT_SEC), \
+                        patch("soundfile.info", return_value=mock_info):
+                    response = self.client.post(
+                        "/v1/stt/transcribe",
+                        data={"file": (io.BytesIO(wav_data), "blocked.wav")},
+                        content_type="multipart/form-data",
+                    )
+                elapsed = _time.monotonic() - started_at
+
+                self.assertTrue(started.wait(timeout=1.0))
+                self.assertEqual(response.status_code, 504)
+                self.assertEqual(response.get_json(), {"error": "Transcription timeout"})
+                self.assertLess(elapsed, 1.0)
+                self.process_exit.assert_not_called()
+
+                pending_uploads = [path for path in upload_dir.iterdir() if path != unrelated]
+                self.assertEqual(len(pending_uploads), 1)
+                self.assertTrue(pending_uploads[0].name.endswith("_blocked.wav"))
+
+                response.close()
+                response_closed = True
+                self.process_exit.assert_called_once_with(70)
+                self.assertFalse(pending_uploads[0].exists())
+                self.assertTrue(unrelated.exists())
+            finally:
+                if response is not None and not response_closed:
+                    response.close()
+                release.set()
+                self.assertTrue(finished.wait(timeout=2.0))
+
+    def test_success_cleans_temp_without_process_exit(self):
+        """Успешная транскрибация очищает upload и не ставит hard-exit."""
+        wav_data = _make_wav_bytes()
+        mock_info = MagicMock(duration=5.0)
+
+        with tempfile.TemporaryDirectory(prefix="krab-rest-success-") as root:
+            upload_dir = Path(root) / "temp_uploads"
+            with patch.object(_rest_mod, "TEMP_DIR", upload_dir), \
+                    patch("soundfile.info", return_value=mock_info):
+                response = self.client.post(
+                    "/v1/stt/transcribe",
+                    data={"file": (io.BytesIO(wav_data), "success.wav")},
+                    content_type="multipart/form-data",
+                )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(list(upload_dir.iterdir()), [])
+            response.close()
+            self.process_exit.assert_not_called()
+
+    def test_transcriber_error_cleans_temp_without_process_exit(self):
+        """Завершившаяся ошибка даёт 500 без рестарта и без остатка upload."""
+        self.transcriber.transcribe.side_effect = RuntimeError("decoder failed")
+        wav_data = _make_wav_bytes()
+        mock_info = MagicMock(duration=5.0)
+
+        with tempfile.TemporaryDirectory(prefix="krab-rest-error-") as root:
+            upload_dir = Path(root) / "temp_uploads"
+            with patch.object(_rest_mod, "TEMP_DIR", upload_dir), \
+                    patch("soundfile.info", return_value=mock_info):
+                response = self.client.post(
+                    "/v1/stt/transcribe",
+                    data={"file": (io.BytesIO(wav_data), "error.wav")},
+                    content_type="multipart/form-data",
+                )
+
+            self.assertEqual(response.status_code, 500)
+            self.assertEqual(list(upload_dir.iterdir()), [])
+            response.close()
+            self.process_exit.assert_not_called()
+
+    def test_completed_timeout_exception_does_not_poison_process(self):
+        """TimeoutError из decoder-а не равен wall-clock таймауту Future."""
+        import concurrent.futures as _cf
+
+        self.transcriber.transcribe.side_effect = _cf.TimeoutError("decoder timeout")
+        wav_data = _make_wav_bytes()
+        mock_info = MagicMock(duration=5.0)
+
+        with tempfile.TemporaryDirectory(prefix="krab-rest-decoder-timeout-") as root:
+            upload_dir = Path(root) / "temp_uploads"
+            with patch.object(_rest_mod, "TEMP_DIR", upload_dir), \
+                    patch("soundfile.info", return_value=mock_info):
+                response = self.client.post(
+                    "/v1/stt/transcribe",
+                    data={"file": (io.BytesIO(wav_data), "decoder-timeout.wav")},
+                    content_type="multipart/form-data",
+                )
+
+            self.assertEqual(response.status_code, 500)
+            self.assertEqual(list(upload_dir.iterdir()), [])
+            response.close()
+            self.process_exit.assert_not_called()
 
 
 # ===========================================================================
