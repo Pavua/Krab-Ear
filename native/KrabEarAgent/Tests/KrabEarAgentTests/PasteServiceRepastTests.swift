@@ -1,6 +1,8 @@
 /*
- PasteServiceRepastTests.swift
- Тесты для функционала быстрого повтора вставки в PasteService.
+ PasteServiceRepastTests — изолированно проверяет quick replay в PasteService.
+
+ Связь с PasteService: private UserDefaults suite хранит только данные теста, а
+ repastePerformer заменяет реальную вставку в frontmost-приложение безопасной имитацией.
 */
 
 import XCTest
@@ -8,68 +10,91 @@ import XCTest
 
 final class PasteServiceRepastTests: XCTestCase {
 
-    var service: PasteService!
-    let testKey = "KrabEar_LastPastedText"
+    private let testKey = "KrabEar_LastPastedText"
+    private var service: PasteService!
+    private var defaults: UserDefaults!
+    private var pasteboard: NSPasteboard!
+    private var suiteName: String!
+    private var repasteCalls: [String] = []
 
     override func setUp() {
         super.setUp()
-        service = PasteService()
-        // Очищаем UserDefaults перед каждым тестом
-        UserDefaults.standard.removeObject(forKey: testKey)
+        suiteName = "KrabEarRepastTests.\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)
+        pasteboard = NSPasteboard(name: .init("KrabEarRepastTests.\(UUID().uuidString)"))
+        service = PasteService(
+            pasteboard: pasteboard,
+            defaults: defaults,
+            repastePerformer: { [weak self] text in
+                self?.repasteCalls.append(text)
+                return PasteAttemptResult(ok: true, reason: "fake_repaste")
+            }
+        )
     }
 
     override func tearDown() {
-        UserDefaults.standard.removeObject(forKey: testKey)
+        defaults.removePersistentDomain(forName: suiteName)
+        pasteboard.clearContents()
+        service = nil
+        defaults = nil
+        pasteboard = nil
+        suiteName = nil
+        repasteCalls = []
         super.tearDown()
     }
 
     // MARK: - recordLastPaste
 
-    func testRecordLastPasteSavesToUserDefaults() {
+    func testRecordLastPasteSavesToInjectedDefaults() {
         service.recordLastPaste("Hello world")
-        let stored = UserDefaults.standard.string(forKey: testKey)
-        XCTAssertEqual(stored, "Hello world")
+
+        XCTAssertEqual(defaults.string(forKey: testKey), "Hello world")
     }
 
     func testLastPastedTextReturnsNilWhenEmpty() {
-        // UserDefaults очищен в setUp
         XCTAssertNil(service.lastPastedText)
     }
 
-    func testLastPastedTextPersistsAcrossInstances() {
+    func testLastPastedTextPersistsAcrossInstancesWithSameDefaults() {
         service.recordLastPaste("Persistent text")
-        // Создаём новый экземпляр — должен прочитать из UserDefaults
-        let service2 = PasteService()
+        let service2 = PasteService(
+            pasteboard: pasteboard,
+            defaults: defaults,
+            repastePerformer: { _ in PasteAttemptResult(ok: true, reason: "fake_repaste") }
+        )
+
         XCTAssertEqual(service2.lastPastedText, "Persistent text")
     }
 
     // MARK: - repastLast
 
-    func testRepastLastReturnsNoLastPasteWhenEmpty() {
+    func testRepastLastReturnsNoLastPasteWhenEmptyWithoutCallingPerformer() {
         let result = service.repastLast()
+
         XCTAssertFalse(result.ok)
         XCTAssertEqual(result.reason, "no_last_paste")
+        XCTAssertTrue(repasteCalls.isEmpty)
     }
 
-    func testRepastLastReturnsRepasteTooSoonWithinCooldown() {
-        // Записываем текст и сразу вызываем повтор
+    func testRepastLastReturnsRepasteTooSoonWithoutCallingPerformer() {
         service.recordLastPaste("Quick text")
-        // Cooldown 1.0s — вызов сразу после должен вернуть too_soon
+
         let result = service.repastLast()
+
         XCTAssertFalse(result.ok)
         XCTAssertEqual(result.reason, "repaste_too_soon")
+        XCTAssertTrue(repasteCalls.isEmpty)
     }
 
-    func testRepastLastAllowedAfterCooldown() {
-        // Устанавливаем lastPastedAt в прошлом через UserDefaults
+    func testRepastLastAllowedAfterCooldownUsesInjectedPerformer() {
+        // Отсутствие in-memory timestamp имитирует восстановление текста из прошлой сессии.
         service.lastPastedText = "Old text"
-        // Не вызываем recordLastPaste, поэтому lastPastedAt = nil
-        // Это симулирует «вставка была в прошлой сессии»
+
         let result = service.repastLast()
-        // Должен попытаться вставить (не вернуть cooldown-ошибку)
-        // Реальная вставка не удастся (нет target app), но reason не "repaste_too_soon"
-        XCTAssertNotEqual(result.reason, "repaste_too_soon")
-        XCTAssertNotEqual(result.reason, "no_last_paste")
+
+        XCTAssertTrue(result.ok)
+        XCTAssertEqual(result.reason, "fake_repaste")
+        XCTAssertEqual(repasteCalls, ["Old text"])
     }
 
     func testCooldownValueIs1Second() {

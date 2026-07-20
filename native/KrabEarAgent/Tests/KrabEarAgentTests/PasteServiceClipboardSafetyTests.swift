@@ -1,11 +1,9 @@
 /*
- PasteServiceClipboardSafetyTests — S34 clipboard safety (спека
- 2026-07-19-s34-clipboard-safety-design.md).
+ PasteServiceClipboardSafetyTests — проверяет защиту скрытого содержимого буфера.
 
- Тесты трогают РЕАЛЬНЫЙ NSPasteboard.general (прецедент PasteServiceRepastTests —
- прямая работа с system pasteboard/UserDefaults в тестах — норма проекта).
- setUp/tearDown сохраняют и восстанавливают исходное содержимое буфера, чтобы не
- оставлять мусор в CI-раннере после теста.
+ Почему отдельный именованный NSPasteboard:
+ тесты не должны читать или менять буфер обмена пользователя. PasteService получает
+ этот приватный экземпляр через DI, поэтому проверки безопасны для локального запуска и CI.
 */
 
 import XCTest
@@ -13,48 +11,46 @@ import XCTest
 
 final class PasteServiceClipboardSafetyTests: XCTestCase {
 
-    var service: PasteService!
+    private var service: PasteService!
+    private var pasteboard: NSPasteboard!
     private let concealedType = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
-    private var savedPasteboardString: String?
 
     override func setUp() {
         super.setUp()
-        service = PasteService()
-        savedPasteboardString = NSPasteboard.general.string(forType: .string)
+        pasteboard = NSPasteboard(name: .init("KrabEarClipboardSafetyTests.\(UUID().uuidString)"))
+        service = PasteService(pasteboard: pasteboard)
     }
 
     override func tearDown() {
-        NSPasteboard.general.clearContents()
-        if let saved = savedPasteboardString {
-            NSPasteboard.general.setString(saved, forType: .string)
-        }
+        pasteboard.clearContents()
         service = nil
+        pasteboard = nil
         super.tearDown()
     }
 
     // MARK: - 1. Обычная запись не меняется
 
     func test_putToClipboard_writes_normally_when_no_concealed_content() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString("previous text", forType: .string)
+        pasteboard.clearContents()
+        pasteboard.setString("previous text", forType: .string)
 
         service.putToClipboard("new dictated text")
 
-        XCTAssertEqual(NSPasteboard.general.string(forType: .string), "new dictated text")
+        XCTAssertEqual(pasteboard.string(forType: .string), "new dictated text")
     }
 
     // MARK: - 2. Concealed-контент не затирается
 
     func test_putToClipboard_skips_write_when_concealed_type_present() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.declareTypes([.string, concealedType], owner: nil)
-        NSPasteboard.general.setString("super-secret-password", forType: .string)
-        NSPasteboard.general.setData(Data(), forType: concealedType)
+        pasteboard.clearContents()
+        pasteboard.declareTypes([.string, concealedType], owner: nil)
+        pasteboard.setString("super-secret-password", forType: .string)
+        pasteboard.setData(Data(), forType: concealedType)
 
         service.putToClipboard("new dictated text")
 
         XCTAssertEqual(
-            NSPasteboard.general.string(forType: .string), "super-secret-password",
+            pasteboard.string(forType: .string), "super-secret-password",
             "защищённый буфер не должен быть затёрт диктовкой")
     }
 
@@ -64,68 +60,61 @@ final class PasteServiceClipboardSafetyTests: XCTestCase {
         var callbackCount = 0
         service.onConcealedClipboardSkipped = { callbackCount += 1 }
 
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString("plain text", forType: .string)
+        pasteboard.clearContents()
+        pasteboard.setString("plain text", forType: .string)
         service.putToClipboard("dictated 1")
         XCTAssertEqual(callbackCount, 0, "обычная запись не должна триггерить callback")
 
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.declareTypes([.string, concealedType], owner: nil)
-        NSPasteboard.general.setString("secret", forType: .string)
-        NSPasteboard.general.setData(Data(), forType: concealedType)
+        pasteboard.clearContents()
+        pasteboard.declareTypes([.string, concealedType], owner: nil)
+        pasteboard.setString("secret", forType: .string)
+        pasteboard.setData(Data(), forType: concealedType)
         service.putToClipboard("dictated 2")
         XCTAssertEqual(callbackCount, 1, "пропуск concealed-буфера должен триггерить callback ровно 1 раз")
     }
 
-    // MARK: - 4. Пустой буфер (types == nil) не крешит guard
+    // MARK: - 4. Пустой буфер не крешит guard
 
     func test_putToClipboard_empty_pasteboard_writes_normally() {
-        NSPasteboard.general.clearContents()
-        // На реальном macOS-буфере clearContents() даёт types == [] (пустой массив),
-        // не nil — но guard использует `?? false`, поэтому оба случая безопасны;
-        // проверяем именно отсутствие concealedType, а не точное значение types.
+        pasteboard.clearContents()
         XCTAssertFalse(
-            NSPasteboard.general.types?.contains(concealedType) ?? false,
+            pasteboard.types?.contains(concealedType) ?? false,
             "предусловие: буфер не содержит concealedType")
 
         service.putToClipboard("first write")
 
-        XCTAssertEqual(NSPasteboard.general.string(forType: .string), "first write")
+        XCTAssertEqual(pasteboard.string(forType: .string), "first write")
     }
 
-    // MARK: - 4b. Fable-ревью F1: pasteToFrontmostApp НЕ синтезирует Cmd+V, если
-    // запись в буфер пропущена — иначе в frontmost app вставится СТАРОЕ (возможно
-    // защищённое) содержимое буфера вместо тихого отказа.
+    // MARK: - 4b. При concealed-буфере вставка завершается до синтетического Cmd+V
 
     func test_pasteToFrontmostApp_aborts_before_key_events_when_concealed() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.declareTypes([.string, concealedType], owner: nil)
-        NSPasteboard.general.setString("super-secret-password", forType: .string)
-        NSPasteboard.general.setData(Data(), forType: concealedType)
+        pasteboard.clearContents()
+        pasteboard.declareTypes([.string, concealedType], owner: nil)
+        pasteboard.setString("super-secret-password", forType: .string)
+        pasteboard.setData(Data(), forType: concealedType)
 
-        // Гард срабатывает ДО resolvePreferredPasteTargetApp/waitForModifierRelease —
-        // детерминированно и без зависимости от реального frontmost app в CI.
         let result = service.pasteToFrontmostApp("dictated text")
 
         XCTAssertFalse(result.ok)
         XCTAssertEqual(result.reason, "concealed_clipboard_skipped")
         XCTAssertEqual(
-            NSPasteboard.general.string(forType: .string), "super-secret-password",
-            "буфер не должен быть тронут — Cmd+V не должен был синтезироваться")
+            pasteboard.string(forType: .string), "super-secret-password",
+            "буфер не должен быть тронут до обработки key events")
     }
 
-    // MARK: - 4c. Fable-ревью F3: explicit user-initiated copy обходит guard
+    // MARK: - 4c. Явное пользовательское копирование обходит guard
 
     func test_putToClipboardUserInitiated_bypasses_concealed_guard() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.declareTypes([.string, concealedType], owner: nil)
-        NSPasteboard.general.setString("secret", forType: .string)
-        NSPasteboard.general.setData(Data(), forType: concealedType)
+        pasteboard.clearContents()
+        pasteboard.declareTypes([.string, concealedType], owner: nil)
+        pasteboard.setString("secret", forType: .string)
+        pasteboard.setData(Data(), forType: concealedType)
 
         service.putToClipboardUserInitiated("explicit copy")
 
         XCTAssertEqual(
-            NSPasteboard.general.string(forType: .string), "explicit copy",
+            pasteboard.string(forType: .string), "explicit copy",
             "явное действие «Копировать» обязано писать безусловно")
     }
 
@@ -141,8 +130,6 @@ final class PasteServiceClipboardSafetyTests: XCTestCase {
         XCTAssertTrue(src.contains("onConcealedClipboardSkipped ="),
                       "closure обязана быть подключена в main.swift")
 
-        // Реентерабельность (спека §2.2): closure НЕ должна звать handlePasteFailure,
-        // иначе повторный putToClipboard внутри неё снова упрётся в guard -> цикл.
         guard let range = src.range(of: "onConcealedClipboardSkipped = ") else {
             return XCTFail("wiring not found")
         }
@@ -152,20 +139,12 @@ final class PasteServiceClipboardSafetyTests: XCTestCase {
         }
         let closureBody = tail[..<closingBrace]
         XCTAssertFalse(closureBody.contains("handlePasteFailure"),
-                        "closure не должна вести обратно в handlePasteFailure (реентерабельность)")
-        // Fable-ревью (double-notify, после F1-фикса): closure НЕ должна сама звать
-        // notify() — единственный источник пользовательского уведомления теперь
-        // явная Bool-проверка на каждом call site + handlePasteFailure. Второй notify
-        // отсюда дублировал бы то же событие.
+                       "closure не должна вести обратно в handlePasteFailure")
         XCTAssertFalse(closureBody.contains("notify("),
-                        "closure не должна сама уведомлять — иначе дублирует handlePasteFailure/call-site notify")
+                       "closure не должна дублировать пользовательское уведомление")
     }
 
     func test_explicit_copy_sites_use_user_initiated_bypass() throws {
-        // Fable-ревью F3: три explicit-copy call site'а должны звать
-        // putToClipboardUserInitiated, НЕ putToClipboard (который теперь блокирует
-        // запись при защищённом буфере) — иначе «Копировать последний»/«Копировать
-        // заметку»/QuickReplace тихо перестают работать при заблокированном буфере.
         let sites: [(file: String, marker: String)] = [
             ("main.swift", "func onCopyLastResult"),
             ("main+QuickCapture.swift", "func onQuickNoteItemClicked(_ sender: NSMenuItem)"),
@@ -181,7 +160,6 @@ final class PasteServiceClipboardSafetyTests: XCTestCase {
             guard let markerRange = src.range(of: site.marker) else {
                 return XCTFail("marker \(site.marker) not found in \(site.file)")
             }
-            // Ищем ближайший putToClipboard*-вызов после маркера (в пределах ~500 символов).
             let window = src[markerRange.upperBound...].prefix(500)
             XCTAssertTrue(window.contains("putToClipboardUserInitiated"),
                           "\(site.file): explicit-copy обязан идти через putToClipboardUserInitiated")

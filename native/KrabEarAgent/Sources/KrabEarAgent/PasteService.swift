@@ -19,6 +19,22 @@ struct PasteAttemptResult {
 /// Нативная вставка текста в активное приложение через буфер обмена и Cmd+V.
 final class PasteService {
 
+    /// Зависимости вынесены для изоляции unit-тестов от буфера и настроек пользователя.
+    private let pasteboard: NSPasteboard
+    private let defaults: UserDefaults
+    private let repastePerformer: ((String) -> PasteAttemptResult)?
+
+    /// В приложении используются системные зависимости; тесты передают приватные экземпляры.
+    init(
+        pasteboard: NSPasteboard = .general,
+        defaults: UserDefaults = .standard,
+        repastePerformer: ((String) -> PasteAttemptResult)? = nil
+    ) {
+        self.pasteboard = pasteboard
+        self.defaults = defaults
+        self.repastePerformer = repastePerformer
+    }
+
     // MARK: - Smart field-aware paste
 
     /// Управляет умной вставкой по типу поля (AX role-based). Обновляется из настроек.
@@ -105,8 +121,8 @@ final class PasteService {
 
     /// Последний успешно вставленный текст. Читается из/записывается в UserDefaults.
     var lastPastedText: String? {
-        get { UserDefaults.standard.string(forKey: lastPastedTextKey) }
-        set { UserDefaults.standard.set(newValue, forKey: lastPastedTextKey) }
+        get { defaults.string(forKey: lastPastedTextKey) }
+        set { defaults.set(newValue, forKey: lastPastedTextKey) }
     }
 
     /// Запоминает успешно вставленный текст для возможного быстрого повтора.
@@ -126,6 +142,9 @@ final class PasteService {
            Date().timeIntervalSince(lastAt) < repasteCooldownSec {
             return PasteAttemptResult(ok: false, reason: "repaste_too_soon")
         }
+        if let repastePerformer {
+            return repastePerformer(text)
+        }
         return pasteToFrontmostApp(text)
     }
 
@@ -142,7 +161,6 @@ final class PasteService {
     ///   содержимого буфера, если новая запись была пропущена — Fable-ревью F1).
     @discardableResult
     func putToClipboard(_ text: String) -> Bool {
-        let pasteboard = NSPasteboard.general
         guard !pasteboardHoldsConcealedContent(pasteboard) else {
             logger.warn("[Clipboard] Overwrite skipped — pasteboard holds concealed content")
             onConcealedClipboardSkipped?()
@@ -161,7 +179,6 @@ final class PasteService {
     /// guard'ом не защищены вообще (Fable-ревью F3 — оставлять их непоследовательными
     /// было бы хуже, чем дать всем explicit-copy местам единый предсказуемый bypass).
     func putToClipboardUserInitiated(_ text: String) {
-        let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
     }

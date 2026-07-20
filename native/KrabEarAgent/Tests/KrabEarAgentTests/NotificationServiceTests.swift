@@ -2,38 +2,73 @@
  NotificationServiceTests — тесты сервиса уведомлений через osascript.
 
  Стратегия:
- NotificationService — final class без DI, использует /usr/bin/osascript.
+ NotificationService получает runner через DI, поэтому тесты не запускают /usr/bin/osascript.
  Тестируем:
    1. requestAuthorizationIfNeeded() — no-op, не падает.
-   2. notify() с обычным input не бросает исключений.
-   3. Экранирование кавычек: проверяем формулу escaping белым ящиком
+   2. notify() с обычным вводом не бросает исключений.
+   3. Экранирование кавычек: проверяем формулу белым ящиком
       (та же логика что в production — replacingOccurrences of "\"" with "\\\"").
    4. Граничные случаи: пустые строки, строки с несколькими кавычками.
    5. Скрипт osascript собирается в ожидаемом формате.
    6. Unicode title/body.
    7. Имитация отсутствия разрешений (graceful).
    8. Concurrent show safe.
-   9. Deduplicate identical notification (smoke).
+   9. Повтор одинакового уведомления (дымовая проверка).
 
  Подход:
- - NotificationService использует osascript (не UNUserNotificationCenter), поэтому
-   мокировать UNCenter не требуется.
- - Мы тестируем публичный контракт: метод должен принять любой input без краша.
- - Whitebox тесты проверяют логику экранирования напрямую.
+ - Инъецированный runner записывает команды вместо показа уведомлений.
+ - Мы тестируем публичный контракт: метод должен принять любой ввод без сбоя.
+ - Проверки белого ящика контролируют логику экранирования напрямую.
 */
 
 import XCTest
 @testable import KrabEarAgent
+
+/// Потокобезопасно записывает команды вместо запуска внешнего процесса.
+private final class RecordingNotificationProcessRunner: NotificationProcessRunning, @unchecked Sendable {
+    struct Call: Equatable {
+        let executableURL: URL
+        let arguments: [String]
+    }
+
+    private let lock = NSLock()
+    private var recordedCalls: [Call] = []
+
+    func run(executableURL: URL, arguments: [String]) throws {
+        lock.lock()
+        recordedCalls.append(Call(executableURL: executableURL, arguments: arguments))
+        lock.unlock()
+    }
+
+    var calls: [Call] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedCalls
+    }
+}
+
+/// Имитирует ошибку запуска, чтобы проверить некритичный характер уведомления.
+private struct ThrowingNotificationProcessRunner: NotificationProcessRunning {
+    enum TestError: Error {
+        case launchFailed
+    }
+
+    func run(executableURL: URL, arguments: [String]) throws {
+        throw TestError.launchFailed
+    }
+}
 
 // MARK: - Tests
 
 final class NotificationServiceTests: XCTestCase {
 
     private var svc: NotificationService!
+    private var runner: RecordingNotificationProcessRunner!
 
     override func setUp() {
         super.setUp()
-        svc = NotificationService()
+        runner = RecordingNotificationProcessRunner()
+        svc = NotificationService(processRunner: runner)
     }
 
     // MARK: - requestAuthorizationIfNeeded
@@ -46,11 +81,31 @@ final class NotificationServiceTests: XCTestCase {
 
     // MARK: - show basic notification
 
-    /// notify() с обычными строками не бросает и не крашит.
+    /// Команда приложения делегируется инъецированному runner без запуска osascript.
+    func test_notify_delegatesExecutableArgumentsAndEscapingToRunner() {
+        let runner = RecordingNotificationProcessRunner()
+        let service = NotificationService(processRunner: runner)
+
+        service.notify(title: #"Krab "Ear""#, body: #"Тело "уведомления""#)
+
+        XCTAssertEqual(
+            runner.calls,
+            [
+                .init(
+                    executableURL: URL(fileURLWithPath: "/usr/bin/osascript"),
+                    arguments: [
+                        "-e",
+                        #"display notification "Тело \"уведомления\"" with title "Krab \"Ear\"""#,
+                    ]
+                ),
+            ]
+        )
+    }
+
+    /// Ошибка runner не должна прерывать основной сценарий приложения.
     func test_show_basic_notification() {
-        // Реальный osascript запустится, но тест не ждёт его завершения —
-        // Process.run() async, нам важно что метод не throws/не крашится.
-        svc.notify(title: "Krab Ear", body: "Готово")
+        let failingService = NotificationService(processRunner: ThrowingNotificationProcessRunner())
+        failingService.notify(title: "Krab Ear", body: "Готово")
     }
 
     /// notify() с пустыми строками не крашится.
@@ -92,21 +147,15 @@ final class NotificationServiceTests: XCTestCase {
     // MARK: - handles no permission gracefully
 
     func test_handles_no_permission_gracefully() {
-        // osascript может вернуть ненулевой exit-код если уведомления запрещены.
-        // NotificationService использует try? process.run() + молча игнорирует ошибки.
-        // Тест проверяет что API не крашится при любых условиях среды.
-        let localSvc = NotificationService()
-        // Вызов с валидными данными — должен завершиться без исключений.
-        localSvc.requestAuthorizationIfNeeded()
-        localSvc.notify(title: "Permission test", body: "Should not crash even if blocked")
-        // Если мы здесь — тест прошёл (graceful silence).
+        let failingService = NotificationService(processRunner: ThrowingNotificationProcessRunner())
+        failingService.requestAuthorizationIfNeeded()
+        failingService.notify(title: "Permission test", body: "Should not crash even if blocked")
     }
 
     // MARK: - concurrent show safe
 
     func test_concurrent_show_safe() {
-        // notify() создаёт Process и вызывает try process.run() — не мутирует shared state.
-        // Проверяем что параллельные вызовы не падают.
+        // Потокобезопасный recorder позволяет проверить точное число вызовов без osascript.
         let expectation = self.expectation(description: "concurrent notify")
         expectation.expectedFulfillmentCount = 10
 
@@ -119,7 +168,7 @@ final class NotificationServiceTests: XCTestCase {
         }
 
         wait(for: [expectation], timeout: 10)
-        // Reaching here without crash = pass
+        XCTAssertEqual(runner.calls.count, 10)
     }
 
     // MARK: - dedupe identical notification (smoke)
