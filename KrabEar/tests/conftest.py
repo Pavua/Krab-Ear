@@ -1,4 +1,4 @@
-"""pytest conftest: captures [BENCH] output and appends to .benchmarks/history.jsonl."""
+"""Общие pytest-фикстуры и сохранение результатов [BENCH] в историю проекта."""
 from __future__ import annotations
 
 # Wave 58 ext CI fix: pre-import numpy.exceptions to dodge an infinite
@@ -270,32 +270,6 @@ def _extract_bench_pairs(text: str) -> list[tuple[str, float]]:
         if m:
             pairs.append((m.group(1).strip(), float(m.group(2))))
     return pairs
-
-
-def pytest_sessionfinish(session: pytest.Session, exitstatus: object) -> None:
-    """Session-end backstop: reap any orphaned MLX/GigaAM subprocess workers.
-
-    This is an xdist-safe safety net — each xdist worker calls this at the end
-    of its own session, after all its tests have finished.  The primary cleanup
-    is the per-test ``addCleanup`` registered in subprocess-spawning tests; this
-    hook is a last-resort backstop in case a test crashes before cleanup runs.
-
-    The pkill pattern matches the gigaam_worker.py launch cmdline:
-        .../venv_gigaam/bin/python -u .../gigaam_worker.py
-    Shell-script stubs spawned by test_runtime_self_redirect.py exit or are
-    killed by their own finally blocks; they do not match this pattern.
-    """
-    import subprocess as _sp
-
-    for pattern in ("gigaam_worker.py", "import sys;ex"):
-        try:
-            _sp.run(
-                ["pkill", "-9", "-f", pattern],
-                capture_output=True,
-                timeout=5,
-            )
-        except Exception:
-            pass
 
 
 @pytest.hookimpl(hookwrapper=True)

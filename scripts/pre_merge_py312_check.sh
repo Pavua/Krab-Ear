@@ -1,32 +1,30 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# pre_merge_py312_check.sh — reproduce the ubuntu krab-ear-ci environment LOCALLY
-# so a PR can be validated BEFORE the slow remote CI, breaking the red-tip cycle.
+# pre_merge_py312_check.sh — локально воспроизводит окружение ubuntu krab-ear-ci,
+# чтобы проверить PR до медленного удалённого CI и не создавать red-tip цикл.
 #
-# WHY: the dev venv (.venv_krab_ear) runs Python 3.14 and HAS mlx-whisper /
-# mlx.core installed (macOS wheels exist). The ubuntu CI runner (krab-ear-ci.yml
-# backend-tests) runs Python 3.12 and has NO mlx wheels at all. Any test that
-# assumes `import mlx_whisper` succeeds, or asserts the STT-available branch,
-# passes locally ("false green") but FAILS on ubuntu. This is the "mlx-masking"
-# trap that caused three red tips in the wave-18..23 arc (see CLAUDE.md).
+# ЗАЧЕМ: dev-venv (.venv_krab_ear) работает на Python 3.14 и содержит
+# mlx-whisper / mlx.core (для macOS есть wheels). Ubuntu runner использует
+# Python 3.12 без mlx wheels. Тест, который полагается на успешный импорт MLX,
+# локально даёт ложный GREEN, но падает в ubuntu (см. mlx-masking в CLAUDE.md).
 #
-# This harness builds/reuses a Python 3.12 venv at $HARNESS_VENV with the full
-# backend requirements MINUS mlx / mlx-whisper, exactly matching ubuntu, and runs
-# the given test files memory-safe (one file at a time, no xdist), reaping
-# orphaned MLX/inference subprocesses between files.
+# Harness создаёт или переиспользует Python 3.12 venv в $HARNESS_VENV с полными
+# backend-зависимостями, кроме mlx / mlx-whisper, и запускает файлы по одному.
+# Между файлами он пассивно сравнивает worker-процессы: чужие процессы не трогает,
+# а новые утечки показывает как PID+command и учитывает как провал файла.
 #
-# USAGE:
+# ИСПОЛЬЗОВАНИЕ:
 #   scripts/pre_merge_py312_check.sh [TEST_FILE ...]
-#     - with args: run exactly those test files (paths relative to repo root or absolute)
-#     - no args:   auto-detect changed test files vs origin/codex/krab-ear-v2
-#                  (git diff --name-only) and run those.
+#     - с аргументами: запускает именно эти файлы (относительные или абсолютные);
+#     - без аргументов: находит изменённые тесты относительно
+#       origin/codex/krab-ear-v2 через git diff --name-only.
 #
-# ENV OVERRIDES:
-#   HARNESS_VENV   (default /tmp/py312)        venv location
-#   PY312          (default python3.12 on PATH) interpreter to build the venv
-#   REBUILD=1      force-recreate the venv from scratch
+# ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ:
+#   HARNESS_VENV   (по умолчанию /tmp/py312)     путь к venv;
+#   PY312          (по умолчанию python3.12)     интерпретатор для venv;
+#   REBUILD=1      принудительно пересоздаёт venv.
 #
-# EXIT: 0 if all selected test files pass, non-zero on first failure / no tests.
+# ВЫХОД: 0, если все выбранные файлы прошли; иначе ненулевой код.
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
@@ -40,11 +38,25 @@ BASE_REF="${BASE_REF:-origin/codex/krab-ear-v2}"
 log() { printf '\033[1;36m[harness]\033[0m %s\n' "$*"; }
 err() { printf '\033[1;31m[harness]\033[0m %s\n' "$*" >&2; }
 
-reap() {
-  pkill -9 -f "import sys;ex" 2>/dev/null || true
-  pkill -9 -f mlx_subprocess  2>/dev/null || true
-  pkill -9 -f gigaam_worker   2>/dev/null || true
-  return 0
+snapshot_matching_workers() {
+  local output_path="$1"
+  local all_processes_path="${output_path}.all"
+  local snapshot_status
+
+  # Сначала сохраняем ps целиком: тогда команда фильтра не попадёт в собственный
+  # снимок только потому, что её argv содержит искомые worker-маркеры.
+  if ! LC_ALL=C ps -axo pid=,command= > "$all_processes_path"; then
+    rm -f "$all_processes_path"
+    return 1
+  fi
+  LC_ALL=C awk '
+    index($0, "gigaam_worker.py") ||
+    index($0, "mlx_subprocess") ||
+    index($0, "import sys;ex") { print }
+  ' "$all_processes_path" | LC_ALL=C sort > "$output_path"
+  snapshot_status=$?
+  rm -f "$all_processes_path"
+  return "$snapshot_status"
 }
 
 # --- 1. ensure interpreter ------------------------------------------------
@@ -102,9 +114,13 @@ else
     [ -n "$f" ] && [ -f "$f" ] && TESTS+=("$f")
   done < <(git diff --name-only "$BASE_REF"...HEAD 2>/dev/null | grep -E 'KrabEar/tests/test_.*\.py$' ; \
            git diff --name-only 2>/dev/null | grep -E 'KrabEar/tests/test_.*\.py$')
-  # de-dup
+  # Убираем дубликаты без mapfile/readarray, которых нет в системном Bash 3.2.
   if [ "${#TESTS[@]}" -gt 0 ]; then
-    mapfile -t TESTS < <(printf '%s\n' "${TESTS[@]}" | sort -u)
+    unique_tests=()
+    while IFS= read -r f; do
+      [ -n "$f" ] && unique_tests+=("$f")
+    done < <(printf '%s\n' "${TESTS[@]}" | sort -u)
+    TESTS=("${unique_tests[@]}")
   fi
 fi
 
@@ -116,16 +132,55 @@ fi
 log "running ${#TESTS[@]} test file(s) memory-safe (one at a time, no xdist):"
 printf '  - %s\n' "${TESTS[@]}"
 
-# --- 4. run each file, memory-safe ---------------------------------------
+# --- 4. запускаем каждый файл и пассивно проверяем утечки ----------------
+WORKER_SNAPSHOT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/krab-ear-py312-workers.XXXXXX")" \
+  || { err "не удалось создать каталог снимков worker-процессов"; exit 2; }
+
+cleanup_worker_snapshots() {
+  [ -d "${WORKER_SNAPSHOT_DIR:-}" ] || return 0
+  rm -f "$WORKER_SNAPSHOT_DIR"/* 2>/dev/null || true
+  rmdir "$WORKER_SNAPSHOT_DIR" 2>/dev/null || true
+}
+trap cleanup_worker_snapshots EXIT
+
 fails=()
+test_index=0
 for t in "${TESTS[@]}"; do
+  test_index=$((test_index + 1))
+  before_workers="$WORKER_SNAPSHOT_DIR/${test_index}.before"
+  after_workers="$WORKER_SNAPSHOT_DIR/${test_index}.after"
+  new_workers="$WORKER_SNAPSHOT_DIR/${test_index}.new"
+  file_failed=0
+
+  if ! snapshot_matching_workers "$before_workers"; then
+    err "не удалось снять worker-процессы перед $t"
+    exit 2
+  fi
+
   log "→ $t"
   if PYTHONPATH="$REPO_ROOT/KrabEar" "$HARNESS_VENV/bin/python" -m pytest "$t" -p no:xdist -q; then
     :
   else
+    file_failed=1
+  fi
+
+  if ! snapshot_matching_workers "$after_workers"; then
+    err "не удалось снять worker-процессы после $t"
+    file_failed=1
+  elif ! LC_ALL=C comm -13 "$before_workers" "$after_workers" > "$new_workers"; then
+    err "не удалось сравнить снимки worker-процессов после $t"
+    file_failed=1
+  elif [ -s "$new_workers" ]; then
+    err "после $t появились новые worker-процессы; сигналы им НЕ отправлялись:"
+    while IFS= read -r worker; do
+      printf '   НОВЫЙ WORKER: %s\n' "$worker" >&2
+    done < "$new_workers"
+    file_failed=1
+  fi
+
+  if [ "$file_failed" -ne 0 ]; then
     fails+=("$t")
   fi
-  reap
 done
 
 echo
