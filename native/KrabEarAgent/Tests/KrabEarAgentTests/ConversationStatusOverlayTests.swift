@@ -12,16 +12,17 @@ import AppKit
 final class ConversationStatusOverlayTests: XCTestCase {
 
     private var overlay: ConversationStatusOverlay!
+    private let defaultsDomain = IsolatedUserDefaultsDomain(scope: "ConversationStatusOverlayTests")
 
     override func setUp() async throws {
         try await super.setUp()
-        overlay = ConversationStatusOverlay()
+        overlay = ConversationStatusOverlay(userDefaults: defaultsDomain.defaults)
     }
 
     override func tearDown() async throws {
         overlay.hide()
         overlay = nil
-        UserDefaults.standard.removeObject(forKey: "KrabEar_ConversationStatusHUDPosition")
+        defaultsDomain.removePersistentDomain()
         try await super.tearDown()
     }
 
@@ -68,10 +69,11 @@ final class ConversationStatusOverlayTests: XCTestCase {
 final class ConversationOverlayWiringTests: XCTestCase {
 
     private var vc: ConversationViewController!
+    private let defaultsDomain = IsolatedUserDefaultsDomain(scope: "ConversationOverlayWiringTests")
 
     override func setUp() async throws {
         try await super.setUp()
-        vc = ConversationViewController(config: .default)
+        vc = ConversationViewController(config: .default, userDefaults: defaultsDomain.defaults)
         vc.loadView()
         vc.viewDidLoad()
     }
@@ -80,6 +82,7 @@ final class ConversationOverlayWiringTests: XCTestCase {
         vc.statusOverlay?.hide()
         vc.interruptFallbackTimer?.invalidate()
         vc = nil
+        defaultsDomain.removePersistentDomain()
         try await super.tearDown()
     }
 
@@ -91,7 +94,7 @@ final class ConversationOverlayWiringTests: XCTestCase {
     }
 
     func test_applyState_updatesOverlayText() {
-        let overlay = ConversationStatusOverlay()
+        let overlay = ConversationStatusOverlay(userDefaults: defaultsDomain.defaults)
         vc.statusOverlay = overlay
         vc.conversationState = .speaking
         XCTAssertEqual(overlay._testStatusText, "🔴 Говорит")
@@ -108,7 +111,7 @@ final class ConversationOverlayWiringTests: XCTestCase {
     }
 
     func test_computeAndPushLevel_feedsOverlay_noCrash() {
-        let overlay = ConversationStatusOverlay()
+        let overlay = ConversationStatusOverlay(userDefaults: defaultsDomain.defaults)
         vc.statusOverlay = overlay
         vc.computeAndPushLevel([0.4, 0.5, 0.6])  // smoke: пуш в meter overlay не падает
     }
@@ -124,9 +127,10 @@ final class ConversationOverlayWiringTests: XCTestCase {
 final class ConversationStatusOverlayPositionGuardTests: XCTestCase {
 
     private let positionKey = "KrabEar_ConversationStatusHUDPosition"
+    private let defaultsDomain = IsolatedUserDefaultsDomain(scope: "ConversationStatusOverlayPositionGuardTests")
 
     override func tearDown() async throws {
-        UserDefaults.standard.removeObject(forKey: positionKey)
+        defaultsDomain.removePersistentDomain()
         try await super.tearDown()
     }
 
@@ -136,7 +140,7 @@ final class ConversationStatusOverlayPositionGuardTests: XCTestCase {
               let str = String(data: data, encoding: .utf8) else {
             return XCTFail("не удалось сериализовать тестовую позицию")
         }
-        UserDefaults.standard.set(str, forKey: positionKey)
+        defaultsDomain.defaults.set(str, forKey: positionKey)
     }
 
     /// Заведомо off-screen сохранённая позиция (например после отключения второго
@@ -148,7 +152,7 @@ final class ConversationStatusOverlayPositionGuardTests: XCTestCase {
     func test_restorePosition_offScreen_doesNotApplyBogusOrigin() {
         savePosition(x: 99999, y: 99999)
 
-        let overlay = ConversationStatusOverlay()
+        let overlay = ConversationStatusOverlay(userDefaults: defaultsDomain.defaults)
         defer { overlay.hide() }
 
         XCTAssertNotEqual(overlay._testPanelOrigin.x, 99999)
@@ -166,7 +170,7 @@ final class ConversationStatusOverlayPositionGuardTests: XCTestCase {
         let y = vf.minY + 40
         savePosition(x: x, y: y)
 
-        let overlay = ConversationStatusOverlay()
+        let overlay = ConversationStatusOverlay(userDefaults: defaultsDomain.defaults)
         defer { overlay.hide() }
 
         XCTAssertEqual(overlay._testPanelOrigin.x, x, accuracy: 0.5)
@@ -186,10 +190,11 @@ final class ConversationWindowWillCloseTests: XCTestCase {
 
     private var vc: ConversationViewController!
     private var window: NSWindow!
+    private let defaultsDomain = IsolatedUserDefaultsDomain(scope: "ConversationWindowWillCloseTests")
 
     override func setUp() async throws {
         try await super.setUp()
-        vc = ConversationViewController(config: .default)
+        vc = ConversationViewController(config: .default, userDefaults: defaultsDomain.defaults)
         vc.loadView()
         vc.viewDidLoad()
         // Реальное NSWindow вокруг view — иначе view.window остаётся nil и
@@ -208,6 +213,7 @@ final class ConversationWindowWillCloseTests: XCTestCase {
         vc.interruptFallbackTimer?.invalidate()
         vc = nil
         window = nil
+        defaultsDomain.removePersistentDomain()
         try await super.tearDown()
     }
 
@@ -252,7 +258,7 @@ final class ConversationWindowWillCloseTests: XCTestCase {
     /// ЛЮБОЕ willClose где-либо в приложении. Хендлер обязан требовать non-nil С ОБЕИХ
     /// сторон ДО identity-сравнения.
     func test_nilObjectNotification_isIgnored_noFalseTrigger() {
-        let bareVC = ConversationViewController(config: .default)
+        let bareVC = ConversationViewController(config: .default, userDefaults: defaultsDomain.defaults)
         bareVC.loadView()
         bareVC.viewDidLoad()
         bareVC.isSessionActive = true

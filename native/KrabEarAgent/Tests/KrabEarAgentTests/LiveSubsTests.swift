@@ -216,10 +216,21 @@ final class SystemAudioCaptureTests: XCTestCase {
 @MainActor
 final class LiveSubtitlesOverlayTests: XCTestCase {
 
+    private let defaultsDomain = IsolatedUserDefaultsDomain(scope: "LiveSubsOverlayTests")
+
+    override func tearDown() async throws {
+        defaultsDomain.removePersistentDomain()
+        try await super.tearDown()
+    }
+
+    private func makeOverlay() -> LiveSubtitlesOverlay {
+        LiveSubtitlesOverlay(userDefaults: defaultsDomain.defaults)
+    }
+
     // MARK: 9. isVisible starts false
 
     func testIsVisibleStartsFalse() {
-        XCTAssertFalse(LiveSubtitlesOverlay().isVisible)
+        XCTAssertFalse(makeOverlay().isVisible)
     }
 
     // MARK: 10. show/hide toggles isVisible
@@ -227,7 +238,8 @@ final class LiveSubtitlesOverlayTests: XCTestCase {
     func testShowHideTogglesIsVisible() {
         // Production-фабрика создаёт URLSession; unit-тест подменяет её no-op сессией.
         let overlay = LiveSubtitlesOverlay(
-            sseSessionFactory: { _ in NoOpLiveSubtitlesSSESession() }
+            sseSessionFactory: { _ in NoOpLiveSubtitlesSSESession() },
+            userDefaults: defaultsDomain.defaults
         )
         overlay.show()
         XCTAssertTrue(overlay.isVisible)
@@ -238,7 +250,7 @@ final class LiveSubtitlesOverlayTests: XCTestCase {
     // MARK: 11. addEntry + clearAll no crash
 
     func testAddEntryAndClearAllNoCrash() {
-        let overlay = LiveSubtitlesOverlay()
+        let overlay = makeOverlay()
         overlay.addEntry(original: "Hello", translation: "Привет")
         overlay.clearAll()
         XCTAssertTrue(true)
@@ -247,7 +259,7 @@ final class LiveSubtitlesOverlayTests: XCTestCase {
     // MARK: 12. max 3 entries — 4th evicts 1st, no crash
 
     func testMaxThreeEntriesNoCrash() {
-        let overlay = LiveSubtitlesOverlay()
+        let overlay = makeOverlay()
         for i in 1...4 {
             overlay.addEntry(original: "Orig \(i)", translation: "Trans \(i)")
         }
@@ -258,7 +270,7 @@ final class LiveSubtitlesOverlayTests: XCTestCase {
     // MARK: 13. showOriginalAndTranslation toggle
 
     func testShowOriginalToggle() {
-        let overlay = LiveSubtitlesOverlay()
+        let overlay = makeOverlay()
         overlay.showOriginalAndTranslation = true
         XCTAssertTrue(overlay.showOriginalAndTranslation)
         overlay.showOriginalAndTranslation = false
@@ -268,14 +280,14 @@ final class LiveSubtitlesOverlayTests: XCTestCase {
     // MARK: 14. resetPosition no crash
 
     func testResetPositionNoCrash() {
-        LiveSubtitlesOverlay().resetPosition()
+        makeOverlay().resetPosition()
         XCTAssertTrue(true)
     }
 
     // MARK: 15. rapid fire 20 entries — no crash
 
     func testRapidFireEntriesNoCrash() {
-        let overlay = LiveSubtitlesOverlay()
+        let overlay = makeOverlay()
         for i in 0..<20 {
             overlay.addEntry(original: "Original \(i)", translation: "Перевод \(i)")
         }
@@ -286,6 +298,6 @@ final class LiveSubtitlesOverlayTests: XCTestCase {
     // MARK: 16. restBaseURL default contains 5005
 
     func testRestBaseURLDefault() {
-        XCTAssertTrue(LiveSubtitlesOverlay().restBaseURL.contains("5005"))
+        XCTAssertTrue(makeOverlay().restBaseURL.contains("5005"))
     }
 }

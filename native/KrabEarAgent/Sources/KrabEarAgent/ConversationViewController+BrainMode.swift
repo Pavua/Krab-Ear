@@ -27,13 +27,19 @@ extension ConversationViewController {
     /// Последний сохранённый выбор пользователя. "auto" если ключ не задан или
     /// содержит неизвестное значение.
     nonisolated static var savedBrainMode: String {
-        let raw = UserDefaults.standard.string(forKey: kBrainModeUserDefaultsKey) ?? "auto"
+        savedBrainMode(in: .standard)
+    }
+
+    /// Читает выбор из указанного домена. Отдельная точка нужна unit-тестам,
+    /// чтобы не зависеть от живых настроек приложения.
+    nonisolated static func savedBrainMode(in defaults: UserDefaults) -> String {
+        let raw = defaults.string(forKey: kBrainModeUserDefaultsKey) ?? "auto"
         return brainModeSegmentValues.contains(raw) ? raw : "auto"
     }
 
     /// Сохранить выбор пользователя.
-    nonisolated static func saveBrainMode(_ mode: String) {
-        UserDefaults.standard.set(mode, forKey: kBrainModeUserDefaultsKey)
+    nonisolated static func saveBrainMode(_ mode: String, in defaults: UserDefaults = .standard) {
+        defaults.set(mode, forKey: kBrainModeUserDefaultsKey)
     }
 
     // MARK: - Segment action (target/action wiring — в +UI.swift buildUI())
@@ -43,7 +49,7 @@ extension ConversationViewController {
         let values = ConversationViewController.brainModeSegmentValues
         let mode = (idx >= 0 && idx < values.count) ? values[idx] : "auto"
         config.brainMode = mode
-        ConversationViewController.saveBrainMode(mode)
+        ConversationViewController.saveBrainMode(mode, in: userDefaults)
     }
 
     // MARK: - "Сделать дефолтом" (PUT /v1/settings/conversation)

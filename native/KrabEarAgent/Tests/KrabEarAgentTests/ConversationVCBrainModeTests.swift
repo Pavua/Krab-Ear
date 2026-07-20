@@ -14,22 +14,32 @@ import XCTest
 
 final class ConversationBrainModePersistenceTests: XCTestCase {
 
+    private let defaultsDomain = IsolatedUserDefaultsDomain(scope: "ConversationBrainModePersistenceTests")
+
     override func tearDown() {
-        UserDefaults.standard.removeObject(forKey: "KrabEar_ConversationBrainMode")
+        defaultsDomain.removePersistentDomain()
         super.tearDown()
     }
 
     func test_savedBrainMode_defaultsToAuto_whenUnset() {
-        UserDefaults.standard.removeObject(forKey: "KrabEar_ConversationBrainMode")
-        XCTAssertEqual(ConversationViewController.savedBrainMode, "auto")
+        XCTAssertEqual(
+            ConversationViewController.savedBrainMode(in: defaultsDomain.defaults),
+            "auto"
+        )
     }
 
     func test_savedBrainMode_roundTrip() {
-        ConversationViewController.saveBrainMode("krab")
-        XCTAssertEqual(ConversationViewController.savedBrainMode, "krab")
+        ConversationViewController.saveBrainMode("krab", in: defaultsDomain.defaults)
+        XCTAssertEqual(
+            ConversationViewController.savedBrainMode(in: defaultsDomain.defaults),
+            "krab"
+        )
 
-        ConversationViewController.saveBrainMode("fast")
-        XCTAssertEqual(ConversationViewController.savedBrainMode, "fast")
+        ConversationViewController.saveBrainMode("fast", in: defaultsDomain.defaults)
+        XCTAssertEqual(
+            ConversationViewController.savedBrainMode(in: defaultsDomain.defaults),
+            "fast"
+        )
     }
 }
 
@@ -39,17 +49,18 @@ final class ConversationBrainModePersistenceTests: XCTestCase {
 final class ConversationBrainModeSegmentActionTests: XCTestCase {
 
     private var vc: ConversationViewController!
+    private let defaultsDomain = IsolatedUserDefaultsDomain(scope: "ConversationBrainModeSegmentActionTests")
 
     override func setUp() async throws {
         try await super.setUp()
-        vc = ConversationViewController(config: .default)
+        vc = ConversationViewController(config: .default, userDefaults: defaultsDomain.defaults)
         vc.loadView()
         vc.viewDidLoad()
     }
 
     override func tearDown() async throws {
-        UserDefaults.standard.removeObject(forKey: "KrabEar_ConversationBrainMode")
         vc = nil
+        defaultsDomain.removePersistentDomain()
         try await super.tearDown()
     }
 
@@ -57,21 +68,30 @@ final class ConversationBrainModeSegmentActionTests: XCTestCase {
         vc.brainModeControl.selectedSegment = 0
         vc.onBrainModeSegmentChanged()
         XCTAssertEqual(vc.config.brainMode, "fast")
-        XCTAssertEqual(ConversationViewController.savedBrainMode, "fast")
+        XCTAssertEqual(
+            ConversationViewController.savedBrainMode(in: defaultsDomain.defaults),
+            "fast"
+        )
     }
 
     func test_onBrainModeSegmentChanged_krab_updatesConfigAndPersists() {
         vc.brainModeControl.selectedSegment = 1
         vc.onBrainModeSegmentChanged()
         XCTAssertEqual(vc.config.brainMode, "krab")
-        XCTAssertEqual(ConversationViewController.savedBrainMode, "krab")
+        XCTAssertEqual(
+            ConversationViewController.savedBrainMode(in: defaultsDomain.defaults),
+            "krab"
+        )
     }
 
     func test_onBrainModeSegmentChanged_auto_updatesConfigAndPersists() {
         vc.brainModeControl.selectedSegment = 2
         vc.onBrainModeSegmentChanged()
         XCTAssertEqual(vc.config.brainMode, "auto")
-        XCTAssertEqual(ConversationViewController.savedBrainMode, "auto")
+        XCTAssertEqual(
+            ConversationViewController.savedBrainMode(in: defaultsDomain.defaults),
+            "auto"
+        )
     }
 }
 
@@ -80,11 +100,22 @@ final class ConversationBrainModeSegmentActionTests: XCTestCase {
 @MainActor
 final class ConversationBrainModeSetDefaultRequestTests: XCTestCase {
 
+    private let defaultsDomain = IsolatedUserDefaultsDomain(scope: "ConversationBrainModeSetDefaultRequestTests")
+
+    override func tearDown() async throws {
+        defaultsDomain.removePersistentDomain()
+        try await super.tearDown()
+    }
+
+    private func makeViewController(config: ConversationConfig = .default) -> ConversationViewController {
+        ConversationViewController(config: config, userDefaults: defaultsDomain.defaults)
+    }
+
     func test_buildSetDefaultRequest_methodAndURL() {
         var config = ConversationConfig.default
         config.httpBaseURLString = "http://127.0.0.1:8090"
         config.brainMode = "krab"
-        let vc = ConversationViewController(config: config)
+        let vc = makeViewController(config: config)
 
         let req = vc._buildSetDefaultRequest()
         XCTAssertNotNil(req)
@@ -95,7 +126,7 @@ final class ConversationBrainModeSetDefaultRequestTests: XCTestCase {
     func test_buildSetDefaultRequest_bodyContainsBrainMode() {
         var config = ConversationConfig.default
         config.brainMode = "auto"
-        let vc = ConversationViewController(config: config)
+        let vc = makeViewController(config: config)
 
         let req = vc._buildSetDefaultRequest()
         guard let body = req?.httpBody,
@@ -107,7 +138,7 @@ final class ConversationBrainModeSetDefaultRequestTests: XCTestCase {
     }
 
     func test_buildSetDefaultRequest_setsContentTypeHeader() {
-        let vc = ConversationViewController(config: .default)
+        let vc = makeViewController()
         let req = vc._buildSetDefaultRequest()
         XCTAssertEqual(req?.value(forHTTPHeaderField: "Content-Type"), "application/json")
     }
@@ -115,7 +146,7 @@ final class ConversationBrainModeSetDefaultRequestTests: XCTestCase {
     func test_buildSetDefaultRequest_invalidBaseURL_returnsNil() {
         var config = ConversationConfig.default
         config.httpBaseURLString = ""
-        let vc = ConversationViewController(config: config)
+        let vc = makeViewController(config: config)
         XCTAssertNil(vc._buildSetDefaultRequest())
     }
 
@@ -126,7 +157,7 @@ final class ConversationBrainModeSetDefaultRequestTests: XCTestCase {
     func test_buildSetDefaultRequest_withApiKey_setsAuthorizationHeader() {
         var config = ConversationConfig.default
         config.apiKey = "tok-secret"
-        let vc = ConversationViewController(config: config)
+        let vc = makeViewController(config: config)
         let req = vc._buildSetDefaultRequest()
         XCTAssertEqual(req?.value(forHTTPHeaderField: "Authorization"), "Bearer tok-secret")
     }
@@ -134,7 +165,7 @@ final class ConversationBrainModeSetDefaultRequestTests: XCTestCase {
     func test_buildSetDefaultRequest_emptyApiKey_noAuthorizationHeader() {
         var config = ConversationConfig.default
         config.apiKey = ""
-        let vc = ConversationViewController(config: config)
+        let vc = makeViewController(config: config)
         let req = vc._buildSetDefaultRequest()
         XCTAssertNil(req?.value(forHTTPHeaderField: "Authorization"),
                      "Пустой apiKey не должен добавлять заголовок Authorization")

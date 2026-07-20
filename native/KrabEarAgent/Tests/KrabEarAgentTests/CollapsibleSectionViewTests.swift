@@ -23,15 +23,11 @@ final class CollapsibleSectionViewTests: XCTestCase {
 
     /// Unique prefix per test run to avoid UserDefaults cross-contamination.
     private let keySuffix = UUID().uuidString
+    private let defaultsDomain = IsolatedUserDefaultsDomain(scope: "CollapsibleSectionViewTests")
 
-    override func tearDown() {
-        super.tearDown()
-        // Clean up all keys written during this test run.
-        let defaults = UserDefaults.standard
-        for key in defaults.dictionaryRepresentation().keys
-            where key.contains(keySuffix) || key.hasPrefix("CollapsibleSection_test_") {
-            defaults.removeObject(forKey: key)
-        }
+    override func tearDown() async throws {
+        defaultsDomain.removePersistentDomain()
+        try await super.tearDown()
     }
 
     // MARK: - Helpers
@@ -43,8 +39,13 @@ final class CollapsibleSectionViewTests: XCTestCase {
     ) -> CollapsibleSectionView {
         let id = sectionId ?? "test_\(keySuffix)"
         // Ensure no stale UserDefaults key influences the test.
-        UserDefaults.standard.removeObject(forKey: "CollapsibleSection_\(id)")
-        return CollapsibleSectionView(sectionId: id, title: title, isExpanded: isExpanded)
+        defaultsDomain.defaults.removeObject(forKey: "CollapsibleSection_\(id)")
+        return CollapsibleSectionView(
+            sectionId: id,
+            title: title,
+            isExpanded: isExpanded,
+            userDefaults: defaultsDomain.defaults
+        )
     }
 
     // MARK: - Initial state
@@ -79,8 +80,12 @@ final class CollapsibleSectionViewTests: XCTestCase {
 
     func test_sectionId_stored() {
         let id = "my_unique_\(keySuffix)"
-        UserDefaults.standard.removeObject(forKey: "CollapsibleSection_\(id)")
-        let section = CollapsibleSectionView(sectionId: id, title: "Title")
+        defaultsDomain.defaults.removeObject(forKey: "CollapsibleSection_\(id)")
+        let section = CollapsibleSectionView(
+            sectionId: id,
+            title: "Title",
+            userDefaults: defaultsDomain.defaults
+        )
         XCTAssertEqual(section.sectionId, id, "sectionId property must match constructor arg")
     }
 
@@ -139,49 +144,65 @@ final class CollapsibleSectionViewTests: XCTestCase {
 
     func test_persist_state_expanded_in_userdefaults() {
         let id = "persist_exp_\(keySuffix)"
-        UserDefaults.standard.removeObject(forKey: "CollapsibleSection_\(id)")
-        let section = CollapsibleSectionView(sectionId: id, title: "X", isExpanded: false)
+        defaultsDomain.defaults.removeObject(forKey: "CollapsibleSection_\(id)")
+        let section = CollapsibleSectionView(
+            sectionId: id,
+            title: "X",
+            isExpanded: false,
+            userDefaults: defaultsDomain.defaults
+        )
         section.setExpanded(true, animated: false)
 
-        let stored = UserDefaults.standard.bool(forKey: "CollapsibleSection_\(id)")
+        let stored = defaultsDomain.defaults.bool(forKey: "CollapsibleSection_\(id)")
         XCTAssertTrue(stored, "setExpanded(true) must write true to UserDefaults")
-        UserDefaults.standard.removeObject(forKey: "CollapsibleSection_\(id)")
     }
 
     func test_persist_state_collapsed_in_userdefaults() {
         let id = "persist_col_\(keySuffix)"
-        UserDefaults.standard.removeObject(forKey: "CollapsibleSection_\(id)")
-        let section = CollapsibleSectionView(sectionId: id, title: "X", isExpanded: true)
+        defaultsDomain.defaults.removeObject(forKey: "CollapsibleSection_\(id)")
+        let section = CollapsibleSectionView(
+            sectionId: id,
+            title: "X",
+            isExpanded: true,
+            userDefaults: defaultsDomain.defaults
+        )
         section.setExpanded(false, animated: false)
 
-        let stored = UserDefaults.standard.bool(forKey: "CollapsibleSection_\(id)")
+        let stored = defaultsDomain.defaults.bool(forKey: "CollapsibleSection_\(id)")
         XCTAssertFalse(stored, "setExpanded(false) must write false to UserDefaults")
-        UserDefaults.standard.removeObject(forKey: "CollapsibleSection_\(id)")
     }
 
     func test_restore_state_from_userdefaults() {
         // Pre-seed UserDefaults with collapsed=false (i.e. expanded=false) before init.
         let id = "restore_\(keySuffix)"
-        UserDefaults.standard.set(false, forKey: "CollapsibleSection_\(id)")
+        defaultsDomain.defaults.set(false, forKey: "CollapsibleSection_\(id)")
 
         // Even though constructor arg says isExpanded=true, the stored key wins.
-        let section = CollapsibleSectionView(sectionId: id, title: "X", isExpanded: true)
+        let section = CollapsibleSectionView(
+            sectionId: id,
+            title: "X",
+            isExpanded: true,
+            userDefaults: defaultsDomain.defaults
+        )
 
         XCTAssertFalse(section.isExpanded,
                        "UserDefaults stored value must override constructor isExpanded arg")
-        UserDefaults.standard.removeObject(forKey: "CollapsibleSection_\(id)")
     }
 
     func test_restore_expanded_from_userdefaults_overrides_constructor() {
         let id = "restore_exp_\(keySuffix)"
         // Seed: expanded=true stored, constructor says false.
-        UserDefaults.standard.set(true, forKey: "CollapsibleSection_\(id)")
+        defaultsDomain.defaults.set(true, forKey: "CollapsibleSection_\(id)")
 
-        let section = CollapsibleSectionView(sectionId: id, title: "X", isExpanded: false)
+        let section = CollapsibleSectionView(
+            sectionId: id,
+            title: "X",
+            isExpanded: false,
+            userDefaults: defaultsDomain.defaults
+        )
 
         XCTAssertTrue(section.isExpanded,
                       "UserDefaults true must override constructor false")
-        UserDefaults.standard.removeObject(forKey: "CollapsibleSection_\(id)")
     }
 
     // MARK: - Unicode title / sectionId
@@ -189,26 +210,33 @@ final class CollapsibleSectionViewTests: XCTestCase {
     func test_unicode_title_stored_and_displayed() {
         let id = "unicode_\(keySuffix)"
         let unicodeTitle = "Секция Настройки 🎙️"
-        UserDefaults.standard.removeObject(forKey: "CollapsibleSection_\(id)")
-        let section = CollapsibleSectionView(sectionId: id, title: unicodeTitle)
+        defaultsDomain.defaults.removeObject(forKey: "CollapsibleSection_\(id)")
+        let section = CollapsibleSectionView(
+            sectionId: id,
+            title: unicodeTitle,
+            userDefaults: defaultsDomain.defaults
+        )
 
         XCTAssertEqual(section.titleLabel.stringValue, unicodeTitle,
                        "titleLabel must display the full Unicode title")
-        UserDefaults.standard.removeObject(forKey: "CollapsibleSection_\(id)")
     }
 
     func test_unicode_sectionId_defaults_key() {
         let id = "секция_\(keySuffix)"
-        UserDefaults.standard.removeObject(forKey: "CollapsibleSection_\(id)")
-        let section = CollapsibleSectionView(sectionId: id, title: "T", isExpanded: true)
+        defaultsDomain.defaults.removeObject(forKey: "CollapsibleSection_\(id)")
+        let section = CollapsibleSectionView(
+            sectionId: id,
+            title: "T",
+            isExpanded: true,
+            userDefaults: defaultsDomain.defaults
+        )
         section.setExpanded(false, animated: false)
 
         let key = "CollapsibleSection_\(id)"
-        XCTAssertNotNil(UserDefaults.standard.object(forKey: key),
+        XCTAssertNotNil(defaultsDomain.defaults.object(forKey: key),
                         "Unicode sectionId must produce a valid UserDefaults key")
-        XCTAssertFalse(UserDefaults.standard.bool(forKey: key),
+        XCTAssertFalse(defaultsDomain.defaults.bool(forKey: key),
                        "collapsed state must be persisted under unicode sectionId key")
-        UserDefaults.standard.removeObject(forKey: key)
     }
 
     // MARK: - Concurrent toggle safety
@@ -247,11 +275,21 @@ final class CollapsibleSectionViewTests: XCTestCase {
     func test_multiple_sections_independent_defaults() {
         let idA = "sectionA_\(keySuffix)"
         let idB = "sectionB_\(keySuffix)"
-        UserDefaults.standard.removeObject(forKey: "CollapsibleSection_\(idA)")
-        UserDefaults.standard.removeObject(forKey: "CollapsibleSection_\(idB)")
+        defaultsDomain.defaults.removeObject(forKey: "CollapsibleSection_\(idA)")
+        defaultsDomain.defaults.removeObject(forKey: "CollapsibleSection_\(idB)")
 
-        let a = CollapsibleSectionView(sectionId: idA, title: "A", isExpanded: true)
-        let b = CollapsibleSectionView(sectionId: idB, title: "B", isExpanded: false)
+        let a = CollapsibleSectionView(
+            sectionId: idA,
+            title: "A",
+            isExpanded: true,
+            userDefaults: defaultsDomain.defaults
+        )
+        let b = CollapsibleSectionView(
+            sectionId: idB,
+            title: "B",
+            isExpanded: false,
+            userDefaults: defaultsDomain.defaults
+        )
 
         a.setExpanded(false, animated: false)
 
@@ -259,7 +297,5 @@ final class CollapsibleSectionViewTests: XCTestCase {
         XCTAssertFalse(a.isExpanded, "section A must be collapsed after setExpanded(false)")
         XCTAssertFalse(b.isExpanded, "section B state must be independent of section A")
 
-        UserDefaults.standard.removeObject(forKey: "CollapsibleSection_\(idA)")
-        UserDefaults.standard.removeObject(forKey: "CollapsibleSection_\(idB)")
     }
 }

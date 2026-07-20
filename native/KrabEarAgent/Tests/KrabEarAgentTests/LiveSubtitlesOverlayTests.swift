@@ -30,6 +30,7 @@
   26. test_deinitCancelsTaskAndInvalidatesSession — освобождение URLSession
   27. test_invalidResponsesDoNotResetBoundedReconnectBudget — HTTP/MIME ошибки не оживляют поток
   28. test_splitUTF8ScalarIsPreservedUntilCompleteLine — split UTF-8 не повреждает строку
+  29. test_initializer_restoresShowOriginal_fromInjectedDefaults — HUD читает внедрённый suite
 */
 
 import XCTest
@@ -99,10 +100,17 @@ private final class TrackingSSEEnvironment {
 @MainActor
 final class LiveSubtitlesOverlayWave190Tests: XCTestCase {
 
+    private let defaultsDomain = IsolatedUserDefaultsDomain(scope: "LiveSubtitlesOverlayWave190Tests")
+
+    override func tearDown() async throws {
+        defaultsDomain.removePersistentDomain()
+        try await super.tearDown()
+    }
+
     // MARK: - Helpers
 
     private func makeOverlay() -> LiveSubtitlesOverlay {
-        LiveSubtitlesOverlay()
+        LiveSubtitlesOverlay(userDefaults: defaultsDomain.defaults)
     }
 
     /// Даёт задачам, поставленным через `Task { @MainActor }`, отработать без ожидания по времени.
@@ -121,7 +129,8 @@ final class LiveSubtitlesOverlayWave190Tests: XCTestCase {
             },
             reconnectScheduler: { _, workItem in
                 environment.scheduledReconnects.append(workItem)
-            }
+            },
+            userDefaults: defaultsDomain.defaults
         )
     }
 
@@ -502,14 +511,26 @@ final class LiveSubtitlesOverlayWave190Tests: XCTestCase {
         XCTAssertTrue(true, "Переключение showOriginalAndTranslation не должно крашиться")
     }
 
+    func test_initializer_restoresShowOriginal_fromInjectedDefaults() {
+        defaultsDomain.defaults.set(false, forKey: "KrabEar_LiveSubsShowOriginal")
+
+        let overlay = makeOverlay()
+
+        XCTAssertFalse(
+            overlay.showOriginalAndTranslation,
+            "HUD обязан читать настройку показа оригинала из внедрённого домена"
+        )
+    }
+
     // MARK: 18. test_resetPosition_no_crash
 
     func test_resetPosition_no_crash() {
+        defaultsDomain.defaults.set("test-position", forKey: "KrabEar_LiveSubsHUDPosition")
         let overlay = makeOverlay()
         overlay.resetPosition()
         // UserDefaults ключ должен быть удалён
         XCTAssertNil(
-            UserDefaults.standard.string(forKey: "KrabEar_LiveSubsHUDPosition"),
+            defaultsDomain.defaults.string(forKey: "KrabEar_LiveSubsHUDPosition"),
             "resetPosition должен удалять сохранённую позицию из UserDefaults"
         )
     }
@@ -678,9 +699,10 @@ final class SSESessionDelegateLifecycleTests: XCTestCase {
 final class LiveSubtitlesOverlayPositionGuardTests: XCTestCase {
 
     private let positionKey = "KrabEar_LiveSubsHUDPosition"
+    private let defaultsDomain = IsolatedUserDefaultsDomain(scope: "LiveSubtitlesOverlayPositionGuardTests")
 
     override func tearDown() async throws {
-        UserDefaults.standard.removeObject(forKey: positionKey)
+        defaultsDomain.removePersistentDomain()
         try await super.tearDown()
     }
 
@@ -690,7 +712,7 @@ final class LiveSubtitlesOverlayPositionGuardTests: XCTestCase {
               let str = String(data: data, encoding: .utf8) else {
             return XCTFail("не удалось сериализовать тестовую позицию")
         }
-        UserDefaults.standard.set(str, forKey: positionKey)
+        defaultsDomain.defaults.set(str, forKey: positionKey)
     }
 
     /// Заведомо off-screen сохранённая позиция (например после отключения второго
@@ -702,7 +724,7 @@ final class LiveSubtitlesOverlayPositionGuardTests: XCTestCase {
     func test_restorePosition_offScreen_doesNotApplyBogusOrigin() {
         savePosition(x: 99999, y: 99999)
 
-        let overlay = LiveSubtitlesOverlay()
+        let overlay = LiveSubtitlesOverlay(userDefaults: defaultsDomain.defaults)
 
         XCTAssertNotEqual(overlay._testPanelOrigin.x, 99999)
         XCTAssertNotEqual(overlay._testPanelOrigin.y, 99999)
@@ -719,7 +741,7 @@ final class LiveSubtitlesOverlayPositionGuardTests: XCTestCase {
         let y = vf.minY + 40
         savePosition(x: x, y: y)
 
-        let overlay = LiveSubtitlesOverlay()
+        let overlay = LiveSubtitlesOverlay(userDefaults: defaultsDomain.defaults)
 
         XCTAssertEqual(overlay._testPanelOrigin.x, x, accuracy: 0.5)
         XCTAssertEqual(overlay._testPanelOrigin.y, y, accuracy: 0.5)

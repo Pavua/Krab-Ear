@@ -635,6 +635,8 @@ public class CollapsibleSectionView: NSView {
     public let contentStackView = NSStackView()
     private let containerStack = NSStackView()
     private let headerSeparator = NSBox()
+    /// Хранилище состояния раскрытия; `.standard` сохраняет production-поведение.
+    private let userDefaults: UserDefaults
 
     // MARK: - Hover state (Gemini design 2026-04-26 microinteraction)
 
@@ -645,14 +647,21 @@ public class CollapsibleSectionView: NSView {
 
     public private(set) var isExpanded: Bool
 
-    public init(sectionId: String, title: String, isExpanded: Bool = true, iconSymbol: String? = nil) {
+    public init(
+        sectionId: String,
+        title: String,
+        isExpanded: Bool = true,
+        iconSymbol: String? = nil,
+        userDefaults: UserDefaults = .standard
+    ) {
         self.sectionId = sectionId
         self.isExpanded = isExpanded
+        self.userDefaults = userDefaults
         super.init(frame: .zero)
 
         let key = "CollapsibleSection_\(sectionId)"
-        if UserDefaults.standard.object(forKey: key) != nil {
-            self.isExpanded = UserDefaults.standard.bool(forKey: key)
+        if userDefaults.object(forKey: key) != nil {
+            self.isExpanded = userDefaults.bool(forKey: key)
         }
 
         setup(title: title, iconSymbol: iconSymbol)
@@ -805,7 +814,7 @@ public class CollapsibleSectionView: NSView {
             applyChanges()
         }
 
-        UserDefaults.standard.set(expanded, forKey: "CollapsibleSection_\(sectionId)")
+        userDefaults.set(expanded, forKey: "CollapsibleSection_\(sectionId)")
     }
 
     // MARK: - Hover tracking (Gemini design 2026-04-26)

@@ -120,6 +120,9 @@ struct LastTranscriptionSnapshot {
 final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     private let controlNotificationName = Notification.Name("com.krabear.agent.control")
     private let options: LaunchOptions
+    /// Хранилище настроек делегата; `.standard` — production-дефолт,
+    /// отдельный suite защищает unit-тесты быстрых пресетов от живых настроек.
+    let userDefaults: UserDefaults
     let backendSupervisor: BackendSupervisor
     let launchAgentManager: LaunchAgentManager
     var ipcClient: IPCClient
@@ -195,8 +198,9 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     /// A3 adaptive backoff: last observed audio RMS from get_recording_state
     var previewLastAudioRms: Double = 1.0
 
-    init(options: LaunchOptions) {
+    init(options: LaunchOptions, userDefaults: UserDefaults = .standard) {
         self.options = options
+        self.userDefaults = userDefaults
         self.backendSupervisor = BackendSupervisor(projectRoot: options.projectRoot)
         self.launchAgentManager = LaunchAgentManager(projectRoot: options.projectRoot)
         self.ipcClient = IPCClient(socketPath: (NSString(string: "~/Library/Application Support/KrabEar").expandingTildeInPath as NSString).appendingPathComponent("krabear.sock"))

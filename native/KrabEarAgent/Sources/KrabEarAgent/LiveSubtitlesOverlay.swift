@@ -134,18 +134,26 @@ final class LiveSubtitlesOverlay: NSObject {
 
     private let positionKey = "KrabEar_LiveSubsHUDPosition"
     private let showOrigKey = "KrabEar_LiveSubsShowOriginal"
+    /// Хранилище настроек HUD; production использует `.standard`, тесты — UUID-suite.
+    private let userDefaults: UserDefaults
 
     // MARK: - Init
 
     override convenience init() {
-        self.init(sseSessionFactory: nil, reconnectScheduler: nil)
+        self.init(sseSessionFactory: nil, reconnectScheduler: nil, userDefaults: .standard)
+    }
+
+    /// Упрощённая тестовая точка входа без создания собственной SSE-фабрики.
+    convenience init(userDefaults: UserDefaults) {
+        self.init(sseSessionFactory: nil, reconnectScheduler: nil, userDefaults: userDefaults)
     }
 
     /// Фабрики подменяются только в тестах; обычный путь использует URLSession
     /// и ограниченную экспоненциальную задержку на главной очереди.
     init(
         sseSessionFactory: ((SSESessionDelegate) -> LiveSubtitlesSSESession)?,
-        reconnectScheduler: ((TimeInterval, DispatchWorkItem) -> Void)? = nil
+        reconnectScheduler: ((TimeInterval, DispatchWorkItem) -> Void)? = nil,
+        userDefaults: UserDefaults = .standard
     ) {
         // Создаём плавающий NSPanel
         let initialFrame = NSRect(x: 0, y: 0, width: 680, height: 120)
@@ -157,13 +165,14 @@ final class LiveSubtitlesOverlay: NSObject {
         )
         self.sseSessionFactory = sseSessionFactory
         self.reconnectScheduler = reconnectScheduler
+        self.userDefaults = userDefaults
         super.init()
         setupPanel()
         restorePosition()
 
         // Восстановить настройку showOriginal
-        if UserDefaults.standard.object(forKey: showOrigKey) != nil {
-            showOriginalAndTranslation = UserDefaults.standard.bool(forKey: showOrigKey)
+        if userDefaults.object(forKey: showOrigKey) != nil {
+            showOriginalAndTranslation = userDefaults.bool(forKey: showOrigKey)
         }
     }
 
@@ -192,7 +201,7 @@ final class LiveSubtitlesOverlay: NSObject {
     }
 
     func resetPosition() {
-        UserDefaults.standard.removeObject(forKey: positionKey)
+        userDefaults.removeObject(forKey: positionKey)
         placeAtBottom()
     }
 
@@ -268,7 +277,7 @@ final class LiveSubtitlesOverlay: NSObject {
     }
 
     private func restorePosition() {
-        if let saved = UserDefaults.standard.string(forKey: positionKey),
+        if let saved = userDefaults.string(forKey: positionKey),
            let data = saved.data(using: .utf8),
            let dict = try? JSONSerialization.jsonObject(with: data) as? [String: CGFloat],
            let x = dict["x"], let y = dict["y"] {
@@ -288,7 +297,7 @@ final class LiveSubtitlesOverlay: NSObject {
         let dict: [String: CGFloat] = ["x": origin.x, "y": origin.y]
         if let data = try? JSONSerialization.data(withJSONObject: dict),
            let str = String(data: data, encoding: .utf8) {
-            UserDefaults.standard.set(str, forKey: positionKey)
+            userDefaults.set(str, forKey: positionKey)
         }
     }
 

@@ -30,6 +30,8 @@ final class ConversationStatusOverlay: NSObject {
 
     private(set) var isVisible = false
     private let positionKey = "KrabEar_ConversationStatusHUDPosition"
+    /// Хранилище позиции панели; `.standard` остаётся production-дефолтом.
+    private let userDefaults: UserDefaults
 
     // MARK: - Test hooks
 
@@ -40,7 +42,8 @@ final class ConversationStatusOverlay: NSObject {
 
     // MARK: - Init
 
-    override init() {
+    init(userDefaults: UserDefaults = .standard) {
+        self.userDefaults = userDefaults
         panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 280, height: 64),
             styleMask: [.nonactivatingPanel, .hudWindow, .utilityWindow],
@@ -169,7 +172,7 @@ final class ConversationStatusOverlay: NSObject {
     }
 
     private func restorePosition() {
-        if let saved = UserDefaults.standard.string(forKey: positionKey),
+        if let saved = userDefaults.string(forKey: positionKey),
            let data = saved.data(using: .utf8),
            let dict = try? JSONSerialization.jsonObject(with: data) as? [String: CGFloat],
            let x = dict["x"], let y = dict["y"] {
@@ -189,7 +192,7 @@ final class ConversationStatusOverlay: NSObject {
         let dict: [String: CGFloat] = ["x": origin.x, "y": origin.y]
         if let data = try? JSONSerialization.data(withJSONObject: dict),
            let str = String(data: data, encoding: .utf8) {
-            UserDefaults.standard.set(str, forKey: positionKey)
+            userDefaults.set(str, forKey: positionKey)
         }
     }
 

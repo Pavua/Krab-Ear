@@ -40,14 +40,15 @@ final class QuickPresetsCatalogTests: XCTestCase {
 final class QuickPresetsCycleTests: XCTestCase {
 
     private let key = "KrabEar_ActivePreset"
+    private let defaultsDomain = IsolatedUserDefaultsDomain(scope: "QuickPresetsCycleTests")
 
     override func setUp() async throws {
         try await super.setUp()
-        UserDefaults.standard.removeObject(forKey: key)
+        defaultsDomain.defaults.removeObject(forKey: key)
     }
 
     override func tearDown() async throws {
-        UserDefaults.standard.removeObject(forKey: key)
+        defaultsDomain.removePersistentDomain()
         try await super.tearDown()
     }
 
@@ -57,21 +58,24 @@ final class QuickPresetsCycleTests: XCTestCase {
                 return Data(#"{"id":"x","ok":true,"result":{}}"#.utf8)
             }
         }
-        let delegate = AgentAppDelegate(options: LaunchOptions(arguments: [CommandLine.arguments[0]]))
+        let delegate = AgentAppDelegate(
+            options: LaunchOptions(arguments: [CommandLine.arguments[0]]),
+            userDefaults: defaultsDomain.defaults
+        )
         delegate.ipcClient = IPCClient(socketProvider: NoOpProvider())
         return delegate
     }
 
     func test_cycleToNextPreset_fromDefault_goesToMeeting() async throws {
         let delegate = makeDelegate()
-        UserDefaults.standard.set("default", forKey: key)
+        defaultsDomain.defaults.set("default", forKey: key)
 
         delegate.cycleToNextPreset()
         // Allow Task.detached to settle
         try await Task.sleep(for: .milliseconds(300))
 
         XCTAssertEqual(
-            UserDefaults.standard.string(forKey: key), "meeting",
+            defaultsDomain.defaults.string(forKey: key), "meeting",
             "Cycling from 'default' should land on 'meeting'"
         )
     }
@@ -79,19 +83,19 @@ final class QuickPresetsCycleTests: XCTestCase {
     func test_cycleToNextPreset_wrapsAroundFromLast() async throws {
         let delegate = makeDelegate()
         let lastId = AgentAppDelegate.recordingPresets.last!.id
-        UserDefaults.standard.set(lastId, forKey: key)
+        defaultsDomain.defaults.set(lastId, forKey: key)
 
         delegate.cycleToNextPreset()
         try await Task.sleep(for: .milliseconds(300))
 
         XCTAssertEqual(
-            UserDefaults.standard.string(forKey: key), AgentAppDelegate.recordingPresets.first!.id,
+            defaultsDomain.defaults.string(forKey: key), AgentAppDelegate.recordingPresets.first!.id,
             "Cycling past the last preset should wrap back to the first"
         )
     }
 
     func test_activePresetBadge_defaultWhenNoneStored() {
-        UserDefaults.standard.removeObject(forKey: key)
+        defaultsDomain.defaults.removeObject(forKey: key)
         let delegate = makeDelegate()
         XCTAssertEqual(delegate.activePresetBadge(), "D",
             "Badge should be 'D' (default) when no preset is stored in UserDefaults")
@@ -99,7 +103,7 @@ final class QuickPresetsCycleTests: XCTestCase {
 
     func test_activePresetBadge_reflectsStoredPreset() async throws {
         let delegate = makeDelegate()
-        UserDefaults.standard.set("meeting", forKey: key)
+        defaultsDomain.defaults.set("meeting", forKey: key)
         // Meeting badge
         let badge = delegate.activePresetBadge()
         let expected = AgentAppDelegate.recordingPresets.first { $0.id == "meeting" }?.badge ?? ""
@@ -113,9 +117,10 @@ final class QuickPresetsCycleTests: XCTestCase {
 final class QuickPresetsIPCOffloadTests: XCTestCase {
 
     private let key = "KrabEar_ActivePreset"
+    private let defaultsDomain = IsolatedUserDefaultsDomain(scope: "QuickPresetsIPCOffloadTests")
 
     override func tearDown() async throws {
-        UserDefaults.standard.removeObject(forKey: key)
+        defaultsDomain.removePersistentDomain()
         try await super.tearDown()
     }
 
@@ -144,7 +149,10 @@ final class QuickPresetsIPCOffloadTests: XCTestCase {
             }
         }
 
-        let delegate = AgentAppDelegate(options: LaunchOptions(arguments: [CommandLine.arguments[0]]))
+        let delegate = AgentAppDelegate(
+            options: LaunchOptions(arguments: [CommandLine.arguments[0]]),
+            userDefaults: defaultsDomain.defaults
+        )
         delegate.ipcClient = IPCClient(socketProvider: PresetProvider(recorder: recorder))
 
         delegate.applyRecordingPreset("meeting", source: "test")
@@ -164,13 +172,16 @@ final class QuickPresetsIPCOffloadTests: XCTestCase {
             }
         }
 
-        let delegate = AgentAppDelegate(options: LaunchOptions(arguments: [CommandLine.arguments[0]]))
+        let delegate = AgentAppDelegate(
+            options: LaunchOptions(arguments: [CommandLine.arguments[0]]),
+            userDefaults: defaultsDomain.defaults
+        )
         delegate.ipcClient = IPCClient(socketProvider: SuccessProvider())
 
         delegate.applyRecordingPreset("translation", source: "test")
         try await Task.sleep(for: .milliseconds(300))
 
-        XCTAssertEqual(UserDefaults.standard.string(forKey: key), "translation",
+        XCTAssertEqual(defaultsDomain.defaults.string(forKey: key), "translation",
             "UserDefaults should be updated to 'translation' after successful IPC")
     }
 }

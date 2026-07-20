@@ -48,7 +48,7 @@ extension AgentAppDelegate {
                 // concurrency — captured `self?` cannot be reused across concurrent contexts.
                 await MainActor.run { [weak self] in
                     guard let self else { return }
-                    UserDefaults.standard.set(presetId, forKey: "KrabEar_ActivePreset")
+                    self.userDefaults.set(presetId, forKey: "KrabEar_ActivePreset")
                     self.refreshStatusItemTitle()
                     self.rebuildStatusMenu()
                 }
@@ -59,7 +59,7 @@ extension AgentAppDelegate {
     }
 
     func cycleToNextPreset() {
-        let currentPreset = UserDefaults.standard.string(forKey: "KrabEar_ActivePreset") ?? "default"
+        let currentPreset = userDefaults.string(forKey: "KrabEar_ActivePreset") ?? "default"
         let ids = AgentAppDelegate.recordingPresets.map { $0.id }
         let currentIdx = ids.firstIndex(of: currentPreset) ?? 0
         let nextIdx = (currentIdx + 1) % ids.count
@@ -67,13 +67,13 @@ extension AgentAppDelegate {
     }
 
     func activePresetBadge() -> String {
-        let active = UserDefaults.standard.string(forKey: "KrabEar_ActivePreset") ?? "default"
+        let active = userDefaults.string(forKey: "KrabEar_ActivePreset") ?? "default"
         return AgentAppDelegate.recordingPresets.first { $0.id == active }?.badge ?? "D"
     }
 
     func buildPresetSubmenu() -> NSMenu {
         let submenu = NSMenu()
-        let active = UserDefaults.standard.string(forKey: "KrabEar_ActivePreset") ?? "default"
+        let active = userDefaults.string(forKey: "KrabEar_ActivePreset") ?? "default"
         for (idx, preset) in AgentAppDelegate.recordingPresets.enumerated() {
             let item = NSMenuItem(
                 title: preset.menuLabel,

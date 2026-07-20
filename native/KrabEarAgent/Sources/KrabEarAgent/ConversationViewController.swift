@@ -109,6 +109,10 @@ final class ConversationViewController: NSViewController {
     /// Неизменяемая граница системного ввода-вывода для всей жизни контроллера.
     let runtimeOptions: ConversationRuntimeOptions
 
+    /// Хранилище пользовательского выбора brain-mode и позиции дочернего HUD.
+    /// Приложение использует `.standard`, unit-тесты передают отдельный UUID-suite.
+    let userDefaults: UserDefaults
+
     // MARK: UI elements (constructed in +UI extension)
     let statusLabel         = NSTextField(labelWithString: "⚪ Готов")
     let transcriptView      = NSTextView()
@@ -165,16 +169,19 @@ final class ConversationViewController: NSViewController {
 
     init(
         config: ConversationConfig,
-        runtimeOptions: ConversationRuntimeOptions = .production
+        runtimeOptions: ConversationRuntimeOptions = .production,
+        userDefaults: UserDefaults = .standard
     ) {
         self.config = config
         self.runtimeOptions = runtimeOptions
+        self.userDefaults = userDefaults
         super.init(nibName: nil, bundle: nil)
     }
 
     required init?(coder: NSCoder) {
         self.config = .default
         self.runtimeOptions = .production
+        self.userDefaults = .standard
         super.init(coder: coder)
     }
 
@@ -321,7 +328,7 @@ final class ConversationViewController: NSViewController {
     /// Создать overlay при первом обращении и подвязать кнопку «Прервать».
     func ensureStatusOverlay() {
         guard statusOverlay == nil else { return }
-        let overlay = ConversationStatusOverlay()
+        let overlay = ConversationStatusOverlay(userDefaults: userDefaults)
         overlay.onInterrupt = { [weak self] in self?.interruptAI() }
         statusOverlay = overlay
     }
