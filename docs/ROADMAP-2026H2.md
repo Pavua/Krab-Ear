@@ -289,6 +289,8 @@ Swift не зовёт её 4 IPC-метода); дублировать рабо�
 - **LLM-bench refresh**: при выходе заметной локальной модели — прогон `scripts/llm-bench/`
   (safe-bench → text-bench), решение о замене прод-rewriter'а. Инфраструктура готова.
 - **STT-refresh**: аналогично при новых whisper/GigaAM/Parakeet поколениях (бенч на реальном RU-звонке).
+  **Выполнен 2026-07-20**: GigaAM v2 → v3_e2e_rnnt (спека `2026-07-20-gigaam-v3-upgrade-design.md`).
+  Qwen3-ASR (MLX) забенчен, в прод не введён (медленнее v3, смысловые ошибки) — кандидат на будущее.
 - **Dependency audit**: раз в квартал (последний — 2026-05-20, `docs/dependencies-audit-2026-05-20.md`).
 - **Disk/worktree гигиена**: `scripts/cleanup_worktree_shadows.command` + ручная ревизия
   `.claude/worktrees/` раз в месяц (урок: 392 worktree = 106 GB).

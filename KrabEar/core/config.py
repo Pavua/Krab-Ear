@@ -331,22 +331,29 @@ class Settings(BaseSettings):
     # При False Voxtral работает только как STT (без reasoning overhead).
     VOXTRAL_REASONING_ENABLED: bool = False
 
-    # --- GigaAM-RNNT v2 adapter (RU-специализированная модель от Sber) ---
-    # GigaAM — Conformer-based модель (244M параметров), дообученная на 50 000 часах
-    # русскоязычной речи. WER на Common Voice RU:
-    #   GigaAM-RNNT v2: ~3.8%  vs  whisper-large-v3: ~9.8% (≈2.5× улучшение).
-    # Лицензия: MIT — коммерческое использование разрешено.
-    # PyPI: pip install gigaam  (официальный пакет от salute-developers)
+    # --- GigaAM v3 adapter (RU-специализированная модель от Sber) ---
+    # GigaAM — Conformer-based модель, дообученная на русскоязычной речи.
+    # 2026-07-20: апгрейд v2 → v3 (спека 2026-07-20-gigaam-v3-upgrade-design.md).
+    # v3_e2e_rnnt (end-to-end) нативно выдаёт пунктуацию + капитализацию + числа,
+    # v2 отдавал всё строчными без знаков. Живой бенч M4 Max на 5 RU-сэмплах: v3 не
+    # медленнее v2, на технике/code-switching быстрее (0.40–1.17с vs 0.59–1.40с).
+    # v3 также заявляет −30% WER на "новых доменах" (колл-центр, музыка, нестандартная
+    # речь) при сохранении качества v2 на публичных бенчах. Для сравнения WER:
+    #   GigaAM v2-RNNT: ~3.8% Common Voice RU  vs  whisper-large-v3: ~9.8%.
+    # Лицензия: MIT. Пакет — git-исходник (v3 НЕ в PyPI 0.1.0), пиновано на коммит,
+    # см. scripts/install_gigaam_venv.command. torch-пин ослаблен до >=2.6.
     # HuggingFace: salute-developers/GigaAM
     # Opt-in: по умолчанию выключено до проверки установки gigaam.
     # Когда STT_GIGAAM_ENABLED=True И STT_LANGUAGE_ROUTING_ENABLED=True:
     #   detected_lang == "ru" → GigaAM → fallback whisper-large-v3.
     # Использует PyTorch + MPS (не MLX) → mlx_lock НЕ нужен.
-    # Потребление памяти: ~1 GB (244M float32 params) + ~200 MB torch runtime.
+    # Потребление памяти: ~1 GB params + ~200 MB torch runtime.
     STT_GIGAAM_ENABLED: bool = False
-    # Режим модели: "rnnt" (выше качество, RNNT decoder) или "ctc" (быстрее, CTC decoder).
-    # Полные имена тоже поддерживаются: "v2_rnnt", "v2_ctc", "v1_rnnt", "v1_ctc".
-    STT_GIGAAM_MODE: str = "rnnt"
+    # Режим модели. Дефолт "v3_e2e_rnnt" — end-to-end RNNT с нативной пунктуацией.
+    # Другие v3: "v3_rnnt"/"v3_ctc" (без e2e-нормализации), "v3_e2e_ctc" (быстрее, ниже
+    # качество). Legacy: "v2_rnnt"/"v2_ctc". 🔴 В git-пакете голое "rnnt" алиасится в
+    # "v3_rnnt" (НЕ v2_rnnt как в PyPI 0.1.0) → указываем полное имя явно.
+    STT_GIGAAM_MODE: str = "v3_e2e_rnnt"
     # Устройство для инференса: "cpu" (default, рекомендуется) или "mps" (Apple Silicon GPU).
     # Bench 2026-04-26 на M4 Max: CPU 0.62s vs MPS 4.36s на 15-сек fragment (RTF
     # 0.041 vs 0.291). MPS медленнее из-за warmup + tensor transfer overhead на
@@ -919,9 +926,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # --- Russian Whisper fine-tune ---
     "stt_use_ru_finetune": False,
     "stt_ru_finetune_model": "antony66/whisper-large-v3-russian",
-    # --- GigaAM-RNNT v2 adapter ---
+    # --- GigaAM v3 adapter (2026-07-20 апгрейд v2 → v3_e2e_rnnt) ---
     "stt_gigaam_enabled": False,
-    "stt_gigaam_mode": "rnnt",
+    "stt_gigaam_mode": "v3_e2e_rnnt",
     "stt_gigaam_device": "mps",
     # --- SenseVoice adapter (East Asian multilingual) ---
     "stt_sensevoice_enabled": False,

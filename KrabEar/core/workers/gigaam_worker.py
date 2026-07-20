@@ -46,13 +46,36 @@ from typing import Any, Optional
 # Использует эксклюзивный fcntl flock на PID-файл вместо pgrep (race-free).
 # ---------------------------------------------------------------------------
 
+def _engine_name_from_mode(mode: Optional[str]) -> str:
+    """Имя движка из режима модели: срезает версионный префикс.
+
+    v3_e2e_rnnt / v3_rnnt / v2_rnnt / v1_rnnt → "gigaam-rnnt" (движок один
+    независимо от версии). Порядок replace важен: v3_e2e_ ДО v3_.
+    """
+    mode_base = (
+        (mode or "rnnt")
+        .replace("v3_e2e_", "")
+        .replace("v3_", "")
+        .replace("v2_", "")
+        .replace("v1_", "")
+    )
+    return f"gigaam-{mode_base}"
+
+
 def _acquire_singleton_lock() -> None:
     """Попытка захватить эксклюзивный lock на PID-файл.
 
     При успехе — пишет PID и возвращает управление (lock держится до exit).
     При неудаче (другой воркер уже держит lock) — печатает предупреждение в stderr
     и завершает процесс с кодом 0 (не ошибка — просто не нужен дубликат).
+
+    Пропускается под KRAB_EAR_GIGAAM_WORKER_NO_SINGLETON=1 — чтобы юнит-тесты,
+    импортирующие этот модуль, не хватали прод-lock (иначе живой воркер → sys.exit(0)
+    убьёт тест-процесс) и не создавали побочный flock.
     """
+    if os.environ.get("KRAB_EAR_GIGAAM_WORKER_NO_SINGLETON") == "1":
+        return
+
     import fcntl
     import tempfile
 
@@ -320,9 +343,8 @@ def _handle_transcribe(params: dict) -> dict:
     _free_mps_pool()
 
     # Имя движка соответствует тому что использует in-process адаптер
-    # (core/pipeline/stt_gigaam.py — _engine_name).
-    mode_base = (_MODE or "rnnt").replace("v2_", "").replace("v1_", "")
-    engine = f"gigaam-{mode_base}"
+    # (core/pipeline/stt_gigaam.py — _engine_name). v3_e2e_rnnt → "gigaam-rnnt".
+    engine = _engine_name_from_mode(_MODE)
     if longform:
         engine = f"{engine}-longform"
 

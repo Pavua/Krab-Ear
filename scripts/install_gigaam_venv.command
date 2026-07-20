@@ -1,9 +1,15 @@
 #!/bin/bash
 # install_gigaam_venv.command
 #
-# Создаёт изолированный venv для GigaAM-RNNT v2 (RU STT, ~2.5× меньше WER чем whisper-large-v3).
-# Krab Ear main venv (Python 3.14, torch 2.11) НЕ совместим с pin'ами GigaAM 0.1.0.
-# Этот скрипт ставит GigaAM в ~/.venv_krab_ear_gigaam с Python 3.12 + torch 2.5.1.
+# Создаёт изолированный venv для GigaAM v3 (RU STT). Krab Ear main venv
+# (Python 3.14, torch 2.11) держим отдельно, чтобы не смешивать зависимости.
+# Этот скрипт ставит GigaAM v3 в ~/.venv_krab_ear_gigaam с Python 3.12.
+#
+# 2026-07-20 (спека docs/superpowers/specs/2026-07-20-gigaam-v3-upgrade-design.md):
+# апгрейд v2 → v3. Пакет gigaam==0.1.0 (PyPI) содержит ТОЛЬКО v1/v2 — v3-модели
+# есть только в git-исходнике. Новый пакет ослабил torch-пин до torch>=2.6
+# (extra [torch]). Ставим с ПИНОВАННОГО коммита (воспроизводимость для DMG-получателей).
+# Прод-mode = v3_e2e_rnnt (нативная пунктуация/капитализация/числа; забенчено быстрее v2).
 #
 # После install: см. memory/reference_gigaam_install_working.md для интеграции в Krab Ear.
 
@@ -11,6 +17,9 @@ set -e
 
 VENV_PATH="$HOME/.venv_krab_ear_gigaam"
 PYTHON_BIN="/opt/homebrew/bin/python3.12"
+# Пиновано на коммит 2026-07-14 (первый с v3 + multilingual). НЕ floating master.
+GIGAAM_REPO="https://github.com/salute-developers/GigaAM.git"
+GIGAAM_COMMIT="559d88d6b72541412743929f633a6ae7c9950b85"
 
 echo "=== GigaAM venv installer ==="
 echo "Target: $VENV_PATH"
@@ -43,19 +52,29 @@ echo "→ Активирую и обновляю pip…"
 source "$VENV_PATH/bin/activate"
 pip install --upgrade pip
 
-echo "→ Ставлю torch 2.5.1 + onnxruntime 1.23.0 (для совместимости с GigaAM)…"
-pip install "torch==2.5.1" "torchaudio==2.5.1" "onnxruntime==1.23.0" "onnx==1.19.0"
+echo "→ Клонирую GigaAM (git, пиновано на $GIGAAM_COMMIT)…"
+SRC_DIR="$VENV_PATH/src/GigaAM"
+mkdir -p "$VENV_PATH/src"
+if [ ! -d "$SRC_DIR/.git" ]; then
+    git clone "$GIGAAM_REPO" "$SRC_DIR"
+fi
+git -C "$SRC_DIR" fetch --all --quiet
+git -C "$SRC_DIR" checkout --quiet "$GIGAAM_COMMIT"
 
-echo "→ Ставлю gigaam (downgrade'нет onnx/onnxruntime автоматически)…"
-pip install gigaam
+echo "→ Ставлю gigaam v3 из исходника с extra [torch] (torch>=2.6)…"
+pip install -e "$SRC_DIR"'[torch]'
 
 echo ""
-echo "→ Smoke import…"
+echo "→ Smoke import + проверка v3-модели в реестре…"
 "$VENV_PATH/bin/python" -c "
 import gigaam, inspect
 print('✓ gigaam загружается')
 print('  load_model signature:', inspect.signature(gigaam.load_model))
-print('  attrs:', [x for x in dir(gigaam) if not x.startswith('_')][:10])
+names = getattr(gigaam, '_MODEL_HASHES', {})
+assert 'v3_e2e_rnnt' in names, 'v3_e2e_rnnt отсутствует в реестре — не тот коммит?'
+print('  ✓ v3_e2e_rnnt в реестре моделей')
+import torch
+print('  torch:', torch.__version__, 'mps:', torch.backends.mps.is_available())
 "
 
 echo ""
