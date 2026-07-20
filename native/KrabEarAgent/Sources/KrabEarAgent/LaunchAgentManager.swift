@@ -5,46 +5,84 @@
  1) PermissionWizard/main.swift: включение/выключение автозапуска.
  2) Krab Ear.app bundle: canonical autostart target (Phase C.6.2).
 
- Phase C.6.2 root-cause fix:
- - Plist label: com.antigravity.krab-ear (canonical bundle ID).
- - ProgramArguments: /usr/bin/open -W <bundle path> — launchd opens the .app bundle,
-   not start_agent.command → runtime/KrabEarAgent.
- - install() removes legacy com.krabear.agent.plist on first run (idempotent).
+ Исправление первопричины Phase C.6.2:
+ - label plist: com.antigravity.krab-ear (канонический bundle ID);
+ - ProgramArguments: /usr/bin/open -W <bundle path> — launchd открывает .app bundle,
+   а не start_agent.command → runtime/KrabEarAgent;
+ - install() идемпотентно удаляет старый com.krabear.agent.plist.
+
+ Безопасность тестов:
+ - production-initializer использует пользовательский `~/Library/LaunchAgents` и
+   настоящий `/bin/launchctl`;
+ - designated initializer принимает отдельный каталог и runner процессов, поэтому
+   unit-тесты не могут менять живое launchd-состояние.
 */
 
 import Foundation
 
+/// Узкая граница для компонентов, которым нужно только включать автозапуск.
+/// PermissionWizard зависит от этого протокола и в тестах получает spy без I/O.
+protocol AutostartManaging: AnyObject {
+    func setAutostart(enabled: Bool)
+}
+
+/// Подменяемый запуск процесса: тесты записывают запрос, не создавая `Process`.
+typealias LaunchAgentProcessRunner = @Sendable (
+    _ executable: String,
+    _ arguments: [String]
+) -> Int32
+
 /// Управляет launchd автозапуском нативного агента.
-final class LaunchAgentManager {
-    /// Canonical label matching the app's bundle ID (com.antigravity.krab-ear).
+final class LaunchAgentManager: AutostartManaging, @unchecked Sendable {
+    /// Канонический label совпадает с bundle ID приложения.
     private let label = "com.antigravity.krab-ear"
-    /// Legacy label used before Phase C.6.2 — removed on install() for one-time migration.
+    /// Старый label удаляется при install() во время одноразовой миграции.
     private let legacyLabel = "com.krabear.agent"
     private let projectRoot: String
+    private let launchAgentsDirectory: URL
+    private let processRunner: LaunchAgentProcessRunner
 
-    init(projectRoot: String) {
+    /// Production-вход сохраняет прежнюю сигнатуру для всех runtime call-sites.
+    convenience init(projectRoot: String) {
+        self.init(
+            projectRoot: projectRoot,
+            launchAgentsDirectory: FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/LaunchAgents", isDirectory: true),
+            processRunner: { executable, arguments in
+                Self.runSystemProcess(executable: executable, arguments: arguments)
+            }
+        )
+    }
+
+    /// Designated initializer изолирует файловый каталог и запуск процессов.
+    /// Тесты обязаны передавать UUID-temp directory и runner-spy.
+    init(
+        projectRoot: String,
+        launchAgentsDirectory: URL,
+        processRunner: @escaping LaunchAgentProcessRunner
+    ) {
         self.projectRoot = projectRoot
+        self.launchAgentsDirectory = launchAgentsDirectory
+        self.processRunner = processRunner
     }
 
     private var plistPath: String {
-        let launchAgents = NSString(string: "~/Library/LaunchAgents").expandingTildeInPath
-        return (launchAgents as NSString).appendingPathComponent("\(label).plist")
+        launchAgentsDirectory.appendingPathComponent("\(label).plist").path
     }
 
-    /// Path of the legacy plist that must be removed during migration.
+    /// Путь старого plist, удаляемого при миграции.
     private var legacyPlistPath: String {
-        let launchAgents = NSString(string: "~/Library/LaunchAgents").expandingTildeInPath
-        return (launchAgents as NSString).appendingPathComponent("\(legacyLabel).plist")
+        launchAgentsDirectory.appendingPathComponent("\(legacyLabel).plist").path
     }
 
-    /// Resolved path to the .app bundle.
-    /// Prefers the bundle adjacent to the project root; falls back to Bundle.main.
+    /// Вычисленный путь к .app bundle.
+    /// Сначала ищет bundle рядом с корнем проекта, затем использует Bundle.main.
     private var bundlePath: String {
         let candidate = (projectRoot as NSString).appendingPathComponent("Krab Ear.app")
         if FileManager.default.fileExists(atPath: candidate) {
             return candidate
         }
-        // Fallback: strip inner bundle paths to reach the .app container.
+        // Поднимаемся из внутренних каталогов до контейнера .app.
         var url = Bundle.main.bundleURL
         while url.pathExtension != "app" && url.path != "/" {
             url.deleteLastPathComponent()
@@ -68,10 +106,12 @@ final class LaunchAgentManager {
     }
 
     func install() {
-        let launchAgents = NSString(string: "~/Library/LaunchAgents").expandingTildeInPath
-        try? FileManager.default.createDirectory(atPath: launchAgents, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(
+            at: launchAgentsDirectory,
+            withIntermediateDirectories: true
+        )
 
-        // Phase C.6.2: Remove legacy com.krabear.agent.plist (idempotent).
+        // Phase C.6.2: идемпотентно удаляем старый com.krabear.agent.plist.
         removeLegacyPlistIfPresent()
 
         let bundlePathValue = bundlePath
@@ -104,7 +144,7 @@ final class LaunchAgentManager {
         reloadAgent()
     }
 
-    /// Removes the legacy com.krabear.agent.plist if it exists (idempotent one-time migration).
+    /// Удаляет старый com.krabear.agent.plist при одноразовой миграции.
     private func removeLegacyPlistIfPresent() {
         let path = legacyPlistPath
         guard FileManager.default.fileExists(atPath: path) else { return }
@@ -115,7 +155,7 @@ final class LaunchAgentManager {
 
 #if DEBUG
     /// Тест-хук: возвращает сгенерированный plist XML без записи на диск.
-    /// Используется в unit-тестах для проверки содержимого без FileManager side-effects.
+    /// Используется в unit-тестах для проверки содержимого без файловых изменений.
     func buildPlistContent() -> String {
         let bundlePathValue = bundlePath
         return """
@@ -153,7 +193,7 @@ final class LaunchAgentManager {
     /// Тест-хук: возвращает legacy label для проверки миграции.
     var legacyLabelForTest: String { legacyLabel }
 
-    /// Тест-хук: возвращает resolved bundle path без побочных эффектов.
+    /// Тест-хук: возвращает вычисленный bundle path без побочных эффектов.
     var bundlePathForTest: String { bundlePath }
 #endif
 
@@ -171,9 +211,14 @@ final class LaunchAgentManager {
 
     @discardableResult
     private func runLaunchctl(args: [String]) -> Int32 {
+        processRunner("/bin/launchctl", args)
+    }
+
+    /// Единственная live-реализация process runner; unit-тесты её не получают.
+    private static func runSystemProcess(executable: String, arguments: [String]) -> Int32 {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = args
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
         do {
             try process.run()
             process.waitUntilExit()

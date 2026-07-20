@@ -1,78 +1,153 @@
 /*
- LaunchAgentManagerTests — тесты Phase C.6.2 root-cause fix.
+ LaunchAgentManagerTests — безопасные тесты автозапуска Krab Ear.
 
  Проверяет:
- 1. label == "com.antigravity.krab-ear" (canonical bundle ID).
+ 1. label == "com.antigravity.krab-ear" (канонический bundle ID).
  2. legacyLabel == "com.krabear.agent".
  3. buildPlistContent() содержит /usr/bin/open -W <bundle> (НЕ start_agent.command).
  4. buildPlistContent() НЕ содержит /bin/zsh и start_agent.command.
- 5. buildPlistContent() содержит canonical label.
+ 5. buildPlistContent() содержит канонический label.
  6. plistPath содержит label "com.antigravity.krab-ear".
- 7. bundlePath содержит ".app" расширение или projectRoot component.
- 8. isInstalled: false если plist отсутствует.
- 9. install() создаёт файл plist.
+ 7. bundlePath содержит расширение ".app" рядом с projectRoot.
+ 8. isAutostartEnabled: false/true для plist в изолированном каталоге.
+ 9. install() создаёт plist только во временном каталоге.
  10. install() идемпотентен (двойной вызов = одинаковый результат).
  11. uninstall() удаляет файл plist.
- 12. Корректная обработка отсутствия разрешений.
+ 12. Корректная обработка недоступного тестового каталога.
  13. Plist является валидным XML.
- 14. concurrent install безопасен.
+ 14. Параллельный install безопасен.
 
  Подход:
- - buildPlistContent() вызывается в DEBUG-режиме без FileManager side-effects.
- - Launchctl и launchd не трогаются.
- - Файловые тесты используют временные директории.
+ - Каждый manager получает UUID-каталог внутри temporaryDirectory.
+ - Runner процессов всегда подменён потокобезопасным recorder: настоящий
+   `/bin/launchctl` никогда не запускается.
+ - Очистка удаляет только созданный конкретным тестом временный корень.
 */
 
 import XCTest
 @testable import KrabEarAgent
 
+/// Потокобезопасно сохраняет запросы на запуск процесса, не создавая `Process`.
+private final class LaunchAgentProcessRecorder: @unchecked Sendable {
+    struct Call: Equatable {
+        let executable: String
+        let arguments: [String]
+    }
+
+    private let lock = NSLock()
+    private var storedCalls: [Call] = []
+
+    func run(executable: String, arguments: [String]) -> Int32 {
+        lock.lock()
+        storedCalls.append(Call(executable: executable, arguments: arguments))
+        lock.unlock()
+        return 0
+    }
+
+    var calls: [Call] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedCalls
+    }
+}
+
+/// Полный изолированный контур одного теста LaunchAgentManager.
+private struct LaunchAgentManagerFixture: Sendable {
+    let manager: LaunchAgentManager
+    let root: URL
+    let projectRoot: URL
+    let launchAgentsDirectory: URL
+    let canonicalPlist: URL
+    let legacyPlist: URL
+    let recorder: LaunchAgentProcessRecorder
+}
+
 @MainActor
 final class LaunchAgentManagerTests: XCTestCase {
 
-    // MARK: - Fixtures
+    // MARK: - Изолированные фикстуры
 
-    private func makeManager(projectRoot: String = "/tmp/krab_ear_test_root") -> LaunchAgentManager {
-        LaunchAgentManager(projectRoot: projectRoot)
+    private func makeFixture() throws -> LaunchAgentManagerFixture {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("KrabEarLaunchAgentTests-\(UUID().uuidString)", isDirectory: true)
+            .standardizedFileURL
+        let projectRoot = root.appendingPathComponent("project", isDirectory: true)
+        let bundle = projectRoot.appendingPathComponent("Krab Ear.app", isDirectory: true)
+        let launchAgentsDirectory = root
+            .appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+        let recorder = LaunchAgentProcessRecorder()
+
+        try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
+        addTeardownBlock {
+            // Удаляется только UUID-корень этого теста; пользовательский home не затрагивается.
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let manager = LaunchAgentManager(
+            projectRoot: projectRoot.path,
+            launchAgentsDirectory: launchAgentsDirectory,
+            processRunner: recorder.run(executable:arguments:)
+        )
+        return LaunchAgentManagerFixture(
+            manager: manager,
+            root: root,
+            projectRoot: projectRoot,
+            launchAgentsDirectory: launchAgentsDirectory,
+            canonicalPlist: launchAgentsDirectory
+                .appendingPathComponent("com.antigravity.krab-ear.plist"),
+            legacyPlist: launchAgentsDirectory
+                .appendingPathComponent("com.krabear.agent.plist"),
+            recorder: recorder
+        )
     }
 
-    // MARK: - Label tests
+    private func makeManager() throws -> LaunchAgentManager {
+        try makeFixture().manager
+    }
 
-    func testLabelIsCanonical() {
-        let manager = makeManager()
+    // MARK: - Идентификаторы launchd
+
+    func testLabelIsCanonical() throws {
+        let manager = try makeManager()
         XCTAssertEqual(manager.labelForTest, "com.antigravity.krab-ear",
                        "Label must match canonical bundle ID com.antigravity.krab-ear")
     }
 
-    func testLegacyLabelIsCorrect() {
-        let manager = makeManager()
+    func testLegacyLabelIsCorrect() throws {
+        let manager = try makeManager()
         XCTAssertEqual(manager.legacyLabelForTest, "com.krabear.agent",
                        "Legacy label must be com.krabear.agent for migration cleanup")
     }
 
-    // MARK: - plistPath tests
+    // MARK: - Пути plist
 
-    func testPlistPathContainsCanonicalLabel() {
-        let manager = makeManager()
+    func testPlistPathContainsCanonicalLabel() throws {
+        let manager = try makeManager()
         XCTAssertTrue(manager.plistPathForTest.contains("com.antigravity.krab-ear"),
                       "plistPath must contain canonical label com.antigravity.krab-ear, got: \(manager.plistPathForTest)")
     }
 
-    func testPlistPathEndsWithPlist() {
-        let manager = makeManager()
+    func testPlistPathEndsWithPlist() throws {
+        let manager = try makeManager()
         XCTAssertTrue(manager.plistPathForTest.hasSuffix(".plist"),
                       "plistPath must end with .plist, got: \(manager.plistPathForTest)")
     }
 
-    func testPlistPathInLaunchAgents() {
-        let manager = makeManager()
-        XCTAssertTrue(manager.plistPathForTest.contains("LaunchAgents"),
-                      "plistPath must be inside ~/Library/LaunchAgents, got: \(manager.plistPathForTest)")
+    func testPlistPathUsesInjectedLaunchAgentsDirectory() throws {
+        let fixture = try makeFixture()
+        XCTAssertEqual(fixture.manager.plistPathForTest, fixture.canonicalPlist.path)
+        XCTAssertTrue(fixture.manager.plistPathForTest.hasPrefix(fixture.root.path))
+
+        XCTAssertEqual(
+            fixture.canonicalPlist.deletingLastPathComponent(),
+            fixture.launchAgentsDirectory
+        )
     }
 
-    // MARK: - buildPlistContent tests (Phase C.6.2 ProgramArguments shape)
+    // MARK: - Содержимое ProgramArguments из Phase C.6.2
 
-    func testPlistUsesOpenNotZsh() {
-        let manager = makeManager()
+    func testPlistUsesOpenNotZsh() throws {
+        let manager = try makeManager()
         let content = manager.buildPlistContent()
         XCTAssertTrue(content.contains("/usr/bin/open"),
                       "ProgramArguments must use /usr/bin/open (not /bin/zsh), got:\n\(content)")
@@ -80,29 +155,29 @@ final class LaunchAgentManagerTests: XCTestCase {
                        "ProgramArguments must NOT contain /bin/zsh, got:\n\(content)")
     }
 
-    func testPlistUsesWFlag() {
-        let manager = makeManager()
+    func testPlistUsesWFlag() throws {
+        let manager = try makeManager()
         let content = manager.buildPlistContent()
         XCTAssertTrue(content.contains("<string>-W</string>"),
                       "ProgramArguments must include -W flag for /usr/bin/open, got:\n\(content)")
     }
 
-    func testPlistDoesNotReferenceStartAgentCommand() {
-        let manager = makeManager()
+    func testPlistDoesNotReferenceStartAgentCommand() throws {
+        let manager = try makeManager()
         let content = manager.buildPlistContent()
         XCTAssertFalse(content.contains("start_agent.command"),
                        "ProgramArguments must NOT reference start_agent.command (Phase C.6.2), got:\n\(content)")
     }
 
-    func testPlistDoesNotReferenceLaunchedByLaunchd() {
-        let manager = makeManager()
+    func testPlistDoesNotReferenceLaunchedByLaunchd() throws {
+        let manager = try makeManager()
         let content = manager.buildPlistContent()
         XCTAssertFalse(content.contains("--launched-by-launchd"),
                        "ProgramArguments must NOT include --launched-by-launchd, got:\n\(content)")
     }
 
-    func testPlistContainsCanonicalLabel() {
-        let manager = makeManager()
+    func testPlistContainsCanonicalLabel() throws {
+        let manager = try makeManager()
         let content = manager.buildPlistContent()
         XCTAssertTrue(content.contains("com.antigravity.krab-ear"),
                       "Plist Label must be com.antigravity.krab-ear, got:\n\(content)")
@@ -110,209 +185,236 @@ final class LaunchAgentManagerTests: XCTestCase {
                        "Plist Label must NOT be legacy com.krabear.agent, got:\n\(content)")
     }
 
-    func testPlistContainsBundleAppExtension() {
-        let manager = makeManager()
+    func testPlistContainsBundleAppExtension() throws {
+        let manager = try makeManager()
         let content = manager.buildPlistContent()
-        // The bundle path argument must point to a .app bundle.
+        // Аргумент bundle path обязан указывать на .app.
         XCTAssertTrue(content.contains(".app"),
                       "ProgramArguments must include a .app bundle path, got:\n\(content)")
     }
 
-    func testPlistContainsRunAtLoad() {
-        let manager = makeManager()
+    func testPlistContainsRunAtLoad() throws {
+        let manager = try makeManager()
         let content = manager.buildPlistContent()
         XCTAssertTrue(content.contains("<key>RunAtLoad</key>"),
                       "Plist must contain RunAtLoad key, got:\n\(content)")
     }
 
-    func testPlistContainsKeepAlive() {
-        let manager = makeManager()
+    func testPlistContainsKeepAlive() throws {
+        let manager = try makeManager()
         let content = manager.buildPlistContent()
         XCTAssertTrue(content.contains("<key>KeepAlive</key>"),
                       "Plist must contain KeepAlive key, got:\n\(content)")
     }
 
-    func testPlistDoesNotContainWorkingDirectory() {
-        // WorkingDirectory was removed — /usr/bin/open does not need it.
-        let manager = makeManager()
+    func testPlistDoesNotContainWorkingDirectory() throws {
+        // WorkingDirectory удалён: `/usr/bin/open` в нём не нуждается.
+        let manager = try makeManager()
         let content = manager.buildPlistContent()
         XCTAssertFalse(content.contains("<key>WorkingDirectory</key>"),
                        "Plist must NOT contain WorkingDirectory (not needed for /usr/bin/open), got:\n\(content)")
     }
 
-    // MARK: - bundlePath tests
+    // MARK: - Разрешение bundlePath
 
-    func testBundlePathContainsApp() {
-        let manager = makeManager()
+    func testBundlePathContainsApp() throws {
+        let manager = try makeManager()
         let path = manager.bundlePathForTest
-        // Either from projectRoot lookup or Bundle.main fallback, must end in .app
+        // Фикстура создаёт bundle рядом с projectRoot, поэтому fallback не нужен.
         XCTAssertTrue(path.hasSuffix(".app") || path.contains("Krab Ear.app"),
                       "bundlePath must point to a .app bundle, got: \(path)")
     }
 
-    func testBundlePathWithRealProjectRoot() {
-        // Use actual project root which has the .app next to it
-        let projectRoot = "/Users/pablito/Antigravity_AGENTS/Krab Ear"
-        let manager = makeManager(projectRoot: projectRoot)
-        let path = manager.bundlePathForTest
-        XCTAssertTrue(path.hasSuffix(".app"),
-                      "bundlePath with real project root must end in .app, got: \(path)")
+    func testBundlePathUsesBundleAdjacentToInjectedProjectRoot() throws {
+        let fixture = try makeFixture()
+        XCTAssertEqual(
+            fixture.manager.bundlePathForTest,
+            fixture.projectRoot.appendingPathComponent("Krab Ear.app").path
+        )
     }
 
-    // MARK: - isInstalled: returns false if plist absent
+    // MARK: - Состояние установки в изолированном каталоге
 
-    func test_isInstalled_returns_false_if_plist_absent() {
-        // isAutostartEnabled() checks FileManager.fileExists at the plistPath.
-        // We can't change the real plistPath, but we verify the logic by
-        // checking that a freshly constructed manager reports consistent state:
-        // if the real plist does not exist, isAutostartEnabled() must return false.
-        let manager = makeManager()
-        let plistExists = FileManager.default.fileExists(atPath: manager.plistPathForTest)
-        let reported = manager.isAutostartEnabled()
-        XCTAssertEqual(reported, plistExists,
-                       "isAutostartEnabled() must reflect actual filesystem presence of plist")
+    func test_isAutostartEnabled_returnsFalseWhenInjectedPlistIsAbsent() throws {
+        let fixture = try makeFixture()
+        XCTAssertFalse(fixture.manager.isAutostartEnabled())
     }
 
-    func test_isInstalled_false_for_nonexistent_path() {
-        // A manager rooted at a temp path that never had install() called:
-        // plistPath must not exist, and isAutostartEnabled() returns false.
-        let tmpRoot = NSTemporaryDirectory().appending("krabtest_\(Int.random(in: 100000...999999))")
-        let manager = makeManager(projectRoot: tmpRoot)
-        // plistPath lives in ~/Library/LaunchAgents, which always exists;
-        // we only assert false when plist file itself is absent.
-        let plistPath = manager.plistPathForTest
-        // Remove if accidentally present from prior test run
-        try? FileManager.default.removeItem(atPath: plistPath)
-        // Only assert if it really isn't present now
-        if !FileManager.default.fileExists(atPath: plistPath) {
-            XCTAssertFalse(manager.isAutostartEnabled(),
-                           "isAutostartEnabled() must be false when plist file does not exist")
-        }
+    func test_isAutostartEnabled_returnsTrueWhenInjectedPlistExists() throws {
+        let fixture = try makeFixture()
+        try FileManager.default.createDirectory(
+            at: fixture.launchAgentsDirectory,
+            withIntermediateDirectories: true
+        )
+        try Data("test".utf8).write(to: fixture.canonicalPlist)
+
+        XCTAssertTrue(fixture.manager.isAutostartEnabled())
     }
 
-    // MARK: - install() creates plist file
+    // MARK: - Создание plist через install()
 
-    func test_install_creates_plist_file() {
-        let manager = makeManager()
-        let plistPath = manager.plistPathForTest
+    func test_installWritesInjectedPlistAndUsesInjectedRunner() throws {
+        let fixture = try makeFixture()
 
-        // Clean up before test
-        try? FileManager.default.removeItem(atPath: plistPath)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: plistPath),
-                       "Plist must not exist before install()")
+        fixture.manager.install()
 
-        // install() calls launchctl which may fail in sandbox — we only check file creation.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.canonicalPlist.path))
+        XCTAssertEqual(
+            fixture.recorder.calls,
+            [
+                .init(
+                    executable: "/bin/launchctl",
+                    arguments: ["bootout", "gui/\(getuid())", fixture.canonicalPlist.path]
+                ),
+                .init(
+                    executable: "/bin/launchctl",
+                    arguments: ["bootstrap", "gui/\(getuid())", fixture.canonicalPlist.path]
+                ),
+            ]
+        )
+        XCTAssertTrue(
+            fixture.recorder.calls.allSatisfy { call in
+                call.arguments.last?.hasPrefix(fixture.root.path) == true
+            },
+            "Все launchctl-пути теста обязаны оставаться внутри UUID-каталога"
+        )
+    }
+
+    // MARK: - Идемпотентность install()
+
+    func test_installIsIdempotentInsideInjectedDirectory() throws {
+        let fixture = try makeFixture()
+
+        fixture.manager.install()
+        let firstContent = try String(contentsOf: fixture.canonicalPlist, encoding: .utf8)
+        fixture.manager.install()
+        let secondContent = try String(contentsOf: fixture.canonicalPlist, encoding: .utf8)
+
+        XCTAssertEqual(firstContent, secondContent)
+        XCTAssertEqual(fixture.recorder.calls.count, 4)
+        XCTAssertTrue(
+            fixture.recorder.calls.allSatisfy {
+                $0.arguments.last == fixture.canonicalPlist.path
+            }
+        )
+    }
+
+    func test_installRemovesLegacyPlistThroughInjectedRunner() throws {
+        let fixture = try makeFixture()
+        try FileManager.default.createDirectory(
+            at: fixture.launchAgentsDirectory,
+            withIntermediateDirectories: true
+        )
+        try Data("legacy".utf8).write(to: fixture.legacyPlist)
+
+        fixture.manager.install()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.legacyPlist.path))
+        XCTAssertEqual(
+            fixture.recorder.calls.first,
+            .init(
+                executable: "/bin/launchctl",
+                arguments: ["bootout", "gui/\(getuid())", fixture.legacyPlist.path]
+            )
+        )
+    }
+
+    func test_setAutostartRoutesBothDecisionsInsideInjectedDirectory() throws {
+        let fixture = try makeFixture()
+
+        fixture.manager.setAutostart(enabled: true)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.canonicalPlist.path))
+        fixture.manager.setAutostart(enabled: false)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.canonicalPlist.path))
+        XCTAssertEqual(fixture.recorder.calls.count, 3)
+        XCTAssertTrue(
+            fixture.recorder.calls.allSatisfy {
+                $0.arguments.last == fixture.canonicalPlist.path
+            }
+        )
+    }
+
+    // MARK: - Удаление plist через uninstall()
+
+    func test_uninstallRemovesOnlyInjectedPlistAndUsesInjectedRunner() throws {
+        let fixture = try makeFixture()
+        try FileManager.default.createDirectory(
+            at: fixture.launchAgentsDirectory,
+            withIntermediateDirectories: true
+        )
+        try Data("dummy".utf8).write(to: fixture.canonicalPlist)
+
+        fixture.manager.uninstall()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.canonicalPlist.path))
+        XCTAssertEqual(
+            fixture.recorder.calls,
+            [
+                .init(
+                    executable: "/bin/launchctl",
+                    arguments: ["bootout", "gui/\(getuid())", fixture.canonicalPlist.path]
+                ),
+            ]
+        )
+    }
+
+    // MARK: - Недоступный каталог
+
+    func test_unavailableInjectedDirectoryIsHandledWithoutRealProcess() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("KrabEarLaunchAgentBlocked-\(UUID().uuidString)")
+            .standardizedFileURL
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+
+        let regularFile = root.appendingPathComponent("regular-file")
+        try Data("block directory creation".utf8).write(to: regularFile)
+        let blockedDirectory = regularFile.appendingPathComponent("LaunchAgents")
+        let recorder = LaunchAgentProcessRecorder()
+        let manager = LaunchAgentManager(
+            projectRoot: root.path,
+            launchAgentsDirectory: blockedDirectory,
+            processRunner: recorder.run(executable:arguments:)
+        )
+
         manager.install()
-
-        XCTAssertTrue(FileManager.default.fileExists(atPath: plistPath),
-                      "install() must create the plist file at \(plistPath)")
-
-        // Cleanup
-        try? FileManager.default.removeItem(atPath: plistPath)
-    }
-
-    // MARK: - install() idempotent
-
-    func test_install_idempotent() {
-        let manager = makeManager()
-        let plistPath = manager.plistPathForTest
-
-        try? FileManager.default.removeItem(atPath: plistPath)
-
-        manager.install()
-        guard FileManager.default.fileExists(atPath: plistPath) else {
-            XCTFail("install() must create plist on first call")
-            return
-        }
-
-        // Capture modification date after first install
-        let attrs1 = try? FileManager.default.attributesOfItem(atPath: plistPath)
-        let size1 = (attrs1?[.size] as? Int) ?? 0
-
-        // Second call — file must remain with the same content
-        manager.install()
-        XCTAssertTrue(FileManager.default.fileExists(atPath: plistPath),
-                      "install() called twice must leave plist present")
-
-        let attrs2 = try? FileManager.default.attributesOfItem(atPath: plistPath)
-        let size2 = (attrs2?[.size] as? Int) ?? 0
-        XCTAssertEqual(size1, size2,
-                       "install() called twice must produce the same file size (idempotent)")
-
-        // Cleanup
-        try? FileManager.default.removeItem(atPath: plistPath)
-    }
-
-    // MARK: - uninstall() removes plist file
-
-    func test_uninstall_removes_plist_file() {
-        let manager = makeManager()
-        let plistPath = manager.plistPathForTest
-
-        // Create a dummy plist to simulate installed state
-        let launchAgents = (plistPath as NSString).deletingLastPathComponent
-        try? FileManager.default.createDirectory(atPath: launchAgents,
-                                                  withIntermediateDirectories: true)
-        FileManager.default.createFile(atPath: plistPath, contents: Data("dummy".utf8))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: plistPath),
-                      "Pre-condition: plist must exist before uninstall()")
-
         manager.uninstall()
 
-        XCTAssertFalse(FileManager.default.fileExists(atPath: plistPath),
-                       "uninstall() must remove the plist file at \(plistPath)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: manager.plistPathForTest))
+        XCTAssertEqual(recorder.calls.count, 3)
+        XCTAssertTrue(recorder.calls.allSatisfy { $0.executable == "/bin/launchctl" })
     }
 
-    // MARK: - handles permission denied gracefully
+    // MARK: - Валидность XML plist
 
-    func test_handles_permission_denied_gracefully() {
-        // LaunchAgentManager uses try? for all FileManager operations — it should
-        // never propagate errors. We verify this by constructing a manager whose
-        // plist path is non-writable.
-        // Since we cannot easily make ~/Library/LaunchAgents non-writable in tests,
-        // we rely on the fact that install()/uninstall() use try? (not try!).
-        // The test verifies the class compiles and runs without crashing on all paths.
-        let manager = makeManager(projectRoot: "/nonexistent/root/\(UUID().uuidString)")
-
-        // These must not throw or crash, even if filesystem ops silently fail.
-        XCTAssertNoThrow(manager.install(), "install() must not throw even on non-writable paths")
-        XCTAssertNoThrow(manager.uninstall(), "uninstall() must not throw even on non-writable paths")
-        XCTAssertNoThrow(manager.setAutostart(enabled: true), "setAutostart(true) must not throw")
-        XCTAssertNoThrow(manager.setAutostart(enabled: false), "setAutostart(false) must not throw")
-
-        // Cleanup in case install() succeeded
-        try? FileManager.default.removeItem(atPath: manager.plistPathForTest)
-    }
-
-    // MARK: - plist format: valid XML
-
-    func test_plist_format_valid_xml() {
-        let manager = makeManager()
+    func test_plist_format_valid_xml() throws {
+        let manager = try makeManager()
         let content = manager.buildPlistContent()
 
-        // Must open with XML declaration
+        // XML обязан начинаться декларацией.
         XCTAssertTrue(content.contains("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"),
                       "Plist must start with XML declaration")
 
-        // Must contain DOCTYPE plist
+        // Формат plist обязан объявлять DOCTYPE.
         XCTAssertTrue(content.contains("<!DOCTYPE plist"),
                       "Plist must contain DOCTYPE declaration")
 
-        // Must have root <plist> element
+        // Корневой элемент — <plist>.
         XCTAssertTrue(content.contains("<plist version=\"1.0\">") || content.contains("<plist version='1.0'>"),
                       "Plist must have root <plist> element")
 
-        // Must close root element
+        // Корневой элемент должен быть закрыт.
         XCTAssertTrue(content.contains("</plist>"),
                       "Plist must close root </plist> element")
 
-        // Must have <dict> root child
+        // Корневой plist содержит словарь.
         XCTAssertTrue(content.contains("<dict>"),
                       "Plist must contain <dict> root element")
         XCTAssertTrue(content.contains("</dict>"),
                       "Plist must close <dict> element")
 
-        // Must be parseable by XMLParser
+        // Финальная проверка реальным XMLParser.
         let data = Data(content.utf8)
         let parser = XMLParser(data: data)
         let delegate = XMLParseErrorDelegate()
@@ -322,15 +424,12 @@ final class LaunchAgentManagerTests: XCTestCase {
                       "buildPlistContent() must produce parseable XML. Error: \(delegate.errorDescription ?? "none")")
     }
 
-    // MARK: - concurrent install safe
+    // MARK: - Безопасность параллельного install
 
-    func test_concurrent_install_safe() {
-        // Verify install() can be called concurrently without crashing.
-        // LaunchAgentManager uses try? FileManager operations which are
-        // individually atomic at the OS level for simple writes.
-        let manager = makeManager()
-        let plistPath = manager.plistPathForTest
-        try? FileManager.default.removeItem(atPath: plistPath)
+    func test_concurrentInstallRemainsInsideInjectedDirectory() throws {
+        // Параллельные вызовы проверяют существующую атомарную запись plist;
+        // recorder защищён lock и никогда не создаёт системный процесс.
+        let fixture = try makeFixture()
 
         let expectation = self.expectation(description: "concurrent install")
         expectation.expectedFulfillmentCount = 5
@@ -338,29 +437,30 @@ final class LaunchAgentManagerTests: XCTestCase {
         let queue = DispatchQueue(label: "test.concurrent", attributes: .concurrent)
         for _ in 0..<5 {
             queue.async {
-                manager.install()
+                fixture.manager.install()
                 expectation.fulfill()
             }
         }
 
         wait(for: [expectation], timeout: 10)
 
-        // File should exist (at least one install succeeded)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: plistPath),
-                      "After concurrent install(), plist file must exist")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.canonicalPlist.path))
 
-        // Content must be valid (last writer wins, but must be valid XML)
-        if let written = try? String(contentsOfFile: plistPath, encoding: .utf8) {
+        // Побеждает последний writer, но итог обязан остаться валидным plist.
+        if let written = try? String(contentsOf: fixture.canonicalPlist, encoding: .utf8) {
             XCTAssertTrue(written.contains("com.antigravity.krab-ear"),
                           "Plist written by concurrent install() must contain canonical label")
         }
-
-        // Cleanup
-        try? FileManager.default.removeItem(atPath: plistPath)
+        XCTAssertEqual(fixture.recorder.calls.count, 10)
+        XCTAssertTrue(
+            fixture.recorder.calls.allSatisfy {
+                $0.arguments.last == fixture.canonicalPlist.path
+            }
+        )
     }
 }
 
-// MARK: - XMLParseErrorDelegate helper
+// MARK: - Вспомогательный XMLParseErrorDelegate
 
 private final class XMLParseErrorDelegate: NSObject, XMLParserDelegate {
     var hadError = false

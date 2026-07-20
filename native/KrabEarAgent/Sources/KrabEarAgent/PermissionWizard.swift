@@ -2,7 +2,7 @@
  Онбординг Krab Ear по критичным системным правам и автозапуску.
 
  Связи модуля:
- 1) LaunchAgentManager: включает/отключает launchd автозапуск.
+ 1) AutostartManaging: включает/отключает launchd автозапуск; тесты используют spy.
  2) AgentSettings: сохраняет факт завершения онбординга.
 */
 
@@ -15,7 +15,7 @@ final class PermissionWizard {
     func runIfNeeded(
         settings: AgentSettings,
         persistSettings: ([String: Any]) -> Void,
-        launchAgentManager: LaunchAgentManager
+        launchAgentManager: any AutostartManaging
     ) -> AgentSettings {
         guard !settings.onboardingCompleted else {
             return settings
@@ -114,7 +114,7 @@ final class PermissionWizard {
         to settings: AgentSettings,
         autostart: Bool,
         persistSettings: ([String: Any]) -> Void,
-        launchAgentManager: LaunchAgentManager
+        launchAgentManager: any AutostartManaging
     ) -> AgentSettings {
         var updated = settings
         launchAgentManager.setAutostart(enabled: autostart)

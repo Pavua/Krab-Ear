@@ -2,63 +2,70 @@
  PermissionWizardTests — тесты машины состояний PermissionWizard.
 
  Подход:
- - НЕ вызываем runIfNeeded() напрямую — он показывает NSAlert modals.
+ - runIfNeeded() вызывается только для раннего guard, до показа NSAlert.
+ - Автозапуск заменён spy-объектом: тесты не создают plist и процессы.
  - Тестируем:
    (1) Условие раннего выхода: onboardingCompleted == true → пропустить онбординг.
    (2) applyCompletionState() тест-хук: мутации AgentSettings и persistSettings вызов.
    (3) Флаг autoStartEnabled правильно отражает параметр autostart.
    (4) onboardingCompleted выставляется в true после applyCompletionState.
    (5) persistSettings вызывается с правильными ключами payload.
-   (6) LaunchAgentManager.setAutostart вызывается с нужным значением (via temp dir).
+   (6) AutostartManaging получает ровно ожидаемые значения.
 */
 
 import XCTest
 @testable import KrabEarAgent
 
-// MARK: - PermissionWizardTests
+// MARK: - Тесты PermissionWizard
+
+/// Запоминает решения онбординга об автозапуске без файловых изменений.
+private final class AutostartManagerSpy: AutostartManaging {
+    private(set) var receivedValues: [Bool] = []
+
+    func setAutostart(enabled: Bool) {
+        receivedValues.append(enabled)
+    }
+}
 
 @MainActor
 final class PermissionWizardTests: XCTestCase {
 
-    // MARK: - Helpers
+    // MARK: - Вспомогательные объекты
 
     private func makeWizard() -> PermissionWizard {
         PermissionWizard()
     }
 
-    private func makeLaunchManager() -> LaunchAgentManager {
-        // Используем tmpdir как projectRoot — plist будет писаться в реальный
-        // ~/Library/LaunchAgents, но мы проверяем только поведение, не файловую систему.
-        LaunchAgentManager(projectRoot: NSTemporaryDirectory())
-    }
-
-    // MARK: - Early-return guard: onboardingCompleted == true
+    // MARK: - Ранний выход при onboardingCompleted == true
 
     func test_runIfNeeded_alreadyCompleted_returnsUnmodifiedSettings() {
-        // Если onboarding уже завершён, runIfNeeded должен немедленно вернуть исходные settings.
-        // Мы проверяем это через applyCompletionState — после него onboardingCompleted = true,
-        // и следующий вызов должен быть no-op (тестируем guard вручную).
+        let wizard = makeWizard()
+        let autostartManager = AutostartManagerSpy()
         var settings = AgentSettings.default
         settings.onboardingCompleted = true
+        settings.autoStartEnabled = true
+        var persistCalled = false
 
-        // Имитируем логику guard из runIfNeeded
-        let guard_triggers_early_return = settings.onboardingCompleted
-        XCTAssertTrue(guard_triggers_early_return, "Если onboardingCompleted=true, онбординг должен быть пропущен")
+        let result = wizard.runIfNeeded(
+            settings: settings,
+            persistSettings: { _ in persistCalled = true },
+            launchAgentManager: autostartManager
+        )
+
+        XCTAssertTrue(result.onboardingCompleted)
+        XCTAssertTrue(result.autoStartEnabled)
+        XCTAssertFalse(persistCalled, "Ранний guard не должен повторно сохранять настройки")
+        XCTAssertTrue(
+            autostartManager.receivedValues.isEmpty,
+            "Ранний guard не должен менять launchd-состояние"
+        )
     }
 
-    func test_runIfNeeded_notCompleted_guardIsFalse() {
-        var settings = AgentSettings.default
-        settings.onboardingCompleted = false
-
-        let should_run_onboarding = !settings.onboardingCompleted
-        XCTAssertTrue(should_run_onboarding, "Если onboardingCompleted=false, онбординг должен запуститься")
-    }
-
-    // MARK: - applyCompletionState: state mutations
+    // MARK: - Мутации состояния в applyCompletionState
 
     func test_applyCompletionState_setsOnboardingCompleted() {
         let wizard = makeWizard()
-        let launchManager = makeLaunchManager()
+        let launchManager = AutostartManagerSpy()
         var persistCalled = false
 
         var settings = AgentSettings.default
@@ -72,11 +79,13 @@ final class PermissionWizardTests: XCTestCase {
         )
 
         XCTAssertTrue(result.onboardingCompleted, "applyCompletionState должен выставить onboardingCompleted=true")
+        XCTAssertTrue(persistCalled, "applyCompletionState должен сохранить итоговые настройки")
+        XCTAssertEqual(launchManager.receivedValues, [false])
     }
 
     func test_applyCompletionState_autostartTrue_reflectedInSettings() {
         let wizard = makeWizard()
-        let launchManager = makeLaunchManager()
+        let launchManager = AutostartManagerSpy()
 
         let settings = AgentSettings.default
         let result = wizard.applyCompletionState(
@@ -87,11 +96,12 @@ final class PermissionWizardTests: XCTestCase {
         )
 
         XCTAssertTrue(result.autoStartEnabled, "autoStartEnabled должен быть true когда autostart=true")
+        XCTAssertEqual(launchManager.receivedValues, [true])
     }
 
     func test_applyCompletionState_autostartFalse_reflectedInSettings() {
         let wizard = makeWizard()
-        let launchManager = makeLaunchManager()
+        let launchManager = AutostartManagerSpy()
 
         var settings = AgentSettings.default
         settings.autoStartEnabled = true  // начальное значение true
@@ -104,11 +114,12 @@ final class PermissionWizardTests: XCTestCase {
         )
 
         XCTAssertFalse(result.autoStartEnabled, "autoStartEnabled должен быть false когда autostart=false")
+        XCTAssertEqual(launchManager.receivedValues, [false])
     }
 
     func test_applyCompletionState_callsPersistSettings() {
         let wizard = makeWizard()
-        let launchManager = makeLaunchManager()
+        let launchManager = AutostartManagerSpy()
         var persistedPayload: [String: Any]?
 
         let settings = AgentSettings.default
@@ -122,11 +133,12 @@ final class PermissionWizardTests: XCTestCase {
         XCTAssertNotNil(persistedPayload, "persistSettings должен быть вызван с payload")
         let onboardingValue = persistedPayload?["onboarding_completed"] as? Bool
         XCTAssertEqual(onboardingValue, true, "payload должен содержать onboarding_completed=true")
+        XCTAssertEqual(launchManager.receivedValues, [false])
     }
 
     func test_applyCompletionState_payloadContainsAutoStartKey() {
         let wizard = makeWizard()
-        let launchManager = makeLaunchManager()
+        let launchManager = AutostartManagerSpy()
         var persistedPayload: [String: Any]?
 
         _ = wizard.applyCompletionState(
@@ -138,9 +150,10 @@ final class PermissionWizardTests: XCTestCase {
 
         let autoStartValue = persistedPayload?["auto_start_enabled"] as? Bool
         XCTAssertEqual(autoStartValue, true, "payload['auto_start_enabled'] должен совпадать с переданным autostart")
+        XCTAssertEqual(launchManager.receivedValues, [true])
     }
 
-    // MARK: - Initial step intro guard
+    // MARK: - Создание начального шага
 
     /// Wizard существует и может быть создан — базовая smoke проверка
     /// что init не крашится и экземпляр валиден без UI.
@@ -149,13 +162,13 @@ final class PermissionWizardTests: XCTestCase {
         XCTAssertNotNil(wizard, "PermissionWizard должен создаваться без параметров")
     }
 
-    // MARK: - UserDefaults-style completion persistence
+    // MARK: - Сохранение результата в формате UserDefaults
 
     /// applyCompletionState проверяет что payload содержит все ожидаемые ключи
     /// для корректного сохранения в UserDefaults через persistSettings.
     func test_completion_payload_has_required_userdefaults_keys() {
         let wizard = makeWizard()
-        let launchManager = makeLaunchManager()
+        let launchManager = AutostartManagerSpy()
         var persistedPayload: [String: Any]?
 
         _ = wizard.applyCompletionState(
@@ -170,15 +183,16 @@ final class PermissionWizardTests: XCTestCase {
                       "payload должен содержать ключ 'onboarding_completed'")
         XCTAssertTrue(keys.contains("auto_start_enabled"),
                       "payload должен содержать ключ 'auto_start_enabled'")
+        XCTAssertEqual(launchManager.receivedValues, [true])
     }
 
-    // MARK: - Concurrent access safety
+    // MARK: - Повторное применение состояния
 
     /// Многократные вызовы applyCompletionState подряд не должны нарушать инварианты —
     /// каждый вызов возвращает settings с onboardingCompleted=true.
-    func test_concurrent_completion_idempotent() {
+    func test_repeatedCompletionPreservesEachAutostartDecision() {
         let wizard = makeWizard()
-        let launchManager = makeLaunchManager()
+        let launchManager = AutostartManagerSpy()
         var callCount = 0
 
         for i in 0..<5 {
@@ -194,5 +208,6 @@ final class PermissionWizardTests: XCTestCase {
         }
 
         XCTAssertEqual(callCount, 5, "persistSettings должен быть вызван ровно 5 раз")
+        XCTAssertEqual(launchManager.receivedValues, [true, false, true, false, true])
     }
 }
