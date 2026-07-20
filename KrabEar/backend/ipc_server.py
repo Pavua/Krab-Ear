@@ -12,6 +12,7 @@ import logging
 import os
 import socket
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -48,10 +49,71 @@ class IPCServer:
         self._stop_event = threading.Event()
         # W1767 #1 (HIGH): semaphore ограничивает число параллельных коннектов.
         self._conn_semaphore = threading.BoundedSemaphore(_IPC_MAX_CONNECTIONS)
+        # Registry нужен не для статистики: shutdown обязан дождаться handlers,
+        # иначе service может закрыть STT-ресурсы под выполняющимся запросом.
+        self._handler_threads: set[threading.Thread] = set()
+        self._handler_threads_lock = threading.Lock()
 
-    def stop(self) -> None:
-        """Останавливает accept loop."""
-        self._stop_event.set()
+    def stop(self, timeout_sec: float = 1.5) -> bool:
+        """Закрывает допуск новых соединений и ждёт активные handlers.
+
+        ``timeout_sec`` — общий бюджет на все потоки, а не таймаут каждого
+        ``join()``. Живые после deadline handles остаются в registry, поэтому
+        повторный вызов может дождаться их после разблокировки.
+
+        :returns: ``True``, если все handlers кроме текущего завершились.
+        """
+        timeout = max(0.0, float(timeout_sec))
+        deadline = time.monotonic() + timeout
+        current = threading.current_thread()
+
+        # Event ставится под тем же lock, под которым accept-loop регистрирует
+        # новый handler. Поэтому после выхода отсюда новый поток уже не проскочит.
+        with self._handler_threads_lock:
+            self._stop_event.set()
+
+        while True:
+            with self._handler_threads_lock:
+                handlers: list[threading.Thread] = []
+                for handler in tuple(self._handler_threads):
+                    if handler is current:
+                        continue
+                    if handler.is_alive():
+                        handlers.append(handler)
+                    else:
+                        # Нормальный handler удаляет себя в finally; эта ветка
+                        # страхует завершение между snapshot и проверкой.
+                        self._handler_threads.discard(handler)
+
+            if not handlers:
+                return True
+
+            for handler in handlers:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                handler.join(timeout=remaining)
+
+            with self._handler_threads_lock:
+                alive = [
+                    handler
+                    for handler in self._handler_threads
+                    if handler is not current and handler.is_alive()
+                ]
+                for handler in tuple(self._handler_threads):
+                    if handler is not current and not handler.is_alive():
+                        self._handler_threads.discard(handler)
+
+            if not alive:
+                return True
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "IPC: %d handler-потоков не завершились за %.2fс",
+                    len(alive),
+                    timeout,
+                    extra={"alive_handlers": len(alive)},
+                )
+                return False
 
     def serve_forever(self) -> None:
         """Основной цикл обработки входящих подключений."""
@@ -100,20 +162,50 @@ class IPCServer:
                     conn.close()
                     continue
 
-                # PR #14: thread-per-connection. Без этого длинный STT-запрос
-                # блокирует accept-loop и другие IPC-клиенты не могут опрашивать
-                # прогресс. daemon=True — потоки умирают вместе с процессом.
-                threading.Thread(
-                    target=self._handle_connection,
-                    args=(conn,),
-                    name="ipc-conn",
-                    daemon=True,
-                ).start()
+                self._start_connection_handler(conn)
         finally:
             server.close()
             if self.socket_path.exists():
                 self.socket_path.unlink()
             logger.info("IPC сервер остановлен")
+
+    def _start_connection_handler(self, conn: socket.socket) -> bool:
+        """Регистрирует и запускает handler для уже занятого semaphore-slot.
+
+        Регистрация происходит до ``start()`` под lifecycle-lock. При shutdown
+        или ошибке запуска метод сам закрывает conn и возвращает semaphore-slot.
+        """
+        should_cleanup = False
+        handler: threading.Thread | None = None
+        with self._handler_threads_lock:
+            if self._stop_event.is_set():
+                should_cleanup = True
+            else:
+                try:
+                    handler = threading.Thread(
+                        target=self._handle_connection,
+                        args=(conn,),
+                        name="ipc-conn",
+                        daemon=True,
+                    )
+                    self._handler_threads.add(handler)
+                    handler.start()
+                except Exception:
+                    if handler is not None:
+                        self._handler_threads.discard(handler)
+                    logger.exception("IPC: не удалось запустить handler-поток")
+                    should_cleanup = True
+                else:
+                    return True
+
+        if should_cleanup:
+            try:
+                conn.close()
+            except OSError as exc:
+                logger.debug("IPC: ошибка закрытия незапущенного conn: %s", exc)
+            finally:
+                self._conn_semaphore.release()
+        return False
 
     def _handle_connection(self, conn: socket.socket) -> None:
         """Чтение одной JSON-команды и возврат JSON-ответа.
@@ -190,7 +282,13 @@ class IPCServer:
         finally:
             # W1767 #1 (HIGH): освобождаем семафор в любом случае,
             # в том числе при socket.timeout (slow-loris guard).
-            self._conn_semaphore.release()
+            try:
+                self._conn_semaphore.release()
+            finally:
+                # Удаляем именно текущий поток: handle может завершиться в любой
+                # точке и должен исчезнуть из registry даже при ошибке release().
+                with self._handler_threads_lock:
+                    self._handler_threads.discard(threading.current_thread())
 
     # ------------------------------------------------------------------
     # W1767 #4 (MED): вспомогательный метод сборки потокового сообщения

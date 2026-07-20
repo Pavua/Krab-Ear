@@ -1,9 +1,10 @@
-"""Тесты Wave 1767: hardening ipc_server.py (HIGH + 2 MED).
+"""Тесты Wave 1767 и 2026-07-20: hardening ``ipc_server.py``.
 
 Охватывает:
   #1 (HIGH) slow-loris / thread exhaustion — recv-таймаут + BoundedSemaphore
   #4 (MED)  single recv() truncation — _recv_until_newline чанковая сборка
   #5 (MED)  socket fd leak on bind() failure
+  lifecycle активных handler-потоков — deadline, registry и повторный stop
 
 Тесты используют fake/loopback socket'ы — реальных моделей не загружают.
 """
@@ -410,6 +411,244 @@ class BindFailureFdLeakTestCase(unittest.TestCase):
             "umask() должен быть вызван минимум дважды (set + restore)",
         )
         self.assertEqual(captured_umask_calls[0], 0o077, "Первый вызов umask — 0o077")
+
+
+# ---------------------------------------------------------------------------
+# 2026-07-20: lifecycle активных handler-потоков
+# ---------------------------------------------------------------------------
+
+class _LifecycleJSONConnection:
+    """Минимальный потоковый сокет с одним JSON-запросом."""
+
+    def __init__(self) -> None:
+        payload = {"id": "lifecycle", "method": "ping", "params": {}}
+        self._chunks = [(json.dumps(payload) + "\n").encode("utf-8"), b""]
+        self.closed = threading.Event()
+        self.sent: list[bytes] = []
+        self.timeout: float | None = None
+
+    def settimeout(self, timeout: float | None) -> None:
+        self.timeout = timeout
+
+    def recv(self, _size: int) -> bytes:
+        return self._chunks.pop(0)
+
+    def sendall(self, data: bytes) -> None:
+        self.sent.append(data)
+
+    def close(self) -> None:
+        self.closed.set()
+
+    def __enter__(self) -> "_LifecycleJSONConnection":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+
+class _LifecycleImmediateService:
+    """Сервис, который немедленно завершает запрос."""
+
+    def handle_request(self, payload: dict) -> dict:
+        return {"id": payload.get("id"), "ok": True, "result": {}}
+
+
+class _LifecycleBlockingService:
+    """Сервис с управляемой точкой блокировки внутри handler-потока."""
+
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def handle_request(self, payload: dict) -> dict:
+        self.entered.set()
+        self.release.wait()
+        return {"id": payload.get("id"), "ok": True, "result": {}}
+
+
+class _LifecycleSelfStoppingService:
+    """Сервис, вызывающий stop() из текущего IPC-handler."""
+
+    def __init__(self) -> None:
+        self.ipc: IPCServer | None = None
+        self.stop_result: bool | None = None
+        self.done = threading.Event()
+
+    def handle_request(self, payload: dict) -> dict:
+        assert self.ipc is not None
+        self.stop_result = self.ipc.stop(timeout_sec=0.05)
+        self.done.set()
+        return {"id": payload.get("id"), "ok": True, "result": {}}
+
+
+def _make_lifecycle_server(
+    test_case: unittest.TestCase,
+    service: object,
+) -> IPCServer:
+    """Создаёт IPCServer в отдельном временном каталоге."""
+    temp_dir = tempfile.TemporaryDirectory(prefix="krab-ipc-lifecycle-")
+    test_case.addCleanup(temp_dir.cleanup)
+    return IPCServer(socket_path=Path(temp_dir.name) / "test.sock", service=service)
+
+
+def _start_accepted_connection(
+    ipc: IPCServer,
+    conn: _LifecycleJSONConnection,
+) -> bool:
+    """Повторяет контракт accept-loop: сначала занимает semaphore-slot."""
+    acquired = ipc._conn_semaphore.acquire(blocking=False)
+    if not acquired:
+        raise AssertionError("Тестовый IPC semaphore неожиданно исчерпан")
+    return ipc._start_connection_handler(conn)
+
+
+def _drain_available_slots(ipc: IPCServer) -> int:
+    """Считает свободные semaphore-slot без обращения к внутреннему счётчику."""
+    count = 0
+    while ipc._conn_semaphore.acquire(blocking=False):
+        count += 1
+    for _ in range(count):
+        ipc._conn_semaphore.release()
+    return count
+
+
+class IPCHandlerLifecycleTestCase(unittest.TestCase):
+    """Проверяет registry, общий deadline и повторяемую остановку handlers."""
+
+    def test_clean_handler_completion_makes_stop_true(self) -> None:
+        """Успешный handler удаляет себя, а stop() возвращает True."""
+        ipc = _make_lifecycle_server(self, _LifecycleImmediateService())
+        conn = _LifecycleJSONConnection()
+
+        self.assertTrue(_start_accepted_connection(ipc, conn))
+        self.assertTrue(ipc.stop(timeout_sec=1.0))
+
+        self.assertTrue(conn.closed.wait(1.0))
+        with ipc._handler_threads_lock:
+            self.assertEqual(ipc._handler_threads, set())
+        self.assertEqual(_drain_available_slots(ipc), _IPC_MAX_CONNECTIONS)
+
+    def test_blocked_handler_stays_tracked_then_retry_succeeds(self) -> None:
+        """Таймаут сохраняет живой handle; release + повторный stop завершают его."""
+        service = _LifecycleBlockingService()
+        ipc = _make_lifecycle_server(self, service)
+        # Регистрируем после temp cleanup: unittest выполняет cleanup в LIFO,
+        # поэтому ранний RED сначала отпустит handler и лишь затем удалит каталог.
+        self.addCleanup(service.release.set)
+        conn = _LifecycleJSONConnection()
+
+        self.assertTrue(_start_accepted_connection(ipc, conn))
+        self.assertTrue(service.entered.wait(1.0))
+
+        self.assertFalse(ipc.stop(timeout_sec=0.01))
+        with ipc._handler_threads_lock:
+            tracked = tuple(ipc._handler_threads)
+        self.assertEqual(len(tracked), 1)
+        self.assertTrue(tracked[0].is_alive())
+
+        service.release.set()
+        self.assertTrue(ipc.stop(timeout_sec=1.0))
+        with ipc._handler_threads_lock:
+            self.assertEqual(ipc._handler_threads, set())
+        self.assertEqual(_drain_available_slots(ipc), _IPC_MAX_CONNECTIONS)
+
+    def test_stop_from_current_handler_does_not_join_itself(self) -> None:
+        """Handler может инициировать shutdown без self-join RuntimeError."""
+        service = _LifecycleSelfStoppingService()
+        ipc = _make_lifecycle_server(self, service)
+        service.ipc = ipc
+
+        self.assertTrue(_start_accepted_connection(ipc, _LifecycleJSONConnection()))
+        self.assertTrue(service.done.wait(1.0))
+        self.assertTrue(service.stop_result)
+        self.assertTrue(ipc.stop(timeout_sec=1.0))
+
+    def test_multiple_handlers_share_one_stop_deadline(self) -> None:
+        """Первый join расходует общий бюджет, второй не получает новый таймаут."""
+        ipc = _make_lifecycle_server(self, _LifecycleImmediateService())
+
+        class _Clock:
+            """Управляемые монотонные часы без реального ожидания."""
+
+            value = 0.0
+
+            def monotonic(self) -> float:
+                return self.value
+
+        clock = _Clock()
+
+        class _BudgetConsumer:
+            """Duck-type handler, который целиком расходует переданный бюджет."""
+
+            def __init__(self) -> None:
+                self.alive = True
+                self.join_timeouts: list[float] = []
+
+            def is_alive(self) -> bool:
+                return self.alive
+
+            def join(self, timeout: float | None = None) -> None:
+                assert timeout is not None
+                self.join_timeouts.append(timeout)
+                clock.value += timeout
+
+        handlers = (_BudgetConsumer(), _BudgetConsumer())
+        with ipc._handler_threads_lock:
+            ipc._handler_threads.update(handlers)
+
+        with patch("backend.ipc_server.time.monotonic", side_effect=clock.monotonic):
+            self.assertFalse(ipc.stop(timeout_sec=1.0))
+
+        joined = [timeout for handler in handlers for timeout in handler.join_timeouts]
+        self.assertEqual(len(joined), 1)
+        self.assertAlmostEqual(joined[0], 1.0)
+        with ipc._handler_threads_lock:
+            self.assertEqual(ipc._handler_threads, set(handlers))
+
+        for handler in handlers:
+            handler.alive = False
+        self.assertTrue(ipc.stop(timeout_sec=0.0))
+
+    def test_stop_rejects_connection_before_thread_creation(self) -> None:
+        """После stop() новый принятый conn закрывается и возвращает slot."""
+        ipc = _make_lifecycle_server(self, _LifecycleImmediateService())
+        conn = _LifecycleJSONConnection()
+        self.assertTrue(ipc.stop(timeout_sec=0.0))
+
+        with patch("backend.ipc_server.threading.Thread") as thread_factory:
+            self.assertFalse(_start_accepted_connection(ipc, conn))
+
+        thread_factory.assert_not_called()
+        self.assertTrue(conn.closed.is_set())
+        with ipc._handler_threads_lock:
+            self.assertEqual(ipc._handler_threads, set())
+        self.assertEqual(_drain_available_slots(ipc), _IPC_MAX_CONNECTIONS)
+
+    def test_start_failure_was_registered_and_releases_resources(self) -> None:
+        """Thread.start() failure убирает pre-registered handle и возвращает slot."""
+        ipc = _make_lifecycle_server(self, _LifecycleImmediateService())
+        conn = _LifecycleJSONConnection()
+
+        class _StartFailureThread:
+            """Duck-type поток; не наследуется от Thread и не попадает в _limbo."""
+
+            observed_registered = False
+
+            def start(self) -> None:
+                # Production вызывает start() уже внутри lifecycle-lock;
+                # повторный захват обычного Lock здесь создал бы ложный deadlock.
+                self.observed_registered = self in ipc._handler_threads
+                raise RuntimeError("детерминированный отказ start")
+
+        fake_thread = _StartFailureThread()
+        with patch("backend.ipc_server.threading.Thread", return_value=fake_thread):
+            self.assertFalse(_start_accepted_connection(ipc, conn))
+
+        self.assertTrue(fake_thread.observed_registered)
+        self.assertTrue(conn.closed.is_set())
+        with ipc._handler_threads_lock:
+            self.assertEqual(ipc._handler_threads, set())
+        self.assertEqual(_drain_available_slots(ipc), _IPC_MAX_CONNECTIONS)
 
 
 if __name__ == "__main__":
