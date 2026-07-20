@@ -44,23 +44,152 @@ private func makeTempDefaults() -> UserDefaults {
     return d
 }
 
-/// Потокобезопасно переносит точный результат callback запуска в тестовый поток.
-/// `@unchecked Sendable` допустим здесь, потому что каждое чтение и запись защищены lock.
-private final class RunningApplicationHolder: @unchecked Sendable {
-    private let lock = NSLock()
-    private var application: NSRunningApplication?
+/// Канонизирует путь app-bundle перед сравнением владельца процесса.
+/// Двойная стандартизация убирает `..` как до, так и после разрешения symlink.
+private func normalizedApplicationBundleURL(_ url: URL) -> URL {
+    url.standardizedFileURL.resolvingSymlinksInPath().standardizedFileURL
+}
 
-    func store(_ application: NSRunningApplication?) {
-        lock.lock()
-        defer { lock.unlock() }
-        self.application = application
+/// Совпадение bundle URL — единственное основание считать процесс созданным тестом.
+private func applicationBundleURL(_ candidate: URL?, matches expected: URL) -> Bool {
+    guard let candidate else { return false }
+    return normalizedApplicationBundleURL(candidate) == normalizedApplicationBundleURL(expected)
+}
+
+/// Потокобезопасная машина владения не даёт timeout-callback утечь после теста.
+/// `@unchecked Sendable` допустим: состояние целиком закрыто lock, termination — вне lock.
+private final class ExactApplicationOwnershipHolder<Application>: @unchecked Sendable {
+    enum RegistrationResult: Equatable {
+        case stored
+        case rejectedMismatch
+        case terminatedAfterAbandonment
     }
 
-    func load() -> NSRunningApplication? {
+    private let lock = NSLock()
+    private let expectedBundleURL: URL
+    private let bundleURL: (Application) -> URL?
+    private let terminate: (Application) -> Void
+
+    private var ownedApplication: Application?
+    private var isAbandoned = false
+    private var storedCallbackFailure: String?
+
+    init(
+        expectedBundleURL: URL,
+        bundleURL: @escaping (Application) -> URL?,
+        terminate: @escaping (Application) -> Void
+    ) {
+        self.expectedBundleURL = normalizedApplicationBundleURL(expectedBundleURL)
+        self.bundleURL = bundleURL
+        self.terminate = terminate
+    }
+
+    func register(_ application: Application) -> RegistrationResult {
+        // Mismatch проверяется до выдачи cleanup-владения и никогда не завершается.
+        guard applicationBundleURL(bundleURL(application), matches: expectedBundleURL) else {
+            return .rejectedMismatch
+        }
+
+        lock.lock()
+        let mustTerminateImmediately = isAbandoned
+        if !mustTerminateImmediately {
+            ownedApplication = application
+        }
+        lock.unlock()
+
+        if mustTerminateImmediately {
+            terminate(application)
+            return .terminatedAfterAbandonment
+        }
+        return .stored
+    }
+
+    func recordCallbackFailure(_ message: String) {
         lock.lock()
         defer { lock.unlock() }
+        if storedCallbackFailure == nil {
+            storedCallbackFailure = message
+        }
+    }
+
+    func callbackFailure() -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedCallbackFailure
+    }
+
+    /// Атомарно закрывает приём, забирает уже сохранённый exact app и завершает его.
+    /// Поздний exact callback увидит `isAbandoned` и сам немедленно завершит app.
+    func abandonAndTerminateOwnedApplication() {
+        lock.lock()
+        isAbandoned = true
+        let application = ownedApplication
+        ownedApplication = nil
+        lock.unlock()
+
+        if let application {
+            terminate(application)
+        }
+    }
+
+    /// Передаёт exact app вызывающему коду и одновременно закрывает holder от late callback.
+    func takeOwnedApplicationForCleanup() -> Application? {
+        lock.lock()
+        isAbandoned = true
+        let application = ownedApplication
+        ownedApplication = nil
+        lock.unlock()
         return application
     }
+}
+
+/// Ошибочная явная конфигурация — это failure, а не ложнозелёный skip.
+private enum KrabEarXCUIConfigurationError: LocalizedError {
+    case missingBundle(String)
+    case notAppBundle(String)
+    case wrongBundleIdentifier(path: String, actual: String?, expected: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .missingBundle(let path):
+            return "KRAB_EAR_APP_PATH не существует или не является каталогом app-bundle: \(path)"
+        case .notAppBundle(let path):
+            return "KRAB_EAR_APP_PATH должен оканчиваться на .app: \(path)"
+        case .wrongBundleIdentifier(let path, let actual, let expected):
+            return "KRAB_EAR_APP_PATH указывает на bundle ID \(actual ?? "nil") вместо \(expected): \(path)"
+        }
+    }
+}
+
+/// Валидирует только явно переданный test bundle и возвращает канонический путь.
+private func validatedApplicationBundlePath(
+    _ configuredPath: String,
+    expectedBundleIdentifier: String
+) throws -> String {
+    let configuredURL = URL(
+        fileURLWithPath: configuredPath,
+        isDirectory: true
+    ).standardizedFileURL
+    guard configuredURL.pathExtension.lowercased() == "app" else {
+        throw KrabEarXCUIConfigurationError.notAppBundle(configuredPath)
+    }
+
+    let normalizedURL = normalizedApplicationBundleURL(configuredURL)
+    var isDirectory = ObjCBool(false)
+    guard FileManager.default.fileExists(atPath: normalizedURL.path, isDirectory: &isDirectory),
+          isDirectory.boolValue else {
+        throw KrabEarXCUIConfigurationError.missingBundle(configuredPath)
+    }
+
+    let actualBundleIdentifier = Bundle(url: normalizedURL)?.bundleIdentifier
+    guard actualBundleIdentifier == expectedBundleIdentifier else {
+        throw KrabEarXCUIConfigurationError.wrongBundleIdentifier(
+            path: configuredPath,
+            actual: actualBundleIdentifier,
+            expected: expectedBundleIdentifier
+        )
+    }
+    return normalizedURL.path
 }
 
 // MARK: - 1. Settings Logic Tests (headless, SPM-compatible)
@@ -238,7 +367,197 @@ final class KrabEarSettingsLogicTests: XCTestCase {
     }
 }
 
-// MARK: - 2. XCUITest Flow Tests (требует Xcode UI Testing host)
+// MARK: - 2. System app ownership helpers (headless)
+
+/// Лёгкий двойник приложения позволяет проверять владение процессом без запуска .app.
+private final class FakeOwnedApplication: @unchecked Sendable {
+    let bundleURL: URL?
+
+    private let lock = NSLock()
+    private var storedTerminationCount = 0
+
+    init(bundleURL: URL?) {
+        self.bundleURL = bundleURL
+    }
+
+    var terminationCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedTerminationCount
+    }
+
+    func terminate() {
+        lock.lock()
+        defer { lock.unlock() }
+        storedTerminationCount += 1
+    }
+}
+
+/// Чистые тесты закрепляют точное URL-владение и timeout-гонку без системных API.
+final class KrabEarSystemApplicationOwnershipTests: XCTestCase {
+
+    private let expectedURL = URL(fileURLWithPath: "/tmp/Krab Ear.app", isDirectory: true)
+
+    private func makeHolder() -> ExactApplicationOwnershipHolder<FakeOwnedApplication> {
+        ExactApplicationOwnershipHolder(
+            expectedBundleURL: expectedURL,
+            bundleURL: { $0.bundleURL },
+            terminate: { $0.terminate() }
+        )
+    }
+
+    func test_normalizedBundleURL_matchesEquivalentPath() {
+        let equivalentURL = URL(
+            fileURLWithPath: "/tmp/krab-owner/../Krab Ear.app",
+            isDirectory: true
+        )
+
+        XCTAssertTrue(applicationBundleURL(equivalentURL, matches: expectedURL))
+        XCTAssertFalse(applicationBundleURL(nil, matches: expectedURL))
+    }
+
+    func test_normalizedBundleURL_resolvesSymlink() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krab-url-\(UUID().uuidString)", isDirectory: true)
+        let targetURL = rootURL.appendingPathComponent("Target Krab Ear.app", isDirectory: true)
+        let symlinkURL = rootURL.appendingPathComponent("Linked Krab Ear.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: targetURL, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: symlinkURL, withDestinationURL: targetURL)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+
+        XCTAssertTrue(applicationBundleURL(symlinkURL, matches: targetURL))
+    }
+
+    func test_mismatchNeverBecomesOwnedOrTerminated() {
+        let holder = makeHolder()
+        let mismatch = FakeOwnedApplication(
+            bundleURL: URL(fileURLWithPath: "/tmp/Production Krab Ear.app", isDirectory: true)
+        )
+
+        holder.abandonAndTerminateOwnedApplication()
+
+        XCTAssertEqual(holder.register(mismatch), .rejectedMismatch)
+        XCTAssertEqual(mismatch.terminationCount, 0)
+        XCTAssertNil(holder.takeOwnedApplicationForCleanup())
+    }
+
+    func test_abandonTerminatesStoredAndLateExactApplications() {
+        let holder = makeHolder()
+        let stored = FakeOwnedApplication(bundleURL: expectedURL)
+        let late = FakeOwnedApplication(bundleURL: expectedURL)
+
+        XCTAssertEqual(holder.register(stored), .stored)
+        holder.abandonAndTerminateOwnedApplication()
+
+        XCTAssertEqual(stored.terminationCount, 1)
+        XCTAssertEqual(holder.register(late), .terminatedAfterAbandonment)
+        XCTAssertEqual(late.terminationCount, 1)
+        XCTAssertNil(holder.takeOwnedApplicationForCleanup())
+    }
+
+    func test_takeForCleanupSealsHolderAgainstLateCallback() {
+        let holder = makeHolder()
+        let stored = FakeOwnedApplication(bundleURL: expectedURL)
+        let late = FakeOwnedApplication(bundleURL: expectedURL)
+
+        XCTAssertEqual(holder.register(stored), .stored)
+        XCTAssertTrue(holder.takeOwnedApplicationForCleanup() === stored)
+        XCTAssertEqual(stored.terminationCount, 0, "Cleanup остаётся обязанностью вызывающего кода")
+
+        XCTAssertEqual(holder.register(late), .terminatedAfterAbandonment)
+        XCTAssertEqual(late.terminationCount, 1)
+    }
+
+    func test_registerAndAbandonRaceTerminatesExactApplicationOnce() {
+        for _ in 0..<100 {
+            let holder = makeHolder()
+            let application = FakeOwnedApplication(bundleURL: expectedURL)
+            let group = DispatchGroup()
+
+            group.enter()
+            DispatchQueue.global().async {
+                _ = holder.register(application)
+                group.leave()
+            }
+            group.enter()
+            DispatchQueue.global().async {
+                holder.abandonAndTerminateOwnedApplication()
+                group.leave()
+            }
+
+            XCTAssertEqual(group.wait(timeout: .now() + 2), .success)
+            XCTAssertEqual(application.terminationCount, 1)
+            XCTAssertNil(holder.takeOwnedApplicationForCleanup())
+        }
+    }
+
+    func test_explicitNonAppPathIsConfigurationFailure() {
+        XCTAssertThrowsError(
+            try validatedApplicationBundlePath(
+                "/tmp/krab-system-test",
+                expectedBundleIdentifier: "com.antigravity.krab-ear"
+            )
+        ) { error in
+            guard case KrabEarXCUIConfigurationError.notAppBundle = error else {
+                return XCTFail("Ожидалась ошибка notAppBundle, получено: \(error)")
+            }
+        }
+    }
+
+    func test_explicitMissingAppIsConfigurationFailure() {
+        let missingPath = "/tmp/krab-missing-\(UUID().uuidString).app"
+
+        XCTAssertThrowsError(
+            try validatedApplicationBundlePath(
+                missingPath,
+                expectedBundleIdentifier: "com.antigravity.krab-ear"
+            )
+        ) { error in
+            guard case KrabEarXCUIConfigurationError.missingBundle = error else {
+                return XCTFail("Ожидалась ошибка missingBundle, получено: \(error)")
+            }
+        }
+    }
+
+    func test_explicitForeignBundleIsConfigurationFailure() throws {
+        let bundleURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krab-foreign-\(UUID().uuidString).app", isDirectory: true)
+        let contentsURL = bundleURL.appendingPathComponent("Contents", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: contentsURL,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: bundleURL) }
+
+        let plist: [String: Any] = [
+            "CFBundleIdentifier": "com.example.foreign",
+            "CFBundleName": "Foreign Test Bundle",
+            "CFBundlePackageType": "APPL",
+        ]
+        let plistData = try PropertyListSerialization.data(
+            fromPropertyList: plist,
+            format: .xml,
+            options: 0
+        )
+        try plistData.write(
+            to: contentsURL.appendingPathComponent("Info.plist"),
+            options: .atomic
+        )
+
+        XCTAssertThrowsError(
+            try validatedApplicationBundlePath(
+                bundleURL.path,
+                expectedBundleIdentifier: "com.antigravity.krab-ear"
+            )
+        ) { error in
+            guard case KrabEarXCUIConfigurationError.wrongBundleIdentifier = error else {
+                return XCTFail("Ожидалась ошибка wrongBundleIdentifier, получено: \(error)")
+            }
+        }
+    }
+}
+
+// MARK: - 3. XCUITest Flow Tests (требует Xcode UI Testing host)
 
 /// Полные E2E сценарии через XCUIApplication.
 /// При обычном `swift test` все тесты skip с пояснением.
@@ -276,7 +595,7 @@ final class KrabEarXCUIFlowTests: XCTestCase {
               !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
         }
-        return path
+        return path.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func requireAppPath(function: String = #function) throws -> String {
@@ -289,21 +608,32 @@ final class KrabEarXCUIFlowTests: XCTestCase {
             """
         )
 
-        // После XCTSkipIf значение гарантировано существует; отдельно проверяем,
-        // что опечатка не превратится в ошибку launch и путь не ведёт к чужому app.
-        let path = configuredPath!
-        var isDirectory = ObjCBool(false)
-        let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
-        try XCTSkipUnless(
-            exists && isDirectory.boolValue,
-            "\(function): KRAB_EAR_APP_PATH не существует или не является app-bundle: \(path)"
+        // После XCTSkipIf значение гарантировано задано. Любая ошибка явно заданного
+        // пути — failure: иначе опечатка создала бы ложнозелёный системный прогон.
+        return try validatedApplicationBundlePath(
+            configuredPath!,
+            expectedBundleIdentifier: bundleIdentifier
         )
-        try XCTSkipUnless(
-            URL(fileURLWithPath: path).pathExtension.lowercased() == "app" &&
-                Bundle(path: path)?.bundleIdentifier == bundleIdentifier,
-            "\(function): KRAB_EAR_APP_PATH должен указывать на Krab Ear.app с bundle ID \(bundleIdentifier)"
+    }
+
+    /// Возвращает только процесс из явно проверенного test bundle. Production-копия
+    /// с тем же bundle ID, но другим bundleURL, намеренно не участвует в тесте.
+    private func requireRunningApplication(
+        at appPath: String,
+        function: String = #function
+    ) throws -> NSRunningApplication {
+        let expectedURL = normalizedApplicationBundleURL(
+            URL(fileURLWithPath: appPath, isDirectory: true)
         )
-        return path
+        let application = NSRunningApplication
+            .runningApplications(withBundleIdentifier: bundleIdentifier)
+            .first { applicationBundleURL($0.bundleURL, matches: expectedURL) }
+
+        try XCTSkipIf(
+            application == nil,
+            "\(function): точный test bundle из KRAB_EAR_APP_PATH не запущен; production-копия не используется"
+        )
+        return application!
     }
 
     // MARK: testApplicationLaunches
@@ -324,28 +654,60 @@ final class KrabEarXCUIFlowTests: XCTestCase {
         let workspace = NSWorkspace.shared
         let config    = NSWorkspace.OpenConfiguration()
         config.activates = false
+        config.createsNewApplicationInstance = true
 
-        let appURL = URL(fileURLWithPath: appPath)
+        let appURL = normalizedApplicationBundleURL(
+            URL(fileURLWithPath: appPath, isDirectory: true)
+        )
         let expectation = XCTestExpectation(description: "App launched")
-        let launchedApplicationHolder = RunningApplicationHolder()
+        let launchedApplicationHolder = ExactApplicationOwnershipHolder<NSRunningApplication>(
+            expectedBundleURL: appURL,
+            bundleURL: { $0.bundleURL },
+            terminate: { _ = $0.terminate() }
+        )
 
         workspace.openApplication(at: appURL, configuration: config) { app, error in
             defer { expectation.fulfill() }
             if let error {
-                XCTFail("Не удалось запустить app: \(error.localizedDescription)")
-            } else {
-                XCTAssertNotNil(app, "NSRunningApplication должен быть non-nil")
-                launchedApplicationHolder.store(app)
+                launchedApplicationHolder.recordCallbackFailure(
+                    "Не удалось запустить app: \(error.localizedDescription)"
+                )
+                return
+            }
+            guard let app else {
+                launchedApplicationHolder.recordCallbackFailure(
+                    "Callback запуска не вернул NSRunningApplication"
+                )
+                return
+            }
+
+            if launchedApplicationHolder.register(app) == .rejectedMismatch {
+                launchedApplicationHolder.recordCallbackFailure(
+                    "Callback вернул app с другим bundleURL; процесс не завершён из соображений безопасности"
+                )
             }
         }
-        wait(for: [expectation], timeout: 10)
+        let waitResult = XCTWaiter.wait(for: [expectation], timeout: 10)
 
-        guard let launchedApplication = launchedApplicationHolder.load() else {
-            XCTFail("Callback запуска не вернул NSRunningApplication")
+        guard waitResult == .completed else {
+            // Атомарная отметка закрывает гонку с callback после timeout.
+            launchedApplicationHolder.abandonAndTerminateOwnedApplication()
+            XCTFail("Callback запуска не завершился за 10 секунд: \(waitResult)")
             return
         }
-        // Завершаем исключительно экземпляр, который создал этот callback. Поиск
-        // другого процесса по bundle ID здесь намеренно запрещён.
+
+        if let callbackFailure = launchedApplicationHolder.callbackFailure() {
+            launchedApplicationHolder.abandonAndTerminateOwnedApplication()
+            XCTFail(callbackFailure)
+            return
+        }
+
+        guard let launchedApplication = launchedApplicationHolder.takeOwnedApplicationForCleanup() else {
+            XCTFail("Callback запуска не передал exact app во владение cleanup")
+            return
+        }
+        // URL уже проверен holder до этой точки; только теперь cleanup получает право
+        // завершить точный экземпляр, созданный callback.
         defer { _ = launchedApplication.terminate() }
 
         // Даём время на инициализацию NSStatusItem
@@ -355,6 +717,10 @@ final class KrabEarXCUIFlowTests: XCTestCase {
             launchedApplication.bundleIdentifier,
             bundleIdentifier,
             "Callback должен вернуть именно Krab Ear"
+        )
+        XCTAssertTrue(
+            applicationBundleURL(launchedApplication.bundleURL, matches: appURL),
+            "Callback должен вернуть именно bundle из KRAB_EAR_APP_PATH"
         )
         XCTAssertFalse(launchedApplication.isTerminated, "Запущенный тестом Krab Ear должен быть активен")
     }
@@ -368,7 +734,8 @@ final class KrabEarXCUIFlowTests: XCTestCase {
     /// Accessibility permission. Тест упадёт с "не удалось получить AX ref"
     /// если permission не выдан — запустите PermissionWizard сначала.
     func testOpenSettingsFromMenuBar() throws {
-        _ = try requireAppPath()
+        let appPath = try requireAppPath()
+        let app = try requireRunningApplication(at: appPath)
 
         // Проверяем наличие Accessibility permission
         let axEnabled = AXIsProcessTrusted()
@@ -378,20 +745,7 @@ final class KrabEarXCUIFlowTests: XCTestCase {
             "Выдайте доступ в System Settings → Privacy & Security → Accessibility."
         )
 
-        // В Xcode UITest этот тест использовал бы XCUIApplication + menuBars.
-        // Через AX API: находим menu bar процесса KrabEar и кликаем.
-        let runningApps = NSWorkspace.shared.runningApplications.filter {
-            $0.bundleIdentifier == "com.antigravity.krab-ear"
-        }
-        try XCTSkipIf(
-            runningApps.isEmpty,
-            "testOpenSettingsFromMenuBar: Krab Ear должен быть запущен перед тестом"
-        )
-
-        guard let app = runningApps.first else {
-            XCTFail("No running app found"); return
-        }
-
+        // AX API получает PID только точного test bundle, а не production-копии.
         let axApp = AXUIElementCreateApplication(app.processIdentifier)
         var menuBarRef: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(axApp, kAXMenuBarAttribute as CFString, &menuBarRef)
@@ -411,20 +765,15 @@ final class KrabEarXCUIFlowTests: XCTestCase {
 
     // MARK: testTabSwitcher
 
-    /// E2E: переключение между вкладками "Диктовка"/"Live перевод"/"История"/"Разговор с AI".
-    /// Использует AXUIElement для поиска NSTabView и смены selectedTab.
+    /// Safety-gate: допускает только exact test bundle; логика вкладок проверяется
+    /// headless, а реальное AX-переключение выполняется Xcode UITest host.
     func testTabSwitcher() throws {
-        _ = try requireAppPath()
+        let appPath = try requireAppPath()
+        _ = try requireRunningApplication(at: appPath)
 
         let axEnabled = AXIsProcessTrusted()
         try XCTSkipIf(!axEnabled,
             "testTabSwitcher требует Accessibility permission.")
-
-        let runningApps = NSWorkspace.shared.runningApplications.filter {
-            $0.bundleIdentifier == "com.antigravity.krab-ear"
-        }
-        try XCTSkipIf(runningApps.isEmpty,
-            "testTabSwitcher: Krab Ear должен быть запущен")
 
         // Проверяем что известные tab identifiers существуют (headless-compatible check)
         let expectedTabs = ["dictation", "live_translation", "history", "conversation"]
@@ -433,8 +782,9 @@ final class KrabEarXCUIFlowTests: XCTestCase {
 
         // В Xcode UITest: найти NSTabView через AX tree, перебрать tabGroup.buttons,
         // проверить titles соответствуют expectedTabs, кликнуть каждую.
-        // В swift test mode: логика подтверждена через KrabEarSettingsLogicTests.testTabSwitcher_tabIdentifiersKnown
-        XCTAssertTrue(true, "Tab identifiers валидны — полный E2E требует Xcode UITest host")
+        // В SPM этот opt-in сценарий не заявляет проверку production: он допускает
+        // только exact test bundle, а логика вкладок отдельно покрыта headless-тестом.
+        XCTAssertTrue(true, "Tab identifiers валидны — AX-переключение требует Xcode UITest host")
     }
 
     // MARK: testOpacitySliderPersists
@@ -480,7 +830,7 @@ final class KrabEarXCUIFlowTests: XCTestCase {
     }
 }
 
-// MARK: - 3. CGEvent Synthetic Hotkey Tests (headless)
+// MARK: - 4. CGEvent Synthetic Hotkey Tests (headless)
 
 /// Тесты синтетических клавиатурных событий для hotkey flows.
 /// Используют CGEvent API напрямую — не требуют .app bundle.

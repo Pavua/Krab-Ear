@@ -79,6 +79,9 @@ final class Sequoia26TCCMicrophoneTests: XCTestCase {
             "Запрос TCC микрофона требует явного KRAB_RUN_SYSTEM_TESTS=1"
         )
 
+        let authorizationStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        let callbackTimeout: TimeInterval = authorizationStatus == .notDetermined ? 60.0 : 3.0
+
         // Вызываем в тестовой среде — ожидаем что callback придёт без crash.
         let exp = expectation(description: "requestAccess callback")
         exp.isInverted = false
@@ -89,8 +92,9 @@ final class Sequoia26TCCMicrophoneTests: XCTestCase {
             exp.fulfill()
         }
 
-        // timeout 3s — в тестовой среде callback должен прийти быстро
-        wait(for: [exp], timeout: 3.0)
+        // Первый интерактивный TCC-диалог требует времени пользователю; для уже
+        // определённого статуса callback по-прежнему обязан прийти быстро.
+        wait(for: [exp], timeout: callbackTimeout)
     }
 }
 
