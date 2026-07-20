@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import io
 import json
+import shutil
 import struct
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
@@ -218,6 +220,37 @@ class TestMagicByteValidationAcceptsWav(_Base):
         self.assertEqual(resp.status_code, 200)
         body = resp.get_json()
         self.assertEqual(body.get("status"), "ok")
+
+
+@unittest.skipUnless(_REST_AVAILABLE, "REST server dependencies not available")
+class TestUploadTempDirectoryRecovery(_Base):
+    """Каталог временных загрузок восстанавливается перед сохранением файла."""
+
+    def test_valid_upload_recreates_deleted_temp_directory(self):
+        """Удалённый после импорта TEMP_DIR не превращает валидную загрузку в 500."""
+        wav_data = _make_wav_bytes()
+        mock_info = MagicMock()
+        mock_info.duration = 5.0
+
+        with tempfile.TemporaryDirectory(prefix="krab-rest-upload-") as root:
+            upload_dir = Path(root) / "temp_uploads"
+            upload_dir.mkdir(parents=True)
+            shutil.rmtree(upload_dir)
+            self.assertFalse(upload_dir.exists())
+
+            with patch.object(_rest_mod, "TEMP_DIR", upload_dir), \
+                    patch("soundfile.info", return_value=mock_info):
+                resp = self.client.post(
+                    "/v1/stt/transcribe",
+                    data={"file": (io.BytesIO(wav_data), "voice.wav")},
+                    content_type="multipart/form-data",
+                )
+
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(resp.get_json().get("text"), "hello")
+            self.assertTrue(upload_dir.is_dir())
+            self.assertEqual(list(upload_dir.iterdir()), [])
+            self.transcriber.transcribe.assert_called_once()
 
 
 @unittest.skipUnless(_REST_AVAILABLE, "REST server dependencies not available")

@@ -1420,6 +1420,9 @@ def transcribe_audio():
     try:
         # F3 (W1766): file.save перемещён ВНУТРЬ try, чтобы finally-блок гарантированно
         # удалял частичный файл при ошибках записи (ENOSPC и т.п.).
+        # Каталог мог исчезнуть после импорта из-за системной очистки или изоляции теста.
+        # mkdir остаётся внутри try: ошибки прав/ENOSPC проходят общий обработчик ниже.
+        TEMP_DIR.mkdir(parents=True, exist_ok=True)
         file.save(str(temp_path))
 
         # F1: Validate magic bytes before handing the file to any decoder.
