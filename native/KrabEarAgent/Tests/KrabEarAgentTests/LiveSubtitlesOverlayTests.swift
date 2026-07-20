@@ -22,11 +22,27 @@
   18. test_resetPosition_no_crash          — resetPosition не крашится
   19. test_restBaseURL_default             — содержит 5005
   20. test_clearAll_after_multiple_entries — 5 entries → clearAll → count = 0
+  21. test_showHideShow_replacesSSETaskWithoutAccumulation — жизненный цикл SSE без дублей
 */
 
 import XCTest
 import AppKit
 @testable import KrabEarAgent
+
+/// Тестовая SSE-задача считает запуски и отмены без сетевого соединения.
+/// Так тест проверяет именно владение задачей, а не особенности URLSession.
+private final class TrackingLiveSubtitlesSSETask: LiveSubtitlesSSETask {
+    private(set) var resumeCount = 0
+    private(set) var cancelCount = 0
+
+    func resume() {
+        resumeCount += 1
+    }
+
+    func cancel() {
+        cancelCount += 1
+    }
+}
 
 // MARK: - LiveSubtitlesOverlayWave190Tests
 
@@ -205,6 +221,41 @@ final class LiveSubtitlesOverlayWave190Tests: XCTestCase {
         XCTAssertTrue(overlay.isVisible, "show() должен устанавливать isVisible = true")
         overlay.hide()
         XCTAssertFalse(overlay.isVisible, "hide() должен устанавливать isVisible = false")
+    }
+
+    /// show → hide → show не должен оставлять старое SSE-соединение живым:
+    /// скрытие отменяет именно активную задачу и освобождает ссылку на неё.
+    func test_showHideShow_replacesSSETaskWithoutAccumulation() {
+        var createdTasks: [TrackingLiveSubtitlesSSETask] = []
+        let overlay = LiveSubtitlesOverlay(sseTaskFactory: { _ in
+            let task = TrackingLiveSubtitlesSSETask()
+            createdTasks.append(task)
+            return task
+        })
+
+        overlay.show()
+
+        XCTAssertEqual(createdTasks.count, 1)
+        XCTAssertEqual(createdTasks[0].resumeCount, 1)
+        XCTAssertEqual(createdTasks[0].cancelCount, 0)
+        XCTAssertTrue(overlay._testHasActiveSSETask)
+
+        overlay.hide()
+
+        XCTAssertEqual(createdTasks[0].cancelCount, 1)
+        XCTAssertFalse(overlay._testHasActiveSSETask)
+
+        overlay.show()
+
+        XCTAssertEqual(createdTasks.count, 2, "Повторный show должен создать ровно одну новую задачу")
+        XCTAssertEqual(createdTasks[0].cancelCount, 1, "Старая задача не должна ожить или отменяться повторно")
+        XCTAssertEqual(createdTasks[1].resumeCount, 1)
+        XCTAssertEqual(createdTasks[1].cancelCount, 0)
+        XCTAssertTrue(overlay._testHasActiveSSETask)
+
+        overlay.hide()
+        XCTAssertEqual(createdTasks[1].cancelCount, 1)
+        XCTAssertFalse(overlay._testHasActiveSSETask)
     }
 
     // MARK: 17. test_showOriginal_toggle_no_crash

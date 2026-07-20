@@ -21,6 +21,15 @@
 import AppKit
 import Foundation
 
+/// Минимальный контракт SSE-задачи нужен, чтобы жизненный цикл соединения можно было
+/// проверить без реального REST-сервера. В рабочем коде его реализует URLSessionDataTask.
+protocol LiveSubtitlesSSETask: AnyObject {
+    func resume()
+    func cancel()
+}
+
+extension URLSessionDataTask: LiveSubtitlesSSETask {}
+
 // MARK: - SubtitleEntry
 
 private struct SubtitleEntry: Identifiable {
@@ -66,6 +75,9 @@ final class LiveSubtitlesOverlay: NSObject {
     /// Origin панели (для unit-тестов off-screen guard).
     var _testPanelOrigin: NSPoint { panel.frame.origin }
 
+    /// Есть ли ровно одна принадлежащая панели активная SSE-задача.
+    var _testHasActiveSSETask: Bool { sseStreamTask != nil }
+
     /// Текущий event type из SSE (из строки "event: ..."), чтобы фильтровать data-строки.
     private var pendingSSEEventType: String? = nil
 
@@ -81,9 +93,8 @@ final class LiveSubtitlesOverlay: NSObject {
 
     // MARK: - SSE
 
-    private var sseTask: URLSessionDataTask?
-    private let sseSession = URLSession(configuration: .default)
-    private var sseBuffer = ""
+    private var sseStreamTask: LiveSubtitlesSSETask?
+    private let sseTaskFactory: ((URLRequest) -> LiveSubtitlesSSETask)?
 
     // MARK: - UserDefaults keys
 
@@ -92,7 +103,12 @@ final class LiveSubtitlesOverlay: NSObject {
 
     // MARK: - Init
 
-    override init() {
+    override convenience init() {
+        self.init(sseTaskFactory: nil)
+    }
+
+    /// Фабрика подменяется только в тестах; обычный путь создаёт URLSessionDataTask.
+    init(sseTaskFactory: ((URLRequest) -> LiveSubtitlesSSETask)?) {
         // Создаём плавающий NSPanel
         let initialFrame = NSRect(x: 0, y: 0, width: 680, height: 120)
         panel = NSPanel(
@@ -101,6 +117,7 @@ final class LiveSubtitlesOverlay: NSObject {
             backing: .buffered,
             defer: false
         )
+        self.sseTaskFactory = sseTaskFactory
         super.init()
         setupPanel()
         restorePosition()
@@ -391,14 +408,13 @@ final class LiveSubtitlesOverlay: NSObject {
     }
 
     private func stopSSE() {
-        sseTask?.cancel()
-        sseTask = nil
-        sseBuffer = ""
+        sseStreamTask?.cancel()
+        sseStreamTask = nil
+        pendingSSEEventType = nil
     }
 
     // MARK: - SSE Stream (URLSession streaming)
 
-    private var sseStreamTask: URLSessionDataTask?
     private lazy var sseDelegate: SSESessionDelegate = SSESessionDelegate { [weak self] line in
         Task { @MainActor [weak self] in
             self?.handleSSELine(line)
@@ -409,7 +425,7 @@ final class LiveSubtitlesOverlay: NSObject {
     private func startSSEStream(url: URL) {
         var request = URLRequest(url: url, timeoutInterval: 600)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        let task = sseStreamSession.dataTask(with: request)
+        let task = sseTaskFactory?(request) ?? sseStreamSession.dataTask(with: request)
         sseStreamTask = task
         task.resume()
     }
