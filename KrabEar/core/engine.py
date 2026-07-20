@@ -1789,8 +1789,20 @@ class AudioEngine:
         for info in chunks_info:
             _report(f"stt_chunk_{info['idx']}")
             try:
+                # Файловые чанки остаются на исходной частоте. Передаём её
+                # дальше только когда она отличается от продуктовых 16 кГц:
+                # GigaAM нормализует сигнал один раз непосредственно перед
+                # вычислением длительности, остальные адаптеры не меняем.
+                _fallback_rate_kwargs = (
+                    {"audio_sample_rate": effective_sr}
+                    if effective_sr != 16000
+                    else {}
+                )
                 raw_result = self._transcribe_with_fallback(
-                    info["audio"], prompt=dynamic_prompt, language=resolved_lang
+                    info["audio"],
+                    prompt=dynamic_prompt,
+                    language=resolved_lang,
+                    **_fallback_rate_kwargs,
                 )
                 raw_text = str(raw_result.get("text", "")).strip()
                 cleaned = TextUtils.cleanup_transcript(raw_text, profile=cleanup_profile)
@@ -1885,14 +1897,30 @@ class AudioEngine:
             "emotion": None,
         }
 
-    def _transcribe_with_fallback(self, audio_data: Any, prompt: str, language: str | None = None) -> dict[str, Any]:
+    def _transcribe_with_fallback(
+        self,
+        audio_data: Any,
+        prompt: str,
+        language: str | None = None,
+        audio_sample_rate: int | float | None = None,
+    ) -> dict[str, Any]:
         """Пробует несколько моделей при возникновении ошибок (например, нехватка VRAM).
 
         Перед загрузкой тяжёлых моделей (не balanced) проверяет свободную память
         через vm_stat, чтобы macOS Jetsam не убил процесс (SIGKILL).
         """
         with _profiler.start_span("stt_with_fallback"):
-            return self._transcribe_with_fallback_impl(audio_data, prompt, language)
+            # Старые test doubles и внутренние вызовы ожидают три аргумента.
+            # Не передаём новый keyword для канонических 16 кГц/неизвестной
+            # частоты; non-16k chunked-путь использует расширенный контракт.
+            if audio_sample_rate is None:
+                return self._transcribe_with_fallback_impl(audio_data, prompt, language)
+            return self._transcribe_with_fallback_impl(
+                audio_data,
+                prompt,
+                language,
+                audio_sample_rate=audio_sample_rate,
+            )
 
     _SENSEVOICE_MARKER: str = "sensevoice:adapter"
     _PARAKEET_MARKER: str = "parakeet:adapter"
@@ -1901,7 +1929,13 @@ class AudioEngine:
     _RU_FINETUNE_MARKER: str = "ru_finetune:adapter"
     _GIGAAM_MARKER: str = "gigaam:adapter"
 
-    def _transcribe_with_fallback_impl(self, audio_data: Any, prompt: str, language: str | None = None) -> dict[str, Any]:
+    def _transcribe_with_fallback_impl(
+        self,
+        audio_data: Any,
+        prompt: str,
+        language: str | None = None,
+        audio_sample_rate: int | float | None = None,
+    ) -> dict[str, Any]:
         """Внутренняя реализация fallback chain. Отделена от публичной _transcribe_with_fallback
         чтобы обернуть весь chain одним span'ом без изменения retry/timeout логики."""
         candidates = [self.current_model]
@@ -2014,12 +2048,17 @@ class AudioEngine:
         _ru_finetune_model = settings.STT_RU_FINETUNE_MODEL
         _gigaam_mode = getattr(settings, "STT_GIGAAM_MODE", "rnnt")
         _gigaam_model_label = f"gigaam-{_gigaam_mode}"
+        _gigaam_source_rate = 16000 if audio_sample_rate is None else audio_sample_rate
         _adapter_dispatch = [
             (
                 self._GIGAAM_MARKER,
                 "stt_gigaam",
                 _gigaam_model_label,
-                lambda: self._transcribe_gigaam(audio_data, language=language),
+                lambda: self._transcribe_gigaam(
+                    audio_data,
+                    language=language,
+                    sample_rate=_gigaam_source_rate,
+                ),
             ),
             (
                 self._RU_FINETUNE_MARKER,
@@ -2080,15 +2119,19 @@ class AudioEngine:
                         _gigaam_text = str(adapter_result.get("text", "")).strip()
                         _gigaam_engine = str(adapter_result.get("engine", ""))
                         _gigaam_error = adapter_result.get("error")
-                        if (
-                            not _gigaam_text
-                            or _gigaam_error
-                            or _gigaam_engine.endswith("-error")
-                        ):
+                        if _gigaam_error or _gigaam_engine.endswith("-error"):
                             raise RuntimeError(
-                                "GigaAM вернул аварийный или пустой результат: "
+                                "GigaAM вернул аварийный результат: "
                                 f"{_gigaam_error or _gigaam_engine or 'empty_text'}"
                             )
+                        if not _gigaam_text:
+                            # Пустой успешный ответ бывает на тишине и не доказывает,
+                            # что модель сломана. Переключаем только этот запрос на
+                            # Whisper, не записывая GigaAM в 300-секундный blacklist.
+                            logger.info(
+                                "GigaAM не распознал речь — request-local fallback на Whisper"
+                            )
+                            continue
                     adapter_result["model_used"] = adapter_model
                     return adapter_result
                 except Exception as exc:
@@ -2776,7 +2819,56 @@ class AudioEngine:
         logger.info("Voxtral модель загружена: %s", settings.VOXTRAL_MODEL)
         return self._voxtral_model
 
-    def _transcribe_gigaam(self, audio_data: Any, language: str | None = None) -> dict[str, Any]:
+    @staticmethod
+    def _resample_gigaam_audio_to_16k(
+        audio: np.ndarray,
+        source_sample_rate: int | float,
+    ) -> np.ndarray:
+        """Приводит mono float32 сигнал к реальным 16 кГц ровно один раз.
+
+        GigaAM, его 25-секундный лимит и AudioChunker должны видеть один и тот
+        же массив. Поэтому ресемплинг выполняется до выбора short/longform, а в
+        адаптер дальше всегда передаётся уже каноническая частота 16 кГц.
+        """
+        try:
+            source_rate = float(source_sample_rate)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Некорректная частота аудио для GigaAM: {source_sample_rate!r}"
+            ) from exc
+        if not np.isfinite(source_rate) or source_rate <= 0:
+            raise ValueError(
+                f"Частота аудио для GigaAM должна быть положительной: {source_sample_rate!r}"
+            )
+
+        mono = np.asarray(audio, dtype=np.float32)
+        if mono.ndim != 1:
+            raise ValueError(f"GigaAM ожидает mono-массив, получена shape={mono.shape}")
+        if mono.size == 0 or source_rate == 16000.0:
+            return np.ascontiguousarray(mono, dtype=np.float32)
+
+        target_length = max(1, int(round(mono.size * 16000.0 / source_rate)))
+        try:
+            import scipy.signal as scipy_signal  # type: ignore[import]
+
+            normalized = scipy_signal.resample(mono, target_length)
+        except ImportError:
+            old_positions = np.arange(mono.size, dtype=np.float64)
+            new_positions = np.linspace(
+                0.0,
+                float(mono.size - 1),
+                target_length,
+                dtype=np.float64,
+            )
+            normalized = np.interp(new_positions, old_positions, mono)
+        return np.ascontiguousarray(normalized, dtype=np.float32)
+
+    def _transcribe_gigaam(
+        self,
+        audio_data: Any,
+        language: str | None = None,
+        sample_rate: int | float = 16000,
+    ) -> dict[str, Any]:
         """Транскрибация через GigaAM v1-v3 (русскоязычный STT, Sber).
 
         Args:
@@ -2784,6 +2876,8 @@ class AudioEngine:
                         или bytes (PCM int16 LE от AudioRecorder).
             language: ISO 639-1 код языка; GigaAM поддерживает только "ru",
                       передаётся для совместимости интерфейса.
+            sample_rate: реальная частота ndarray/PCM bytes; для файла берётся
+                         непосредственно из контейнера через soundfile.
 
         Returns:
             dict с ключами:
@@ -2833,11 +2927,14 @@ class AudioEngine:
             if sess is not None and getattr(sess, "_error_bus", None) is None:
                 sess._error_bus = engine_error_bus
 
-        # Нормализуем audio_data в numpy float32
+        # Нормализуем вход в mono float32 и сохраняем реальную исходную частоту.
+        source_sample_rate: int | float = sample_rate
         if isinstance(audio_data, (str, Path)):
             if sf is None:
                 raise ImportError("soundfile не установлен, не могу читать аудио-файл")
-            audio_array, _sr = sf.read(str(audio_data), dtype="float32", always_2d=False)
+            audio_array, source_sample_rate = sf.read(
+                str(audio_data), dtype="float32", always_2d=False,
+            )
             if audio_array.ndim > 1:
                 audio_array = audio_array.mean(axis=1)
             audio_data_np = audio_array.astype(np.float32)
@@ -2850,6 +2947,14 @@ class AudioEngine:
                 audio_data_np = audio_data_np.mean(axis=1)
         else:
             raise TypeError(f"Неподдерживаемый тип audio_data для GigaAM: {type(audio_data)}")
+
+        # Критический инвариант: duration, chunker и адаптер работают с одним
+        # каноническим mono/16k массивом. Адаптер получает sample_rate=16000 и
+        # потому не выполняет второй реальный ресемплинг.
+        audio_data_np = self._resample_gigaam_audio_to_16k(
+            audio_data_np,
+            source_sample_rate,
+        )
 
         # GigaAM `transcribe()` имеет hard limit ~25 сек на одну операцию.
         # Для длинных аудио поддерживаем два пути:
@@ -2907,9 +3012,14 @@ class AudioEngine:
                         duration_sec,
                         "set" if hf_token else "cached",
                     )
-                    result = adapter.transcribe(audio_data_np, longform=True, hf_token=hf_token)
+                    result = adapter.transcribe(
+                        audio_data_np,
+                        sample_rate=16000,
+                        longform=True,
+                        hf_token=hf_token,
+                    )
             else:
-                result = adapter.transcribe(audio_data_np)
+                result = adapter.transcribe(audio_data_np, sample_rate=16000)
         except Exception as exc:
             # Оба пути упали. Исключение — единственный однозначный сигнал
             # fallback-chain перейти к Whisper; error-dict раньше считался

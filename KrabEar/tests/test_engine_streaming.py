@@ -109,6 +109,34 @@ class TestTranscribeChunkedBasic(unittest.TestCase):
         self.assertIn("text", result)
         self.assertTrue(result["text"])
 
+    def test_chunked_forwards_real_source_sample_rate(self):
+        """Чанки 48 кГц передают effective_sr в GigaAM fallback-chain."""
+        audio = _make_audio(2.0, sr=48_000)
+        observed_rates: list[int | None] = []
+
+        def capture_rate(audio_data, prompt, language=None, audio_sample_rate=None):
+            observed_rates.append(audio_sample_rate)
+            return {
+                "text": "часть",
+                "segments": [{"avg_logprob": -0.3}],
+                "engine": "gigaam-rnnt",
+                "model_used": "test-model",
+                "language": "ru",
+            }
+
+        with patch.object(
+            self.engine, "_transcribe_with_fallback", side_effect=capture_rate,
+        ):
+            self.engine.transcribe_chunked(
+                audio,
+                sample_rate=48_000,
+                chunk_sec=1.0,
+                overlap_sec=0.0,
+            )
+
+        self.assertTrue(observed_rates)
+        self.assertEqual(observed_rates, [48_000] * len(observed_rates))
+
     def test_seam_stitching_removes_duplicates(self):
         """Дублирующиеся слова на шве удаляются через LCS."""
         # chunk_prev заканчивается на "hello world", chunk_next начинается с "world foo bar"

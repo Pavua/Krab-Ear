@@ -345,6 +345,7 @@ class TestGigaAMFallbackOnTranscribeError(unittest.TestCase):
             result = engine._transcribe_with_fallback(_audio(), prompt="", language="ru")
             # Whisper должен был вернуть результат
             self.assertEqual(result.get("text"), "whisper fallback result")
+            self.assertIn(engine._GIGAAM_MARKER, engine._unavailable_models)
 
     def test_error_dict_and_empty_text_continue_to_whisper(self):
         """Аварийный dict GigaAM не является успешным результатом chain."""
@@ -373,6 +374,35 @@ class TestGigaAMFallbackOnTranscribeError(unittest.TestCase):
             )
 
         self.assertEqual(result["text"], "whisper после ошибки")
+        self.assertIn(engine._GIGAAM_MARKER, engine._unavailable_models)
+
+    def test_successful_empty_result_falls_back_without_blacklist(self):
+        """Тишина даёт fallback только текущему запросу, не отключая GigaAM."""
+        fake_settings = _make_settings(STT_GIGAAM_ENABLED=True)
+        fake_router = _make_fake_router(adapter=_make_fake_adapter())
+        mlx_stub = MagicMock()
+        mlx_stub.transcribe.return_value = {
+            "text": "whisper после тишины",
+            "language": "ru",
+            "segments": [],
+        }
+
+        with patch("core.engine.settings", fake_settings), \
+             patch("core.engine.mlx_whisper", mlx_stub):
+            engine = _make_audio_engine_without_warmup()
+            engine._router = fake_router
+            engine._transcribe_gigaam = MagicMock(return_value={
+                "text": "",
+                "confidence": 0.9,
+                "engine": "gigaam-rnnt",
+            })
+
+            result = engine._transcribe_with_fallback(
+                _audio(), prompt="", language="ru",
+            )
+
+        self.assertEqual(result["text"], "whisper после тишины")
+        self.assertNotIn(engine._GIGAAM_MARKER, engine._unavailable_models)
 
 
 class TestGigaAMConfidence(unittest.TestCase):
@@ -462,6 +492,65 @@ class TestGigaAMTranscribeGigaamMethod(unittest.TestCase):
 
             with self.assertRaises(RuntimeError):
                 engine._transcribe_gigaam(_audio(), language="ru")
+
+    def test_file_48k_is_mono_16k_before_duration_and_adapter(self):
+        """Файл 48 кГц нормализуется до mono 16 кГц до выбора shortform."""
+        fake_adapter = _make_fake_adapter(text="нормализовано")
+        fake_settings = _make_settings(STT_GIGAAM_ENABLED=True)
+        stereo_48k = np.column_stack([
+            _audio(seconds=10.0, sr=48_000),
+            _audio(seconds=10.0, sr=48_000),
+        ])
+
+        with patch("core.engine.settings", fake_settings), \
+             patch("core.engine.sf") as soundfile_stub:
+            soundfile_stub.read.return_value = (stereo_48k, 48_000)
+            engine = _make_audio_engine_without_warmup()
+            engine._router = _make_fake_router(adapter=fake_adapter)
+
+            result = engine._transcribe_gigaam("/tmp/fake-48k.wav", language="ru")
+
+        self.assertEqual(result["text"], "нормализовано")
+        fake_adapter.transcribe.assert_called_once()
+        normalized = fake_adapter.transcribe.call_args.args[0]
+        self.assertEqual(normalized.ndim, 1)
+        self.assertEqual(normalized.dtype, np.float32)
+        self.assertEqual(len(normalized), 10 * 16_000)
+        self.assertEqual(fake_adapter.transcribe.call_args.kwargs["sample_rate"], 16_000)
+        self.assertNotEqual(
+            fake_adapter.transcribe.call_args.kwargs.get("longform"), True,
+        )
+
+    def test_pcm_bytes_48k_is_resampled_once_before_adapter(self):
+        """PCM bytes с явной частотой достигают адаптера как mono 16 кГц."""
+        fake_adapter = _make_fake_adapter(text="pcm нормализован")
+        fake_settings = _make_settings(STT_GIGAAM_ENABLED=True)
+        pcm_48k = np.clip(
+            _audio(seconds=2.0, sr=48_000) * 32768.0,
+            -32768,
+            32767,
+        ).astype(np.int16).tobytes()
+
+        with patch("core.engine.settings", fake_settings):
+            engine = _make_audio_engine_without_warmup()
+            engine._router = _make_fake_router(adapter=fake_adapter)
+
+            result = engine._transcribe_gigaam(
+                pcm_48k,
+                language="ru",
+                sample_rate=48_000,
+            )
+
+        self.assertEqual(result["text"], "pcm нормализован")
+        fake_adapter.transcribe.assert_called_once()
+        normalized = fake_adapter.transcribe.call_args.args[0]
+        self.assertEqual(normalized.ndim, 1)
+        self.assertEqual(normalized.dtype, np.float32)
+        self.assertEqual(len(normalized), 2 * 16_000)
+        self.assertEqual(
+            fake_adapter.transcribe.call_args.kwargs["sample_rate"],
+            16_000,
+        )
 
 
 class TestGigaAMAndFinetuneBothEnabled(unittest.TestCase):
