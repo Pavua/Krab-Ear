@@ -1,10 +1,10 @@
 """Тесты lifecycle-контракта realtime_partial и таймаута stop().
 
-W1323: Validates:
-  1. stop() default timeout is 30s (not 4s).
-  2. _stop_requested flag is set True on stop().
-  3. Warning logged when thread still alive after join timeout.
-  4. Живой self._thread сохраняется после join timeout и блокирует restart.
+W1323 проверяет:
+  1. Таймаут stop() по умолчанию равен 30 секундам, а не 4.
+  2. stop() устанавливает флаг _stop_requested.
+  3. Живой после join timeout поток приводит к предупреждению.
+  4. Живой self._thread сохраняется после join timeout и блокирует перезапуск.
   5. Разблокированный после timeout worker не публикует устаревший partial.
 """
 import ast
