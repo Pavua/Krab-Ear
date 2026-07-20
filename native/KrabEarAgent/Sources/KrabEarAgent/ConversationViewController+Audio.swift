@@ -1,25 +1,18 @@
 /*
- ConversationViewController+Audio — AVAudioEngine capture / playback (Phase 1.4, wired).
+ ConversationViewController+Audio — захват и воспроизведение PCM для «Разговора с AI».
 
- Phase 1.4: PCM16 LE mono, no codec needed.
-   Uplink:   AVAudioEngine mic tap → resample to 16kHz mono Float32 →
-             Float32→PCM16 LE conversion → sendAudioFrame(pcmData)
-   Downlink: handleDownlinkAudio(data) → PCM16 LE → Float32 →
-             AVAudioPCMBuffer → AVAudioPlayerNode.scheduleBuffer
+ После `conv.ready` одна согласованная частота применяется в обе стороны:
+ - uplink: микрофон → ресемплинг → точные 80-мс фреймы → PCM16 LE → WebSocket;
+ - downlink: PCM16 LE → Float32 → AVAudioPlayerNode на согласованной частоте.
 
- Voice Gateway speaks raw PCM16 LE mono (confirmed: conversation.py «Бинарные фреймы: PCM16 LE mono»).
- No Opus library is needed — format conversion is done inline.
+ Moshi использует 24 кГц и требует ровно 1920 сэмплов на фрейм; старый pipeline
+ использует 16 кГц и 1280 сэмплов. До `conv.ready` захват не запускается, поэтому
+ сервер никогда не получает фрейм неверной длины. Для legacy `engine.loaded` и
+ `conv.ready` без `sample_rate` действует fallback 16 кГц.
 
- Downlink sample rate (downlinkSampleRate = 24000 Hz) matches VG's documented TTS output.
- AVAudioEngine's mainMixerNode auto-resamples to the hardware output rate, so a mismatch
- here only affects playback pitch — it never crashes. Adjust as the VG contract evolves.
-
- Swift 6 concurrency note:
- AVAudioNode tap block is called on the Core Audio real-time thread — NOT on the
- main actor. Accessing @MainActor-isolated properties directly from inside the
- block triggers _swift_task_checkIsolatedSwift → EXC_BREAKPOINT.
- Fix: use a nonisolated(unsafe) atomic mirror of isSessionActive for the RT guard,
- then dispatch any main-actor work via Task { @MainActor in … }.
+ Tap AVAudioNode вызывается в real-time потоке Core Audio, а контроллер изолирован
+ главным актором. Поэтому tap читает только nonisolated-зеркало активности, копирует
+ сэмплы и передаёт дальнейшую обработку через Task на главный актор.
 */
 
 @preconcurrency import AVFoundation
@@ -27,19 +20,12 @@ import Foundation
 
 extension ConversationViewController {
 
-    // MARK: - Audio holder (same pattern as WSHolder)
+    // MARK: - Хранилище аудиосостояния
 
     nonisolated(unsafe) private static var audioHolderKey: UInt8 = 0
 
-    /// Thread-safe mirror of `isSessionActive` for use inside the Core Audio
-    /// real-time tap block. Must be updated in lockstep with `isSessionActive`.
+    /// Зеркало `isSessionActive` для real-time tap без обращения к главному актору.
     nonisolated(unsafe) static var _rtSessionActive: Bool = false
-
-    /// Downlink sample rate from the Voice Gateway (PCM16 LE mono).
-    /// VERIFIED live 2026-06-20: krab_ear_pipeline engine emits conv.ready.data.sample_rate = 16000
-    /// (symmetric with the 16kHz uplink). AVAudioEngine auto-resamples to hardware rate.
-    /// TODO: parse conv.ready.data.sample_rate dynamically (other engines may differ, e.g. Moshi 24k).
-    private static let downlinkSampleRate: Double = 16000
 
     private var audioHolder: AudioHolder {
         if let h = objc_getAssociatedObject(self, &ConversationViewController.audioHolderKey) as? AudioHolder {
@@ -50,56 +36,126 @@ extension ConversationViewController {
         return h
     }
 
-    // MARK: - Capture (mic → uplink)
+    // MARK: - Согласование контракта
+
+    /// Сбрасывает состояние предыдущей сессии. До ready сборщик намеренно закрыт.
+    func prepareAudioNegotiation() {
+        ConversationViewController._rtSessionActive = false
+        audioHolder.negotiationReady = false
+        audioHolder.sampleRate = ConversationAudioContract.fallbackSampleRate
+        audioHolder.frameAssembler = ConversationAudioFrameAssembler(
+            frameLength: ConversationAudioContract.samplesPerFrame(
+                sampleRate: ConversationAudioContract.fallbackSampleRate
+            )
+        )
+    }
+
+    /// Применяет серверную частоту, но не касается аудиоустройств; это чистая граница
+    /// между парсингом протокола и AVAudioEngine, пригодная для headless-тестов.
+    func configureNegotiatedAudio(sampleRate: Double?) {
+        let normalized = ConversationAudioContract.normalizedSampleRate(sampleRate)
+        audioHolder.sampleRate = normalized
+        audioHolder.frameAssembler = ConversationAudioFrameAssembler(
+            frameLength: ConversationAudioContract.samplesPerFrame(sampleRate: normalized)
+        )
+        audioHolder.negotiationReady = true
+    }
+
+    /// Активирует аудио после ready. Повторное идентичное событие не рвёт поток;
+    /// изменение частоты приводит к контролируемой перенастройке одного engine.
+    func activateNegotiatedAudio(sampleRate: Double?) {
+        let normalized = ConversationAudioContract.normalizedSampleRate(sampleRate)
+        let alreadyConfigured = audioHolder.negotiationReady
+            && audioHolder.sampleRate == normalized
+            && audioHolder.engine != nil
+        guard !alreadyConfigured else { return }
+
+        if audioHolder.engine != nil {
+            stopAudioCapture()
+        }
+        configureNegotiatedAudio(sampleRate: normalized)
+        guard isSessionActive else { return }
+        startAudioCapture()
+    }
+
+    /// Единый playback-формат: downlink интерпретируется на той же частоте, что ready.
+    func makeDownlinkPlaybackFormat() -> AVAudioFormat? {
+        AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: audioHolder.sampleRate,
+            channels: 1,
+            interleaved: false
+        )
+    }
+
+    /// Добавляет ресемплированный чанк и возвращает только полные 80-мс фреймы.
+    /// До согласования возвращает пустой массив — это основной uplink-гейт.
+    func assembleUplinkFrames(_ samples: [Float]) -> [[Float]] {
+        guard audioHolder.negotiationReady else { return [] }
+        return audioHolder.frameAssembler.append(samples)
+    }
+
+    // MARK: - Захват (микрофон → uplink)
 
     /// Запустить захват микрофона и подключить player-node для воспроизведения downlink.
-    /// Phase 1.4: один AVAudioEngine обслуживает и input-tap (uplink) и player-node (downlink).
+    /// Один AVAudioEngine обслуживает input-tap и player-node на частоте из ready.
     func startAudioCapture() {
-        // Mirror session state for RT-thread access before starting engine.
+        guard audioHolder.negotiationReady else {
+            AgentLogger.shared.warn("[Audio] Захват отложен до conv.ready")
+            return
+        }
+
+        // Зеркало выставляется до старта engine, чтобы первый tap не потерял сессию.
         ConversationViewController._rtSessionActive = isSessionActive
 
         let engine      = AVAudioEngine()
         let inputNode   = engine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
+        let sampleRate  = audioHolder.sampleRate
 
-        // Конвертер в 16kHz mono для uplink.
+        // Конвертер приводит аппаратную частоту микрофона к контракту текущего движка.
         guard let targetFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
-            sampleRate: 16000,
+            sampleRate: sampleRate,
             channels: 1,
             interleaved: false
         ) else {
-            AgentLogger.shared.info("[Audio] Не удалось создать 16kHz формат")
+            AgentLogger.shared.info("[Audio] Не удалось создать uplink-формат \(Int(sampleRate)) Гц")
             return
         }
 
-        let converter = AVAudioConverter(from: inputFormat, to: targetFormat)
+        guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
+            AgentLogger.shared.info("[Audio] Не удалось создать ресемплер микрофона")
+            return
+        }
 
-        // 80ms буфер = 16000 * 0.08 = 1280 сэмплов.
-        let bufferSize: AVAudioFrameCount = 1280
+        // Размер tap задан в аппаратных сэмплах; итоговую точность обеспечивает assembler.
+        let tapBufferSize = AVAudioFrameCount(max(
+            1,
+            Int((inputFormat.sampleRate * ConversationAudioContract.frameDurationSeconds).rounded())
+        ))
 
-        // Swift 6: AVAudioNodeTapBlock runs on the Core Audio real-time thread.
-        // Without an explicit `@Sendable` annotation the compiler infers the closure as
-        // `@MainActor`-isolated (because `startAudioCapture` is `@MainActor`), which makes
-        // the Swift 6 runtime assert `_swift_task_checkIsolatedSwift` trap with
-        // EXC_BREAKPOINT when the block fires from `RealtimeMessenger.mServiceQueue`.
-        // Marking the block `@Sendable` breaks that inference and satisfies Swift 6.
+        // Явный @Sendable не даёт замыканию унаследовать @MainActor от этого метода.
         let tapBlock: @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void = { [weak self] buffer, _ in
-            // ⚠️ Core Audio real-time thread — do NOT access @MainActor properties here.
-            // Use the nonisolated mirror _rtSessionActive instead of self.isSessionActive.
+            // Здесь real-time поток: свойства главного актора читать нельзя.
             guard self != nil, ConversationViewController._rtSessionActive else { return }
-            guard let converted = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: bufferSize) else { return }
+
+            let ratio = targetFormat.sampleRate / max(inputFormat.sampleRate, 1)
+            let estimatedFrames = Int(ceil(Double(buffer.frameLength) * ratio)) + 16
+            guard let converted = AVAudioPCMBuffer(
+                pcmFormat: targetFormat,
+                frameCapacity: AVAudioFrameCount(max(1, estimatedFrames))
+            ) else { return }
 
             var error: NSError?
-            // AVAudioConverterInputBlock — not an inout parameter; pass directly.
+            let supplier = SingleAudioBufferSupplier(buffer: buffer)
             let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
-                outStatus.pointee = .haveData
-                return buffer
+                supplier.next(status: outStatus)
             }
-            let status = converter?.convert(to: converted, error: &error, withInputFrom: inputBlock)
+            let status = converter.convert(to: converted, error: &error, withInputFrom: inputBlock)
             guard status == .haveData || status == .inputRanDry else { return }
 
-            // Extract raw samples on RT thread (safe: Float array copy, no actor crossing).
+            // Копия Float-массива безопасно пересекает границу потока.
             let frameLength = Int(converted.frameLength)
             let samples: [Float]
             if let channelData = converted.floatChannelData {
@@ -108,32 +164,25 @@ extension ConversationViewController {
                 samples = []
             }
 
-            // Dispatch to main actor for PCM16 encoding and level-meter update.
+            // Сборка фреймов, WebSocket и UI принадлежат главному актору.
             Task { @MainActor [weak self] in
                 self?.processAudioSamples(samples)
             }
         }
 
-        inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: inputFormat, block: tapBlock)
+        inputNode.installTap(onBus: 0, bufferSize: tapBufferSize, format: inputFormat, block: tapBlock)
 
-        // MARK: Downlink player node (Phase 1.4)
-        // Attach a player node to the SAME engine so one engine handles both
-        // input-tap (uplink) and playback (downlink) without two engine starts.
+        // Тот же engine обслуживает playback, чтобы не было двух конкурирующих графов.
         let player = AVAudioPlayerNode()
         engine.attach(player)
 
-        guard let playbackFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: ConversationViewController.downlinkSampleRate,
-            channels: 1,
-            interleaved: false
-        ) else {
-            AgentLogger.shared.warn("[Audio] Не удалось создать playback-формат 24kHz — downlink недоступен")
-            // Continue without player: uplink still works.
+        guard let playbackFormat = makeDownlinkPlaybackFormat() else {
+            AgentLogger.shared.warn("[Audio] Не удалось создать playback-формат \(Int(sampleRate)) Гц")
+            // Uplink остаётся полезен даже без устройства воспроизведения.
             audioHolder.engine = engine
             do {
                 try engine.start()
-                AgentLogger.shared.info("[Audio] Захват запущен (uplink only, no player)")
+                AgentLogger.shared.info("[Audio] Захват запущен только для uplink")
             } catch {
                 AgentLogger.shared.error("[Audio] Ошибка запуска движка: \(error.localizedDescription)")
             }
@@ -147,7 +196,10 @@ extension ConversationViewController {
         do {
             try engine.start()
             player.play()
-            AgentLogger.shared.info("[Audio] Захват запущен (PCM16 uplink + downlink player, 16kHz/24kHz)")
+            let frameLength = ConversationAudioContract.samplesPerFrame(sampleRate: sampleRate)
+            AgentLogger.shared.info(
+                "[Audio] Контракт активен: \(Int(sampleRate)) Гц, \(frameLength) сэмплов/80 мс"
+            )
         } catch {
             AgentLogger.shared.error("[Audio] Ошибка запуска движка: \(error.localizedDescription)")
         }
@@ -155,62 +207,63 @@ extension ConversationViewController {
 
     /// Остановить захват микрофона и player node.
     func stopAudioCapture() {
-        // Clear RT mirror before removing tap so the in-flight block exits early.
+        // Сначала закрываем RT-гейт, затем разбираем граф.
         ConversationViewController._rtSessionActive = false
         audioHolder.engine?.inputNode.removeTap(onBus: 0)
-        // Stop player cleanly before engine stop to avoid scheduling on a stopped node.
         audioHolder.playerNode?.stop()
         audioHolder.playerNode = nil
         audioHolder.engine?.stop()
         audioHolder.engine = nil
-        // Сбросить level-meter в idle-состояние (@MainActor — безопасно).
+        audioHolder.frameAssembler.reset()
+        audioHolder.negotiationReady = false
         resetMicLevelMeter()
         AgentLogger.shared.info("[Audio] Захват остановлен")
     }
 
     /// Обработать PCM-сэмплы на главном акторе.
-    /// Phase 1.4: Float32 → PCM16 LE → sendAudioFrame (uplink) + level-meter.
+    /// Float32 → точные 80-мс фреймы → PCM16 LE + level-meter.
     /// Вызывается только из Task { @MainActor } внутри installTap-блока.
     func processAudioSamples(_ samples: [Float]) {
-        // Level-meter: вычислить RMS и передать в визуализатор.
-        // Безопасно — вызываемся на @MainActor, без IPC (AGENT-3 чист).
+        // Индикатор получает каждый чанк, а сеть — только полные контрактные фреймы.
         computeAndPushLevel(samples)
 
-        // Uplink: Float32 → PCM16 LE → binary WS frame.
-        // This path is @MainActor; 1280 samples (80ms) makes the loop cheap.
         guard isSessionActive, !samples.isEmpty else { return }
-        var pcm = Data(capacity: samples.count * 2)
-        for s in samples {
-            let clamped = s.isFinite ? max(-1.0, min(1.0, s)) : 0.0  // NaN/Inf-safe clamp
-            let i = Int16(clamped * 32767.0)
-            withUnsafeBytes(of: i.littleEndian) { pcm.append(contentsOf: $0) }
+        for frame in assembleUplinkFrames(samples) {
+            var pcm = Data(capacity: frame.count * 2)
+            for sample in frame {
+                // Не-числовые значения превращаем в тишину, чтобы не портить PCM.
+                let clamped = sample.isFinite ? max(-1.0, min(1.0, sample)) : 0.0
+                let integer = Int16(clamped * 32767.0)
+                withUnsafeBytes(of: integer.littleEndian) { pcm.append(contentsOf: $0) }
+            }
+            sendAudioFrame(pcm)
         }
-        sendAudioFrame(pcm)
     }
 
-    // MARK: - Playback (downlink → speaker)
+    // MARK: - Воспроизведение (downlink → колонки)
 
     /// Обработать бинарный PCM16 LE фрейм от сервера.
-    /// Phase 1.4: PCM16 LE → Float32 → AVAudioPCMBuffer → scheduleBuffer.
+    /// PCM16 LE → Float32 → AVAudioPCMBuffer на частоте из ready → scheduleBuffer.
     /// Вызывается из Main Actor (из handleWSMessage) — безопасно обращаться к @MainActor свойствам.
     func handleDownlinkAudio(_ data: Data) {
-        // Обновляем состояние — сервер присылает аудио только когда AI говорит.
+        let frameCount = data.count / 2
+        guard audioHolder.negotiationReady,
+              data.count.isMultiple(of: 2),
+              frameCount > 0,
+              let fmt = makeDownlinkPlaybackFormat(),
+              let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(frameCount))
+        else {
+            AgentLogger.shared.info("[Audio] Downlink: фрейм до ready или некорректный PCM (\(data.count) bytes)")
+            return
+        }
+
+        // Валидный бинарный фрейм означает, что ассистент действительно заговорил.
         if conversationState != .speaking {
             conversationState = .speaking
         }
 
-        let frameCount = data.count / 2
-        guard frameCount > 0,
-              let fmt = AVAudioFormat(
-                  commonFormat: .pcmFormatFloat32,
-                  sampleRate: ConversationViewController.downlinkSampleRate,
-                  channels: 1,
-                  interleaved: false
-              ),
-              let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(frameCount)),
-              let player = audioHolder.playerNode
-        else {
-            AgentLogger.shared.info("[Audio] Downlink: пропуск фрейма (\(data.count) bytes) — player недоступен")
+        guard let player = audioHolder.playerNode else {
+            AgentLogger.shared.info("[Audio] Downlink: player недоступен")
             return
         }
 
@@ -225,7 +278,7 @@ extension ConversationViewController {
         player.scheduleBuffer(buf, completionHandler: nil)
     }
 
-    // MARK: - Interrupt support (Волна 3c)
+    // MARK: - Поддержка прерывания (Волна 3c)
 
     /// Сбросить уже запланированные downlink-буферы (прерывание ответа).
     /// AVAudioPlayerNode.stop() снимает все scheduled buffers; play() возвращает
@@ -242,9 +295,39 @@ extension ConversationViewController {
     }
 }
 
-// MARK: - AudioHolder
+// MARK: - Вспомогательные хранилища
+
+/// AVAudioConverter запрашивает вход синхронно, но тип его блока помечен Sendable.
+/// Отдельный объект сохраняет одноразовое состояние без захвата изменяемой локальной
+/// переменной. `@unchecked Sendable` безопасен здесь: один экземпляр живёт внутри
+/// единственного синхронного вызова `convert` и не передаётся между очередями.
+private final class SingleAudioBufferSupplier: @unchecked Sendable {
+    private let buffer: AVAudioPCMBuffer
+    private var wasSupplied = false
+
+    init(buffer: AVAudioPCMBuffer) {
+        self.buffer = buffer
+    }
+
+    func next(status: UnsafeMutablePointer<AVAudioConverterInputStatus>) -> AVAudioBuffer? {
+        guard !wasSupplied else {
+            status.pointee = .noDataNow
+            return nil
+        }
+        wasSupplied = true
+        status.pointee = .haveData
+        return buffer
+    }
+}
 
 private final class AudioHolder: NSObject {
     var engine: AVAudioEngine?
     var playerNode: AVAudioPlayerNode?
+    var sampleRate = ConversationAudioContract.fallbackSampleRate
+    var negotiationReady = false
+    var frameAssembler = ConversationAudioFrameAssembler(
+        frameLength: ConversationAudioContract.samplesPerFrame(
+            sampleRate: ConversationAudioContract.fallbackSampleRate
+        )
+    )
 }

@@ -173,19 +173,21 @@ final class ConversationEventsTests: XCTestCase {
                 "sample_rate": 16000
             ] as [String: Any]
         ])
-        guard case .engineLoaded(let name, let elapsed) = event else {
-            return XCTFail("Expected engineLoaded, got \(String(describing: event))")
+        guard case .engineReady(let name, let elapsed, let sampleRate) = event else {
+            return XCTFail("Ожидалось engineReady, получено \(String(describing: event))")
         }
         XCTAssertEqual(name, "krab_ear_pipeline")
         XCTAssertEqual(elapsed, 0.0, accuracy: 1e-9)
+        XCTAssertEqual(sampleRate, 16_000)
     }
 
     func test_convReady_missingEngine_nameIsEmpty() {
         let event = decode(["type": "conv.ready", "data": [:] as [String: Any]])
-        guard case .engineLoaded(let name, _) = event else {
-            return XCTFail("Expected engineLoaded")
+        guard case .engineReady(let name, _, let sampleRate) = event else {
+            return XCTFail("Ожидалось engineReady")
         }
         XCTAssertEqual(name, "")
+        XCTAssertNil(sampleRate)
     }
 
     // MARK: - conv.error / conv.fatal

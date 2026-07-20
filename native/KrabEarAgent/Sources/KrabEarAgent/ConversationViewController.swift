@@ -188,8 +188,10 @@ final class ConversationViewController: NSViewController {
         conversationState = .connecting
         transcriptBuffer = ""
         updateTranscript("")
+        // Микрофон запускается только после `conv.ready`: Moshi требует 24 кГц,
+        // а старый pipeline — 16 кГц. До согласования отправлять фреймы нельзя.
+        prepareAudioNegotiation()
         startWebSocketSession()
-        startAudioCapture()
     }
 
     /// Остановить сессию. Вызывается из hotkey-toggle или кнопки «Прервать».
@@ -332,9 +334,17 @@ final class ConversationViewController: NSViewController {
                 }
             }
 
+        case .engineReady(let name, let elapsed, let sampleRate):
+            let elapsedStr = elapsed > 0 ? " (\(String(format: "%.1f", elapsed))s)" : ""
+            appendTranscriptLine("— Движок \(name) готов\(elapsedStr)")
+            activateNegotiatedAudio(sampleRate: sampleRate)
+            conversationState = .listening
+
         case .engineLoaded(let name, let elapsed):
             let elapsedStr = elapsed > 0 ? " (\(String(format: "%.1f", elapsed))s)" : ""
             appendTranscriptLine("— Движок \(name) готов\(elapsedStr)")
+            // Старый Gateway не передавал sample_rate и работал на 16 кГц.
+            activateNegotiatedAudio(sampleRate: nil)
             conversationState = .listening
 
         case .replyFinal(let text):

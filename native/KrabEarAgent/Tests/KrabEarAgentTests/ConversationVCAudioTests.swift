@@ -6,7 +6,7 @@
  Тестируем доступную логику:
    1. handleDownlinkAudio() → переход в .speaking при получении аудио-фрейма.
    2. Повторный вызов handleDownlinkAudio() не дублирует смену состояния.
-   3. startConversation() / stopConversation() переключают isSessionActive.
+   3. startConversation() ждёт ready перед захватом, stopConversation() очищает сессию.
    4. stopConversation() → состояние возвращается в .idle.
    5. ConversationEvent.decode — корректное декодирование JSON в typed event.
    6. ConversationEvent.decode — неизвестный тип → .unknown, nil на невалидном JSON.
@@ -26,6 +26,8 @@ final class ConversationVCAudioTests: XCTestCase {
         vc = ConversationViewController(config: .default)
         vc.loadView()
         vc.viewDidLoad()
+        vc.prepareAudioNegotiation()
+        vc.configureNegotiatedAudio(sampleRate: nil)
     }
 
     override func tearDown() async throws {
@@ -57,12 +59,13 @@ final class ConversationVCAudioTests: XCTestCase {
     /// (WS + AVAudioEngine не запустятся в тестах, но флаг и состояние должны выставиться.)
     func test_startConversation_setsSessionActiveAndConnecting() {
         XCTAssertFalse(vc.isSessionActive)
-        // startConversation() вызывает startWebSocketSession() + startAudioCapture()
-        // которые могут тихо упасть без сети/микрофона — нам важны побочные эффекты на state.
+        // До ready открывается только WebSocket; микрофон не должен стартовать заранее.
         vc.startConversation()
         XCTAssertTrue(vc.isSessionActive, "После startConversation isSessionActive должен быть true")
         XCTAssertEqual(vc.conversationState, .connecting,
                        "startConversation должен переводить в .connecting")
+        XCTAssertFalse(ConversationViewController._rtSessionActive,
+                       "До conv.ready real-time uplink-гейт должен оставаться закрыт")
         // Cleanup
         vc.isSessionActive = false
     }

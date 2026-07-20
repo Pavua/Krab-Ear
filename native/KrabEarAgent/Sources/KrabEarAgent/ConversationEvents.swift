@@ -32,7 +32,10 @@ enum ConversationEvent {
     /// conv.transcript_partial (isFinal=false) / conv.transcript_final (isFinal=true).
     case sttPartial(text: String, lang: String, isFinal: Bool)
 
-    /// Движок AI успешно загружен и готов к работе (conv.ready).
+    /// Современный `conv.ready`: движок готов, а частота определяет uplink и downlink.
+    case engineReady(name: String, elapsedSec: Double, sampleRate: Double?)
+
+    /// Старое `engine.loaded` без аудиопараметров; клиент использует fallback 16 кГц.
     case engineLoaded(name: String, elapsedSec: Double)
 
     /// Финальный текстовый ответ AI (conv.reply_final).
@@ -89,7 +92,16 @@ extension ConversationEvent {
 
         case "conv.ready":
             let name = (payload["engine"] as? String) ?? ""
-            return .engineLoaded(name: name, elapsedSec: 0.0)
+            let elapsedSec = (payload["elapsed_sec"] as? NSNumber)?.doubleValue ?? 0.0
+            let sampleRate: Double?
+            if let number = payload["sample_rate"] as? NSNumber {
+                sampleRate = number.doubleValue
+            } else if let text = payload["sample_rate"] as? String {
+                sampleRate = Double(text)
+            } else {
+                sampleRate = nil
+            }
+            return .engineReady(name: name, elapsedSec: elapsedSec, sampleRate: sampleRate)
 
         case "conv.error":
             let message = (payload["message"] as? String)

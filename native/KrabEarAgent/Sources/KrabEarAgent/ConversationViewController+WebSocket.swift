@@ -1,15 +1,14 @@
 /*
- ConversationViewController+WebSocket — URLSessionWebSocketTask клиент.
+ ConversationViewController+WebSocket — клиент URLSessionWebSocketTask.
 
- Протокол (spec Section 4.1):
- - Uplink binary:   Opus PCM 16kHz 80ms фреймы (отправляется из +Audio).
- - Uplink control:  JSON {"type":"control","action":"..."}.
- - Downlink binary: Opus PCM 24kHz 80ms (воспроизводится в +Audio).
- - Downlink JSON:   события ConversationEvent (декодируются здесь).
+ Протокол Voice Gateway:
+ - uplink binary: PCM16 LE mono, точные 80 мс на частоте из `conv.ready`;
+ - uplink control: JSON {"type":"control","action":"..."};
+ - downlink binary: PCM16 LE mono на той же согласованной частоте;
+ - downlink JSON: типизированные события ConversationEvent.
 
- Реальный WS endpoint задаётся через ConversationConfig.wsURLString.
- Пока Voice Gateway (PR 1.1) не смерджен — URL является плейсхолдером,
- который пользователь может переопределить через настройки.
+ URL сессии и авторизация задаются через ConversationConfig. Аудиофреймы до
+ `conv.ready` не отправляются: Moshi принимает 1920@24k, legacy — 1280@16k.
 */
 
 import Foundation
@@ -132,7 +131,7 @@ extension ConversationViewController {
             handleDownlinkEvent(event)
 
         case .data(let data):
-            // Бинарный Opus downlink — передаём в Audio extension для воспроизведения.
+            // Бинарный PCM16 LE downlink передаём аудиослою для воспроизведения.
             handleDownlinkAudio(data)
 
         @unknown default:
@@ -156,7 +155,7 @@ extension ConversationViewController {
         }
     }
 
-    /// Отправить бинарный Opus-фрейм (вызывается из +Audio).
+    /// Отправить бинарный PCM16 LE фрейм (вызывается из +Audio).
     func sendAudioFrame(_ data: Data) {
         guard isSessionActive else { return }
         wsHolder.task?.send(.data(data)) { error in
