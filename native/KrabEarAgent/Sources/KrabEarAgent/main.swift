@@ -207,9 +207,9 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         // Wave 656: log bootstrap stage — app_launched.
         AgentRecoveryLogger.shared.logStage("app_launched")
 
-        // Phase C C.6: POSIX flock — race-free single-instance guard.
-        // Должен быть ДО killOtherAgentInstances — если другой экземпляр уже держит lock,
-        // немедленно завершаем этот процесс (не убивая старый экземпляр).
+        // Phase C C.6: POSIX flock — единственная общая single-instance гарантия.
+        // Новый экземпляр завершается сам; startup больше не ищет и не убивает
+        // процессы только по имени `KrabEarAgent`.
         guard acquireFileLock(logger: logger) else {
             // Другой экземпляр Krab Ear уже запущен и держит lock.
             SentryConfig.recordTerminate(callsite: "acquire_file_lock_duplicate")
@@ -217,8 +217,8 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        // Phase C C.6.2 and single-instance cleanup are moved to background task
-        // to avoid blocking applicationDidFinishLaunching with synchronous Process executions.
+        // Точечная legacy-очистка и LaunchServices cleanup вынесены в фон,
+        // чтобы синхронные Process-вызовы не блокировали applicationDidFinishLaunching.
 
         // Sentry / GlitchTip telemetry — no-op если DSN не задан в settings
         let sentryDsn = UserDefaults.standard.string(forKey: "KrabEar_SentryDSN") ?? ""
@@ -261,7 +261,8 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         Task.detached { [weak self] in
             guard let self else { return }
             
-            // Execute synchronous Process cleanups off the main thread
+            // Очистка legacy-runtime проверяет точный канонический путь и identity;
+            // production/dev/worktree app-бинарники по одному имени не затрагиваются.
             let killedOrphans = killOrphanRuntimeProcesses(projectRoot: projectRootURL, logger: self.logger)
             if killedOrphans > 0 {
                 self.logger.warn("Phase C C.6.2: Killed \(killedOrphans) orphan native/runtime/KrabEarAgent process(es)")
@@ -270,13 +271,6 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             }
             
             cleanupWorktreeShadows(projectRoot: projectRootURL, logger: self.logger)
-            
-            let killed = killOtherAgentInstances()
-            if killed > 0 {
-                self.logger.warn("Single-instance guard: убито дубликатов KrabEarAgent: \(killed)")
-            } else {
-                self.logger.info("Single-instance guard: дубликаты не обнаружены")
-            }
             
             self.logger.info("BackendSupervisor режим: \(self.backendSupervisor.supervisionMode == .passive ? "passive (launchd Variant B)" : "active (standalone)")")
 

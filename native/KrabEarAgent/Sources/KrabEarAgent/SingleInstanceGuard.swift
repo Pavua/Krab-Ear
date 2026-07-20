@@ -1,120 +1,163 @@
 /*
- SingleInstanceGuard — defensive guard against duplicate KrabEarAgent processes.
+ SingleInstanceGuard — безопасная защита от параллельных экземпляров Krab Ear.
 
- Проблема: устаревший `native/runtime/KrabEarAgent --launched-by-launchd` может
- остаться как orphan-процесс после перехода на новый .app bundle. В результате
- в Dock появляются два icon, а Settings panel открывается некорректно.
+ Основную single-instance гарантию даёт POSIX flock: новый агент завершается,
+ если lock уже удерживает работающий экземпляр. Поиск по одному имени процесса
+ намеренно не используется, потому что он не отличает production, dev и worktree
+ бинарники и способен отправить сигнал не тому процессу.
 
- Решение: при старте ищем все процессы с именем KrabEarAgent кроме текущего
- и убиваем их. Используем pgrep + kill, чтобы поймать и bundle-less бинарники,
- которые не видны через NSRunningApplication.runningApplications(withBundleIdentifier:).
+ Единственная принудительная очистка сохранена для устаревшего бинарника
+ `native/runtime/KrabEarAgent`. Кандидаты подтверждаются через `proc_pidpath`,
+ канонический путь и start-time процесса дважды проверяются перед SIGKILL.
+ Все внешние операции инъецируются, чтобы unit-тесты не отправляли сигналы.
 
- Phase C C.6 дополнения:
- - cleanupWorktreeShadows: при старте unregister из LaunchServices все
-   "Krab Ear.app" из ".claude/worktrees/agent-XXX/" и re-register основной bundle.
- - acquireFileLock / releaseFileLock: POSIX flock на agent.lock для race-free
-   single-instance гарантии (второй процесс сразу terminates).
-
- Функции вынесены как свободные (не методы делегата) для тестируемости.
+ Файл также содержит очистку теневых bundle из LaunchServices и жизненный цикл
+ file lock. Свободные функции оставлены для изолированного тестирования.
 */
 
 import Darwin
 import Foundation
 
-/// Ищет и убивает все процессы с именем «KrabEarAgent», кроме текущего.
-/// Возвращает количество убитых процессов.
-///
-/// - Parameter pgrepRunner: замена для Process-запуска pgrep (инъекция для тестов).
-/// - Returns: Количество убитых дубликатов.
-@discardableResult
-func killOtherAgentInstances(
-    pgrepRunner: (_ arguments: [String]) -> String = defaultPgrepRunner
-) -> Int {
-    let selfPid = getpid()
-    let output = pgrepRunner(["-x", "KrabEarAgent"])
-    let pids = output
-        .split(separator: "\n")
-        .compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
-        .filter { $0 != selfPid }
+// MARK: - Очистка устаревшего runtime-бинарника (Phase C C.6.2)
 
-    for pid in pids {
-        kill(pid, SIGKILL)
-    }
-    return pids.count
+/// Стабильная identity процесса, достаточная для защиты от повторного использования PID.
+struct AgentProcessIdentity: Equatable, Sendable {
+    let executablePath: String
+    let effectiveUserID: uid_t
+    let startSeconds: UInt64
+    let startMicroseconds: UInt64
 }
 
-// MARK: - Default pgrep runner
-
-/// Запускает `/usr/bin/pgrep` с переданными аргументами и возвращает stdout.
-let defaultPgrepRunner: @Sendable ([String]) -> String = { arguments in
-    let task = Process()
-    task.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-    task.arguments = arguments
-    let pipe = Pipe()
-    task.standardOutput = pipe
-    task.standardError = Pipe() // silence stderr
-    do {
-        try task.run()
-    } catch {
-        return ""
-    }
-    // ВАЖНО (cherry-picked from sister branch 761bd5b): сначала drain pipe,
-    // потом waitUntilExit. Иначе при output > pipe buffer (~16KB) pgrep блокируется
-    // на write, waitUntilExit висит forever → main thread зависает в
-    // applicationDidFinishLaunching → menu bar иконка не появляется,
-    // hotkey monitor не регистрируется. Diagnosis 2026-05-09 22:56 session.
-    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-    task.waitUntilExit()
-    return String(data: data, encoding: .utf8) ?? ""
+/// Возвращает канонический абсолютный путь с разрешёнными символическими ссылками.
+private func canonicalExecutablePath(_ path: String) -> String {
+    URL(fileURLWithPath: path)
+        .standardizedFileURL
+        .resolvingSymlinksInPath()
+        .path
 }
 
-// MARK: - Orphan runtime binary cleanup (Phase C C.6.2)
+/// Минимальная системная identity, читаемая через `proc_pidinfo`.
+private struct KernelProcessIdentity: Equatable {
+    let effectiveUserID: uid_t
+    let startSeconds: UInt64
+    let startMicroseconds: UInt64
+}
 
-/// Ищет и убивает все процессы KrabEarAgent, запущенные из `native/runtime/KrabEarAgent`
-/// (legacy dev binary) — не из основного .app bundle.
-/// Использует `ps -axo pid,command` + kill(SIGKILL).
-/// Idempotent — safe при повторном вызове.
+/// Читает UID и время старта. Неполный ответ ядра считается отсутствием identity.
+private func readKernelProcessIdentity(_ pid: pid_t) -> KernelProcessIdentity? {
+    var info = proc_bsdinfo()
+    let expectedSize = Int32(MemoryLayout<proc_bsdinfo>.size)
+    let actualSize = withUnsafeMutablePointer(to: &info) { pointer in
+        proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, pointer, expectedSize)
+    }
+    guard actualSize == expectedSize else { return nil }
+
+    return KernelProcessIdentity(
+        effectiveUserID: info.pbi_uid,
+        startSeconds: UInt64(info.pbi_start_tvsec),
+        startMicroseconds: UInt64(info.pbi_start_tvusec)
+    )
+}
+
+/// Читает непротиворечивую identity процесса через `proc_pidpath` и `proc_pidinfo`.
+/// Системная identity проверяется до и после чтения пути, чтобы не принять новый процесс,
+/// которому система успела повторно выдать тот же PID.
+let defaultProcessIdentityReader: @Sendable (pid_t) -> AgentProcessIdentity? = { pid in
+    guard pid > 1 else { return nil }
+    guard let before = readKernelProcessIdentity(pid) else { return nil }
+
+    var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN * 4))
+    let capacity = UInt32(buffer.count)
+    let length = buffer.withUnsafeMutableBufferPointer { pointer -> Int32 in
+        guard let baseAddress = pointer.baseAddress else { return 0 }
+        return proc_pidpath(pid, baseAddress, capacity)
+    }
+    guard length > 0 else { return nil }
+    guard let after = readKernelProcessIdentity(pid), after == before else { return nil }
+
+    return AgentProcessIdentity(
+        executablePath: canonicalExecutablePath(String(cString: buffer)),
+        effectiveUserID: before.effectiveUserID,
+        startSeconds: before.startSeconds,
+        startMicroseconds: before.startMicroseconds
+    )
+}
+
+/// Отправляет системный сигнал. В тестах всегда заменяется безопасным замыканием-регистратором.
+let defaultAgentSignalSender: @Sendable (pid_t, Int32) -> Int32 = { pid, signal in
+    Darwin.kill(pid, signal)
+}
+
+/// Завершает только процессы, чей реальный executable совпадает с
+/// `<projectRoot>/native/runtime/KrabEarAgent` после канонизации пути.
+/// Identity читается дважды: смена пути, UID или start-time отменяет сигнал.
 ///
 /// - Parameters:
 ///   - projectRoot: Корень проекта (содержащий `native/runtime/KrabEarAgent`).
-///   - logger: Используется для warning/error логов; если nil — silent.
-///   - psRunner: Замена для Process-запуска ps (инъекция для тестов).
-/// - Returns: Количество убитых orphan-процессов.
+///   - logger: Получатель диагностических сообщений; `nil` отключает логирование.
+///   - psRunner: Инъецируемый запуск `ps`, возвращающий только PID.
+///   - identityReader: Инъецируемое чтение identity процесса.
+///   - signalSender: Инъецируемая отправка сигнала.
+/// - Returns: Количество процессов, для которых signalSender вернул успех.
 @discardableResult
 func killOrphanRuntimeProcesses(
     projectRoot: URL,
     logger: AgentLogger? = nil,
-    psRunner: (_ arguments: [String]) -> String = defaultPsRunner
+    psRunner: (_ arguments: [String]) -> String = defaultPsRunner,
+    identityReader: (pid_t) -> AgentProcessIdentity? = defaultProcessIdentityReader,
+    signalSender: (pid_t, Int32) -> Int32 = defaultAgentSignalSender
 ) -> Int {
-    let runtimeBinaryPath = projectRoot
-        .appendingPathComponent("native/runtime/KrabEarAgent")
-        .path
+    let runtimeBinaryPath = canonicalExecutablePath(
+        projectRoot.appendingPathComponent("native/runtime/KrabEarAgent").path
+    )
 
-    let output = psRunner(["-axo", "pid,command"])
+    let output = psRunner(["-axo", "pid="])
     guard !output.isEmpty else { return 0 }
 
-    let myPid = getpid()
+    let selfPID = getpid()
+    let currentUserID = geteuid()
+    let candidatePIDs = Set(output.split(whereSeparator: \Character.isNewline).compactMap { token in
+        pid_t(token.trimmingCharacters(in: .whitespaces))
+    })
     var killed = 0
 
-    for line in output.components(separatedBy: "\n") {
-        guard line.contains(runtimeBinaryPath) else { continue }
+    for pid in candidatePIDs.sorted() {
+        guard pid > 1, pid != selfPID else { continue }
+        guard let firstRead = identityReader(pid) else { continue }
+        let firstIdentity = AgentProcessIdentity(
+            executablePath: canonicalExecutablePath(firstRead.executablePath),
+            effectiveUserID: firstRead.effectiveUserID,
+            startSeconds: firstRead.startSeconds,
+            startMicroseconds: firstRead.startMicroseconds
+        )
+        guard firstIdentity.effectiveUserID == currentUserID else { continue }
+        guard firstIdentity.executablePath == runtimeBinaryPath else { continue }
 
-        // Парсим PID из начала строки (ведущие пробелы + цифры)
-        let parts = line.trimmingCharacters(in: .whitespaces)
-            .components(separatedBy: " ")
-            .filter { !$0.isEmpty }
-        guard let firstPart = parts.first, let pid = Int32(firstPart) else { continue }
-        guard pid != myPid else { continue }  // никогда не убиваем себя
+        guard let secondRead = identityReader(pid) else { continue }
+        let secondIdentity = AgentProcessIdentity(
+            executablePath: canonicalExecutablePath(secondRead.executablePath),
+            effectiveUserID: secondRead.effectiveUserID,
+            startSeconds: secondRead.startSeconds,
+            startMicroseconds: secondRead.startMicroseconds
+        )
+        guard secondIdentity == firstIdentity else {
+            logger?.warn("Legacy runtime pid=\(pid) сменил identity перед сигналом — пропускаем")
+            continue
+        }
 
-        logger?.warn("Killing orphan runtime KrabEarAgent pid=\(pid) path=\(runtimeBinaryPath)")
-        kill(pid, SIGKILL)
-        killed += 1
+        logger?.warn("Завершаем точный legacy runtime pid=\(pid) path=\(runtimeBinaryPath)")
+        if signalSender(pid, SIGKILL) == 0 {
+            killed += 1
+        } else {
+            let errorMessage = String(cString: strerror(errno))
+            logger?.error("Не удалось завершить legacy runtime pid=\(pid): \(errorMessage)")
+        }
     }
 
     return killed
 }
 
-// MARK: - Default ps runner
+// MARK: - Стандартный запуск ps
 
 /// Запускает `/bin/ps` с переданными аргументами и возвращает stdout.
 let defaultPsRunner: @Sendable ([String]) -> String = { arguments in
@@ -123,15 +166,14 @@ let defaultPsRunner: @Sendable ([String]) -> String = { arguments in
     task.arguments = arguments
     let pipe = Pipe()
     task.standardOutput = pipe
-    task.standardError = Pipe() // silence stderr
+    task.standardError = Pipe() // stderr намеренно не выводится в startup-лог
     do {
         try task.run()
     } catch {
         return ""
     }
-    // ВАЖНО (cherry-picked from sister branch 761bd5b): drain pipe BEFORE waitUntilExit.
-    // Same reason as defaultPgrepRunner above. ps output for "axo pid,command" может
-    // легко превысить 16KB pipe buffer, тогда ps блокируется на write→main hangs.
+    // Сначала освобождаем pipe и только затем ждём завершения. Иначе большой
+    // вывод `ps` способен заполнить буфер и навсегда заблокировать startup-задачу.
     let data = pipe.fileHandleForReading.readDataToEndOfFile()
     task.waitUntilExit()
     return String(data: data, encoding: .utf8) ?? ""
