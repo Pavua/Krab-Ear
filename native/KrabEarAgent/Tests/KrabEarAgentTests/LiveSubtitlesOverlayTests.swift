@@ -28,6 +28,8 @@
   24. test_partialBufferDoesNotCrossConnectionGeneration — буфер не смешивает поколения
   25. test_reconnectStopsAfterBoundedAttempts — ограничение серии переподключений
   26. test_deinitCancelsTaskAndInvalidatesSession — освобождение URLSession
+  27. test_invalidResponsesDoNotResetBoundedReconnectBudget — HTTP/MIME ошибки не оживляют поток
+  28. test_splitUTF8ScalarIsPreservedUntilCompleteLine — split UTF-8 не повреждает строку
 */
 
 import XCTest
@@ -70,6 +72,11 @@ private final class TrackingLiveSubtitlesSSESession: LiveSubtitlesSSESession {
 
     func receive(_ text: String) {
         delegate._testReceive(text)
+    }
+
+    @discardableResult
+    func receiveResponse(statusCode: Int, contentType: String?) -> Bool {
+        delegate._testReceiveResponse(statusCode: statusCode, contentType: contentType)
     }
 
     func complete(error: Error? = nil) {
@@ -416,6 +423,53 @@ final class LiveSubtitlesOverlayWave190Tests: XCTestCase {
         overlay.hide()
     }
 
+    func test_invalidResponsesDoNotResetBoundedReconnectBudget() async {
+        let environment = TrackingSSEEnvironment()
+        let overlay = makeTrackedOverlay(environment: environment)
+        overlay.show()
+
+        // Начальное соединение + пять разрешённых reconnect-попыток. Каждая
+        // ошибка присылает правдоподобное SSE-тело: оно не должно ни попасть в
+        // UI, ни обнулить бюджет, если HTTP status/MIME не прошли проверку.
+        for attempt in 0...overlay._testMaximumReconnectAttempts {
+            let session = environment.sessions.last!
+            let accepted: Bool
+            if attempt.isMultiple(of: 2) {
+                accepted = session.receiveResponse(
+                    statusCode: 503,
+                    contentType: "text/event-stream"
+                )
+            } else {
+                accepted = session.receiveResponse(
+                    statusCode: 200,
+                    contentType: "text/html; charset=utf-8"
+                )
+            }
+            XCTAssertFalse(accepted)
+
+            session.receive("event: live_subs.result\n")
+            session.receive(#"data: {"text":"Ошибка","translation":"Error"}"# + "\n")
+            session.complete(error: SyntheticSSEError())
+            await drainSSECallbacks()
+
+            if attempt < overlay._testMaximumReconnectAttempts {
+                XCTAssertEqual(environment.scheduledReconnects.count, 1)
+                environment.scheduledReconnects.removeFirst().perform()
+                await drainSSECallbacks()
+            }
+        }
+
+        XCTAssertTrue(environment.scheduledReconnects.isEmpty)
+        XCTAssertFalse(overlay._testHasActiveSSETask)
+        XCTAssertEqual(
+            environment.sessions.count,
+            overlay._testMaximumReconnectAttempts + 1,
+            "Серия не должна создать больше пяти повторных подключений"
+        )
+        XCTAssertEqual(overlay._testEntryCount, 0, "Тело ошибочного ответа не является SSE")
+        overlay.hide()
+    }
+
     func test_deinitCancelsTaskAndInvalidatesSession() async {
         let environment = TrackingSSEEnvironment()
         var overlay: LiveSubtitlesOverlay? = makeTrackedOverlay(environment: environment)
@@ -490,6 +544,93 @@ final class LiveSubtitlesOverlayWave190Tests: XCTestCase {
 /// Общий делегат используется несколькими экранами, поэтому незавершённые строки
 /// разных URLSessionTask не должны склеиваться даже при повторном использовании.
 final class SSESessionDelegateLifecycleTests: XCTestCase {
+
+    func test_splitUTF8ScalarIsPreservedUntilCompleteLine() {
+        var lines: [String] = []
+        let delegate = SSESessionDelegate { lines.append($0) }
+        let expected = #"data: {"text":"Привет 🦀"}"#
+        let bytes = Data(expected.utf8)
+        guard let scalarStart = bytes.firstIndex(of: 0xF0) else {
+            return XCTFail("В тестовой строке не найден четырёхбайтовый UTF-8 scalar")
+        }
+        let splitIndex = scalarStart + 2
+
+        delegate._testReceive(bytes.prefix(upTo: splitIndex))
+        XCTAssertTrue(lines.isEmpty)
+
+        var tail = Data(bytes.suffix(from: splitIndex))
+        tail.append(0x0A)
+        delegate._testReceive(tail)
+
+        XCTAssertEqual(lines, [expected])
+    }
+
+    func test_responseValidationRejectsStatusAndMIMEBeforeDeliveringLines() {
+        var lines: [String] = []
+        let delegate = SSESessionDelegate { lines.append($0) }
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let url = URL(string: "http://127.0.0.1:5005/v1/events")!
+
+        func deliverResponse(
+            statusCode: Int,
+            contentType: String,
+            task: URLSessionDataTask
+        ) -> URLSession.ResponseDisposition? {
+            guard let response = HTTPURLResponse(
+                url: url,
+                statusCode: statusCode,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": contentType]
+            ) else {
+                XCTFail("Не удалось создать тестовый HTTPURLResponse")
+                return nil
+            }
+            var disposition: URLSession.ResponseDisposition?
+            delegate.urlSession(
+                session,
+                dataTask: task,
+                didReceive: response,
+                completionHandler: { disposition = $0 }
+            )
+            return disposition
+        }
+
+        let rejectedStatusTask = session.dataTask(with: url)
+        XCTAssertEqual(deliverResponse(
+            statusCode: 503,
+            contentType: "text/event-stream",
+            task: rejectedStatusTask
+        ), .cancel)
+        delegate._testReceive(
+            "event: rejected-status\n",
+            taskIdentifier: rejectedStatusTask.taskIdentifier
+        )
+
+        let rejectedMIMETask = session.dataTask(with: url)
+        XCTAssertEqual(deliverResponse(
+            statusCode: 200,
+            contentType: "text/html; charset=utf-8",
+            task: rejectedMIMETask
+        ), .cancel)
+        delegate._testReceive(
+            "event: rejected-mime\n",
+            taskIdentifier: rejectedMIMETask.taskIdentifier
+        )
+
+        let acceptedTask = session.dataTask(with: url)
+        XCTAssertEqual(deliverResponse(
+            statusCode: 200,
+            contentType: "text/event-stream; charset=utf-8",
+            task: acceptedTask
+        ), .allow)
+        delegate._testReceive(
+            "event: accepted\n",
+            taskIdentifier: acceptedTask.taskIdentifier
+        )
+
+        XCTAssertEqual(lines, ["event: accepted"])
+    }
 
     func test_partialBuffersAreSeparatedByTask() {
         var lines: [String] = []
