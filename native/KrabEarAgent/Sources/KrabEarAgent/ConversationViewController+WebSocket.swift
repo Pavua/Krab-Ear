@@ -35,7 +35,7 @@ extension ConversationViewController {
     // MARK: - Session start / stop
 
     /// Открыть WS-соединение с Voice Gateway и начать receive-loop.
-    func startWebSocketSession() {
+    func startWebSocketSession(generation: UUID) {
         guard let url = URL(string: config.wsURLString) else {
             AgentLogger.shared.info("[WS] Невалидный URL: \(config.wsURLString)")
             conversationState = .error("Невалидный Gateway URL")
@@ -73,7 +73,7 @@ extension ConversationViewController {
         task.resume()
 
         AgentLogger.shared.info("[WS] Connecting → \(url.absoluteString)")
-        startReceiveLoop()
+        startReceiveLoop(task: task, generation: generation)
     }
 
     /// Закрыть соединение чисто (close frame).
@@ -87,26 +87,29 @@ extension ConversationViewController {
 
     // MARK: - Receive loop
 
-    private func startReceiveLoop() {
-        guard let task = wsHolder.task else { return }
-
+    private func startReceiveLoop(task: URLSessionWebSocketTask, generation: UUID) {
         task.receive { [weak self] result in
             guard let self else { return }
             switch result {
             case .success(let message):
                 Task { @MainActor [weak self] in
-                    // isSessionActive-гейт симметрично .failure: in-flight сообщение,
-                    // принятое в момент юзерского «Стоп», не должно диспатчиться
-                    // после stopConversation() (слышимая «ошибка» после остановки).
-                    guard let self, self.isSessionActive else { return }
-                    self.handleWSMessage(message)
+                    // UUID и идентичность задачи закрывают гонку остановки и
+                    // быстрого перезапуска: старое
+                    // завершение не может диспатчить событие или продолжить receive
+                    // уже на сокете нового разговора.
+                    guard let self,
+                          self.acceptsConversationCallback(generation),
+                          self.wsHolder.task === task else { return }
+                    self.handleWSMessage(message, generation: generation)
                     // Планируем следующий receive — WebSocketTask не авто-повторяет.
-                    self.startReceiveLoop()
+                    self.startReceiveLoop(task: task, generation: generation)
                 }
 
             case .failure(let error):
                 Task { @MainActor [weak self] in
-                    guard let self, self.isSessionActive else { return }
+                    guard let self,
+                          self.acceptsConversationCallback(generation),
+                          self.wsHolder.task === task else { return }
                     let desc = (error as NSError).localizedDescription
                     AgentLogger.shared.info("[WS] Receive error: \(desc)")
                     self.classifyAndAnnounceWSFailure()
@@ -119,7 +122,8 @@ extension ConversationViewController {
 
     // MARK: - Message dispatch
 
-    private func handleWSMessage(_ message: URLSessionWebSocketTask.Message) {
+    func handleWSMessage(_ message: URLSessionWebSocketTask.Message, generation: UUID) {
+        guard acceptsConversationCallback(generation) else { return }
         switch message {
         case .string(let text):
             guard let data = text.data(using: .utf8),

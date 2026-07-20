@@ -315,7 +315,10 @@ final class HotkeyManager {
 
         guard isTargetKey else { return }
 
-        let isDown = event.modifierFlags.contains(.option)
+        let isDown = OptionKeyPhysicalState.isDown(
+            keyCode: event.keyCode,
+            modifierFlagsRawValue: event.modifierFlags.rawValue
+        )
         processKeyEvent(isDown: isDown)
     }
 
@@ -388,6 +391,29 @@ final class HotkeyManager {
 
         guard isTargetKey else { return }
         processKeyEvent(isDown: isOptionDown)
+    }
+
+    /// Тестирует реальное декодирование flagsChanged, включая одновременное
+    /// удержание левой и правой Option.
+    @MainActor
+    func injectFlagsChangedLogic(keyCode: UInt16, modifierFlagsRawValue: UInt) {
+        let isTargetKey: Bool
+        switch variant {
+        case .rightOption, .rightOptionToggle:
+            isTargetKey = keyCode == Keycode.rightOption.rawValue
+        case .leftOption:
+            isTargetKey = keyCode == Keycode.leftOption.rawValue
+        case .anyOption:
+            isTargetKey = keyCode == Keycode.rightOption.rawValue
+                || keyCode == Keycode.leftOption.rawValue
+        }
+        guard isTargetKey else { return }
+        processKeyEvent(
+            isDown: OptionKeyPhysicalState.isDown(
+                keyCode: keyCode,
+                modifierFlagsRawValue: modifierFlagsRawValue
+            )
+        )
     }
 
     /// Тест-хук: симулировать DOWN через ту же production-ветку hold lifecycle.

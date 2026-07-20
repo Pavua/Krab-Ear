@@ -16,6 +16,35 @@
 import AppKit
 import Foundation
 
+/// Физическое состояние левой/правой Option из аппаратных битов NSEvent.
+/// Общий `.option` не подходит: он остаётся установленным при отпускании одной
+/// клавиши, пока вторая Option продолжает удерживаться.
+enum OptionKeyPhysicalState {
+    static let leftOptionMask: UInt = 0x0000_0020
+    static let rightOptionMask: UInt = 0x0000_0040
+
+    static func isDown(keyCode: UInt16, modifierFlagsRawValue: UInt) -> Bool {
+        let targetMask: UInt
+        switch keyCode {
+        case Keycode.leftOption.rawValue:
+            targetMask = leftOptionMask
+        case Keycode.rightOption.rawValue:
+            targetMask = rightOptionMask
+        default:
+            return false
+        }
+
+        let deviceState = modifierFlagsRawValue & (leftOptionMask | rightOptionMask)
+        if deviceState != 0 {
+            return deviceState & targetMask != 0
+        }
+
+        // Некоторые синтетические/удалённые события не несут аппаратных битов.
+        // В этом случае сохраняем совместимость с агрегатным флагом.
+        return modifierFlagsRawValue & NSEvent.ModifierFlags.option.rawValue != 0
+    }
+}
+
 /// Детектор двойного нажатия Right Option в окне 300 мс.
 ///
 /// Не конфликтует с одиночным Right Option single-hold (диктовка):
@@ -96,13 +125,26 @@ final class HotkeyDoubleTapDetector {
 
     @MainActor
     private func handle(event: NSEvent) {
-        guard event.keyCode == Keycode.rightOption.rawValue else { return }
+        injectFlagsChangedLogic(
+            keyCode: event.keyCode,
+            modifierFlagsRawValue: event.modifierFlags.rawValue,
+            time: Date().timeIntervalSinceReferenceDate
+        )
+    }
 
-        // Реагируем только на press (флаг появился — key down)
-        let isDown = event.modifierFlags.contains(.option)
-        guard isDown else { return }
-
-        injectTapAt(time: Date().timeIntervalSinceReferenceDate)
+    /// Общая рабочая и тестовая граница для события flagsChanged.
+    @MainActor
+    func injectFlagsChangedLogic(
+        keyCode: UInt16,
+        modifierFlagsRawValue: UInt,
+        time: TimeInterval
+    ) {
+        guard keyCode == Keycode.rightOption.rawValue,
+              OptionKeyPhysicalState.isDown(
+                keyCode: keyCode,
+                modifierFlagsRawValue: modifierFlagsRawValue
+              ) else { return }
+        injectTapAt(time: time)
     }
 
     /// Тест-хук: ввести синтетический тап в логику детектора.

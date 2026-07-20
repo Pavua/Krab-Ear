@@ -140,6 +140,46 @@ final class ConversationViewControllerTests: XCTestCase {
                       "interruptButton должна быть скрыта после остановки")
     }
 
+    /// Поздние данные старого WebSocket и старого аудиоперехвата не должны попадать
+    /// в быстро запущенный новый разговор.
+    func test_staleSessionGeneration_rejectsWebSocketAndAudioCallbacks() {
+        vc.isSessionActive = true
+        vc.prepareAudioNegotiation()
+        let staleGeneration = vc.beginConversationGeneration()
+        let currentGeneration = vc.beginConversationGeneration()
+        let reply = #"{"type":"conv.reply_final","data":{"text":"Старый ответ"}}"#
+
+        vc.handleWSMessage(.string(reply), generation: staleGeneration)
+        vc.processAudioSamples(
+            Array(repeating: 0.25, count: 320),
+            sourceSampleRate: 16_000,
+            generation: staleGeneration
+        )
+
+        XCTAssertTrue(vc.transcriptBuffer.isEmpty)
+        XCTAssertEqual(vc.pendingAudioPrebufferSampleCount, 0)
+
+        vc.handleWSMessage(.string(reply), generation: currentGeneration)
+        vc.processAudioSamples(
+            Array(repeating: 0.25, count: 320),
+            sourceSampleRate: 16_000,
+            generation: currentGeneration
+        )
+
+        XCTAssertTrue(vc.transcriptBuffer.contains("Старый ответ"))
+        XCTAssertEqual(vc.pendingAudioPrebufferSampleCount, 320)
+    }
+
+    /// Даже актуальный UUID отвергается после остановки сессии.
+    func test_sessionGeneration_requiresActiveSession() {
+        vc.isSessionActive = true
+        let generation = vc.beginConversationGeneration()
+        XCTAssertTrue(vc.acceptsConversationCallback(generation))
+
+        vc.isSessionActive = false
+        XCTAssertFalse(vc.acceptsConversationCallback(generation))
+    }
+
     // MARK: - 5. test_streaming_message_display
 
     /// sttPartial с isFinal=false должен показывать частичный текст

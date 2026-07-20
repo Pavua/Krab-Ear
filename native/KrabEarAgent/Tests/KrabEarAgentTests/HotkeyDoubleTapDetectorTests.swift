@@ -12,6 +12,7 @@
  Swift 6: все тесты @MainActor (detector изолирован на MainActor).
 */
 
+import AppKit
 import XCTest
 @testable import KrabEarAgent
 
@@ -332,6 +333,35 @@ final class HotkeyDoubleTapDetectorTests: XCTestCase {
         let detector = makeDetector(windowMs: 0.150)
         XCTAssertEqual(detector.windowMs, 0.150, accuracy: 0.0001,
                        "windowMs должен сохраняться корректно")
+    }
+
+    /// Отпускание правой Option при удерживаемой левой сохраняет общий `.option`,
+    /// но не является вторым нажатием правой клавиши.
+    func test_rightOptionReleaseWhileLeftHeld_doesNotCompleteDoubleTap() {
+        var count = 0
+        let detector = makeDetector(windowMs: 0.3) { count += 1 }
+        let option = NSEvent.ModifierFlags.option.rawValue
+
+        detector.injectFlagsChangedLogic(
+            keyCode: Keycode.rightOption.rawValue,
+            modifierFlagsRawValue: option | OptionKeyPhysicalState.rightOptionMask,
+            time: 100.0
+        )
+        detector.injectFlagsChangedLogic(
+            keyCode: Keycode.rightOption.rawValue,
+            modifierFlagsRawValue: option | OptionKeyPhysicalState.leftOptionMask,
+            time: 100.1
+        )
+        XCTAssertEqual(count, 0, "Отпускание не должно считаться вторым нажатием")
+
+        detector.injectFlagsChangedLogic(
+            keyCode: Keycode.rightOption.rawValue,
+            modifierFlagsRawValue: option
+                | OptionKeyPhysicalState.leftOptionMask
+                | OptionKeyPhysicalState.rightOptionMask,
+            time: 100.2
+        )
+        XCTAssertEqual(count, 1, "Следующее физическое нажатие завершает double-tap")
     }
 }
 

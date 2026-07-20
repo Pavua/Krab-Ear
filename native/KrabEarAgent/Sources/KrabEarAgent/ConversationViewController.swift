@@ -100,6 +100,24 @@ final class ConversationViewController: NSViewController {
     var transcriptBuffer = ""
     var isSessionActive  = false
 
+    /// UUID текущего разговора. Любой асинхронный обратный вызов обязан захватить
+    /// значение при создании и сверить его перед изменением UI/аудио.
+    private(set) var conversationGeneration = UUID()
+
+    /// Открывает новое поколение обратных вызовов. Метод имеет внутреннюю видимость,
+    /// чтобы модульные тесты проверяли ту же защиту без живого WebSocket/микрофона.
+    @discardableResult
+    func beginConversationGeneration() -> UUID {
+        let generation = UUID()
+        conversationGeneration = generation
+        return generation
+    }
+
+    /// Разрешает обратный вызов только активной сессии, которая его породила.
+    func acceptsConversationCallback(_ generation: UUID) -> Bool {
+        isSessionActive && generation == conversationGeneration
+    }
+
     /// Fallback-таймер ручного прерывания: если сервер не подтвердил conv.interrupted
     /// за interruptFallbackInterval — применяем прерывание локально.
     var interruptFallbackTimer: Timer?
@@ -182,6 +200,7 @@ final class ConversationViewController: NSViewController {
     func startConversation() {
         guard !isSessionActive else { return }
         isSessionActive = true
+        let generation = beginConversationGeneration()
         ensureStatusOverlay()
         updateOverlayVisibility()
         NotificationCenter.default.post(name: .krabConversationStarted, object: nil)
@@ -191,7 +210,7 @@ final class ConversationViewController: NSViewController {
         // Сразу начинаем bounded prebuffer в 16 кГц, но до `conv.ready` ничего
         // не отправляем: Moshi требует 24 кГц, старый pipeline — 16 кГц.
         prepareAudioNegotiation()
-        startWebSocketSession()
+        startWebSocketSession(generation: generation)
         // Невалидный URL выставляет error синхронно; микрофон в таком случае не нужен.
         if case .error = conversationState { return }
         startAudioPrebufferCapture()
@@ -217,13 +236,14 @@ final class ConversationViewController: NSViewController {
     /// interruptFallbackInterval, если подтверждение не пришло.
     func interruptAI() {
         guard isSessionActive else { return }
+        let generation = conversationGeneration
         sendControlMessage(.interrupt)
         interruptFallbackTimer?.invalidate()
         interruptFallbackTimer = Timer.scheduledTimer(
             withTimeInterval: interruptFallbackInterval, repeats: false
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self, self.isSessionActive else { return }
+                guard let self, self.acceptsConversationCallback(generation) else { return }
                 AgentLogger.shared.info("[ConversationVC] Interrupt: сервер не подтвердил за \(self.interruptFallbackInterval)s — локальный fallback")
                 self.handleInterrupted(reason: "local_fallback")
             }

@@ -196,6 +196,7 @@ extension ConversationViewController {
         // следующий ready получил бы ложный активный RT-гейт без живого engine.
         audioHolder.captureSampleRate = sampleRate
         ConversationViewController._rtSessionActive = isSessionActive
+        let generation = conversationGeneration
 
         // Размер tap задан в аппаратных сэмплах; итоговую точность обеспечивает assembler.
         let tapBufferSize = AVAudioFrameCount(max(
@@ -234,7 +235,12 @@ extension ConversationViewController {
 
             // Сборка фреймов, WebSocket и UI принадлежат главному актору.
             Task { @MainActor [weak self] in
-                self?.processAudioSamples(samples, sourceSampleRate: sampleRate)
+                guard let self, self.acceptsConversationCallback(generation) else { return }
+                self.processAudioSamples(
+                    samples,
+                    sourceSampleRate: sampleRate,
+                    generation: generation
+                )
             }
         }
 
@@ -323,7 +329,12 @@ extension ConversationViewController {
     /// Обработать PCM-сэмплы на главном акторе.
     /// Float32 → точные 80-мс фреймы → PCM16 LE + level-meter.
     /// Вызывается только из Task { @MainActor } внутри installTap-блока.
-    func processAudioSamples(_ samples: [Float], sourceSampleRate: Double? = nil) {
+    func processAudioSamples(
+        _ samples: [Float],
+        sourceSampleRate: Double? = nil,
+        generation: UUID? = nil
+    ) {
+        if let generation, !acceptsConversationCallback(generation) { return }
         // Индикатор получает каждый чанк, а сеть — только полные контрактные фреймы.
         computeAndPushLevel(samples)
 

@@ -9,6 +9,7 @@
  debounce isPressed, start/stop lifecycle.
 */
 
+import AppKit
 import XCTest
 @testable import KrabEarAgent
 
@@ -122,6 +123,32 @@ final class HotkeyManagerTests: XCTestCase {
         manager.injectEventLogic(keyCode: Keycode.rightOption.rawValue, isOptionDown: true)   // toggle #2
 
         XCTAssertEqual(toggleCount, 2, "Два полных нажатия должны вызывать toggle дважды")
+    }
+
+    /// Агрегатный флаг `.option` остаётся включённым, пока удерживается левая
+    /// Option. Отпускание правой клавиши обязано смотреть на её аппаратную маску, иначе
+    /// менеджер навсегда оставляет `isPressed=true`.
+    func test_rightOptionReleaseWhileLeftHeld_rearmsNextRightPress() {
+        var toggleCount = 0
+        let manager = makeManager(variant: "right_option") { toggleCount += 1 }
+        let option = NSEvent.ModifierFlags.option.rawValue
+
+        manager.injectFlagsChangedLogic(
+            keyCode: Keycode.rightOption.rawValue,
+            modifierFlagsRawValue: option | OptionKeyPhysicalState.rightOptionMask
+        )
+        manager.injectFlagsChangedLogic(
+            keyCode: Keycode.rightOption.rawValue,
+            modifierFlagsRawValue: option | OptionKeyPhysicalState.leftOptionMask
+        )
+        manager.injectFlagsChangedLogic(
+            keyCode: Keycode.rightOption.rawValue,
+            modifierFlagsRawValue: option
+                | OptionKeyPhysicalState.leftOptionMask
+                | OptionKeyPhysicalState.rightOptionMask
+        )
+
+        XCTAssertEqual(toggleCount, 2, "Следующий физический Right Option должен снова сработать")
     }
 
     func test_keyUp_withoutPriorDown_doesNotToggle() {

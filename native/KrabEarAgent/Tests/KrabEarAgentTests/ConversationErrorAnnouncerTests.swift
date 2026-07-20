@@ -134,10 +134,10 @@ final class ConversationErrorAnnouncerWiringTests: XCTestCase {
                       "startReceiveLoop failure-ветка должна вызывать classifyAndAnnounceWSFailure()")
     }
 
-    func test_sourceContract_receiveLoopSuccessBranch_gatedByIsSessionActive() throws {
-        // .success-ветка receive-цикла обязана гейтиться isSessionActive симметрично
-        // .failure: без гейта in-flight событие, принятое в момент юзерского «Стоп»,
-        // диспатчится в handleDownlinkEvent уже после остановки сессии.
+    func test_sourceContract_receiveLoopSuccessBranch_gatedByGenerationAndTask() throws {
+        // Успешная ветка обязана проверять UUID сессии и идентичность сокет-задачи.
+        // Одного isSessionActive недостаточно: после быстрого stop→start старый
+        // callback увидит уже активную новую сессию.
         let src = try String(contentsOf: Self.wsSwiftURL, encoding: .utf8)
         guard let successRange = src.range(of: "case .success(let message):"),
               let failureRange = src.range(of: "case .failure(let error):"),
@@ -146,8 +146,10 @@ final class ConversationErrorAnnouncerWiringTests: XCTestCase {
             return XCTFail("Не нашли ветки .success/.failure в startReceiveLoop")
         }
         let successBranch = src[successRange.upperBound..<failureRange.lowerBound]
-        XCTAssertTrue(successBranch.contains("self.isSessionActive"),
-                      ".success-ветка receive-цикла должна гейтиться isSessionActive")
+        XCTAssertTrue(successBranch.contains("acceptsConversationCallback(generation)"),
+                      "Успешная ветка должна проверять поколение разговора")
+        XCTAssertTrue(successBranch.contains("wsHolder.task === task"),
+                      "Успешная ветка должна оставаться привязана к исходной задаче")
     }
 
     private static var wsSwiftURL: URL {
