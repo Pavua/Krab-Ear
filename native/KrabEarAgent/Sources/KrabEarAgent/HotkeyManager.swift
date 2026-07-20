@@ -30,6 +30,103 @@ enum HotkeyMode: String {
     case hold = "hold"
 }
 
+/// Минимальный жизненный цикл детектора, которым владеет HotkeyManager.
+/// Протокол отделяет модульные тесты менеджера от системных наблюдателей NSEvent.
+@MainActor
+protocol HotkeyDoubleTapDetecting: AnyObject {
+    func start()
+    func stop()
+}
+
+extension HotkeyDoubleTapDetector: HotkeyDoubleTapDetecting {}
+
+/// Граница всех системных эффектов, создаваемых `HotkeyManager.start()`.
+/// Рабочее приложение получает системную реализацию, а модульные тесты — заглушку-счётчик.
+@MainActor
+protocol HotkeyRuntimeControlling: AnyObject {
+    func isChordOccupied(keyCode: UInt32, modifiers: UInt32) -> Bool
+
+    func installGlobalFlagsChangedMonitor(
+        handler: @escaping @Sendable (NSEvent) -> Void
+    ) -> Any?
+
+    func installLocalFlagsChangedMonitor(
+        handler: @escaping @Sendable (NSEvent) -> Void
+    ) -> Any?
+
+    func installGlobalKeyDownMonitor(
+        handler: @escaping @Sendable (NSEvent) -> Void
+    ) -> Any?
+
+    func removeMonitor(_ monitor: Any)
+
+    func makeDoubleTapDetector(
+        windowMs: TimeInterval,
+        onDoubleTap: @escaping @MainActor @Sendable () -> Void
+    ) -> any HotkeyDoubleTapDetecting
+}
+
+/// Системная среда горячих клавиш. Она сохраняет прежние вызовы Carbon/AppKit
+/// и используется по умолчанию во всех рабочих конструкторах.
+@MainActor
+final class SystemHotkeyRuntime: HotkeyRuntimeControlling {
+    nonisolated init() {}
+
+    func isChordOccupied(keyCode: UInt32, modifiers: UInt32) -> Bool {
+        let probeID = EventHotKeyID(
+            signature: OSType(0x4B524142),
+            id: UInt32(9878)
+        )
+        var hotKeyRef: EventHotKeyRef?
+        let status = RegisterEventHotKey(
+            keyCode,
+            modifiers,
+            probeID,
+            GetApplicationEventTarget(),
+            0,
+            &hotKeyRef
+        )
+
+        if status == noErr, let hotKeyRef {
+            // Проверка не владеет клавишей после ответа: успешную регистрацию сразу снимаем.
+            UnregisterEventHotKey(hotKeyRef)
+        }
+        return status == OSStatus(eventHotKeyExistsErr)
+    }
+
+    func installGlobalFlagsChangedMonitor(
+        handler: @escaping @Sendable (NSEvent) -> Void
+    ) -> Any? {
+        NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged, handler: handler)
+    }
+
+    func installLocalFlagsChangedMonitor(
+        handler: @escaping @Sendable (NSEvent) -> Void
+    ) -> Any? {
+        NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
+            handler(event)
+            return event
+        }
+    }
+
+    func installGlobalKeyDownMonitor(
+        handler: @escaping @Sendable (NSEvent) -> Void
+    ) -> Any? {
+        NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: handler)
+    }
+
+    func removeMonitor(_ monitor: Any) {
+        NSEvent.removeMonitor(monitor)
+    }
+
+    func makeDoubleTapDetector(
+        windowMs: TimeInterval,
+        onDoubleTap: @escaping @MainActor @Sendable () -> Void
+    ) -> any HotkeyDoubleTapDetecting {
+        HotkeyDoubleTapDetector(windowMs: windowMs, onDoubleTap: onDoubleTap)
+    }
+}
+
 /// Нативный hotkey менеджер для Option key toggle / hold.
 /// Также управляет DoubleTapDetector для запуска «Разговора с AI» (PR 1.5)
 /// и глобальным Cmd+Option+V для быстрого повтора вставки.
@@ -67,7 +164,7 @@ final class HotkeyManager {
 
     /// Детектор двойного нажатия Right Option (300 мс окно).
     /// Callback: переключить вкладку Разговор с AI и запустить/остановить сессию.
-    private var doubleTapDetector: HotkeyDoubleTapDetector?
+    private var doubleTapDetector: (any HotkeyDoubleTapDetecting)?
 
     /// Колбэк на double-tap (задаётся при запуске из main.swift).
     var onConversationDoubleTap: (@MainActor () -> Void)?
@@ -179,16 +276,21 @@ final class HotkeyManager {
     /// Задаётся из main.swift после того как ipcClient готов.
     var reportHotkeyConflictHandler: ((String) -> Void)?
 
+    /// Владелец границ Carbon/AppKit; системная реализация остаётся рабочей по умолчанию.
+    private let runtime: any HotkeyRuntimeControlling
+
     init(
         variant: String,
         onToggle: @escaping @MainActor () -> Void,
         mode: String = "toggle",
-        holdMinDurationMs: Int = 200
+        holdMinDurationMs: Int = 200,
+        runtime: any HotkeyRuntimeControlling = SystemHotkeyRuntime()
     ) {
         self.variant = HotkeyVariant(rawValue: variant) ?? .rightOption
         self.onToggle = onToggle
         self.mode = HotkeyMode(rawValue: mode) ?? .toggle
         self.holdMinDurationMs = holdMinDurationMs
+        self.runtime = runtime
     }
 
     func start() {
@@ -200,16 +302,15 @@ final class HotkeyManager {
         // our own NSEvent monitors are set up.
         probeChordConflict()
 
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+        globalMonitor = runtime.installGlobalFlagsChangedMonitor { [weak self] event in
             Task { @MainActor [weak self] in
                 self?.handle(event: event)
             }
         }
-        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+        localMonitor = runtime.installLocalFlagsChangedMonitor { [weak self] event in
             Task { @MainActor [weak self] in
                 self?.handle(event: event)
             }
-            return event
         }
 
         // PR 1.5: Запустить детектор двойного нажатия Right Option
@@ -217,15 +318,18 @@ final class HotkeyManager {
         // При detection единая точка consumeConversationDoubleTap отменяет и
         // одиночный toggle, и ещё не начавшийся hold.
         if Self.supportsConversationDoubleTap(variant: variant.rawValue) {
-            let detector = HotkeyDoubleTapDetector(windowMs: 0.3) { [weak self] in
-                self?.consumeConversationDoubleTap()
-            }
+            let detector = runtime.makeDoubleTapDetector(
+                windowMs: 0.3,
+                onDoubleTap: { [weak self] in
+                    self?.consumeConversationDoubleTap()
+                }
+            )
             detector.start()
             doubleTapDetector = detector
         }
 
         // Quick replay: глобальный монитор Cmd+Option+V
-        replayMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        replayMonitor = runtime.installGlobalKeyDownMonitor { [weak self] event in
             Task { @MainActor [weak self] in
                 self?.handleKeyDown(event: event)
             }
@@ -252,25 +356,11 @@ final class HotkeyManager {
             modifiers = UInt32(optionKey)
         }
 
-        let probeID = EventHotKeyID(signature: OSType(0x4B524142), id: UInt32(9878))  // 'KRAB', probe sentinel
-        var hotKeyRef: EventHotKeyRef?
-        let status = RegisterEventHotKey(
-            keyCode,
-            modifiers,
-            probeID,
-            GetApplicationEventTarget(),
-            0,
-            &hotKeyRef
-        )
-
-        if status == OSStatus(eventHotKeyExistsErr) {
+        if runtime.isChordOccupied(keyCode: keyCode, modifiers: modifiers) {
             // Another app holds the chord — fire error bus report.
             let chordName = variant.rawValue
             AgentLogger.shared.warn("HotkeyManager: chord '\(chordName)' занят другим приложением (eventHotKeyExistsErr)")
             reportHotkeyConflictHandler?(chordName)
-        } else if status == noErr, let ref = hotKeyRef {
-            // Successfully registered — immediately unregister, this was only a probe.
-            UnregisterEventHotKey(ref)
         }
         // Other non-zero statuses (e.g. paramErr) are silently ignored —
         // they don't indicate a conflict, just that the probe wasn't supported.
@@ -286,15 +376,15 @@ final class HotkeyManager {
             onHoldStop?()
         }
         if let globalMonitor {
-            NSEvent.removeMonitor(globalMonitor)
+            runtime.removeMonitor(globalMonitor)
             self.globalMonitor = nil
         }
         if let localMonitor {
-            NSEvent.removeMonitor(localMonitor)
+            runtime.removeMonitor(localMonitor)
             self.localMonitor = nil
         }
         if let replayMonitor {
-            NSEvent.removeMonitor(replayMonitor)
+            runtime.removeMonitor(replayMonitor)
             self.replayMonitor = nil
         }
         doubleTapDetector?.stop()
