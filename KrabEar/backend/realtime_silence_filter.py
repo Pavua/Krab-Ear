@@ -86,6 +86,13 @@ class RealtimeSilenceFilter:
     def enabled(self) -> bool:
         return self._enabled
 
+    @property
+    def is_running(self) -> bool:
+        """Показывает, остался ли жив фоновый worker."""
+        with self._lock:
+            thread = self._thread
+        return thread is not None and thread.is_alive()
+
     def start(self) -> None:
         """Запускает фоновый поток проверки тишины (идемпотентен)."""
         if not self._enabled:
@@ -109,18 +116,41 @@ class RealtimeSilenceFilter:
                 self._max_silence_sec,
             )
 
-    def stop(self) -> list[tuple[float, float]]:
-        """Останавливает фоновый поток, возвращает накопленные silence_ranges."""
-        self._stop_event.set()
+    def stop(self, timeout_sec: float | None = None) -> list[tuple[float, float]]:
+        """Останавливает worker и возвращает накопленные silence_ranges.
+
+        При таймауте живой handle сохраняется. Это не даёт последующему
+        ``start()`` очистить общий Event и оживить прежний поток.
+        """
         with self._lock:
+            # set + capture линейны со start(): новый запуск не очистит Event
+            # между запросом остановки и захватом текущего handle.
+            self._stop_event.set()
             thread = self._thread
-            self._thread = None
-        if thread is not None:
-            thread.join(timeout=max(self._check_sec + 1.0, 2.0))
+        timeout = (
+            max(self._check_sec + 1.0, 2.0)
+            if timeout_sec is None
+            else max(0.0, float(timeout_sec))
+        )
+        if (
+            thread is not None
+            and thread.is_alive()
+            and thread is not threading.current_thread()
+        ):
+            thread.join(timeout=timeout)
 
         with self._lock:
+            if self._thread is thread and (
+                thread is None or not thread.is_alive()
+            ):
+                self._thread = None
             ranges = list(self._silence_ranges)
 
+        if thread is not None and thread.is_alive():
+            logger.warning(
+                "RealtimeSilenceFilter worker не завершился за %.1f с",
+                timeout,
+            )
         logger.debug("RealtimeSilenceFilter остановлен, %d диапазонов тишины", len(ranges))
         return ranges
 

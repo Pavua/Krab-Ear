@@ -6,6 +6,7 @@
 
 import sys
 import os
+import threading
 import time
 import unittest
 
@@ -149,6 +150,32 @@ class TestRealtimeSilenceFilterLifecycle(unittest.TestCase):
         thread2 = rsf._thread
         self.assertIs(thread1, thread2)
         rsf.stop()
+
+    def test_stop_timeout_preserves_handle_and_blocks_restart(self):
+        """При timeout RSF сохраняет worker и не очищает его общий Event."""
+        rsf = self._make_filter(_make_speech(5.0))
+        release = threading.Event()
+        stuck_thread = threading.Thread(target=release.wait, daemon=True)
+        with rsf._lock:
+            rsf._thread = stuck_thread
+        stuck_thread.start()
+        self.addCleanup(stuck_thread.join, 1.0)
+        self.addCleanup(release.set)
+
+        rsf.stop(timeout_sec=0.01)
+        self.assertTrue(rsf.is_running)
+        self.assertIs(rsf._thread, stuck_thread)
+        self.assertTrue(rsf._stop_event.is_set())
+
+        rsf.start()
+        self.assertIs(rsf._thread, stuck_thread)
+        self.assertTrue(rsf._stop_event.is_set())
+
+        release.set()
+        stuck_thread.join(timeout=1.0)
+        rsf.stop(timeout_sec=0.1)
+        self.assertFalse(rsf.is_running)
+        self.assertIsNone(rsf._thread)
 
 
 # ---------------------------------------------------------------------------

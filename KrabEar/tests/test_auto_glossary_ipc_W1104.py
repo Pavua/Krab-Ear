@@ -84,6 +84,7 @@ class _Base(unittest.TestCase):
             transcriber=_FakeTranscriber(),
             translator=_FakeTranslator(),
         )
+        self.addCleanup(self.service.close)
 
     def _call(self, method: str, params: dict[str, Any] | None = None) -> dict:
         return self.service.handle_request(

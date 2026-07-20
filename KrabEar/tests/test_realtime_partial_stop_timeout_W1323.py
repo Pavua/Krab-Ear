@@ -1,10 +1,11 @@
-"""Tests for W1315 F3 MED fix: realtime_partial stop() 30s timeout + _stop_requested flag.
+"""Тесты lifecycle-контракта realtime_partial и таймаута stop().
 
 W1323: Validates:
   1. stop() default timeout is 30s (not 4s).
   2. _stop_requested flag is set True on stop().
   3. Warning logged when thread still alive after join timeout.
-  4. self._thread set to None after join timeout (even if thread still alive).
+  4. Живой self._thread сохраняется после join timeout и блокирует restart.
+  5. Разблокированный после timeout worker не публикует устаревший partial.
 """
 import ast
 import logging
@@ -95,6 +96,7 @@ class TestStopRequestedFlagSet(unittest.TestCase):
     def test_stop_requested_flag_reset_on_start(self):
         """start() resets _stop_requested so a re-start works."""
         rpt = _make_rpt()
+        self.addCleanup(rpt.stop)
         rpt.stop()
         self.assertTrue(rpt._stop_requested)
         # Now start again — flag should be cleared.
@@ -126,14 +128,14 @@ class TestWarningLoggedIfThreadAliveAfterJoin(unittest.TestCase):
 
         messages = "\n".join(log_ctx.output)
         self.assertIn(
-            "realtime_partial worker did not stop within 30s",
+            "realtime_partial worker не завершился",
             messages,
-            "Expected warning about worker not stopping within 30s",
+            "Ожидалось предупреждение о незавершённом worker",
         )
         self.assertIn(
-            "stale partials",
+            "устаревший partial",
             messages,
-            "Warning should mention stale partials",
+            "Предупреждение должно объяснять риск устаревшего partial",
         )
 
     def test_no_warning_when_thread_stops_in_time(self):
@@ -154,10 +156,10 @@ class TestWarningLoggedIfThreadAliveAfterJoin(unittest.TestCase):
         mock_warn.assert_not_called()
 
 
-class TestThreadSetToNoneAfterJoinTimeout(unittest.TestCase):
-    """self._thread is set to None after stop(), even if thread still alive."""
+class TestThreadHandleAfterJoinTimeout(unittest.TestCase):
+    """Живой handle сохраняется до подтверждённого завершения worker."""
 
-    def test_thread_set_to_none_after_join_timeout(self):
+    def test_thread_retained_after_join_timeout(self):
         rpt = _make_rpt()
 
         mock_thread = MagicMock(spec=threading.Thread)
@@ -165,15 +167,19 @@ class TestThreadSetToNoneAfterJoinTimeout(unittest.TestCase):
         rpt._thread = mock_thread
 
         with self.assertLogs("KrabEar.RealtimePartial", level="WARNING"):
-            rpt.stop(timeout_sec=0.01)
+            stopped = rpt.stop(timeout_sec=0.01)
 
-        self.assertIsNone(rpt._thread, "self._thread must be None after stop() even if thread alive")
+        self.assertFalse(stopped)
+        self.assertIs(rpt._thread, mock_thread)
+
+        rpt.start("sess-restart-blocked")
+        self.assertIs(rpt._thread, mock_thread)
 
     def test_thread_set_to_none_when_not_running(self):
         """stop() when thread is None leaves thread as None."""
         rpt = _make_rpt()
         self.assertIsNone(rpt._thread)
-        rpt.stop()
+        self.assertTrue(rpt.stop())
         self.assertIsNone(rpt._thread)
 
     def test_thread_set_to_none_after_clean_stop(self):
@@ -184,8 +190,82 @@ class TestThreadSetToNoneAfterJoinTimeout(unittest.TestCase):
         mock_thread.is_alive.side_effect = [True, False]
         rpt._thread = mock_thread
 
-        rpt.stop(timeout_sec=0.01)
+        self.assertTrue(rpt.stop(timeout_sec=0.01))
         self.assertIsNone(rpt._thread)
+
+
+class TestNoStaleEmitAfterStopTimeout(unittest.TestCase):
+    """Завершившийся после timeout STT-вызов не публикует старый partial."""
+
+    def test_blocked_transcription_does_not_emit_after_stop(self):
+        entered = threading.Event()
+        release = threading.Event()
+        transcriber = MagicMock()
+
+        def _blocked_preview(**_kwargs):
+            entered.set()
+            release.wait(timeout=2.0)
+            return {"text": "устаревший текст"}
+
+        transcriber.transcribe_preview.side_effect = _blocked_preview
+        recorder = MagicMock()
+        recorder.snapshot_audio.return_value = (MagicMock(size=16), 1.0)
+        event_bus = MagicMock()
+        rpt = RealtimePartialTranscriber(
+            transcriber=transcriber,
+            recorder=recorder,
+            event_bus=event_bus,
+            interval_sec=0.1,
+        )
+        rpt.start("sess-timeout")
+        self.addCleanup(rpt.stop, 1.0)
+        self.addCleanup(release.set)
+        self.assertTrue(entered.wait(timeout=1.0))
+
+        with self.assertLogs("KrabEar.RealtimePartial", level="WARNING"):
+            self.assertFalse(rpt.stop(timeout_sec=0.01))
+        release.set()
+        thread = rpt._thread
+        self.assertIsNotNone(thread)
+        assert thread is not None
+        thread.join(timeout=1.0)
+        self.assertTrue(rpt.stop(timeout_sec=0.1))
+        event_bus.emit.assert_not_called()
+
+    def test_snapshot_unblocked_after_stop_does_not_start_stt(self):
+        """После stop() результат зависшего snapshot не запускает STT."""
+        entered = threading.Event()
+        release = threading.Event()
+        transcriber = _make_transcriber_with_preview()
+        recorder = MagicMock()
+
+        def _blocked_snapshot(**_kwargs):
+            entered.set()
+            release.wait(timeout=2.0)
+            return MagicMock(size=16), 1.0
+
+        recorder.snapshot_audio.side_effect = _blocked_snapshot
+        event_bus = MagicMock()
+        rpt = RealtimePartialTranscriber(
+            transcriber=transcriber,
+            recorder=recorder,
+            event_bus=event_bus,
+            interval_sec=0.1,
+        )
+        rpt.start("sess-snapshot-timeout")
+        self.addCleanup(rpt.stop, 1.0)
+        self.addCleanup(release.set)
+        self.assertTrue(entered.wait(timeout=1.0))
+
+        with self.assertLogs("KrabEar.RealtimePartial", level="WARNING"):
+            self.assertFalse(rpt.stop(timeout_sec=0.01))
+        release.set()
+        thread = rpt._thread
+        self.assertIsNotNone(thread)
+        assert thread is not None
+        thread.join(timeout=1.0)
+        self.assertTrue(rpt.stop(timeout_sec=0.1))
+        transcriber.transcribe_preview.assert_not_called()
 
 
 class TestWorkerChecksStopRequestedFlag(unittest.TestCase):

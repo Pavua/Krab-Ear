@@ -81,6 +81,7 @@ class BatchTestBase(unittest.TestCase):
             transcriber=FakeTranscriber(),
             translator=FakeTranslator(),
         )
+        self.addCleanup(self.service.close)
 
     def batch(self, requests, request_id="b1"):
         return self.service.handle_request(

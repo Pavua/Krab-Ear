@@ -99,26 +99,28 @@ class RealtimePartialTranscriber:
         worker loop ловит AttributeError бесконечно и спамит логи (на CI это
         приводит к 10-min job timeout).
         """
-        if self.is_running:
-            return
         if not callable(getattr(self._transcriber, "transcribe_preview", None)):
             logger.info(
                 "RealtimePartialTranscriber отключён: transcriber %s не имеет метода transcribe_preview",
                 type(self._transcriber).__name__,
             )
             return
-        self._session_id = session_id
-        self._sample_rate = sample_rate
-        self._stop_event.clear()
-        self._stop_requested = False
-        new_thread = threading.Thread(
-            target=self._worker,
-            name="RealtimePartialTranscriber",
-            daemon=True,
-        )
         with self._thread_lock:
+            # Handle сохраняется после timeout stop(); пока такой поток жив,
+            # общий Event нельзя очищать — иначе старый worker продолжит работу.
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._session_id = session_id
+            self._sample_rate = sample_rate
+            self._stop_event.clear()
+            self._stop_requested = False
+            new_thread = threading.Thread(
+                target=self._worker,
+                name="RealtimePartialTranscriber",
+                daemon=True,
+            )
             self._thread = new_thread
-        new_thread.start()
+            new_thread.start()
         logger.debug(
             "RealtimePartialTranscriber запущен: session=%s interval=%.1fs buffer=%.1fs",
             session_id,
@@ -126,32 +128,43 @@ class RealtimePartialTranscriber:
             self._buffer_sec,
         )
 
-    def stop(self, timeout_sec: float = 30.0) -> None:
+    def stop(self, timeout_sec: float = 30.0) -> bool:
         """Остановить поток и дождаться его завершения.
 
         Idempotent: безопасно вызывать если поток не запущен.
 
-        Таймаут увеличен до 30s чтобы покрыть случай когда mlx_lock удерживается
-        финальным STT-вызовом (бюджет STT timeout = 30s). При истечении таймаута
-        пишется предупреждение и self._thread обнуляется, чтобы следующий start()
-        не отказал с «поток уже запущен».
+        Таймаут по умолчанию покрывает STT-вызов. При его истечении метод
+        возвращает False и сохраняет живой handle: следующий start() обязан
+        отказаться, иначе очистка общего Event оживит старый worker.
         """
-        self._stop_requested = True
-        self._stop_event.set()
         with self._thread_lock:
+            # Флаг и handle захватываются одной линейной операцией со start(),
+            # чтобы параллельный запуск не успел очистить только что заданный Event.
+            self._stop_requested = True
+            self._stop_event.set()
             thread_to_join = self._thread
+        if (
+            thread_to_join is not None
+            and thread_to_join.is_alive()
+            and thread_to_join is not threading.current_thread()
+        ):
+            thread_to_join.join(timeout=max(0.0, float(timeout_sec)))
+
         if thread_to_join is not None and thread_to_join.is_alive():
-            thread_to_join.join(timeout=timeout_sec)
-            if thread_to_join.is_alive():
-                logger.warning(
-                    "realtime_partial worker did not stop within 30s"
-                    " — daemon thread may emit stale partials"
-                    " (session=%s)",
-                    self._session_id,
-                )
+            logger.warning(
+                "realtime_partial worker не завершился за %.1f с"
+                " — daemon может отправить устаревший partial"
+                " (session=%s)",
+                timeout_sec,
+                self._session_id,
+            )
+            return False
+
         with self._thread_lock:
-            self._thread = None
+            if self._thread is thread_to_join:
+                self._thread = None
         logger.debug("RealtimePartialTranscriber остановлен: session=%s", self._session_id)
+        return True
 
     def pause(self) -> None:
         """Приостановить снапшоты/эмиты без остановки треда (C2a, Metal-констрейнт).
@@ -200,6 +213,11 @@ class RealtimePartialTranscriber:
                     break
                 continue
 
+            # snapshot может разблокироваться уже после stop(); в этом случае
+            # нельзя начинать новый Metal/STT-вызов.
+            if self._stop_event.is_set() or self._stop_requested:
+                break
+
             # Пропускаем если нет новых данных (меньше 0.5 сек прогресса)
             if (duration_sec - last_transcribed_duration) < 0.5:
                 continue
@@ -220,6 +238,12 @@ class RealtimePartialTranscriber:
                 if error_count >= _MAX_CONSECUTIVE_ERRORS:
                     break
                 continue
+
+            # stop() мог сработать, пока Metal/STT-вызов был заблокирован.
+            # После разблокировки результат уже относится к закрытой сессии и
+            # не должен попасть в event bus как устаревший partial.
+            if self._stop_event.is_set() or self._stop_requested:
+                break
 
             text = (result.get("text") or "").strip() if isinstance(result, dict) else ""
             if not text:

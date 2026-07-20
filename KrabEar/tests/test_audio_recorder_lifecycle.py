@@ -76,6 +76,7 @@ class TestStartStopBasic(unittest.TestCase):
         """start() returns True, is_recording becomes True; stop() returns audio tuple."""
         with patch("sounddevice.InputStream", return_value=_make_stream_cm()):
             rec = AudioRecorder()
+            self.addCleanup(rec.abort)
             result = rec.start()
             self.assertTrue(result, "start() should return True on first call")
             self.assertTrue(rec.is_recording, "is_recording should be True after start()")
@@ -151,6 +152,7 @@ class TestCaptureThreadLifecycle(unittest.TestCase):
         """A worker thread is created on start() and joined/cleared on stop()."""
         with patch("sounddevice.InputStream", return_value=_make_stream_cm()):
             rec = AudioRecorder()
+            self.addCleanup(rec.abort)
             rec.start()
             # Thread should exist and be alive shortly after start
             time.sleep(0.02)
@@ -166,6 +168,145 @@ class TestCaptureThreadLifecycle(unittest.TestCase):
             thread_ref.join(timeout=1.0)
             self.assertFalse(thread_ref.is_alive(), "Worker thread should have terminated after stop()")
 
+    def test_abort_discards_buffers_without_concatenate_and_is_idempotent(self) -> None:
+        """abort() завершает worker и очищает аудио без сборки финального массива."""
+        with patch("sounddevice.InputStream", return_value=_make_stream_cm()):
+            rec = AudioRecorder()
+            self.addCleanup(rec.stop)
+            self.assertTrue(rec.start())
+
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                with rec._lock:
+                    thread_ref = rec._thread
+                    has_chunks = bool(rec._chunks)
+                if thread_ref is not None and thread_ref.is_alive() and has_chunks:
+                    break
+                time.sleep(0.005)
+
+            self.assertIsNotNone(thread_ref)
+            self.assertTrue(thread_ref.is_alive())
+            self.assertTrue(has_chunks)
+            with rec._lock:
+                rec._pending_result = (np.ones(8, dtype=np.float32), 1.0)
+
+            with patch(
+                "backend.recorder.np.concatenate",
+                side_effect=AssertionError("abort() не должен конкатенировать чанки"),
+            ) as concatenate:
+                self.assertTrue(rec.abort(timeout_sec=1.0))
+                self.assertTrue(rec.abort(timeout_sec=1.0))
+
+            concatenate.assert_not_called()
+            thread_ref.join(timeout=1.0)
+            self.assertFalse(thread_ref.is_alive())
+            self.assertFalse(rec.is_recording)
+            with rec._lock:
+                self.assertIsNone(rec._thread)
+                self.assertEqual(rec._chunks, [])
+                self.assertEqual(rec._chunks_total_samples, 0)
+                self.assertIsNone(rec._pending_result)
+
+    def test_abort_timeout_keeps_thread_handle_for_retry(self) -> None:
+        """При таймауте abort() возвращает False и не теряет живой thread."""
+        rec = AudioRecorder()
+        release = threading.Event()
+        stuck_thread = threading.Thread(target=release.wait, daemon=True)
+        with rec._lock:
+            rec._is_recording = True
+            rec._thread = stuck_thread
+            rec._chunks = [np.ones((8, 1), dtype=np.float32)]
+            rec._chunks_total_samples = 8
+        stuck_thread.start()
+        self.addCleanup(stuck_thread.join, 1.0)
+        self.addCleanup(release.set)
+
+        self.assertFalse(rec.abort(timeout_sec=0.01))
+        with rec._lock:
+            self.assertIs(rec._thread, stuck_thread)
+            self.assertEqual(rec._chunks_total_samples, 8)
+
+        release.set()
+        stuck_thread.join(timeout=1.0)
+        self.assertTrue(rec.abort(timeout_sec=0.1))
+        with rec._lock:
+            self.assertIsNone(rec._thread)
+            self.assertEqual(rec._chunks, [])
+
+    def test_stop_timeout_preserves_worker_and_blocks_restart(self) -> None:
+        """stop() не отдаёт неполное аудио и не оживляет зависший worker."""
+        rec = AudioRecorder()
+        release = threading.Event()
+        stuck_thread = threading.Thread(target=release.wait, daemon=True)
+        with rec._lock:
+            rec._is_recording = True
+            rec._started_at = time.monotonic()
+            rec._thread = stuck_thread
+            rec._chunks = [np.ones((8, 1), dtype=np.float32)]
+            rec._chunks_total_samples = 8
+        stuck_thread.start()
+        self.addCleanup(stuck_thread.join, 1.0)
+        self.addCleanup(release.set)
+
+        self.assertIsNone(rec.stop(timeout_sec=0.01))
+        with rec._lock:
+            self.assertIs(rec._thread, stuck_thread)
+            self.assertEqual(rec._chunks_total_samples, 8)
+        self.assertTrue(rec._stop_event.is_set())
+
+        # start() не должен очистить общий Event, пока старый поток ещё жив.
+        self.assertFalse(rec.start())
+        self.assertTrue(rec._stop_event.is_set())
+        with rec._lock:
+            self.assertIs(rec._thread, stuck_thread)
+
+        release.set()
+        stuck_thread.join(timeout=1.0)
+        result = rec.stop(timeout_sec=0.1)
+        self.assertIsNotNone(result)
+        assert result is not None
+        audio, _duration = result
+        self.assertEqual(audio.size, 8)
+        with rec._lock:
+            self.assertIsNone(rec._thread)
+
+    def test_abort_during_blocking_read_discards_returned_chunk(self) -> None:
+        """Разблокированный после abort() read не создаёт pending_result."""
+        entered = threading.Event()
+        release = threading.Event()
+        stream = MagicMock()
+
+        def _blocking_read(n: int) -> tuple[np.ndarray, bool]:
+            entered.set()
+            release.wait(timeout=2.0)
+            return np.ones((n, 1), dtype=np.float32), False
+
+        stream.read.side_effect = _blocking_read
+        stream_cm = MagicMock()
+        stream_cm.__enter__ = MagicMock(return_value=stream)
+        stream_cm.__exit__ = MagicMock(return_value=False)
+
+        with patch("sounddevice.InputStream", return_value=stream_cm):
+            rec = AudioRecorder(max_recording_samples=1)
+            self.addCleanup(rec.abort)
+            self.addCleanup(release.set)
+            self.assertTrue(rec.start())
+            self.assertTrue(entered.wait(timeout=1.0))
+            self.assertFalse(rec.abort(timeout_sec=0.01))
+
+            with patch("backend.recorder.np.concatenate") as concatenate:
+                release.set()
+                thread = rec._thread
+                self.assertIsNotNone(thread)
+                assert thread is not None
+                thread.join(timeout=1.0)
+                self.assertTrue(rec.abort(timeout_sec=0.1))
+
+            concatenate.assert_not_called()
+            with rec._lock:
+                self.assertIsNone(rec._pending_result)
+                self.assertEqual(rec._chunks, [])
+
 
 # ---------------------------------------------------------------------------
 # 6. Device unavailable (OSError on InputStream open)
@@ -180,6 +321,7 @@ class TestHandlesDeviceUnavailable(unittest.TestCase):
 
         with patch("sounddevice.InputStream", return_value=error_cm):
             rec = AudioRecorder()
+            self.addCleanup(rec.abort)
             rec.start()
             # Worker thread exits immediately due to OSError; give it time
             time.sleep(0.05)
@@ -299,6 +441,7 @@ class TestClearBufferSafety(unittest.TestCase):
 
         with patch("sounddevice.InputStream", return_value=error_cm):
             rec = AudioRecorder()
+            self.addCleanup(rec.abort)
             rec.start()
             time.sleep(0.05)
 

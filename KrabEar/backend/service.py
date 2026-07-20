@@ -170,8 +170,8 @@ if str(PROJECT_ROOT) not in sys.path:
 logger = logging.getLogger("KrabEar.Backend.Service")
 
 
-def _exit_without_python_finalize_if_wake_word_hung(
-    wake_word_stopped: bool | None,
+def _exit_without_python_finalize_if_worker_hung(
+    workers_stopped: bool | None,
     *,
     exit_fn: Callable[[int], None] | None = None,
 ) -> None:
@@ -185,13 +185,25 @@ def _exit_without_python_finalize_if_wake_word_hung(
     # Hard-exit допустим только по ЯВНОМУ False от нового close-контракта.
     # Legacy/test double может вернуть None; считать его доказанным CFFI-клином
     # нельзя, иначе обычный тест main() или старый embedder внезапно завершится 70.
-    if wake_word_stopped is not False:
+    if workers_stopped is not False:
         return
     logger.critical(
-        "Wake-word listener завис: завершаем процесс без Python-finalize, "
+        "Нативный/audio worker завис: завершаем процесс без Python-finalize, "
         "чтобы launchd поднял чистый экземпляр"
     )
     (exit_fn or os._exit)(os.EX_SOFTWARE)
+
+
+def _exit_without_python_finalize_if_wake_word_hung(
+    wake_word_stopped: bool | None,
+    *,
+    exit_fn: Callable[[int], None] | None = None,
+) -> None:
+    """Совместимый alias старого имени для тестов и внешних embedder-ов."""
+    _exit_without_python_finalize_if_worker_hung(
+        wake_word_stopped,
+        exit_fn=exit_fn,
+    )
 
 
 # wave1775: which EventBus events are forwarded to registered webhooks.
@@ -1493,8 +1505,23 @@ class BackendService:
 
         Идемпотентен — безопасно вызывать несколько раз. Используется в
         signal handler run_server() и в finally serve_forever(). Возвращает
-        False только когда wake-word listener нельзя безопасно завершить.
+        False, когда любой нативный/audio worker не подтвердил завершение.
         """
+        all_workers_stopped = True
+        recording_core = getattr(self, "_recording_core_svc", None)
+        if recording_core is not None:
+            try:
+                if recording_core.close_background_workers() is False:
+                    all_workers_stopped = False
+                    logger.error(
+                        "RecordingCoreService не завершил все worker-ы при close()"
+                    )
+            except Exception:
+                all_workers_stopped = False
+                logger.exception(
+                    "RecordingCoreService.close_background_workers() raised during close()"
+                )
+
         wake_word_stopped = True
         # Stop export-scheduler worker thread.
         stop_event = getattr(self, "_export_scheduler_stop", None)
@@ -1578,7 +1605,7 @@ class BackendService:
             except Exception:
                 wake_word_stopped = False
                 logger.exception("OpenWakeWordAdapter.stop() raised during close()")
-        return wake_word_stopped
+        return all_workers_stopped and wake_word_stopped
 
     # ------------------------------------------------------------------ #
     # Backwards-compatible proxy properties for Wave 172 migration         #
@@ -3600,13 +3627,13 @@ class BackendService:
         from backend.recording_core_service import RecordingCoreService as _RCS
         return _RCS._collect_audio_paths(paths)
 
-    def _start_preview_worker(self, quality_profile: str) -> None:
+    def _start_preview_worker(self, quality_profile: str) -> bool:
         """Delegated to RecordingCoreService."""
-        self._recording_core_svc._start_preview_worker(quality_profile=quality_profile)
+        return self._recording_core_svc._start_preview_worker(quality_profile=quality_profile)
 
-    def _stop_preview_worker(self) -> None:
+    def _stop_preview_worker(self) -> bool:
         """Delegated to RecordingCoreService."""
-        self._recording_core_svc._stop_preview_worker()
+        return self._recording_core_svc._stop_preview_worker()
 
     def _reset_preview_state(self) -> None:
         """Delegated to RecordingCoreService."""
@@ -5130,7 +5157,7 @@ def main() -> None:
         # shutdown are captured before the buffer is flushed.
         # No-op when Sentry is not initialized (DSN absent).
         flush_sentry()
-        _exit_without_python_finalize_if_wake_word_hung(wake_word_stopped)
+        _exit_without_python_finalize_if_worker_hung(wake_word_stopped)
 
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -5141,7 +5168,7 @@ def main() -> None:
         service._shutdown_handler.shutdown()
         wake_word_stopped = service.close()
         flush_sentry()
-        _exit_without_python_finalize_if_wake_word_hung(wake_word_stopped)
+        _exit_without_python_finalize_if_worker_hung(wake_word_stopped)
 
 
 if __name__ == "__main__":

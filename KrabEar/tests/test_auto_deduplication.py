@@ -295,6 +295,7 @@ class AutoDedupIPCTestCase(unittest.TestCase):
             transcriber=MagicMock(),
             translator=MagicMock(),
         )
+        self.addCleanup(self.svc.close)
 
     def test_get_dedup_stats_handler(self) -> None:
         """IPC get_dedup_stats возвращает корректный ответ."""
@@ -886,6 +887,7 @@ class W1412SettingsProviderTestCase(unittest.TestCase):
             transcriber=MagicMock(),
             translator=MagicMock(),
         )
+        self.addCleanup(svc.close)
 
         # Патчим handle_run_deduplication чтобы перехватить params
         captured_params: list[dict] = []
@@ -937,6 +939,7 @@ class W1412SettingsProviderTestCase(unittest.TestCase):
             transcriber=MagicMock(),
             translator=MagicMock(),
         )
+        self.addCleanup(svc.close)
 
         self.assertIsNotNone(
             svc._auto_deduplicator._settings_provider,

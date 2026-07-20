@@ -83,7 +83,13 @@ class AudioRecorder:
         # data-lock release window inside stop() cannot interleave with a new start.
         with self._lifecycle_lock:
             with self._lock:
-                if self._is_recording:
+                # После таймаута stop()/abort() старый CFFI-worker может быть
+                # жив, хотя публичный флаг уже False. Его handle намеренно
+                # сохраняется: очистка общего Event оживила бы старый цикл и
+                # запустила второй поток поверх него.
+                if self._is_recording or (
+                    self._thread is not None and self._thread.is_alive()
+                ):
                     return False
                 self._chunks = []
                 self._chunks_total_samples = 0
@@ -107,26 +113,56 @@ class AudioRecorder:
         # The worker uses _lock (data), never _lifecycle_lock → join() here can't deadlock.
         with self._lifecycle_lock:
             with self._lock:
-                if not self._is_recording:
+                thread = self._thread
+                if not self._is_recording and (
+                    thread is None or not thread.is_alive()
+                ):
                     # W1670: авто-остановка уже сработала — вернуть сохранённый результат
                     pending = self._pending_result
                     if pending is not None:
                         self._pending_result = None
+                        if self._thread is thread:
+                            self._thread = None
                         return pending
-                    return None
+                    # Живой handle после предыдущего таймаута обрабатывается
+                    # ниже повторным join. Мёртвый handle с чанками означает,
+                    # что worker завершился уже после того таймаута: аудио ещё
+                    # нужно безопасно забрать, а не потерять.
+                    if thread is None or not self._chunks:
+                        if self._thread is thread:
+                            self._thread = None
+                        return None
                 self._is_recording = False
-                thread = self._thread
 
             self._stop_event.set()
-            if thread is not None:
-                thread.join(timeout=timeout_sec)
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout=max(0.0, float(timeout_sec)))
+
+            # Нельзя отдавать частичный буфер и терять handle, пока worker ещё
+            # способен дописать чанк. Повторный stop() завершит сбор после его
+            # фактического выхода.
+            if thread is not None and thread.is_alive():
+                logger.warning(
+                    "AudioRecorder worker не завершился за %.1f с при stop()",
+                    timeout_sec,
+                )
+                return None
 
             with self._lock:
+                pending = self._pending_result
+                if pending is not None:
+                    self._pending_result = None
+                    if self._thread is thread:
+                        self._thread = None
+                    self._started_at = 0.0
+                    return pending
                 duration = max(0.0, time.monotonic() - self._started_at)
                 chunks = list(self._chunks)
                 self._chunks = []
                 self._chunks_total_samples = 0
-                self._thread = None
+                if self._thread is thread:
+                    self._thread = None
+                self._started_at = 0.0
 
         if not chunks:
             return np.array([], dtype=np.float32), duration
@@ -144,6 +180,43 @@ class AudioRecorder:
                 else:
                     audio = np.array([], dtype=np.float32)
         return audio, duration
+
+    def abort(self, timeout_sec: float = 3.0) -> bool:
+        """Остановить захват и отбросить аудио без сборки финального массива.
+
+        Метод предназначен для shutdown процесса, когда транскрибация уже не
+        начнётся. В отличие от :meth:`stop`, он не вызывает ``np.concatenate``
+        и поэтому не удваивает пиковую память длинной записи. Идемпотентен и
+        сериализован с ``start()``/``stop()`` тем же lifecycle-lock.
+        """
+        with self._lifecycle_lock:
+            with self._lock:
+                self._is_recording = False
+                thread = self._thread
+
+            self._stop_event.set()
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout=max(0.0, float(timeout_sec)))
+
+            if thread is not None and thread.is_alive():
+                logger.warning(
+                    "AudioRecorder worker не завершился за %.1f с при abort()",
+                    timeout_sec,
+                )
+                # Handle и буфер нужны для безопасного повторного abort():
+                # worker всё ещё может дописать данные после этого возврата.
+                return False
+
+            # Очищаем только после join: worker при авто-лимите может временно
+            # держать локальную копию чанков и записать _pending_result перед выходом.
+            with self._lock:
+                self._chunks = []
+                self._chunks_total_samples = 0
+                self._pending_result = None
+                if self._thread is thread:
+                    self._thread = None
+                self._started_at = 0.0
+            return True
 
     def set_device(self, device: "int | str | None") -> None:
         """Устанавливает аудиоустройство для следующей записи.
@@ -276,6 +349,11 @@ class AudioRecorder:
                 last_level_emit_at = 0.0
                 while not self._stop_event.is_set():
                     data, overflowed = stream.read(self.chunk_size)
+                    # PortAudio read может разблокироваться уже после abort().
+                    # Такой последний чанк нельзя добавлять или собирать в
+                    # pending_result: shutdown требует только отбросить аудио.
+                    if self._stop_event.is_set():
+                        break
                     if overflowed:
                         logger.warning("Переполнение аудиобуфера во время записи")
                         self._push_buffer_overflow_error()

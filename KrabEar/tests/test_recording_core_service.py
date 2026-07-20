@@ -10,7 +10,6 @@ from __future__ import annotations
 import sys
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -382,6 +381,118 @@ class TestPreviewWorker(unittest.TestCase):
         svc = _make_service(self._tmp)
         self.assertIsNone(svc.preview_error_last_reset_ts)
 
+    def test_timeout_preserves_preview_handle_and_blocks_restart(self):
+        """Зависший preview нельзя забыть или оживить очисткой общего Event."""
+        entered = threading.Event()
+        release = threading.Event()
+        recorder = MagicMock()
+        recorder.is_recording = True
+        recorder.sample_rate = 1
+        recorder.snapshot_audio.return_value = (
+            np.ones(2, dtype=np.float32),
+            1.0,
+        )
+        transcriber = MagicMock()
+
+        def _blocked_preview(*_args, **_kwargs):
+            entered.set()
+            release.wait(timeout=2.0)
+            return {"text": "устаревший preview"}
+
+        transcriber.transcribe_preview.side_effect = _blocked_preview
+        svc = _make_service(self._tmp, recorder=recorder, transcriber=transcriber)
+        self.addCleanup(svc._stop_preview_worker)
+        self.addCleanup(release.set)
+
+        with patch(
+            "backend.recording_core_service.IPC_PREVIEW_THREAD_TIMEOUT_SEC",
+            0.01,
+        ):
+            self.assertTrue(svc.start_preview_worker("balanced"))
+            first_thread = svc._preview_thread
+            self.assertIsNotNone(first_thread)
+            self.assertTrue(entered.wait(timeout=1.0))
+
+            self.assertFalse(svc._stop_preview_worker())
+            self.assertIs(svc._preview_thread, first_thread)
+            first_event = svc._preview_stop_event
+            self.assertTrue(first_event.is_set())
+
+            self.assertFalse(svc.start_preview_worker("balanced"))
+            self.assertIs(svc._preview_thread, first_thread)
+            self.assertIs(svc._preview_stop_event, first_event)
+            self.assertTrue(first_event.is_set())
+
+            release.set()
+            assert first_thread is not None
+            first_thread.join(timeout=1.0)
+            self.assertTrue(svc._stop_preview_worker())
+            self.assertIsNone(svc._preview_thread)
+
+
+class TestRecordingLifecycleGate(unittest.TestCase):
+    """Start setup и close образуют линейный lifecycle без потерянных handle."""
+
+    def setUp(self):
+        self._tmp_ctx = tempfile.TemporaryDirectory()
+        self._tmp = self._tmp_ctx.name
+        self.addCleanup(self._tmp_ctx.cleanup)
+
+    def test_close_waits_for_inflight_start_then_stops_it(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        class _BlockingRecorder(_FakeRecorder):
+            def start(self) -> bool:
+                entered.set()
+                release.wait(timeout=2.0)
+                return super().start()
+
+        recorder = _BlockingRecorder()
+        svc = _make_service(self._tmp, recorder=recorder)
+        start_result: dict = {}
+        close_result: list[bool] = []
+
+        start_thread = threading.Thread(
+            target=lambda: start_result.update(svc.handle_start_recording({})),
+            daemon=True,
+        )
+        start_thread.start()
+        self.addCleanup(start_thread.join, 1.0)
+        self.addCleanup(release.set)
+        self.assertTrue(entered.wait(timeout=1.0))
+
+        close_started = threading.Event()
+
+        def _close() -> None:
+            close_started.set()
+            close_result.append(svc.close_background_workers())
+
+        close_thread = threading.Thread(
+            target=_close,
+            daemon=True,
+        )
+        close_thread.start()
+        self.addCleanup(close_thread.join, 1.0)
+        self.addCleanup(release.set)
+        self.assertTrue(close_started.wait(timeout=1.0))
+        self.assertTrue(close_thread.is_alive())
+
+        release.set()
+        start_thread.join(timeout=1.0)
+        close_thread.join(timeout=1.0)
+        self.assertEqual(start_result["status"], "recording")
+        self.assertEqual(close_result, [True])
+        self.assertFalse(recorder.is_recording)
+        self.assertIsNone(svc._rt_partial)
+        self.assertIsNone(svc._rsf)
+
+        self.assertEqual(
+            svc.handle_start_recording({})["status"],
+            "backend_closing",
+        )
+        self.assertFalse(svc.start_preview_worker("balanced"))
+
 
 class TestAudioGuardHelpers(unittest.TestCase):
     """Tests for the static audio analysis helpers."""
@@ -688,7 +799,6 @@ class TestDiskFullPhaseE(unittest.TestCase):
 
     def _make_disk_full_store(self, errno_val=28):
         """Return a mock store whose add_history_item raises OSError(ENOSPC)."""
-        import errno as _errno_mod
         store = MagicMock()
         store.data_dir = Path(self._tmp)
         store.get_history_page = MagicMock(return_value=([], None))

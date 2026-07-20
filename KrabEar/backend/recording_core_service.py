@@ -48,6 +48,12 @@ logger = logging.getLogger("KrabEar.Backend.RecordingCore")
 # persisted/overridden value is non-finite or outside [0.0, 1.0].
 _DEFAULT_DEDUP_THRESHOLD = 0.9
 
+# launchd даёт backend около 15 секунд на весь shutdown. Эти независимые
+# бюджеты оставляют запас для остальных сервисов и финального flush.
+_SHUTDOWN_RT_PARTIAL_TIMEOUT_SEC = 3.0
+_SHUTDOWN_RSF_TIMEOUT_SEC = 2.5
+_SHUTDOWN_RECORDER_TIMEOUT_SEC = 3.0
+
 
 def _sanitize_dedup_threshold(raw: Any) -> float:
     """Coerce *raw* into a valid auto-dedup similarity threshold in [0.0, 1.0].
@@ -80,6 +86,8 @@ class RecordingCoreService:
     Constructor accepts all collaborators as keyword arguments so that
     BackendService can wire them at init time, and tests can inject fakes.
     """
+
+    _lifecycle_init_lock = threading.Lock()
 
     def __init__(
         self,
@@ -136,6 +144,12 @@ class RecordingCoreService:
         # Serializes history persistence in phase_e to prevent double-write races
         self._persist_lock = threading.Lock()
 
+        # Start setup и shutdown должны быть линейными: IPC обслуживает запросы
+        # в отдельных потоках, поэтому close иначе мог забрать handle до того,
+        # как параллельный start успел его опубликовать.
+        self._recording_lifecycle_lock = threading.RLock()
+        self._closed_event = threading.Event()
+
         # Preview worker state (owned by this service)
         self._preview_lock = threading.Lock()
         # wave-1770 MED (race): _start/_stop_preview_worker mutate _preview_thread
@@ -179,6 +193,26 @@ class RecordingCoreService:
     # Internal helpers                                                     #
     # ------------------------------------------------------------------ #
 
+    def _ensure_recording_lifecycle_state(
+        self,
+    ) -> tuple[Any, threading.Event]:
+        """Вернуть lifecycle-примитивы для runtime и legacy ``__new__``-дублей.
+
+        Старые узкие тесты намеренно обходят ``__init__`` и заполняют только
+        зависимости исследуемого handler-а. Ленивая инициализация сохраняет
+        этот контракт, не ослабляя потокобезопасность runtime-gate.
+        """
+        with type(self)._lifecycle_init_lock:
+            lifecycle_lock = getattr(self, "_recording_lifecycle_lock", None)
+            if lifecycle_lock is None:
+                lifecycle_lock = threading.RLock()
+                self._recording_lifecycle_lock = lifecycle_lock
+            closed_event = getattr(self, "_closed_event", None)
+            if closed_event is None:
+                closed_event = threading.Event()
+                self._closed_event = closed_event
+        return lifecycle_lock, closed_event
+
     def _get_runtime_setting(self, key: str, default: Any) -> Any:
         """Read a setting from the live cached_settings dict."""
         try:
@@ -217,6 +251,18 @@ class RecordingCoreService:
     # ------------------------------------------------------------------ #
 
     def handle_start_recording(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Запустить запись, если сервис ещё не вошёл в shutdown."""
+        lifecycle_lock, closed_event = self._ensure_recording_lifecycle_state()
+        with lifecycle_lock:
+            if closed_event.is_set():
+                return {
+                    "status": "backend_closing",
+                    "is_recording": False,
+                }
+            return self._handle_start_recording_locked(params)
+
+    def _handle_start_recording_locked(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Выполнить цельный setup записи под lifecycle-lock."""
         # Apply selected_input_device from settings before starting (W1327 F2 HIGH).
         # Uses cached_settings() — runtime-safe per Wave 58 lesson.
         _settings_pre = self._settings_svc.cached_settings()
@@ -236,9 +282,14 @@ class RecordingCoreService:
                 preview_text = self._preview_text
                 preview_duration = self._preview_duration_sec
             # Идемпотентный контракт: повторный start не считается ошибкой.
+            recorder_is_recording = bool(getattr(self.recorder, "is_recording", False))
             return {
-                "status": "already_recording",
-                "is_recording": True,
+                "status": (
+                    "already_recording"
+                    if recorder_is_recording
+                    else "recorder_stopping"
+                ),
+                "is_recording": recorder_is_recording,
                 "duration_sec": preview_duration,
                 "preview_text": preview_text,
             }
@@ -307,27 +358,33 @@ class RecordingCoreService:
                         # not touch _rt_lock, so stopping under the lock cannot deadlock.
                         if self._rt_partial is not None:
                             try:
-                                self._rt_partial.stop()
+                                old_rt_stopped = self._rt_partial.stop() is not False
                             except Exception:
                                 logger.warning("rt_partial: stop старого инстанса упал", exc_info=True)
-                            self._rt_partial = None
-                        _rt = RealtimePartialTranscriber(
-                            transcriber=self.transcriber,
-                            recorder=self.recorder,
-                            event_bus=event_bus,
-                            interval_sec=_interval,
-                            buffer_sec=_buffer,
-                            privacy_getter=_privacy_getter,
-                        )
-                        _rt.start(
-                            session_id=self._rt_session_id,
-                            sample_rate=_sample_rate,
-                        )
-                        self._rt_partial = _rt
+                                old_rt_stopped = False
+                            if old_rt_stopped:
+                                self._rt_partial = None
+                        if self._rt_partial is None:
+                            _rt = RealtimePartialTranscriber(
+                                transcriber=self.transcriber,
+                                recorder=self.recorder,
+                                event_bus=event_bus,
+                                interval_sec=_interval,
+                                buffer_sec=_buffer,
+                                privacy_getter=_privacy_getter,
+                            )
+                            _rt.start(
+                                session_id=self._rt_session_id,
+                                sample_rate=_sample_rate,
+                            )
+                            self._rt_partial = _rt
+                        else:
+                            logger.warning(
+                                "RealtimePartialTranscriber не перезапущен: "
+                                "прежний worker ещё жив"
+                            )
                 except Exception:
                     logger.exception("Не удалось запустить RealtimePartialTranscriber")
-                    with self._rt_lock:
-                        self._rt_partial = None
 
         # W930 CRITICAL fix: wire SessionTracker start — skip in privacy mode
         _privacy_mode = bool(settings.get("privacy_mode_enabled", False))
@@ -348,11 +405,19 @@ class RecordingCoreService:
         # wave-27 MED (race): reset + construct + start + publish the handle
         # atomically under _rt_lock so a concurrent stop_recording cannot orphan
         # the filter's background work.
-        with self._rt_lock:
-            self._rsf = None
-        if bool(settings.get("realtime_silence_filter_enabled", False)):
-            try:
-                with self._rt_lock:
+        try:
+            with self._rt_lock:
+                if self._rsf is not None:
+                    try:
+                        self._rsf.stop()
+                    except Exception:
+                        logger.warning("RSF: stop старого инстанса упал", exc_info=True)
+                    if not self._rsf.is_running:
+                        self._rsf = None
+                if (
+                    bool(settings.get("realtime_silence_filter_enabled", False))
+                    and self._rsf is None
+                ):
                     _rsf = RealtimeSilenceFilter(
                         recorder=self.recorder,
                         settings=settings,
@@ -360,10 +425,12 @@ class RecordingCoreService:
                     )
                     _rsf.start()
                     self._rsf = _rsf
-            except Exception:
-                logger.exception("Не удалось запустить RealtimeSilenceFilter")
-                with self._rt_lock:
-                    self._rsf = None
+                elif self._rsf is not None:
+                    logger.warning(
+                        "RealtimeSilenceFilter не перезапущен: прежний worker ещё жив"
+                    )
+        except Exception:
+            logger.exception("Не удалось запустить RealtimeSilenceFilter")
         return {"status": "recording"}
 
     def handle_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -783,38 +850,160 @@ class RecordingCoreService:
     # keep legacy underscore name as alias so BackendService internal callers continue to work
     _reset_preview_state = reset_preview_state
 
-    def start_preview_worker(self, quality_profile: str) -> None:
-        self._start_preview_worker(quality_profile=quality_profile)
+    def start_preview_worker(self, quality_profile: str) -> bool:
+        return self._start_preview_worker(quality_profile=quality_profile)
 
-    def _start_preview_worker(self, quality_profile: str) -> None:
+    def _start_preview_worker(self, quality_profile: str) -> bool:
+        """Запустить preview только до начала общего shutdown."""
+        lifecycle_lock, closed_event = self._ensure_recording_lifecycle_state()
+        with lifecycle_lock:
+            if closed_event.is_set():
+                return False
+            return self._start_preview_worker_locked(quality_profile)
+
+    def _start_preview_worker_locked(self, quality_profile: str) -> bool:
+        """Опубликовать новое поколение preview под lifecycle-lock."""
         # wave-1770 MED: serialise thread-handle lifecycle (reentrant — calls _stop below).
         with self._preview_thread_lock:
-            self._stop_preview_worker()
+            if not self._stop_preview_worker():
+                logger.warning(
+                    "Realtime preview не перезапущен: прежний worker ещё жив"
+                )
+                return False
             if not callable(getattr(self.transcriber, "transcribe_preview", None)):
                 logger.info(
                     "Realtime preview disabled: transcriber %s не имеет метода transcribe_preview",
                     type(self.transcriber).__name__,
                 )
-                return
-            self._preview_stop_event.clear()
+                return False
+            # У каждого поколения свой Event. Старый заблокированный worker
+            # никогда не увидит clear() нового запуска и не сможет ожить.
+            stop_event = threading.Event()
+            self._preview_stop_event = stop_event
             self._preview_thread = threading.Thread(
                 target=self._preview_loop,
-                args=(quality_profile,),
+                args=(quality_profile, stop_event),
                 daemon=True,
             )
             self._preview_thread.start()
+            return True
 
-    def _stop_preview_worker(self) -> None:
+    def _stop_preview_worker(self) -> bool:
         # wave-1770 MED: serialise thread-handle lifecycle. RLock so _start (which holds
         # it) can call this. join() is safe here — the worker writes _preview_text under
         # the SEPARATE _preview_lock, never _preview_thread_lock, so no deadlock.
         with self._preview_thread_lock:
-            self._preview_stop_event.set()
-            if self._preview_thread and self._preview_thread.is_alive():
-                self._preview_thread.join(timeout=IPC_PREVIEW_THREAD_TIMEOUT_SEC)
-            self._preview_thread = None
+            thread = self._preview_thread
+            stop_event = self._preview_stop_event
+            stop_event.set()
+            if (
+                thread is not None
+                and thread.is_alive()
+                and thread is not threading.current_thread()
+            ):
+                thread.join(timeout=IPC_PREVIEW_THREAD_TIMEOUT_SEC)
+            if thread is not None and thread.is_alive():
+                logger.warning(
+                    "Realtime preview worker не завершился за %.1f с",
+                    IPC_PREVIEW_THREAD_TIMEOUT_SEC,
+                )
+                return False
+            if self._preview_thread is thread:
+                self._preview_thread = None
+            return True
 
-    def _preview_loop(self, quality_profile: str) -> None:
+    def close_background_workers(self) -> bool:
+        """Закрыть все recording-worker-ы без финальной транскрибации аудио.
+
+        Порядок важен: потребители аудиобуфера завершаются до рекордера. Каждый
+        этап изолирован от ошибок, а повторный вызов безопасен. False означает,
+        что хотя бы один worker не подтвердил завершение за короткий shutdown-
+        бюджет; его handle сохраняется для повторной попытки.
+        """
+        # Флаг ставится до ожидания lock: новый IPC-start сразу увидит shutdown,
+        # а уже начавшийся setup сначала полностью опубликует свои handle.
+        lifecycle_lock, closed_event = self._ensure_recording_lifecycle_state()
+        closed_event.set()
+        with lifecycle_lock:
+            all_stopped = True
+
+            try:
+                if self._stop_preview_worker() is False:
+                    all_stopped = False
+            except Exception:
+                all_stopped = False
+                logger.exception("Ошибка при остановке realtime preview")
+
+            # Атомарно забираем оба handle. При timeout возвращаем конкретный
+            # объект в пустой slot, чтобы повторный close мог сделать retry.
+            with self._rt_lock:
+                rt_partial = self._rt_partial
+                rsf = self._rsf
+                self._rt_partial = None
+                self._rsf = None
+
+            if rt_partial is not None:
+                try:
+                    rt_stopped = rt_partial.stop(
+                        timeout_sec=_SHUTDOWN_RT_PARTIAL_TIMEOUT_SEC
+                    ) is not False
+                except Exception:
+                    rt_stopped = False
+                    logger.exception("Ошибка при остановке RealtimePartialTranscriber")
+                if not rt_stopped:
+                    all_stopped = False
+                    with self._rt_lock:
+                        if self._rt_partial is None:
+                            self._rt_partial = rt_partial
+
+            silence_ranges: list[tuple[float, float]] = []
+            if rsf is not None:
+                try:
+                    silence_ranges = rsf.stop(
+                        timeout_sec=_SHUTDOWN_RSF_TIMEOUT_SEC
+                    ) or []
+                    rsf_stopped = not rsf.is_running
+                except Exception:
+                    rsf_stopped = False
+                    logger.exception("Ошибка при остановке RealtimeSilenceFilter")
+                if not rsf_stopped:
+                    all_stopped = False
+                    with self._rt_lock:
+                        if self._rsf is None:
+                            self._rsf = rsf
+            self._last_silence_ranges = silence_ranges
+
+            try:
+                abort = getattr(type(self.recorder), "abort", None)
+                if callable(abort):
+                    abort_result = self.recorder.abort(
+                        timeout_sec=_SHUTDOWN_RECORDER_TIMEOUT_SEC
+                    )
+                    recorder_stopped = (
+                        abort_result is not False
+                        and not bool(getattr(self.recorder, "is_recording", False))
+                    )
+                elif bool(getattr(self.recorder, "is_recording", False)):
+                    self.recorder.stop()
+                    recorder_stopped = not bool(
+                        getattr(self.recorder, "is_recording", False)
+                    )
+                else:
+                    recorder_stopped = True
+                all_stopped = recorder_stopped and all_stopped
+            except Exception:
+                all_stopped = False
+                logger.exception("Ошибка при аварийной остановке AudioRecorder")
+
+            return all_stopped
+
+    def _preview_loop(
+        self,
+        quality_profile: str,
+        stop_event: threading.Event | None = None,
+    ) -> None:
+        # Optional оставлен для legacy-тестов, вызывающих loop напрямую.
+        worker_stop_event = stop_event or self._preview_stop_event
         snapshot_audio = getattr(self.recorder, "snapshot_audio", None)
         min_samples = int(getattr(self.recorder, "sample_rate", 16000) * 0.8)
         last_refresh_duration = 0.0
@@ -823,12 +1012,12 @@ class RecordingCoreService:
         _POLL_MAX = 1.5
         _POLL_BACKOFF = 1.5
 
-        while not self._preview_stop_event.is_set():
+        while not worker_stop_event.is_set():
             if not bool(getattr(self.recorder, "is_recording", False)):
                 break
 
             if not callable(snapshot_audio):
-                self._preview_stop_event.wait(poll_interval)
+                worker_stop_event.wait(poll_interval)
                 continue
 
             try:
@@ -842,8 +1031,13 @@ class RecordingCoreService:
                         self._preview_error_count,
                     )
                 poll_interval = min(poll_interval * _POLL_BACKOFF, _POLL_MAX)
-                self._preview_stop_event.wait(poll_interval)
+                worker_stop_event.wait(poll_interval)
                 continue
+
+            # snapshot мог завершиться после shutdown request; новый STT уже
+            # нельзя запускать даже если полученный аудиобуфер валиден.
+            if worker_stop_event.is_set():
+                break
 
             with self._preview_lock:
                 self._preview_duration_sec = float(duration_sec)
@@ -851,10 +1045,10 @@ class RecordingCoreService:
             current_size = int(getattr(audio_data, "size", 0))
             if current_size < min_samples:
                 poll_interval = min(poll_interval * _POLL_BACKOFF, _POLL_MAX)
-                self._preview_stop_event.wait(poll_interval)
+                worker_stop_event.wait(poll_interval)
                 continue
             if duration_sec - last_refresh_duration < 0.9:
-                self._preview_stop_event.wait(_POLL_MIN)
+                worker_stop_event.wait(_POLL_MIN)
                 continue
 
             try:
@@ -873,8 +1067,13 @@ class RecordingCoreService:
                         self._preview_error_count,
                     )
                 poll_interval = min(poll_interval * _POLL_BACKOFF, _POLL_MAX)
-                self._preview_stop_event.wait(poll_interval)
+                worker_stop_event.wait(poll_interval)
                 continue
+
+            # stop() мог истечь по таймауту, пока transcribe_preview был
+            # заблокирован. Такой результат уже не принадлежит живой сессии.
+            if worker_stop_event.is_set():
+                break
 
             if self._preview_error_count > 0:
                 self._preview_error_last_reset_ts = time.time()
@@ -897,7 +1096,7 @@ class RecordingCoreService:
                     self._preview_updated_at = float(duration_sec)
                 poll_interval = min(poll_interval * _POLL_BACKOFF, _POLL_MAX)
             last_refresh_duration = float(duration_sec)
-            self._preview_stop_event.wait(poll_interval)
+            worker_stop_event.wait(poll_interval)
 
     # ------------------------------------------------------------------ #
     # stop_recording phase helpers                                         #
@@ -989,6 +1188,14 @@ class RecordingCoreService:
     def _stop_recording_phase_a(
         self, params: dict[str, Any], settings: dict[str, Any]
     ) -> dict[str, Any]:
+        """Сериализовать короткую фазу остановки с setup новой записи."""
+        lifecycle_lock, _closed_event = self._ensure_recording_lifecycle_state()
+        with lifecycle_lock:
+            return self._stop_recording_phase_a_locked(params, settings)
+
+    def _stop_recording_phase_a_locked(
+        self, params: dict[str, Any], settings: dict[str, Any]
+    ) -> dict[str, Any]:
         """Stop preview worker, stop realtime partial, stop recorder."""
         self._stop_preview_worker()
         rt_session_id = self._rt_session_id
@@ -1012,9 +1219,14 @@ class RecordingCoreService:
             self._rt_partial = None
         if _rt_partial is not None:
             try:
-                _rt_partial.stop()
+                rt_stopped = _rt_partial.stop() is not False
             except Exception:
+                rt_stopped = False
                 logger.exception("Ошибка при остановке RealtimePartialTranscriber")
+            if not rt_stopped:
+                with self._rt_lock:
+                    if self._rt_partial is None:
+                        self._rt_partial = _rt_partial
 
         # W1325 F1 HIGH: stop RSF and capture silence_ranges
         _silence_ranges: list[tuple[float, float]] = []
@@ -1024,9 +1236,15 @@ class RecordingCoreService:
         if _rsf is not None:
             try:
                 _silence_ranges = _rsf.stop() or []
+                rsf_stopped = not _rsf.is_running
             except Exception:
+                rsf_stopped = False
                 logger.exception("Ошибка при остановке RealtimeSilenceFilter")
                 _silence_ranges = []
+            if not rsf_stopped:
+                with self._rt_lock:
+                    if self._rsf is None:
+                        self._rsf = _rsf
         self._last_silence_ranges = _silence_ranges
 
         stop_tail_trim_ms = self._coerce_bounded(

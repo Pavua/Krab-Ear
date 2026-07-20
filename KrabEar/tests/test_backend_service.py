@@ -793,6 +793,119 @@ class BackendServiceTestCase(unittest.TestCase):
         self.assertEqual(state["result"]["preview_text"], "")
         self.assertTrue(self.request("stop_recording", {"quality_profile": "balanced"})["ok"])
 
+    def test_close_stops_recording_workers_before_store_cleanup(self) -> None:
+        """close() завершает recording-workers до удаления их StateStore."""
+        settings = self.request(
+            "set_settings",
+            {
+                "realtime_silence_filter_enabled": True,
+                "rt_silence_check_sec": 0.5,
+            },
+        )
+        self.assertTrue(settings["ok"])
+        self.assertTrue(self.request("start_recording")["ok"])
+        recording_core = self.service._recording_core_svc
+        # Страховки регистрируются до проверок живости: любой ранний RED всё
+        # равно остановит worker-ы раньше TemporaryDirectory.cleanup.
+        self.addCleanup(self.service.recorder.stop)
+        self.addCleanup(recording_core._stop_preview_worker)
+        preview_thread = recording_core._preview_thread
+        rt_partial = recording_core._rt_partial
+        rsf = recording_core._rsf
+        if rt_partial is not None:
+            self.addCleanup(rt_partial.stop)
+        if rsf is not None:
+            self.addCleanup(rsf.stop)
+        self.assertIsNotNone(preview_thread)
+        self.assertIsNotNone(rt_partial)
+        self.assertIsNotNone(rsf)
+        self.assertTrue(preview_thread.is_alive())
+        self.assertTrue(rt_partial.is_running)
+        with rsf._lock:
+            rsf_thread = rsf._thread
+        self.assertIsNotNone(rsf_thread)
+        self.assertTrue(rsf_thread.is_alive())
+
+        close_returned = threading.Event()
+        store_access_after_close = threading.Event()
+        original_load_settings = self.service.store.load_settings
+
+        def tracked_load_settings():
+            if close_returned.is_set():
+                store_access_after_close.set()
+            return original_load_settings()
+
+        self.service.store.load_settings = tracked_load_settings  # type: ignore[method-assign]
+        self.service._settings_svc._cache_ttl = 0.0
+
+        self.assertTrue(self.service.close())
+        close_returned.set()
+
+        self.assertFalse(
+            store_access_after_close.wait(timeout=0.8),
+            "preview worker обратился к StateStore после возврата close()",
+        )
+        self.assertFalse(
+            preview_thread.is_alive(),
+            "preview worker остался жив после BackendService.close()",
+        )
+        self.assertFalse(rt_partial.is_running)
+        rsf_thread.join(timeout=1.0)
+        self.assertFalse(rsf_thread.is_alive())
+        self.assertIsNone(recording_core._rt_partial)
+        self.assertIsNone(recording_core._rsf)
+        self.assertFalse(self.service.recorder.is_recording)
+
+    def test_close_isolates_preview_stop_error_before_other_teardown(self) -> None:
+        """Ошибка preview-stop не мешает закрытию остальных фоновых сервисов."""
+        from unittest.mock import MagicMock, patch
+
+        calls: list[str] = []
+        recording_core = self.service._recording_core_svc
+        rt_partial = MagicMock()
+        rsf = MagicMock()
+        with recording_core._rt_lock:
+            recording_core._rt_partial = rt_partial
+            recording_core._rsf = rsf
+        self.service.recorder.start()
+
+        def fail_preview_stop() -> None:
+            calls.append("preview")
+            raise RuntimeError("preview stop failed")
+
+        rt_partial.stop.side_effect = (
+            lambda **_kwargs: calls.append("rt_partial") or True
+        )
+        rsf.stop.side_effect = lambda **_kwargs: calls.append("rsf") or []
+        rsf.is_running = False
+
+        def track_recorder_stop() -> None:
+            calls.append("recorder")
+            self.service.recorder.is_recording = False
+
+        def track_disk_stop() -> None:
+            calls.append("disk")
+
+        with patch.object(
+            recording_core,
+            "_stop_preview_worker",
+            side_effect=fail_preview_stop,
+        ), patch.object(
+            self.service.recorder,
+            "stop",
+            side_effect=track_recorder_stop,
+        ), patch.object(
+            self.service._disk_monitor,
+            "stop",
+            side_effect=track_disk_stop,
+        ):
+            self.assertFalse(self.service.close())
+
+        self.assertEqual(
+            calls,
+            ["preview", "rt_partial", "rsf", "recorder", "disk"],
+        )
+
     def test_start_recording_is_idempotent(self) -> None:
         first = self.request("start_recording")
         self.assertTrue(first["ok"])
@@ -1427,21 +1540,23 @@ class BackendServiceTestCase(unittest.TestCase):
                 transcriber=EngineCapturingTranscriber(),
                 translator=FakeTranslator(),
             )
+            try:
+                def req(method, params=None):
+                    return svc.handle_request({"id": "t1", "method": method, "params": params or {}})
 
-            def req(method, params=None):
-                return svc.handle_request({"id": "t1", "method": method, "params": params or {}})
+                # До записи — None.
+                pre = req("get_diagnostics")
+                self.assertIsNone(pre["result"]["stt"]["last_engine"])
 
-            # До записи — None.
-            pre = req("get_diagnostics")
-            self.assertIsNone(pre["result"]["stt"]["last_engine"])
+                # Одна запись.
+                req("start_recording")
+                req("stop_recording", {"quality_profile": "balanced"})
 
-            # Одна запись.
-            req("start_recording")
-            req("stop_recording", {"quality_profile": "balanced"})
-
-            # После — должен быть заполнен.
-            post = req("get_diagnostics")
-            self.assertEqual(post["result"]["stt"]["last_engine"], "gigaam-rnnt")
+                # После — должен быть заполнен.
+                post = req("get_diagnostics")
+                self.assertEqual(post["result"]["stt"]["last_engine"], "gigaam-rnnt")
+            finally:
+                svc.close()
 
     def test_diagnostics_stt_last_engine_stays_none_for_string_transcriber(self) -> None:
         """Если transcriber вернул строку (без engine), last_engine остаётся None."""
@@ -1473,7 +1588,10 @@ class BackendServiceLLMInitializationTestCase(unittest.TestCase):
         with patch.object(_cfg.settings, "LLM_ENABLED", False):
             from backend.service import BackendService
             service = BackendService(store=self.store)
-            self.assertIsNone(service._llm_rewriter)
+            try:
+                self.assertIsNone(service._llm_rewriter)
+            finally:
+                service.close()
 
     def test_llm_rewriter_created_when_admin_enabled(self):
         """settings.LLM_ENABLED=True → _llm_rewriter is LLMRewriter instance."""
@@ -1485,7 +1603,10 @@ class BackendServiceLLMInitializationTestCase(unittest.TestCase):
             from backend.service import BackendService
             from backend.llm_rewriter import LLMRewriter
             service = BackendService(store=self.store)
-            self.assertIsInstance(service._llm_rewriter, LLMRewriter)
+            try:
+                self.assertIsInstance(service._llm_rewriter, LLMRewriter)
+            finally:
+                service.close()
 
 
 class VocabularyCapturingTranscriber(FakeTranscriber):
@@ -2296,12 +2417,15 @@ class FeatureFlagsInitOrderTestCase(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         store = StateStore(Path(tmp) / "data")
-        return BackendService(
+        service = BackendService(
             store=store,
             recorder=FakeRecorder(),
             transcriber=FakeTranscriber(),
             translator=FakeTranslator(),
         )
+        # Зарегистрирован после rmtree, поэтому LIFO сначала закроет worker-ы.
+        self.addCleanup(service.close)
+        return service
 
     def test_backend_service_initializes_without_attribute_error(self) -> None:
         """BackendService() must not raise AttributeError on instantiation.
