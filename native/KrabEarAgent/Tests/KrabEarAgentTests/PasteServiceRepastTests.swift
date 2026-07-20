@@ -35,6 +35,7 @@ final class PasteServiceRepastTests: XCTestCase {
     override func tearDown() {
         defaults.removePersistentDomain(forName: suiteName)
         pasteboard.clearContents()
+        pasteboard.releaseGlobally()
         service = nil
         defaults = nil
         pasteboard = nil

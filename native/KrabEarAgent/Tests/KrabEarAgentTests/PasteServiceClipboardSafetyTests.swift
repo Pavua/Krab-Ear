@@ -23,6 +23,7 @@ final class PasteServiceClipboardSafetyTests: XCTestCase {
 
     override func tearDown() {
         pasteboard.clearContents()
+        pasteboard.releaseGlobally()
         service = nil
         pasteboard = nil
         super.tearDown()
