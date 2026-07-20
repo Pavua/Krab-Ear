@@ -1520,7 +1520,7 @@ def transcribe_audio():
             lang_hint=lang_hint,
         )
         _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        _pool_timed_out = False
+        _pool_shutdown_nonblocking = False
         try:
             _future = _pool.submit(deps.transcriber.transcribe, _transcribe_path, **_transcribe_kwargs)
             try:
@@ -1532,10 +1532,26 @@ def transcribe_audio():
                     # зависший executor; повторный result() вернёт результат
                     # гонки либо пробросит исходное исключение в общий 500.
                     result = _future.result()
-                else:
-                    _pool_timed_out = True
-                    # Отменяем только ещё не начавшиеся задачи и не ждём running
-                    # worker: ожидание снова превратило бы быстрый 504 в зависание.
+                elif _future.cancel():
+                    # Pending Future ещё не получил worker и успешно отменён:
+                    # poisoned процесса нет, поэтому обычный 504 безопасен.
+                    logger.warning(
+                        "Transcription timed out before worker start after %ss for %s",
+                        _TRANSCRIBE_TIMEOUT_SEC,
+                        safe_base,
+                    )
+                    timeout_response = jsonify({"error": "Transcription timeout"})
+                    timeout_response.status_code = 504
+                    return timeout_response
+                elif _future.done():
+                    # Future мог завершиться между первой done-проверкой и
+                    # cancel(). Забираем результат гонки без ложного hard-exit.
+                    result = _future.result()
+                elif _future.running():
+                    _pool_shutdown_nonblocking = True
+                    # Уже работающую задачу Future.cancel() не прерывает.
+                    # Не ждём non-daemon worker: ожидание снова превратило бы
+                    # быстрый 504 в зависание Python-finalize.
                     _pool.shutdown(wait=False, cancel_futures=True)
                     logger.error(
                         "Transcription timed out after %ss for %s",
@@ -1547,10 +1563,24 @@ def transcribe_audio():
                     _arm_timeout_exit(timeout_response, temp_path)
                     temp_cleanup_deferred = True
                     return timeout_response
+                else:
+                    # Для стандартного Future ветка недостижима. Нестандартному
+                    # executor не доверяем настолько, чтобы убивать процесс без
+                    # доказанного running; возвращаем fail-safe 504 без ожидания.
+                    _pool_shutdown_nonblocking = True
+                    _pool.shutdown(wait=False, cancel_futures=True)
+                    logger.error(
+                        "Transcription Future entered an unknown state after %ss for %s",
+                        _TRANSCRIBE_TIMEOUT_SEC,
+                        safe_base,
+                    )
+                    timeout_response = jsonify({"error": "Transcription timeout"})
+                    timeout_response.status_code = 504
+                    return timeout_response
         finally:
-            if not _pool_timed_out:
-                # На success/error Future уже завершён, поэтому wait=True не
-                # добавляет latency и гарантирует отсутствие executor-хвоста.
+            if not _pool_shutdown_nonblocking:
+                # На success/error/cancelled-pending Future нет работающей
+                # задачи, поэтому wait=True гарантирует отсутствие хвоста.
                 _pool.shutdown(wait=True)
         elapsed_sec = time.monotonic() - start_ts
 

@@ -315,54 +315,131 @@ class TestDecoderRejectsAudioOver1Hour(_Base):
 
 
 @unittest.skipUnless(_REST_AVAILABLE, "REST server dependencies not available")
-class TestTranscribeTimeoutKillsLongRunning(_Base):
-    """F2: transcriber.transcribe() that never returns → 504 after timeout."""
+class TestTranscribeTimeoutFutureStates(_Base):
+    """Не-running Future не вызывает hard-exit здорового REST-процесса."""
 
-    def test_transcribe_timeout_kills_long_running(self):
-        """Future.result() raises TimeoutError → handler returns 504."""
+    def test_pending_future_returns_504_without_process_exit(self):
+        """Успешный cancel pending Future даёт обычный 504 и cleanup."""
         import concurrent.futures as _cf
 
         wav_data = _make_wav_bytes()
         mock_info = MagicMock()
         mock_info.duration = 30.0
+        pending_future = _cf.Future()
+        shutdown_calls = []
 
-        # Replace the ThreadPoolExecutor so future.result() raises TimeoutError.
-        # W1755: _FakeExecutor must expose shutdown() since the fixed handler
-        # calls _pool.shutdown(wait=False, cancel_futures=True) explicitly.
+        # Executor намеренно не запускает задачу: cancel() обязан вернуть True.
         class _FakeExecutor:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *a):
-                pass
-
             def submit(self, fn, *args, **kwargs):
-                fut = _cf.Future()
-                # Don't set result — leave future pending
-                return fut
+                return pending_future
 
-            def shutdown(self, wait=True, cancel_futures=False):  # noqa: ARG002
-                pass
+            def shutdown(self, wait=True, cancel_futures=False):
+                shutdown_calls.append((wait, cancel_futures))
 
-        with patch("soundfile.info", return_value=mock_info), \
-                patch("concurrent.futures.ThreadPoolExecutor", return_value=_FakeExecutor()), \
-                patch.object(
-                    _cf.Future,
-                    "result",
-                    side_effect=_cf.TimeoutError("timed out"),
-                ):
-            resp = self.client.post(
-                "/v1/stt/transcribe",
-                data={"file": (io.BytesIO(wav_data), "slow.wav")},
-                content_type="multipart/form-data",
+        with tempfile.TemporaryDirectory(prefix="krab-rest-pending-") as root:
+            upload_dir = Path(root) / "temp_uploads"
+            with patch.object(_rest_mod, "TEMP_DIR", upload_dir), \
+                    patch("soundfile.info", return_value=mock_info), \
+                    patch("concurrent.futures.ThreadPoolExecutor", return_value=_FakeExecutor()), \
+                    patch.object(
+                        _cf.Future,
+                        "result",
+                        side_effect=_cf.TimeoutError("timed out"),
+                    ):
+                resp = self.client.post(
+                    "/v1/stt/transcribe",
+                    data={"file": (io.BytesIO(wav_data), "pending.wav")},
+                    content_type="multipart/form-data",
+                )
+
+            self.assertEqual(resp.status_code, 504)
+            self.assertEqual(resp.get_json(), {"error": "Transcription timeout"})
+            self.assertTrue(pending_future.cancelled())
+            self.assertEqual(shutdown_calls, [(True, False)])
+            self.assertEqual(list(upload_dir.iterdir()), [])
+            self.process_exit.assert_not_called()
+            resp.close()
+            self.process_exit.assert_not_called()
+
+    def test_unknown_non_running_future_returns_504_without_exit(self):
+        """Нестандартное неопределённое состояние даёт fail-safe 504."""
+        import concurrent.futures as _cf
+
+        wav_data = _make_wav_bytes()
+        mock_info = MagicMock(duration=30.0)
+        state_calls = []
+        shutdown_calls = []
+
+        class _UnknownFuture:
+            def result(self, timeout=None):
+                state_calls.append(("result", timeout))
+                raise _cf.TimeoutError("timed out")
+
+            def done(self):
+                state_calls.append(("done", None))
+                return False
+
+            def cancel(self):
+                state_calls.append(("cancel", None))
+                return False
+
+            def running(self):
+                state_calls.append(("running", None))
+                return False
+
+        class _FakeExecutor:
+            def submit(self, fn, *args, **kwargs):
+                return _UnknownFuture()
+
+            def shutdown(self, wait=True, cancel_futures=False):
+                shutdown_calls.append((wait, cancel_futures))
+
+        with tempfile.TemporaryDirectory(prefix="krab-rest-unknown-future-") as root:
+            upload_dir = Path(root) / "temp_uploads"
+            with patch.object(_rest_mod, "TEMP_DIR", upload_dir), \
+                    patch("soundfile.info", return_value=mock_info), \
+                    patch("concurrent.futures.ThreadPoolExecutor", return_value=_FakeExecutor()):
+                resp = self.client.post(
+                    "/v1/stt/transcribe",
+                    data={"file": (io.BytesIO(wav_data), "unknown.wav")},
+                    content_type="multipart/form-data",
+                )
+
+            self.assertEqual(resp.status_code, 504)
+            self.assertEqual(resp.get_json(), {"error": "Transcription timeout"})
+            self.assertEqual(
+                [name for name, _value in state_calls],
+                ["result", "done", "cancel", "done", "running"],
             )
-        self.assertEqual(resp.status_code, 504)
-        body = resp.get_json()
-        self.assertIn("timeout", body.get("error", "").lower())
-        self.process_exit.assert_not_called()
-        resp.close()
-        self.process_exit.assert_called_once_with(
-            _rest_mod._TRANSCRIBE_TIMEOUT_EXIT_CODE,
+            self.assertEqual(shutdown_calls, [(False, True)])
+            self.assertEqual(list(upload_dir.iterdir()), [])
+            self.process_exit.assert_not_called()
+            resp.close()
+            self.process_exit.assert_not_called()
+
+
+@unittest.skipUnless(_REST_AVAILABLE, "REST server dependencies not available")
+class TestGunicornTimeoutBudget(unittest.TestCase):
+    """Gunicorn не должен обрывать REST раньше собственного watchdog."""
+
+    def test_gunicorn_timeout_exceeds_watchdog_and_response_close_grace(self):
+        """Worker budget покрывает watchdog, graceful shutdown и close grace."""
+        import runpy
+
+        config = runpy.run_path(str(PROJECT_ROOT / "gunicorn_config.py"))
+        minimum_response_close_grace_sec = 30
+
+        self.assertGreaterEqual(
+            config["timeout"],
+            (
+                _rest_mod._TRANSCRIBE_TIMEOUT_SEC
+                + config["graceful_timeout"]
+                + minimum_response_close_grace_sec
+            ),
+            (
+                "gunicorn timeout обязан пережить REST watchdog и дать "
+                "Response.call_on_close выполнить fail-fast"
+            )
         )
 
 
