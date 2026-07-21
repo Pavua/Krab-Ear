@@ -143,6 +143,29 @@ class TestPhaseA(unittest.TestCase):
         self.assertIn("early_return", result)
         self.assertEqual(result["early_return"]["status"], "already_stopped")
 
+    def test_returns_recorder_timeout_when_worker_hangs(self):
+        """F2 (Fable 2026-07-22): timeout stop() → status=recorder_timeout, не already_stopped.
+
+        Раньше зависший worker (PortAudio hang class) выглядел для Swift как
+        идемпотентный already_stopped — пользователь молча терял диктовку.
+        """
+        from backend.recorder import AudioRecorderStopTimeout
+
+        class _HungRecorder(_FakeRecorderRecording):
+            def stop(self, timeout_sec=3.0, trim_tail_ms=0):
+                raise AudioRecorderStopTimeout("worker не завершился за 0.0 с")
+
+        rec = _HungRecorder()
+        rec.start()
+        svc = _make_service(self, recorder=rec, tmp_dir=self.tmp.name)
+        settings = svc._cached_settings()
+        result = svc._stop_recording_phase_a({}, settings)
+        self.assertIn("early_return", result)
+        self.assertEqual(result["early_return"]["status"], "recorder_timeout")
+        self.assertFalse(result["early_return"]["is_recording"])
+        # preview_text обязан присутствовать (шанс спасти диктовку из превью).
+        self.assertIn("preview_text", result["early_return"])
+
     def test_returns_audio_and_duration_on_success(self):
         """Phase A returns audio/duration_sec/sr when recorder is active."""
         rec = _FakeRecorderRecording()

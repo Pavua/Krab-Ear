@@ -33,6 +33,7 @@ from backend.ipc_constants import IPC_PREVIEW_THREAD_TIMEOUT_SEC
 from backend.job_tracker import JobTracker
 from backend.observability import add_breadcrumb
 from backend.realtime_partial import RealtimePartialTranscriber
+from backend.recorder import AudioRecorderStopTimeout
 from backend.realtime_silence_filter import RealtimeSilenceFilter
 from backend.transcript_writer import TranscriptWriter
 from contracts.registry import EventType
@@ -1253,7 +1254,27 @@ class RecordingCoreService:
             min_value=0,
             max_value=1200,
         )
-        stopped = self._stop_recorder_guarded(stop_tail_trim_ms=stop_tail_trim_ms)
+        try:
+            stopped = self._stop_recorder_guarded(stop_tail_trim_ms=stop_tail_trim_ms)
+        except AudioRecorderStopTimeout:
+            # F2 (Fable-ревью 2026-07-22): зависший audio-worker раньше выглядел
+            # как идемпотентный already_stopped — Swift молчал, диктовка терялась
+            # без следа. Отдаём различимый статус + превью как шанс спасения.
+            logger.error(
+                "stop_recording: audio worker завис — отдаю recorder_timeout"
+            )
+            with self._preview_lock:
+                preview_text = self._preview_text
+                preview_duration = self._preview_duration_sec
+            return {
+                "early_return": {
+                    "status": "recorder_timeout",
+                    "is_recording": False,
+                    "duration_sec": preview_duration,
+                    "preview_text": preview_text,
+                    "stop_tail_trim_ms": stop_tail_trim_ms,
+                }
+            }
         if stopped is None:
             with self._preview_lock:
                 preview_text = self._preview_text

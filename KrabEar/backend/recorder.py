@@ -30,6 +30,15 @@ _AUDIO_LEVEL_EMIT_INTERVAL_SEC = 0.033  # ~30 Hz для VU meter
 MAX_RECORDING_SAMPLES = 16000 * 60 * 60 * 4  # 4 hours @ 16 kHz
 
 
+class AudioRecorderStopTimeout(RuntimeError):
+    """stop() не дождался выхода worker-потока за отведённый таймаут.
+
+    Отличим от «нечего отдавать» (``None``): вызыватель обязан донести до
+    пользователя громкий ``recorder_timeout``, а не тихий ``already_stopped``
+    (F2, Fable-ревью 2026-07-22 — тихая полная потеря диктовки).
+    """
+
+
 class AudioRecorder:
     """Потокобезопасный рекордер c режимом start/stop."""
 
@@ -140,13 +149,17 @@ class AudioRecorder:
 
             # Нельзя отдавать частичный буфер и терять handle, пока worker ещё
             # способен дописать чанк. Повторный stop() завершит сбор после его
-            # фактического выхода.
+            # фактического выхода. Исход обязан быть РАЗЛИЧИМЫМ от «нечего
+            # отдавать»: None здесь превращался в тихий already_stopped и
+            # пользователь молча терял диктовку (F2, Fable-ревью 2026-07-22).
             if thread is not None and thread.is_alive():
                 logger.warning(
                     "AudioRecorder worker не завершился за %.1f с при stop()",
                     timeout_sec,
                 )
-                return None
+                raise AudioRecorderStopTimeout(
+                    f"AudioRecorder worker не завершился за {timeout_sec:.1f} с"
+                )
 
             with self._lock:
                 pending = self._pending_result

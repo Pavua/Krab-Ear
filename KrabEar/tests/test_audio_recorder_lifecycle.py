@@ -30,7 +30,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from backend.recorder import AudioRecorder  # noqa: E402
+from backend.recorder import AudioRecorder, AudioRecorderStopTimeout  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +168,53 @@ class TestCaptureThreadLifecycle(unittest.TestCase):
             thread_ref.join(timeout=1.0)
             self.assertFalse(thread_ref.is_alive(), "Worker thread should have terminated after stop()")
 
+    def test_stop_timeout_raises_distinct_error_not_silent_none(self) -> None:
+        """F2 (Fable 2026-07-22): timeout stop() обязан быть различимым.
+
+        Возврат None при живом worker неотличим от already_stopped: вызыватель
+        (recording_core_service phase_a) молча отвечал already_stopped, Swift не
+        показывал ничего — тихая полная потеря диктовки. Timeout должен кидать
+        AudioRecorderStopTimeout, чтобы дойти до пользователя отдельным статусом.
+        """
+        entered_read = threading.Event()
+        release_worker = threading.Event()
+
+        def _blocking_read(*_args: object, **_kwargs: object):
+            entered_read.set()
+            release_worker.wait(timeout=5.0)
+            return np.zeros((160, 1), dtype=np.float32), False
+
+        stream = MagicMock()
+        stream.read.side_effect = _blocking_read
+        stream_cm = MagicMock()
+        stream_cm.__enter__ = MagicMock(return_value=stream)
+        stream_cm.__exit__ = MagicMock(return_value=False)
+
+        with patch("sounddevice.InputStream", return_value=stream_cm):
+            rec = AudioRecorder()
+            self.assertTrue(rec.start())
+            # Ждём ВХОДА worker'а в блокирующий read: is_alive() истинно ещё до
+            # первого read, и ранний stop() позволил бы worker'у чисто выйти по
+            # event (гонка — тест мигал бы «not raised»).
+            self.assertTrue(
+                entered_read.wait(timeout=2.0),
+                "worker не дошёл до stream.read()",
+            )
+
+            try:
+                with self.assertRaises(AudioRecorderStopTimeout):
+                    rec.stop(timeout_sec=0.05)
+            finally:
+                release_worker.set()
+                with rec._lock:
+                    hung = rec._thread
+                if hung is not None:
+                    hung.join(timeout=2.0)
+                try:
+                    rec.stop(timeout_sec=1.0)
+                except AudioRecorderStopTimeout:
+                    pass
+
     def test_abort_discards_buffers_without_concatenate_and_is_idempotent(self) -> None:
         """abort() завершает worker и очищает аудио без сборки финального массива."""
         with patch("sounddevice.InputStream", return_value=_make_stream_cm()):
@@ -248,7 +295,10 @@ class TestCaptureThreadLifecycle(unittest.TestCase):
         self.addCleanup(stuck_thread.join, 1.0)
         self.addCleanup(release.set)
 
-        self.assertIsNone(rec.stop(timeout_sec=0.01))
+        # F2 (Fable 2026-07-22): timeout теперь кидает различимое исключение,
+        # а не молчаливый None; handle и чанки по-прежнему сохраняются.
+        with self.assertRaises(AudioRecorderStopTimeout):
+            rec.stop(timeout_sec=0.01)
         with rec._lock:
             self.assertIs(rec._thread, stuck_thread)
             self.assertEqual(rec._chunks_total_samples, 8)

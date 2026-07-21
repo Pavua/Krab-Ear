@@ -399,7 +399,13 @@ class CallAssistService:
         # unconditionally would silently abort an unrelated recording that happened
         # to be running when handle_stop is called on an already-idle session.
         if active and self.recorder.is_recording:
-            self.recorder.stop()
+            try:
+                self.recorder.stop()
+            except Exception:
+                # AudioRecorderStopTimeout и родня: зависший worker не должен
+                # рушить stop-флоу call assist — сессия уже помечена stopped,
+                # дальше идут VG-вызовы. Раньше stop() молча возвращал None.
+                logger.exception("call_assist stop: рекордер не остановился")
 
         settings = self.store.load_settings()
         voice_gateway_url = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()

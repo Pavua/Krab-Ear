@@ -216,6 +216,21 @@ extension AgentAppDelegate {
                 // Идемпотентный stop: backend уже в idle, лишние уведомления пользователю не нужны.
                 logger.info("stop_recording: backend уже idle (already_stopped), синхронизирую состояние")
                 _ = syncRecordingStateWithBackend()
+            case "recorder_timeout":
+                // F2 (Fable-ревью 2026-07-22): audio-worker завис (PortAudio hang class),
+                // финального аудио нет. Пробуем спасти диктовку из превью; пользователь
+                // в любом случае ОБЯЗАН узнать, что запись не сохранилась — раньше этот
+                // исход маскировался под тихий already_stopped.
+                logger.error("stop_recording: recorder_timeout — аудио-поток завис, финальное аудио потеряно")
+                recoverFromPreviewFallback(reason: "Аудио-подсистема зависла (recorder_timeout)") { recovered in
+                    if !recovered {
+                        self.notify(
+                            title: "Krab Ear",
+                            body: "Запись не сохранилась: аудио-подсистема зависла. Попробуйте ещё раз; если повторится — перезапустите backend."
+                        )
+                    }
+                }
+                _ = syncRecordingStateWithBackend()
             case "empty_audio":
                 logger.warn("stop_recording вернул empty_audio")
                 notify(title: "Krab Ear", body: "Аудио пустое, попробуйте ещё раз")
