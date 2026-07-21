@@ -186,6 +186,7 @@ class TestSilenceRangesPassedToTranscribe(unittest.TestCase):
 
         with patch("backend.recording_core_service.RealtimeSilenceFilter") as MockRSF:
             mock_filter = MagicMock()
+            mock_filter.is_running = False  # hardening 2026-07-20: truthy-мок вернул бы фильтр в слот
             mock_filter.enabled = True
             mock_filter.stop.return_value = fake_ranges
             MockRSF.return_value = mock_filter
@@ -210,6 +211,7 @@ class TestSilenceRangesPassedToTranscribe(unittest.TestCase):
 
         with patch("backend.recording_core_service.RealtimeSilenceFilter") as MockRSF:
             mock_filter = MagicMock()
+            mock_filter.is_running = False  # hardening 2026-07-20: truthy-мок вернул бы фильтр в слот
             mock_filter.enabled = True
             mock_filter.stop.return_value = []
             MockRSF.return_value = mock_filter
@@ -228,6 +230,7 @@ class TestSilenceRangesPassedToTranscribe(unittest.TestCase):
 
         with patch("backend.recording_core_service.RealtimeSilenceFilter") as MockRSF:
             mock_filter = MagicMock()
+            mock_filter.is_running = False  # hardening 2026-07-20: truthy-мок вернул бы фильтр в слот
             mock_filter.stop.return_value = []
             MockRSF.return_value = mock_filter
 
@@ -246,6 +249,7 @@ class TestSilenceRangesPassedToTranscribe(unittest.TestCase):
 
         with patch("backend.recording_core_service.RealtimeSilenceFilter") as MockRSF:
             mock_filter = MagicMock()
+            mock_filter.is_running = False  # hardening 2026-07-20: truthy-мок вернул бы фильтр в слот
             mock_filter.stop.return_value = []
             MockRSF.return_value = mock_filter
 

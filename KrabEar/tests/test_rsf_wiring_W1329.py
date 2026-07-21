@@ -287,8 +287,10 @@ class TestRSFWiringW1329(unittest.TestCase):
 
         # Recording should have completed without error
         self.assertIn(result.get("status"), ("ok", "empty_text", "empty_audio"))
-        # RSF should have been cleared regardless
-        self.assertIsNone(svc._rsf)
+        # Runtime-hardening 2026-07-20: упавший stop() значит «фильтр, возможно,
+        # ещё жив» — хэндл ВОЗВРАЩАЕТСЯ в слот (symметрично recorder'у), а не
+        # теряется. Главный инвариант теста неизменен: stop_recording не падает.
+        self.assertIs(svc._rsf, mock_rsf_instance)
 
     def test_rsf_instance_cleared_after_stop(self):
         """After stop_recording, _rsf is None regardless of enabled state."""
@@ -297,6 +299,9 @@ class TestRSFWiringW1329(unittest.TestCase):
 
         mock_rsf_instance = MagicMock()
         mock_rsf_instance.stop.return_value = []
+        # MagicMock.is_running был бы truthy-моком → phase_a сочла бы фильтр
+        # «не остановившимся» и вернула его в слот (hardening 2026-07-20).
+        mock_rsf_instance.is_running = False
 
         with patch(
             "backend.recording_core_service.RealtimeSilenceFilter",

@@ -34,7 +34,11 @@ class EventBridgeWiringSourceContractTestCase(unittest.TestCase):
 
     def test_event_bridge_stopped_in_close(self):
         close_start = _SERVICE_SRC.index("def close(self)")
-        close_body = _SERVICE_SRC[close_start:close_start + 3000]
+        # До конца метода, а не фиксированное окно: рост close() (runtime-
+        # hardening 2026-07-20 добавил close_background_workers в начало)
+        # выталкивал _event_bridge за границу среза → ложный RED.
+        close_end = _SERVICE_SRC.index("\n    def ", close_start)
+        close_body = _SERVICE_SRC[close_start:close_end]
         self.assertIn("_event_bridge", close_body)
         self.assertIn(".stop()", close_body)
 

@@ -254,6 +254,13 @@ class _FakeRSF:
             self._started = False
         return []
 
+    @property
+    def is_running(self) -> bool:
+        # hardening 2026-07-20: phase_a проверяет is_running после stop();
+        # без атрибута AttributeError трактовался как «не остановился» и
+        # фильтр возвращался в слот — ассерты «cleared after stop» краснели.
+        return self._started
+
 
 class _FakeRecorder:
     """Старт всегда успешен; стоп возвращает None → phase_a берёт early_return
