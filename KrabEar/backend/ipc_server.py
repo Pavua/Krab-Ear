@@ -67,10 +67,15 @@ class IPCServer:
         deadline = time.monotonic() + timeout
         current = threading.current_thread()
 
-        # Event ставится под тем же lock, под которым accept-loop регистрирует
-        # новый handler. Поэтому после выхода отсюда новый поток уже не проскочит.
-        with self._handler_threads_lock:
-            self._stop_event.set()
+        # _stop_event.set() атомарен — лок здесь БРАТЬ НЕЛЬЗЯ: stop() зовётся из
+        # signal handler'а, который Python исполняет в main thread между
+        # байткодами — в том числе когда accept-петля (тот же main thread) уже
+        # держит нереентерабельный _handler_threads_lock внутри
+        # _start_connection_handler → self-deadlock (F1, Fable-ревью 2026-07-22).
+        # Поздно зарегистрированный handler не проскочит: регистрация и проверка
+        # _stop_event идут под локом, а join-цикл ниже снимает свежий снапшот
+        # registry на каждой итерации.
+        self._stop_event.set()
 
         while True:
             with self._handler_threads_lock:

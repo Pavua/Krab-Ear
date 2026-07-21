@@ -650,6 +650,38 @@ class IPCHandlerLifecycleTestCase(unittest.TestCase):
             self.assertEqual(ipc._handler_threads, set())
         self.assertEqual(_drain_available_slots(ipc), _IPC_MAX_CONNECTIONS)
 
+    def test_stop_sets_event_without_handler_threads_lock(self) -> None:
+        """F1 (Fable 2026-07-22): set() события не должен требовать lock.
+
+        Signal handler исполняется в main thread между байткодами — в том числе
+        когда accept-петля (тот же main thread) уже держит нереентерабельный
+        ``_handler_threads_lock`` внутри ``_start_connection_handler``. Если
+        ``stop()`` берёт тот же lock ради ``_stop_event.set()``, получается
+        self-deadlock. Здесь лок захвачен «accept-петлёй» (тестовым потоком),
+        а stop() из параллельного потока обязан успеть взвести событие ДО
+        освобождения лока.
+        """
+        ipc = _make_lifecycle_server(self, _LifecycleImmediateService())
+
+        self.assertTrue(ipc._handler_threads_lock.acquire(timeout=1.0))
+        try:
+            stopper = threading.Thread(
+                target=lambda: ipc.stop(timeout_sec=0.2), daemon=True
+            )
+            stopper.start()
+            deadline = time.monotonic() + 1.0
+            while not ipc._stop_event.is_set() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(
+                ipc._stop_event.is_set(),
+                "stop() обязан взводить _stop_event без захвата "
+                "_handler_threads_lock (self-deadlock в signal handler)",
+            )
+        finally:
+            ipc._handler_threads_lock.release()
+        stopper.join(timeout=2.0)
+        self.assertFalse(stopper.is_alive())
+
 
 if __name__ == "__main__":
     unittest.main()
