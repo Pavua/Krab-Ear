@@ -70,9 +70,13 @@ class FakeStore:
 class FakeIPCServer:
     def __init__(self):
         self.stopped = False
+        self.signal_requests = 0
 
     def stop(self):
         self.stopped = True
+
+    def request_stop_from_signal(self):
+        self.signal_requests += 1
 
 
 def _make_service(
@@ -429,14 +433,15 @@ class TestShutdownHandlerSignalRegistration(unittest.TestCase):
             self.assertIn(signal.SIGTERM, registered_signals)
             self.assertIn(signal.SIGINT, registered_signals)
 
-    def test_signal_handler_calls_shutdown(self):
+    def test_signal_handler_only_requests_ipc_stop(self):
         handler = GracefulShutdownHandler(data_dir=self.data_dir)
         svc = _make_service()
         handler._service = svc
 
         with patch.object(handler, "shutdown") as mock_shutdown:
             handler._signal_handler(signal.SIGTERM, None)
-            mock_shutdown.assert_called_once()
+            mock_shutdown.assert_not_called()
+        self.assertEqual(svc._ipc_server.signal_requests, 1)
 
     def test_register_stores_service_reference(self):
         handler = GracefulShutdownHandler(data_dir=self.data_dir)
@@ -490,6 +495,115 @@ class TestShutdownHandlerThreadSafety(unittest.TestCase):
         self.assertEqual(len(results), 20)
         for r in results:
             self.assertIn("clean", r)
+
+    def test_failed_ipc_drain_aborts_before_persistence(self):
+        """False от IPC запрещает касаться общих metadata-ресурсов."""
+        handler = GracefulShutdownHandler(data_dir=self.data_dir)
+        svc = MagicMock()
+        svc._ipc_server.stop.return_value = False
+        handler.bind(svc)
+
+        self.assertFalse(handler.shutdown())
+
+        svc._ipc_server.stop.assert_called_once_with()
+        svc.vocabulary.load.assert_not_called()
+        svc._audit_logger.close.assert_not_called()
+        svc._usage_tracker._persist.assert_not_called()
+        svc._playback_tracker._save.assert_not_called()
+        svc.store.maybe_compact.assert_not_called()
+        self.assertFalse((self.data_dir / _SHUTDOWN_INFO_FILE).exists())
+
+    def test_stop_exception_aborts_before_persistence(self):
+        """Исключение drain трактуется как недоказанная квиесценция."""
+        handler = GracefulShutdownHandler(data_dir=self.data_dir)
+        svc = MagicMock()
+        svc._ipc_server.stop.side_effect = RuntimeError("join failed")
+        handler.bind(svc)
+
+        self.assertFalse(handler.shutdown())
+        svc.vocabulary.load.assert_not_called()
+        self.assertTrue(handler._shutdown_done.is_set())
+
+    def test_missing_ipc_stop_aborts_before_persistence(self):
+        """Наличие server без stop() не считается доказанной квиесценцией."""
+        handler = GracefulShutdownHandler(data_dir=self.data_dir)
+        svc = MagicMock()
+        svc._ipc_server = MagicMock(spec=[])
+        handler.bind(svc)
+
+        self.assertFalse(handler.shutdown())
+        svc.vocabulary.load.assert_not_called()
+        self.assertTrue(handler._shutdown_done.is_set())
+
+    def test_concurrent_caller_waits_for_owner_result(self):
+        """Конкурентный caller не объявляет успех до завершения владельца."""
+        handler = GracefulShutdownHandler(data_dir=self.data_dir)
+        svc = _make_service()
+        entered = threading.Event()
+        release = threading.Event()
+        original_save = handler._save_vocabulary
+
+        def _blocked_save(service):
+            entered.set()
+            release.wait()
+            original_save(service)
+
+        handler._save_vocabulary = _blocked_save
+        handler.bind(svc)
+        results: list[bool] = []
+        second_started = threading.Event()
+
+        owner = threading.Thread(target=lambda: results.append(handler.shutdown()))
+
+        def _second_shutdown() -> None:
+            second_started.set()
+            results.append(handler.shutdown())
+
+        waiter = threading.Thread(target=_second_shutdown)
+        owner.start()
+        self.addCleanup(owner.join, 1.0)
+        self.addCleanup(release.set)
+        self.assertTrue(entered.wait(timeout=1.0))
+        waiter.start()
+        self.addCleanup(waiter.join, 1.0)
+        self.assertTrue(second_started.wait(timeout=1.0))
+        self.assertEqual(results, [])
+
+        release.set()
+        owner.join(timeout=1.0)
+        waiter.join(timeout=1.0)
+        self.assertEqual(results, [True, True])
+        self.assertEqual(len(svc.vocabulary.save_calls), 1)
+
+    def test_owner_reentry_returns_false_without_deadlock(self):
+        """Metadata callback не может рекурсивно запустить второй teardown."""
+        handler = GracefulShutdownHandler(data_dir=self.data_dir)
+        svc = _make_service()
+        reentry_results: list[bool] = []
+
+        def _reentrant_save(_service):
+            reentry_results.append(
+                handler.shutdown(ipc_already_stopped=True)
+            )
+
+        handler._save_vocabulary = _reentrant_save
+        handler.bind(svc)
+
+        self.assertTrue(handler.shutdown())
+        self.assertEqual(reentry_results, [False])
+        self.assertTrue(handler._shutdown_done.is_set())
+
+    def test_unexpected_persist_exception_still_releases_waiters(self):
+        """Override _persist не оставляет single-flight в вечном in-progress."""
+        handler = GracefulShutdownHandler(data_dir=self.data_dir)
+        svc = _make_service()
+        handler._persist = MagicMock(side_effect=RuntimeError("persist failed"))
+        handler.bind(svc)
+
+        self.assertTrue(handler.shutdown())
+        self.assertTrue(handler._shutdown_done.is_set())
+        self.assertFalse(handler.get_shutdown_status()["clean"])
+        self.assertTrue(handler.shutdown())
 
 
 # ===========================================================================
@@ -555,8 +669,8 @@ class TestShutdownHandlerRegisterCleanupCallback(unittest.TestCase):
         self.assertIs(handler._service, svc2)
 
 
-class TestShutdownHandlerLIFOOrder(unittest.TestCase):
-    """test_run_cleanups_in_lifo_order: verify shutdown steps execute in defined sequence."""
+class TestShutdownHandlerStepOrder(unittest.TestCase):
+    """Проверяет IPC-first порядок шагов завершения."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -565,9 +679,8 @@ class TestShutdownHandlerLIFOOrder(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_run_cleanups_in_lifo_order(self):
-        """Steps execute vocabulary → audit → usage → playback → compact → socket.
-        Verify by recording call order via side_effects."""
+    def test_run_cleanups_in_ipc_first_order(self):
+        """Шаги идут socket → vocabulary → audit → usage → playback → compact."""
         call_order: list[str] = []
         handler = GracefulShutdownHandler(data_dir=self.data_dir)
         svc = MagicMock()
@@ -607,7 +720,15 @@ class TestShutdownHandlerLIFOOrder(unittest.TestCase):
         handler.shutdown()
 
         # _save_vocabulary calls load() then save(); both recorded
-        expected = ["vocab_load", "vocab_save", "audit_close", "usage_persist", "playback_save", "compact", "socket_stop"]
+        expected = [
+            "socket_stop",
+            "vocab_load",
+            "vocab_save",
+            "audit_close",
+            "usage_persist",
+            "playback_save",
+            "compact",
+        ]
         self.assertEqual(call_order, expected, f"Step order mismatch: {call_order}")
 
 

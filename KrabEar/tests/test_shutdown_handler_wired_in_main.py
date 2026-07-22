@@ -1,21 +1,18 @@
-"""Integration tests: GracefulShutdownHandler is wired in main() — W981.
+"""Интеграционные тесты wiring GracefulShutdownHandler в main() — W981.
 
-Verifies that the SIGTERM path in service.main() runs all 6 shutdown steps
-(vocabulary save, audit log flush, usage stats, playback stats, history
-compaction, socket close) and that the shutdown_in_progress logic is correct.
+Проверяют signal-safe SIGTERM-путь, единый shutdown-координатор, операции
+сохранения/закрытия и корректную семантику ``shutdown_in_progress``.
 """
 
 from __future__ import annotations
 
-import os
 import signal
 import sys
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = str(Path(__file__).parent.parent)
 if PROJECT_ROOT not in sys.path:
@@ -206,7 +203,7 @@ class TestGracefulShutdownAllSteps(unittest.TestCase):
 
 
 class TestShutdownHandlerWiredInMain(unittest.TestCase):
-    """Проверяет, что в service.main() shutdown_handler.register() вызывается.
+    """Проверяет единственное владение shutdown-путём в service.main().
 
     Подход: статический AST-анализ + grep исходника service.py.
     Не импортирует backend.service (несовместимо с Python 3.9 из-за slots=True).
@@ -229,26 +226,36 @@ class TestShutdownHandlerWiredInMain(unittest.TestCase):
                 return "\n".join(lines[start:end])
         return ""
 
-    def test_register_called_in_main(self) -> None:
-        """main() содержит вызов _shutdown_handler.register(service)."""
+    def test_bind_called_in_main_without_signal_registration(self) -> None:
+        """main() привязывает metadata-handler без временного перехвата сигналов."""
         body = self._main_body()
         self.assertIn(
+            "_shutdown_handler.bind(",
+            body,
+            "main() должен привязать service к metadata-handler",
+        )
+        self.assertNotIn(
             "_shutdown_handler.register(",
             body,
-            "main() должен вызывать service._shutdown_handler.register(service)",
+            "legacy register() не должен перехватывать production-сигналы",
         )
 
-    def test_shutdown_called_in_signal_handler(self) -> None:
-        """main() → _signal_handler вызывает shutdown_handler.shutdown()."""
+    def test_signal_handler_only_requests_accept_loop_stop(self) -> None:
+        """Signal callback не содержит teardown, lock, I/O или логирования."""
         body = self._main_body()
         self.assertIn(
-            "_shutdown_handler.shutdown()",
+            "server.request_stop_from_signal()",
             body,
-            "Обработчик сигнала в main() должен вызывать shutdown_handler.shutdown()",
+            "Signal callback должен только попросить IPC-loop выйти",
         )
+        signal_body = body.split("def _signal_handler", 1)[1].split(
+            "signal.signal", 1
+        )[0]
+        for forbidden in ("shutdown(", "server.stop(", "service.close(", "logger."):
+            self.assertNotIn(forbidden, signal_body)
 
-    def test_shutdown_called_in_finally_block(self) -> None:
-        """main() → finally-блок вызывает shutdown_handler.shutdown()."""
+    def test_single_coordinator_called_in_finally_block(self) -> None:
+        """Весь teardown выполняется одной функцией только из finally."""
         import ast
         source = self._source()
         tree = ast.parse(source)
@@ -271,36 +278,35 @@ class TestShutdownHandlerWiredInMain(unittest.TestCase):
                 lines = source.splitlines()
                 for stmt in finalbody:
                     # Получаем строки finally-блока
-                    stmt_line = lines[stmt.lineno - 1] if stmt.lineno <= len(lines) else ""
                     end_line = stmt.end_lineno if hasattr(stmt, "end_lineno") else stmt.lineno
                     finally_code = "\n".join(lines[stmt.lineno - 1:end_line])
-                    if "_shutdown_handler.shutdown()" in finally_code:
+                    if "_shutdown_backend(" in finally_code:
                         found_finally_shutdown = True
                         break
 
         self.assertTrue(
             found_finally_shutdown,
-            "finally-блок main() должен вызывать service._shutdown_handler.shutdown()",
+            "finally-блок main() должен вызывать _shutdown_backend()",
         )
 
-    def test_ipc_server_assigned_before_register(self) -> None:
-        """service._ipc_server = server происходит до register() в main()."""
+    def test_ipc_server_assigned_before_bind(self) -> None:
+        """service._ipc_server = server происходит до bind() в main()."""
         body = self._main_body()
         ipc_assign_pos = body.find("._ipc_server = server")
-        register_pos = body.find("._shutdown_handler.register(")
+        bind_pos = body.find("._shutdown_handler.bind(")
 
         self.assertGreater(
             ipc_assign_pos, -1,
             "main() должен содержать присваивание service._ipc_server = server",
         )
         self.assertGreater(
-            register_pos, -1,
-            "main() должен содержать вызов _shutdown_handler.register(service)",
+            bind_pos, -1,
+            "main() должен содержать вызов _shutdown_handler.bind(service)",
         )
         self.assertLess(
             ipc_assign_pos,
-            register_pos,
-            "_ipc_server должен присваиваться ДО вызова register()",
+            bind_pos,
+            "_ipc_server должен присваиваться ДО вызова bind()",
         )
 
 
@@ -328,8 +334,32 @@ class TestShutdownHandlerRegisterAPI(unittest.TestCase):
         with h._lock:
             self.assertIs(h._service, svc)
 
-    def test_signal_handler_calls_shutdown(self) -> None:
-        """Обработчик сигнала из register() вызывает shutdown()."""
+    def test_register_rejects_service_without_signal_stop_request(self) -> None:
+        """Несовместимый legacy-service не превращает SIGTERM в тихий no-op."""
+        h = GracefulShutdownHandler(data_dir=None)
+        svc = MagicMock()
+        svc._ipc_server = None
+
+        with patch("signal.signal") as install_signal:
+            with self.assertRaises(TypeError):
+                h.register(svc)
+        install_signal.assert_not_called()
+        self.assertIsNone(h._service)
+
+    def test_register_rejects_ipc_without_full_stop(self) -> None:
+        """Одной signal-метки недостаточно для доказуемой квиесценции."""
+        h = GracefulShutdownHandler(data_dir=None)
+        svc = MagicMock()
+        svc._ipc_server = MagicMock(spec=["request_stop_from_signal"])
+
+        with patch("signal.signal") as install_signal:
+            with self.assertRaises(TypeError):
+                h.register(svc)
+        install_signal.assert_not_called()
+        self.assertIsNone(h._service)
+
+    def test_signal_handler_only_requests_ipc_stop(self) -> None:
+        """Legacy register() также устанавливает request-only callback."""
         h = GracefulShutdownHandler(data_dir=None)
         svc = MagicMock()
 
@@ -337,24 +367,13 @@ class TestShutdownHandlerRegisterAPI(unittest.TestCase):
         with patch("signal.signal", side_effect=lambda sig, hnd: installed.__setitem__(sig, hnd)):
             h.register(svc)
 
-        shutdown_called = threading.Event()
-        original_shutdown = h.shutdown
-
-        def track_shutdown() -> None:
-            shutdown_called.set()
-            original_shutdown()
-
-        h.shutdown = track_shutdown  # type: ignore[method-assign]
-
         # Вызываем handler напрямую
         handler = installed[signal.SIGTERM]
         self.assertTrue(callable(handler))
-        handler(signal.SIGTERM, None)  # type: ignore[call-arg]
-
-        self.assertTrue(
-            shutdown_called.wait(timeout=2),
-            "shutdown() должен быть вызван при получении SIGTERM",
-        )
+        with patch.object(h, "shutdown") as shutdown:
+            handler(signal.SIGTERM, None)  # type: ignore[call-arg]
+            shutdown.assert_not_called()
+        svc._ipc_server.request_stop_from_signal.assert_called_once_with()
 
 
 if __name__ == "__main__":

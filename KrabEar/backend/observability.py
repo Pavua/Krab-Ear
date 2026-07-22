@@ -1,7 +1,7 @@
-"""Observability helpers for Krab Ear backend.
+"""Средства наблюдаемости backend Krab Ear.
 
-Sentry/GlitchTip integration (Sentry-compatible self-hosted option).
-All functions are no-op when DSN is not provided — safe to ship without a DSN.
+Модуль связывает backend с Sentry/GlitchTip. Без DSN все функции безопасно
+превращаются в no-op, поэтому локальная поставка не зависит от телеметрии.
 """
 
 from __future__ import annotations
@@ -383,18 +383,15 @@ def mask_phone(phone: str) -> str:
 
 
 def install_signal_handlers() -> None:
-    """Install Sentry-aware handlers for SIGABRT/SIGSEGV.
+    """Установить Sentry-aware обработчики SIGABRT/SIGSEGV.
 
-    SIGTERM is intentionally excluded — ``main()`` in ``service.py`` owns the
-    SIGTERM handler and calls both ``shutdown_handler.shutdown()`` **and**
-    ``flush_sentry()`` in the correct order (shutdown first, so final events are
-    captured before the flush).
+    SIGTERM намеренно исключён: ``service.main()`` только просит IPC-loop выйти,
+    после чего единый ``finally`` выполняет IPC → workers → metadata → Sentry.
 
-    Sends a Sentry event with the signal name before propagating the signal
-    to the default handler so the process terminates normally.
+    Перед передачей аварийного сигнала default-handler-у отправляет событие
+    Sentry с именем сигнала.
 
-    Idempotent — multiple calls don't re-install handlers.
-    No-op if Sentry SDK is not initialized (DSN not set).
+    Идемпотентен; без инициализированного Sentry SDK ничего не делает.
     """
     if getattr(install_signal_handlers, "_installed", False):
         return
@@ -413,17 +410,17 @@ def install_signal_handlers() -> None:
                     sentry_sdk.flush(timeout=2.0)
         except Exception:  # noqa: BLE001
             pass  # телеметрия не должна мешать штатному завершению
-        # Re-raise via default handler so the process actually terminates.
+        # Возвращаем default-handler, чтобы аварийный сигнал завершил процесс.
         signal.signal(signum, signal.SIG_DFL)
         signal.raise_signal(signum)
 
-    # SIGTERM is NOT in this list — main()'s _signal_handler handles it.
+    # SIGTERM здесь нет: им владеет signal-safe callback из service.main().
     for sig in (signal.SIGABRT, signal.SIGSEGV):
         try:
             signal.signal(sig, _handler)
         except (ValueError, OSError):
-            # SIGSEGV / SIGABRT may not be settable in all contexts
-            # (e.g. inside threads or restricted environments).
+            # В некоторых контекстах (например, не-main thread) установка
+            # SIGSEGV / SIGABRT запрещена самим Python/runtime.
             pass
 
 

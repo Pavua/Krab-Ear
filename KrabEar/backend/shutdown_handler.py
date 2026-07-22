@@ -1,12 +1,13 @@
-"""Graceful shutdown handler для Krab Ear backend.
+"""Metadata-часть координированного shutdown Krab Ear backend.
 
-Регистрирует обработчики SIGTERM/SIGINT и при завершении:
+Request-only SIGTERM/SIGINT callback останавливает admission, а обычный
+``finally`` после доказанной квиесценции выполняет:
 - сохраняет словарь на диск;
 - сбрасывает (закрывает) audit log;
 - сохраняет статистику использования;
 - сохраняет статистику воспроизведения;
 - запускает компактирование истории при необходимости;
-- закрывает IPC-сокет;
+- при standalone-вызове сначала дренирует IPC-сокет;
 - фиксирует метаданные завершения в {data_dir}/shutdown_info.json.
 """
 
@@ -33,9 +34,9 @@ class GracefulShutdownHandler:
     Использование::
 
         handler = GracefulShutdownHandler(data_dir=data_dir)
-        handler.register(service)          # устанавливает SIGTERM / SIGINT
+        handler.register(service)          # signal только просит IPC-loop выйти
         # … сервис работает …
-        # при получении сигнала handler.shutdown() вызывается автоматически
+        # владелец control-flow вызывает handler.shutdown() в finally
 
     Args:
         data_dir: директория, куда сохраняется ``shutdown_info.json``.
@@ -56,6 +57,8 @@ class GracefulShutdownHandler:
         # _shutdown_started гарантирует, что только один поток выполняет shutdown()
         self._shutdown_started = False
         self._shutdown_done = threading.Event()
+        self._shutdown_owner_thread_id: int | None = None
+        self._safe_to_close_service = False
 
         # Метаданные последнего завершения — сохраняются в файл
         self._last_shutdown_time: str | None = None
@@ -69,7 +72,15 @@ class GracefulShutdownHandler:
     # ------------------------------------------------------------------
 
     def register(self, service: Any) -> None:
-        """Сохраняет ссылку на сервис и устанавливает обработчики сигналов.
+        """Привязать сервис и установить request-only signal callback.
+
+        Callback не выполняет teardown: host-loop обязан выйти по IPC-request
+        и вызвать ``shutdown()`` из обычного ``finally``. Сервис без
+        ``_ipc_server.request_stop_from_signal()`` отклоняется при регистрации,
+        чтобы SIGTERM не превратился в тихий no-op.
+
+        В W1787 это намеренно изменённый legacy-контракт: прежний ``register``
+        выполнял lock/I/O прямо внутри signal callback и был deadlock-prone.
 
         Args:
             service: экземпляр ``BackendService`` (или совместимый объект).
@@ -80,130 +91,189 @@ class GracefulShutdownHandler:
                 - ``_usage_tracker`` — ``UsageTracker`` с методом ``get_usage_stats()`` и ``_persist()``;
                 - ``_playback_tracker`` — ``PlaybackTracker`` с методом ``_save()``;
                 - ``store`` — ``StateStore`` с методами ``maybe_compact()`` и свойством ``history_path``;
-                - ``_ipc_server`` — ``IPCServer`` с методом ``stop()`` (устанавливается отдельно).
+                - ``_ipc_server`` — обязательный ``IPCServer`` с методами
+                  ``request_stop_from_signal()`` и ``stop()``.
 
         Метод потокобезопасен — повторный вызов заменяет сервис.
         """
-        with self._lock:
-            self._service = service
+        server = getattr(service, "_ipc_server", None)
+        request_stop = getattr(server, "request_stop_from_signal", None)
+        stop = getattr(server, "stop", None)
+        if not callable(request_stop) or not callable(stop):
+            raise TypeError(
+                "register() требует _ipc_server с request_stop_from_signal() "
+                "и stop()"
+            )
+        self.bind(service)
 
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
         logger.info("GracefulShutdownHandler зарегистрирован (SIGTERM + SIGINT)")
 
-    def shutdown(self) -> None:
-        """Выполняет последовательность корректного завершения.
+    def bind(self, service: Any) -> None:
+        """Привязать сервис без перехвата сигналов процесса.
 
-        Идемпотентен — повторный вызов не производит действий.
-        Потокобезопасен: только один поток выполняет шаги; остальные ожидают окончания.
+        Production-entrypoint использует этот метод, потому что signal callback
+        там только просит IPC accept-loop выйти, а teardown выполняет ``finally``.
         """
         with self._lock:
+            self._service = service
+        logger.debug("GracefulShutdownHandler привязан к сервису без сигналов")
+
+    def shutdown(self, *, ipc_already_stopped: bool = False) -> bool:
+        """Сохранить общие ресурсы только после доказанной IPC-квиесценции.
+
+        Первый caller становится владельцем. Конкурентные caller-ы ждут его
+        результат, а реентерабельный вызов владельца немедленно получает
+        ``False`` и не блокирует сам себя.
+
+        ``ipc_already_stopped`` передаёт владение от production-координатора:
+        он уже закрыл admission и дождался всех IPC-handler-ов.
+
+        :returns: ``True``, когда общие ресурсы безопасно закрывать дальше.
+        """
+        owner_thread_id = threading.get_ident()
+        run_shutdown = False
+        with self._lock:
             if self._shutdown_started:
-                # Другой поток уже выполняет или завершил shutdown
-                return
-            self._shutdown_started = True
-            service = self._service
+                if self._shutdown_owner_thread_id == owner_thread_id:
+                    return False
+                shutdown_done = self._shutdown_done
+            else:
+                self._shutdown_started = True
+                self._shutdown_owner_thread_id = owner_thread_id
+                self._safe_to_close_service = False
+                service = self._service
+                shutdown_done = self._shutdown_done
+                run_shutdown = True
+
+        if not run_shutdown:
+            shutdown_done.wait()
+            with self._lock:
+                return self._safe_to_close_service
 
         shutdown_start = time.monotonic()
         clean = True
         errors: list[str] = []
+        safe_to_close_service = False
 
         logger.info("GracefulShutdownHandler: начинаем завершение…")
 
-        # 1. Сохраняем словарь
         try:
-            self._save_vocabulary(service)
-        except Exception as exc:
-            clean = False
-            errors.append(f"vocabulary: {exc}")
-            logger.exception("Ошибка сохранения словаря при завершении")
+            # IPC — первый ownership-барьер. Пока handler жив, сохранение или
+            # закрытие общего store/audit/event_bus создало бы гонку use-after-close.
+            if not ipc_already_stopped:
+                try:
+                    ipc_stopped = self._close_socket(service)
+                except Exception as exc:
+                    clean = False
+                    errors.append(f"socket: {exc}")
+                    logger.exception("Ошибка закрытия IPC-сокета при завершении")
+                    return False
+                if ipc_stopped is False:
+                    clean = False
+                    errors.append(
+                        "socket: IPC-handler-ы не подтвердили завершение"
+                    )
+                    logger.error(
+                        "IPC-квиесценция не подтверждена; persistence пропущен"
+                    )
+                    return False
 
-        # 2. Сбрасываем audit log
-        try:
-            self._flush_audit_log(service)
-        except Exception as exc:
-            clean = False
-            errors.append(f"audit_log: {exc}")
-            logger.exception("Ошибка сброса audit log при завершении")
-
-        # 3. Сохраняем статистику использования
-        try:
-            self._save_usage_stats(service)
-        except Exception as exc:
-            clean = False
-            errors.append(f"usage_stats: {exc}")
-            logger.exception("Ошибка сохранения usage stats при завершении")
-
-        # 4. Сохраняем статистику воспроизведения
-        try:
-            self._save_playback_stats(service)
-        except Exception as exc:
-            clean = False
-            errors.append(f"playback_stats: {exc}")
-            logger.exception("Ошибка сохранения playback stats при завершении")
-
-        # 5. Компактирование истории при необходимости
-        try:
-            self._maybe_compact_history(service)
-        except Exception as exc:
-            clean = False
-            errors.append(f"compact: {exc}")
-            logger.exception("Ошибка компактирования истории при завершении")
-
-        # 6. Закрываем EventReplayManager (сбрасываем файл персистенции)
-        try:
-            self._close_event_replay(service)
-        except Exception as exc:
-            clean = False
-            errors.append(f"event_replay: {exc}")
-            logger.exception("Ошибка закрытия EventReplayManager при завершении")
-
-        # 7. Рассылаем sentinel активным SSE/WS-подписчикам — они завершаются сразу
-        #    вместо ожидания poll-таймаута (до 15 с). F3 W1673.
-        try:
-            self._broadcast_event_bus_sentinel(service)
-        except Exception as exc:
-            clean = False
-            errors.append(f"event_bus_sentinel: {exc}")
-            logger.exception("Ошибка рассылки sentinel в EventBus при завершении")
-
-        # 8. Закрываем IPC-сокет
-        try:
-            self._close_socket(service)
-        except Exception as exc:
-            clean = False
-            errors.append(f"socket: {exc}")
-            logger.exception("Ошибка закрытия IPC-сокета при завершении")
-
-        # 9. Сбрасываем накопленные warn-tier батчи в Sentry (ErrorBus.flush_all)
-        try:
-            self._close_error_bus()
-        except Exception as exc:
-            clean = False
-            errors.append(f"error_bus: {exc}")
-            logger.exception("Ошибка сброса error_bus при завершении")
-
-        elapsed_ms = round((time.monotonic() - shutdown_start) * 1000, 1)
-        ts_now = datetime.now(timezone.utc).isoformat()
-
-        # 8. Сохраняем метаданные завершения
-        with self._lock:
-            self._last_shutdown_time = ts_now
-            self._last_shutdown_clean = clean
-        self._persist(ts_now, clean, elapsed_ms, errors)
-
-        if clean:
-            logger.info(
-                "GracefulShutdownHandler: завершение выполнено за %.1f мс", elapsed_ms
+            cleanup_steps = (
+                (
+                    "vocabulary",
+                    self._save_vocabulary,
+                    "Ошибка сохранения словаря при завершении",
+                ),
+                (
+                    "audit_log",
+                    self._flush_audit_log,
+                    "Ошибка сброса audit log при завершении",
+                ),
+                (
+                    "usage_stats",
+                    self._save_usage_stats,
+                    "Ошибка сохранения usage stats при завершении",
+                ),
+                (
+                    "playback_stats",
+                    self._save_playback_stats,
+                    "Ошибка сохранения playback stats при завершении",
+                ),
+                (
+                    "compact",
+                    self._maybe_compact_history,
+                    "Ошибка компактирования истории при завершении",
+                ),
+                (
+                    "event_replay",
+                    self._close_event_replay,
+                    "Ошибка закрытия EventReplayManager при завершении",
+                ),
+                (
+                    "event_bus_sentinel",
+                    self._broadcast_event_bus_sentinel,
+                    "Ошибка рассылки sentinel в EventBus при завершении",
+                ),
             )
-        else:
-            logger.warning(
-                "GracefulShutdownHandler: завершение с ошибками за %.1f мс: %s",
-                elapsed_ms,
-                "; ".join(errors),
-            )
+            for error_key, cleanup, error_message in cleanup_steps:
+                try:
+                    cleanup(service)
+                except Exception as exc:
+                    clean = False
+                    errors.append(f"{error_key}: {exc}")
+                    logger.exception(error_message)
 
-        self._shutdown_done.set()
+            try:
+                self._close_error_bus()
+            except Exception as exc:
+                clean = False
+                errors.append(f"error_bus: {exc}")
+                logger.exception("Ошибка сброса error_bus при завершении")
+
+            elapsed_ms = round((time.monotonic() - shutdown_start) * 1000, 1)
+            ts_now = datetime.now(timezone.utc).isoformat()
+            with self._lock:
+                self._last_shutdown_time = ts_now
+                self._last_shutdown_clean = clean
+            try:
+                self._persist(ts_now, clean, elapsed_ms, errors)
+            except Exception as exc:
+                # _persist штатно ловит filesystem-ошибки сам; этот guard
+                # защищает single-flight event при тестовом/внешнем override.
+                clean = False
+                errors.append(f"shutdown_info: {exc}")
+                with self._lock:
+                    self._last_shutdown_clean = False
+                logger.exception("Ошибка сохранения shutdown_info при завершении")
+
+            if clean:
+                logger.info(
+                    "GracefulShutdownHandler: завершение выполнено за %.1f мс",
+                    elapsed_ms,
+                )
+            else:
+                logger.warning(
+                    "GracefulShutdownHandler: завершение с ошибками за %.1f мс: %s",
+                    elapsed_ms,
+                    "; ".join(errors),
+                )
+
+            # Ошибки отдельных metadata-шагов отражаются в clean=False, но
+            # IPC уже дренирован: дальнейший close сервиса остаётся безопасным.
+            safe_to_close_service = True
+            return True
+        finally:
+            with self._lock:
+                if not safe_to_close_service:
+                    self._last_shutdown_time = datetime.now(
+                        timezone.utc
+                    ).isoformat()
+                    self._last_shutdown_clean = False
+                self._safe_to_close_service = safe_to_close_service
+                self._shutdown_owner_thread_id = None
+            self._shutdown_done.set()
 
     def get_shutdown_status(self) -> dict[str, Any]:
         """Возвращает информацию о последнем завершении.
@@ -313,15 +383,21 @@ class GracefulShutdownHandler:
             else:
                 logger.debug("EventBus sentinel: нет активных подписчиков при завершении")
 
-    def _close_socket(self, service: Any) -> None:
-        """Останавливает IPC-сервер (если зарегистрирован)."""
+    def _close_socket(self, service: Any) -> bool:
+        """Остановить IPC и вернуть подтверждение завершения handler-ов."""
         server = getattr(service, "_ipc_server", None)
         if server is None:
-            return
+            return True
         stop = getattr(server, "stop", None)
-        if callable(stop):
-            stop()
-            logger.debug("IPC-сокет закрыт")
+        if not callable(stop):
+            logger.error("IPC-сервер не предоставляет обязательный stop()")
+            return False
+        stop_result = stop()
+        if stop_result is False:
+            logger.error("IPC-сервер не подтвердил завершение handler-ов")
+            return False
+        logger.debug("IPC-сокет закрыт")
+        return True
 
     def _close_error_bus(self) -> None:
         """Сбрасывает все накопленные warn-tier батчи в Sentry через ErrorBus.flush_all().
@@ -399,6 +475,10 @@ class GracefulShutdownHandler:
     # ------------------------------------------------------------------
 
     def _signal_handler(self, signum: int, frame: Any) -> None:
-        """Вызывается при SIGTERM / SIGINT."""
-        logger.info("Получен сигнал %s, запускаем graceful shutdown…", signum)
-        self.shutdown()
+        """Signal-safe запрос: teardown выполнит владелец обычного control-flow."""
+        del signum, frame
+        service = self._service
+        server = getattr(service, "_ipc_server", None)
+        request_stop = getattr(server, "request_stop_from_signal", None)
+        if callable(request_stop):
+            request_stop()

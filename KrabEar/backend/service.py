@@ -175,12 +175,11 @@ def _exit_without_python_finalize_if_worker_hung(
     *,
     exit_fn: Callable[[int], None] | None = None,
 ) -> None:
-    """Завершает уже остановленный backend без `_Py_Finalize` при CFFI-клине.
+    """Завершить backend без `_Py_Finalize` при недоказанном барьере.
 
-    PortAudio может навсегда оставить listener внутри `ffi_call`. Обычная
-    финализация модулей в таком состоянии трижды приводила к SIGSEGV. К этому
-    моменту IPC, хранилище и остальные фоновые сервисы уже закрыты, поэтому
-    контролируемый `_exit` безопаснее повторного входа в CFFI teardown.
+    Литеральный ``False`` может прийти от IPC-handler-а или native/audio
+    worker-а. Обычная финализация в обоих случаях способна закрыть общий ресурс
+    под живым потоком, поэтому launchd должен поднять чистый процесс.
     """
     # Hard-exit допустим только по ЯВНОМУ False от нового close-контракта.
     # Legacy/test double может вернуть None; считать его доказанным CFFI-клином
@@ -188,7 +187,7 @@ def _exit_without_python_finalize_if_worker_hung(
     if workers_stopped is not False:
         return
     logger.critical(
-        "Нативный/audio worker завис: завершаем процесс без Python-finalize, "
+        "Shutdown-барьер не подтверждён: завершаем без Python-finalize, "
         "чтобы launchd поднял чистый экземпляр"
     )
     (exit_fn or os._exit)(os.EX_SOFTWARE)
@@ -204,6 +203,52 @@ def _exit_without_python_finalize_if_wake_word_hung(
         wake_word_stopped,
         exit_fn=exit_fn,
     )
+
+
+def _shutdown_backend(
+    service: Any,
+    server: IPCServer,
+    shutdown_handler: GracefulShutdownHandler,
+    *,
+    flush_fn: Callable[[], None] = flush_sentry,
+    exit_fn: Callable[[int], None] | None = None,
+) -> bool:
+    """Единожды выполнить shutdown в порядке IPC → workers → metadata.
+
+    Явный ``False`` любого ownership-барьера запрещает переход к следующим
+    ресурсам. Перед аварийным выходом telemetry сбрасывается, а при тестовой
+    инъекции возвращается ``False`` без продолжения teardown.
+    """
+    try:
+        ipc_quiesced = server.stop()
+    except Exception:
+        logger.exception("IPCServer.stop() выбросил исключение при shutdown")
+        ipc_quiesced = False
+    if ipc_quiesced is False:
+        flush_fn()
+        _exit_without_python_finalize_if_worker_hung(False, exit_fn=exit_fn)
+        return False
+
+    try:
+        workers_stopped = service.close()
+    except Exception:
+        logger.exception("BackendService.close() выбросил исключение при shutdown")
+        workers_stopped = False
+    if workers_stopped is False:
+        flush_fn()
+        _exit_without_python_finalize_if_worker_hung(False, exit_fn=exit_fn)
+        return False
+
+    try:
+        metadata_safe = shutdown_handler.shutdown(ipc_already_stopped=True)
+    except Exception:
+        logger.exception("Metadata shutdown выбросил исключение")
+        metadata_safe = False
+    flush_fn()
+    if metadata_safe is False:
+        _exit_without_python_finalize_if_worker_hung(False, exit_fn=exit_fn)
+        return False
+    return True
 
 
 # wave1775: which EventBus events are forwarded to registered webhooks.
@@ -5141,23 +5186,15 @@ def main() -> None:
     service = build_service(data_dir)
     server = IPCServer(socket_path=socket_path, service=service)
 
-    # Даём shutdown_handler ссылку на IPC-сервер (шаг 6 graceful shutdown).
+    # Даём metadata-handler ссылку на сервис, но не право перехватывать сигналы:
+    # production-порядком IPC → workers → metadata владеет один finally ниже.
     service._ipc_server = server
-
-    # Регистрируем graceful shutdown handler (SIGTERM + SIGINT).
-    service._shutdown_handler.register(service)
+    service._shutdown_handler.bind(service)
 
     def _signal_handler(signum: int, frame: Any) -> None:
-        logger.info("Получен сигнал %s, завершаем backend", signum)
-        # W1633: run graceful shutdown first so final events are captured.
-        service._shutdown_handler.shutdown()
-        server.stop()
-        wake_word_stopped = service.close()
-        # W1640: flush Sentry AFTER shutdown so any errors raised during
-        # shutdown are captured before the buffer is flushed.
-        # No-op when Sentry is not initialized (DSN absent).
-        flush_sentry()
-        _exit_without_python_finalize_if_worker_hung(wake_word_stopped)
+        """Только попросить accept-loop выйти; teardown выполнит finally."""
+        del signum, frame
+        server.request_stop_from_signal()
 
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -5165,10 +5202,11 @@ def main() -> None:
     try:
         server.serve_forever()
     finally:
-        service._shutdown_handler.shutdown()
-        wake_word_stopped = service.close()
-        flush_sentry()
-        _exit_without_python_finalize_if_worker_hung(wake_word_stopped)
+        _shutdown_backend(
+            service,
+            server,
+            service._shutdown_handler,
+        )
 
 
 if __name__ == "__main__":

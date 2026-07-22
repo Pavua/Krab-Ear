@@ -1,15 +1,9 @@
-"""RecordingCoreService — recording lifecycle + transcribe orchestration.
+"""RecordingCoreService — lifecycle записи и оркестрация транскрибации.
 
-Extracted from BackendService Wave 172 (largest remaining monolith).
-Handles:
-  - start_recording / stop_recording (5-phase pipeline)
-  - get_recording_state
-  - list_audio_inputs / get_audio_devices
-  - transcribe_paths (sync) / transcribe_paths_async + progress/cancel
-  - preview_transcribe_paths
-
-All handler methods are named ``handle_*`` and are registered into
-BackendService.handle_request dispatch table.
+Выделен из BackendService в Wave 172, чтобы изолировать самый крупный домен:
+start/stop записи, состояние и аудиоустройства, синхронную/асинхронную
+транскрибацию, прогресс/отмену и preview. Методы ``handle_*`` регистрируются
+в таблице диспетчеризации ``BackendService.handle_request``.
 """
 
 from __future__ import annotations
@@ -54,6 +48,9 @@ _DEFAULT_DEDUP_THRESHOLD = 0.9
 _SHUTDOWN_RT_PARTIAL_TIMEOUT_SEC = 3.0
 _SHUTDOWN_RSF_TIMEOUT_SEC = 2.5
 _SHUTDOWN_RECORDER_TIMEOUT_SEC = 3.0
+# Этот бюджет ограничивает только ожидание незавершённого start/setup.
+# Остальные worker-ы сохраняют собственные независимые stop-таймауты ниже.
+_SHUTDOWN_LIFECYCLE_LOCK_TIMEOUT_SEC = 1.5
 
 
 def _sanitize_dedup_threshold(raw: Any) -> float:
@@ -254,6 +251,13 @@ class RecordingCoreService:
     def handle_start_recording(self, params: dict[str, Any]) -> dict[str, Any]:
         """Запустить запись, если сервис ещё не вошёл в shutdown."""
         lifecycle_lock, closed_event = self._ensure_recording_lifecycle_state()
+        # Быстрая проверка не даёт новому start встать за уже зависшим setup.
+        # Повторная проверка под lock ниже закрывает гонку с началом shutdown.
+        if closed_event.is_set():
+            return {
+                "status": "backend_closing",
+                "is_recording": False,
+            }
         with lifecycle_lock:
             if closed_event.is_set():
                 return {
@@ -913,7 +917,13 @@ class RecordingCoreService:
                 self._preview_thread = None
             return True
 
-    def close_background_workers(self) -> bool:
+    def close_background_workers(
+        self,
+        *,
+        lifecycle_lock_timeout_sec: float = (
+            _SHUTDOWN_LIFECYCLE_LOCK_TIMEOUT_SEC
+        ),
+    ) -> bool:
         """Закрыть все recording-worker-ы без финальной транскрибации аудио.
 
         Порядок важен: потребители аудиобуфера завершаются до рекордера. Каждый
@@ -925,7 +935,17 @@ class RecordingCoreService:
         # а уже начавшийся setup сначала полностью опубликует свои handle.
         lifecycle_lock, closed_event = self._ensure_recording_lifecycle_state()
         closed_event.set()
-        with lifecycle_lock:
+        lock_timeout = max(0.0, float(lifecycle_lock_timeout_sec))
+        if not lifecycle_lock.acquire(timeout=lock_timeout):
+            logger.error(
+                "Recording lifecycle-lock не освобождён за %.2f с; "
+                "worker handles оставлены для безопасной повторной остановки",
+                lock_timeout,
+                extra={"shutdown_blocker": "recording_lifecycle_lock"},
+            )
+            return False
+
+        try:
             all_stopped = True
 
             try:
@@ -997,6 +1017,8 @@ class RecordingCoreService:
                 logger.exception("Ошибка при аварийной остановке AudioRecorder")
 
             return all_stopped
+        finally:
+            lifecycle_lock.release()
 
     def _preview_loop(
         self,

@@ -760,6 +760,24 @@ Swift не зовёт её 4 IPC-метода); дублировать рабо�
   Правило в CLAUDE.md (§Working guidelines). Хвост-кандидат мини-волны: GUI-ретрай stop_recording
   при переподнявшемся сокете + спасение live-превью при IPC-таймауте (сейчас generic-ошибка без
   попытки восстановления).
+- 2026-07-22 (**F4+F5 bounded single-owner shutdown — КОД ГОТОВ, БЕЗ PUSH/MERGE/ДЕПЛОЯ**) —
+  отдельная ветка `codex/bounded-single-owner-shutdown-20260722` поверх `f71a30fa` закрывает два
+  подтверждённых хвоста приёмки runtime-hardening. **F4:** `RecordingCoreService` немедленно закрывает
+  admission новых START, ждёт lifecycle-lock не более 1.5с, при timeout не трогает worker handles и
+  возвращает `False`; после освобождения зависшего setup повторный close штатно завершает recorder.
+  **F5:** SIGTERM/SIGINT callback только ставит простую bool-метку без Lock/Event/log/I/O; единственный
+  `finally` выполняет `IPC → workers → metadata → Sentry`, а явный `False`/исключение любого ownership-
+  барьера ведёт в fail-closed `os._exit(EX_SOFTWARE)` до закрытия следующего ресурса. Текущий IPC-handler
+  больше не может вернуть ложный `True` из `stop()`. Legacy `GracefulShutdownHandler.register()`
+  намеренно сменил контракт на request-only, валидирует `request_stop_from_signal()+stop()` до bind и
+  документирован как breaking W1787; production использует `bind()` и не имеет окна с unsafe handler.
+  Старый W1640-тест, вручную симулировавший противоположный signal-контракт, переписан на фактический
+  AST/runtime-путь; пять ErrorBus-only тестов переведены с `register()` на `bind()`. Гейты: **208/208**
+  целевых тестов на Python 3.14.4; те же 8 файлов по одному на ubuntu-parity Python 3.12.7 без MLX —
+  ALL GREEN; соседний shutdown/observability/resource пласт независимо проверен (390 green), flake8,
+  `git diff --check`, `make audit-all` — clean; три независимых review → **APPROVE**. Прод, launchd и
+  живые настройки не тронуты. После приёмки останутся F3 pre-roll, F6 LiveSubtitles reconnect и
+  GUI-rescue stop_recording из пост-инцидентного хвоста.
 
 ### 2026-07-23/24 — приёмка codex #2 + два «инструмента, которые никогда не работали»
 

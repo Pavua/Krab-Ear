@@ -1,11 +1,8 @@
-"""Tests for W1640: SIGTERM handler runs graceful shutdown then flushes Sentry.
+"""Регрессии W1640 для SIGTERM-владения и финального Sentry flush.
 
-Verifies:
-- main()'s _signal_handler calls shutdown() before flush_sentry() (ordering)
-- flush_sentry() is called on SIGTERM even when Sentry is uninitialized (no crash)
-- observability.install_signal_handlers() no longer installs a SIGTERM handler
-  (SIGTERM is now owned by main()'s _signal_handler)
-- flush_sentry() public helper is no-op when Sentry not initialized
+Проверяют request-only callback в ``service.main()``, порядок единственного
+shutdown-координатора, отсутствие SIGTERM в observability-handler-ах и
+безопасный no-op ``flush_sentry()`` без инициализированного SDK.
 """
 
 from __future__ import annotations
@@ -13,7 +10,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = str(Path(__file__).parent.parent)
 if PROJECT_ROOT not in sys.path:
@@ -97,8 +94,6 @@ class TestInstallSignalHandlersSkipsSigterm(unittest.TestCase):
         import signal as sig
         import backend.observability as obs
 
-        sentinel = object()
-
         with patch.object(sig, "signal") as mock_signal:
             obs.install_signal_handlers()
 
@@ -123,65 +118,96 @@ class TestInstallSignalHandlersSkipsSigterm(unittest.TestCase):
         self.assertIn(sig.SIGABRT, registered)
 
 
-class TestSigtermHandlerOrderShutdownBeforeFlush(unittest.TestCase):
-    """main()'s _signal_handler must call shutdown() BEFORE flush_sentry()."""
+class TestSigtermRequestOnlyAndCoordinatorOrder(unittest.TestCase):
+    """Проверяет фактический callback и исполняемый shutdown-helper."""
 
-    def _simulate_signal_handler(
-        self,
-        shutdown_fn: MagicMock,
-        flush_fn: MagicMock,
-    ) -> list[str]:
-        """Extract and invoke _signal_handler from main() source, return call order."""
-        # We can't call main() directly (it blocks), but we can verify the
-        # ordering by reading the module's source-of-truth: the actual code
-        # that runs when _signal_handler is invoked.  We do this by calling
-        # the extracted logic inline, mirroring what main() does:
-        call_order: list[str] = []
+    SERVICE_PATH = Path(__file__).parent.parent / "backend" / "service.py"
 
-        original_shutdown = shutdown_fn.side_effect
-        original_flush = flush_fn.side_effect
+    def _signal_handler_source(self) -> str:
+        """Извлечь вложенный ``main._signal_handler`` через AST."""
+        import ast
 
-        def _shutdown() -> None:
-            call_order.append("shutdown")
-            if original_shutdown:
-                original_shutdown()
+        source = self.SERVICE_PATH.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "_signal_handler":
+                lines = source.splitlines()
+                return "\n".join(lines[node.lineno - 1:node.end_lineno])
+        self.fail("main._signal_handler не найден")
 
-        def _flush() -> None:
-            call_order.append("flush_sentry")
-            if original_flush:
-                original_flush()
+    def test_main_signal_handler_only_requests_ipc_stop(self) -> None:
+        """Signal callback не делает teardown или Sentry I/O."""
+        callback = self._signal_handler_source()
+        self.assertIn("server.request_stop_from_signal()", callback)
+        for forbidden in (
+            "shutdown(",
+            "server.stop(",
+            "service.close(",
+            "flush_sentry(",
+            "logger.",
+        ):
+            self.assertNotIn(forbidden, callback)
 
-        shutdown_fn.side_effect = _shutdown
-        flush_fn.side_effect = _flush
+    def test_coordinator_flushes_after_successful_metadata(self) -> None:
+        """Sentry flush идёт после IPC, workers и metadata на green-path."""
+        from backend.service import _shutdown_backend
 
-        # Execute the handler body in the same order as main()
-        shutdown_fn()  # service._shutdown_handler.shutdown()
-        flush_fn()     # flush_sentry()
+        events: list[str] = []
+        server = MagicMock()
+        server.stop.side_effect = lambda: events.append("ipc") or True
+        service = MagicMock()
+        service.close.side_effect = lambda: events.append("workers") or True
+        handler = MagicMock()
+        handler.shutdown.side_effect = (
+            lambda **_kwargs: events.append("metadata") or True
+        )
 
-        return call_order
+        self.assertTrue(
+            _shutdown_backend(
+                service,
+                server,
+                handler,
+                flush_fn=lambda: events.append("flush_sentry"),
+                exit_fn=MagicMock(),
+            )
+        )
+        self.assertEqual(
+            events,
+            ["ipc", "workers", "metadata", "flush_sentry"],
+        )
 
-    def test_shutdown_called_before_sentry_flush(self) -> None:
-        """shutdown() precedes flush_sentry() in SIGTERM handler."""
-        shutdown_mock = MagicMock()
-        flush_mock = MagicMock()
+    def test_failed_ipc_flushes_before_hard_exit(self) -> None:
+        """Даже fail-closed путь сначала отдаёт telemetry в Sentry."""
+        import os
+        from backend.service import _shutdown_backend
 
-        order = self._simulate_signal_handler(shutdown_mock, flush_mock)
+        events: list[str] = []
+        exit_codes: list[int] = []
+        server = MagicMock()
+        server.stop.return_value = False
+        service = MagicMock()
+        handler = MagicMock()
 
-        self.assertEqual(order, ["shutdown", "flush_sentry"])
-
-    def test_flush_sentry_called_after_shutdown(self) -> None:
-        """flush_sentry() is the last step in the SIGTERM handler."""
-        shutdown_mock = MagicMock()
-        flush_mock = MagicMock()
-
-        order = self._simulate_signal_handler(shutdown_mock, flush_mock)
-
-        self.assertEqual(order[-1], "flush_sentry")
-        self.assertEqual(order[0], "shutdown")
+        self.assertFalse(
+            _shutdown_backend(
+                service,
+                server,
+                handler,
+                flush_fn=lambda: events.append("flush_sentry"),
+                exit_fn=lambda code: (
+                    events.append("hard_exit"),
+                    exit_codes.append(code),
+                ),
+            )
+        )
+        self.assertEqual(events, ["flush_sentry", "hard_exit"])
+        self.assertEqual(exit_codes, [os.EX_SOFTWARE])
+        service.close.assert_not_called()
+        handler.shutdown.assert_not_called()
 
 
 class TestSigtermHandlerNoCrashWhenSentryUninitialized(unittest.TestCase):
-    """_signal_handler must not crash when Sentry is not initialized."""
+    """Sentry flush безопасен без инициализированного SDK."""
 
     def test_flush_sentry_noop_uninitialized(self) -> None:
         """flush_sentry() is a no-op when _sentry_initialized is False."""
@@ -190,24 +216,10 @@ class TestSigtermHandlerNoCrashWhenSentryUninitialized(unittest.TestCase):
         original = obs._sentry_initialized
         try:
             obs._sentry_initialized = False
-            # Simulate what _signal_handler does: call flush_sentry after shutdown
-            obs.flush_sentry()  # Must not raise
+            # Flush выполняет coordinator после teardown, а не signal callback.
+            obs.flush_sentry()
         finally:
             obs._sentry_initialized = original
-
-    def test_flush_sentry_in_handler_context_no_crash(self) -> None:
-        """Calling flush_sentry() from a mock signal handler does not crash."""
-        import backend.observability as obs
-
-        shutdown_handler = MagicMock()
-
-        def mock_signal_handler(signum: int, frame: object) -> None:
-            shutdown_handler.shutdown()
-            obs.flush_sentry()  # Must not raise regardless of Sentry state
-
-        # Invoke as if SIGTERM was received
-        mock_signal_handler(15, None)
-        shutdown_handler.shutdown.assert_called_once()
 
 
 class TestFlushSentryExportedFromObservability(unittest.TestCase):
@@ -222,7 +234,6 @@ class TestFlushSentryExportedFromObservability(unittest.TestCase):
     def test_flush_sentry_imported_in_service(self) -> None:
         """service.py imports flush_sentry from observability."""
         import ast
-        import importlib.util
 
         service_path = Path(__file__).parent.parent / "backend" / "service.py"
         source = service_path.read_text(encoding="utf-8")

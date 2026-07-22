@@ -47,12 +47,20 @@ class IPCServer:
         self.socket_path = socket_path
         self.service = service
         self._stop_event = threading.Event()
+        # Python вызывает signal callback между произвольными bytecode main-
+        # потока. Поэтому callback меняет только эту простую метку и не входит
+        # в Lock/Event; полный drain выполняется позже из обычного finally.
+        self._signal_stop_requested = False
         # W1767 #1 (HIGH): semaphore ограничивает число параллельных коннектов.
         self._conn_semaphore = threading.BoundedSemaphore(_IPC_MAX_CONNECTIONS)
         # Registry нужен не для статистики: shutdown обязан дождаться handlers,
         # иначе service может закрыть STT-ресурсы под выполняющимся запросом.
         self._handler_threads: set[threading.Thread] = set()
         self._handler_threads_lock = threading.Lock()
+
+    def request_stop_from_signal(self) -> None:
+        """Попросить accept-loop завершиться без lock, I/O и логирования."""
+        self._signal_stop_requested = True
 
     def stop(self, timeout_sec: float = 1.5) -> bool:
         """Закрывает допуск новых соединений и ждёт активные handlers.
@@ -61,24 +69,24 @@ class IPCServer:
         ``join()``. Живые после deadline handles остаются в registry, поэтому
         повторный вызов может дождаться их после разблокировки.
 
-        :returns: ``True``, если все handlers кроме текущего завершились.
+        Вызов из самого handler закрывает admission и дренирует остальные
+        потоки, но возвращает ``False``: текущий handler ещё не квиесцирован.
+
+        :returns: ``True`` только после завершения всех handler-потоков.
         """
         timeout = max(0.0, float(timeout_sec))
         deadline = time.monotonic() + timeout
         current = threading.current_thread()
+        current_is_handler = False
 
-        # _stop_event.set() атомарен — лок здесь БРАТЬ НЕЛЬЗЯ: stop() зовётся из
-        # signal handler'а, который Python исполняет в main thread между
-        # байткодами — в том числе когда accept-петля (тот же main thread) уже
-        # держит нереентерабельный _handler_threads_lock внутри
-        # _start_connection_handler → self-deadlock (F1, Fable-ревью 2026-07-22).
-        # Поздно зарегистрированный handler не проскочит: регистрация и проверка
-        # _stop_event идут под локом, а join-цикл ниже снимает свежий снапшот
-        # registry на каждой итерации.
+        # Admission-event ставим до registry-lock: пока coordinator ждёт lock,
+        # поздний conn уже будет отвергнут внутри _start_connection_handler.
+        # Signal callback сюда больше не входит — он меняет отдельную bool-метку.
         self._stop_event.set()
 
         while True:
             with self._handler_threads_lock:
+                current_is_handler = current in self._handler_threads
                 handlers: list[threading.Thread] = []
                 for handler in tuple(self._handler_threads):
                     if handler is current:
@@ -91,7 +99,7 @@ class IPCServer:
                         self._handler_threads.discard(handler)
 
             if not handlers:
-                return True
+                return not current_is_handler
 
             for handler in handlers:
                 remaining = deadline - time.monotonic()
@@ -110,7 +118,7 @@ class IPCServer:
                         self._handler_threads.discard(handler)
 
             if not alive:
-                return True
+                return not current_is_handler
             if time.monotonic() >= deadline:
                 logger.warning(
                     "IPC: %d handler-потоков не завершились за %.2fс",
@@ -145,15 +153,26 @@ class IPCServer:
             server.settimeout(IPC_SOCKET_TIMEOUT_SEC)
 
             logger.info("IPC сервер запущен на %s", self.socket_path)
-            while not self._stop_event.is_set():
+            while not (
+                self._stop_event.is_set() or self._signal_stop_requested
+            ):
                 try:
                     conn, _ = server.accept()
                 except socket.timeout:
                     continue
                 except OSError:
-                    if self._stop_event.is_set():
+                    if (
+                        self._stop_event.is_set()
+                        or self._signal_stop_requested
+                    ):
                         break
                     raise
+
+                # Сигнал мог прийти, пока accept() ждал соединение. Такой conn
+                # уже нельзя передавать бизнес-логике перед shutdown-барьером.
+                if self._signal_stop_requested:
+                    conn.close()
+                    break
 
                 # W1767 #1 (HIGH): проверяем лимит коннектов.
                 # BoundedSemaphore.acquire(blocking=False) — не блокирует;
@@ -183,7 +202,7 @@ class IPCServer:
         should_cleanup = False
         handler: threading.Thread | None = None
         with self._handler_threads_lock:
-            if self._stop_event.is_set():
+            if self._stop_event.is_set() or self._signal_stop_requested:
                 should_cleanup = True
             else:
                 try:

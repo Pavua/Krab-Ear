@@ -1,7 +1,7 @@
-"""Tests for WarnBatcher.flush_all(), ErrorBus.flush_all(), and
-GracefulShutdownHandler._close_error_bus integration (W1231 F3 MED fix).
+"""Тесты интеграции WarnBatcher/ErrorBus flush с graceful shutdown.
 
-Wave 1234 — W1231 F3 MED: WarnBatcher.flush_all + GracefulShutdown error_bus close hook.
+Wave 1234 закрывает W1231 F3 MED: ``flush_all`` должен сбросить накопленные
+ошибки, а metadata-handler — вызвать ErrorBus hook без signal-регистрации.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import sys
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -175,7 +175,7 @@ class ShutdownHandlerErrorBusTests(unittest.TestCase):
 
         handler = GracefulShutdownHandler(data_dir=None, error_bus=mock_bus)
         svc = self._make_service()
-        handler.register(svc)
+        handler.bind(svc)
         handler.shutdown()
 
         mock_bus.flush_all.assert_called_once()
@@ -187,7 +187,7 @@ class ShutdownHandlerErrorBusTests(unittest.TestCase):
 
         handler = GracefulShutdownHandler(data_dir=None, error_bus=mock_bus)
         svc = self._make_service()
-        handler.register(svc)
+        handler.bind(svc)
         # Should not raise
         handler.shutdown()
 
@@ -197,7 +197,7 @@ class ShutdownHandlerErrorBusTests(unittest.TestCase):
         """GracefulShutdownHandler.shutdown() is safe when error_bus is None."""
         handler = GracefulShutdownHandler(data_dir=None, error_bus=None)
         svc = self._make_service()
-        handler.register(svc)
+        handler.bind(svc)
         # Should complete without exceptions
         handler.shutdown()
 
@@ -218,7 +218,7 @@ class ShutdownHandlerErrorBusTests(unittest.TestCase):
         svc._ipc_server = None
         svc._error_bus = mock_bus  # Service has the bus
 
-        handler.register(svc)
+        handler.bind(svc)
         handler.shutdown()
 
         mock_bus.flush_all.assert_called_once()
@@ -230,7 +230,7 @@ class ShutdownHandlerErrorBusTests(unittest.TestCase):
 
         handler = GracefulShutdownHandler(data_dir=None, error_bus=mock_bus)
         svc = self._make_service()
-        handler.register(svc)
+        handler.bind(svc)
         # Must not propagate the exception — clean shutdown with error recorded
         handler.shutdown()
 

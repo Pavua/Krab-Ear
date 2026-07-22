@@ -1,15 +1,8 @@
-"""Wave 216 — GracefulShutdownHandler deep lifecycle tests.
+"""Углублённые lifecycle-тесты GracefulShutdownHandler из Wave 216.
 
-Covers:
- - LIFO callback ordering
- - callback error isolation (continue on failure)
- - atomic write of shutdown_info.json
- - SIGTERM / SIGINT signal handlers wiring
- - idempotency (double-call safety)
- - per-callback timeout enforcement
- - unicode callback names in log
- - uptime field in shutdown_info.json
- - concurrent register during shutdown is safe
+Покрывают порядок callback-ов, изоляцию ошибок, атомарный shutdown_info.json,
+SIGTERM/SIGINT wiring, идемпотентность, timeout-контракты, Unicode в логах,
+uptime и безопасный конкурентный register во время завершения.
 """
 
 from __future__ import annotations
@@ -65,11 +58,11 @@ def _make_service(*, vocabulary_words=("foo", "bar")):
 
 
 # ===========================================================================
-# 1. LIFO callback ordering
+# 1. IPC-first порядок callback-ов
 # ===========================================================================
 
-class TestShutdownLIFO(unittest.TestCase):
-    """Registered shutdown callbacks must fire in LIFO order."""
+class TestShutdownStepOrder(unittest.TestCase):
+    """IPC ownership-барьер выполняется до metadata callback-ов."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -78,16 +71,13 @@ class TestShutdownLIFO(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_full_shutdown_calls_all_registered_callbacks_in_LIFO(self):
-        """Steps execute in LIFO order: last-registered is first called."""
+    def test_full_shutdown_runs_ipc_barrier_before_metadata(self):
+        """Все шаги вызваны, причём socket-stop идёт первым."""
         handler = GracefulShutdownHandler(data_dir=self.data_dir)
         call_order: list[str] = []
 
-        # Patch each private step in the expected LIFO sequence.
-        # GracefulShutdownHandler executes: vocabulary → audit_log →
-        # usage_stats → playback_stats → compact → socket.
-        # We simulate LIFO by registering post-init hooks via monkey-patching
-        # the internal helper methods.
+        # IPC является ownership-барьером и поэтому выполняется раньше любых
+        # операций над общими metadata-ресурсами.
         original_save_vocab = handler._save_vocabulary
         original_flush_audit = handler._flush_audit_log
         original_save_usage = handler._save_usage_stats
@@ -133,8 +123,8 @@ class TestShutdownLIFO(unittest.TestCase):
         # All six steps must have fired
         self.assertEqual(
             call_order,
-            ["vocabulary", "audit_log", "usage_stats",
-             "playback_stats", "compact", "socket"],
+            ["socket", "vocabulary", "audit_log", "usage_stats",
+             "playback_stats", "compact"],
             f"Unexpected step order: {call_order}",
         )
 
@@ -272,15 +262,16 @@ class TestSIGTERM(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_signal_handler_SIGTERM_triggers_shutdown(self):
-        """_signal_handler(SIGTERM) must invoke shutdown()."""
+    def test_signal_handler_SIGTERM_only_requests_ipc_stop(self):
+        """SIGTERM callback не выполняет teardown внутри signal-контекста."""
         handler = GracefulShutdownHandler(data_dir=self.data_dir)
         svc = _make_service()
         handler._service = svc
 
         with patch.object(handler, "shutdown") as mock_shutdown:
             handler._signal_handler(signal.SIGTERM, None)
-            mock_shutdown.assert_called_once()
+            mock_shutdown.assert_not_called()
+        svc._ipc_server.request_stop_from_signal.assert_called_once_with()
 
     def test_register_wires_SIGTERM_to_signal_module(self):
         handler = GracefulShutdownHandler(data_dir=self.data_dir)
@@ -305,15 +296,16 @@ class TestSIGINT(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_signal_handler_SIGINT_triggers_shutdown(self):
-        """_signal_handler(SIGINT) must invoke shutdown()."""
+    def test_signal_handler_SIGINT_only_requests_ipc_stop(self):
+        """SIGINT использует тот же signal-safe request-only контракт."""
         handler = GracefulShutdownHandler(data_dir=self.data_dir)
         svc = _make_service()
         handler._service = svc
 
         with patch.object(handler, "shutdown") as mock_shutdown:
             handler._signal_handler(signal.SIGINT, None)
-            mock_shutdown.assert_called_once()
+            mock_shutdown.assert_not_called()
+        svc._ipc_server.request_stop_from_signal.assert_called_once_with()
 
     def test_register_wires_SIGINT_to_signal_module(self):
         handler = GracefulShutdownHandler(data_dir=self.data_dir)

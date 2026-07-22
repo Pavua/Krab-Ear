@@ -1,8 +1,7 @@
-"""Wave 172 — unit tests for RecordingCoreService.
+"""Unit-тесты RecordingCoreService, выделенного в Wave 172.
 
-Tests the recording lifecycle service extracted from BackendService in Wave 172.
-Covers: start/stop recording, recording state, audio inputs, transcribe progress/cancel,
-preview_transcribe_paths, preview worker, and core audio guard helpers.
+Покрывают start/stop и состояние записи, аудиовходы, прогресс/отмену
+транскрибации, preview-пути, preview-worker и защитные audio-инварианты.
 """
 
 from __future__ import annotations
@@ -492,6 +491,121 @@ class TestRecordingLifecycleGate(unittest.TestCase):
             "backend_closing",
         )
         self.assertFalse(svc.start_preview_worker("balanced"))
+
+    def test_hung_start_gives_bounded_close_and_retry_stops_recorder(self):
+        """Зависший setup не держит shutdown вечно, а retry завершает запись."""
+        entered = threading.Event()
+        release = threading.Event()
+
+        class _BlockingRecorder(_FakeRecorder):
+            def __init__(self) -> None:
+                self.start_calls = 0
+                self.stop_calls = 0
+
+            def start(self) -> bool:
+                self.start_calls += 1
+                entered.set()
+                release.wait()
+                return super().start()
+
+            def stop(self, timeout_sec=3.0, trim_tail_ms=0):
+                self.stop_calls += 1
+                return super().stop(timeout_sec, trim_tail_ms)
+
+        recorder = _BlockingRecorder()
+        svc = _make_service(self._tmp, recorder=recorder)
+        rt_partial = MagicMock()
+        rt_partial.stop.return_value = True
+        rsf = MagicMock()
+        rsf.stop.return_value = []
+        rsf.is_running = False
+        svc._rt_partial = rt_partial
+        svc._rsf = rsf
+
+        start_result: dict = {}
+        start_thread = threading.Thread(
+            target=lambda: start_result.update(svc.handle_start_recording({})),
+            daemon=True,
+        )
+        start_thread.start()
+        self.addCleanup(start_thread.join, 1.0)
+        self.addCleanup(release.set)
+        self.assertTrue(entered.wait(timeout=1.0))
+
+        close_result: list[bool] = []
+        close_finished = threading.Event()
+
+        def _close() -> None:
+            close_result.append(
+                svc.close_background_workers(lifecycle_lock_timeout_sec=0.02)
+            )
+            close_finished.set()
+
+        close_thread = threading.Thread(target=_close, daemon=True)
+        close_thread.start()
+        self.addCleanup(close_thread.join, 1.0)
+        self.assertTrue(
+            close_finished.wait(timeout=0.5),
+            "close обязан вернуть False в пределах lifecycle-бюджета",
+        )
+        self.assertEqual(close_result, [False])
+        self.assertTrue(svc._closed_event.is_set())
+        self.assertEqual(recorder.stop_calls, 0)
+        self.assertIs(svc._rt_partial, rt_partial)
+        self.assertIs(svc._rsf, rsf)
+        rt_partial.stop.assert_not_called()
+        rsf.stop.assert_not_called()
+
+        # Второй start не ждёт зависший lifecycle-lock после начала shutdown.
+        self.assertEqual(
+            svc.handle_start_recording({})["status"],
+            "backend_closing",
+        )
+        self.assertEqual(recorder.start_calls, 1)
+
+        release.set()
+        start_thread.join(timeout=1.0)
+        self.assertEqual(start_result["status"], "recording")
+        self.assertTrue(recorder.is_recording)
+
+        self.assertTrue(
+            svc.close_background_workers(lifecycle_lock_timeout_sec=0.2)
+        )
+        self.assertFalse(recorder.is_recording)
+        self.assertEqual(recorder.stop_calls, 1)
+        self.assertIsNone(svc._rt_partial)
+        self.assertIsNone(svc._rsf)
+
+    def test_close_does_not_release_unacquired_lifecycle_lock(self):
+        """Timeout не имеет права освобождать lock, принадлежащий start-потоку."""
+
+        class _BlockedLock:
+            def __init__(self) -> None:
+                self.acquire_timeouts: list[float] = []
+                self.release_calls = 0
+
+            def acquire(self, *, timeout: float) -> bool:
+                self.acquire_timeouts.append(timeout)
+                return False
+
+            def release(self) -> None:
+                self.release_calls += 1
+
+        svc = _make_service(self._tmp)
+        blocked_lock = _BlockedLock()
+        closed_event = threading.Event()
+        svc._ensure_recording_lifecycle_state = MagicMock(
+            return_value=(blocked_lock, closed_event)
+        )
+
+        # Вызываем production API без test-time override: этот тест не даст
+        # случайно заменить default на безлимитный или непрактично огромный.
+        self.assertFalse(svc.close_background_workers())
+        self.assertEqual(len(blocked_lock.acquire_timeouts), 1)
+        self.assertGreater(blocked_lock.acquire_timeouts[0], 0.0)
+        self.assertLessEqual(blocked_lock.acquire_timeouts[0], 5.0)
+        self.assertEqual(blocked_lock.release_calls, 0)
+        self.assertTrue(closed_event.is_set())
 
 
 class TestAudioGuardHelpers(unittest.TestCase):

@@ -553,15 +553,50 @@ class IPCHandlerLifecycleTestCase(unittest.TestCase):
         self.assertEqual(_drain_available_slots(ipc), _IPC_MAX_CONNECTIONS)
 
     def test_stop_from_current_handler_does_not_join_itself(self) -> None:
-        """Handler может инициировать shutdown без self-join RuntimeError."""
+        """Текущий handler не объявляет полную квиесценцию до своего выхода."""
         service = _LifecycleSelfStoppingService()
         ipc = _make_lifecycle_server(self, service)
         service.ipc = ipc
 
         self.assertTrue(_start_accepted_connection(ipc, _LifecycleJSONConnection()))
         self.assertTrue(service.done.wait(1.0))
-        self.assertTrue(service.stop_result)
+        self.assertFalse(service.stop_result)
+        # После возврата handler удаляет себя из registry; внешний coordinator
+        # получает доказательство полной квиесценции повторным drain.
         self.assertTrue(ipc.stop(timeout_sec=1.0))
+
+    def test_signal_stop_request_does_not_touch_registry_lock(self) -> None:
+        """Signal-request меняет только bool и не входит в lifecycle-lock."""
+        ipc = _make_lifecycle_server(self, _LifecycleImmediateService())
+
+        class _ForbiddenLock:
+            def __enter__(self):
+                raise AssertionError("signal-request не должен входить в lock")
+
+            def __exit__(self, *_args):
+                return False
+
+            def acquire(self, *_args, **_kwargs):
+                raise AssertionError("signal-request не должен брать lock")
+
+        ipc._handler_threads_lock = _ForbiddenLock()
+        ipc.request_stop_from_signal()
+        self.assertTrue(ipc._signal_stop_requested)
+
+    def test_connection_after_signal_request_is_closed_without_handler(self) -> None:
+        """Принятый после SIGTERM conn не достигает бизнес-логики."""
+        ipc = _make_lifecycle_server(self, _LifecycleImmediateService())
+        conn = _LifecycleJSONConnection()
+        ipc.request_stop_from_signal()
+
+        with patch("backend.ipc_server.threading.Thread") as thread_factory:
+            self.assertFalse(_start_accepted_connection(ipc, conn))
+
+        thread_factory.assert_not_called()
+        self.assertTrue(conn.closed.is_set())
+        with ipc._handler_threads_lock:
+            self.assertEqual(ipc._handler_threads, set())
+        self.assertEqual(_drain_available_slots(ipc), _IPC_MAX_CONNECTIONS)
 
     def test_multiple_handlers_share_one_stop_deadline(self) -> None:
         """Первый join расходует общий бюджет, второй не получает новый таймаут."""
@@ -651,15 +686,11 @@ class IPCHandlerLifecycleTestCase(unittest.TestCase):
         self.assertEqual(_drain_available_slots(ipc), _IPC_MAX_CONNECTIONS)
 
     def test_stop_sets_event_without_handler_threads_lock(self) -> None:
-        """F1 (Fable 2026-07-22): set() события не должен требовать lock.
+        """Полный stop взводит admission-event до ожидания registry-lock.
 
-        Signal handler исполняется в main thread между байткодами — в том числе
-        когда accept-петля (тот же main thread) уже держит нереентерабельный
-        ``_handler_threads_lock`` внутри ``_start_connection_handler``. Если
-        ``stop()`` берёт тот же lock ради ``_stop_event.set()``, получается
-        self-deadlock. Здесь лок захвачен «accept-петлёй» (тестовым потоком),
-        а stop() из параллельного потока обязан успеть взвести событие ДО
-        освобождения лока.
+        Signal callback теперь использует отдельную bool-метку. Для обычного
+        coordinator-stop сохраняем раннее закрытие admission: новый conn не
+        должен проскочить, пока coordinator ждёт уже удерживаемый registry-lock.
         """
         ipc = _make_lifecycle_server(self, _LifecycleImmediateService())
 
@@ -675,7 +706,7 @@ class IPCHandlerLifecycleTestCase(unittest.TestCase):
             self.assertTrue(
                 ipc._stop_event.is_set(),
                 "stop() обязан взводить _stop_event без захвата "
-                "_handler_threads_lock (self-deadlock в signal handler)",
+                "_handler_threads_lock",
             )
         finally:
             ipc._handler_threads_lock.release()
