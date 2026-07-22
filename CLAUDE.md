@@ -588,6 +588,18 @@ These top-level directories are created at runtime and are excluded from version
 
 ## Working guidelines for Claude sessions
 
+### 🔴 Рестарт backend в проде — ТОЛЬКО через safe-скрипт (инцидент 2026-07-22)
+
+`launchctl kickstart -k gui/501/ai.krab.ear.backend` под АКТИВНОЙ записью безвозвратно теряет
+диктовку (аудио живёт в памяти backend-процесса; GUI получает «Backend не ответил за таймаут»).
+Живой инцидент: деплой приёмки codex сделал kickstart ровно в момент диктовки владельца — две
+записи потеряны. **Правило: для рестарта прод-backend использовать
+`scripts/safe_backend_restart.command` (проверяет `get_recording_state`/`get_meeting_live_state`
+через IPC, отказывается под записью/встречей, `--wait N` — подождать, `--with-rest` — + REST-юнит,
+после kickstart ждёт ping-готовность). Голый kickstart — только когда сокет уже мёртв/завис**
+(скрипт сам это определяет и пропускает проверку). Открытый UX-хвост инцидента: GUI не ретраит
+stop_recording при переподнявшемся сокете и не спасает live-превью — кандидат мини-волны (ROADMAP).
+
 ### Sub-agent model selection (cost-conscious)
 
 Используй Agent tool с явным `model` параметром — **default opus сжигает quota** (user установил правило 2026-04-17 после 5h quota hit).
