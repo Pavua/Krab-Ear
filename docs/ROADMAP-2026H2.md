@@ -719,3 +719,34 @@ Swift не зовёт её 4 IPC-метода); дублировать рабо�
   зелёный. Полный безопасный Swift/Python chunk-гейт, `make audit-all`, push/merge/parity/deploy и
   живой голосовой smoke трёх brain-режимов оставлены следующей сессии. Тестом созданный live plist
   намеренно не удалялся и агент не загружался: любые live launchd-изменения — только по явному «да».
+- 2026-07-22 (**приёмка codex runtime-hardening ЗАВЕРШЕНА** — смёржено + задеплоено) — принята
+  вся работа codex-сессии (USER3, GPT-5.6): ветка `codex/runtime-hardening-20260720` доросла до
+  **43 коммитов** (+26 после checkpoint'а: массовая DI-изоляция Swift-тестов от живого home/launchctl/
+  defaults/pasteboard, REST poisoned-process fail-fast `os._exit(70)` после 504, IPC graceful stop c
+  handler-registry, устранение квадратичного чтения bookmarks, реап recording-workers). Конвейер
+  приёмки: полный Swift suite **1329/0** (впервые запускаем ВЕСЬ suite — DI сняла опасный тестовый
+  долг; доказано mtime живого plist) + release build, Python изменённых файлов + ubuntu-parity,
+  flake8/audit-all/verify_claude_md, личный построчный гейт критических диффов (kill-логика,
+  STT-цепочка, shutdown-пути, гейт-скрипты), **Fable-ревью целого диффа → APPROVE WITH FIXES**.
+  Fable нашёл 2 обязательных: **F1** self-deadlock — `IPCServer.stop()` брал `_handler_threads_lock`
+  вокруг `Event.set()`, а signal handler исполняется в main thread, который в accept-петле уже
+  держит этот нереентерабельный лок (окно взводилось каждым коннектом поллеров) — фикс `979e4dd1`;
+  **F2** тихая потеря диктовки — timeout `recorder.stop()` → None → `already_stopped` → Swift молчал;
+  теперь `AudioRecorderStopTimeout` → статус `recorder_timeout` (+preview как шанс спасения) →
+  `recoverFromPreviewFallback`/громкое уведомление — фикс `e82acdc9`. Первый CI-раунд красный:
+  4 wiring-теста ВНЕ diff-списка codex зависели от новой RSF-семантики phase_a (`is_running` +
+  возврат неостановившегося фильтра в слот) — класс «source-dependent тесты»; починены под
+  подтверждённый контракт + прогнаны ВСЕ 19 зависящих файлов (203/203) — `e3f2ff28`. CI зелёный
+  по полному SHA → ff-merge `430300d5..e3f2ff28` (чужой WIP telegram_bridge.py не пересекался,
+  стеш не понадобился) → деплой: backend PID 42771 + REST PID 42773 (`kickstart -k`, ping/health ok),
+  parity-бинари из смёрженного чекаута (UUID `8F496BDF` совпадает у бандла/runtime/запущенного
+  агента PID 49982), socket-E2E smokes 37 методов + 21 privacy-гейт — ALL GREEN. Бонус ветки:
+  закрыт chip `task_516f2320` (SingleInstanceGuard: kill-by-name/-path удалены, гарантия — только
+  flock). Открытые хвосты приёмки: **F3** hold-старт задержан на 200–310мс (клиппинг начала речи;
+  прод не задет — владелец на toggle; при возврате hold — pre-roll кольцевой буфер ~350мс);
+  F4 `close_background_workers` ждёт lifecycle_lock без таймаута (SIGKILL-путь при START-hang);
+  F5 двойной вызов + игнор результата `IPCServer.stop()` в shutdown; F6 reconnect-бюджет
+  LiveSubtitlesOverlay (~15.5с) короче холодного старта REST после fail-fast. Инфраструктурные
+  находки сессии: под uid502 launchd-плист запускает НАШ бандл (21-07 жило два агента разных uid —
+  эскалировано владельцу); тестовый артефакт `com.antigravity.krab-ear.plist` (20-07 14:15)
+  оставлен NOT_LOADED до решения владельца.
