@@ -57,13 +57,15 @@ busy_reason() {
   # Печатает причину занятости ("recording" / "meeting") или ничего.
   local rec meet
   rec=$(ipc_call get_recording_state)
-  if [ -n "$rec" ] && printf '%s' "$rec" | grep -q '"is_recording": true'; then
+  if [ -n "$rec" ] && printf '%s' "$rec" | grep -qE '"is_recording"[[:space:]]*:[[:space:]]*true'; then
     echo "recording"
     return 0
   fi
   meet=$(ipc_call get_meeting_live_state)
-  # Активная meeting-сессия: state не idle/absent. Мягкий греп по "active".
-  if [ -n "$meet" ] && printf '%s' "$meet" | grep -qE '"(state|status)": "(recording|active|running)"'; then
+  # Живой IPC-контракт MeetingSessionService возвращает boolean ``active``;
+  # старые state/status оставляем fallback'ом для совместимости с ранними ветками.
+  if [ -n "$meet" ] && printf '%s' "$meet" | grep -qE \
+    '"active"[[:space:]]*:[[:space:]]*true|"(state|status)"[[:space:]]*:[[:space:]]*"(recording|active|running)"'; then
     echo "meeting"
     return 0
   fi
