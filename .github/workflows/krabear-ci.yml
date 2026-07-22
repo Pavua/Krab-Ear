@@ -79,8 +79,18 @@ jobs:
           # threads blocked clean xdist worker teardown ("node down: Not properly
           # terminated") and xdist mis-attributed the dead worker to a random test.
           set +e
-          mapfile -t files < <(ls KrabEar/tests/test_*.py | sort)
-          n=${#files[@]}; nchunks=16; chunk=$(( (n + nchunks - 1) / nchunks )); rc=0
+          # Один и тот же блок должен оставаться переносимым между Ubuntu и Bash 3.2 на macOS.
+          files=()
+          for file in KrabEar/tests/test_*.py; do
+            [ -f "$file" ] || continue
+            files[${#files[@]}]="$file"
+          done
+          n=${#files[@]}
+          if [ "$n" -eq 0 ]; then
+            echo "::error::Не найдено ни одного Python test-файла"
+            exit 1
+          fi
+          nchunks=16; chunk=$(( (n + nchunks - 1) / nchunks )); rc=0
           echo "Total test files: $n, chunks: $nchunks, chunk size: $chunk"
           : > /tmp/pf_failed.txt
           reap() { pkill -9 -f "import sys;ex" 2>/dev/null || true; pkill -9 -f "mlx_subprocess" 2>/dev/null || true; pkill -9 -f "gigaam_worker" 2>/dev/null || true; }
