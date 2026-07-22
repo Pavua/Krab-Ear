@@ -15,6 +15,10 @@
 #   scripts/safe_backend_restart.command            # backend, отказ при записи
 #   scripts/safe_backend_restart.command --wait 120 # ждать окончания до 120с
 #   scripts/safe_backend_restart.command --with-rest# + рестарт REST-юнита
+#
+# ⚠️ ВНЕШНИЙ КОНТРАКТ: скрипт вызывается лаунчерами Voice Gateway (их PR #113,
+# 2026-07-22) — имя файла, флаги (--wait/--with-rest) и exit-коды (0 ok /
+# 1 refused-or-fail / 2 usage) менять только по координации с VG-сессией.
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
