@@ -54,14 +54,16 @@ jobs:
             ${{ runner.os }}-pip-${{ matrix.python-version }}-
             ${{ runner.os }}-pip-
 
-      - name: Install ffmpeg (torchcodec dylib dependency)
+      - name: Install ffmpeg and GNU timeout
         # torchcodec ships libtorchcodec_core{4..8}.dylib which dlopen libavutil.{56..60}.dylib.
         # macos-latest doesn't ship ffmpeg by default — install via brew so the test suite
         # can collect modules that transitively import torchcodec without OSError.
         # Wave 49 fix: was the sole remaining Python 3.12 CI fail.
         run: |
-          brew install ffmpeg
+          # coreutils гарантирует timeout/gtimeout для chunk- и per-file-дедлайнов.
+          brew install ffmpeg coreutils
           brew list --versions ffmpeg
+          brew list --versions coreutils
 
       - name: Install Python dependencies
         run: |
@@ -145,15 +147,33 @@ jobs:
           # threads blocked clean xdist worker teardown ("node down") and xdist
           # mis-attributed the dead worker to a random victim test.
           set +e
-          mapfile -t files < <(ls KrabEar/tests/test_*.py | sort)
-          n=${#files[@]}; nchunks=16; chunk=$(( (n + nchunks - 1) / nchunks )); rc=0; failed=""
+          # macOS запускает шаги через Bash 3.2, где нет mapfile/readarray.
+          files=()
+          for file in KrabEar/tests/test_*.py; do
+            [ -f "$file" ] || continue
+            files[${#files[@]}]="$file"
+          done
+          n=${#files[@]}
+          if [ "$n" -eq 0 ]; then
+            echo "::error::Не найдено ни одного Python test-файла"
+            exit 1
+          fi
+          if command -v timeout >/dev/null 2>&1; then
+            timeout_cmd=timeout
+          elif command -v gtimeout >/dev/null 2>&1; then
+            timeout_cmd=gtimeout
+          else
+            echo "::error::Не найден GNU timeout/gtimeout"
+            exit 1
+          fi
+          nchunks=16; chunk=$(( (n + nchunks - 1) / nchunks )); rc=0; failed=""
           echo "Total test files: $n, chunks: $nchunks, chunk size: $chunk"
           reap() { pkill -9 -f "import sys;ex" 2>/dev/null || true; pkill -9 -f "mlx_subprocess" 2>/dev/null || true; pkill -9 -f "gigaam_worker" 2>/dev/null || true; }
           for i in $(seq 0 $((nchunks - 1))); do
             sub=("${files[@]:$((i*chunk)):$chunk}")
             [ ${#sub[@]} -eq 0 ] && continue
             echo "::group::pytest chunk $((i+1))/$nchunks (${#sub[@]} files)"
-            timeout 600 python -m pytest "${sub[@]}" --tb=short -q -p no:xdist -p no:cacheprovider
+            "$timeout_cmd" 600 python -m pytest "${sub[@]}" --tb=short -q -p no:xdist -p no:cacheprovider
             crc=$?
             echo "::endgroup::"
             reap
@@ -165,7 +185,7 @@ jobs:
               # pass in isolation (-> green), genuine per-file failures are reported by filename.
               echo "::warning::chunk $((i+1)) exited $crc — re-running per-file to isolate"
               for f in "${sub[@]}"; do
-                timeout 150 python -m pytest "$f" --tb=short -q -p no:xdist -p no:cacheprovider > /tmp/pf.log 2>&1
+                "$timeout_cmd" 150 python -m pytest "$f" --tb=short -q -p no:xdist -p no:cacheprovider > /tmp/pf.log 2>&1
                 fcode=$?
                 if [ $fcode -ne 0 ]; then
                   echo "::error::isolated FAIL($fcode): $f"; tail -20 /tmp/pf.log
