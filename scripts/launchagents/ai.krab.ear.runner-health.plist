@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.krab.ear.runner-health</string>
+
+    <key>Comment</key>
+    <string>2026-07-24: health-check self-hosted GitHub Actions runner (krab-ear-m4max),
+    поднятого взамен GitHub-hosted macOS раннеров после account-wide billing block.
+    Streak-gated (offline >= 3 подряд), не единичное наблюдение — тот же
+    hysteresis-паттерн, что сиблинг ai.krab.runner-health (Krab-openclaw).
+    Runs every 15 min. Operator install: launchctl bootstrap gui/$UID этот plist.</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/pablito/Antigravity_AGENTS/Krab Ear/.venv_krab_ear/bin/python</string>
+        <string>/Users/pablito/Antigravity_AGENTS/Krab Ear/scripts/krab_ear_runner_health_check.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/pablito/Antigravity_AGENTS/Krab Ear</string>
+
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/pablito/Antigravity_AGENTS/Krab Ear/logs/runner_health.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/pablito/Antigravity_AGENTS/Krab Ear/logs/runner_health.err.log</string>
+</dict>
+</plist>

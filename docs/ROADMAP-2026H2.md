@@ -824,3 +824,26 @@ graceful SIGTERM, REST при этом не тронут → не экосист
 `safe_backend_restart.command`, т.е. риск потери диктовки сохраняется. Кандидат волны:
 инструментировать shutdown-путь + rescue-дамп аудио при SIGTERM во время записи (у codex
 уже есть WIP-ветка `user3-recording-rescue-20260722` с `RecordingStopRecoveryTests.swift`).
+
+### 2026-07-24 — self-hosted GitHub Actions runner (macOS ARM64)
+
+GitHub billing account-wide $0 budget + Stop usage=Yes на Actions (macOS-минуты ×10 против
+Linux — вероятный главный драйвер). Поднят `krab-ear-m4max` (user-level launchd, без sudo,
+`~/actions-runner-krab-ear`), отдельный от сиблинга `krab-m4max` (Krab-openclaw).
+
+**Гейт безопасности перед установкой** (репо публичный, self-hosted = код push/PR с правами
+локального юзера): владелец лично проверил Settings → Actions → General → Fork pull request
+workflows = «Require approval for first-time contributors» (скриншот, не API — GitHub REST
+не отдаёт эту настройку полем). Первый PR нового форка требует ручного approve.
+
+**Охват**: `ci.yml` python+swift, `krabear-ci.yml` swift-build → `runs-on: [self-hosted,
+macOS, ARM64]`. Все `ubuntu-latest` не тронуты (физически не выполнятся на macOS-раннере).
+`release.yml` осознанно НЕ тронут (публичный релизный пайплайн — отдельная категория риска,
+минуты жжёт редко). `actions/setup-python@v5` заменён на изолированный venv поверх системного
+python3.12 + `$GITHUB_PATH` — известный баг action'а безусловно пишет в
+`/Users/runner/hostedtoolcache`, `EACCES` без sudo на self-hosted macOS.
+
+Health-check `scripts/krab_ear_runner_health_check.py` + LaunchAgent
+`ai.krab.ear.runner-health` (15 мин, streak≥3). Живой смок: первый push после установки —
+раннер online, `busy=true` во время реального прогона (не queued на GitHub-hosted).
+Подробности и операционные команды — CLAUDE.md §Self-hosted CI runner.
