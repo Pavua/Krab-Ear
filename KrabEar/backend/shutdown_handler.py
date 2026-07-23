@@ -27,6 +27,9 @@ logger = logging.getLogger("KrabEar.Backend.ShutdownHandler")
 
 _SHUTDOWN_INFO_FILE = "shutdown_info.json"
 
+# Сколько не-владелец ждёт чужой shutdown, прежде чем считать барьер недоказанным.
+_NON_OWNER_WAIT_TIMEOUT_SEC = 20.0
+
 
 class GracefulShutdownHandler:
     """Координирует корректное завершение работы backend-сервиса.
@@ -96,26 +99,35 @@ class GracefulShutdownHandler:
 
         Метод потокобезопасен — повторный вызов заменяет сервис.
         """
-        server = getattr(service, "_ipc_server", None)
-        request_stop = getattr(server, "request_stop_from_signal", None)
-        stop = getattr(server, "stop", None)
-        if not callable(request_stop) or not callable(stop):
-            raise TypeError(
-                "register() требует _ipc_server с request_stop_from_signal() "
-                "и stop()"
-            )
         self.bind(service)
 
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
         logger.info("GracefulShutdownHandler зарегистрирован (SIGTERM + SIGINT)")
 
+    @staticmethod
+    def _require_ipc_contract(service: Any) -> None:
+        """Сервис обязан нести IPC-сервер с полным shutdown-контрактом."""
+        server = getattr(service, "_ipc_server", None)
+        request_stop = getattr(server, "request_stop_from_signal", None)
+        stop = getattr(server, "stop", None)
+        if not callable(request_stop) or not callable(stop):
+            raise TypeError(
+                "shutdown-handler требует _ipc_server с "
+                "request_stop_from_signal() и stop()"
+            )
+
     def bind(self, service: Any) -> None:
         """Привязать сервис без перехвата сигналов процесса.
 
         Production-entrypoint использует этот метод, потому что signal callback
         там только просит IPC accept-loop выйти, а teardown выполняет ``finally``.
+
+        Приёмочное ревью 2026-07-23 (F3): строгая проверка жила только в
+        ``register()``, который прод больше не вызывает — гейт стоял на мёртвом
+        пути, а живой принимал что угодно.
         """
+        self._require_ipc_contract(service)
         with self._lock:
             self._service = service
         logger.debug("GracefulShutdownHandler привязан к сервису без сигналов")
@@ -148,7 +160,14 @@ class GracefulShutdownHandler:
                 run_shutdown = True
 
         if not run_shutdown:
-            shutdown_done.wait()
+            # F4: без таймаута зависший владелец блокировал вызывающего навечно
+            # (sticky state without an exit). Недождавшийся — fail-closed.
+            if not shutdown_done.wait(timeout=_NON_OWNER_WAIT_TIMEOUT_SEC):
+                logger.error(
+                    "Ожидание чужого shutdown превысило %.1f с — барьер не доказан",
+                    _NON_OWNER_WAIT_TIMEOUT_SEC,
+                )
+                return False
             with self._lock:
                 return self._safe_to_close_service
 
@@ -387,6 +406,11 @@ class GracefulShutdownHandler:
         """Остановить IPC и вернуть подтверждение завершения handler-ов."""
         server = getattr(service, "_ipc_server", None)
         if server is None:
+            # Осознанно True: IPC-handler-ы принадлежат серверу, поэтому его
+            # отсутствие означает, что мешать закрытию ресурсов физически некому.
+            # (Ревью 2026-07-23 предлагало fail-closed — отклонено при гейте:
+            # неполный сервис теперь отсекается валидацией в bind(), а для
+            # embed-сценариев без IPC отказ ронял бы сохранение метаданных.)
             return True
         stop = getattr(server, "stop", None)
         if not callable(stop):

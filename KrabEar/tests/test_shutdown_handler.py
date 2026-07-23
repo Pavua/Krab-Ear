@@ -525,12 +525,21 @@ class TestShutdownHandlerThreadSafety(unittest.TestCase):
         self.assertTrue(handler._shutdown_done.is_set())
 
     def test_missing_ipc_stop_aborts_before_persistence(self):
-        """Наличие server без stop() не считается доказанной квиесценцией."""
+        """Наличие server без stop() не считается доказанной квиесценцией.
+
+        Ревью 2026-07-23 (F3) перенесло гейт на ЖИВОЙ путь: неполный сервис
+        теперь отсекается уже при bind() (fail-fast). Defense-in-depth внутри
+        shutdown() сохранён — проверяется на сервисе, установленном в обход API.
+        """
         handler = GracefulShutdownHandler(data_dir=self.data_dir)
         svc = MagicMock()
         svc._ipc_server = MagicMock(spec=[])
-        handler.bind(svc)
 
+        with self.assertRaises(TypeError):
+            handler.bind(svc)
+
+        # Обход публичного API не должен обходить и барьер квиесценции.
+        handler._service = svc
         self.assertFalse(handler.shutdown())
         svc.vocabulary.load.assert_not_called()
         self.assertTrue(handler._shutdown_done.is_set())
@@ -866,6 +875,64 @@ class TestShutdownHandlerTimeoutPerCallback(unittest.TestCase):
         data = json.loads((self.data_dir / _SHUTDOWN_INFO_FILE).read_text())
         self.assertTrue(data["clean"])
         self.assertGreater(data["elapsed_ms"], 0)
+
+
+class TestShutdownHandlerBindValidation(unittest.TestCase):
+    """Приёмочное ревью 2026-07-23 (F3): гейт должен стоять на ЖИВОМ пути.
+
+    Строгая проверка ``_ipc_server`` жила в ``register()``, который прод больше
+    не вызывает (entrypoint использует ``bind()``), а ``bind()`` принимал что
+    угодно. Плюс ``_close_socket`` при отсутствующем сервере возвращал ``True``
+    («квиесценция доказана») — fail-open в безопасностном барьере.
+    """
+
+    def test_bind_rejects_service_without_ipc_server(self):
+        handler = GracefulShutdownHandler()
+
+        class _NoServer:
+            pass
+
+        with self.assertRaises(TypeError):
+            handler.bind(_NoServer())
+
+    def test_close_socket_without_server_stays_permissive(self):
+        """Отсутствие сервера = отсутствие handler-ов, мешать закрытию некому.
+
+        Ревью предлагало здесь fail-closed; отклонено при гейте — неполный
+        сервис отсекается валидацией bind(), а отказ ронял бы сохранение
+        метаданных в embed-сценариях без IPC.
+        """
+        handler = GracefulShutdownHandler()
+
+        class _NoServer:
+            pass
+
+        self.assertTrue(handler._close_socket(_NoServer()))
+
+
+class TestShutdownHandlerNonOwnerWait(unittest.TestCase):
+    """Приёмочное ревью 2026-07-23 (F4): не-владелец не ждёт вечно."""
+
+    def test_non_owner_wait_is_bounded(self):
+        handler = GracefulShutdownHandler()
+        # Имитируем «владелец начал и завис»: started взведён, done не ставится.
+        handler._shutdown_started = True
+        handler._shutdown_owner_thread_id = -1  # заведомо чужой поток
+
+        result: list[bool] = []
+        # Вызов в отдельном потоке: до фикса ожидание БЕСКОНЕЧНО и блокировало
+        # бы весь прогон (проверено — pytest убивал файл по таймауту).
+        worker = threading.Thread(
+            target=lambda: result.append(handler.shutdown()), daemon=True
+        )
+        worker.start()
+        worker.join(timeout=25.0)
+
+        self.assertFalse(
+            worker.is_alive(),
+            "ожидание не-владельца обязано быть ограничено таймаутом, а не вечным",
+        )
+        self.assertEqual(result, [False], "недоказанный барьер обязан быть False")
 
 
 if __name__ == "__main__":

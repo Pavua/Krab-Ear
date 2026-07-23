@@ -939,7 +939,8 @@ class RecordingCoreService:
         if not lifecycle_lock.acquire(timeout=lock_timeout):
             logger.error(
                 "Recording lifecycle-lock не освобождён за %.2f с; "
-                "worker handles оставлены для безопасной повторной остановки",
+                "worker handles сохранены, но повторной остановки НЕ будет: "
+                "координатор завершит процесс через os._exit (F5, ревью 2026-07-23)",
                 lock_timeout,
                 extra={"shutdown_blocker": "recording_lifecycle_lock"},
             )
