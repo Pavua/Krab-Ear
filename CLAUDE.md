@@ -588,6 +588,29 @@ These top-level directories are created at runtime and are excluded from version
 
 ## Working guidelines for Claude sessions
 
+### 🔴 Shell-совместимость гейтов: macOS = Bash 3.2 + BSD-утилиты (2026-07-23, два живых случая)
+
+Два «инструмента, которые выглядели рабочими, но не работали НИКОГДА» — найдены в один день,
+класс один: shell-конструкция, валидная в dev-окружении, но не в целевом.
+1. **`ensure_agent_running.command`**: `pgrep` на macOS использует **ERE**, а в паттерне стояла
+   BRE-альтернация `\|` → искался литерал `KrabEarAgent|native`. 12 подряд `FAIL agent still
+   absent` и ни одного успеха при ЖИВОМ агенте (+ лишний `open` при работающем агенте →
+   риск дубля против SingleInstanceGuard). Три смок-отчёта подряд диагностировали это как
+   «мало 15 секунд» — symptom-fix, который не помог бы.
+2. **macOS CI (`ci.yml`) не запускал Python-тесты вообще**: раннер даёт **Bash 3.2**, где нет
+   `mapfile`/`readarray` → `files` пуст → все 16 чанков пропущены → job **SUCCESS**. Логи:
+   `mapfile: command not found` / `Total test files: 0`. GNU `timeout` на macOS тоже отсутствует
+   (нужен `coreutils`/`gtimeout`).
+
+**Правила**: (а) в CI-шагах и `.command`-скриптах для macOS — только Bash 3.2-совместимое
+(никаких `mapfile`, `readarray`, `declare -A`, `${var^^}`); (б) всякий цикл «собрать список →
+обработать» обязан иметь **fail-closed** гард на пустой список (`[ "$n" -eq 0 ] && exit 1`),
+иначе пустота читается как успех; (в) BSD vs GNU: `pgrep`=ERE, `sed -i` требует суффикс,
+`timeout` отсутствует — проверяй утилиту в ЦЕЛЕВОЙ ОС, а не только локально;
+(г) для «сторожевых» скриптов пиши тест, который поднимает реальный процесс/состояние и
+проверяет РЕАЛЬНУЮ утилиту паттерном, извлечённым из скрипта (`test_ensure_agent_running_contract.py`,
+`test_safe_backend_restart_contract.py` — образцы).
+
 ### 🔴 Рестарт backend в проде — ТОЛЬКО через safe-скрипт (инцидент 2026-07-22)
 
 `launchctl kickstart -k gui/501/ai.krab.ear.backend` под АКТИВНОЙ записью безвозвратно теряет
