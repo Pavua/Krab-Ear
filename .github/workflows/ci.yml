@@ -27,7 +27,7 @@ jobs:
 
   python:
     name: Python ${{ matrix.python-version }}
-    runs-on: macos-latest
+    runs-on: [self-hosted, macOS, ARM64]
 
     strategy:
       fail-fast: false
@@ -38,10 +38,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
+      - name: Set up Python ${{ matrix.python-version }} (self-hosted venv — bypass setup-python macOS tool-cache bug)
+        # 2026-07-24: actions/setup-python@v5 безусловно перезаписывает
+        # AGENT_TOOLSDIRECTORY на /Users/runner/hostedtoolcache на любом macOS
+        # (известный баг, не уважает RUNNER_TOOL_CACHE self-hosted раннера) —
+        # mkdir падает EACCES, т.к. /Users/runner на этой машине не существует
+        # и создать его без sudo нельзя. Обход: изолированный venv поверх уже
+        # установленного системного python3.12 (Homebrew), PATH через
+        # $GITHUB_PATH — тот же эффект (изолированный интерпретатор в PATH),
+        # без обращения к hostedtoolcache вообще. $RUNNER_TEMP уникален и
+        # авто-чистится раннером между джобами — venv не накапливается.
+        run: |
+          python${{ matrix.python-version }} -m venv "$RUNNER_TEMP/venv-py${{ matrix.python-version }}"
+          echo "$RUNNER_TEMP/venv-py${{ matrix.python-version }}/bin" >> "$GITHUB_PATH"
 
       - name: Cache pip dependencies
         uses: actions/cache@v4
@@ -202,7 +211,7 @@ jobs:
     name: Swift agent build
     needs: changes
     if: ${{ needs.changes.outputs.swift == 'true' }}
-    runs-on: macos-latest
+    runs-on: [self-hosted, macOS, ARM64]
 
     steps:
       - name: Checkout
