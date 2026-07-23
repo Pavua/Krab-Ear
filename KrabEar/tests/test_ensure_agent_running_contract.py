@@ -48,8 +48,14 @@ def test_pgrep_pattern_detects_running_agent(tmp_path: Path) -> None:
 
     proc = subprocess.Popen([str(fake_agent), "30"])
     try:
-        # Даём ядру зарегистрировать процесс в таблице.
-        deadline = time.monotonic() + 3.0
+        # 2026-07-24: self-hosted раннер под конкурентной нагрузкой (свой же
+        # pytest-чанк + параллельные git/gh-вызовы с той же машины) — каждый
+        # pgrep-подпроцесс форкается/планируется медленнее, чем на idle
+        # GitHub-hosted VM. 3с окна одному разу не хватило (тот же класс
+        # wall-clock гонки, что MLX-watchdog тесты этой же волны). Регистрация
+        # argv в таблице процессов атомарна на уровне ядра — не сама причина
+        # задержки, причина в scheduling самого pgrep под нагрузкой.
+        deadline = time.monotonic() + 15.0
         found = ""
         while time.monotonic() < deadline:
             found = subprocess.run(
@@ -60,11 +66,18 @@ def test_pgrep_pattern_detects_running_agent(tmp_path: Path) -> None:
             ).stdout
             if str(proc.pid) in found:
                 break
-            time.sleep(0.05)
+            time.sleep(0.1)
 
+        if str(proc.pid) not in found:
+            # Диагностика на будущее: если снова упадёт — видно КОГО pgrep
+            # вообще нашёл, а не только факт неудачи.
+            ps_sample = subprocess.run(
+                ["ps", "-p", str(proc.pid)], capture_output=True, text=True, check=False
+            ).stdout
         assert str(proc.pid) in found, (
             "паттерн pgrep из ensure_agent_running.command не находит живой "
-            f"процесс агента (pgrep на macOS — ERE, не BRE). Паттерн: {pattern!r}"
+            f"процесс агента (pgrep на macOS — ERE, не BRE). Паттерн: {pattern!r}\n"
+            f"pgrep stdout: {found!r}\nps -p {proc.pid}: {ps_sample!r}"
         )
     finally:
         proc.kill()
