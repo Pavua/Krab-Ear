@@ -58,8 +58,14 @@ count_agent_pids() {
     # killing the script before PRE_COUNT is assigned, so auto-launch NEVER ran.
     # Fix: capture pgrep output in a variable with `|| true` so a "no match"
     # result is an empty string, not a fatal exit.
+    # 🔴 2026-07-23: pgrep на macOS использует ERE, а здесь стояла BRE-альтернация
+    # `\|` — то есть искался ЛИТЕРАЛ "KrabEarAgent|native". Скрипт не находил
+    # агента НИКОГДА: при живом агенте делал лишний `open` (риск дубля процесса
+    # против SingleInstanceGuard), а после успешного старта всё равно рапортовал
+    # `FAIL agent still absent` — 12 подряд с 18-07 и ни одного успеха.
+    # Увеличение окна ожидания (рекомендация трёх смок-отчётов) лечило бы симптом.
     local raw
-    raw="$(pgrep -fl "Krab Ear.app/Contents/MacOS/KrabEarAgent\|native/runtime/KrabEarAgent" 2>/dev/null || true)"
+    raw="$(pgrep -fl "Krab Ear.app/Contents/MacOS/KrabEarAgent|native/runtime/KrabEarAgent" 2>/dev/null || true)"
     # Filter out this script itself, grep, and pgrep from the list.
     echo "$raw" | grep -v "ensure_agent_running\|grep\|pgrep" | grep -c . || true
 }
