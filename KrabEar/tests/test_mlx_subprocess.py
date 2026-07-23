@@ -126,11 +126,15 @@ class TestMLXWatchdogTimeout(unittest.TestCase):
         release = threading.Event()
 
         def _hang():
-            # Таймер разблокировки заводится ИЗНУТРИ потока: снаружи он мог
-            # сработать ещё до входа в run_with_timeout на медленном раннере —
-            # тогда _hang возвращался мгновенно и таймаут не наступал
-            # (падение macOS CI 2026-07-23 после включения реального прогона).
-            threading.Timer(0.1, release.set).start()
+            # Никакого Timer.set() — wait() сам естественно разблокируется
+            # через initial_delay (0.5с). Таймер здесь давал ЛОЖНОЕ ускорение
+            # (0.1с) с запасом всего 50мс над timeout_sec=0.05с — на
+            # загруженном раннере GIL/scheduler jitter съедал этот запас,
+            # daemon-поток успевал завершиться ДО первого join() и
+            # MLXTimeoutError не наступал (2026-07-23, второй раунд после
+            # прошлого фикса). Без таймера thread гарантированно жив на
+            # отметке timeout_sec (запас 450мс) и завершается сам к 0.5с —
+            # задолго до MLX_HANG_HARD_KILL_SEC (120с default).
             release.wait(timeout=initial_delay)  # returns when event set or timeout
 
         return _hang, release
