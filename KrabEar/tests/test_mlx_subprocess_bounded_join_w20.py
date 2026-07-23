@@ -73,10 +73,12 @@ class TestBoundedJoinNormalTimeout(unittest.TestCase):
         allow_finish = threading.Event()
 
         def _hang():
+            # Отсчёт разблокировки стартует ИЗНУТРИ потока: снаружи он мог
+            # истечь до входа в run_with_timeout на медленном раннере, и тогда
+            # _hang возвращался мгновенно, а таймаут не наступал (падение
+            # macOS CI 2026-07-23, воспроизведено задержкой 120 мс).
+            threading.Timer(0.08, allow_finish.set).start()
             allow_finish.wait(timeout=2.0)
-
-        # Let the daemon thread finish quickly so bounded join exits fast
-        threading.Timer(0.08, allow_finish.set).start()
 
         with self.assertRaises(MLXTimeoutError):
             self.watchdog.run_with_timeout(
@@ -89,9 +91,9 @@ class TestBoundedJoinNormalTimeout(unittest.TestCase):
         allow_finish = threading.Event()
 
         def _hang():
+            # Отсчёт стартует изнутри потока — см. пояснение выше.
+            threading.Timer(0.08, allow_finish.set).start()
             allow_finish.wait(timeout=2.0)
-
-        threading.Timer(0.08, allow_finish.set).start()
 
         try:
             self.watchdog.run_with_timeout(
@@ -108,9 +110,9 @@ class TestBoundedJoinNormalTimeout(unittest.TestCase):
         allow_finish = threading.Event()
 
         def _hang():
+            # Отсчёт стартует изнутри потока — см. пояснение выше.
+            threading.Timer(0.08, allow_finish.set).start()
             allow_finish.wait(timeout=2.0)
-
-        threading.Timer(0.08, allow_finish.set).start()
 
         with self.assertRaises(MLXTimeoutError):
             self.watchdog.run_with_timeout(fn=_hang, timeout_sec=_INFERENCE_TIMEOUT)
@@ -124,10 +126,11 @@ class TestBoundedJoinNormalTimeout(unittest.TestCase):
         allow_finish = threading.Event()
 
         def _hang():
+            # Отсчёт изнутри потока — иначе на медленном раннере таймер
+            # срабатывает до входа в run_with_timeout (см. пояснение выше).
+            threading.Timer(0.08, allow_finish.set).start()
             allow_finish.wait(timeout=2.0)
             thread_finished.set()  # set AFTER blocking op completes
-
-        threading.Timer(0.08, allow_finish.set).start()
 
         with self.assertRaises(MLXTimeoutError):
             self.watchdog.run_with_timeout(
@@ -147,9 +150,9 @@ class TestBoundedJoinNormalTimeout(unittest.TestCase):
         allow_finish = threading.Event()
 
         def _hang():
+            # Отсчёт изнутри потока — см. пояснение выше.
+            threading.Timer(0.06, allow_finish.set).start()
             allow_finish.wait(timeout=2.0)
-
-        threading.Timer(0.06, allow_finish.set).start()
 
         deadline = _INFERENCE_TIMEOUT + 0.5  # 40ms inference + 500ms slack
         t0 = time.monotonic()

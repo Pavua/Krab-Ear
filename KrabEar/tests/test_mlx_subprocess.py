@@ -126,6 +126,11 @@ class TestMLXWatchdogTimeout(unittest.TestCase):
         release = threading.Event()
 
         def _hang():
+            # Таймер разблокировки заводится ИЗНУТРИ потока: снаружи он мог
+            # сработать ещё до входа в run_with_timeout на медленном раннере —
+            # тогда _hang возвращался мгновенно и таймаут не наступал
+            # (падение macOS CI 2026-07-23 после включения реального прогона).
+            threading.Timer(0.1, release.set).start()
             release.wait(timeout=initial_delay)  # returns when event set or timeout
 
         return _hang, release
@@ -134,27 +139,23 @@ class TestMLXWatchdogTimeout(unittest.TestCase):
         """Функция, зависающая дольше таймаута, вызывает MLXTimeoutError."""
         _hang, release = self._make_releasable_hang(initial_delay=0.5)
         # Release the daemon quickly so join() in run_with_timeout completes fast.
-        threading.Timer(0.1, release.set).start()
         with self.assertRaises(MLXTimeoutError):
             self.watchdog.run_with_timeout(fn=_hang, timeout_sec=0.05, model_name="test-hang")
 
     def test_crashes_count_incremented_on_timeout(self):
         _hang, release = self._make_releasable_hang(initial_delay=0.5)
-        threading.Timer(0.1, release.set).start()
         with self.assertRaises(MLXTimeoutError):
             self.watchdog.run_with_timeout(fn=_hang, timeout_sec=0.05)
         self.assertEqual(self.watchdog.crashes_count, 1)
 
     def test_total_calls_incremented_on_timeout(self):
         _hang, release = self._make_releasable_hang(initial_delay=0.5)
-        threading.Timer(0.1, release.set).start()
         with self.assertRaises(MLXTimeoutError):
             self.watchdog.run_with_timeout(fn=_hang, timeout_sec=0.05)
         self.assertEqual(self.watchdog.total_calls, 1)
 
     def test_timeout_error_carries_model_name(self):
         _hang, release = self._make_releasable_hang(initial_delay=0.5)
-        threading.Timer(0.1, release.set).start()
         try:
             self.watchdog.run_with_timeout(fn=_hang, timeout_sec=0.05, model_name="mlx-large")
         except MLXTimeoutError as e:
@@ -165,7 +166,6 @@ class TestMLXWatchdogTimeout(unittest.TestCase):
     def test_sentry_notification_called_on_timeout(self):
         """_notify_sentry_timeout should be invoked on timeout (no-op if sentry absent)."""
         _hang, release = self._make_releasable_hang(initial_delay=0.5)
-        threading.Timer(0.1, release.set).start()
         with patch("core.mlx_subprocess._notify_sentry_timeout") as mock_notify:
             with self.assertRaises(MLXTimeoutError):
                 self.watchdog.run_with_timeout(fn=_hang, timeout_sec=0.05, model_name="test")
@@ -268,11 +268,11 @@ class TestMLXWatchdogLockRaceGuard(unittest.TestCase):
         allow_finish = threading.Event()
 
         def _hang():
+            # Сигнал заводится изнутри потока — снаружи он мог сработать до
+            # входа в run_with_timeout на медленном раннере.
+            threading.Timer(0.1, allow_finish.set).start()
             allow_finish.wait(timeout=2.0)  # blocks until we signal
             thread_finished.set()           # mark completion AFTER blocking op
-
-        # Signal quickly so the unbounded join() completes fast
-        threading.Timer(0.1, allow_finish.set).start()
 
         with self.assertRaises(MLXTimeoutError):
             self.watchdog.run_with_timeout(fn=_hang, timeout_sec=0.02, model_name="race-test")
@@ -289,9 +289,9 @@ class TestMLXWatchdogLockRaceGuard(unittest.TestCase):
         allow_finish = threading.Event()
 
         def _hang():
+            # Сигнал изнутри потока — см. пояснение выше.
+            threading.Timer(0.1, allow_finish.set).start()
             allow_finish.wait(timeout=2.0)
-
-        threading.Timer(0.1, allow_finish.set).start()
 
         exc_caught = None
         try:
