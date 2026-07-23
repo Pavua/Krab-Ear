@@ -154,7 +154,8 @@ class TestSigtermRequestOnlyAndCoordinatorOrder(unittest.TestCase):
 
         events: list[str] = []
         server = MagicMock()
-        server.stop.side_effect = lambda: events.append("ipc") or True
+        # Координатор передаёт явный бюджет дренажа (F1, приёмка 2026-07-23).
+        server.stop.side_effect = lambda **_kw: events.append("ipc") or True
         service = MagicMock()
         service.close.side_effect = lambda: events.append("workers") or True
         handler = MagicMock()

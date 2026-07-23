@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+import unittest.mock
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -17,6 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import backend.service as service_module  # noqa: E402
 from backend.service import _shutdown_backend  # noqa: E402
 
 
@@ -40,7 +42,7 @@ class TestBoundedSingleOwnerShutdown(unittest.TestCase):
             return result
 
         server = MagicMock()
-        server.stop.side_effect = lambda: _stage("ipc", ipc_result)
+        server.stop.side_effect = lambda **_kw: _stage("ipc", ipc_result)
 
         service = MagicMock()
         service.close.side_effect = lambda: _stage("workers", workers_result)
@@ -76,7 +78,7 @@ class TestBoundedSingleOwnerShutdown(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(events, ["ipc", "workers", "metadata", "flush"])
         self.assertEqual(exits, [])
-        server.stop.assert_called_once_with()
+        server.stop.assert_called_once_with(timeout_sec=service_module._IPC_DRAIN_BUDGET_SEC)
         service.close.assert_called_once_with()
         handler.shutdown.assert_called_once_with(ipc_already_stopped=True)
 
@@ -89,7 +91,7 @@ class TestBoundedSingleOwnerShutdown(unittest.TestCase):
         self.assertFalse(result)
         self.assertEqual(events, ["ipc", "flush", "exit"])
         self.assertEqual(exits, [os.EX_SOFTWARE])
-        server.stop.assert_called_once_with()
+        server.stop.assert_called_once_with(timeout_sec=service_module._IPC_DRAIN_BUDGET_SEC)
         service.close.assert_not_called()
         handler.shutdown.assert_not_called()
 
@@ -102,7 +104,7 @@ class TestBoundedSingleOwnerShutdown(unittest.TestCase):
         self.assertFalse(result)
         self.assertEqual(events, ["ipc", "flush", "exit"])
         self.assertEqual(exits, [os.EX_SOFTWARE])
-        server.stop.assert_called_once_with()
+        server.stop.assert_called_once_with(timeout_sec=service_module._IPC_DRAIN_BUDGET_SEC)
         service.close.assert_not_called()
         handler.shutdown.assert_not_called()
 
@@ -169,6 +171,75 @@ class TestBoundedSingleOwnerShutdown(unittest.TestCase):
         )
         self.assertEqual(exits, [os.EX_SOFTWARE])
         handler.shutdown.assert_called_once_with(ipc_already_stopped=True)
+
+
+class DrainBudgetTestCase(unittest.TestCase):
+    """Приёмочное ревью 2026-07-23 (F1): бюджет дренажа IPC.
+
+    ``handle_request`` выполняется В handler-потоке и включает весь STT-пайплайн
+    (`handle_stop_recording`/`meeting_stop`/`transcribe_paths`) — секунды-минуты.
+    С дефолтными 1.5 с координатор объявляет барьер недоказанным и делает
+    ``os._exit`` ДО ``service.close()``/metadata: словарь, usage, playback,
+    компактирование и ``shutdown_info.json`` теряются. Живой триггер есть:
+    эскалация WakeWordWatchdog → forceRestartBackend → ``kickstart -k``
+    минует ``safe_backend_restart.command``. ``ExitTimeOut=15`` в plist
+    оставляет запас на 8 с дренажа + close() + metadata.
+    """
+
+    def test_coordinator_grants_explicit_drain_budget(self) -> None:
+        service = MagicMock()
+        service.close.return_value = True
+        server = MagicMock()
+        server.stop.return_value = True
+        handler = MagicMock()
+        handler.shutdown.return_value = True
+
+        result = _shutdown_backend(
+            service,
+            server,
+            handler,
+            flush_fn=lambda: None,
+            exit_fn=lambda code: None,
+        )
+
+        self.assertTrue(result)
+        server.stop.assert_called_once()
+        _, kwargs = server.stop.call_args
+        budget = kwargs.get("timeout_sec")
+        self.assertIsNotNone(
+            budget,
+            "координатор обязан задавать явный бюджет дренажа, а не дефолтные 1.5 с",
+        )
+        self.assertGreaterEqual(budget, 8.0, "бюджет мал для STT-запроса в handler-потоке")
+        self.assertLessEqual(budget, 12.0, "бюджет обязан помещаться в ExitTimeOut=15")
+
+
+class HardExitObservabilityTestCase(unittest.TestCase):
+    """Приёмочное ревью 2026-07-23 (F2): причина hard-exit обязана доехать.
+
+    ``logger.critical`` порождает Sentry-событие через LoggingIntegration, но
+    ставилось в очередь ПОСЛЕ ``flush_sentry()`` — а ``os._exit`` не даёт ни
+    второго flush, ни atexit-хука, поэтому причина аварийного выхода терялась
+    навсегда именно в том сценарии, ради наблюдаемости которого писался хелпер.
+    """
+
+    def test_flush_happens_after_critical_log(self) -> None:
+        events: list[str] = []
+
+        with unittest.mock.patch.object(
+            service_module.logger, "critical", side_effect=lambda *a, **k: events.append("log")
+        ):
+            service_module._exit_without_python_finalize_if_worker_hung(
+                False,
+                exit_fn=lambda code: events.append("exit"),
+                flush_fn=lambda: events.append("flush"),
+            )
+
+        self.assertEqual(
+            events,
+            ["log", "flush", "exit"],
+            "flush обязан идти между критическим логом и os._exit",
+        )
 
 
 if __name__ == "__main__":

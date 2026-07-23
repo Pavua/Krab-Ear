@@ -174,6 +174,7 @@ def _exit_without_python_finalize_if_worker_hung(
     workers_stopped: bool | None,
     *,
     exit_fn: Callable[[int], None] | None = None,
+    flush_fn: Callable[[], None] | None = None,
 ) -> None:
     """Завершить backend без `_Py_Finalize` при недоказанном барьере.
 
@@ -190,6 +191,14 @@ def _exit_without_python_finalize_if_worker_hung(
         "Shutdown-барьер не подтверждён: завершаем без Python-finalize, "
         "чтобы launchd поднял чистый экземпляр"
     )
+    # Приёмочное ревью 2026-07-23 (F2): logger.critical порождает Sentry-событие
+    # через LoggingIntegration, а os._exit не даёт ни второго flush, ни atexit —
+    # без flush ИМЕННО ЗДЕСЬ причина аварийного выхода терялась навсегда.
+    if flush_fn is not None:
+        try:
+            flush_fn()
+        except Exception:
+            logger.exception("flush telemetry перед hard-exit упал")
     (exit_fn or os._exit)(os.EX_SOFTWARE)
 
 
@@ -203,6 +212,12 @@ def _exit_without_python_finalize_if_wake_word_hung(
         wake_word_stopped,
         exit_fn=exit_fn,
     )
+
+
+# Бюджет дренажа IPC-handler'ов при shutdown. Должен покрывать типовой
+# синхронный STT-запрос в handler-потоке и укладываться в ExitTimeOut=15
+# вместе с service.close() и записью metadata.
+_IPC_DRAIN_BUDGET_SEC = 8.0
 
 
 def _shutdown_backend(
@@ -220,13 +235,20 @@ def _shutdown_backend(
     инъекции возвращается ``False`` без продолжения teardown.
     """
     try:
-        ipc_quiesced = server.stop()
+        # F1 (приёмочное ревью 2026-07-23): STT-пайплайн выполняется В
+        # handler-потоке (handle_stop_recording/meeting_stop/transcribe_paths),
+        # поэтому дефолтных 1.5 с не хватает — координатор объявлял барьер
+        # недоказанным и делал os._exit ДО close()/metadata, теряя словарь,
+        # usage, playback, компактирование и shutdown_info.json.
+        # 8 с укладываются в ExitTimeOut=15 вместе с close() и metadata.
+        ipc_quiesced = server.stop(timeout_sec=_IPC_DRAIN_BUDGET_SEC)
     except Exception:
         logger.exception("IPCServer.stop() выбросил исключение при shutdown")
         ipc_quiesced = False
     if ipc_quiesced is False:
-        flush_fn()
-        _exit_without_python_finalize_if_worker_hung(False, exit_fn=exit_fn)
+        _exit_without_python_finalize_if_worker_hung(
+            False, exit_fn=exit_fn, flush_fn=flush_fn
+        )
         return False
 
     try:
@@ -235,8 +257,9 @@ def _shutdown_backend(
         logger.exception("BackendService.close() выбросил исключение при shutdown")
         workers_stopped = False
     if workers_stopped is False:
-        flush_fn()
-        _exit_without_python_finalize_if_worker_hung(False, exit_fn=exit_fn)
+        _exit_without_python_finalize_if_worker_hung(
+            False, exit_fn=exit_fn, flush_fn=flush_fn
+        )
         return False
 
     try:
