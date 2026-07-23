@@ -150,6 +150,20 @@ class ErrorBusFlushAllTests(unittest.TestCase):
 # GracefulShutdownHandler error_bus close hook tests
 # ---------------------------------------------------------------------------
 
+class _FakeIPCServer:
+    """Минимальная duck-typed заглушка IPC-контракта (F3, приёмка 2026-07-23).
+
+    Эти тесты проверяют error_bus flush через bind()+shutdown(), а не сам
+    IPC-слой — им нужна лишь форма контракта, не поведение.
+    """
+
+    def stop(self, *args, **kwargs):
+        return True
+
+    def request_stop_from_signal(self):
+        pass
+
+
 class ShutdownHandlerErrorBusTests(unittest.TestCase):
     def _make_service(self, error_bus=None):
         svc = MagicMock()
@@ -160,7 +174,10 @@ class ShutdownHandlerErrorBusTests(unittest.TestCase):
         svc.store = MagicMock()
         svc.store.maybe_compact.return_value = False
         svc.store.data_dir = None
-        svc._ipc_server = None
+        # F3 (приёмка 2026-07-23): bind() требует полный IPC-контракт — тесты
+        # этого файла про error_bus, не про IPC, но обязаны дать duck-typed
+        # заглушку, иначе строгая валидация (справедливо) их отклонит.
+        svc._ipc_server = _FakeIPCServer()
         if error_bus is not None:
             svc._error_bus = error_bus
         else:
@@ -215,7 +232,7 @@ class ShutdownHandlerErrorBusTests(unittest.TestCase):
         svc._playback_tracker = None
         svc.store = MagicMock()
         svc.store.maybe_compact.return_value = False
-        svc._ipc_server = None
+        svc._ipc_server = _FakeIPCServer()  # F3: bind() требует контракт
         svc._error_bus = mock_bus  # Service has the bus
 
         handler.bind(svc)
