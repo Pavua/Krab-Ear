@@ -2126,6 +2126,7 @@ class HistoryService:
             bookmarks_deleted (int): количество удалённых закладок (0 если N/A)
             call_sessions_deleted (int): количество удалённых сессий звонков (0 если N/A)
             transcripts_deleted (int): количество удалённых .md файлов в transcripts/ (W1749)
+            rescue_deleted (int): количество удалённых файлов rescue-spill (R1, 2026-07-24)
             semantic_purged (bool): True если семантический индекс очищен
             complete (bool): True если все вторичные шаги завершились без ошибок
             errors (list[str]): имена шагов, завершившихся с ошибкой (без PII)
@@ -2215,6 +2216,65 @@ class HistoryService:
         except Exception:
             logger.warning("purge_all_data: transcript directory deletion failed", exc_info=True)
             secondary_errors.append("transcripts")
+
+        # --- 1d. R1 (2026-07-24): rescue-аудио (недо-восстановленный spill) —
+        # голос пользователя. RecordingSpillWriter дублирует сырые фреймы
+        # активной записи в <data_dir>/rescue/ (crash-safety, см.
+        # recording_spill.py); .part-файлы, не успевшие восстановиться на
+        # предыдущем старте (recording_rescue.run_rescue_scan), а также сам
+        # финализированный .rescued.wav и .meta.json сайдкар — всё под этим
+        # каталогом. Полный обход (не только *.f32.part) страхует от будущих
+        # расширений формата.
+        rescue_deleted = 0
+        try:
+            rescue_dir = Path(self.store.data_dir) / "rescue"
+            if rescue_dir.is_dir():
+                for f in rescue_dir.iterdir():
+                    if f.is_file():
+                        f.unlink(missing_ok=True)
+                        rescue_deleted += 1
+        except Exception:
+            logger.warning("purge_all_data: rescue/ deletion failed", exc_info=True)
+            secondary_errors.append("rescue")
+
+        # --- 1e. R1 (2026-07-24): форензика некорректных завершений —
+        # хвосты unified log / launchctl print / собственных логов backend,
+        # собранные shutdown_forensics.check_and_collect() после SIGKILL/OOM.
+        # Хвосты логов и launchctl print могут содержать имена/пути, тесно
+        # связанные с активностью владельца; чистим вместе с остальными
+        # диагностическими артефактами.
+        try:
+            import shutil as _shutil
+            forensics_dir = Path(self.store.data_dir) / "forensics"
+            if forensics_dir.is_dir():
+                _shutil.rmtree(forensics_dir, ignore_errors=False)
+            # rmtree выше уже стирает форензику целиком — она живёт в
+            # forensics/<timestamp>/*.{txt,json}, динамический подкаталог,
+            # который статический guard audit_purge_coverage.py не умеет
+            # развернуть по рекурсивному rmtree. Явные литералы ниже —
+            # no-op сегодня (файлы на уровень глубже) и одновременно (а)
+            # страховка на случай будущей плоской раскладки, (б) явное
+            # перечисление каждого имени файла форензики для guard'а — тот
+            # же приём, что explicit glob-семейства transcripts/ выше.
+            (forensics_dir / "log_show.txt").unlink(missing_ok=True)
+            (forensics_dir / "launchctl_print.txt").unlink(missing_ok=True)
+            (forensics_dir / "own_logs_tail.txt").unlink(missing_ok=True)
+            (forensics_dir / "prev_shutdown_info.json").unlink(missing_ok=True)
+            (forensics_dir / "stale_marker.json").unlink(missing_ok=True)
+        except Exception:
+            logger.warning("purge_all_data: forensics/ deletion failed", exc_info=True)
+            secondary_errors.append("forensics")
+
+        # --- 1f. R1 (2026-07-24): dirty-маркер (не PII сам по себе — pid +
+        # монотоничный таймстамп текущей жизни, — но чистим заодно: ноль
+        # вреда, и живой маркер на выключенном backend не должен переживать
+        # wipe-all как артефакт).
+        try:
+            from backend.shutdown_forensics import _MARKER as _ALIVE_MARKER_FILE
+            (Path(self.store.data_dir) / _ALIVE_MARKER_FILE).unlink(missing_ok=True)
+        except Exception:
+            logger.warning("purge_all_data: runtime_alive.marker deletion failed", exc_info=True)
+            secondary_errors.append("runtime_alive_marker")
 
         # --- 2. W1771 GAP-3: БЕЗУСЛОВНАЯ очистка версий транскрипций (true wipe).
         # Раньше здесь был cleanup_for_ids(current_active_ids) — он стирал версии
@@ -2816,6 +2876,7 @@ class HistoryService:
                     "bookmarks_deleted": bookmarks_deleted,
                     "call_sessions_deleted": call_sessions_deleted,
                     "transcripts_deleted": transcripts_deleted,
+                    "rescue_deleted": rescue_deleted,
                     "obsidian_deleted": obsidian_deleted,
                     "secondary_errors": secondary_errors,
                 },
@@ -2834,6 +2895,7 @@ class HistoryService:
                 "bookmarks_deleted": bookmarks_deleted,
                 "call_sessions_deleted": call_sessions_deleted,
                 "transcripts_deleted": transcripts_deleted,
+                "rescue_deleted": rescue_deleted,
                 "obsidian_deleted": obsidian_deleted,
                 "semantic_purged": semantic_purged,
             },
@@ -2870,6 +2932,7 @@ class HistoryService:
             "bookmarks_deleted": bookmarks_deleted,
             "call_sessions_deleted": call_sessions_deleted,
             "transcripts_deleted": transcripts_deleted,
+            "rescue_deleted": rescue_deleted,
             "obsidian_deleted": obsidian_deleted,
             "semantic_purged": semantic_purged,
             "complete": len(secondary_errors) == 0,
