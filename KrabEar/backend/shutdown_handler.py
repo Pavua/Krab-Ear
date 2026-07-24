@@ -23,6 +23,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from backend.shutdown_forensics import _MARKER as _ALIVE_MARKER_FILE
+
 logger = logging.getLogger("KrabEar.Backend.ShutdownHandler")
 
 _SHUTDOWN_INFO_FILE = "shutdown_info.json"
@@ -514,6 +516,21 @@ class GracefulShutdownHandler:
             tmp_path.replace(path)
         except Exception:
             logger.warning("Не удалось сохранить shutdown_info.json", exc_info=True)
+            return
+
+        # R1 Task 6: маркер живой жизни удаляется ТОЛЬКО после доказанной
+        # записи shutdown_info.json выше — если запись провалилась (return
+        # в except-ветке уже произошёл), маркер обязан остаться, иначе
+        # следующий старт ошибочно сочтёт эту смерть graceful (форензика
+        # молча потеряется). Удаление — best-effort, ошибка не критична:
+        # худший случай — лишний (безвредный) сбор форензики в следующий раз.
+        try:
+            (self._data_dir / _ALIVE_MARKER_FILE).unlink(missing_ok=True)
+        except Exception:
+            logger.warning(
+                "Не удалось удалить runtime_alive.marker после graceful shutdown",
+                exc_info=True,
+            )
 
     # ------------------------------------------------------------------
     # Обработчик сигналов

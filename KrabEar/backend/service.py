@@ -1276,26 +1276,44 @@ class BackendService:
         # actually reach the ErrorBus and the Loud Errors UI toast.
         self._disk_monitor._error_bus = self._error_bus
 
-        # R1: восстановление незавершённых записей прошлой жизни процесса.
-        # Фоновый тред — старт IPC не ждёт (спека §4.2). Ошибка скана НЕ
-        # должна ронять старт backend — try/except с одним WARN.
+        # R1: единый тред старт-recovery (Task 6 амендмент к Task 4).
+        # Порядок ОБЯЗАТЕЛЕН: форензика прошлой жизни СНАЧАЛА (пока dirty-
+        # маркер ещё несёт улику предыдущей жизни процесса), маркер ТЕКУЩЕЙ
+        # жизни пишется ПОСЛЕ сбора (иначе свежий маркер затрёт улику ДО
+        # того, как check_and_collect успеет её прочитать), скан
+        # восстановления записей — последним. Фоновый тред — старт IPC не
+        # ждёт (спека §4.2/§4.3). check_and_collect/write_alive_marker/
+        # run_rescue_scan контрактно НИКОГДА не бросают сами по себе
+        # (fail-open с внутренним WARN); внешний try/except здесь страхует
+        # только сам импорт модулей и создание треда.
         try:
+            from backend.shutdown_forensics import check_and_collect, write_alive_marker
             from backend.recording_rescue import run_rescue_scan
-            _rescue_dir = Path(self.store.data_dir) / "rescue"
-            threading.Thread(
-                target=run_rescue_scan,
-                kwargs=dict(
+            _data_dir = Path(self.store.data_dir)
+            _rescue_dir = _data_dir / "rescue"
+            _own_log_dirs = [
+                PROJECT_ROOT / "logs" / "krab-ear-backend.out.log",
+                PROJECT_ROOT / "logs" / "krab-ear-backend.err.log",
+            ]
+
+            def _startup_recovery() -> None:
+                check_and_collect(data_dir=_data_dir, log_dirs=_own_log_dirs)
+                write_alive_marker(_data_dir)
+                run_rescue_scan(
                     rescue_dir=_rescue_dir,
                     recording_core=self._recording_core_svc,
                     error_bus=self._error_bus,
                     settings_get=self._get_runtime_setting,
                     collection_manager=self._collections,
-                ),
+                )
+
+            threading.Thread(
+                target=_startup_recovery,
                 daemon=True,
-                name="recording-rescue-scan",
+                name="startup-recovery",
             ).start()
         except Exception:
-            logger.warning("recording_rescue: старт скана провалился", exc_info=True)
+            logger.warning("startup-recovery: старт треда провалился", exc_info=True)
 
         # Обработчик корректного завершения (регистрация сигналов — через register())
         self._shutdown_handler = GracefulShutdownHandler(data_dir=self.store.data_dir)
