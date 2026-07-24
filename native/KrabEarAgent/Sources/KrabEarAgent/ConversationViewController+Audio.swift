@@ -190,6 +190,29 @@ extension ConversationViewController {
 
         let engine      = AVAudioEngine()
         let inputNode   = engine.inputNode
+
+        // 🔴 W1893: системная эхо-компенсация macOS (VPIO — тот же тракт, что у FaceTime).
+        // БЕЗ неё колонки играют TTS-ответ → микрофон слышит его → STT распознаёт эхо как
+        // речь пользователя → мозг отвечает на самого себя → бесконечная петля (живой
+        // инцидент 2026-07-24: 77 минут ассистент разговаривал сам с собой про погоду,
+        // сжигая облачную квоту, и не реагировал на владельца). Включать ОБЯЗАТЕЛЬНО до
+        // чтения inputFormat — VPIO меняет формат входа.
+        // Полудуплексный fail-safe ниже (см. isOwnPlaybackAudible) страхует случай, когда
+        // VPIO недоступен: барж-ин деградирует, но петля невозможна.
+        var echoCancellationActive = false
+        do {
+            try inputNode.setVoiceProcessingEnabled(true)
+            echoCancellationActive = true
+            // Выход — best-effort: вход уже несёт AEC, ради него всё и делается.
+            try? engine.outputNode.setVoiceProcessingEnabled(true)
+            AgentLogger.shared.info("[Audio] Эхо-компенсация (VPIO) включена")
+        } catch {
+            AgentLogger.shared.warn(
+                "[Audio] VPIO недоступен (\(error.localizedDescription)) — "
+                + "полудуплексный режим: uplink молчит на время своего TTS"
+            )
+        }
+
         let inputFormat = inputNode.outputFormat(forBus: 0)
 
         // Конвертер приводит аппаратную частоту микрофона к контракту текущего движка.
@@ -211,6 +234,8 @@ extension ConversationViewController {
         // Состояние публикуется только после успешной подготовки форматов. Иначе
         // следующий ready получил бы ложный активный RT-гейт без живого engine.
         audioHolder.captureSampleRate = sampleRate
+        audioHolder.echoCancellationActive = echoCancellationActive
+        audioHolder.playbackQueueEndsAt = .distantPast
         ConversationViewController._rtSessionActive = isSessionActive
         let generation = conversationGeneration
 
@@ -333,6 +358,7 @@ extension ConversationViewController {
         audioHolder.engine?.stop()
         audioHolder.engine = nil
         audioHolder.captureSampleRate = nil
+        audioHolder.playbackQueueEndsAt = .distantPast
         if resetSessionState {
             audioHolder.frameAssembler.reset()
             audioHolder.prebuffer.reset()
@@ -355,9 +381,35 @@ extension ConversationViewController {
         computeAndPushLevel(samples)
 
         guard isSessionActive, !samples.isEmpty else { return }
+
+        // W1893 fail-safe: без VPIO собственный TTS дошёл бы до микрофона и вернулся
+        // в VG как «речь пользователя» (петля самоэха). Здесь именно DROP, а не буфер:
+        // задержанное эхо, отправленное позже, обмануло бы VAD ровно так же.
+        if !audioHolder.echoCancellationActive, isOwnPlaybackAudible() { return }
+
         let frames = assembleUplinkFrames(samples, sourceSampleRate: sourceSampleRate)
         sendUplinkFrames(frames)
     }
+
+    /// Играет ли прямо сейчас (или доигрывает) собственный TTS-ответ.
+    ///
+    /// Модель очереди `AVAudioPlayerNode`: чанки приходят из сети быстрее реального
+    /// времени и копятся в узле, поэтому окно считается от КОНЦА уже запланированного
+    /// воспроизведения, а не от «сейчас». Хвост добавляется на реверберацию комнаты —
+    /// звук слышен микрофону ещё некоторое время после последнего сэмпла.
+    func isOwnPlaybackAudible() -> Bool {
+        Date() < audioHolder.playbackQueueEndsAt.addingTimeInterval(_echoGuardTailSeconds)
+    }
+
+    /// Тестовый доступ к флагу VPIO: живой AVAudioEngine в юнит-тестах не поднимается,
+    /// поэтому ветку fail-safe иначе не проверить.
+    var isEchoCancellationActive: Bool {
+        get { audioHolder.echoCancellationActive }
+        set { audioHolder.echoCancellationActive = newValue }
+    }
+
+    /// Дедлайн окна тишины — только для тестов (проверка кумулятивного продления).
+    var echoGuardDeadlineForTests: Date { audioHolder.playbackQueueEndsAt }
 
     /// Единственная точка кодирования Float32-фреймов в wire PCM16 LE.
     private func sendUplinkFrames(_ frames: [[Float]]) {
@@ -395,6 +447,15 @@ extension ConversationViewController {
             conversationState = .speaking
         }
 
+        // W1893: окно «свой TTS слышен» продлеваем ДО guard'а на player — сигналом
+        // служит сам факт прихода TTS от сервера, а не успешность локального узла.
+        // Отсчёт от конца уже запланированного (чанки приходят быстрее реального
+        // времени и копятся в очереди), но не раньше «сейчас» — иначе после паузы
+        // окно осталось бы в прошлом и не покрыло реальное воспроизведение.
+        let chunkSeconds = Double(frameCount) / fmt.sampleRate
+        audioHolder.playbackQueueEndsAt = max(Date(), audioHolder.playbackQueueEndsAt)
+            .addingTimeInterval(chunkSeconds)
+
         guard let player = audioHolder.playerNode else {
             AgentLogger.shared.info("[Audio] Downlink: player недоступен")
             return
@@ -420,6 +481,10 @@ extension ConversationViewController {
     /// не-запущенном engine (play() на attached-node у остановленного engine
     /// не вызывается — guard по isRunning).
     func flushDownlinkPlayback() {
+        // Окно тишины закрываем ДО guard'а на player: это состояние логики, а не узла.
+        // За guard'ом оно осталось бы открытым при отсутствующем плеере, и микрофон
+        // молчал бы ещё всю длину снятой очереди (поймано собственным тестом W1893).
+        audioHolder.playbackQueueEndsAt = .distantPast
         guard let player = audioHolder.playerNode else { return }
         player.stop()
         if audioHolder.engine?.isRunning == true {
@@ -434,6 +499,10 @@ extension ConversationViewController {
 /// Отдельный объект сохраняет одноразовое состояние без захвата изменяемой локальной
 /// переменной. `@unchecked Sendable` безопасен здесь: один экземпляр живёт внутри
 /// единственного синхронного вызова `convert` и не передаётся между очередями.
+/// Хвост окна тишины полудуплексного fail-safe (W1893): звук собственных колонок
+/// доходит до микрофона с реверберацией комнаты уже после последнего сэмпла.
+private let _echoGuardTailSeconds: TimeInterval = 0.35
+
 private final class SingleAudioBufferSupplier: @unchecked Sendable {
     private let buffer: AVAudioPCMBuffer
     private var wasSupplied = false
@@ -459,6 +528,11 @@ private final class AudioHolder: NSObject {
     var sampleRate = ConversationAudioContract.fallbackSampleRate
     var captureSampleRate: Double?
     var negotiationReady = false
+    /// W1893: удалось ли включить системную эхо-компенсацию (VPIO). false → работает
+    /// полудуплексный fail-safe (uplink молчит, пока слышен собственный TTS).
+    var echoCancellationActive = false
+    /// W1893: момент, когда доиграет уже запланированный downlink (модель очереди плеера).
+    var playbackQueueEndsAt = Date.distantPast
     var prebuffer = ConversationAudioPrebuffer(
         maxSampleCount: ConversationAudioContract.prebufferMaxSampleCount
     )
