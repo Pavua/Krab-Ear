@@ -1354,7 +1354,7 @@ def _privacy_gate(f):
 
 
 @v1_blp.route("/tts/synthesize", methods=["POST"])
-@limiter.limit("10 per minute")
+@limiter.limit("60 per minute")
 @_privacy_gate
 @require_api_key
 def synthesize_speech():
@@ -1402,7 +1402,7 @@ def synthesize_speech():
 
 @v1_blp.route("/stt/transcribe", methods=["POST"])
 @v1_blp.response(200, TranscribeResponseSchema)
-@limiter.limit("10 per minute")
+@limiter.limit("60 per minute")
 @_privacy_gate
 @require_api_key
 def transcribe_audio():
