@@ -740,6 +740,19 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "dedupe_seconds": 60,
     },
 
+    # ── R1 (2026-07-24): аудио записи восстановлено после смерти backend ─────
+    # recording_rescue.run_rescue_scan() пушит при находке .part-файла на старте.
+    # actionable=False: восстановление уже произошло автоматически; уведомление
+    # информирует (item появится в history / WAV лежит в rescue/ при privacy).
+    "audio.recording_rescued": {
+        "user_msg_ru": "Найдена незавершённая запись — аудио восстановлено после сбоя",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "warn",
+        "dedupe_seconds": 5,
+    },
+
     # ── W1231 F2 HIGH: two live callsites with unregistered codes ─────────────
 
     # rewriter.mlx_token_bug — mlx_lm 0.31.3 HTTP 500 UnboundLocalError on

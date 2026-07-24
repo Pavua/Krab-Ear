@@ -290,14 +290,17 @@ class RecordingCoreService:
         # R1: continuous spill — открыть writer ДО recorder.start(), чтобы
         # recorder-воркер сразу получил живой объект. Ошибки создания/открытия
         # НИКОГДА не роняют запись — fail-open (spill=None, один WARN).
+        # getattr: старые узкие тесты обходят __init__ через __new__ (см.
+        # _ensure_recording_lifecycle_state выше) и не знают про R1-поля.
         spill = None
-        if self._rescue_dir is not None and bool(
+        _rescue_dir = getattr(self, "_rescue_dir", None)
+        if _rescue_dir is not None and bool(
             _settings_pre.get("recording_spill_enabled", True)
         ):
             try:
                 from backend.recording_spill import RecordingSpillWriter
                 spill = RecordingSpillWriter(
-                    rescue_dir=self._rescue_dir,
+                    rescue_dir=_rescue_dir,
                     sample_rate=int(getattr(self.recorder, "sample_rate", 16000)),
                     channels=int(getattr(self.recorder, "channels", 1)),
                     source=str(params.get("source", "dictation")),
@@ -308,7 +311,20 @@ class RecordingCoreService:
                 logger.warning("RecordingSpill: не удалось создать writer — "
                                "запись продолжается без spill", exc_info=True)
                 spill = None
-        started = self.recorder.start(spill=spill)
+        try:
+            started = self.recorder.start(spill=spill)
+        except TypeError:
+            # R1 fail-open: recorder не поддерживает kwarg spill= (legacy/
+            # тестовый дубль, предшествующий Task 2) — запись НИКОГДА не
+            # должна упасть из-за спилла. Продолжаем без spill.
+            logger.warning(
+                "RecordingSpill: recorder.start() не принимает spill= — "
+                "запись продолжается без spill", exc_info=True,
+            )
+            if spill is not None:
+                spill.discard()
+                spill = None
+            started = self.recorder.start()
         if not started:
             if spill is not None:
                 spill.discard()  # запись не началась — файл-пустышка не нужен
@@ -490,7 +506,8 @@ class RecordingCoreService:
         # empty_audio — self._active_spill намеренно НЕ трогаем: recorder_timeout
         # означает, что воркер мог не завершить работу; в остальных случаях
         # writer уже пуст/закрыт и будет подобран следующим rescue-сканом.)
-        spill = self._active_spill
+        # getattr: старые узкие тесты, обходящие __init__, не знают про R1.
+        spill = getattr(self, "_active_spill", None)
         self._active_spill = None
 
         # Phase B: audio quality guards (silence + background)

@@ -1276,6 +1276,27 @@ class BackendService:
         # actually reach the ErrorBus and the Loud Errors UI toast.
         self._disk_monitor._error_bus = self._error_bus
 
+        # R1: восстановление незавершённых записей прошлой жизни процесса.
+        # Фоновый тред — старт IPC не ждёт (спека §4.2). Ошибка скана НЕ
+        # должна ронять старт backend — try/except с одним WARN.
+        try:
+            from backend.recording_rescue import run_rescue_scan
+            _rescue_dir = Path(self.store.data_dir) / "rescue"
+            threading.Thread(
+                target=run_rescue_scan,
+                kwargs=dict(
+                    rescue_dir=_rescue_dir,
+                    recording_core=self._recording_core_svc,
+                    error_bus=self._error_bus,
+                    settings_get=self._get_runtime_setting,
+                    collection_manager=self._collections,
+                ),
+                daemon=True,
+                name="recording-rescue-scan",
+            ).start()
+        except Exception:
+            logger.warning("recording_rescue: старт скана провалился", exc_info=True)
+
         # Обработчик корректного завершения (регистрация сигналов — через register())
         self._shutdown_handler = GracefulShutdownHandler(data_dir=self.store.data_dir)
 
