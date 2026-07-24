@@ -229,6 +229,50 @@ class RunRescueScanTest(unittest.TestCase):
         remaining = list(self.rescue_dir.glob("*.f32.part"))
         self.assertEqual(len(remaining), 1)
 
+    def test_parts_param_ignores_files_outside_frozen_snapshot(self):
+        """R1 HIGH-1 (adversarial-гейт целого диффа, 2026-07-24): при
+        переданном ``parts=`` скан обязан работать ТОЛЬКО с этим списком,
+        даже если в директории уже лежит ДРУГОЙ .f32.part-файл (симулирует
+        гонку — новая ЖИВАЯ запись, начатая, пока фоновый
+        startup-recovery-тред ещё был занят check_and_collect()). Живой файл
+        не должен быть тронут: не финализирован, не удалён, не
+        транскрибирован."""
+        old_part = _seed_part(self.rescue_dir, source="dictation")
+        # "Новая" запись появляется УЖЕ ПОСЛЕ заморозки снимка вызывающей
+        # стороной — вызывающая сторона передаёт список БЕЗ этого файла.
+        new_live_part = _seed_part(self.rescue_dir, source="meeting")
+        core = FakeRecordingCore()
+        result = run_rescue_scan(
+            rescue_dir=self.rescue_dir,
+            recording_core=core,
+            error_bus=FakeErrorBus(),
+            settings_get=_settings(),
+            collection_manager=FakeCollectionManager(),
+            parts=[old_part],
+        )
+        self.assertEqual(result, {"rescued": 1, "transcribed": 1, "kept_wavs": 0})
+        self.assertEqual(len(core.calls), 1)
+        # Старый файл обработан и удалён (обычное восстановление).
+        self.assertFalse(old_part.exists())
+        # Живой файл НЕ в снимке — обязан пережить скан нетронутым.
+        self.assertTrue(new_live_part.exists())
+
+    def test_parts_param_none_falls_back_to_live_glob(self):
+        """Обратная совместимость: без parts= — прежнее поведение (живой
+        glob под локом), используется прямыми вызовами/существующими
+        тестами этого файла."""
+        part = _seed_part(self.rescue_dir)
+        core = FakeRecordingCore()
+        result = run_rescue_scan(
+            rescue_dir=self.rescue_dir,
+            recording_core=core,
+            error_bus=FakeErrorBus(),
+            settings_get=_settings(),
+            collection_manager=FakeCollectionManager(),
+        )
+        self.assertEqual(result["rescued"], 1)
+        self.assertFalse(part.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

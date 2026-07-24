@@ -1295,6 +1295,24 @@ class BackendService:
                 PROJECT_ROOT / "logs" / "krab-ear-backend.out.log",
                 PROJECT_ROOT / "logs" / "krab-ear-backend.err.log",
             ]
+            # R1 HIGH-1 (adversarial-гейт целого диффа, 2026-07-24): снимок
+            # .part-кандидатов ЗАМОРАЖИВАЕТСЯ здесь — СИНХРОННО, ВНУТРИ
+            # __init__, ДО старта фонового треда. IPC-сокет конструируется
+            # только в main() ПОСЛЕ возврата из этого __init__ — значит на
+            # этой строке ни один клиент физически не мог вызвать
+            # start_recording, и любой .part в этом снимке гарантированно
+            # принадлежит ПРОШЛОЙ жизни процесса. Фоновый тред ниже может
+            # провести десятки секунд в check_and_collect() (subprocess-
+            # таймауты до ~60с на UNCLEAN-смерти) ДО того, как дойдёт до
+            # run_rescue_scan — не замораживать список значило бы отдать
+            # ему живой glob() уже ПОСЛЕ того, как IPC успел принять новую
+            # (легитимную) запись, и рескью-скан мог бы удалить её
+            # crash-safety файл как «восстановленный».
+            try:
+                _frozen_rescue_parts = sorted(_rescue_dir.glob("*.f32.part")) if _rescue_dir.is_dir() else []
+            except Exception:
+                logger.warning("startup-recovery: не удалось заморозить снимок rescue/", exc_info=True)
+                _frozen_rescue_parts = []
 
             def _startup_recovery() -> None:
                 check_and_collect(data_dir=_data_dir, log_dirs=_own_log_dirs)
@@ -1305,6 +1323,7 @@ class BackendService:
                     error_bus=self._error_bus,
                     settings_get=self._get_runtime_setting,
                     collection_manager=self._collections,
+                    parts=_frozen_rescue_parts,
                 )
 
             threading.Thread(

@@ -136,8 +136,23 @@ def run_rescue_scan(
     error_bus: Any,
     settings_get: Callable[[str, Any], Any],
     collection_manager: Any,
+    parts: "list[Path] | None" = None,
 ) -> dict[str, int]:
     """Найти и восстановить незавершённые записи прошлой жизни процесса.
+
+    ``parts`` — ЗАМОРОЖЕННЫЙ снимок кандидатов, сделанный вызывающей
+    стороной ДО старта фонового треда (см. ``service.py``). R1 HIGH-1
+    (adversarial-гейт целого диффа, 2026-07-24): без заморозки этот скан
+    выполняется в фоновом треде ПОСЛЕ ``shutdown_forensics.check_and_collect``
+    (до ~60с двух subprocess-таймаутов на UNCLEAN-смерти) — IPC-сокет к
+    этому моменту уже принимает клиентов (конструируется в main() СРАЗУ
+    после возврата из ``BackendService.__init__``, не дожидаясь этого
+    треда). Живой ``glob()`` в этом окне подобрал бы .part-файл НОВОЙ,
+    только что начатой записи (если владелец нажал хоткей сразу после
+    рестарта после сбоя) и удалил бы его как «восстановленный» —
+    crash-safety именно этой записи молча исчезает в момент, когда она
+    нужнее всего. При ``parts=None`` (обратная совместимость с прямыми
+    вызовами/тестами) — старое поведение, живой ``glob()`` внутри лока.
 
     Single-flight (module-level lock): конкурентный вызов немедленно
     возвращает нулевые счётчики — защита от шторма при быстрых рестартах.
@@ -150,14 +165,17 @@ def run_rescue_scan(
         return result
     try:
         rescue_dir = Path(rescue_dir)
-        if not rescue_dir.is_dir():
-            return result
-        try:
-            parts = sorted(rescue_dir.glob("*.f32.part"))[:_MAX_PER_PASS]
-        except Exception:
-            logger.exception("recording_rescue: не удалось перечислить %s", rescue_dir)
-            return result
-        for part_path in parts:
+        if parts is not None:
+            candidates = list(parts)[:_MAX_PER_PASS]
+        else:
+            if not rescue_dir.is_dir():
+                return result
+            try:
+                candidates = sorted(rescue_dir.glob("*.f32.part"))[:_MAX_PER_PASS]
+            except Exception:
+                logger.exception("recording_rescue: не удалось перечислить %s", rescue_dir)
+                return result
+        for part_path in candidates:
             try:
                 _process_one(part_path, recording_core, error_bus, settings_get, collection_manager, result)
             except Exception:
