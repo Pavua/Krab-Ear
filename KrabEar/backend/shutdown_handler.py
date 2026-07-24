@@ -536,18 +536,22 @@ class GracefulShutdownHandler:
     # Обработчик сигналов
     # ------------------------------------------------------------------
 
-    def _signal_handler(self, signum: int, frame: Any) -> None:
-        """Signal-safe запрос: teardown выполнит владелец обычного control-flow.
-
-        R1 (2026-07-24): дополнительно снимает форензический контекст — какой
-        сигнал пришёл, шла ли запись/встреча. Исполняется КАК SIGNAL CALLBACK ОС:
+    def _capture_signal_context(self, signum: int) -> None:
+        """Снять форензический контекст сигнала — какой сигнал пришёл, шла ли
+        запись/встреча (R1, 2026-07-24). Исполняется КАК SIGNAL CALLBACK ОС:
         никаких локов, I/O или логирования — только присваивания простых
         объектов через getattr(..., default) (инвариант F1/F5 приёмки #1891).
         recorder.is_recording — @property, берущее recorder._lock, поэтому
         читаем приватный recorder._is_recording НАПРЯМУЮ: racy read осознан
         (bool, CPython атомарное чтение) — это диагностика, не критичная логика.
+
+        Вынесено в отдельный метод (амендмент Task 8, найдено живым e2e-
+        смоком), потому что production НЕ регистрирует ``_signal_handler``
+        напрямую через ``signal.signal()`` — ``main()`` в service.py держит
+        СВОЙ локальный колбэк (единственный владелец OS-сигналов, см.
+        ``bind()`` докстринг) и зовёт этот метод явно, чтобы не дублировать
+        логику построения ``_signal_context`` в двух местах (sibling-drift).
         """
-        del frame
         service = self._service
         recorder = getattr(service, "recorder", None)
         meeting = getattr(service, "_meeting_svc", None)
@@ -556,6 +560,19 @@ class GracefulShutdownHandler:
             "recording_active": bool(getattr(recorder, "_is_recording", False)),
             "meeting_active": getattr(meeting, "_session", None) is not None,
         }
+
+    def _signal_handler(self, signum: int, frame: Any) -> None:
+        """Signal-safe запрос: teardown выполнит владелец обычного control-flow.
+
+        Используется legacy-путём ``register()`` (см. докстринг метода) и
+        напрямую в unit-тестах; production-путь (``main()`` в service.py,
+        владеющий ``signal.signal()``) зовёт ``_capture_signal_context()`` +
+        ``request_stop_from_signal()`` по отдельности (тот же эффект, без
+        дублирования тела метода).
+        """
+        del frame
+        self._capture_signal_context(signum)
+        service = self._service
         server = getattr(service, "_ipc_server", None)
         request_stop = getattr(server, "request_stop_from_signal", None)
         if callable(request_stop):

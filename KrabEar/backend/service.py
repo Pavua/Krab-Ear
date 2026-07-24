@@ -5256,8 +5256,22 @@ def main() -> None:
     service._shutdown_handler.bind(service)
 
     def _signal_handler(signum: int, frame: Any) -> None:
-        """Только попросить accept-loop выйти; teardown выполнит finally."""
-        del signum, frame
+        """Снять форензический контекст сигнала (R1 Task 5) и попросить
+        accept-loop выйти; полный teardown выполнит finally ниже.
+
+        R1 Task 8 амендмент (найдено живым e2e-смоком, 2026-07-24):
+        GracefulShutdownHandler._signal_handler САМ по себе НИКОГДА не
+        регистрируется как OS-обработчик сигнала в production — bind() (в
+        отличие от legacy register()) намеренно не трогает регистрацию
+        сигналов ОС, единственный владелец сигналов здесь. Без явного
+        вызова _capture_signal_context()
+        signal/recording_active/meeting_active в shutdown_info.json всегда
+        оставались бы дефолтными (None/False) на КАЖДОМ реальном сигнале —
+        unit-тесты этого не ловили, т.к. вызывали handler._signal_handler()
+        напрямую, в обход этой функции.
+        """
+        del frame
+        service._shutdown_handler._capture_signal_context(signum)
         server.request_stop_from_signal()
 
     signal.signal(signal.SIGINT, _signal_handler)
