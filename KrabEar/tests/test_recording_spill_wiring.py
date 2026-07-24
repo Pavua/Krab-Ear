@@ -231,17 +231,57 @@ class RecordingSpillWiringTest(unittest.TestCase):
         self.assertTrue(part_path.exists())
         self.assertIsNone(svc._active_spill)
 
-    def test_start_failure_discards_placeholder(self):
+    def test_start_failure_fresh_service_discards_placeholder(self):
+        """Свежий сервис без активной записи: start() не удался (recorder
+        сам сообщает "не готов", is_recording=False) — placeholder-файл
+        должен быть удалён, _active_spill остаётся None (нечего было
+        трогать)."""
         recorder = _FakeRecorder(start_ok=False)
         svc = _make_service(
             self._tmp, self.rescue_dir, recorder=recorder,
             settings_overrides={"recording_spill_enabled": True},
         )
         result = svc.handle_start_recording({})
-        self.assertIn(result["status"], ("already_recording", "recorder_stopping"))
-        # start() не удался — placeholder-файл не должен пережить вызов.
+        self.assertEqual(result["status"], "recorder_stopping")
         self.assertFalse(any(self.rescue_dir.glob("*.part")) if self.rescue_dir.exists() else False)
         self.assertIsNone(svc._active_spill)
+
+    def test_start_already_recording_preserves_active_spill(self):
+        """R1 HIGH-2 (adversarial-гейт 2026-07-24): PROMOTE-сценарий —
+        MeetingSessionService.handle_meeting_start зовёт
+        handle_start_recording({"source": "meeting"}) поверх уже идущей
+        диктовки. recorder.start() возвращает False (уже пишет),
+        recorder.is_recording=True → status="already_recording". Placeholder
+        spill B (только что созданный для этого вызова) должен быть
+        отброшен, НО _active_spill обязан по-прежнему указывать на ЖИВОЙ
+        writer A текущей диктовки — иначе handle_stop_recording не найдёт,
+        что discard()-нуть после успешного персиста, и файл A навсегда
+        останется в rescue/."""
+        recorder = _FakeRecorder(start_ok=False)
+        recorder.is_recording = True  # диктовка уже идёт
+        svc = _make_service(
+            self._tmp, self.rescue_dir, recorder=recorder,
+            settings_overrides={"recording_spill_enabled": True},
+        )
+        from backend.recording_spill import RecordingSpillWriter
+        live_writer = RecordingSpillWriter(
+            rescue_dir=self.rescue_dir, sample_rate=16000, channels=1,
+            source="dictation",
+        )
+        self.assertTrue(live_writer.open())
+        live_writer.append(np.zeros(1600, dtype=np.float32))
+        svc._active_spill = live_writer
+
+        result = svc.handle_start_recording({"source": "meeting"})
+
+        self.assertEqual(result["status"], "already_recording")
+        self.assertIs(svc._active_spill, live_writer)
+        self.assertTrue(live_writer.part_path.exists())
+        # placeholder B, созданный ВНУТРИ этого вызова для параметров
+        # "meeting", должен быть отброшен и не пережить вызов.
+        remaining_parts = set(self.rescue_dir.glob("*.f32.part"))
+        self.assertEqual(remaining_parts, {live_writer.part_path})
+        live_writer.discard()
 
 
 if __name__ == "__main__":

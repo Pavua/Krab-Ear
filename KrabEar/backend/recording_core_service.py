@@ -328,7 +328,19 @@ class RecordingCoreService:
         if not started:
             if spill is not None:
                 spill.discard()  # запись не началась — файл-пустышка не нужен
-            self._active_spill = None
+            # R1 HIGH-2 (adversarial-гейт целого диффа, 2026-07-24):
+            # НЕ трогать self._active_spill здесь. "not started" покрывает
+            # ДВА разных исхода: (а) свежий сервис без активной записи —
+            # _active_spill и так уже None, обнулять нечего; (б) PROMOTE
+            # (MeetingSessionService.handle_meeting_start зовёт
+            # handle_start_recording({"source": "meeting"}) поверх уже
+            # идущей диктовки — status="already_recording") — здесь
+            # _active_spill указывает на ЖИВОЙ writer текущей диктовки.
+            # Прежний безусловный `self._active_spill = None` стирал эту
+            # ссылку под чужой (живой) записью: handle_stop_recording
+            # больше не находил writer, чтобы discard() его после
+            # успешного персиста → файл диктовки навсегда оставался в
+            # rescue/ и дублировался следующим rescue-сканом.
             with self._preview_lock:
                 preview_text = self._preview_text
                 preview_duration = self._preview_duration_sec
