@@ -183,7 +183,11 @@ extension ConversationViewController {
     }
 
     /// Общий конструктор графа: до ready только input, после ready input + player.
-    private func startAudioEngine(captureSampleRate sampleRate: Double, enablePlayback: Bool) {
+    private func startAudioEngine(
+        captureSampleRate sampleRate: Double,
+        enablePlayback: Bool,
+        allowVoiceProcessing: Bool = true
+    ) {
         // Последняя линия защиты перед созданием AVAudioEngine и обращением к inputNode.
         guard runtimeOptions.capturesAudio else { return }
         guard audioHolder.engine == nil else { return }
@@ -200,17 +204,19 @@ extension ConversationViewController {
         // Полудуплексный fail-safe ниже (см. isOwnPlaybackAudible) страхует случай, когда
         // VPIO недоступен: барж-ин деградирует, но петля невозможна.
         var echoCancellationActive = false
-        do {
-            try inputNode.setVoiceProcessingEnabled(true)
-            echoCancellationActive = true
-            // Выход — best-effort: вход уже несёт AEC, ради него всё и делается.
-            try? engine.outputNode.setVoiceProcessingEnabled(true)
-            AgentLogger.shared.info("[Audio] Эхо-компенсация (VPIO) включена")
-        } catch {
-            AgentLogger.shared.warn(
-                "[Audio] VPIO недоступен (\(error.localizedDescription)) — "
-                + "полудуплексный режим: uplink молчит на время своего TTS"
-            )
+        if allowVoiceProcessing {
+            do {
+                try inputNode.setVoiceProcessingEnabled(true)
+                echoCancellationActive = true
+                // Выход — best-effort: вход уже несёт AEC, ради него всё и делается.
+                try? engine.outputNode.setVoiceProcessingEnabled(true)
+                AgentLogger.shared.info("[Audio] Эхо-компенсация (VPIO) включена")
+            } catch {
+                AgentLogger.shared.warn(
+                    "[Audio] VPIO недоступен (\(error.localizedDescription)) — "
+                    + "полудуплексный режим: uplink молчит на время своего TTS"
+                )
+            }
         }
 
         let inputFormat = inputNode.outputFormat(forBus: 0)
@@ -294,6 +300,18 @@ extension ConversationViewController {
                 AgentLogger.shared.info("[Audio] Cold-start prebuffer запущен: 16 кГц, сеть закрыта")
             } catch {
                 tearDownFailedAudioEngine(engine: engine, inputNode: inputNode, player: nil)
+                if echoCancellationActive {
+                    AgentLogger.shared.warn(
+                        "[Audio] Prebuffer не стартовал с VPIO (\(error.localizedDescription)) — "
+                        + "пересобираю без эхо-компенсации"
+                    )
+                    startAudioEngine(
+                        captureSampleRate: sampleRate,
+                        enablePlayback: enablePlayback,
+                        allowVoiceProcessing: false
+                    )
+                    return
+                }
                 AgentLogger.shared.error("[Audio] Ошибка запуска prebuffer: \(error.localizedDescription)")
             }
             return
@@ -311,11 +329,32 @@ extension ConversationViewController {
                 AgentLogger.shared.info("[Audio] Захват запущен только для uplink")
             } catch {
                 tearDownFailedAudioEngine(engine: engine, inputNode: inputNode, player: nil)
+                if echoCancellationActive {
+                    AgentLogger.shared.warn(
+                        "[Audio] Uplink-only не стартовал с VPIO (\(error.localizedDescription)) — "
+                        + "пересобираю без эхо-компенсации"
+                    )
+                    startAudioEngine(
+                        captureSampleRate: sampleRate,
+                        enablePlayback: enablePlayback,
+                        allowVoiceProcessing: false
+                    )
+                    return
+                }
                 AgentLogger.shared.error("[Audio] Ошибка запуска движка: \(error.localizedDescription)")
             }
             return
         }
 
+        // W1893: VPIO навязывает свой аппаратный формат выходному узлу, и связка
+        // mainMixer→output, унаследованная от не-VPIO конфигурации, перестаёт быть
+        // валидной (живое падение engine.start() с -10875 kAudioUnitErr_FormatNotSupported).
+        // Пересобираем её на РЕАЛЬНОМ формате выхода; связь player→mainMixer остаётся
+        // на контрактных 16 кГц — конвертацию делает сам микшер.
+        let hardwareOutputFormat = engine.outputNode.inputFormat(forBus: 0)
+        if hardwareOutputFormat.sampleRate > 0 && hardwareOutputFormat.channelCount > 0 {
+            engine.connect(engine.mainMixerNode, to: engine.outputNode, format: hardwareOutputFormat)
+        }
         engine.connect(player, to: engine.mainMixerNode, format: playbackFormat)
         audioHolder.playerNode = player
 
@@ -328,6 +367,22 @@ extension ConversationViewController {
             )
         } catch {
             tearDownFailedAudioEngine(engine: engine, inputNode: inputNode, player: player)
+            // 🔴 Откат: неудачный старт с VPIO НЕ должен оставлять пользователя вообще без
+            // микрофона (живая регрессия 2026-07-24 — «Слушает» без единого сэмпла).
+            // Пересобираем граф без эхо-компенсации: барж-ин деградирует до полудуплекса,
+            // но разговор работает, а петля самоэха закрыта окном тишины.
+            if echoCancellationActive {
+                AgentLogger.shared.warn(
+                    "[Audio] Движок не стартовал с VPIO (\(error.localizedDescription)) — "
+                    + "пересобираю без эхо-компенсации, полудуплексный fail-safe"
+                )
+                startAudioEngine(
+                    captureSampleRate: sampleRate,
+                    enablePlayback: enablePlayback,
+                    allowVoiceProcessing: false
+                )
+                return
+            }
             AgentLogger.shared.error("[Audio] Ошибка запуска движка: \(error.localizedDescription)")
         }
     }
