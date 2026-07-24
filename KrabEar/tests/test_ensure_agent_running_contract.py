@@ -22,6 +22,18 @@ launchd-раннере становилась ``<defunct>`` почти мгно�
 Обход: shell-скрипт вместо бинарной копии — текстовые скрипты с shebang не
 код-signed/не quarantine-чувствительны на macOS, `pgrep -f` видит путь к
 скрипту как аргумент интерпретатора точно так же.
+
+2026-07-24, третий раунд (ubuntu ``backend-tests``, GitHub-hosted): процесс
+жив и здоров (``ps -p`` подтвердил нормальный CMD), ``pgrep -fl`` РЕАЛЬНО
+нашёл его (``'11610 KrabEarAgent\\n'``) — но ассерт проверял наличие ПОЛНОГО
+ПУТИ к fake_agent в тексте вывода pgrep, а не факт совпадения PID. GNU
+procps ``pgrep -l`` печатает короткое имя процесса (``/proc/PID/comm``,
+базовое имя, без пути) — в отличие от BSD/macOS ``pgrep -l``, который
+включает более полную строку. Сам продовый скрипт (``ensure_agent_running.
+command:68-70``) НИКОГДА не проверяет содержимое строки — только считает
+непустые строки после фильтрации шума (``grep -c .``), так что реальное
+поведение кросс-платформенно корректно; баг был только в тестовом ассерте.
+Фикс: проверять PID в первом поле каждой строки вывода, а не путь-строку.
 """
 
 from __future__ import annotations
@@ -62,6 +74,7 @@ def test_pgrep_pattern_detects_running_agent(tmp_path: Path) -> None:
     try:
         deadline = time.monotonic() + 10.0
         found = ""
+        matched_pids: set[str] = set()
         while time.monotonic() < deadline:
             found = subprocess.run(
                 ["pgrep", "-fl", pattern],
@@ -69,23 +82,25 @@ def test_pgrep_pattern_detects_running_agent(tmp_path: Path) -> None:
                 text=True,
                 check=False,
             ).stdout
-            # Ищем ПУТЬ, а не PID: shebang-скрипт запускается как
-            # `/bin/sh <путь>` — PID процесса-обёртки sh не связан с
-            # proc.pid предсказуемо, а вот путь к самому скрипту всегда
-            # присутствует в argv как есть. Другие процессы на этой машине
-            # (в т.ч. реальный прод-агент того же приложения) могут ТОЖЕ
-            # матчить паттерн — это не ошибка, а корректное поведение
-            # реального pgrep -f на этой машине; проверяем СВОЙ конкретный
-            # tmp_path, не факт единственности совпадения.
-            if str(fake_agent) in found:
+            # Проверяем PID в первом поле строки, а не текст команды: GNU
+            # pgrep -l (Linux) печатает короткое /proc/PID/comm без пути,
+            # BSD pgrep -l (macOS) печатает более полную строку — формат
+            # display-вывода различается кросс-платформенно, но факт
+            # совпадения (наличие PID в списке) — нет. Именно на этом факте
+            # держится продовый скрипт (grep -c . после фильтрации шума),
+            # не на содержимом строки.
+            matched_pids = {
+                line.split()[0] for line in found.strip().splitlines() if line.split()
+            }
+            if str(proc.pid) in matched_pids:
                 break
             time.sleep(0.1)
 
-        if str(fake_agent) not in found:
+        if str(proc.pid) not in matched_pids:
             ps_sample = subprocess.run(
                 ["ps", "-p", str(proc.pid)], capture_output=True, text=True, check=False
             ).stdout
-        assert str(fake_agent) in found, (
+        assert str(proc.pid) in matched_pids, (
             "паттерн pgrep из ensure_agent_running.command не находит живой "
             f"процесс агента (pgrep на macOS — ERE, не BRE). Паттерн: {pattern!r}\n"
             f"pgrep stdout: {found!r}\nps -p {proc.pid}: {ps_sample!r}\n"
