@@ -847,3 +847,17 @@ Health-check `scripts/krab_ear_runner_health_check.py` + LaunchAgent
 `ai.krab.ear.runner-health` (15 мин, streak≥3). Живой смок: первый push после установки —
 раннер online, `busy=true` во время реального прогона (не queued на GitHub-hosted).
 Подробности и операционные команды — CLAUDE.md §Self-hosted CI runner.
+
+**Живая приёмка self-hosted раннера (2026-07-24) — итог**: 5 раундов CI на самом раннере
+поймали 4 реальных бага (не флейки), все закрыты, коммит `d1a1b580` — оба воркфлоу `CI`
+(macOS self-hosted) и `krab-ear-ci` (ubuntu GitHub-hosted) зелёные на одном SHA.
+1. MLX-watchdog timing race (2 раунда) — таймер убран, `Event.wait()` даёт запас 300-400мс.
+2. `test_ensure_agent_running_contract.py` round A (macOS self-hosted): копия `/bin/sleep`
+   под чужим именем становилась `<defunct>` на non-interactive launchd — обход shell-скриптом.
+3. `test_ensure_agent_running_contract.py` round B (ubuntu GitHub-hosted, НОВЫЙ баг): GNU
+   `pgrep -l` печатает короткое `/proc/PID/comm` без пути (BSD `pgrep -l` — полнее); ассерт
+   проверял путь-строку в выводе вместо факта PID-совпадения. Продовый скрипт багу не
+   подвержен (считает непустые строки, не парсит текст) — фикс только тестовый.
+Задача #25 закрыта целиком. Задача установки self-hosted раннера доказала свою ценность:
+все 4 находки — РЕАЛЬНЫЕ, вскрыты именно живым прогоном на реальном железе/окружении,
+которое раньше не тестировалось (GitHub-hosted macOS раннеры имели другую среду).
