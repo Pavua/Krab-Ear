@@ -962,3 +962,12 @@ Health-check `scripts/krab_ear_runner_health_check.py` + LaunchAgent
   (`diarize=false` рядом с существующим `persist_history=False` в
   `KrabEarPipelineEngine.transcribe_stream`). Живая верификация фикса разговора всё ещё ждёт
   голоса владельца — отдельный пункт, не блокирует эту волну.
+  **Задеплоено + измерено живьём (21:50)**: `kickstart -k ai.krab.ear.rest`, новый PID
+  подтверждён, `diarize=true/false` через реальный REST-запрос на synthetic-аудио
+  (`say -v Milena`, `persist_history=false`). На 10.1с клипе (ближе к реальному инциденту,
+  чем короткий) — `diarize=true`: 12701мс→3292мс (сильный разброс между прогонами);
+  `diarize=false`: 1102мс→1118мс (стабильно). Диапазон `diarize=true` почти совпадает с
+  живыми замерами инцидента (10062-10208мс→отмена) — не только медленнее, но и
+  непредсказуемее, что хуже для системы с фиксированным порогом гистерезиса. Числа
+  переданы в VG-сессию `send_message`; их часть (проброс `diarize` через
+  `orchestrate_stt`+freeze-resilience wrapper) — по их графику, не блокирует.
