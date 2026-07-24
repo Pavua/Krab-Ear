@@ -236,32 +236,48 @@ class TestShutdownInfoR1FieldsWithoutSignal(unittest.TestCase):
 
 
 class TestSignalHandlerSourceContract(unittest.TestCase):
-    """AST-разбор тела GracefulShutdownHandler._signal_handler.
+    """AST-разбор тел ВСЕХ методов, исполняемых как OS signal callback.
+
+    R1 Task 8 амендмент (2026-07-24): изначально эти проверки матчили только
+    ``_signal_handler``. Task 8 вынес чувствительное тело (снятие форензического
+    контекста без локов/I/O/логов) в отдельный ``_capture_signal_context`` —
+    ``_signal_handler`` теперь лишь ДЕЛЕГИРУЕТ ему вызов. AST-обход НЕ
+    спускается в тело вызываемого метода через узел ``Call`` — старые тесты,
+    матчившие только ``_signal_handler``, стали бы test-validates-the-hole
+    (проверяли пустую обёртку, а не реальный чувствительный код). Обе точки
+    входа реально исполняются как OS-колбэк: ``_signal_handler`` — legacy
+    путь ``register()`` (``signal.signal(..., self._signal_handler)``) и
+    прямые вызовы в unit-тестах; ``_capture_signal_context`` — прод-путь
+    (локальный колбэк в ``main()``, service.py, зовёт его явно). Проверяем ОБЕ.
 
     Substring-на-весь-исходник (как в test_shutdown_handler_wired_in_main.py
-    для функции внутри main()) здесь НЕ подходит: сам метод теперь несёт
-    докстринг, объясняющий ИМЕННО запрет на recorder.is_recording/locks/логи —
-    честная документация содержит эти слова как текст. AST матчит реальные
-    узлы (With/Call/Attribute), докстринг — просто Constant-строка и не
-    участвует в этих узлах.
+    для функции внутри main()) здесь НЕ подходит: методы несут докстринги,
+    объясняющие ИМЕННО запрет на recorder.is_recording/locks/логи — честная
+    документация содержит эти слова как текст. AST матчит реальные узлы
+    (With/Call/Attribute), докстринг — просто Constant-строка и не участвует
+    в этих узлах.
     """
 
-    @staticmethod
-    def _method_ast_node() -> ast.FunctionDef:
+    _SIGNAL_CALLBACK_METHODS = ("_signal_handler", "_capture_signal_context")
+
+    @classmethod
+    def _method_ast_node(cls, method_name: str) -> ast.FunctionDef:
         source = textwrap.dedent(inspect.getsource(GracefulShutdownHandler))
         tree = ast.parse(source)
         class_node = tree.body[0]
         assert isinstance(class_node, ast.ClassDef)
         for node in ast.walk(class_node):
-            if isinstance(node, ast.FunctionDef) and node.name == "_signal_handler":
+            if isinstance(node, ast.FunctionDef) and node.name == method_name:
                 return node
-        raise AssertionError("_signal_handler не найден в AST GracefulShutdownHandler")
+        raise AssertionError(f"{method_name} не найден в AST GracefulShutdownHandler")
 
     def test_no_with_statements(self):
         """Никаких context manager'ов (локов и т.п.) внутри signal callback."""
-        node = self._method_ast_node()
-        with_nodes = [n for n in ast.walk(node) if isinstance(n, (ast.With, ast.AsyncWith))]
-        self.assertEqual(with_nodes, [], "signal-safe метод не должен содержать `with`")
+        for method_name in self._SIGNAL_CALLBACK_METHODS:
+            with self.subTest(method=method_name):
+                node = self._method_ast_node(method_name)
+                with_nodes = [n for n in ast.walk(node) if isinstance(n, (ast.With, ast.AsyncWith))]
+                self.assertEqual(with_nodes, [], "signal-safe метод не должен содержать `with`")
 
     def test_no_is_recording_property_access(self):
         """Запрещён доступ к recorder.is_recording (property, берущее lock).
@@ -270,38 +286,44 @@ class TestSignalHandlerSourceContract(unittest.TestCase):
         читается напрямую, это НЕ ast.Attribute-узел с attr == "is_recording"
         (строка "_is_recording" — просто аргумент-константа вызова getattr).
         """
-        node = self._method_ast_node()
-        bad_attrs = [
-            n for n in ast.walk(node)
-            if isinstance(n, ast.Attribute) and n.attr == "is_recording"
-        ]
-        self.assertEqual(bad_attrs, [], "нельзя брать recorder.is_recording (лочит) в signal-safe коде")
+        for method_name in self._SIGNAL_CALLBACK_METHODS:
+            with self.subTest(method=method_name):
+                node = self._method_ast_node(method_name)
+                bad_attrs = [
+                    n for n in ast.walk(node)
+                    if isinstance(n, ast.Attribute) and n.attr == "is_recording"
+                ]
+                self.assertEqual(bad_attrs, [], "нельзя брать recorder.is_recording (лочит) в signal-safe коде")
 
     def test_no_logger_calls(self):
         """Никакого logging внутри signal callback (может блокировать на локе форматтера)."""
-        node = self._method_ast_node()
-        logger_calls = [
-            n for n in ast.walk(node)
-            if isinstance(n, ast.Attribute)
-            and isinstance(n.value, ast.Name)
-            and n.value.id == "logger"
-        ]
-        self.assertEqual(logger_calls, [], "signal-safe метод не должен звать logger.*")
+        for method_name in self._SIGNAL_CALLBACK_METHODS:
+            with self.subTest(method=method_name):
+                node = self._method_ast_node(method_name)
+                logger_calls = [
+                    n for n in ast.walk(node)
+                    if isinstance(n, ast.Attribute)
+                    and isinstance(n.value, ast.Name)
+                    and n.value.id == "logger"
+                ]
+                self.assertEqual(logger_calls, [], "signal-safe метод не должен звать logger.*")
 
     def test_no_file_io_or_json_calls(self):
         """Никакого I/O (open()) и сериализации (json.*) внутри signal callback."""
-        node = self._method_ast_node()
-        for n in ast.walk(node):
-            if isinstance(n, ast.Call):
-                func = n.func
-                if isinstance(func, ast.Name) and func.id == "open":
-                    self.fail("signal-safe метод не должен звать open()")
-                if (
-                    isinstance(func, ast.Attribute)
-                    and isinstance(func.value, ast.Name)
-                    and func.value.id == "json"
-                ):
-                    self.fail("signal-safe метод не должен звать json.*")
+        for method_name in self._SIGNAL_CALLBACK_METHODS:
+            with self.subTest(method=method_name):
+                node = self._method_ast_node(method_name)
+                for n in ast.walk(node):
+                    if isinstance(n, ast.Call):
+                        func = n.func
+                        if isinstance(func, ast.Name) and func.id == "open":
+                            self.fail(f"{method_name}: signal-safe метод не должен звать open()")
+                        if (
+                            isinstance(func, ast.Attribute)
+                            and isinstance(func.value, ast.Name)
+                            and func.value.id == "json"
+                        ):
+                            self.fail(f"{method_name}: signal-safe метод не должен звать json.*")
 
 
 if __name__ == "__main__":
