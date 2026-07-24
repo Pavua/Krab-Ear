@@ -86,7 +86,12 @@ class IPCRoundtripTestCase(unittest.TestCase):
     """Проверяет полный цикл JSON-RPC запрос→ответ через handle_request."""
 
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
+        # ignore_cleanup_errors=True: BackendService starts background threads
+        # (DiskSpaceMonitor и т.п.; R1 startup-recovery — только когда есть
+        # реальная работа) that may write to data dir after the test ends →
+        # OSError on cleanup in CI (established pattern, see BackendServiceTestCase
+        # in test_backend_service.py).
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.tmp.cleanup)
         store = StateStore(Path(self.tmp.name) / "data")
         self.service = BackendService(

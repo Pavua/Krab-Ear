@@ -136,6 +136,11 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             # wake-word _listen_loop wedged (thread alive, no frames, no
             # exception) and a soft reinit didn't fix it either.
             "audio.wakeword_wedged",
+            # Added R1 (2026-07-24) — recording_rescue.run_rescue_scan() пушит
+            # при находке .part-файла на старте после некорректного
+            # завершения backend (SIGKILL/crash/OOM); уведомляет, что аудио
+            # восстановлено (или лежит WAV-ом при privacy_mode).
+            "audio.recording_rescued",
         }
         self.assertEqual(set(ERROR_REGISTRY.keys()), expected)
 
@@ -233,7 +238,8 @@ class ErrorRegistryShapeTests(unittest.TestCase):
         crypto-audit (2026-06-20) added history.encrypt_fail = 60;
         2026-07-12 mic-watchdog self-heal added audio.stack_wedged = 61;
         2026-07-15 wake-word watchdog added audio.wakeword_wedged = 62;
+        R1 (2026-07-24) recording-reliability wave added audio.recording_rescued = 63;
         test_expected_codes_present guards the exact set so this count test is a
         redundant but cheap invariant.
         """
-        self.assertEqual(len(ERROR_REGISTRY), 62)
+        self.assertEqual(len(ERROR_REGISTRY), 63)

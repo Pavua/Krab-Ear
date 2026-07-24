@@ -1287,6 +1287,7 @@ class BackendService:
         # (fail-open с внутренним WARN); внешний try/except здесь страхует
         # только сам импорт модулей и создание треда.
         try:
+            from backend.shutdown_forensics import _MARKER as _ALIVE_MARKER_FILE
             from backend.shutdown_forensics import check_and_collect, write_alive_marker
             from backend.recording_rescue import run_rescue_scan
             _data_dir = Path(self.store.data_dir)
@@ -1314,23 +1315,54 @@ class BackendService:
                 logger.warning("startup-recovery: не удалось заморозить снимок rescue/", exc_info=True)
                 _frozen_rescue_parts = []
 
-            def _startup_recovery() -> None:
-                check_and_collect(data_dir=_data_dir, log_dirs=_own_log_dirs)
-                write_alive_marker(_data_dir)
-                run_rescue_scan(
-                    rescue_dir=_rescue_dir,
-                    recording_core=self._recording_core_svc,
-                    error_bus=self._error_bus,
-                    settings_get=self._get_runtime_setting,
-                    collection_manager=self._collections,
-                    parts=_frozen_rescue_parts,
-                )
+            # Ubuntu-CI амендмент (2026-07-24, найдено красным CI после
+            # adversarial-гейта): голый фоновый daemon-тред, стартующий
+            # РЕАЛЬНОЕ дисковое I/O (write_alive_marker создаёт data_dir/
+            # маркер немедленно) сразу при КАЖДОМ конструировании
+            # BackendService — а таких конструирований в тест-сьюте сотни,
+            # почти все на свежих tempfile.TemporaryDirectory(). Даже
+            # микросекундная гонка thread-write vs test tearDown's rmtree
+            # даёт `OSError: Directory not empty` под нагрузкой CI-раннера
+            # (3 файла упали в чанк-прогоне: test_error_codes.py — отдельная
+            # причина, registry-count; test_ipc_dispatch_integration.py/
+            # test_ipc_roundtrip.py — ИМЕННО эта гонка). Корневая причина:
+            # тред спавнится БЕЗУСЛОВНО, хотя в подавляющем большинстве
+            # случаев (чистый старт: маркера нет, rescue/ пуст) ему нечего
+            # делать — check_and_collect() сам вернул бы "first_run"/"clean"
+            # мгновенно, без единого subprocess-вызова. Фикс: дешёвая
+            # синхронная проверка "есть ли реальная работа" ДО решения
+            # спавнить тред. Если маркера нет И нет замороженных .part —
+            # тред НЕ нужен вообще; маркер текущей жизни пишем синхронно
+            # (одна короткая запись файла, уже совершённая до возврата из
+            # __init__ — с тестом больше нечему racing). Тред спавнится
+            # ТОЛЬКО когда есть реальная (потенциально медленная) работа:
+            # либо UNCLEAN-маркер прошлой жизни (форензика), либо
+            # незавершённые записи (rescue-скан с возможной транскрипцией).
+            _had_dirty_marker = (_data_dir / _ALIVE_MARKER_FILE).exists()
+            _needs_background_recovery = _had_dirty_marker or bool(_frozen_rescue_parts)
 
-            threading.Thread(
-                target=_startup_recovery,
-                daemon=True,
-                name="startup-recovery",
-            ).start()
+            if _needs_background_recovery:
+                def _startup_recovery() -> None:
+                    check_and_collect(data_dir=_data_dir, log_dirs=_own_log_dirs)
+                    write_alive_marker(_data_dir)
+                    run_rescue_scan(
+                        rescue_dir=_rescue_dir,
+                        recording_core=self._recording_core_svc,
+                        error_bus=self._error_bus,
+                        settings_get=self._get_runtime_setting,
+                        collection_manager=self._collections,
+                        parts=_frozen_rescue_parts,
+                    )
+
+                threading.Thread(
+                    target=_startup_recovery,
+                    daemon=True,
+                    name="startup-recovery",
+                ).start()
+            else:
+                # Чистый старт: нечего восстанавливать/собирать — пишем
+                # маркер ТЕКУЩЕЙ жизни синхронно (быстро, без потока).
+                write_alive_marker(_data_dir)
         except Exception:
             logger.warning("startup-recovery: старт треда провалился", exc_info=True)
 

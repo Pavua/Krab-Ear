@@ -118,7 +118,13 @@ class _IPCBase(unittest.TestCase):
     """Common setUp + helper for all IPC integration scenarios."""
 
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
+        # ignore_cleanup_errors=True: BackendService starts background threads
+        # (DiskSpaceMonitor и т.п.; R1 startup-recovery — только когда есть
+        # реальная работа) that may write to data dir after the test ends →
+        # OSError on cleanup in CI (established pattern, see BackendServiceTestCase
+        # in test_backend_service.py). Особенно актуально здесь: этот класс
+        # конструирует ВТОРОЙ BackendService на том же data_dir (reload-тесты).
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.tmp.cleanup)
         self.data_dir = Path(self.tmp.name) / "data"
         self.store = StateStore(self.data_dir)
