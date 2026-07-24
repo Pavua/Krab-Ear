@@ -186,7 +186,7 @@ extension ConversationViewController {
     private func startAudioEngine(
         captureSampleRate sampleRate: Double,
         enablePlayback: Bool,
-        allowVoiceProcessing: Bool = true
+        allowVoiceProcessing: Bool = _voiceProcessingDefaultEnabled
     ) {
         // Последняя линия защиты перед созданием AVAudioEngine и обращением к inputNode.
         guard runtimeOptions.capturesAudio else { return }
@@ -557,6 +557,25 @@ extension ConversationViewController {
 /// Хвост окна тишины полудуплексного fail-safe (W1893): звук собственных колонок
 /// доходит до микрофона с реверберацией комнаты уже после последнего сэмпла.
 private let _echoGuardTailSeconds: TimeInterval = 0.35
+
+/// 🔴 W1893: системная эхо-компенсация (VPIO) ВЫКЛЮЧЕНА по умолчанию.
+///
+/// Архитектурно она — правильный ответ на петлю самоэха (снимает эхо на уровне ОС и
+/// СОХРАНЯЕТ барж-ин), но два живых прогона 2026-07-24 показали, что включение ломает
+/// аудио-тракт на этой машине двумя разными способами подряд:
+///   1) `engine.start()` падал с -10875 (kAudioUnitErr_FormatNotSupported) — закрыто
+///      явной пересборкой mainMixer→output на аппаратном формате;
+///   2) после этого движок стартовал («Контракт активен»), но тап переставал отдавать
+///      кадры — индикатор уровня стоял мёртвым, ни одного сэмпла в uplink.
+/// Причина (2) не найдена: вероятнее всего VPIO переопределяет формат входа уже ПОСЛЕ
+/// старта, и тап, установленный на формате, прочитанном до старта, замолкает.
+///
+/// До тех пор, пока это не отлажено на стенде (а не вживую на владельце), петлю
+/// самоэха держит полудуплексное окно тишины — детерминированное и покрытое тестами.
+/// Цена: барж-ин (перебить ассистента голосом) не работает, пока он говорит.
+/// Направление отказа выбрано осознанно: «разговор работает, перебивание — нет» лучше,
+/// чем «ассистент говорит сам с собой» или «микрофон молча мёртв».
+private let _voiceProcessingDefaultEnabled = false
 
 private final class SingleAudioBufferSupplier: @unchecked Sendable {
     private let buffer: AVAudioPCMBuffer
