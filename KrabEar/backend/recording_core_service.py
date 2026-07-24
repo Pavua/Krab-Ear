@@ -107,6 +107,7 @@ class RecordingCoreService:
         transcription_counter_ref: list,  # [int] mutable box so BackendService sees updates
         last_stt_engine_ref: list,        # [str|None] mutable box
         auto_deduplicator: "AutoDeduplicator | None" = None,
+        rescue_dir: "Path | None" = None,
     ) -> None:
         self.recorder = recorder
         self.transcriber = transcriber
@@ -125,6 +126,11 @@ class RecordingCoreService:
         self._transcription_counter_ref = transcription_counter_ref
         self._last_stt_engine_ref = last_stt_engine_ref
         self._auto_deduplicator = auto_deduplicator
+        # R1: каталог continuous-spill (<data_dir>/rescue/). None → spill выключен
+        # безусловно (напр. старые тесты, не знающие про R1). Доступ только под
+        # _recording_lifecycle_lock (start и phase_a уже живут под ним).
+        self._rescue_dir = rescue_dir
+        self._active_spill: Any = None
 
         # Wired by BackendService after init (same pattern as llm_rewriter._error_bus).
         self._error_bus: Any = None
@@ -281,8 +287,32 @@ class RecordingCoreService:
                     _selected_device,
                     _dev_err,
                 )
-        started = self.recorder.start()
+        # R1: continuous spill — открыть writer ДО recorder.start(), чтобы
+        # recorder-воркер сразу получил живой объект. Ошибки создания/открытия
+        # НИКОГДА не роняют запись — fail-open (spill=None, один WARN).
+        spill = None
+        if self._rescue_dir is not None and bool(
+            _settings_pre.get("recording_spill_enabled", True)
+        ):
+            try:
+                from backend.recording_spill import RecordingSpillWriter
+                spill = RecordingSpillWriter(
+                    rescue_dir=self._rescue_dir,
+                    sample_rate=int(getattr(self.recorder, "sample_rate", 16000)),
+                    channels=int(getattr(self.recorder, "channels", 1)),
+                    source=str(params.get("source", "dictation")),
+                )
+                if not spill.open():
+                    spill = None
+            except Exception:
+                logger.warning("RecordingSpill: не удалось создать writer — "
+                               "запись продолжается без spill", exc_info=True)
+                spill = None
+        started = self.recorder.start(spill=spill)
         if not started:
+            if spill is not None:
+                spill.discard()  # запись не началась — файл-пустышка не нужен
+            self._active_spill = None
             with self._preview_lock:
                 preview_text = self._preview_text
                 preview_duration = self._preview_duration_sec
@@ -298,6 +328,7 @@ class RecordingCoreService:
                 "duration_sec": preview_duration,
                 "preview_text": preview_text,
             }
+        self._active_spill = spill
         self._reset_preview_state()
         settings = self._settings_svc.cached_settings()
         # LM Studio brain unload: освобождаем ~19 GB unified memory под Whisper+pyannote.
@@ -454,6 +485,14 @@ class RecordingCoreService:
         _bookmark_session_id = phase_a["bookmark_session_id"]
         sr = phase_a["sr"]
 
+        # R1: спилл принадлежит завершившейся записи; новый start создаст свой.
+        # (При early_return самой phase_a — recorder_timeout/already_stopped/
+        # empty_audio — self._active_spill намеренно НЕ трогаем: recorder_timeout
+        # означает, что воркер мог не завершить работу; в остальных случаях
+        # writer уже пуст/закрыт и будет подобран следующим rescue-сканом.)
+        spill = self._active_spill
+        self._active_spill = None
+
         # Phase B: audio quality guards (silence + background)
         phase_b = self._stop_recording_phase_b(audio, duration_sec, stop_tail_trim_ms, sr)
         if "early_return" in phase_b:
@@ -464,6 +503,9 @@ class RecordingCoreService:
             # silence_detected branch of _build_empty_audio_response does.
             if self._audio_selfheal is not None and phase_b["early_return"].get("silence_detected"):
                 self._audio_selfheal.record_empty_result()
+            # R1: тишина/фоновая речь — записи в history не будет, файл не нужен.
+            if spill is not None:
+                spill.discard()
             return phase_b["early_return"]
 
         silence_detected = phase_b["silence_detected"]
@@ -472,6 +514,11 @@ class RecordingCoreService:
         # Phase C: STT execution
         phase_c = self._stop_recording_phase_c(audio, duration_sec, sr)
         if "early_return" in phase_c:
+            # R1: STT упал — спилл ОСТАВИТЬ (восстановление на следующем старте
+            # вернёт аудио, которое сейчас потеряно). close() уже сделан
+            # recorder.stop() внутри phase_a — повторный вызов безопасен.
+            if spill is not None:
+                spill.close()
             return phase_c["early_return"]
         transcribe_payload = phase_c["transcribe_payload"]
 
@@ -491,6 +538,9 @@ class RecordingCoreService:
             # miss a noise floor that still confuses Whisper into silence).
             if self._audio_selfheal is not None:
                 self._audio_selfheal.record_empty_result()
+            # R1: пустой текст — та же логика, что STT-провал: оставить.
+            if spill is not None:
+                spill.close()
             return phase_d["early_return"]
 
         # A real, non-empty transcript came back — audio pipeline just proved
@@ -499,7 +549,7 @@ class RecordingCoreService:
             self._audio_selfheal.record_success()
 
         # Phase E: history persistence + response assembly
-        return self._stop_recording_phase_e(
+        resp = self._stop_recording_phase_e(
             phase_d=phase_d,
             sr=sr,
             duration_sec=duration_sec,
@@ -511,6 +561,12 @@ class RecordingCoreService:
             bookmark_session_id=_bookmark_session_id,
             settings=settings,
         )
+        if spill is not None:
+            if resp.get("history_id") or resp.get("skipped") == "duplicate":
+                spill.discard()
+            # иначе (persist_failed и т.п.): оставить для восстановления —
+            # персист не состоялся, аудио ещё нигде не сохранено.
+        return resp
 
     def pause_realtime_partials(self) -> None:
         """Пауза партиалов на время тяжёлой операции meeting-слота (C2a).

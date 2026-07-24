@@ -211,7 +211,7 @@ class MeetingSessionService:
 
         session: _MeetingSession | None = None
         try:
-            start_resp = self._recording_core.handle_start_recording({})
+            start_resp = self._recording_core.handle_start_recording({"source": "meeting"})
             promoted = start_resp.get("status") == "already_recording"
 
             speakers_enabled = bool(self._settings_get(

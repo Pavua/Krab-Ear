@@ -1044,6 +1044,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # No data leaves the machine (LM Studio at 127.0.0.1 is still allowed).
     # Default False: opt-in by user.
     "privacy_mode_enabled": False,
+    # --- R1: continuous spill записи (crash-safety) ---
+    # Во время записи сырые фреймы дублируются на диск (<data_dir>/rescue/);
+    # при смерти backend аудио восстанавливается на следующем старте.
+    "recording_spill_enabled": True,
     # --- Scored STT adapter selection (D.2.3) ---
     # "auto_scored" = score function (language match + speed + quality + duration penalty).
     # "legacy"      = прежний порядок adapter chain из AudioEngine.

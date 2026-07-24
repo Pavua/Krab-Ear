@@ -31,7 +31,9 @@ class _FakeRecorder:
     is_recording = False
     sample_rate = 16000
 
-    def start(self) -> bool:
+    def start(self, spill=None) -> bool:
+        # R1: RecordingCoreService always calls start(spill=...); these fakes
+        # don't own spill lifecycle (that's RecordingCoreService._active_spill).
         if self.is_recording:
             return False
         self.is_recording = True
@@ -442,10 +444,10 @@ class TestRecordingLifecycleGate(unittest.TestCase):
         release = threading.Event()
 
         class _BlockingRecorder(_FakeRecorder):
-            def start(self) -> bool:
+            def start(self, spill=None) -> bool:
                 entered.set()
                 release.wait(timeout=2.0)
-                return super().start()
+                return super().start(spill=spill)
 
         recorder = _BlockingRecorder()
         svc = _make_service(self._tmp, recorder=recorder)
@@ -502,11 +504,11 @@ class TestRecordingLifecycleGate(unittest.TestCase):
                 self.start_calls = 0
                 self.stop_calls = 0
 
-            def start(self) -> bool:
+            def start(self, spill=None) -> bool:
                 self.start_calls += 1
                 entered.set()
                 release.wait()
-                return super().start()
+                return super().start(spill=spill)
 
             def stop(self, timeout_sec=3.0, trim_tail_ms=0):
                 self.stop_calls += 1

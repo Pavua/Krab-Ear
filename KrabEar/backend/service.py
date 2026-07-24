@@ -1126,6 +1126,7 @@ class BackendService:
             transcription_counter_ref=self._transcription_counter_ref,
             last_stt_engine_ref=self._last_stt_engine_ref,
             auto_deduplicator=self._auto_deduplicator,
+            rescue_dir=Path(self.store.data_dir) / "rescue",
         )
         # W1776: late-inject _bookmarks so phase_e can rebind live-recording bookmarks.
         # _bookmarks is created earlier in __init__ (line ~396).
