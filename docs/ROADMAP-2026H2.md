@@ -926,3 +926,39 @@ Health-check `scripts/krab_ear_runner_health_check.py` + LaunchAgent
   `_SENSITIVE_FIELDS` (специально для агента, live-подтверждено настроенным в проде);
   `hf_token` в `ErrorActionHandler.swift` — только имя side-effect действия, не значение.
   **Вывод: систематической проблемы нет, W1892 закрыт полностью, не часть более широкого паттерна.**
+
+- **2026-07-24 (21:00-21:40) — W1897: построчный гейт PR #130 VG (barge-hysteresis) нашёл, что
+  «fast»-половина фикса — мёртвый параметр, реальный источник латентности — незнятая диаризация.**
+  После ~12ч перерыва (сессия ждала живого голоса владельца) провёл ревью РЕАЛЬНОГО диффа коммита
+  5fe2ec2 в Krab Voice Gateway, прежде чем владелец повторит живой тест. Гистерезис барж-ина
+  (`_pending_barge`, порог 300мс, оба `clear()` на границах хода) прочитан построчно — багов не
+  нашёл, `_is_speech` уже RMS-гейтит (`conv_speech_rms=500`), так что распределённый по времени
+  шум не может накопиться до порога (только настоящая речь). Но у ВТОРОЙ половины фикса
+  (`quality_profile="fast"` для снижения ~10с STT-латентности) нашёл ДВА реальных факта, оба
+  подтверждены чтением кода Krab Ear, не гипотеза: (1) `AudioEngine.set_quality_profile()`
+  (`core/engine.py`) распознаёт ТОЛЬКО `{"balanced","max"}` — "fast" (и "accurate") молча
+  коэрсится в "balanced"; ДО PR #130 `KrabEarSTTEngine.transcribe` тоже жёстко слал "balanced"
+  литералом — то есть до и после фикса Krab Ear выбирает РОВНО ТУ ЖЕ модель
+  (`MODEL_BALANCED = whisper-large-v3-turbo`, уже turbo). "fast" синтаксически доходит, но
+  функционально ничего не меняет. (2) `rest_server.py::/v1/stt/transcribe` вообще НЕ читал
+  form-поле `diarize` — `Transcriber.transcribe` получал `diarize=None` → падает на
+  `settings.DIARIZATION_ENABLED` (`True` и в статическом Pydantic-дефолте, и в живом
+  `settings.json`) — pyannote-диаризация реально гоняется на КАЖДОМ ходе разговора, без единого
+  способа отключить. Это куда более вероятный источник ~10с, чем выбор модели.
+  **Фикс (Krab Ear, коммит 821f4bf0, ветка `claude/krab-ear-c3b-scratchpad-d7e2df`)**: добавлен
+  `diarize` bool form-параметр на `/v1/stt/transcribe` по прецеденту существующего
+  `persist_history` (omitted → `None`, поведение остальных вызывающих не меняется). TDD (4 новых
+  теста + `test_persist_history`-паттерн), ubuntu-parity, flake8, весь `make audit-all` — все
+  зелёные. Докстринг `transcribe_audio()` исправлен (раньше вводил в заблуждение про
+  `quality_profile=fast`). **Урок процесса**: по пути СЛУЧАЙНО отредактировал 2 файла в ОБЩЕМ
+  главном чекауте (`/Users/pablito/Antigravity_AGENTS/Krab Ear`, а не в своём worktree) —
+  `cd`-префикс команд для grep/тестов незаметно тащил за собой и Edit-вызовы. Обнаружил ДО
+  коммита через `git branch --show-current` (стандартная привычка), нашёл там же чужой
+  устаревший WIP (`telegram_bridge.py` + `wake_word_models/hard_negatives_raw/`, датированы
+  07-20, явно не текущая сессия — не трогал), откатил СВОИ 2 файла точечно (`git checkout --`),
+  fast-forward подтянул отставший worktree (`abe2018a`→`1223390f`, безопасный предок) и
+  переприменил фикс уже в правильном месте. Кросс-сессионный брифинг отправлен в сессию VG
+  (`local_72e663af...`, `send_message`) с обоими находками + инструкцией, что заменить у себя
+  (`diarize=false` рядом с существующим `persist_history=False` в
+  `KrabEarPipelineEngine.transcribe_stream`). Живая верификация фикса разговора всё ещё ждёт
+  голоса владельца — отдельный пункт, не блокирует эту волну.
