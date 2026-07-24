@@ -914,3 +914,15 @@ Health-check `scripts/krab_ear_runner_health_check.py` + LaunchAgent
   переживать конкуренцию за CPU с параллельной разработкой того же владельца на той
   же машине. Пока не системно — один инцидент, не трогаю бюджет теста без повторных
   случаев.
+
+- **2026-07-24 (07:00) — системная проверка багокласса W1892 на все 16 sensitive-полей: НЕГАТИВНЫЙ результат (ценно)**.
+  После фикса `voice_gateway_api_key` проверил все `_SENSITIVE_FIELDS` (`settings_backup.py`) на тот
+  же паттерн («Swift читает поле из `get_settings` для СВОЕГО исходящего вызова, получает
+  REDACTED»). `voice_gateway_api_key` — единственный реальный экземпляр. Остальные 15 безопасны:
+  telnyx/twilio-ключи в `CallAutomationController.swift` используются ТОЛЬКО как `!key.isEmpty`
+  для статус-точки (реальные звонки делает Python); openai/anthropic/cloud_rewriter-ключи —
+  только `patchKey` в write-направлении (`set_settings`), не читаются для вызова; `sentry_dsn`
+  уже архитектурно решён отдельным `sentry_dsn_agent`, намеренно НЕ входящим в
+  `_SENSITIVE_FIELDS` (специально для агента, live-подтверждено настроенным в проде);
+  `hf_token` в `ErrorActionHandler.swift` — только имя side-effect действия, не значение.
+  **Вывод: систематической проблемы нет, W1892 закрыт полностью, не часть более широкого паттерна.**
