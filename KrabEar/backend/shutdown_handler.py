@@ -63,6 +63,11 @@ class GracefulShutdownHandler:
         self._shutdown_owner_thread_id: int | None = None
         self._safe_to_close_service = False
 
+        # R1 (2026-07-24): момент старта процесса для uptime_sec в shutdown_info.json;
+        # снимок сигнального контекста, который заполняет только _signal_handler().
+        self._started_monotonic = time.monotonic()
+        self._signal_context: dict[str, Any] | None = None
+
         # Метаданные последнего завершения — сохраняются в файл
         self._last_shutdown_time: str | None = None
         self._last_shutdown_clean: bool | None = None
@@ -484,6 +489,22 @@ class GracefulShutdownHandler:
             "elapsed_ms": elapsed_ms,
             "errors": errors,
         }
+        # R1 (2026-07-24): аддитивные поля форензики — какой сигнал пришёл, сколько
+        # процесс прожил, шла ли запись/встреча в момент сигнала. Существующие
+        # читатели shutdown_info.json не ломаются (новые ключи, старые не тронуты).
+        ctx = self._signal_context or {}
+        sig_num = ctx.get("signal")
+        try:
+            sig_name = signal.Signals(sig_num).name if sig_num is not None else None
+        except ValueError:
+            sig_name = str(sig_num)
+        payload.update({
+            "signal": sig_name,
+            "uptime_sec": round(time.monotonic() - self._started_monotonic, 1),
+            "recording_active": bool(ctx.get("recording_active", False)),
+            "meeting_active": bool(ctx.get("meeting_active", False)),
+            "pid": os.getpid(),
+        })
         tmp_path = path.with_suffix(".json.tmp")
         try:
             tmp_path.write_text(
@@ -499,9 +520,25 @@ class GracefulShutdownHandler:
     # ------------------------------------------------------------------
 
     def _signal_handler(self, signum: int, frame: Any) -> None:
-        """Signal-safe запрос: teardown выполнит владелец обычного control-flow."""
-        del signum, frame
+        """Signal-safe запрос: teardown выполнит владелец обычного control-flow.
+
+        R1 (2026-07-24): дополнительно снимает форензический контекст — какой
+        сигнал пришёл, шла ли запись/встреча. Исполняется КАК SIGNAL CALLBACK ОС:
+        никаких локов, I/O или логирования — только присваивания простых
+        объектов через getattr(..., default) (инвариант F1/F5 приёмки #1891).
+        recorder.is_recording — @property, берущее recorder._lock, поэтому
+        читаем приватный recorder._is_recording НАПРЯМУЮ: racy read осознан
+        (bool, CPython атомарное чтение) — это диагностика, не критичная логика.
+        """
+        del frame
         service = self._service
+        recorder = getattr(service, "recorder", None)
+        meeting = getattr(service, "_meeting_svc", None)
+        self._signal_context = {
+            "signal": signum,
+            "recording_active": bool(getattr(recorder, "_is_recording", False)),
+            "meeting_active": getattr(meeting, "_session", None) is not None,
+        }
         server = getattr(service, "_ipc_server", None)
         request_stop = getattr(server, "request_stop_from_signal", None)
         if callable(request_stop):
