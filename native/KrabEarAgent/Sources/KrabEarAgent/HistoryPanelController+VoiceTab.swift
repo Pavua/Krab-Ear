@@ -41,6 +41,22 @@ extension HistoryPanelController {
         let vc = ConversationViewController(config: config)
         conversationVC = vc
 
+        // W1892: settings.voiceGatewayAPIKey приходит из get_settings, который
+        // редактирует ВСЕ sensitive-поля в "REDACTED" (wave-35 CRIT) — ConversationConfig
+        // выше временно несёт этот placeholder. Дозагружаем реальный ключ асинхронно
+        // (off-main IPC, AGENT-3 паттерн) через узкоскоуповый internal-only метод ДО
+        // того, как пользователь физически сможет нажать «Начать разговор».
+        let credentialIPC = self.ipcClient
+        Task { [weak vc] in
+            guard let response = try? await credentialIPC.callAsync(
+                method: "get_voice_gateway_credential", params: [:]
+            ), let result = response["result"] as? [String: Any],
+                  let realKey = result["voice_gateway_api_key"] as? String else { return }
+            await MainActor.run {
+                vc?.config.apiKey = realKey
+            }
+        }
+
         // Волна 3c: локальная озвучка ошибок — синтез через IPC synthesize_speech
         // (строго off-main, AGENT-3), воспроизведение через AVAudioPlayer.
         // Пустой wav_bytes_b64 (privacy mode / TTS недоступен) → тихая text-only деградация.

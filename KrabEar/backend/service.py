@@ -1864,6 +1864,7 @@ class BackendService:
             "delete_history_item": self._history.handle_delete_history_item,  # VERIFIED: called from Swift (HistoryPanel)
             "set_paste_status": self._handle_set_paste_status,  # VERIFIED: called from Swift (main)
             "get_settings": self._settings_svc.handle_get_settings,  # VERIFIED: called from Swift (main)
+            "get_voice_gateway_credential": self._settings_svc.handle_get_voice_gateway_credential,
             "set_settings": self._settings_svc.handle_set_settings,  # VERIFIED: called from Swift (main)
             "compact_history": self._history.handle_compact_history,  # VERIFIED: called from Swift (main, HistoryPanel)
             "add_history_item": self._history.handle_add_history_item,  # VERIFIED: called from Swift (main, HistoryPanel)

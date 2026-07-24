@@ -273,6 +273,23 @@ class SettingsService:
                 settings[k] = "REDACTED"
         return settings
 
+    def handle_get_voice_gateway_credential(self, params: dict[str, Any]) -> dict[str, Any]:
+        """W1892: узкоскоуповый НЕредактированный источник VG-креденшела.
+
+        Swift открывает WS к Voice Gateway напрямую (минуя Python-бэкенд), поэтому
+        ему нужно реальное значение ``voice_gateway_api_key`` для заголовка
+        ``Authorization: Bearer`` — общий ``get_settings`` его редактирует
+        (wave-35 CRIT, верно для всех остальных клиентов/полей). Возвращает ТОЛЬКО
+        эти два поля, ничего сверх — не расширяет отображение секрета ни в UI, ни в
+        бэкапах (``settings_backup.py`` продолжает редактировать поле на диске).
+        """
+        settings = self.cached_settings()
+        return {
+            "ok": True,
+            "voice_gateway_url": settings.get("voice_gateway_url", ""),
+            "voice_gateway_api_key": settings.get("voice_gateway_api_key", ""),
+        }
+
     def handle_set_settings(self, params: dict[str, Any]) -> dict[str, Any]:
         with self._save_lock:  # W1437
             return self._handle_set_settings_locked(params)
