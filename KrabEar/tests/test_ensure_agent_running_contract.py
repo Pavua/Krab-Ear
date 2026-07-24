@@ -9,14 +9,25 @@ BRE-альтернацию ``\\|`` — то есть искал ЛИТЕРАЛ `
 
 Тест поднимает настоящий процесс по пути, содержащему
 ``Krab Ear.app/Contents/MacOS/KrabEarAgent``, и проверяет РЕАЛЬНЫЙ ``pgrep``
-с паттерном из скрипта. Прод не затрагивается: используется временный каталог,
-процесс — обычный ``sleep``, и он гарантированно убивается в finally.
+с паттерном из скрипта. Прод не затрагивается: используется временный каталог.
+
+2026-07-24, второй раунд на self-hosted раннере: копия скомпилированного
+``/bin/sleep`` под чужим именем (``KrabEarAgent``) на non-interactive
+launchd-раннере становилась ``<defunct>`` почти мгновенно (подтверждено
+диагностикой ``ps -p`` — 0.00s CPU, процесс не проработал ни секунды), тогда
+как интерактивно (Terminal-сессия) тот же трюк работал стабильно. Похоже на
+код-signing/Gatekeeper-разницу между interactive и launchd-service контекстом
+для СКОПИРОВАННОГО Mach-O бинарника под непривычным путём/именем — тот же
+класс TCC-квирков, что уже не раз ловился в этом проекте (см. CLAUDE.md).
+Обход: shell-скрипт вместо бинарной копии — текстовые скрипты с shebang не
+код-signed/не quarantine-чувствительны на macOS, `pgrep -f` видит путь к
+скрипту как аргумент интерпретатора точно так же.
 """
 
 from __future__ import annotations
 
+import os
 import re
-import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -43,19 +54,13 @@ def test_pgrep_pattern_detects_running_agent(tmp_path: Path) -> None:
     fake_bundle = tmp_path / "Krab Ear.app" / "Contents" / "MacOS"
     fake_bundle.mkdir(parents=True)
     fake_agent = fake_bundle / "KrabEarAgent"
-    # Настоящий исполняемый файл: pgrep -f матчит полный путь в argv.
-    shutil.copy("/bin/sleep", fake_agent)
+    # Shell-скрипт, не бинарная копия — см. пояснение в докстринге модуля.
+    fake_agent.write_text("#!/bin/sh\nsleep 30\n", encoding="utf-8")
+    fake_agent.chmod(0o755)
 
-    proc = subprocess.Popen([str(fake_agent), "30"])
+    proc = subprocess.Popen([str(fake_agent)])
     try:
-        # 2026-07-24: self-hosted раннер под конкурентной нагрузкой (свой же
-        # pytest-чанк + параллельные git/gh-вызовы с той же машины) — каждый
-        # pgrep-подпроцесс форкается/планируется медленнее, чем на idle
-        # GitHub-hosted VM. 3с окна одному разу не хватило (тот же класс
-        # wall-clock гонки, что MLX-watchdog тесты этой же волны). Регистрация
-        # argv в таблице процессов атомарна на уровне ядра — не сама причина
-        # задержки, причина в scheduling самого pgrep под нагрузкой.
-        deadline = time.monotonic() + 15.0
+        deadline = time.monotonic() + 10.0
         found = ""
         while time.monotonic() < deadline:
             found = subprocess.run(
@@ -64,20 +69,28 @@ def test_pgrep_pattern_detects_running_agent(tmp_path: Path) -> None:
                 text=True,
                 check=False,
             ).stdout
-            if str(proc.pid) in found:
+            # Ищем ПУТЬ, а не PID: shebang-скрипт запускается как
+            # `/bin/sh <путь>` — PID процесса-обёртки sh не связан с
+            # proc.pid предсказуемо, а вот путь к самому скрипту всегда
+            # присутствует в argv как есть. Другие процессы на этой машине
+            # (в т.ч. реальный прод-агент того же приложения) могут ТОЖЕ
+            # матчить паттерн — это не ошибка, а корректное поведение
+            # реального pgrep -f на этой машине; проверяем СВОЙ конкретный
+            # tmp_path, не факт единственности совпадения.
+            if str(fake_agent) in found:
                 break
             time.sleep(0.1)
 
-        if str(proc.pid) not in found:
-            # Диагностика на будущее: если снова упадёт — видно КОГО pgrep
-            # вообще нашёл, а не только факт неудачи.
+        if str(fake_agent) not in found:
             ps_sample = subprocess.run(
                 ["ps", "-p", str(proc.pid)], capture_output=True, text=True, check=False
             ).stdout
-        assert str(proc.pid) in found, (
+        assert str(fake_agent) in found, (
             "паттерн pgrep из ensure_agent_running.command не находит живой "
             f"процесс агента (pgrep на macOS — ERE, не BRE). Паттерн: {pattern!r}\n"
-            f"pgrep stdout: {found!r}\nps -p {proc.pid}: {ps_sample!r}"
+            f"pgrep stdout: {found!r}\nps -p {proc.pid}: {ps_sample!r}\n"
+            f"fake_agent existed: {fake_agent.exists()}, "
+            f"executable: {os.access(fake_agent, os.X_OK)}"
         )
     finally:
         proc.kill()
