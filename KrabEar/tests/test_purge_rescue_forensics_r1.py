@@ -22,6 +22,7 @@ test_purge_cluster_w1770.py (FakeStore + HistoryService(store=store)).
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -180,16 +181,29 @@ class RescueForensicsPurgeTest(unittest.TestCase):
         self.assertFalse((self._dir / "forensics").exists(), "forensics/ должен быть удалён целиком")
         self.assertNotIn("forensics", result.get("errors", []))
 
-    def test_runtime_alive_marker_removed(self) -> None:
-        """runtime_alive.marker удаляется (ноль вреда — не PII, но чистим)."""
+    def test_runtime_alive_marker_rewritten_for_current_life(self) -> None:
+        """R1 LOW-5 (adversarial-гейт целого диффа, 2026-07-24): маркер
+        СТАРОЙ (сеянной) жизни удаляется, но purge_all_data — IPC-хендлер,
+        достижимый только пока backend ЖИВ, поэтому маркер обязан быть
+        СРАЗУ ПЕРЕПИСАН для ТЕКУЩЕЙ, всё ещё живой жизни процесса. Голый
+        unlink без переписи выключил бы UNCLEAN-детекцию: если backend
+        умрёт по SIGKILL/OOM ПОСЛЕ purge, check_and_collect на следующем
+        старте увидел бы отсутствующий маркер и классифицировал смерть
+        как "clean" — форензика молча не собралась бы."""
         marker = self._seed_marker()
         self.assertTrue(marker.exists())
+        stale_payload = json.loads(marker.read_text(encoding="utf-8"))
+        self.assertEqual(stale_payload["pid"], 1234)  # сеянное фейковое значение
 
         result = self._purge()
 
         self.assertTrue(result.get("ok"), result)
-        self.assertFalse(marker.exists(), "runtime_alive.marker должен быть удалён")
         self.assertNotIn("runtime_alive_marker", result.get("errors", []))
+        self.assertTrue(marker.exists(), "маркер обязан быть ПЕРЕПИСАН для текущей живой жизни")
+        fresh_payload = json.loads(marker.read_text(encoding="utf-8"))
+        self.assertEqual(fresh_payload["pid"], os.getpid(),
+                         "маркер должен нести PID ЭТОГО (текущего, живого) процесса")
+        self.assertNotEqual(fresh_payload["started_at_iso"], stale_payload["started_at_iso"])
 
     def test_purge_without_rescue_or_forensics_no_crash(self) -> None:
         """purge на пустом data_dir не бросает и не добавляет новые шаги в errors."""
@@ -211,7 +225,9 @@ class RescueForensicsPurgeTest(unittest.TestCase):
         self.assertFalse(part_path.exists())
         self.assertFalse(out_dir.exists())
         self.assertFalse((self._dir / "forensics").exists())
-        self.assertFalse(marker.exists())
+        # Маркер СУЩЕСТВУЕТ (переписан для текущей живой жизни, не просто удалён).
+        self.assertTrue(marker.exists())
+        self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))["pid"], os.getpid())
         self.assertEqual(result.get("errors", []), [])
 
 

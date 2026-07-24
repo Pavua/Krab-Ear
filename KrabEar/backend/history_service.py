@@ -2265,15 +2265,23 @@ class HistoryService:
             logger.warning("purge_all_data: forensics/ deletion failed", exc_info=True)
             secondary_errors.append("forensics")
 
-        # --- 1f. R1 (2026-07-24): dirty-маркер (не PII сам по себе — pid +
-        # монотоничный таймстамп текущей жизни, — но чистим заодно: ноль
-        # вреда, и живой маркер на выключенном backend не должен переживать
-        # wipe-all как артефакт).
+        # --- 1f. R1 (2026-07-24): dirty-маркер — удалить И СРАЗУ ПЕРЕПИСАТЬ
+        # для ТЕКУЩЕЙ (всё ещё живой) жизни процесса. purge_all_data —
+        # IPC-хендлер, достижимый только пока backend жив; маркер уже
+        # существует с момента старта ЭТОГО процесса (write_alive_marker
+        # в service.py.__init__). LOW-5 (adversarial-гейт целого диффа,
+        # 2026-07-24): голый unlink без переписи выключал UNCLEAN-детекцию
+        # для оставшейся жизни процесса — если backend умрёт по SIGKILL/OOM
+        # ПОСЛЕ purge (и ДО следующего graceful restart), check_and_collect
+        # на следующем старте увидел бы отсутствующий маркер и классифицировал
+        # смерть как "clean", форензика молча не собралась бы — ровно тот
+        # инцидент, ради диагностики которого Task 6 существует.
         try:
-            from backend.shutdown_forensics import _MARKER as _ALIVE_MARKER_FILE
+            from backend.shutdown_forensics import _MARKER as _ALIVE_MARKER_FILE, write_alive_marker
             (Path(self.store.data_dir) / _ALIVE_MARKER_FILE).unlink(missing_ok=True)
+            write_alive_marker(self.store.data_dir)
         except Exception:
-            logger.warning("purge_all_data: runtime_alive.marker deletion failed", exc_info=True)
+            logger.warning("purge_all_data: runtime_alive.marker rewrite failed", exc_info=True)
             secondary_errors.append("runtime_alive_marker")
 
         # --- 2. W1771 GAP-3: БЕЗУСЛОВНАЯ очистка версий транскрипций (true wipe).
