@@ -79,6 +79,9 @@ class AudioRecorder:
         # W1670: буфер для аудио, собранного при авто-остановке по max-duration.
         # Устанавливается воркером при MAX_RECORDING_SAMPLES, очищается в start().
         self._pending_result: tuple[np.ndarray, float] | None = None
+        # R1: continuous spill writer (duck-typed .append/.close/.failed), см.
+        # backend/recording_spill.py. None = spill выключен для этой записи.
+        self._spill = None
 
     @property
     def is_recording(self) -> bool:
@@ -86,8 +89,14 @@ class AudioRecorder:
         with self._lock:
             return self._is_recording
 
-    def start(self) -> bool:
-        """Запускает запись, если рекордер сейчас в idle состоянии."""
+    def start(self, spill: "object | None" = None) -> bool:
+        """Запускает запись, если рекордер сейчас в idle состоянии.
+
+        ``spill`` — опциональный открытый :class:`RecordingSpillWriter`
+        (duck-typed .append/.close/.failed, R1). Recorder только дописывает
+        и закрывает его; удаление (``discard()``) принадлежит вызывающей
+        стороне (RecordingCoreService).
+        """
         # wave-1770 MED: serialise the whole start against a concurrent stop() so the
         # data-lock release window inside stop() cannot interleave with a new start.
         with self._lifecycle_lock:
@@ -106,6 +115,7 @@ class AudioRecorder:
                 self._is_recording = True
                 self._started_at = time.monotonic()
                 self._pending_result = None  # W1670: сброс результата предыдущей авто-остановки
+                self._spill = spill
                 self._thread = threading.Thread(target=self._worker, daemon=True)
                 self._thread.start()
                 return True
@@ -116,11 +126,20 @@ class AudioRecorder:
         W1670: если запись уже завершена авто-остановкой по MAX_RECORDING_SAMPLES,
         возвращает накопленный аудио-буфер из _pending_result вместо None.
         Это предотвращает потерю до ~880 МБ аудио при превышении лимита длительности.
+
+        R1: во всех ветках выхода, КРОМЕ таймаута (воркер ещё может дописывать),
+        принадлежащий этой записи spill-writer закрывается (файлы остаются на
+        диске — удаление принадлежит вызывающей стороне). close() зовётся
+        строго вне ``self._lock`` (I/O под данным-локом — запрещённый класс
+        W1652/F3).
         """
         # wave-1770 MED: hold _lifecycle_lock across the ENTIRE stop (incl. join) so a
         # concurrent start() cannot spawn a new worker during the data-lock release window.
         # The worker uses _lock (data), never _lifecycle_lock → join() here can't deadlock.
         with self._lifecycle_lock:
+            spill_local = None
+            early_return = False
+            early_result: tuple[np.ndarray, float] | None = None
             with self._lock:
                 thread = self._thread
                 if not self._is_recording and (
@@ -132,50 +151,72 @@ class AudioRecorder:
                         self._pending_result = None
                         if self._thread is thread:
                             self._thread = None
-                        return pending
+                        spill_local = self._spill
+                        self._spill = None
+                        early_result = pending
+                        early_return = True
                     # Живой handle после предыдущего таймаута обрабатывается
                     # ниже повторным join. Мёртвый handle с чанками означает,
                     # что worker завершился уже после того таймаута: аудио ещё
                     # нужно безопасно забрать, а не потерять.
-                    if thread is None or not self._chunks:
+                    elif thread is None or not self._chunks:
                         if self._thread is thread:
                             self._thread = None
-                        return None
-                self._is_recording = False
+                        spill_local = self._spill
+                        self._spill = None
+                        early_return = True
+                    else:
+                        self._is_recording = False
+                else:
+                    self._is_recording = False
 
-            self._stop_event.set()
-            if thread is not None and thread is not threading.current_thread():
-                thread.join(timeout=max(0.0, float(timeout_sec)))
+            if not early_return:
+                self._stop_event.set()
+                if thread is not None and thread is not threading.current_thread():
+                    thread.join(timeout=max(0.0, float(timeout_sec)))
 
-            # Нельзя отдавать частичный буфер и терять handle, пока worker ещё
-            # способен дописать чанк. Повторный stop() завершит сбор после его
-            # фактического выхода. Исход обязан быть РАЗЛИЧИМЫМ от «нечего
-            # отдавать»: None здесь превращался в тихий already_stopped и
-            # пользователь молча терял диктовку (F2, Fable-ревью 2026-07-22).
-            if thread is not None and thread.is_alive():
-                logger.warning(
-                    "AudioRecorder worker не завершился за %.1f с при stop()",
-                    timeout_sec,
-                )
-                raise AudioRecorderStopTimeout(
-                    f"AudioRecorder worker не завершился за {timeout_sec:.1f} с"
-                )
+                # Нельзя отдавать частичный буфер и терять handle, пока worker ещё
+                # способен дописать чанк. Повторный stop() завершит сбор после его
+                # фактического выхода. Исход обязан быть РАЗЛИЧИМЫМ от «нечего
+                # отдавать»: None здесь превращался в тихий already_stopped и
+                # пользователь молча терял диктовку (F2, Fable-ревью 2026-07-22).
+                if thread is not None and thread.is_alive():
+                    logger.warning(
+                        "AudioRecorder worker не завершился за %.1f с при stop()",
+                        timeout_sec,
+                    )
+                    # R1: воркер завис и может ещё дописывать — spill НЕ трогаем.
+                    raise AudioRecorderStopTimeout(
+                        f"AudioRecorder worker не завершился за {timeout_sec:.1f} с"
+                    )
 
-            with self._lock:
-                pending = self._pending_result
-                if pending is not None:
-                    self._pending_result = None
-                    if self._thread is thread:
-                        self._thread = None
-                    self._started_at = 0.0
-                    return pending
-                duration = max(0.0, time.monotonic() - self._started_at)
-                chunks = list(self._chunks)
-                self._chunks = []
-                self._chunks_total_samples = 0
-                if self._thread is thread:
-                    self._thread = None
-                self._started_at = 0.0
+                with self._lock:
+                    spill_local = self._spill
+                    self._spill = None
+                    pending = self._pending_result
+                    if pending is not None:
+                        self._pending_result = None
+                        if self._thread is thread:
+                            self._thread = None
+                        self._started_at = 0.0
+                        early_result = pending
+                        early_return = True
+                    else:
+                        duration = max(0.0, time.monotonic() - self._started_at)
+                        chunks = list(self._chunks)
+                        self._chunks = []
+                        self._chunks_total_samples = 0
+                        if self._thread is thread:
+                            self._thread = None
+                        self._started_at = 0.0
+
+        # R1 spill: строго ВНЕ self._lock (I/O под локом — запрещённый класс
+        # W1652/F3). close() оставляет файлы на диске — discard() решает
+        # вызывающая сторона (RecordingCoreService) после успешного персиста.
+        if spill_local is not None:
+            spill_local.close()
+        if early_return:
+            return early_result
 
         if not chunks:
             return np.array([], dtype=np.float32), duration
@@ -201,6 +242,9 @@ class AudioRecorder:
         начнётся. В отличие от :meth:`stop`, он не вызывает ``np.concatenate``
         и поэтому не удваивает пиковую память длинной записи. Идемпотентен и
         сериализован с ``start()``/``stop()`` тем же lifecycle-lock.
+
+        R1: spill-writer закрывается (НЕ discard — файлы остаются на диске,
+        это shutdown-путь и следующий старт восстановит аудио).
         """
         with self._lifecycle_lock:
             with self._lock:
@@ -218,6 +262,7 @@ class AudioRecorder:
                 )
                 # Handle и буфер нужны для безопасного повторного abort():
                 # worker всё ещё может дописать данные после этого возврата.
+                # R1: spill тоже не трогаем — воркер может ещё дописывать.
                 return False
 
             # Очищаем только после join: worker при авто-лимите может временно
@@ -226,9 +271,14 @@ class AudioRecorder:
                 self._chunks = []
                 self._chunks_total_samples = 0
                 self._pending_result = None
+                spill_local = self._spill
+                self._spill = None
                 if self._thread is thread:
                     self._thread = None
                 self._started_at = 0.0
+            # R1 spill: close() строго вне self._lock (I/O под локом запрещено).
+            if spill_local is not None:
+                spill_local.close()
             return True
 
     def set_device(self, device: "int | str | None") -> None:
@@ -349,6 +399,7 @@ class AudioRecorder:
         """Фоновый цикл чтения чанков из микрофона."""
         with self._lock:
             device = self._device
+            spill = self._spill
         try:
             stream_kwargs: dict = {
                 "samplerate": self.sample_rate,
@@ -392,6 +443,10 @@ class AudioRecorder:
                         else:
                             self._chunks.append(data.copy())
                             self._chunks_total_samples += chunk_samples
+                    # R1 spill: строго ВНЕ self._lock (I/O под локом — запретный
+                    # класс W1652/F3). Ошибки диска гасятся внутри append().
+                    if spill is not None and not _max_duration_exceeded:
+                        spill.append(data)
                     # Push error OUTSIDE the lock to avoid lock-order deadlock:
                     # error_bus._lock → event_bus.emit() → SSE callbacks that may
                     # call recorder.is_recording / snapshot_rms (which re-acquire
@@ -404,6 +459,12 @@ class AudioRecorder:
                             audio = np.array([], dtype=np.float32)
                         with self._lock:
                             self._pending_result = (audio, duration)
+                        # R1: авто-лимит останавливает запись здесь же — закрыть
+                        # spill сразу (stop()/abort() уже не увидят этот _spill,
+                        # т.к. worker завершится раньше следующего stop() под
+                        # тем же lifecycle_lock; файлы остаются для восстановления).
+                        if spill is not None:
+                            spill.close()
                         self._push_max_duration_error()
                         break
                     if self._on_audio_level is not None:
