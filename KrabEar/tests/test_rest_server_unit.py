@@ -358,6 +358,88 @@ class TranscribePersistHistoryFlagTest(_TranscribeBase):
         self.assertEqual(call_kwargs.get("text"), "Привет мир")
 
 
+# ---------------------------------------------------------------------------
+# 1c. POST /v1/stt/transcribe — diarize flag (2026-07-24)
+#
+# W1897: rest_server never read a `diarize` form field at all — every REST
+# caller (incl. Voice Gateway's "Разговор с AI" conversation flow) silently
+# fell through to Transcriber.transcribe's diarize=None default, which
+# resolves to settings.DIARIZATION_ENABLED (True live). Pyannote diarization
+# ran on EVERY conversational turn with no way to opt out, independent of and
+# unaddressed by VG's quality_profile="fast" plumbing (itself a no-op —
+# AudioEngine.set_quality_profile only recognizes {"balanced","max"}, so
+# "fast" silently coerces to "balanced"). Diarization overhead is the more
+# plausible driver of the ~10s conversational STT latency this was meant to
+# fix. Default (field omitted) is unchanged — existing callers keep whatever
+# diarize=None resolution they had before.
+# ---------------------------------------------------------------------------
+
+@unittest.skipUnless(_REST_AVAILABLE, "REST server dependencies not available")
+class TranscribeDiarizeFlagTest(_TranscribeBase):
+    """POST /v1/stt/transcribe with diarize form field."""
+
+    def test_diarize_false_passed_through_as_false(self):
+        data = {
+            "file": (io.BytesIO(b"RIFF....WAVEfmt "), "audio.wav"),
+            "diarize": "false",
+        }
+        resp = self.client.post(
+            "/v1/stt/transcribe",
+            data=data,
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(resp.status_code, 200)
+        call_kwargs = self.mock_transcriber.transcribe.call_args[1]
+        self.assertIs(call_kwargs.get("diarize"), False)
+
+    def test_diarize_true_passed_through_as_true(self):
+        data = {
+            "file": (io.BytesIO(b"RIFF....WAVEfmt "), "audio.wav"),
+            "diarize": "true",
+        }
+        resp = self.client.post(
+            "/v1/stt/transcribe",
+            data=data,
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(resp.status_code, 200)
+        call_kwargs = self.mock_transcriber.transcribe.call_args[1]
+        self.assertIs(call_kwargs.get("diarize"), True)
+
+    def test_diarize_case_insensitive_variants(self):
+        for raw, expected in (
+            ("0", False), ("no", False), ("FALSE", False), ("No", False),
+            ("1", True), ("yes", True), ("TRUE", True), ("Yes", True),
+        ):
+            with self.subTest(raw=raw):
+                self.mock_transcriber.transcribe.reset_mock()
+                data = {
+                    "file": (io.BytesIO(b"RIFF....WAVEfmt "), "audio.wav"),
+                    "diarize": raw,
+                }
+                resp = self.client.post(
+                    "/v1/stt/transcribe",
+                    data=data,
+                    content_type="multipart/form-data",
+                )
+                self.assertEqual(resp.status_code, 200)
+                call_kwargs = self.mock_transcriber.transcribe.call_args[1]
+                self.assertIs(call_kwargs.get("diarize"), expected)
+
+    def test_diarize_omitted_defaults_to_none(self):
+        """Regression: no diarize field → None, unchanged pre-existing resolution
+        (Transcriber.transcribe falls back to settings.DIARIZATION_ENABLED)."""
+        data = {"file": (io.BytesIO(b"RIFF....WAVEfmt "), "audio.wav")}
+        resp = self.client.post(
+            "/v1/stt/transcribe",
+            data=data,
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(resp.status_code, 200)
+        call_kwargs = self.mock_transcriber.transcribe.call_args[1]
+        self.assertIsNone(call_kwargs.get("diarize"))
+
+
 @unittest.skipUnless(_REST_AVAILABLE, "REST server dependencies not available")
 class TranscribePrivacyModeWinsOverPersistHistoryTest(_TranscribeBase):
     """privacy_mode_enabled must ALWAYS win over persist_history (CLAUDE.md rule)."""

@@ -1410,12 +1410,24 @@ def transcribe_audio():
 
     Request: multipart/form-data
         - file: audio file (required). Allowed: .wav .mp3 .ogg .m4a .flac .opus .webm .mp4 .aac
-        - quality_profile: fast|balanced|accurate (default: balanced)
+        - quality_profile: fast|balanced|accurate (default: balanced). NOTE
+          (W1897): AudioEngine.set_quality_profile() only recognizes
+          {"balanced", "max"} — "fast" and "accurate" both silently coerce to
+          "balanced" (i.e. MODEL_BALANCED / whisper-large-v3-turbo). There is
+          currently no distinct faster model tier; use `diarize=false` below
+          to actually cut per-call latency.
         - cleanup_profile: off|soft|strict (default: soft)
         - domain: casual|finance|code|conversational|medical (default: casual)
         - lang_hint: ISO 639-1 code (optional, auto-detected when omitted)
         - vocabulary: comma-separated hint words (optional)
         - chat_id + message_id: idempotency key pair (optional)
+        - diarize: "true"/"1"/"yes" or "false"/"0"/"no" (case-insensitive,
+          optional). Omitted → None, falls back to settings.DIARIZATION_ENABLED
+          (True by default) via Transcriber.transcribe(). Explicit override lets
+          a caller skip the pyannote diarization pass per-call — e.g. Voice
+          Gateway's "Разговор с AI" conversation flow, where diarization adds
+          real latency to every short conversational turn for no benefit
+          (single speaker, no need to separate voices).
         - persist_history: "true"/"1"/"yes" (case-insensitive) or "false"/"0"/"no"
           (default: true). When false, the transcription is still performed and
           returned in the response, but is NOT written to history.ndjson. Intended
@@ -1505,6 +1517,18 @@ def transcribe_audio():
         req_vocab = [w.strip() for w in req_vocab_raw.split(",") if w.strip()] if req_vocab_raw else []
         full_vocabulary = list(set(deps.store.load_vocabulary() + req_vocab))
 
+        # W1897: diarize form field — explicit per-call override. Omitted (None)
+        # preserves prior behavior (Transcriber.transcribe falls back to
+        # settings.DIARIZATION_ENABLED). Lets ephemeral-conversation callers
+        # (Voice Gateway's "Разговор с AI") skip pyannote diarization overhead
+        # per-turn without touching the global setting for other callers.
+        _diarize_raw = request.form.get("diarize")
+        diarize_override = (
+            None
+            if _diarize_raw is None
+            else _diarize_raw.strip().lower() in ("true", "1", "yes")
+        )
+
         # F2: ограничиваем весь вызов транскрайбера wall-clock таймаутом.
         # ThreadPoolExecutor создаёт non-daemon worker, поэтому cancel_futures
         # не может остановить уже начавшийся MLX-вызов. На таймауте сначала
@@ -1518,6 +1542,7 @@ def transcribe_audio():
             domain=domain,
             extra_vocabulary=full_vocabulary,
             lang_hint=lang_hint,
+            diarize=diarize_override,
         )
         _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         _pool_shutdown_nonblocking = False
