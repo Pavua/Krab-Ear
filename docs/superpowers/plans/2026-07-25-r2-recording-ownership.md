@@ -1,0 +1,1157 @@
+# R2 «Владение записью» — Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Сделать владение общей записью явным и проверяемым, чтобы чужой потребитель не мог остановить не свою запись, а прерванная транспортом остановка не теряла результат.
+
+**Architecture:** Поколение записи (`token` + `owner` + `state`) заводится при старте под уже существующим `_recording_lifecycle_lock`; гейт остановки — первая операция в `phase_a_locked`, решает по токену (не по кэшу); явная матрица переходов владения; кэш терминальных ответов для replay; Swift-сторона перестаёт трогать чужую запись и получает единый ретрай-helper. Спека: `docs/superpowers/specs/2026-07-25-r2-recording-ownership-design.md`.
+
+**Tech Stack:** Python 3.14 (`.venv_krab_ear`), unittest/pytest, Swift 6 (swift-tools 6.0, macOS 13+), Unix-socket JSON-RPC.
+
+## Global Constraints
+
+- Тесты Python: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/<file> -v -p no:cacheprovider` из корня репо; venv `source .venv_krab_ear/bin/activate`.
+- Каждый тест, создающий `BackendService(...)`, ОБЯЗАН звать `service.close()` в tearDown (правило #1782). Тесты, создающие его на temp-директории, используют `tempfile.TemporaryDirectory(ignore_cleanup_errors=True)` (установленная конвенция, см. `test_backend_service.py`).
+- Swift: `cd native/KrabEarAgent && swift build -c release`; тесты `swift test`.
+- Новые тест-файлы Python — через `scripts/pre_merge_py312_check.sh <файлы>` (ubuntu-parity, ТОЛЬКО тест-файлы).
+- flake8 по CI-команде (W293 в тестах НЕ расслаблен), `make audit-all` перед финишем.
+- НИКАКОГО I/O под `AudioRecorder._lock` (класс W1652/F3) и никаких локов/I/O/логирования в signal-callback.
+- Коммиты явными путями (`git add <files>`), НИКОГДА `git add -A`.
+- Swift-глифы: любой новый non-ASCII символ грепать по `native/` — если 0 вхождений, заменить установленным (CoreText-hang AGENT-J/M).
+- **Никакие изменения не должны отвергать запросы без owner/token** — старый бинарь агента против нового backend обязан продолжать работать (two-binary drift).
+- `recording_owner_enforce` по умолчанию `False`; токенные инварианты действуют в ОБОИХ режимах безусловно.
+
+---
+
+## Чанки исполнения
+
+- **Чанк A** (Task 1) — живой фикс безопасности, шипится первым и независимо.
+- **Чанк B** (Task 2-4) — ядро: поколение, гейт, матрица переходов.
+- **Чанк C** (Task 5-6) — кэш ответов и телеметрия владения.
+- **Чанк D** (Task 7-8) — Swift-ретрай и закрытие волны.
+
+---
+
+## Чанк A — живой фикс безопасности
+
+### Task 1: Хоткей не трогает чужую запись (F1)
+
+**Files:**
+- Modify: `KrabEar/backend/recording_core_service.py` (`__init__`, `_handle_start_recording_locked`, `handle_get_recording_state`)
+- Modify: `native/KrabEarAgent/Sources/KrabEarAgent/main+HotkeyRecording.swift` (`syncRecordingStateWithBackend`, `performRecordToggle`, `startRecording`)
+- Test: `KrabEar/tests/test_recording_owner_state.py` (новый)
+- Test: `native/KrabEarAgent/Tests/KrabEarAgentTests/HotkeyOwnerGuardTests.swift` (новый)
+
+**Interfaces:**
+- Produces (для Task 2): поле `self._active_owner: str | None` на `RecordingCoreService` — минимальное отслеживание владельца. **Task 2 его ПОГЛОЩАЕТ**, заменяя на полноценное `self._active_generation`; здесь оно введено намеренно, чтобы живой фикс шипился первым и не ждал всей архитектуры.
+- Produces (для Task 7): `get_recording_state` возвращает дополнительное поле `owner: str | None`.
+
+**Контекст задачи (зачем):** сегодня при идущей встрече одиночный тап Right Option попадает в ветку «лечения рассинхрона» (`main+HotkeyRecording.swift:61-71`) и останавливает запись встречи: отчёт теряется (`item_id: None`), а транскрипт часа уходит в `pasteToFrontmostApp`. Плюс `already_recording` в хоткее (`:118-126`) считается успехом.
+
+- [ ] **Step 1: Написать падающий Python-тест**
+
+Создать `KrabEar/tests/test_recording_owner_state.py`. Фейк-коллабораторы скопировать из `KrabEar/tests/test_recording_spill_wiring.py` (прочитать его `_FakeRecorder`, `_make_service` и переиспользовать структуру — НЕ изобретать свою).
+
+```python
+"""owner в get_recording_state (R2 Task 1) — живой фикс F1."""
+from __future__ import annotations
+
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+# _FakeRecorder / _make_service — скопировать из test_recording_spill_wiring.py
+
+
+class RecordingOwnerStateTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp_ctx = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self._tmp_ctx.cleanup)
+        self._tmp = Path(self._tmp_ctx.name)
+        self.rescue_dir = self._tmp / "rescue"
+
+    def test_owner_is_none_when_idle(self):
+        svc = _make_service(self._tmp, self.rescue_dir, recorder=_FakeRecorder())
+        state = svc.handle_get_recording_state({})
+        self.assertIsNone(state["owner"])
+
+    def test_owner_defaults_to_dictation(self):
+        svc = _make_service(self._tmp, self.rescue_dir, recorder=_FakeRecorder())
+        svc.handle_start_recording({})
+        self.assertEqual(svc.handle_get_recording_state({})["owner"], "dictation")
+
+    def test_owner_reflects_explicit_source(self):
+        svc = _make_service(self._tmp, self.rescue_dir, recorder=_FakeRecorder())
+        svc.handle_start_recording({"source": "meeting"})
+        self.assertEqual(svc.handle_get_recording_state({})["owner"], "meeting")
+
+    def test_owner_cleared_after_stop(self):
+        svc = _make_service(self._tmp, self.rescue_dir, recorder=_FakeRecorder())
+        svc.handle_start_recording({})
+        svc.handle_stop_recording({"quality_profile": "balanced"})
+        self.assertIsNone(svc.handle_get_recording_state({})["owner"])
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Убедиться, что падает правильно**
+
+Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_recording_owner_state.py -v -p no:cacheprovider`
+Expected: FAIL с `KeyError: 'owner'`
+
+- [ ] **Step 3: Реализовать backend-часть**
+
+В `RecordingCoreService.__init__` рядом с `self._active_spill: Any = None` добавить:
+
+```python
+        # R2 Task 1: минимальное отслеживание владельца записи для живого фикса F1
+        # (хоткей не должен останавливать чужую запись). Task 2 заменяет это поле
+        # полноценным self._active_generation — здесь оно введено, чтобы фикс
+        # безопасности шипился первым, не дожидаясь всей архитектуры владения.
+        self._active_owner: str | None = None
+```
+
+В `_handle_start_recording_locked` сразу после `self._active_spill = spill` (строка ~331 после R1-правок) добавить:
+
+```python
+        self._active_owner = str(params.get("source", "dictation"))
+```
+
+В ветке `if not started:` НИЧЕГО про `_active_owner` не делать (по прецеденту R1 HIGH-2: ветка not-started не трогает состояние живой чужой записи).
+
+В `handle_stop_recording` рядом с существующим `spill = getattr(self, "_active_spill", None); self._active_spill = None` добавить сброс:
+
+```python
+        self._active_owner = None
+```
+
+В `handle_get_recording_state` в возвращаемый dict добавить:
+
+```python
+            "owner": getattr(self, "_active_owner", None),
+```
+
+- [ ] **Step 4: Зелёные тесты + регрессия**
+
+Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_recording_owner_state.py KrabEar/tests/test_recording_core_service.py KrabEar/tests/test_recording_spill_wiring.py -v -p no:cacheprovider`
+Expected: все PASS
+
+- [ ] **Step 5: Написать падающий Swift-тест**
+
+Создать `native/KrabEarAgent/Tests/KrabEarAgentTests/HotkeyOwnerGuardTests.swift`. Прочитать существующий `QuickCaptureWiringTests.swift` для установленного в проекте паттерна source-contract тестов и переиспользовать его.
+
+```swift
+import XCTest
+@testable import KrabEarAgent
+
+/// R2 Task 1 (F1): хоткей не должен останавливать чужую запись.
+/// Source-contract: проверяем, что ветка auto-heal гейтится владельцем.
+final class HotkeyOwnerGuardTests: XCTestCase {
+
+    private func hotkeySource() throws -> String {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // KrabEarAgentTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // KrabEarAgent
+            .appendingPathComponent("Sources/KrabEarAgent/main+HotkeyRecording.swift")
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    func test_autoHeal_is_gated_by_owner() throws {
+        let src = try hotkeySource()
+        XCTAssertTrue(
+            src.contains("backendOwner"),
+            "Ветка лечения рассинхрона обязана учитывать владельца записи (F1)"
+        )
+    }
+
+    func test_already_recording_is_not_treated_as_success() throws {
+        let src = try hotkeySource()
+        XCTAssertFalse(
+            src.contains("isRecording = true\n                startRealtimeOverlayPolling()"),
+            "already_recording больше не должен считаться успешным стартом (зеркало C3a-фикса)"
+        )
+    }
+}
+```
+
+- [ ] **Step 6: Убедиться, что Swift-тесты падают**
+
+Run: `cd native/KrabEarAgent && swift test --filter HotkeyOwnerGuardTests`
+Expected: FAIL обоих кейсов
+
+- [ ] **Step 7: Реализовать Swift-часть**
+
+7a. `syncRecordingStateWithBackend()` (строка 80) — вернуть не только флаг, но и владельца. Заменить сигнатуру и тело:
+
+```swift
+    /// Возвращает (пишет ли backend, владелец записи).
+    /// owner == nil означает: либо записи нет, либо backend СТАРЫЙ и поля не отдаёт
+    /// (агент пересобран, backend не кикстартнут). Отличать эти случаи по is_recording.
+    func syncRecordingStateWithBackend() -> (recording: Bool, owner: String?) {
+        guard
+            let stateResponse = try? callWithRecovery(method: "get_recording_state", params: [:]),
+            let state = stateResponse["result"] as? [String: Any]
+        else {
+            return (isRecording, nil)
+        }
+
+        let backendRecording = (state["is_recording"] as? Bool) ?? false
+        let backendOwner = state["owner"] as? String
+        if backendRecording != isRecording {
+            isRecording = backendRecording
+            refreshStatusItemTitle()
+            rebuildStatusMenu()
+        }
+        return (backendRecording, backendOwner)
+    }
+```
+
+7b. В `performRecordToggle` заменить первую строку и ветку auto-heal:
+
+```swift
+        let (backendRecording, backendOwner) = syncRecordingStateWithBackend()
+        if backendRecording != wasRecordingLocally {
+            logger.warn("Десинхрон состояния записи: local=\(wasRecordingLocally), backend=\(backendRecording), owner=\(backendOwner ?? "nil")")
+        }
+```
+
+и ветку `if !wasRecordingLocally && backendRecording` целиком заменить на:
+
+```swift
+        // Если backend пишет, а локально флаг был сбит — раньше мы безусловно
+        // «лечили рассинхрон», останавливая запись. При активной встрече это
+        // убивало её отчёт (item_id: None) и вставляло час транскрипта в активное
+        // окно (F1). Теперь heal разрешён только для СВОЕЙ записи.
+        // Отсутствие owner = старый backend → heal разрешён (сегодняшнее поведение),
+        // иначе зависшую диктовку станет нечем добить (two-binary drift).
+        if !wasRecordingLocally && backendRecording {
+            if let owner = backendOwner, owner != "dictation" {
+                let human = owner == "meeting" ? "встреча" : "быстрая заметка"
+                await MainActor.run {
+                    self.notify(
+                        title: "Krab Ear",
+                        body: "Идёт \(human) — запись не тронута."
+                    )
+                }
+                return
+            }
+            await MainActor.run {
+                self.notify(
+                    title: "Krab Ear",
+                    body: "Найден рассинхрон записи. Сначала завершаю зависшую сессию."
+                )
+            }
+            stopRecording()
+            return
+        }
+```
+
+7c. В `startRecording()` заменить блок `if status == "already_recording"` (строка ~118) на отказ с откатом ducking. Прочитать строки 100-135 целиком: ducking включается ДО старта (строка ~111) и восстанавливается только в defer стопа — под чужой записью его надо восстановить здесь же, иначе системный звук зальёт микрофон встречи. Точное имя метода восстановления взять из существующего defer в `stopRecording()` (`grep -n "ducking" native/KrabEarAgent/Sources/KrabEarAgent/main+HotkeyRecording.swift`).
+
+```swift
+            if status == "already_recording" {
+                // Зеркало C3a-фикса для быстрой заметки: already_recording — НЕ успех.
+                // Раньше агент выставлял isRecording = true и следующий тап слал стоп,
+                // останавливая чужую (например, встречи) запись.
+                logger.warn("start_recording: запись уже идёт — не перехватываем")
+                restoreSystemAudioAfterRecording()   // точное имя — из defer в stopRecording()
+                notify(title: "Krab Ear", body: "Запись уже идёт — новая не начата.")
+                return
+            }
+```
+
+- [ ] **Step 8: Зелёные Swift-тесты + полная сборка**
+
+Run: `cd native/KrabEarAgent && swift build -c release && swift test`
+Expected: сборка OK, вся сьюта зелёная (существующие тесты, зависящие от `syncRecordingStateWithBackend`, могли сломаться из-за смены сигнатуры — починить их под новый кортеж, это ожидаемая часть задачи)
+
+- [ ] **Step 9: Гейты и коммит**
+
+```bash
+scripts/pre_merge_py312_check.sh KrabEar/tests/test_recording_owner_state.py
+flake8 KrabEar/backend/recording_core_service.py KrabEar/tests/test_recording_owner_state.py
+git add KrabEar/backend/recording_core_service.py KrabEar/tests/test_recording_owner_state.py \
+  native/KrabEarAgent/Sources/KrabEarAgent/main+HotkeyRecording.swift \
+  native/KrabEarAgent/Tests/KrabEarAgentTests/HotkeyOwnerGuardTests.swift
+git commit -m "fix(r2): хоткей не останавливает чужую запись + already_recording не успех (Task 1, F1)"
+```
+
+---
+
+## Чанк B — ядро владения
+
+### Task 2: Поколение записи (токен + владелец + spill-интеграция)
+
+**Files:**
+- Modify: `KrabEar/backend/recording_spill.py` (`RecordingSpillWriter.__init__`)
+- Modify: `KrabEar/backend/recording_core_service.py` (`__init__`, `_handle_start_recording_locked`, `handle_get_recording_state`)
+- Test: `KrabEar/tests/test_recording_generation.py` (новый)
+
+**Interfaces:**
+- Consumes: `self._active_owner` из Task 1 (ПОГЛОЩАЕТСЯ — удаляется, заменяется на `_active_generation`).
+- Produces (для Task 3-7):
+  - `self._active_generation: dict | None` со схемой `{"token": str, "owner": str, "state": "capturing"|"finalizing", "started_at": float, "promoted_from": str | None}`
+  - `RecordingSpillWriter(rescue_dir, sample_rate, channels, source="unknown", session_id=None)` — новый последний параметр; при `None` генерирует свой uuid как сейчас.
+  - `handle_start_recording` возвращает в ответе `generation_token: str` и `owner: str`.
+  - `handle_get_recording_state` возвращает `owner` и `generation_token`.
+
+- [ ] **Step 1: Написать падающий тест**
+
+Создать `KrabEar/tests/test_recording_generation.py` (фейки — из `test_recording_spill_wiring.py`):
+
+```python
+"""Поколение записи: токен, владелец, единство с spill (R2 Task 2)."""
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from backend.recording_spill import RecordingSpillWriter  # noqa: E402
+# _FakeRecorder / _make_service — скопировать из test_recording_spill_wiring.py
+
+
+class SpillWriterSessionIdTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp_ctx = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self._tmp_ctx.cleanup)
+        self.rescue_dir = Path(self._tmp_ctx.name) / "rescue"
+
+    def test_accepts_external_session_id(self):
+        w = RecordingSpillWriter(rescue_dir=self.rescue_dir, sample_rate=16000,
+                                 channels=1, source="dictation", session_id="tok-123")
+        self.assertEqual(w.session_id, "tok-123")
+        self.assertTrue(w.part_path.name.startswith("tok-123"))
+
+    def test_generates_own_id_when_omitted(self):
+        w = RecordingSpillWriter(rescue_dir=self.rescue_dir, sample_rate=16000,
+                                 channels=1, source="dictation")
+        self.assertTrue(w.session_id)
+
+
+class RecordingGenerationTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp_ctx = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self._tmp_ctx.cleanup)
+        self._tmp = Path(self._tmp_ctx.name)
+        self.rescue_dir = self._tmp / "rescue"
+
+    def test_start_creates_generation_and_returns_token(self):
+        svc = _make_service(self._tmp, self.rescue_dir, recorder=_FakeRecorder(),
+                            settings_overrides={"recording_spill_enabled": True})
+        resp = svc.handle_start_recording({})
+        self.assertEqual(resp["status"], "recording")
+        self.assertTrue(resp["generation_token"])
+        self.assertEqual(resp["owner"], "dictation")
+        gen = svc._active_generation
+        self.assertEqual(gen["state"], "capturing")
+        self.assertEqual(gen["token"], resp["generation_token"])
+        self.assertIsNone(gen["promoted_from"])
+
+    def test_generation_token_is_spill_session_id(self):
+        """F7: токен поколения и имя rescue-файла — одна сущность."""
+        recorder = _FakeRecorder()
+        svc = _make_service(self._tmp, self.rescue_dir, recorder=recorder,
+                            settings_overrides={"recording_spill_enabled": True})
+        resp = svc.handle_start_recording({})
+        self.assertEqual(recorder.received_spill.session_id, resp["generation_token"])
+
+    def test_state_exposes_token_and_owner(self):
+        svc = _make_service(self._tmp, self.rescue_dir, recorder=_FakeRecorder())
+        resp = svc.handle_start_recording({"source": "meeting"})
+        state = svc.handle_get_recording_state({})
+        self.assertEqual(state["owner"], "meeting")
+        self.assertEqual(state["generation_token"], resp["generation_token"])
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Verify FAIL** (`TypeError: __init__() got an unexpected keyword argument 'session_id'`)
+
+- [ ] **Step 3: Реализация**
+
+3a. `recording_spill.py`, `RecordingSpillWriter.__init__` — заменить генерацию id:
+
+```python
+    def __init__(self, rescue_dir: Path, sample_rate: int, channels: int,
+                 source: str = "unknown", session_id: "str | None" = None) -> None:
+        # R2 F7: токен поколения записи и имя rescue-файла — ОДНА сущность, чтобы
+        # сообщение клиента «восстановится при следующем запуске» указывало на
+        # конкретный файл. При session_id=None поведение прежнее (свой uuid).
+        self.session_id = session_id or uuid.uuid4().hex
+```
+
+3b. `recording_core_service.py.__init__` — УДАЛИТЬ `self._active_owner` (Task 1) и добавить:
+
+```python
+        # R2: поколение записи — идентичность цикла «старт → терминальный ответ».
+        # Схема: {"token", "owner", "state": capturing|finalizing, "started_at",
+        # "promoted_from"}. Живёт под _recording_lifecycle_lock (нового лока нет).
+        self._active_generation: "dict[str, Any] | None" = None
+```
+
+3c. `_handle_start_recording_locked` — токен генерится ПЕРВЫМ, до создания spill, и передаётся в него. Заменить блок создания spill (после R1-правок он начинается с `spill = None`):
+
+```python
+        import uuid as _uuid
+        _generation_token = _uuid.uuid4().hex
+        _owner = str(params.get("source", "dictation"))
+
+        spill = None
+        _rescue_dir = getattr(self, "_rescue_dir", None)
+        if _rescue_dir is not None and bool(
+            _settings_pre.get("recording_spill_enabled", True)
+        ):
+            try:
+                from backend.recording_spill import RecordingSpillWriter
+                spill = RecordingSpillWriter(
+                    rescue_dir=_rescue_dir,
+                    sample_rate=int(getattr(self.recorder, "sample_rate", 16000)),
+                    channels=int(getattr(self.recorder, "channels", 1)),
+                    source=_owner,
+                    session_id=_generation_token,
+                )
+                if not spill.open():
+                    spill = None
+            except Exception:
+                logger.warning("RecordingSpill: не удалось создать writer — "
+                               "запись продолжается без spill", exc_info=True)
+                spill = None
+```
+
+После `self._active_spill = spill` добавить:
+
+```python
+        import time as _time
+        self._active_generation = {
+            "token": _generation_token,
+            "owner": _owner,
+            "state": "capturing",
+            "started_at": _time.monotonic(),
+            "promoted_from": None,
+        }
+```
+
+В успешный ответ старта (dict со `status: "recording"`) добавить ключи `"generation_token": _generation_token, "owner": _owner`. Найти его греп-ом по `"status": "recording"` в этом методе.
+
+3d. `handle_get_recording_state` — заменить строку с `owner` из Task 1 на:
+
+```python
+        _gen = getattr(self, "_active_generation", None)
+```
+
+и в возвращаемый dict:
+
+```python
+            "owner": (_gen or {}).get("owner"),
+            "generation_token": (_gen or {}).get("token"),
+```
+
+3e. В `handle_stop_recording` заменить сброс `self._active_owner = None` (Task 1) на сброс поколения — ВРЕМЕННО простой (Task 3 заменит на терминализацию):
+
+```python
+        self._active_generation = None
+```
+
+- [ ] **Step 4: Зелёные + регрессия**
+
+Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_recording_generation.py KrabEar/tests/test_recording_owner_state.py KrabEar/tests/test_recording_spill.py KrabEar/tests/test_recording_spill_wiring.py KrabEar/tests/test_recording_core_service.py KrabEar/tests/test_recording_rescue.py -v -p no:cacheprovider`
+Expected: все PASS (тесты Task 1 продолжают работать — `owner` отдаётся уже из поколения)
+
+- [ ] **Step 5: Гейты и коммит**
+
+```bash
+scripts/pre_merge_py312_check.sh KrabEar/tests/test_recording_generation.py
+flake8 KrabEar/backend/recording_spill.py KrabEar/backend/recording_core_service.py KrabEar/tests/test_recording_generation.py
+git add KrabEar/backend/recording_spill.py KrabEar/backend/recording_core_service.py KrabEar/tests/test_recording_generation.py
+git commit -m "feat(r2): поколение записи — токен, владелец, единство с spill (Task 2)"
+```
+
+### Task 3: Гейт остановки и токенные инварианты
+
+**Files:**
+- Modify: `KrabEar/backend/recording_core_service.py` (`handle_stop_recording`, `_stop_recording_phase_a_locked`)
+- Test: `KrabEar/tests/test_recording_stop_gate.py` (новый)
+
+**Interfaces:**
+- Consumes: `self._active_generation` (Task 2).
+- Produces (для Task 5, 7): статусы `owner_mismatch`, `unknown_generation`, `stop_in_progress`; хук `self._terminalize_generation(response) -> None`, который Task 5 расширяет записью в кэш.
+
+**Инварианты (из спеки §4.2, нарушение = провал задачи):**
+1. Гейт — ПЕРВАЯ операция в `_stop_recording_phase_a_locked`, ДО `self._stop_preview_worker()`. Иначе отвергнутый стоп уже убил партиалы/превью живой чужой записи.
+2. Решение по ТОКЕНУ, не по кэшу.
+3. Отсутствие токена → legacy-путь, НИКОГДА не отказ.
+4. `recorder_timeout` НЕ терминализирует поколение (повторный стоп — штатный путь спасения аудио, `recorder.py:158-161`).
+
+- [ ] **Step 1: Написать падающий тест**
+
+`KrabEar/tests/test_recording_stop_gate.py` (фейки — из `test_recording_spill_wiring.py`):
+
+```python
+"""Гейт остановки: токенные инварианты (R2 Task 3)."""
+from __future__ import annotations
+
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+# _FakeRecorder / _FakeTranscriber / _make_service — из test_recording_spill_wiring.py
+
+
+class StopGateTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp_ctx = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self._tmp_ctx.cleanup)
+        self._tmp = Path(self._tmp_ctx.name)
+        self.rescue_dir = self._tmp / "rescue"
+
+    def _svc(self, **kw):
+        return _make_service(self._tmp, self.rescue_dir, recorder=_FakeRecorder(), **kw)
+
+    def test_matching_token_stops_normally(self):
+        svc = self._svc()
+        start = svc.handle_start_recording({})
+        resp = svc.handle_stop_recording({
+            "quality_profile": "balanced",
+            "generation_token": start["generation_token"],
+        })
+        self.assertNotIn(resp.get("status"), ("unknown_generation", "owner_mismatch"))
+
+    def test_foreign_token_never_stops_active_recording(self):
+        """F2: главный инвариант — чужой токен не трогает живую запись."""
+        svc = self._svc()
+        svc.handle_start_recording({})
+        resp = svc.handle_stop_recording({
+            "quality_profile": "balanced",
+            "generation_token": "totally-unknown-token",
+        })
+        self.assertEqual(resp["status"], "unknown_generation")
+        self.assertTrue(svc.recorder.is_recording, "запись обязана продолжаться")
+        self.assertIsNotNone(svc._active_generation)
+
+    def test_missing_token_uses_legacy_path(self):
+        """Старый бинарь агента обязан продолжать работать (two-binary drift)."""
+        svc = self._svc()
+        svc.handle_start_recording({})
+        resp = svc.handle_stop_recording({"quality_profile": "balanced"})
+        self.assertNotIn(resp.get("status"), ("unknown_generation", "owner_mismatch"))
+
+    def test_gate_runs_before_preview_teardown(self):
+        """F6: отвергнутый стоп НЕ должен убивать превью живой записи."""
+        svc = self._svc()
+        svc.handle_start_recording({})
+        svc._preview_text = "живой текст"
+        svc.handle_stop_recording({
+            "quality_profile": "balanced",
+            "generation_token": "foreign",
+        })
+        self.assertEqual(svc._preview_text, "живой текст")
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Verify FAIL** (`unknown_generation` не возвращается; превью затирается)
+
+- [ ] **Step 3: Реализация**
+
+3a. Добавить метод разбора гейта на `RecordingCoreService` (рядом с `handle_stop_recording`):
+
+```python
+    def _stop_gate_decision(self, params: "dict[str, Any]") -> "dict[str, Any] | None":
+        """Решение гейта остановки. None = пропустить в штатный стоп.
+
+        R2 §4.2. Решение принимается по ТОКЕНУ, а не по кэшу: кэш — оптимизация
+        replay'я, а не защита. Отсутствие токена НИКОГДА не отказ (старый бинарь
+        агента против нового backend — задокументированный two-binary drift).
+        """
+        token = params.get("generation_token")
+        if not token:
+            return None  # legacy-путь: как сегодня
+
+        gen = self._active_generation
+        if gen is not None and gen.get("token") == token:
+            if gen.get("state") == "finalizing":
+                return {"status": "stop_in_progress", "generation_token": token}
+            return None  # наш токен, запись идёт — штатная остановка
+
+        replayed = self._replay_terminal_response(token)
+        if replayed is not None:
+            return replayed
+
+        # Токен предъявлен, но не найден ни среди активных, ни в кэше: рекордер
+        # НЕ трогаем ни при каких обстоятельствах — иначе протухший ретрай
+        # остановил бы уже начатую СЛЕДУЮЩУЮ запись (F2).
+        return {"status": "unknown_generation", "generation_token": token}
+```
+
+3b. Добавить заглушку replay (Task 5 наполнит её кэшем):
+
+```python
+    def _replay_terminal_response(self, token: str) -> "dict[str, Any] | None":
+        """Реплей терминального ответа по токену. Task 5 добавляет кэш."""
+        return None
+```
+
+3c. Добавить терминализацию поколения:
+
+```python
+    def _terminalize_generation(self, response: "dict[str, Any]") -> None:
+        """Завершить поколение: запись необратимо окончена (R2 §4.1).
+
+        Зовётся ПЕРЕД каждым терминальным return handle_stop_recording. Task 5
+        добавляет сюда запись ответа в кэш для replay.
+        """
+        self._active_generation = None
+```
+
+3d. В `_stop_recording_phase_a_locked` — гейт ПЕРВОЙ строкой, до `self._stop_preview_worker()`:
+
+```python
+        # R2 §4.2 (F6): гейт — ПЕРВАЯ операция под lifecycle-локом. phase_a ниже
+        # сносит preview worker, _rt_partial и RSF ДО recorder.stop(); гейт,
+        # стоящий позже, уже убил бы партиалы живой ЧУЖОЙ записи, и обещание
+        # «отказ не трогает запись» было бы ложью.
+        _gate = self._stop_gate_decision(params)
+        if _gate is not None:
+            return {"early_return": _gate}
+```
+
+3e. В `handle_stop_recording` — терминализировать перед каждым терминальным return. Обернуть существующие ветки: там, где сейчас `return phase_b["early_return"]` / `phase_c` / `phase_d` / `return resp`, добавить перед return вызов `self._terminalize_generation(<ответ>)`. **Исключения** (НЕ терминализировать): ответы гейта (`owner_mismatch`, `unknown_generation`, `stop_in_progress`) и `recorder_timeout`. Для `already_stopped` и пустого аудио — терминализировать.
+
+Точный способ различить: гейт возвращается из `_stop_gate_decision`, поэтому в `handle_stop_recording` после `phase_a` проверять:
+
+```python
+        if "early_return" in phase_a:
+            _er = phase_a["early_return"]
+            _status = _er.get("status")
+            # recorder_timeout — единственный ранний выход, НЕ терминализирующий
+            # поколение: recorder.py:158-161 документирует повторный стоп как
+            # штатный путь спасения аудио; терминализация заставила бы гейт
+            # ответить ретраю unknown_generation и потерять данные, которые
+            # сегодняшний код успешно спасает.
+            if _status not in ("owner_mismatch", "unknown_generation",
+                               "stop_in_progress", "recorder_timeout"):
+                self._terminalize_generation(_er)
+            return _er
+```
+
+3f. В `_handle_start_recording_locked` при успешном старте взводить `capturing` (уже сделано Task 2); в `phase_a_locked` сразу после успешного забора аудио (после того как `stopped` получено и не None) перевести в `finalizing`:
+
+```python
+        if self._active_generation is not None:
+            self._active_generation["state"] = "finalizing"
+```
+
+- [ ] **Step 4: Зелёные + регрессия**
+
+Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_recording_stop_gate.py KrabEar/tests/test_recording_generation.py KrabEar/tests/test_recording_core_service.py KrabEar/tests/test_recording_spill_wiring.py KrabEar/tests/test_meeting_session_service_W_C2a.py -v -p no:cacheprovider`
+Expected: все PASS
+
+- [ ] **Step 5: Гейты и коммит**
+
+```bash
+scripts/pre_merge_py312_check.sh KrabEar/tests/test_recording_stop_gate.py
+flake8 KrabEar/backend/recording_core_service.py KrabEar/tests/test_recording_stop_gate.py
+git add KrabEar/backend/recording_core_service.py KrabEar/tests/test_recording_stop_gate.py
+git commit -m "feat(r2): гейт остановки — токенные инварианты, терминализация поколения (Task 3)"
+```
+
+### Task 4: Матрица переходов владения + promote
+
+**Files:**
+- Modify: `KrabEar/backend/recording_core_service.py` (`_handle_start_recording_locked`, ветка `not started`)
+- Modify: `KrabEar/backend/recording_spill.py` (новый метод `rewrite_source`)
+- Test: `KrabEar/tests/test_recording_owner_matrix.py` (новый)
+
+**Interfaces:**
+- Consumes: `self._active_generation` (Task 2), статусы Task 3.
+- Produces: статусы старта `owner_conflict`, `unmanaged_recording`; promote-ответ `already_recording` + `generation_token` + `promoted: true`.
+
+**Матрица (спека §4.3) — реализовать ДОСЛОВНО:**
+
+| Текущий владелец | Стартует | Решение |
+|---|---|---|
+| нет записи | любой | обычный старт |
+| `dictation` | `meeting` | promote: владелец → `meeting`, токен тот же, `promoted_from="dictation"` |
+| тот же владелец | тот же | идемпотентный `already_recording` (как сегодня) |
+| `quick_capture` | `meeting` | `owner_conflict` |
+| любой | `quick_capture` | `owner_conflict` |
+| любой | `dictation` | `owner_conflict` |
+| `meeting` | любой (кроме meeting) | `owner_conflict` |
+| запись идёт, поколения нет (call assist) | любой | `unmanaged_recording` |
+| статус `recorder_stopping` | любой | отказ как сегодня |
+
+- [ ] **Step 1: Написать падающий тест**
+
+`KrabEar/tests/test_recording_owner_matrix.py` — по кейсу на каждую строку матрицы. Ключевые:
+
+```python
+    def test_meeting_promotes_dictation(self):
+        """Живой прод-сценарий C2: встреча повышает идущую диктовку."""
+        svc = self._svc()
+        start = svc.handle_start_recording({})
+        svc.recorder.is_recording = True
+        resp = svc.handle_start_recording({"source": "meeting"})
+        self.assertEqual(resp["status"], "already_recording")
+        self.assertTrue(resp["promoted"])
+        self.assertEqual(resp["generation_token"], start["generation_token"])
+        gen = svc._active_generation
+        self.assertEqual(gen["owner"], "meeting")
+        self.assertEqual(gen["promoted_from"], "dictation")
+
+    def test_quick_capture_does_not_promote_to_meeting(self):
+        svc = self._svc()
+        svc.handle_start_recording({"source": "quick_capture"})
+        svc.recorder.is_recording = True
+        resp = svc.handle_start_recording({"source": "meeting"})
+        self.assertEqual(resp["status"], "owner_conflict")
+        self.assertEqual(svc._active_generation["owner"], "quick_capture")
+
+    def test_same_owner_repeat_is_idempotent(self):
+        svc = self._svc()
+        svc.handle_start_recording({})
+        svc.recorder.is_recording = True
+        resp = svc.handle_start_recording({})
+        self.assertEqual(resp["status"], "already_recording")
+        self.assertFalse(resp.get("promoted", False))
+
+    def test_recording_without_generation_is_unmanaged(self):
+        """Call assist стартует рекордер напрямую, минуя сервис."""
+        svc = self._svc()
+        svc.recorder.is_recording = True   # рекордер занят, поколения нет
+        resp = svc.handle_start_recording({"source": "meeting"})
+        self.assertEqual(resp["status"], "unmanaged_recording")
+```
+
+- [ ] **Step 2: Verify FAIL**
+
+- [ ] **Step 3: Реализация**
+
+В `_handle_start_recording_locked`, в ветке `if not started:` — заменить существующий блок формирования ответа на разбор матрицы. Сохранить дисциплину R1 HIGH-2: `self._active_generation` НЕ обнуляется, spill собственной неудавшейся попытки discard'ится:
+
+```python
+        if not started:
+            if spill is not None:
+                spill.discard()  # запись не началась — файл-пустышка не нужен
+            recorder_is_recording = bool(getattr(self.recorder, "is_recording", False))
+            with self._preview_lock:
+                preview_text = self._preview_text
+                preview_duration = self._preview_duration_sec
+
+            if not recorder_is_recording:
+                # Рекордер уже останавливается — как сегодня.
+                return {
+                    "status": "recorder_stopping",
+                    "is_recording": False,
+                    "duration_sec": preview_duration,
+                    "preview_text": preview_text,
+                }
+
+            gen = self._active_generation
+            if gen is None:
+                # Рекордер занят, но поколения нет: его стартовал call assist
+                # напрямую (call_assist_service.py:271), минуя этот сервис.
+                # Известный bypass, задокументирован в спеке §3.
+                return {
+                    "status": "unmanaged_recording",
+                    "is_recording": True,
+                    "duration_sec": preview_duration,
+                    "preview_text": preview_text,
+                }
+
+            current_owner = gen.get("owner")
+            if current_owner == _owner:
+                # Идемпотентный повтор от того же владельца — контракт не меняем,
+                # на него завязаны живые клиенты (main+QuickCapture.swift:102).
+                return {
+                    "status": "already_recording",
+                    "is_recording": True,
+                    "duration_sec": preview_duration,
+                    "preview_text": preview_text,
+                    "generation_token": gen["token"],
+                    "owner": current_owner,
+                    "promoted": False,
+                }
+
+            if current_owner == "dictation" and _owner == "meeting":
+                # ЕДИНСТВЕННЫЙ разрешённый promote — прод-поведение C2.
+                gen["owner"] = "meeting"
+                gen["promoted_from"] = "dictation"
+                _spill = getattr(self, "_active_spill", None)
+                if _spill is not None:
+                    _spill.rewrite_source("meeting", promoted_from="dictation")
+                return {
+                    "status": "already_recording",
+                    "is_recording": True,
+                    "duration_sec": preview_duration,
+                    "preview_text": preview_text,
+                    "generation_token": gen["token"],
+                    "owner": "meeting",
+                    "promoted": True,
+                }
+
+            return {
+                "status": "owner_conflict",
+                "is_recording": True,
+                "duration_sec": preview_duration,
+                "preview_text": preview_text,
+                "owner": current_owner,
+            }
+```
+
+Добавить `rewrite_source` в `RecordingSpillWriter` (fail-open, F10):
+
+```python
+    def rewrite_source(self, source: str, promoted_from: "str | None" = None) -> None:
+        """Перезаписать meta-сайдкар после promote. Fail-open: ошибка не критична —
+        rescue-файл просто останется с прежней пометкой источника."""
+        try:
+            meta = json.loads(self._meta_path.read_text(encoding="utf-8"))
+            meta["source"] = source
+            if promoted_from:
+                meta["promoted_from"] = promoted_from
+            self._meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+            self.source = source
+        except Exception:
+            logger.warning("RecordingSpill: не удалось перезаписать meta после promote",
+                           exc_info=True)
+```
+
+- [ ] **Step 4: Зелёные + КРИТИЧЕСКАЯ регрессия promote**
+
+Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_recording_owner_matrix.py KrabEar/tests/test_meeting_session_service_W_C2a.py KrabEar/tests/test_meeting_dispatch_privacy_W_C2a.py KrabEar/tests/test_recording_core_service.py -v -p no:cacheprovider`
+Expected: все PASS. Если тесты встречи упали — promote сломан, это блокер задачи.
+
+- [ ] **Step 5: Гейты и коммит**
+
+```bash
+scripts/pre_merge_py312_check.sh KrabEar/tests/test_recording_owner_matrix.py
+flake8 KrabEar/backend/recording_core_service.py KrabEar/backend/recording_spill.py KrabEar/tests/test_recording_owner_matrix.py
+git add KrabEar/backend/recording_core_service.py KrabEar/backend/recording_spill.py KrabEar/tests/test_recording_owner_matrix.py
+git commit -m "feat(r2): матрица переходов владения + promote с перезаписью spill-meta (Task 4)"
+```
+
+---
+
+## Чанк C — кэш ответов и телеметрия
+
+### Task 5: Кэш терминальных ответов + инвалидация
+
+**Files:**
+- Modify: `KrabEar/backend/recording_core_service.py` (`__init__`, `_terminalize_generation`, `_replay_terminal_response`)
+- Modify: `KrabEar/backend/history_service.py` (`handle_purge_all_data`)
+- Test: `KrabEar/tests/test_recording_terminal_cache.py` (новый)
+
+**Interfaces:**
+- Consumes: `_terminalize_generation` / `_replay_terminal_response` (Task 3, заглушки).
+- Produces: `clear_terminal_cache()` — публичный метод для purge.
+
+- [ ] **Step 1: Падающий тест** — кейсы: повторный стоп с тем же токеном отдаёт тот же ответ и НЕ персистит второй раз; кэш ограничен 3 записями; TTL 5 минут (подменить время монотоника); при `privacy_mode_enabled=True` replay отдаёт `unknown_generation`, а не текст; `clear_terminal_cache()` опустошает.
+
+- [ ] **Step 2: Verify FAIL**
+
+- [ ] **Step 3: Реализация.** В `__init__`: `self._terminal_cache: "OrderedDict[str, tuple[float, dict]]" = OrderedDict()` + `self._terminal_cache_lock = threading.Lock()`. Константы `_TERMINAL_CACHE_MAX = 3`, `_TERMINAL_CACHE_TTL_SEC = 300.0`.
+
+`_terminalize_generation` дополнить записью в кэш под локом (ключ — токен завершаемого поколения, значение — `(time.monotonic(), response)`), с вытеснением старейшего при превышении лимита.
+
+`_replay_terminal_response` — чтение под локом с проверкой TTL И **privacy-гейтом на чтении**:
+
+```python
+    def _replay_terminal_response(self, token: str) -> "dict[str, Any] | None":
+        # R2 §4.4 (F9): privacy-гейт стоит на ЧТЕНИИ, а не подпиской на смену
+        # настройки — подписки на шину событий это задокументированный капкан
+        # проекта (две шины), а гейт на чтении не может «не сработать»:
+        # пути выдачи в обход него не существует.
+        if self._get_runtime_setting("privacy_mode_enabled", False):
+            return None
+        with self._terminal_cache_lock:
+            entry = self._terminal_cache.get(token)
+            if entry is None:
+                return None
+            stored_at, response = entry
+            if time.monotonic() - stored_at > _TERMINAL_CACHE_TTL_SEC:
+                self._terminal_cache.pop(token, None)
+                return None
+            return dict(response)
+```
+
+В `handle_purge_all_data` (`history_service.py`) — вызвать `clear_terminal_cache()` у recording-core рядом с остальными in-memory шагами purge. Точное имя атрибута сверить грепом; добавить запись в реестр `scripts/audit_inmemory_purge_coverage.py` (он курируемый — прочитать его формат и добавить строку, иначе гейт не узнает о новом RAM-хранилище PII).
+
+- [ ] **Step 4: Зелёные + `python3 scripts/audit_inmemory_purge_coverage.py --fail-on-found`**
+
+- [ ] **Step 5: Гейты и коммит**
+
+### Task 6: Прошивка `source` + shadow-телеметрия владения
+
+**Files:**
+- Modify: `KrabEar/backend/meeting_session_service.py:286` (внутренний стоп)
+- Modify: `native/KrabEarAgent/Sources/KrabEarAgent/main+QuickCapture.swift:57, 91, 134`
+- Modify: `native/KrabEarAgent/Sources/KrabEarAgent/main+HotkeyRecording.swift` (старт и стоп)
+- Modify: `KrabEar/backend/recording_core_service.py` (`_stop_gate_decision` — mismatch)
+- Modify: `KrabEar/backend/error_codes.py` (новый код)
+- Modify: `KrabEar/core/config.py` (`recording_owner_enforce`)
+- Test: `KrabEar/tests/test_recording_owner_telemetry.py` (новый)
+
+**Ключевое правило (F5):** mismatch фиксируется ТОЛЬКО позитивный — владелец передан И не совпал. Отсутствие владельца — `logger.debug`, никогда не WARNING и не ErrorBus. Иначе штатная финализация встречи спамила бы телеметрию и «неделя чистых логов» не наступила бы.
+
+- [ ] **Step 1: Падающий тест** — кейсы: чужой owner в shadow → WARNING + ErrorBus, поведение НЕ меняется (запись остановлена); чужой owner в enforce → `owner_mismatch`, рекордер не тронут; отсутствие owner → ни WARNING, ни ErrorBus, стоп проходит; свой owner → тишина.
+
+- [ ] **Step 2: Verify FAIL**
+
+- [ ] **Step 3: Реализация.** Код ошибки в `error_codes.py` рядом с `audio.recording_rescued`:
+
+```python
+    # ── R2 (2026-07-25): чужой потребитель попытался остановить не свою запись ─
+    "recording.owner_mismatch": {
+        "user_msg_ru": "Попытка остановить чужую запись — запись не тронута",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "warn",
+        "dedupe_seconds": 30,
+    },
+```
+
+Настройка в `DEFAULT_SETTINGS` рядом с `recording_spill_enabled`:
+
+```python
+    # --- R2: контроль владения записью ---
+    # False = shadow (только громкий лог + ErrorBus), True = отказ чужому стопу.
+    # Флип после недели чистой телеметрии (решение владельца).
+    "recording_owner_enforce": False,
+```
+
+В `_stop_gate_decision` — проверка владельца ПОСЛЕ токенных инвариантов:
+
+```python
+        requested_owner = params.get("source")
+        if gen is not None and requested_owner and gen.get("owner") != requested_owner:
+            self._report_owner_mismatch(gen.get("owner"), requested_owner)
+            if bool(self._get_runtime_setting("recording_owner_enforce", False)):
+                return {
+                    "status": "owner_mismatch",
+                    "owner": gen.get("owner"),
+                    "requested": requested_owner,
+                }
+```
+
+Прошивка вызовов: `meeting_session_service.py:286` → `handle_stop_recording({"source": "meeting"})`; `main+QuickCapture.swift` три места → добавить `"source": "quick_capture"` в params; `main+HotkeyRecording.swift` старт и стоп → `"source": "dictation"` (в стопе — рядом с `quality_profile`).
+
+- [ ] **Step 4: Зелёные + полный swift test + прогон meeting-тестов**
+- [ ] **Step 5: Гейты и коммит**
+
+---
+
+## Чанк D — Swift-ретрай и закрытие
+
+### Task 7: Единый helper остановки с ретраем
+
+**Files:**
+- Create: `native/KrabEarAgent/Sources/KrabEarAgent/RecordingStopCoordinator.swift`
+- Modify: `main+HotkeyRecording.swift`, `main+QuickCapture.swift` (перевести стопы на helper)
+- Test: `native/KrabEarAgent/Tests/KrabEarAgentTests/RecordingStopCoordinatorTests.swift`
+
+**Контракт helper'а** (спека §4.6):
+- предъявляет `generation_token`, полученный на старте;
+- ретраит ТОЛЬКО транспортную неоднозначность (сокет закрыт, обрыв, реконнект), максимум 2 доп. попытки;
+- НЕ ретраит типизированный `ok:false`;
+- `stop_in_progress` → опрос раз в 2 с, суммарный бюджет 5 минут, затем сообщение «финализация затянулась — результат появится в истории» (НЕ «потеряно»);
+- `unknown_generation` и исчерпание попыток → показать превью + «запись восстановится при следующем запуске»;
+- `owner_mismatch` → человеческое сообщение + сброс локального состояния.
+
+Референс на чтение (НЕ cherry-pick): `.worktrees/user3-recording-rescue-20260722/native/KrabEarAgent/Sources/KrabEarAgent/RecordingStopRecovery.swift` — там та же задача решена в 679 строк; наша цель ~200-250, без owner/token-двухосевости.
+
+- [ ] **Step 1: Написать падающий тест**
+
+Создать `native/KrabEarAgent/Tests/KrabEarAgentTests/RecordingStopCoordinatorTests.swift`.
+Тестируется чистая логика решения (что делать с ответом/ошибкой), поэтому координатор
+проектируется так, чтобы решение было отделимо от IPC: чистая функция
+`RecordingStopCoordinator.decide(afterStatus:attempt:)` и
+`RecordingStopCoordinator.decide(afterTransportError:attempt:)`, возвращающие
+`StopDecision`. IPC-цикл — тонкая обёртка над ними.
+
+```swift
+import XCTest
+@testable import KrabEarAgent
+
+final class RecordingStopCoordinatorTests: XCTestCase {
+
+    func test_transport_error_retries_up_to_two_extra_attempts() {
+        XCTAssertEqual(RecordingStopCoordinator.decide(afterTransportError: true, attempt: 1), .retry)
+        XCTAssertEqual(RecordingStopCoordinator.decide(afterTransportError: true, attempt: 2), .retry)
+        XCTAssertEqual(RecordingStopCoordinator.decide(afterTransportError: true, attempt: 3), .giveUpRescuePending)
+    }
+
+    func test_typed_backend_error_is_never_retried() {
+        // Типизированный ok:false — настоящая ошибка бэкенда, крутить её нельзя.
+        XCTAssertEqual(RecordingStopCoordinator.decide(afterStatus: "stt_failed", attempt: 1), .surfaceAsIs)
+    }
+
+    func test_stop_in_progress_polls_within_budget_then_reports_slow_finalization() {
+        XCTAssertEqual(RecordingStopCoordinator.decide(afterStatus: "stop_in_progress", attempt: 1), .pollAgain)
+        // 5 минут / 2 с = 150 опросов; 151-й выходит из цикла БЕЗ «потеряно».
+        XCTAssertEqual(RecordingStopCoordinator.decide(afterStatus: "stop_in_progress", attempt: 151), .finalizationSlow)
+    }
+
+    func test_unknown_generation_points_at_rescue_not_loss() {
+        XCTAssertEqual(RecordingStopCoordinator.decide(afterStatus: "unknown_generation", attempt: 1), .giveUpRescuePending)
+    }
+
+    func test_owner_mismatch_has_its_own_branch() {
+        XCTAssertEqual(RecordingStopCoordinator.decide(afterStatus: "owner_mismatch", attempt: 1), .foreignOwner)
+    }
+}
+```
+
+- [ ] **Step 2: Убедиться, что тесты падают**
+
+Run: `cd native/KrabEarAgent && swift test --filter RecordingStopCoordinatorTests`
+Expected: FAIL — `cannot find 'RecordingStopCoordinator' in scope`
+
+- [ ] **Step 3: Реализовать координатор**
+
+Создать `native/KrabEarAgent/Sources/KrabEarAgent/RecordingStopCoordinator.swift`:
+
+```swift
+import Foundation
+
+/// Решение о следующем шаге остановки записи (R2 §4.6).
+enum StopDecision: Equatable {
+    /// Транспорт неоднозначен — повторить запрос с тем же токеном.
+    case retry
+    /// Финализация ещё идёт — подождать и переспросить.
+    case pollAgain
+    /// Финализация затянулась дольше бюджета: результат появится в истории.
+    case finalizationSlow
+    /// Запись не найдена / попытки исчерпаны: аудио восстановится при старте.
+    case giveUpRescuePending
+    /// Запись принадлежит другому потребителю.
+    case foreignOwner
+    /// Обычный ответ бэкенда — обработать как есть, НЕ ретраить.
+    case surfaceAsIs
+}
+
+enum RecordingStopCoordinator {
+    /// Максимум ДОПОЛНИТЕЛЬНЫХ попыток при транспортной неоднозначности.
+    static let maxTransportRetries = 2
+    /// Опрос при stop_in_progress: раз в 2 с, суммарный бюджет 5 минут.
+    static let pollIntervalSec: TimeInterval = 2
+    static let maxPolls = 150
+
+    static func decide(afterTransportError isTransport: Bool, attempt: Int) -> StopDecision {
+        guard isTransport else { return .surfaceAsIs }
+        return attempt <= maxTransportRetries ? .retry : .giveUpRescuePending
+    }
+
+    static func decide(afterStatus status: String, attempt: Int) -> StopDecision {
+        switch status {
+        case "stop_in_progress":
+            return attempt <= maxPolls ? .pollAgain : .finalizationSlow
+        case "unknown_generation":
+            return .giveUpRescuePending
+        case "owner_mismatch":
+            return .foreignOwner
+        default:
+            // Любой типизированный ответ бэкенда (включая ok:false) — не ретраим:
+            // иначе будем бесконечно крутить настоящую ошибку.
+            return .surfaceAsIs
+        }
+    }
+}
+```
+
+- [ ] **Step 4: Зелёные тесты**
+
+Run: `cd native/KrabEarAgent && swift test --filter RecordingStopCoordinatorTests`
+Expected: все PASS
+
+- [ ] **Step 5: Подключить координатор к живым путям остановки**
+
+В `main+HotkeyRecording.swift` и `main+QuickCapture.swift`: хранить `generation_token`,
+полученный из ответа `start_recording`, передавать его в params стопа и прогонять
+ответ/ошибку через `RecordingStopCoordinator.decide(...)`, реализовав ветки:
+`.retry` — повторить вызов; `.pollAgain` — `Thread.sleep`-эквивалент через
+`Task.sleep(nanoseconds:)` на `pollIntervalSec` и повтор; `.finalizationSlow` —
+`notify` «Финализация затянулась — результат появится в истории»; `.giveUpRescuePending`
+— показать текст превью + «запись восстановится при следующем запуске»;
+`.foreignOwner` — «Идёт другая запись» + сброс локального `isRecording`;
+`.surfaceAsIs` — существующая обработка статусов (не трогать).
+
+Точное место хранения токена: там же, где хранится `recordingTargetApp` в
+`main+HotkeyRecording.swift` (associated-object паттерн агента) —
+прочитать его объявление грепом `grep -n "recordingTargetApp" native/KrabEarAgent/Sources/KrabEarAgent/*.swift`
+и завести `activeGenerationToken: String?` рядом, тем же способом.
+
+- [ ] **Step 6: Полная сборка и сьюта**
+
+Run: `cd native/KrabEarAgent && swift build -c release && swift test`
+Expected: сборка OK, вся сьюта зелёная
+
+- [ ] **Step 7: Коммит**
+
+```bash
+git add native/KrabEarAgent/Sources/KrabEarAgent/RecordingStopCoordinator.swift \
+  native/KrabEarAgent/Tests/KrabEarAgentTests/RecordingStopCoordinatorTests.swift \
+  native/KrabEarAgent/Sources/KrabEarAgent/main+HotkeyRecording.swift \
+  native/KrabEarAgent/Sources/KrabEarAgent/main+QuickCapture.swift
+git commit -m "feat(r2): единый координатор остановки с ретраем и бюджетом (Task 7)"
+```
+
+### Task 8: Живой e2e, финальные гейты, документация
+
+**Files:**
+- Create: `scripts/e2e_owner_gate_smoke.py`
+- Modify: `docs/ROADMAP-2026H2.md` (журнал + хвост F8), `CLAUDE.md` (карта модулей)
+
+- [ ] **Step 1: Живой смок.** По образцу `scripts/e2e_rescue_smoke.py` (throwaway data_dir, teardown в finally). Сценарии: (а) диктовка → promote во встречу → `meeting_stop`: один терминальный ответ, ноль ложных mismatch в логе; (б) стоп с протухшим токеном при активной записи → `unknown_generation`, запись жива; (в) двойной стоп с одним токеном → один и тот же ответ.
+
+- [ ] **Step 2: Полные гейты**
+
+```bash
+PYTHONPATH=$(pwd)/KrabEar python -m pytest \
+  KrabEar/tests/test_recording_owner_state.py KrabEar/tests/test_recording_generation.py \
+  KrabEar/tests/test_recording_stop_gate.py KrabEar/tests/test_recording_owner_matrix.py \
+  KrabEar/tests/test_recording_terminal_cache.py KrabEar/tests/test_recording_owner_telemetry.py \
+  KrabEar/tests/test_recording_core_service.py KrabEar/tests/test_recording_spill_wiring.py \
+  KrabEar/tests/test_recording_rescue.py KrabEar/tests/test_meeting_session_service_W_C2a.py \
+  KrabEar/tests/test_backend_service.py -v -p no:cacheprovider
+make audit-all
+cd native/KrabEarAgent && swift build -c release && swift test
+python scripts/e2e_owner_gate_smoke.py
+python scripts/e2e_rescue_smoke.py     # регрессия R1
+bash scripts/run_e2e_smokes.command    # регрессия 37 методов + privacy
+```
+
+- [ ] **Step 3: Документация.** Журнал ROADMAP (объём, находки, отклонённая рекомендация по `recorder_timeout` с обоснованием); **обязательно строка про хвост F8** (таймаут `meeting_stop` 60с короче финализации часовой встречи); строки в CLAUDE.md про поколение записи и матрицу владения.
+
+- [ ] **Step 4: Adversarial-ревью всего диффа** (Fable) перед мержем — конвейер §1 ROADMAP.
+
+---
+
+## Порядок и параллелизм
+
+Задачи строго последовательны: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8. Каждая следующая опирается на интерфейсы предыдущей (`_active_owner` → `_active_generation` → гейт → матрица → кэш → телеметрия → клиент). Параллелить нечего — это одна цепочка по одному файлу-ядру `recording_core_service.py`.
+
+Рекомендуемое исполнение: subagent-driven, свежий Sonnet-воркер на задачу, личный построчный гейт координатора после каждой, финальный Fable-гейт всего диффа перед мержем.
