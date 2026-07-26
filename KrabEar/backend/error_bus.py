@@ -29,6 +29,8 @@ Component = Literal[
     "system",
     # Wave 490 additions
     "startup",
+    # R2: lifecycle владения общим recorder.
+    "recording",
 ]
 
 

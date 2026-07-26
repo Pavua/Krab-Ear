@@ -1128,6 +1128,10 @@ class BackendService:
             auto_deduplicator=self._auto_deduplicator,
             rescue_dir=Path(self.store.data_dir) / "rescue",
         )
+        # R2 Task 6: owner-mismatch обязан попадать не только в WARNING, но и
+        # в тот же ErrorBus, который опрашивает native-agent. Core создаётся
+        # после ErrorBus, поэтому явный late-inject не зависит от глобалов.
+        self._recording_core_svc._error_bus = self._error_bus
         # W1776: late-inject _bookmarks so phase_e can rebind live-recording bookmarks.
         # _bookmarks is created earlier in __init__ (line ~396).
         self._recording_core_svc._bookmarks = self._bookmarks

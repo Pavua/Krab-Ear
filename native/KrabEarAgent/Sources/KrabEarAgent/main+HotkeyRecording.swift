@@ -230,7 +230,10 @@ extension AgentAppDelegate {
                 enabled: settings.audioDuckingEnabled,
                 duckPercent: effectiveDuckingPercent
             )
-            let response = try callWithRecovery(method: "start_recording", params: [:])
+            let response = try callWithRecovery(
+                method: "start_recording",
+                params: ["source": "dictation"]
+            )
             let result = response["result"] as? [String: Any]
             let status = (result?["status"] as? String) ?? "recording"
             if status == "already_recording" {
@@ -293,6 +296,7 @@ extension AgentAppDelegate {
             let response = try callWithRecovery(
                 method: "stop_recording",
                 params: [
+                    "source": "dictation",
                     "quality_profile": settings.qualityProfile,
                     "cleanup_profile": settings.cleanupProfile,
                     "translation_mode": settings.translationMode,

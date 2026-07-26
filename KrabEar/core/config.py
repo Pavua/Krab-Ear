@@ -1048,6 +1048,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Во время записи сырые фреймы дублируются на диск (<data_dir>/rescue/);
     # при смерти backend аудио восстанавливается на следующем старте.
     "recording_spill_enabled": True,
+    # --- R2: контроль владения записью ---
+    # False = shadow (WARNING + ErrorBus, stop продолжается), True = отказ
+    # чужому stop. Флип — только решением владельца после недели чистых логов.
+    "recording_owner_enforce": False,
     # --- Scored STT adapter selection (D.2.3) ---
     # "auto_scored" = score function (language match + speed + quality + duration penalty).
     # "legacy"      = прежний порядок adapter chain из AudioEngine.

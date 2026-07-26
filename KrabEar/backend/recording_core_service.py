@@ -62,6 +62,14 @@ _MAX_FINALIZING_GENERATIONS = 8
 # удержания транскриптов в RAM; TTL измеряется только монотонными часами.
 _TERMINAL_CACHE_MAX = 3
 _TERMINAL_CACHE_TTL_SEC = 300.0
+# R2 Task 6: только эти категории разрешено выносить из lifecycle-протокола
+# в широкую телеметрию. Произвольный source допустим для совместимости API,
+# но может содержать PII и потому сворачивается в нейтральный ``other``.
+_OWNER_TELEMETRY_ALLOWLIST = frozenset({
+    "dictation",
+    "meeting",
+    "quick_capture",
+})
 
 
 def _sanitize_dedup_threshold(raw: Any) -> float:
@@ -607,13 +615,94 @@ class RecordingCoreService:
                 self._terminal_cache_epoch
             ) + 1
 
+    @staticmethod
+    def _requested_stop_owner(
+        params: dict[str, Any],
+    ) -> str | None:
+        """Нормализовать owner stop-запроса, не ломая legacy-клиентов.
+
+        В отличие от start, отсутствие/пустота здесь НЕ означает dictation:
+        старый бинарь без source должен пройти только token-гейт и не создавать
+        ложное owner-событие. Нестроковые JSON-значения также считаются legacy.
+        """
+        raw_owner = params.get("source")
+        if not isinstance(raw_owner, str):
+            return None
+        owner = raw_owner.strip()
+        return owner or None
+
+    @staticmethod
+    def _owner_telemetry_category(owner: Any) -> str:
+        """Вернуть PII-безопасную категорию для WARNING и ErrorBus."""
+        if (
+            isinstance(owner, str)
+            and owner in _OWNER_TELEMETRY_ALLOWLIST
+        ):
+            return owner
+        return "other"
+
     def _report_owner_mismatch(
         self,
         owner: str | None,
         requested: str,
     ) -> None:
-        """Хук shadow-телеметрии; Task 6 добавит WARNING и ErrorBus."""
-        return None
+        """Громко, но fail-open сообщить о положительном owner-mismatch.
+
+        В телеметрию не попадают token, текст, путь или произвольный source.
+        Ошибка logger/ErrorBus не имеет права менять решение shadow/enforce и
+        тем более оставлять микрофон захваченным из-за сбоя наблюдаемости.
+        """
+        try:
+            safe_owner = self._owner_telemetry_category(owner)
+            safe_requested = self._owner_telemetry_category(requested)
+            logger.warning(
+                "Несовпадение владельца записи: owner=%s requested=%s",
+                safe_owner,
+                safe_requested,
+            )
+            error_bus = getattr(self, "_error_bus", None)
+            if error_bus is None:
+                return
+
+            from datetime import datetime, timezone
+
+            from backend.error_bus import KrabError
+            from backend.error_codes import ERROR_REGISTRY
+
+            entry = ERROR_REGISTRY.get(
+                "recording.owner_mismatch",
+                {},
+            )
+            error_bus.push(KrabError(
+                severity=entry.get("severity", "warn"),
+                component="recording",
+                code="recording.owner_mismatch",
+                message_user=entry.get(
+                    "user_msg_ru",
+                    "Обнаружено несовпадение режима при остановке записи",
+                ),
+                message_debug=(
+                    "recording owner mismatch: "
+                    f"owner={safe_owner} requested={safe_requested}"
+                ),
+                timestamp=datetime.now(timezone.utc),
+                context={
+                    "owner": safe_owner,
+                    "requested": safe_requested,
+                },
+                actionable=entry.get("actionable", False),
+                action_id=entry.get("action_id"),
+            ))
+        except Exception:
+            # Даже logging handler может быть внешним и бросить исключение.
+            # Второй лог — best-effort и не должен повторно сломать stop.
+            try:
+                logger.debug(
+                    "Owner-mismatch telemetry недоступна",
+                    exc_info=True,
+                )
+            except Exception:
+                pass
 
     def _stop_gate_decision(
         self,
@@ -656,8 +745,16 @@ class RecordingCoreService:
                     "generation_token": token,
                 }
 
-        requested_raw = params.get("source")
-        requested_owner = str(requested_raw) if requested_raw else None
+        requested_owner = self._requested_stop_owner(params)
+        if active is not None and requested_owner is None:
+            try:
+                logger.debug(
+                    "Owner stop-gate: source отсутствует или legacy; "
+                    "owner-политику пропускаю"
+                )
+            except Exception:
+                # Диагностический breadcrumb не участвует в решении stop.
+                pass
         if (
             active is not None
             and requested_owner
@@ -672,11 +769,12 @@ class RecordingCoreService:
                 ),
                 requested_owner,
             )
-            if bool(
+            if self._coerce_bool(
                 self._get_runtime_setting(
                     "recording_owner_enforce",
                     False,
-                )
+                ),
+                default=False,
             ):
                 return {
                     "status": "owner_mismatch",

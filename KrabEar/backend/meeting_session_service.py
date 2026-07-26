@@ -491,7 +491,9 @@ class MeetingSessionService:
         # _stopping остаётся True и не даёт новому start вклиниться в финализацию.
         stop_resp: dict[str, Any] = {}
         if getattr(self._recorder, "is_recording", False):
-            stop_resp = self._recording_core.handle_stop_recording({})
+            stop_resp = self._recording_core.handle_stop_recording({
+                "source": "meeting",
+            })
         item_id = stop_resp.get("history_id")
         self._teardown_session(emit_finished=True, item_id=item_id)
         return {"ok": True, "item_id": item_id}

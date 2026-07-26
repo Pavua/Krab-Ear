@@ -141,6 +141,9 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             # завершения backend (SIGKILL/crash/OOM); уведомляет, что аудио
             # восстановлено (или лежит WAV-ом при privacy_mode).
             "audio.recording_rescued",
+            # Added R2 (2026-07-25) — положительный конфликт owner при stop:
+            # shadow логирует и продолжает, enforce отклоняет физический stop.
+            "recording.owner_mismatch",
         }
         self.assertEqual(set(ERROR_REGISTRY.keys()), expected)
 
@@ -239,7 +242,8 @@ class ErrorRegistryShapeTests(unittest.TestCase):
         2026-07-12 mic-watchdog self-heal added audio.stack_wedged = 61;
         2026-07-15 wake-word watchdog added audio.wakeword_wedged = 62;
         R1 (2026-07-24) recording-reliability wave added audio.recording_rescued = 63;
+        R2 (2026-07-25) owner shadow telemetry added recording.owner_mismatch = 64;
         test_expected_codes_present guards the exact set so this count test is a
         redundant but cheap invariant.
         """
-        self.assertEqual(len(ERROR_REGISTRY), 63)
+        self.assertEqual(len(ERROR_REGISTRY), 64)

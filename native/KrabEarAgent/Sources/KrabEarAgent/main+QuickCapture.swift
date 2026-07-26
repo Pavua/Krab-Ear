@@ -91,7 +91,9 @@ extension AgentAppDelegate {
                             let orphanIpc = self.ipcClient
                             Task.detached {
                                 _ = try? await orphanIpc.callAsync(
-                                    method: "stop_recording", params: [:], timeoutSec: 120)
+                                    method: "stop_recording",
+                                    params: ["source": "quick_capture"],
+                                    timeoutSec: 120)
                             }
                             return false
                         }
@@ -134,7 +136,9 @@ extension AgentAppDelegate {
             }
             do {
                 let resp = try await self.ipcClient.callAsync(
-                    method: "stop_recording", params: [:], timeoutSec: 120)
+                    method: "stop_recording",
+                    params: ["source": "quick_capture"],
+                    timeoutSec: 120)
                 let result = resp["result"] as? [String: Any] ?? [:]
                 await self.handleQuickCaptureResult(result)
             } catch {

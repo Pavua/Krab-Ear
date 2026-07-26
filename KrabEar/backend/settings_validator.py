@@ -148,6 +148,8 @@ _BOOL_FIELDS: dict[str, bool] = {
     "audio_selfheal_enabled": True,
     "wake_word_watchdog_enabled": True,
     "meeting_live_speakers_enabled": True,
+    # R2: строка "false" не должна становиться truthy в owner-гейте.
+    "recording_owner_enforce": False,
     # --- C3a Quick Capture ---
     "quick_capture_send_to_notes": False,
     "quick_capture_obsidian_sync": False,

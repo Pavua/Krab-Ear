@@ -369,6 +369,10 @@ class MeetingStopTestCase(unittest.TestCase):
         self.assertEqual(bus.types().count("meeting.finalizing"), 1)
         self.assertEqual(bus.types().count("meeting.finished"), 1)
         self.assertEqual(len(svc._recording_core.stopped), 1)
+        self.assertEqual(
+            svc._recording_core.stopped[0],
+            {"source": "meeting"},
+        )
         state = svc.handle_get_meeting_live_state({})
         self.assertFalse(state["active"])
 

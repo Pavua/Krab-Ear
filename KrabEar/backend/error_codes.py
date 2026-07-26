@@ -753,6 +753,18 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "dedupe_seconds": 5,
     },
 
+    # ── R2 (2026-07-25): чужой потребитель запросил stop активной записи ───
+    # Текст намеренно не обещает «запись не тронута»: в shadow-режиме stop
+    # продолжается, а в enforce отклоняется. Фактическое решение видно в ответе.
+    "recording.owner_mismatch": {
+        "user_msg_ru": "Обнаружено несовпадение режима при остановке записи",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "warn",
+        "dedupe_seconds": 30,
+    },
+
     # ── W1231 F2 HIGH: two live callsites with unregistered codes ─────────────
 
     # rewriter.mlx_token_bug — mlx_lm 0.31.3 HTTP 500 UnboundLocalError on

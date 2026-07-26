@@ -1246,64 +1246,69 @@ backend-only, а на машине параллельно идёт длител�
 
 **Files:**
 - Modify: `KrabEar/backend/meeting_session_service.py:493-494` (внутренний стоп)
-- Modify: `native/KrabEarAgent/Sources/KrabEarAgent/main+QuickCapture.swift:57, 91, 134`
+- Modify: `native/KrabEarAgent/Sources/KrabEarAgent/main+QuickCapture.swift:91, 134`
 - Modify: `native/KrabEarAgent/Sources/KrabEarAgent/main+HotkeyRecording.swift` (старт и стоп)
 - Modify: `KrabEar/backend/recording_core_service.py` (`_stop_gate_decision` — mismatch)
 - Modify: `KrabEar/backend/error_codes.py` (новый код)
+- Modify: `KrabEar/backend/error_bus.py` (типизированный component `recording`)
+- Modify: `KrabEar/backend/service.py` (живой late-inject ErrorBus)
+- Modify: `KrabEar/backend/settings_validator.py` (bool-нормализация)
 - Modify: `KrabEar/core/config.py` (`recording_owner_enforce`)
+- Modify: `KrabEar/tests/test_error_codes.py` (канонический registry = 64)
+- Modify: `KrabEar/tests/test_meeting_session_service_W_C2a.py` (живой payload)
 - Test: `KrabEar/tests/test_recording_owner_telemetry.py` (новый)
 
 **Ключевое правило (F5):** mismatch фиксируется ТОЛЬКО позитивный — владелец передан И не совпал. Отсутствие владельца — `logger.debug`, никогда не WARNING и не ErrorBus. Иначе штатная финализация встречи спамила бы телеметрию и «неделя чистых логов» не наступила бы.
 
-- [ ] **Step 1: Падающий тест** — кейсы: чужой owner в shadow → WARNING + ErrorBus, поведение НЕ меняется (запись остановлена); чужой owner в enforce → `owner_mismatch`, рекордер не тронут; отсутствие owner → ни WARNING, ни ErrorBus, стоп проходит; свой owner → тишина.
+- [x] **Step 1: Падающий тест** — 22 теста покрывают shadow/enforce,
+  matching/tokenless stop, foreign/malformed/finalizing/replay precedence,
+  promote, legacy/whitespace/non-string source, fail-open logger/ErrorBus,
+  PII-redaction, config/validator/registry и живую source-проводку.
 
-- [ ] **Step 2: Verify FAIL**
+- [x] **Step 2: Verify FAIL** — исходный RED: **19 failure/subfailure /
+  10 pass** (21 test item). Падения точно совпали с отсутствующей Task 6:
+  stub-телеметрия, ложный `bool("false")`, ненормализованный source, нет
+  ErrorBus wiring/registry/default и три живые stop/start-проводки.
 
-- [ ] **Step 3: Реализация.** Код ошибки в `error_codes.py` рядом с `audio.recording_rescued`:
+- [x] **Step 3: Реализация.**
 
-```python
-    # ── R2 (2026-07-25): чужой потребитель попытался остановить не свою запись ─
-    "recording.owner_mismatch": {
-        "user_msg_ru": "Попытка остановить чужую запись — запись не тронута",
-        "actionable": False,
-        "action_id": None,
-        "action_label": "",
-        "severity": "warn",
-        "dedupe_seconds": 30,
-    },
-```
+Фактическая реализация расширена после независимого pre-audit:
 
-Настройка в `DEFAULT_SETTINGS` рядом с `recording_spill_enabled`:
+- `_requested_stop_owner` принимает только непустую строку после `strip`;
+  missing/null/empty/whitespace/non-string остаются legacy и дают только
+  PII-безопасный DEBUG при живом generation;
+- token invariants и terminal replay остаются раньше owner-политики;
+- positive mismatch даёт один WARNING + ErrorBus. Произвольные source не
+  выходят из lifecycle-слоя: allowlist `dictation/meeting/quick_capture`,
+  остальное сворачивается в `other`; logger/ErrorBus/debug fail-open;
+- `recording.owner_mismatch` получил нейтральный user-message, severity warn,
+  dedupe 30 и типизированный ErrorBus component `recording`;
+- Core получает живой `self._error_bus`; DEFAULT_SETTINGS и SettingsValidator
+  держат `recording_owner_enforce=False`, Core дополнительно использует
+  `_coerce_bool`, поэтому строка `"false"` не включает enforce;
+- meeting internal stop передаёт `source=meeting`; dictation start/stop —
+  `source=dictation`; Quick Capture start уже был прошит до Task 6, поэтому
+  добавлены только normal/orphan stop без duplicate Swift key.
 
-```python
-    # --- R2: контроль владения записью ---
-    # False = shadow (только громкий лог + ErrorBus), True = отказ чужому стопу.
-    # Флип после недели чистой телеметрии (решение владельца).
-    "recording_owner_enforce": False,
-```
+- [x] **Step 4: Зелёные регрессии + ресурсно-безопасный Swift-гейт**
 
-В `_stop_gate_decision` — проверка владельца ПОСЛЕ токенных инвариантов:
+Evidence 2026-07-26: новый файл — **22/22 PASS**; объединённый узкий набор
+Tasks 1–6 + meeting/settings/ErrorBus registry — **280/280 PASS** на macOS.
+Ubuntu-parity Python 3.12 без MLX — **22 + 38 + 12 PASS** для Task 6,
+meeting и error registry. `flake8`, `py_compile`, `git diff --check` и
+`swiftc -frontend -parse` двух изменённых Swift-файлов зелёные.
+Независимый Terra Ultra post-audit: **GO, P0–P2 нет**.
 
-```python
-        requested_owner = params.get("source")
-        if gen is not None and requested_owner and gen.get("owner") != requested_owner:
-            self._report_owner_mismatch(gen.get("owner"), requested_owner)
-            if bool(self._get_runtime_setting("recording_owner_enforce", False)):
-                return {
-                    "status": "owner_mismatch",
-                    "owner": gen.get("owner"),
-                    "requested": requested_owner,
-                }
-```
+Полный `swift test` намеренно отложен до release-гейта Task 8: на M4 Max
+параллельно сутки идёт локальная транскрибация, а Swift build создаст лишнюю
+CPU/disk contention. Parse-only здесь честно отмечен и не считается release
+acceptance.
 
-Прошивка вызовов: `meeting_session_service.py:493-494` →
-`handle_stop_recording({"source": "meeting"})`; `main+QuickCapture.swift` три
-места → добавить `"source": "quick_capture"` в params;
-`main+HotkeyRecording.swift` старт и стоп → `"source": "dictation"` (в стопе —
-рядом с `quality_profile`).
+- [x] **Step 5: Гейты и checkpoint-коммит**
 
-- [ ] **Step 4: Зелёные + полный swift test + прогон meeting-тестов**
-- [ ] **Step 5: Гейты и коммит**
+Task 6 отдельно не merge/deploy: enforce остаётся `False`, а Task 7 обязан
+добавить token/retry, сохранить meeting retry-handle при `recorder_timeout`
+и убрать условный stop по `recorder.is_recording`.
 
 ---
 
