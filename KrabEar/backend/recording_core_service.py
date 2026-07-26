@@ -8,6 +8,7 @@ start/stop записи, состояние и аудиоустройства, �
 
 from __future__ import annotations
 
+import copy
 import inspect
 import logging
 import math
@@ -16,6 +17,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -56,6 +58,10 @@ _SHUTDOWN_LIFECYCLE_LOCK_TIMEOUT_SEC = 1.5
 # R2 Task 3: живые finalizing-хвосты не вытесняются. Восьмой может завершиться,
 # а девятый fresh start временно получает уже известный recorder_stopping.
 _MAX_FINALIZING_GENERATIONS = 8
+# R2 Task 5: три terminal-ответа покрывают транспортный retry без бессрочного
+# удержания транскриптов в RAM; TTL измеряется только монотонными часами.
+_TERMINAL_CACHE_MAX = 3
+_TERMINAL_CACHE_TTL_SEC = 300.0
 
 
 def _sanitize_dedup_threshold(raw: Any) -> float:
@@ -142,6 +148,15 @@ class RecordingCoreService:
         self._active_generation: dict[str, Any] | None = None
         self._finalizing_generations: dict[str, dict[str, Any]] = {}
         self._generation_revision = 0
+        # Terminal-cache хранит полный уже публичный stop-ответ, включая PII.
+        # Epoch не даёт pre-purge хвосту заново опубликовать старый ответ после
+        # clear_terminal_cache(); lock не берёт lifecycle-lock в обратную сторону.
+        self._terminal_cache: OrderedDict[
+            str,
+            tuple[float, dict[str, Any]],
+        ] = OrderedDict()
+        self._terminal_cache_lock = threading.Lock()
+        self._terminal_cache_epoch = 0
 
         # Wired by BackendService after init (same pattern as llm_rewriter._error_bus).
         self._error_bus: Any = None
@@ -349,6 +364,9 @@ class RecordingCoreService:
             "started_at": time.monotonic(),
             "promoted_from": None,
             "revision": self._next_generation_revision_locked(),
+            # Снимок epoch линеаризует start относительно privacy-purge:
+            # хвост поколения, начатого до purge, больше не репопулирует PII.
+            "terminal_cache_epoch": self._terminal_cache_epoch_snapshot(),
         }
         self._active_generation = generation
         return generation
@@ -482,12 +500,112 @@ class RecordingCoreService:
         self._clear_active_generation_locked()
         return generation
 
+    def _ensure_terminal_cache_state(
+        self,
+    ) -> tuple[
+        OrderedDict[str, tuple[float, dict[str, Any]]],
+        Any,
+        int,
+    ]:
+        """Вернуть cache-примитивы, включая legacy ``__new__``-дубли."""
+        cache = getattr(self, "_terminal_cache", None)
+        cache_lock = getattr(self, "_terminal_cache_lock", None)
+        epoch = getattr(self, "_terminal_cache_epoch", None)
+        if cache is not None and cache_lock is not None and epoch is not None:
+            return cache, cache_lock, int(epoch)
+
+        with type(self)._lifecycle_init_lock:
+            cache = getattr(self, "_terminal_cache", None)
+            if cache is None:
+                cache = OrderedDict()
+                self._terminal_cache = cache
+            cache_lock = getattr(self, "_terminal_cache_lock", None)
+            if cache_lock is None:
+                cache_lock = threading.Lock()
+                self._terminal_cache_lock = cache_lock
+            epoch = getattr(self, "_terminal_cache_epoch", None)
+            if epoch is None:
+                epoch = 0
+                self._terminal_cache_epoch = epoch
+        return cache, cache_lock, int(epoch)
+
+    def _terminal_cache_epoch_snapshot(self) -> int:
+        """Снять текущий purge-epoch под cache-lock."""
+        _, cache_lock, _ = self._ensure_terminal_cache_state()
+        with cache_lock:
+            return int(self._terminal_cache_epoch)
+
+    @staticmethod
+    def _prune_expired_terminal_cache_locked(
+        cache: OrderedDict[str, tuple[float, dict[str, Any]]],
+        now: float,
+    ) -> None:
+        """Удалить все TTL-протухшие PII-снимки; caller держит cache-lock."""
+        expired_tokens = [
+            token
+            for token, (stored_at, _) in cache.items()
+            if now - stored_at >= _TERMINAL_CACHE_TTL_SEC
+        ]
+        for token in expired_tokens:
+            cache.pop(token, None)
+
     def _replay_terminal_response(
         self,
         token: str,
     ) -> dict[str, Any] | None:
-        """Хук replay терминального ответа; Task 5 добавит TTL-кэш."""
-        return None
+        """Вернуть независимый снимок terminal-ответа, если TTL/privacy разрешают."""
+        # Privacy проверяется на чтении: кэш мог быть заполнен до включения
+        # режима, но ни один replay-путь не должен выдать старый cleartext.
+        if bool(
+            self._get_runtime_setting(
+                "privacy_mode_enabled",
+                False,
+            )
+        ):
+            return None
+
+        try:
+            cache, cache_lock, _ = self._ensure_terminal_cache_state()
+            now = time.monotonic()
+            with cache_lock:
+                self._prune_expired_terminal_cache_locked(cache, now)
+                entry = cache.get(token)
+                if entry is None:
+                    return None
+                try:
+                    replay = copy.deepcopy(entry[1])
+                except Exception:
+                    # Некопируемый снимок не должен ломать каждый retry.
+                    cache.pop(token, None)
+                    raise
+        except Exception:
+            # Любой сбой cache-read — безопасный miss. Ответ и token не
+            # логируем: cached payload может содержать полный транскрипт.
+            logger.warning(
+                "Terminal cache: чтение replay не удалось",
+                exc_info=True,
+            )
+            return None
+
+        # Повторная проверка сужает окно переключения privacy между первым
+        # чтением настройки и готовым снимком ответа.
+        if bool(
+            self._get_runtime_setting(
+                "privacy_mode_enabled",
+                False,
+            )
+        ):
+            return None
+        return replay
+
+    def clear_terminal_cache(self) -> None:
+        """Немедленно стереть terminal PII и закрыть epoch для старых хвостов."""
+        cache, cache_lock, _ = self._ensure_terminal_cache_state()
+        with cache_lock:
+            cache.clear()
+            self._terminal_cache_epoch = int(
+                self._terminal_cache_epoch
+            ) + 1
 
     def _report_owner_mismatch(
         self,
@@ -579,16 +697,66 @@ class RecordingCoreService:
         """
         if generation is None:
             return
+        try:
+            # Снимок делаем до lifecycle-lock: terminal response может нести
+            # длинный транскрипт, но его копирование не должно блокировать G2.
+            response_snapshot = copy.deepcopy(response)
+        except Exception:
+            response_snapshot = None
+            logger.warning(
+                "Terminal cache: не удалось создать снимок ответа",
+                exc_info=True,
+            )
+
         lifecycle_lock, _ = self._ensure_recording_lifecycle_state()
         with lifecycle_lock:
             token = str(generation.get("token") or "")
             finalizing = self._finalizing_generations_locked()
+            terminalized = False
             if token and finalizing.get(token) is generation:
                 del finalizing[token]
+                terminalized = True
             # Defensive-путь для orphan/already_stopped: compare+clear
             # выполняются в одной критической секции, поэтому G1 не сотрёт G2.
             if getattr(self, "_active_generation", None) is generation:
                 self._clear_active_generation_locked()
+                terminalized = True
+
+            if terminalized and token and response_snapshot is not None:
+                try:
+                    cache, cache_lock, _ = (
+                        self._ensure_terminal_cache_state()
+                    )
+                    now = time.monotonic()
+                    with cache_lock:
+                        self._prune_expired_terminal_cache_locked(
+                            cache,
+                            now,
+                        )
+                        if int(
+                            generation.get(
+                                "terminal_cache_epoch",
+                                -1,
+                            )
+                        ) == int(self._terminal_cache_epoch):
+                            # Первый terminal-ответ token неизменяем:
+                            # defensive повтор не переписывает replay.
+                            if token not in cache:
+                                cache[token] = (
+                                    now,
+                                    response_snapshot,
+                                )
+                            while len(cache) > _TERMINAL_CACHE_MAX:
+                                cache.popitem(last=False)
+                        # При несовпавшем epoch history-финализация законна,
+                        # но pre-purge transcript в RAM больше не публикуем.
+                except Exception:
+                    # Cache — best-effort adjunct ПОСЛЕ успешного identity-CAS.
+                    # Его отказ не меняет terminal response и не оживляет G1.
+                    logger.warning(
+                        "Terminal cache: публикация ответа не удалась",
+                        exc_info=True,
+                    )
 
     @staticmethod
     def _build_finalization_failed_response(

@@ -81,6 +81,7 @@ class HistoryService:
         auto_glossary_builder: Any | None = None,
         playback_tracker: "PlaybackTracker | None" = None,
         transcript_versions: Any | None = None,
+        recording_core: Any | None = None,
     ) -> None:
         self.store = store
         # Разделяемый список clipboard_history из BackendService (передаётся по ссылке).
@@ -141,6 +142,9 @@ class HistoryService:
         # terminal-задачи хранят items[].text (полный текст транскрипций) и errors.
         # Файлового артефакта нет; clear() сбрасывает _jobs и все сопутствующие dict-ы.
         self._job_tracker: Any = None         # JobTracker — in-memory async-job registry (transcript PII)
+        # R2 Task 5: terminal stop-response cache содержит полный transcript.
+        # В production ссылка late-injected после создания RecordingCoreService.
+        self._recording_core: Any = recording_core
         # wave-33 A1: SharingManager — in-memory _index хранит полный текст транскрипций
         # (content/text/translated_text). rmtree(shares/) удаляет файлы, но RAM-копия
         # продолжает отдавать данные через get_shared. clear() сбрасывает _index.
@@ -2850,7 +2854,22 @@ class HistoryService:
                 logger.warning("purge_all_data: job_tracker.clear() не удался", exc_info=True)
                 secondary_errors.append("job_tracker")
 
-        # --- 37. Crypto-audit (2026-06-20): удалить ключ шифрования истории из Keychain.
+        # --- 37. R2: очистить terminal stop-response cache в RAM ---
+        # Ответы несут text/original_text/translated_text и recovery-поля.
+        # clear также увеличивает epoch: уже идущий pre-purge STT-хвост после
+        # завершения не сможет заново положить старый транскрипт в этот кэш.
+        if self._recording_core is not None:
+            try:
+                self._recording_core.clear_terminal_cache()
+                logger.info("purge_all_data: terminal cache записи очищен")
+            except Exception:
+                logger.warning(
+                    "purge_all_data: clear_terminal_cache failed",
+                    exc_info=True,
+                )
+                secondary_errors.append("terminal_cache")
+
+        # --- 38. Crypto-audit (2026-06-20): удалить ключ шифрования истории из Keychain.
         # Без этого выживший AES-256 ключ расшифровывает pre-purge бэкап history.ndjson
         # (Time Machine / iCloud / FS-снапшот) — ciphertext + живой ключ = весь текст.
         # delete_history_key — no-op без Keychain (KeystoreUnavailable на Linux/CI → не

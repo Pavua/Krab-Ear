@@ -130,6 +130,12 @@ REGISTRY: tuple[RegistryEntry, ...] = (
         "transcript text in items[].text + error fragments (live up to 1h)",
     ),
     RegistryEntry(
+        receiver="_recording_core",
+        method="clear_terminal_cache",
+        pii="terminal-ответы stop_recording в RAM: text/original_text/"
+        "translated_text, recovery-пути и публичные поля ошибок (TTL 5 минут)",
+    ),
+    RegistryEntry(
         receiver="_semantic_searcher",
         method="purge_all",
         pii="SemanticSearcher embedding index + purge-epoch barrier "

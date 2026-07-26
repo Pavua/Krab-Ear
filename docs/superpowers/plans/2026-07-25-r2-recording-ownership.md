@@ -1147,13 +1147,12 @@ Task 4 не меняет Swift, а на машине параллельно ид
    (по образцу уже существующих опциональных коллабораторов этого класса —
    `_transcript_versions`, `_recording_chain_mgr`, `_semantic_searcher`: сохраняются
    в `self._<имя>` и везде проверяются на `None`).
-2. `service.py` при конструировании `HistoryService(...)` передаёт
-   `recording_core=self._recording_core_svc`. **Порядок важен**: `HistoryService`
-   должен конструироваться ПОСЛЕ `RecordingCoreService` — проверить грепом
-   `grep -n "HistoryService(\|RecordingCoreService(" KrabEar/backend/service.py`
-   и, если порядок обратный, передать не ссылку, а колбэк
-   `recording_core_fn=lambda: self._recording_core_svc` (тот же приём, что
-   `reset_preview_fn` в конструкторе `CallAssistService`, `service.py:570`).
+2. `service.py` создаёт `HistoryService` раньше `RecordingCoreService`: он уже
+   нужен `PurgeScheduler`, а перестановка расширила бы риск за Task 5. Поэтому
+   после создания Core используется прямой late-inject
+   `self._history._recording_core = self._recording_core_svc` рядом с уже живой
+   проводкой `_job_tracker`. Callback отклонён: AST-гард ниже распознаёт literal
+   clear-call на атрибуте, а late-inject соответствует текущему паттерну проекта.
 3. Шаг в `handle_purge_all_data` рядом с остальными in-memory шагами:
 
 ```python
@@ -1168,8 +1167,8 @@ Task 4 не меняет Swift, а на машине параллельно ид
 ```
 
 4. `scripts/audit_inmemory_purge_coverage.py` — курируемый AST-реестр: строка вызова
-   в шаге purge обязана **дословно** совпасть со строкой реестра. Прочитать формат
-   существующих записей (там 5 штук) и добавить свою в том же виде:
+   в шаге purge обязана **дословно** совпасть со строкой реестра. К прежним пяти
+   записям добавляется шестая:
    `self._recording_core.clear_terminal_cache()` с описанием
    «terminal-ответы стопа (text/original_text/translated_text) в RAM, TTL 5 мин».
 
@@ -1177,40 +1176,71 @@ Task 4 не меняет Swift, а на машине параллельно ид
 - Consumes: `_terminalize_generation` / `_replay_terminal_response` (Task 3, заглушки).
 - Produces: `clear_terminal_cache()` — публичный метод для purge.
 
-- [ ] **Step 1: Падающий тест** — кейсы: повторный стоп с тем же токеном отдаёт тот же ответ и НЕ персистит второй раз; кэш ограничен 3 записями; TTL 5 минут (подменить время монотоника); при `privacy_mode_enabled=True` replay отдаёт `unknown_generation`, а не текст; `clear_terminal_cache()` опустошает.
+- [x] **Step 1: Падающий тест** — `test_recording_terminal_cache.py`
+  проверяет: exact replay без второго stop/persist; старый token не трогает G2;
+  FIFO cap=3; monotonic TTL (`299.999` жив, `300.000` истёк); prune всех expired
+  на put/replay; privacy read-gate; idempotent clear; deep-copy на store и каждом
+  replay; stale identity-CAS; fail-open copy/read/write; History constructor,
+  purge success/failure/no-confirm/compat и production late-inject.
 
-- [ ] **Step 2: Verify FAIL**
+- [x] **Step 2: Verify FAIL** — исходный RED **12 FAIL / 3 PASS**. После базовой
+  реализации два независимых adversarial-аудита добавили детерминированные RED:
+  cache write после успешного CAS пробрасывал `RuntimeError`, затем cache read
+  из TTL-prune ломал stop-gate. Оба дефекта воспроизведены до исправления.
 
-- [ ] **Step 3: Реализация.** В `__init__`: `self._terminal_cache: "OrderedDict[str, tuple[float, dict]]" = OrderedDict()` + `self._terminal_cache_lock = threading.Lock()`. Константы `_TERMINAL_CACHE_MAX = 3`, `_TERMINAL_CACHE_TTL_SEC = 300.0`.
+- [x] **Step 3: Реализация.**
 
-`_terminalize_generation` дополнить записью в кэш под локом (ключ — токен завершаемого поколения, значение — `(time.monotonic(), response)`), с вытеснением старейшего при превышении лимита.
+- `OrderedDict[token → (stored_at_monotonic, deepcopy(response))]`, отдельный
+  lock, FIFO cap=3 и TTL 300 секунд; каждый put/replay удаляет **все** expired.
+- generation при publish сохраняет `terminal_cache_epoch`. Purge под cache-lock
+  делает `clear()` + `epoch += 1`; terminalizer после успешного identity-CAS
+  публикует snapshot только при совпавшем epoch. Так blocked G1, начатая до
+  purge, завершает history, но не репопулирует PII; G2 после purge replayable.
+- Snapshot ответа строится до lifecycle-lock; CAS-delete + cache publish остаются
+  одной lifecycle-линеаризацией без окна `не finalizing, но ещё не cached`.
+  Lock-order только `lifecycle → cache`; purge lifecycle-lock не берёт.
+- Store и replay используют независимые `deepcopy`. Ошибки snapshot, publish и
+  всего read-пути (`ensure/prune/get/deepcopy/pop`) fail-open как cache miss:
+  terminal lifecycle не меняется, payload/token в warning не логируются.
+- Replay дважды проверяет live `privacy_mode_enabled`; privacy возвращает
+  `unknown_generation`, а не сохранённый текст.
+- `HistoryService(recording_core=None)` + production late-inject, прямой purge
+  clear-call и шестая запись curated AST registry реализованы дословно.
 
-`_replay_terminal_response` — чтение под локом с проверкой TTL И **privacy-гейтом на чтении**:
+- [x] **Step 4: Зелёные + privacy audit**
 
-```python
-    def _replay_terminal_response(self, token: str) -> "dict[str, Any] | None":
-        # R2 §4.4 (F9): privacy-гейт стоит на ЧТЕНИИ, а не подпиской на смену
-        # настройки — подписки на шину событий это задокументированный капкан
-        # проекта (две шины), а гейт на чтении не может «не сработать»:
-        # пути выдачи в обход него не существует.
-        if self._get_runtime_setting("privacy_mode_enabled", False):
-            return None
-        with self._terminal_cache_lock:
-            entry = self._terminal_cache.get(token)
-            if entry is None:
-                return None
-            stored_at, response = entry
-            if time.monotonic() - stored_at > _TERMINAL_CACHE_TTL_SEC:
-                self._terminal_cache.pop(token, None)
-                return None
-            return dict(response)
+Evidence 2026-07-26:
+
+- новый cache/epoch/purge-набор — **20/20 PASS**;
+- расширенная регрессия Tasks 1–5 + существующие RAM-purge кластеры —
+  **197/197 PASS** на каноническом macOS venv;
+- Ubuntu-parity Python 3.12.11 без MLX — **20/20 PASS**, новых worker-процессов
+  после файла нет;
+- `audit_inmemory_purge_coverage.py --fail-on-found`: **6/6 covered, 0 gaps**;
+- `flake8`, `git diff --check` и независимый read-only adversarial-аудит —
+  GREEN/GO.
+
+- [x] **Step 5: Гейты и коммит**
+
+```bash
+scripts/pre_merge_py312_check.sh \
+  KrabEar/tests/test_recording_terminal_cache.py
+"/Users/pablito/Antigravity_AGENTS/Krab Ear/.venv_krab_ear/bin/python" \
+  scripts/audit_inmemory_purge_coverage.py --fail-on-found
+git add \
+  KrabEar/backend/recording_core_service.py \
+  KrabEar/backend/history_service.py \
+  KrabEar/backend/service.py \
+  KrabEar/tests/test_recording_terminal_cache.py \
+  scripts/audit_inmemory_purge_coverage.py \
+  docs/superpowers/plans/2026-07-25-r2-recording-ownership.md \
+  docs/superpowers/specs/2026-07-25-r2-recording-ownership-design.md
+git commit -m "feat(r2): TTL-replay терминальных ответов + purge-epoch (Task 5)"
 ```
 
-В `handle_purge_all_data` (`history_service.py`) — вызвать `clear_terminal_cache()` у recording-core рядом с остальными in-memory шагами purge. Точное имя атрибута сверить грепом; добавить запись в реестр `scripts/audit_inmemory_purge_coverage.py` (он курируемый — прочитать его формат и добавить строку, иначе гейт не узнает о новом RAM-хранилище PII).
-
-- [ ] **Step 4: Зелёные + `python3 scripts/audit_inmemory_purge_coverage.py --fail-on-found`**
-
-- [ ] **Step 5: Гейты и коммит**
+Swift/MLX/production runtime не запускались и не перезапускались: Task 5
+backend-only, а на машине параллельно идёт длительная локальная транскрибация.
+Этот checkpoint не даёт разрешения на merge/deploy до Tasks 6–8.
 
 ### Task 6: Прошивка `source` + shadow-телеметрия владения
 

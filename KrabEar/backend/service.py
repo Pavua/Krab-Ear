@@ -1177,6 +1177,10 @@ class BackendService:
         # handle_purge_all_data can call clear() — terminal jobs hold transcript
         # text in items[].text (full PII) and survive privacy-purge without this wire.
         self._history._job_tracker = self._recording_core_svc._job_tracker
+        # R2 Task 5: HistoryService создан раньше RecordingCoreService, поэтому
+        # прямой late-inject повторяет тот же безопасный порядок, что JobTracker.
+        # Privacy-purge очищает terminal-response cache и повышает его epoch.
+        self._history._recording_core = self._recording_core_svc
         # wave-1770 HIGH: inject SearchHistoryManager so handle_purge_all_data can call
         # clear_search_history() (clears in-memory _entries) instead of just unlinking
         # the file (which left RAM entries returning stale queries until restart).
