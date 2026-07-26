@@ -327,20 +327,25 @@ git commit -m "fix(r2): хоткей не останавливает чужую 
 
 **Files:**
 - Modify: `KrabEar/backend/recording_spill.py` (`RecordingSpillWriter.__init__`)
-- Modify: `KrabEar/backend/recording_core_service.py` (`__init__`, `_handle_start_recording_locked`, `handle_get_recording_state`)
+- Modify: `KrabEar/backend/recording_core_service.py` (`__init__`,
+  `_handle_start_recording_locked`, `handle_get_recording_state`, phase A,
+  owner-bound shutdown)
 - Test: `KrabEar/tests/test_recording_generation.py` (новый)
+- Test: `KrabEar/tests/test_recording_owner_state.py` (CAS/atomic-state/retry)
+- Test: `KrabEar/tests/test_recording_core_service.py` (degraded start +
+  восстановление восьми ранее не собиравшихся helper-тестов)
 
 **Interfaces:**
 - Consumes: `self._active_owner` и `self._active_owner_revision` из Task 1
   (ПОГЛОЩАЮТСЯ — удаляются, заменяются на `_active_generation`; CAS-revision
   должна стать частью generation/token-перехода, а не исчезнуть).
 - Produces (для Task 3-7):
-  - `self._active_generation: dict | None` со схемой `{"token": str, "owner": str, "state": "capturing"|"finalizing", "started_at": float, "promoted_from": str | None}`
+  - `self._active_generation: dict | None` со схемой `{"token": str, "owner": str, "state": "capturing"|"finalizing", "started_at": float, "promoted_from": str | None, "revision": int}`; revision и монотонный `_generation_revision` сохраняют CAS-контракт Task 1.
   - `RecordingSpillWriter(rescue_dir, sample_rate, channels, source="unknown", session_id=None)` — новый последний параметр; при `None` генерирует свой uuid как сейчас.
   - `handle_start_recording` возвращает в ответе `generation_token: str` и `owner: str`.
   - `handle_get_recording_state` возвращает `owner` и `generation_token`.
 
-- [ ] **Step 1: Написать падающий тест**
+- [x] **Step 1: Написать падающий тест**
 
 Создать `KrabEar/tests/test_recording_generation.py` (фейки — из `test_recording_spill_wiring.py`):
 
@@ -419,9 +424,9 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: Verify FAIL** (`TypeError: __init__() got an unexpected keyword argument 'session_id'`)
+- [x] **Step 2: Verify FAIL** (`TypeError: __init__() got an unexpected keyword argument 'session_id'`)
 
-- [ ] **Step 3: Реализация**
+- [x] **Step 3: Реализация**
 
 3a. `recording_spill.py`, `RecordingSpillWriter.__init__` — заменить генерацию id:
 
@@ -439,8 +444,9 @@ if __name__ == "__main__":
 ```python
         # R2: поколение записи — идентичность цикла «старт → терминальный ответ».
         # Схема: {"token", "owner", "state": capturing|finalizing, "started_at",
-        # "promoted_from"}. Живёт под _recording_lifecycle_lock (нового лока нет).
+        # "promoted_from", "revision"}. Живёт под _recording_lifecycle_lock.
         self._active_generation: "dict[str, Any] | None" = None
+        self._generation_revision = 0
 ```
 
 3c. `_handle_start_recording_locked` — токен генерится ПЕРВЫМ, до создания spill, и передаётся в него. Заменить блок создания spill (после R1-правок он начинается с `spill = None`):
@@ -472,20 +478,21 @@ if __name__ == "__main__":
                 spill = None
 ```
 
-После `self._active_spill = spill` добавить:
+После `self._active_spill = spill` публиковать generation через единый helper,
+который выдаёт монотонную CAS-revision:
 
 ```python
-        import time as _time
-        self._active_generation = {
-            "token": _generation_token,
-            "owner": _owner,
-            "state": "capturing",
-            "started_at": _time.monotonic(),
-            "promoted_from": None,
-        }
+        generation = self._publish_active_generation_locked(
+            token=_generation_token,
+            owner=_owner,
+        )
 ```
 
-В успешный ответ старта (dict со `status: "recording"`) добавить ключи `"generation_token": _generation_token, "owner": _owner`. Найти его греп-ом по `"status": "recording"` в этом методе.
+Фактический helper также записывает `revision` через
+`_next_generation_revision_locked`; прямое присваивание dict здесь запрещено,
+иначе CAS Task 1 тихо исчезнет. В успешный ответ старта добавить
+`"generation_token": generation["token"]`, `"owner": generation["owner"]` и
+`"owner_revision": generation["revision"]`.
 
 3d. `handle_get_recording_state` — заменить строку с `owner` из Task 1 на:
 
@@ -500,25 +507,57 @@ if __name__ == "__main__":
             "generation_token": (_gen or {}).get("token"),
 ```
 
-3e. В `handle_stop_recording` заменить сброс `self._active_owner = None` (Task 1) на сброс поколения — ВРЕМЕННО простой (Task 3 заменит на терминализацию):
+3e. **Уточнение после Task 1:** простой сброс в outer
+`handle_stop_recording` запрещён. Он позволил бы хвосту stop G1 стереть G2,
+стартовавшую после физической остановки G1. В Task 2 generation снимается
+под lifecycle-lock в phase A вместе с подтверждённым physical stop; при
+`recorder_timeout` сохраняется как retry-handle. Shutdown снимает её только
+после подтверждённой остановки recorder и всех retained worker-ов.
 
 ```python
-        self._active_generation = None
+        self._clear_active_generation_locked()
 ```
 
-- [ ] **Step 4: Зелёные + регрессия**
+- [x] **Step 4: Зелёные + регрессия**
 
-Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_recording_generation.py KrabEar/tests/test_recording_owner_state.py KrabEar/tests/test_recording_spill.py KrabEar/tests/test_recording_spill_wiring.py KrabEar/tests/test_recording_core_service.py KrabEar/tests/test_recording_rescue.py -v -p no:cacheprovider`
-Expected: все PASS (тесты Task 1 продолжают работать — `owner` отдаётся уже из поколения)
+Run: `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD/KrabEar" python -m pytest
+KrabEar/tests/test_recording_generation.py
+KrabEar/tests/test_recording_owner_state.py KrabEar/tests/test_recording_spill.py
+KrabEar/tests/test_recording_spill_wiring.py
+KrabEar/tests/test_recording_core_service.py
+KrabEar/tests/test_recording_rescue.py
+KrabEar/tests/test_recorder_spill_integration.py
+KrabEar/tests/test_meeting_session_service_W_C2a.py --timeout=60
+-p no:cacheprovider -p no:xdist -q`
 
-- [ ] **Step 5: Гейты и коммит**
+Evidence 2026-07-26: **182/182 PASS** на macOS. Отдельно проверены
+детерминированные межпоточные окна G1/G2, stale CAS, `recorder_timeout`,
+retained shutdown, privacy+spill-off, collision/partial-unlink и post-capture
+`TypeError`. Старый `owner_revision`-consumer MeetingSession остался зелёным.
+
+- [x] **Step 5: Гейты и коммит**
 
 ```bash
-scripts/pre_merge_py312_check.sh KrabEar/tests/test_recording_generation.py
-flake8 KrabEar/backend/recording_spill.py KrabEar/backend/recording_core_service.py KrabEar/tests/test_recording_generation.py
-git add KrabEar/backend/recording_spill.py KrabEar/backend/recording_core_service.py KrabEar/tests/test_recording_generation.py
+scripts/pre_merge_py312_check.sh \
+  KrabEar/tests/test_recording_generation.py \
+  KrabEar/tests/test_recording_owner_state.py \
+  KrabEar/tests/test_recording_spill.py \
+  KrabEar/tests/test_recording_spill_wiring.py \
+  KrabEar/tests/test_recorder_spill_integration.py \
+  KrabEar/tests/test_recording_rescue.py \
+  KrabEar/tests/test_meeting_session_service_W_C2a.py
+flake8 KrabEar/backend/recording_spill.py \
+  KrabEar/backend/recording_core_service.py \
+  KrabEar/tests/test_recording_generation.py
+# Стадировать только явный список Task 2; git add -A запрещён.
 git commit -m "feat(r2): поколение записи — токен, владелец, единство с spill (Task 2)"
 ```
+
+Evidence 2026-07-26: полный parity-набор Python 3.12 без MLX GREEN; после
+финального cleanup-hardening изменённые generation+spill **31/31 PASS**.
+`flake8`, `git diff --check` и два независимых read-only adversarial-аудита
+GREEN. Swift/MLX/прод не запускались и не перезапускались: Task 2 не меняет
+Swift, а на машине параллельно идёт длительная локальная транскрибация.
 
 ### Task 3: Гейт остановки и токенные инварианты
 
@@ -528,13 +567,23 @@ git commit -m "feat(r2): поколение записи — токен, вла�
 
 **Interfaces:**
 - Consumes: `self._active_generation` (Task 2).
-- Produces (для Task 5, 7): статусы `owner_mismatch`, `unknown_generation`, `stop_in_progress`; хук `self._terminalize_generation(response) -> None`, который Task 5 расширяет записью в кэш.
+- Produces (для Task 5, 7): статусы `owner_mismatch`, `unknown_generation`,
+  `stop_in_progress`; bounded-реестр
+  `self._finalizing_generations: dict[str, dict[str, Any]]`; хук
+  `self._terminalize_generation(response) -> None`, который Task 5 расширяет
+  записью в кэш.
 
 **Инварианты (из спеки §4.2, нарушение = провал задачи):**
 1. Гейт — ПЕРВАЯ операция в `_stop_recording_phase_a_locked`, ДО `self._stop_preview_worker()`. Иначе отвергнутый стоп уже убил партиалы/превью живой чужой записи.
 2. Решение по ТОКЕНУ, не по кэшу.
 3. Отсутствие токена → legacy-путь, НИКОГДА не отказ.
 4. `recorder_timeout` НЕ терминализирует поколение (повторный стоп — штатный путь спасения аудио, `recorder.py:158-161`).
+5. `_active_generation` представляет только текущий physical capture. После
+   успешной phase A прежняя G1 переходит в `_finalizing_generations`, поэтому
+   G2 может стартовать, а повторный stop G1 всё ещё получает
+   `stop_in_progress`.
+6. Проверка и удаление generation выполняются под тем же lifecycle-lock, что
+   start/phase A. Identity-check без lock — TOCTOU и не является CAS.
 
 - [ ] **Step 1: Написать падающий тест**
 
@@ -625,23 +674,47 @@ class StopGateTest(unittest.TestCase):
         """
         svc = self._svc()
         gen_a = {"token": "A", "owner": "dictation", "state": "finalizing",
-                 "started_at": 0.0, "promoted_from": None}
+                 "started_at": 0.0, "promoted_from": None, "revision": 1}
         gen_b = {"token": "B", "owner": "dictation", "state": "capturing",
-                 "started_at": 1.0, "promoted_from": None}
+                 "started_at": 1.0, "promoted_from": None, "revision": 2}
+        svc._finalizing_generations["A"] = gen_a
         svc._active_generation = gen_b
         svc._terminalize_generation(gen_a, {"status": "ok"})
         self.assertIs(svc._active_generation, gen_b, "поколение B не должно быть стёрто")
-
+        self.assertNotIn("A", svc._finalizing_generations)
 
 if __name__ == "__main__":
     unittest.main()
 ```
 
+Кроме кода выше, Step 1 обязан содержать два **непустых детерминированных**
+interleaving-теста:
+
+1. Заблокировать phase B stop G1, запустить G2 и повторить stop с token G1:
+   ответ `stop_in_progress`, recorder и active-generation G2 не изменены.
+2. Удержать lifecycle-lock, запустить terminalizer G1 и доказать, что он ждёт;
+   опубликовать G2 под тем же lock и отпустить. После завершения из
+   finalizing-map удалена только G1, active G2 сохранена. Тест обязан
+   синхронизироваться через `threading.Event`, без `sleep()` и вероятностного
+   stress-loop.
+
 - [ ] **Step 2: Verify FAIL** (`unknown_generation` не возвращается; превью затирается)
 
 - [ ] **Step 3: Реализация**
 
-3a. Добавить метод разбора гейта на `RecordingCoreService` (рядом с `handle_stop_recording`).
+3a. В `__init__` добавить bounded-реестр:
+
+```python
+        self._finalizing_generations: dict[str, dict[str, Any]] = {}
+```
+
+Одновременно разрешено не более 8 незавершённых тяжёлых хвостов. Если реестр
+достиг лимита, новый start возвращает уже поддерживаемый клиентом
+`recorder_stopping` и не захватывает микрофон; живые записи из реестра не
+вытесняются.
+
+Добавить метод разбора гейта на `RecordingCoreService` (рядом с
+`handle_stop_recording`).
 
 **Гейт двухосевой, и оси нельзя схлопывать** (P3 ревью плана): ось 1 — токенные
 инварианты (защита данных, безусловна), ось 2 — владение (политика shadow/enforce,
@@ -667,10 +740,13 @@ if __name__ == "__main__":
         # ── Ось 1: токенные инварианты ───────────────────────────────────────
         if token:
             if gen is not None and gen.get("token") == token:
-                if gen.get("state") == "finalizing":
-                    return {"status": "stop_in_progress", "generation_token": token}
                 # Токен наш и запись идёт — НО не выходим: promote-кейс обязан
                 # дойти до оси 2 (владелец мог смениться на meeting).
+            elif token in self._finalizing_generations:
+                return {
+                    "status": "stop_in_progress",
+                    "generation_token": token,
+                }
             else:
                 replayed = self._replay_terminal_response(token)
                 if replayed is not None:
@@ -710,7 +786,8 @@ if __name__ == "__main__":
         return None
 ```
 
-3c. Добавить терминализацию поколения — **по ССЫЛКЕ на своё поколение, с CAS**:
+3c. Добавить терминализацию поколения — **по ССЫЛКЕ на своё поколение, с CAS
+под lifecycle-lock**:
 
 ```python
     def _terminalize_generation(
@@ -721,8 +798,8 @@ if __name__ == "__main__":
         Зовётся ПЕРЕД каждым терминальным return handle_stop_recording. Task 5
         добавляет сюда запись ответа в кэш под ключом gen["token"].
 
-        🔴 Принимает ССЫЛКУ на своё поколение и обнуляет слот только через CAS.
-        Безусловное `self._active_generation = None` было бы багом класса
+        🔴 Принимает ССЫЛКУ на своё поколение и удаляет только его через CAS
+        под lifecycle-lock. Безусловное `self._active_generation = None` было бы багом класса
         R1 HIGH-2: lifecycle-лок отпускается сразу после phase_a
         (`_stop_recording_phase_a`: `with lifecycle_lock: return ...`), а фазы
         b-e идут минутами БЕЗ лока. За это время пользователь успевает начать
@@ -733,8 +810,14 @@ if __name__ == "__main__":
         if gen is None:
             return
         # Task 5 вставит сюда запись в кэш под gen["token"].
-        if self._active_generation is gen:
-            self._active_generation = None
+        lifecycle_lock, _ = self._ensure_recording_lifecycle_state()
+        with lifecycle_lock:
+            token = str(gen.get("token") or "")
+            if self._finalizing_generations.get(token) is gen:
+                del self._finalizing_generations[token]
+            # Defensive путь для already_stopped/empty до помещения в реестр.
+            if self._active_generation is gen:
+                self._clear_active_generation_locked()
 ```
 
 Чтобы ссылка была доступна, `_stop_recording_phase_a_locked` кладёт своё поколение в
@@ -784,12 +867,25 @@ if __name__ == "__main__":
 phase_c, phase_d и финальный `resp` из phase_e) — тот же вызов с `_gen`:
 `self._terminalize_generation(_gen, <ответ>)` перед `return`.
 
-3f. В `_handle_start_recording_locked` при успешном старте взводить `capturing` (уже сделано Task 2); в `phase_a_locked` сразу после успешного забора аудио (после того как `stopped` получено и не None) перевести в `finalizing`:
+3f. В `_handle_start_recording_locked` при успешном старте взводить `capturing`
+(уже сделано Task 2). До захвата микрофона проверить лимит
+`_finalizing_generations`; при 8 live-хвостах вернуть `recorder_stopping`.
+
+В `phase_a_locked` сразу после успешного забора аудио (после того как `stopped`
+получено и не `None`) атомарно переместить generation из active-слота в
+finalizing-реестр:
 
 ```python
-        if self._active_generation is not None:
-            self._active_generation["state"] = "finalizing"
+        gen = self._active_generation
+        if gen is not None:
+            gen["state"] = "finalizing"
+            self._finalizing_generations[gen["token"]] = gen
+            self._clear_active_generation_locked()
 ```
+
+При `recorder_timeout` перемещения нет: G1 остаётся активным retry-handle. Это
+также означает, что stop-gate обязан читать active и finalizing структуры только
+под lifecycle-lock (его вызывают первой операцией внутри phase A).
 
 - [ ] **Step 4: Зелёные + регрессия**
 

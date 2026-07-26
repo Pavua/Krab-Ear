@@ -242,7 +242,7 @@ class RecordingOwnerStateTest(unittest.TestCase):
                 restore_owner="dictation",
             )
         )
-        self.assertEqual(service._active_owner, "meeting")
+        self.assertEqual(service._active_generation["owner"], "meeting")
         self.assertTrue(
             service.rollback_owner_transition(
                 expected_revision=revision,
@@ -250,7 +250,7 @@ class RecordingOwnerStateTest(unittest.TestCase):
                 restore_owner="dictation",
             )
         )
-        self.assertEqual(service._active_owner, "dictation")
+        self.assertEqual(service._active_generation["owner"], "dictation")
 
     def test_state_waits_for_atomic_owner_publication(self):
         """Нельзя публиковать is_recording=True раньше owner той же записи."""
@@ -259,12 +259,15 @@ class RecordingOwnerStateTest(unittest.TestCase):
         start_done = threading.Event()
         state_call_started = threading.Event()
         state_done = threading.Event()
+        start_result: dict = {}
         state_result: dict = {}
         errors: list[BaseException] = []
 
         def _start() -> None:
             try:
-                service.handle_start_recording({"source": "meeting"})
+                start_result.update(
+                    service.handle_start_recording({"source": "meeting"})
+                )
             except BaseException as exc:
                 errors.append(exc)
             finally:
@@ -300,6 +303,10 @@ class RecordingOwnerStateTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertTrue(state_result["is_recording"])
         self.assertEqual(state_result["owner"], "meeting")
+        self.assertEqual(
+            state_result["generation_token"],
+            start_result["generation_token"],
+        )
 
     def test_owner_cleared_after_stop(self):
         service = _make_service(
@@ -330,7 +337,7 @@ class RecordingOwnerStateTest(unittest.TestCase):
         """Сброшенный recorder-флаг не скрывает живой thread-handle."""
         recorder = _RetryAbortRecorder()
         service = _make_service(self._tmp, self.rescue_dir, recorder=recorder)
-        service.handle_start_recording({"source": "meeting"})
+        started = service.handle_start_recording({"source": "meeting"})
 
         self.assertFalse(service.abort_recording_if_owner("meeting"))
         self.assertFalse(recorder.is_recording)
@@ -338,6 +345,10 @@ class RecordingOwnerStateTest(unittest.TestCase):
         self.assertEqual(
             service.handle_get_recording_state({})["owner"],
             "meeting",
+        )
+        self.assertEqual(
+            service.handle_get_recording_state({})["generation_token"],
+            started["generation_token"],
         )
 
         self.assertTrue(service.abort_recording_if_owner("meeting"))
@@ -349,7 +360,7 @@ class RecordingOwnerStateTest(unittest.TestCase):
         """Owner остаётся retry-токеном, пока RT-worker не остановлен."""
         recorder = _FakeRecorder()
         service = _make_service(self._tmp, self.rescue_dir, recorder=recorder)
-        service.handle_start_recording({"source": "meeting"})
+        started = service.handle_start_recording({"source": "meeting"})
         partial = _RetryPartialWorker()
         service._rt_partial = partial
 
@@ -359,6 +370,10 @@ class RecordingOwnerStateTest(unittest.TestCase):
         self.assertEqual(
             service.handle_get_recording_state({})["owner"],
             "meeting",
+        )
+        self.assertEqual(
+            service.handle_get_recording_state({})["generation_token"],
+            started["generation_token"],
         )
 
         self.assertTrue(service.abort_recording_if_owner("meeting"))

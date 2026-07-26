@@ -231,7 +231,9 @@ class TestStartRecording(unittest.TestCase):
         self.assertEqual(result["status"], "recording")
         self.assertTrue(result["is_recording"])
         self.assertTrue(result["post_start_degraded"])
-        self.assertEqual(svc._active_owner, "meeting")
+        self.assertTrue(result["generation_token"])
+        self.assertEqual(result["owner"], "meeting")
+        self.assertEqual(svc._active_generation["owner"], "meeting")
 
 
 class TestStopRecording(unittest.TestCase):
@@ -890,8 +892,7 @@ class TestSessionTrackerSkipsInPrivacyMode(unittest.TestCase):
         self.assertEqual(result["status"], "recording")
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestCoreHelperMethods(unittest.TestCase):
 
     def test_coerce_bool_false_values(self):
         for val in (False, 0, "0", "false", "off", "no"):

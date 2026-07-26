@@ -8,12 +8,14 @@ start/stop записи, состояние и аудиоустройства, �
 
 from __future__ import annotations
 
+import inspect
 import logging
 import math
 import re
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -131,14 +133,11 @@ class RecordingCoreService:
         # _recording_lifecycle_lock (start и phase_a уже живут под ним).
         self._rescue_dir = rescue_dir
         self._active_spill: Any = None
-        # R2 Task 1: минимально отслеживаем владельца общей записи, чтобы
-        # хоткей не мог «лечением рассинхрона» остановить встречу или заметку.
-        # Task 2 поглотит поле полноценным поколением token/owner/state.
-        self._active_owner: str | None = None
-        # Узкая CAS-ревизия нужна уже Task 1 для rollback promote:
-        # если meeting setup упал после dictation→meeting, возвращать owner
-        # назад можно лишь пока не произошло другого owner-перехода.
-        self._active_owner_revision = 0
+        # R2 Task 2: одна идентичность физической записи от start до terminal.
+        # Словарь живёт только под _recording_lifecycle_lock; revision сохраняет
+        # CAS-семантику Task 1 при promote/rollback, token при этом не меняется.
+        self._active_generation: dict[str, Any] | None = None
+        self._generation_revision = 0
 
         # Wired by BackendService after init (same pattern as llm_rewriter._error_bus).
         self._error_bus: Any = None
@@ -292,9 +291,15 @@ class RecordingCoreService:
                     # имеет права скрыть уже захваченный микрофон исключением.
                     # Клиент получает честный recording и может продолжить
                     # либо выполнить owner-bound компенсацию.
-                    if getattr(self, "_active_owner", None) is None:
-                        self._set_active_owner_locked(
-                            str(params.get("source", "dictation"))
+                    generation = getattr(
+                        self,
+                        "_active_generation",
+                        None,
+                    )
+                    if generation is None:
+                        generation = self._publish_active_generation_locked(
+                            token=uuid.uuid4().hex,
+                            owner=str(params.get("source", "dictation")),
                         )
                     logger.exception(
                         "Post-start setup упал после захвата микрофона; "
@@ -303,26 +308,60 @@ class RecordingCoreService:
                     return {
                         "status": "recording",
                         "is_recording": True,
-                        "owner_revision": int(
-                            getattr(self, "_active_owner_revision", 0)
-                        ),
+                        "generation_token": generation["token"],
+                        "owner": generation["owner"],
+                        "owner_revision": generation["revision"],
                         "owner_promoted": False,
                         "post_start_degraded": True,
                     }
                 raise
 
-    def _set_active_owner_locked(self, owner: str | None) -> int:
-        """Опубликовать owner-переход и вернуть его CAS-ревизию."""
-        revision = int(
-            getattr(self, "_active_owner_revision", 0)
-        ) + 1
-        self._active_owner = owner
-        self._active_owner_revision = revision
+    def _next_generation_revision_locked(self) -> int:
+        """Выдать следующую монотонную CAS-ревизию generation-перехода."""
+        revision = int(getattr(self, "_generation_revision", 0)) + 1
+        self._generation_revision = revision
         return revision
 
-    def _clear_active_owner_locked(self) -> None:
-        """Снять владельца физически завершённой записи под lifecycle-lock."""
-        self._set_active_owner_locked(None)
+    def _publish_active_generation_locked(
+        self,
+        *,
+        token: str,
+        owner: str,
+    ) -> dict[str, Any]:
+        """Атомарно опубликовать поколение после успешного recorder.start."""
+        generation = {
+            "token": str(token),
+            "owner": str(owner),
+            "state": "capturing",
+            "started_at": time.monotonic(),
+            "promoted_from": None,
+            "revision": self._next_generation_revision_locked(),
+        }
+        self._active_generation = generation
+        return generation
+
+    def _transition_generation_owner_locked(
+        self,
+        owner: str,
+        *,
+        promoted_from: str | None,
+    ) -> int:
+        """Сменить owner того же token и вернуть новую CAS-ревизию."""
+        generation = getattr(self, "_active_generation", None)
+        if generation is None:
+            raise RuntimeError("Owner-переход без активного поколения")
+        revision = self._next_generation_revision_locked()
+        generation["owner"] = str(owner)
+        generation["promoted_from"] = promoted_from
+        generation["revision"] = revision
+        return revision
+
+    def _clear_active_generation_locked(self) -> None:
+        """Снять физически завершённое поколение под lifecycle-lock."""
+        if getattr(self, "_active_generation", None) is None:
+            return
+        self._next_generation_revision_locked()
+        self._active_generation = None
 
     def rollback_owner_transition(
         self,
@@ -336,17 +375,24 @@ class RecordingCoreService:
         with lifecycle_lock:
             if not bool(getattr(self.recorder, "is_recording", False)):
                 return False
+            generation = getattr(self, "_active_generation", None)
             if (
-                getattr(self, "_active_owner", None) != expected_owner
-                or int(getattr(self, "_active_owner_revision", 0))
-                != int(expected_revision)
+                generation is None
+                or generation.get("owner") != expected_owner
+                or int(generation.get("revision", 0)) != int(expected_revision)
             ):
                 return False
-            self._set_active_owner_locked(restore_owner)
+            self._transition_generation_owner_locked(
+                restore_owner,
+                promoted_from=None,
+            )
             return True
 
     def _handle_start_recording_locked(self, params: dict[str, Any]) -> dict[str, Any]:
         """Выполнить цельный setup записи под lifecycle-lock."""
+        recorder_was_recording = bool(
+            getattr(self.recorder, "is_recording", False)
+        )
         # Apply selected_input_device from settings before starting (W1327 F2 HIGH).
         # Uses cached_settings() — runtime-safe per Wave 58 lesson.
         _settings_pre = self._settings_svc.cached_settings()
@@ -365,6 +411,8 @@ class RecordingCoreService:
         # НИКОГДА не роняют запись — fail-open (spill=None, один WARN).
         # getattr: старые узкие тесты обходят __init__ через __new__ (см.
         # _ensure_recording_lifecycle_state выше) и не знают про R1-поля.
+        generation_token = uuid.uuid4().hex
+        requested_owner = str(params.get("source", "dictation"))
         spill = None
         _rescue_dir = getattr(self, "_rescue_dir", None)
         if _rescue_dir is not None and bool(
@@ -376,7 +424,8 @@ class RecordingCoreService:
                     rescue_dir=_rescue_dir,
                     sample_rate=int(getattr(self.recorder, "sample_rate", 16000)),
                     channels=int(getattr(self.recorder, "channels", 1)),
-                    source=str(params.get("source", "dictation")),
+                    source=requested_owner,
+                    session_id=generation_token,
                 )
                 if not spill.open():
                     spill = None
@@ -385,19 +434,55 @@ class RecordingCoreService:
                                "запись продолжается без spill", exc_info=True)
                 spill = None
         try:
-            started = self.recorder.start(spill=spill)
-        except TypeError:
-            # R1 fail-open: recorder не поддерживает kwarg spill= (legacy/
-            # тестовый дубль, предшествующий Task 2) — запись НИКОГДА не
-            # должна упасть из-за спилла. Продолжаем без spill.
-            logger.warning(
-                "RecordingSpill: recorder.start() не принимает spill= — "
-                "запись продолжается без spill", exc_info=True,
+            start_callable = self.recorder.start
+            start_accepts_spill = True
+            try:
+                start_signature = inspect.signature(start_callable)
+            except (TypeError, ValueError):
+                # Для непрозрачного callable выполняем один современный вызов.
+                # Retry после TypeError опасен: первый вызов мог уже захватить
+                # микрофон, и второй создал бы две логические идентичности.
+                pass
+            else:
+                try:
+                    start_signature.bind(spill=spill)
+                except TypeError:
+                    start_accepts_spill = False
+
+            if start_accepts_spill:
+                started = start_callable(spill=spill)
+            else:
+                # R1 fail-open для доказанного legacy-контракта без spill=.
+                # Совместимость выяснена ДО вызова, поэтому recorder.start()
+                # по-прежнему выполняется не более одного раза.
+                logger.warning(
+                    "RecordingSpill: сигнатура recorder.start() не принимает "
+                    "spill= — запись продолжается без spill"
+                )
+                if spill is not None:
+                    spill.discard()
+                    spill = None
+                started = start_callable()
+        except Exception:
+            # Реальный AudioRecorder.start() failure-atomic, но внешний/legacy
+            # recorder может бросить уже после физического захвата. Тогда
+            # публикуем тот же token/spill, чтобы outer fail-open ответ не
+            # создал вторую идентичность поверх живой записи.
+            recorder_is_recording = bool(
+                getattr(self.recorder, "is_recording", False)
             )
-            if spill is not None:
+            if not recorder_was_recording and recorder_is_recording:
+                self._active_spill = spill
+                if getattr(self, "_active_generation", None) is None:
+                    self._publish_active_generation_locked(
+                        token=generation_token,
+                        owner=requested_owner,
+                    )
+            elif spill is not None:
+                # При повторном start живой G1 уже владеет своим writer A.
+                # Текущий B — только placeholder неудавшейся попытки.
                 spill.discard()
-                spill = None
-            started = self.recorder.start()
+            raise
         if not started:
             if spill is not None:
                 spill.discard()  # запись не началась — файл-пустышка не нужен
@@ -424,13 +509,19 @@ class RecordingCoreService:
             # но меняет владельца, иначе следующий хоткей остановит встречу.
             # Ссылку _active_spill здесь по-прежнему не трогаем (R1 HIGH-2).
             owner_promoted = False
+            generation = getattr(self, "_active_generation", None)
             if (
                 recorder_is_recording
-                and str(params.get("source", "dictation")) == "meeting"
-                and getattr(self, "_active_owner", None) == "dictation"
+                and requested_owner == "meeting"
+                and generation is not None
+                and generation.get("owner") == "dictation"
             ):
-                self._set_active_owner_locked("meeting")
+                self._transition_generation_owner_locked(
+                    "meeting",
+                    promoted_from="dictation",
+                )
                 owner_promoted = True
+            generation = getattr(self, "_active_generation", None)
             return {
                 "status": (
                     "already_recording"
@@ -440,15 +531,25 @@ class RecordingCoreService:
                 "is_recording": recorder_is_recording,
                 "duration_sec": preview_duration,
                 "preview_text": preview_text,
-                "owner_revision": int(
-                    getattr(self, "_active_owner_revision", 0)
+                "generation_token": (
+                    generation.get("token") if generation is not None else None
+                ),
+                "owner": (
+                    generation.get("owner") if generation is not None else None
+                ),
+                "owner_revision": (
+                    int(generation.get("revision", 0))
+                    if generation is not None
+                    else int(getattr(self, "_generation_revision", 0))
                 ),
                 "owner_promoted": owner_promoted,
             }
         self._active_spill = spill
-        owner_revision = self._set_active_owner_locked(
-            str(params.get("source", "dictation"))
+        generation = self._publish_active_generation_locked(
+            token=generation_token,
+            owner=requested_owner,
         )
+        owner_revision = int(generation["revision"])
         # После успешного recorder.start() IPC обязан вернуть ``recording``:
         # вспомогательные preview/telemetry-хуки не владеют микрофоном и не
         # имеют права превратить живую запись в «ошибку запуска» для клиента.
@@ -618,6 +719,8 @@ class RecordingCoreService:
         return {
             "status": "recording",
             "is_recording": True,
+            "generation_token": generation["token"],
+            "owner": generation["owner"],
             "owner_revision": owner_revision,
             "owner_promoted": False,
         }
@@ -749,15 +852,21 @@ class RecordingCoreService:
                 logger.warning("resume_realtime_partials: resume() упал", exc_info=True)
 
     def handle_get_recording_state(self, params: dict[str, Any]) -> dict[str, Any]:
-        # is_recording+owner — один протокольный снимок. recorder.start()
-        # публикует физический флаг раньше owner; без lifecycle-lock клиент
+        # is_recording+generation — один протокольный снимок. recorder.start()
+        # публикует физический флаг раньше generation; без lifecycle-lock клиент
         # видел невозможную пару True/null посреди штатного meeting-start.
         lifecycle_lock, _ = self._ensure_recording_lifecycle_state()
         with lifecycle_lock:
             is_recording = bool(
                 getattr(self.recorder, "is_recording", False)
             )
-            active_owner = getattr(self, "_active_owner", None)
+            generation = getattr(self, "_active_generation", None)
+            active_owner = (
+                generation.get("owner") if generation is not None else None
+            )
+            generation_token = (
+                generation.get("token") if generation is not None else None
+            )
         with self._preview_lock:
             preview_text = self._preview_text
             preview_duration = self._preview_duration_sec
@@ -782,6 +891,7 @@ class RecordingCoreService:
         return {
             "is_recording": is_recording,
             "owner": active_owner,
+            "generation_token": generation_token,
             "duration_sec": preview_duration,
             "preview_text": preview_text,
             "audio_rms": audio_rms,
@@ -1157,7 +1267,8 @@ class RecordingCoreService:
         мог завершить recorder.start() одновременно с ошибкой/close(). Проверка
         owner и аварийная остановка выполняются под одним lifecycle-lock.
         begin_shutdown() перед close-компенсацией запрещает новое поколение;
-        полноценный generation/token появится в R2 Tasks 2–3.
+        generation остаётся retry-handle до подтверждённой остановки всех
+        recorder/RT-worker-ов и только затем атомарно снимается.
         """
         lifecycle_lock, _ = self._ensure_recording_lifecycle_state()
         lock_timeout = max(0.0, float(lifecycle_lock_timeout_sec))
@@ -1170,7 +1281,10 @@ class RecordingCoreService:
             )
             return False
         try:
-            active_owner = getattr(self, "_active_owner", None)
+            generation = getattr(self, "_active_generation", None)
+            active_owner = (
+                generation.get("owner") if generation is not None else None
+            )
             recorder_is_recording = bool(
                 getattr(self.recorder, "is_recording", False)
             )
@@ -1360,10 +1474,10 @@ class RecordingCoreService:
             and recorder_worker_stopped
         )
         if all_stopped:
-            # Owner — тоже retry-handle. Снимать его раньше нельзя: повторный
-            # owner-bound abort обязан отличать recovery своей записи от
-            # попытки погасить чужое более новое поколение.
-            self._clear_active_owner_locked()
+            # Generation — тоже retry-handle. Снимать её раньше нельзя:
+            # повторный owner-bound abort обязан отличать recovery своей записи
+            # от попытки погасить чужое более новое поколение.
+            self._clear_active_generation_locked()
 
         return all_stopped
 
@@ -1645,9 +1759,9 @@ class RecordingCoreService:
                 }
             }
         if stopped is None:
-            # Рекордер уже idle: stale owner больше не имеет живой записи.
+            # Рекордер уже idle: stale generation больше не имеет живой записи.
             # Выполняем под lifecycle-lock до допуска следующего start.
-            self._clear_active_owner_locked()
+            self._clear_active_generation_locked()
             spill = getattr(self, "_active_spill", None)
             self._active_spill = None
             with self._preview_lock:
@@ -1669,10 +1783,10 @@ class RecordingCoreService:
         # его под lifecycle-lock ДО допуска start/shutdown следующего перехода.
         spill = getattr(self, "_active_spill", None)
         self._active_spill = None
-        # Владелец завершается атомарно с физической записью. Если снять его
+        # Generation завершается атомарно с физической записью. Если снять её
         # позже в handle_stop_recording, новый start успеет опубликовать G2,
-        # а хвост stop G1 ошибочно очистит уже нового владельца.
-        self._clear_active_owner_locked()
+        # а хвост stop G1 ошибочно очистит уже новое поколение.
+        self._clear_active_generation_locked()
         add_breadcrumb(
             category="recording",
             message="stopped",
