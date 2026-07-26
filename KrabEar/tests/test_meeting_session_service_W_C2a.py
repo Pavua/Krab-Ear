@@ -73,7 +73,10 @@ class _FakeRecordingCore:
 
     def handle_start_recording(self, params):
         self.started.append(params)
-        return {"status": "started", "is_recording": True}
+        return {
+            "status": "recording",
+            "is_recording": True,
+        }
 
     def handle_stop_recording(self, params):
         self.stopped.append(params)
@@ -456,7 +459,7 @@ class StaleWorkerGuardTestCase(unittest.TestCase):
 
         stuck = _NeverJoinsThread()
         svc._worker = stuck
-        svc._stop_worker()
+        self.assertFalse(svc._stop_worker())
         self.assertIsNotNone(
             svc._worker, "handle воркера должен сохраниться при таймауте join")
         self.assertIs(svc._worker, stuck)
@@ -477,8 +480,36 @@ class StaleWorkerGuardTestCase(unittest.TestCase):
                 self._joined = True
 
         svc._worker = _DeadThread()
-        svc._stop_worker()
+        self.assertTrue(svc._stop_worker())
         self.assertIsNone(svc._worker)
+
+    def test_close_returns_false_until_retained_worker_dies(self) -> None:
+        """Shutdown не стирает meeting-session после join-timeout."""
+        svc, _, _ = _make_svc()
+        svc.handle_meeting_start({})
+        self.assertTrue(svc._stop_worker())
+
+        class _RetryThread:
+            def __init__(self) -> None:
+                self.alive = True
+
+            def is_alive(self) -> bool:
+                return self.alive
+
+            def join(self, timeout=None) -> None:
+                return None
+
+        stuck = _RetryThread()
+        svc._worker = stuck
+
+        self.assertFalse(svc.close())
+        self.assertIs(svc._worker, stuck)
+        self.assertIsNotNone(svc._session)
+
+        stuck.alive = False
+        self.assertTrue(svc.close())
+        self.assertIsNone(svc._worker)
+        self.assertIsNone(svc._session)
 
 
 class _SlowStopFakeRecordingCore(_FakeRecordingCore):
@@ -585,7 +616,7 @@ class CloseReleasesLeaseTestCase(unittest.TestCase):
 
 
 class StartWorkerRollbackTestCase(unittest.TestCase):
-    def test_start_worker_failure_rolls_back_session_and_releases_lease(self) -> None:
+    def test_start_worker_failure_rolls_back_before_recorder_and_lease(self) -> None:
         import sys as _sys
         calls: list[tuple[str, Any]] = []
 
@@ -619,8 +650,41 @@ class StartWorkerRollbackTestCase(unittest.TestCase):
 
         self.assertIsNone(
             svc._session, "сессия обязана откатиться при провале _start_worker")
-        self.assertIn(("acquire", "krab_ear"), calls)
-        self.assertIn(("release", "krab_ear"), calls)
+        self.assertEqual(
+            calls,
+            [],
+            "Preflight-провал происходит до захвата brain lease",
+        )
+        self.assertEqual(
+            svc._recording_core.started,
+            [],
+            "Провал preflight worker не должен вообще запускать recorder",
+        )
+
+    def test_worker_failure_precedes_promote_side_effect(self) -> None:
+        """Провал worker не должен даже запрашивать dictation→meeting."""
+        svc, _, _ = _make_svc()
+        core = svc._recording_core
+        calls: list[dict] = []
+
+        def _promote(params):
+            calls.append(params)
+            return {
+                "status": "already_recording",
+                "is_recording": True,
+            }
+
+        core.handle_start_recording = _promote
+
+        def _boom() -> None:
+            raise RuntimeError("meeting worker boom")
+
+        svc._start_worker = _boom
+        with self.assertRaises(RuntimeError):
+            svc.handle_meeting_start({})
+
+        self.assertEqual(calls, [])
+        self.assertIsNone(svc._session)
 
     def test_start_recording_failure_still_rolls_back_reservation(self) -> None:
         """Регрессия: провал ДО создания session (ещё есть только reservation)
@@ -634,6 +698,547 @@ class StartWorkerRollbackTestCase(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             svc.handle_meeting_start({})
         self.assertIsNone(svc._session)
+
+
+class MeetingTransitionSerializationTestCase(unittest.TestCase):
+    def test_stop_and_new_start_wait_for_inflight_start_setup(self) -> None:
+        """start→stop→start не должны подменить reservation под старым worker."""
+        svc, _, _ = _make_svc()
+        setup_entered = threading.Event()
+        release_setup = threading.Event()
+        stop_started = threading.Event()
+        stop_done = threading.Event()
+        second_started = threading.Event()
+        second_done = threading.Event()
+        errors: list[BaseException] = []
+        original_start_worker = svc._start_worker
+
+        def _blocking_start_worker() -> None:
+            setup_entered.set()
+            if not release_setup.wait(timeout=2.0):
+                raise TimeoutError("Тест не отпустил setup первой встречи")
+            original_start_worker()
+
+        svc._start_worker = _blocking_start_worker
+
+        def _call_start(done: threading.Event) -> None:
+            try:
+                svc.handle_meeting_start({})
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                done.set()
+
+        def _call_stop() -> None:
+            stop_started.set()
+            try:
+                svc.handle_meeting_stop({})
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                stop_done.set()
+
+        first_done = threading.Event()
+        first = threading.Thread(target=_call_start, args=(first_done,), daemon=True)
+        stop = threading.Thread(target=_call_stop, daemon=True)
+
+        def _call_second_start() -> None:
+            second_started.set()
+            _call_start(second_done)
+
+        second = threading.Thread(target=_call_second_start, daemon=True)
+        first.start()
+        self.assertTrue(setup_entered.wait(timeout=1.0))
+        stop.start()
+        second.start()
+        self.assertTrue(stop_started.wait(timeout=1.0))
+        self.assertTrue(second_started.wait(timeout=1.0))
+        try:
+            self.assertFalse(
+                stop_done.wait(timeout=0.1),
+                "meeting_stop не должен разбирать незавершённый start-setup",
+            )
+            self.assertFalse(
+                second_done.wait(timeout=0.1),
+                "Новый meeting_start не должен обгонять setup первой сессии",
+            )
+        finally:
+            release_setup.set()
+
+        for thread in (first, stop, second):
+            thread.join(timeout=3.0)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        svc.close()
+
+
+class MeetingPreflightLifecycleTestCase(unittest.TestCase):
+    def test_worker_waits_armed_while_recording_start_is_pending(self) -> None:
+        """Preflight-thread не должен self-finalize до recorder.start."""
+        recorder = _FakeRecorder()
+        recorder.is_recording = False
+        core = _FakeRecordingCore()
+        bus = _SpyBus()
+        core_entered = threading.Event()
+        release_core = threading.Event()
+        result: dict = {}
+        errors: list[BaseException] = []
+
+        def _blocking_start(params):
+            core_entered.set()
+            if not release_core.wait(timeout=2.0):
+                raise TimeoutError("Тест не отпустил RecordingCore.start")
+            recorder.is_recording = True
+            core.started.append(params)
+            return {"status": "recording", "is_recording": True}
+
+        core.handle_start_recording = _blocking_start
+        svc = MeetingSessionService(
+            recorder=recorder,
+            transcriber=_FakeTranscriber(),
+            recording_core=core,
+            action_items_extractor=None,
+            settings_get=lambda key, default=None: {
+                "privacy_mode_enabled": False,
+                "meeting_chunk_stt_interval_sec": 25.0,
+                "meeting_items_interval_sec": 60.0,
+                "llm_brain_lease_enabled": False,
+            }.get(key, default),
+            event_bus=bus,
+        )
+
+        def _call_start() -> None:
+            try:
+                result.update(svc.handle_meeting_start({}))
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=_call_start, daemon=True)
+        thread.start()
+        self.assertTrue(core_entered.wait(timeout=1.0))
+        try:
+            self.assertFalse(
+                release_core.wait(timeout=0.7)
+            )
+            self.assertIsNotNone(
+                svc._session,
+                "Неармированный worker не должен убрать preflight-session",
+            )
+            self.assertNotIn("meeting.finished", bus.types())
+        finally:
+            release_core.set()
+
+        thread.join(timeout=3.0)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(result.get("ok"))
+        svc.close()
+
+    def test_early_shutdown_rejects_inflight_start_after_core_returns(
+        self,
+    ) -> None:
+        """Ранний гейт не даёт вернуть успех до позднего close worker-а."""
+        recorder = _FakeRecorder()
+        recorder.is_recording = False
+        core = _FakeRecordingCore()
+        core_entered = threading.Event()
+        release_core = threading.Event()
+        errors: list[BaseException] = []
+        aborted_owners: list[str] = []
+
+        def _blocking_start(params):
+            core_entered.set()
+            if not release_core.wait(timeout=2.0):
+                raise TimeoutError("Тест не отпустил RecordingCore.start")
+            recorder.is_recording = True
+            return {"status": "recording", "is_recording": True}
+
+        core.handle_start_recording = _blocking_start
+
+        def _abort_owned(owner: str) -> bool:
+            aborted_owners.append(owner)
+            recorder.is_recording = False
+            return True
+
+        core.abort_recording_if_owner = _abort_owned
+        svc = MeetingSessionService(
+            recorder=recorder,
+            transcriber=_FakeTranscriber(),
+            recording_core=core,
+            action_items_extractor=None,
+            settings_get=lambda key, default=None: {
+                "privacy_mode_enabled": False,
+                "meeting_chunk_stt_interval_sec": 25.0,
+                "meeting_items_interval_sec": 60.0,
+                "llm_brain_lease_enabled": False,
+            }.get(key, default),
+            event_bus=_SpyBus(),
+        )
+
+        thread = threading.Thread(
+            target=lambda: self._capture_start_error(svc, errors),
+            daemon=True,
+        )
+        thread.start()
+        self.assertTrue(core_entered.wait(timeout=1.0))
+        svc.begin_shutdown()
+        release_core.set()
+        thread.join(timeout=3.0)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIsNone(svc._session)
+        self.assertFalse(
+            recorder.is_recording,
+            "close не должен оставить свежий orphan-рекордер",
+        )
+        self.assertEqual(aborted_owners, ["meeting"])
+        svc.close()
+
+    def test_close_rolls_back_inflight_promotion_without_stopping_dictation(
+        self,
+    ) -> None:
+        """Promote rollback возвращает owner, но сохраняет исходную запись."""
+        recorder = _FakeRecorder()
+        recorder.is_recording = True
+        core = _FakeRecordingCore()
+        core_entered = threading.Event()
+        release_core = threading.Event()
+        errors: list[BaseException] = []
+        owner_state = {"owner": "meeting", "revision": 7}
+        rollback_calls: list[dict] = []
+
+        def _blocking_promote(params):
+            core_entered.set()
+            if not release_core.wait(timeout=2.0):
+                raise TimeoutError("Тест не отпустил promote")
+            return {
+                "status": "already_recording",
+                "is_recording": True,
+                "owner_promoted": True,
+                "owner_revision": owner_state["revision"],
+            }
+
+        def _rollback_owner(**kwargs) -> bool:
+            rollback_calls.append(kwargs)
+            if (
+                kwargs["expected_revision"] != owner_state["revision"]
+                or kwargs["expected_owner"] != owner_state["owner"]
+            ):
+                return False
+            owner_state["owner"] = kwargs["restore_owner"]
+            owner_state["revision"] += 1
+            return True
+
+        core.handle_start_recording = _blocking_promote
+        core.rollback_owner_transition = _rollback_owner
+        svc = MeetingSessionService(
+            recorder=recorder,
+            transcriber=_FakeTranscriber(),
+            recording_core=core,
+            action_items_extractor=None,
+            settings_get=lambda key, default=None: {
+                "privacy_mode_enabled": False,
+                "meeting_chunk_stt_interval_sec": 25.0,
+                "meeting_items_interval_sec": 60.0,
+                "llm_brain_lease_enabled": False,
+            }.get(key, default),
+            event_bus=_SpyBus(),
+        )
+
+        thread = threading.Thread(
+            target=lambda: self._capture_start_error(svc, errors),
+            daemon=True,
+        )
+        thread.start()
+        self.assertTrue(core_entered.wait(timeout=1.0))
+        svc.close()
+        release_core.set()
+        thread.join(timeout=3.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertTrue(
+            recorder.is_recording,
+            "rollback promote не должен гасить исходную диктовку",
+        )
+        self.assertEqual(owner_state["owner"], "dictation")
+        self.assertEqual(
+            rollback_calls,
+            [{
+                "expected_revision": 7,
+                "expected_owner": "meeting",
+                "restore_owner": "dictation",
+            }],
+        )
+
+    def test_failed_promote_rollback_is_retried_by_close(self) -> None:
+        """Исключение CAS сохраняет revision и исходную диктовку для retry."""
+        recorder = _FakeRecorder()
+        recorder.is_recording = True
+        core = _FakeRecordingCore()
+        core_entered = threading.Event()
+        release_core = threading.Event()
+        errors: list[BaseException] = []
+        owner_state = {"owner": "meeting", "revision": 11}
+        rollback_calls: list[dict] = []
+
+        def _blocking_promote(params):
+            core_entered.set()
+            if not release_core.wait(timeout=2.0):
+                raise TimeoutError("Тест не отпустил promote")
+            return {
+                "status": "already_recording",
+                "is_recording": True,
+                "owner_promoted": True,
+                "owner_revision": owner_state["revision"],
+            }
+
+        def _rollback_owner(**kwargs) -> bool:
+            rollback_calls.append(kwargs)
+            if len(rollback_calls) == 1:
+                raise RuntimeError("временная ошибка CAS")
+            owner_state["owner"] = kwargs["restore_owner"]
+            owner_state["revision"] += 1
+            return True
+
+        core.handle_start_recording = _blocking_promote
+        core.rollback_owner_transition = _rollback_owner
+        svc = MeetingSessionService(
+            recorder=recorder,
+            transcriber=_FakeTranscriber(),
+            recording_core=core,
+            action_items_extractor=None,
+            settings_get=lambda key, default=None: {
+                "privacy_mode_enabled": False,
+                "meeting_chunk_stt_interval_sec": 25.0,
+                "meeting_items_interval_sec": 60.0,
+                "llm_brain_lease_enabled": False,
+            }.get(key, default),
+            event_bus=_SpyBus(),
+        )
+
+        thread = threading.Thread(
+            target=lambda: self._capture_start_error(svc, errors),
+            daemon=True,
+        )
+        thread.start()
+        self.assertTrue(core_entered.wait(timeout=1.0))
+        self.assertFalse(svc.close())
+        release_core.set()
+        thread.join(timeout=3.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertTrue(recorder.is_recording)
+        self.assertEqual(owner_state["owner"], "meeting")
+        self.assertTrue(svc._recovery_pending)
+        self.assertEqual(svc._recovery_owner_revision, 11)
+        self.assertIsNotNone(svc._session)
+
+        self.assertTrue(svc.close())
+        self.assertTrue(recorder.is_recording)
+        self.assertEqual(owner_state["owner"], "dictation")
+        self.assertFalse(svc._recovery_pending)
+        self.assertIsNone(svc._session)
+        self.assertEqual(len(rollback_calls), 2)
+
+    def test_meeting_stop_retries_promote_rollback_without_stopping_dictation(
+        self,
+    ) -> None:
+        """Даже privacy-stop не превращает promote-recovery в physical stop."""
+        recorder = _FakeRecorder()
+        recorder.is_recording = True
+        core = _FakeRecordingCore()
+        owner_state = {"owner": "meeting", "revision": 21}
+        rollback_calls: list[dict] = []
+        settings = {"privacy_mode_enabled": False}
+
+        core.handle_start_recording = lambda params: {
+            "status": "already_recording",
+            "is_recording": True,
+            "owner_promoted": True,
+            "owner_revision": owner_state["revision"],
+        }
+
+        def _rollback_owner(**kwargs) -> bool:
+            rollback_calls.append(kwargs)
+            if len(rollback_calls) == 1:
+                raise RuntimeError("временная ошибка CAS")
+            owner_state["owner"] = kwargs["restore_owner"]
+            owner_state["revision"] += 1
+            return True
+
+        core.rollback_owner_transition = _rollback_owner
+        svc = MeetingSessionService(
+            recorder=recorder,
+            transcriber=_FakeTranscriber(),
+            recording_core=core,
+            action_items_extractor=None,
+            settings_get=lambda key, default=None: {
+                "privacy_mode_enabled": settings["privacy_mode_enabled"],
+                "meeting_chunk_stt_interval_sec": 25.0,
+                "meeting_items_interval_sec": 60.0,
+                "llm_brain_lease_enabled": False,
+            }.get(key, default),
+            event_bus=_SpyBus(),
+        )
+        svc._arm_worker = lambda: (_ for _ in ()).throw(
+            RuntimeError("arm failed")
+        )
+
+        with self.assertRaises(RuntimeError):
+            svc.handle_meeting_start({})
+        self.assertTrue(svc._recovery_pending)
+        self.assertEqual(owner_state["owner"], "meeting")
+        settings["privacy_mode_enabled"] = True
+
+        response = svc.handle_meeting_stop({})
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response.get("recovered"), "owner_rollback")
+        self.assertTrue(recorder.is_recording)
+        self.assertEqual(owner_state["owner"], "dictation")
+        self.assertEqual(core.stopped, [])
+        self.assertFalse(svc._recovery_pending)
+        self.assertIsNone(svc._session)
+        self.assertEqual(len(rollback_calls), 2)
+
+    def test_failed_fresh_compensation_retains_retryable_session(self) -> None:
+        """Неуспешный abort сохраняет handle до повторного close."""
+        recorder = _FakeRecorder()
+        recorder.is_recording = False
+        core = _FakeRecordingCore()
+        abort_results = [False, True]
+
+        def _start(params):
+            recorder.is_recording = True
+            return {
+                "status": "recording",
+                "is_recording": True,
+                "owner_promoted": False,
+                "owner_revision": 1,
+            }
+
+        def _abort(owner: str) -> bool:
+            result = abort_results.pop(0)
+            if result:
+                recorder.is_recording = False
+            return result
+
+        core.handle_start_recording = _start
+        core.abort_recording_if_owner = _abort
+        svc = MeetingSessionService(
+            recorder=recorder,
+            transcriber=_FakeTranscriber(),
+            recording_core=core,
+            action_items_extractor=None,
+            settings_get=lambda key, default=None: {
+                "privacy_mode_enabled": False,
+                "meeting_chunk_stt_interval_sec": 25.0,
+                "meeting_items_interval_sec": 60.0,
+                "llm_brain_lease_enabled": False,
+            }.get(key, default),
+            event_bus=_SpyBus(),
+        )
+        svc._arm_worker = lambda: (_ for _ in ()).throw(
+            RuntimeError("arm failed")
+        )
+
+        with self.assertRaises(RuntimeError):
+            svc.handle_meeting_start({})
+
+        self.assertTrue(recorder.is_recording)
+        self.assertTrue(svc._recovery_pending)
+        self.assertIsNotNone(
+            svc._session,
+            "session — retry-handle, её нельзя стирать до подтверждённого abort",
+        )
+        self.assertTrue(svc.close())
+        self.assertFalse(recorder.is_recording)
+        self.assertFalse(svc._recovery_pending)
+        self.assertIsNone(svc._session)
+
+    def test_close_retains_inflight_setup_until_recovery_is_published(
+        self,
+    ) -> None:
+        """close не стирает reservation раньше решения start-компенсации."""
+        recorder = _FakeRecorder()
+        recorder.is_recording = False
+        core = _FakeRecordingCore()
+        core_entered = threading.Event()
+        release_core = threading.Event()
+        abort_results = [False, True]
+        errors: list[BaseException] = []
+
+        def _blocking_start(params):
+            core_entered.set()
+            if not release_core.wait(timeout=2.0):
+                raise TimeoutError("Тест не отпустил RecordingCore.start")
+            recorder.is_recording = True
+            return {
+                "status": "recording",
+                "is_recording": True,
+                "owner_promoted": False,
+                "owner_revision": 1,
+            }
+
+        def _abort(owner: str) -> bool:
+            result = abort_results.pop(0)
+            if result:
+                recorder.is_recording = False
+            return result
+
+        core.handle_start_recording = _blocking_start
+        core.abort_recording_if_owner = _abort
+        svc = MeetingSessionService(
+            recorder=recorder,
+            transcriber=_FakeTranscriber(),
+            recording_core=core,
+            action_items_extractor=None,
+            settings_get=lambda key, default=None: {
+                "privacy_mode_enabled": False,
+                "meeting_chunk_stt_interval_sec": 25.0,
+                "meeting_items_interval_sec": 60.0,
+                "llm_brain_lease_enabled": False,
+            }.get(key, default),
+            event_bus=_SpyBus(),
+        )
+
+        thread = threading.Thread(
+            target=lambda: self._capture_start_error(svc, errors),
+            daemon=True,
+        )
+        thread.start()
+        self.assertTrue(core_entered.wait(timeout=1.0))
+
+        self.assertFalse(
+            svc.close(),
+            "close обязан сохранить reservation незавершённого setup",
+        )
+        self.assertIsNotNone(svc._session)
+        release_core.set()
+        thread.join(timeout=3.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertTrue(recorder.is_recording)
+        self.assertTrue(svc._recovery_pending)
+        self.assertIsNotNone(svc._session)
+
+        self.assertTrue(svc.close())
+        self.assertFalse(recorder.is_recording)
+        self.assertFalse(svc._recovery_pending)
+        self.assertIsNone(svc._session)
+
+    @staticmethod
+    def _capture_start_error(
+        svc: MeetingSessionService,
+        errors: list[BaseException],
+    ) -> None:
+        try:
+            svc.handle_meeting_start({})
+        except BaseException as exc:
+            errors.append(exc)
 
 
 if __name__ == "__main__":

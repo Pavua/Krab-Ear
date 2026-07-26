@@ -163,6 +163,76 @@ class TestStartRecording(unittest.TestCase):
         self.assertEqual(svc.preview_text, "")
         self.assertEqual(svc.preview_duration_sec, 0.0)
 
+    def test_post_start_hooks_are_fail_open(self):
+        """После захвата микрофона вспомогательные хуки не отменяют успех."""
+
+        class _SingleReadSettings:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def cached_settings(self):
+                self.calls += 1
+                if self.calls > 1:
+                    raise RuntimeError("повторное чтение settings запрещено")
+                return {
+                    "llm_brain_unload_on_recording": False,
+                    "llm_brain_lease_enabled": False,
+                    "realtime_preview_enabled": True,
+                    "realtime_partial_enabled": False,
+                    "realtime_silence_filter_enabled": False,
+                }
+
+        settings = _SingleReadSettings()
+        svc = _make_service(
+            self._tmp,
+            extra_kwargs={"settings_svc": settings},
+        )
+        svc._reset_preview_state = MagicMock(
+            side_effect=RuntimeError("preview reset failed")
+        )
+        svc._start_preview_worker = MagicMock(
+            side_effect=RuntimeError("preview worker failed")
+        )
+
+        with patch(
+            "backend.recording_core_service.add_breadcrumb",
+            side_effect=RuntimeError("breadcrumb failed"),
+        ):
+            result = svc.handle_start_recording({})
+
+        self.assertEqual(result["status"], "recording")
+        self.assertTrue(svc.recorder.is_recording)
+        self.assertEqual(settings.calls, 1)
+        svc._reset_preview_state.assert_called_once_with()
+        svc._start_preview_worker.assert_called_once_with(
+            quality_profile="balanced"
+        )
+
+    def test_confirmed_post_start_exception_returns_honest_recording(self):
+        """Boundary не скрывает подтверждённый start поздним исключением."""
+        svc = _make_service(self._tmp)
+        svc._settings_svc.cached_settings = MagicMock(return_value={
+            "llm_brain_unload_on_recording": False,
+            "llm_brain_lease_enabled": False,
+            "realtime_preview_enabled": False,
+            "realtime_partial_enabled": False,
+            "realtime_silence_filter_enabled": False,
+        })
+        original_setup = svc._handle_start_recording_locked
+
+        def _broken_setup(params):
+            result = original_setup(params)
+            self.assertEqual(result["status"], "recording")
+            raise RuntimeError("неизвестный post-start hook")
+
+        svc._handle_start_recording_locked = _broken_setup
+        result = svc.handle_start_recording({"source": "meeting"})
+
+        self.assertEqual(result["status"], "recording")
+        self.assertTrue(result["is_recording"])
+        self.assertTrue(result["post_start_degraded"])
+        self.assertEqual(svc._active_owner, "meeting")
+
 
 class TestStopRecording(unittest.TestCase):
     def setUp(self):

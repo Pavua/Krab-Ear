@@ -35,7 +35,11 @@ _ITEMS_MIN_GROWTH = 200    # симв.: минимальный прирост т
 _LEASE_RENEW_SEC = 15.0    # период продления brain-lease
 _LEASE_TTL_SEC = 45.0      # TTL lease (перекрывает период продления с запасом)
 _WORKER_WAIT_SEC = 0.5     # шаг ожидания воркера
+_WORKER_JOIN_TIMEOUT_SEC = 30.0
+_SETUP_CLOSE_WAIT_SEC = 0.25  # bounded wait setup перед сохранением retry-handle
 _DIAR_MIN_AUDIO_SEC = 5.0  # окно короче — эмбеддинги шумные, тик пропускаем
+_RECOVERY_ABORT_OWNER = "abort_owner"
+_RECOVERY_ROLLBACK_OWNER = "rollback_owner"
 
 
 class LiveSpeakerTracker:
@@ -173,10 +177,32 @@ class MeetingSessionService:
         # вычисляется под внешним `with self._lock`) — non-reentrant Lock
         # там дедлочился бы.
         self._lock = threading.RLock()          # состояние сессии
+        # Целиком сериализует start-setup и stop. Одного _lock недостаточно:
+        # start намеренно отпускает его на I/O, и stop→start раньше могли
+        # подменить reservation до публикации worker первой сессии.
+        self._transition_lock = threading.RLock()
         self._session: _MeetingSession | None = None
         self._next_due: dict[Any, float] = {}
+        # Worker создаётся до физического recorder.start(), но не имеет права
+        # читать idle-рекордер и self-finalize до успешной публикации встречи.
+        # Отдельный Event нужен потому, что stop обязан разбудить и такой
+        # «подготовленный, но ещё не вооружённый» поток.
+        self._worker_lock = threading.RLock()
         self._worker: threading.Thread | None = None
         self._stop_event = threading.Event()
+        self._worker_armed_event = threading.Event()
+        # close() выставляет флаг без ожидания тяжёлого start/setup. Старт
+        # повторно проверяет его на границах побочных эффектов и не публикует
+        # успешную встречу после начала shutdown.
+        self._closed_event = threading.Event()
+        # Если fresh start уже захватил микрофон, а owner-bound abort не
+        # подтвердился, session нельзя удалять: она остаётся retry-handle для
+        # meeting_stop/повторного close.
+        self._recovery_pending = False
+        self._recovery_kind: str | None = None
+        self._recovery_owner_revision: int | None = None
+        self._setup_done_event = threading.Event()
+        self._setup_done_event.set()
         # C2a Task 10 (Фикс 2): гейт идемпотентности handle_meeting_stop —
         # конкурентный/повторный вызов не должен звать handle_stop_recording
         # и эмиттить meeting.finished дважды.
@@ -185,11 +211,23 @@ class MeetingSessionService:
     # ------------------------------------------------------------------ IPC
 
     def handle_meeting_start(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Сериализовать полный setup встречи со stop и следующим start."""
+        self._raise_if_closed()
+        with self._transition_lock:
+            self._raise_if_closed()
+            return self._handle_meeting_start_serialized(params)
+
+    def _handle_meeting_start_serialized(
+        self,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
         """IPC meeting_start: старт записи+сессии ИЛИ повышение идущей записи."""
         if self._settings_get("privacy_mode_enabled", False):
             return {"ok": False, "skipped": "privacy_mode"}
 
         with self._lock:
+            if self._stopping:
+                return {"ok": False, "error": "meeting_stopping"}
             if self._session is not None and not self._session.privacy_stopped:
                 return {"ok": True, "already_active": True,
                         "started_at": self._session.started_at,
@@ -208,19 +246,20 @@ class MeetingSessionService:
             # при ошибке или заменяется реальной сессией при успехе.
             reservation = _MeetingSession()
             self._session = reservation
+            self._setup_done_event.clear()
 
         session: _MeetingSession | None = None
+        promoted = False
+        recording_status: str | None = None
+        owner_promoted = False
+        owner_revision: int | None = None
+        meeting_lease_acquired = False
         try:
-            start_resp = self._recording_core.handle_start_recording({"source": "meeting"})
-            promoted = start_resp.get("status") == "already_recording"
-
             speakers_enabled = bool(self._settings_get(
                 "meeting_live_speakers_enabled", True))
             session = _MeetingSession(
-                promoted=promoted,
                 language=str(params.get("language", self._settings_get(
                     "meeting_items_language", "ru")) or "ru"),
-                cursor_sec=float(self._recorder.get_duration_sec()) if promoted else 0.0,
                 speakers_enabled=speakers_enabled,
             )
             if speakers_enabled:
@@ -235,25 +274,163 @@ class MeetingSessionService:
                 }
                 if speakers_enabled:
                     self._next_due[MeetingJob.DIAR_WINDOW] = now + self._diar_interval()
-            # C2a Task 10 (Фикс 4): внутри try — исключение из _start_worker()
-            # (защитный пояс Фикс 1в: второй живой воркер) обязано откатить
-            # сессию и освободить lease через except-ветку ниже, а не утечь
-            # с "полу-стартованной" сессией без воркера.
-            self._acquire_lease()
+
+            # Worker — последний потенциально падающий setup-шаг ДО физического
+            # recorder.start/promote. Так ошибка не оставляет скрытый захват
+            # микрофона после сообщения UI «встреча не запущена».
             self._start_worker()
-        except Exception:
+            self._raise_if_closed()
+            start_resp = self._recording_core.handle_start_recording(
+                {"source": "meeting"}
+            )
+            status = str(start_resp.get("status", ""))
+            if status not in {"recording", "already_recording"}:
+                raise RuntimeError(
+                    f"meeting: recorder start rejected with status={status}"
+                )
+            recording_status = status
+            owner_promoted = bool(start_resp.get("owner_promoted", False))
+            raw_owner_revision = start_resp.get("owner_revision")
+            if raw_owner_revision is not None:
+                owner_revision = int(raw_owner_revision)
+            self._raise_if_closed()
+            promoted = status == "already_recording"
+            cursor_sec = 0.0
+            if promoted:
+                try:
+                    cursor_sec = float(self._recorder.get_duration_sec())
+                except Exception:
+                    logger.warning(
+                        "meeting: не удалось снять cursor promote",
+                        exc_info=True,
+                    )
             with self._lock:
-                if self._session is reservation or self._session is session:
+                session.promoted = promoted
+                session.cursor_sec = cursor_sec
+            # RecordingCore на fresh start освобождает brain lease; встреча
+            # должна приобрести его ПОСЛЕ успешного старта, а не до него.
+            self._acquire_lease()
+            meeting_lease_acquired = True
+            self._arm_worker()
+            # Линеаризационная точка успешного start: если close начался до
+            # неё, свежую запись компенсируем и наружу успех не публикуем.
+            self._raise_if_closed()
+        except Exception as exc:
+            # Worker мог успеть стартовать до ошибки RecordingCore — гасим его
+            # до снятия session, чтобы не оставить GPU-slot без владельца.
+            self._stop_worker()
+            if meeting_lease_acquired:
+                # close мог успеть release ДО того, как start приобрёл lease.
+                # Поэтому rollback выполняется самим start-переходом.
+                self._release_lease()
+
+            compensation_failed = False
+            retain_for_recovery = False
+            recovery_kind: str | None = None
+            recovery_owner_revision: int | None = None
+            if recording_status == "recording":
+                # Любое исключение после fresh recorder.start() требует
+                # физической компенсации. Сейчас практически это close-race;
+                # общий гард не даст будущему fallible setup вернуть orphan.
+                abort_owned = getattr(
+                    self._recording_core,
+                    "abort_recording_if_owner",
+                    None,
+                )
+                try:
+                    compensation_failed = (
+                        not callable(abort_owned)
+                        or not abort_owned("meeting")
+                    )
+                except Exception:
+                    compensation_failed = True
+                    logger.exception(
+                        "meeting: owner-bound компенсация fresh start упала"
+                    )
+                retain_for_recovery = compensation_failed
+                if retain_for_recovery:
+                    recovery_kind = _RECOVERY_ABORT_OWNER
+            elif recording_status == "already_recording" and owner_promoted:
+                rollback_owner = getattr(
+                    self._recording_core,
+                    "rollback_owner_transition",
+                    None,
+                )
+                try:
+                    if owner_revision is None or not callable(rollback_owner):
+                        compensation_failed = True
+                        retain_for_recovery = True
+                        recovery_kind = _RECOVERY_ROLLBACK_OWNER
+                        recovery_owner_revision = owner_revision
+                    elif not rollback_owner(
+                            expected_revision=owner_revision,
+                            expected_owner="meeting",
+                            restore_owner="dictation",
+                    ):
+                        # CAS mismatch/stopped = переход уже не наш. Это
+                        # безопасный отказ менять owner, не recovery-handle.
+                        logger.info(
+                            "meeting: promote rollback уже не применим "
+                            "(owner-переход замещён или запись остановлена)"
+                        )
+                except Exception:
+                    compensation_failed = True
+                    retain_for_recovery = True
+                    recovery_kind = _RECOVERY_ROLLBACK_OWNER
+                    recovery_owner_revision = owner_revision
+                    logger.exception(
+                        "meeting: CAS-rollback promote owner упал"
+                    )
+            with self._lock:
+                if (
+                    retain_for_recovery
+                    and self._session is session
+                ):
+                    self._recovery_pending = True
+                    self._recovery_kind = recovery_kind
+                    self._recovery_owner_revision = recovery_owner_revision
+                elif (
+                    self._session is reservation
+                    or self._session is session
+                ):
                     self._session = None
                     self._next_due = {}
-            self._release_lease()
+                    self._recovery_pending = False
+                    self._recovery_kind = None
+                    self._recovery_owner_revision = None
+            if compensation_failed:
+                raise RuntimeError(
+                    "meeting: start завершился ошибкой, но owner-bound "
+                    "компенсация не подтверждена"
+                ) from exc
             raise
+        finally:
+            # close() ждёт этот барьер ограниченное время и никогда не чистит
+            # reservation, пока именно start ещё решает rollback/recovery.
+            self._setup_done_event.set()
 
         logger.info("meeting: сессия запущена", extra={
             "promoted": promoted, "language": session.language})
         return {"ok": True, "promoted": promoted, "started_at": session.started_at}
 
     def handle_meeting_stop(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Остановить встречу, не удерживая transition-lock на тяжёлом STT."""
+        with self._lock:
+            if self._stopping:
+                return {"ok": True, "already_stopping": True}
+            # Флаг ставится ДО ожидания setup-lock: следующий start либо ждёт
+            # текущий setup, либо быстро получает meeting_stopping.
+            self._stopping = True
+        try:
+            return self._handle_meeting_stop_serialized(params)
+        finally:
+            with self._lock:
+                self._stopping = False
+
+    def _handle_meeting_stop_serialized(
+        self,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
         """IPC meeting_stop: гасит live-сессию и останавливает запись обычным путём.
 
         C2a Task 10 (аудит MED): идемпотентен — дабл-клик в UI / два
@@ -263,11 +440,39 @@ class MeetingSessionService:
         в finally, так что независимые ПОСЛЕДОВАТЕЛЬНЫЕ вызовы (новая сессия
         после предыдущего stop) не залипают.
         """
-        with self._lock:
-            if self._stopping:
-                return {"ok": True, "already_stopping": True}
-            self._stopping = True
-        try:
+        with self._transition_lock:
+            with self._lock:
+                promote_recovery = (
+                    self._recovery_pending
+                    and self._recovery_kind == _RECOVERY_ROLLBACK_OWNER
+                )
+            if promote_recovery:
+                # Встреча не была опубликована, а физическая запись — исходная
+                # диктовка. Ни обычный meeting_stop, ни privacy-ветка не имеют
+                # права её гасить: повторяем только revision-bound CAS.
+                if not self._stop_worker():
+                    return {
+                        "ok": False,
+                        "error": "meeting_recovery_pending",
+                    }
+                self._release_lease()
+                if not self._retry_pending_recovery():
+                    return {
+                        "ok": False,
+                        "error": "meeting_recovery_pending",
+                    }
+                with self._lock:
+                    self._session = None
+                    self._next_due = {}
+                    self._recovery_pending = False
+                    self._recovery_kind = None
+                    self._recovery_owner_revision = None
+                return {
+                    "ok": True,
+                    "active": False,
+                    "recovered": "owner_rollback",
+                }
+
             if self._settings_get("privacy_mode_enabled", False):
                 # privacy включили посреди встречи: сессию всё равно закрываем,
                 # но запись останавливает обычный privacy-путь записи.
@@ -281,15 +486,15 @@ class MeetingSessionService:
 
             self._stop_worker()
             self._emit("meeting.finalizing", {})
-            stop_resp: dict[str, Any] = {}
-            if getattr(self._recorder, "is_recording", False):
-                stop_resp = self._recording_core.handle_stop_recording({})
-            item_id = stop_resp.get("history_id")
-            self._teardown_session(emit_finished=True, item_id=item_id)
-            return {"ok": True, "item_id": item_id}
-        finally:
-            with self._lock:
-                self._stopping = False
+
+        # STT/LLM-фазы могут длиться минуты. transition-lock уже отпущен, но
+        # _stopping остаётся True и не даёт новому start вклиниться в финализацию.
+        stop_resp: dict[str, Any] = {}
+        if getattr(self._recorder, "is_recording", False):
+            stop_resp = self._recording_core.handle_stop_recording({})
+        item_id = stop_resp.get("history_id")
+        self._teardown_session(emit_finished=True, item_id=item_id)
+        return {"ok": True, "item_id": item_id}
 
     def handle_get_meeting_live_state(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC get_meeting_live_state: снимок для панели/поллинга."""
@@ -317,12 +522,116 @@ class MeetingSessionService:
 
     # ------------------------------------------------------------- lifecycle
 
-    def close(self) -> None:
-        """Останов воркера (BackendService.close())."""
-        self._stop_worker()
-        self._release_lease()  # C2a Task 10 (Фикс 3): зеркально остальным teardown-путям
+    def begin_shutdown(self) -> None:
+        """Неблокирующе запретить новые start до закрытия RecordingCore."""
+        # Ставим флаг ДО любых ожиданий: параллельный start увидит shutdown
+        # после возврата RecordingCore и выполнит owner-bound компенсацию.
+        self._closed_event.set()
+        begin_core_shutdown = getattr(
+            self._recording_core,
+            "begin_shutdown",
+            None,
+        )
+        if callable(begin_core_shutdown):
+            try:
+                # Запрещаем новые recorder.start до owner-bound компенсации:
+                # без generation/token это устраняет ABA именно в shutdown.
+                begin_core_shutdown()
+            except Exception:
+                logger.exception(
+                    "meeting: RecordingCore не принял begin_shutdown"
+                )
+
+    def close(self) -> bool:
+        """Остановить meeting-worker; False сохраняет retry-handle."""
+        self.begin_shutdown()
+        worker_stopped = self._stop_worker()
+        # C2a Task 10 (Фикс 3): зеркально остальным teardown-путям.
+        self._release_lease()
+
+        if not worker_stopped:
+            logger.error(
+                "meeting: close сохранил живой worker-handle; "
+                "повторный close обязан завершить teardown"
+            )
+            return False
+
+        if not self._setup_done_event.wait(_SETUP_CLOSE_WAIT_SEC):
+            logger.error(
+                "meeting: close сохранил незавершённый start-setup; "
+                "повторный close выполнит recovery после его возврата"
+            )
+            return False
+
+        if not self._retry_pending_recovery():
+            logger.error(
+                "meeting: close сохранил recovery-session — "
+                "компенсация перехода не подтверждена"
+            )
+            return False
+
         with self._lock:
             self._session = None
+            self._next_due = {}
+            self._recovery_pending = False
+            self._recovery_kind = None
+            self._recovery_owner_revision = None
+        return True
+
+    def _retry_pending_recovery(self) -> bool:
+        """Повторить безопасную компенсацию незавершённого start-перехода."""
+        with self._lock:
+            recovery_pending = self._recovery_pending
+            recovery_kind = self._recovery_kind
+            owner_revision = self._recovery_owner_revision
+        if not recovery_pending:
+            return True
+
+        if recovery_kind == _RECOVERY_ROLLBACK_OWNER:
+            rollback_owner = getattr(
+                self._recording_core,
+                "rollback_owner_transition",
+                None,
+            )
+            if owner_revision is None or not callable(rollback_owner):
+                logger.error(
+                    "meeting: promote-recovery не имеет revision/CAS-handler"
+                )
+                return False
+            try:
+                # False здесь безопасен: revision уже замещена или запись
+                # остановлена. В отличие от exception результат CAS известен.
+                rollback_owner(
+                    expected_revision=owner_revision,
+                    expected_owner="meeting",
+                    restore_owner="dictation",
+                )
+                return True
+            except Exception:
+                logger.exception(
+                    "meeting: повторный CAS-rollback promote owner упал"
+                )
+                return False
+
+        if recovery_kind in {None, _RECOVERY_ABORT_OWNER}:
+            abort_owned = getattr(
+                self._recording_core,
+                "abort_recording_if_owner",
+                None,
+            )
+            try:
+                return (
+                    callable(abort_owned)
+                    and bool(abort_owned("meeting"))
+                )
+            except Exception:
+                logger.exception(
+                    "meeting: повторная recovery-остановка при close упала"
+                )
+                return False
+
+        logger.error("meeting: неизвестный recovery-kind %r", recovery_kind)
+        return False
 
     def _start_worker(self) -> None:
         # C2a Task 10 (Фикс 1в): защитный пояс. Основной гард — в
@@ -330,30 +639,63 @@ class MeetingSessionService:
         # можно попасть в обход него — например, self-finalize путь
         # _run_due_job_once, где старый воркер физически ещё не успел
         # завершиться, а self._stop_event не взводился вовсе.
-        w = self._worker
-        if w is not None and w.is_alive():
-            raise RuntimeError(
-                "meeting: предыдущий воркер ещё жив — второй GPU-слот запрещён")
-        self._stop_event.clear()
-        t = threading.Thread(
-            target=self._worker_loop, name="meeting-gpu-slot", daemon=True)
-        self._worker = t
-        t.start()
+        with self._worker_lock:
+            self._raise_if_closed()
+            w = self._worker
+            if w is not None and w.is_alive():
+                raise RuntimeError(
+                    "meeting: предыдущий воркер ещё жив — второй GPU-слот запрещён")
+            self._stop_event.clear()
+            self._worker_armed_event.clear()
+            t = threading.Thread(
+                target=self._worker_loop, name="meeting-gpu-slot", daemon=True)
+            self._worker = t
+            t.start()
 
-    def _stop_worker(self) -> None:
-        self._stop_event.set()
-        t = self._worker
-        if t is not None and t.is_alive():
-            t.join(timeout=30.0)
-            if t.is_alive():
-                logger.warning("meeting: воркер не завершился за 30с")
-                # C2a Task 10 (аудит HIGH): handle НЕ обнуляем — тред может
-                # быть ещё жив после таймаута join. Обнуление здесь "теряло"
-                # бы его: следующий handle_meeting_start() решил бы, что
-                # слот свободен, и заспавнил бы второй воркер параллельно
-                # со старым (двойной GPU-доступ + чужие pause/resume/события).
-                return
-        self._worker = None
+    def _arm_worker(self) -> None:
+        """Разрешить preflight-worker читать состояние активной записи."""
+        with self._worker_lock:
+            self._raise_if_closed()
+            worker = self._worker
+            if (
+                worker is None
+                or not worker.is_alive()
+                or self._stop_event.is_set()
+            ):
+                raise RuntimeError(
+                    "meeting: preflight-worker завершился до публикации встречи"
+                )
+            self._worker_armed_event.set()
+
+    def _stop_worker(self) -> bool:
+        """Запросить остановку и подтвердить смерть retained worker-handle."""
+        with self._worker_lock:
+            self._stop_event.set()
+            # Разбудить поток, который ещё ждёт arm; после пробуждения он
+            # сначала увидит stop_event и не выполнит ни одного meeting-job.
+            self._worker_armed_event.set()
+            t = self._worker
+            if (
+                t is not None
+                and t.is_alive()
+                and t is not threading.current_thread()
+            ):
+                t.join(timeout=_WORKER_JOIN_TIMEOUT_SEC)
+                if t.is_alive():
+                    logger.warning(
+                        "meeting: воркер не завершился за %.1fс",
+                        _WORKER_JOIN_TIMEOUT_SEC,
+                    )
+                    # C2a Task 10 (аудит HIGH): handle НЕ обнуляем — тред может
+                    # быть ещё жив после таймаута join. Обнуление здесь "теряло"
+                    # бы его: следующий handle_meeting_start() решил бы, что
+                    # слот свободен, и заспавнил бы второй воркер параллельно
+                    # со старым (двойной GPU-доступ + чужие pause/resume/события).
+                    return False
+            if t is not None and t.is_alive():
+                return False
+            self._worker = None
+            return True
 
     def _teardown_session(self, emit_finished: bool,
                           item_id: Any = None) -> None:
@@ -364,10 +706,22 @@ class MeetingSessionService:
         with self._lock:
             self._session = None
             self._next_due = {}
+            self._recovery_pending = False
+            self._recovery_kind = None
+            self._recovery_owner_revision = None
 
     # ---------------------------------------------------------------- worker
 
     def _worker_loop(self) -> None:
+        # Preflight-worker существует до recorder.start(), чтобы возможная
+        # ошибка создания потока не оставила скрытый захват микрофона. До arm
+        # он не читает recorder.is_recording и не может self-finalize сессию.
+        while not self._stop_event.is_set():
+            if self._worker_armed_event.wait(_WORKER_WAIT_SEC):
+                break
+        if self._stop_event.is_set():
+            return
+
         while not self._stop_event.is_set():
             self._stop_event.wait(_WORKER_WAIT_SEC)
             if self._stop_event.is_set():
@@ -379,6 +733,11 @@ class MeetingSessionService:
             with self._lock:
                 if self._session is None or self._session.privacy_stopped:
                     break
+
+    def _raise_if_closed(self) -> None:
+        """Не разрешить новому meeting-start пережить начало shutdown."""
+        if self._closed_event.is_set():
+            raise RuntimeError("meeting: service closing")
 
     def _run_due_job_once(self, now: float) -> MeetingJob | None:
         """Одна итерация слота: выполняет ВСЕ созревшие задачи по приоритету

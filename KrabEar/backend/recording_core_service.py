@@ -131,6 +131,14 @@ class RecordingCoreService:
         # _recording_lifecycle_lock (start и phase_a уже живут под ним).
         self._rescue_dir = rescue_dir
         self._active_spill: Any = None
+        # R2 Task 1: минимально отслеживаем владельца общей записи, чтобы
+        # хоткей не мог «лечением рассинхрона» остановить встречу или заметку.
+        # Task 2 поглотит поле полноценным поколением token/owner/state.
+        self._active_owner: str | None = None
+        # Узкая CAS-ревизия нужна уже Task 1 для rollback promote:
+        # если meeting setup упал после dictation→meeting, возвращать owner
+        # назад можно лишь пока не произошло другого owner-перехода.
+        self._active_owner_revision = 0
 
         # Wired by BackendService after init (same pattern as llm_rewriter._error_bus).
         self._error_bus: Any = None
@@ -270,7 +278,72 @@ class RecordingCoreService:
                     "status": "backend_closing",
                     "is_recording": False,
                 }
-            return self._handle_start_recording_locked(params)
+            was_recording = bool(
+                getattr(self.recorder, "is_recording", False)
+            )
+            try:
+                return self._handle_start_recording_locked(params)
+            except Exception:
+                is_recording = bool(
+                    getattr(self.recorder, "is_recording", False)
+                )
+                if not was_recording and is_recording:
+                    # Последний защитный пояс: неизвестный post-start hook не
+                    # имеет права скрыть уже захваченный микрофон исключением.
+                    # Клиент получает честный recording и может продолжить
+                    # либо выполнить owner-bound компенсацию.
+                    if getattr(self, "_active_owner", None) is None:
+                        self._set_active_owner_locked(
+                            str(params.get("source", "dictation"))
+                        )
+                    logger.exception(
+                        "Post-start setup упал после захвата микрофона; "
+                        "публикуем деградированный recording"
+                    )
+                    return {
+                        "status": "recording",
+                        "is_recording": True,
+                        "owner_revision": int(
+                            getattr(self, "_active_owner_revision", 0)
+                        ),
+                        "owner_promoted": False,
+                        "post_start_degraded": True,
+                    }
+                raise
+
+    def _set_active_owner_locked(self, owner: str | None) -> int:
+        """Опубликовать owner-переход и вернуть его CAS-ревизию."""
+        revision = int(
+            getattr(self, "_active_owner_revision", 0)
+        ) + 1
+        self._active_owner = owner
+        self._active_owner_revision = revision
+        return revision
+
+    def _clear_active_owner_locked(self) -> None:
+        """Снять владельца физически завершённой записи под lifecycle-lock."""
+        self._set_active_owner_locked(None)
+
+    def rollback_owner_transition(
+        self,
+        *,
+        expected_revision: int,
+        expected_owner: str,
+        restore_owner: str,
+    ) -> bool:
+        """CAS-откатить promote, не затрагивая более новое поколение owner."""
+        lifecycle_lock, _ = self._ensure_recording_lifecycle_state()
+        with lifecycle_lock:
+            if not bool(getattr(self.recorder, "is_recording", False)):
+                return False
+            if (
+                getattr(self, "_active_owner", None) != expected_owner
+                or int(getattr(self, "_active_owner_revision", 0))
+                != int(expected_revision)
+            ):
+                return False
+            self._set_active_owner_locked(restore_owner)
+            return True
 
     def _handle_start_recording_locked(self, params: dict[str, Any]) -> dict[str, Any]:
         """Выполнить цельный setup записи под lifecycle-lock."""
@@ -346,6 +419,18 @@ class RecordingCoreService:
                 preview_duration = self._preview_duration_sec
             # Идемпотентный контракт: повторный start не считается ошибкой.
             recorder_is_recording = bool(getattr(self.recorder, "is_recording", False))
+            # Task 1 обязан шипиться независимо от полной матрицы Task 4:
+            # живой promote диктовки во встречу не создаёт новый recorder/spill,
+            # но меняет владельца, иначе следующий хоткей остановит встречу.
+            # Ссылку _active_spill здесь по-прежнему не трогаем (R1 HIGH-2).
+            owner_promoted = False
+            if (
+                recorder_is_recording
+                and str(params.get("source", "dictation")) == "meeting"
+                and getattr(self, "_active_owner", None) == "dictation"
+            ):
+                self._set_active_owner_locked("meeting")
+                owner_promoted = True
             return {
                 "status": (
                     "already_recording"
@@ -355,10 +440,29 @@ class RecordingCoreService:
                 "is_recording": recorder_is_recording,
                 "duration_sec": preview_duration,
                 "preview_text": preview_text,
+                "owner_revision": int(
+                    getattr(self, "_active_owner_revision", 0)
+                ),
+                "owner_promoted": owner_promoted,
             }
         self._active_spill = spill
-        self._reset_preview_state()
-        settings = self._settings_svc.cached_settings()
+        owner_revision = self._set_active_owner_locked(
+            str(params.get("source", "dictation"))
+        )
+        # После успешного recorder.start() IPC обязан вернуть ``recording``:
+        # вспомогательные preview/telemetry-хуки не владеют микрофоном и не
+        # имеют права превратить живую запись в «ошибку запуска» для клиента.
+        try:
+            self._reset_preview_state()
+        except Exception:
+            logger.warning(
+                "Не удалось сбросить preview после старта записи",
+                exc_info=True,
+            )
+        # Повторное cached_settings() раньше оставляло orphan-рекордер, если
+        # cache-provider падал уже ПОСЛЕ recorder.start(). Снимок получен до
+        # физического старта и остаётся единым для всего setup-перехода.
+        settings = _settings_pre
         # LM Studio brain unload: освобождаем ~19 GB unified memory под Whisper+pyannote.
         try:
             brain_model = str(settings.get("llm_brain_model", "")).strip()
@@ -377,15 +481,31 @@ class RecordingCoreService:
                 release_brain_lease("krab_ear")
             except Exception as exc:
                 logger.debug("BrainLease: release hook error (ignored): %s", exc)
-        add_breadcrumb(
-            category="recording",
-            message="started",
-            level="info",
-            data={"quality_profile": str(settings.get("quality_profile", "balanced"))},
-        )
+        try:
+            add_breadcrumb(
+                category="recording",
+                message="started",
+                level="info",
+                data={
+                    "quality_profile": str(
+                        settings.get("quality_profile", "balanced")
+                    )
+                },
+            )
+        except Exception:
+            logger.debug(
+                "Sentry breadcrumb старта записи недоступен",
+                exc_info=True,
+            )
         if bool(settings.get("realtime_preview_enabled", True)):
             quality_profile = str(settings.get("quality_profile", "balanced"))
-            self._start_preview_worker(quality_profile=quality_profile)
+            try:
+                self._start_preview_worker(quality_profile=quality_profile)
+            except Exception:
+                logger.warning(
+                    "Не удалось запустить realtime preview; запись продолжается",
+                    exc_info=True,
+                )
         if bool(settings.get("realtime_partial_enabled", True)):
             if self._get_runtime_setting("privacy_mode_enabled", False):
                 logger.info("RealtimePartialTranscriber не запущен: privacy_mode_enabled=True")
@@ -495,7 +615,12 @@ class RecordingCoreService:
                     )
         except Exception:
             logger.exception("Не удалось запустить RealtimeSilenceFilter")
-        return {"status": "recording"}
+        return {
+            "status": "recording",
+            "is_recording": True,
+            "owner_revision": owner_revision,
+            "owner_promoted": False,
+        }
 
     def handle_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
         """Orchestrate the stop-recording pipeline via 5 phase helpers."""
@@ -504,6 +629,12 @@ class RecordingCoreService:
         # Phase A: finalize audio capture
         phase_a = self._stop_recording_phase_a(params, settings)
         if "early_return" in phase_a:
+            # При recorder_timeout phase A намеренно не отдаёт spill: живой
+            # worker ещё может писать. Для already_stopped/empty_audio handle
+            # уже атомарно отвязан и остаётся на диске для rescue.
+            early_spill = phase_a.get("spill")
+            if early_spill is not None:
+                early_spill.close()
             return phase_a["early_return"]
 
         audio = phase_a["audio"]
@@ -512,15 +643,10 @@ class RecordingCoreService:
         _rt_session_id = phase_a["rt_session_id"]
         _bookmark_session_id = phase_a["bookmark_session_id"]
         sr = phase_a["sr"]
-
-        # R1: спилл принадлежит завершившейся записи; новый start создаст свой.
-        # (При early_return самой phase_a — recorder_timeout/already_stopped/
-        # empty_audio — self._active_spill намеренно НЕ трогаем: recorder_timeout
-        # означает, что воркер мог не завершить работу; в остальных случаях
-        # writer уже пуст/закрыт и будет подобран следующим rescue-сканом.)
-        # getattr: старые узкие тесты, обходящие __init__, не знают про R1.
-        spill = getattr(self, "_active_spill", None)
-        self._active_spill = None
+        # Phase A атомарно отвязывает spill вместе с физическим stop. Иначе
+        # concurrent shutdown мог забрать writer между phase A и этой строкой,
+        # а успешный normal stop оставлял rescue-дубль.
+        spill = phase_a["spill"]
 
         # Phase B: audio quality guards (silence + background)
         phase_b = self._stop_recording_phase_b(audio, duration_sec, stop_tail_trim_ms, sr)
@@ -623,6 +749,15 @@ class RecordingCoreService:
                 logger.warning("resume_realtime_partials: resume() упал", exc_info=True)
 
     def handle_get_recording_state(self, params: dict[str, Any]) -> dict[str, Any]:
+        # is_recording+owner — один протокольный снимок. recorder.start()
+        # публикует физический флаг раньше owner; без lifecycle-lock клиент
+        # видел невозможную пару True/null посреди штатного meeting-start.
+        lifecycle_lock, _ = self._ensure_recording_lifecycle_state()
+        with lifecycle_lock:
+            is_recording = bool(
+                getattr(self.recorder, "is_recording", False)
+            )
+            active_owner = getattr(self, "_active_owner", None)
         with self._preview_lock:
             preview_text = self._preview_text
             preview_duration = self._preview_duration_sec
@@ -645,7 +780,8 @@ class RecordingCoreService:
             except Exception:
                 elapsed_sec = preview_duration or 0.0
         return {
-            "is_recording": bool(getattr(self.recorder, "is_recording", False)),
+            "is_recording": is_recording,
+            "owner": active_owner,
             "duration_sec": preview_duration,
             "preview_text": preview_text,
             "audio_rms": audio_rms,
@@ -1002,6 +1138,93 @@ class RecordingCoreService:
                 self._preview_thread = None
             return True
 
+    def begin_shutdown(self) -> None:
+        """Запретить новые start без ожидания текущего lifecycle-перехода."""
+        _, closed_event = self._ensure_recording_lifecycle_state()
+        closed_event.set()
+
+    def abort_recording_if_owner(
+        self,
+        expected_owner: str,
+        *,
+        lifecycle_lock_timeout_sec: float = (
+            _SHUTDOWN_LIFECYCLE_LOCK_TIMEOUT_SEC
+        ),
+    ) -> bool:
+        """Аварийно погасить запись, если текущий владелец совпадает.
+
+        Это компенсационный путь MeetingSessionService: свежий meeting-start
+        мог завершить recorder.start() одновременно с ошибкой/close(). Проверка
+        owner и аварийная остановка выполняются под одним lifecycle-lock.
+        begin_shutdown() перед close-компенсацией запрещает новое поколение;
+        полноценный generation/token появится в R2 Tasks 2–3.
+        """
+        lifecycle_lock, _ = self._ensure_recording_lifecycle_state()
+        lock_timeout = max(0.0, float(lifecycle_lock_timeout_sec))
+        if not lifecycle_lock.acquire(timeout=lock_timeout):
+            logger.error(
+                "Recording lifecycle-lock не освобождён за %.2f с; "
+                "owner-bound abort не выполнен",
+                lock_timeout,
+                extra={"shutdown_blocker": "recording_owner_abort"},
+            )
+            return False
+        try:
+            active_owner = getattr(self, "_active_owner", None)
+            recorder_is_recording = bool(
+                getattr(self.recorder, "is_recording", False)
+            )
+            if (
+                active_owner != str(expected_owner)
+                and not (
+                    active_owner is None
+                    and not recorder_is_recording
+                )
+            ):
+                logger.warning(
+                    "Owner-bound abort отклонён: ожидался %r, активен %r",
+                    expected_owner,
+                    active_owner,
+                )
+                return False
+
+            # Даже при уже сброшенном recorder-флаге повторяем весь teardown:
+            # первый abort мог остановить микрофон, но сохранить preview/RT/RSF
+            # handle после timeout. Idle-флаг сам по себе не является
+            # подтверждением, что все owned worker-ы завершены.
+            all_workers_stopped = self._abort_recording_workers_locked()
+            microphone_stopped = not bool(
+                getattr(self.recorder, "is_recording", False)
+            )
+            recorder_worker_stopped = not self._recorder_worker_alive()
+            if not all_workers_stopped:
+                logger.error(
+                    "Owner-bound abort: flag_stopped=%s, worker_stopped=%s, "
+                    "но не все worker-ы подтвердили остановку",
+                    microphone_stopped,
+                    recorder_worker_stopped,
+                )
+            return (
+                all_workers_stopped
+                and microphone_stopped
+                and recorder_worker_stopped
+            )
+        finally:
+            lifecycle_lock.release()
+
+    def _recorder_worker_alive(self) -> bool:
+        """Fail-closed проверить retained AudioRecorder thread-handle."""
+        worker = getattr(self.recorder, "_thread", None)
+        if worker is None:
+            return False
+        try:
+            return bool(worker.is_alive())
+        except Exception:
+            logger.exception(
+                "Не удалось проверить AudioRecorder worker — считаю живым"
+            )
+            return True
+
     def close_background_workers(
         self,
         *,
@@ -1032,79 +1255,117 @@ class RecordingCoreService:
             return False
 
         try:
-            all_stopped = True
-
-            try:
-                if self._stop_preview_worker() is False:
-                    all_stopped = False
-            except Exception:
-                all_stopped = False
-                logger.exception("Ошибка при остановке realtime preview")
-
-            # Атомарно забираем оба handle. При timeout возвращаем конкретный
-            # объект в пустой slot, чтобы повторный close мог сделать retry.
-            with self._rt_lock:
-                rt_partial = self._rt_partial
-                rsf = self._rsf
-                self._rt_partial = None
-                self._rsf = None
-
-            if rt_partial is not None:
-                try:
-                    rt_stopped = rt_partial.stop(
-                        timeout_sec=_SHUTDOWN_RT_PARTIAL_TIMEOUT_SEC
-                    ) is not False
-                except Exception:
-                    rt_stopped = False
-                    logger.exception("Ошибка при остановке RealtimePartialTranscriber")
-                if not rt_stopped:
-                    all_stopped = False
-                    with self._rt_lock:
-                        if self._rt_partial is None:
-                            self._rt_partial = rt_partial
-
-            silence_ranges: list[tuple[float, float]] = []
-            if rsf is not None:
-                try:
-                    silence_ranges = rsf.stop(
-                        timeout_sec=_SHUTDOWN_RSF_TIMEOUT_SEC
-                    ) or []
-                    rsf_stopped = not rsf.is_running
-                except Exception:
-                    rsf_stopped = False
-                    logger.exception("Ошибка при остановке RealtimeSilenceFilter")
-                if not rsf_stopped:
-                    all_stopped = False
-                    with self._rt_lock:
-                        if self._rsf is None:
-                            self._rsf = rsf
-            self._last_silence_ranges = silence_ranges
-
-            try:
-                abort = getattr(type(self.recorder), "abort", None)
-                if callable(abort):
-                    abort_result = self.recorder.abort(
-                        timeout_sec=_SHUTDOWN_RECORDER_TIMEOUT_SEC
-                    )
-                    recorder_stopped = (
-                        abort_result is not False
-                        and not bool(getattr(self.recorder, "is_recording", False))
-                    )
-                elif bool(getattr(self.recorder, "is_recording", False)):
-                    self.recorder.stop()
-                    recorder_stopped = not bool(
-                        getattr(self.recorder, "is_recording", False)
-                    )
-                else:
-                    recorder_stopped = True
-                all_stopped = recorder_stopped and all_stopped
-            except Exception:
-                all_stopped = False
-                logger.exception("Ошибка при аварийной остановке AudioRecorder")
-
-            return all_stopped
+            return self._abort_recording_workers_locked()
         finally:
             lifecycle_lock.release()
+
+    def _abort_recording_workers_locked(self) -> bool:
+        """Остановить consumers+recorder; caller уже держит lifecycle-lock."""
+        all_stopped = True
+
+        try:
+            if self._stop_preview_worker() is False:
+                all_stopped = False
+        except Exception:
+            all_stopped = False
+            logger.exception("Ошибка при остановке realtime preview")
+
+        # Атомарно забираем оба handle. При timeout возвращаем конкретный
+        # объект в пустой slot, чтобы повторный close мог сделать retry.
+        with self._rt_lock:
+            rt_partial = self._rt_partial
+            rsf = self._rsf
+            self._rt_partial = None
+            self._rsf = None
+
+        if rt_partial is not None:
+            try:
+                rt_stopped = rt_partial.stop(
+                    timeout_sec=_SHUTDOWN_RT_PARTIAL_TIMEOUT_SEC
+                ) is not False
+            except Exception:
+                rt_stopped = False
+                logger.exception(
+                    "Ошибка при остановке RealtimePartialTranscriber"
+                )
+            if not rt_stopped:
+                all_stopped = False
+                with self._rt_lock:
+                    if self._rt_partial is None:
+                        self._rt_partial = rt_partial
+
+        silence_ranges: list[tuple[float, float]] = []
+        if rsf is not None:
+            try:
+                silence_ranges = rsf.stop(
+                    timeout_sec=_SHUTDOWN_RSF_TIMEOUT_SEC
+                ) or []
+                rsf_stopped = not rsf.is_running
+            except Exception:
+                rsf_stopped = False
+                logger.exception(
+                    "Ошибка при остановке RealtimeSilenceFilter"
+                )
+            if not rsf_stopped:
+                all_stopped = False
+                with self._rt_lock:
+                    if self._rsf is None:
+                        self._rsf = rsf
+        self._last_silence_ranges = silence_ranges
+
+        try:
+            abort = getattr(type(self.recorder), "abort", None)
+            if callable(abort):
+                abort_result = self.recorder.abort(
+                    timeout_sec=_SHUTDOWN_RECORDER_TIMEOUT_SEC
+                )
+                recorder_stopped = (
+                    abort_result is not False
+                    and not bool(
+                        getattr(self.recorder, "is_recording", False)
+                    )
+                )
+            elif bool(getattr(self.recorder, "is_recording", False)):
+                self.recorder.stop()
+                recorder_stopped = not bool(
+                    getattr(self.recorder, "is_recording", False)
+                )
+            else:
+                recorder_stopped = True
+            all_stopped = recorder_stopped and all_stopped
+        except Exception:
+            all_stopped = False
+            recorder_stopped = False
+            logger.exception("Ошибка при аварийной остановке AudioRecorder")
+
+        recorder_worker_stopped = not self._recorder_worker_alive()
+        if recorder_stopped:
+            # AudioRecorder.abort() закрывает свой spill, но Core тоже владеет
+            # ссылкой. Закрытие идемпотентно; файл оставляем для rescue
+            # следующего запуска, а устаревший handle снимаем.
+            spill = getattr(self, "_active_spill", None)
+            self._active_spill = None
+            if spill is not None:
+                try:
+                    spill.close()
+                except Exception:
+                    logger.debug(
+                        "RecordingSpill: close при abort упал",
+                        exc_info=True,
+                    )
+
+        all_stopped = (
+            all_stopped
+            and recorder_stopped
+            and recorder_worker_stopped
+        )
+        if all_stopped:
+            # Owner — тоже retry-handle. Снимать его раньше нельзя: повторный
+            # owner-bound abort обязан отличать recovery своей записи от
+            # попытки погасить чужое более новое поколение.
+            self._clear_active_owner_locked()
+
+        return all_stopped
 
     def _preview_loop(
         self,
@@ -1384,10 +1645,16 @@ class RecordingCoreService:
                 }
             }
         if stopped is None:
+            # Рекордер уже idle: stale owner больше не имеет живой записи.
+            # Выполняем под lifecycle-lock до допуска следующего start.
+            self._clear_active_owner_locked()
+            spill = getattr(self, "_active_spill", None)
+            self._active_spill = None
             with self._preview_lock:
                 preview_text = self._preview_text
                 preview_duration = self._preview_duration_sec
             return {
+                "spill": spill,
                 "early_return": {
                     "status": "already_stopped",
                     "is_recording": False,
@@ -1398,6 +1665,14 @@ class RecordingCoreService:
             }
 
         audio, duration_sec = stopped
+        # Spill принадлежит этому физически завершённому поколению. Забираем
+        # его под lifecycle-lock ДО допуска start/shutdown следующего перехода.
+        spill = getattr(self, "_active_spill", None)
+        self._active_spill = None
+        # Владелец завершается атомарно с физической записью. Если снять его
+        # позже в handle_stop_recording, новый start успеет опубликовать G2,
+        # а хвост stop G1 ошибочно очистит уже нового владельца.
+        self._clear_active_owner_locked()
         add_breadcrumb(
             category="recording",
             message="stopped",
@@ -1429,6 +1704,7 @@ class RecordingCoreService:
 
         if getattr(audio, "size", 0) == 0:
             return {
+                "spill": spill,
                 "early_return": self._build_empty_audio_response(
                     duration_sec=duration_sec,
                     quality_profile=sr["quality_profile"],
@@ -1446,6 +1722,7 @@ class RecordingCoreService:
             "rt_session_id": rt_session_id,
             "bookmark_session_id": bookmark_session_id,
             "sr": sr,
+            "spill": spill,
         }
 
     def _stop_recording_phase_b(

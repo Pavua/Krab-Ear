@@ -16,10 +16,12 @@
    5. syncRecordingState: детекция mismatch (backend != local)
    6. syncRecordingState: no mismatch (backend == local)
    7. handleRecordToggle: localRecording=true, backend=false → sync-only (не стартует новую запись)
-   8. handleRecordToggle: localRecording=false, backend=true → stopRecording вызывается
+   8. handleRecordToggle: legacy local=false/backend=true → stopRecording
+   9. handleRecordToggle: foreign/unmanaged owner → запись не трогается
 */
 
 import XCTest
+@testable import KrabEarAgent
 
 // MARK: - Pure logic helpers (mirrors of main+HotkeyRecording.swift inline logic)
 
@@ -55,6 +57,10 @@ enum RecordingLogic {
     /// Описывает, что должно произойти при handleRecordToggleRequest,
     /// когда isProcessing=false и debounce прошёл.
     enum ToggleAction {
+        /// Не посылать start/stop, пока IPC-state не подтверждён.
+        case refuseUnknown
+        /// Не трогать запись другого или неуправляемого режима.
+        case refuseForeign
         /// Только синхронизировать состояние (не стартовать новую запись).
         case syncOnly
         /// Вызвать stopRecording для завершения зависшей сессии.
@@ -66,8 +72,21 @@ enum RecordingLogic {
     /// Зеркало ветвления в handleRecordToggleRequest (после debounce-проверки).
     static func decideToggleAction(
         wasRecordingLocally: Bool,
-        backendRecording: Bool
+        backendRecording: Bool,
+        backendOwner: String? = nil,
+        ownerFieldPresent: Bool = false,
+        stateVerified: Bool = true
     ) -> ToggleAction {
+        if !stateVerified {
+            return .refuseUnknown
+        }
+        if HotkeyRecordingOwnershipPolicy.isForeignRecording(
+            isRecording: backendRecording,
+            owner: backendOwner,
+            ownerFieldPresent: ownerFieldPresent
+        ) {
+            return .refuseForeign
+        }
         // local=true, backend=false → sync-only, не стартуем новую запись
         if wasRecordingLocally && !backendRecording {
             return .syncOnly
@@ -175,13 +194,50 @@ final class MainHotkeyRecordingTests: XCTestCase {
     }
 
     func test_toggleAction_localFalse_backendTrue_stopHanging() {
-        // backend записывает, но local флаг сброшен → завершить зависшую сессию
+        // Старый backend без owner: сохраняем согласованный legacy auto-heal.
         let action = RecordingLogic.decideToggleAction(
             wasRecordingLocally: false,
             backendRecording: true
         )
         if case .stopHanging = action { /* OK */ } else {
             XCTFail("Ожидался .stopHanging, получили \(action)")
+        }
+    }
+
+    func test_toggleAction_foreignOwner_refusesStop() {
+        let action = RecordingLogic.decideToggleAction(
+            wasRecordingLocally: true,
+            backendRecording: true,
+            backendOwner: "meeting",
+            ownerFieldPresent: true
+        )
+        if case .refuseForeign = action { /* ожидаемый безопасный отказ */ } else {
+            XCTFail("Ожидался .refuseForeign, получили \(action)")
+        }
+    }
+
+    func test_toggleAction_presentNullOwner_refusesStop() {
+        let action = RecordingLogic.decideToggleAction(
+            wasRecordingLocally: false,
+            backendRecording: true,
+            backendOwner: nil,
+            ownerFieldPresent: true
+        )
+        if case .refuseForeign = action { /* ожидаемый безопасный отказ */ } else {
+            XCTFail("Ожидался .refuseForeign, получили \(action)")
+        }
+    }
+
+    func test_toggleAction_unverifiedState_refusesAnyMutation() {
+        let action = RecordingLogic.decideToggleAction(
+            wasRecordingLocally: true,
+            backendRecording: true,
+            backendOwner: nil,
+            ownerFieldPresent: false,
+            stateVerified: false
+        )
+        if case .refuseUnknown = action { /* ожидаемый fail-safe отказ */ } else {
+            XCTFail("Ожидался .refuseUnknown, получили \(action)")
         }
     }
 

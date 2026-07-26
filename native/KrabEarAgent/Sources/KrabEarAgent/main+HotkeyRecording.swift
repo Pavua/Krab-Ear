@@ -1,10 +1,60 @@
 /*
  main+HotkeyRecording.swift
- AgentAppDelegate extension: hotkey toggle handler, start/stop recording, state sync with backend.
+ Расширение AgentAppDelegate: горячая клавиша, запуск/остановка записи
+ и безопасная синхронизация владельца общего backend-рекордера.
 */
 
 import AppKit
 import Foundation
+
+/// Чистая политика сопоставления общего backend-рекордера с hotkey-диктовкой.
+/// Отсутствующий owner сохраняет legacy, а явный owner:null означает unmanaged.
+enum HotkeyRecordingOwnershipPolicy {
+    static func isForeignRecording(
+        isRecording: Bool,
+        owner: String?,
+        ownerFieldPresent: Bool
+    ) -> Bool {
+        guard isRecording else { return false }
+        if let owner {
+            return owner != "dictation"
+        }
+        return ownerFieldPresent
+    }
+
+    static func representsLocalDictation(
+        isRecording: Bool,
+        owner: String?,
+        ownerFieldPresent: Bool
+    ) -> Bool {
+        guard isRecording else { return false }
+        if let owner {
+            return owner == "dictation"
+        }
+        return !ownerFieldPresent
+    }
+}
+
+/// Сериализует физический start, включая IPC и владение audio-ducking snapshot.
+/// NSLock нужен потому, что toggle стартует из detached task, а hold — с main.
+final class RecordingStartGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var inFlight = false
+
+    func tryAcquire() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !inFlight else { return false }
+        inFlight = true
+        return true
+    }
+
+    func release() {
+        lock.lock()
+        inFlight = false
+        lock.unlock()
+    }
+}
 
 extension AgentAppDelegate {
 
@@ -28,10 +78,9 @@ extension AgentAppDelegate {
         }
         lastToggleRequestAt = now
 
-        // Dispatch IPC work off the main thread to prevent the 2000ms+ main-thread
-        // hang (Sentry KRAB-EAR-AGENT-3) caused by synchronous `callWithRecovery`
-        // blocking the main runloop. UI state reads happen before the hop;
-        // stopRecording/startRecording update UI state via @MainActor methods inside.
+        // IPC уходит с main thread: синхронный callWithRecovery раньше блокировал
+        // runloop более чем на 2 секунды (Sentry KRAB-EAR-AGENT-3). Снимок UI
+        // читается до перехода, а обновления выполняются через MainActor ниже.
         let wasRecordingLocally = isRecording
         Task.detached { [weak self] in
             await self?.performRecordToggle(wasRecordingLocally: wasRecordingLocally)
@@ -41,9 +90,53 @@ extension AgentAppDelegate {
     /// Выполнить логику toggle записи вне главного потока.
     /// Все обращения к @MainActor-изолированным свойствам сделаны через явные `await MainActor.run`.
     func performRecordToggle(wasRecordingLocally: Bool) async {
-        let backendRecording = syncRecordingStateWithBackend()
+        let (backendRecording, backendOwner, ownerFieldPresent, stateVerified) =
+            syncRecordingStateWithBackend()
+        // Ошибку IPC нельзя выдавать за старый backend без owner: в таком
+        // «legacy»-виде promoted meeting снова можно было бы остановить тапом.
+        // Пока снимок не подтверждён, fail-safe запрещает и start, и stop.
+        if !stateVerified {
+            logger.warn("Не удалось подтвердить владельца записи — toggle отклонён")
+            await MainActor.run {
+                self.notify(
+                    title: "Krab Ear",
+                    body: "Не удалось проверить режим записи — запись не тронута."
+                )
+            }
+            return
+        }
         if backendRecording != wasRecordingLocally {
-            logger.warn("Десинхрон состояния записи: local=\(wasRecordingLocally), backend=\(backendRecording)")
+            logger.warn(
+                "Десинхрон состояния записи: local=\(wasRecordingLocally), " +
+                "backend=\(backendRecording), owner=\(backendOwner ?? "nil"), " +
+                "ownerFieldPresent=\(ownerFieldPresent)"
+            )
+        }
+
+        // Owner-гейт обязан стоять ДО любой ветки stop: это закрывает не только
+        // потерянный локальный флаг, но и dictation→meeting promote, при котором
+        // снимок wasRecordingLocally законно остаётся true.
+        if HotkeyRecordingOwnershipPolicy.isForeignRecording(
+            isRecording: backendRecording,
+            owner: backendOwner,
+            ownerFieldPresent: ownerFieldPresent
+        ) {
+            let human: String
+            switch backendOwner {
+            case "meeting":
+                human = "встреча"
+            case "quick_capture":
+                human = "быстрая заметка"
+            default:
+                human = "запись другого режима"
+            }
+            await MainActor.run {
+                self.notify(
+                    title: "Krab Ear",
+                    body: "Идёт \(human) — запись не тронута."
+                )
+            }
+            return
         }
 
         // Если локально считалось, что пишем, но backend уже idle — не стартуем новую
@@ -58,7 +151,7 @@ extension AgentAppDelegate {
             return
         }
 
-        // Если backend пишет, а локально флаг был сбит, сначала корректно завершаем зависшую запись.
+        // После owner-гейта выше здесь остаётся только своя/legacy-диктовка.
         if !wasRecordingLocally && backendRecording {
             await MainActor.run {
                 self.notify(
@@ -77,24 +170,49 @@ extension AgentAppDelegate {
         }
     }
 
-    func syncRecordingStateWithBackend() -> Bool {
+    /// Возвращает флаг записи, владельца и наличие owner в IPC-контракте.
+    /// Старый backend не отдаёт ключ, новый всегда отдаёт строку либо null.
+    func syncRecordingStateWithBackend() -> (
+        recording: Bool,
+        owner: String?,
+        ownerFieldPresent: Bool,
+        stateVerified: Bool
+    ) {
         guard
             let stateResponse = try? callWithRecovery(method: "get_recording_state", params: [:]),
             let state = stateResponse["result"] as? [String: Any]
         else {
-            return isRecording
+            return (isRecording, nil, false, false)
         }
 
         let backendRecording = (state["is_recording"] as? Bool) ?? false
-        if backendRecording != isRecording {
-            isRecording = backendRecording
+        let backendOwner = state["owner"] as? String
+        let ownerFieldPresent = state.keys.contains("owner")
+        // Общий backend-флаг нельзя слепо зеркалить в hotkey-состояние:
+        // при явном meeting/quick_capture второй тап иначе остановит чужую запись.
+        // Только ОТСУТСТВУЮЩИЙ ключ сохраняет auto-heal старого backend;
+        // owner:null нового backend — достижимая unmanaged/pending запись.
+        let backendRepresentsLocalDictation =
+            HotkeyRecordingOwnershipPolicy.representsLocalDictation(
+                isRecording: backendRecording,
+                owner: backendOwner,
+                ownerFieldPresent: ownerFieldPresent
+            )
+        if backendRepresentsLocalDictation != isRecording {
+            isRecording = backendRepresentsLocalDictation
             refreshStatusItemTitle()
             rebuildStatusMenu()
         }
-        return backendRecording
+        return (backendRecording, backendOwner, ownerFieldPresent, true)
     }
 
     func startRecording() {
+        guard recordingStartGate.tryAcquire() else {
+            logger.warn("start_recording уже выполняется — повторный старт подавлен")
+            return
+        }
+        defer { recordingStartGate.release() }
+
         captureRecordingTargetApp()
         let targetBundle = recordingTargetApp?.bundleIdentifier ?? "nil"
         logger.info("Старт записи. targetApp=\(targetBundle)")
@@ -116,12 +234,14 @@ extension AgentAppDelegate {
             let result = response["result"] as? [String: Any]
             let status = (result?["status"] as? String) ?? "recording"
             if status == "already_recording" {
-                logger.warn("Backend вернул already_recording на start_recording")
-                isRecording = true
-                startRealtimeOverlayPolling()
-                refreshStatusItemTitle()
-                rebuildStatusMenu()
-                // Это штатная идемпотентная синхронизация, не показываем шумный алерт.
+                // already_recording — не наш успешный старт: принятие его за успех
+                // позволяло следующему тапу остановить чужую встречу или заметку.
+                logger.warn("start_recording: запись уже идёт — не перехватываем")
+                audioDuckingService.restoreAfterRecording()
+                notify(
+                    title: "Krab Ear",
+                    body: "Запись уже идёт — новая не начата."
+                )
                 return
             }
             if status != "recording" {
@@ -141,6 +261,9 @@ extension AgentAppDelegate {
             rebuildStatusMenu()
         } catch {
             logger.error("Ошибка start_recording: \(error.localizedDescription)")
+            // Ducking включается до IPC; любой отказ старта обязан восстановить
+            // системный звук, а не только отдельный already_recording.
+            audioDuckingService.restoreAfterRecording()
             notify(
                 title: "Krab Ear",
                 body: "Не удалось начать запись: \(error.localizedDescription)"

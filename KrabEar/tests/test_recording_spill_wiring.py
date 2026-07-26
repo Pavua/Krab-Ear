@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -214,6 +215,52 @@ class RecordingSpillWiringTest(unittest.TestCase):
         self.assertIsNotNone(result.get("history_id"))
         self.assertFalse(part_path.exists())
         self.assertIsNone(svc._active_spill)
+
+    def test_shutdown_cannot_steal_spill_after_physical_stop(self):
+        """Phase A атомарно передаёт spill обычному stop-пайплайну."""
+        recorder = _FakeRecorder()
+        svc = _make_service(
+            self._tmp, self.rescue_dir, recorder=recorder,
+            settings_overrides={"recording_spill_enabled": True},
+        )
+        svc.handle_start_recording({})
+        part_path = recorder.received_spill.part_path
+        phase_b_entered = threading.Event()
+        release_phase_b = threading.Event()
+        errors: list[BaseException] = []
+        result: dict = {}
+        original_phase_b = svc._stop_recording_phase_b
+
+        def _blocking_phase_b(*args, **kwargs):
+            phase_b_entered.set()
+            if not release_phase_b.wait(timeout=2.0):
+                raise TimeoutError("Тест не отпустил phase B")
+            return original_phase_b(*args, **kwargs)
+
+        def _stop() -> None:
+            try:
+                result.update(svc.handle_stop_recording({}))
+            except BaseException as exc:
+                errors.append(exc)
+
+        svc._stop_recording_phase_b = _blocking_phase_b
+        thread = threading.Thread(target=_stop, daemon=True)
+        thread.start()
+        self.assertTrue(phase_b_entered.wait(timeout=1.0))
+        try:
+            self.assertIsNone(
+                svc._active_spill,
+                "после физического stop writer уже принадлежит normal pipeline",
+            )
+            self.assertTrue(svc.close_background_workers())
+        finally:
+            release_phase_b.set()
+        thread.join(timeout=3.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(result.get("status"), "ok")
+        self.assertFalse(part_path.exists())
 
     def test_stop_keeps_spill_when_stt_fails(self):
         recorder = _FakeRecorder()

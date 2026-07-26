@@ -27,6 +27,16 @@ class MeetingDispatchInvariantTestCase(unittest.TestCase):
         self.assertIn("_meeting_svc.close()", src,
                       "BackendService.close() обязан звать _meeting_svc.close()")
 
+    def test_meeting_shutdown_gate_precedes_recording_core_close(self) -> None:
+        """Production close не публикует start-успех после abort Core."""
+        src = SERVICE_PY.read_text(encoding="utf-8")
+        close_start = src.index("def close(self)")
+        close_end = src.index("\n    def ", close_start)
+        close_body = src[close_start:close_end]
+        meeting_gate = close_body.index("meeting_service.begin_shutdown()")
+        core_close = close_body.index("recording_core.close_background_workers()")
+        self.assertLess(meeting_gate, core_close)
+
 
 class MeetingBackendIntegrationTestCase(unittest.TestCase):
     """Полный BackendService с фейками: методы диспатчатся и privacy-гейтятся."""

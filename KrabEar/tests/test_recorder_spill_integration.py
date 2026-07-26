@@ -2,6 +2,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -69,6 +70,27 @@ class RecorderSpillTest(unittest.TestCase):
         r.start()
         self.assertIsNone(r._spill)
         r.abort(timeout_sec=0.5)
+
+    def test_thread_start_failure_rolls_back_state_and_closes_spill(self):
+        """Неудача создания worker-а не публикует ложную запись."""
+        recorder = AudioRecorder()
+        spill = FakeSpill()
+
+        with patch(
+            "backend.recorder.threading.Thread.start",
+            side_effect=RuntimeError("can't start new thread"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "can't start new thread",
+            ):
+                recorder.start(spill=spill)
+
+        self.assertFalse(recorder.is_recording)
+        self.assertIsNone(recorder._thread)
+        self.assertIsNone(recorder._spill)
+        self.assertTrue(spill.closed)
+        self.assertIsNone(recorder.stop())
 
 
 if __name__ == "__main__":

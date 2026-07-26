@@ -1667,6 +1667,19 @@ class BackendService:
         False, когда любой нативный/audio worker не подтвердил завершение.
         """
         all_workers_stopped = True
+        meeting_service = getattr(self, "_meeting_svc", None)
+        if meeting_service is not None:
+            try:
+                # Двухфазный shutdown: meeting-start должен увидеть closing
+                # ДО того, как RecordingCore остановит уже опубликованный
+                # recorder. Иначе start мог вернуть ok=True для мёртвой записи.
+                meeting_service.begin_shutdown()
+            except Exception:
+                all_workers_stopped = False
+                logger.exception(
+                    "MeetingSessionService.begin_shutdown() raised during close()"
+                )
+
         recording_core = getattr(self, "_recording_core_svc", None)
         if recording_core is not None:
             try:
@@ -1736,8 +1749,13 @@ class BackendService:
         # Stop MeetingSessionService worker thread (C2a) — mirrors the
         # EventBridge/PurgeScheduler stop above (same CI daemon-thread rule).
         try:
-            self._meeting_svc.close()
+            if self._meeting_svc.close() is False:
+                all_workers_stopped = False
+                logger.error(
+                    "MeetingSessionService сохранил recovery-session при close()"
+                )
         except Exception:
+            all_workers_stopped = False
             logger.exception("MeetingSessionService.close() raised during close()")
 
         # Stop WakeWordWatchdog daemon thread — same CI daemon-thread teardown

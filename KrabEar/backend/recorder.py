@@ -100,25 +100,62 @@ class AudioRecorder:
         # wave-1770 MED: serialise the whole start against a concurrent stop() so the
         # data-lock release window inside stop() cannot interleave with a new start.
         with self._lifecycle_lock:
-            with self._lock:
-                # После таймаута stop()/abort() старый CFFI-worker может быть
-                # жив, хотя публичный флаг уже False. Его handle намеренно
-                # сохраняется: очистка общего Event оживила бы старый цикл и
-                # запустила второй поток поверх него.
-                if self._is_recording or (
-                    self._thread is not None and self._thread.is_alive()
-                ):
-                    return False
-                self._chunks = []
-                self._chunks_total_samples = 0
-                self._stop_event.clear()
-                self._is_recording = True
-                self._started_at = time.monotonic()
-                self._pending_result = None  # W1670: сброс результата предыдущей авто-остановки
-                self._spill = spill
-                self._thread = threading.Thread(target=self._worker, daemon=True)
-                self._thread.start()
-                return True
+            worker: threading.Thread | None = None
+            try:
+                with self._lock:
+                    # После таймаута stop()/abort() старый CFFI-worker может
+                    # быть жив, хотя публичный флаг уже False. Его handle
+                    # намеренно сохраняется: очистка общего Event оживила бы
+                    # старый цикл и запустила второй поток поверх него.
+                    if self._is_recording or (
+                        self._thread is not None
+                        and self._thread.is_alive()
+                    ):
+                        return False
+                    self._chunks = []
+                    self._chunks_total_samples = 0
+                    self._stop_event.clear()
+                    self._is_recording = True
+                    self._started_at = time.monotonic()
+                    # W1670: сброс результата предыдущей авто-остановки.
+                    self._pending_result = None
+                    self._spill = spill
+                    worker = threading.Thread(
+                        target=self._worker,
+                        daemon=True,
+                    )
+                    self._thread = worker
+                    worker.start()
+                    return True
+            except Exception:
+                # Thread.start() — последний fallible шаг после публикации
+                # is_recording. Откатываем его атомарно, иначе Core честно
+                # вернёт recording для рекордера без живого audio-worker.
+                self._stop_event.set()
+                spill_to_close = None
+                with self._lock:
+                    self._is_recording = False
+                    self._started_at = 0.0
+                    self._chunks = []
+                    self._chunks_total_samples = 0
+                    self._pending_result = None
+                    if worker is None or not worker.is_alive():
+                        if self._thread is worker:
+                            self._thread = None
+                        spill_to_close = self._spill
+                        self._spill = None
+                # Spill.close() делает I/O и потому выполняется строго вне
+                # self._lock. Если worker каким-то образом всё же ожил, handle
+                # и spill сохраняются для повторного abort().
+                if spill_to_close is not None:
+                    try:
+                        spill_to_close.close()
+                    except Exception:
+                        logger.debug(
+                            "AudioRecorder.start: spill close при rollback упал",
+                            exc_info=True,
+                        )
+                raise
 
     def stop(self, timeout_sec: float = 3.0, trim_tail_ms: int = 0) -> tuple[np.ndarray, float] | None:
         """Останавливает запись и возвращает (audio, duration).

@@ -162,6 +162,8 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     var settings: AgentSettings = .default
     var isRecording = false
     var isProcessing = false
+    /// Не даёт двум async start разделить один snapshot audio ducking.
+    let recordingStartGate = RecordingStartGate()
     /// C3a: активна быстрая заметка (запись без вставки в активное окно, спека
     /// 2026-07-16-c3-quick-capture-design.md §2a). Подавляет streaming-paste
     /// и взаимно исключается с диктовкой/встречей.
@@ -1149,7 +1151,11 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         manager.onHoldStop = { [weak self] in
             DispatchQueue.main.async {
                 guard let self, self.isRecording else { return }
-                self.stopRecording()
+                // Hold и toggle обязаны проходить один owner/state-гейт:
+                // прямой stop после dictation→meeting убивал чужую встречу.
+                Task.detached { [weak self] in
+                    await self?.performRecordToggle(wasRecordingLocally: true)
+                }
             }
         }
         // Явно сохранённый false обязан переживать restart. Если ключ ещё не

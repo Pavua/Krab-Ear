@@ -25,7 +25,10 @@
 
 ## Чанки исполнения
 
-- **Чанк A** (Task 1) — живой фикс безопасности, шипится первым и независимо.
+- **Чанк A** (Task 1) — проверенный кодовый checkpoint безопасности, но **не
+  самостоятельный production deploy**. Разбор выявил остаточное TOCTOU-окно между
+  клиентскими `get_recording_state` и `stop_recording`; выкладка разрешена только
+  после серверного token/generation gate из Tasks 2–3.
 - **Чанк B** (Task 2-4) — ядро: поколение, гейт, матрица переходов.
 - **Чанк C** (Task 5-6) — кэш ответов и телеметрия владения.
 - **Чанк D** (Task 7-8) — Swift-ретрай и закрытие волны.
@@ -37,18 +40,45 @@
 ### Task 1: Хоткей не трогает чужую запись (F1)
 
 **Files:**
-- Modify: `KrabEar/backend/recording_core_service.py` (`__init__`, `_handle_start_recording_locked`, `handle_get_recording_state`)
-- Modify: `native/KrabEarAgent/Sources/KrabEarAgent/main+HotkeyRecording.swift` (`syncRecordingStateWithBackend`, `performRecordToggle`, `startRecording`)
+- Modify: `KrabEar/backend/recording_core_service.py`, `recorder.py`,
+  `meeting_session_service.py`, `service.py`
+- Modify: `native/KrabEarAgent/Sources/KrabEarAgent/main+HotkeyRecording.swift`,
+  `main+QuickCapture.swift`, `main.swift`
 - Test: `KrabEar/tests/test_recording_owner_state.py` (новый)
+- Test: `KrabEar/tests/test_recording_core_service.py`,
+  `test_recording_spill_wiring.py`, `test_recorder_spill_integration.py`,
+  `test_meeting_session_service_W_C2a.py`,
+  `test_meeting_dispatch_privacy_W_C2a.py`
 - Test: `native/KrabEarAgent/Tests/KrabEarAgentTests/HotkeyOwnerGuardTests.swift` (новый)
+- Test: `native/KrabEarAgent/Tests/KrabEarAgentTests/MainHotkeyRecordingTests.swift`
 
 **Interfaces:**
-- Produces (для Task 2): поле `self._active_owner: str | None` на `RecordingCoreService` — минимальное отслеживание владельца. **Task 2 его ПОГЛОЩАЕТ**, заменяя на полноценное `self._active_generation`; здесь оно введено намеренно, чтобы живой фикс шипился первым и не ждал всей архитектуры.
+- Produces (для Task 2): поля `self._active_owner: str | None` и
+  `self._active_owner_revision: int` на `RecordingCoreService` — минимальное
+  отслеживание владельца и CAS-revision для безопасной компенсации promote.
+  **Task 2 поглощает оба поля**, заменяя их полноценным
+  `self._active_generation`; Task 2 обязан сохранить revision-bound семантику.
 - Produces (для Task 7): `get_recording_state` возвращает дополнительное поле `owner: str | None`.
 
 **Контекст задачи (зачем):** сегодня при идущей встрече одиночный тап Right Option попадает в ветку «лечения рассинхрона» (`main+HotkeyRecording.swift:61-71`) и останавливает запись встречи: отчёт теряется (`item_id: None`), а транскрипт часа уходит в `pasteToFrontmostApp`. Плюс `already_recording` в хоткее (`:118-126`) считается успехом.
 
-- [ ] **Step 1: Написать падающий Python-тест**
+> **Checkpoint 2026-07-26 — Task 1 code-complete, deploy paused.**
+> Adversarial-разбор расширил исходный F1 до полного lifecycle-контракта:
+> owner публикуется атомарно со start/stop; promote откатывается revision-CAS;
+> fresh-start и shutdown сохраняют retry-handles; `AudioRecorder.start()` стал
+> failure-atomic; normal stop атомарно забирает spill; зависшие recorder,
+> preview, partial/RSF и meeting-worker не маскируются флагом `is_recording`.
+> Swift fail-closed различает отсутствующее поле owner (старый backend) и
+> явный `null` (unmanaged recording), а все stop-ветки проходят один owner-guard.
+>
+> Проверено: Python 3.14 — 135/135 доменных + 5/5 BackendService/dispatch;
+> Ubuntu-parity Python 3.12 без MLX — 141/141; Swift release build — OK;
+> Swift suite — 1348 executed, 12 skipped, 0 failed; flake8 и
+> `git diff --check` — чисто; независимый adversarial gate — GREEN.
+> Живой production smoke намеренно не выполнялся: token-gate ещё отсутствует,
+> а production-рекордер удерживает rescue `.part` после PortAudio `-9986`.
+
+- [x] **Step 1: Написать падающий Python-тест**
 
 Создать `KrabEar/tests/test_recording_owner_state.py`. Фейк-коллабораторы скопировать из `KrabEar/tests/test_recording_spill_wiring.py` (прочитать его `_FakeRecorder`, `_make_service` и переиспользовать структуру — НЕ изобретать свою).
 
@@ -101,12 +131,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: Убедиться, что падает правильно**
+- [x] **Step 2: Убедиться, что падает правильно**
 
 Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_recording_owner_state.py -v -p no:cacheprovider`
 Expected: FAIL с `KeyError: 'owner'`
 
-- [ ] **Step 3: Реализовать backend-часть**
+- [x] **Step 3: Реализовать backend-часть**
 
 В `RecordingCoreService.__init__` рядом с `self._active_spill: Any = None` добавить:
 
@@ -138,12 +168,12 @@ Expected: FAIL с `KeyError: 'owner'`
             "owner": getattr(self, "_active_owner", None),
 ```
 
-- [ ] **Step 4: Зелёные тесты + регрессия**
+- [x] **Step 4: Зелёные тесты + регрессия**
 
 Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_recording_owner_state.py KrabEar/tests/test_recording_core_service.py KrabEar/tests/test_recording_spill_wiring.py -v -p no:cacheprovider`
 Expected: все PASS
 
-- [ ] **Step 5: Написать падающий Swift-тест**
+- [x] **Step 5: Написать падающий Swift-тест**
 
 Создать `native/KrabEarAgent/Tests/KrabEarAgentTests/HotkeyOwnerGuardTests.swift`. Прочитать существующий `QuickCaptureWiringTests.swift` для установленного в проекте паттерна source-contract тестов и переиспользовать его.
 
@@ -182,12 +212,12 @@ final class HotkeyOwnerGuardTests: XCTestCase {
 }
 ```
 
-- [ ] **Step 6: Убедиться, что Swift-тесты падают**
+- [x] **Step 6: Убедиться, что Swift-тесты падают**
 
 Run: `cd native/KrabEarAgent && swift test --filter HotkeyOwnerGuardTests`
 Expected: FAIL обоих кейсов
 
-- [ ] **Step 7: Реализовать Swift-часть**
+- [x] **Step 7: Реализовать Swift-часть**
 
 7a. `syncRecordingStateWithBackend()` (строка 80) — вернуть не только флаг, но и владельца. Заменить сигнатуру и тело:
 
@@ -268,19 +298,24 @@ Expected: FAIL обоих кейсов
             }
 ```
 
-- [ ] **Step 8: Зелёные Swift-тесты + полная сборка**
+- [x] **Step 8: Зелёные Swift-тесты + полная сборка**
 
 Run: `cd native/KrabEarAgent && swift build -c release && swift test`
 Expected: сборка OK, вся сьюта зелёная (существующие тесты, зависящие от `syncRecordingStateWithBackend`, могли сломаться из-за смены сигнатуры — починить их под новый кортеж, это ожидаемая часть задачи)
 
-- [ ] **Step 9: Гейты и коммит**
+- [x] **Step 9: Гейты и коммит**
 
 ```bash
-scripts/pre_merge_py312_check.sh KrabEar/tests/test_recording_owner_state.py
-flake8 KrabEar/backend/recording_core_service.py KrabEar/tests/test_recording_owner_state.py
-git add KrabEar/backend/recording_core_service.py KrabEar/tests/test_recording_owner_state.py \
-  native/KrabEarAgent/Sources/KrabEarAgent/main+HotkeyRecording.swift \
-  native/KrabEarAgent/Tests/KrabEarAgentTests/HotkeyOwnerGuardTests.swift
+scripts/pre_merge_py312_check.sh \
+  KrabEar/tests/test_recording_owner_state.py \
+  KrabEar/tests/test_recording_spill_wiring.py \
+  KrabEar/tests/test_meeting_session_service_W_C2a.py \
+  KrabEar/tests/test_recorder_spill_integration.py \
+  KrabEar/tests/test_recording_core_service.py \
+  KrabEar/tests/test_meeting_dispatch_privacy_W_C2a.py
+make audit-all
+cd native/KrabEarAgent && swift build -c release && swift test
+# Стадировать только явный список файлов checkpoint; git add -A запрещён.
 git commit -m "fix(r2): хоткей не останавливает чужую запись + already_recording не успех (Task 1, F1)"
 ```
 
@@ -296,7 +331,9 @@ git commit -m "fix(r2): хоткей не останавливает чужую 
 - Test: `KrabEar/tests/test_recording_generation.py` (новый)
 
 **Interfaces:**
-- Consumes: `self._active_owner` из Task 1 (ПОГЛОЩАЕТСЯ — удаляется, заменяется на `_active_generation`).
+- Consumes: `self._active_owner` и `self._active_owner_revision` из Task 1
+  (ПОГЛОЩАЮТСЯ — удаляются, заменяются на `_active_generation`; CAS-revision
+  должна стать частью generation/token-перехода, а не исчезнуть).
 - Produces (для Task 3-7):
   - `self._active_generation: dict | None` со схемой `{"token": str, "owner": str, "state": "capturing"|"finalizing", "started_at": float, "promoted_from": str | None}`
   - `RecordingSpillWriter(rescue_dir, sample_rate, channels, source="unknown", session_id=None)` — новый последний параметр; при `None` генерирует свой uuid как сейчас.
@@ -1231,9 +1268,13 @@ Expected: все PASS
 тем же способом, обнулять там же, где обнуляется `recordingTargetApp`.
 
 🔴 Poll-цикл `stop_in_progress` (до 5 минут) обязан жить **вне главного потока** —
-это прямой AGENT-3 класс (синхронный IPC на main thread даёт AppHang). Весь цикл
-исполняется внутри уже существующего `Task.detached` из `performRecordToggle`;
-ожидание между опросами — `try await Task.sleep(nanoseconds:)`, НЕ `Thread.sleep`.
+это прямой AGENT-3 класс (синхронный IPC на main thread даёт AppHang).
+`AgentAppDelegate` помечен `@MainActor`, поэтому одного внешнего `Task.detached`
+недостаточно: обращение к actor-isolated helper может снова выполнить синхронный
+IPC на main. Каждый IPC-вызов цикла обязан идти через существующий
+`ipcClient.callAsync(...)`, который переносит `call(...)` на background queue.
+Ожидание между опросами — `try await Task.sleep(nanoseconds:)`, НЕ
+`Thread.sleep`; чистая decision-логика координатора не должна требовать MainActor.
 
 - [ ] **Step 6: Полная сборка и сьюта**
 

@@ -54,7 +54,10 @@ extension AgentAppDelegate {
             guard let self else { return }
             do {
                 let resp = try await self.ipcClient.callAsync(
-                    method: "start_recording", params: [:], timeoutSec: 10)
+                    method: "start_recording",
+                    params: ["source": "quick_capture"],
+                    timeoutSec: 10
+                )
                 // callAsync возвращает полный конверт {ok, result, id} — реальные
                 // поля лежат в result (сверено с IPCClient.swift:400-480 и
                 // main+HotkeyRecording.swift:startRecording()).
