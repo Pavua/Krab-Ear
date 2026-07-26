@@ -303,7 +303,7 @@ class RecordingCoreService:
                     if generation is None:
                         generation = self._publish_active_generation_locked(
                             token=uuid.uuid4().hex,
-                            owner=str(params.get("source", "dictation")),
+                            owner=self._requested_recording_owner(params),
                         )
                     logger.exception(
                         "Post-start setup упал после захвата микрофона; "
@@ -319,6 +319,15 @@ class RecordingCoreService:
                         "post_start_degraded": True,
                     }
                 raise
+
+    @staticmethod
+    def _requested_recording_owner(params: dict[str, Any]) -> str:
+        """Нормализовать owner старого/неполного start-запроса."""
+        raw_owner = params.get("source")
+        if raw_owner is None:
+            return "dictation"
+        owner = str(raw_owner).strip()
+        return owner or "dictation"
 
     def _next_generation_revision_locked(self) -> int:
         """Выдать следующую монотонную CAS-ревизию generation-перехода."""
@@ -358,7 +367,81 @@ class RecordingCoreService:
         generation["owner"] = str(owner)
         generation["promoted_from"] = promoted_from
         generation["revision"] = revision
+        spill = getattr(self, "_active_spill", None)
+        rewrite_source = getattr(spill, "rewrite_source", None)
+        if callable(rewrite_source):
+            try:
+                # Один helper обслуживает и promote, и revision-CAS rollback:
+                # RAM-owner и rescue-meta не расходятся по разным веткам.
+                rewrite_source(
+                    str(owner),
+                    promoted_from=promoted_from,
+                )
+            except Exception:
+                # Реальный RecordingSpillWriter уже fail-open, но duck-typed
+                # legacy writer не должен отменить состоявшийся owner-переход.
+                logger.warning(
+                    "RecordingSpill: owner изменён, но rewrite_source упал",
+                    exc_info=True,
+                )
         return revision
+
+    def _active_generation_start_response_locked(
+        self,
+        generation: dict[str, Any],
+        requested_owner: str,
+    ) -> dict[str, Any]:
+        """Разрешить repeat/promote/conflict без нового physical start."""
+        with self._preview_lock:
+            preview_text = self._preview_text
+            preview_duration = self._preview_duration_sec
+
+        current_owner = generation.get("owner")
+        if current_owner == requested_owner:
+            return {
+                "status": "already_recording",
+                "is_recording": True,
+                "duration_sec": preview_duration,
+                "preview_text": preview_text,
+                "generation_token": generation.get("token"),
+                "owner": current_owner,
+                "owner_revision": int(
+                    generation.get("revision", 0)
+                ),
+                "owner_promoted": False,
+                "promoted": False,
+            }
+
+        if (
+            current_owner == "dictation"
+            and requested_owner == "meeting"
+        ):
+            owner_revision = self._transition_generation_owner_locked(
+                "meeting",
+                promoted_from="dictation",
+            )
+            return {
+                "status": "already_recording",
+                "is_recording": True,
+                "duration_sec": preview_duration,
+                "preview_text": preview_text,
+                "generation_token": generation.get("token"),
+                "owner": "meeting",
+                "owner_revision": owner_revision,
+                # Старый контракт нужен MeetingSessionService для CAS rollback;
+                # promoted — аддитивный явный контракт R2 §4.3.
+                "owner_promoted": True,
+                "promoted": True,
+            }
+
+        return {
+            "status": "owner_conflict",
+            "is_recording": True,
+            "duration_sec": preview_duration,
+            "preview_text": preview_text,
+            "owner": current_owner,
+            "requested": requested_owner,
+        }
 
     def _clear_active_generation_locked(self) -> None:
         """Снять физически завершённое поколение под lifecycle-lock."""
@@ -553,11 +636,15 @@ class RecordingCoreService:
 
     def _handle_start_recording_locked(self, params: dict[str, Any]) -> dict[str, Any]:
         """Выполнить цельный setup записи под lifecycle-lock."""
+        requested_owner = self._requested_recording_owner(params)
         recorder_was_recording = bool(
             getattr(self.recorder, "is_recording", False)
         )
         active_generation = getattr(self, "_active_generation", None)
-        if not recorder_was_recording and active_generation is not None:
+        if active_generation is not None and (
+            not recorder_was_recording
+            or active_generation.get("state") != "capturing"
+        ):
             # После recorder_timeout физический worker уже может успеть
             # завершиться, но G1 всё ещё хранит право на retry/rescue. Новый
             # start G2 не должен перезаписать эту единственную идентичность.
@@ -575,10 +662,30 @@ class RecordingCoreService:
                     active_generation.get("revision", 0)
                 ),
                 "owner_promoted": False,
+                "promoted": False,
+            }
+        if active_generation is not None:
+            # Repeat/promote/conflict — логический переход существующей G1.
+            # Решаем его до device/spill/recorder.start: новый physical capture
+            # и placeholder B для уже занятого микрофона не создаются.
+            return self._active_generation_start_response_locked(
+                active_generation,
+                requested_owner,
+            )
+        if recorder_was_recording:
+            # Call Assist пока захватывает AudioRecorder напрямую. Generation
+            # отсутствует, поэтому безопасно доказать owner/promotion нельзя.
+            with self._preview_lock:
+                preview_text = self._preview_text
+                preview_duration = self._preview_duration_sec
+            return {
+                "status": "unmanaged_recording",
+                "is_recording": True,
+                "duration_sec": preview_duration,
+                "preview_text": preview_text,
             }
         if (
-            not recorder_was_recording
-            and len(self._finalizing_generations_locked())
+            len(self._finalizing_generations_locked())
             >= _MAX_FINALIZING_GENERATIONS
         ):
             # Проверка стоит до device/spill/UUID/recorder.start: отказ из-за
@@ -628,7 +735,6 @@ class RecordingCoreService:
         # getattr: старые узкие тесты обходят __init__ через __new__ (см.
         # _ensure_recording_lifecycle_state выше) и не знают про R1-поля.
         generation_token = uuid.uuid4().hex
-        requested_owner = str(params.get("source", "dictation"))
         spill = None
         _rescue_dir = getattr(self, "_rescue_dir", None)
         if _rescue_dir is not None and bool(
@@ -695,70 +801,46 @@ class RecordingCoreService:
                         owner=requested_owner,
                     )
             elif spill is not None:
-                # При повторном start живой G1 уже владеет своим writer A.
-                # Текущий B — только placeholder неудавшейся попытки.
+                # Физический захват не состоялся: этот writer — лишь
+                # placeholder одной неудавшейся fresh-start попытки.
                 spill.discard()
             raise
         if not started:
             if spill is not None:
                 spill.discard()  # запись не началась — файл-пустышка не нужен
-            # R1 HIGH-2 (adversarial-гейт целого диффа, 2026-07-24):
-            # НЕ трогать self._active_spill здесь. "not started" покрывает
-            # ДВА разных исхода: (а) свежий сервис без активной записи —
-            # _active_spill и так уже None, обнулять нечего; (б) PROMOTE
-            # (MeetingSessionService.handle_meeting_start зовёт
-            # handle_start_recording({"source": "meeting"}) поверх уже
-            # идущей диктовки — status="already_recording") — здесь
-            # _active_spill указывает на ЖИВОЙ writer текущей диктовки.
-            # Прежний безусловный `self._active_spill = None` стирал эту
-            # ссылку под чужой (живой) записью: handle_stop_recording
-            # больше не находил writer, чтобы discard() его после
-            # успешного персиста → файл диктовки навсегда оставался в
-            # rescue/ и дублировался следующим rescue-сканом.
             with self._preview_lock:
                 preview_text = self._preview_text
                 preview_duration = self._preview_duration_sec
-            # Идемпотентный контракт: повторный start не считается ошибкой.
-            recorder_is_recording = bool(getattr(self.recorder, "is_recording", False))
-            # Task 1 обязан шипиться независимо от полной матрицы Task 4:
-            # живой promote диктовки во встречу не создаёт новый recorder/spill,
-            # но меняет владельца, иначе следующий хоткей остановит встречу.
-            # Ссылку _active_spill здесь по-прежнему не трогаем (R1 HIGH-2).
-            owner_promoted = False
+            recorder_is_recording = bool(
+                getattr(self.recorder, "is_recording", False)
+            )
             generation = getattr(self, "_active_generation", None)
-            if (
-                recorder_is_recording
-                and requested_owner == "meeting"
-                and generation is not None
-                and generation.get("owner") == "dictation"
-            ):
-                self._transition_generation_owner_locked(
-                    "meeting",
-                    promoted_from="dictation",
-                )
-                owner_promoted = True
-            generation = getattr(self, "_active_generation", None)
+            if recorder_is_recording:
+                if generation is not None:
+                    # Defensive race-путь: обычные Core-переходы отсечены
+                    # preflight выше, но duck-typed recorder мог опубликовать
+                    # состояние во время своего start().
+                    return self._active_generation_start_response_locked(
+                        generation,
+                        requested_owner,
+                    )
+                return {
+                    "status": "unmanaged_recording",
+                    "is_recording": True,
+                    "duration_sec": preview_duration,
+                    "preview_text": preview_text,
+                }
+
             return {
-                "status": (
-                    "already_recording"
-                    if recorder_is_recording
-                    else "recorder_stopping"
-                ),
-                "is_recording": recorder_is_recording,
+                "status": "recorder_stopping",
+                "is_recording": False,
                 "duration_sec": preview_duration,
                 "preview_text": preview_text,
-                "generation_token": (
-                    generation.get("token") if generation is not None else None
+                "owner_revision": int(
+                    getattr(self, "_generation_revision", 0)
                 ),
-                "owner": (
-                    generation.get("owner") if generation is not None else None
-                ),
-                "owner_revision": (
-                    int(generation.get("revision", 0))
-                    if generation is not None
-                    else int(getattr(self, "_generation_revision", 0))
-                ),
-                "owner_promoted": owner_promoted,
+                "owner_promoted": False,
+                "promoted": False,
             }
         self._active_spill = spill
         generation = self._publish_active_generation_locked(

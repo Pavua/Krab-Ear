@@ -938,13 +938,20 @@ git commit -m "feat(r2): гейт остановки — токенные инв
 ### Task 4: Матрица переходов владения + promote
 
 **Files:**
-- Modify: `KrabEar/backend/recording_core_service.py` (`_handle_start_recording_locked`, ветка `not started`)
+- Modify: `KrabEar/backend/recording_core_service.py` (preflight матрица +
+  общий owner-transition/rollback)
 - Modify: `KrabEar/backend/recording_spill.py` (новый метод `rewrite_source`)
 - Test: `KrabEar/tests/test_recording_owner_matrix.py` (новый)
+- Test: `KrabEar/tests/test_recording_generation.py`,
+  `test_recording_spill_wiring.py`,
+  `test_meeting_session_service_W_C2a.py` (усиленный контракт)
+- Modify: дизайн-спека и этот план
 
 **Interfaces:**
 - Consumes: `self._active_generation` (Task 2), статусы Task 3.
-- Produces: статусы старта `owner_conflict`, `unmanaged_recording`; promote-ответ `already_recording` + `generation_token` + `promoted: true`.
+- Produces: статусы старта `owner_conflict`, `unmanaged_recording`;
+  promote-ответ `already_recording` + тот же `generation_token` + новая
+  `owner_revision` + `owner_promoted: true` + `promoted: true`.
 
 **Матрица (спека §4.3) — реализовать ДОСЛОВНО:**
 
@@ -960,7 +967,7 @@ git commit -m "feat(r2): гейт остановки — токенные инв
 | запись идёт, поколения нет (call assist) | любой | `unmanaged_recording` |
 | статус `recorder_stopping` | любой | отказ как сегодня |
 
-- [ ] **Step 1: Написать падающий тест**
+- [x] **Step 1: Написать падающий тест**
 
 `KrabEar/tests/test_recording_owner_matrix.py` — по кейсу на каждую строку матрицы. Ключевые:
 
@@ -1002,113 +1009,122 @@ git commit -m "feat(r2): гейт остановки — токенные инв
         self.assertEqual(resp["status"], "unmanaged_recording")
 ```
 
-- [ ] **Step 2: Verify FAIL**
+- [x] **Step 2: Verify FAIL** — исходный RED: **10 FAIL / 2 PASS**. Зелёными
+  были только fresh start и уже существующий `recorder_stopping`; отсутствовали
+  conflicts/unmanaged/promoted/meta rewrite.
 
-- [ ] **Step 3: Реализация**
+- [x] **Step 3: Реализация**
 
-В `_handle_start_recording_locked`, в ветке `if not started:` — заменить существующий блок формирования ответа на разбор матрицы. Сохранить дисциплину R1 HIGH-2: `self._active_generation` НЕ обнуляется, spill собственной неудавшейся попытки discard'ится:
-
-```python
-        if not started:
-            if spill is not None:
-                spill.discard()  # запись не началась — файл-пустышка не нужен
-            recorder_is_recording = bool(getattr(self.recorder, "is_recording", False))
-            with self._preview_lock:
-                preview_text = self._preview_text
-                preview_duration = self._preview_duration_sec
-
-            if not recorder_is_recording:
-                # Рекордер уже останавливается — как сегодня.
-                return {
-                    "status": "recorder_stopping",
-                    "is_recording": False,
-                    "duration_sec": preview_duration,
-                    "preview_text": preview_text,
-                }
-
-            gen = self._active_generation
-            if gen is None:
-                # Рекордер занят, но поколения нет: его стартовал call assist
-                # напрямую (call_assist_service.py:271), минуя этот сервис.
-                # Известный bypass, задокументирован в спеке §3.
-                return {
-                    "status": "unmanaged_recording",
-                    "is_recording": True,
-                    "duration_sec": preview_duration,
-                    "preview_text": preview_text,
-                }
-
-            current_owner = gen.get("owner")
-            if current_owner == _owner:
-                # Идемпотентный повтор от того же владельца — контракт не меняем,
-                # на него завязаны живые клиенты (main+QuickCapture.swift:102).
-                return {
-                    "status": "already_recording",
-                    "is_recording": True,
-                    "duration_sec": preview_duration,
-                    "preview_text": preview_text,
-                    "generation_token": gen["token"],
-                    "owner": current_owner,
-                    "promoted": False,
-                }
-
-            if current_owner == "dictation" and _owner == "meeting":
-                # ЕДИНСТВЕННЫЙ разрешённый promote — прод-поведение C2.
-                gen["owner"] = "meeting"
-                gen["promoted_from"] = "dictation"
-                _spill = getattr(self, "_active_spill", None)
-                if _spill is not None:
-                    _spill.rewrite_source("meeting", promoted_from="dictation")
-                return {
-                    "status": "already_recording",
-                    "is_recording": True,
-                    "duration_sec": preview_duration,
-                    "preview_text": preview_text,
-                    "generation_token": gen["token"],
-                    "owner": "meeting",
-                    "promoted": True,
-                }
-
-            return {
-                "status": "owner_conflict",
-                "is_recording": True,
-                "duration_sec": preview_duration,
-                "preview_text": preview_text,
-                "owner": current_owner,
-            }
-```
-
-Добавить `rewrite_source` в `RecordingSpillWriter` (fail-open, F10):
+Матрица существующей generation решается **до** settings/device/UUID/spill и
+`recorder.start()`. Это сильнее первоначального варианта в `if not started`:
+repeat/promote/conflict не трогают микрофон и не создают placeholder B.
 
 ```python
-    def rewrite_source(self, source: str, promoted_from: "str | None" = None) -> None:
-        """Перезаписать meta-сайдкар после promote. Fail-open: ошибка не критична —
-        rescue-файл просто останется с прежней пометкой источника."""
-        try:
-            meta = json.loads(self._meta_path.read_text(encoding="utf-8"))
-            meta["source"] = source
-            if promoted_from:
-                meta["promoted_from"] = promoted_from
-            self._meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
-            self.source = source
-        except Exception:
-            logger.warning("RecordingSpill: не удалось перезаписать meta после promote",
-                           exc_info=True)
+requested_owner = _requested_recording_owner(params)  # null/blank → dictation
+if active_generation is not None:
+    if (
+        not recorder_was_recording
+        or active_generation.get("state") != "capturing"
+    ):
+        return {"status": "recorder_stopping"}
+    return _active_generation_start_response_locked(
+        active_generation,
+        requested_owner,
+    )
+if recorder_was_recording:
+    return {"status": "unmanaged_recording"}
 ```
 
-- [ ] **Step 4: Зелёные + КРИТИЧЕСКАЯ регрессия promote**
+`_active_generation_start_response_locked`:
 
-Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_recording_owner_matrix.py KrabEar/tests/test_meeting_session_service_W_C2a.py KrabEar/tests/test_meeting_dispatch_privacy_W_C2a.py KrabEar/tests/test_recording_core_service.py -v -p no:cacheprovider`
-Expected: все PASS. Если тесты встречи упали — promote сломан, это блокер задачи.
+- same owner возвращает тот же token/revision и оба false-маркера promote;
+- dictation → meeting вызывает только
+  `_transition_generation_owner_locked("meeting", promoted_from="dictation")`
+  и возвращает `owner_promoted`, `owner_revision`, `promoted`;
+- остальные пары возвращают `owner_conflict` без token, revision/meta/recorder
+  не меняются.
 
-- [ ] **Step 5: Гейты и коммит**
+Fallback `if not started` сохраняется лишь для гонки с внешним direct-recorder:
+занятый recorder без generation → `unmanaged_recording`, idle →
+`recorder_stopping`; placeholder собственной неудавшейся попытки discard-ится.
+
+`_transition_generation_owner_locked` после in-memory CAS best-effort вызывает
+`_active_spill.rewrite_source(...)`. Поэтому тот же путь работает при
+`rollback_owner_transition`: source возвращается в `dictation`,
+`promoted_from` удаляется. Исключение duck-typed writer логируется и не
+откатывает уже совершённый owner-переход.
+
+`RecordingSpillWriter.rewrite_source(...) -> bool`:
+
+- сначала проверяет `_owns_paths`; collision/failed-open/discard возвращают
+  `False` и не трогают чужие/удалённые пути;
+- сохраняет sample_rate/channels/started_at и будущие неизвестные поля;
+- пишет через `core.atomic_io.atomic_write_text` (unique temp, fsync,
+  `os.replace`, cleanup);
+- меняет `self.source` только после успешного replace;
+- работает и при открытом writer, и после `close`; ошибка fail-open возвращает
+  `False`, старый валидный meta остаётся на месте.
+
+- [x] **Step 4: Зелёные + КРИТИЧЕСКАЯ регрессия promote**
+
+Run (канонический проектный venv): `PYTHONDONTWRITEBYTECODE=1
+PYTHONPATH="$PWD/KrabEar"
+"/Users/pablito/Antigravity_AGENTS/Krab Ear/.venv_krab_ear/bin/python"
+-m pytest
+KrabEar/tests/test_recording_owner_matrix.py
+KrabEar/tests/test_recording_generation.py
+KrabEar/tests/test_recording_spill.py
+KrabEar/tests/test_recording_spill_wiring.py
+KrabEar/tests/test_recording_owner_state.py
+KrabEar/tests/test_recording_stop_gate.py
+KrabEar/tests/test_recording_core_service.py
+KrabEar/tests/test_meeting_session_service_W_C2a.py
+KrabEar/tests/test_meeting_dispatch_privacy_W_C2a.py
+--timeout=60 -p no:cacheprovider -p no:xdist -q`.
+
+Evidence 2026-07-26: исходный RED — **10 FAIL / 2 PASS**; после реализации
+полная Task 1–4 матрица — **212/212 PASS** на macOS. Отдельный Python 3.12
+без MLX прогнал owner/generation/spill/meeting-набор — **93/93 PASS**.
+Два независимых read-only аудита повторили расширенный набор — **202 PASS**
+каждый; atomic helper + новая owner-матрица дополнительно — **19/19 PASS**.
+Падение трёх meeting-dispatch тестов в системном Anaconda Python
+локализовано как shadowing локального namespace сторонним пакетом `tests`;
+канонический `.venv_krab_ear` дал **6/6 PASS**, поэтому код/импорты проекта
+не менялись.
+
+- [x] **Step 5: Гейты и коммит**
 
 ```bash
-scripts/pre_merge_py312_check.sh KrabEar/tests/test_recording_owner_matrix.py
-flake8 KrabEar/backend/recording_core_service.py KrabEar/backend/recording_spill.py KrabEar/tests/test_recording_owner_matrix.py
-git add KrabEar/backend/recording_core_service.py KrabEar/backend/recording_spill.py KrabEar/tests/test_recording_owner_matrix.py
-git commit -m "feat(r2): матрица переходов владения + promote с перезаписью spill-meta (Task 4)"
+scripts/pre_merge_py312_check.sh \
+  KrabEar/tests/test_recording_owner_matrix.py \
+  KrabEar/tests/test_recording_generation.py \
+  KrabEar/tests/test_recording_spill.py \
+  KrabEar/tests/test_recording_spill_wiring.py \
+  KrabEar/tests/test_meeting_session_service_W_C2a.py
+flake8 KrabEar/backend/recording_core_service.py \
+  KrabEar/backend/recording_spill.py \
+  KrabEar/tests/test_recording_owner_matrix.py \
+  KrabEar/tests/test_recording_generation.py \
+  KrabEar/tests/test_recording_spill_wiring.py \
+  KrabEar/tests/test_meeting_session_service_W_C2a.py
+git add \
+  KrabEar/backend/recording_core_service.py \
+  KrabEar/backend/recording_spill.py \
+  KrabEar/tests/test_recording_owner_matrix.py \
+  KrabEar/tests/test_recording_generation.py \
+  KrabEar/tests/test_recording_spill_wiring.py \
+  KrabEar/tests/test_meeting_session_service_W_C2a.py \
+  docs/superpowers/plans/2026-07-25-r2-recording-ownership.md \
+  docs/superpowers/specs/2026-07-25-r2-recording-ownership-design.md
+git commit -m "feat(r2): матрица переходов владения + promote с атомарной spill-meta (Task 4)"
 ```
+
+Evidence 2026-07-26: финальный focused-набор на каноническом venv —
+**143/143 PASS**; расширенные macOS и Python 3.12 прогоны перечислены в
+Step 4. `flake8`, `git diff --check` и два независимых read-only
+adversarial-аудита — GREEN/GO. Swift/MLX/production runtime не запускались:
+Task 4 не меняет Swift, а на машине параллельно идёт длительная локальная
+транскрибация. Checkpoint не даёт разрешения на merge/deploy до Tasks 5–8.
 
 ---
 

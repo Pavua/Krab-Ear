@@ -134,7 +134,8 @@ DoD:
   - phase_e во всех исходах: успех, `duplicate`, `persist_failed`;
   - `empty_audio` из самой phase_a — аудио забрано успешно, просто оно пустое;
     рекордер уже idle, запись окончена;
-  - `already_stopped` из phase_a (`stopped is None`, `recording_core_service.py:2017`)
+  - `already_stopped` из phase_a (`stopped is None`, ветка
+    `status="already_stopped"` в `recording_core_service.py`)
     — забирать нечего и повтор всегда даст тот же результат; поколение осиротело.
     Локальная G1 сначала передаётся через finalizing-реестр outer terminalizer-у,
     что даёт будущему Task 5 ключ для честного replay.
@@ -227,15 +228,20 @@ Promote сегодня детектится косвенно, по статус�
 
 **Контракт ответа `start_recording`** (без него матрица неоднозначна — N2):
 
+- `source`, равный `null`, пустой строке или одним пробелам, нормализуется в
+  legacy-owner `dictation`; старые/неполные клиенты не создают владельцев
+  `"None"`/`""`.
 - Успешный старт: `{"status": "recording", "generation_token": <token>, "owner": <owner>, ...}`
   — токен возвращается **в ответе на сам старт**, а не добывается вторым вызовом
   `get_recording_state` (иначе между ними гонка).
 - **Повтор от того же владельца** (`dictation` поверх `dictation` и т.п.) остаётся
-  идемпотентным `already_recording` — как сегодня, плюс `generation_token`/`owner`.
+  идемпотентным `already_recording` — как сегодня, плюс `generation_token`/`owner`,
+  неизменная `owner_revision`, `owner_promoted=false`, `promoted=false`.
   Это НЕ конфликт: на статусе `already_recording` завязаны живые клиенты
   (`main+QuickCapture.swift:102` показывает «Микрофон занят»), ломать их незачем.
 - **Promote** (`dictation` → `meeting`) отвечает `already_recording` +
-  `generation_token` существующего поколения + `promoted: true`. Форма сохранена
+  `generation_token` существующего поколения + новая `owner_revision` +
+  `owner_promoted: true` + аддитивный алиас `promoted: true`. Форма сохранена
   намеренно: `meeting_session_service.py:297` детектит promote именно по
   `status == "already_recording"`, и менять этот статус значит синхронно
   переписывать детект. Встреча ОБЯЗАНА получить существующий токен — иначе её стоп
@@ -247,9 +253,15 @@ Promote сегодня детектится косвенно, по статус�
   был бы бессмысленным ответом.
 
 **Promote не создаёт и не подменяет spill** — сохраняется дисциплина ветки not-started,
-введённая фиксом R1 HIGH-2: discard'ится только spill собственной неудавшейся попытки,
-`_active_spill` живой записи не трогается. На promote дополнительно перезаписывается
-meta-сайдкар (`source="meeting"`, `promoted_from="dictation"`), fail-open (F10).
+введённая фиксом R1 HIGH-2. Матрица существующей generation решается до применения
+device, UUID/spill и `recorder.start()`, поэтому placeholder второй попытки вообще
+не создаётся. На promote общий revision-CAS helper атомарно и fail-open
+перезаписывает meta-сайдкар (`source="meeting"`,
+`promoted_from="dictation"`). Тот же helper при успешном compensation rollback
+возвращает `source="dictation"` и удаляет `promoted_from`; stale CAS не меняет
+ни RAM, ни meta. Writer без `_owns_paths` не имеет права переписывать sidecar,
+а запись идёт через общий crash-safe `atomic_write_text` (unique tmp → fsync →
+replace), чтобы сбой не уничтожил параметры rescue.
 
 ### 4.4 Кэш терминальных ответов
 

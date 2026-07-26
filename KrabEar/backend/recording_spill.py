@@ -130,6 +130,48 @@ class RecordingSpillWriter:
                 logger.debug("RecordingSpill: close() error", exc_info=True)
             self._fh = None
 
+    def rewrite_source(
+        self,
+        source: str,
+        promoted_from: str | None = None,
+    ) -> bool:
+        """Атомарно обновить owner-метки сайдкара после CAS-перехода.
+
+        Fail-open: невозможность обновить метку не влияет на живую запись.
+        Writer без права на зарезервированные пути ничего не меняет — иначе
+        неудачная коллизия session_id могла бы перезаписать чужой сайдкар.
+        """
+        if not self._owns_paths:
+            return False
+        resolved_source = str(source)
+        try:
+            meta = json.loads(
+                self._meta_path.read_text(encoding="utf-8")
+            )
+            meta["source"] = resolved_source
+            if promoted_from is None:
+                meta.pop("promoted_from", None)
+            else:
+                meta["promoted_from"] = str(promoted_from)
+
+            # Прямой write_text мог бы обнулить meta при kill между truncate
+            # и записью, после чего rescue потерял бы sample_rate/channels.
+            from core.atomic_io import atomic_write_text
+
+            atomic_write_text(
+                self._meta_path,
+                json.dumps(meta, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            self.source = resolved_source
+            return True
+        except Exception:
+            logger.warning(
+                "RecordingSpill: не удалось обновить meta после owner-перехода",
+                exc_info=True,
+            )
+            return False
+
     def discard(self) -> None:
         """close + удалить файлы. Идемпотентно; зовётся после персиста в history."""
         self.close()

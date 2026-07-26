@@ -149,6 +149,29 @@ class MeetingStartStateTestCase(unittest.TestCase):
         self.assertAlmostEqual(svc._session.cursor_sec, 42.0, places=3)
         svc.close()
 
+    def test_owner_conflict_rolls_back_meeting_without_stopping_foreign_recording(
+        self,
+    ) -> None:
+        """Quick capture остаётся жива при запрещённом старте встречи."""
+        rec = _FakeRecorder()
+        rec.is_recording = True
+        svc, bus, _ = _make_svc(recorder=rec)
+        core = svc._recording_core
+        core.handle_start_recording = lambda params: {
+            "status": "owner_conflict",
+            "is_recording": True,
+            "owner": "quick_capture",
+        }
+
+        with self.assertRaises(RuntimeError):
+            svc.handle_meeting_start({})
+
+        self.assertTrue(rec.is_recording)
+        self.assertIsNone(svc._session)
+        self.assertEqual(core.stopped, [])
+        self.assertNotIn("meeting.finished", bus.types())
+        svc.close()
+
     def test_start_is_idempotent(self) -> None:
         svc, _, _ = _make_svc()
         svc.handle_meeting_start({})

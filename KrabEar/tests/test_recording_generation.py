@@ -470,8 +470,8 @@ class RecordingGenerationTest(unittest.TestCase):
             started["generation_token"],
         )
 
-    def test_repeat_start_exception_preserves_live_generation_and_spill(self):
-        """Placeholder B не подменяет live writer A уже идущей записи."""
+    def test_promote_does_not_reenter_recorder_or_replace_live_spill(self):
+        """Owner-переход решается до recorder.start и placeholder B."""
         recorder = _RaisesOnRepeatRecorder()
         service = self._service(
             recorder=recorder,
@@ -481,18 +481,18 @@ class RecordingGenerationTest(unittest.TestCase):
         live_spill = service._active_spill
         self.assertIsNotNone(live_spill)
 
-        with self.assertRaises(RuntimeError):
-            service.handle_start_recording({"source": "meeting"})
+        promoted = service.handle_start_recording({"source": "meeting"})
 
+        self.assertEqual(promoted["status"], "already_recording")
+        self.assertTrue(promoted["owner_promoted"])
         self.assertIs(service._active_spill, live_spill)
         self.assertTrue(live_spill.part_path.exists())
         self.assertEqual(
             service._active_generation["token"],
             started["generation_token"],
         )
-        self.assertEqual(service._active_generation["owner"], "dictation")
-        self.assertIsNotNone(recorder.repeat_spill)
-        self.assertFalse(recorder.repeat_spill.part_path.exists())
+        self.assertEqual(service._active_generation["owner"], "meeting")
+        self.assertIsNone(recorder.repeat_spill)
 
     def test_post_capture_exception_publishes_matching_generation(self):
         """Late exception возвращает честный degraded start с тем же token."""
