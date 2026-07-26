@@ -33,6 +33,13 @@
 - **Чанк C** (Task 5-6) — кэш ответов и телеметрия владения.
 - **Чанк D** (Task 7-8) — Swift-ретрай и закрытие волны.
 
+> **Гейт частичной выкладки:** Tasks 2–6 можно коммитить и тестировать
+> изолированно, но нельзя отдельно merge/deploy. До Task 7 (Swift сохраняет
+> token и делает bounded retry stop) и Task 8 (cross-binary e2e)
+> `recorder_timeout` намеренно удерживает G1; legacy UI после него может увидеть
+> только `recorder_stopping` и не умеет завершить recovery-цикл. Допустима лишь
+> атомарная выкладка полного R2 после всех гейтов.
+
 ---
 
 ## Чанк A — живой фикс безопасности
@@ -564,19 +571,23 @@ Swift, а на машине параллельно идёт длительная
 **Files:**
 - Modify: `KrabEar/backend/recording_core_service.py` (`handle_stop_recording`, `_stop_recording_phase_a_locked`)
 - Test: `KrabEar/tests/test_recording_stop_gate.py` (новый)
+- Modify: `docs/superpowers/specs/2026-07-25-r2-recording-ownership-design.md`
+- Modify: этот план (фактический контракт и evidence)
 
 **Interfaces:**
 - Consumes: `self._active_generation` (Task 2).
 - Produces (для Task 5, 7): статусы `owner_mismatch`, `unknown_generation`,
-  `stop_in_progress`; bounded-реестр
+  `stop_in_progress`, `finalization_failed`; bounded-реестр
   `self._finalizing_generations: dict[str, dict[str, Any]]`; хук
-  `self._terminalize_generation(response) -> None`, который Task 5 расширяет
-  записью в кэш.
+  `self._terminalize_generation(generation, response) -> None`, который Task 5
+  расширяет записью в кэш.
 
 **Инварианты (из спеки §4.2, нарушение = провал задачи):**
 1. Гейт — ПЕРВАЯ операция в `_stop_recording_phase_a_locked`, ДО `self._stop_preview_worker()`. Иначе отвергнутый стоп уже убил партиалы/превью живой чужой записи.
 2. Решение по ТОКЕНУ, не по кэшу.
-3. Отсутствие токена → legacy-путь, НИКОГДА не отказ.
+3. Только отсутствие **ключа** `generation_token` → legacy-путь, НИКОГДА не
+   отказ. Присутствующее невалидное значение (`None`, `""`, `0`, list/dict)
+   → `unknown_generation`, recorder не трогаем.
 4. `recorder_timeout` НЕ терминализирует поколение (повторный стоп — штатный путь спасения аудио, `recorder.py:158-161`).
 5. `_active_generation` представляет только текущий physical capture. После
    успешной phase A прежняя G1 переходит в `_finalizing_generations`, поэтому
@@ -584,8 +595,11 @@ Swift, а на машине параллельно идёт длительная
    `stop_in_progress`.
 6. Проверка и удаление generation выполняются под тем же lifecycle-lock, что
    start/phase A. Identity-check без lock — TOCTOU и не является CAS.
+7. После `recorder_timeout` сохранённая active G1 блокирует fresh start до
+   успешного token-retry, даже если physical recorder уже idle. Guard стоит до
+   UUID/spill/device/start и не имеет побочных эффектов.
 
-- [ ] **Step 1: Написать падающий тест**
+- [x] **Step 1: Написать падающий тест**
 
 `KrabEar/tests/test_recording_stop_gate.py` (фейки — из `test_recording_spill_wiring.py`):
 
@@ -698,9 +712,10 @@ interleaving-теста:
    синхронизироваться через `threading.Event`, без `sleep()` и вероятностного
    stress-loop.
 
-- [ ] **Step 2: Verify FAIL** (`unknown_generation` не возвращается; превью затирается)
+- [x] **Step 2: Verify FAIL** — исходная реализация дала 9 FAIL / 10 PASS:
+  токенный гейт отсутствовал, lifecycle G1/G2 не был разделён.
 
-- [ ] **Step 3: Реализация**
+- [x] **Step 3: Реализация**
 
 3a. В `__init__` добавить bounded-реестр:
 
@@ -733,16 +748,27 @@ interleaving-теста:
         Отсутствие токена НИКОГДА не отказ сам по себе (старый бинарь агента против
         нового backend — задокументированный two-binary drift).
         """
+        token_present = "generation_token" in params
         token = params.get("generation_token")
         requested_owner = params.get("source")
-        gen = self._active_generation
+        gen = getattr(self, "_active_generation", None)
 
         # ── Ось 1: токенные инварианты ───────────────────────────────────────
-        if token:
+        if token_present:
+            if not isinstance(token, str) or not token:
+                return {
+                    "status": "unknown_generation",
+                    "generation_token": token,
+                }
             if gen is not None and gen.get("token") == token:
+                if gen.get("state") == "finalizing":
+                    return {
+                        "status": "stop_in_progress",
+                        "generation_token": token,
+                    }
                 # Токен наш и запись идёт — НО не выходим: promote-кейс обязан
                 # дойти до оси 2 (владелец мог смениться на meeting).
-            elif token in self._finalizing_generations:
+            elif token in self._finalizing_generations_locked():
                 return {
                     "status": "stop_in_progress",
                     "generation_token": token,
@@ -813,8 +839,9 @@ interleaving-теста:
         lifecycle_lock, _ = self._ensure_recording_lifecycle_state()
         with lifecycle_lock:
             token = str(gen.get("token") or "")
-            if self._finalizing_generations.get(token) is gen:
-                del self._finalizing_generations[token]
+            finalizing = self._finalizing_generations_locked()
+            if finalizing.get(token) is gen:
+                del finalizing[token]
             # Defensive путь для already_stopped/empty до помещения в реестр.
             if self._active_generation is gen:
                 self._clear_active_generation_locked()
@@ -822,9 +849,11 @@ interleaving-теста:
 
 Чтобы ссылка была доступна, `_stop_recording_phase_a_locked` кладёт своё поколение в
 результат (тем же приёмом, каким `handle_stop_recording` уже забирает `spill`):
-после перевода в `finalizing` добавить в возвращаемый dict ключ
-`"generation": self._active_generation`. В `handle_stop_recording` сразу после
-`phase_a` захватить его рядом с существующим захватом spill:
+сначала сохраняет локальную G1, переводит именно её в `finalizing`, очищает
+active-slot, затем добавляет в возвращаемый dict ключ `"generation": generation`.
+Возвращать здесь `self._active_generation` запрещено: после атомарного move там
+уже `None`, а позднее может находиться G2. В `handle_stop_recording` сразу после
+`phase_a` захватить локальную ссылку рядом с существующим захватом spill:
 
 ```python
         _gen = phase_a.get("generation")
@@ -844,60 +873,65 @@ interleaving-теста:
             return {"early_return": _gate}
 ```
 
-3e. В `handle_stop_recording` — терминализировать перед каждым терминальным return. Обернуть существующие ветки: там, где сейчас `return phase_b["early_return"]` / `phase_c` / `phase_d` / `return resp`, добавить перед return вызов `self._terminalize_generation(<ответ>)`. **Исключения** (НЕ терминализировать): ответы гейта (`owner_mismatch`, `unknown_generation`, `stop_in_progress`) и `recorder_timeout`. Для `already_stopped` и пустого аудио — терминализировать.
+3e. В `handle_stop_recording` тяжёлые B–E вынести в
+`_run_stop_recording_tail()`, который возвращает один terminal response. Outer
+handler вызывает `_terminalize_generation(generation, response)` ровно в одной
+точке. Неожиданное исключение B–E превращается в `finalization_failed`, spill
+закрывается и остаётся для rescue, после чего та же единая точка терминализирует
+G1. Для early-return phase A правило структурное:
 
-Точный способ различить: гейт возвращается из `_stop_gate_decision`, поэтому в `handle_stop_recording` после `phase_a` проверять:
+- gate-ответ и `recorder_timeout` не содержат `generation` и возвращаются без
+  терминализации;
+- `already_stopped`, `empty_audio` и post-stop `finalization_failed` содержат
+  локальную G1 и проходят через тот же terminalizer.
 
-```python
-        if "early_return" in phase_a:
-            _er = phase_a["early_return"]
-            _status = _er.get("status")
-            # recorder_timeout — единственный ранний выход, НЕ терминализирующий
-            # поколение: recorder.py:158-161 документирует повторный стоп как
-            # штатный путь спасения аудио; терминализация заставила бы гейт
-            # ответить ретраю unknown_generation и потерять данные, которые
-            # сегодняшний код успешно спасает.
-            if _status not in ("owner_mismatch", "unknown_generation",
-                               "stop_in_progress", "recorder_timeout"):
-                self._terminalize_generation(phase_a.get("generation"), _er)
-            return _er
-```
-
-Во всех остальных терминальных ветках `handle_stop_recording` (early_return phase_b,
-phase_c, phase_d и финальный `resp` из phase_e) — тот же вызов с `_gen`:
-`self._terminalize_generation(_gen, <ответ>)` перед `return`.
+Так код не зависит от вручную поддерживаемого списка статусов и не оставляет
+утечку map при добавлении новой терминальной ветки.
 
 3f. В `_handle_start_recording_locked` при успешном старте взводить `capturing`
 (уже сделано Task 2). До захвата микрофона проверить лимит
 `_finalizing_generations`; при 8 live-хвостах вернуть `recorder_stopping`.
 
+До лимита отдельно поставить guard: если recorder уже idle, но active G1
+сохранена после `recorder_timeout`, вернуть `recorder_stopping` **до**
+device/UUID/spill/start. Это не даёт G2 перезаписать retry/rescue G1.
+
 В `phase_a_locked` сразу после успешного забора аудио (после того как `stopped`
 получено и не `None`) атомарно переместить generation из active-слота в
-finalizing-реестр:
+finalizing-реестр через единый helper:
 
 ```python
-        gen = self._active_generation
-        if gen is not None:
-            gen["state"] = "finalizing"
-            self._finalizing_generations[gen["token"]] = gen
-            self._clear_active_generation_locked()
+        generation = self._move_active_generation_to_finalizing_locked()
 ```
 
-При `recorder_timeout` перемещения нет: G1 остаётся активным retry-handle. Это
-также означает, что stop-gate обязан читать active и finalizing структуры только
-под lifecycle-lock (его вызывают первой операцией внутри phase A).
+Move выполняется до fallible breadcrumb/LM/settings hooks. Если любой из них
+падает после physical stop, ответ становится `finalization_failed`, G1
+терминализируется, spill остаётся для rescue. При `recorder_timeout` перемещения
+нет: G1 остаётся активным retry-handle. Stop-gate читает active и finalizing
+структуры только под lifecycle-lock (его вызывают первой операцией внутри phase A).
 
-- [ ] **Step 4: Зелёные + регрессия**
+- [x] **Step 4: Зелёные + регрессия**
 
 Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_recording_stop_gate.py KrabEar/tests/test_recording_generation.py KrabEar/tests/test_recording_core_service.py KrabEar/tests/test_recording_spill_wiring.py KrabEar/tests/test_meeting_session_service_W_C2a.py -v -p no:cacheprovider`
 Expected: все PASS
 
-- [ ] **Step 5: Гейты и коммит**
+Evidence 2026-07-26: новый stop-gate **20/20 PASS**; объединённая матрица
+Tasks 1–3 **179/179 PASS** с `--timeout=60`, без xdist/cacheprovider;
+ubuntu-parity Python 3.12.11 без MLX — все 6 файлов **179/179 PASS**, повтор
+финального stop-gate после cleanup-hardening **20/20 PASS**. `flake8` и
+`git diff --check` GREEN. Два независимых read-only аудита: GO для
+изолированного Task 3 checkpoint; release NO-GO до исправленного Task 7 и Task 8
+(явный гейт частичной выкладки выше).
+
+- [x] **Step 5: Гейты и коммит**
 
 ```bash
 scripts/pre_merge_py312_check.sh KrabEar/tests/test_recording_stop_gate.py
 flake8 KrabEar/backend/recording_core_service.py KrabEar/tests/test_recording_stop_gate.py
-git add KrabEar/backend/recording_core_service.py KrabEar/tests/test_recording_stop_gate.py
+git add KrabEar/backend/recording_core_service.py \
+  KrabEar/tests/test_recording_stop_gate.py \
+  docs/superpowers/plans/2026-07-25-r2-recording-ownership.md \
+  docs/superpowers/specs/2026-07-25-r2-recording-ownership-design.md
 git commit -m "feat(r2): гейт остановки — токенные инварианты, терминализация поколения (Task 3)"
 ```
 
@@ -1165,7 +1199,7 @@ git commit -m "feat(r2): матрица переходов владения + pr
 ### Task 6: Прошивка `source` + shadow-телеметрия владения
 
 **Files:**
-- Modify: `KrabEar/backend/meeting_session_service.py:286` (внутренний стоп)
+- Modify: `KrabEar/backend/meeting_session_service.py:493-494` (внутренний стоп)
 - Modify: `native/KrabEarAgent/Sources/KrabEarAgent/main+QuickCapture.swift:57, 91, 134`
 - Modify: `native/KrabEarAgent/Sources/KrabEarAgent/main+HotkeyRecording.swift` (старт и стоп)
 - Modify: `KrabEar/backend/recording_core_service.py` (`_stop_gate_decision` — mismatch)
@@ -1216,7 +1250,11 @@ git commit -m "feat(r2): матрица переходов владения + pr
                 }
 ```
 
-Прошивка вызовов: `meeting_session_service.py:286` → `handle_stop_recording({"source": "meeting"})`; `main+QuickCapture.swift` три места → добавить `"source": "quick_capture"` в params; `main+HotkeyRecording.swift` старт и стоп → `"source": "dictation"` (в стопе — рядом с `quality_profile`).
+Прошивка вызовов: `meeting_session_service.py:493-494` →
+`handle_stop_recording({"source": "meeting"})`; `main+QuickCapture.swift` три
+места → добавить `"source": "quick_capture"` в params;
+`main+HotkeyRecording.swift` старт и стоп → `"source": "dictation"` (в стопе —
+рядом с `quality_profile`).
 
 - [ ] **Step 4: Зелёные + полный swift test + прогон meeting-тестов**
 - [ ] **Step 5: Гейты и коммит**
@@ -1230,12 +1268,20 @@ git commit -m "feat(r2): матрица переходов владения + pr
 **Files:**
 - Create: `native/KrabEarAgent/Sources/KrabEarAgent/RecordingStopCoordinator.swift`
 - Modify: `main+HotkeyRecording.swift`, `main+QuickCapture.swift` (перевести стопы на helper)
+- Modify: `MeetingLivePanelController.swift` (тот же bounded retry без sync IPC)
+- Modify: `KrabEar/backend/meeting_session_service.py` (сохранить token и
+  session/retry-handle при `recorder_timeout`)
 - Test: `native/KrabEarAgent/Tests/KrabEarAgentTests/RecordingStopCoordinatorTests.swift`
+- Test: `KrabEar/tests/test_meeting_session_service_W_C2a.py`
 
 **Контракт helper'а** (спека §4.6):
 - предъявляет `generation_token`, полученный на старте;
 - ретраит ТОЛЬКО транспортную неоднозначность (сокет закрыт, обрыв, реконнект), максимум 2 доп. попытки;
-- НЕ ретраит типизированный `ok:false`;
+- `recorder_timeout` — единственный non-terminal типизированный ответ: повторить
+  stop с тем же token максимум 2 дополнительных раза с задержками 2 и 4 с;
+  после исчерпания бюджета сохранить token/recovery-state, и следующее действие
+  снова направить в stop, а не в fresh start;
+- прочие типизированные `ok:false` НЕ ретраит;
 - `stop_in_progress` → опрос раз в 2 с, суммарный бюджет 5 минут, затем сообщение «финализация затянулась — результат появится в истории» (НЕ «потеряно»);
 - `unknown_generation` и исчерпание попыток → показать превью + «запись восстановится при следующем запуске»;
 - `owner_mismatch` → человеческое сообщение + сброс локального состояния.
@@ -1266,6 +1312,21 @@ final class RecordingStopCoordinatorTests: XCTestCase {
     func test_typed_backend_error_is_never_retried() {
         // Типизированный ok:false — настоящая ошибка бэкенда, крутить её нельзя.
         XCTAssertEqual(RecordingStopCoordinator.decide(afterStatus: "stt_failed", attempt: 1), .surfaceAsIs)
+    }
+
+    func test_recorder_timeout_retries_same_generation_then_retains_recovery() {
+        XCTAssertEqual(
+            RecordingStopCoordinator.decide(afterStatus: "recorder_timeout", attempt: 1),
+            .retryRecorderStop(delaySec: 2)
+        )
+        XCTAssertEqual(
+            RecordingStopCoordinator.decide(afterStatus: "recorder_timeout", attempt: 2),
+            .retryRecorderStop(delaySec: 4)
+        )
+        XCTAssertEqual(
+            RecordingStopCoordinator.decide(afterStatus: "recorder_timeout", attempt: 3),
+            .recoveryPending
+        )
     }
 
     func test_stop_in_progress_polls_within_budget_then_reports_slow_finalization() {
@@ -1300,6 +1361,10 @@ import Foundation
 enum StopDecision: Equatable {
     /// Транспорт неоднозначен — повторить запрос с тем же токеном.
     case retry
+    /// Physical worker не отдал аудио — повторить stop той же G1.
+    case retryRecorderStop(delaySec: TimeInterval)
+    /// Бюджет timeout-retry исчерпан; token нельзя очищать или заменять G2.
+    case recoveryPending
     /// Финализация ещё идёт — подождать и переспросить.
     case pollAgain
     /// Финализация затянулась дольше бюджета: результат появится в истории.
@@ -1315,6 +1380,8 @@ enum StopDecision: Equatable {
 enum RecordingStopCoordinator {
     /// Максимум ДОПОЛНИТЕЛЬНЫХ попыток при транспортной неоднозначности.
     static let maxTransportRetries = 2
+    /// Максимум ДОПОЛНИТЕЛЬНЫХ physical-stop попыток после recorder_timeout.
+    static let maxRecorderTimeoutRetries = 2
     /// Опрос при stop_in_progress: раз в 2 с, суммарный бюджет 5 минут.
     static let pollIntervalSec: TimeInterval = 2
     static let maxPolls = 150
@@ -1326,6 +1393,13 @@ enum RecordingStopCoordinator {
 
     static func decide(afterStatus status: String, attempt: Int) -> StopDecision {
         switch status {
+        case "recorder_timeout":
+            guard attempt <= maxRecorderTimeoutRetries else {
+                return .recoveryPending
+            }
+            return .retryRecorderStop(
+                delaySec: TimeInterval(1 << attempt)
+            )
         case "stop_in_progress":
             return attempt <= maxPolls ? .pollAgain : .finalizationSlow
         case "unknown_generation":
@@ -1333,8 +1407,9 @@ enum RecordingStopCoordinator {
         case "owner_mismatch":
             return .foreignOwner
         default:
-            // Любой типизированный ответ бэкенда (включая ok:false) — не ретраим:
-            // иначе будем бесконечно крутить настоящую ошибку.
+            // Любой ОСТАЛЬНОЙ типизированный ответ бэкенда — не ретраим:
+            // recorder_timeout разобран выше как единственное non-terminal
+            // исключение, а настоящую ошибку крутить бесконечно нельзя.
             return .surfaceAsIs
         }
     }
@@ -1351,7 +1426,13 @@ Expected: все PASS
 В `main+HotkeyRecording.swift` и `main+QuickCapture.swift`: хранить `generation_token`,
 полученный из ответа `start_recording`, передавать его в params стопа и прогонять
 ответ/ошибку через `RecordingStopCoordinator.decide(...)`, реализовав ветки:
-`.retry` — повторить вызов; `.pollAgain` — `Thread.sleep`-эквивалент через
+`.retry` — повторить вызов после транспортной неоднозначности;
+`.retryRecorderStop(delaySec)` — после async `Task.sleep` на 2/4 с повторить
+stop **с тем же token**;
+`.recoveryPending` — сохранить token и локальный recovery-state, показать
+«Аудио ещё восстанавливается — нажмите остановку ещё раз; при необходимости
+перезапустите backend»; следующий toggle обязан снова идти в stop, не start;
+`.pollAgain` — `Thread.sleep`-эквивалент через
 `Task.sleep(nanoseconds:)` на `pollIntervalSec` и повтор; `.finalizationSlow` —
 `notify` «Финализация затянулась — результат появится в истории»; `.giveUpRescuePending`
 — показать текст превью + «запись восстановится при следующем запуске»;
@@ -1361,7 +1442,39 @@ Expected: все PASS
 Точное место хранения токена: `recordingTargetApp` — обычное stored property на
 `AgentAppDelegate` (`main.swift:184`, НЕ associated-object; не городить
 `objc_setAssociatedObject`). Завести рядом `var activeGenerationToken: String?`
-тем же способом, обнулять там же, где обнуляется `recordingTargetApp`.
+тем же способом. Обнулять только после terminal response; при
+`recorder_timeout`/`.recoveryPending` токен сохраняется.
+
+Meeting-путь закрыть тем же контрактом, а не надеяться на публичный флаг
+`recorder.is_recording`:
+
+1. `_MeetingSession` хранит `generation_token`, полученный из ответа
+   `handle_start_recording`; `meeting_start` и `get_meeting_live_state`
+   аддитивно возвращают его Swift как opaque-string.
+2. `meeting_stop` принимает необязательный token. Если он передан и не совпал с
+   живой session, вернуть `unknown_generation` без вызова Core; tokenless старый
+   Swift получает server-side token из session.
+3. `handle_meeting_stop` зовёт Core с
+   `{"source": "meeting", "generation_token": token}` даже если recorder уже
+   сообщает `False`.
+4. При `recorder_timeout` сессия и token сохраняются, `_teardown_session()` и
+   `meeting.finished` не вызываются; ответ остаётся non-terminal.
+   Флаг `stop_retry_pending` не даёт повторно эмитить `meeting.finalizing`.
+5. `MeetingLivePanelController` повторяет именно `meeting_stop`, а не raw
+   `stop_recording`, по решению `.retryRecorderStop`; при `.recoveryPending`
+   вновь разрешает явное действие восстановления, но не изображает
+   idle/fresh-start. Ручной повтор получает новый отдельный трёхпопытный бюджет.
+6. Потерянный terminal IPC-ответ: повтор с token после teardown вызывает Core
+   replay Task 5 и снова возвращает тот же `item_id`; persist и
+   `meeting.finished` не дублируются. Конкурентный wrapper-stop нормализуется в
+   `stop_in_progress`.
+
+Backend-тесты обязаны покрыть: первый stop меняет recorder flag на `False` и
+возвращает timeout, повтор всё равно предъявляет тот же token и завершается;
+исчерпание retry сохраняет `_MeetingSession`, token и не эмиттит
+`meeting.finished`; неверный token не вызывает Core; конкурентный stop зовёт
+Core один раз; потерянный успешный ответ реплеит тот же `item_id` без второго
+persist/finished; tokenless legacy-вызов использует token session.
 
 🔴 Poll-цикл `stop_in_progress` (до 5 минут) обязан жить **вне главного потока** —
 это прямой AGENT-3 класс (синхронный IPC на main thread даёт AppHang).
@@ -1383,7 +1496,10 @@ Expected: сборка OK, вся сьюта зелёная
 git add native/KrabEarAgent/Sources/KrabEarAgent/RecordingStopCoordinator.swift \
   native/KrabEarAgent/Tests/KrabEarAgentTests/RecordingStopCoordinatorTests.swift \
   native/KrabEarAgent/Sources/KrabEarAgent/main+HotkeyRecording.swift \
-  native/KrabEarAgent/Sources/KrabEarAgent/main+QuickCapture.swift
+  native/KrabEarAgent/Sources/KrabEarAgent/main+QuickCapture.swift \
+  native/KrabEarAgent/Sources/KrabEarAgent/MeetingLivePanelController.swift \
+  KrabEar/backend/meeting_session_service.py \
+  KrabEar/tests/test_meeting_session_service_W_C2a.py
 git commit -m "feat(r2): единый координатор остановки с ретраем и бюджетом (Task 7)"
 ```
 
@@ -1393,7 +1509,17 @@ git commit -m "feat(r2): единый координатор остановки 
 - Create: `scripts/e2e_owner_gate_smoke.py`
 - Modify: `docs/ROADMAP-2026H2.md` (журнал + хвост F8), `CLAUDE.md` (карта модулей)
 
-- [ ] **Step 1: Живой смок.** По образцу `scripts/e2e_rescue_smoke.py` (throwaway data_dir, teardown в finally). Сценарии: (а) диктовка → promote во встречу → `meeting_stop`: один терминальный ответ, ноль ложных mismatch в логе; (б) стоп с протухшим токеном при активной записи → `unknown_generation`, запись жива; (в) двойной стоп с одним токеном → один и тот же ответ.
+- [ ] **Step 1: Живой смок.** По образцу `scripts/e2e_rescue_smoke.py`
+  (throwaway data_dir, teardown в finally). Сценарии: (а) диктовка → promote во
+  встречу → `meeting_stop`: один терминальный ответ, ноль ложных mismatch в
+  логе; (б) стоп с протухшим токеном при активной записи →
+  `unknown_generation`, запись жива; (в) двойной стоп с одним токеном → один и
+  тот же ответ; (г) `recorder_timeout` → recorder flag `False` → повтор тем же
+  token успешно забирает G1, fresh start между попытками не вызывается;
+  (д) meeting-timeout сохраняет session/token, не эмиттит `meeting.finished`,
+  повторный `meeting_stop` завершается ровно один раз; (е) terminal
+  `meeting_stop` с потерянным IPC-ответом реплеит тот же `item_id` по token без
+  второго persist/finished.
 
 - [ ] **Step 1b: Проверка DoD 1 — тап хоткея при чужой записи.** Сценарии (а)-(в)
   все IPC-уровня и НЕ проверяют то, что обещает DoD 1 спеки («тап Right Option при

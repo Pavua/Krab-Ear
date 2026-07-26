@@ -53,6 +53,9 @@ _SHUTDOWN_RECORDER_TIMEOUT_SEC = 3.0
 # Этот бюджет ограничивает только ожидание незавершённого start/setup.
 # Остальные worker-ы сохраняют собственные независимые stop-таймауты ниже.
 _SHUTDOWN_LIFECYCLE_LOCK_TIMEOUT_SEC = 1.5
+# R2 Task 3: живые finalizing-хвосты не вытесняются. Восьмой может завершиться,
+# а девятый fresh start временно получает уже известный recorder_stopping.
+_MAX_FINALIZING_GENERATIONS = 8
 
 
 def _sanitize_dedup_threshold(raw: Any) -> float:
@@ -133,10 +136,11 @@ class RecordingCoreService:
         # _recording_lifecycle_lock (start и phase_a уже живут под ним).
         self._rescue_dir = rescue_dir
         self._active_spill: Any = None
-        # R2 Task 2: одна идентичность физической записи от start до terminal.
-        # Словарь живёт только под _recording_lifecycle_lock; revision сохраняет
-        # CAS-семантику Task 1 при promote/rollback, token при этом не меняется.
+        # R2: active-slot описывает только текущий physical capture. После
+        # успешной phase A G1 переходит в finalizing-map, чтобы тяжёлый хвост
+        # G1 не мешал старту G2, но оставался адресуемым для token-retry.
         self._active_generation: dict[str, Any] | None = None
+        self._finalizing_generations: dict[str, dict[str, Any]] = {}
         self._generation_revision = 0
 
         # Wired by BackendService after init (same pattern as llm_rewriter._error_bus).
@@ -363,6 +367,165 @@ class RecordingCoreService:
         self._next_generation_revision_locked()
         self._active_generation = None
 
+    def _finalizing_generations_locked(
+        self,
+    ) -> dict[str, dict[str, Any]]:
+        """Вернуть finalizing-реестр; caller держит lifecycle-lock.
+
+        Ленивая ветка сохраняет совместимость узких legacy-тестов, которые
+        создают сервис через ``__new__`` и намеренно обходят ``__init__``.
+        """
+        generations = getattr(self, "_finalizing_generations", None)
+        if generations is None:
+            generations = {}
+            self._finalizing_generations = generations
+        return generations
+
+    def _move_active_generation_to_finalizing_locked(
+        self,
+    ) -> dict[str, Any] | None:
+        """Атомарно передать завершённый physical capture тяжёлому хвосту."""
+        generation = getattr(self, "_active_generation", None)
+        if generation is None:
+            return None
+        token = str(generation.get("token") or "")
+        if not token:
+            # Generation без token не должна возникать после Task 2. Не
+            # публикуем неадресуемый хвост, но снимаем stale active-slot.
+            self._clear_active_generation_locked()
+            return generation
+        generation["state"] = "finalizing"
+        self._finalizing_generations_locked()[token] = generation
+        self._clear_active_generation_locked()
+        return generation
+
+    def _replay_terminal_response(
+        self,
+        token: str,
+    ) -> dict[str, Any] | None:
+        """Хук replay терминального ответа; Task 5 добавит TTL-кэш."""
+        return None
+
+    def _report_owner_mismatch(
+        self,
+        owner: str | None,
+        requested: str,
+    ) -> None:
+        """Хук shadow-телеметрии; Task 6 добавит WARNING и ErrorBus."""
+        return None
+
+    def _stop_gate_decision(
+        self,
+        params: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Решить, можно ли трогать recorder; caller держит lifecycle-lock.
+
+        Legacy означает только отсутствие ключа generation_token. Если ключ
+        присутствует, но его значение пустое/нестроковое, fail-closed защищает
+        следующую запись от некорректного или протухшего клиента.
+        """
+        token_present = "generation_token" in params
+        raw_token = params.get("generation_token")
+        active = getattr(self, "_active_generation", None)
+
+        if token_present:
+            if not isinstance(raw_token, str) or not raw_token:
+                return {
+                    "status": "unknown_generation",
+                    "generation_token": raw_token,
+                }
+            token = raw_token
+            if active is not None and active.get("token") == token:
+                if active.get("state") == "finalizing":
+                    return {
+                        "status": "stop_in_progress",
+                        "generation_token": token,
+                    }
+            elif token in self._finalizing_generations_locked():
+                return {
+                    "status": "stop_in_progress",
+                    "generation_token": token,
+                }
+            else:
+                replayed = self._replay_terminal_response(token)
+                if replayed is not None:
+                    return replayed
+                return {
+                    "status": "unknown_generation",
+                    "generation_token": token,
+                }
+
+        requested_raw = params.get("source")
+        requested_owner = str(requested_raw) if requested_raw else None
+        if (
+            active is not None
+            and requested_owner
+            and active.get("owner") != requested_owner
+        ):
+            current_owner = active.get("owner")
+            self._report_owner_mismatch(
+                (
+                    str(current_owner)
+                    if current_owner is not None
+                    else None
+                ),
+                requested_owner,
+            )
+            if bool(
+                self._get_runtime_setting(
+                    "recording_owner_enforce",
+                    False,
+                )
+            ):
+                return {
+                    "status": "owner_mismatch",
+                    "owner": current_owner,
+                    "requested": requested_owner,
+                }
+        return None
+
+    def _terminalize_generation(
+        self,
+        generation: dict[str, Any] | None,
+        response: dict[str, Any],
+    ) -> None:
+        """Удалить только конкретную G1 через identity-CAS под общим lock.
+
+        ``response`` уже передаётся сейчас, хотя Task 3 его не хранит: Task 5
+        использует тот же единый хук для bounded TTL-replay без обходных путей.
+        """
+        if generation is None:
+            return
+        lifecycle_lock, _ = self._ensure_recording_lifecycle_state()
+        with lifecycle_lock:
+            token = str(generation.get("token") or "")
+            finalizing = self._finalizing_generations_locked()
+            if token and finalizing.get(token) is generation:
+                del finalizing[token]
+            # Defensive-путь для orphan/already_stopped: compare+clear
+            # выполняются в одной критической секции, поэтому G1 не сотрёт G2.
+            if getattr(self, "_active_generation", None) is generation:
+                self._clear_active_generation_locked()
+
+    @staticmethod
+    def _build_finalization_failed_response(
+        generation: dict[str, Any] | None,
+        exc: BaseException,
+    ) -> dict[str, Any]:
+        """Собрать безопасный terminal-ответ после physical stop."""
+        return {
+            "ok": False,
+            "status": "finalization_failed",
+            "error": "finalization_failed",
+            "error_type": type(exc).__name__,
+            "is_recording": False,
+            "generation_token": (
+                generation.get("token")
+                if generation is not None
+                else None
+            ),
+        }
+
     def rollback_owner_transition(
         self,
         *,
@@ -393,6 +556,59 @@ class RecordingCoreService:
         recorder_was_recording = bool(
             getattr(self.recorder, "is_recording", False)
         )
+        active_generation = getattr(self, "_active_generation", None)
+        if not recorder_was_recording and active_generation is not None:
+            # После recorder_timeout физический worker уже может успеть
+            # завершиться, но G1 всё ещё хранит право на retry/rescue. Новый
+            # start G2 не должен перезаписать эту единственную идентичность.
+            with self._preview_lock:
+                preview_text = self._preview_text
+                preview_duration = self._preview_duration_sec
+            return {
+                "status": "recorder_stopping",
+                "is_recording": False,
+                "duration_sec": preview_duration,
+                "preview_text": preview_text,
+                "generation_token": active_generation.get("token"),
+                "owner": active_generation.get("owner"),
+                "owner_revision": int(
+                    active_generation.get("revision", 0)
+                ),
+                "owner_promoted": False,
+            }
+        if (
+            not recorder_was_recording
+            and len(self._finalizing_generations_locked())
+            >= _MAX_FINALIZING_GENERATIONS
+        ):
+            # Проверка стоит до device/spill/UUID/recorder.start: отказ из-за
+            # backlog не оставляет ложного rescue-файла и не трогает микрофон.
+            with self._preview_lock:
+                preview_text = self._preview_text
+                preview_duration = self._preview_duration_sec
+            generation = getattr(self, "_active_generation", None)
+            return {
+                "status": "recorder_stopping",
+                "is_recording": False,
+                "duration_sec": preview_duration,
+                "preview_text": preview_text,
+                "generation_token": (
+                    generation.get("token")
+                    if generation is not None
+                    else None
+                ),
+                "owner": (
+                    generation.get("owner")
+                    if generation is not None
+                    else None
+                ),
+                "owner_revision": (
+                    int(generation.get("revision", 0))
+                    if generation is not None
+                    else int(getattr(self, "_generation_revision", 0))
+                ),
+                "owner_promoted": False,
+            }
         # Apply selected_input_device from settings before starting (W1327 F2 HIGH).
         # Uses cached_settings() — runtime-safe per Wave 58 lesson.
         _settings_pre = self._settings_svc.cached_settings()
@@ -726,19 +942,53 @@ class RecordingCoreService:
         }
 
     def handle_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Orchestrate the stop-recording pipeline via 5 phase helpers."""
+        """Остановить capture и терминализировать ровно его generation."""
         settings = self._settings_svc.cached_settings()
 
-        # Phase A: finalize audio capture
         phase_a = self._stop_recording_phase_a(params, settings)
         if "early_return" in phase_a:
-            # При recorder_timeout phase A намеренно не отдаёт spill: живой
-            # worker ещё может писать. Для already_stopped/empty_audio handle
-            # уже атомарно отвязан и остаётся на диске для rescue.
+            response = phase_a["early_return"]
+            generation = phase_a.get("generation")
+            # Gate/recorder_timeout структурно не несут generation и потому
+            # не могут случайно завершить ещё живой capture.
+            if generation is not None:
+                self._terminalize_generation(generation, response)
             early_spill = phase_a.get("spill")
             if early_spill is not None:
                 early_spill.close()
-            return phase_a["early_return"]
+            return response
+
+        generation = phase_a.get("generation")
+        try:
+            response = self._run_stop_recording_tail(
+                phase_a=phase_a,
+                settings=settings,
+            )
+        except Exception as exc:
+            # Physical stop уже состоялся. Не оставляем G1 навечно в
+            # finalizing-map: отдаём типизированный терминальный ответ, а spill
+            # сохраняем для rescue следующего запуска.
+            logger.exception(
+                "stop_recording: неожиданная ошибка тяжёлой финализации"
+            )
+            spill = phase_a.get("spill")
+            if spill is not None:
+                spill.close()
+            response = self._build_finalization_failed_response(
+                generation,
+                exc,
+            )
+
+        self._terminalize_generation(generation, response)
+        return response
+
+    def _run_stop_recording_tail(
+        self,
+        *,
+        phase_a: dict[str, Any],
+        settings: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Выполнить тяжёлые фазы B–E после необратимого physical stop."""
 
         audio = phase_a["audio"]
         duration_sec = phase_a["duration_sec"]
@@ -1681,6 +1931,12 @@ class RecordingCoreService:
         self, params: dict[str, Any], settings: dict[str, Any]
     ) -> dict[str, Any]:
         """Stop preview worker, stop realtime partial, stop recorder."""
+        # R2 F6: гейт обязан быть первой операцией под lifecycle-lock. Даже
+        # preview/RT/RSF живой чужой записи нельзя трогать до решения по token.
+        gate_response = self._stop_gate_decision(params)
+        if gate_response is not None:
+            return {"early_return": gate_response}
+
         self._stop_preview_worker()
         rt_session_id = self._rt_session_id
 
@@ -1760,8 +2016,10 @@ class RecordingCoreService:
             }
         if stopped is None:
             # Рекордер уже idle: stale generation больше не имеет живой записи.
-            # Выполняем под lifecycle-lock до допуска следующего start.
-            self._clear_active_generation_locked()
+            # Локальная ссылка нужна outer terminalizer-у и будущему replay.
+            generation = (
+                self._move_active_generation_to_finalizing_locked()
+            )
             spill = getattr(self, "_active_spill", None)
             self._active_spill = None
             with self._preview_lock:
@@ -1769,6 +2027,7 @@ class RecordingCoreService:
                 preview_duration = self._preview_duration_sec
             return {
                 "spill": spill,
+                "generation": generation,
                 "early_return": {
                     "status": "already_stopped",
                     "is_recording": False,
@@ -1783,61 +2042,94 @@ class RecordingCoreService:
         # его под lifecycle-lock ДО допуска start/shutdown следующего перехода.
         spill = getattr(self, "_active_spill", None)
         self._active_spill = None
-        # Generation завершается атомарно с физической записью. Если снять её
-        # позже в handle_stop_recording, новый start успеет опубликовать G2,
-        # а хвост stop G1 ошибочно очистит уже новое поколение.
-        self._clear_active_generation_locked()
-        add_breadcrumb(
-            category="recording",
-            message="stopped",
-            level="info",
-            data={"duration_sec": round(float(duration_sec), 2)},
-        )
-
-        # Brain lease coordination: acquire lease before preloading brain so Krab
-        # userbot knows Ear is about to use LM Studio on Metal GPU.
-        if bool(settings.get("llm_brain_lease_enabled", True)):
-            try:
-                from backend.brain_lease import acquire_brain_lease
-                ttl = float(settings.get("llm_brain_lease_ttl_sec", 30.0))
-                acquire_brain_lease("krab_ear", ttl_sec=ttl)
-            except Exception as exc:
-                logger.debug("BrainLease: acquire hook error (ignored): %s", exc)
-
+        # Physical stop необратим: G1 должна стать finalizing ДО любого
+        # fallible hook, иначе новый start G2 мог бы перезаписать stale active G1.
+        generation = self._move_active_generation_to_finalizing_locked()
         try:
-            brain_model = str(settings.get("llm_brain_model", "")).strip()
-            preload_enabled = bool(settings.get("llm_brain_preload_on_stop", True))
-            if brain_model and preload_enabled:
-                from backend.lm_studio_lifecycle import load_model_async
-                base_url = str(settings.get("llm_base_url", "http://localhost:1234/v1"))
-                load_model_async(base_url, brain_model)
+            add_breadcrumb(
+                category="recording",
+                message="stopped",
+                level="info",
+                data={"duration_sec": round(float(duration_sec), 2)},
+            )
+
+            # Brain lease coordination: acquire lease before preloading brain
+            # so Krab userbot knows Ear is about to use LM Studio on Metal GPU.
+            if bool(settings.get("llm_brain_lease_enabled", True)):
+                try:
+                    from backend.brain_lease import acquire_brain_lease
+                    ttl = float(
+                        settings.get("llm_brain_lease_ttl_sec", 30.0)
+                    )
+                    acquire_brain_lease("krab_ear", ttl_sec=ttl)
+                except Exception as exc:
+                    logger.debug(
+                        "BrainLease: acquire hook error (ignored): %s",
+                        exc,
+                    )
+
+            try:
+                brain_model = str(
+                    settings.get("llm_brain_model", "")
+                ).strip()
+                preload_enabled = bool(
+                    settings.get("llm_brain_preload_on_stop", True)
+                )
+                if brain_model and preload_enabled:
+                    from backend.lm_studio_lifecycle import load_model_async
+                    base_url = str(
+                        settings.get(
+                            "llm_base_url",
+                            "http://localhost:1234/v1",
+                        )
+                    )
+                    load_model_async(base_url, brain_model)
+            except Exception as exc:
+                logger.debug(
+                    "LM Studio brain preload hook failed: %s",
+                    exc,
+                )
+
+            sr = self._load_stop_recording_settings(params, settings)
+
+            if getattr(audio, "size", 0) == 0:
+                return {
+                    "spill": spill,
+                    "generation": generation,
+                    "early_return": self._build_empty_audio_response(
+                        duration_sec=duration_sec,
+                        quality_profile=sr["quality_profile"],
+                        cleanup_profile=sr["cleanup_profile"],
+                        translation_mode=sr["translation_mode"],
+                        translate_and_paste=sr["translate_and_paste"],
+                        stop_tail_trim_ms=stop_tail_trim_ms,
+                    )
+                }
+
+            return {
+                "audio": audio,
+                "duration_sec": duration_sec,
+                "stop_tail_trim_ms": stop_tail_trim_ms,
+                "rt_session_id": rt_session_id,
+                "bookmark_session_id": bookmark_session_id,
+                "sr": sr,
+                "spill": spill,
+                "generation": generation,
+            }
         except Exception as exc:
-            logger.debug("LM Studio brain preload hook failed: %s", exc)
-
-        sr = self._load_stop_recording_settings(params, settings)
-
-        if getattr(audio, "size", 0) == 0:
+            logger.exception(
+                "stop_recording: phase A упала после physical stop"
+            )
+            if spill is not None:
+                spill.close()
             return {
                 "spill": spill,
-                "early_return": self._build_empty_audio_response(
-                    duration_sec=duration_sec,
-                    quality_profile=sr["quality_profile"],
-                    cleanup_profile=sr["cleanup_profile"],
-                    translation_mode=sr["translation_mode"],
-                    translate_and_paste=sr["translate_and_paste"],
-                    stop_tail_trim_ms=stop_tail_trim_ms,
-                )
+                "generation": generation,
+                "early_return": self._build_finalization_failed_response(
+                    generation,
+                    exc,
+                ),
             }
-
-        return {
-            "audio": audio,
-            "duration_sec": duration_sec,
-            "stop_tail_trim_ms": stop_tail_trim_ms,
-            "rt_session_id": rt_session_id,
-            "bookmark_session_id": bookmark_session_id,
-            "sr": sr,
-            "spill": spill,
-        }
 
     def _stop_recording_phase_b(
         self,
