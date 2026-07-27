@@ -70,6 +70,9 @@ _OWNER_TELEMETRY_ALLOWLIST = frozenset({
     "meeting",
     "quick_capture",
 })
+# Client lease остаётся непрозрачным, но ограничение длины не даёт удерживать
+# произвольные мегабайты во всех active-state ответах и снимках.
+_START_REQUEST_ID_MAX_CHARS = 256
 
 
 def _sanitize_dedup_threshold(raw: Any) -> float:
@@ -327,6 +330,9 @@ class RecordingCoreService:
                         generation = self._publish_active_generation_locked(
                             token=uuid.uuid4().hex,
                             owner=self._requested_recording_owner(params),
+                            start_request_id=(
+                                self._requested_start_request_id(params)
+                            ),
                         )
                     logger.exception(
                         "Post-start setup упал после захвата микрофона; "
@@ -339,6 +345,9 @@ class RecordingCoreService:
                         "owner": generation["owner"],
                         "owner_revision": generation["revision"],
                         "owner_promoted": False,
+                        "start_request_id": generation.get(
+                            "start_request_id"
+                        ),
                         "post_start_degraded": True,
                     }
                 raise
@@ -352,6 +361,27 @@ class RecordingCoreService:
         owner = str(raw_owner).strip()
         return owner or "dictation"
 
+    @staticmethod
+    def _requested_start_request_id(
+        params: dict[str, Any],
+    ) -> str | None:
+        """Проверить и вернуть непрозрачный client lease без нормализации."""
+        if "start_request_id" not in params:
+            return None
+        request_id = params.get("start_request_id")
+        if (
+            not isinstance(request_id, str)
+            or not request_id
+            or len(request_id) > _START_REQUEST_ID_MAX_CHARS
+        ):
+            # Значение намеренно не включается в исключение: dispatch пишет
+            # сообщение в журнал, а request ID не должен туда попасть.
+            raise ValueError(
+                "start_request_id должен быть непустой строкой длиной "
+                f"не более {_START_REQUEST_ID_MAX_CHARS} символов"
+            )
+        return request_id
+
     def _next_generation_revision_locked(self) -> int:
         """Выдать следующую монотонную CAS-ревизию generation-перехода."""
         revision = int(getattr(self, "_generation_revision", 0)) + 1
@@ -363,11 +393,13 @@ class RecordingCoreService:
         *,
         token: str,
         owner: str,
+        start_request_id: str | None = None,
     ) -> dict[str, Any]:
         """Атомарно опубликовать поколение после успешного recorder.start."""
         generation = {
             "token": str(token),
             "owner": str(owner),
+            "start_request_id": start_request_id,
             "state": "capturing",
             "started_at": time.monotonic(),
             "promoted_from": None,
@@ -416,6 +448,7 @@ class RecordingCoreService:
         self,
         generation: dict[str, Any],
         requested_owner: str,
+        requested_start_request_id: str | None,
     ) -> dict[str, Any]:
         """Разрешить repeat/promote/conflict без нового physical start."""
         with self._preview_lock:
@@ -423,9 +456,18 @@ class RecordingCoreService:
             preview_duration = self._preview_duration_sec
 
         current_owner = generation.get("owner")
+        active_start_request_id = generation.get("start_request_id")
         if current_owner == requested_owner:
+            idempotent_replay = (
+                requested_start_request_id is not None
+                and requested_start_request_id == active_start_request_id
+            )
             return {
-                "status": "already_recording",
+                "status": (
+                    "recording"
+                    if idempotent_replay
+                    else "already_recording"
+                ),
                 "is_recording": True,
                 "duration_sec": preview_duration,
                 "preview_text": preview_text,
@@ -436,6 +478,7 @@ class RecordingCoreService:
                 ),
                 "owner_promoted": False,
                 "promoted": False,
+                "start_request_id": active_start_request_id,
             }
 
         if (
@@ -458,6 +501,7 @@ class RecordingCoreService:
                 # promoted — аддитивный явный контракт R2 §4.3.
                 "owner_promoted": True,
                 "promoted": True,
+                "start_request_id": active_start_request_id,
             }
 
         return {
@@ -467,6 +511,7 @@ class RecordingCoreService:
             "preview_text": preview_text,
             "owner": current_owner,
             "requested": requested_owner,
+            "start_request_id": active_start_request_id,
         }
 
     def _clear_active_generation_locked(self) -> None:
@@ -644,7 +689,7 @@ class RecordingCoreService:
     def _report_owner_mismatch(
         self,
         owner: str | None,
-        requested: str,
+        requested: str | None,
     ) -> None:
         """Громко, но fail-open сообщить о положительном owner-mismatch.
 
@@ -746,6 +791,49 @@ class RecordingCoreService:
                 }
 
         requested_owner = self._requested_stop_owner(params)
+        if "expected_owner_revision" in params:
+            raw_revision = params.get("expected_owner_revision")
+            revision_valid = (
+                type(raw_revision) is int
+                and raw_revision > 0
+            )
+            current_owner = (
+                active.get("owner") if active is not None else None
+            )
+            current_revision = (
+                int(active.get("revision", 0))
+                if active is not None
+                else int(getattr(self, "_generation_revision", 0))
+            )
+            strict_match = (
+                token_present
+                and isinstance(raw_token, str)
+                and bool(raw_token)
+                and active is not None
+                and active.get("token") == raw_token
+                and requested_owner is not None
+                and active.get("owner") == requested_owner
+                and revision_valid
+                and current_revision == raw_revision
+            )
+            if not strict_match:
+                # Наличие revision переводит запрос в fail-closed CAS-режим.
+                # Решение принимается до teardown и не зависит от shadow-флага.
+                self._report_owner_mismatch(
+                    (
+                        str(current_owner)
+                        if current_owner is not None
+                        else None
+                    ),
+                    requested_owner,
+                )
+                return {
+                    "status": "owner_mismatch",
+                    "owner": current_owner,
+                    "requested": requested_owner,
+                    "owner_revision": current_revision,
+                }
+
         if active is not None and requested_owner is None:
             try:
                 logger.debug(
@@ -903,6 +991,7 @@ class RecordingCoreService:
     def _handle_start_recording_locked(self, params: dict[str, Any]) -> dict[str, Any]:
         """Выполнить цельный setup записи под lifecycle-lock."""
         requested_owner = self._requested_recording_owner(params)
+        requested_start_request_id = self._requested_start_request_id(params)
         recorder_was_recording = bool(
             getattr(self.recorder, "is_recording", False)
         )
@@ -929,6 +1018,9 @@ class RecordingCoreService:
                 ),
                 "owner_promoted": False,
                 "promoted": False,
+                "start_request_id": active_generation.get(
+                    "start_request_id"
+                ),
             }
         if active_generation is not None:
             # Repeat/promote/conflict — логический переход существующей G1.
@@ -937,6 +1029,7 @@ class RecordingCoreService:
             return self._active_generation_start_response_locked(
                 active_generation,
                 requested_owner,
+                requested_start_request_id,
             )
         if recorder_was_recording:
             # Call Assist пока захватывает AudioRecorder напрямую. Generation
@@ -1065,6 +1158,7 @@ class RecordingCoreService:
                     self._publish_active_generation_locked(
                         token=generation_token,
                         owner=requested_owner,
+                        start_request_id=requested_start_request_id,
                     )
             elif spill is not None:
                 # Физический захват не состоялся: этот writer — лишь
@@ -1089,6 +1183,7 @@ class RecordingCoreService:
                     return self._active_generation_start_response_locked(
                         generation,
                         requested_owner,
+                        requested_start_request_id,
                     )
                 return {
                     "status": "unmanaged_recording",
@@ -1112,6 +1207,7 @@ class RecordingCoreService:
         generation = self._publish_active_generation_locked(
             token=generation_token,
             owner=requested_owner,
+            start_request_id=requested_start_request_id,
         )
         owner_revision = int(generation["revision"])
         # После успешного recorder.start() IPC обязан вернуть ``recording``:
@@ -1287,6 +1383,7 @@ class RecordingCoreService:
             "owner": generation["owner"],
             "owner_revision": owner_revision,
             "owner_promoted": False,
+            "start_request_id": generation.get("start_request_id"),
         }
 
     def handle_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1465,6 +1562,11 @@ class RecordingCoreService:
             generation_token = (
                 generation.get("token") if generation is not None else None
             )
+            start_request_id = (
+                generation.get("start_request_id")
+                if generation is not None
+                else None
+            )
         with self._preview_lock:
             preview_text = self._preview_text
             preview_duration = self._preview_duration_sec
@@ -1490,6 +1592,7 @@ class RecordingCoreService:
             "is_recording": is_recording,
             "owner": active_owner,
             "generation_token": generation_token,
+            "start_request_id": start_request_id,
             "duration_sec": preview_duration,
             "preview_text": preview_text,
             "audio_rms": audio_rms,

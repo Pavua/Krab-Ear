@@ -350,6 +350,103 @@ class StopGateTest(unittest.TestCase):
         self.assertEqual(recorder.stop_calls, 0)
         self.assertTrue(recorder.is_recording)
 
+    def test_stale_dictation_revision_after_promote_is_strict_refusal(self):
+        """Promote инвалидирует R1 даже при выключенном owner-enforce."""
+        recorder = _CountingRecorder()
+        service = self._service(
+            recorder=recorder,
+            settings_overrides={"recording_owner_enforce": False},
+        )
+        started = service.handle_start_recording({
+            "source": "dictation",
+            "start_request_id": "dictation-start",
+        })
+        promoted = service.handle_start_recording({
+            "source": "meeting",
+            "start_request_id": "meeting-start",
+        })
+        self.assertEqual(
+            promoted["start_request_id"],
+            "dictation-start",
+        )
+        self.assertEqual(
+            service._active_generation["start_request_id"],
+            "dictation-start",
+        )
+
+        refused = service.handle_stop_recording({
+            "generation_token": started["generation_token"],
+            "source": "dictation",
+            "expected_owner_revision": started["owner_revision"],
+        })
+
+        self.assertEqual(refused["status"], "owner_mismatch")
+        self.assertEqual(refused["owner"], "meeting")
+        self.assertEqual(refused["requested"], "dictation")
+        self.assertEqual(
+            refused["owner_revision"],
+            promoted["owner_revision"],
+        )
+        self.assertEqual(recorder.stop_calls, 0)
+        self.assertTrue(recorder.is_recording)
+        self.assertIsNotNone(service._active_generation)
+
+        stale_revision_only = service.handle_stop_recording({
+            "generation_token": started["generation_token"],
+            "source": "meeting",
+            "expected_owner_revision": started["owner_revision"],
+        })
+        self.assertEqual(stale_revision_only["status"], "owner_mismatch")
+        self.assertEqual(recorder.stop_calls, 0)
+
+        accepted = service.handle_stop_recording({
+            "generation_token": started["generation_token"],
+            "source": "meeting",
+            "expected_owner_revision": promoted["owner_revision"],
+        })
+        self.assertEqual(accepted["status"], "ok")
+        self.assertEqual(recorder.stop_calls, 1)
+
+    def test_malformed_strict_revision_never_reaches_recorder(self):
+        """Невалидная CAS-ревизия означает typed refusal, а не shadow-stop."""
+        for invalid_revision in (None, False, "1", 1.0):
+            with self.subTest(invalid_revision=invalid_revision):
+                recorder = _CountingRecorder()
+                service = self._service(
+                    recorder=recorder,
+                    settings_overrides={"recording_owner_enforce": False},
+                )
+                started = service.handle_start_recording({
+                    "source": "meeting",
+                })
+
+                response = service.handle_stop_recording({
+                    "generation_token": started["generation_token"],
+                    "source": "meeting",
+                    "expected_owner_revision": invalid_revision,
+                })
+
+                self.assertEqual(response["status"], "owner_mismatch")
+                self.assertEqual(recorder.stop_calls, 0)
+                self.assertTrue(recorder.is_recording)
+
+    def test_legacy_owner_mismatch_without_revision_keeps_shadow_stop(self):
+        """Без expected revision старый shadow-контракт остаётся fail-open."""
+        recorder = _CountingRecorder()
+        service = self._service(
+            recorder=recorder,
+            settings_overrides={"recording_owner_enforce": False},
+        )
+        started = service.handle_start_recording({"source": "meeting"})
+
+        response = service.handle_stop_recording({
+            "generation_token": started["generation_token"],
+            "source": "dictation",
+        })
+
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(recorder.stop_calls, 1)
+
     def test_retry_g1_while_g2_captures_reports_stop_in_progress(self):
         recorder = _CountingRecorder()
         service = self._service(recorder=recorder)

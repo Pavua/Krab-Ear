@@ -31,6 +31,7 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
         case idle        // сессии нет
         case live        // сессия активна, рендерим state
         case finalizing  // meeting_stop отправлен, ждём отчёт (sticky)
+        case recoveryPending  // stop не terminal; разрешён явный повтор той же G1
         case privacy     // privacy_mode_active
     }
 
@@ -69,18 +70,36 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
     /// оба несут item_id — без гарда владелец открыл бы ДВА окна отчёта.
     /// Взводится заново при входе в новую live-сессию (setUIState).
     private var finishedDelivered = false
+    /// Opaque generation из meeting_start/live-state; UUID на клиенте запрещён.
+    private var generationToken: String?
+    /// Token последнего one-shot finished нужен владельцу как fence для
+    /// асинхронной загрузки отчёта после очистки live-route.
+    private(set) var lastDeliveredGenerationToken: String?
+    /// Fence от позднего ответа stop после SSE-finished или нового действия.
+    private var activeStopRequestID: UUID?
 
     private func deliverFinished(_ itemID: String?) {
         guard !finishedDelivered else { return }
         finishedDelivered = true
+        activeStopRequestID = nil
+        lastDeliveredGenerationToken = generationToken
+        generationToken = nil
+        invalidatePollRequests()
+        setUIState(.idle)
         onFinished?(itemID)
     }
 
     private let restBaseURL = "http://127.0.0.1:5005"
     private var sseTask: URLSessionDataTask?
+    private var sseDelegate: SSESessionDelegate?
+    private var sseSession: URLSession?
+    /// Отсекает callbacks уже отменённого SSE-соединения после старта нового.
+    private var sseStreamEpoch: UInt64 = 0
     private var pendingSSEEventType: String?
     private var lastSSEActivity: TimeInterval = 0
     private var pollTimer: Timer?
+    /// Last-write-wins fence для конкурирующих poll-ответов.
+    private var pollRequestSequence: UInt64 = 0
     private var silenceTimer: Timer?
     private(set) var pollFallbackActive = false
     private var transientErrorActive = false
@@ -91,12 +110,6 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
         "meeting.transcript_appended", "meeting.items_updated",
         "meeting.speakers_updated", "meeting.finalizing", "meeting.finished",
     ]
-
-    private lazy var sseDelegate = SSESessionDelegate { [weak self] line in
-        Task { @MainActor [weak self] in self?.handleSSELine(line) }
-    }
-    private lazy var sseSession = URLSession(configuration: .default,
-                                             delegate: sseDelegate, delegateQueue: nil)
 
     // MARK: - Test hooks (паттерн ConversationStatusOverlay)
 
@@ -116,13 +129,44 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
     var _testIsReleasedWhenClosed: Bool { panel.isReleasedWhenClosed }
     var _testPanelDelegateIsController: Bool { panel.delegate === self }
     var _testHeaderTimerActive: Bool { timerTick != nil }
+    var _testGenerationToken: String? { generationToken }
+    var _testStopButtonEnabled: Bool { stopButton.isEnabled }
+    var hasUnresolvedMeetingStop: Bool {
+        uiState == .finalizing || uiState == .recoveryPending
+    }
+    func _testEnterStopRecovery() {
+        enterMeetingStopRecovery("Тестовое восстановление")
+    }
     func _testSimulateWindowWillClose() {
         windowWillClose(Notification(name: NSWindow.willCloseNotification, object: panel))
     }
     var _testPollFallbackActive: Bool { pollFallbackActive }
 
     /// Прямой вызов SSE-парсера строки — без реального сетевого стрима.
-    func _testHandleSSELine(_ line: String) { handleSSELine(line) }
+    func _testHandleSSELine(_ line: String) {
+        handleSSELine(line, streamEpoch: sseStreamEpoch)
+    }
+
+    @discardableResult
+    func _testBeginSSEStreamEpoch() -> UInt64 {
+        beginSSEStreamEpoch()
+    }
+
+    func _testHandleSSELine(_ line: String, streamEpoch: UInt64) {
+        handleSSELine(line, streamEpoch: streamEpoch)
+    }
+
+    @discardableResult
+    func _testBeginPollRequest() -> UInt64 {
+        beginPollRequest()
+    }
+
+    func _testHandlePollState(
+        _ state: [String: Any],
+        requestSequence: UInt64
+    ) {
+        handlePollState(state, requestSequence: requestSequence)
+    }
 
     /// Сдвигает `lastSSEActivity` в прошлое и дёргает watchdog-тик напрямую —
     /// БЕЗ реального ожидания (тест не крутит RunLoop 15+ секунд).
@@ -193,6 +237,7 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
     /// из hide(), панель просто перестаёт тянуть данные, пока скрыта.
     func stopUpdates() {
         stopSSE()
+        invalidatePollRequests()
         pollTimer?.invalidate(); pollTimer = nil
         silenceTimer?.invalidate(); silenceTimer = nil
         deactivatePollFallback()
@@ -202,7 +247,12 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
     /// Единственная точка входа данных: полный снапшот get_meeting_live_state
     /// ИЛИ склеенный из SSE-событий (Task 2). Чистая функция состояния → UI.
     func render(state: [String: Any]) {
-        if uiState == .finalizing { return }  // sticky до отчёта/reset
+        if uiState == .finalizing || uiState == .recoveryPending {
+            return  // sticky до terminal finished/reset
+        }
+        if let token = state["generation_token"] as? String, !token.isEmpty {
+            adoptGenerationToken(token)
+        }
         if (state["privacy_mode_active"] as? Bool) == true { setUIState(.privacy); return }
         guard (state["active"] as? Bool) == true else { setUIState(.idle); return }
         setUIState(.live)
@@ -219,35 +269,151 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
     }
 
     func enterFinalizing() { setUIState(.finalizing) }
-    func resetToIdle() { setUIState(.idle) }   // после показа отчёта/ошибки
+    func resetToIdle() {
+        activeStopRequestID = nil
+        generationToken = nil
+        invalidatePollRequests()
+        setUIState(.idle)
+    }
 
-    /// meeting_stop IPC (off-main, AGENT-3). item_id в ответе → onFinished сразу
-    /// (не ждём SSE); без item_id — остаёмся в .finalizing до meeting.finished по SSE.
+    /// Асинхронный отчёт старой сессии не вправе сбрасывать уже принятую G2.
+    func isFinishedCompletionCurrent(
+        expectedGenerationToken: String?
+    ) -> Bool {
+        generationToken == nil || generationToken == expectedGenerationToken
+    }
+
+    @discardableResult
+    func resetToIdleAfterFinished(
+        expectedGenerationToken: String?
+    ) -> Bool {
+        guard isFinishedCompletionCurrent(
+            expectedGenerationToken: expectedGenerationToken
+        ) else {
+            return false
+        }
+        resetToIdle()
+        return true
+    }
+
+    /// Принять opaque-token непосредственно из meeting_start до первого poll.
+    func acceptGenerationToken(_ token: String?) {
+        guard let token, !token.isEmpty else { return }
+        guard !hasUnresolvedMeetingStop else { return }
+        adoptGenerationToken(token)
+    }
+
+    /// Возвращает только факт принятия opaque-token текущей панелью. Нужен
+    /// Hotkey reconciliation, чтобы снять pending promote лишь когда callback
+    /// meeting_start уже доказанно дошёл до того же G1.
+    func hasAcceptedGenerationToken(_ expectedToken: String) -> Bool {
+        generationToken == expectedToken
+    }
+
+    private func adoptGenerationToken(_ token: String) {
+        guard generationToken != token else { return }
+        generationToken = token
+        finishedDelivered = false
+        // До появления token SSE уже мог принять lifecycle старой сессии.
+        // Новый transport epoch отбрасывает его отложенные callbacks.
+        if sseTask != nil {
+            startSSE()
+        }
+    }
+
+    /// meeting_stop через единый async coordinator. Каждый ручной recovery тап
+    /// получает новый bounded budget, но предъявляет тот же generation_token.
     func requestStop() {
+        guard activeStopRequestID == nil else { return }
         enterFinalizing()
         guard let client = ipcClient else {
-            showTransientError("Нет соединения с backend'ом")
-            resetToIdle()
+            enterMeetingStopRecovery(
+                "Нет соединения с backend'ом — повторите остановку"
+            )
             return
         }
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            do {
-                nonisolated(unsafe) let response = try client.call(method: "meeting_stop", params: [:])
-                nonisolated(unsafe) let result = response["result"] as? [String: Any] ?? [:]
-                let itemID = result["item_id"] as? String
-                DispatchQueue.main.async {
-                    if let itemID, !itemID.isEmpty {
-                        self?.deliverFinished(itemID)
-                    }
-                    // без item_id — ждём meeting.finished по SSE, состояние остаётся .finalizing
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self?.showTransientError("Не удалось завершить встречу: \(error.localizedDescription)")
-                    self?.resetToIdle()
-                }
-            }
+        let requestID = UUID()
+        activeStopRequestID = requestID
+        let stopToken = generationToken
+        Task { @MainActor [weak self] in
+            await self?.performMeetingStop(
+                client: client,
+                requestID: requestID,
+                generationToken: stopToken
+            )
         }
+    }
+
+    private func performMeetingStop(
+        client: IPCClient,
+        requestID: UUID,
+        generationToken: String?
+    ) async {
+        var params: [String: Any] = [:]
+        if let generationToken, !generationToken.isEmpty {
+            params["generation_token"] = generationToken
+        }
+        let request = RecordingStopRequest(
+            method: "meeting_stop",
+            params: params,
+            timeoutSec: 120
+        )
+        let outcome = await RecordingStopCoordinator.execute(
+            request: request,
+            operation: { repeatedRequest in
+                try await client.callAsync(
+                    method: repeatedRequest.method,
+                    params: repeatedRequest.params,
+                    timeoutSec: repeatedRequest.timeoutSec
+                )
+            }
+        )
+
+        guard activeStopRequestID == requestID else {
+            return  // SSE/new state уже терминализировали этот запрос
+        }
+        activeStopRequestID = nil
+
+        switch outcome.decision {
+        case .surfaceAsIs where outcome.hasTerminalResponse:
+            let itemID = outcome.result?["item_id"] as? String
+            if let itemID, !itemID.isEmpty {
+                deliverFinished(itemID)
+            }
+            // Без item_id остаёмся finalizing до SSE/poll inactive.
+        case .recoveryPending:
+            enterMeetingStopRecovery(
+                "Аудио ещё восстанавливается — повторите остановку"
+            )
+        case .finalizationSlow:
+            enterMeetingStopRecovery(
+                "Финализация затянулась — результат появится в истории"
+            )
+        case .giveUpRescuePending:
+            enterMeetingStopRecovery(
+                "Остановка не подтверждена; запись восстановится при следующем запуске"
+            )
+        case .foreignOwner:
+            self.generationToken = nil
+            showTransientError(
+                "Запись принадлежит другому режиму и не была остановлена"
+            )
+            deliverFinished(nil)
+            setUIState(.idle)
+        case .surfaceAsIs:
+            enterMeetingStopRecovery(
+                "Ответ остановки не получен — повторите действие"
+            )
+        case .retry, .retryRecorderStop, .pollAgain:
+            enterMeetingStopRecovery(
+                "Остановка не подтверждена — повторите действие"
+            )
+        }
+    }
+
+    private func enterMeetingStopRecovery(_ message: String) {
+        setUIState(.recoveryPending)
+        showTransientError(message)
     }
 
     /// Временное сообщение об ошибке в statusLabel (~5с). Не переключает uiState —
@@ -376,11 +542,22 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
     // MARK: - UI state machine
 
     private func setUIState(_ newState: UIState) {
-        if newState == .live && uiState != .live && uiState != .finalizing {
+        if newState == .idle || newState == .privacy {
+            activeStopRequestID = nil
+            generationToken = nil
+        }
+        if newState == .live
+            && uiState != .live
+            && uiState != .finalizing
+            && uiState != .recoveryPending {
             finishedDelivered = false  // новая сессия — гард финализации заново
         }
         uiState = newState
-        let contentVisible = (newState == .live) || (newState == .finalizing)
+        let contentVisible = (
+            newState == .live
+            || newState == .finalizing
+            || newState == .recoveryPending
+        )
         speakersRow.isHidden = !contentVisible
         itemsStack.isHidden = !contentVisible
         transcriptContainer.isHidden = !contentVisible
@@ -397,7 +574,13 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
         if !transientErrorActive {
             applyStatusText(for: newState)
         }
-        stopButton.isEnabled = (newState == .live)
+        stopButton.isEnabled = (
+            newState == .live
+            || newState == .recoveryPending
+        )
+        stopButton.title = newState == .recoveryPending
+            ? "Повторить остановку"
+            : "Завершить встречу"
 
         if newState == .live {
             startTimer()
@@ -427,6 +610,13 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
             statusSpinner.isHidden = false
             statusSpinner.startAnimation(nil)
             statusContainer.isHidden = false
+        case .recoveryPending:
+            statusLabel.stringValue = "Нужно повторить остановку"
+            statusIcon.image = NSImage(
+                systemSymbolName: "arrow.clockwise.circle",
+                accessibilityDescription: nil
+            )
+            statusContainer.isHidden = false
         case .live:
             statusContainer.isHidden = true
         }
@@ -434,7 +624,17 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
 
     // MARK: - Poll (get_meeting_live_state)
 
+    private func beginPollRequest() -> UInt64 {
+        pollRequestSequence &+= 1
+        return pollRequestSequence
+    }
+
+    private func invalidatePollRequests() {
+        pollRequestSequence &+= 1
+    }
+
     private func pollOnce() {
+        let requestSequence = beginPollRequest()
         guard let client = ipcClient else { return }
         // AGENT-3: ipcClient.call строго off-main.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -442,7 +642,12 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
                 nonisolated(unsafe) let response = try client.call(
                     method: "get_meeting_live_state", params: [:])
                 nonisolated(unsafe) let result = response["result"] as? [String: Any] ?? response
-                DispatchQueue.main.async { self?.handlePollState(result) }
+                DispatchQueue.main.async {
+                    self?.handlePollState(
+                        result,
+                        requestSequence: requestSequence
+                    )
+                }
             } catch {
                 // Poll — best-effort фоллбэк; SSE остаётся основным каналом,
                 // одиночная неудача poll'а не показывается пользователю.
@@ -455,11 +660,22 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
     /// доставляем финализацию с nil (отчёт без item_id не построить; запись
     /// доступна в истории), выводя панель из вечного «Финализирую…».
     private func handlePollState(_ state: [String: Any]) {
-        if uiState == .finalizing && (state["active"] as? Bool) != true {
+        if (
+            uiState == .finalizing
+            || uiState == .recoveryPending
+        ) && (state["active"] as? Bool) != true {
             deliverFinished(state["item_id"] as? String)  // почти всегда nil
             return
         }
         render(state: state)
+    }
+
+    private func handlePollState(
+        _ state: [String: Any],
+        requestSequence: UInt64
+    ) {
+        guard requestSequence == pollRequestSequence else { return }
+        handlePollState(state)
     }
 
     func _testHandlePollState(_ state: [String: Any]) { handlePollState(state) }
@@ -470,29 +686,52 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
 
     // MARK: - SSE (общий SSESessionDelegate, паттерн LiveSubtitlesOverlay)
 
+    private func beginSSEStreamEpoch() -> UInt64 {
+        sseStreamEpoch &+= 1
+        pendingSSEEventType = nil
+        return sseStreamEpoch
+    }
+
     private func startSSE() {
         stopSSE()
+        let streamEpoch = beginSSEStreamEpoch()
         let filter = Self.meetingEventTypes.sorted().joined(separator: ",")
         // sorted() — детерминированный URL для тестов/логов; backend принимает
         // comma-list в любом порядке (rest_server.py:1649).
         guard let url = URL(string: "\(restBaseURL)/v1/events?filter=\(filter)") else { return }
         var request = URLRequest(url: url, timeoutInterval: 600)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        let task = sseSession.dataTask(with: request)
+        let delegate = SSESessionDelegate { [weak self] line in
+            Task { @MainActor [weak self] in
+                self?.handleSSELine(line, streamEpoch: streamEpoch)
+            }
+        }
+        let session = URLSession(
+            configuration: .default,
+            delegate: delegate,
+            delegateQueue: nil
+        )
+        sseDelegate = delegate
+        sseSession = session
+        let task = session.dataTask(with: request)
         sseTask = task
         task.resume()
     }
 
     private func stopSSE() {
+        _ = beginSSEStreamEpoch()
         sseTask?.cancel()
         sseTask = nil
-        pendingSSEEventType = nil
+        sseSession?.invalidateAndCancel()
+        sseSession = nil
+        sseDelegate = nil
     }
 
     /// Паттерн LiveSubtitlesOverlay.handleSSELine: `event: ` трекает тип, `data: `
     /// диспатчит по нему. lastSSEActivity обновляется на КАЖДОЙ строке (в т.ч.
     /// строках-разделителях) — это единственный сигнал watchdog'а о живом стриме.
-    private func handleSSELine(_ line: String) {
+    private func handleSSELine(_ line: String, streamEpoch: UInt64) {
+        guard streamEpoch == sseStreamEpoch else { return }
         lastSSEActivity = Date().timeIntervalSince1970
         if pollFallbackActive { deactivatePollFallback() }
 
@@ -515,20 +754,41 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
         let eventData = obj["data"] as? [String: Any] ?? obj
         switch type {
         case "meeting.transcript_appended":
+            guard eventMatchesGeneration(eventData) else { return }
             appendTranscriptChunk(eventData["chunk_text"] as? String ?? "")
         case "meeting.items_updated":
+            guard eventMatchesGeneration(eventData) else { return }
             renderItems(items: eventData["items"] as? [[String: Any]] ?? [],
                         decisions: eventData["decisions"] as? [String] ?? [],
                         questions: eventData["questions"] as? [String] ?? [])
         case "meeting.speakers_updated":
+            guard eventMatchesGeneration(eventData) else { return }
             renderSpeakers(eventData["speakers"] as? [[String: Any]] ?? [])
         case "meeting.finalizing":
+            guard eventMatchesGeneration(eventData) else { return }
             enterFinalizing()
         case "meeting.finished":
+            guard eventMatchesGeneration(eventData) else { return }
             deliverFinished(eventData["item_id"] as? String)
         default:
             break  // недостижимо — фильтр handleSSELine уже отсёк чужие типы
         }
+    }
+
+    /// R2 backend прикладывает opaque-token к terminal lifecycle events.
+    /// Отсутствие поля оставляет совместимость со старым backend; смена
+    /// transport epoch при новом token закрывает его накопленные callbacks.
+    private func eventMatchesGeneration(
+        _ eventData: [String: Any]
+    ) -> Bool {
+        if let eventToken = eventData["generation_token"] as? String,
+           !eventToken.isEmpty {
+            guard let generationToken else { return false }
+            return eventToken == generationToken
+        }
+        // Legacy backend не выдаёт token ни start/live-state, ни SSE. Если
+        // локальный R2 token уже известен, tokenless event недостоверен.
+        return generationToken == nil
     }
 
     /// Хвост транскрипта копится инкрементально по SSE-чанкам; обрезаем спереди,

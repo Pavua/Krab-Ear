@@ -1320,10 +1320,13 @@ Task 6 отдельно не merge/deploy: enforce остаётся `False`, а 
 - Create: `native/KrabEarAgent/Sources/KrabEarAgent/RecordingStopCoordinator.swift`
 - Modify: `main+HotkeyRecording.swift`, `main+QuickCapture.swift` (перевести стопы на helper)
 - Modify: `MeetingLivePanelController.swift` (тот же bounded retry без sync IPC)
-- Modify: `KrabEar/backend/meeting_session_service.py` (сохранить token и
+- Modify: `main+MeetingPanel.swift`, `KrabEar/backend/recording_core_service.py`,
+  `KrabEar/backend/meeting_session_service.py` (lease start/stop, promote и
   session/retry-handle при `recorder_timeout`)
 - Test: `native/KrabEarAgent/Tests/KrabEarAgentTests/RecordingStopCoordinatorTests.swift`
-- Test: `KrabEar/tests/test_meeting_session_service_W_C2a.py`
+- Test: `KrabEar/tests/test_recording_generation.py`,
+  `KrabEar/tests/test_recording_stop_gate.py`,
+  `KrabEar/tests/test_meeting_session_service_W_C2a.py`
 
 **Контракт helper'а** (спека §4.6):
 - предъявляет `generation_token`, полученный на старте;
@@ -1339,7 +1342,7 @@ Task 6 отдельно не merge/deploy: enforce остаётся `False`, а 
 
 Референс на чтение (НЕ cherry-pick): `.worktrees/user3-recording-rescue-20260722/native/KrabEarAgent/Sources/KrabEarAgent/RecordingStopRecovery.swift` — там та же задача решена в 679 строк; наша цель ~200-250, без owner/token-двухосевости.
 
-- [ ] **Step 1: Написать падающий тест**
+- [x] **Step 1: Написать падающий тест**
 
 Создать `native/KrabEarAgent/Tests/KrabEarAgentTests/RecordingStopCoordinatorTests.swift`.
 Тестируется чистая логика решения (что делать с ответом/ошибкой), поэтому координатор
@@ -1396,12 +1399,12 @@ final class RecordingStopCoordinatorTests: XCTestCase {
 }
 ```
 
-- [ ] **Step 2: Убедиться, что тесты падают**
+- [x] **Step 2: Убедиться, что тесты падают**
 
 Run: `cd native/KrabEarAgent && swift test --filter RecordingStopCoordinatorTests`
 Expected: FAIL — `cannot find 'RecordingStopCoordinator' in scope`
 
-- [ ] **Step 3: Реализовать координатор**
+- [x] **Step 3: Реализовать координатор**
 
 Создать `native/KrabEarAgent/Sources/KrabEarAgent/RecordingStopCoordinator.swift`:
 
@@ -1467,12 +1470,12 @@ enum RecordingStopCoordinator {
 }
 ```
 
-- [ ] **Step 4: Зелёные тесты**
+- [x] **Step 4: Зелёные тесты**
 
 Run: `cd native/KrabEarAgent && swift test --filter RecordingStopCoordinatorTests`
 Expected: все PASS
 
-- [ ] **Step 5: Подключить координатор к живым путям остановки**
+- [x] **Step 5: Подключить координатор к живым путям остановки**
 
 В `main+HotkeyRecording.swift` и `main+QuickCapture.swift`: хранить `generation_token`,
 полученный из ответа `start_recording`, передавать его в params стопа и прогонять
@@ -1540,6 +1543,19 @@ IPC на main. Каждый IPC-вызов цикла обязан идти че
 
 Run: `cd native/KrabEarAgent && swift build -c release && swift test`
 Expected: сборка OK, вся сьюта зелёная
+
+> **Evidence 2026-07-27 (USER3 code-only worktree):** дополнительно закрыты
+> четыре adversarial race-condition: pending Quick Capture cancel не посылает
+> tokenless stop; lost start сопоставляется только по exact `start_request_id`;
+> stop нового Swift предъявляет `(generation_token, source, owner_revision)`;
+> поздний meeting promote fenced по token/revision и не очищает G2. Целевой
+> Python-набор: **100/100 PASS**. Swift: **40/40**
+> `RecordingStopCoordinatorTests`, а также **67/67** в
+> `MeetingLivePanelTests`, `HotkeyOwnerGuardTests`, `QuickCaptureWiringTests`.
+> `swiftc -parse` и `git diff --check` зелёные. Полный release build/полная
+> Swift-сьюта и живой cross-binary smoke остаются гейтами Task 8: в этой
+> USER3-сессии runtime не запускался, чтобы не вмешиваться в активную среду
+> основной учётной записи.
 
 - [ ] **Step 7: Коммит**
 

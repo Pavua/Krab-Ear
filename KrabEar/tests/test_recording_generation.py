@@ -370,9 +370,13 @@ class RecordingGenerationTest(unittest.TestCase):
         self.assertTrue(response["generation_token"])
         self.assertIsNone(service._active_spill)
 
-    def test_state_exposes_same_token_and_owner(self):
+    def test_state_exposes_same_token_owner_and_start_request_id(self):
         service = self._service()
-        response = service.handle_start_recording({"source": "meeting"})
+        start_request_id = "  meeting-lease/α  "
+        response = service.handle_start_recording({
+            "source": "meeting",
+            "start_request_id": start_request_id,
+        })
 
         state = service.handle_get_recording_state({})
 
@@ -381,6 +385,84 @@ class RecordingGenerationTest(unittest.TestCase):
             state["generation_token"],
             response["generation_token"],
         )
+        self.assertEqual(response["start_request_id"], start_request_id)
+        self.assertEqual(state["start_request_id"], start_request_id)
+        self.assertEqual(
+            service._active_generation["start_request_id"],
+            start_request_id,
+        )
+
+    def test_same_owner_and_start_request_id_replays_successful_start(self):
+        """Один client lease повторяет успех без нового physical start."""
+        recorder = _RaisesOnRepeatRecorder()
+        service = self._service(recorder=recorder)
+        start_request_id = "  opaque lease/α  "
+        started = service.handle_start_recording({
+            "source": "dictation",
+            "start_request_id": start_request_id,
+        })
+
+        replayed = service.handle_start_recording({
+            "source": "dictation",
+            "start_request_id": start_request_id,
+        })
+
+        self.assertEqual(started["status"], "recording")
+        self.assertEqual(replayed["status"], "recording")
+        self.assertEqual(
+            replayed["generation_token"],
+            started["generation_token"],
+        )
+        self.assertEqual(
+            replayed["owner_revision"],
+            started["owner_revision"],
+        )
+        self.assertEqual(replayed["start_request_id"], start_request_id)
+        self.assertIsNone(recorder.repeat_spill)
+
+    def test_foreign_start_request_id_keeps_original_lease(self):
+        """Чужой ID не присваивает себе уже активное поколение."""
+        service = self._service()
+        started = service.handle_start_recording({
+            "source": "meeting",
+            "start_request_id": "meeting-owner-A",
+        })
+
+        foreign = service.handle_start_recording({
+            "source": "meeting",
+            "start_request_id": "meeting-owner-B",
+        })
+
+        self.assertEqual(foreign["status"], "already_recording")
+        self.assertEqual(
+            foreign["generation_token"],
+            started["generation_token"],
+        )
+        self.assertEqual(
+            foreign["start_request_id"],
+            "meeting-owner-A",
+        )
+        self.assertEqual(
+            service._active_generation["start_request_id"],
+            "meeting-owner-A",
+        )
+
+    def test_invalid_start_request_id_is_rejected_before_capture(self):
+        """Тип, пустота и верхняя граница проверяются до recorder.start."""
+        invalid_values = (None, 7, "", "x" * 257)
+        for invalid_value in invalid_values:
+            with self.subTest(invalid_value=invalid_value):
+                recorder = _FakeRecorder()
+                service = self._service(recorder=recorder)
+
+                with self.assertRaises(ValueError):
+                    service.handle_start_recording({
+                        "source": "dictation",
+                        "start_request_id": invalid_value,
+                    })
+
+                self.assertFalse(recorder.is_recording)
+                self.assertIsNone(service._active_generation)
 
     def test_promote_preserves_token_and_advances_revision(self):
         service = self._service()
@@ -469,6 +551,7 @@ class RecordingGenerationTest(unittest.TestCase):
             repeated["generation_token"],
             started["generation_token"],
         )
+        self.assertIsNone(repeated["start_request_id"])
 
     def test_promote_does_not_reenter_recorder_or_replace_live_spill(self):
         """Owner-переход решается до recorder.start и placeholder B."""

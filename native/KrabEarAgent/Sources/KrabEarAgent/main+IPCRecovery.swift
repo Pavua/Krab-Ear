@@ -28,6 +28,45 @@ extension AgentAppDelegate {
         }
     }
 
+    /// Асинхронный вариант для @MainActor call-site: и socket I/O, и возможный
+    /// restart выполняются вне главного run loop. Не использовать для R2 stop —
+    /// там собственный generation-aware budget RecordingStopCoordinator.
+    func callAsyncWithRecovery(
+        method: String,
+        params: [String: Any] = [:],
+        timeoutSec: Int = IPCClient.defaultTimeoutSec
+    ) async throws -> [String: Any] {
+        let client = ipcClient
+        do {
+            return try await client.callAsync(
+                method: method,
+                params: params,
+                timeoutSec: timeoutSec
+            )
+        } catch let error as IPCError where Self.isConnectionError(error) {
+            logger.warn(
+                "Async IPC ошибка соединения " +
+                "(\(error.localizedDescription)), проверяю backend..."
+            )
+            let supervisor = backendSupervisor
+            let restarted = await Task.detached {
+                supervisor.restartIfDead()
+            }.value
+            guard restarted else {
+                logger.error(
+                    "Не удалось перезапустить backend (лимит перезапусков)"
+                )
+                throw error
+            }
+            logger.info("Backend перезапущен, повторяю async вызов \(method)")
+            return try await client.callAsync(
+                method: method,
+                params: params,
+                timeoutSec: timeoutSec
+            )
+        }
+    }
+
     static func isConnectionError(_ error: IPCError) -> Bool {
         switch error {
         case .socketCreateFailed, .socketConnectFailed, .writeFailed, .readFailed:

@@ -21,6 +21,22 @@
 
 import AppKit
 
+/// Чистая политика публикации recovery-route осиротевшего quick start.
+///
+/// `activeToken == nil` сам по себе не означает пустой маршрут: новый Q2
+/// может уже иметь UI-epoch, но ещё ждать backend-token.
+enum QuickCaptureOrphanRecoveryPolicy {
+    static func canAdopt(
+        activeToken: String?,
+        startRequestPending: Bool,
+        quickCaptureActive: Bool
+    ) -> Bool {
+        activeToken == nil
+            && !startRequestPending
+            && !quickCaptureActive
+    }
+}
+
 extension AgentAppDelegate {
     static let quickCaptureCollectionName = "Быстрые заметки"
 
@@ -39,112 +55,542 @@ extension AgentAppDelegate {
         }
         lastToggleRequestAt = now
 
-        if quickCaptureActive { stopQuickCapture(); return }
+        // Pending/ambiguous Q1 остаётся самостоятельным маршрутом даже когда
+        // пользователь уже отменил его визуально. Новый Q2 до reconciliation
+        // мог бы перезаписать единственную ссылку на lease старого старта.
+        if quickCaptureActive
+            || quickCaptureStartRequestID != nil
+            || quickCaptureStartAmbiguousRequestID != nil {
+            stopQuickCapture()
+            return
+        }
         // Взаимное исключение: диктовка/обработка. Встреча отсекается своим
         // собственным гардом (main+MeetingPanel.swift); чужая активная запись
         // backend'а (если она всё же есть) отразится в status != "recording"
         // на старте ниже.
-        if isRecording || isProcessing {
+        if isRecording
+            || isProcessing
+            || recordingStartInFlight
+            || recordingStartAmbiguous {
             BackendToast.shared.show("Уже идёт запись — заметка недоступна")
             return
         }
-        quickCaptureActive = true
-        rebuildStatusMenu()
-        Task.detached { [weak self] in
-            guard let self else { return }
-            do {
-                let resp = try await self.ipcClient.callAsync(
-                    method: "start_recording",
-                    params: ["source": "quick_capture"],
-                    timeoutSec: 10
-                )
-                // callAsync возвращает полный конверт {ok, result, id} — реальные
-                // поля лежат в result (сверено с IPCClient.swift:400-480 и
-                // main+HotkeyRecording.swift:startRecording()).
-                let result = resp["result"] as? [String: Any] ?? [:]
-                // Успешный статус start_recording — "recording" (НЕ "ok"; сверено
-                // с recording_core_service.py:367). C3a ревью F1: "already_recording"
-                // — идемпотентный ответ recorder'а, УЖЕ занятого чужой записью
-                // (например meeting, который не выставляет Swift-флаг isRecording
-                // и потому не отсекается гардом выше) — это ОТКАЗ, а не успех:
-                // трактовать его как успех означало бы угнать чужую запись (второе
-                // нажатие шлёт stop_recording на ОБЩИЙ recorder — see
-                // meeting_session_service.py:403-410 self-finalize с item_id=None).
-                let status = result["status"] as? String ?? ""
-                // Возвращает true только на настоящем успешном старте (не на
-                // осиротевшем/отвергнутом) — только тогда имеет смысл живьём
-                // проверять quick_capture_show_panel и показывать панель ниже.
-                let started: Bool = await MainActor.run {
-                    if status == "recording" {
-                        // C3a ревью F2b: этот completion мог доехать ПОСЛЕ того,
-                        // как stopQuickCapture() (двойной тап/гонка) уже сбросил
-                        // quickCaptureActive и отправил свой собственный
-                        // stop_recording — backend в этот момент мог быть ещё
-                        // idle и потому теперь стартовал запись, которую больше
-                        // некому остановить. Если состояние уже не совпадает с
-                        // тем, что ожидал этот старт, — не применяем success-эффекты,
-                        // а сами останавливаем осиротевшую запись fire-and-forget.
-                        guard self.quickCaptureActive else {
-                            // Локальный `let` вместо self.ipcClient внутри замыкания —
-                            // тот же приём, что startQuickCaptureHotkeyMonitor(): IPCClient
-                            // сам Sendable, а AgentAppDelegate (self) — нет.
-                            let orphanIpc = self.ipcClient
-                            Task.detached {
-                                _ = try? await orphanIpc.callAsync(
-                                    method: "stop_recording",
-                                    params: ["source": "quick_capture"],
-                                    timeoutSec: 120)
-                            }
-                            return false
-                        }
-                        // wake-word пауза + оверлей; streaming-paste подавлен гардом.
-                        self.startRealtimeOverlayPolling()
-                        BackendToast.shared.show("Быстрая заметка: запись…")
-                        return true
-                    } else {
-                        self.quickCaptureActive = false
-                        self.rebuildStatusMenu()
-                        let message = status == "already_recording"
-                            ? "Микрофон занят другой записью"
-                            : "Не удалось начать заметку"
-                        BackendToast.shared.show(message)
-                        return false
-                    }
-                }
-                if started {
-                    await self.showQuickCapturePanelIfEnabled()
-                }
-            } catch {
-                await MainActor.run {
-                    self.quickCaptureActive = false
-                    self.rebuildStatusMenu()
-                    BackendToast.shared.show("Не удалось начать заметку")
-                }
-            }
+        guard recordingStartGate.tryAcquire() else {
+            BackendToast.shared.show("Предыдущий старт ещё подтверждается")
+            return
         }
+        quickCaptureStartGateHeld = true
+        quickCaptureActive = true
+        let startRequestID = UUID()
+        quickCaptureStartRequestID = startRequestID
+        quickCaptureStartAmbiguousRequestID = nil
+        quickCaptureStopRequestedStartID = nil
+        quickCaptureStopRequestedDuringAmbiguousStart = false
+        rebuildStatusMenu()
+        Task { @MainActor [weak self] in
+            await self?.startQuickCapture(requestID: startRequestID)
+        }
+    }
+
+    /// Выполнить единственный side-effect start Quick Capture. Ошибку канала
+    /// не повторяем: только read-only reconciliation вправе следовать за ней.
+    private func startQuickCapture(requestID: UUID) async {
+        defer { releaseQuickCaptureStartGateIfHeld() }
+        do {
+            let response = try await ipcClient.callAsync(
+                method: "start_recording",
+                params: [
+                    "source": "quick_capture",
+                    "start_request_id": requestID.uuidString,
+                ],
+                timeoutSec: 10
+            )
+            let result = response["result"] as? [String: Any] ?? [:]
+            let returnedStartRequestID = result["start_request_id"] as? String
+            if let returnedStartRequestID,
+               !returnedStartRequestID.isEmpty,
+               returnedStartRequestID != requestID.uuidString {
+                throw IPCError.invalidResponse
+            }
+            await handleQuickCaptureStartResponse(
+                result,
+                requestID: requestID
+            )
+        } catch {
+            guard
+                quickCaptureStartRequestID == requestID
+                    || quickCaptureStartAmbiguousRequestID == requestID
+            else {
+                return
+            }
+            if isAmbiguousStartError(error) {
+                quickCaptureStartAmbiguousRequestID = requestID
+                quickCaptureStopRequestedDuringAmbiguousStart = (
+                    quickCaptureStopRequestedDuringAmbiguousStart
+                    || quickCaptureStopRequestedStartID == requestID
+                )
+                await reconcileAmbiguousQuickCaptureStart(requestID: requestID)
+                return
+            }
+            clearQuickCaptureStartAttempt(requestID: requestID)
+            BackendToast.shared.show("Не удалось начать заметку")
+        }
+    }
+
+    /// Разобрать единственный полученный ответ start и применить его только к
+    /// текущему Q1. Отменённый Q1 компенсируется исключительно полным lease.
+    private func handleQuickCaptureStartResponse(
+        _ result: [String: Any],
+        requestID: UUID
+    ) async {
+        let status = result["status"] as? String ?? ""
+        let rawGenerationToken = result["generation_token"] as? String
+        let generationToken = rawGenerationToken?.isEmpty == false
+            ? rawGenerationToken
+            : nil
+        let ownerRevision = result["owner_revision"] as? Int
+        let ownsStartRequest = quickCaptureStartRequestID == requestID
+
+        guard status == "recording" else {
+            guard ownsStartRequest else { return }
+            clearQuickCaptureStartAttempt(requestID: requestID)
+            let message = status == "already_recording"
+                ? "Микрофон занят другой записью"
+                : "Не удалось начать заметку"
+            BackendToast.shared.show(message)
+            return
+        }
+
+        let stopRequested = (
+            quickCaptureStopRequestedStartID == requestID
+            || quickCaptureStopRequestedDuringAmbiguousStart
+        )
+        guard ownsStartRequest && quickCaptureActive && !stopRequested else {
+            if ownsStartRequest {
+                quickCaptureStartRequestID = nil
+            }
+            await stopOrphanQuickCapture(
+                generationToken: generationToken,
+                ownerRevision: ownerRevision,
+                originRequestID: requestID
+            )
+            return
+        }
+
+        quickCaptureStartRequestID = nil
+        quickCaptureStartAmbiguousRequestID = nil
+        quickCaptureStopRequestedStartID = nil
+        quickCaptureStopRequestedDuringAmbiguousStart = false
+        activeGenerationToken = generationToken
+        activeGenerationOwner = "quick_capture"
+        activeGenerationOwnerRevision = ownerRevision
+        activeGenerationStartRequestID = result["start_request_id"] as? String
+        recordingStopRecoveryPending = false
+        if generationToken == nil {
+            // Прямой legacy-ответ допускается только для обычной записи. В
+            // cancel/ambiguity tokenless компенсация ниже жёстко запрещена.
+            logger.warn(
+                "quick_capture start: backend не вернул generation_token; " +
+                "обычная остановка останется legacy-совместимой"
+            )
+        }
+        startRealtimeOverlayPolling()
+        BackendToast.shared.show("Быстрая заметка: запись…")
+        await showQuickCapturePanelIfEnabled()
+    }
+
+    /// Отпустить общий start-gate ровно один раз после ответа либо snapshot.
+    private func releaseQuickCaptureStartGateIfHeld() {
+        guard quickCaptureStartGateHeld else { return }
+        quickCaptureStartGateHeld = false
+        recordingStartGate.release()
+    }
+
+    /// Снять только UI-ссылки конкретного Q1. Глобальный lease другого режима
+    /// намеренно не меняется: он может быть опубликован поздним meeting-start.
+    private func clearQuickCaptureStartAttempt(requestID: UUID) {
+        if quickCaptureStartRequestID == requestID {
+            quickCaptureStartRequestID = nil
+        }
+        if quickCaptureStartAmbiguousRequestID == requestID {
+            quickCaptureStartAmbiguousRequestID = nil
+        }
+        if quickCaptureStopRequestedStartID == requestID {
+            quickCaptureStopRequestedStartID = nil
+        }
+        quickCaptureStopRequestedDuringAmbiguousStart = false
+        quickCaptureActive = false
+        isProcessing = false
+        refreshStatusItemTitle()
+        rebuildStatusMenu()
     }
 
     func stopQuickCapture() {
         stopRealtimeOverlayPolling()
-        Task.detached { [weak self] in
-            guard let self else { return }
-            defer {
-                Task { await MainActor.run {
-                    self.quickCaptureActive = false
-                    self.rebuildStatusMenu()
-                } }
+        // Pending start не имеет доказанного lease. Фиксируем отмену Q1, но
+        // никогда не отправляем source-only stop: он мог бы остановить meeting
+        // или dictation, успевшие занять общий recorder.
+        if let requestID = quickCaptureStartRequestID
+            ?? quickCaptureStartAmbiguousRequestID {
+            quickCaptureStopRequestedStartID = requestID
+            quickCaptureStopRequestedDuringAmbiguousStart = (
+                quickCaptureStartAmbiguousRequestID == requestID
+            )
+            quickCaptureActive = false
+            isProcessing = true
+            refreshStatusItemTitle()
+            rebuildStatusMenu()
+            if quickCaptureStartAmbiguousRequestID == requestID,
+               !quickCaptureStartGateHeld {
+                Task { @MainActor [weak self] in
+                    await self?.reconcileAmbiguousQuickCaptureStart(
+                        requestID: requestID
+                    )
+                }
             }
-            do {
-                let resp = try await self.ipcClient.callAsync(
-                    method: "stop_recording",
-                    params: ["source": "quick_capture"],
-                    timeoutSec: 120)
-                let result = resp["result"] as? [String: Any] ?? [:]
-                await self.handleQuickCaptureResult(result)
-            } catch {
-                await MainActor.run { BackendToast.shared.show("Ошибка завершения заметки") }
-            }
+            return
         }
+
+        guard activeGenerationOwner == "quick_capture" else {
+            isProcessing = false
+            refreshStatusItemTitle()
+            rebuildStatusMenu()
+            return
+        }
+        isProcessing = true
+        refreshStatusItemTitle()
+        rebuildStatusMenu()
+        let stopToken = activeGenerationToken
+        let stopOwnerRevision = activeGenerationOwnerRevision
+        Task { @MainActor [weak self] in
+            await self?.performQuickCaptureStop(
+                stopToken: stopToken,
+                stopOwnerRevision: stopOwnerRevision
+            )
+        }
+    }
+
+    /// Остановить живую заметку через общий bounded coordinator.
+    private func performQuickCaptureStop(
+        stopToken: String?,
+        stopOwnerRevision: Int?
+    ) async {
+        let stopOwner = "quick_capture"
+        let request = quickCaptureStopRequest(
+            generationToken: stopToken,
+            ownerRevision: stopOwnerRevision
+        )
+        let client = ipcClient
+        let outcome = await RecordingStopCoordinator.execute(
+            request: request,
+            operation: { repeatedRequest in
+                try await client.callAsync(
+                    method: repeatedRequest.method,
+                    params: repeatedRequest.params,
+                    timeoutSec: repeatedRequest.timeoutSec
+                )
+            }
+        )
+
+        isProcessing = false
+        let routeStillMatches = (
+            activeGenerationOwner == stopOwner
+            && activeGenerationToken == stopToken
+            && activeGenerationOwnerRevision == stopOwnerRevision
+        )
+        guard routeStillMatches else {
+            logger.warn(
+                "Поздний quick_capture stop-ответ не меняет новое поколение"
+            )
+            refreshStatusItemTitle()
+            rebuildStatusMenu()
+            return
+        }
+
+        switch outcome.decision {
+        case .surfaceAsIs where outcome.hasTerminalResponse:
+            // Пока Notes/Obsidian/collection post-processing делает await,
+            // новый toggle не должен открыть reentrant stop/start.
+            isProcessing = true
+            quickCaptureActive = false
+            await handleQuickCaptureResult(outcome.result ?? [:])
+            clearQuickCaptureStopRoute()
+        case .foreignOwner:
+            clearQuickCaptureStopRoute()
+            BackendToast.shared.show(
+                "Идёт другая запись — быстрая заметка её не остановила"
+            )
+        case .recoveryPending:
+            retainQuickCaptureStopRecovery(
+                result: outcome.result,
+                message: "Аудио ещё восстанавливается — нажмите остановку ещё раз"
+            )
+        case .finalizationSlow:
+            retainQuickCaptureStopRecovery(
+                result: outcome.result,
+                message: "Финализация затянулась — результат появится в истории"
+            )
+        case .giveUpRescuePending:
+            retainQuickCaptureStopRecovery(
+                result: outcome.result,
+                message: "Остановка не подтверждена; запись восстановится при следующем запуске"
+            )
+        case .surfaceAsIs:
+            retainQuickCaptureStopRecovery(
+                result: outcome.result,
+                message: "Ответ остановки не получен — нажмите остановку ещё раз"
+            )
+        case .retry, .retryRecorderStop, .pollAgain:
+            logger.error(
+                "RecordingStopCoordinator вернул промежуточное quick_capture решение"
+            )
+            retainQuickCaptureStopRecovery(
+                result: outcome.result,
+                message: "Остановка не подтверждена — повторите действие"
+            )
+        }
+    }
+
+    /// Сверить потерянный Quick start с backend. Snapshot без точного request
+    /// ID не даёт права ни принять, ни скомпенсировать запись.
+    private func reconcileAmbiguousQuickCaptureStart(requestID: UUID) async {
+        guard
+            quickCaptureStartRequestID == requestID
+                || quickCaptureStartAmbiguousRequestID == requestID
+        else {
+            return
+        }
+
+        quickCaptureStartAmbiguousRequestID = requestID
+        let snapshot = await recordingStateSnapshot()
+        let decision = RecordingStartAmbiguityPolicy.decide(
+            snapshot: snapshot,
+            expectedOwner: "quick_capture",
+            expectedStartRequestID: requestID.uuidString,
+            allowsMeetingPromotion: false
+        )
+        let stopRequested = (
+            quickCaptureStopRequestedStartID == requestID
+            || quickCaptureStopRequestedDuringAmbiguousStart
+        )
+
+        switch decision {
+        case .retryReconciliation:
+            quickCaptureActive = !stopRequested
+            isProcessing = stopRequested
+            BackendToast.shared.show(
+                "Старт заметки не подтверждён; новый старт заблокирован до проверки backend"
+            )
+            refreshStatusItemTitle()
+            rebuildStatusMenu()
+        case let .adoptExpectedOwner(generationToken):
+            guard
+                let generationToken,
+                !generationToken.isEmpty,
+                let ownerRevision = snapshot.ownerRevision
+            else {
+                // У нового backend этот guard недостижим; при несовместимом
+                // снимке сохраняем Q1 неизвестным, а не отправляем legacy stop.
+                quickCaptureStartAmbiguousRequestID = requestID
+                return
+            }
+            quickCaptureStartRequestID = nil
+            quickCaptureStartAmbiguousRequestID = nil
+            quickCaptureStopRequestedStartID = nil
+            quickCaptureStopRequestedDuringAmbiguousStart = false
+            activeGenerationToken = generationToken
+            activeGenerationOwner = "quick_capture"
+            activeGenerationOwnerRevision = ownerRevision
+            activeGenerationStartRequestID = requestID.uuidString
+            recordingStopRecoveryPending = false
+            if stopRequested {
+                quickCaptureActive = true
+                isProcessing = true
+                await performQuickCaptureStop(
+                    stopToken: generationToken,
+                    stopOwnerRevision: ownerRevision
+                )
+                return
+            }
+            quickCaptureActive = true
+            isProcessing = false
+            startRealtimeOverlayPolling()
+            BackendToast.shared.show("Быстрая заметка: запись…")
+            refreshStatusItemTitle()
+            rebuildStatusMenu()
+            await showQuickCapturePanelIfEnabled()
+        case .awaitPromotedMeeting:
+            // Для Quick Capture такой promote не является разрешённым
+            // переходом: текущий Q1 остаётся неизвестным до следующего read.
+            quickCaptureStartAmbiguousRequestID = requestID
+            quickCaptureActive = !stopRequested
+            isProcessing = stopRequested
+        case .rejectAsIdleOrForeign:
+            if snapshot.isRecording && snapshot.owner == "quick_capture" {
+                // Same-source, но чужой/legacy request ID: нельзя отдать его
+                // следующему Q2 и нельзя остановить без доказанного lease.
+                quickCaptureStartRequestID = requestID
+                quickCaptureStartAmbiguousRequestID = requestID
+                quickCaptureActive = !stopRequested
+                isProcessing = stopRequested
+                BackendToast.shared.show(
+                    "Заметка не подтверждена; ожидаю безопасную сверку backend"
+                )
+                refreshStatusItemTitle()
+                rebuildStatusMenu()
+                return
+            }
+            clearQuickCaptureStartAttempt(requestID: requestID)
+            BackendToast.shared.show("Старт заметки не подтвердился; запись не тронута")
+        }
+    }
+
+    /// Компенсировать отменённый/устаревший Q1. Непустые token и revision
+    /// обязательны: source-only компенсация здесь запрещена без исключений.
+    private func stopOrphanQuickCapture(
+        generationToken: String?,
+        ownerRevision: Int?,
+        originRequestID: UUID
+    ) async {
+        guard
+            let generationToken,
+            !generationToken.isEmpty,
+            let ownerRevision,
+            ownerRevision > 0
+        else {
+            // Оставляем Q1 в fail-safe ambiguity. Старый backend может не
+            // поддерживать lease, но компенсировать его tokenless опаснее.
+            if activeGenerationToken == nil,
+               activeGenerationOwner == nil {
+                quickCaptureStartRequestID = originRequestID
+                quickCaptureStartAmbiguousRequestID = originRequestID
+                quickCaptureStopRequestedStartID = originRequestID
+                quickCaptureStopRequestedDuringAmbiguousStart = true
+                quickCaptureActive = false
+                isProcessing = false
+                BackendToast.shared.show(
+                    "Отмена заметки ожидает подтверждения lease backend"
+                )
+                refreshStatusItemTitle()
+                rebuildStatusMenu()
+            }
+            return
+        }
+
+        let request = quickCaptureStopRequest(
+            generationToken: generationToken,
+            ownerRevision: ownerRevision
+        )
+        let client = ipcClient
+        let outcome = await RecordingStopCoordinator.execute(
+            request: request,
+            operation: { repeatedRequest in
+                try await client.callAsync(
+                    method: repeatedRequest.method,
+                    params: repeatedRequest.params,
+                    timeoutSec: repeatedRequest.timeoutSec
+                )
+            }
+        )
+
+        let mayMutateUI = QuickCaptureOrphanRecoveryPolicy.canAdopt(
+            activeToken: activeGenerationToken,
+            startRequestPending: quickCaptureStartRequestID != nil,
+            quickCaptureActive: quickCaptureActive
+        ) && quickCaptureStartAmbiguousRequestID == nil
+        guard mayMutateUI else {
+            logger.warn(
+                "Orphan quick_capture stop не меняет более новый UI-route"
+            )
+            return
+        }
+
+        quickCaptureStopRequestedStartID = nil
+        quickCaptureStopRequestedDuringAmbiguousStart = false
+        if outcome.decision == .foreignOwner {
+            // Строгий CAS доказал, что G1 уже повышен/передан другому owner.
+            // Ни recovery-route, ни повторный stop Quick Capture здесь нельзя
+            // публиковать: это был бы UI-способ присвоить чужую запись.
+            isProcessing = false
+            BackendToast.shared.show(
+                "Другая запись уже владеет заметкой; остановка не выполнена"
+            )
+            refreshStatusItemTitle()
+            rebuildStatusMenu()
+            return
+        }
+        if outcome.hasTerminalResponse {
+            isProcessing = true
+            await handleQuickCaptureResult(outcome.result ?? [:])
+            isProcessing = false
+            refreshStatusItemTitle()
+            rebuildStatusMenu()
+            return
+        }
+
+        activeGenerationToken = generationToken
+        activeGenerationOwner = "quick_capture"
+        activeGenerationOwnerRevision = ownerRevision
+        activeGenerationStartRequestID = originRequestID.uuidString
+        recordingStopRecoveryPending = true
+        quickCaptureActive = true
+        quickCapturePanelController?.setRecording(true)
+        BackendToast.shared.show(
+            "Заметка ещё восстанавливается — нажмите остановку ещё раз"
+        )
+        rebuildStatusMenu()
+    }
+
+    /// Собрать immutable stop-запрос. Новый lease получает строгий CAS, тогда
+    /// как обычный подтверждённый legacy start сохраняет совместимый fallback.
+    private func quickCaptureStopRequest(
+        generationToken: String?,
+        ownerRevision: Int?
+    ) -> RecordingStopRequest {
+        var params: [String: Any] = ["source": "quick_capture"]
+        if let generationToken, !generationToken.isEmpty {
+            params["generation_token"] = generationToken
+        }
+        if let generationToken, !generationToken.isEmpty,
+           let ownerRevision {
+            params["expected_owner_revision"] = ownerRevision
+        }
+        return RecordingStopRequest(
+            method: "stop_recording",
+            params: params,
+            timeoutSec: 120
+        )
+    }
+
+    private func retainQuickCaptureStopRecovery(
+        result: [String: Any]?,
+        message: String
+    ) {
+        activeGenerationOwner = "quick_capture"
+        recordingStopRecoveryPending = true
+        quickCaptureActive = true
+        quickCapturePanelController?.setRecording(true)
+        let rawPreview = (result?["preview_text"] as? String ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let preview = rawPreview.isEmpty
+            ? ""
+            : ": \(String(rawPreview.prefix(120)))"
+        BackendToast.shared.show(message + preview)
+        refreshStatusItemTitle()
+        rebuildStatusMenu()
+    }
+
+    private func clearQuickCaptureStopRoute() {
+        activeGenerationToken = nil
+        activeGenerationOwner = nil
+        activeGenerationOwnerRevision = nil
+        activeGenerationStartRequestID = nil
+        recordingStopRecoveryPending = false
+        isProcessing = false
+        quickCaptureActive = false
+        quickCapturePanelController?.setRecording(false)
+        refreshStatusItemTitle()
+        rebuildStatusMenu()
     }
 
     private func handleQuickCaptureResult(_ result: [String: Any]) async {

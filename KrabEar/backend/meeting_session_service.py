@@ -130,6 +130,26 @@ class _MeetingSession:
     started_at: float = field(default_factory=time.time)
     promoted: bool = False
     language: str = "ru"
+    # Токен выдаёт только RecordingCore при старте G1. Meeting-слой хранит и
+    # возвращает его как opaque-значение: сам UUID здесь никогда не генерируется.
+    generation_token: str | None = None
+    # CAS-ревизия владельца относится к тому же G1, что и token. При promote
+    # token остаётся прежним, а revision растёт; поэтому stop обязан предъявить
+    # оба значения, иначе запоздалый meeting-stop способен затронуть уже чужой
+    # режим записи.
+    owner_revision: int | None = None
+    # Непрозрачный идентификатор клиентского запроса из исходного Core-start.
+    # При promote это именно идентификатор первоначальной диктовки, а не
+    # позднего meeting-клика: Core хранит его неизменным для доказательства
+    # происхождения G1.
+    start_request_id: str | None = None
+    # После recorder_timeout/stop_in_progress сессия остаётся retry-handle.
+    # Отдельный флаг не даёт фоновому воркеру ошибочно self-finalize её по
+    # временному ``recorder.is_recording == False``.
+    stop_retry_pending: bool = False
+    # ``meeting.finalizing`` описывает начало одной логической финализации, а
+    # не каждую попытку physical stop того же поколения.
+    finalizing_emitted: bool = False
     cursor_sec: float = 0.0
     chunks: list[str] = field(default_factory=list)
     transcript_len: int = 0
@@ -207,6 +227,10 @@ class MeetingSessionService:
         # конкурентный/повторный вызов не должен звать handle_stop_recording
         # и эмиттить meeting.finished дважды.
         self._stopping = False
+        # Снимок G1 берётся в линеаризационной точке остановки. Он остаётся
+        # доступен конкурентному IPC даже после окончательного снятия, когда
+        # self._session уже очищен, но первый stop ещё не вернул ответ.
+        self._stopping_generation_token: str | None = None
 
     # ------------------------------------------------------------------ IPC
 
@@ -231,7 +255,11 @@ class MeetingSessionService:
             if self._session is not None and not self._session.privacy_stopped:
                 return {"ok": True, "already_active": True,
                         "started_at": self._session.started_at,
-                        "promoted": self._session.promoted}
+                        "promoted": self._session.promoted,
+                        "generation_token": self._session.generation_token,
+                        "owner_revision": self._session.owner_revision,
+                        "start_request_id": self._session.start_request_id,
+                        "stop_retry_pending": self._session.stop_retry_pending}
             # C2a Task 10 (аудит HIGH): предыдущий GPU-слот-воркер ещё жив
             # (застрявший MLX-вызов пережил 30с join в _stop_worker) —
             # второй воркер параллельно недопустим (см. докстринг модуля).
@@ -280,8 +308,16 @@ class MeetingSessionService:
             # микрофона после сообщения UI «встреча не запущена».
             self._start_worker()
             self._raise_if_closed()
+            # ``start_request_id`` создаёт клиент до IPC и должен дойти до
+            # Core без генерации/нормализации в meeting-слое. Отсутствие ключа
+            # сохраняет legacy-совместимость старого нативного агента.
+            start_params: dict[str, Any] = {"source": "meeting"}
+            if "start_request_id" in params:
+                start_params["start_request_id"] = params.get(
+                    "start_request_id"
+                )
             start_resp = self._recording_core.handle_start_recording(
-                {"source": "meeting"}
+                start_params
             )
             status = str(start_resp.get("status", ""))
             if status not in {"recording", "already_recording"}:
@@ -289,10 +325,34 @@ class MeetingSessionService:
                     f"meeting: recorder start rejected with status={status}"
                 )
             recording_status = status
+            raw_generation_token = start_resp.get("generation_token")
+            # R2-Core всегда выдаёт opaque token. Старый backend ещё может
+            # вернуть его без поля; такой legacy-режим сохраняем только для
+            # совместимости до одновременного рестарта agent/backend и никогда
+            # не подменяем самодельным UUID.
+            generation_token = (
+                raw_generation_token
+                if isinstance(raw_generation_token, str)
+                and bool(raw_generation_token)
+                else None
+            )
             owner_promoted = bool(start_resp.get("owner_promoted", False))
             raw_owner_revision = start_resp.get("owner_revision")
-            if raw_owner_revision is not None:
-                owner_revision = int(raw_owner_revision)
+            # Строгий stop принимает только положительный int. Некорректный
+            # ответ старого/duck-typed Core не приводим к int молча: тогда
+            # meeting остаётся в legacy-режиме вместо ложного CAS-lease.
+            if (
+                type(raw_owner_revision) is int
+                and raw_owner_revision > 0
+            ):
+                owner_revision = raw_owner_revision
+            raw_start_request_id = start_resp.get("start_request_id")
+            start_request_id = (
+                raw_start_request_id
+                if isinstance(raw_start_request_id, str)
+                and bool(raw_start_request_id)
+                else None
+            )
             self._raise_if_closed()
             promoted = status == "already_recording"
             cursor_sec = 0.0
@@ -307,6 +367,9 @@ class MeetingSessionService:
             with self._lock:
                 session.promoted = promoted
                 session.cursor_sec = cursor_sec
+                session.generation_token = generation_token
+                session.owner_revision = owner_revision
+                session.start_request_id = start_request_id
             # RecordingCore на fresh start освобождает brain lease; встреча
             # должна приобрести его ПОСЛЕ успешного старта, а не до него.
             self._acquire_lease()
@@ -411,21 +474,70 @@ class MeetingSessionService:
 
         logger.info("meeting: сессия запущена", extra={
             "promoted": promoted, "language": session.language})
-        return {"ok": True, "promoted": promoted, "started_at": session.started_at}
+        return {
+            "ok": True,
+            "promoted": promoted,
+            "started_at": session.started_at,
+            "generation_token": session.generation_token,
+            "owner_revision": session.owner_revision,
+            "start_request_id": session.start_request_id,
+        }
 
     def handle_meeting_stop(self, params: dict[str, Any]) -> dict[str, Any]:
         """Остановить встречу, не удерживая transition-lock на тяжёлом STT."""
         with self._lock:
+            session = self._session
+            token_is_supplied = "generation_token" in params
+            supplied_token = params.get("generation_token")
+            if (
+                token_is_supplied
+                and (
+                    not isinstance(supplied_token, str)
+                    or not supplied_token
+                )
+            ):
+                # Пустой/нестроковый token — не legacy. Явно предъявленное
+                # неверное значение не имеет права молча подменяться token'ом
+                # живой сессии и трогать Core.
+                return self._unknown_generation_response(supplied_token)
+            if (
+                token_is_supplied
+                and session is not None
+                and supplied_token != session.generation_token
+            ):
+                return self._unknown_generation_response(supplied_token)
             if self._stopping:
-                return {"ok": True, "already_stopping": True}
+                # После окончательного снятия self._session уже None, но чужой
+                # токен не вправе маскироваться под идущую остановку. Legacy-
+                # клиент без токена получает серверный G1 из снимка первого stop.
+                stopping_token = self._stopping_generation_token
+                if (
+                    token_is_supplied
+                    and supplied_token != stopping_token
+                ):
+                    return self._unknown_generation_response(supplied_token)
+                return {
+                    "ok": True,
+                    "status": "stop_in_progress",
+                    "generation_token": stopping_token,
+                    "active": session is not None,
+                }
             # Флаг ставится ДО ожидания setup-lock: следующий start либо ждёт
             # текущий setup, либо быстро получает meeting_stopping.
             self._stopping = True
+            self._stopping_generation_token = (
+                session.generation_token
+                if session is not None
+                else supplied_token
+                if token_is_supplied
+                else None
+            )
         try:
             return self._handle_meeting_stop_serialized(params)
         finally:
             with self._lock:
                 self._stopping = False
+                self._stopping_generation_token = None
 
     def _handle_meeting_stop_serialized(
         self,
@@ -440,6 +552,15 @@ class MeetingSessionService:
         в finally, так что независимые ПОСЛЕДОВАТЕЛЬНЫЕ вызовы (новая сессия
         после предыдущего stop) не залипают.
         """
+        token_is_supplied = "generation_token" in params
+        supplied_token = params.get("generation_token")
+        session: _MeetingSession | None = None
+        generation_token: str | None = None
+        # Событие finalizing нельзя публиковать до ответа строгого Core-stop:
+        # owner_mismatch означает, что эта сессия уже не имеет права
+        # финализировать чужой G1 даже только на уровне UI.
+        finalizing_requested = False
+
         with self._transition_lock:
             with self._lock:
                 promote_recovery = (
@@ -474,29 +595,250 @@ class MeetingSessionService:
                 }
 
             if self._settings_get("privacy_mode_enabled", False):
-                # privacy включили посреди встречи: сессию всё равно закрываем,
-                # но запись останавливает обычный privacy-путь записи.
-                self._teardown_session(emit_finished=False)
-                return {"ok": True, "skipped": "privacy_mode"}
+                # Privacy, включённый посреди встречи, сохраняет прежний
+                # fail-closed контракт: live-сессию закрываем без Core-
+                # финализации, history и meeting.finished. Обычный privacy-
+                # lifecycle записи отвечает за физическую остановку отдельно.
+                with self._lock:
+                    privacy_session = self._session
+                    privacy_token = (
+                        privacy_session.generation_token
+                        if privacy_session is not None
+                        else (
+                            supplied_token
+                            if isinstance(supplied_token, str)
+                            else None
+                        )
+                    )
+                teardown_finished = self._teardown_session(
+                    emit_finished=False,
+                    expected_session=privacy_session,
+                )
+                if not teardown_finished:
+                    with self._lock:
+                        # Ложный результат имеет значение только пока та же
+                        # сессия всё ещё удерживает живой дескриптор воркера.
+                        # Режим приватности скрывает данные, но G1 остаётся
+                        # повторяемым для остановки.
+                        retained = (
+                            privacy_session is not None
+                            and self._session is privacy_session
+                        )
+                        if retained:
+                            privacy_session.stop_retry_pending = True
+                            privacy_session.privacy_stopped = True
+                    if retained:
+                        return {
+                            "ok": True,
+                            "status": "stop_in_progress",
+                            "active": True,
+                            "privacy_mode_active": True,
+                            "generation_token": privacy_token,
+                        }
+                return {
+                    "ok": True,
+                    "status": "privacy_mode",
+                    "skipped": "privacy_mode",
+                    "active": False,
+                    "generation_token": privacy_token,
+                }
 
             with self._lock:
-                had_session = self._session is not None
-            if not had_session:
-                return {"ok": True, "active": False}
+                session = self._session
+                if session is not None:
+                    if token_is_supplied:
+                        if (
+                            not isinstance(supplied_token, str)
+                            or not supplied_token
+                            or supplied_token != session.generation_token
+                        ):
+                            return self._unknown_generation_response(
+                                supplied_token
+                            )
+                        generation_token = supplied_token
+                    else:
+                        generation_token = session.generation_token
 
-            self._stop_worker()
-            self._emit("meeting.finalizing", {})
+                    # Legacy session без token поддерживает только legacy stop.
+                    # Новый R2-путь всегда имеет token и ниже предъявляет его
+                    # даже если recorder уже успел сообщить False.
+                    if token_is_supplied and generation_token is None:
+                        return self._unknown_generation_response(
+                            supplied_token
+                        )
+                    if not session.finalizing_emitted:
+                        finalizing_requested = True
+                elif token_is_supplied:
+                    if not isinstance(supplied_token, str) or not supplied_token:
+                        return self._unknown_generation_response(supplied_token)
+                    # Потерянный IPC-ответ после terminal teardown: Core сам
+                    # вернёт immutable replay либо unknown_generation.
+                    generation_token = supplied_token
+                else:
+                    return {"ok": True, "active": False}
+
+            if session is not None:
+                worker_stopped = self._stop_worker()
+                # При неостановившемся worker Core ещё не вызывается. Флаг
+                # нужен сохранить прямо сейчас, чтобы повторные stop не
+                # дублировали lifecycle-событие того же retry-handle.
+                if (
+                    not worker_stopped
+                    and finalizing_requested
+                    and self._claim_finalizing_event(session)
+                ):
+                    self._emit("meeting.finalizing", {
+                        "generation_token": session.generation_token,
+                    })
+                if not worker_stopped:
+                    # Сохранившийся живой воркер мог уже пройти ранние
+                    # проверки перед самофинализацией. До подтверждённой смерти
+                    # Core нельзя трогать: сохраняем G1 и маркер повторной
+                    # попытки остановки.
+                    with self._lock:
+                        active = self._session is session
+                        if active:
+                            session.stop_retry_pending = True
+                    return self._meeting_stop_response(
+                        {"status": "stop_in_progress"},
+                        generation_token,
+                        active=active,
+                    )
 
         # STT/LLM-фазы могут длиться минуты. transition-lock уже отпущен, но
         # _stopping остаётся True и не даёт новому start вклиниться в финализацию.
-        stop_resp: dict[str, Any] = {}
-        if getattr(self._recorder, "is_recording", False):
-            stop_resp = self._recording_core.handle_stop_recording({
-                "source": "meeting",
+        stop_params: dict[str, Any] = {"source": "meeting"}
+        if generation_token is not None:
+            stop_params["generation_token"] = generation_token
+        if (
+            session is not None
+            and generation_token is not None
+            and session.owner_revision is not None
+        ):
+            # Строгая аренда намеренно берётся из серверного ответа
+            # meeting_start,
+            # а не из IPC meeting_stop: клиент не вправе понизить/подменить
+            # revision и превратить защищённый stop обратно в legacy-shadow.
+            stop_params["expected_owner_revision"] = session.owner_revision
+        stop_resp = self._recording_core.handle_stop_recording(stop_params)
+        status = str(stop_resp.get("status", "ok"))
+
+        # Core подтвердил, что stop относится к предъявленному владельцу. Лишь
+        # теперь это действительно начало финализации live-сессии. Для
+        # типизированных owner_mismatch/unknown_generation событие сознательно
+        # не публикуем.
+        if (
+            status not in {"owner_mismatch", "unknown_generation"}
+            and finalizing_requested
+            and self._claim_finalizing_event(session)
+        ):
+            self._emit("meeting.finalizing", {
+                "generation_token": session.generation_token,
             })
+
+        if status in {"recorder_timeout", "stop_in_progress"}:
+            if session is not None:
+                with self._lock:
+                    # Сессия могла быть снята только аварийным внешним путём;
+                    # identity-проверка не даёт протухшему RPC воскресить её.
+                    if self._session is session:
+                        session.stop_retry_pending = True
+            return self._meeting_stop_response(
+                stop_resp,
+                generation_token,
+                active=session is not None,
+            )
+
+        if status == "owner_mismatch":
+            # CAS отказ не является terminal stop. Сохраняем session вместе с
+            # её token+revision, чтобы поздний повтор не потерял strict lease
+            # и не скатился к legacy stop чужой записи. Worker уже остановлен,
+            # а stop_retry_pending блокирует его возможную self-finalization.
+            active = False
+            if session is not None:
+                with self._lock:
+                    if self._session is session:
+                        session.stop_retry_pending = True
+                        active = True
+            return self._meeting_stop_response(
+                stop_resp,
+                generation_token,
+                active=active,
+            )
+
+        # Unknown generation не имеет живого Core-объекта, за который можно
+        # безопасно повторять CAS. Live-обработку снимаем без finished и без
+        # повторного обращения к recorder.
+        if status == "unknown_generation":
+            if session is not None:
+                self._teardown_session(
+                    emit_finished=False,
+                    expected_session=session,
+                    stop_worker=False,
+                )
+            return self._meeting_stop_response(
+                stop_resp,
+                generation_token,
+                active=False,
+            )
+
+        # Terminal response (включая Core terminal-cache replay): history уже
+        # сохранена Core, поэтому только live session, существовавшая ДО этого
+        # вызова, имеет право эмиттить meeting.finished.
         item_id = stop_resp.get("history_id")
-        self._teardown_session(emit_finished=True, item_id=item_id)
-        return {"ok": True, "item_id": item_id}
+        if session is not None:
+            self._teardown_session(
+                emit_finished=True,
+                item_id=item_id,
+                expected_session=session,
+                stop_worker=False,
+            )
+        return self._meeting_stop_response(
+            stop_resp,
+            generation_token,
+            active=False,
+        )
+
+    def _claim_finalizing_event(self, session: _MeetingSession | None) -> bool:
+        """Однократно закрепить lifecycle-событие за ещё живой сессией."""
+        if session is None:
+            return False
+        with self._lock:
+            if self._session is not session or session.finalizing_emitted:
+                return False
+            session.finalizing_emitted = True
+            return True
+
+    @staticmethod
+    def _unknown_generation_response(token: Any) -> dict[str, Any]:
+        """Вернуть typed отказ без вызова RecordingCore."""
+        return {
+            "ok": True,
+            "status": "unknown_generation",
+            "generation_token": token,
+        }
+
+    @staticmethod
+    def _meeting_stop_response(
+        stop_resp: dict[str, Any],
+        generation_token: str | None,
+        *,
+        active: bool,
+    ) -> dict[str, Any]:
+        """Адаптировать ответ Core к IPC-контракту meeting-панели.
+
+        Верхнеуровневый ``ok`` остаётся True и для типизированных отказов
+        Core: иначе IPCClient превратит полезный status в общий backendError,
+        и Swift не сможет выбрать правильную ветку восстановления.
+        """
+        response = dict(stop_resp)
+        response["ok"] = True
+        response["status"] = str(stop_resp.get("status", "ok"))
+        response["active"] = active
+        response["generation_token"] = generation_token
+        if "history_id" in stop_resp:
+            response["item_id"] = stop_resp.get("history_id")
+        return response
 
     def handle_get_meeting_live_state(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC get_meeting_live_state: снимок для панели/поллинга."""
@@ -511,6 +853,10 @@ class MeetingSessionService:
                 "active": True,
                 "started_at": s.started_at,
                 "promoted": s.promoted,
+                "generation_token": s.generation_token,
+                "owner_revision": s.owner_revision,
+                "start_request_id": s.start_request_id,
+                "stop_retry_pending": s.stop_retry_pending,
                 "transcript_len": s.transcript_len,
                 "transcript_tail": s.tail(),
                 "items": list(s.items),
@@ -699,18 +1045,54 @@ class MeetingSessionService:
             self._worker = None
             return True
 
-    def _teardown_session(self, emit_finished: bool,
-                          item_id: Any = None) -> None:
-        self._stop_worker()
-        self._release_lease()
-        if emit_finished:
-            self._emit("meeting.finished", {"item_id": item_id})
+    def _teardown_session(
+        self,
+        emit_finished: bool,
+        item_id: Any = None,
+        *,
+        expected_session: _MeetingSession | None = None,
+        claim_finalizing: bool = False,
+        stop_worker: bool = True,
+    ) -> bool:
+        """Атомарно снять ровно ожидаемую сессию и вернуть факт владения.
+
+        Старый воркер хранит локальную ссылку на прежнюю _MeetingSession.
+        Поэтому проверка тождества и однократный захват события finalizing
+        делаются под одной блокировкой: проигравший гонку не опубликует
+        событие finished дважды.
+        """
+        if stop_worker and not self._stop_worker():
+            return False
         with self._lock:
+            session = self._session
+            if (
+                session is None
+                or (
+                    expected_session is not None
+                    and session is not expected_session
+                )
+            ):
+                return False
+            if claim_finalizing:
+                if session.finalizing_emitted:
+                    return False
+                session.finalizing_emitted = True
             self._session = None
             self._next_due = {}
             self._recovery_pending = False
             self._recovery_kind = None
             self._recovery_owner_revision = None
+        self._release_lease()
+        if claim_finalizing:
+            self._emit("meeting.finalizing", {
+                "generation_token": session.generation_token,
+            })
+        if emit_finished:
+            self._emit("meeting.finished", {
+                "item_id": item_id,
+                "generation_token": session.generation_token,
+            })
+        return True
 
     # ---------------------------------------------------------------- worker
 
@@ -754,6 +1136,12 @@ class MeetingSessionService:
         if s is None or s.privacy_stopped:
             return None
 
+        # recorder_timeout — не доказательство terminal stop: Core удерживает
+        # G1/spill для повторной попытки. Даже если прежний worker ещё успел
+        # проснуться, он не должен стереть этот recovery-handle самофинализацией.
+        if s.stop_retry_pending:
+            return None
+
         # privacy посреди встречи: глушим live-обработку (спека §3)
         if self._settings_get("privacy_mode_enabled", False):
             with self._lock:
@@ -764,12 +1152,15 @@ class MeetingSessionService:
 
         # запись остановили в обход meeting_stop -> финализируемся сами
         if not getattr(self._recorder, "is_recording", False):
-            self._release_lease()
-            self._emit("meeting.finalizing", {})
-            self._emit("meeting.finished", {"item_id": None})
-            with self._lock:
-                self._session = None
-                self._next_due = {}
+            self._teardown_session(
+                emit_finished=True,
+                item_id=None,
+                expected_session=s,
+                claim_finalizing=True,
+                # Этот путь исполняет сам worker: join себя всегда вернёт
+                # False, хотя сессией он ещё владеет.
+                stop_worker=False,
+            )
             return None
 
         self._renew_lease_if_due(now)
@@ -815,7 +1206,11 @@ class MeetingSessionService:
                 s.last_updated_ts = time.time()
         if text:
             self._emit("meeting.transcript_appended",
-                       {"chunk_text": text, "total_len": s.transcript_len})
+                       {
+                           "chunk_text": text,
+                           "total_len": s.transcript_len,
+                           "generation_token": s.generation_token,
+                       })
 
     def _job_items_llm(self, s: _MeetingSession) -> None:
         if self._extractor is None:
@@ -845,7 +1240,9 @@ class MeetingSessionService:
         if result.ok:
             self._emit("meeting.items_updated", {
                 "items": list(s.items), "decisions": list(s.decisions),
-                "questions": list(s.questions)})
+                "questions": list(s.questions),
+                "generation_token": s.generation_token,
+            })
 
     def _job_diar_window(self, s: _MeetingSession) -> None:
         """DIAR_WINDOW-тик (C2b, спека §2.5a): окно → WAV → диаризация+эмбеддинги
@@ -906,7 +1303,10 @@ class MeetingSessionService:
                 s.speakers = snap
                 s.degraded_diarization = False
                 s.last_updated_ts = time.time()
-            self._emit("meeting.speakers_updated", {"speakers": list(snap)})
+            self._emit("meeting.speakers_updated", {
+                "speakers": list(snap),
+                "generation_token": s.generation_token,
+            })
         except Exception:
             logger.warning("meeting: DIAR_WINDOW-тик упал", exc_info=True)
             with self._lock:

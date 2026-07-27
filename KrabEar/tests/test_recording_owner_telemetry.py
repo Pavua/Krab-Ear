@@ -500,13 +500,17 @@ class RecordingOwnerSourceWiringContractTest(unittest.TestCase):
             / "backend"
             / "meeting_session_service.py"
         ).read_text(encoding="utf-8")
-        self.assertRegex(
+        self.assertIn(
+            'stop_params: dict[str, Any] = {"source": "meeting"}',
             source,
-            re.compile(
-                r'handle_stop_recording\(\s*\{\s*'
-                r'"source":\s*"meeting",?\s*\}\s*\)',
-                re.DOTALL,
-            ),
+        )
+        self.assertIn(
+            'stop_params["generation_token"] = generation_token',
+            source,
+        )
+        self.assertIn(
+            "handle_stop_recording(stop_params)",
+            source,
         )
 
     def test_dictation_start_and_stop_identify_owner(self) -> None:
@@ -521,7 +525,10 @@ class RecordingOwnerSourceWiringContractTest(unittest.TestCase):
         )
         stop_start = source.index("func stopRecording()")
         stop_body = source[stop_start:]
-        self.assertIn('"source": "dictation"', stop_body)
+        self.assertIn('let stopOwner = "dictation"', stop_body)
+        self.assertIn('"source": stopOwner', stop_body)
+        self.assertIn('params["generation_token"] = stopToken', stop_body)
+        self.assertIn("RecordingStopCoordinator.execute", stop_body)
 
     def test_quick_capture_all_recording_calls_identify_owner(self) -> None:
         source = self._swift_source("main+QuickCapture.swift")
@@ -531,18 +538,29 @@ class RecordingOwnerSourceWiringContractTest(unittest.TestCase):
             source,
             re.DOTALL,
         )
-        stop_calls = re.findall(
-            r'method:\s*"stop_recording",\s*'
-            r'params:\s*\["source":\s*"quick_capture"\]',
-            source,
-            re.DOTALL,
-        )
         self.assertEqual(len(start_calls), 1)
-        self.assertEqual(
-            len(stop_calls),
-            2,
-            "И normal stop, и orphan compensation обязаны назвать owner",
+        self.assertIn(
+            "quickCaptureStopRequest(generationToken: stopToken)",
+            source,
         )
+        self.assertRegex(
+            source,
+            re.compile(
+                r"stopOrphanQuickCapture\(.*?"
+                r"quickCaptureStopRequest\(\s*"
+                r"generationToken:\s*generationToken",
+                re.DOTALL,
+            ),
+        )
+        self.assertIn(
+            'var params: [String: Any] = ["source": "quick_capture"]',
+            source,
+        )
+        self.assertIn(
+            'params["generation_token"] = generationToken',
+            source,
+        )
+        self.assertIn("RecordingStopCoordinator.execute", source)
 
 
 if __name__ == "__main__":

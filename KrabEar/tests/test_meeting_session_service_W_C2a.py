@@ -70,17 +70,24 @@ class _FakeRecordingCore:
         self.resumed = 0
         self.started: list[dict] = []
         self.stopped: list[dict] = []
+        self._next_generation = 0
 
     def handle_start_recording(self, params):
         self.started.append(params)
+        self._next_generation += 1
         return {
             "status": "recording",
             "is_recording": True,
+            "generation_token": f"meeting-generation-{self._next_generation}",
         }
 
     def handle_stop_recording(self, params):
         self.stopped.append(params)
-        return {"history_id": "hist-1", "text": "финал"}
+        return {
+            "status": "ok",
+            "history_id": "hist-1",
+            "text": "финал",
+        }
 
     def pause_realtime_partials(self) -> None:
         self.paused += 1
@@ -371,7 +378,10 @@ class MeetingStopTestCase(unittest.TestCase):
         self.assertEqual(len(svc._recording_core.stopped), 1)
         self.assertEqual(
             svc._recording_core.stopped[0],
-            {"source": "meeting"},
+            {
+                "source": "meeting",
+                "generation_token": "meeting-generation-1",
+            },
         )
         state = svc.handle_get_meeting_live_state({})
         self.assertFalse(state["active"])
@@ -401,6 +411,641 @@ class MeetingStopTestCase(unittest.TestCase):
         state = svc.handle_get_meeting_live_state({})
         self.assertFalse(state["active"])
         svc.close()
+
+
+class MeetingRecordingOwnershipTestCase(unittest.TestCase):
+    """R2: meeting-обёртка хранит и предъявляет Core lease поколения."""
+
+    def test_privacy_enabled_mid_meeting_skips_core_and_finished(self) -> None:
+        svc, bus, _ = _make_svc()
+        started = svc.handle_meeting_start({})
+        original_settings_get = svc._settings_get
+        svc._settings_get = lambda key, default=None: (
+            True
+            if key == "privacy_mode_enabled"
+            else original_settings_get(key, default)
+        )
+
+        response = svc.handle_meeting_stop({
+            "generation_token": started["generation_token"],
+        })
+
+        self.assertEqual(response["status"], "privacy_mode")
+        self.assertEqual(response["skipped"], "privacy_mode")
+        self.assertEqual(
+            response["generation_token"],
+            started["generation_token"],
+        )
+        self.assertEqual(svc._recording_core.stopped, [])
+        self.assertIsNone(svc._session)
+        self.assertNotIn("meeting.finished", bus.types())
+
+    def test_privacy_retained_worker_reports_retry_until_worker_dies(self) -> None:
+        """Приватность не маскирует живой воркер ложным ответом о завершении."""
+        svc, bus, _ = _make_svc()
+        core = svc._recording_core
+        token = svc.handle_meeting_start({})["generation_token"]
+        session = svc._session
+        self.assertIsNotNone(session)
+        self.assertTrue(svc._stop_worker())
+
+        class _RetainedWorker:
+            def __init__(self) -> None:
+                self.alive = True
+
+            def is_alive(self) -> bool:
+                return self.alive
+
+            def join(self, timeout=None) -> None:
+                return None
+
+        retained = _RetainedWorker()
+        svc._worker = retained
+        original_settings_get = svc._settings_get
+        svc._settings_get = lambda key, default=None: (
+            True
+            if key == "privacy_mode_enabled"
+            else original_settings_get(key, default)
+        )
+        try:
+            pending = svc.handle_meeting_stop({"generation_token": token})
+
+            self.assertEqual(pending["status"], "stop_in_progress")
+            self.assertTrue(pending["active"])
+            self.assertTrue(pending["privacy_mode_active"])
+            self.assertEqual(pending["generation_token"], token)
+            self.assertEqual(core.stopped, [])
+            self.assertIs(svc._session, session)
+            self.assertTrue(session.stop_retry_pending)
+            self.assertTrue(session.privacy_stopped)
+            self.assertNotIn("meeting.finalizing", bus.types())
+            self.assertNotIn("meeting.finished", bus.types())
+
+            retained.alive = False
+            terminal = svc.handle_meeting_stop({"generation_token": token})
+
+            self.assertEqual(terminal["status"], "privacy_mode")
+            self.assertEqual(terminal["skipped"], "privacy_mode")
+            self.assertFalse(terminal["active"])
+            self.assertEqual(terminal["generation_token"], token)
+            self.assertEqual(core.stopped, [])
+            self.assertIsNone(svc._session)
+        finally:
+            retained.alive = False
+            svc._settings_get = original_settings_get
+            svc.close()
+
+    def test_start_and_live_state_publish_core_generation_token(self) -> None:
+        svc, _, _ = _make_svc()
+
+        started = svc.handle_meeting_start({})
+        state = svc.handle_get_meeting_live_state({})
+        repeated = svc.handle_meeting_start({})
+
+        self.assertEqual(started["generation_token"], "meeting-generation-1")
+        self.assertEqual(state["generation_token"], started["generation_token"])
+        self.assertEqual(repeated["generation_token"], started["generation_token"])
+        svc.close()
+
+    def test_fresh_start_forwards_and_returns_opaque_core_lease(self) -> None:
+        """Новый G1 не меняет ID клиента и хранит revision для строгого stop."""
+        svc, _, _ = _make_svc()
+        core = svc._recording_core
+        request_id = "  meeting-lease/α  "
+
+        def _start(params):
+            core.started.append(dict(params))
+            return {
+                "status": "recording",
+                "is_recording": True,
+                "generation_token": "meeting-g1",
+                "owner_revision": 41,
+                "start_request_id": request_id,
+            }
+
+        core.handle_start_recording = _start
+
+        started = svc.handle_meeting_start({"start_request_id": request_id})
+        state = svc.handle_get_meeting_live_state({})
+        repeated = svc.handle_meeting_start({"start_request_id": "другой-id"})
+
+        self.assertEqual(
+            core.started,
+            [{"source": "meeting", "start_request_id": request_id}],
+        )
+        for payload in (started, state, repeated):
+            self.assertEqual(payload["generation_token"], "meeting-g1")
+            self.assertEqual(payload["owner_revision"], 41)
+            self.assertEqual(payload["start_request_id"], request_id)
+        self.assertTrue(repeated["already_active"])
+        svc.close()
+
+    def test_promoted_start_uses_original_core_lease(self) -> None:
+        """Повышение G1 возвращает ID исходной диктовки, а не meeting-клика."""
+        svc, _, _ = _make_svc()
+        core = svc._recording_core
+        meeting_click_id = "meeting-click-id"
+        dictation_start_id = "dictation-origin-id"
+
+        def _promote(params):
+            core.started.append(dict(params))
+            return {
+                "status": "already_recording",
+                "is_recording": True,
+                "generation_token": "shared-g1",
+                "owner_promoted": True,
+                "owner_revision": 42,
+                "start_request_id": dictation_start_id,
+            }
+
+        core.handle_start_recording = _promote
+
+        started = svc.handle_meeting_start({
+            "start_request_id": meeting_click_id,
+        })
+
+        self.assertEqual(
+            core.started,
+            [{"source": "meeting", "start_request_id": meeting_click_id}],
+        )
+        self.assertTrue(started["promoted"])
+        self.assertEqual(started["generation_token"], "shared-g1")
+        self.assertEqual(started["owner_revision"], 42)
+        self.assertEqual(started["start_request_id"], dictation_start_id)
+        svc.close()
+
+    def test_owner_mismatch_retains_strict_lease_without_finalizing(self) -> None:
+        """Устаревший meeting-stop не трогает recorder и не теряет CAS-аренду."""
+        svc, bus, recorder = _make_svc()
+        core = svc._recording_core
+
+        def _start(params):
+            core.started.append(dict(params))
+            return {
+                "status": "recording",
+                "is_recording": True,
+                "generation_token": "meeting-g1",
+                "owner_revision": 51,
+                "start_request_id": "meeting-start-id",
+            }
+
+        def _owner_mismatch(params):
+            core.stopped.append(dict(params))
+            return {
+                "status": "owner_mismatch",
+                "owner": "dictation",
+                "requested": "meeting",
+                "owner_revision": 52,
+            }
+
+        core.handle_start_recording = _start
+        core.handle_stop_recording = _owner_mismatch
+        started = svc.handle_meeting_start({
+            "start_request_id": "meeting-start-id",
+        })
+
+        first = svc.handle_meeting_stop({
+            "generation_token": started["generation_token"],
+        })
+        repeated = svc.handle_meeting_stop({
+            "generation_token": started["generation_token"],
+        })
+
+        expected_stop = {
+            "source": "meeting",
+            "generation_token": "meeting-g1",
+            "expected_owner_revision": 51,
+        }
+        self.assertEqual(core.stopped, [expected_stop, expected_stop])
+        for payload in (first, repeated):
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["status"], "owner_mismatch")
+            self.assertEqual(payload["owner"], "dictation")
+            self.assertEqual(payload["requested"], "meeting")
+            self.assertEqual(payload["owner_revision"], 52)
+            self.assertTrue(payload["active"])
+        self.assertTrue(recorder.is_recording)
+        self.assertIsNotNone(svc._session)
+        self.assertTrue(svc._session.stop_retry_pending)
+        self.assertEqual(bus.types().count("meeting.finalizing"), 0)
+        self.assertEqual(bus.types().count("meeting.finished"), 0)
+        svc.close()
+
+    def test_live_events_publish_current_generation_token(self) -> None:
+        """Все потоковые meeting-события несут G1 для защиты Swift от устаревших событий."""
+        import backend.meeting_session_service as mss
+        import tempfile
+
+        class _FakeSoundFile:
+            @staticmethod
+            def write(path, data, samplerate) -> None:
+                Path(path).write_bytes(b"RIFFfake")
+
+        diar_result = {
+            "segments": [{"start": 0.0, "end": 3.0, "speaker": "SPEAKER_00"}],
+            "speaker_embeddings": {"SPEAKER_00": [1.0] + [0.0] * 7},
+        }
+        svc, bus, _ = _make_svc(extractor=_FakeExtractor(ok=True))
+        original_sf = mss._sf
+        with tempfile.TemporaryDirectory() as tmp:
+            svc._data_dir = Path(tmp)
+            svc._diarize_window = lambda path: diar_result
+            mss._sf = _FakeSoundFile()
+            try:
+                started = svc.handle_meeting_start({})
+                token = started["generation_token"]
+                session = svc._session
+                self.assertIsNotNone(session)
+                self.assertTrue(svc._stop_worker())
+
+                svc._job_chunk_stt(session)
+                with svc._lock:
+                    session.chunks.append("х" * 300)
+                    session.transcript_len += 300
+                svc._job_items_llm(session)
+                svc._job_diar_window(session)
+
+                payloads = {
+                    kind: payload
+                    for kind, payload in bus.events
+                    if kind in {
+                        "meeting.transcript_appended",
+                        "meeting.items_updated",
+                        "meeting.speakers_updated",
+                    }
+                }
+                self.assertEqual(
+                    set(payloads),
+                    {
+                        "meeting.transcript_appended",
+                        "meeting.items_updated",
+                        "meeting.speakers_updated",
+                    },
+                )
+                for payload in payloads.values():
+                    self.assertEqual(payload["generation_token"], token)
+            finally:
+                mss._sf = original_sf
+                svc.close()
+
+    def test_tokenless_stop_uses_server_token_when_recorder_is_already_idle(
+        self,
+    ) -> None:
+        """Legacy Swift не теряет G1, если worker успел объявить recorder idle."""
+        svc, _, recorder = _make_svc()
+        started = svc.handle_meeting_start({})
+        recorder.is_recording = False
+
+        response = svc.handle_meeting_stop({})
+
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(response["generation_token"], started["generation_token"])
+        self.assertEqual(
+            svc._recording_core.stopped,
+            [{
+                "source": "meeting",
+                "generation_token": started["generation_token"],
+            }],
+        )
+
+    def test_wrong_or_invalid_token_does_not_call_core_or_replace_it(self) -> None:
+        svc, bus, _ = _make_svc()
+        started = svc.handle_meeting_start({})
+
+        for supplied in ("foreign-generation", "", None, 42):
+            with self.subTest(supplied=supplied):
+                response = svc.handle_meeting_stop({"generation_token": supplied})
+
+                self.assertEqual(response["status"], "unknown_generation")
+                self.assertEqual(response["generation_token"], supplied)
+                self.assertEqual(svc._recording_core.stopped, [])
+                self.assertIsNotNone(svc._session)
+                self.assertEqual(
+                    svc._session.generation_token,
+                    started["generation_token"],
+                )
+                self.assertNotIn("meeting.finalizing", bus.types())
+                self.assertNotIn("meeting.finished", bus.types())
+        svc.close()
+
+    def test_recorder_timeout_retains_session_token_and_blocks_worker_self_finalize(
+        self,
+    ) -> None:
+        svc, bus, recorder = _make_svc()
+        core = svc._recording_core
+        stop_results = [
+            {
+                "status": "recorder_timeout",
+                "is_recording": False,
+                "preview_text": "черновик встречи",
+            },
+            {
+                "status": "ok",
+                "history_id": "hist-recovered",
+                "text": "финал встречи",
+            },
+        ]
+
+        def _stop(params):
+            core.stopped.append(params)
+            recorder.is_recording = False
+            return stop_results.pop(0)
+
+        core.handle_stop_recording = _stop
+        started = svc.handle_meeting_start({})
+        token = started["generation_token"]
+
+        timed_out = svc.handle_meeting_stop({"generation_token": token})
+
+        self.assertEqual(timed_out["status"], "recorder_timeout")
+        self.assertFalse(recorder.is_recording)
+        self.assertIsNotNone(svc._session)
+        self.assertEqual(svc._session.generation_token, token)
+        self.assertTrue(svc._session.stop_retry_pending)
+        self.assertEqual(bus.types().count("meeting.finalizing"), 1)
+        self.assertEqual(bus.types().count("meeting.finished"), 0)
+
+        # Имитируем опоздавший тик прежнего worker-а: timeout не terminal.
+        self.assertIsNone(
+            svc._run_due_job_once(
+                now=svc._next_due[MeetingJob.CHUNK_STT] + 0.1,
+            )
+        )
+        self.assertIsNotNone(svc._session)
+        self.assertEqual(bus.types().count("meeting.finished"), 0)
+
+        recovered = svc.handle_meeting_stop({"generation_token": token})
+
+        self.assertEqual(recovered["status"], "ok")
+        self.assertEqual(recovered["item_id"], "hist-recovered")
+        self.assertEqual(
+            core.stopped,
+            [
+                {"source": "meeting", "generation_token": token},
+                {"source": "meeting", "generation_token": token},
+            ],
+        )
+        self.assertIsNone(svc._session)
+        self.assertEqual(bus.types().count("meeting.finalizing"), 1)
+        self.assertEqual(bus.types().count("meeting.finished"), 1)
+
+    def test_repeated_timeout_keeps_retry_handle_after_client_budget_exhaustion(
+        self,
+    ) -> None:
+        """Backend не владеет бюджетом Swift и не стирает G1 после трёх RPC."""
+        svc, bus, recorder = _make_svc()
+        core = svc._recording_core
+
+        def _timeout(params):
+            core.stopped.append(params)
+            recorder.is_recording = False
+            return {"status": "recorder_timeout", "is_recording": False}
+
+        core.handle_stop_recording = _timeout
+        token = svc.handle_meeting_start({})["generation_token"]
+
+        responses = [
+            svc.handle_meeting_stop({"generation_token": token})
+            for _ in range(3)
+        ]
+
+        self.assertTrue(all(r["status"] == "recorder_timeout" for r in responses))
+        self.assertIsNotNone(svc._session)
+        self.assertEqual(svc._session.generation_token, token)
+        self.assertTrue(svc._session.stop_retry_pending)
+        self.assertEqual(bus.types().count("meeting.finalizing"), 1)
+        self.assertEqual(bus.types().count("meeting.finished"), 0)
+        self.assertEqual(len(core.stopped), 3)
+        svc.close()
+
+    def test_core_stop_in_progress_is_nonterminal(self) -> None:
+        svc, bus, _ = _make_svc()
+        core = svc._recording_core
+
+        def _in_progress(params):
+            core.stopped.append(params)
+            return {"status": "stop_in_progress"}
+
+        core.handle_stop_recording = _in_progress
+        token = svc.handle_meeting_start({})["generation_token"]
+
+        response = svc.handle_meeting_stop({"generation_token": token})
+
+        self.assertEqual(response["status"], "stop_in_progress")
+        self.assertTrue(response["active"])
+        self.assertIsNotNone(svc._session)
+        self.assertTrue(svc._session.stop_retry_pending)
+        self.assertEqual(bus.types().count("meeting.finalizing"), 1)
+        self.assertEqual(bus.types().count("meeting.finished"), 0)
+        svc.close()
+
+    def test_lost_terminal_response_replays_same_item_without_second_finished(
+        self,
+    ) -> None:
+        svc, bus, _ = _make_svc()
+        core = svc._recording_core
+        terminal_cache: dict[str, dict] = {}
+        physical_persists: list[str] = []
+
+        def _stop_with_replay(params):
+            core.stopped.append(params)
+            token = params["generation_token"]
+            replayed = terminal_cache.get(token)
+            if replayed is not None:
+                return dict(replayed)
+            physical_persists.append(token)
+            response = {
+                "status": "ok",
+                "history_id": "hist-terminal-cache",
+            }
+            terminal_cache[token] = dict(response)
+            return response
+
+        core.handle_stop_recording = _stop_with_replay
+        started = svc.handle_meeting_start({})
+        token = started["generation_token"]
+
+        first = svc.handle_meeting_stop({"generation_token": token})
+        replayed = svc.handle_meeting_stop({"generation_token": token})
+
+        self.assertEqual(first["status"], "ok")
+        self.assertEqual(replayed["status"], "ok")
+        self.assertEqual(replayed["item_id"], first["item_id"])
+        self.assertEqual(bus.types().count("meeting.finalizing"), 1)
+        self.assertEqual(bus.types().count("meeting.finished"), 1)
+        self.assertEqual(
+            physical_persists,
+            [token],
+            "повтор после потери IPC-ответа обязан пройти через terminal replay",
+        )
+        self.assertEqual(
+            svc._recording_core.stopped,
+            [
+                {"source": "meeting", "generation_token": token},
+                {"source": "meeting", "generation_token": token},
+            ],
+        )
+
+    def test_retained_worker_defers_core_and_keeps_lifecycle_one_shot(
+        self,
+    ) -> None:
+        """Таймаут join сохраняет G1, а опоздавший воркер не дублирует события."""
+        import backend.meeting_session_service as mss
+
+        svc, bus, recorder = _make_svc()
+        token = svc.handle_meeting_start({})["generation_token"]
+        session = svc._session
+        self.assertIsNotNone(session)
+        self.assertTrue(svc._stop_worker())
+
+        worker_at_idle_check = threading.Event()
+        release_worker = threading.Event()
+        original_settings_get = svc._settings_get
+
+        def _settings_get(key, default=None):
+            if (
+                key == "privacy_mode_enabled"
+                and threading.current_thread().name == "retained-meeting-worker"
+            ):
+                # Воркер уже прошёл проверку stop_retry_pending, но ещё не
+                # успел самофинализировать неактивный рекордер. Это узкая гонка.
+                worker_at_idle_check.set()
+                release_worker.wait(2.0)
+            return original_settings_get(key, default)
+
+        svc._settings_get = _settings_get
+
+        def _stale_worker() -> None:
+            svc._run_due_job_once(time.monotonic())
+
+        worker = threading.Thread(
+            target=_stale_worker,
+            name="retained-meeting-worker",
+            daemon=True,
+        )
+        svc._worker = worker
+        worker.start()
+
+        original_timeout = mss._WORKER_JOIN_TIMEOUT_SEC
+        try:
+            self.assertTrue(worker_at_idle_check.wait(2.0))
+            mss._WORKER_JOIN_TIMEOUT_SEC = 0.01
+
+            deferred = svc.handle_meeting_stop({"generation_token": token})
+
+            self.assertEqual(deferred["status"], "stop_in_progress")
+            self.assertTrue(deferred["active"])
+            self.assertEqual(deferred["generation_token"], token)
+            self.assertEqual(svc._recording_core.stopped, [])
+            self.assertIs(svc._session, session)
+            self.assertTrue(svc._session.stop_retry_pending)
+            self.assertEqual(
+                [payload for kind, payload in bus.events
+                 if kind == "meeting.finalizing"],
+                [{"generation_token": token}],
+            )
+            self.assertEqual(
+                [payload for kind, payload in bus.events
+                 if kind == "meeting.finished"],
+                [],
+            )
+
+            recorder.is_recording = False
+            release_worker.set()
+            worker.join(timeout=2.0)
+            self.assertFalse(worker.is_alive())
+
+            # Воркер был уже после ранней проверки флага повтора, поэтому
+            # гард тождества и однократности обязан подавить его старую финализацию.
+            self.assertIs(svc._session, session)
+            self.assertEqual(svc._recording_core.stopped, [])
+            self.assertEqual(bus.types().count("meeting.finalizing"), 1)
+            self.assertEqual(bus.types().count("meeting.finished"), 0)
+
+            recovered = svc.handle_meeting_stop({"generation_token": token})
+
+            self.assertEqual(recovered["status"], "ok")
+            self.assertEqual(
+                svc._recording_core.stopped,
+                [{"source": "meeting", "generation_token": token}],
+            )
+            self.assertIsNone(svc._session)
+            self.assertEqual(
+                [payload for kind, payload in bus.events
+                 if kind == "meeting.finalizing"],
+                [{"generation_token": token}],
+            )
+            self.assertEqual(
+                [payload for kind, payload in bus.events
+                 if kind == "meeting.finished"],
+                [{"item_id": "hist-1", "generation_token": token}],
+            )
+        finally:
+            mss._WORKER_JOIN_TIMEOUT_SEC = original_timeout
+            release_worker.set()
+            worker.join(timeout=2.0)
+            svc._settings_get = original_settings_get
+            svc.close()
+
+    def test_concurrent_stop_uses_stored_token_after_terminal_teardown(
+        self,
+    ) -> None:
+        """Конкурентный IPC видит G1 после снятия сессии и отвергает чужие токены."""
+        svc, _, _ = _make_svc()
+        core = svc._recording_core
+        token = svc.handle_meeting_start({})["generation_token"]
+        teardown_entered = threading.Event()
+        release_teardown = threading.Event()
+        original_teardown = svc._teardown_session
+        first_response: dict[str, Any] = {}
+
+        def _hold_teardown(*args, **kwargs):
+            result = original_teardown(*args, **kwargs)
+            teardown_entered.set()
+            release_teardown.wait(2.0)
+            return result
+
+        svc._teardown_session = _hold_teardown
+
+        def _first_stop() -> None:
+            first_response["value"] = svc.handle_meeting_stop({
+                "generation_token": token,
+            })
+
+        worker = threading.Thread(target=_first_stop, daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(teardown_entered.wait(2.0))
+            self.assertIsNone(svc._session)
+
+            tokenless = svc.handle_meeting_stop({})
+            same_token = svc.handle_meeting_stop({"generation_token": token})
+
+            self.assertEqual(tokenless["status"], "stop_in_progress")
+            self.assertEqual(tokenless["generation_token"], token)
+            self.assertEqual(same_token["status"], "stop_in_progress")
+            self.assertEqual(same_token["generation_token"], token)
+
+            for foreign in ("foreign-generation", "", None, 42):
+                with self.subTest(foreign=foreign):
+                    rejected = svc.handle_meeting_stop({
+                        "generation_token": foreign,
+                    })
+                    self.assertEqual(rejected["status"], "unknown_generation")
+                    self.assertEqual(rejected["generation_token"], foreign)
+
+            self.assertEqual(
+                core.stopped,
+                [{"source": "meeting", "generation_token": token}],
+            )
+        finally:
+            release_teardown.set()
+            worker.join(timeout=2.0)
+            svc._teardown_session = original_teardown
+            svc.close()
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(first_response["value"]["status"], "ok")
 
 
 class BrainLeaseTestCase(unittest.TestCase):
@@ -595,6 +1240,10 @@ class MeetingStopIdempotencyTestCase(unittest.TestCase):
         self.assertEqual(bus.types().count("meeting.finished"), 1)
         self.assertEqual(len(results), 2)
         self.assertTrue(all(r.get("ok") for r in results))
+        self.assertEqual(
+            sorted(r.get("status") for r in results),
+            ["ok", "stop_in_progress"],
+        )
 
     def test_sequential_stop_calls_are_each_independent(self) -> None:
         """_stopping обязан сброситься в finally — второй, ПОСЛЕДОВАТЕЛЬНЫЙ

@@ -164,10 +164,43 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     var isProcessing = false
     /// Не даёт двум async start разделить один snapshot audio ducking.
     let recordingStartGate = RecordingStartGate()
+    /// Пока backend ещё не вернул token старта, отпускание hold/второй toggle
+    /// запоминаются как stop-intent и исполняются сразу после ответа G1.
+    var recordingStartInFlight = false
+    var recordingStopRequestedDuringStart = false
+    /// Идентификатор конкретной попытки start_recording диктовки. Он передаётся
+    /// backend без нормализации и позволяет отличить свой потерянный ответ G1
+    /// от уже занятого рекордера другого клиента.
+    var recordingStartRequestID: String?
+    /// Transport-ошибка start не означает, что backend не открыл G1. Пока этот
+    /// флаг истинен, новый старт запрещён: сначала нужен безопасный snapshot.
+    var recordingStartAmbiguous = false
+    /// Request ID неоднозначной попытки; хранится до доказанного idle/foreign
+    /// состояния либо до принятия именно этого поколения.
+    var recordingStartAmbiguousRequestID: String?
+    /// Повторный toggle во время сохранённой неоднозначности — намерение
+    /// остановить только подтверждённый собственный G1, не tokenless stop.
+    var recordingStopRequestedDuringAmbiguousStart = false
     /// C3a: активна быстрая заметка (запись без вставки в активное окно, спека
     /// 2026-07-16-c3-quick-capture-design.md §2a). Подавляет streaming-paste
     /// и взаимно исключается с диктовкой/встречей.
     var quickCaptureActive = false
+    /// UI-epoch незавершённого quick start. Это НЕ generation_token: нужен
+    /// только чтобы опоздавший callback старого нажатия не присвоил состояние
+    /// более новому start/stop-переходу.
+    var quickCaptureStartRequestID: UUID?
+    /// Quick Capture хранит ambiguity отдельно от UI-epoch: отменённый или
+    /// потерянный Q1 не должен разрешить новый Q2 до его reconciliation.
+    var quickCaptureStartAmbiguousRequestID: UUID?
+    /// Отмена pending Quick Capture привязана к исходному request ID. До
+    /// получения непустого token она не посылает в backend stop_recording.
+    var quickCaptureStopRequestedStartID: UUID?
+    /// Явный признак stop-intent в ambiguous Quick start нужен и для UI, и для
+    /// тестов инварианта «не компенсировать запись без lease».
+    var quickCaptureStopRequestedDuringAmbiguousStart = false
+    /// Quick Capture удерживает общий start-gate до разбора единственного
+    /// ответа Q1; это не даёт диктовке открыть G2 между pending start и cancel.
+    var quickCaptureStartGateHeld = false
     /// C3a Task 2: глобальный хоткей-монитор Cmd+Shift+N — ОБЯЗАН сохраняться
     /// (урок main+QuickPresets.swift: несохранённый монитор не снять в teardown).
     var quickCaptureHotkeyMonitor: Any?
@@ -184,6 +217,28 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     var lastToggleRequestAt: TimeInterval = 0
     let toggleDebounceSec: TimeInterval = 0.35
     var recordingTargetApp: NSRunningApplication?
+    /// R2: opaque-token текущей локальной диктовки/быстрой заметки. Встреча
+    /// хранит тот же generation отдельно в MeetingLivePanelController.
+    var activeGenerationToken: String?
+    /// Backend source, которому принадлежит локальный stop-route.
+    var activeGenerationOwner: String?
+    /// Версия владельца lease. Promote сохраняет token, но увеличивает это
+    /// значение, поэтому поздний stop старой диктовки атомарно отвергается.
+    var activeGenerationOwnerRevision: Int?
+    /// Server-side идентичность start, из которого получен текущий lease.
+    /// Не логируется: это opaque-значение, а не пользовательская метка.
+    var activeGenerationStartRequestID: String?
+    /// После неоднозначного/non-terminal stop следующий тап повторяет stop G1,
+    /// а не пытается открыть свежее поколение G2.
+    var recordingStopRecoveryPending = false
+    /// Dictation могла быть повышена до meeting без нового physical capture.
+    /// Тогда системный audio-ducking наследует встреча и восстанавливает ровно
+    /// после её единственного terminal finished.
+    var meetingInheritedDictationDucking = false
+    /// meeting_start мог подтвердить promote G1 раньше, чем async dictation
+    /// start вернул тот же token. Поздний ответ обязан завершить handoff,
+    /// а не публиковать G1 обратно как локальную диктовку.
+    var pendingMeetingPromotionToken: String?
     var lastExternalApp: NSRunningApplication?
     var hasShownAccessibilityHint = false
     var lastResult: LastTranscriptionSnapshot?
@@ -1145,15 +1200,27 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         manager.onHoldStart = { [weak self] in
             DispatchQueue.main.async {
                 guard let self, !self.isRecording else { return }
-                self.startRecording()
+                Task { @MainActor [weak self] in
+                    // Hold-start проходит тот же owner/state gate: прямой start
+                    // мог восстановить ducking живой promoted meeting после
+                    // ожидаемого backend already_recording.
+                    await self?.performRecordToggle(
+                        wasRecordingLocally: false
+                    )
+                }
             }
         }
         manager.onHoldStop = { [weak self] in
             DispatchQueue.main.async {
-                guard let self, self.isRecording else { return }
+                guard let self else { return }
+                if self.recordingStartInFlight {
+                    self.recordingStopRequestedDuringStart = true
+                    return
+                }
+                guard self.isRecording else { return }
                 // Hold и toggle обязаны проходить один owner/state-гейт:
                 // прямой stop после dictation→meeting убивал чужую встречу.
-                Task.detached { [weak self] in
+                Task { @MainActor [weak self] in
                     await self?.performRecordToggle(wasRecordingLocally: true)
                 }
             }

@@ -23,10 +23,12 @@ final class MeetingLivePanelTests: XCTestCase {
             ["label": "Спикер 2", "talk_sec": 14.8, "last_active_ts": Date().timeIntervalSince1970 - 95],
         ],
         degradedLLM: Bool = false,
-        degradedDiar: Bool = false
+        degradedDiar: Bool = false,
+        generationToken: String = "Meeting-G1-Opaque"
     ) -> [String: Any] {
         [
             "ok": true, "active": active,
+            "generation_token": generationToken,
             "started_at": Date().timeIntervalSince1970 - 120,
             "transcript_len": 640, "transcript_tail": transcriptTail,
             "items": items, "decisions": decisions, "questions": questions,
@@ -82,6 +84,135 @@ final class MeetingLivePanelTests: XCTestCase {
         // inactive (запись остановлена) — тоже остаёмся в finalizing до finished/отчёта
         c.render(state: ["ok": true, "active": false])
         XCTAssertEqual(c._testUIState, .finalizing)
+    }
+
+    func test_live_state_preserves_opaque_generation_token() {
+        let c = MeetingLivePanelController()
+        c.render(state: makeState(
+            generationToken: "MiXeD-Token-Without-Normalization"
+        ))
+        XCTAssertEqual(
+            c._testGenerationToken,
+            "MiXeD-Token-Without-Normalization"
+        )
+    }
+
+    func test_start_response_token_is_accepted_before_poll() {
+        let c = MeetingLivePanelController()
+        c.acceptGenerationToken("Start-Response-Token")
+        c.acceptGenerationToken("")
+
+        XCTAssertEqual(c._testGenerationToken, "Start-Response-Token")
+    }
+
+    func test_recovery_rejects_token_from_new_start_response() {
+        let c = MeetingLivePanelController()
+        c.render(state: makeState(generationToken: "Meeting-G1"))
+        c._testEnterStopRecovery()
+
+        c.acceptGenerationToken("Meeting-G2")
+
+        XCTAssertTrue(c.hasUnresolvedMeetingStop)
+        XCTAssertEqual(c._testGenerationToken, "Meeting-G1")
+    }
+
+    func test_recovery_state_is_sticky_and_allows_explicit_retry() {
+        let c = MeetingLivePanelController()
+        c.render(state: makeState())
+        c._testEnterStopRecovery()
+
+        XCTAssertEqual(c._testUIState, .recoveryPending)
+        XCTAssertTrue(c._testStopButtonEnabled)
+        XCTAssertEqual(c._testGenerationToken, "Meeting-G1-Opaque")
+
+        c.render(state: makeState(transcriptTail: "поздний poll"))
+        XCTAssertEqual(c._testUIState, .recoveryPending)
+        XCTAssertEqual(c._testGenerationToken, "Meeting-G1-Opaque")
+    }
+
+    func test_recovery_poll_inactive_delivers_finish_once() {
+        let c = MeetingLivePanelController()
+        var calls: [String?] = []
+        c.onFinished = { calls.append($0) }
+        c.render(state: makeState())
+        c._testEnterStopRecovery()
+
+        c._testHandlePollState(["ok": true, "active": false])
+        c._testHandlePollState(["ok": true, "active": false])
+
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertNil(calls[0])
+        XCTAssertNil(c._testGenerationToken)
+    }
+
+    func test_older_poll_cannot_reset_newer_live_generation() {
+        let c = MeetingLivePanelController()
+        var finishedCalls = 0
+        c.onFinished = { _ in finishedCalls += 1 }
+
+        let initialPoll = c._testBeginPollRequest()
+        c.render(state: makeState(generationToken: "Meeting-G1"))
+        let refreshAfterStart = c._testBeginPollRequest()
+
+        c._testHandlePollState(
+            ["ok": true, "active": false],
+            requestSequence: initialPoll
+        )
+
+        XCTAssertEqual(c._testUIState, .live)
+        XCTAssertEqual(c._testGenerationToken, "Meeting-G1")
+        XCTAssertEqual(finishedCalls, 0)
+
+        c._testHandlePollState(
+            makeState(generationToken: "Meeting-G1"),
+            requestSequence: refreshAfterStart
+        )
+        XCTAssertEqual(c._testUIState, .live)
+    }
+
+    func test_cancelled_sse_epoch_cannot_finish_new_generation() {
+        let c = MeetingLivePanelController()
+        var reports: [String?] = []
+        c.onFinished = { reports.append($0) }
+
+        let oldStream = c._testBeginSSEStreamEpoch()
+        c.render(state: makeState(generationToken: "Meeting-G1"))
+        _ = c._testBeginSSEStreamEpoch()
+        c.render(state: makeState(generationToken: "Meeting-G2"))
+
+        c._testHandleSSELine(
+            "event: meeting.finished",
+            streamEpoch: oldStream
+        )
+        c._testHandleSSELine(
+            #"data: {"item_id":"old-report","generation_token":"Meeting-G1"}"#,
+            streamEpoch: oldStream
+        )
+
+        XCTAssertTrue(reports.isEmpty)
+        XCTAssertEqual(c._testUIState, .live)
+        XCTAssertEqual(c._testGenerationToken, "Meeting-G2")
+    }
+
+    func test_same_sse_stream_rejects_foreign_lifecycle_generation() {
+        let c = MeetingLivePanelController()
+        var reports: [String?] = []
+        c.onFinished = { reports.append($0) }
+        c.render(state: makeState(generationToken: "Meeting-G2"))
+        let stream = c._testBeginSSEStreamEpoch()
+
+        c._testHandleSSELine(
+            "event: meeting.finished",
+            streamEpoch: stream
+        )
+        c._testHandleSSELine(
+            #"data: {"item_id":"old-report","generation_token":"Meeting-G1"}"#,
+            streamEpoch: stream
+        )
+
+        XCTAssertTrue(reports.isEmpty)
+        XCTAssertEqual(c._testUIState, .live)
+        XCTAssertEqual(c._testGenerationToken, "Meeting-G2")
     }
 
     // === Fable-гейт волны: находки адверсариального ревью ===
@@ -150,13 +281,13 @@ final class MeetingLivePanelTests: XCTestCase {
         let c = MeetingLivePanelController()
         c.render(state: makeState())
         c._testHandleSSELine("event: meeting.speakers_updated")
-        c._testHandleSSELine(#"data: {"speakers":[{"label":"Спикер 1","talk_sec":5.0,"last_active_ts":0}]}"#)
+        c._testHandleSSELine(#"data: {"generation_token":"Meeting-G1-Opaque","speakers":[{"label":"Спикер 1","talk_sec":5.0,"last_active_ts":0}]}"#)
         XCTAssertEqual(c._testSpeakerChipCount, 1)
         c.enterFinalizing()
         var received: [String?] = []
         c.onFinished = { received.append($0) }
         c._testHandleSSELine("event: meeting.finished")
-        c._testHandleSSELine(#"data: {"item_id":"flat-1"}"#)
+        c._testHandleSSELine(#"data: {"item_id":"flat-1","generation_token":"Meeting-G1-Opaque"}"#)
         XCTAssertEqual(received, ["flat-1"])
     }
 
@@ -186,7 +317,7 @@ final class MeetingLivePanelTests: XCTestCase {
         let c = MeetingLivePanelController()
         c.render(state: makeState())
         c._testHandleSSELine("event: meeting.speakers_updated")
-        c._testHandleSSELine(#"data: {"type":"meeting.speakers_updated","data":{"speakers":[{"label":"Спикер 1","talk_sec":5.0,"last_active_ts":0}]}}"#)
+        c._testHandleSSELine(#"data: {"type":"meeting.speakers_updated","data":{"generation_token":"Meeting-G1-Opaque","speakers":[{"label":"Спикер 1","talk_sec":5.0,"last_active_ts":0}]}}"#)
         XCTAssertEqual(c._testSpeakerChipCount, 1)
     }
 
@@ -194,7 +325,7 @@ final class MeetingLivePanelTests: XCTestCase {
         let c = MeetingLivePanelController()
         c.render(state: makeState(transcriptTail: "начало. "))
         c._testHandleSSELine("event: meeting.transcript_appended")
-        c._testHandleSSELine(#"data: {"data":{"chunk_text":"продолжение","total_len":700}}"#)
+        c._testHandleSSELine(#"data: {"data":{"generation_token":"Meeting-G1-Opaque","chunk_text":"продолжение","total_len":700}}"#)
         XCTAssertTrue(c._testTranscriptTailText.hasSuffix("продолжение "))
     }
 
@@ -214,7 +345,7 @@ final class MeetingLivePanelTests: XCTestCase {
         c.render(state: makeState())
         c.enterFinalizing()
         c._testHandleSSELine("event: meeting.finished")
-        c._testHandleSSELine(#"data: {"data":{"item_id":"abc-123"}}"#)
+        c._testHandleSSELine(#"data: {"data":{"item_id":"abc-123","generation_token":"Meeting-G1-Opaque"}}"#)
         XCTAssertEqual(received, "abc-123")
     }
 
@@ -227,16 +358,16 @@ final class MeetingLivePanelTests: XCTestCase {
         c.render(state: makeState())
         c.enterFinalizing()
         c._testHandleSSELine("event: meeting.finished")
-        c._testHandleSSELine(#"data: {"data":{"item_id":"abc-123"}}"#)
+        c._testHandleSSELine(#"data: {"data":{"item_id":"abc-123","generation_token":"Meeting-G1-Opaque"}}"#)
         c._testHandleSSELine("event: meeting.finished")
-        c._testHandleSSELine(#"data: {"data":{"item_id":"abc-123"}}"#)
+        c._testHandleSSELine(#"data: {"data":{"item_id":"abc-123","generation_token":"Meeting-G1-Opaque"}}"#)
         XCTAssertEqual(calls.count, 1)
         // Новая сессия (render active после resetToIdle) взводит гард заново.
         c.resetToIdle()
         c.render(state: makeState())
         c.enterFinalizing()
         c._testHandleSSELine("event: meeting.finished")
-        c._testHandleSSELine(#"data: {"data":{"item_id":"def-456"}}"#)
+        c._testHandleSSELine(#"data: {"data":{"item_id":"def-456","generation_token":"Meeting-G1-Opaque"}}"#)
         XCTAssertEqual(calls.count, 2)
     }
 
@@ -247,7 +378,67 @@ final class MeetingLivePanelTests: XCTestCase {
         XCTAssertTrue(c._testPollFallbackActive)
         // Любая живая SSE-строка снимает фоллбэк
         c._testHandleSSELine("event: meeting.items_updated")
-        c._testHandleSSELine(#"data: {"data":{"items":[],"decisions":[],"questions":[]}}"#)
+        c._testHandleSSELine(#"data: {"data":{"generation_token":"Meeting-G1-Opaque","items":[],"decisions":[],"questions":[]}}"#)
         XCTAssertFalse(c._testPollFallbackActive)
+    }
+
+    func test_r2_finished_is_ignored_before_local_token_is_known() {
+        let c = MeetingLivePanelController()
+        var calls = 0
+        c.onFinished = { _ in calls += 1 }
+
+        c._testHandleSSELine("event: meeting.finished")
+        c._testHandleSSELine(
+            #"data: {"item_id":"old","generation_token":"Meeting-G1"}"#
+        )
+
+        XCTAssertEqual(calls, 0)
+        XCTAssertNil(c.lastDeliveredGenerationToken)
+    }
+
+    func test_old_report_completion_cannot_reset_new_generation() {
+        let c = MeetingLivePanelController()
+        c.render(state: makeState(generationToken: "Meeting-G1"))
+        c._testHandleSSELine("event: meeting.finished")
+        c._testHandleSSELine(
+            #"data: {"item_id":"old","generation_token":"Meeting-G1"}"#
+        )
+        XCTAssertEqual(c.lastDeliveredGenerationToken, "Meeting-G1")
+
+        c.acceptGenerationToken("Meeting-G2")
+
+        XCTAssertFalse(
+            c.resetToIdleAfterFinished(
+                expectedGenerationToken: "Meeting-G1"
+            )
+        )
+        XCTAssertEqual(c._testGenerationToken, "Meeting-G2")
+    }
+
+    func test_foreign_partial_events_do_not_mutate_new_generation() {
+        let c = MeetingLivePanelController()
+        c.render(state: makeState(
+            transcriptTail: "текст G2",
+            generationToken: "Meeting-G2"
+        ))
+        let speakersBefore = c._testSpeakerChipCount
+        let itemsBefore = c._testItemRowCount
+
+        c._testHandleSSELine("event: meeting.transcript_appended")
+        c._testHandleSSELine(
+            #"data: {"chunk_text":"старый G1","generation_token":"Meeting-G1"}"#
+        )
+        c._testHandleSSELine("event: meeting.items_updated")
+        c._testHandleSSELine(
+            #"data: {"items":[],"decisions":[],"questions":[],"generation_token":"Meeting-G1"}"#
+        )
+        c._testHandleSSELine("event: meeting.speakers_updated")
+        c._testHandleSSELine(
+            #"data: {"speakers":[],"generation_token":"Meeting-G1"}"#
+        )
+
+        XCTAssertEqual(c._testTranscriptTailText, "текст G2")
+        XCTAssertEqual(c._testSpeakerChipCount, speakersBefore)
+        XCTAssertEqual(c._testItemRowCount, itemsBefore)
     }
 }
