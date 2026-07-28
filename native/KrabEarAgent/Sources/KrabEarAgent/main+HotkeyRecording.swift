@@ -746,6 +746,20 @@ extension AgentAppDelegate {
             )
             return
         case .giveUpRescuePending:
+            // `unknown_generation` — АВТОРИТЕТНЫЙ ответ backend «такого
+            // поколения не существует», а не транспортная неопределённость.
+            // Удерживать под него recovery-route нечем: короткое замыкание в
+            // handleRecordToggleRequest повторяло бы stop с тем же мёртвым
+            // токеном на каждый тап хоткея, а сверка с backend стоит ниже и
+            // недостижима — диктовка залипала бы до рестарта агента с
+            // неснятым ducking. Rescue отработает на следующем старте backend.
+            if (outcome.result?["status"] as? String) == "unknown_generation" {
+                clearDictationStopRecovery(
+                    result: outcome.result,
+                    message: "Поколение записи уже закрыто backend. Запись восстановится при следующем запуске — повторять остановку не нужно."
+                )
+                return
+            }
             retainDictationStopRecovery(
                 result: outcome.result,
                 message: "Ответ остановки не подтверждён. Запись восстановится при следующем запуске; можно повторить остановку сейчас."
@@ -858,6 +872,34 @@ extension AgentAppDelegate {
             refreshStatusItemTitle()
             rebuildStatusMenu()
         }
+    }
+
+    /// Отпустить G1, когда backend авторитетно сообщил, что поколения нет.
+    ///
+    /// Симметрична `retainDictationStopRecovery`, но для случая, когда
+    /// удерживать recovery-route бессмысленно: токен мёртв, повторный stop
+    /// вернёт ровно тот же `unknown_generation`. Чистим состояние по образцу
+    /// `.rejectAsIdleOrForeign` — включая ducking, иначе системный звук
+    /// остался бы приглушённым до перезапуска агента.
+    private func clearDictationStopRecovery(
+        result: [String: Any]?,
+        message: String
+    ) {
+        activeGenerationToken = nil
+        activeGenerationOwner = nil
+        activeGenerationOwnerRevision = nil
+        recordingStopRecoveryPending = false
+        isRecording = false
+        isProcessing = false
+        audioDuckingService.restoreAfterRecording()
+        let rawPreview = (result?["preview_text"] as? String ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let preview = rawPreview.isEmpty
+            ? ""
+            : "\nПревью: \(String(rawPreview.prefix(140)))"
+        notify(title: "Krab Ear", body: message + preview)
+        refreshStatusItemTitle()
+        rebuildStatusMenu()
     }
 
     /// Сохранить G1 как явный recovery-route и показать безопасное превью.

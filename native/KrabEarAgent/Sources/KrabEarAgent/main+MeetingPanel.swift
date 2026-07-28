@@ -203,6 +203,11 @@ extension AgentAppDelegate {
         // meeting_start способен открыть G2 после уже состоявшегося terminal
         // stop с потерянным ответом. Сначала разрешаем G1 poll/SSE-путём.
         guard !controller.hasUnresolvedMeetingStop else {
+            // Обновления обязаны идти именно здесь: show() их не поднимает, а
+            // закрытие панели крестиком их погасило. Без этого единственный
+            // выход из sticky-finalizing (poll со снимком inactive) мёртв, и
+            // переоткрытая панель навсегда показывает «Финализирую…».
+            controller.startUpdates()
             return
         }
         let client = ipcClient

@@ -331,6 +331,17 @@ extension AgentAppDelegate {
                 message: "Финализация затянулась — результат появится в истории"
             )
         case .giveUpRescuePending:
+            // Симметрично диктовке (main+HotkeyRecording): unknown_generation —
+            // авторитетное «поколения нет», а не транспортная неопределённость.
+            // Под ним quickCaptureActive=true залипал бы навсегда, блокируя и
+            // заметку, и диктовку, и встречу. Rescue отработает на старте backend.
+            if (outcome.result?["status"] as? String) == "unknown_generation" {
+                clearQuickCaptureStopRoute()
+                BackendToast.shared.show(
+                    "Поколение заметки уже закрыто backend — повторять остановку не нужно"
+                )
+                return
+            }
             retainQuickCaptureStopRecovery(
                 result: outcome.result,
                 message: "Остановка не подтверждена; запись восстановится при следующем запуске"
