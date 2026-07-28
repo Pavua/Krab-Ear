@@ -54,7 +54,11 @@ VENV_PY = Path(sys.executable)
 SOCKET_READY_TIMEOUT_SEC = 90.0
 RECORD_SETTLE_SEC = 1.5
 MEETING_SETTLE_SEC = 2.0
-STOP_TIMEOUT_SEC = 180.0
+# ПЕРВЫЙ реальный стоп на throwaway-инстансе тянет холодную загрузку
+# whisper-large-v3 (и GigaAM, если включён) — это законно занимает минуты.
+# Скупой таймаут здесь даёт ЛОЖНЫЙ провал смока вместо находки (проверено:
+# 180с не хватало). См. «щедрые таймауты для агентных задач» в CLAUDE.md.
+STOP_TIMEOUT_SEC = 600.0
 
 _STEPS: list[tuple[str, bool, str]] = []
 
@@ -120,6 +124,25 @@ def _wait_for_socket(sock_path: Path, proc: subprocess.Popen, timeout_sec: float
             return False
         time.sleep(0.5)
     return False
+
+
+def _prepare_lightweight_settings(sock: Path) -> None:
+    """Убрать из-под смока всё, что не относится к ВЛАДЕНИЮ записью.
+
+    Смок проверяет токены/статусы/переходы владения, а не качество STT.
+    На throwaway-инстансе тяжёлый путь распознавания создаёт только шум: GigaAM
+    worker там не поднимается и каждая попытка съедает 60-85с перед откатом
+    на whisper, из-за чего стоп не укладывается ни в какой разумный таймаут,
+    запись продолжает расти, и следующий стоп становится ещё медленнее.
+    """
+    _call(sock, "set_settings", {
+        "stt_gigaam_enabled": False,
+        "diarization_enabled": False,
+        "llm_rewriter_enabled": False,
+        "realtime_partial_enabled": False,
+        "realtime_preview_enabled": False,
+        "quality_profile": "balanced",
+    }, timeout=30.0)
 
 
 def _count_owner_mismatch(log_path: Path) -> int:
@@ -284,11 +307,22 @@ def main() -> int:
             _step("backend поднялся", False, "сокет не открылся")
             return _finish(tmp_dir, log_path)
         _step("backend поднялся", True)
+        _prepare_lightweight_settings(sock)
+        _step("окружение облегчено (STT-chain/диаризация/LLM выключены)", True)
 
-        _scenario_b_stale_token(sock)
-        _scenario_c_double_stop(sock)
-        _scenario_a_promote(sock, log_path)
-        _scenario_e_meeting_replay(sock)
+        # Каждый сценарий изолирован: таймаут или упавший IPC в одном не имеет
+        # права отменить проверки остальных — иначе смок теряет покрытие там,
+        # где как раз мог бы найти регрессию.
+        for label, scenario in (
+            ("B stale-token", lambda: _scenario_b_stale_token(sock)),
+            ("C double-stop", lambda: _scenario_c_double_stop(sock)),
+            ("A promote", lambda: _scenario_a_promote(sock, log_path)),
+            ("E meeting-replay", lambda: _scenario_e_meeting_replay(sock)),
+        ):
+            try:
+                scenario()
+            except Exception as exc:  # noqa: BLE001 — смок обязан дойти до конца
+                _step(f"{label}: сценарий не завершился", False, repr(exc))
 
         return _finish(tmp_dir, log_path)
     finally:
