@@ -53,7 +53,11 @@ class _FakeRecordingCore:
         self.resumed = 0
 
     def handle_start_recording(self, params):
-        return {"status": "started", "is_recording": True}
+        # Статуса "started" продовый RecordingCoreService не возвращает
+        # никогда — успешный старт это "recording", промоут поверх идущей
+        # записи это "already_recording". R2 валидирует статус строго,
+        # поэтому заглушка обязана говорить на языке реального Core.
+        return {"status": "recording", "is_recording": True}
 
     def handle_stop_recording(self, params):
         return {"history_id": "hist-1"}

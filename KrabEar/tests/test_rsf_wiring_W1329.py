@@ -27,14 +27,21 @@ from tests.test_helpers import make_test_item  # noqa: E402
 # ---------------------------------------------------------------------------
 
 class FakeRecorder:
-    is_recording = True
+    # R2: Core читает is_recording ДО старта, чтобы отличить свою запись от
+    # чужой. Реальный AudioRecorder держит False до start() (recorder.py),
+    # поэтому константа True здесь означала бы «микрофон уже занят кем-то».
     sample_rate = 16000
 
+    def __init__(self):
+        self.is_recording = False
+
     def start(self):
+        self.is_recording = True
         return True
 
     def stop(self, trim_tail_ms=0):
         import numpy as np
+        self.is_recording = False
         audio = np.ones(16000, dtype=np.float32) * 0.1
         return audio, 1.0
 

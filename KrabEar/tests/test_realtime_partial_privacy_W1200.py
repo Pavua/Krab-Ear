@@ -90,8 +90,18 @@ def _make_recording_core_service(privacy: bool = False):  # noqa: F821
 
     settings_svc = _make_settings_svc(privacy=privacy)
     recorder = _make_recorder()
-    recorder.start = MagicMock(return_value=True)
     recorder.sample_rate = 16000
+    # R2: Core читает is_recording ДО старта. У голого MagicMock любой
+    # неуказанный атрибут истинен, что читалось бы как «микрофон уже занят»
+    # и уводило старт в unmanaged_recording. Реальный AudioRecorder держит
+    # False до start() и True после (recorder.py) — повторяем это.
+    recorder.is_recording = False
+
+    def _start(*_args, **_kwargs):
+        recorder.is_recording = True
+        return True
+
+    recorder.start = MagicMock(side_effect=_start)
 
     svc = RecordingCoreService(
         recorder=recorder,
@@ -308,8 +318,16 @@ class TestRecordingCoreServicePrivacyStartGuard(unittest.TestCase):
         settings_svc.cached_settings.side_effect = lambda: dict(settings_dict)
 
         recorder = MagicMock()
-        recorder.start = MagicMock(return_value=True)
         recorder.sample_rate = 16000
+        # См. комментарий в _make_recording_core_service: is_recording
+        # обязан быть False до start(), иначе R2-Core читает чужую запись.
+        recorder.is_recording = False
+
+        def _start_recorder(*_args, **_kwargs):
+            recorder.is_recording = True
+            return True
+
+        recorder.start = MagicMock(side_effect=_start_recorder)
 
         svc = RecordingCoreService(
             recorder=recorder,

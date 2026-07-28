@@ -72,8 +72,18 @@ def _make_service(settings_side_effect):
     settings_svc.cached_settings.side_effect = settings_side_effect
 
     recorder = MagicMock()
-    recorder.start = MagicMock(return_value=True)
     recorder.sample_rate = 16000
+    # R2: Core читает is_recording ДО старта. У голого MagicMock любой
+    # неуказанный атрибут истинен, что читалось бы как «микрофон уже занят»
+    # и уводило старт в unmanaged_recording. Реальный AudioRecorder держит
+    # False до start() и True после (recorder.py) — повторяем это.
+    recorder.is_recording = False
+
+    def _start(*_args, **_kwargs):
+        recorder.is_recording = True
+        return True
+
+    recorder.start = MagicMock(side_effect=_start)
 
     return RecordingCoreService(
         recorder=recorder,

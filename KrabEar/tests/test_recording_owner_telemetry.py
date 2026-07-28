@@ -515,11 +515,15 @@ class RecordingOwnerSourceWiringContractTest(unittest.TestCase):
 
     def test_dictation_start_and_stop_identify_owner(self) -> None:
         source = self._swift_source("main+HotkeyRecording.swift")
+        # Проверяем ПРИСУТСТВИЕ owner-ключа внутри params, а не то, что он
+        # там единственный: рядом легитимно живёт start_request_id, и
+        # закрывающая скобка сразу после "dictation" краснила бы корректный
+        # код при любом расширении вызова.
         self.assertRegex(
             source,
             re.compile(
                 r'method:\s*"start_recording",\s*'
-                r'params:\s*\["source":\s*"dictation"\]',
+                r'params:\s*\[[^\]]*?"source":\s*"dictation"',
                 re.DOTALL,
             ),
         )
@@ -532,16 +536,25 @@ class RecordingOwnerSourceWiringContractTest(unittest.TestCase):
 
     def test_quick_capture_all_recording_calls_identify_owner(self) -> None:
         source = self._swift_source("main+QuickCapture.swift")
+        # Как и для диктовки: owner-ключ обязан быть, но не обязан быть
+        # единственным параметром вызова (см. start_request_id).
         start_calls = re.findall(
             r'method:\s*"start_recording",\s*'
-            r'params:\s*\["source":\s*"quick_capture"\]',
+            r'params:\s*\[[^\]]*?"source":\s*"quick_capture"',
             source,
             re.DOTALL,
         )
         self.assertEqual(len(start_calls), 1)
-        self.assertIn(
-            "quickCaptureStopRequest(generationToken: stopToken)",
+        # Вызов многострочный и несёт второй аргумент ownerRevision (строгий
+        # CAS-lease). Фиксируем СМЫСЛ — stopToken уходит как generationToken —
+        # а не однострочную форму записи.
+        self.assertRegex(
             source,
+            re.compile(
+                r"quickCaptureStopRequest\(\s*"
+                r"generationToken:\s*stopToken\b",
+                re.DOTALL,
+            ),
         )
         self.assertRegex(
             source,
