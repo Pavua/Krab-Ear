@@ -580,9 +580,40 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
 
     /// Wake word через IPC-поллинг backend'а (openWakeWord).
     /// Дефолт: выключен (приватность). Включается в Settings → «Разговор с AI».
+    /// Отзеркалить локальный тумблер wake word в backend-настройку.
+    ///
+    /// UserDefaults остаётся ИСТОЧНИКОМ ПРАВДЫ — это то, что пользователь
+    /// переключает в Настройках. Но backend с 2026-07-29 гейтит
+    /// `wake_word_start` по `wake_word_enabled` (F5), поэтому обязан знать
+    /// значение: без зеркала settings.json продолжал бы расходиться с
+    /// реальностью (живой инцидент: JSON показывал False, микрофон слушал).
+    ///
+    /// Строго off-main (AGENT-3) и без блокировки старта: провал синхронизации
+    /// не должен ломать запуск агента — backend по умолчанию разрешает старт,
+    /// так что худший исход промаха здесь прежнее поведение, не отказ фичи.
+    func syncWakeWordEnabledToBackend(_ enabled: Bool) {
+        let client = ipcClient
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            do {
+                _ = try client.call(
+                    method: "set_settings",
+                    params: ["wake_word_enabled": enabled]
+                )
+            } catch {
+                self?.logger.warn(
+                    "Wake word: не удалось синхронизировать wake_word_enabled с backend"
+                )
+            }
+        }
+    }
+
     /// Имя функции сохранено для минимального диффа вызывающих мест.
     func setupWakeWordListenerIfEnabled() {
         let enabled = UserDefaults.standard.bool(forKey: "KrabEar_WakeWordEnabled")
+        // Зеркалим ДО guard: выключенное состояние обязано доехать до backend
+        // так же надёжно, как включённое — иначе выключить фичу было бы можно
+        // только в UI, а settings.json остался бы врать.
+        syncWakeWordEnabledToBackend(enabled)
         guard enabled else {
             logger.info("Wake word: выключен (UserDefaults KrabEar_WakeWordEnabled=false)")
             return

@@ -1357,6 +1357,11 @@ extension HistoryPanelController {
         UserDefaults.standard.set(enabled, forKey: "KrabEar_WakeWordEnabled")
         if let appDelegate = NSApp.delegate as? AgentAppDelegate {
             appDelegate.applyWakeWordEnabled(enabled)
+            // Зеркало в backend-настройку: он гейтит wake_word_start по
+            // wake_word_enabled (F5, 2026-07-29). Без этого тумблер менял бы
+            // только локальный UserDefaults, а settings.json продолжал бы
+            // расходиться с реальным поведением микрофона.
+            appDelegate.syncWakeWordEnabledToBackend(enabled)
         }
         refreshWakeWordStatusRow()
     }

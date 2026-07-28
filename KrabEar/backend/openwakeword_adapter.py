@@ -404,6 +404,7 @@ class OpenWakeWordAdapter:
         Security guards (W1205):
           F2 — возвращает skipped если privacy_mode_enabled.
           F1 — порог < 0 отклоняется; < 0.05 зажимается к 0.05; > 1.0 зажимается к 1.0.
+          F5 — возвращает skipped если wake_word_enabled=False (2026-07-29).
         """
         # F2: privacy mode guard — do not open mic tap in privacy mode
         if self._settings_get("privacy_mode_enabled", False):
@@ -412,6 +413,23 @@ class OpenWakeWordAdapter:
                 "отклонён — privacy_mode_enabled=True"
             )
             return {"ok": False, "reason": "cannot activate wake-word in privacy mode"}
+
+        # F5: настройка выключения обязана РЕАЛЬНО выключать (2026-07-29).
+        # До этого гейта `wake_word_enabled` не читалась backend'ом вообще, и
+        # settings.json показывал False, пока микрофон слушался — выключить
+        # фичу через настройки было физически невозможно. Backend владеет
+        # микрофоном, поэтому гейт стоит здесь: устаревший или сломанный агент
+        # не должен уметь открыть тап вопреки настройке.
+        #
+        # Дефолт — РАЗРЕШЕНО: отсутствие ключа означает «агент ещё не
+        # синхронизировал своё значение», а не «выключено». Fail-closed здесь
+        # тихо сломал бы работающий wake word у всех, у кого ключа ещё нет.
+        if self._settings_get("wake_word_enabled", True) is False:
+            logger.info(
+                "OpenWakeWordAdapter.handle_wake_word_start: "
+                "отклонён — wake_word_enabled=False"
+            )
+            return {"ok": False, "reason": "wake word disabled in settings"}
 
         model_name = str(params.get("model", "hey_jarvis"))
 
