@@ -53,6 +53,7 @@ class HealthCheckService:
         recorder: Any = None,
         last_stt_engine_ref: list[str] | None = None,
         wake_word_watchdog: Any = None,
+        rest_inprocess: Any = None,
     ) -> None:
         self.store = store
         self._health_checker = health_checker
@@ -73,6 +74,9 @@ class HealthCheckService:
         # 2026-07-15 (спека wake-word-watchdog): опциональный — get_diagnostics
         # деградирует до schema-parity fallback, если watchdog не подключён.
         self._wake_word_watchdog = wake_word_watchdog
+        # M2 (спека 2026-07-16 §4.2): опциональный — рубильник REST_IN_PROCESS_ENABLED
+        # по умолчанию выключен, get_diagnostics деградирует до schema-parity fallback.
+        self._rest_inprocess = rest_inprocess
 
     # ------------------------------------------------------------------
     # handle_ping
@@ -201,6 +205,8 @@ class HealthCheckService:
             "metrics_summary": self._get_metrics_summary(),
             # Event-мост IPC->REST (spec 2026-07-07-event-bridge-design.md) diagnostics.
             "event_bridge": self._get_event_bridge_summary(),
+            # In-process REST (spec 2026-07-16 §4.2): enabled/running/port/error.
+            "rest_in_process": self._get_rest_inprocess_summary(),
             # B3 (spec 2026-07-19-b3-brain-lease-visibility): кто держит LM Studio.
             "brain_lease": self._build_brain_lease_summary(),
         }
@@ -293,6 +299,22 @@ class HealthCheckService:
                 "enabled": False, "state": "error",
                 "queue_depth": 0, "sent": 0, "dropped": 0, "dropped_stale": 0, "failed": 0,
             }
+
+    def _get_rest_inprocess_summary(self) -> dict[str, Any]:
+        """Возвращает InProcessRestServer.status() либо schema-parity fallback.
+
+        Никогда не роняет get_diagnostics (аналог _get_event_bridge_summary).
+        Отсутствие коллаборатора — не ошибка: рубильник REST_IN_PROCESS_ENABLED
+        по умолчанию выключен, поэтому честный ответ здесь "выключен", а не
+        пустой словарь.
+        """
+        if self._rest_inprocess is None:
+            return {"enabled": False, "running": False, "port": None, "error": None}
+        try:
+            return dict(self._rest_inprocess.status())
+        except Exception:
+            logger.warning("HealthCheckService: InProcessRestServer.status() упал", exc_info=True)
+            return {"enabled": False, "running": False, "port": None, "error": "status_failed"}
 
     def _get_metrics_summary(self) -> dict[str, Any]:
         """Возвращает краткий снимок MetricsCollector для диагностического вывода.

@@ -1284,6 +1284,7 @@ class BackendService:
             recorder=self.recorder,
             last_stt_engine_ref=self._last_stt_engine_ref,
             wake_word_watchdog=self._wake_word_watchdog,
+            rest_inprocess=self._rest_inprocess,
         )
 
         logger.info("Krab Ear backend version %s starting up", APP_VERSION)
