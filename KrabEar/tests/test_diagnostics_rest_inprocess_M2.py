@@ -1,6 +1,6 @@
 """M2 Task 7 — секция ``rest_in_process`` в get_diagnostics.
 
-Спека: docs/superpowers/specs/2026-07-16-c3-quick-capture-design.md §4.2
+Спека: docs/superpowers/specs/2026-07-16-m-series-rest-merge-design.md §4.2
 (рубильник REST_IN_PROCESS_ENABLED, дефолт выключен).
 
 Коллаборатор ``InProcessRestServer`` опционален — HealthCheckService должен
