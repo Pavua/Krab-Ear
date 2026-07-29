@@ -167,7 +167,12 @@ class EventBridge:
         self._data_dir = Path(data_dir)
         self._post_fn = post_fn or _default_post_fn
 
-        self._enabled = bool(getattr(settings, "EVENT_BRIDGE_ENABLED", True))
+        # M2: в слитом процессе (REST внутри backend) шина ОДНА — мост создал бы
+        # echo: событие ушло бы на /internal/event и вернулось в ту же шину.
+        # Поэтому in-process режим выключает мост так же жёстко, как killswitch.
+        self._enabled = bool(getattr(settings, "EVENT_BRIDGE_ENABLED", True)) and not bool(
+            getattr(settings, "REST_IN_PROCESS_ENABLED", False)
+        )
         self._rest_port = int(getattr(settings, "REST_SERVER_PORT", 5005))
         self._url = f"http://127.0.0.1:{self._rest_port}/internal/event"
 
