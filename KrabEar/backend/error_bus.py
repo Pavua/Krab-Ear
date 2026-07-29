@@ -31,6 +31,8 @@ Component = Literal[
     "startup",
     # R2: lifecycle владения общим recorder.
     "recording",
+    # M2: встроенный в backend REST-сервер (rest.port_conflict).
+    "rest",
 ]
 
 
