@@ -103,6 +103,7 @@ Privacy-mode gate pattern (waves 23-30): any IPC handler that returns transcript
 - **`backend/translator.py`** — Offline-first translator (RU↔ES, EN→RU, Auto, Bilingual modes) with in-memory cache.
 - **`backend/llm_rewriter.py`** — LLM post-processing via LM Studio (qwen3-4b-abliterated). CircuitBreaker + chatbot detection + length ratio guard.
 - **`backend/rest_server.py`** — Flask REST API (port 5005) for HTTP-based transcription and metrics. Separate from the IPC service.
+- **`backend/rest_inprocess.py`** — `InProcessRestServer`: M2 opt-in (`REST_IN_PROCESS_ENABLED`, default off) — hosts the same REST app inside the backend process on a daemon `make_server()` thread instead of a second `rest_server.py` process; fail-open on port conflict, never breaks dictation.
 - **`backend/event_bus.py`** — In-process pub/sub EventBus with SSE streaming. Supports both untyped `emit(str, dict)` and typed `emit_typed(EventType, BaseModel)`.
 - **`backend/metrics_collector.py`** — Thread-safe sliding-window metrics (latency percentiles, confidence).
 - **`backend/obsidian_sync.py`** — `ObsidianSyncManager`: sync transcriptions to an Obsidian vault as .md files with YAML frontmatter; incremental (timestamp-based) and forced modes; state persisted in obsidian_sync.json (runtime data file, not in repo).
