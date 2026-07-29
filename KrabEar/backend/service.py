@@ -795,6 +795,41 @@ class BackendService:
             logger.exception("event-bridge: failed to wire EventBus listener")
         self._event_bridge.start()
 
+        # M2: REST внутри этого же процесса (спека 2026-07-16 §4.2). Рубильник
+        # по умолчанию выключен — прод продолжает работать на двух процессах,
+        # пока владелец не решит иначе. Мост событий выше сам выключился по
+        # тому же рубильнику, поэтому echo в общей шине невозможен.
+        #
+        # Зависимости ПОДМЕНЯЮТСЯ, а не создаются заново: импорт rest_server
+        # строит свой standalone-комплект (так работают 20 тест-файлов, которые
+        # патчат этот модуль), и без подмены в одном процессе жили бы два
+        # AudioEngine/StateStore — ровно тот дубль, ради устранения которого
+        # затевалась серия M. Прежний комплект становится недостижим и уходит
+        # в сборщик мусора.
+        self._rest_inprocess = None
+        if bool(getattr(settings, "REST_IN_PROCESS_ENABLED", False)):
+            try:
+                import backend.rest_server as _rest_module
+                from backend.rest_inprocess import InProcessRestServer
+
+                _rest_module.adopt_external_singletons(
+                    engine=self.transcriber.engine,
+                    store=self.store,
+                    transcriber=self.transcriber,
+                    translator=self.translator,
+                    tts_service=self._tts,
+                )
+                self._rest_inprocess = InProcessRestServer(
+                    app=_rest_module.create_app(),
+                    settings=settings,
+                    error_push=self._push_rest_error,
+                )
+                self._rest_inprocess.start()
+            except Exception:
+                # Fail-open: встроенный REST не должен мешать диктовке.
+                logger.exception("in-process REST: не удалось поднять")
+                self._rest_inprocess = None
+
         self._sharing = SharingManager(
             store=self.store,
             privacy_mode_fn=lambda: self._get_runtime_setting("privacy_mode_enabled", False),
@@ -1569,6 +1604,39 @@ class BackendService:
         except Exception:
             return default
 
+    def _push_rest_error(self, code: str, detail: str) -> None:
+        """Колбэк для InProcessRestServer: заворачивает сбой в KrabError (M2).
+
+        Зовётся из чужого треда (rest-inprocess), поэтому тело целиком под
+        try/except — необработанное исключение здесь тихо уронило бы тред
+        сервера. Образец заполнения полей — WakeWordWatchdog._escalate()
+        (backend/wake_word_watchdog.py): severity/текст берутся из
+        ERROR_REGISTRY, а не хардкодятся здесь, чтобы код ошибки оставался
+        единственным источником правды для UI-сообщения.
+        """
+        try:
+            from datetime import datetime, timezone
+
+            from backend.error_bus import KrabError
+            from backend.error_codes import ERROR_REGISTRY
+
+            entry = ERROR_REGISTRY.get(code, {})
+            self._error_bus.push(KrabError(
+                severity=entry.get("severity", "error"),
+                component="rest",
+                code=code,
+                message_user=entry.get(
+                    "user_msg_ru", "Встроенный REST-сервер недоступен.",
+                ),
+                message_debug=detail,
+                timestamp=datetime.now(timezone.utc),
+                context={"detail": detail},
+                actionable=bool(entry.get("actionable", False)),
+                action_id=entry.get("action_id"),
+            ))
+        except Exception:
+            logger.exception("in-process REST: _push_rest_error упал")
+
     @staticmethod
     def _webhook_safe_payload(payload: dict[str, Any]) -> dict[str, Any]:
         """Возвращает PII-безопасную копию payload для отправки во внешний webhook.
@@ -1753,6 +1821,14 @@ class BackendService:
                 event_bridge.stop()
             except Exception:
                 logger.exception("EventBridge.stop() raised during close()")
+
+        # Stop in-process REST (M2) — тот же daemon-thread teardown rule.
+        rest_inprocess = getattr(self, "_rest_inprocess", None)
+        if rest_inprocess is not None:
+            try:
+                rest_inprocess.stop()
+            except Exception:
+                logger.exception("InProcessRestServer.stop() raised during close()")
 
         # Stop MeetingSessionService worker thread (C2a) — mirrors the
         # EventBridge/PurgeScheduler stop above (same CI daemon-thread rule).
