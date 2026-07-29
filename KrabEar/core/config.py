@@ -91,6 +91,14 @@ class Settings(BaseSettings):
     # НЕ live-toggle через set_settings.
     EVENT_BRIDGE_ENABLED: bool = True
 
+    # --- In-process REST (backend/rest_inprocess.py, spec 2026-07-16 §4) ------
+    # True = backend-процесс поднимает REST-сервер ВНУТРИ себя (один процесс
+    # вместо двух), при этом EventBridge не включается — шина общая.
+    # Killswitch, читается ОДИН РАЗ при старте (как EVENT_BRIDGE_ENABLED) —
+    # НЕ live-toggle через set_settings. Дефолт False: пока прод на двух
+    # процессах, включение — отдельное решение владельца (канарейка §4.5).
+    REST_IN_PROCESS_ENABLED: bool = False
+
     model_config = SettingsConfigDict(
         env_prefix="KRAB_EAR_",
         env_file=(".env", str(_SECRETS_FILE)),
@@ -1005,6 +1013,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "history_large_mb": 500,
     "auto_cleanup_enabled": False,
     "auto_cleanup_after_days": 365,
+    # --- In-process REST (см. REST_IN_PROCESS_ENABLED выше) ---
+    # Видимость настройки в GUI/get_settings. Источник правды при СТАРТЕ —
+    # Pydantic-поле; этот ключ ничего не включает сам по себе.
+    "rest_in_process_enabled": False,
     # --- Action Items auto-extraction (LLM-based) ---
     # Opt-in: False по умолчанию (burn-in период).
     "action_items_auto_extract": False,
