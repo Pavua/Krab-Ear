@@ -833,4 +833,22 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "severity": "error",
         "dedupe_seconds": 300,
     },
+    # rest.port_conflict — in-process REST не смог занять порт (M2).
+    # Реальный сценарий: легаси launchd-агент ai.krab.ear.rest ещё живёт и
+    # держит 5005, а backend уже стартует с rest_in_process_enabled=true.
+    # Fail-open: backend продолжает работать БЕЗ in-process REST (диктовка
+    # важнее), поэтому это не critical и не крутит crash-loop — в отличие от
+    # standalone-пути, где EADDRINUSE завершает процесс через sys.exit(1).
+    "rest.port_conflict": {
+        "user_msg_ru": (
+            "Порт REST уже занят — встроенный веб-сервер не запущен. "
+            "Основные функции работают. Обычно причина в том, что старый "
+            "отдельный REST-агент ещё не выгружен."
+        ),
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "warn",
+        "dedupe_seconds": 300,
+    },
 }

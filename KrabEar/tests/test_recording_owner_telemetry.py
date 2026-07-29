@@ -468,7 +468,7 @@ class RecordingOwnerConfigurationContractTest(unittest.TestCase):
             "не тронута",
             entry["user_msg_ru"].lower(),
         )
-        self.assertEqual(len(ERROR_REGISTRY), 64)
+        self.assertEqual(len(ERROR_REGISTRY), 65)
 
     def test_backend_service_wires_error_bus_into_recording_core(self) -> None:
         source = (
