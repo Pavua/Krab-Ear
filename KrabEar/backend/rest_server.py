@@ -120,6 +120,60 @@ def _deps() -> "RestDeps":
     return _MODULE_DEPS
 
 
+_ADOPTABLE_NAMES = ("engine", "store", "transcriber", "translator", "tts_service")
+
+
+def adopt_external_singletons(
+    *,
+    engine,
+    store,
+    transcriber,
+    translator,
+    tts_service,
+) -> None:
+    """Подменяет standalone-комплект ссылками на объекты владельца процесса (M2).
+
+    Вызывается BackendService'ом, когда REST поднимается ВНУТРИ backend-процесса:
+    импорт этого модуля уже создал собственный комплект, и без подмены в одном
+    процессе жили бы два AudioEngine/StateStore — ровно тот дубль тяжёлого
+    состояния, ради устранения которого затевалась серия M.
+
+    Почему подмена, а не ленивое создание: 20 тест-файлов патчат этот модуль
+    либо через конструкторы вокруг импорта, либо через patch.object на
+    module-атрибут. Отложенное создание ломает оба способа (объект рождается
+    уже вне патч-контекста), поэтому комплект по-прежнему создаётся на импорте,
+    а меняется только то, КУДА указывают имена.
+
+    Аргументы только именованные: пять однотипных объектов подряд слишком легко
+    перепутать местами, а перепутанные store и transcriber всплыли бы не здесь,
+    а в обработчике запроса.
+    """
+    incoming = {
+        "engine": engine,
+        "store": store,
+        "transcriber": transcriber,
+        "translator": translator,
+        "tts_service": tts_service,
+    }
+    missing = [name for name, obj in incoming.items() if obj is None]
+    if missing:
+        # Fail-fast: молча оставить прежний объект — значит отдать обработчику
+        # standalone-состояние при уверенности вызывающего, что подмена прошла.
+        raise ValueError(
+            "adopt_external_singletons: не переданы зависимости: "
+            + ", ".join(sorted(missing))
+        )
+
+    g = globals()
+    for name in _ADOPTABLE_NAMES:
+        g[name] = incoming[name]
+
+    logger.info(
+        "rest_server: standalone-комплект заменён зависимостями владельца "
+        "процесса (in-process режим)"
+    )
+
+
 def _base_config() -> dict:
     """Flask config values shared by every create_app() instance (M1)."""
     return {
