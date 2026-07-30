@@ -84,5 +84,37 @@ class InProcessRestServerTest(unittest.TestCase):
         srv.stop()   # второй раз не должен бросать
 
 
+    def test_stop_immediately_after_start_does_not_hang(self):
+        """Регрессия на гонку stop/_serve (находка финального ревью волны).
+
+        _serve раньше читал self._server из поля, которое stop() обнуляет под
+        локом: при неудачном порядке тред выходил НЕ входя в serve_forever(),
+        а stop() звал server.shutdown(), который ждёт выставляемое только из
+        finally внутри serve_forever() событие — и ждёт БЕЗ таймаута. То есть
+        stop() висел навсегда, унося с собой close() и штатное завершение
+        backend (launchd добивал SIGKILL по ExitTimeOut).
+
+        Тест бьёт именно в это окно: stop() сразу после start(), без паузы.
+        Порог 20с — с большим запасом над барьером 2с + join 5с; при
+        регрессии тест не уложится ни в какой порог, он висит вечно.
+        """
+        import time as _time
+
+        for _ in range(15):
+            cfg = SimpleNamespace(
+                REST_IN_PROCESS_ENABLED=True, REST_SERVER_PORT=_free_port()
+            )
+            srv = InProcessRestServer(app=_TinyApp(), settings=cfg)
+            self.assertTrue(srv.start())
+            t0 = _time.monotonic()
+            srv.stop()
+            elapsed = _time.monotonic() - t0
+            self.assertLess(
+                elapsed, 20.0,
+                f"stop() занял {elapsed:.1f}с — похоже на зависание shutdown()",
+            )
+            self.assertFalse(srv.status()["running"])
+
+
 if __name__ == "__main__":
     unittest.main()

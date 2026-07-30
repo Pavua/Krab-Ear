@@ -20,6 +20,9 @@ from typing import Any, Callable
 logger = logging.getLogger("KrabEar.Backend.RestInProcess")
 
 SHUTDOWN_JOIN_TIMEOUT_SEC = 5.0
+# Сколько ждать фактического входа треда в serve_forever перед shutdown().
+# Меньше join-таймаута: это ожидание СТАРТА цикла, а не его завершения.
+SERVE_ENTER_TIMEOUT_SEC = 2.0
 
 
 class InProcessRestServer:
@@ -40,6 +43,8 @@ class InProcessRestServer:
         self._thread: threading.Thread | None = None
         self._error: str | None = None
         self._lock = threading.Lock()
+        # Выставляется тредом ПЕРЕД входом в serve_forever — барьер для stop().
+        self._serving = threading.Event()
 
     # ------------------------------------------------------------------
 
@@ -84,8 +89,10 @@ class InProcessRestServer:
                 self._push_error("rest.port_conflict", self._error)
                 return False
 
+            self._serving.clear()
             self._thread = threading.Thread(
                 target=self._serve,
+                args=(self._server,),
                 name="rest-inprocess",
                 daemon=True,
             )
@@ -101,10 +108,12 @@ class InProcessRestServer:
         logger.info("InProcessRestServer: слушает 127.0.0.1:%s", self._port)
         return True
 
-    def _serve(self) -> None:
-        server = self._server
-        if server is None:
-            return
+    def _serve(self, server: Any) -> None:
+        # Сервер приходит АРГУМЕНТОМ, а не читается из self._server: поле
+        # мутирует stop() под локом, и при гонке тред увидел бы None, вышел
+        # бы не входя в serve_forever(), а ждущий stop() повис бы навсегда
+        # (см. барьер _serving ниже).
+        self._serving.set()
         try:
             server.serve_forever()
         except Exception:
@@ -122,10 +131,25 @@ class InProcessRestServer:
             self._server, self._thread = None, None
 
         if server is not None:
-            try:
-                server.shutdown()
-            except Exception:
-                logger.exception("InProcessRestServer: shutdown() бросил")
+            # shutdown() ждёт событие, которое выставляет ТОЛЬКО finally внутри
+            # serve_forever(), причём ждёт БЕЗ таймаута. Позвать его до входа
+            # треда в цикл = повиснуть навсегда (параметр timeout ниже
+            # ограничивает лишь join, до него управление не дойдёт).
+            # Поэтому сначала барьер: дождаться фактического входа в цикл.
+            if self._serving.wait(timeout=SERVE_ENTER_TIMEOUT_SEC):
+                try:
+                    server.shutdown()
+                except Exception:
+                    logger.exception("InProcessRestServer: shutdown() бросил")
+            else:
+                # Тред не вошёл в цикл за отведённое время. shutdown() тут
+                # запрещён; закрытие слушающего сокета ниже само выведет тред,
+                # если он всё-таки войдёт позже.
+                logger.warning(
+                    "InProcessRestServer: тред не вошёл в serve_forever за %.1fс "
+                    "— пропускаем shutdown(), закрываем сокет",
+                    SERVE_ENTER_TIMEOUT_SEC,
+                )
             try:
                 server.server_close()
             except Exception:
