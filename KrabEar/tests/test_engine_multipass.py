@@ -358,5 +358,64 @@ class UnavailableModelSkippedTest(unittest.TestCase):
         self.assertIn("max-model", engine._unavailable_models)
 
 
+class NativeEngineConfidenceTest(unittest.TestCase):
+    """Результат без segments, но с явным confidence (GigaAM) — не 0.0.
+
+    До фикса _raw_confidence_from_result возвращал 0.0 для любого результата
+    без segments, из-за чего multipass ВСЕГДА перегонял GigaAM-результат через
+    whisper и whisper побеждал — GigaAM был декоративным в каскаде.
+    """
+
+    def test_explicit_confidence_without_segments(self):
+        engine = _make_engine()
+        gigaam_result = {
+            "text": "привет",
+            "language": "ru",
+            "confidence": 0.9,
+            "engine": "gigaam-mlx-rnnt",
+            "native_punctuation": True,
+        }
+        self.assertAlmostEqual(
+            engine._raw_confidence_from_result(gigaam_result), 0.9
+        )
+
+    def test_no_segments_no_confidence_stays_zero(self):
+        engine = _make_engine()
+        self.assertEqual(
+            engine._raw_confidence_from_result({"text": "..."}), 0.0
+        )
+
+    def test_segments_take_priority_over_explicit_confidence(self):
+        engine = _make_engine()
+        result = _stt_result(0.30)
+        result["confidence"] = 0.99
+        self.assertAlmostEqual(
+            engine._raw_confidence_from_result(result), 0.30, places=2
+        )
+
+    def test_gigaam_result_above_threshold_skips_retry(self):
+        engine = _make_engine()
+        with patch("core.engine.settings") as mock_cfg:
+            mock_cfg.STT_MULTIPASS_ENABLED = True
+            mock_cfg.STT_MIN_CONFIDENCE_THRESHOLD = 0.65
+            mock_cfg.STT_MAX_RETRIES = 2
+            mock_cfg.MODEL_BALANCED = "balanced-model"
+            mock_cfg.model_max_list = ["max-model"]
+            mock_cfg.NETWORK_MODE = "offline_strict"
+
+            first = {
+                "text": "привет",
+                "language": "ru",
+                "confidence": 0.9,
+                "engine": "gigaam-mlx-rnnt",
+                "native_punctuation": True,
+            }
+            result = engine._maybe_multipass_retry(b"audio", "prompt", "ru", first)
+
+        self.assertIs(result, first)
+        self.assertEqual(len(result["multipass_attempts"]), 1)
+        self.assertAlmostEqual(result["multipass_attempts"][0]["confidence"], 0.9)
+
+
 if __name__ == "__main__":
     unittest.main()
