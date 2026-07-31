@@ -1212,7 +1212,12 @@ class AudioEngine:
                     text = _dt_result
 
             # 4.5a Punctuation-only LLM pass (opt-in, перед полным rewrite)
-            if self._punctuation_pass_allowed() and not _is_loop:
+            # Модели с нативной пунктуацией (gigaam-mlx) помечают результат
+            # native_punctuation=True — дорогой LLM-проход для них холостой.
+            _native_punct = isinstance(result, dict) and bool(
+                result.get("native_punctuation")
+            )
+            if self._punctuation_pass_allowed() and not _is_loop and not _native_punct:
                 _report("punctuation_pass")
                 punct_result = self._llm_rewriter.fix_punctuation_only(
                     text, language=resolved_lang or settings.TRANSCRIBE_LANGUAGE
@@ -3006,8 +3011,13 @@ class AudioEngine:
                         duration_sec, len(chunks), _GIGAAM_MAX_CHUNK_SEC,
                     )
                     chunk_results: list[dict] = []
+                    chunks_native_punct = False
                     for ch in chunks:
                         ch_result = adapter.transcribe(ch.audio, sample_rate=16000)
+                        chunks_native_punct = chunks_native_punct or (
+                            isinstance(ch_result, dict)
+                            and bool(ch_result.get("native_punctuation"))
+                        )
                         chunk_results.append({
                             "text": ch_result.get("text", "") if isinstance(ch_result, dict) else str(ch_result),
                             "confidence": float(ch_result.get("confidence", 0.9)) if isinstance(ch_result, dict) else 0.9,
@@ -3023,6 +3033,9 @@ class AudioEngine:
                             f"{engine_name_from_mode(getattr(settings, 'STT_GIGAAM_MODE', 'rnnt'))}"
                             "-chunked"
                         ),
+                        # Пересборка не должна терять флаг адаптера (гейт
+                        # punctuation-LLM-pass ниже по transcribe()).
+                        "native_punctuation": chunks_native_punct,
                     }
                 except Exception as chunker_exc:
                     # AudioChunker failed — fallback на transcribe_longform() (pyannote path).
@@ -3073,6 +3086,9 @@ class AudioEngine:
         text = result.get("text", "") if isinstance(result, dict) else str(result)
         confidence = float(result.get("confidence", 0.0)) if isinstance(result, dict) else 0.0
         engine_name = result.get("engine", "gigaam-rnnt") if isinstance(result, dict) else "gigaam-rnnt"
+        native_punctuation = (
+            bool(result.get("native_punctuation", False)) if isinstance(result, dict) else False
+        )
 
         logger.info(
             "GigaAM транскрибация завершена: len=%d chars, confidence=%.3f, engine=%s",
@@ -3086,6 +3102,7 @@ class AudioEngine:
             "language": "ru",
             "confidence": confidence,
             "engine": engine_name,
+            "native_punctuation": native_punctuation,
         }
 
     def _transcribe_voxtral(self, audio_data: Any, language: str | None = None) -> dict[str, Any]:

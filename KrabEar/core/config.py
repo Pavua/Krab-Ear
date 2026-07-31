@@ -378,6 +378,10 @@ class Settings(BaseSettings):
     #                  scripts/install_gigaam_venv.command). Worker держит модель в
     #                  памяти, общается через stdin/stdout JSON.
     #   "auto" (default) — пробует in_process; при ImportError → subprocess.
+    #   "mlx" — gigaam-mlx (aystream/gigaam-mlx) в ГЛАВНОМ процессе под mlx_lock:
+    #           чистый MLX без PyTorch, по-чанковый лок (см. stt_gigaam_mlx.py).
+    #           Диверсия на отдельный класс происходит в stt_router —
+    #           GigaAMAdapter это значение не принимает.
     STT_GIGAAM_TRANSPORT: str = "auto"
     # Путь к Python интерпретатору изолированного venv с установленным gigaam.
     # Используется только при transport in {"subprocess", "auto"}.
@@ -938,6 +942,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "stt_gigaam_enabled": False,
     "stt_gigaam_mode": "v3_e2e_rnnt",
     "stt_gigaam_device": "mps",
+    # Транспорт GigaAM: auto|in_process|subprocess|mlx. До волны gigaam-mlx
+    # ключ в DEFAULT_SETTINGS отсутствовал; default повторяет прежнее
+    # фактическое поведение UI (subprocess в проде).
+    "stt_gigaam_transport": "subprocess",
     # --- SenseVoice adapter (East Asian multilingual) ---
     "stt_sensevoice_enabled": False,
     "stt_sensevoice_model": "FunAudioLLM/SenseVoiceSmall",
