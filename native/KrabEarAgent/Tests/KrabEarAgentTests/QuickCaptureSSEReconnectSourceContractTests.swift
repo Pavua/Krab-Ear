@@ -22,6 +22,13 @@
       — реконнект проверяет panel.isVisible (жизненный цикл SSE привязан к
         show()/close()), а не isRecording — в контроллере нет отдельного
         понятия «режим активен» (см. докстринг задачи 8).
+   4. test_handleSSECompletion_invalidatesSessionBeforeClearing
+      — S3 финальное ревью, фикс 2: handleSSECompletion() обязан
+        инвалидировать sseSession (invalidateAndCancel()) ПЕРЕД обнулением —
+        URLSession с кастомным делегатом держит его сильной ссылкой до явной
+        инвалидации; голое `sseSession = nil` копило неинвалидированную
+        сессию+делегат на КАЖДЫЙ обрыв (обычный путь при живущей задаче 7 —
+        не редкий кейс) без верхней границы.
 */
 
 import XCTest
@@ -71,6 +78,45 @@ final class QuickCaptureSSEReconnectSourceContractTests: XCTestCase {
             "иначе устаревший таймер поднимет соединение поверх уже закрытой " +
             "панели или уже идущей новой попытки."
         )
+    }
+
+    func test_handleSSECompletion_invalidatesSessionBeforeClearing() throws {
+        let src = try Self.readSource()
+        let body = try Self.functionBody(
+            named: "private func handleSSECompletion",
+            nextAnchor: "private func scheduleSSEReconnect",
+            in: src
+        )
+
+        let invalidateRange = body.range(of: "sseSession?.invalidateAndCancel()")
+        XCTAssertNotNil(
+            invalidateRange,
+            "handleSSECompletion обязан звать sseSession?.invalidateAndCancel() — " +
+            "иначе URLSession с кастомным делегатом держит его сильной ссылкой " +
+            "навсегда (утечка на каждый обрыв SSE, не только редкий кейс)."
+        )
+        if let invalidateRange, let clearRange = body.range(of: "sseSession = nil") {
+            XCTAssertTrue(
+                invalidateRange.upperBound <= clearRange.lowerBound,
+                "invalidateAndCancel() обязан идти ДО обнуления sseSession — " +
+                "иначе ссылка на сессию теряется прежде инвалидации."
+            )
+        } else {
+            XCTFail("handleSSECompletion обязан обнулять sseSession после инвалидации")
+        }
+    }
+
+    /// Вырезает тело метода `named...{` до `nextAnchor` — достаточно грубо
+    /// (не парсит скобки), но устойчиво для наших плоских methods без
+    /// вложенных `private func` внутри тела.
+    private static func functionBody(named marker: String, nextAnchor: String, in src: String) throws -> Substring {
+        guard let start = src.range(of: marker) else {
+            throw XCTSkip("Маркер \(marker) не найден — возможно метод переименован")
+        }
+        guard let end = src.range(of: nextAnchor, range: start.upperBound..<src.endIndex) else {
+            throw XCTSkip("Маркер \(nextAnchor) не найден — возможно метод переименован")
+        }
+        return src[start.upperBound..<end.lowerBound]
     }
 
     /// Резолвит Sources/KrabEarAgent/QuickCapturePanelController.swift от

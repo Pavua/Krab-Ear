@@ -335,6 +335,14 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
         // задачи — молчим, текущая попытка либо не начиналась, либо это она.
         guard generation == sseGeneration else { return }
         sseTask = nil
+        // Финал ревью S3: раньше сессия здесь просто обнулялась БЕЗ
+        // invalidateAndCancel() — URLSession с кастомным делегатом держит
+        // его сильной ссылкой до явной инвалидации, поэтому каждый обрыв
+        // (нормальный путь этого метода — REST лежит/лечится не меньше
+        // минуты, задача 7) копил ОДНУ неинвалидированную сессию+делегат
+        // навсегда. Тот же вызов, что stopSSE() выше и образец
+        // LiveSubtitlesOverlay.swift::closeCurrentSSEConnection().
+        sseSession?.invalidateAndCancel()
         sseSession = nil
         // Панель закрыта — не переподключаемся, тот же принцип, что и
         // таймер/пульс (resyncTimerAndPulseIfNeeded, windowWillClose):
