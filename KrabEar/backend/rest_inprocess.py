@@ -27,6 +27,15 @@ SHUTDOWN_JOIN_TIMEOUT_SEC = 5.0
 # Меньше join-таймаута: это ожидание СТАРТА цикла, а не его завершения.
 SERVE_ENTER_TIMEOUT_SEC = 2.0
 
+# S3/Задача 7b, п.6 плана: сколько restart() ждёт stop() на ОТДЕЛЬНОМ треде,
+# прежде чем сдаться. server.shutdown() внутри stop() блокируется БЕЗ
+# таймаута, если serve_forever реально вошёл в цикл (барьер _serving
+# защищает только «тред ещё не вошёл») — а сторож зовёт restart() именно
+# тогда, когда serve_forever мог зависнуть на самом отказе, который лечим.
+# Больше SHUTDOWN_JOIN_TIMEOUT_SEC=5.0 (таймаут join() ВНУТРИ самого stop()),
+# чтобы не срезать штатный путь останова раньше его собственного дедлайна.
+RESTART_STOP_DEADLINE_SEC = 6.0
+
 # S3/Задача 5: посчитанный бюджет дренажа активных REST-запросов в stop().
 # ExitTimeOut=15 (ai.krab.ear.backend.plist.template) минус уже занятые
 # _IPC_DRAIN_BUDGET_SEC=8.0 (service.py) и SHUTDOWN_JOIN_TIMEOUT_SEC=5.0 выше
@@ -84,6 +93,14 @@ class InProcessRestServer:
         self._lock = threading.Lock()
         # Выставляется тредом ПЕРЕД входом в serve_forever — барьер для stop().
         self._serving = threading.Event()
+        # S3/Задача 7b: "был живой serve" за жизнь текущего процесса — ставится
+        # ОДИН раз в момент входа в serve_forever, дальше уже не сбрасывается
+        # (в т.ч. после stop()). Контракт RestWatchdog (rest_watchdog.py):
+        # занятый порт (running=false от EADDRINUSE) неотличим от "REST умер"
+        # по одному только running, а лечить сторож обязан ТОЛЬКО то, что
+        # хотя бы раз реально слушало — иначе REST, ни разу не поднявшийся
+        # из-за конфликта порта на старте, лечился бы вечным штормом restart().
+        self._ever_served: bool = False
 
         # S3/Задача 5: гейт останова запросов + реестр активных (не-стриминговых)
         # запросов. См. _install_drain_hooks() и владение флагом в docstring stop().
@@ -242,6 +259,8 @@ class InProcessRestServer:
         # бы не входя в serve_forever(), а ждущий stop() повис бы навсегда
         # (см. барьер _serving ниже).
         self._serving.set()
+        with self._lock:
+            self._ever_served = True
         try:
             server.serve_forever()
         except Exception:
@@ -328,7 +347,44 @@ class InProcessRestServer:
                 "running": bool(running),
                 "port": self._port,
                 "error": self._error,
+                # S3/Задача 7b: контракт RestWatchdog.check_once() — читается
+                # через .get("ever_served", False), см. докстринг rest_watchdog.py.
+                "ever_served": self._ever_served,
             }
+
+    def restart(self) -> bool:
+        """Лечение сторожа (S3/Задача 7b) = ``stop()`` + ``start()`` с общим
+        deadline на ОТДЕЛЬНОМ треде — не блокирует вызывающего (тик
+        ``RestWatchdog``) дольше ``RESTART_STOP_DEADLINE_SEC``.
+
+        Наивная реализация зависла бы на том самом отказе, который лечит:
+        ``stop()`` зовёт ``server.shutdown()``, блокирующийся БЕЗ таймаута,
+        когда serve_forever реально вошёл в цикл. По истечении дедлайна
+        возвращаем ``False`` НЕ дожидаясь stop() — сторож идёт прямо к
+        эскалации вместо вечного зависания собственного тика.
+        """
+        done = threading.Event()
+
+        def _do_stop() -> None:
+            try:
+                self.stop()
+            finally:
+                done.set()
+
+        threading.Thread(
+            target=_do_stop, name="rest-inprocess-restart-stop", daemon=True,
+        ).start()
+
+        if not done.wait(timeout=RESTART_STOP_DEADLINE_SEC):
+            logger.error(
+                "InProcessRestServer.restart(): stop() не завершился за "
+                "%.1fс — server.shutdown() застрял на самом отказе, который "
+                "лечим; сдаёмся без ожидания, вызывающий (сторож) эскалирует",
+                RESTART_STOP_DEADLINE_SEC,
+            )
+            return False
+
+        return self.start()
 
     # ------------------------------------------------------------------
 

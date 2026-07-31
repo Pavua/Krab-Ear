@@ -236,7 +236,26 @@ def _shutdown_backend(
     ресурсам. Перед аварийным выходом telemetry сбрасывается, а при тестовой
     инъекции возвращается ``False`` без продолжения teardown.
     """
-    # ЯКОРЬ ДЛЯ S3/ЗАДАЧИ 7 (сторож REST): остановка сторожа встаёт СЮДА,
+    # S3/Задача 7b, п.7: терминальная защёлка + останов сторожа REST — САМЫЙ
+    # ПЕРВЫЙ шаг teardown, раньше даже rest_inprocess.begin_shutdown() ниже.
+    # Single-flight внутри сторожа сериализует его собственные stop()/heal, но
+    # не запрещает ему взять флайт ПОСЛЕ того, как close() его отпустит:
+    # shutdown идёт дальше (TTS и адаптеры уже закрываются), а сторож поднимает
+    # REST заново — сервер принимает запросы над полузакрытым backend'ом.
+    # begin_shutdown() — необратимое состояние (лечение запрещено НАВСЕГДА,
+    # переживает даже тик, который уже был в процессе на момент вызова);
+    # stop() — реальный останов daemon-треда (идемпотентный повтор в
+    # close() ниже по цепочке — тот же паттерн, что EventBridge/PurgeScheduler).
+    rest_watchdog = getattr(service, "_rest_watchdog", None)
+    if rest_watchdog is not None:
+        try:
+            rest_watchdog.begin_shutdown()
+            rest_watchdog.stop()
+        except Exception:
+            logger.exception(
+                "RestWatchdog.begin_shutdown()/stop() выбросил при shutdown"
+            )
+
     # ДО взвода shutting_down ниже — иначе сторож увидит 503 на /health уже
     # останавливающегося REST и попытается его «вылечить» гонкой с этим же
     # teardown'ом.
@@ -916,6 +935,24 @@ class BackendService:
                 )
                 self._push_rest_error("rest.startup_failed", _detail)
 
+        # S3/Задача 7b (спека §Р6): активный сторож REST — конструируется
+        # ВСЕГДА, когда self._rest_inprocess не None (рубильник был включён
+        # на старте), не только на живом сервере: RestWatchdog умеет
+        # надгробие сам (п.5 плана — "не лечить надгробие", уже в 7a) и
+        # безопасно no-op'ит на нём вечно. При выключенном рубильнике
+        # (self._rest_inprocess остаётся None) сторожить нечего — конструктор
+        # не зовётся вовсе, get_diagnostics деградирует до fallback
+        # {"enabled": False, "wired": False} (см. HealthCheckService).
+        self._rest_watchdog = None
+        if self._rest_inprocess is not None:
+            from backend.rest_watchdog import RestWatchdog
+
+            self._rest_watchdog = RestWatchdog(
+                owner=self._rest_inprocess,
+                error_bus=self._error_bus,
+            )
+            self._rest_watchdog.start()
+
         # Event-мост IPC -> REST (spec 2026-07-07-event-bridge-design.md): доставляет
         # события ЛОКАЛЬНОЙ (IPC-процесса) шины в REST-процесс, откуда их уже
         # раздают существующие SSE/WS подписчики. Закрывает класс багов
@@ -1392,6 +1429,7 @@ class BackendService:
             last_stt_engine_ref=self._last_stt_engine_ref,
             wake_word_watchdog=self._wake_word_watchdog,
             rest_inprocess=self._rest_inprocess,
+            rest_watchdog=self._rest_watchdog,
         )
 
         logger.info("Krab Ear backend version %s starting up", APP_VERSION)
@@ -1948,6 +1986,18 @@ class BackendService:
                 event_bridge.stop()
             except Exception:
                 logger.exception("EventBridge.stop() raised during close()")
+
+        # Stop RestWatchdog daemon thread (S3/Задача 7b, п.7) — ДО
+        # rest_inprocess.stop() ниже: терминальная защёлка уже взведена
+        # раньше в _shutdown_backend, здесь — идемпотентный повтор stop()
+        # для путей закрытия, которые не проходят через _shutdown_backend
+        # (например прямой BackendService.close() из тестов/скриптов).
+        rest_watchdog = getattr(self, "_rest_watchdog", None)
+        if rest_watchdog is not None:
+            try:
+                rest_watchdog.stop()
+            except Exception:
+                logger.exception("RestWatchdog.stop() raised during close()")
 
         # Stop in-process REST (M2) — тот же daemon-thread teardown rule.
         rest_inprocess = getattr(self, "_rest_inprocess", None)

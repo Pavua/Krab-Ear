@@ -54,6 +54,7 @@ class HealthCheckService:
         last_stt_engine_ref: list[str] | None = None,
         wake_word_watchdog: Any = None,
         rest_inprocess: Any = None,
+        rest_watchdog: Any = None,
     ) -> None:
         self.store = store
         self._health_checker = health_checker
@@ -77,6 +78,10 @@ class HealthCheckService:
         # M2 (спека 2026-07-16 §4.2): опциональный — рубильник REST_IN_PROCESS_ENABLED
         # по умолчанию выключен, get_diagnostics деградирует до schema-parity fallback.
         self._rest_inprocess = rest_inprocess
+        # S3/Задача 7b: сторож REST (rest_watchdog.py) — опциональный по той
+        # же причине, что rest_inprocess: конструируется только когда
+        # рубильник REST_IN_PROCESS_ENABLED включён (см. service.py).
+        self._rest_watchdog = rest_watchdog
 
     # ------------------------------------------------------------------
     # handle_ping
@@ -207,6 +212,15 @@ class HealthCheckService:
             "event_bridge": self._get_event_bridge_summary(),
             # In-process REST (spec 2026-07-16 §4.2): enabled/running/port/error.
             "rest_in_process": self._get_rest_inprocess_summary(),
+            # S3/Задача 7b (спека 2026-07-31-s3-rest-flip-design.md §Р6):
+            # активный сторож REST. Schema-parity fallback по образцу
+            # wake_word_watchdog выше — если сторож не подключён (рубильник
+            # REST_IN_PROCESS_ENABLED выключен), get_diagnostics не роняется.
+            "rest_watchdog": (
+                self._rest_watchdog.state()
+                if self._rest_watchdog is not None
+                else {"enabled": False, "wired": False}
+            ),
             # B3 (spec 2026-07-19-b3-brain-lease-visibility): кто держит LM Studio.
             "brain_lease": self._build_brain_lease_summary(),
         }
