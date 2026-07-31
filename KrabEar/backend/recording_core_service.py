@@ -2731,6 +2731,29 @@ class RecordingCoreService:
         _phase_c_settings = self._settings_svc.cached_settings()
         _diarize_enabled = _phase_c_settings.get("diarization_enabled", False)
         _sil_ranges = getattr(self, "_last_silence_ranges", None) or None
+
+        # Спасательная копия ДО транскрибации: зависший STT (дедлок mlx_lock,
+        # PortAudio-wedge) не бросает исключение — except ниже не выполнится, а
+        # вотчдог перезапустит backend и аудио из памяти пропадёт (инцидент
+        # 01.08.2026, три диктовки подряд). Файл удаляется после успеха.
+        _presaved_path: Path | None = None
+        audio_recovery_path: str | None = None
+        try:
+            import uuid as _uuid
+
+            import soundfile as _sf
+            _failed_dir = Path(self.store.data_dir) / "failed_recordings"
+            _failed_dir.mkdir(parents=True, exist_ok=True)
+            _presaved_path = _failed_dir / f"{_uuid.uuid4().hex}.wav"
+            _sf.write(
+                str(_presaved_path), audio,
+                int(getattr(self.recorder, "sample_rate", 16000)),
+            )
+            audio_recovery_path = str(Path("failed_recordings") / _presaved_path.name)
+        except Exception as _pre_exc:
+            _presaved_path = None
+            logger.warning("phase_c: не удалось сохранить спасательную копию аудио: %s", _pre_exc)
+
         try:
             transcribe_payload = self.transcriber.transcribe(
                 audio,
@@ -2746,17 +2769,7 @@ class RecordingCoreService:
             )
         except Exception as _stt_exc:
             logger.exception("phase_c: STT crashed", extra={"quality_profile": quality_profile})
-            audio_recovery_path = None
-            try:
-                import uuid as _uuid
-                import soundfile as _sf
-                _rec_id = _uuid.uuid4().hex
-                _failed_dir = Path(self.store.data_dir) / "failed_recordings"
-                _failed_dir.mkdir(parents=True, exist_ok=True)
-                _sf.write(str(_failed_dir / f"{_rec_id}.wav"), audio, int(getattr(self.recorder, "sample_rate", 16000)))
-                audio_recovery_path = str(Path("failed_recordings") / f"{_rec_id}.wav")
-            except Exception as _pe:
-                logger.warning("phase_c: failed to persist recovery audio: %s", _pe)
+            # Спасательная копия уже на диске (см. presave выше) — её и отдаём.
             if self._error_bus is not None:
                 try:
                     from backend.error_bus import KrabError
@@ -2778,6 +2791,13 @@ class RecordingCoreService:
                                      "error_detail": str(_stt_exc),
                                      "audio_recovery_path": audio_recovery_path,
                                      "status": "stt_failed"}}
+
+        # STT дошёл до конца — спасательная копия больше не нужна.
+        if _presaved_path is not None:
+            try:
+                _presaved_path.unlink(missing_ok=True)
+            except OSError as _rm_exc:
+                logger.warning("phase_c: не удалось убрать спасательную копию: %s", _rm_exc)
 
         return {"transcribe_payload": transcribe_payload}
 
