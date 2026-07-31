@@ -67,6 +67,13 @@ BACKOFF_MAX_SEC = 30.0           # потолок backoff
 # Верхняя граница ожидания в sender-цикле (держит stop()/backoff отзывчивыми;
 # будится немедленно по wake_event.set() из on_event(), не влияет на задержку).
 SENDER_POLL_SEC = 1.0
+# R2-фикс 4 (финальное ревью S3): именованная константа вместо голого
+# литерала в stop() ниже — посчитанный бюджет останова
+# (test_rest_inprocess_drain_budget_S3_task5.py) ссылается на неё напрямую,
+# не задваивая число магической копией. stop() зовётся из
+# BackendService.close(), ПОСЛЕ IPC-дренажа и RestWatchdog.stop() —
+# последовательно добавляется в общий бюджет ExitTimeOut.
+STOP_JOIN_TIMEOUT_SEC = 5.0
 
 EVENT_BRIDGE_TOKEN_FILENAME = "event_bridge_token"
 _TOKEN_BYTES = 32                # secrets.token_hex(32) -> 64 hex-символа
@@ -273,12 +280,12 @@ class EventBridge:
         logger.info("EventBridge запущен (url=%s)", self._url)
 
     def stop(self) -> None:
-        """Graceful shutdown: дожидается завершения потока (до 5с). Idempotent."""
+        """Graceful shutdown: дожидается завершения потока (до STOP_JOIN_TIMEOUT_SEC). Idempotent."""
         self._stop_event.set()
         self._wake_event.set()  # немедленно будим поток, не дожидаясь SENDER_POLL_SEC
         thread = self._thread
         if thread is not None and thread.is_alive():
-            thread.join(timeout=5.0)
+            thread.join(timeout=STOP_JOIN_TIMEOUT_SEC)
         logger.debug("EventBridge остановлен")
 
     # ------------------------------------------------------------------

@@ -78,6 +78,14 @@ CONSECUTIVE_FAILURES_TO_HEAL = 2
 _HEAL_STORM_WINDOW_SEC = 600.0
 _HEAL_STORM_MAX = 3
 
+# R2-фикс 4 (финальное ревью S3): именованная константа вместо голого
+# литерала — раньше stop() ниже звал thread.join(timeout=2.0) напрямую,
+# и посчитанный бюджет останова (test_rest_inprocess_drain_budget_S3_task5.py)
+# не мог сослаться на это число, не задваивая его магической копией. Этот
+# join() выполняется В _shutdown_backend, ДО IPC-дренажа (service.py) —
+# последовательно добавляется в общий бюджет ExitTimeOut, не параллельно.
+STOP_JOIN_TIMEOUT_SEC = 2.0
+
 
 class RestWatchdog:
     """Daemon-тред: проверяет health встроенного REST, лечит через
@@ -150,9 +158,12 @@ class RestWatchdog:
             self._thread = None
         self._stop_event.set()
         if thread is not None and thread.is_alive():
-            thread.join(timeout=2.0)
+            thread.join(timeout=STOP_JOIN_TIMEOUT_SEC)
             if thread.is_alive():
-                logger.warning("RestWatchdog: тред не завершился за 2.0с")
+                logger.warning(
+                    "RestWatchdog: тред не завершился за %.1fс",
+                    STOP_JOIN_TIMEOUT_SEC,
+                )
 
     def begin_shutdown(self) -> None:
         """Терминальная защёлка (S3/Задача 7b, п.7): лечение запрещено
@@ -233,7 +244,20 @@ class RestWatchdog:
             # п.4: успешный HTTP-ответ пробы при running=false доказывает,
             # что порт слушает КТО-ТО ДРУГОЙ (легаси-юнит), не наш процесс —
             # отдельное нелечимое состояние, а не смерть REST.
-            self._port_held_externally = not running
+            #
+            # R2-фикс 2, часть 2: это верно ТОЛЬКО когда наш сервер НИКОГДА
+            # не слушал за жизнь процесса (ever_served=False, типично —
+            # конфликт порта на самом старте). Если ever_served=True, running
+            # уже успел стать False (stop() обнуляет self._server/_thread
+            # под локом МГНОВЕННО, задолго до факта закрытия сокета) — тогда
+            # "здоровая" проба почти наверняка бьёт в НАШ ЖЕ полу-закрытый
+            # инстанс (или уже классифицирована как shutting_down-маркер в
+            # _default_probe и сюда вообще не дошла бы как healthy). Ложное
+            # "порт занят снаружи" в этом случае отправило бы владельца
+            # выгружать несуществующий юнит вместо реального лечения REST.
+            self._port_held_externally = (
+                not running and not bool(status.get("ever_served", False))
+            )
             self._reset_streak()
             return None
 
@@ -350,7 +374,20 @@ class RestWatchdog:
         """GET /health на loopback. True = сервер жив (ЛЮБОЙ HTTP-ответ, в
         т.ч. 429/5xx — /health не защищён require_api_key и делит бакет
         120/мин с остальными loopback-клиентами: Voice Gateway, Swift, сам
-        сторож). False — ТОЛЬКО таймаут или ошибка соединения (п.2)."""
+        сторож). False — таймаут, ошибка соединения (п.2), ИЛИ наш
+        собственный маркер останова (R2-фикс 2 ниже).
+
+        R2-фикс 2, часть 1: 503 с телом ``{"error": "shutting_down"}`` — это
+        НЕ произвольный 5xx стороннего сервиса, а ДЕТЕРМИНИРОВАННЫЙ маркер,
+        который сам rest_inprocess.py отдаёт на ЛЮБОЙ путь (включая
+        ``/health``), пока флаг ``shutting_down`` взведён (см.
+        ``_gate_or_count`` в rest_inprocess.py). Если проба слепо засчитывает
+        такой ответ за здоровье, сторож принимает СВОЙ ЖЕ отказ-в-обслуживании
+        за доказательство жизни (живой сценарий — см. docstring теста
+        test_rest_watchdog_own_503_marker_S3_r2fix2.py). Любой другой 5xx/429
+        (в т.ч. 503 без этого конкретного тела — legacy/прокси/иной сбой)
+        по-прежнему = здоровье, контракт п.2 не сужается сверх этого частного
+        случая."""
         import requests
 
         try:
@@ -358,12 +395,23 @@ class RestWatchdog:
         except Exception:
             port = 5005
         try:
-            requests.get(
+            resp = requests.get(
                 f"http://127.0.0.1:{port}/health", timeout=_PROBE_TIMEOUT_SEC,
             )
-            return True
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
             return False
+
+        if resp.status_code == 503:
+            try:
+                body = resp.json()
+            except ValueError:
+                # Не-JSON тело — точно не наш маркер (rest_inprocess всегда
+                # отдаёт JSON); fail-open к исходному правилу п.2 (жив).
+                body = None
+            if isinstance(body, dict) and body.get("error") == "shutting_down":
+                return False
+
+        return True
 
     # ------------------------------------------------------------------
 
