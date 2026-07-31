@@ -891,19 +891,38 @@ class BackendService:
         # затевалась серия M. Прежний комплект становится недостижим и уходит
         # в сборщик мусора.
         self._rest_inprocess = None
-        # S3/Задача 9, п.1: паттерн волны 58 ("Runtime vs static settings
-        # reads") — runtime-ключ rest_in_process_enabled из settings.json
-        # первым, статическое pydantic-поле как фоллбэк. До фикса здесь
-        # читалось голое settings.REST_IN_PROCESS_ENABLED — владелец включал
-        # ключ через set_settings, IPC рапортовал успех, а этот участок
-        # молча игнорировал runtime-значение. Рубильник читается ОДИН раз
-        # при старте — не live-toggle (живое переключение потребовало бы
-        # поднимать и опускать Flask на ходу).
-        _rest_enabled = bool(
-            self._get_runtime_setting(
-                "rest_in_process_enabled", settings.REST_IN_PROCESS_ENABLED
+        # S3/Задача 9, п.1 (+ доработка по итогам ревью): приоритет —
+        # явная переменная окружения KRAB_EAR_REST_IN_PROCESS_ENABLED →
+        # runtime-ключ rest_in_process_enabled из settings.json → pydantic-
+        # дефолт. Паттерн волны 58 ("Runtime vs static settings reads") дал
+        # только средние два уровня — до фикса здесь читалось голое
+        # settings.REST_IN_PROCESS_ENABLED, владелец включал ключ через
+        # set_settings, IPC рапортовал успех, а участок молча игнорировал
+        # runtime-значение. Но DEFAULT_SETTINGS ВСЕГДА содержит этот ключ
+        # (settings.json), поэтому голая замена приоритета сделала бы
+        # переменную окружения (KRAB_EAR_<ИМЯ>, документированный механизм
+        # проекта, см. CLAUDE.md "Config override") недостижимой для этого
+        # конкретного ключа — она перестала бы на что-либо влиять.
+        #
+        # Переменная окружения — аварийный рычаг уровня launchd-plist, она
+        # ОБЯЗАНА перебивать пользовательскую настройку, а не наоборот. Тот
+        # же принцип пиннинга, что settings_service._ENV_PINNED_SETTINGS для
+        # ipc_signing_secret/ipc_signing_enabled (там — запрет перезаписи
+        # через set_settings; здесь — приоритет чтения на старте, механизм
+        # разный, принцип общий: явно заданный env всегда старше файла
+        # настроек). settings.REST_IN_PROCESS_ENABLED уже отражает значение
+        # переменной (pydantic env_prefix="KRAB_EAR_" в core/config.py), так
+        # что при её наличии runtime-ключ полностью игнорируется. Рубильник
+        # читается ОДИН раз при старте — не live-toggle (живое переключение
+        # потребовало бы поднимать и опускать Flask на ходу).
+        if os.environ.get("KRAB_EAR_REST_IN_PROCESS_ENABLED") is not None:
+            _rest_enabled = bool(settings.REST_IN_PROCESS_ENABLED)
+        else:
+            _rest_enabled = bool(
+                self._get_runtime_setting(
+                    "rest_in_process_enabled", settings.REST_IN_PROCESS_ENABLED
+                )
             )
-        )
         if _rest_enabled:
             try:
                 import backend.rest_server as _rest_module
