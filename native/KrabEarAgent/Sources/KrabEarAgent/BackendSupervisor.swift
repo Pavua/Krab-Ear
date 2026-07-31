@@ -303,6 +303,34 @@ final class BackendSupervisor: @unchecked Sendable {
         (projectRoot as NSString).appendingPathComponent("KrabEar/main.py")
     }
 
+    /// Окружение для standalone-спавна backend-процесса (active-режим
+    /// супервизора — DMG-получатели без установленного launchd-юнита).
+    /// Зеркалит `ai.krab.ear.backend.plist.template`'s `EnvironmentVariables`
+    /// для двух полей, критичных для корректности данных:
+    /// - `KRAB_EAR_DATA_DIR` обязан совпадать с аргументом `--data-dir`
+    ///   (тот же баг класса S3/Р3 — без этого `settings.DATA_DIR` внутри
+    ///   backend остаётся дефолтным `~/.krab_ear_data`, а REST/purge/cloud_*
+    ///   читают его, пока StateStore получает каталог отдельным аргументом;
+    ///   `handle_purge_all_data` чистит НЕ тот каталог, что REST пишет
+    ///   `temp_uploads` — сырое аудио переживает "Удалить все данные").
+    /// - `PYTHONPATH` обязан включать `KrabEar/`, иначе `import backend.*`/
+    ///   `import core.*` внутри `main.py` падает при отсутствующем
+    ///   унаследованном окружении (например запуск не из Terminal).
+    /// Остальные переменные унаследованы от текущего процесса — standalone
+    /// dev-запуск обычно уже идёт из shell с нужным PATH/токенами.
+    /// Выделено в чистую функцию для юнит-тестов (тот же приём, что
+    /// `backendScriptPath`).
+    static func backendEnvironment(
+        projectRoot: String,
+        dataDir: String,
+        base: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [String: String] {
+        var env = base
+        env["KRAB_EAR_DATA_DIR"] = dataDir
+        env["PYTHONPATH"] = (projectRoot as NSString).appendingPathComponent("KrabEar")
+        return env
+    }
+
     /// Аргументы launchctl для принудительного рестарта launchd-owned backend.
     /// Выделено в чистую функцию для юнит-тестов.
     static func kickstartArguments(uid: uid_t) -> [String] {
@@ -401,6 +429,7 @@ final class BackendSupervisor: @unchecked Sendable {
             "--socket-path", socketPath,
         ]
         process.currentDirectoryURL = URL(fileURLWithPath: projectRoot)
+        process.environment = Self.backendEnvironment(projectRoot: projectRoot, dataDir: dataDir)
 
         // Нельзя оставлять нечитабельный Pipe: при переполнении буфера backend может зависнуть.
         process.standardOutput = FileHandle.nullDevice
