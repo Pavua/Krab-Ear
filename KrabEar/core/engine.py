@@ -1328,10 +1328,9 @@ class AudioEngine:
                         except Exception as _cr_exc:
                             logger.warning("Cloud rewrite error (ignored): %s", _cr_exc)
 
-            # 5. Расчет метрик уверенности
-            confidence = 0.0
-            if segments:
-                confidence = float(np.mean([np.exp(s.get("avg_logprob", -1.0)) for s in segments]))
+            # 5. Расчет метрик уверенности (единый источник — helper: результаты
+            # без segments, но с явным confidence (GigaAM) не зануляются)
+            confidence = self._raw_confidence_from_result(result)
 
             duration = time.time() - start_time
 
@@ -1857,10 +1856,7 @@ class AudioEngine:
                 )
                 raw_text = str(raw_result.get("text", "")).strip()
                 cleaned = TextUtils.cleanup_transcript(raw_text, profile=cleanup_profile)
-                segs = raw_result.get("segments", [])
-                conf = 0.0
-                if segs:
-                    conf = float(np.mean([np.exp(s.get("avg_logprob", -1.0)) for s in segs]))
+                conf = self._raw_confidence_from_result(raw_result)
                 chunk_results.append({
                     "idx": info["idx"],
                     "start_sec": info["start_sec"],
