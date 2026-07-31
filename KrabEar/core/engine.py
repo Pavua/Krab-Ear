@@ -1523,10 +1523,15 @@ class AudioEngine:
 
     @staticmethod
     def _raw_confidence_from_result(result: dict[str, Any]) -> float:
-        """Вычисляет сырую уверенность из segments dict, возвращает 0.0 если нет данных."""
+        """Вычисляет сырую уверенность из segments dict, возвращает 0.0 если нет данных.
+
+        Результаты без segments, но с явным confidence (GigaAM-адаптеры) —
+        берём явное поле: иначе multipass считает их провальными (0.0) и
+        всегда перегоняет через whisper, выбрасывая GigaAM-текст.
+        """
         segments = result.get("segments", [])
         if not segments:
-            return 0.0
+            return float(result.get("confidence") or 0.0)
         return float(np.mean([np.exp(s.get("avg_logprob", -1.0)) for s in segments]))
 
     def _maybe_multipass_retry(
