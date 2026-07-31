@@ -195,4 +195,66 @@ final class BackendSupervisorTests: XCTestCase {
             "спавн backend/service.py напрямую раздваивает модуль backend.service при включённом REST (Р9); got: \(path)"
         )
     }
+
+    // MARK: backendEnvironment — S3 финальное ревью, фикс 1
+
+    /// До фикса standalone-спавн (`startBackendProcess()`) не задавал
+    /// `process.environment` вообще — `KRAB_EAR_DATA_DIR` не совпадал с
+    /// `--data-dir` в active-режиме супервизора, из-за чего REST
+    /// `temp_uploads` и `handle_purge_all_data` читали/чистили РАЗНЫЕ
+    /// каталоги (см. `ai.krab.ear.backend.plist.template`'s
+    /// `KRAB_EAR_DATA_DIR` и `test_backend_plist_data_dir_parity_S3.py`
+    /// на стороне плиста — это зеркало для standalone-пути).
+    func test_backendEnvironment_setsDataDirMatchingArgument() {
+        let env = BackendSupervisor.backendEnvironment(
+            projectRoot: "/tmp/my_project",
+            dataDir: "/tmp/my_project_data",
+            base: [:]
+        )
+
+        XCTAssertEqual(
+            env["KRAB_EAR_DATA_DIR"],
+            "/tmp/my_project_data",
+            "KRAB_EAR_DATA_DIR обязан совпадать с --data-dir, иначе settings.DATA_DIR расходится со StateStore"
+        )
+    }
+
+    func test_backendEnvironment_setsPythonPathUnderProjectRoot() {
+        let env = BackendSupervisor.backendEnvironment(
+            projectRoot: "/tmp/my_project",
+            dataDir: "/tmp/my_project_data",
+            base: [:]
+        )
+
+        XCTAssertEqual(
+            env["PYTHONPATH"],
+            "/tmp/my_project/KrabEar",
+            "PYTHONPATH обязан указывать на KrabEar/, иначе import backend.*/core.* падает"
+        )
+    }
+
+    func test_backendEnvironment_preservesInheritedVariables() {
+        let env = BackendSupervisor.backendEnvironment(
+            projectRoot: "/tmp/my_project",
+            dataDir: "/tmp/my_project_data",
+            base: ["PATH": "/usr/bin:/bin", "HF_TOKEN": "secret"]
+        )
+
+        XCTAssertEqual(env["PATH"], "/usr/bin:/bin", "унаследованные переменные не должны теряться")
+        XCTAssertEqual(env["HF_TOKEN"], "secret", "унаследованные переменные не должны теряться")
+    }
+
+    func test_backendEnvironment_overridesConflictingInheritedDataDir() {
+        // Если родительский shell уже экспортировал KRAB_EAR_DATA_DIR/PYTHONPATH
+        // (например от предыдущего dev-запуска), явное значение обязано победить —
+        // иначе именно этот случай воспроизводит живой баг.
+        let env = BackendSupervisor.backendEnvironment(
+            projectRoot: "/tmp/my_project",
+            dataDir: "/tmp/my_project_data",
+            base: ["KRAB_EAR_DATA_DIR": "/tmp/stale", "PYTHONPATH": "/tmp/stale/KrabEar"]
+        )
+
+        XCTAssertEqual(env["KRAB_EAR_DATA_DIR"], "/tmp/my_project_data")
+        XCTAssertEqual(env["PYTHONPATH"], "/tmp/my_project/KrabEar")
+    }
 }
