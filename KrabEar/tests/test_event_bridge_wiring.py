@@ -48,6 +48,26 @@ class EventBridgeWiringSourceContractTestCase(unittest.TestCase):
     def test_health_check_service_exposes_event_bridge_in_diagnostics(self):
         self.assertIn('"event_bridge"', _HEALTH_SRC)
 
+    # -- S3/Задача 6: динамическое подавление -----------------------------------
+
+    def test_event_bridge_receives_rest_running_fn(self):
+        """Мост получает аксессор владельца, а не читает рубильник сам —
+        одноразовое чтение REST_IN_PROCESS_ENABLED в конструкторе больше
+        недостаточно (сторож REST способен поднять сервер позже старта)."""
+        self.assertIn("rest_running_fn=self._is_rest_inprocess_running", _SERVICE_SRC)
+
+    def test_rest_inprocess_block_constructed_before_event_bridge(self):
+        """Блок подъёма REST обязан идти ВЫШЕ создания моста — мосту нужен
+        готовый self._rest_inprocess для рабочего аксессора (иначе первый же
+        батч читал бы ещё не созданный атрибут)."""
+        rest_idx = _SERVICE_SRC.index("self._rest_inprocess = None")
+        bridge_idx = _SERVICE_SRC.index("self._event_bridge = EventBridge(")
+        self.assertLess(
+            rest_idx, bridge_idx,
+            "self._rest_inprocess = None должен встречаться в источнике РАНЬШЕ, "
+            "чем self._event_bridge = EventBridge(...)",
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

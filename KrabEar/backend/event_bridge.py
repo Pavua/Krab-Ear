@@ -26,6 +26,17 @@ Stale-TTL (поправка контролёра №1, 2026-07-07): перед �
 burst стухших UI-событий (старые субтитры поверх свежих). Невалидный/
 отсутствующий ts трактуется как "свежий" (fail-open — не терять события
 из-за формата).
+
+Динамическое подавление (S3/Задача 6): когда REST поднят ВНУТРИ этого же
+процесса (M2), IPC- и REST-сторона делят ОДНУ EventBus — мост, продолжающий
+слать batches на /internal/event, задвоил бы доставку (`emit_envelope`
+кладёт конверт в те же `_subscribers`, минуя листенеров, event_bus.py:210-217).
+Владелец (BackendService) передаёт в конструктор `rest_running_fn` —
+аксессор, опрашиваемый перед КАЖДЫМ батчем в `_tick()`, а не один раз при
+старте: сторож REST способен поднять in-process сервер позже старта, и
+одноразовое решение не заметило бы этого. Пока аксессор говорит "слушает" —
+`state="suppressed"`, очередь не копится (on_event() не кладёт новые
+конверты, `_tick()` подчищает случайно попавший остаток).
 """
 
 from __future__ import annotations
@@ -162,17 +173,26 @@ class EventBridge:
         settings: "Settings",
         data_dir: Path,
         post_fn: Callable[[str, dict[str, Any], str, float], bool] | None = None,
+        rest_running_fn: Callable[[], bool] | None = None,
     ) -> None:
         self._settings = settings
         self._data_dir = Path(data_dir)
         self._post_fn = post_fn or _default_post_fn
 
-        # M2: в слитом процессе (REST внутри backend) шина ОДНА — мост создал бы
-        # echo: событие ушло бы на /internal/event и вернулось в ту же шину.
-        # Поэтому in-process режим выключает мост так же жёстко, как killswitch.
-        self._enabled = bool(getattr(settings, "EVENT_BRIDGE_ENABLED", True)) and not bool(
-            getattr(settings, "REST_IN_PROCESS_ENABLED", False)
-        )
+        # S3/Задача 6: рубильник REST_IN_PROCESS_ENABLED больше НЕ читается
+        # здесь — одноразового решения в конструкторе недостаточно (сторож
+        # REST, отдельная задача волны, способен поднять in-process REST
+        # ПОЗЖЕ старта; одноразовое подавление оставило бы мост живым при
+        # работающем REST — он начал бы постить события в собственный
+        # процесс, `emit_envelope` доставил бы их подписчикам ВТОРОЙ раз в
+        # обход `_subscribers`, минуя листенеров, см. event_bus.py:210-217).
+        # Вместо этого владелец (BackendService) передаёт аксессор,
+        # отвечающий на вопрос «слушает ли in-process REST ПРЯМО СЕЙЧАС» —
+        # он вызывается перед КАЖДЫМ батчем в _tick(), не один раз в init.
+        # None означает «владельца нет» (standalone-режим, тесты) и
+        # трактуется как «не слушает» — мост работает как раньше.
+        self._enabled = bool(getattr(settings, "EVENT_BRIDGE_ENABLED", True))
+        self._rest_running_fn = rest_running_fn
         self._rest_port = int(getattr(settings, "REST_SERVER_PORT", 5005))
         self._url = f"http://127.0.0.1:{self._rest_port}/internal/event"
 
@@ -198,8 +218,16 @@ class EventBridge:
     # ------------------------------------------------------------------
 
     def on_event(self, event_type: str, payload: dict[str, Any]) -> None:
-        """Push-листенер EventBus. НЕ делает I/O — только deque.append + wake."""
+        """Push-листенер EventBus. НЕ делает I/O — только deque.append + wake.
+
+        S3/Задача 6, пункт 5: пока in-process REST слушает, конверты вообще
+        не копятся в очереди — иначе вечный drop-oldest на здоровой системе
+        (dropped/failed растут без единого реального сбоя, ложная тревога для
+        канарейки). Не только экономия — POST в подавленном состоянии всё
+        равно пропускается в _tick(), очередь бы просто копилась впустую."""
         if not self._enabled:
+            return
+        if self._is_suppressed():
             return
         envelope = {
             "type": event_type,
@@ -211,6 +239,20 @@ class EventBridge:
                 self._dropped_count += 1
             self._queue.append(envelope)
         self._wake_event.set()
+
+    def _is_suppressed(self) -> bool:
+        """True когда in-process REST слушает ПРЯМО СЕЙЧАС — постить в
+        собственный процесс нельзя. None-аксессор (владельца нет) трактуется
+        как «не слушает». Аксессор не должен ронять мост: исключение —
+        fail-open в сторону работающего моста, не в сторону тихой потери
+        событий."""
+        if self._rest_running_fn is None:
+            return False
+        try:
+            return bool(self._rest_running_fn())
+        except Exception:
+            logger.exception("EventBridge: rest_running_fn бросил — считаем REST не слушающим")
+            return False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -249,10 +291,29 @@ class EventBridge:
             self._wake_event.clear()
             if self._stop_event.is_set():
                 break
-            now = time.monotonic()
-            if self._state == "down" and now < self._next_retry_ts:
-                continue
-            self._drain_and_send()
+            self._tick()
+
+    def _tick(self) -> None:
+        """Один шаг sender-цикла — проверка подавления, затем попытка отправки.
+
+        Вынесено из _loop() отдельным методом ради юнит-тестируемости без
+        реального треда (образец — существующие тесты, вызывающие
+        _drain_and_send() напрямую). Подавление проверяется здесь, перед
+        КАЖДОЙ попыткой, а не один раз при старте (S3/Задача 6, пункт 2)."""
+        if self._is_suppressed():
+            with self._lock:
+                self._queue.clear()
+            self._set_state("suppressed")
+            return
+        if self._state == "suppressed":
+            # Разожмён — возвращаемся к "unknown", реальный up/down определит
+            # следующая попытка отправки (батч почти всегда пуст: on_event()
+            # не копил очередь, пока был подавлен).
+            self._set_state("unknown")
+        now = time.monotonic()
+        if self._state == "down" and now < self._next_retry_ts:
+            return
+        self._drain_and_send()
 
     def _drain_and_send(self) -> None:
         """Отправляет до BATCH_MAX свежих конвертов. Peek (не pop) до подтверждения
@@ -315,6 +376,10 @@ class EventBridge:
             )
         elif new_state == "up" and old_state != "unknown":
             logger.info("EventBridge: REST снова доступен (%s)", self._url)
+        elif new_state == "suppressed":
+            logger.info("EventBridge: подавлен работающим in-process REST (%s)", self._url)
+        elif old_state == "suppressed":
+            logger.info("EventBridge: in-process REST больше не слушает — мост разожмён")
 
     # ------------------------------------------------------------------
     # Diagnostics (get_diagnostics.event_bridge, Задача 5)

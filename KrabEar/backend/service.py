@@ -852,23 +852,18 @@ class BackendService:
                 self._webhook_manager.set_privacy_mode(new_privacy)
         self._settings_svc.register_after_save_hook(_on_privacy_mode_webhooks)
 
-        # Event-мост IPC -> REST (spec 2026-07-07-event-bridge-design.md): доставляет
-        # события ЛОКАЛЬНОЙ (IPC-процесса) шины в REST-процесс, откуда их уже
-        # раздают существующие SSE/WS подписчики. Закрывает класс багов
-        # "эмитится в IPC, слушается REST" (wake word/krab_error чинились
-        # IPC-поллингом; rewriter_recovered/live_subs агентским путём — нет,
-        # см. Задача 1 плана волны).
-        self._event_bridge = EventBridge(settings=settings, data_dir=self.store.data_dir)
-        try:
-            event_bus.add_listener(self._event_bridge.on_event)
-        except Exception:
-            logger.exception("event-bridge: failed to wire EventBus listener")
-        self._event_bridge.start()
-
         # M2: REST внутри этого же процесса (спека 2026-07-16 §4.2). Рубильник
         # по умолчанию выключен — прод продолжает работать на двух процессах,
-        # пока владелец не решит иначе. Мост событий выше сам выключился по
-        # тому же рубильнику, поэтому echo в общей шине невозможен.
+        # пока владелец не решит иначе.
+        #
+        # S3/Задача 6: блок перенесён ВЫШЕ создания event-моста (ниже) — мосту
+        # нужен готовый self._rest_inprocess для динамической проверки
+        # "слушает ли in-process REST ПРЯМО СЕЙЧАС" перед КАЖДЫМ батчем, а не
+        # разовое чтение рубильника в конструкторе (сторож REST, отдельная
+        # задача волны, способен поднять REST позже старта — одноразовое
+        # решение оставило бы мост живым и бьющим в собственный процесс).
+        # Все коллабораторы, нужные этому блоку (store, transcriber,
+        # translator, self._tts), созданы выше по конструктору.
         #
         # Зависимости ПОДМЕНЯЮТСЯ, а не создаются заново: импорт rest_server
         # строит свой standalone-комплект (так работают 20 тест-файлов, которые
@@ -920,6 +915,27 @@ class BackendService:
                     error=_detail,
                 )
                 self._push_rest_error("rest.startup_failed", _detail)
+
+        # Event-мост IPC -> REST (spec 2026-07-07-event-bridge-design.md): доставляет
+        # события ЛОКАЛЬНОЙ (IPC-процесса) шины в REST-процесс, откуда их уже
+        # раздают существующие SSE/WS подписчики. Закрывает класс багов
+        # "эмитится в IPC, слушается REST" (wake word/krab_error чинились
+        # IPC-поллингом; rewriter_recovered/live_subs агентским путём — нет,
+        # см. Задача 1 плана волны).
+        #
+        # S3/Задача 6: подавление ДИНАМИЧЕСКОЕ — rest_running_fn спрашивает
+        # self._rest_inprocess.status()["running"] перед КАЖДЫМ батчем, а не
+        # один раз при конструировании (см. комментарий над блоком REST выше).
+        self._event_bridge = EventBridge(
+            settings=settings,
+            data_dir=self.store.data_dir,
+            rest_running_fn=self._is_rest_inprocess_running,
+        )
+        try:
+            event_bus.add_listener(self._event_bridge.on_event)
+        except Exception:
+            logger.exception("event-bridge: failed to wire EventBus listener")
+        self._event_bridge.start()
 
         self._sharing = SharingManager(
             store=self.store,
@@ -1695,6 +1711,25 @@ class BackendService:
             return self._cached_settings().get(key, default)
         except Exception:
             return default
+
+    def _is_rest_inprocess_running(self) -> bool:
+        """Аксессор для EventBridge (S3/Задача 6): слушает ли in-process REST
+        ПРЯМО СЕЙЧАС — вызывается перед КАЖДЫМ батчем моста, не один раз.
+
+        ``self._rest_inprocess`` — либо None (рубильник выключен), либо
+        ``InProcessRestServer``, либо ``_RestInProcessTombstone`` (сборка
+        упала); оба класса отдают ``status()["running"]``. Читаем ``status()``
+        заново на каждый вызов, а не кэшируем — сторож REST (отдельная задача
+        волны) способен поднять/уронить сервер между вызовами.
+        """
+        rest_inprocess = getattr(self, "_rest_inprocess", None)
+        if rest_inprocess is None:
+            return False
+        try:
+            return bool(rest_inprocess.status().get("running", False))
+        except Exception:
+            logger.exception("EventBridge: rest_inprocess.status() бросил при проверке подавления")
+            return False
 
     def _push_rest_error(self, code: str, detail: str) -> None:
         """Колбэк для InProcessRestServer: заворачивает сбой в KrabError (M2).
