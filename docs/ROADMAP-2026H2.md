@@ -1196,3 +1196,27 @@ Health-check `scripts/krab_ear_runner_health_check.py` + LaunchAgent
   «два процесса vs один» и сравнительный p95 «in-process vs двухпроцессный» (спека §4.5)
   — следующая волна, если решит опираться на эти числа для гейта канарейки, должна
   прогнать `scripts/memory_baseline.py` в обоих режимах сама.
+
+## 2026-07-31 — Волна gigaam-mlx-diar (ветка claude/gigaam-mlx-diar-wave)
+
+  Спека: `docs/2026-07-31-wave-gigaam-mlx-diar-SPEC.md` (v2 после адверсариального
+  ревью — 3 CRITICAL сняты до кода). Сделано (всё opt-in, дефолты не менялись):
+  **W-A** `stt_gigaam_transport="mlx"` — GigaAM v3 через gigaam-mlx в главном
+  процессе: по-чанковый `mlx_inter_process_lock→mlx_lock` (чанки ≤20с, между
+  чанками лок отпущен), инференс на ПЕРСИСТЕНТНОМ потоке с future-таймаутом
+  (get_watchdog непригоден: MLX платит компиляцию графа per-thread — живой бенч
+  поймал 6× деградацию), warmup на тишине, lazy-import (py3.12-парити),
+  `native_punctuation` гейтит только punctuation-LLM-pass и только для MLX-пути.
+  **W-B** `DIARIZATION_MODEL_CANDIDATES` — цикл кандидатов с пер-кандидатным
+  фолбэком (латч после провала всех), `_diarization_active_model`, честный probe.
+  **W-C** `core/diarized_transcription.py` — diarize→slice→transcribe для
+  ФАЙЛОВЫХ записей >120с (`[mm:ss] SPEAKER_N:`, ранний return до rewrite/paste,
+  soft-fail). Гейты: 262 теста затронутых областей + 30 новых зелёные, flake8,
+  `make audit-all` CLEAN, py312-парити ALL GREEN. Живой e2e M4 Max: RNNT-MLX
+  8.6× RT (ускорение 2.7× против голого cpu — порог 5× спеки НЕ достигнут,
+  cpu M4 Max быстрее оценки; честно помечено в спеке), CTC-MLX 40× RT (~12×),
+  W-C транскрипты корректны на community-1, конвейер ~2× RT.
+  **Осталось**: канарейка владельца → решение о `transport=mlx` в проде
+  (рекомендация: RNNT-MLX для длинных, рассмотреть CTC для войсов); TODO
+  почанковая диаризация (сейчас `_diarization_run_lock` держится весь прогон
+  файла — конфликт только с live-встречей C2).
