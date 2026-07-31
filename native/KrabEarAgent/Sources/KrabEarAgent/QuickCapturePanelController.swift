@@ -42,6 +42,18 @@
  волны) — статус записи рендерится тем же `RecordingIndicator` (цветная точка
  с pulsing-анимацией), что и MeetingLivePanelController; кнопка старт/стоп —
  SF Symbols `record.circle.fill`/`stop.circle.fill`.
+
+ S3 Task 8 (2026-07-31, спека Р12 находка I-E): раньше SSESessionDelegate
+ конструировался без onComplete — обрыв потока (до этой волны редкий; после
+ включения in-process REST режима рвётся при каждом лечении сторожа задачи 7
+ и при самом рестарте REST) тихо ронял задачу, панель навсегда показывала
+ последний партиал, хотя запись продолжалась и диагностика оставалась
+ зелёной. Теперь startSSE/stopSSE/handleSSECompletion переподключаются с
+ экспоненциальным backoff БЕЗ give-up-лимита, пока панель видима
+ (`panel.isVisible` — жизненный цикл SSE привязан к show()/close(), в панели
+ нет отдельного понятия «режим активен»); `sseGeneration` защищает от
+ устаревшего завершения уже отменённой попытки (см. комментарий у объявления
+ `sseGeneration`).
 */
 
 import AppKit
@@ -87,10 +99,15 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
 
     private static let maxNoteRows = 7
 
-    // MARK: - SSE (Task 2 — партиалы записи, паттерн MeetingLivePanelController)
+    // MARK: - SSE (Task 2 — партиалы записи, паттерн MeetingLivePanelController;
+    // Task 8 — переподключение при обрыве, спека Р12 находка I-E)
 
     private let restBaseURL = "http://127.0.0.1:5005"
     private var sseTask: URLSessionDataTask?
+    /// Новая `URLSession` на каждую попытку подключения (не общий lazy var,
+    /// см. startSSE) — держим ссылку только чтобы явно инвалидировать её в
+    /// stopSSE.
+    private var sseSession: URLSession?
     private var pendingSSEEventType: String?
 
     /// Ровно ДВА типа события — сверены с realtime_partial.py/recording_core_service.py,
@@ -99,11 +116,27 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
         "realtime.partial_transcript", "realtime.final_transcript",
     ]
 
-    private lazy var sseDelegate = SSESessionDelegate { [weak self] line in
-        Task { @MainActor [weak self] in self?.handleSSELine(line) }
-    }
-    private lazy var sseSession = URLSession(configuration: .default,
-                                             delegate: sseDelegate, delegateQueue: nil)
+    /// Генерация текущей попытки подключения — растёт на каждый явный стоп
+    /// (stopSSE зовётся и из hide()/windowWillClose, и из самого startSSE
+    /// перед новым стартом). `URLSession` отменяет задачу асинхронно, поэтому
+    /// колбэк завершения УЖЕ отменённой задачи может прийти уже после того,
+    /// как sseTask начал указывать на новую попытку — generation, захваченная
+    /// замыканием onComplete в момент создания КОНКРЕТНОЙ попытки (см.
+    /// startSSE), отсекает такие устаревшие сигналы в handleSSECompletion.
+    private var sseGeneration: UInt64 = 0
+
+    /// Экспоненциальный backoff переподключения. 🔴 Кап `LiveSubtitlesOverlay`
+    /// (5 попыток, до 8с — сдаётся примерно за полминуты) здесь скопировать
+    /// НЕЛЬЗЯ: цикл сторожа REST (задача 7) — не меньше минуты на детекцию
+    /// нездоровья плюс рестарт, скопированный кап сдался бы раньше, чем REST
+    /// поднимется обратно, и воспроизвёл бы ровно тот застывший экран, который
+    /// чинит эта задача. Пока панель видима — переподключаемся без give-up-
+    /// лимита; счётчик попыток сбрасывается любой полученной строкой
+    /// (handleSSELine) — доказательство, что поток снова живой.
+    private var sseReconnectAttempts = 0
+    private let sseReconnectBaseDelay: TimeInterval = 0.5
+    private let sseReconnectMaxDelay: TimeInterval = 30.0
+    private var sseReconnectWorkItem: DispatchWorkItem?
 
     // MARK: - Test hooks (паттерн MeetingLivePanelController)
 
@@ -252,26 +285,85 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
 
     private func startSSE() {
         stopSSE()
+        sseGeneration &+= 1
+        let generation = sseGeneration
+
         let filter = Self.quickCaptureEventTypes.sorted().joined(separator: ",")
         // sorted() — детерминированный URL для тестов/логов; backend принимает
         // comma-list в любом порядке (rest_server.py:1649).
         guard let url = URL(string: "\(restBaseURL)/v1/events?filter=\(filter)") else { return }
         var request = URLRequest(url: url, timeoutInterval: 600)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        let task = sseSession.dataTask(with: request)
+
+        // Отдельные делегат+сессия на каждую попытку (не общий lazy var, как
+        // раньше) — иначе onComplete не смог бы различить завершение старой,
+        // уже отменённой задачи и текущей: обе используют один и тот же
+        // делегат, а generation, захваченная замыканием ниже, определена
+        // именно для ЭТОЙ попытки.
+        let delegate = SSESessionDelegate(
+            onLine: { [weak self] line in
+                Task { @MainActor [weak self] in self?.handleSSELine(line) }
+            },
+            onComplete: { [weak self] _ in
+                Task { @MainActor [weak self] in self?.handleSSECompletion(generation: generation) }
+            }
+        )
+        let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+        sseSession = session
+        let task = session.dataTask(with: request)
         sseTask = task
         task.resume()
     }
 
     private func stopSSE() {
+        sseReconnectWorkItem?.cancel()
+        sseReconnectWorkItem = nil
+        sseGeneration &+= 1
         sseTask?.cancel()
         sseTask = nil
+        sseSession?.invalidateAndCancel()
+        sseSession = nil
         pendingSSEEventType = nil
+    }
+
+    /// Задача 8: раньше делегат создавался без onComplete — обрыв потока (в
+    /// т.ч. каждое лечение сторожа REST из задачи 7 и сам рестарт REST при
+    /// включении in-process режима) тихо ронял задачу, панель навсегда
+    /// показывала последний полученный партиал, хотя запись продолжалась.
+    private func handleSSECompletion(generation: UInt64) {
+        // Устаревшее завершение уже отменённой (стопом или новым стартом)
+        // задачи — молчим, текущая попытка либо не начиналась, либо это она.
+        guard generation == sseGeneration else { return }
+        sseTask = nil
+        sseSession = nil
+        // Панель закрыта — не переподключаемся, тот же принцип, что и
+        // таймер/пульс (resyncTimerAndPulseIfNeeded, windowWillClose):
+        // «панель видима» = panel.isVisible, в контроллере нет отдельного
+        // понятия «режим активен».
+        guard panel.isVisible else { return }
+        scheduleSSEReconnect(afterGeneration: generation)
+    }
+
+    private func scheduleSSEReconnect(afterGeneration generation: UInt64) {
+        let exponent = min(sseReconnectAttempts, 6)
+        let delay = min(sseReconnectBaseDelay * pow(2.0, Double(exponent)), sseReconnectMaxDelay)
+        sseReconnectAttempts += 1
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, self.sseGeneration == generation, self.panel.isVisible else { return }
+            self.startSSE()
+        }
+        sseReconnectWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
     /// Паттерн MeetingLivePanelController.handleSSELine: `event: ` трекает тип,
     /// `data: ` диспатчит по нему.
     private func handleSSELine(_ line: String) {
+        // Любая полученная строка (включая пустые keep-alive) доказывает, что
+        // поток жив — сбрасываем backoff, чтобы следующий обрыв снова начинал
+        // с минимальной задержки, а не с потолка, накопленного прошлой серией.
+        sseReconnectAttempts = 0
         if line.hasPrefix("event: ") {
             pendingSSEEventType = String(line.dropFirst(7)).trimmingCharacters(in: .whitespaces)
         } else if line.hasPrefix("data: ") {
