@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Живой e2e-смок волны M2 «REST внутри процесса backend» (Task 8).
+"""Живой e2e-смок волны M2/S3 «REST внутри процесса backend» (M2 Task 8, доведено
+до буквы §4.5 родительской спеки в S3 Task 10).
 
 Поднимает ОТДЕЛЬНЫЙ throwaway backend (временный data_dir + СЛУЧАЙНЫЙ
 свободный порт — никогда 5005) с включённым рубильником
@@ -10,11 +11,16 @@
   3. ``get_diagnostics()["rest_in_process"]`` не врёт про running/port;
   4. мост событий IPC->REST сам себя выключил (анти-echo, спека §2.1);
   5. сервер держит нагрузку: 3 параллельных SSE-подписчика + 20+
-     конкурентных HTTP-запросов, печатается p95;
+     конкурентных ``POST /v1/stt/transcribe`` (S3/Task10 — было ``GET /health``,
+     что не проверяло реальный STT-путь), печатается p95/p50;
   6. событие, эмитнутое в шину backend, доходит до КАЖДОГО SSE-подписчика
      РОВНО один раз — главная проверка волны (без анти-echo мост дал бы
      повторную доставку одного и того же конверта);
-  7. после ``service.close()`` порт освобождён и REST-тред мёртв.
+  7. WS ``/v1/stream`` (S3/Task10, ранее не проверялся вообще) принимает
+     ``config``→``audio(is_final=true)`` и не роняет соединение ошибкой;
+  8. SIGTERM ПОД активной нагрузкой укладывается в бюджет ``ExitTimeOut=15``с
+     (S3/Task10, находка Р5 задачи 5 плана) и ``runtime_alive.marker``
+     удаляется штатно — после чего порт освобождён и REST-тред мёртв.
 
 ИЗОЛЯЦИЯ (обязательна — на машине живёт ПРОДОВЫЙ backend владельца):
   - временный data_dir через tempfile.mkdtemp(), удаляется в finally;
@@ -22,13 +28,17 @@
   - никаких launchctl/pkill/kill по имени процесса — только
     ``proc.terminate()``/``proc.kill()`` над СОБСТВЕННЫМ throwaway-сабпроцессом,
     который создал этот же скрипт;
-  - подключение только к throwaway Unix-сокету во временном data_dir.
+  - подключение только к throwaway Unix-сокету во временном data_dir;
+  - никакого реального аудио через мик/динамики — POST/WS кормятся синтетическим
+    WAV-фикстюром (тишина, сгенерирована stdlib ``wave``), чтобы не задевать
+    ЖИВУЮ диктовку владельца, если она идёт параллельно на той же машине.
 
 Паттерны переиспользованы из ``scripts/e2e_owner_gate_smoke.py`` (спавн
 throwaway backend через subprocess, JSON-RPC поверх Unix-сокета, облегчение
-окружения через set_settings) и ``scripts/run_e2e_bridge_smoke.command``
+окружения через set_settings), ``scripts/run_e2e_bridge_smoke.command``
 (идея проверять «дошло ровно один раз» живым HTTP/SSE трафиком, а не
-юнит-моком).
+юнит-моком) и ``scripts/e2e_meeting_smoke.py`` (пустой/тихий результат STT —
+валидный исход смока транспорта, не провал).
 
 Запуск (venv обязателен; интерпретатор из .venv_krab_ear, путь содержит
 пробел — в реальной команде обязательно взять в кавычки):
@@ -55,12 +65,20 @@ import tempfile
 import threading
 import time
 import uuid
+import wave
 from pathlib import Path
 
 try:
     import requests
-except ImportError:  # pragma: no cover — venv гарантирует requests (event_bridge.py уже зависит)
+except ImportError:  # pragma: no cover — венв гарантирует requests (event_bridge.py уже зависит)
     print("FAIL: пакет requests не найден в интерпретаторе — активируй .venv_krab_ear", file=sys.stderr)
+    sys.exit(2)
+
+try:
+    import websockets
+    import websockets.sync.client as _ws_client
+except ImportError:  # pragma: no cover — венв гарантирует websockets (см. requirements.txt)
+    print("FAIL: пакет websockets не найден в интерпретаторе — активируй .venv_krab_ear", file=sys.stderr)
     sys.exit(2)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -71,7 +89,15 @@ VENV_PY = Path(sys.executable)
 # короче 120с, даже если по факту укладывается за секунды.
 PHASE_TIMEOUT_SEC = 150.0
 SOCKET_READY_TIMEOUT_SEC = 120.0
-SHUTDOWN_WAIT_SEC = 60.0
+# S3/Task10 (живой прогон вскрыл): POST /v1/stt/transcribe (в отличие от
+# бывшего GET /health) реально контендит за mlx_lock — 24 конкурентных
+# запроса СЕРИАЛИЗУЮТСЯ через ОДИН лок процесса (см. §1.3 признанных
+# исключений спеки). Живое измерение на этой (шумной, под нагрузкой
+# владельца) машине: хвостовые запросы ждали до ~164с в очереди —
+# PHASE_TIMEOUT_SEC=150с недостаточен именно для ЭТОЙ фазы. Щедрый таймаут
+# (см. codex "generous timeouts for agentic work") — не режем валидную
+# сериализацию по живому контракту mlx_lock.
+LOAD_PHASE_TIMEOUT_SEC = 600.0
 
 LOAD_REQUEST_COUNT = 24  # >= 20 конкурентных HTTP-запросов, требование задачи
 LOAD_WORKERS = 10
@@ -79,8 +105,32 @@ SSE_SUBSCRIBER_COUNT = 3
 SSE_SETTLE_SEC = 2.5      # даём генератору sse_stream() дойти до bus.subscribe()
 SSE_DELIVERY_GRACE_SEC = 4.0  # окно, за которое возможный дубль успел бы прилететь
 SSE_READ_TIMEOUT_SEC = 30.0
+WS_CONNECT_TIMEOUT_SEC = 15.0
+
+# ai.krab.ear.backend.plist.template::ExitTimeOut — контракт, который S3/Task5
+# считал (8с IPC-дренаж + 5с REST-join + 2с REST-дренаж = 15с потолок).
+# Смок обязан ЖИВЬЁМ доказать, что SIGTERM под нагрузкой в него укладывается,
+# а не просто читать число из плиста.
+EXIT_TIME_OUT_SEC = 15.0
+SIGTERM_WAIT_GRACE_SEC = 5.0  # запас поверх контракта на шум throwaway-машины/subprocess.wait()
 
 _STEPS: list[tuple[str, bool, str]] = []
+
+
+def _make_silence_wav(path: Path, duration_sec: float = 1.0, sample_rate: int = 16000) -> Path:
+    """Синтетический WAV-фикстюр (тишина) — НЕ живой мик/динамики.
+
+    Используется и для POST /v1/stt/transcribe (multipart file), и как источник
+    PCM-байт для WS /v1/stream — единая точка генерации, чтобы оба транспорта
+    гоняли БУКВАЛЬНО один и тот же синтетический сигнал.
+    """
+    n_samples = int(duration_sec * sample_rate)
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)  # 16-bit PCM
+        wf.setframerate(sample_rate)
+        wf.writeframes(b"\x00\x00" * n_samples)
+    return path
 
 
 def _step(label: str, ok: bool, detail: str = "") -> bool:
@@ -191,19 +241,35 @@ def _wait_for_socket(sock_path: Path, proc: subprocess.Popen, timeout_sec: float
     return False
 
 
-def _prepare_lightweight_settings(sock: Path) -> None:
+def _prepare_lightweight_settings(sock: Path) -> bool:
     """Облегчает окружение throwaway-инстанса (урок волны R2, F1 плана M2).
 
-    Смок проверяет транспорт (HTTP/SSE поверх in-process REST), а не качество
-    STT/диаризации/LLM — тяжёлые движки на throwaway-инстансе только едят
-    минуты на холодный старт worker-ов и не участвуют ни в одной из 7 фаз.
+    Смок проверяет транспорт (HTTP/SSE/WS поверх in-process REST), а не
+    качество STT/диаризации/LLM — тяжёлые движки на throwaway-инстансе только
+    едят минуты на холодный старт worker-ов и не участвуют ни в одной из фаз.
+
+    S3/Task10: ключ настройки — ``llm_rewrite_enabled`` (реальный ключ в
+    ``DEFAULT_SETTINGS``), а не ``llm_rewriter_enabled`` — старое имя было
+    несуществующим ключом: ``set_settings`` рапортовал успех и молча НИЧЕГО
+    не выключал (сеттер просто игнорирует неизвестные ключи), опечатка была
+    невидима, потому что вызывающая сторона не проверяла ответ. Теперь и ключ
+    исправлен, и ответ проверяется явно — возвращаемое bool идёт в gate.
     """
-    _call(sock, "set_settings", {
+    lightweight_settings = {
         "stt_gigaam_enabled": False,
         "diarization_enabled": False,
-        "llm_rewriter_enabled": False,
+        "llm_rewrite_enabled": False,
         "realtime_partial_enabled": False,
-    }, timeout=30.0)
+    }
+    resp = _call(sock, "set_settings", lightweight_settings, timeout=30.0)
+    if not resp.get("ok"):
+        return False
+    # handle_set_settings возвращает ПОЛНЫЙ смёрженный словарь настроек (не
+    # {"ok": ...}) — единственный надёжный способ поймать «ключ проигнорирован»
+    # (несуществующий/переименованный ключ) — сверить каждое значение ЭХОМ,
+    # а не только верхнеуровневый ok транспорта JSON-RPC.
+    merged = _result(resp)
+    return all(merged.get(key) == value for key, value in lightweight_settings.items())
 
 
 # ---------------------------------------------------------------------------
@@ -235,12 +301,74 @@ def _phase_diagnostics_rest_inprocess(sock: Path, port: int) -> bool:
 
 
 def _phase_bridge_disabled(sock: Path) -> bool:
-    """(4) Мост событий выключен — анти-echo, доказательство невозможности двойной доставки."""
+    """(4) Мост событий подавлен — анти-echo, доказательство невозможности двойной доставки.
+
+    S3/Task10 (живой прогон вскрыл): контракт был написан в M2, когда мост при
+    `REST_IN_PROCESS_ENABLED` вообще не поднимался и репортовал статический
+    ``state="disabled"``. Задача 6 этой волны (``event_bridge.py``, "Динамическое
+    подавление") заменила механизм — мост теперь ЖИВОЙ, опрашивает
+    ``rest_running_fn`` перед КАЖДЫМ батчем и репортует ``state="suppressed"``,
+    пока in-process REST слушает (см. докстринг ``event_bridge.py`` §"Динамическое
+    подавление"). ``"disabled"`` в этом контракте означает совсем другое —
+    сам мост выключен настройкой ``event_bridge_enabled=false``, что здесь не
+    тот случай. Ассерт обновлён на актуальный контракт, а не на M2-эру.
+    """
     diag = _result(_call(sock, "get_diagnostics", {}, timeout=30.0))
     state = diag.get("event_bridge", {}).get("state")
-    ok = state == "disabled"
-    _step("event_bridge.state == 'disabled'", ok, f"state={state!r}")
+    ok = state == "suppressed"
+    _step("event_bridge.state == 'suppressed' (анти-echo активен под in-process REST)", ok, f"state={state!r}")
     return ok
+
+
+def _phase_ws_stream(port: int, wav_path: Path) -> bool:
+    """(7) WS /v1/stream не сломан слиянием (S3/Task10 — родительская §4.5, ранее не проверялось).
+
+    Протокол (CLAUDE.md "Voice Gateway bridge endpoints", rest_server.py
+    ``_ws_stream_handler``): первое сообщение обязано быть ``{"type":"config"}``,
+    дальше — ``{"type":"audio", data: b64 PCM16, sample_rate, is_final}``.
+    Синтетическая тишина не обязана дать непустой ``text`` (см. докстринг
+    e2e_meeting_smoke.py — тихий результат валиден), поэтому gate проверяет
+    ТРАНСПОРТ: соединение открылось, конфиг принят (сервер не прислал
+    ``invalid_config``/``invalid_json`` и не разорвал соединение), любое
+    финальное сообщение (или чистое закрытие) — не ``{"type":"error"}``.
+    """
+    ws_url = f"ws://127.0.0.1:{port}/v1/stream"
+    audio_bytes = wav_path.read_bytes()
+    # WAV-заголовок (44 байта) пропускаем — сервер ожидает сырой PCM16, не .wav-контейнер.
+    import base64
+    pcm_b64 = base64.b64encode(audio_bytes[44:]).decode("ascii")
+
+    try:
+        with _ws_client.connect(ws_url, open_timeout=WS_CONNECT_TIMEOUT_SEC) as ws:
+            ws.send(json.dumps({"type": "config", "mode": "transcribe", "backend": "local"}))
+            ws.send(json.dumps({
+                "type": "audio", "data": pcm_b64, "sample_rate": 16000, "is_final": True,
+            }))
+            error_seen = False
+            final_seen = False
+            try:
+                while True:
+                    raw = ws.recv(timeout=30.0)
+                    msg = json.loads(raw)
+                    if msg.get("type") == "error":
+                        error_seen = True
+                        _step("WS /v1/stream не вернул error", False, f"msg={msg}")
+                        break
+                    if msg.get("type") == "final":
+                        final_seen = True
+            except (websockets.exceptions.ConnectionClosed, TimeoutError):
+                pass  # штатное закрытие сервером после is_final=True — не ошибка
+    except Exception as exc:  # noqa: BLE001 — исход отражается в _step ниже
+        _step("WS /v1/stream: соединение и config/audio цикл", False, f"исключение: {exc!r}")
+        return False
+
+    if not error_seen:
+        _step(
+            "WS /v1/stream: соединение и config/audio цикл (без {type:error})",
+            True,
+            f"final_message_seen={final_seen} (тишина без speech валидна — см. e2e_meeting_smoke.py)",
+        )
+    return not error_seen
 
 
 def _sse_reader(url: str, marker: str, out: dict, stop_event: threading.Event) -> None:
@@ -288,8 +416,33 @@ def _timed_get(url: str) -> tuple[float, int]:
     return (time.monotonic() - t0, resp.status_code)
 
 
-def _phase_load_and_single_delivery(base_url: str, sock: Path) -> dict | None:
-    """(5)+(6) Нагрузка (3 SSE + 20+ HTTP конкурентно) и проверка "ровно один раз"."""
+def _timed_post_transcribe(base_url: str, wav_path: Path) -> tuple[float, int]:
+    """POST /v1/stt/transcribe с синтетическим WAV — реальный STT-путь под нагрузкой.
+
+    S3/Task10 (Р8): §4.5 родительской спеки требует именно POST здесь, а не
+    GET /health — GET проверяет только веб-сервер, не путь, который реально
+    контендит за mlx_lock (тот самый сценарий конкуренции за GPU, ради
+    которого затевался этот замер). diarize=false + persist_history=false —
+    держим throwaway-нагрузку лёгкой и не засоряем историю тестовыми записями.
+
+    Таймаут запроса 300с (не 60с) — живой прогон на загруженной машине
+    показал хвостовые запросы до ~164с в очереди за ОДНИМ mlx_lock (24
+    конкурентных вызова СЕРИАЛИЗУЮТСЯ, см. LOAD_PHASE_TIMEOUT_SEC); короткий
+    таймаут рвал бы валидную, просто медленную обработку.
+    """
+    t0 = time.monotonic()
+    with wav_path.open("rb") as fh:
+        resp = requests.post(
+            f"{base_url}/v1/stt/transcribe",
+            files={"file": ("silence.wav", fh, "audio/wav")},
+            data={"diarize": "false", "persist_history": "false", "quality_profile": "balanced"},
+            timeout=300,
+        )
+    return (time.monotonic() - t0, resp.status_code)
+
+
+def _phase_load_and_single_delivery(base_url: str, sock: Path, wav_path: Path) -> dict | None:
+    """(5)+(6) Нагрузка (3 SSE + 20+ POST /v1/stt/transcribe конкурентно) и проверка "ровно один раз"."""
     sse_url = f"{base_url}/v1/events?filter=krab_error"
     marker = f"m2-smoke-{uuid.uuid4().hex}"
     stop_event = threading.Event()
@@ -321,7 +474,10 @@ def _phase_load_and_single_delivery(base_url: str, sock: Path) -> dict | None:
     latencies: list[float] = []
     statuses: list[int] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=LOAD_WORKERS) as ex:
-        futures = [ex.submit(_timed_get, f"{base_url}/health") for _ in range(LOAD_REQUEST_COUNT)]
+        futures = [
+            ex.submit(_timed_post_transcribe, base_url, wav_path)
+            for _ in range(LOAD_REQUEST_COUNT)
+        ]
         # Эмитим маркерное событие ПОКА нагрузка ещё в полёте — "доставка под нагрузкой".
         trigger = _result(_call(sock, "report_hotkey_conflict", {"chord": marker}, timeout=30.0))
         for f in concurrent.futures.as_completed(futures):
@@ -336,11 +492,16 @@ def _phase_load_and_single_delivery(base_url: str, sock: Path) -> dict | None:
     p95_ms = _percentile(latencies, 0.95) * 1000.0
     p50_ms = _percentile(latencies, 0.50) * 1000.0
     _step(
-        f"{LOAD_REQUEST_COUNT} конкурентных HTTP-запросов все успешны",
+        f"{LOAD_REQUEST_COUNT} конкурентных POST /v1/stt/transcribe все успешны",
         all_2xx and len(statuses) == LOAD_REQUEST_COUNT,
         f"коды={sorted(set(statuses))} n={len(statuses)}",
     )
-    print(f"    p50={p50_ms:.1f}мс  p95={p95_ms:.1f}мс  (n={len(latencies)}, воркеров={LOAD_WORKERS})", flush=True)
+    print(
+        f"    POST /v1/stt/transcribe: p50={p50_ms:.1f}мс  p95={p95_ms:.1f}мс  "
+        f"(n={len(latencies)}, воркеров={LOAD_WORKERS}) — ШУМНО на загруженной машине, "
+        "см. отдельный сценарий GPU-конкуренции для сравнения до/после",
+        flush=True,
+    )
 
     # Окно на возможную повторную доставку — если бы анти-echo был сломан,
     # дубль долетел бы почти сразу следом за первым конвертом. Счётчики в
@@ -383,19 +544,82 @@ def _phase_load_and_single_delivery(base_url: str, sock: Path) -> dict | None:
     }
 
 
-def _phase_clean_stop(proc: subprocess.Popen, port: int, base_url: str) -> bool:
-    """(7) После service.close() порт свободен и REST-тред мёртв."""
-    proc.terminate()
+def _phase_sigterm_under_load_and_stop(
+    proc: subprocess.Popen, port: int, base_url: str, data_dir: Path, wav_path: Path,
+) -> bool:
+    """(8) SIGTERM ПОД активной нагрузкой укладывается в бюджет ExitTimeOut=15с,
+    ``runtime_alive.marker`` удаляется штатно, порт освобождён, REST-тред мёртв.
+
+    S3/Task10 (Р5+Р8): раньше «чистый останов» проверялся ТОЛЬКО в покое (без
+    нагрузки). Контракт бюджета из задачи 5 плана (8с IPC-дренаж +
+    5с join REST-сервера + 2с REST-дренаж = 15с потолок ExitTimeOut) до сих пор
+    не был доказан живым процессом с активным запросом в полёте — а именно
+    ради этого бюджет и считался.
+    """
+    marker_path = data_dir / "runtime_alive.marker"
+    _step(
+        "runtime_alive.marker существует до останова (доказывает, что живой процесс его пишет)",
+        marker_path.exists(),
+    )
+
+    # Держим POST в полёте на фоне — результат не важен (backend вправе честно
+    # оборвать соединение при shutdown), важен только сам факт активного
+    # запроса В МОМЕНТ сигнала — та самая "нагрузка", про которую спорит Р7.
+    inflight_started = threading.Event()
+
+    def _inflight_post() -> None:
+        try:
+            with wav_path.open("rb") as fh:
+                inflight_started.set()
+                requests.post(
+                    f"{base_url}/v1/stt/transcribe",
+                    files={"file": ("silence.wav", fh, "audio/wav")},
+                    data={"diarize": "false", "persist_history": "false"},
+                    timeout=30,
+                )
+        except Exception:
+            pass  # ожидаемо — сервер может оборвать соединение прямо при shutdown
+
+    inflight_thread = threading.Thread(target=_inflight_post, daemon=True)
+    inflight_thread.start()
+    inflight_started.wait(timeout=5.0)
+    time.sleep(0.2)  # даём запросу реально долететь до сервера до сигнала
+
+    t0 = time.monotonic()
+    proc.terminate()  # SIGTERM (POSIX-семантика Popen.terminate())
     try:
-        proc.wait(timeout=SHUTDOWN_WAIT_SEC)
+        proc.wait(timeout=EXIT_TIME_OUT_SEC + SIGTERM_WAIT_GRACE_SEC)
         exited = True
     except subprocess.TimeoutExpired:
         exited = False
-    _step("процесс backend завершился после SIGTERM", exited, f"уложился в {SHUTDOWN_WAIT_SEC:.0f}с")
+    elapsed_sec = time.monotonic() - t0
+    inflight_thread.join(timeout=5.0)
+
+    _step(
+        f"процесс завершился после SIGTERM ПОД нагрузкой в бюджет ExitTimeOut={EXIT_TIME_OUT_SEC:.0f}с",
+        exited and elapsed_sec <= EXIT_TIME_OUT_SEC + SIGTERM_WAIT_GRACE_SEC,
+        f"elapsed={elapsed_sec:.2f}с (плист-контракт={EXIT_TIME_OUT_SEC:.0f}с, "
+        f"допуск шума throwaway-машины=+{SIGTERM_WAIT_GRACE_SEC:.0f}с)",
+    )
     if not exited:
         proc.kill()
         proc.wait(timeout=10)
         return False
+
+    marker_gone = not marker_path.exists()
+    _step("runtime_alive.marker удалён штатным graceful shutdown", marker_gone)
+
+    shutdown_info_path = data_dir / "shutdown_info.json"
+    shutdown_ok = False
+    if shutdown_info_path.exists():
+        try:
+            info = json.loads(shutdown_info_path.read_text(encoding="utf-8"))
+            shutdown_ok = bool(info.get("clean")) and info.get("signal") == "SIGTERM"
+            _step("shutdown_info.json отражает чистый SIGTERM", shutdown_ok, f"info={info}")
+        except (OSError, json.JSONDecodeError) as exc:
+            _step("shutdown_info.json читаем", False, repr(exc))
+    else:
+        _step("shutdown_info.json создан", False, "файл отсутствует")
 
     # Порт свободен — доказательство успешным bind'ом нового сервера на него.
     port_free = False
@@ -419,7 +643,7 @@ def _phase_clean_stop(proc: subprocess.Popen, port: int, base_url: str) -> bool:
         _step("REST-тред мёртв (соединение отвергнуто)", False, f"неожиданное исключение: {exc!r}")
         return False
     _step("REST-тред мёртв (соединение отвергнуто)", conn_refused)
-    return port_free and conn_refused
+    return exited and marker_gone and shutdown_ok and port_free and conn_refused
 
 
 # ---------------------------------------------------------------------------
@@ -458,9 +682,12 @@ def main() -> int:
     port = _find_free_port()
     base_url = f"http://127.0.0.1:{port}"
     sock = data_dir / "krabear.sock"
+    # Синтетический WAV — единственный источник "аудио" во всём смоке (POST +
+    # WS + SIGTERM-под-нагрузкой). Никакого реального мика/динамиков.
+    wav_path = _make_silence_wav(tmp_dir / "silence_fixture.wav")
 
     print("=" * 70)
-    print("M2 REST-IN-PROCESS LOAD SMOKE — throwaway data_dir:", data_dir)
+    print("M2/S3 REST-IN-PROCESS LOAD SMOKE — throwaway data_dir:", data_dir)
     print(f"Случайный порт: {port}  (никогда 5005 — прод не задет)")
     print("=" * 70)
 
@@ -472,9 +699,15 @@ def main() -> int:
                 _step("backend поднялся (in-process REST рубильник включён)", False, "сокет не открылся")
                 return False
             _step("backend поднялся (in-process REST рубильник включён)", True)
-            _prepare_lightweight_settings(sock)
-            _step("окружение облегчено (GigaAM/диаризация/LLM/realtime-partial выключены)", True)
-            return True
+            lightened_ok = _prepare_lightweight_settings(sock)
+            # S3/Task10: раньше печаталось True безусловно — set_settings мог
+            # тихо проигнорировать несуществующий ключ, и опечатка была
+            # невидима. Теперь gate реально зависит от эха настроек.
+            _step(
+                "окружение облегчено (GigaAM/диаризация/LLM/realtime-partial выключены)",
+                lightened_ok,
+            )
+            return lightened_ok
 
         started = _run_phase("1. Поднять throwaway backend", _phase1)
         if not started:
@@ -485,18 +718,23 @@ def main() -> int:
             "3. Диагностика rest_in_process не врёт",
             lambda: _phase_diagnostics_rest_inprocess(sock, port),
         )
-        ok4 = _run_phase("4. Мост событий выключен (анти-echo)", lambda: _phase_bridge_disabled(sock))
+        ok4 = _run_phase("4. Мост событий подавлен (анти-echo)", lambda: _phase_bridge_disabled(sock))
         load_result = _run_phase(
-            "5+6. Нагрузка (3 SSE + 20+ HTTP) и доставка ровно 1 раз",
-            lambda: _phase_load_and_single_delivery(base_url, sock),
+            "5+6. Нагрузка (3 SSE + 20+ POST /v1/stt/transcribe) и доставка ровно 1 раз",
+            lambda: _phase_load_and_single_delivery(base_url, sock, wav_path),
+            timeout=LOAD_PHASE_TIMEOUT_SEC,
         )
         ok7 = _run_phase(
-            "7. Чистый останов (порт свободен, тред мёртв)",
-            lambda: _phase_clean_stop(proc, port, base_url),
+            "7. WS /v1/stream не сломан",
+            lambda: _phase_ws_stream(port, wav_path),
         )
-        proc = None  # phase 7 уже разобралась с процессом (успешно или через kill)
+        ok8 = _run_phase(
+            "8. SIGTERM под нагрузкой в бюджет ExitTimeOut, marker удалён, порт свободен",
+            lambda: _phase_sigterm_under_load_and_stop(proc, port, base_url, data_dir, wav_path),
+        )
+        proc = None  # фаза 8 уже разобралась с процессом (успешно или через kill)
 
-        del ok2, ok3, ok4, load_result, ok7  # статусы уже осели в _STEPS через _step()
+        del ok2, ok3, ok4, load_result, ok7, ok8  # статусы уже осели в _STEPS через _step()
         return _finish(tmp_dir, log_path)
     finally:
         if proc is not None and proc.poll() is None:
