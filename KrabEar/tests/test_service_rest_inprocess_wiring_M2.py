@@ -176,6 +176,11 @@ class RestInProcessBuildFailureTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.tmp.cleanup)
         store = StateStore(Path(self.tmp.name) / "data")
+        # S3/Задача 9: runtime-ключ — ЕДИНСТВЕННОЕ реальное включение с этой
+        # волны (см. test_rest_inprocess_runtime_toggle_S3_task9.py); голое
+        # pydantic-поле выше остаётся как фоллбэк, который сюда не доходит,
+        # т.к. DEFAULT_SETTINGS всегда содержит "rest_in_process_enabled".
+        store.save_settings({"rest_in_process_enabled": True})
         self.service = BackendService(
             store=store,
             recorder=FakeRecorder(),
@@ -236,6 +241,8 @@ class RestInProcessBuildFailureCallsPushErrorTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.tmp.cleanup)
         store = StateStore(Path(self.tmp.name) / "data")
+        # S3/Задача 9: runtime-ключ — единственное реальное включение.
+        store.save_settings({"rest_in_process_enabled": True})
         self.service = BackendService(
             store=store,
             recorder=FakeRecorder(),

@@ -83,6 +83,10 @@ class RestWatchdogWiredWhenSwitchOnTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.tmp.cleanup)
         store = StateStore(Path(self.tmp.name) / "data")
+        # S3/Задача 9: runtime-ключ — единственное реальное включение с этой
+        # волны (см. test_rest_inprocess_runtime_toggle_S3_task9.py); голое
+        # pydantic-поле выше остаётся фоллбэком, недостижимым на практике.
+        store.save_settings({"rest_in_process_enabled": True})
         self.service = BackendService(
             store=store,
             recorder=FakeRecorder(),

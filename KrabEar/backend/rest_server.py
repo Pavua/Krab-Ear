@@ -73,7 +73,13 @@ class RestDeps(_Protocol):
 
 @_dataclass
 class StaticDeps:
-    """Путь M2: BackendService собирает deps из своих коллабораторов."""
+    """Используется тестами M1 для явной сборки набора deps.
+
+    Волна M2 пошла другим путём — подменой module-level глобалов
+    (см. ``adopt_external_singletons`` ниже), а не сборкой ``StaticDeps`` из
+    коллабораторов BackendService. Класс остаётся живым ради тестов M1,
+    которые собирают deps явно (без подмены глобалов).
+    """
     engine: _Any
     store: _Any
     transcriber: _Any
@@ -167,10 +173,38 @@ def adopt_external_singletons(
     g = globals()
     for name in _ADOPTABLE_NAMES:
         g[name] = incoming[name]
+    g["_singletons_adopted"] = True
 
     logger.info(
         "rest_server: standalone-комплект заменён зависимостями владельца "
         "процесса (in-process режим)"
+    )
+
+
+def release_external_singletons() -> None:
+    """Парная операция к ``adopt_external_singletons`` (S3/Задача 9, п.3).
+
+    Возвращает module-level имена (``engine``, ``store``, ``transcriber``,
+    ``translator``, ``tts_service``) обратно к собственному standalone-
+    комплекту REST-модуля и снимает флаг ``_singletons_adopted``. Без этого
+    ``_rest_engine_cleanup`` (atexit ниже) при выходе процесса читала бы
+    имя ``engine``, указывающее на объект ВЛАДЕЛЬЦА процесса (BackendService)
+    — и закрывала бы его GigaAM-адаптер, а не собственный.
+
+    Вызывается ``BackendService.close()`` сразу после ``rest_inprocess.stop()``.
+    Идемпотентна и безопасна как no-op, если усыновления не было (рубильник
+    выключен, либо сборка упала до ``adopt_external_singletons``).
+    """
+    g = globals()
+    if not g.get("_singletons_adopted"):
+        return
+    for name, obj in _OWN_SINGLETONS.items():
+        g[name] = obj
+    g["_singletons_adopted"] = False
+
+    logger.info(
+        "rest_server: усыновлённые зависимости освобождены, "
+        "module-level имена возвращены к собственному комплекту"
     )
 
 
@@ -715,6 +749,20 @@ transcriber = Transcriber(engine=engine)
 translator = Translator()
 tts_service = TTSService()
 
+# S3/Задача 9, п.3: снимок СОБСТВЕННОГО standalone-комплекта модуля — до
+# adopt_external_singletons() module-level имена выше указывают именно на
+# эти объекты. release_external_singletons() возвращает имена сюда, а
+# _rest_engine_cleanup() (atexit ниже) сверяется с флагом _singletons_adopted,
+# чтобы не закрыть чужой (усыновлённый) движок.
+_OWN_SINGLETONS: dict[str, _Any] = {
+    "engine": engine,
+    "store": store,
+    "transcriber": transcriber,
+    "translator": translator,
+    "tts_service": tts_service,
+}
+_singletons_adopted = False
+
 
 def _propagate_hf_token_to_env() -> None:
     """Make the user's gated-pyannote HF token reach the REST engine's diarization.
@@ -767,7 +815,22 @@ _propagate_hf_token_to_env()
 
 
 def _rest_engine_cleanup() -> None:
-    """atexit cleanup — закрывает GigaAM адаптер если он был создан (graceful shutdown)."""
+    """atexit cleanup — закрывает GigaAM адаптер если он был создан (graceful shutdown).
+
+    S3/Задача 9, п.3: если ``engine`` усыновлён (``_singletons_adopted``) —
+    это объект ВЛАДЕЛЬЦА процесса (BackendService), не собственный REST-движок
+    модуля. Закрывать его отсюда значит закрывать чужой GigaAM-адаптер посреди
+    жизненного цикла backend'а. Штатный путь (``BackendService.close()``)
+    зовёт ``release_external_singletons()`` до этой точки, поэтому здесь флаг
+    обычно уже снят; проверка — paranoid guard на случай падения процесса
+    ДО штатного close().
+    """
+    if _singletons_adopted:
+        logger.debug(
+            "REST atexit: пропуск — engine усыновлён владельцем процесса, "
+            "закрывать чужой GigaAM-адаптер здесь нельзя"
+        )
+        return
     try:
         if engine is not None and engine._router is not None:
             adapter = engine._router.get_gigaam_adapter()
