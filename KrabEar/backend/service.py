@@ -891,7 +891,19 @@ class BackendService:
         # затевалась серия M. Прежний комплект становится недостижим и уходит
         # в сборщик мусора.
         self._rest_inprocess = None
-        _rest_enabled = bool(getattr(settings, "REST_IN_PROCESS_ENABLED", False))
+        # S3/Задача 9, п.1: паттерн волны 58 ("Runtime vs static settings
+        # reads") — runtime-ключ rest_in_process_enabled из settings.json
+        # первым, статическое pydantic-поле как фоллбэк. До фикса здесь
+        # читалось голое settings.REST_IN_PROCESS_ENABLED — владелец включал
+        # ключ через set_settings, IPC рапортовал успех, а этот участок
+        # молча игнорировал runtime-значение. Рубильник читается ОДИН раз
+        # при старте — не live-toggle (живое переключение потребовало бы
+        # поднимать и опускать Flask на ходу).
+        _rest_enabled = bool(
+            self._get_runtime_setting(
+                "rest_in_process_enabled", settings.REST_IN_PROCESS_ENABLED
+            )
+        )
         if _rest_enabled:
             try:
                 import backend.rest_server as _rest_module
@@ -2006,6 +2018,18 @@ class BackendService:
                 rest_inprocess.stop()
             except Exception:
                 logger.exception("InProcessRestServer.stop() raised during close()")
+            # S3/Задача 9, п.3: возвращает module-level имена rest_server
+            # обратно к его собственному standalone-комплекту (парная
+            # операция к adopt_external_singletons() выше в __init__) —
+            # иначе atexit-очистка (_rest_engine_cleanup) при выходе процесса
+            # читала бы усыновлённый (чужой, уже закрытый выше) объект.
+            # No-op, если усыновления не было (сборка упала до
+            # adopt_external_singletons() — надгробие без реальной подмены).
+            try:
+                import backend.rest_server as _rest_module
+                _rest_module.release_external_singletons()
+            except Exception:
+                logger.exception("release_external_singletons() raised during close()")
 
         # Stop MeetingSessionService worker thread (C2a) — mirrors the
         # EventBridge/PurgeScheduler stop above (same CI daemon-thread rule).
