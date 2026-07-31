@@ -10,8 +10,15 @@
   Межпроцессный flock имеет 5-секундный timeout с raise — длительное
   удержание роняло бы чужие вызовы.
 * Загрузка модели и скачивание весов — ВНЕ лока.
-* Каждый инференс-вызов — под MLX watchdog: зависший Metal-вызов без
-  watchdog повесил бы RLock навечно (freeze-class).
+* Каждый инференс-вызов — под таймаут-защитой на ПЕРСИСТЕНТНОМ потоке
+  (single-worker executor + future.result(timeout)): зависший Metal-вызов
+  без таймаута повесил бы RLock навечно (freeze-class). get_watchdog()
+  здесь непригоден: он создаёт НОВЫЙ поток на каждый вызов, а MLX платит
+  прогрев графа per-thread — живой бенч показал многократную деградацию
+  на по-чанковом пути. При таймауте executor выбрасывается (его поток —
+  daemon) и создаётся заново.
+* Первый инференс после загрузки модели — прогрев на 0.5 c тишины
+  (компиляция MLX-графа ~секунды), чтобы чанки шли с честной скоростью.
 * gigaam_mlx импортируется лениво: библиотека есть только на Apple Silicon,
   py3.12 ubuntu-parity CI работает без неё.
 
@@ -29,10 +36,13 @@ from typing import Optional
 
 import numpy as np
 
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+
 from core.audio_chunker import AudioChunker
 from core.mlx_inter_lock import mlx_inter_process_lock
 from core.mlx_lock import mlx_lock
-from core.mlx_subprocess import get_watchdog
+from core.mlx_subprocess import MLXTimeoutError
 
 logger = logging.getLogger("KrabEar.GigaAMMLX")
 
@@ -80,6 +90,9 @@ class GigaAMMLXAdapter:
         self._tokenizer: Optional[object] = None
         # Сериализация тяжёлой lazy-загрузки (зеркало GigaAMAdapter._model_lock).
         self._model_lock = threading.Lock()
+        # Персистентный инференс-поток (см. докстроку модуля) + флаг прогрева.
+        self._executor: Optional[ThreadPoolExecutor] = None
+        self._warmed = False
 
     # ------------------------------------------------------------------
     # Публичный API (контракт GigaAMAdapter)
@@ -106,25 +119,11 @@ class GigaAMMLXAdapter:
 
         import gigaam_mlx  # lazy: см. докстроку модуля
 
+        self._warmup(gigaam_mlx, model, tokenizer)
+
         texts: list[str] = []
-        watchdog = get_watchdog()
         for chunk in chunks:
-            tmp_path = self._write_temp_wav(chunk.audio)
-            try:
-                # Critical section — минимальный: один инференс одного чанка.
-                with mlx_inter_process_lock(), mlx_lock():
-                    piece = watchdog.run_with_timeout(
-                        fn=lambda p=tmp_path: gigaam_mlx.transcribe(
-                            model, tokenizer, p
-                        ),
-                        timeout_sec=self._watchdog_timeout_sec,
-                        model_name=f"gigaam-mlx-{self._mlx_model_type}",
-                    )
-            finally:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
+            piece = self._infer_chunk(gigaam_mlx, model, tokenizer, chunk.audio)
             piece = (piece or "").strip()
             if piece:
                 texts.append(piece)
@@ -152,7 +151,56 @@ class GigaAMMLXAdapter:
         with self._model_lock:
             self._model = None
             self._tokenizer = None
+            self._warmed = False
+            if self._executor is not None:
+                self._executor.shutdown(wait=False, cancel_futures=True)
+                self._executor = None
         logger.debug("GigaAMMLXAdapter: модель выгружена")
+
+    # ------------------------------------------------------------------
+    # Инференс: персистентный поток + таймаут + локи
+    # ------------------------------------------------------------------
+
+    def _infer_chunk(self, gigaam_mlx, model, tokenizer, audio: np.ndarray) -> str:
+        tmp_path = self._write_temp_wav(audio)
+        try:
+            # Critical section — минимальный: один инференс одного чанка.
+            with mlx_inter_process_lock(), mlx_lock():
+                return self._run_with_timeout(
+                    lambda: gigaam_mlx.transcribe(model, tokenizer, tmp_path)
+                )
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    def _run_with_timeout(self, fn):
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="gigaam-mlx"
+            )
+        future = self._executor.submit(fn)
+        try:
+            return future.result(timeout=self._watchdog_timeout_sec)
+        except FuturesTimeoutError:
+            # Поток executor'а завис в Metal-вызове — бросаем его (daemon)
+            # и создаём чистый; следующий вызов заплатит прогрев заново.
+            self._executor.shutdown(wait=False, cancel_futures=True)
+            self._executor = None
+            self._warmed = False
+            raise MLXTimeoutError(
+                self._watchdog_timeout_sec, f"gigaam-mlx-{self._mlx_model_type}"
+            )
+
+    def _warmup(self, gigaam_mlx, model, tokenizer) -> None:
+        """Один прогрев на процесс: компиляция MLX-графа ~секунды."""
+        if self._warmed:
+            return
+        silence = np.zeros(int(0.5 * _REQUIRED_SAMPLE_RATE), dtype=np.float32)
+        self._infer_chunk(gigaam_mlx, model, tokenizer, silence)
+        self._warmed = True
+        logger.debug("GigaAMMLXAdapter: прогрев выполнен")
 
     # ------------------------------------------------------------------
     # Внутреннее
