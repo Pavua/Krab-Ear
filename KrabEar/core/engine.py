@@ -393,6 +393,9 @@ class AudioEngine:
         self._unavailable_models: dict[str, float] = {}
         self._diarization_pipeline: Pipeline | None = None
         self._diarization_load_error: str | None = None
+        # Фактически загруженная модель диаризации (может отличаться от
+        # settings.DIARIZATION_MODEL при непустом DIARIZATION_MODEL_CANDIDATES).
+        self._diarization_active_model: str | None = None
         self._diarization_load_lock: threading.RLock = threading.RLock()
         # C2b: сериализация САМИХ инференсов pyannote (полная диаризация phase C
         # vs DIAR_WINDOW-тик meeting-сессии). Load-lock выше защищает только загрузку.
@@ -910,6 +913,44 @@ class AudioEngine:
                 except Exception as _spk_exc:
                     logger.debug("Speaker-aware prompt: оценка не удалась, пропускаем: %s", _spk_exc)
 
+        # 1.9 Диаризованный конвейер (W-C, opt-in): ТОЛЬКО файловые входы —
+        # живые диктовки (ndarray/bytes) не попадают сюда никогда. Ранний
+        # return до rewrite/cleanup/paste: спикер-транскрипт не должен идти
+        # в LLM-переписывание и автовставку. Не зависит от STT_STREAMING_ENABLED.
+        if (
+            not is_preview
+            and getattr(settings, "DIARIZED_TRANSCRIPTION_ENABLED", False)
+            and isinstance(audio_data, (str, Path))
+            and os.path.exists(str(audio_data))
+        ):
+            _diar_duration: float | None = None
+            try:
+                import soundfile as _sf_diar
+                _diar_duration = _sf_diar.info(str(audio_data)).duration
+            except Exception:
+                pass
+            if (
+                _diar_duration is not None
+                and _diar_duration > settings.DIARIZED_MIN_DURATION_SEC
+            ):
+                try:
+                    _spk_cache: dict[str, Any] = {}
+                    _num_spk = self._estimate_num_speakers(audio_data, cache=_spk_cache)
+                except Exception:
+                    _num_spk = None
+                if _num_spk is not None and _num_spk <= settings.DIARIZED_MAX_SPEAKERS:
+                    from core.diarized_transcription import run_diarized_transcription
+                    try:
+                        return run_diarized_transcription(
+                            self, audio_data, language=lang_hint,
+                        )
+                    except Exception as _diar_exc:
+                        # Soft-fail: любой сбой конвейера → обычный путь ниже.
+                        logger.warning(
+                            "Diarized pipeline failed (%s) — обычный путь",
+                            str(_diar_exc)[:200],
+                        )
+
         # 2. Routing: chunked path для длинных записей (если включён)
         # Для numpy-буферов определяем длительность через len/sample_rate.
         # Для файлов — через soundfile.info (lazy import, мягкий fallback).
@@ -1212,7 +1253,12 @@ class AudioEngine:
                     text = _dt_result
 
             # 4.5a Punctuation-only LLM pass (opt-in, перед полным rewrite)
-            if self._punctuation_pass_allowed() and not _is_loop:
+            # Модели с нативной пунктуацией (gigaam-mlx) помечают результат
+            # native_punctuation=True — дорогой LLM-проход для них холостой.
+            _native_punct = isinstance(result, dict) and bool(
+                result.get("native_punctuation")
+            )
+            if self._punctuation_pass_allowed() and not _is_loop and not _native_punct:
                 _report("punctuation_pass")
                 punct_result = self._llm_rewriter.fix_punctuation_only(
                     text, language=resolved_lang or settings.TRANSCRIBE_LANGUAGE
@@ -3006,8 +3052,13 @@ class AudioEngine:
                         duration_sec, len(chunks), _GIGAAM_MAX_CHUNK_SEC,
                     )
                     chunk_results: list[dict] = []
+                    chunks_native_punct = False
                     for ch in chunks:
                         ch_result = adapter.transcribe(ch.audio, sample_rate=16000)
+                        chunks_native_punct = chunks_native_punct or (
+                            isinstance(ch_result, dict)
+                            and bool(ch_result.get("native_punctuation"))
+                        )
                         chunk_results.append({
                             "text": ch_result.get("text", "") if isinstance(ch_result, dict) else str(ch_result),
                             "confidence": float(ch_result.get("confidence", 0.9)) if isinstance(ch_result, dict) else 0.9,
@@ -3023,6 +3074,9 @@ class AudioEngine:
                             f"{engine_name_from_mode(getattr(settings, 'STT_GIGAAM_MODE', 'rnnt'))}"
                             "-chunked"
                         ),
+                        # Пересборка не должна терять флаг адаптера (гейт
+                        # punctuation-LLM-pass ниже по transcribe()).
+                        "native_punctuation": chunks_native_punct,
                     }
                 except Exception as chunker_exc:
                     # AudioChunker failed — fallback на transcribe_longform() (pyannote path).
@@ -3073,6 +3127,9 @@ class AudioEngine:
         text = result.get("text", "") if isinstance(result, dict) else str(result)
         confidence = float(result.get("confidence", 0.0)) if isinstance(result, dict) else 0.0
         engine_name = result.get("engine", "gigaam-rnnt") if isinstance(result, dict) else "gigaam-rnnt"
+        native_punctuation = (
+            bool(result.get("native_punctuation", False)) if isinstance(result, dict) else False
+        )
 
         logger.info(
             "GigaAM транскрибация завершена: len=%d chars, confidence=%.3f, engine=%s",
@@ -3086,6 +3143,7 @@ class AudioEngine:
             "language": "ru",
             "confidence": confidence,
             "engine": engine_name,
+            "native_punctuation": native_punctuation,
         }
 
     def _transcribe_voxtral(self, audio_data: Any, language: str | None = None) -> dict[str, Any]:
@@ -3418,17 +3476,41 @@ class AudioEngine:
             # Если HF_HUB_OFFLINE=1, модель загружается из кэша без token.
             # Span фиксируется только при первом реальном load'е (guard выше гарантирует
             # что повторные вызовы сразу возвращают кэш).
-            with _profiler.start_span(f"model_load_{_short_model_name(settings.DIARIZATION_MODEL)}"):
-                try:
-                    kwargs = {"token": hf_token} if hf_token else {}
-                    self._diarization_pipeline = Pipeline.from_pretrained(settings.DIARIZATION_MODEL, **kwargs)
-                except Exception as e:
-                    self._diarization_load_error = f"Не удалось загрузить pyannote pipeline: {e}"
-                    raise RuntimeError(self._diarization_load_error)
-                diarization_device = self._resolve_diarization_device()
-                self._diarization_pipeline.to(diarization_device)
-                logger.info("Diarization pipeline загружен на устройство %s", diarization_device)
-                return self._diarization_pipeline
+            candidates_raw = getattr(settings, "DIARIZATION_MODEL_CANDIDATES", "") or ""
+            candidates = [c.strip() for c in candidates_raw.split(",") if c.strip()]
+            if not candidates:
+                candidates = [settings.DIARIZATION_MODEL]
+
+            last_error: Exception | None = None
+            for model_name in candidates:
+                with _profiler.start_span(f"model_load_{_short_model_name(model_name)}"):
+                    try:
+                        kwargs = {"token": hf_token} if hf_token else {}
+                        pipeline = Pipeline.from_pretrained(model_name, **kwargs)
+                    except Exception as e:
+                        # Пер-кандидатная семантика: провал одного кандидата не
+                        # блокирует следующих; латч ставится после провала ВСЕХ.
+                        last_error = e
+                        logger.warning(
+                            "Diarization: кандидат %s не загрузился: %s",
+                            model_name, str(e)[:200],
+                        )
+                        continue
+                    diarization_device = self._resolve_diarization_device()
+                    pipeline.to(diarization_device)
+                    self._diarization_pipeline = pipeline
+                    self._diarization_active_model = model_name
+                    logger.info(
+                        "Diarization pipeline (%s) загружен на устройство %s",
+                        model_name, diarization_device,
+                    )
+                    return self._diarization_pipeline
+
+            self._diarization_load_error = (
+                f"Не удалось загрузить pyannote pipeline "
+                f"(кандидаты: {', '.join(candidates)}): {last_error}"
+            )
+            raise RuntimeError(self._diarization_load_error)
 
     @staticmethod
     def _resolve_diarization_device() -> torch.device:

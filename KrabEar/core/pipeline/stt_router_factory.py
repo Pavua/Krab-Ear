@@ -56,7 +56,10 @@ def build_router(settings_dict: dict[str, Any] | None = None) -> STTRouter:
             )
             adapters.append(gigaam)
             logger.debug("RouterFactory: GigaAM adapter added (mode=%s)", gigaam._mode)
-        except ImportError as exc:
+        except (ImportError, ValueError) as exc:
+            # ValueError: transport="mlx" поддержан только основным стеком
+            # (stt_router.get_gigaam_adapter); Phase D.2 фабрика не подключена
+            # к engine — деградируем мягко, не роняя build_router у REST.
             logger.warning("RouterFactory: GigaAMSTTAdapter unavailable: %s", exc)
 
     # ----------------------------------------------------------------

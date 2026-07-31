@@ -3080,9 +3080,19 @@ class BackendService:
         from core.config import settings as cfg
         hf_token = os.environ.get("HF_TOKEN") or cfg.HF_TOKEN
         has_token = bool(hf_token)
-        model_cached = BackendService._hf_model_cached(cfg.DIARIZATION_MODEL)
+        candidates_raw = getattr(cfg, "DIARIZATION_MODEL_CANDIDATES", "") or ""
+        candidates = [c.strip() for c in candidates_raw.split(",") if c.strip()]
+        if not candidates:
+            candidates = [cfg.DIARIZATION_MODEL]
+        cached_map = {
+            name: BackendService._hf_model_cached(name) for name in candidates
+        }
+        # ready: хотя бы один кандидат в кэше (первый закешированный и победит
+        # в _load_diarization_pipeline — probe не должен врать про модель).
+        model_cached = any(cached_map.values())
         return {
-            "model": cfg.DIARIZATION_MODEL,
+            "model": candidates[0],
+            "model_candidates": cached_map,
             "has_hf_token": has_token,
             "model_cached": model_cached,
             "ready": has_token and model_cached,

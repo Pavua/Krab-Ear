@@ -438,6 +438,41 @@ class STTRouter:
             )
             self._close_cached_gigaam_adapter()
 
+        if transport == "mlx":
+            # MLX-транспорт — другой КЛАСС адаптера (инференс в главном процессе
+            # под mlx_lock); диверсия обязана происходить до конструктора
+            # GigaAMAdapter: его _VALID_TRANSPORTS не знает "mlx" (ValueError).
+            try:
+                from core.pipeline.stt_gigaam_mlx import (  # type: ignore[import]
+                    GigaAMMLXAdapter,
+                )
+            except ImportError:
+                logger.warning(
+                    "STTRouter.get_gigaam_adapter: transport=mlx, но "
+                    "core.pipeline.stt_gigaam_mlx не найден"
+                )
+                return None
+            try:
+                timeout = float(
+                    getattr(self._settings, "MLX_TRANSCRIBE_TIMEOUT_SEC", 120.0)
+                )
+                adapter = GigaAMMLXAdapter(mode=mode, watchdog_timeout_sec=timeout)
+                self._gigaam_adapter = adapter
+                self._gigaam_adapter_fingerprint = fingerprint
+                logger.info(
+                    "STTRouter.get_gigaam_adapter: MLX-адаптер создан (mode=%s)",
+                    mode,
+                )
+                return adapter
+            except Exception as exc:
+                # ValueError(mode) и пр.: GigaAM мягко выключается, каскад
+                # продолжает по whisper-кандидатам (симметрия PyTorch-ветки).
+                logger.warning(
+                    "STTRouter.get_gigaam_adapter: ошибка создания MLX-адаптера: %s",
+                    exc,
+                )
+                return None
+
         try:
             from core.pipeline.stt_gigaam import GigaAMAdapter  # type: ignore[import]
         except ImportError:

@@ -123,6 +123,21 @@ class Settings(BaseSettings):
     HF_TOKEN: str = ""
     DIARIZATION_ENABLED: bool = True
     DIARIZATION_MODEL: str = "pyannote/speaker-diarization-3.1"
+    # Опциональный список моделей диаризации через запятую (W-B волны
+    # gigaam-mlx-diar): первая загрузившаяся побеждает, ошибка кандидата не
+    # блокирует следующих. Пустая строка (default) = прежнее поведение —
+    # единственная DIARIZATION_MODEL. Пример:
+    # "pyannote/speaker-diarization-community-1,pyannote/speaker-diarization-3.1"
+    DIARIZATION_MODEL_CANDIDATES: str = ""
+    # --- Диаризованный конвейер длинных записей (W-C волны gigaam-mlx-diar) ---
+    # Opt-in: для ФАЙЛОВЫХ входов длиннее DIARIZED_MIN_DURATION_SEC транскрипт
+    # собирается по спикер-сегментам: диаризация → нарезка → распознавание
+    # каждого сегмента каскадом → "[mm:ss] SPEAKER_N: текст". Живые диктовки
+    # (ndarray/bytes) не затрагиваются никогда. Результат НЕ идёт в
+    # LLM-rewrite и автовставку (ранний return до постобработки).
+    DIARIZED_TRANSCRIPTION_ENABLED: bool = False
+    DIARIZED_MIN_DURATION_SEC: float = 120.0
+    DIARIZED_MAX_SPEAKERS: int = 2
 
     # Сетевые настройки
     # "offline_strict" — локальный MLX only, без Remote STT fallback.
@@ -378,6 +393,10 @@ class Settings(BaseSettings):
     #                  scripts/install_gigaam_venv.command). Worker держит модель в
     #                  памяти, общается через stdin/stdout JSON.
     #   "auto" (default) — пробует in_process; при ImportError → subprocess.
+    #   "mlx" — gigaam-mlx (aystream/gigaam-mlx) в ГЛАВНОМ процессе под mlx_lock:
+    #           чистый MLX без PyTorch, по-чанковый лок (см. stt_gigaam_mlx.py).
+    #           Диверсия на отдельный класс происходит в stt_router —
+    #           GigaAMAdapter это значение не принимает.
     STT_GIGAAM_TRANSPORT: str = "auto"
     # Путь к Python интерпретатору изолированного venv с установленным gigaam.
     # Используется только при transport in {"subprocess", "auto"}.
@@ -938,6 +957,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "stt_gigaam_enabled": False,
     "stt_gigaam_mode": "v3_e2e_rnnt",
     "stt_gigaam_device": "mps",
+    # Транспорт GigaAM: auto|in_process|subprocess|mlx. До волны gigaam-mlx
+    # ключ в DEFAULT_SETTINGS отсутствовал; default повторяет прежнее
+    # фактическое поведение UI (subprocess в проде).
+    "stt_gigaam_transport": "subprocess",
     # --- SenseVoice adapter (East Asian multilingual) ---
     "stt_sensevoice_enabled": False,
     "stt_sensevoice_model": "FunAudioLLM/SenseVoiceSmall",
