@@ -178,5 +178,44 @@ class NormalizeAudioMissingFileTestCase(unittest.TestCase):
         self.assertEqual(result, fake_path)
 
 
+class ConfidenceSingleSourceTestCase(unittest.TestCase):
+    """avg_logprob-расчёт живёт ТОЛЬКО в _raw_confidence_from_result.
+
+    Инлайновые дубли (финальные метрики, chunked-путь) зануляли confidence
+    GigaAM-результатов (нет segments, есть явный confidence) даже после фикса
+    самого хелпера — sibling-асимметрия. AST-гейт против нового расползания.
+    """
+
+    def test_avg_logprob_only_in_helper(self) -> None:
+        import ast
+        import inspect
+        import core.engine as engine_mod
+
+        tree = ast.parse(inspect.getsource(engine_mod))
+        offenders: set[str] = set()
+
+        class Visitor(ast.NodeVisitor):
+            def __init__(self) -> None:
+                self.stack: list[str] = []
+
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                self.stack.append(node.name)
+                self.generic_visit(node)
+                self.stack.pop()
+
+            visit_AsyncFunctionDef = visit_FunctionDef  # type: ignore[assignment]
+
+            def visit_Constant(self, node: ast.Constant) -> None:
+                if node.value == "avg_logprob" and self.stack:
+                    offenders.add(self.stack[-1])
+
+        Visitor().visit(tree)
+        self.assertEqual(
+            offenders, {"_raw_confidence_from_result"},
+            "avg_logprob-расчёт должен идти только через "
+            f"_raw_confidence_from_result, найдено в: {sorted(offenders)}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
