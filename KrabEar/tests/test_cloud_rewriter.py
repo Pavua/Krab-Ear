@@ -102,12 +102,14 @@ class TestCloudRewriterStub(unittest.TestCase):
     def test_no_openai_key_returns_none_and_no_http_call(self):
         import backend.cloud_rewriter as cr
 
-        # Patch store to return empty openai key
-        with patch.object(cr, "store") as mock_store:
-            mock_store.load_settings.return_value = {
+        # Подменяем аксессор настроек — возвращаем пустой openai-ключ
+        with patch.object(
+            cr, "_load_settings",
+            return_value={
                 "openai_api_key": "",
                 "cloud_rewriter_provider": "openai",
-            }
+            },
+        ):
             with patch("urllib.request.urlopen") as mock_urlopen:
                 result = cr.cloud_rewrite("привет мир", "ru")
                 self.assertIsNone(result)
@@ -116,11 +118,13 @@ class TestCloudRewriterStub(unittest.TestCase):
     def test_no_anthropic_key_returns_none_and_no_http_call(self):
         import backend.cloud_rewriter as cr
 
-        with patch.object(cr, "store") as mock_store:
-            mock_store.load_settings.return_value = {
+        with patch.object(
+            cr, "_load_settings",
+            return_value={
                 "anthropic_api_key": "",
                 "cloud_rewriter_provider": "anthropic",
-            }
+            },
+        ):
             with patch("urllib.request.urlopen") as mock_urlopen:
                 result = cr.cloud_rewrite("hola mundo", "es")
                 self.assertIsNone(result)
@@ -129,11 +133,13 @@ class TestCloudRewriterStub(unittest.TestCase):
     def test_empty_text_returns_none_without_http_call(self):
         import backend.cloud_rewriter as cr
 
-        with patch.object(cr, "store") as mock_store:
-            mock_store.load_settings.return_value = {
+        with patch.object(
+            cr, "_load_settings",
+            return_value={
                 "openai_api_key": "sk-test",
                 "cloud_rewriter_provider": "openai",
-            }
+            },
+        ):
             with patch("urllib.request.urlopen") as mock_urlopen:
                 result = cr.cloud_rewrite("", "ru")
                 self.assertIsNone(result)
@@ -149,11 +155,13 @@ class TestCloudRewriterOpenAISuccess(unittest.TestCase):
         raw_text = "привет мир это тест"
         polished = "Привет мир, это тест."
 
-        with patch.object(cr, "store") as mock_store:
-            mock_store.load_settings.return_value = {
+        with patch.object(
+            cr, "_load_settings",
+            return_value={
                 "openai_api_key": "sk-test-key",
                 "cloud_rewriter_provider": "openai",
-            }
+            },
+        ):
             mock_resp = _MockHTTPResponse(_make_openai_response(polished))
             with patch("urllib.request.urlopen", return_value=mock_resp):
                 result = cr.cloud_rewrite(raw_text, "ru")
@@ -163,8 +171,7 @@ class TestCloudRewriterOpenAISuccess(unittest.TestCase):
     def test_openai_provider_rewrite_direct(self):
         import backend.cloud_rewriter as cr
 
-        with patch.object(cr, "store") as mock_store:
-            mock_store.load_settings.return_value = {"openai_api_key": "sk-test"}
+        with patch.object(cr, "_load_settings", return_value={"openai_api_key": "sk-test"}):
             provider = cr.OpenAIRewriterProvider()
             polished = "Hello world."
             mock_resp = _MockHTTPResponse(_make_openai_response(polished))
@@ -183,11 +190,13 @@ class TestCloudRewriterAnthropicSuccess(unittest.TestCase):
         raw_text = "hola mundo esto es una prueba"
         polished = "Hola mundo, esto es una prueba."
 
-        with patch.object(cr, "store") as mock_store:
-            mock_store.load_settings.return_value = {
+        with patch.object(
+            cr, "_load_settings",
+            return_value={
                 "anthropic_api_key": "sk-ant-test",
                 "cloud_rewriter_provider": "anthropic",
-            }
+            },
+        ):
             mock_resp = _MockHTTPResponse(_make_anthropic_response(polished))
             with patch("urllib.request.urlopen", return_value=mock_resp):
                 result = cr.cloud_rewrite(raw_text, "es")
@@ -197,8 +206,7 @@ class TestCloudRewriterAnthropicSuccess(unittest.TestCase):
     def test_anthropic_provider_direct(self):
         import backend.cloud_rewriter as cr
 
-        with patch.object(cr, "store") as mock_store:
-            mock_store.load_settings.return_value = {"anthropic_api_key": "sk-ant-test"}
+        with patch.object(cr, "_load_settings", return_value={"anthropic_api_key": "sk-ant-test"}):
             provider = cr.AnthropicRewriterProvider()
             polished = "Привет, мир."
             mock_resp = _MockHTTPResponse(_make_anthropic_response(polished))
@@ -217,11 +225,13 @@ class TestLengthRatioGuard(unittest.TestCase):
         raw_text = "а" * 100
         tiny_output = "x"  # ratio = 0.01 < 0.35 → reject
 
-        with patch.object(cr, "store") as mock_store:
-            mock_store.load_settings.return_value = {
+        with patch.object(
+            cr, "_load_settings",
+            return_value={
                 "openai_api_key": "sk-test",
                 "cloud_rewriter_provider": "openai",
-            }
+            },
+        ):
             mock_resp = _MockHTTPResponse(_make_openai_response(tiny_output))
             with patch("urllib.request.urlopen", return_value=mock_resp):
                 result = cr.cloud_rewrite(raw_text, "ru")
@@ -233,11 +243,13 @@ class TestLengthRatioGuard(unittest.TestCase):
         raw_text = "слово"  # 5 chars
         huge_output = "слово " * 200  # ratio >> 3.0 → reject
 
-        with patch.object(cr, "store") as mock_store:
-            mock_store.load_settings.return_value = {
+        with patch.object(
+            cr, "_load_settings",
+            return_value={
                 "openai_api_key": "sk-test",
                 "cloud_rewriter_provider": "openai",
-            }
+            },
+        ):
             mock_resp = _MockHTTPResponse(_make_openai_response(huge_output))
             with patch("urllib.request.urlopen", return_value=mock_resp):
                 result = cr.cloud_rewrite(raw_text, "ru")
@@ -249,11 +261,13 @@ class TestLengthRatioGuard(unittest.TestCase):
         raw_text = "привет мир это тест сегодня"
         polished = "Привет мир, это тест сегодня."  # ratio ≈ 1.0
 
-        with patch.object(cr, "store") as mock_store:
-            mock_store.load_settings.return_value = {
+        with patch.object(
+            cr, "_load_settings",
+            return_value={
                 "openai_api_key": "sk-test",
                 "cloud_rewriter_provider": "openai",
-            }
+            },
+        ):
             mock_resp = _MockHTTPResponse(_make_openai_response(polished))
             with patch("urllib.request.urlopen", return_value=mock_resp):
                 result = cr.cloud_rewrite(raw_text, "ru")
@@ -268,11 +282,13 @@ class TestNetworkErrorGraceful(unittest.TestCase):
         import urllib.error
         import backend.cloud_rewriter as cr
 
-        with patch.object(cr, "store") as mock_store:
-            mock_store.load_settings.return_value = {
+        with patch.object(
+            cr, "_load_settings",
+            return_value={
                 "openai_api_key": "sk-test",
                 "cloud_rewriter_provider": "openai",
-            }
+            },
+        ):
             http_err = urllib.error.HTTPError(
                 url="https://api.openai.com/v1/chat/completions",
                 code=500,
@@ -289,11 +305,13 @@ class TestNetworkErrorGraceful(unittest.TestCase):
     def test_connection_error_returns_none(self):
         import backend.cloud_rewriter as cr
 
-        with patch.object(cr, "store") as mock_store:
-            mock_store.load_settings.return_value = {
+        with patch.object(
+            cr, "_load_settings",
+            return_value={
                 "openai_api_key": "sk-test",
                 "cloud_rewriter_provider": "openai",
-            }
+            },
+        ):
             with patch("urllib.request.urlopen", side_effect=OSError("Connection refused")):
                 result = cr.cloud_rewrite("тест", "ru")
         self.assertIsNone(result)
@@ -301,11 +319,13 @@ class TestNetworkErrorGraceful(unittest.TestCase):
     def test_unexpected_exception_returns_none(self):
         import backend.cloud_rewriter as cr
 
-        with patch.object(cr, "store") as mock_store:
-            mock_store.load_settings.return_value = {
+        with patch.object(
+            cr, "_load_settings",
+            return_value={
                 "openai_api_key": "sk-test",
                 "cloud_rewriter_provider": "openai",
-            }
+            },
+        ):
             with patch("urllib.request.urlopen", side_effect=RuntimeError("Unexpected")):
                 # Should NOT raise
                 result = cr.cloud_rewrite("тест", "ru")
@@ -425,11 +445,13 @@ class TestPrivacyAuditOnCloudRewrite(unittest.TestCase):
                     "details": details or {},
                 })
 
-        with patch.object(cr, "store") as mock_store:
-            mock_store.load_settings.return_value = {
+        with patch.object(
+            cr, "_load_settings",
+            return_value={
                 "openai_api_key": "sk-test",
                 "cloud_rewriter_provider": "openai",
-            }
+            },
+        ):
             mock_resp = _MockHTTPResponse(_make_openai_response(polished))
             with patch("urllib.request.urlopen", return_value=mock_resp):
                 # Patch get_privacy_audit_logger in engine module (called from inside engine.py)
@@ -478,22 +500,19 @@ class TestGetCloudRewriterFactory(unittest.TestCase):
 
     def test_default_is_openai(self):
         import backend.cloud_rewriter as cr
-        with patch.object(cr, "store") as mock_store:
-            mock_store.load_settings.return_value = {"cloud_rewriter_provider": "openai"}
+        with patch.object(cr, "_load_settings", return_value={"cloud_rewriter_provider": "openai"}):
             provider = cr.get_cloud_rewriter()
         self.assertIsInstance(provider, cr.OpenAIRewriterProvider)
 
     def test_anthropic_selected(self):
         import backend.cloud_rewriter as cr
-        with patch.object(cr, "store") as mock_store:
-            mock_store.load_settings.return_value = {"cloud_rewriter_provider": "anthropic"}
+        with patch.object(cr, "_load_settings", return_value={"cloud_rewriter_provider": "anthropic"}):
             provider = cr.get_cloud_rewriter()
         self.assertIsInstance(provider, cr.AnthropicRewriterProvider)
 
     def test_unknown_provider_falls_back_to_openai(self):
         import backend.cloud_rewriter as cr
-        with patch.object(cr, "store") as mock_store:
-            mock_store.load_settings.return_value = {"cloud_rewriter_provider": "unknown_xyz"}
+        with patch.object(cr, "_load_settings", return_value={"cloud_rewriter_provider": "unknown_xyz"}):
             provider = cr.get_cloud_rewriter()
         # Unknown provider -> defaults to OpenAI
         self.assertIsInstance(provider, cr.OpenAIRewriterProvider)
@@ -512,8 +531,7 @@ class TestCloudRewriterCustomProvider(unittest.TestCase):
     def test_custom_success_via_safe_opener(self):
         import backend.cloud_rewriter as cr
         polished = "Привет, как дела?"
-        with patch.object(cr, "store") as mock_store:
-            mock_store.load_settings.return_value = dict(self._BASE)
+        with patch.object(cr, "_load_settings", return_value=dict(self._BASE)):
             mock_resp = _MockHTTPResponse(_make_openai_response(polished))
             with patch.object(cr._SAFE_OPENER, "open", return_value=mock_resp):
                 out = cr.cloud_rewrite("привет как дела", "ru")
@@ -523,8 +541,7 @@ class TestCloudRewriterCustomProvider(unittest.TestCase):
         import backend.cloud_rewriter as cr
         s = dict(self._BASE)
         s["cloud_rewriter_base_url"] = ""
-        with patch.object(cr, "store") as mock_store:
-            mock_store.load_settings.return_value = s
+        with patch.object(cr, "_load_settings", return_value=s):
             with patch.object(cr._SAFE_OPENER, "open") as mock_open:
                 self.assertIsNone(cr.cloud_rewrite("hi there", "en"))
                 mock_open.assert_not_called()
@@ -533,16 +550,14 @@ class TestCloudRewriterCustomProvider(unittest.TestCase):
         import backend.cloud_rewriter as cr
         s = dict(self._BASE)
         s["cloud_rewriter_custom_model"] = ""
-        with patch.object(cr, "store") as mock_store:
-            mock_store.load_settings.return_value = s
+        with patch.object(cr, "_load_settings", return_value=s):
             with patch.object(cr._SAFE_OPENER, "open") as mock_open:
                 self.assertIsNone(cr.cloud_rewrite("hi there", "en"))
                 mock_open.assert_not_called()
 
     def test_custom_no_key_omits_authorization_header(self):
         import backend.cloud_rewriter as cr
-        with patch.object(cr, "store") as mock_store:
-            mock_store.load_settings.return_value = dict(self._BASE)  # empty api_key
+        with patch.object(cr, "_load_settings", return_value=dict(self._BASE)):  # empty api_key
             mock_resp = _MockHTTPResponse(_make_openai_response("ok"))
             with patch.object(cr._SAFE_OPENER, "open", return_value=mock_resp) as mock_open:
                 cr.cloud_rewrite("hello world", "en")
@@ -554,8 +569,7 @@ class TestCloudRewriterCustomProvider(unittest.TestCase):
         import backend.cloud_rewriter as cr
         s = dict(self._BASE)
         s["cloud_rewriter_api_key"] = "sk-custom-123"
-        with patch.object(cr, "store") as mock_store:
-            mock_store.load_settings.return_value = s
+        with patch.object(cr, "_load_settings", return_value=s):
             mock_resp = _MockHTTPResponse(_make_openai_response("ok"))
             with patch.object(cr._SAFE_OPENER, "open", return_value=mock_resp) as mock_open:
                 cr.cloud_rewrite("hello world", "en")
@@ -566,8 +580,7 @@ class TestCloudRewriterCustomProvider(unittest.TestCase):
         import backend.cloud_rewriter as cr
         s = dict(self._BASE)
         s["cloud_rewriter_base_url"] = "file:///etc/passwd"
-        with patch.object(cr, "store") as mock_store:
-            mock_store.load_settings.return_value = s
+        with patch.object(cr, "_load_settings", return_value=s):
             with patch.object(cr._SAFE_OPENER, "open") as mock_open:
                 self.assertIsNone(cr.cloud_rewrite("hi there", "en"))
                 mock_open.assert_not_called()  # rejected BEFORE any network/file access
@@ -576,8 +589,7 @@ class TestCloudRewriterCustomProvider(unittest.TestCase):
         import backend.cloud_rewriter as cr
         s = dict(self._BASE)
         s["cloud_rewriter_base_url"] = "ftp://evil/x"
-        with patch.object(cr, "store") as mock_store:
-            mock_store.load_settings.return_value = s
+        with patch.object(cr, "_load_settings", return_value=s):
             with patch.object(cr._SAFE_OPENER, "open") as mock_open:
                 self.assertIsNone(cr.cloud_rewrite("hi there", "en"))
                 mock_open.assert_not_called()
@@ -595,8 +607,7 @@ class TestCloudRewriterCustomProvider(unittest.TestCase):
 
     def test_custom_length_ratio_guard_rejects(self):
         import backend.cloud_rewriter as cr
-        with patch.object(cr, "store") as mock_store:
-            mock_store.load_settings.return_value = dict(self._BASE)
+        with patch.object(cr, "_load_settings", return_value=dict(self._BASE)):
             mock_resp = _MockHTTPResponse(_make_openai_response("x" * 500))
             with patch.object(cr._SAFE_OPENER, "open", return_value=mock_resp):
                 self.assertIsNone(cr.cloud_rewrite("short", "en"))  # 500/5 = 100x → rejected

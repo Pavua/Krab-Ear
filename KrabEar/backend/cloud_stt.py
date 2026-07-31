@@ -10,19 +10,55 @@ import json
 import logging
 import math
 import re
+import threading
 import time
 import urllib.request
 import urllib.parse
 import wave
-from typing import Dict, Any, Optional, Protocol
+from typing import Callable, Dict, Any, Optional, Protocol
 
 from backend.state_store import StateStore
 from core.config import settings
 
 logger = logging.getLogger("KrabEar.CloudSTT")
 
-# Используем тот же store, что и в rest_server.py (или создаём новый с тем же DATA_DIR)
-store = StateStore(settings.DATA_DIR)
+# S3/I-C: собственный module-level StateStore здесь был лок-миной. После
+# выравнивания DATA_DIR он смотрел бы на ТЕ ЖЕ файлы, что основной store
+# процесса, а per-thread depth-counter реентерабельности (#1872) живёт в поле
+# ЭКЗЕМПЛЯРА — между двумя экземплярами он не защищает: вход в лок второго
+# из-под лока первого берёт flock на новом fd и заклинивает навсегда. Читаем
+# настройки через аксессор владельца процесса; фоллбэк на собственный ленивый
+# store оставлен для standalone-режима и тестов, где владельца нет.
+_settings_fn: Callable[[], dict] | None = None
+_fallback_store_instance: Optional[StateStore] = None
+_fallback_store_lock = threading.Lock()
+
+
+def adopt_settings_reader(settings_fn: Callable[[], dict]) -> None:
+    """Подменяет источник настроек ссылкой на аксессор владельца процесса."""
+    global _settings_fn
+    _settings_fn = settings_fn
+
+
+def _fallback_store() -> StateStore:
+    """Ленивый синглтон StateStore для standalone-режима/тестов без владельца.
+
+    Double-checked locking: наивный check-then-set создал бы два экземпляра на
+    одних файлах под конкурентным доступом — ту же лок-мину, от которой уходим.
+    """
+    global _fallback_store_instance
+    if _fallback_store_instance is None:
+        with _fallback_store_lock:
+            if _fallback_store_instance is None:
+                _fallback_store_instance = StateStore(settings.DATA_DIR)
+    return _fallback_store_instance
+
+
+def _load_settings() -> dict:
+    if _settings_fn is not None:
+        return _settings_fn()
+    return _fallback_store().load_settings()
+
 
 # --- Hardening limits / validators (2026-06-16 audit of the new VG-bridge surface) ---
 _MAX_RESP_BYTES = 4 * 1024 * 1024          # cap any provider HTTP body (success path) — bound memory
@@ -125,7 +161,7 @@ class OpenAISTTProvider:
         pass
 
     def transcribe(self, pcm_bytes: bytes, sample_rate: int, source_lang: str) -> Dict[str, Any]:
-        api_key = store.load_settings().get("openai_api_key", "").strip()
+        api_key = _load_settings().get("openai_api_key", "").strip()
         if not api_key:
             return {
                 "error": "no_api_key",
@@ -212,7 +248,7 @@ class DeepgramSTTProvider:
         pass
 
     def transcribe(self, pcm_bytes: bytes, sample_rate: int, source_lang: str) -> Dict[str, Any]:
-        api_key = store.load_settings().get("deepgram_api_key", "").strip()
+        api_key = _load_settings().get("deepgram_api_key", "").strip()
         if not api_key:
             return {
                 "error": "no_api_key",
@@ -272,7 +308,7 @@ class AssemblyAISTTProvider:
         pass
 
     def transcribe(self, pcm_bytes: bytes, sample_rate: int, source_lang: str) -> Dict[str, Any]:
-        api_key = store.load_settings().get("assemblyai_api_key", "").strip()
+        api_key = _load_settings().get("assemblyai_api_key", "").strip()
         if not api_key:
             return {
                 "error": "no_api_key",

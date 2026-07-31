@@ -143,6 +143,8 @@ from backend.audit_logger import AuditLogger
 from backend.bulk_reprocess import BulkReprocessor
 from backend.privacy_audit import get_privacy_audit_logger
 from backend.ipc_errors import IpcOperationalError
+import backend.cloud_stt as cloud_stt
+import backend.cloud_rewriter as cloud_rewriter
 
 import argparse
 from datetime import datetime, timedelta, timezone
@@ -405,6 +407,16 @@ class BackendService:
             self._llm_rewriter._settings_getter = self._get_runtime_setting
         self._start_time: float = time.monotonic()
         self._settings_svc = SettingsService(store=self.store)
+        # S3/Задача 2: cloud_stt/cloud_rewriter раньше строили СОБСТВЕННЫЙ
+        # StateStore(settings.DATA_DIR) — после выравнивания каталога данных
+        # (S3/Задача 1) это те же файлы, что у self.store, а per-thread
+        # depth-counter реентерабельности (#1872) живёт в поле экземпляра и
+        # между двумя StateStore не защищает — лок-мина. Подключаем оба модуля
+        # к аксессору владельца процесса. БЕЗУСЛОВНО и ВНЕ блока in-process
+        # REST: cloud_rewriter зовётся из engine.py уже сегодня, а этот вызов
+        # не должен зависеть от рубильника REST_IN_PROCESS_ENABLED.
+        cloud_stt.adopt_settings_reader(self._cached_settings)
+        cloud_rewriter.adopt_settings_reader(self._cached_settings)
         # Hot-propagate api_key changes to the running LLMRewriter without restart.
         _rewriter_ref = self._llm_rewriter
         if _rewriter_ref is not None:

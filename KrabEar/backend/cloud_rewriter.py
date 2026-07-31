@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import urllib.error
 import urllib.request
-from typing import Any, Dict, Optional, Protocol
+from typing import Any, Callable, Dict, Optional, Protocol
 from urllib.parse import urlparse
 
 from backend.state_store import StateStore
@@ -137,8 +138,42 @@ _CLEANUP_SYSTEM_PROMPTS: Dict[str, str] = {
 
 _DEFAULT_SYSTEM_PROMPT = _CLEANUP_SYSTEM_PROMPTS["ru"]
 
-# Module-level store — same pattern as cloud_stt.py
-store = StateStore(settings.DATA_DIR)
+# S3/I-C: собственный module-level StateStore здесь был лок-миной. После
+# выравнивания DATA_DIR он смотрел бы на ТЕ ЖЕ файлы, что основной store
+# процесса, а per-thread depth-counter реентерабельности (#1872) живёт в поле
+# ЭКЗЕМПЛЯРА — между двумя экземплярами он не защищает: вход в лок второго
+# из-под лока первого берёт flock на новом fd и заклинивает навсегда. Читаем
+# настройки через аксессор владельца процесса; фоллбэк на собственный ленивый
+# store оставлен для standalone-режима и тестов, где владельца нет.
+_settings_fn: Callable[[], dict] | None = None
+_fallback_store_instance: Optional[StateStore] = None
+_fallback_store_lock = threading.Lock()
+
+
+def adopt_settings_reader(settings_fn: Callable[[], dict]) -> None:
+    """Подменяет источник настроек ссылкой на аксессор владельца процесса."""
+    global _settings_fn
+    _settings_fn = settings_fn
+
+
+def _fallback_store() -> StateStore:
+    """Ленивый синглтон StateStore для standalone-режима/тестов без владельца.
+
+    Double-checked locking: наивный check-then-set создал бы два экземпляра на
+    одних файлах под конкурентным доступом — ту же лок-мину, от которой уходим.
+    """
+    global _fallback_store_instance
+    if _fallback_store_instance is None:
+        with _fallback_store_lock:
+            if _fallback_store_instance is None:
+                _fallback_store_instance = StateStore(settings.DATA_DIR)
+    return _fallback_store_instance
+
+
+def _load_settings() -> dict:
+    if _settings_fn is not None:
+        return _settings_fn()
+    return _fallback_store().load_settings()
 
 
 # -------------------------------------------------------------------------
@@ -168,7 +203,7 @@ class OpenAIRewriterProvider:
     _MODEL = "gpt-4o-mini"
 
     def rewrite(self, text: str, language: str) -> Dict[str, Any]:
-        api_key = store.load_settings().get("openai_api_key", "").strip()
+        api_key = _load_settings().get("openai_api_key", "").strip()
         if not api_key:
             return {
                 "error": "no_api_key",
@@ -224,7 +259,7 @@ class AnthropicRewriterProvider:
     _API_VERSION = "2023-06-01"
 
     def rewrite(self, text: str, language: str) -> Dict[str, Any]:
-        api_key = store.load_settings().get("anthropic_api_key", "").strip()
+        api_key = _load_settings().get("anthropic_api_key", "").strip()
         if not api_key:
             return {
                 "error": "no_api_key",
@@ -287,7 +322,7 @@ class CustomRewriterProvider:
     """
 
     def rewrite(self, text: str, language: str) -> Dict[str, Any]:
-        s = store.load_settings()
+        s = _load_settings()
         base_url = s.get("cloud_rewriter_base_url", "").strip()
         if not base_url:
             return {
@@ -364,7 +399,7 @@ def get_cloud_rewriter(provider_name: Optional[str] = None) -> CloudRewriterProv
 
     Если имя неизвестно — возвращает OpenAI как умолчание.
     """
-    name = (provider_name or store.load_settings().get("cloud_rewriter_provider", "openai")).lower()
+    name = (provider_name or _load_settings().get("cloud_rewriter_provider", "openai")).lower()
     cls = _PROVIDERS.get(name, OpenAIRewriterProvider)
     return cls()
 
@@ -396,7 +431,7 @@ def cloud_rewrite(text: str, language: str) -> Optional[str]:
         return None
 
     try:
-        provider_name = store.load_settings().get("cloud_rewriter_provider", "openai")
+        provider_name = _load_settings().get("cloud_rewriter_provider", "openai")
         provider = get_cloud_rewriter(provider_name)
         result = provider.rewrite(text, language)
 
