@@ -2792,12 +2792,15 @@ class RecordingCoreService:
                                      "audio_recovery_path": audio_recovery_path,
                                      "status": "stt_failed"}}
 
-        # STT дошёл до конца — спасательная копия больше не нужна.
+        # STT дошёл до конца — спасательная копия больше не нужна. Пустой
+        # каталог тоже убираем: успешный прогон не должен оставлять следов
+        # в data_dir (иначе чужие cleanup-и падают на «Directory not empty»).
         if _presaved_path is not None:
             try:
                 _presaved_path.unlink(missing_ok=True)
-            except OSError as _rm_exc:
-                logger.warning("phase_c: не удалось убрать спасательную копию: %s", _rm_exc)
+                _presaved_path.parent.rmdir()
+            except OSError:
+                pass  # каталог непустой (чужие спасённые записи) — так и надо
 
         return {"transcribe_payload": transcribe_payload}
 
