@@ -913,6 +913,44 @@ class AudioEngine:
                 except Exception as _spk_exc:
                     logger.debug("Speaker-aware prompt: оценка не удалась, пропускаем: %s", _spk_exc)
 
+        # 1.9 Диаризованный конвейер (W-C, opt-in): ТОЛЬКО файловые входы —
+        # живые диктовки (ndarray/bytes) не попадают сюда никогда. Ранний
+        # return до rewrite/cleanup/paste: спикер-транскрипт не должен идти
+        # в LLM-переписывание и автовставку. Не зависит от STT_STREAMING_ENABLED.
+        if (
+            not is_preview
+            and getattr(settings, "DIARIZED_TRANSCRIPTION_ENABLED", False)
+            and isinstance(audio_data, (str, Path))
+            and os.path.exists(str(audio_data))
+        ):
+            _diar_duration: float | None = None
+            try:
+                import soundfile as _sf_diar
+                _diar_duration = _sf_diar.info(str(audio_data)).duration
+            except Exception:
+                pass
+            if (
+                _diar_duration is not None
+                and _diar_duration > settings.DIARIZED_MIN_DURATION_SEC
+            ):
+                try:
+                    _spk_cache: dict[str, Any] = {}
+                    _num_spk = self._estimate_num_speakers(audio_data, cache=_spk_cache)
+                except Exception:
+                    _num_spk = None
+                if _num_spk is not None and _num_spk <= settings.DIARIZED_MAX_SPEAKERS:
+                    from core.diarized_transcription import run_diarized_transcription
+                    try:
+                        return run_diarized_transcription(
+                            self, audio_data, language=lang_hint,
+                        )
+                    except Exception as _diar_exc:
+                        # Soft-fail: любой сбой конвейера → обычный путь ниже.
+                        logger.warning(
+                            "Diarized pipeline failed (%s) — обычный путь",
+                            str(_diar_exc)[:200],
+                        )
+
         # 2. Routing: chunked path для длинных записей (если включён)
         # Для numpy-буферов определяем длительность через len/sample_rate.
         # Для файлов — через soundfile.info (lazy import, мягкий fallback).

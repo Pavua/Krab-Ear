@@ -129,6 +129,15 @@ class Settings(BaseSettings):
     # единственная DIARIZATION_MODEL. Пример:
     # "pyannote/speaker-diarization-community-1,pyannote/speaker-diarization-3.1"
     DIARIZATION_MODEL_CANDIDATES: str = ""
+    # --- Диаризованный конвейер длинных записей (W-C волны gigaam-mlx-diar) ---
+    # Opt-in: для ФАЙЛОВЫХ входов длиннее DIARIZED_MIN_DURATION_SEC транскрипт
+    # собирается по спикер-сегментам: диаризация → нарезка → распознавание
+    # каждого сегмента каскадом → "[mm:ss] SPEAKER_N: текст". Живые диктовки
+    # (ndarray/bytes) не затрагиваются никогда. Результат НЕ идёт в
+    # LLM-rewrite и автовставку (ранний return до постобработки).
+    DIARIZED_TRANSCRIPTION_ENABLED: bool = False
+    DIARIZED_MIN_DURATION_SEC: float = 120.0
+    DIARIZED_MAX_SPEAKERS: int = 2
 
     # Сетевые настройки
     # "offline_strict" — локальный MLX only, без Remote STT fallback.
