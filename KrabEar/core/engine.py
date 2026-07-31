@@ -393,6 +393,9 @@ class AudioEngine:
         self._unavailable_models: dict[str, float] = {}
         self._diarization_pipeline: Pipeline | None = None
         self._diarization_load_error: str | None = None
+        # Фактически загруженная модель диаризации (может отличаться от
+        # settings.DIARIZATION_MODEL при непустом DIARIZATION_MODEL_CANDIDATES).
+        self._diarization_active_model: str | None = None
         self._diarization_load_lock: threading.RLock = threading.RLock()
         # C2b: сериализация САМИХ инференсов pyannote (полная диаризация phase C
         # vs DIAR_WINDOW-тик meeting-сессии). Load-lock выше защищает только загрузку.
@@ -3435,17 +3438,41 @@ class AudioEngine:
             # Если HF_HUB_OFFLINE=1, модель загружается из кэша без token.
             # Span фиксируется только при первом реальном load'е (guard выше гарантирует
             # что повторные вызовы сразу возвращают кэш).
-            with _profiler.start_span(f"model_load_{_short_model_name(settings.DIARIZATION_MODEL)}"):
-                try:
-                    kwargs = {"token": hf_token} if hf_token else {}
-                    self._diarization_pipeline = Pipeline.from_pretrained(settings.DIARIZATION_MODEL, **kwargs)
-                except Exception as e:
-                    self._diarization_load_error = f"Не удалось загрузить pyannote pipeline: {e}"
-                    raise RuntimeError(self._diarization_load_error)
-                diarization_device = self._resolve_diarization_device()
-                self._diarization_pipeline.to(diarization_device)
-                logger.info("Diarization pipeline загружен на устройство %s", diarization_device)
-                return self._diarization_pipeline
+            candidates_raw = getattr(settings, "DIARIZATION_MODEL_CANDIDATES", "") or ""
+            candidates = [c.strip() for c in candidates_raw.split(",") if c.strip()]
+            if not candidates:
+                candidates = [settings.DIARIZATION_MODEL]
+
+            last_error: Exception | None = None
+            for model_name in candidates:
+                with _profiler.start_span(f"model_load_{_short_model_name(model_name)}"):
+                    try:
+                        kwargs = {"token": hf_token} if hf_token else {}
+                        pipeline = Pipeline.from_pretrained(model_name, **kwargs)
+                    except Exception as e:
+                        # Пер-кандидатная семантика: провал одного кандидата не
+                        # блокирует следующих; латч ставится после провала ВСЕХ.
+                        last_error = e
+                        logger.warning(
+                            "Diarization: кандидат %s не загрузился: %s",
+                            model_name, str(e)[:200],
+                        )
+                        continue
+                    diarization_device = self._resolve_diarization_device()
+                    pipeline.to(diarization_device)
+                    self._diarization_pipeline = pipeline
+                    self._diarization_active_model = model_name
+                    logger.info(
+                        "Diarization pipeline (%s) загружен на устройство %s",
+                        model_name, diarization_device,
+                    )
+                    return self._diarization_pipeline
+
+            self._diarization_load_error = (
+                f"Не удалось загрузить pyannote pipeline "
+                f"(кандидаты: {', '.join(candidates)}): {last_error}"
+            )
+            raise RuntimeError(self._diarization_load_error)
 
     @staticmethod
     def _resolve_diarization_device() -> torch.device:

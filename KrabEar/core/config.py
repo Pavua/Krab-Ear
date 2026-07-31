@@ -123,6 +123,12 @@ class Settings(BaseSettings):
     HF_TOKEN: str = ""
     DIARIZATION_ENABLED: bool = True
     DIARIZATION_MODEL: str = "pyannote/speaker-diarization-3.1"
+    # Опциональный список моделей диаризации через запятую (W-B волны
+    # gigaam-mlx-diar): первая загрузившаяся побеждает, ошибка кандидата не
+    # блокирует следующих. Пустая строка (default) = прежнее поведение —
+    # единственная DIARIZATION_MODEL. Пример:
+    # "pyannote/speaker-diarization-community-1,pyannote/speaker-diarization-3.1"
+    DIARIZATION_MODEL_CANDIDATES: str = ""
 
     # Сетевые настройки
     # "offline_strict" — локальный MLX only, без Remote STT fallback.
