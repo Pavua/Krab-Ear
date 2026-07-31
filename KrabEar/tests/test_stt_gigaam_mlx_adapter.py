@@ -21,7 +21,7 @@ import numpy as np
 
 from core.audio_chunker import AudioChunk
 from core.mlx_subprocess import MLXTimeoutError
-from core.pipeline import stt_gigaam_mlx as mod
+import core.pipeline.stt_gigaam_mlx as mod
 from core.pipeline.stt_gigaam_mlx import GigaAMMLXAdapter
 
 
