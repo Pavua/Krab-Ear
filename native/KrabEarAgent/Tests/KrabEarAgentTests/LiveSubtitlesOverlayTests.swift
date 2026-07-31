@@ -26,9 +26,9 @@
   22. test_completionReconnectsForEOFAndErrorWhileVisible — восстановление после EOF/ошибки
   23. test_staleConnectionCallbacksIgnoredAfterReconnect — старые обработчики отбрасываются
   24. test_partialBufferDoesNotCrossConnectionGeneration — буфер не смешивает поколения
-  25. test_reconnectStopsAfterBoundedAttempts — ограничение серии переподключений
+  25. test_reconnectContinuesIndefinitelyWhileVisible — S3 фикс 3: без give-up-лимита, пока isVisible
   26. test_deinitCancelsTaskAndInvalidatesSession — освобождение URLSession
-  27. test_invalidResponsesDoNotResetBoundedReconnectBudget — HTTP/MIME ошибки не оживляют поток
+  27. test_invalidResponsesNeverPolluteEntriesDuringUnboundedReconnect — HTTP/MIME ошибки не оживляют поток и не глушат реконнект
   28. test_splitUTF8ScalarIsPreservedUntilCompleteLine — split UTF-8 не повреждает строку
   29. test_initializer_restoresShowOriginal_fromInjectedDefaults — HUD читает внедрённый suite
 */
@@ -422,35 +422,50 @@ final class LiveSubtitlesOverlayWave190Tests: XCTestCase {
         overlay.hide()
     }
 
-    func test_reconnectStopsAfterBoundedAttempts() async {
+    /// S3 финальное ревью, фикс 3: до фикса `maxReconnectAttempts = 5`
+    /// сдавался за ~15.5с — при живом in-process REST сторож задачи 7 лечит
+    /// не меньше минуты, поэтому лимит воспроизводил бы застывший экран
+    /// живых субтитров. Здесь прогоняем 12 подряд обрывов (заведомо больше
+    /// старого лимита 5) и проверяем, что реконнект планируется КАЖДЫЙ раз,
+    /// пока панель видима — и прекращается только по hide(), а не по счётчику.
+    func test_reconnectContinuesIndefinitelyWhileVisible() async {
         let environment = TrackingSSEEnvironment()
         let overlay = makeTrackedOverlay(environment: environment)
         overlay.show()
 
-        for _ in 0..<overlay._testMaximumReconnectAttempts {
+        let attemptsBeyondOldCap = 12
+        for _ in 0..<attemptsBeyondOldCap {
             environment.sessions.last!.complete(error: SyntheticSSEError())
             await drainSSECallbacks()
-            XCTAssertEqual(environment.scheduledReconnects.count, 1)
+            XCTAssertEqual(
+                environment.scheduledReconnects.count, 1,
+                "реконнект обязан планироваться на каждый обрыв, пока панель видима — без верхней границы попыток"
+            )
             environment.scheduledReconnects.removeFirst().perform()
             await drainSSECallbacks()
         }
+        XCTAssertTrue(overlay._testHasActiveSSETask, "после \(attemptsBeyondOldCap) переподключений соединение всё ещё поднимается")
 
+        // Останов приходит только от hide(), не от исчерпанного бюджета попыток.
+        overlay.hide()
         environment.sessions.last!.complete(error: SyntheticSSEError())
         await drainSSECallbacks()
-        XCTAssertTrue(environment.scheduledReconnects.isEmpty)
+        XCTAssertTrue(environment.scheduledReconnects.isEmpty, "скрытая панель не должна планировать реконнект")
         XCTAssertFalse(overlay._testHasActiveSSETask)
-        overlay.hide()
     }
 
-    func test_invalidResponsesDoNotResetBoundedReconnectBudget() async {
+    /// S3 финальное ревью, фикс 3 (сиблинг предыдущего теста): невалидные
+    /// HTTP-ответы (не проходят status/MIME проверку) не должны ни попасть в
+    /// UI, ни остановить бесконечную серию реконнектов раньше времени —
+    /// раньше именование теста относилось к «бюджету» из 5 попыток, теперь
+    /// бюджета нет вовсе, поэтому прогоняем заведомо больше старого лимита.
+    func test_invalidResponsesNeverPolluteEntriesDuringUnboundedReconnect() async {
         let environment = TrackingSSEEnvironment()
         let overlay = makeTrackedOverlay(environment: environment)
         overlay.show()
 
-        // Начальное соединение + пять разрешённых reconnect-попыток. Каждая
-        // ошибка присылает правдоподобное SSE-тело: оно не должно ни попасть в
-        // UI, ни обнулить бюджет, если HTTP status/MIME не прошли проверку.
-        for attempt in 0...overlay._testMaximumReconnectAttempts {
+        let attemptsBeyondOldCap = 12
+        for attempt in 0..<attemptsBeyondOldCap {
             let session = environment.sessions.last!
             let accepted: Bool
             if attempt.isMultiple(of: 2) {
@@ -471,19 +486,18 @@ final class LiveSubtitlesOverlayWave190Tests: XCTestCase {
             session.complete(error: SyntheticSSEError())
             await drainSSECallbacks()
 
-            if attempt < overlay._testMaximumReconnectAttempts {
-                XCTAssertEqual(environment.scheduledReconnects.count, 1)
-                environment.scheduledReconnects.removeFirst().perform()
-                await drainSSECallbacks()
-            }
+            XCTAssertEqual(
+                environment.scheduledReconnects.count, 1,
+                "невалидный ответ не должен глушить серию реконнектов раньше времени"
+            )
+            environment.scheduledReconnects.removeFirst().perform()
+            await drainSSECallbacks()
         }
 
-        XCTAssertTrue(environment.scheduledReconnects.isEmpty)
-        XCTAssertFalse(overlay._testHasActiveSSETask)
+        XCTAssertTrue(overlay._testHasActiveSSETask, "серия продолжается за пределами старого лимита в 5 попыток")
         XCTAssertEqual(
-            environment.sessions.count,
-            overlay._testMaximumReconnectAttempts + 1,
-            "Серия не должна создать больше пяти повторных подключений"
+            environment.sessions.count, attemptsBeyondOldCap + 1,
+            "начальное соединение + \(attemptsBeyondOldCap) переподключений"
         )
         XCTAssertEqual(overlay._testEntryCount, 0, "Тело ошибочного ответа не является SSE")
         overlay.hide()

@@ -91,9 +91,6 @@ final class LiveSubtitlesOverlay: NSObject {
     /// Есть ли ровно одна принадлежащая панели активная SSE-задача.
     var _testHasActiveSSETask: Bool { sseConnection != nil }
 
-    /// Верхняя граница последовательных переподключений без полученных строк.
-    var _testMaximumReconnectAttempts: Int { maxReconnectAttempts }
-
     /// Текущий event type из SSE (из строки "event: ..."), чтобы фильтровать data-строки.
     private var pendingSSEEventType: String? = nil
 
@@ -122,9 +119,22 @@ final class LiveSubtitlesOverlay: NSObject {
     private var sseConnection: SSEConnection?
     private var sseGeneration: UInt64 = 0
     private var reconnectAttempts = 0
-    private let maxReconnectAttempts = 5
+    /// Финал ревью S3, фикс 3: раньше был `maxReconnectAttempts = 5` (сдаётся
+    /// за ~15.5с) — тот же анти-паттерн, что чинила задача 8 у
+    /// QuickCapturePanelController (см. её докстринг про I-E), но здесь его
+    /// не тронули. Остановка REST (in-process режим) гарантированно рвёт SSE
+    /// (сентинел рассылается подписчикам перед остановкой), а цикл лечения
+    /// сторожа задачи 7 — не меньше минуты. У QuickCapture есть polling-
+    /// фоллбэк панели встречи; у этого HUD — ничего, поэтому лимит попыток
+    /// означал бы, что живые субтитры молча умирают до ручного перезапуска
+    /// при зелёной диагностике. Переподключение теперь безлимитно, пока
+    /// `isVisible` (тот же гейт, что уже использует connectSSE/
+    /// receiveSSELine/completeSSEConnection) — задача сама естественно
+    /// прекращается в hide()/deinit через reconnectWorkItem?.cancel().
     private let reconnectBaseDelay: TimeInterval = 0.5
-    private let reconnectMaximumDelay: TimeInterval = 8.0
+    /// Потолок задержки поднят с 8с до 30с — зеркалит
+    /// QuickCapturePanelController.sseReconnectMaxDelay после задачи 8.
+    private let reconnectMaximumDelay: TimeInterval = 30.0
     private var reconnectWorkItem: DispatchWorkItem?
     private var reconnectToken: UUID?
     private let sseSessionFactory: ((SSESessionDelegate) -> LiveSubtitlesSSESession)?
@@ -575,8 +585,6 @@ final class LiveSubtitlesOverlay: NSObject {
     }
 
     private func scheduleSSEReconnect(afterGeneration generation: UInt64) {
-        guard reconnectAttempts < maxReconnectAttempts else { return }
-
         let exponent = min(reconnectAttempts, 4)
         let delay = min(
             reconnectBaseDelay * pow(2.0, Double(exponent)),
