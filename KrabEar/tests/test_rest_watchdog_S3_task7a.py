@@ -184,11 +184,17 @@ class DefaultProbeTests(unittest.TestCase):
 
 
 class PortHeldExternallyTests(unittest.TestCase):
-    """п.4: занятый порт — не смерть."""
+    """п.4: занятый порт — не смерть.
 
-    def test_healthy_probe_while_not_running_is_port_held_externally(self):
+    R2-фикс 2, часть 2 (см. test_rest_watchdog_own_503_marker_S3_r2fix2.py
+    для полного набора): port_held_externally требует ТАКЖЕ
+    ever_served=False — иначе "здоровая" проба на not-running почти всегда
+    бьёт в НАШ ЖЕ полу-закрытый инстанс, а не в чужой легаси-юнит.
+    """
+
+    def test_healthy_probe_while_not_running_and_never_served_is_port_held_externally(self):
         probe = _FakeProbe(results=[True])
-        owner = _FakeOwner(running=False)
+        owner = _FakeOwner(running=False, ever_served=False)
         clock = _Clock()
         wd, owner, clock = _make(owner=owner, probe=probe, clock=clock)
         self.assertIsNone(wd.check_once())
