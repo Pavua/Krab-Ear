@@ -214,6 +214,72 @@ class DrainBudgetTestCase(unittest.TestCase):
         self.assertLessEqual(budget, 12.0, "бюджет обязан помещаться в ExitTimeOut=15")
 
 
+class RestInProcessBeginShutdownOrderTestCase(unittest.TestCase):
+    """S3/Задача 5, п.5: shutting_down взводится ДО IPCServer.stop().
+
+    Порядок важен: 8с IPC-дренажа ниже обязаны работать ОДНОВРЕМЕННО как окно
+    дренажа REST (допуск уже закрыт), а не последовательно после него —
+    иначе бюджеты складываются и не помещаются в ExitTimeOut=15.
+    """
+
+    def test_begin_shutdown_called_before_ipc_stop(self) -> None:
+        events: list[str] = []
+
+        server = MagicMock()
+        server.stop.side_effect = lambda **_kw: (events.append("ipc"), True)[1]
+
+        service = MagicMock()
+        service._rest_inprocess.begin_shutdown.side_effect = (
+            lambda: events.append("rest_begin_shutdown")
+        )
+        service.close.side_effect = lambda: (events.append("workers"), True)[1]
+
+        handler = MagicMock()
+        handler.shutdown.side_effect = lambda **_kw: (events.append("metadata"), True)[1]
+
+        result = _shutdown_backend(
+            service, server, handler, flush_fn=lambda: None, exit_fn=lambda code: None,
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(
+            events, ["rest_begin_shutdown", "ipc", "workers", "metadata"],
+        )
+        service._rest_inprocess.begin_shutdown.assert_called_once_with()
+
+    def test_missing_rest_inprocess_does_not_break_shutdown(self) -> None:
+        """service без _rest_inprocess (рубильник выключен) — не аварийная ветка."""
+        service = MagicMock()
+        service._rest_inprocess = None
+        service.close.return_value = True
+        server = MagicMock()
+        server.stop.return_value = True
+        handler = MagicMock()
+        handler.shutdown.return_value = True
+
+        result = _shutdown_backend(
+            service, server, handler, flush_fn=lambda: None, exit_fn=lambda code: None,
+        )
+        self.assertTrue(result)
+
+    def test_begin_shutdown_exception_does_not_abort_teardown(self) -> None:
+        """Сбой begin_shutdown() — не повод пропускать IPC/workers/metadata."""
+        service = MagicMock()
+        service._rest_inprocess.begin_shutdown.side_effect = RuntimeError("boom")
+        service.close.return_value = True
+        server = MagicMock()
+        server.stop.return_value = True
+        handler = MagicMock()
+        handler.shutdown.return_value = True
+
+        result = _shutdown_backend(
+            service, server, handler, flush_fn=lambda: None, exit_fn=lambda code: None,
+        )
+        self.assertTrue(result)
+        service.close.assert_called_once_with()
+        handler.shutdown.assert_called_once_with(ipc_already_stopped=True)
+
+
 class HardExitObservabilityTestCase(unittest.TestCase):
     """Приёмочное ревью 2026-07-23 (F2): причина hard-exit обязана доехать.
 

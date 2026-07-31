@@ -236,6 +236,23 @@ def _shutdown_backend(
     ресурсам. Перед аварийным выходом telemetry сбрасывается, а при тестовой
     инъекции возвращается ``False`` без продолжения teardown.
     """
+    # ЯКОРЬ ДЛЯ S3/ЗАДАЧИ 7 (сторож REST): остановка сторожа встаёт СЮДА,
+    # ДО взвода shutting_down ниже — иначе сторож увидит 503 на /health уже
+    # останавливающегося REST и попытается его «вылечить» гонкой с этим же
+    # teardown'ом.
+    rest_inprocess = getattr(service, "_rest_inprocess", None)
+    if rest_inprocess is not None:
+        try:
+            # S3/Задача 5, п.5: закрываем REST-допуск РАНЬШЕ IPC-дренажа —
+            # тогда 8с ниже работают ОДНОВРЕМЕННО как окно дренажа REST, а не
+            # последовательно с ним. Полный stop() (сентинел + дренаж реестра
+            # + shutdown()/server_close()) всё равно происходит позже, внутри
+            # service.close() (см. rest_inprocess.stop() там).
+            rest_inprocess.begin_shutdown()
+        except Exception:
+            logger.exception(
+                "InProcessRestServer.begin_shutdown() выбросил при shutdown"
+            )
     try:
         # F1 (приёмочное ревью 2026-07-23): STT-пайплайн выполняется В
         # handler-потоке (handle_stop_recording/meeting_stop/transcribe_paths),
@@ -324,6 +341,13 @@ class _RestInProcessTombstone:
 
     def status(self) -> dict:
         return dict(self._status)
+
+    def begin_shutdown(self) -> None:
+        """Взводить нечего — метод есть ради единообразия с InProcessRestServer.
+
+        S3/Задача 5: _shutdown_backend зовёт begin_shutdown() на любом
+        _rest_inprocess без проверки конкретного типа.
+        """
 
     def stop(self, timeout: float | None = None) -> None:
         """Останавливать нечего — метод есть ради единообразия с close()."""
@@ -871,6 +895,10 @@ class BackendService:
                     settings=settings,
                     enabled=_rest_enabled,
                     error_push=self._push_rest_error,
+                    # S3/Задача 5: та же шина, что использует shutdown_handler
+                    # (см. _broadcast_event_bus_sentinel в shutdown_handler.py)
+                    # — единственный process-wide EventBus singleton.
+                    sentinel_push=event_bus.broadcast_shutdown_sentinel,
                 )
                 self._rest_inprocess.start()
             except Exception as exc:
