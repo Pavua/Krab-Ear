@@ -3170,7 +3170,8 @@ class BackendService:
     def _handle_get_memory_stats(self, params: dict) -> dict:
         """Возвращает RSS/VSZ для backend, agent и worker процессов через psutil.
 
-        Ищет процессы по подстроке cmdline: KrabEarAgent, KrabEar/backend/service.py, gigaam_worker.
+        Ищет процессы по подстроке cmdline: KrabEarAgent, KrabEar/backend/service.py,
+        KrabEar/main.py, gigaam_worker.
         Возвращает {"ok": True, "processes": [...]} или {"ok": False, "reason": "..."}.
         """
         try:
@@ -3194,7 +3195,12 @@ class BackendService:
         for proc in proc_iter:
             try:
                 cmd = " ".join(proc.cmdline() or [])
-                if any(s in cmd for s in ("KrabEarAgent", "KrabEar/backend/service.py", "gigaam_worker")):
+                # S3/Р9: плист/BackendSupervisor теперь спавнят KrabEar/main.py,
+                # а не backend/service.py напрямую — старое имя оставлено для
+                # процессов, поднятых до переустановки юнита.
+                if any(s in cmd for s in (
+                    "KrabEarAgent", "KrabEar/backend/service.py", "KrabEar/main.py", "gigaam_worker",
+                )):
                     mem = proc.memory_info()
                     kind = "agent" if "KrabEarAgent" in cmd else (
                         "worker" if "gigaam_worker" in cmd else "backend"
