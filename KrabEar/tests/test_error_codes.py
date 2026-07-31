@@ -147,6 +147,10 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             # M2 (2026-07-29) — in-process REST-сервер не смог занять порт
             # (EADDRINUSE, обычно легаси launchd-агент ai.krab.ear.rest ещё жив).
             "rest.port_conflict",
+            # S3 Задача 4 (2026-07-31) — сборка REST-приложения упала целиком
+            # (импорт/adopt_external_singletons/create_app()/конструктор), а не
+            # штатный конфликт порта — обслуживается надгробием, не лечится.
+            "rest.startup_failed",
         }
         self.assertEqual(set(ERROR_REGISTRY.keys()), expected)
 
@@ -247,7 +251,9 @@ class ErrorRegistryShapeTests(unittest.TestCase):
         R1 (2026-07-24) recording-reliability wave added audio.recording_rescued = 63;
         R2 (2026-07-25) owner shadow telemetry added recording.owner_mismatch = 64;
         M2 (2026-07-29) in-process REST server added rest.port_conflict = 65;
+        S3 Задача 4 (2026-07-31) added rest.startup_failed (build-failure
+        tombstone, distinct from the fail-open port_conflict path) = 66;
         test_expected_codes_present guards the exact set so this count test is a
         redundant but cheap invariant.
         """
-        self.assertEqual(len(ERROR_REGISTRY), 65)
+        self.assertEqual(len(ERROR_REGISTRY), 66)

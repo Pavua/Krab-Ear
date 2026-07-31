@@ -851,4 +851,25 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "severity": "warn",
         "dedupe_seconds": 300,
     },
+    # rest.startup_failed — S3/Задача 4: сборка REST-приложения упала целиком
+    # (импорт rest_server, adopt_external_singletons, create_app() или сам
+    # конструктор InProcessRestServer бросили исключение) — не то же самое,
+    # что rest.port_conflict. start() документирован как "никогда не бросает"
+    # и сам обрабатывает EADDRINUSE через fail-open внутри себя; если исключение
+    # долетело до внешнего except в service.py, значит упала именно сборка, а
+    # не штатный конфликт порта. severity error (не warn, как у port_conflict):
+    # там REST хотя бы существует и может подняться после освобождения порта,
+    # здесь чинить нечего — надгробие (см. _RestInProcessTombstone).
+    "rest.startup_failed": {
+        "user_msg_ru": (
+            "Встроенный REST-сервер не удалось собрать — веб-функции "
+            "недоступны. Диктовка и остальные функции backend работают "
+            "как обычно."
+        ),
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "error",
+        "dedupe_seconds": 300,
+    },
 }
