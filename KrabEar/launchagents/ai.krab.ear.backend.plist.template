@@ -51,9 +51,28 @@
   <integer>5</integer>
 
   <!-- Backend стартует ~5-8 секунд (загружает Whisper + pyannote модели).
-       Дать запас на graceful shutdown при bootout. -->
+       Дать запас на graceful shutdown при bootout.
+
+       R2-фикс 4 (финальное adversarial-ревью волны S3, 2026-07-31): поднято
+       15 -> 25. Посчитанный ПОСЛЕДОВАТЕЛЬНЫЙ бюджет останова (порядок
+       вызовов — _shutdown_backend/BackendService.close() в service.py)
+       складывается из ШЕСТИ слагаемых, а не трёх, как считал прежний
+       вариант этого комментария:
+         _IPC_DRAIN_BUDGET_SEC=8.0            (service.py, IPC-дренаж)
+         RestWatchdog.stop() join=2.0         (rest_watchdog.py, STOP_JOIN_TIMEOUT_SEC)
+         REST_DRAIN_BUDGET_SEC=2.0            (rest_inprocess.py)
+         SERVE_ENTER_TIMEOUT_SEC=2.0          (rest_inprocess.py, барьер входа в serve_forever)
+         SHUTDOWN_JOIN_TIMEOUT_SEC=5.0        (rest_inprocess.py, join треда сервера)
+         EventBridge.stop() join=5.0          (event_bridge.py, STOP_JOIN_TIMEOUT_SEC)
+       Сумма = 24.0с. Прежние 15 давали РОВНО 15.0 при трёх слагаемых — уже
+       нулевой запас, а с учётом трёх пропущенных слагаемых бюджет попросту
+       не помещался бы (24 > 15), обрезая teardown раньше собственного
+       дедлайна. 25 даёт ~1с запаса сверх посчитанного максимума. Формула —
+       единый источник правды в test_rest_inprocess_drain_budget_S3_task5.py
+       (импортирует именованные константы напрямую, не дублирует числа) —
+       менять ExitTimeOut без синхронной правки этого теста нельзя. -->
   <key>ExitTimeOut</key>
-  <integer>15</integer>
+  <integer>25</integer>
 
   <key>EnvironmentVariables</key>
   <dict>
