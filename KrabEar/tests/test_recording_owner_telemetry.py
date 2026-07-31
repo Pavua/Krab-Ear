@@ -468,7 +468,11 @@ class RecordingOwnerConfigurationContractTest(unittest.TestCase):
             "не тронута",
             entry["user_msg_ru"].lower(),
         )
-        self.assertEqual(len(ERROR_REGISTRY), 65)
+        # S3 Задача 7a (2026-07-31): rest.wedged добавлен в реестр
+        # (RestWatchdog, backend/rest_watchdog.py) — это уже 67 записей.
+        # Этот счётчик и без того отставал от rest.startup_failed (Задача 4,
+        # 66 записей) на момент правки — обновлён до актуального значения.
+        self.assertEqual(len(ERROR_REGISTRY), 67)
 
     def test_backend_service_wires_error_bus_into_recording_core(self) -> None:
         source = (

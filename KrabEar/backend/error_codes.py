@@ -872,4 +872,30 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "severity": "error",
         "dedupe_seconds": 300,
     },
+    # rest.wedged — RestWatchdog (backend/rest_watchdog.py, S3/Задача 7a).
+    # До волны S3 REST жил отдельным launchd-юнитом с KeepAlive=true —
+    # система сама поднимала его после любой смерти. После слияния процессов
+    # эта гарантия исчезла: serve_forever падает — InProcessRestServer пишет
+    # _error и молчит, ни пуша, ни рестарта. Сторож пробует /health раз в
+    # 30с, лечит через owner.restart() после N>=2 подряд провалов (не менее
+    # 60с нездоровья — серия, а не одно наблюдение), и только то, что хотя
+    # бы раз успешно слушало (ever_served) — REST, ни разу не поднявшийся
+    # из-за конфликта порта на старте, не лечится (штатный поток включения
+    # рестартит backend целиком). Этот код — эскалация ПОСЛЕ исчерпания
+    # анти-шторма (3 лечения за 600с не восстановили /health). Образец полей
+    # — audio.wakeword_wedged выше. НЕ эскалирует в
+    # BackendSupervisor.forceRestartBackend() — тот теряет активную
+    # диктовку/встречу; деградация REST предпочтительнее.
+    "rest.wedged": {
+        "user_msg_ru": (
+            "Встроенный REST-сервер завис — автоматическое лечение не "
+            "помогло. Диктовка и остальные функции backend работают как "
+            "обычно."
+        ),
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "error",
+        "dedupe_seconds": 300,
+    },
 }
