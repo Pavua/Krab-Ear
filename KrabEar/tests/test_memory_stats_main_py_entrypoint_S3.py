@@ -12,6 +12,16 @@ Sibling-асимметрия: РОВНО тот же кортеж паттерн
 и ``BackendSupervisor.swift::backendScriptPath``) оба инструмента, не
 опознавая backend ни по одной из трёх веток, дали бы тихо неверные числа —
 именно те числа, на которые опирается решение по канарейке.
+
+S3/Задача 10 (доработка по находке координатора, второй раз за волну ровно
+та же пара расходится): ``scripts/memory_baseline.py`` уже опознаёт легаси
+``KrabEar/backend/rest_server.py`` (см. ``test_memory_baseline.py``), но
+``backend/service.py::_handle_get_memory_stats`` — нет. Владелец видит
+именно GUI-диагностику (``get_memory_stats``) во время двухнедельной
+канарейки, а не CLI-скрипт — без этого фикса замер «до» в панели молчит про
+второй процесс. Классы ниже добавляют матч + новый ``kind="rest"``
+(тот же префикс, что ``rest_rss_mb`` в ``memory_baseline.py`` — две стороны
+обязаны называть эту категорию одинаково).
 """
 
 from __future__ import annotations
@@ -146,6 +156,58 @@ class MemoryBaselineGetProcessesMainPyEntrypointTest(unittest.TestCase):
             msg=f"процесс, запущенный через KrabEar/main.py, не найден: {matches!r}",
         )
         self.assertEqual(matches[0]["pid"], 4242)
+
+
+class GetMemoryStatsRestServerEntrypointTest(unittest.TestCase):
+    """``get_memory_stats`` обязан матчить легаси ``rest_server.py`` и
+    классифицировать его как ``kind="rest"`` (не ``"backend"`` — это другой
+    процесс с другим жизненным циклом, критично различимый в GUI-диагностике
+    во время двухнедельной S3-канарейки «до/после» слияния)."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        store = StateStore(Path(self.tmp.name) / "data")
+        self.service = BackendService(
+            store=store,
+            recorder=_FakeRecorder(),
+            transcriber=_FakeTranscriber(),
+            translator=_FakeTranslator(),
+        )
+        self.addCleanup(self.service.close)
+
+    def test_process_started_via_rest_server_py_classified_as_rest(self) -> None:
+        """RED до фикса: rest_server.py не входит в кортеж паттернов — процесс пропущен."""
+        fake_proc = MagicMock()
+        fake_proc.pid = 9911
+        fake_proc.cmdline.return_value = [
+            "/path/.venv_krab_ear/bin/python3",
+            "/path/KrabEar/backend/rest_server.py",
+        ]
+        fake_proc.name.return_value = "python3"
+        fake_proc.memory_info.return_value = MagicMock(rss=50 * 1024 * 1024, vms=100 * 1024 * 1024)
+
+        fake_psutil = MagicMock()
+        fake_psutil.process_iter.return_value = [fake_proc]
+        fake_psutil.NoSuchProcess = Exception
+        fake_psutil.AccessDenied = Exception
+        fake_psutil.ZombieProcess = Exception
+
+        with patch.dict("sys.modules", {"psutil": fake_psutil}):
+            resp = self.service.handle_request(
+                {"id": "t1", "method": "get_memory_stats", "params": {}}
+            )
+
+        self.assertTrue(resp["ok"], msg=f"IPC dispatch error: {resp}")
+        result = resp["result"]
+        self.assertTrue(result["ok"])
+        procs = result["processes"]
+        self.assertEqual(
+            len(procs), 1,
+            msg=f"процесс, запущенный через KrabEar/backend/rest_server.py, не опознан: {procs!r}",
+        )
+        self.assertEqual(procs[0]["kind"], "rest")
+        self.assertEqual(procs[0]["pid"], 9911)
 
 
 if __name__ == "__main__":

@@ -3387,10 +3387,10 @@ class BackendService:
         return {"ok": True, "sent_count": len(items)}
 
     def _handle_get_memory_stats(self, params: dict) -> dict:
-        """Возвращает RSS/VSZ для backend, agent и worker процессов через psutil.
+        """Возвращает RSS/VSZ для backend, agent, rest и worker процессов через psutil.
 
         Ищет процессы по подстроке cmdline: KrabEarAgent, KrabEar/backend/service.py,
-        KrabEar/main.py, gigaam_worker.
+        KrabEar/main.py, KrabEar/backend/rest_server.py, gigaam_worker.
         Возвращает {"ok": True, "processes": [...]} или {"ok": False, "reason": "..."}.
         """
         try:
@@ -3417,12 +3417,25 @@ class BackendService:
                 # S3/Р9: плист/BackendSupervisor теперь спавнят KrabEar/main.py,
                 # а не backend/service.py напрямую — старое имя оставлено для
                 # процессов, поднятых до переустановки юнита.
+                # S3/Задача 10 (доработка по находке координатора): легаси
+                # standalone rest_server.py добавлен сюда sibling-парой к
+                # той же строке в scripts/memory_baseline.py::get_processes
+                # — иначе GUI-диагностика владельца во время двухнедельной
+                # канарейки не видит второй процесс в конфигурации «до».
                 if any(s in cmd for s in (
-                    "KrabEarAgent", "KrabEar/backend/service.py", "KrabEar/main.py", "gigaam_worker",
+                    "KrabEarAgent", "KrabEar/backend/service.py", "KrabEar/main.py",
+                    "KrabEar/backend/rest_server.py", "gigaam_worker",
                 )):
                     mem = proc.memory_info()
+                    # rest_server.py — отдельный вид процесса (легаси standalone
+                    # REST), не backend: смешать их в одну категорию значило бы
+                    # смазать сравнение «до/после» именно там, где на него
+                    # смотрит владелец. Порядок проверок важен: "backend" —
+                    # дефолт-фоллбэк, поэтому ветка rest обязана идти РАНЬШЕ.
                     kind = "agent" if "KrabEarAgent" in cmd else (
-                        "worker" if "gigaam_worker" in cmd else "backend"
+                        "worker" if "gigaam_worker" in cmd else (
+                            "rest" if "KrabEar/backend/rest_server.py" in cmd else "backend"
+                        )
                     )
                     matches.append({
                         "pid": proc.pid,
