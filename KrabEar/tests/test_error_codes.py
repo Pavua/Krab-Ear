@@ -151,6 +151,11 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             # (импорт/adopt_external_singletons/create_app()/конструктор), а не
             # штатный конфликт порта — обслуживается надгробием, не лечится.
             "rest.startup_failed",
+            # S3 Задача 7a (2026-07-31) — RestWatchdog эскалирует после
+            # исчерпания анти-шторма лечений (3 restart() за 600с не
+            # восстановили /health); ever_served/tombstone гейтят лечение,
+            # см. backend/rest_watchdog.py.
+            "rest.wedged",
         }
         self.assertEqual(set(ERROR_REGISTRY.keys()), expected)
 
@@ -253,7 +258,9 @@ class ErrorRegistryShapeTests(unittest.TestCase):
         M2 (2026-07-29) in-process REST server added rest.port_conflict = 65;
         S3 Задача 4 (2026-07-31) added rest.startup_failed (build-failure
         tombstone, distinct from the fail-open port_conflict path) = 66;
+        S3 Задача 7a (2026-07-31) added rest.wedged (RestWatchdog escalation
+        after anti-storm exhaustion) = 67;
         test_expected_codes_present guards the exact set so this count test is a
         redundant but cheap invariant.
         """
-        self.assertEqual(len(ERROR_REGISTRY), 66)
+        self.assertEqual(len(ERROR_REGISTRY), 67)
