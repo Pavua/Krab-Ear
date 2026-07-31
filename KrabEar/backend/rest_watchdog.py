@@ -108,6 +108,16 @@ class RestWatchdog:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        # S3/Задача 7b, п.7: терминальная защёлка — НЕОБРАТИМАЯ, в отличие от
+        # start()/stop() (переиспользуемый lifecycle). single-flight внутри
+        # _heal_or_escalate сериализует лечения между собой, но не запрещает
+        # тику взять флайт ПОСЛЕ того, как backend начал закрываться: shutdown
+        # идёт дальше (TTS и адаптеры уже закрываются), а сторож поднимает
+        # REST заново — сервер принимает запросы над полузакрытым backend'ом.
+        # Нет метода "отменить" — намеренно: begin_shutdown() зовётся только
+        # из финального teardown процесса (_shutdown_backend), возврата назад
+        # для живого процесса не бывает.
+        self._shutdown_event = threading.Event()
 
         self._last_probe_ts: float | None = None
         self._consecutive_failures = 0
@@ -144,6 +154,24 @@ class RestWatchdog:
             if thread.is_alive():
                 logger.warning("RestWatchdog: тред не завершился за 2.0с")
 
+    def begin_shutdown(self) -> None:
+        """Терминальная защёлка (S3/Задача 7b, п.7): лечение запрещено
+        НАВСЕГДА, начиная с этого вызова.
+
+        В отличие от ``stop()`` (переиспользуемый lifecycle — можно снова
+        ``start()``), это состояние необратимо и переживает даже тред,
+        который уже был ВНУТРИ тика в момент вызова: ``check_once()`` и
+        ``_heal_or_escalate()`` перепроверяют флаг на своих входах, закрывая
+        окно между «backend решил закрываться» и «тик сторожа уже посчитал
+        серию провалов и вот-вот позовёт owner.restart()».
+
+        Вызывается ОДИН раз, самым первым шагом ``_shutdown_backend``,
+        раньше ``rest_inprocess.begin_shutdown()`` — иначе сторож увидит 503
+        на /health уже останавливающегося REST и попытается его «вылечить»
+        гонкой с тем же teardown'ом.
+        """
+        self._shutdown_event.set()
+
     def _run(self) -> None:
         while not self._stop_event.wait(self._tick_interval_sec):
             try:
@@ -157,6 +185,12 @@ class RestWatchdog:
 
     def check_once(self) -> str | None:
         """Возвращает выполненное действие: "healed" | "escalated" | None."""
+        if self._shutdown_event.is_set():
+            # Терминальная защёлка (п.7): backend уже начал закрываться —
+            # даже локальный owner.status() не зовём, чтобы не тратить тик
+            # на то, что заведомо не приведёт ни к чему кроме риска гонки.
+            return None
+
         try:
             status = self._owner.status()
         except Exception:
@@ -224,7 +258,14 @@ class RestWatchdog:
 
     # ------------------------------------------------------------------
 
-    def _heal_or_escalate(self, now: float) -> str:
+    def _heal_or_escalate(self, now: float) -> str | None:
+        if self._shutdown_event.is_set():
+            # Более узкое окно, чем guard в check_once(): защёлка могла
+            # взводиться ПОКА этот тик уже шёл (проба /health занимает до
+            # _PROBE_TIMEOUT_SEC=2с) — перепроверяем прямо перед решением
+            # лечить, а не только на входе в тик.
+            return None
+
         with self._lock:
             while (self._heal_history
                    and now - self._heal_history[0] > _HEAL_STORM_WINDOW_SEC):

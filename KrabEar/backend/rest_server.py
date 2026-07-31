@@ -816,6 +816,15 @@ def log_request(response):
     # Attach request ID to response header for traceability
     response.headers['X-Request-ID'] = request_id
 
+    # S3/Задача 7b, п.6: /health опрашивается раз в 30с сторожем REST
+    # (rest_watchdog.py) — плюс тем же путём Swift/Voice Gateway (см. их
+    # общий loopback-бакет в rest_watchdog.py:_default_probe). Здоровый ответ
+    # не несёт диагностической ценности, но даёт ~2880 строк access-лога в
+    # сутки НАВСЕГДА. X-Request-ID выше проставляется БЕЗУСЛОВНО — решение не
+    # логировать касается только строки в access-логе, не трассировки.
+    if request.path == "/health" and 200 <= response.status_code < 300:
+        return response
+
     if settings.LOG_FORMAT == "json":
         log_record = {
             "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",

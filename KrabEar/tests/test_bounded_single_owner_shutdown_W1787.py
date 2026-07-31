@@ -280,6 +280,84 @@ class RestInProcessBeginShutdownOrderTestCase(unittest.TestCase):
         handler.shutdown.assert_called_once_with(ipc_already_stopped=True)
 
 
+class RestWatchdogTerminalLatchOrderTestCase(unittest.TestCase):
+    """S3/Задача 7b, п.7: сторож REST останавливается САМЫМ ПЕРВЫМ шагом
+    ``_shutdown_backend`` — раньше даже ``rest_inprocess.begin_shutdown()``.
+
+    Без этого узкое окно между «backend решил закрываться» и полным close()
+    позволяло бы уже запущенному тику сторожа поднять REST через
+    owner.restart() ровно тогда, когда shutdown идёт дальше (TTS и адаптеры
+    уже закрываются) — сервер принимал бы запросы над полузакрытым backend'ом.
+    """
+
+    def test_rest_watchdog_stopped_before_rest_inprocess_begin_shutdown(self) -> None:
+        events: list[str] = []
+
+        server = MagicMock()
+        server.stop.side_effect = lambda **_kw: (events.append("ipc"), True)[1]
+
+        service = MagicMock()
+        service._rest_watchdog.begin_shutdown.side_effect = (
+            lambda: events.append("watchdog_begin_shutdown")
+        )
+        service._rest_watchdog.stop.side_effect = lambda: events.append("watchdog_stop")
+        service._rest_inprocess.begin_shutdown.side_effect = (
+            lambda: events.append("rest_begin_shutdown")
+        )
+        service.close.side_effect = lambda: (events.append("workers"), True)[1]
+
+        handler = MagicMock()
+        handler.shutdown.side_effect = lambda **_kw: (events.append("metadata"), True)[1]
+
+        result = _shutdown_backend(
+            service, server, handler, flush_fn=lambda: None, exit_fn=lambda code: None,
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(
+            events,
+            [
+                "watchdog_begin_shutdown", "watchdog_stop",
+                "rest_begin_shutdown", "ipc", "workers", "metadata",
+            ],
+        )
+        service._rest_watchdog.begin_shutdown.assert_called_once_with()
+        service._rest_watchdog.stop.assert_called_once_with()
+
+    def test_missing_rest_watchdog_does_not_break_shutdown(self) -> None:
+        """service без _rest_watchdog (рубильник REST выключен) — не аварийная ветка."""
+        service = MagicMock()
+        service._rest_watchdog = None
+        service.close.return_value = True
+        server = MagicMock()
+        server.stop.return_value = True
+        handler = MagicMock()
+        handler.shutdown.return_value = True
+
+        result = _shutdown_backend(
+            service, server, handler, flush_fn=lambda: None, exit_fn=lambda code: None,
+        )
+        self.assertTrue(result)
+
+    def test_watchdog_stop_exception_does_not_abort_teardown(self) -> None:
+        """Сбой begin_shutdown()/stop() сторожа — не повод пропускать
+        IPC/workers/metadata (тот же fail-safe класс, что у rest_inprocess)."""
+        service = MagicMock()
+        service._rest_watchdog.stop.side_effect = RuntimeError("boom")
+        service.close.return_value = True
+        server = MagicMock()
+        server.stop.return_value = True
+        handler = MagicMock()
+        handler.shutdown.return_value = True
+
+        result = _shutdown_backend(
+            service, server, handler, flush_fn=lambda: None, exit_fn=lambda code: None,
+        )
+        self.assertTrue(result)
+        service.close.assert_called_once_with()
+        handler.shutdown.assert_called_once_with(ipc_already_stopped=True)
+
+
 class HardExitObservabilityTestCase(unittest.TestCase):
     """Приёмочное ревью 2026-07-23 (F2): причина hard-exit обязана доехать.
 

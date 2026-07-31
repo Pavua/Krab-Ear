@@ -749,6 +749,10 @@ class TestRequestIdLogged(_RestBase):
 
         We call log_request directly with a mock response to verify the JSON
         log record shape without relying on handler propagation quirks.
+
+        S3/Задача 7b: /health на 2xx больше не пишет access-лог (см.
+        test_rest_logging.py::HealthLogNoiseSuppressionTest) — используем
+        /metrics, где access-лог по-прежнему пишется как раньше.
         """
         import logging
 
@@ -769,7 +773,7 @@ class TestRequestIdLogged(_RestBase):
         _rest_mod.logger.propagate = False
 
         try:
-            resp = self.client.get("/health")
+            resp = self.client.get("/metrics")
             rid = resp.headers.get("X-Request-ID", "")
             # Verify the X-Request-ID header is present (audit trail property)
             self.assertTrue(len(rid) == 36,

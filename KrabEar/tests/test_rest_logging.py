@@ -301,8 +301,14 @@ class TestRestLoggingJSON(unittest.TestCase):
         return None
 
     def test_json_log_has_required_fields(self):
-        """JSON log contains all required fields."""
-        self.client.get("/health")
+        """JSON log contains all required fields.
+
+        S3/Задача 7b: /health больше не пишет access-лог на 2xx (см.
+        HealthLogNoiseSuppressionTest ниже) — общий контракт формата логов
+        проверяем на нейтральном эндпойнте /info, который такому подавлению
+        не подлежит.
+        """
+        self.client.get("/info")
         record = self._last_json_log()
         self.assertIsNotNone(record, "No JSON log record found")
         for field in ("ts", "request_id", "method", "path", "status", "duration_ms", "ip", "content_length"):
@@ -310,11 +316,11 @@ class TestRestLoggingJSON(unittest.TestCase):
 
     def test_json_log_field_types_and_values(self):
         """JSON log field types match specification."""
-        self.client.get("/health")
+        self.client.get("/info")
         record = self._last_json_log()
         self.assertIsNotNone(record)
         self.assertEqual(record["method"], "GET")
-        self.assertEqual(record["path"], "/health")
+        self.assertEqual(record["path"], "/info")
         self.assertEqual(record["status"], 200)
         self.assertIsInstance(record["duration_ms"], int)
         self.assertGreaterEqual(record["duration_ms"], 0)
@@ -359,8 +365,13 @@ class TestRestLoggingText(unittest.TestCase):
         rest_mod.settings.LOG_FORMAT = self._orig_format
 
     def test_text_log_is_not_json(self):
-        """In text mode, log lines are plain text, not JSON objects."""
-        self.client.get("/health")
+        """In text mode, log lines are plain text, not JSON objects.
+
+        S3/Задача 7b: /health на 2xx больше не пишет access-лог вовсе — общий
+        контракт текстового формата проверяем на /info (см.
+        HealthLogNoiseSuppressionTest ниже про сам /health).
+        """
+        self.client.get("/info")
         self.handler.flush()
         lines = [ln for ln in self.log_stream.getvalue().splitlines() if ln.strip()]
         self.assertTrue(len(lines) > 0, "No log lines emitted")
@@ -373,13 +384,13 @@ class TestRestLoggingText(unittest.TestCase):
 
     def test_text_log_contains_path(self):
         """In text mode, log line includes the request path."""
-        self.client.get("/health")
+        self.client.get("/info")
         self.handler.flush()
-        self.assertIn("/health", self.log_stream.getvalue())
+        self.assertIn("/info", self.log_stream.getvalue())
 
     def test_text_log_contains_request_id(self):
         """In text mode, log line includes the request ID in brackets."""
-        self.client.get("/health")
+        self.client.get("/info")
         self.handler.flush()
         output = self.log_stream.getvalue()
         # Request ID is in UUID format — detect by hyphen pattern
@@ -414,7 +425,12 @@ class TestRestRequestID(unittest.TestCase):
         )
 
     def test_json_log_request_id_matches_response_header(self):
-        """request_id in JSON log matches X-Request-ID response header."""
+        """request_id in JSON log matches X-Request-ID response header.
+
+        S3/Задача 7b: /health на 2xx больше не пишет access-лог — используем
+        /info, где сопоставление лог-записи и заголовка по-прежнему
+        применимо.
+        """
         log_stream = StringIO()
         handler = logging.StreamHandler(log_stream)
         handler.setLevel(logging.INFO)
@@ -423,7 +439,7 @@ class TestRestRequestID(unittest.TestCase):
         rest_mod.logger.addHandler(handler)
         rest_mod.logger.setLevel(logging.DEBUG)
         try:
-            resp = self.client.get("/health")
+            resp = self.client.get("/info")
             handler.flush()
             lines = [ln for ln in log_stream.getvalue().splitlines() if ln.strip()]
             record = None
@@ -438,6 +454,57 @@ class TestRestRequestID(unittest.TestCase):
         finally:
             rest_mod.logger.removeHandler(handler)
             rest_mod.settings.LOG_FORMAT = orig_format
+
+
+class HealthLogNoiseSuppressionTest(unittest.TestCase):
+    """S3/Задача 7b, п.6: сторож REST опрашивает /health раз в 30с — здоровый
+    ответ не пишет access-лог (~2880 строк/сутки навсегда без единого
+    полезного бита). X-Request-ID трассировка не должна пострадать."""
+
+    def setUp(self):
+        _app.config["TESTING"] = True
+        self.client = _app.test_client()
+        self.log_stream = StringIO()
+        self.handler = logging.StreamHandler(self.log_stream)
+        self.handler.setLevel(logging.DEBUG)
+        rest_mod.logger.addHandler(self.handler)
+        rest_mod.logger.setLevel(logging.DEBUG)
+        self._orig_format = rest_mod.settings.LOG_FORMAT
+        rest_mod.settings.LOG_FORMAT = "json"
+
+    def tearDown(self):
+        rest_mod.logger.removeHandler(self.handler)
+        rest_mod.settings.LOG_FORMAT = self._orig_format
+
+    def _log_lines(self):
+        self.handler.flush()
+        return [ln for ln in self.log_stream.getvalue().splitlines() if ln.strip()]
+
+    def test_healthy_health_probe_is_not_logged(self):
+        resp = self.client.get("/health")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._log_lines(), [])
+
+    def test_health_response_still_carries_request_id_header(self):
+        # Подавление лога не должно утащить за собой трассировку.
+        resp = self.client.get("/health")
+        self.assertIn("X-Request-ID", resp.headers)
+
+    def test_non_health_endpoint_still_logs_as_before(self):
+        # Регрессия: подавление касается ТОЛЬКО /health — остальные пути
+        # логируются как раньше.
+        self.client.get("/info")
+        self.assertEqual(len(self._log_lines()), 1)
+
+    def test_non_2xx_health_response_is_still_logged(self):
+        # Белый ящик: log_request() напрямую с искусственным 500-ответом на
+        # /health — /health не имеет штатной ошибочной ветки, воспроизвести
+        # реальный отказ через сеть нестабильно.
+        with _app.test_request_context("/health"):
+            rest_mod.start_timer()
+            resp = _app.response_class(response="err", status=500)
+            rest_mod.log_request(resp)
+        self.assertEqual(len(self._log_lines()), 1)
 
 
 if __name__ == "__main__":
