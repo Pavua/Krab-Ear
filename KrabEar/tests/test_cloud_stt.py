@@ -10,7 +10,7 @@ from backend.rest_server import create_app, ws_stream
 
 
 class TestCloudSTTProviders(unittest.TestCase):
-    @patch("backend.cloud_stt.store.load_settings")
+    @patch("backend.cloud_stt._load_settings")
     def test_openai_stub_mode(self, mock_load_settings):
         mock_load_settings.return_value = {}
         provider = get_cloud_stt_provider("openai")
@@ -19,7 +19,7 @@ class TestCloudSTTProviders(unittest.TestCase):
         self.assertEqual(res.get("error"), "no_api_key")
         self.assertEqual(res.get("provider"), "openai")
 
-    @patch("backend.cloud_stt.store.load_settings")
+    @patch("backend.cloud_stt._load_settings")
     @patch("backend.cloud_stt.urllib.request.urlopen")
     def test_openai_transcribe(self, mock_urlopen, mock_load_settings):
         mock_load_settings.return_value = {"openai_api_key": "test_openai_key"}
@@ -39,7 +39,7 @@ class TestCloudSTTProviders(unittest.TestCase):
         self.assertEqual(req.headers.get("Authorization"), "Bearer test_openai_key")
         self.assertIn("multipart/form-data", req.headers.get("Content-type"))
 
-    @patch("backend.cloud_stt.store.load_settings")
+    @patch("backend.cloud_stt._load_settings")
     @patch("backend.cloud_stt.urllib.request.urlopen")
     def test_openai_language_normalised_to_iso(self, mock_urlopen, mock_load_settings):
         # OpenAI verbose_json returns "language" as a full English WORD ("russian"),
@@ -59,14 +59,14 @@ class TestCloudSTTProviders(unittest.TestCase):
         res2 = provider.transcribe(b"dummy_pcm", 16000, "auto")
         self.assertEqual(res2.get("lang"), "ga")
 
-    @patch("backend.cloud_stt.store.load_settings")
+    @patch("backend.cloud_stt._load_settings")
     def test_deepgram_stub_mode(self, mock_load_settings):
         mock_load_settings.return_value = {}
         provider = get_cloud_stt_provider("deepgram")
         res = provider.transcribe(b"dummy", 16000, "ru")
         self.assertEqual(res.get("error"), "no_api_key")
 
-    @patch("backend.cloud_stt.store.load_settings")
+    @patch("backend.cloud_stt._load_settings")
     @patch("backend.cloud_stt.urllib.request.urlopen")
     def test_deepgram_transcribe(self, mock_urlopen, mock_load_settings):
         mock_load_settings.return_value = {"deepgram_api_key": "test_dg_key"}
@@ -84,14 +84,14 @@ class TestCloudSTTProviders(unittest.TestCase):
         self.assertTrue(req.full_url.startswith("https://api.deepgram.com/v1/listen"))
         self.assertEqual(req.headers.get("Authorization"), "Token test_dg_key")
 
-    @patch("backend.cloud_stt.store.load_settings")
+    @patch("backend.cloud_stt._load_settings")
     def test_assemblyai_stub_mode(self, mock_load_settings):
         mock_load_settings.return_value = {}
         provider = get_cloud_stt_provider("assemblyai")
         res = provider.transcribe(b"dummy", 16000, "ru")
         self.assertEqual(res.get("error"), "no_api_key")
 
-    @patch("backend.cloud_stt.store.load_settings")
+    @patch("backend.cloud_stt._load_settings")
     @patch("backend.cloud_stt.urllib.request.urlopen")
     @patch("backend.cloud_stt.time.sleep", return_value=None)
     def test_assemblyai_transcribe(self, mock_sleep, mock_urlopen, mock_load_settings):
@@ -199,7 +199,7 @@ class TestCloudSTTHardening(unittest.TestCase):
         self.assertEqual(_sanitize_lang("en-US"), "en-us")
         self.assertEqual(_sanitize_lang("../etc/passwd"), "ru")  # junk → default
 
-    @patch("backend.cloud_stt.store.load_settings")
+    @patch("backend.cloud_stt._load_settings")
     @patch("backend.cloud_stt.urllib.request.urlopen")
     def test_openai_multipart_injection_blocked(self, mock_urlopen, mock_load_settings):
         mock_load_settings.return_value = {"openai_api_key": "k"}
@@ -230,7 +230,7 @@ class TestCloudSTTHardening(unittest.TestCase):
         self.assertEqual(_read_capped(_FakeResp(b"x" * 100), limit=10), b"x" * 10)
         self.assertEqual(_read_capped(_FakeResp(b"abc"), limit=4096), b"abc")
 
-    @patch("backend.cloud_stt.store.load_settings")
+    @patch("backend.cloud_stt._load_settings")
     @patch("backend.cloud_stt.urllib.request.urlopen")
     @patch("backend.cloud_stt.time.sleep", return_value=None)
     def test_assemblyai_rejects_malicious_transcript_id(self, mock_sleep, mock_urlopen, mock_load_settings):
@@ -280,7 +280,7 @@ class TestAssemblyAIPollRetry(unittest.TestCase):
         }).encode()
         return MagicMock(__enter__=MagicMock(return_value=poll))
 
-    @patch("backend.cloud_stt.store.load_settings")
+    @patch("backend.cloud_stt._load_settings")
     @patch("backend.cloud_stt.urllib.request.urlopen")
     @patch("backend.cloud_stt.time.sleep", return_value=None)
     def test_single_transient_poll_error_retries_and_succeeds(
@@ -308,7 +308,7 @@ class TestAssemblyAIPollRetry(unittest.TestCase):
         # Verify urlopen was called 4 times: upload + transcribe + (error) + poll-success
         self.assertEqual(mock_urlopen.call_count, 4)
 
-    @patch("backend.cloud_stt.store.load_settings")
+    @patch("backend.cloud_stt._load_settings")
     @patch("backend.cloud_stt.urllib.request.urlopen")
     @patch("backend.cloud_stt.time.sleep", return_value=None)
     def test_three_consecutive_poll_errors_returns_network_error(
@@ -334,7 +334,7 @@ class TestAssemblyAIPollRetry(unittest.TestCase):
         # 5 total calls: upload + transcribe + 3 poll errors
         self.assertEqual(mock_urlopen.call_count, 5)
 
-    @patch("backend.cloud_stt.store.load_settings")
+    @patch("backend.cloud_stt._load_settings")
     @patch("backend.cloud_stt.urllib.request.urlopen")
     @patch("backend.cloud_stt.time.sleep", return_value=None)
     def test_error_counter_resets_on_successful_poll(
