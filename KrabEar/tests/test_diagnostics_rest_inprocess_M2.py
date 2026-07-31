@@ -13,6 +13,11 @@ Coverage:
   2. коллаборатор None -> enabled/running=False, port/error=None (не ошибка)
   3. status() бросает исключение -> error="status_failed", полный набор ключей
   4. проводка конструктора: self._rest_inprocess сохраняется из параметра
+  5. S3/Задача 4: настоящее надгробие (_RestInProcessTombstone, не фейк) даёт
+     ТРЕТЬЕ отличимое состояние — "включён, но сборка упала" — а не тот же
+     словарь, что при коллабораторе None ("рубильник выключен"). Без этого
+     ключа канарейка не отличила бы дефолтное выключенное состояние от
+     мёртвого REST.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ if str(_KRAB_EAR_ROOT) not in sys.path:
     sys.path.insert(0, str(_KRAB_EAR_ROOT))
 
 from backend.health_check_service import HealthCheckService  # noqa: E402
+from backend.service import _RestInProcessTombstone  # noqa: E402
 
 _SCHEMA_KEYS = {"enabled", "running", "port", "error"}
 
@@ -115,6 +121,33 @@ class RestInProcessDiagnosticsTest(unittest.TestCase):
             {"enabled": True, "running": False, "port": 5005, "error": "bind_failed"},
             svc._get_rest_inprocess_summary(),
         )
+
+    # 5 ------------------------------------------------------------------
+    def test_tombstone_is_distinguishable_from_disabled_and_alive(self) -> None:
+        tombstone = _RestInProcessTombstone(
+            enabled=True, port=5005, error="RuntimeError: boom",
+        )
+        svc = _make_service(rest_inprocess=tombstone)
+        diag = svc.handle_get_diagnostics({})
+        section = diag["rest_in_process"]
+
+        # Схема дословно совпадает с остальными состояниями по общим ключам
+        # (HealthCheckService не трогали — это её "прозрачный passthrough" на
+        # status()), но словарь надгробия несёт ДОПОЛНИТЕЛЬНЫЙ ключ tombstone,
+        # которого нет ни у "выключено" (коллаборатор None), ни у "жив".
+        self.assertTrue(_SCHEMA_KEYS.issubset(section.keys()))
+        self.assertIn("tombstone", section)
+        self.assertIs(section["tombstone"], True)
+        self.assertTrue(section["enabled"])
+        self.assertFalse(section["running"])
+        self.assertEqual(5005, section["port"])
+        self.assertIn("boom", section["error"])
+
+        disabled_section = _make_service(rest_inprocess=None).handle_get_diagnostics({})[
+            "rest_in_process"
+        ]
+        self.assertNotIn("tombstone", disabled_section)
+        self.assertNotEqual(disabled_section, section)
 
 
 if __name__ == "__main__":

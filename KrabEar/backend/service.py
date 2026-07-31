@@ -293,6 +293,40 @@ _WEBHOOK_PII_KEYS: frozenset[str] = frozenset({
 })
 
 
+class _RestInProcessTombstone:
+    """Надгробие: сборка REST-приложения упала, лечить нечего.
+
+    S3/Задача 4. До этого класса внешний ``except`` вокруг подъёма
+    in-process REST при сбое сборки (импорт, ``adopt_external_singletons``,
+    ``create_app()``, конструктор ``InProcessRestServer``) ставил
+    ``self._rest_inprocess = None`` — а диагностика на ``None`` отдаёт
+    словарь, байт в байт совпадающий с «рубильник выключен». Для
+    двухнедельной канарейки это ложноотрицательный сигнал: владелец видел бы
+    штатную картину при мёртвом REST.
+
+    Существует, чтобы диагностика отличала «рубильник выключен» от «включён,
+    но не поднялся». Поле ``tombstone`` — не косметика: сторож REST
+    (отдельная задача этой же волны) обязан по нему отличать нелечимое,
+    иначе будет вечно лечить надгробие и выдаст эскалацию поверх уже
+    отправленной ошибки — двойная тревога об одном отказе.
+    """
+
+    def __init__(self, *, enabled: bool, port: int, error: str) -> None:
+        self._status = {
+            "enabled": enabled,
+            "running": False,
+            "port": port,
+            "error": error,
+            "tombstone": True,
+        }
+
+    def status(self) -> dict:
+        return dict(self._status)
+
+    def stop(self, timeout: float | None = None) -> None:
+        """Останавливать нечего — метод есть ради единообразия с close()."""
+
+
 class BackendService:
     """Бизнес-логика сервиса: запись, транскрибация, история и настройки."""
 
@@ -807,7 +841,8 @@ class BackendService:
         # затевалась серия M. Прежний комплект становится недостижим и уходит
         # в сборщик мусора.
         self._rest_inprocess = None
-        if bool(getattr(settings, "REST_IN_PROCESS_ENABLED", False)):
+        _rest_enabled = bool(getattr(settings, "REST_IN_PROCESS_ENABLED", False))
+        if _rest_enabled:
             try:
                 import backend.rest_server as _rest_module
                 from backend.rest_inprocess import InProcessRestServer
@@ -822,13 +857,29 @@ class BackendService:
                 self._rest_inprocess = InProcessRestServer(
                     app=_rest_module.create_app(),
                     settings=settings,
+                    enabled=_rest_enabled,
                     error_push=self._push_rest_error,
                 )
                 self._rest_inprocess.start()
-            except Exception:
-                # Fail-open: встроенный REST не должен мешать диктовке.
+            except Exception as exc:
+                # S3/Задача 4: это сбой СБОРКИ приложения (импорт,
+                # adopt_external_singletons, create_app(), сам конструктор) —
+                # не то же самое, что штатный fail-open внутри start() (тот
+                # документирован как "НИКОГДА не бросает" и сам обрабатывает
+                # EADDRINUSE). Раньше здесь стояло self._rest_inprocess = None,
+                # а диагностика на None отдаёт словарь, байт в байт совпадающий
+                # с «рубильник выключен» — канарейка две недели видела бы
+                # штатную картину при мёртвом REST. Надгробие делает «включён,
+                # но не поднялся» отличимым состоянием, а не только строкой в
+                # логе; error_push доводит это же состояние до ErrorBus.
                 logger.exception("in-process REST: не удалось поднять")
-                self._rest_inprocess = None
+                _detail = f"{type(exc).__name__}: {exc}"
+                self._rest_inprocess = _RestInProcessTombstone(
+                    enabled=_rest_enabled,
+                    port=int(getattr(settings, "REST_SERVER_PORT", 5005)),
+                    error=_detail,
+                )
+                self._push_rest_error("rest.startup_failed", _detail)
 
         self._sharing = SharingManager(
             store=self.store,

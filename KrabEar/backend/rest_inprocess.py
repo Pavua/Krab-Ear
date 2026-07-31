@@ -32,10 +32,19 @@ class InProcessRestServer:
         self,
         app: Any,
         settings: Any,
+        enabled: bool,
         error_push: Callable[[str, str], None] | None = None,
     ) -> None:
+        # S3/Задача 4: рубильник приходит ПАРАМЕТРОМ, а не читается отсюда
+        # сами. Раньше конструктор сам заглядывал в
+        # settings.REST_IN_PROCESS_ENABLED — рубильник получался двухголовым:
+        # владелец включает настройкой (rest_in_process_enabled в
+        # settings.json), service.py конструирует сервер, а он тут же молча
+        # возвращает False, потому что читает статический pydantic-дефолт, а
+        # не runtime-значение. Владелец процесса (service.py) — единственный,
+        # кто знает актуальное значение; сюда оно приходит уже вычисленным.
         self._app = app
-        self._enabled = bool(getattr(settings, "REST_IN_PROCESS_ENABLED", False))
+        self._enabled = bool(enabled)
         self._port = int(getattr(settings, "REST_SERVER_PORT", 5005))
         self._error_push = error_push
 
