@@ -35,8 +35,8 @@ class _TinyApp:
 
 class InProcessRestServerTest(unittest.TestCase):
     def test_disabled_switch_does_not_start(self):
-        cfg = SimpleNamespace(REST_IN_PROCESS_ENABLED=False, REST_SERVER_PORT=_free_port())
-        srv = InProcessRestServer(app=_TinyApp(), settings=cfg)
+        cfg = SimpleNamespace(REST_SERVER_PORT=_free_port())
+        srv = InProcessRestServer(app=_TinyApp(), settings=cfg, enabled=False)
         self.assertFalse(srv.start())
         self.assertFalse(srv.status()["running"])
         self.assertIs(srv.status()["enabled"], False)
@@ -44,8 +44,8 @@ class InProcessRestServerTest(unittest.TestCase):
 
     def test_starts_and_serves_then_stops(self):
         port = _free_port()
-        cfg = SimpleNamespace(REST_IN_PROCESS_ENABLED=True, REST_SERVER_PORT=port)
-        srv = InProcessRestServer(app=_TinyApp(), settings=cfg)
+        cfg = SimpleNamespace(REST_SERVER_PORT=port)
+        srv = InProcessRestServer(app=_TinyApp(), settings=cfg, enabled=True)
         self.assertTrue(srv.start())
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5) as resp:
@@ -63,9 +63,9 @@ class InProcessRestServerTest(unittest.TestCase):
         blocker.listen(1)
         pushed = []
         try:
-            cfg = SimpleNamespace(REST_IN_PROCESS_ENABLED=True, REST_SERVER_PORT=port)
+            cfg = SimpleNamespace(REST_SERVER_PORT=port)
             srv = InProcessRestServer(
-                app=_TinyApp(), settings=cfg,
+                app=_TinyApp(), settings=cfg, enabled=True,
                 error_push=lambda code, detail: pushed.append((code, detail)),
             )
             self.assertFalse(srv.start())          # fail-open, НЕ исключение
@@ -77,8 +77,8 @@ class InProcessRestServerTest(unittest.TestCase):
             blocker.close()
 
     def test_stop_is_idempotent(self):
-        cfg = SimpleNamespace(REST_IN_PROCESS_ENABLED=True, REST_SERVER_PORT=_free_port())
-        srv = InProcessRestServer(app=_TinyApp(), settings=cfg)
+        cfg = SimpleNamespace(REST_SERVER_PORT=_free_port())
+        srv = InProcessRestServer(app=_TinyApp(), settings=cfg, enabled=True)
         srv.start()
         srv.stop()
         srv.stop()   # второй раз не должен бросать
@@ -101,10 +101,8 @@ class InProcessRestServerTest(unittest.TestCase):
         import time as _time
 
         for _ in range(15):
-            cfg = SimpleNamespace(
-                REST_IN_PROCESS_ENABLED=True, REST_SERVER_PORT=_free_port()
-            )
-            srv = InProcessRestServer(app=_TinyApp(), settings=cfg)
+            cfg = SimpleNamespace(REST_SERVER_PORT=_free_port())
+            srv = InProcessRestServer(app=_TinyApp(), settings=cfg, enabled=True)
             self.assertTrue(srv.start())
             t0 = _time.monotonic()
             srv.stop()
@@ -114,6 +112,22 @@ class InProcessRestServerTest(unittest.TestCase):
                 f"stop() занял {elapsed:.1f}с — похоже на зависание shutdown()",
             )
             self.assertFalse(srv.status()["running"])
+
+
+    def test_enabled_param_is_source_of_truth_not_settings(self):
+        """S3/Задача 4: конструктор больше не читает settings.REST_IN_PROCESS_ENABLED.
+
+        cfg тут — обычный SimpleNamespace без этого атрибута вовсе (settings
+        отвечает только за порт). Если бы конструктор всё ещё заглядывал в
+        settings, здесь было бы AttributeError либо (при getattr с дефолтом)
+        тихий возврат к False независимо от переданного enabled=True —
+        именно двухголовый рубильник, который чинит задача.
+        """
+        cfg = SimpleNamespace(REST_SERVER_PORT=_free_port())
+        self.assertFalse(hasattr(cfg, "REST_IN_PROCESS_ENABLED"))
+        srv = InProcessRestServer(app=_TinyApp(), settings=cfg, enabled=True)
+        self.assertIs(srv.status()["enabled"], True)
+        srv.stop()
 
 
 if __name__ == "__main__":
