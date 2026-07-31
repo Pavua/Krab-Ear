@@ -20,10 +20,16 @@
   <key>Label</key>
   <string>ai.krab.ear.backend</string>
 
+  <!-- S3/Р9: запускаем main.py, а НЕ backend/service.py напрямую. Прямой запуск
+       делает service.py модулем __main__, а rest_server.py:37 импортирует
+       backend.service — и при включённом in-process REST файл исполняется
+       ВТОРЫМ экземпляром модуля: в процессе живут два разных класса
+       BackendService. Сегодня безвредно, но любой module-level синглтон,
+       добавленный в service.py, тихо раздвоится. -->
   <key>ProgramArguments</key>
   <array>
     <string>__PROJECT_ROOT__/.venv_krab_ear/bin/python3</string>
-    <string>__PROJECT_ROOT__/KrabEar/backend/service.py</string>
+    <string>__PROJECT_ROOT__/KrabEar/main.py</string>
     <string>--data-dir</string>
     <string>__HOME__/Library/Application Support/KrabEar</string>
     <string>--socket-path</string>
@@ -59,6 +65,18 @@
 
     <key>PYTHONPATH</key>
     <string>__PROJECT_ROOT__/KrabEar</string>
+
+    <!-- S3/Р3: settings.DATA_DIR обязан совпадать с аргументом
+         <hyphen><hyphen>data-dir выше. Backend передаёт каталог АРГУМЕНТОМ (он
+         доходит только до StateStore), а всё, что читает settings.DATA_DIR —
+         rest_server, cloud_stt, cloud_rewriter, startup_diagnostics — смотрит
+         сюда. Пока REST жил отдельным юнитом, переменная была в его плисте
+         (с 16-07); при слиянии процессов она обязана быть здесь, иначе
+         половина процесса читает ~/.krab_ear_data, а история пишется в
+         канонический каталог. Значение сверяется побайтово тестом
+         test_backend_plist_data_dir_parity_S3.py. -->
+    <key>KRAB_EAR_DATA_DIR</key>
+    <string>__HOME__/Library/Application Support/KrabEar</string>
 
     <!-- Diarization (pyannote/speaker-diarization-3.1) требует HF token. -->
     <key>HF_TOKEN</key>

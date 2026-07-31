@@ -289,6 +289,20 @@ final class BackendSupervisor: @unchecked Sendable {
     /// launchd-label backend-сервиса (scripts/install_backend_launchagent.command).
     static let backendLaunchdLabel = "ai.krab.ear.backend"
 
+    /// Путь к точке входа backend-процесса для standalone active-режима.
+    ///
+    /// S3/Р9: запускаем `main.py`, а НЕ `backend/service.py` напрямую — прямой
+    /// запуск делает `service.py` модулем `__main__`, а `rest_server.py`
+    /// импортирует `backend.service`, поэтому при включённом in-process REST
+    /// файл исполнялся бы ВТОРЫМ экземпляром модуля (два разных класса
+    /// `BackendService` в одном процессе). Тот же фикс уже применён к
+    /// `ai.krab.ear.backend.plist.template` (passive/launchd-режим) —
+    /// standalone-путь имел ровно тот же класс бага. Выделено в чистую
+    /// функцию для юнит-тестов (тот же приём, что `kickstartArguments`).
+    static func backendScriptPath(projectRoot: String) -> String {
+        (projectRoot as NSString).appendingPathComponent("KrabEar/main.py")
+    }
+
     /// Аргументы launchctl для принудительного рестарта launchd-owned backend.
     /// Выделено в чистую функцию для юнит-тестов.
     static func kickstartArguments(uid: uid_t) -> [String] {
@@ -369,7 +383,7 @@ final class BackendSupervisor: @unchecked Sendable {
             withIntermediateDirectories: true
         )
 
-        let backendScript = (projectRoot as NSString).appendingPathComponent("KrabEar/backend/service.py")
+        let backendScript = Self.backendScriptPath(projectRoot: projectRoot)
         let venvPython = (projectRoot as NSString).appendingPathComponent(".venv_krab_ear/bin/python")
 
         let pythonPath: String

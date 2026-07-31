@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Krab Ear memory baseline tracker.
 
-Polls backend get_diagnostics + psutil RSS/VSZ for KrabEarAgent + service.py +
-gigaam_worker.py processes every N seconds, writes to CSV.
+Polls backend get_diagnostics + psutil RSS/VSZ for KrabEarAgent + backend
+(service.py or main.py — see S3/Р9) + gigaam_worker.py processes every N
+seconds, writes to CSV.
 
 Usage:
     python3 scripts/memory_baseline.py --interval 60 --duration 3600 --output mem-baseline.csv
@@ -33,7 +34,13 @@ def get_processes() -> list[dict]:
     for proc in psutil.process_iter(["pid", "name", "cmdline", "memory_info"]):
         try:
             cmdline = " ".join(proc.info["cmdline"] or [])
-            if any(s in cmdline for s in ("KrabEarAgent", "KrabEar/backend/service.py", "gigaam_worker")):
+            # S3/Р9: плист/BackendSupervisor теперь спавнят KrabEar/main.py, а
+            # не backend/service.py напрямую — старое имя оставлено для
+            # процессов, поднятых до переустановки юнита (sibling-сайт
+            # той же проверки в backend/service.py::_handle_get_memory_stats).
+            if any(s in cmdline for s in (
+                "KrabEarAgent", "KrabEar/backend/service.py", "KrabEar/main.py", "gigaam_worker",
+            )):
                 matches.append({
                     "pid": proc.info["pid"],
                     "name": proc.info["name"],

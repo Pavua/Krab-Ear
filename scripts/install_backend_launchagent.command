@@ -22,14 +22,93 @@ LABEL="ai.krab.ear.backend"
 SOCKET="$HOME/Library/Application Support/KrabEar/krabear.sock"
 UID_NUM="$(id -u)"
 
+# S3/Р3 (busy-гейт, находка I-D): --wait N ждёт освобождения вместо отказа,
+# --force — осознанный обход (источник правды по флагам/exit-кодам —
+# scripts/safe_backend_restart.command).
+WAIT_SEC=0
+FORCE=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --wait) WAIT_SEC="${2:-60}"; shift 2 ;;
+    --force) FORCE=1; shift ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
 log() { printf '[install] %s\n' "$*"; }
 fail() { printf '[install] ❌ %s\n' "$*" >&2; exit 1; }
+
+# Дословная копия ipc_call()/busy_reason() из safe_backend_restart.command —
+# единый источник правды по семантике занятости backend (S3/Р3). Дублирование
+# осознанное: оба скрипта самодостаточны (без общего source'а), а
+# test_install_backend_busy_gate_contract_S3.py извлекает их из ТЕКСТА этого
+# файла и гоняет изолированно, без запуска установщика целиком.
+ipc_call() {
+  # $1 = method; выводит сырой JSON-ответ или пустую строку при мёртвом сокете.
+  python3 - "$1" <<'PY' 2>/dev/null
+import json, os, socket, sys
+method = sys.argv[1]
+p = os.path.expanduser("~/Library/Application Support/KrabEar/krabear.sock")
+try:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(4)
+    s.connect(p)
+    s.sendall((json.dumps({"id": "1", "method": method, "params": {}}) + "\n").encode())
+    print(s.recv(8192).decode())
+except Exception:
+    pass
+PY
+}
+
+busy_reason() {
+  # Печатает причину занятости ("recording" / "meeting") или ничего.
+  local rec meet
+  rec=$(ipc_call get_recording_state)
+  if [ -n "$rec" ] && printf '%s' "$rec" | grep -qE '"is_recording"[[:space:]]*:[[:space:]]*true'; then
+    echo "recording"
+    return 0
+  fi
+  meet=$(ipc_call get_meeting_live_state)
+  if [ -n "$meet" ] && printf '%s' "$meet" | grep -qE \
+    '"active"[[:space:]]*:[[:space:]]*true|"(state|status)"[[:space:]]*:[[:space:]]*"(recording|active|running)"'; then
+    echo "meeting"
+    return 0
+  fi
+  return 1
+}
 
 [ -f "$TEMPLATE" ] || fail "template not found: $TEMPLATE"
 [ -d "$ROOT_DIR/.venv_krab_ear" ] || fail "venv missing: $ROOT_DIR/.venv_krab_ear (run Start Krab Ear.command once)"
 mkdir -p "$ROOT_DIR/logs"
 mkdir -p "$HOME/Library/LaunchAgents"
 mkdir -p "$HOME/Library/Application Support/KrabEar"
+
+# Busy-гейт перед переустановкой юнита (инцидент 2026-07-22: bootout под
+# диктовкой безвозвратно теряет аудио — оно живёт только в памяти процесса).
+# Отсутствие сокета = первичная установка (backend ещё не запускался) — это
+# НЕ занятость, установка идёт как раньше.
+if [ "$FORCE" -eq 1 ]; then
+  log "--force: busy-гейт пропущен"
+elif [ -S "$SOCKET" ]; then
+  DEADLINE=$(( $(date +%s) + WAIT_SEC ))
+  # 🔴 Вызывать busy_reason ТОЛЬКО внутри if/while: скрипт под `set -e`
+  # (строка 16 выше), а busy_reason по контракту возвращает 1, когда backend
+  # свободен. Голый `REASON=$(busy_reason)` отдельным statement'ом под set -e
+  # молча завершил бы установку на КАЖДОМ свободном прогоне — гейт
+  # инвертировался бы в вечный отказ (см. test_busy_reason_never_called_as_bare_assignment_under_set_e).
+  while REASON=$(busy_reason); do
+    if [ "$WAIT_SEC" -eq 0 ]; then
+      fail "активная сессия ($REASON) — переустановка потеряла бы аудио. Дождись окончания, запусти с --wait N или осознанно --force."
+    fi
+    if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+      fail "сессия ($REASON) не закончилась за ${WAIT_SEC}с"
+    fi
+    log "идёт $REASON — жду… ($(( DEADLINE - $(date +%s) ))с осталось)"
+    sleep 3
+  done
+else
+  log "сокет отсутствует/мёртв — первичная установка, busy-гейт пропущен"
+fi
 
 # HF_TOKEN resolution order:
 #   1. env var HF_TOKEN (если пользователь выставил вручную)

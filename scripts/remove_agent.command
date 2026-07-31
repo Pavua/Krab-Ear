@@ -29,6 +29,11 @@ fi
 
 # 4. Подстраховка: если backend всё ещё жив (например запущен вне launchd),
 #    добиваем pkill. После bootout launchd уже не станет респавнить.
-pkill -f "$ROOT_DIR/KrabEar/backend/service.py" >/dev/null 2>&1 || true
+#    S3/Р9: плист теперь запускает main.py, а не backend/service.py напрямую
+#    (test_backend_plist_data_dir_parity_S3.py) — но до переустановки юнита
+#    или в standalone active-режиме процесс мог стартовать под ЛЮБЫМ именем.
+#    ERE-альтернация (pkill/pgrep на macOS = ERE, не BRE — см.
+#    test_ensure_agent_running_contract.py) матчит оба.
+pkill -f "$ROOT_DIR/KrabEar/(backend/service|main)\.py" >/dev/null 2>&1 || true
 
 echo "✅ Krab Ear Agent остановлен и удалён из автозапуска"

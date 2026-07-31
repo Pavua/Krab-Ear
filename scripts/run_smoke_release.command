@@ -16,7 +16,12 @@ START_LOG="$REPORT_DIR/smoke_release_${TS}.start.log"
 
 AGENT_BIN_PATTERN="$ROOT_DIR/native/runtime/KrabEarAgent"
 AGENT_PATTERN="$ROOT_DIR/native/runtime/KrabEarAgent --project-root $ROOT_DIR"
-BACKEND_PATTERN="$ROOT_DIR/KrabEar/backend/service.py"
+# S3/Р9: standalone active-режим (BackendSupervisor.swift) теперь спавнит
+# main.py, а не backend/service.py напрямую — но старый launchd-плист/старая
+# установка могли ещё гонять backend/service.py. ERE-альтернация (pgrep на
+# macOS = ERE, не BRE — см. test_ensure_agent_running_contract.py) матчит оба,
+# иначе смок сочтёт живой backend отсутствующим.
+BACKEND_PATTERN="$ROOT_DIR/KrabEar/(backend/service|main)\.py"
 
 mkdir -p "$REPORT_DIR"
 

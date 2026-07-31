@@ -174,4 +174,25 @@ final class BackendSupervisorTests: XCTestCase {
             ["kickstart", "-k", "gui/501/ai.krab.ear.backend"]
         )
     }
+
+    // MARK: S3/Р9 — standalone active-режим обязан спавнить main.py
+
+    /// До фикса startBackendProcess() спавнил KrabEar/backend/service.py
+    /// напрямую — модуль исполнялся как __main__, а при включённом
+    /// in-process REST (rest_server.py импортирует backend.service) в
+    /// процессе жили бы два разных класса BackendService (см. плист-фикс
+    /// в ai.krab.ear.backend.plist.template и test_backend_plist_data_dir_parity_S3.py).
+    /// Standalone-путь имел ровно тот же класс бага.
+    func test_backendScriptPath_pointsToMainPy_notServicePyDirectly() {
+        let path = BackendSupervisor.backendScriptPath(projectRoot: "/tmp/my_project")
+
+        XCTAssertTrue(
+            path.hasSuffix("KrabEar/main.py"),
+            "active-режим обязан спавнить main.py, а не backend/service.py напрямую; got: \(path)"
+        )
+        XCTAssertFalse(
+            path.hasSuffix("KrabEar/backend/service.py"),
+            "спавн backend/service.py напрямую раздваивает модуль backend.service при включённом REST (Р9); got: \(path)"
+        )
+    }
 }
