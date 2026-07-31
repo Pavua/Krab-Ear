@@ -61,6 +61,9 @@ _ENUM_FIELDS: dict[str, tuple[str, ...]] = {
     # Порядок начинается с продуктового v3 default: валидатор использует
     # первый элемент как безопасное значение при повреждённой настройке.
     "stt_gigaam_mode": SUPPORTED_GIGAAM_ASR_MODES,
+    # Транспорт GigaAM: первый элемент — безопасный прод-дефолт (subprocess);
+    # "mlx" маршрутизируется на GigaAMMLXAdapter в stt_router.
+    "stt_gigaam_transport": ("subprocess", "auto", "in_process", "mlx"),
 }
 
 # Диапазоны числовых полей: ключ → (min, max, default, type)
