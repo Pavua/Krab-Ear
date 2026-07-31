@@ -2889,6 +2889,42 @@ class HistoryService:
             )
             secondary_errors.append("encryption_key")
 
+        # --- 39. S3/M-B: удалить сырые REST-загрузки (temp_uploads/) ---
+        # TEMP_DIR = settings.DATA_DIR / "temp_uploads" (rest_server.py) хранит сырое
+        # пользовательское аудио из POST /v1/stt/transcribe до его транскрибации и
+        # штатного удаления — при сбое между записью и удалением файл переживает запрос.
+        # Единственное вхождение temp_uploads во всём backend; статик-guard
+        # audit_purge_coverage не видел его: путь строится от settings.DATA_DIR,
+        # а не от одного из паттернов, которые он умеет распознать. Путь здесь
+        # берём от _data_dir (= self.store.data_dir), НЕ от settings.DATA_DIR — до
+        # выравнивания каталогов данных (S3 задача 1) эти два пути в проде разные,
+        # и правильный — тот, что от store. Каталог сам ОБЯЗАН остаться (его ждёт
+        # TEMP_DIR.mkdir на импорте rest_server) — стираем только содержимое;
+        # ошибка на отдельном файле не прерывает очистку остальных.
+        temp_uploads_deleted = 0
+        try:
+            if _data_dir is not None:
+                _temp_uploads_dir = _data_dir / "temp_uploads"
+                if _temp_uploads_dir.is_dir():
+                    _temp_upload_files = [p for p in _temp_uploads_dir.iterdir() if p.is_file()]
+                    for _upload_path in _temp_upload_files:
+                        try:
+                            _upload_path.unlink(missing_ok=True)
+                            temp_uploads_deleted += 1
+                        except OSError:
+                            logger.warning(
+                                "purge_all_data: не удалось удалить %s", _upload_path, exc_info=True
+                            )
+                    if len(_temp_upload_files) > temp_uploads_deleted:
+                        secondary_errors.append("temp_uploads")
+                    if temp_uploads_deleted:
+                        logger.info(
+                            "purge_all_data: удалено %d файлов из temp_uploads/", temp_uploads_deleted
+                        )
+        except Exception:
+            logger.warning("purge_all_data: удаление содержимого temp_uploads/ не удалось", exc_info=True)
+            secondary_errors.append("temp_uploads")
+
         # --- C. W1734: Audit log entry ---
         try:
             from backend.privacy_audit import get_privacy_audit_logger
