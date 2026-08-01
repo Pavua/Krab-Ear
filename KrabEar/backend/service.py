@@ -372,6 +372,28 @@ class _RestInProcessTombstone:
         """Останавливать нечего — метод есть ради единообразия с close()."""
 
 
+def llm_warmup_needed(settings_get: Any) -> bool:
+    """Нужен ли прогрев LLM-модели на старте backend.
+
+    Мало собственного флага: прогрев поднимает многогигабайтную модель в
+    LM Studio и держит её десятки секунд. Если ни один ПОТРЕБИТЕЛЬ не включён
+    (rewrite, punctuation-pass) — греть нечего, память и GPU тратятся впустую
+    (инцидент 01.08.2026: gemma-4-e4b 6.86 ГБ при выключенной постобработке).
+
+    Зеркалит гейты engine._llm_rewrite_allowed / _punctuation_pass_allowed,
+    включая privacy_mode: в приватном режиме потребители заблокированы, значит
+    и прогрев не нужен.
+    """
+    if not bool(settings_get("rewriter_warmup_on_startup", True)):
+        return False
+    if bool(settings_get("privacy_mode_enabled", False)):
+        return False
+    return (
+        bool(settings_get("llm_rewrite_enabled", False))
+        or bool(settings_get("stt_punctuation_llm_pass_enabled", False))
+    )
+
+
 class BackendService:
     """Бизнес-логика сервиса: запись, транскрибация, история и настройки."""
 
@@ -402,7 +424,7 @@ class BackendService:
         # user-overridden values (e.g. rewriter_warmup_timeout_sec=60 in production) actually
         # apply. Previously hardcoded 15s default caused chronic warmup-timeout warnings on
         # cold LM Studio loads (gemma-4-26b takes 20-60s cold).
-        _warmup_enabled = bool(self._get_runtime_setting("rewriter_warmup_on_startup", True))
+        _warmup_enabled = llm_warmup_needed(self._get_runtime_setting)
         _warmup_timeout = float(self._get_runtime_setting("rewriter_warmup_timeout_sec", 60))
         if self._llm_rewriter is not None and _warmup_enabled:
             threading.Thread(
