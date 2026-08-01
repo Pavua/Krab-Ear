@@ -681,6 +681,42 @@ class OpenWakeWordAdapter:
             threshold,
         )
 
+        # 2026-08-01 (F6, mid-flight re-check): гейт handle_wake_word_start
+        # проверяет запись в НАЧАЛЕ старта, а тап открывается здесь — уже после
+        # синхронной загрузки модели. Окно между ними не микросекунда: кэша нет,
+        # каждый start() строит OWWModel заново. Лог инцидента даёт его размер —
+        # 02:35:21 (гейт пройден) → 02:35:37 (тап открыт) = 16 секунд. Запись,
+        # начатая ВНУТРИ окна, встречала уже разрешённый старт и получала второй
+        # тап на то же устройство → worker AudioRecorder висел насмерть.
+        # Штатная пауза поллера тут не спасает: wake_word_stop ждёт на _lock,
+        # который держит загрузка модели.
+        # FAIL-CLOSED, симметрично гейту: не знаем состояние — не открываем.
+        # Поллер ретрайнет своим циклом (~10 с), когда запись кончится.
+        if self._stop_event.is_set():
+            logger.debug(
+                "OpenWakeWordAdapter._listen_loop: остановка запрошена до "
+                "открытия тапа — выходим"
+            )
+            self._cleanup_session_after_loop_exit(generation)
+            return
+        if self._is_recording is not None:
+            try:
+                _recording = bool(self._is_recording())
+            except Exception:
+                logger.warning(
+                    "OpenWakeWordAdapter._listen_loop: is_recording() упал — "
+                    "тап не открываем (fail-closed)",
+                    exc_info=True,
+                )
+                _recording = True
+            if _recording:
+                logger.debug(
+                    "OpenWakeWordAdapter._listen_loop: запись началась во время "
+                    "загрузки модели — тап не открываем"
+                )
+                self._cleanup_session_after_loop_exit(generation)
+                return
+
         try:
             with sd.InputStream(
                 samplerate=sample_rate,
