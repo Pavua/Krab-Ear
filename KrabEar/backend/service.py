@@ -1324,9 +1324,13 @@ class BackendService:
         # openWakeWord adapter (default disabled via WAKE_WORD_ENGINE setting).
         # settings_get ОБЯЗАТЕЛЕН: без него privacy-гейт в handle_wake_word_start
         # и loop-guard читают дефолт (False) и являются декоративными.
+        # is_recording (F6, 2026-08-01) ОБЯЗАТЕЛЕН по той же причине: без него
+        # гейт активной записи декоративен, и self-heal агента открывает второй
+        # входной тап посреди диктовки (recorder_timeout, запись теряется).
         self._oww_adapter = OpenWakeWordAdapter(
             data_dir=self.store.data_dir,
             settings_get=self._get_runtime_setting,
+            is_recording=lambda: bool(getattr(self.recorder, "is_recording", False)),
         )
         # Wave 172: RecordingCoreService owns all recording lifecycle, preview worker,
         # transcription pipeline, and async job tracking.
