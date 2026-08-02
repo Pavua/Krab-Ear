@@ -124,12 +124,36 @@ class TestServiceWiringSourceContract(unittest.TestCase):
     пробросил settings_get. До фикса конструкция была декоративной."""
 
     def test_service_passes_runtime_settings_get(self) -> None:
+        """Проводка settings_get — по AST-вызову, не по точному тексту.
+
+        2026-08-02: старый точный regex покраснел от честного расширения
+        конструкции (F6 добавил kwarg is_recording — свой AST-контракт в
+        test_wake_word_recording_gate_2026_08_01.py). Намерение теста —
+        «settings_get=self._get_runtime_setting присутствует в вызове» —
+        сохранено, но проверяется теперь конструкцией, а не подстрокой,
+        чтобы следующий честный kwarg его снова не красил.
+        """
+        import ast
+
         src = (BACKEND_DIR / "backend" / "service.py").read_text(encoding="utf-8")
-        pattern = (
-            r"OpenWakeWordAdapter\(\s*data_dir=self\.store\.data_dir,"
-            r"\s*settings_get=self\._get_runtime_setting,?\s*\)"
-        )
-        self.assertRegex(src, pattern)
+        found = []
+        for node in ast.walk(ast.parse(src)):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+            if name != "OpenWakeWordAdapter":
+                continue
+            kwargs = {
+                kw.arg: ast.unparse(kw.value) for kw in node.keywords if kw.arg
+            }
+            found.append(kwargs)
+        self.assertTrue(found, "конструкция OpenWakeWordAdapter не найдена в service.py")
+        for kwargs in found:
+            self.assertEqual(
+                kwargs.get("settings_get"), "self._get_runtime_setting",
+                "адаптер сконструирован без settings_get=self._get_runtime_setting "
+                "— privacy-гейт в handle_wake_word_start снова декоративен",
+            )
 
 
 if __name__ == "__main__":
