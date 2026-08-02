@@ -182,5 +182,63 @@ class TestGateIsActuallyWired(unittest.TestCase):
             )
 
 
+class TestSwiftPollerReasonContract(unittest.TestCase):
+    """Строка reason гейта F6 совпадает буква-в-букву в Python и Swift.
+
+    Находка 2 Fable-ревью: WakeWordPoller (Swift) жёг бюджет self-heal
+    (maxFailedStartAttempts=3) на КАЖДОМ отказе. Отказ «recording in progress»
+    — транзиентный (запись кончится сама), и три таких отказа за встречу
+    (встреча НЕ ставит паузу поллеру — амендмент 2026-07-16) оставляли wake
+    word тихо мёртвым до ручного перетыкания тумблера. Фикс: Swift сравнивает
+    reason с константой `recordingInProgressReason` и НЕ инкрементирует бюджет.
+
+    Сравнение строк — межпроцессный контракт: разъедутся буквы (перевод,
+    опечатка, точка) — фикс молча превратится обратно в дыру. Python-сторону
+    берём ЖИВЫМ вызовом гейта (не grep'ом), Swift-сторону — объявлением
+    константы (для Swift AST-парсера здесь нет; объявление `static let` —
+    конструкция, а не комментарий, честный комментарий тест не покраснит).
+    """
+
+    _SWIFT = (
+        PROJECT_ROOT.parent
+        / "native" / "KrabEarAgent" / "Sources" / "KrabEarAgent"
+        / "WakeWordPoller.swift"
+    )
+
+    def _live_python_reason(self) -> str:
+        adapter = _make_adapter(tempfile.mkdtemp(), is_recording=lambda: True)
+        result = adapter.handle_wake_word_start({"model": "hey_jarvis"})
+        self.assertFalse(result["ok"], result)
+        return result["reason"]
+
+    def _swift_constant(self) -> str:
+        import re
+
+        src = self._SWIFT.read_text()
+        m = re.search(
+            r'static\s+let\s+recordingInProgressReason\s*=\s*"([^"]+)"', src
+        )
+        self.assertIsNotNone(
+            m, "константа recordingInProgressReason не найдена в WakeWordPoller.swift"
+        )
+        return m.group(1)
+
+    def test_reason_strings_match_verbatim(self) -> None:
+        self.assertEqual(self._live_python_reason(), self._swift_constant())
+
+    def test_swift_failure_branch_checks_reason_before_budget(self) -> None:
+        """Ветка сравнения стоит в sendStart ДО инкремента бюджета."""
+        src = self._SWIFT.read_text()
+        cmp_pos = src.find("why == Self.recordingInProgressReason")
+        self.assertGreater(
+            cmp_pos, 0,
+            "sendStart не сравнивает reason с recordingInProgressReason — "
+            "транзиентный отказ снова жжёт бюджет self-heal",
+        )
+        inc_pos = src.find("failedStartAttempts += 1")
+        self.assertGreater(inc_pos, cmp_pos,
+                           "инкремент бюджета стоит ДО проверки транзиентной причины")
+
+
 if __name__ == "__main__":
     unittest.main()
