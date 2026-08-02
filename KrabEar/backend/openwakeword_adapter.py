@@ -62,8 +62,12 @@ class OpenWakeWordAdapter:
         self,
         data_dir: str | Path,
         settings_get: Optional[Callable[[str, Any], Any]] = None,
+        is_recording: Optional[Callable[[], bool]] = None,
     ) -> None:
         self._data_dir = Path(data_dir)
+        # 2026-08-01 (F6): активная диктовка запрещает открывать второй тап.
+        # Тот же колбэк, что у AudioReinitCoordinator и WakeWordWatchdog.
+        self._is_recording = is_recording
         self._custom_dir = self._data_dir / _CUSTOM_MODELS_DIR
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
@@ -431,6 +435,39 @@ class OpenWakeWordAdapter:
             )
             return {"ok": False, "reason": "wake word disabled in settings"}
 
+        # F6: активная диктовка запрещает открывать ВТОРОЙ входной тап
+        # (живой инцидент 2026-08-01). Два конкурирующих CoreAudio-тапа на одном
+        # устройстве вешают worker'а AudioRecorder насмерть -> recorder_timeout,
+        # запись теряется целиком. Гейт стоит здесь, а не в агенте: backend
+        # владеет микрофоном и один знает про активную запись — тот же принцип,
+        # что у F5 выше. Источник вызова — self-heal WakeWordPoller, который
+        # шлёт start каждые ~10 секунд и про запись не знает.
+        #
+        # FAIL-CLOSED: сбой колбэка трактуем как «идёт запись». Цена ошибки
+        # несимметрична — ложный отказ лишь не разбудит по слову (обратимо),
+        # ложное разрешение стоит пользователю всей диктовки. Это отличие от
+        # WakeWordWatchdog, где тот же колбэк fail-open: там ошибка в другую
+        # сторону отключила бы сторожа, здесь — сломала бы основную функцию.
+        # Сбой логируем WARNING: тихий fail-closed убил бы wake word навсегда.
+        if self._is_recording is not None:
+            try:
+                _recording = bool(self._is_recording())
+            except Exception:
+                logger.warning(
+                    "OpenWakeWordAdapter.handle_wake_word_start: "
+                    "is_recording() упал — считаем, что запись идёт (fail-closed)",
+                    exc_info=True,
+                )
+                _recording = True
+            if _recording:
+                # DEBUG, а не INFO: поллер стучится каждые ~10 секунд, и на
+                # каждой диктовке INFO залил бы err.log (как это делает F5).
+                logger.debug(
+                    "OpenWakeWordAdapter.handle_wake_word_start: "
+                    "отклонён — идёт запись"
+                )
+                return {"ok": False, "reason": "recording in progress"}
+
         model_name = str(params.get("model", "hey_jarvis"))
 
         # F1: threshold validation and clamping
@@ -643,6 +680,42 @@ class OpenWakeWordAdapter:
             sample_rate,
             threshold,
         )
+
+        # 2026-08-01 (F6, mid-flight re-check): гейт handle_wake_word_start
+        # проверяет запись в НАЧАЛЕ старта, а тап открывается здесь — уже после
+        # синхронной загрузки модели. Окно между ними не микросекунда: кэша нет,
+        # каждый start() строит OWWModel заново. Лог инцидента даёт его размер —
+        # 02:35:21 (гейт пройден) → 02:35:37 (тап открыт) = 16 секунд. Запись,
+        # начатая ВНУТРИ окна, встречала уже разрешённый старт и получала второй
+        # тап на то же устройство → worker AudioRecorder висел насмерть.
+        # Штатная пауза поллера тут не спасает: wake_word_stop ждёт на _lock,
+        # который держит загрузка модели.
+        # FAIL-CLOSED, симметрично гейту: не знаем состояние — не открываем.
+        # Поллер ретрайнет своим циклом (~10 с), когда запись кончится.
+        if self._stop_event.is_set():
+            logger.debug(
+                "OpenWakeWordAdapter._listen_loop: остановка запрошена до "
+                "открытия тапа — выходим"
+            )
+            self._cleanup_session_after_loop_exit(generation)
+            return
+        if self._is_recording is not None:
+            try:
+                _recording = bool(self._is_recording())
+            except Exception:
+                logger.warning(
+                    "OpenWakeWordAdapter._listen_loop: is_recording() упал — "
+                    "тап не открываем (fail-closed)",
+                    exc_info=True,
+                )
+                _recording = True
+            if _recording:
+                logger.debug(
+                    "OpenWakeWordAdapter._listen_loop: запись началась во время "
+                    "загрузки модели — тап не открываем"
+                )
+                self._cleanup_session_after_loop_exit(generation)
+                return
 
         try:
             with sd.InputStream(

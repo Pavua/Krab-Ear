@@ -264,29 +264,49 @@ class MlxLockAcquisitionTests(unittest.TestCase):
         self.transcriber = Transcriber(engine=self.fake_engine)
 
     def test_mlx_lock_acquired_during_transcribe_preview(self):
-        """mlx_lock() context manager is entered when transcribe_preview is called."""
+        """mlx_lock() is acquired and released around transcribe_preview.
+
+        2026-08-01: мок переписан с contextmanager-генератора на обёртку вокруг
+        НАСТОЯЩЕГО RLock. Прежний мок отражал только `with`-протокол, тогда как
+        реальный `mlx_lock()` возвращает `threading.RLock` — у которого есть и
+        `__enter__`, и `acquire(timeout=...)`. Пока продакшн пользовался лишь
+        `with`, расхождение было незаметно; как только transcribe_preview стал
+        брать лок с таймаутом (best-effort превью не ждёт занятый GPU дольше
+        секунды), мок упал с `'_GeneratorContextManager' object has no attribute
+        'acquire'`. Смысл проверки не изменился — по-прежнему пинуется факт
+        захвата и освобождения, — но мок теперь не врёт про интерфейс.
+        """
         lock_acquired_events: list[str] = []
 
-        from core.mlx_lock import mlx_lock as real_lock
-        real_lock_obj = real_lock()
+        import threading as _threading
 
-        original_enter = real_lock_obj.__class__.__enter__
-        original_exit = real_lock_obj.__class__.__exit__
+        class _RecordingLock:
+            """Настоящий RLock + журнал захватов (оба протокола, как у оригинала)."""
+
+            def __init__(self) -> None:
+                self._lock = _threading.RLock()
+
+            def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+                got = self._lock.acquire(blocking, timeout)
+                if got:
+                    lock_acquired_events.append("acquired")
+                return got
+
+            def release(self) -> None:
+                lock_acquired_events.append("released")
+                self._lock.release()
+
+            def __enter__(self):
+                self.acquire()
+                return self
+
+            def __exit__(self, *exc):
+                self.release()
+                return False
 
         # Patch at the module level where transcriber imports mlx_lock
         with patch("backend.transcriber.mlx_lock") as mock_mlx_lock:
-            # Make mlx_lock() return a real context manager so code works
-            import contextlib
-
-            @contextlib.contextmanager
-            def recording_lock():
-                lock_acquired_events.append("acquired")
-                try:
-                    yield
-                finally:
-                    lock_acquired_events.append("released")
-
-            mock_mlx_lock.return_value = recording_lock()
+            mock_mlx_lock.return_value = _RecordingLock()
 
             self.transcriber.transcribe_preview(b"audio")
 

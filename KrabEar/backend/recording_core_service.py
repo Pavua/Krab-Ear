@@ -27,7 +27,10 @@ if TYPE_CHECKING:
 import numpy as np
 
 from core.config import settings as _cfg_settings
-from backend.ipc_constants import IPC_PREVIEW_THREAD_TIMEOUT_SEC
+from backend.ipc_constants import (
+    IPC_PREVIEW_THREAD_TIMEOUT_SEC,
+    RT_PARTIAL_START_STOP_TIMEOUT_SEC,
+)
 from backend.job_tracker import JobTracker
 from backend.observability import add_breadcrumb
 from backend.realtime_partial import RealtimePartialTranscriber
@@ -1303,7 +1306,15 @@ class RecordingCoreService:
                         # not touch _rt_lock, so stopping under the lock cannot deadlock.
                         if self._rt_partial is not None:
                             try:
-                                old_rt_stopped = self._rt_partial.stop() is not False
+                                # 2026-08-01: КОРОТКИЙ бюджет, не дефолтные 30 с.
+                                # Здесь путь СТАРТА записи: не дождались — идём
+                                # дальше без превью (ветка else ниже), поэтому
+                                # длинное ожидание только блокирует диктовку и
+                                # даёт переполнение аудиобуфера. Дефолт stop()
+                                # остаётся 30 с (W1323) для честной остановки.
+                                old_rt_stopped = self._rt_partial.stop(
+                                    timeout_sec=RT_PARTIAL_START_STOP_TIMEOUT_SEC
+                                ) is not False
                             except Exception:
                                 logger.warning("rt_partial: stop старого инстанса упал", exc_info=True)
                                 old_rt_stopped = False

@@ -110,6 +110,10 @@ final class WakeWordPoller {
     /// до следующего activate()/resume() (иначе лог-спам каждые 10s, если
     /// backend отвергает старт, например по privacy mode).
     static let maxFailedStartAttempts = 3
+    /// Reason гейта F6 backend'а (openwakeword_adapter.handle_wake_word_start):
+    /// «идёт запись». Строка сверяется буква-в-букву source-контрактным тестом
+    /// test_wake_word_recording_gate_2026_08_01.py — менять ОБЕ стороны разом.
+    static let recordingInProgressReason = "recording in progress"
 
     /// Все wake word IPC идут через ОДНУ серийную очередь: конкурентная
     /// global не гарантирует порядок ЗАВЕРШЕНИЯ независимых async-блоков,
@@ -134,6 +138,9 @@ final class WakeWordPoller {
     private var lastStartAttempt: TimeInterval = 0
     private var consecutiveEngineUnavailable = 0
     private var failedStartAttempts = 0
+    /// Лог «отложен: идёт запись» — один раз на эпизод, не каждые 10 секунд
+    /// (часовая встреча дала бы сотни одинаковых строк).
+    private var recordingRejectionLogged = false
     /// Последний известный engine_available (для Settings-статуса).
     private(set) var lastEngineAvailable: Bool?
 
@@ -310,6 +317,22 @@ final class WakeWordPoller {
                 guard let self else { return }
                 if ok {
                     self.failedStartAttempts = 0
+                    self.recordingRejectionLogged = false
+                } else if why == Self.recordingInProgressReason {
+                    // F6 (2026-08-01, находка Fable-ревью): «идёт запись» —
+                    // ТРАНЗИЕНТНЫЙ отказ: запись кончится сама, и следующий
+                    // self-heal пройдёт. Бюджет maxFailedStartAttempts
+                    // спроектирован под ПЕРСИСТЕНТНЫЕ причины (privacy,
+                    // выключенная настройка); жечь его транзиентной причиной —
+                    // значит после встречи (она не ставит паузу поллеру,
+                    // амендмент 2026-07-16) wake word тихо мёртв до ручного
+                    // перетыкания тумблера: resume() не придёт (паузы не
+                    // было), running=true не наступит, счётчик не сбросится.
+                    if !self.recordingRejectionLogged {
+                        self.recordingRejectionLogged = true
+                        AgentLogger.shared.info(
+                            "[WakeWord] старт отложен: идёт запись (бюджет self-heal не расходуется)")
+                    }
                 } else {
                     self.failedStartAttempts += 1
                     AgentLogger.shared.warn(

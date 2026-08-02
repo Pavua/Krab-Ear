@@ -17,6 +17,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("KrabEar.Backend.Transcriber")
 
+# 2026-08-01: бюджет ожидания mlx_lock для BEST-EFFORT превью.
+# Финальная транскрибация держит лок десятки секунд (живой замер: 26.98 s с
+# ретраями), и неограниченный захват превращал вспомогательное превью в
+# блокировщик основной записи. Значение меньше интервала превью (3 s): не
+# достался лок — пропускаем итерацию, следующая попытка придёт своим чередом.
+PREVIEW_MLX_LOCK_TIMEOUT_SEC = 1.0
+
 
 class Transcriber:
     """Обёртка над AudioEngine для удобного вызова из API и IPC."""
@@ -103,11 +110,36 @@ class Transcriber:
     def transcribe_preview(self, audio_data: Any, quality_profile: str = "balanced") -> dict[str, Any]:
         """Быстрая транскрибация для realtime-превью (всегда в balanced режиме).
 
-        Оборачивается в mlx_lock() для атомарности (W1364 fix).
+        Оборачивается в mlx_lock() для атомарности (W1364 fix): переключение
+        профиля и инференс обязаны быть неделимы относительно других MLX-вызовов.
+
+        Захват лока — ОГРАНИЧЕН по времени (2026-08-01). Превью — best-effort:
+        ждать GPU десятки секунд ради строки, которая к моменту готовности уже
+        устареет, бессмысленно, а вреда от ожидания много. Живой инцидент:
+        финальная транскрибация держала mlx_lock 26.98 s (ретраи по низкой
+        уверенности через несколько моделей), воркер превью всё это время висел
+        на захвате — и не мог отреагировать на остановку, потому что его
+        проверки `_stop_event` стоят ДО и ПОСЛЕ вызова, а не внутри захвата.
+        Итог: воркер не завершался ни за 1.5 s, ни за 30 s, аудиобуфер
+        переполнялся, диктовка терялась. Вспомогательная функция блокировала
+        основную.
+
+        Не достался лок — возвращаем пустой текст с явным маркером: все три
+        потребителя (realtime_partial, call_assist, meeting_session) уже умеют
+        пустой результат и просто пропустят итерацию.
         """
-        with mlx_lock():
+        lock = mlx_lock()
+        if not lock.acquire(timeout=PREVIEW_MLX_LOCK_TIMEOUT_SEC):
+            logger.debug(
+                "transcribe_preview: GPU занят дольше %.1f с — пропускаем итерацию",
+                PREVIEW_MLX_LOCK_TIMEOUT_SEC,
+            )
+            return {"text": "", "skipped": "mlx_busy"}
+        try:
             self.engine.set_quality_profile("balanced")
             return self.engine.transcribe(audio_data, cleanup_profile="soft", is_preview=True)
+        finally:
+            lock.release()
 
     # ------------------------------------------------------------------
     # Phase B.1 — error_bus integration (late-injection, same as LLMRewriter)
