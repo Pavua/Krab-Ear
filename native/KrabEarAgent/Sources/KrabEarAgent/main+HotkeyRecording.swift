@@ -708,6 +708,18 @@ extension AgentAppDelegate {
             timeoutSec: 120
         )
         let client = ipcClient
+        // 2026-08-03: на время финализации приостанавливаем детектор зависания.
+        // Backend занят STT и не отвечает на ping; порог сторожа — 6 с
+        // (3 × 2), а финализация длинной диктовки занимает десятки секунд
+        // (живой замер: 32-секундная запись → STT 46.17 с). Без паузы сторож
+        // убивал backend ПОСРЕДИ транскрибации, и запись не доезжала ни до
+        // вставки, ни до истории — короткие диктовки проходили, длинные не
+        // проходили никогда. defer гарантирует снятие на ВСЕХ путях выхода,
+        // включая бросок и ранний return: залипшая пауза оставила бы реальное
+        // зависание backend'а без сторожа.
+        let monitor = healthMonitor
+        await monitor?.suspend(.finalizingRecording)
+        defer { Task { await monitor?.resume(.finalizingRecording) } }
         let outcome = await RecordingStopCoordinator.execute(
             request: request,
             operation: { repeatedRequest in

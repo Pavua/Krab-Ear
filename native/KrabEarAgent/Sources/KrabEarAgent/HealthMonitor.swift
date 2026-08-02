@@ -17,6 +17,20 @@ import Foundation
 
 // MARK: - HealthMonitor actor (Phase A)
 
+/// Причина легитимного молчания backend'а — НЕ зависание.
+///
+/// Живой инцидент 2026-08-03: длинная диктовка (32 с → 2 чанка) финализируется
+/// 46 секунд, backend всё это время занят STT и не отвечает на ping. Сторож с
+/// порогом 6 с (pingInterval 3 × hangThreshold 2) объявлял его зависшим и
+/// УБИВАЛ ровно посреди транскрибации — запись не доезжала ни до вставки, ни
+/// до истории. Короткие диктовки проходили (укладывались в 6 с), длинные не
+/// проходили НИКОГДА. Тот же класс, что уже чинился дважды в этой волне:
+/// механизм не знал про легитимный источник молчания (у WakeWordPoller — запись,
+/// у WakeWordWatchdog — встреча, здесь — финализация).
+enum HealthSuspendReason: String, CaseIterable, Sendable {
+    case finalizingRecording   // ждём stop_recording: backend занят STT
+}
+
 /// Actor, который раз в `pingInterval` секунд дёргает ping и трекает
 /// последовательные fails. После `hangThreshold` подряд fails переключает
 /// state в `.hung` и зовёт `onHangDetected` ровно один раз.
@@ -30,6 +44,9 @@ actor HealthMonitor {
     private var pingProvider: (@Sendable () async -> Bool)?
     private var onHangDetected: (@Sendable () async -> Void)?
     private var hangFiredForCurrentEpisode: Bool = false
+    /// Причины, по которым backend ЛЕГИТИМНО может не отвечать на ping.
+    /// Set (не счётчик) — идемпотентно по причине, как pausedReasons поллера.
+    private var suspendedReasons: Set<HealthSuspendReason> = []
 
     // Phase B.1: хранит Task подписки на probe events чтобы можно было отменить.
     private var probeSubscriptionTask: Task<Void, Never>?
@@ -94,8 +111,32 @@ actor HealthMonitor {
         }
     }
 
+    /// Приостановить детекцию зависания: backend легитимно занят.
+    /// Идемпотентно по причине. Счётчик неудач сбрасывается, чтобы отказы,
+    /// накопленные ДО паузы, не сложились с послепаузными в ложное зависание.
+    func suspend(_ reason: HealthSuspendReason) {
+        suspendedReasons.insert(reason)
+        consecutiveFailures = 0
+    }
+
+    /// Снять причину. Счётчик сбрасывается: первый ping после долгой операции
+    /// может не успеть (backend дописывает историю) — это не повод убивать.
+    func resume(_ reason: HealthSuspendReason) {
+        suspendedReasons.remove(reason)
+        consecutiveFailures = 0
+    }
+
+    func isSuspended() -> Bool { !suspendedReasons.isEmpty }
+
     private func tick() async {
         guard let provider = pingProvider else { return }
+        // Пока причина активна — не считаем неответы отказами. Ping НЕ шлём
+        // вовсе: под занятым backend'ом он всё равно упрётся в таймаут и
+        // только добавит нагрузки на сокет, у которого лимит коннектов.
+        if !suspendedReasons.isEmpty {
+            consecutiveFailures = 0
+            return
+        }
         let ok = await provider()
         if ok {
             consecutiveFailures = 0

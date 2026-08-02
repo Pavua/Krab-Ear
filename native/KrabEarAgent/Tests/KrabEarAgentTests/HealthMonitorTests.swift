@@ -354,3 +354,85 @@ extension HealthMonitor {
         }
     }
 }
+
+// MARK: - Пауза детекции зависания (живой инцидент 2026-08-03)
+
+/// Длинная диктовка финализируется десятками секунд (замер: 32-секундная
+/// запись → STT 46.17 с), backend всё это время занят и не отвечает на ping.
+/// Сторож с порогом 6 с убивал его ПОСРЕДИ транскрибации: короткие диктовки
+/// проходили, длинные не проходили НИКОГДА — запись не доезжала ни до вставки,
+/// ни до истории.
+final class HealthMonitorSuspendTests: XCTestCase {
+
+    /// Во время паузы неответы НЕ копятся в зависание.
+    func testSuspendedMonitorDoesNotHangWhilePingFails() async {
+        let monitor = HealthMonitor(pingInterval: 0.05, hangThreshold: 2)
+        monitor.setPingProvider { return false }
+
+        await monitor.start()
+        await monitor.suspend(.finalizingRecording)
+        try? await Task.sleep(nanoseconds: 400_000_000) // ~8 тиков подряд
+        let state = await monitor.currentState()
+        await monitor.stop()
+
+        XCTAssertNotEqual(state, .hung, "сторож убил бы backend посреди финализации")
+    }
+
+    /// Во время паузы ping НЕ шлётся вовсе (лишний коннект под занятым backend).
+    func testSuspendedMonitorSkipsPingEntirely() async {
+        let monitor = HealthMonitor(pingInterval: 0.05, hangThreshold: 2)
+        let calls = TestCallCounter()
+        monitor.setPingProvider { calls.bump(); return true }
+
+        await monitor.start()
+        await monitor.suspend(.finalizingRecording)
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        await monitor.stop()
+
+        XCTAssertEqual(calls.value, 0, "ping не должен уходить, пока backend легитимно занят")
+    }
+
+    /// После resume детекция ВОЗВРАЩАЕТСЯ — иначе залипшая пауза оставила бы
+    /// реальное зависание backend'а без сторожа навсегда.
+    func testResumeRestoresHangDetection() async {
+        let monitor = HealthMonitor(pingInterval: 0.05, hangThreshold: 2)
+        monitor.setPingProvider { return false }
+
+        await monitor.start()
+        await monitor.suspend(.finalizingRecording)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        await monitor.resume(.finalizingRecording)
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        let state = await monitor.currentState()
+        await monitor.stop()
+
+        XCTAssertEqual(state, .hung, "после снятия паузы сторож обязан снова ловить зависание")
+    }
+
+    /// Идемпотентность по причине (Set, не счётчик) — двойной suspend снимается
+    /// одним resume, как pausedReasons у WakeWordPoller.
+    func testSuspendIsIdempotentPerReason() async {
+        let monitor = HealthMonitor(pingInterval: 0.05, hangThreshold: 2)
+        monitor.setPingProvider { return false }
+
+        await monitor.start()
+        await monitor.suspend(.finalizingRecording)
+        await monitor.suspend(.finalizingRecording)
+        await monitor.resume(.finalizingRecording)
+        let suspended = await monitor.isSuspended()
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        let state = await monitor.currentState()
+        await monitor.stop()
+
+        XCTAssertFalse(suspended)
+        XCTAssertEqual(state, .hung)
+    }
+}
+
+/// Потокобезопасный счётчик вызовов (провайдер зовётся из actor-контекста).
+final class TestCallCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    func bump() { lock.lock(); count += 1; lock.unlock() }
+    var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+}
