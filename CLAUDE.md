@@ -722,6 +722,24 @@ make sign                                        # rebuilds + signs with stable 
 ```
 После этого TCC reset после rebuild не нужен — identity hash постоянный.
 
+**🔴 Амендмент 2026-08-01 (живой инцидент): стабильная identity НЕ гарантия.**
+После пересборки бинаря запись Accessibility может «протухнуть» даже под
+`Krab Ear Dev Local`: `AXIsProcessTrusted()` возвращает `true`, агент логирует
+«Глобальный hotkey активирован», но события клавиш НЕ приходят (все
+NSEvent-мониторы молчат — и Right Option, и Cmd+Shift+N). Переключение
+тумблера в System Settings НЕ лечит (меняет флаг у той же протухшей записи).
+Лечение: `tccutil reset Accessibility com.antigravity.krab-ear` + перезапуск
+агента (`open` с АБСОЛЮТНЫМ путём к бандлу) + согласие в системном диалоге.
+Два смежных правила: (1) NSEvent-мониторы проверяют разрешение В МОМЕНТ
+СОЗДАНИЯ — выданное позже разрешение требует перезапуска агента; (2) признак
+«агент не даёт строк в agent.log при нажатии» при `AX trusted: true` на
+старте = именно этот класс. Диагностика: `~/Library/Application Support/KrabEar/agent.log`
+(строки `Accessibility AX trusted at startup:` и `Глобальный hotkey активирован`).
+Попутный гоч: codesign бинаря ВНУТРИ .app подписывает весь бандл и падает на
+«detritus», если на КОРНЕ `Krab Ear.app` висит `com.apple.FinderInfo` —
+снимать `xattr -d com.apple.FinderInfo "Krab Ear.app"` (обычный `xattr -cr`
+до корня не добирается, а com.apple.provenance безвреден и неудаляем).
+
 **Fallback / manual reset** (если stable identity не настроена):
 
 macOS TCC (Accessibility, Microphone) кэширует grants по (bundle-id OR absolute path). После rebuild binary с изменённой hash:
