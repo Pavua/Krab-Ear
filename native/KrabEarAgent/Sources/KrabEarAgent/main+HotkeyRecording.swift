@@ -719,7 +719,14 @@ extension AgentAppDelegate {
         // зависание backend'а без сторожа.
         let monitor = healthMonitor
         await monitor?.suspend(.finalizingRecording)
-        defer { Task { await monitor?.resume(.finalizingRecording) } }
+        // Тот же щит для wake-word эскалации: пауза `.recording` снимается уже
+        // в момент запроса остановки, и в окно финализации поллер успевал
+        // увидеть wedged и попросить принудительный рестарт backend'а.
+        wakeWordPoller?.pause(.finalizing)
+        defer {
+            Task { await monitor?.resume(.finalizingRecording) }
+            Task { @MainActor in self.wakeWordPoller?.resume(.finalizing) }
+        }
         let outcome = await RecordingStopCoordinator.execute(
             request: request,
             operation: { repeatedRequest in

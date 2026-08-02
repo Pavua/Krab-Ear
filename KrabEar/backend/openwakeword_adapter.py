@@ -296,17 +296,49 @@ class OpenWakeWordAdapter:
                     self._thread = None
             logger.info("OpenWakeWordAdapter: остановлен")
         else:
+            # 2026-08-03: под АКТИВНОЙ записью невыход за таймаут — ожидаемая
+            # медлительность, а НЕ клин. Живой инцидент: агент паузит wake word
+            # на время диктовки (wake_word_stop → сюда), поток не успевает выйти
+            # за 3 с, адаптер помечал себя wedged, агент видел флаг и УБИВАЛ
+            # backend ПОСРЕДИ записи. То есть сама пауза под запись и порождала
+            # ложный сигнал зависания — запись не доезжала ни до вставки, ни до
+            # истории. Ссылку на поток и возврат False сохраняем: start() всё
+            # равно не создаст второй listener, а лечение отложится до момента,
+            # когда запись кончится и сигнал можно будет оценить честно.
+            _recording = False
+            if self._is_recording is not None:
+                try:
+                    _recording = bool(self._is_recording())
+                except Exception:
+                    # Fail-open в сторону ЛЕЧЕНИЯ: не знаем состояние — считаем,
+                    # что записи нет, и оставляем watchdog'у право вылечить
+                    # настоящий клин (обратное решение молча отключило бы
+                    # самолечение навсегда).
+                    logger.warning(
+                        "OpenWakeWordAdapter.stop: is_recording() упал — "
+                        "трактуем как «записи нет»",
+                        exc_info=True,
+                    )
+                    _recording = False
             with self._lock:
                 # Ссылка намеренно остаётся в self._thread: start() увидит
                 # живой клин и не создаст второй CFFI/PortAudio listener.
                 # Обычный Python-finalize для такого треда небезопасен;
                 # process-level policy в service.py завершит процесс без него.
-                self._wedged = True
-            logger.error(
-                "OpenWakeWordAdapter: тред слушателя не вышел за %.1fs — "
-                "вероятно завис внутри PortAudio (класс инцидента 13-07)",
-                timeout,
-            )
+                if not _recording:
+                    self._wedged = True
+            if _recording:
+                logger.info(
+                    "OpenWakeWordAdapter: тред слушателя не вышел за %.1fs, "
+                    "но идёт запись — wedged НЕ выставляем (легитимная пауза)",
+                    timeout,
+                )
+            else:
+                logger.error(
+                    "OpenWakeWordAdapter: тред слушателя не вышел за %.1fs — "
+                    "вероятно завис внутри PortAudio (класс инцидента 13-07)",
+                    timeout,
+                )
         return exited
 
     def is_running(self) -> bool:

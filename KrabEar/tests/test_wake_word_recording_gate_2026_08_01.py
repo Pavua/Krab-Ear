@@ -182,6 +182,74 @@ class TestGateIsActuallyWired(unittest.TestCase):
             )
 
 
+class TestStopUnderRecordingDoesNotWedge(unittest.TestCase):
+    """Пауза wake word под запись НЕ должна помечать адаптер зависшим.
+
+    Живой инцидент 2026-08-03, замкнутый круг: владелец начинает диктовку →
+    агент паузит wake word (`wake_word_stop` → `adapter.stop()`), чтобы
+    слушатель не ловил его же голос → поток не успевает выйти за 3 с →
+    адаптер ставил `_wedged = True` → агент видел флаг и ПРИНУДИТЕЛЬНО
+    перезапускал backend ПОСРЕДИ записи:
+
+        01:39:56 Старт записи
+        01:40:40 Остановка записи запрошена            (запись 44 с)
+        01:40:40 [WakeWord] backend сообщил wedged — принудительный рестарт
+        01:40:49 stop_recording не подтверждён
+
+    То есть сама легитимная пауза порождала ложный сигнал зависания, и
+    диктовка не доезжала ни до вставки, ни до истории.
+
+    Направление отказа здесь ОБРАТНОЕ гейту F6 — fail-OPEN в сторону лечения:
+    не знаем состояние → считаем, что записи нет, и оставляем watchdog'у право
+    вылечить НАСТОЯЩИЙ клин. Обратное решение молча отключило бы самолечение
+    wake word навсегда. У F6 цена ошибки другая (потерянная диктовка), потому
+    там fail-closed — асимметрия намеренная.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.mkdtemp()
+
+    def _adapter_with_stuck_thread(self, is_recording) -> OpenWakeWordAdapter:
+        import threading
+
+        adapter = _make_adapter(self._tmp, is_recording=is_recording)
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        stuck = threading.Thread(target=lambda: release.wait(timeout=30), daemon=True)
+        stuck.start()
+        self.addCleanup(stuck.join, 1.0)
+        adapter._thread = stuck
+        return adapter
+
+    def test_no_wedge_when_recording_active(self) -> None:
+        adapter = self._adapter_with_stuck_thread(is_recording=lambda: True)
+        exited = adapter.stop(timeout=0.2)
+        self.assertFalse(exited, "поток намеренно не выходит — предпосылка теста")
+        self.assertFalse(
+            adapter._wedged,
+            "под активной записью wedged выставлять нельзя: агент убьёт backend "
+            "посреди диктовки",
+        )
+
+    def test_wedge_still_set_when_idle(self) -> None:
+        """Без записи поведение прежнее — настоящий клин обязан лечиться."""
+        adapter = self._adapter_with_stuck_thread(is_recording=lambda: False)
+        adapter.stop(timeout=0.2)
+        self.assertTrue(adapter._wedged, "вне записи wedged обязан выставляться")
+
+    def test_callback_failure_fails_open_towards_healing(self) -> None:
+        def _boom() -> bool:
+            raise RuntimeError("recorder недоступен")
+
+        adapter = self._adapter_with_stuck_thread(is_recording=_boom)
+        adapter.stop(timeout=0.2)
+        self.assertTrue(
+            adapter._wedged,
+            "сбой колбэка не должен отключать самолечение настоящего клина",
+        )
+
+
 class TestSwiftPollerReasonContract(unittest.TestCase):
     """Строка reason гейта F6 совпадает буква-в-букву в Python и Swift.
 

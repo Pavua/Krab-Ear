@@ -23,6 +23,13 @@ enum WakeWordPauseReason: String, CaseIterable, Sendable {
     case conversation   // идёт «Разговор с AI» — микрофон занят разговором
     case privacyMode    // privacy mode — микрофон wake word держать нельзя
     case ttsPlayback     // собственный TTS звучит через колонки — эхо триггерит детекцию (T5b)
+    /// 2026-08-03: финализация записи. Пауза `.recording` снимается в момент
+    /// ЗАПРОСА остановки (main+RealtimeOverlay), а backend после этого ещё
+    /// десятки секунд занят STT. В это окно поллер успевал увидеть wedged
+    /// (выставленный самой паузой под запись) и эскалировать принудительный
+    /// рестарт — backend умирал посреди финализации, диктовка терялась.
+    /// Причина держится до получения ответа stop_recording.
+    case finalizing
 }
 
 // MARK: - Чистая логика дебаунса
@@ -259,9 +266,23 @@ final class WakeWordPoller {
                     self.onDetection()
                     return
                 }
-                // Эскалация wedged: backend сам не смог вылечить wake-word
-                // поток (спека 2026-07-15) — просим принудительный рестарт.
-                if self.wedgedTracker.shouldEscalate(
+                // 🔴 2026-08-03: НИКОГДА не эскалируем рестарт под запись или
+                // её финализацию. Живой инцидент: пауза wake word на время
+                // диктовки (Set-причина .recording) сама роняла адаптер в
+                // wedged, агент видел флаг и УБИВАЛ backend посреди записи —
+                // диктовка не доезжала ни до вставки, ни до истории.
+                // Backend-сторона тоже починена (stop() не ставит wedged под
+                // записью), но гейт держим и здесь: цена ошибки несимметрична —
+                // отложенное лечение wake word обратимо (эскалация придёт
+                // следующим тиком), убитая диктовка — нет. `pausedReasons`
+                // непуст ровно во время записи/разговора/privacy, то есть
+                // именно тогда, когда рестарт разрушителен.
+                let escalationBlocked = !self.pausedReasons.isEmpty
+                if escalationBlocked && wedged {
+                    AgentLogger.shared.info(
+                        "[WakeWord] wedged, но идёт запись/разговор — эскалация отложена")
+                }
+                if !escalationBlocked, self.wedgedTracker.shouldEscalate(
                     wedged: wedged, now: ProcessInfo.processInfo.systemUptime
                 ) {
                     AgentLogger.shared.warn(
