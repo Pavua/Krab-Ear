@@ -217,6 +217,14 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     var lastToggleRequestAt: TimeInterval = 0
     let toggleDebounceSec: TimeInterval = 0.35
     var recordingTargetApp: NSRunningApplication?
+    /// Адресат автовставки, зафиксированный в момент готовности текста.
+    ///
+    /// Читать `recordingTargetApp` прямо во время вставки нельзя: terminal
+    /// cleanup обнуляет его сразу после обработки текста, а `performAutoPaste`
+    /// может выполниться заметно позже — асинхронный `ensureHistoryItem`, когда
+    /// backend не вернул history_id, или таймаут QuickEdit. Инцидент 2026-08-03:
+    /// цель протухала иначе — её перебивал сменившийся frontmost.
+    var dictationPasteTarget: NSRunningApplication?
     /// R2: opaque-token текущей локальной диктовки/быстрой заметки. Встреча
     /// хранит тот же generation отдельно в MeetingLivePanelController.
     var activeGenerationToken: String?

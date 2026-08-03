@@ -18,6 +18,16 @@ extension AgentAppDelegate {
             return
         }
 
+        // Фиксируем адресата вставки СЕЙЧАС, пока terminal cleanup ещё не обнулил
+        // recordingTargetApp (main+HotkeyRecording.swift чистит его сразу после этого
+        // вызова) и пока сменившийся frontmost не перебил выбор. Инцидент 2026-08-03:
+        // за 38 с финализации активным стал Safari, и диктовка из Claude Desktop
+        // улетела туда. Намеренно БЕЗ `?? lastExternalApp`: то поле переписывается на
+        // каждую активацию внешнего приложения, поэтому «последнее внешнее» к этому
+        // моменту означает «куда пользователь ушёл», а не «откуда диктовал». Когда
+        // запомненной цели нет, пусть решает политика в момент вставки.
+        dictationPasteTarget = recordingTargetApp
+
         // Финализируем streaming-paste сессию АВТОРИТЕТНЫМ текстом из ответа IPC (не через
         // SSE realtime.final_transcript — тот структурно недостижим здесь: SSE уже закрыт
         // к моменту, когда backend успевает его эмиттировать внутри stop_recording; см.
@@ -120,6 +130,10 @@ extension AgentAppDelegate {
     // MARK: - Core paste helper
 
     func performAutoPaste(text: String, historyId: String?) {
+        // Захваченная цель живёт ровно до конца этой попытки: держать её дольше
+        // незачем, а протухшая ссылка увела бы следующую вставку не туда.
+        defer { dictationPasteTarget = nil }
+
         // Если streaming paste уже вставил текст по мере диктовки — пропускаем финальную
         // полную вставку, чтобы не задваивать текст. Сбрасываем флаг после принятия решения.
         if settings.streamingPasteEnabled,
@@ -133,7 +147,7 @@ extension AgentAppDelegate {
             return
         }
 
-        guard let targetApp = resolvePreferredPasteTargetApp() else {
+        guard let targetApp = resolveDictationPasteTargetApp() else {
             markPasteStatus(historyId: historyId, status: "failed")
             historyPanel?.onHistoryDidUpdate()
             logger.warn("Не найден target app для вставки")
@@ -317,6 +331,47 @@ extension AgentAppDelegate {
             logger.info("Использован fallback target app: \(lastExternalApp.bundleIdentifier ?? "unknown")")
         } else {
             logger.warn("Не удалось определить target app на старте записи")
+        }
+    }
+
+    /// Адресат автовставки ДИКТОВКИ: приоритет у приложения, в котором запись
+    /// началась (решение владельца 2026-08-03 — «куда начал, туда и придёт»).
+    ///
+    /// Отдельный резолвер, а не изменение общего: `pasteSnapshotText` обслуживает
+    /// принципиально другой запрос — пользователь прямо сейчас указал, куда
+    /// вставить, и там верным адресатом остаётся текущее активное приложение.
+    /// Урок S34: одна общая точка вредит, когда у вызывающих сторон разные роли.
+    func resolveDictationPasteTargetApp() -> NSRunningApplication? {
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        let captured = dictationPasteTarget.flatMap { $0.isTerminated ? nil : $0 }
+        let frontmost = NSWorkspace.shared.frontmostApplication.flatMap {
+            ($0.processIdentifier != selfPID && $0.activationPolicy == .regular) ? $0 : nil
+        }
+        let lastExternal = lastExternalApp.flatMap { $0.isTerminated ? nil : $0 }
+
+        let choice = DictationPasteTargetPolicy.choose(
+            capturedIsAlive: captured != nil,
+            frontmostIsExternal: frontmost != nil,
+            lastExternalIsAlive: lastExternal != nil
+        )
+
+        // Расхождение стоит видеть в логе: именно оно было невидимой причиной
+        // «текст ушёл не туда» до 2026-08-03.
+        if choice == .captured,
+           let captured,
+           let frontmost,
+           frontmost.processIdentifier != captured.processIdentifier {
+            logger.info(
+                "Автовставка целится в приложение старта записи: \(captured.bundleIdentifier ?? "unknown") "
+                    + "(активно сейчас другое: \(frontmost.bundleIdentifier ?? "unknown"))"
+            )
+        }
+
+        switch choice {
+        case .captured: return captured
+        case .frontmost: return frontmost
+        case .lastExternal: return lastExternal
+        case .none: return nil
         }
     }
 
