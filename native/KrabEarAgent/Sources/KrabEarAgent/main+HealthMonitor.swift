@@ -93,11 +93,18 @@ extension AgentAppDelegate {
             await monitor.setOnHangDetected {
                 await MainActor.run {
                     loggerRef.warn("HealthMonitor: backend hang detected → restartIfDead")
-                    let restarted = supervisor.restartIfDead()
-                    if restarted {
+                    // Различаем ложную тревогу от настоящего события (2026-08-03):
+                    // тугой таймаут пинга HealthMonitor (2с) под нагрузкой иногда не
+                    // укладывается, хотя backend отвечает за доли секунды. Тост
+                    // «Backend перезапущен» на процессе, который никто не трогал,
+                    // вводит в заблуждение — restartIfDeadDetailed() отличает случаи.
+                    switch supervisor.restartIfDeadDetailed() {
+                    case .alreadyAlive:
+                        loggerRef.info("HealthMonitor: backend был жив — ложная тревога (таймаут пинга)")
+                    case .recovered:
                         loggerRef.info("HealthMonitor: backend successfully restarted")
                         BackendToast.shared.show("Backend перезапущен", duration: 3.0)
-                    } else {
+                    case .failed:
                         loggerRef.warn("HealthMonitor: restart failed — лимит перезапусков достигнут")
                         BackendToast.shared.show("⚠ Backend не запускается — открой логи", duration: 10.0)
                     }

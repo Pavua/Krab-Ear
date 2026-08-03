@@ -19,6 +19,23 @@ enum SupervisionMode {
     case passive
 }
 
+/// Честный исход `restartIfDeadDetailed()` — что на самом деле произошло с backend.
+///
+/// Отдельно от простого `Bool`: вызывающая сторона (тост, лог) обязана знать
+/// РАЗНИЦУ между «ничего не трогали, backend был жив всё время» и «backend
+/// реально не отвечал, дождались восстановления» — иначе пользователь видит
+/// тревожный тост про перезапуск на процессе, который никто не перезапускал.
+enum BackendRestartOutcome: Equatable {
+    /// `isBackendAlive()` подтвердил живой backend с первой проверки — ложная
+    /// тревога вызывающего (обычно более тугой таймаут пинга у HealthMonitor).
+    case alreadyAlive
+    /// Backend не ответил первой проверке; дождались восстановления (launchd
+    /// respawn в passive, собственный respawn в active).
+    case recovered
+    /// Восстановить не удалось (лимит попыток в active, таймаут ожидания в passive).
+    case failed
+}
+
 /// Управляет жизненным циклом Python backend-процесса.
 ///
 /// Поддерживает автоматический перезапуск при обнаружении мёртвого backend
@@ -237,15 +254,33 @@ final class BackendSupervisor: @unchecked Sendable {
 
     /// Перезапускает backend, если он мёртв. Возвращает true при успешном восстановлении.
     ///
+    /// Bool-обёртка над `restartIfDeadDetailed()` — сохраняет существующий контракт
+    /// для вызывающих (`main+IPCRecovery.swift`), которым важен только факт «можно
+    /// продолжать». Для честного различения ложной тревоги и настоящего события
+    /// (тост пользователю) см. `restartIfDeadDetailed()`.
+    func restartIfDead() -> Bool {
+        restartIfDeadDetailed() != .failed
+    }
+
+    /// Перезапускает backend, если он мёртв, и honestly сообщает, что произошло.
+    ///
     /// В active режиме ограничен `maxConsecutiveRestarts` попытками подряд,
     /// чтобы не зациклить перезапуски при системном OOM. В passive режиме
     /// полагается на launchd KeepAlive и только ждёт восстановления.
-    func restartIfDead() -> Bool {
+    ///
+    /// `.alreadyAlive` — намеренно ОТДЕЛЕНО от `.recovered`. Живой инцидент
+    /// 2026-08-03: `HealthMonitor` пингует с таймаутом 2с; под нагрузкой (load
+    /// average 40) этот пинг иногда не укладывается, хотя backend отвечает за
+    /// 0.2-0.4с. `isBackendAlive()` использует 60-секундный таймаут и почти всегда
+    /// подтверждает, что backend жив — процесс никогда не трогали, а вызывающая
+    /// сторона до этого фикса показывала тост «Backend перезапущен» на пустом месте
+    /// (7062 срабатываний в логе агента, каждые 1-3 минуты под нагрузкой).
+    func restartIfDeadDetailed() -> BackendRestartOutcome {
         if isBackendAlive() {
             stateLock.lock()
             consecutiveRestarts = 0
             stateLock.unlock()
-            return true
+            return .alreadyAlive
         }
 
         switch supervisionMode {
@@ -254,9 +289,9 @@ final class BackendSupervisor: @unchecked Sendable {
             // Rate limit не применяем — launchd сам throttle'ит.
             do {
                 try ensureBackendRunning()
-                return true
+                return .recovered
             } catch {
-                return false
+                return .failed
             }
 
         case .active:
@@ -270,18 +305,18 @@ final class BackendSupervisor: @unchecked Sendable {
             }
             guard consecutiveRestarts < Self.maxConsecutiveRestarts else {
                 stateLock.unlock()
-                return false
+                return .failed
             }
             consecutiveRestarts += 1
             lastRestartAttemptAt = Date()
             stateLock.unlock()
-            
+
             stopBackend()
             do {
                 try ensureBackendRunning()
-                return true
+                return .recovered
             } catch {
-                return false
+                return .failed
             }
         }
     }

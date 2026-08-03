@@ -122,6 +122,86 @@ final class BackendSupervisorTests: XCTestCase {
         XCTAssertFalse(r3, "4-й restart превышает лимит — должен вернуть false")
     }
 
+    // MARK: restartIfDeadDetailed — честный сигнал (2026-08-03)
+    //
+    // Живой инцидент: `restartIfDead() -> Bool` схлопывает «backend вообще не
+    // трогали, ping совпал» и «backend реально ждали/респавнили» в один и тот же
+    // `true`. HealthMonitor звонит с тугим таймаутом 2с — под нагрузкой (load
+    // average 40 на машине владельца) первый пинг иногда не укладывается, второй,
+    // 60-секундный внутри isBackendAlive(), укладывается всегда. Итог — тост
+    // «Backend перезапущен» на живом, никогда не тронутом процессе, каждые 1-3
+    // минуты под нагрузкой (7062 срабатываний в логе агента).
+
+    func test_restartIfDeadDetailed_alreadyAlive_whenFirstPingSucceeds() {
+        let supervisor = makeSupervisor(mode: .passive, pingResult: true)
+
+        let outcome = supervisor.restartIfDeadDetailed()
+
+        XCTAssertEqual(
+            outcome, .alreadyAlive,
+            "Первый ping (isBackendAlive) успешен — ничего не восстанавливали, это ложная тревога"
+        )
+    }
+
+    func test_restartIfDeadDetailed_recovered_passive_whenEnsureSucceeds() {
+        let supervisor = makeSupervisor(mode: .passive, pingResult: false, ensureError: nil)
+
+        let outcome = supervisor.restartIfDeadDetailed()
+
+        XCTAssertEqual(
+            outcome, .recovered,
+            "Первый ping упал, ensureBackendRunning дождался восстановления — событие настоящее"
+        )
+    }
+
+    func test_restartIfDeadDetailed_failed_passive_whenEnsureThrows() {
+        let supervisor = makeSupervisor(
+            mode: .passive,
+            pingResult: false,
+            ensureError: IPCError.socketConnectFailed("backend timeout")
+        )
+
+        let outcome = supervisor.restartIfDeadDetailed()
+
+        XCTAssertEqual(outcome, .failed)
+    }
+
+    func test_restartIfDeadDetailed_recovered_active_whenRestartSucceeds() {
+        let supervisor = makeSupervisor(mode: .active, pingResult: false, ensureError: nil)
+
+        let outcome = supervisor.restartIfDeadDetailed()
+
+        XCTAssertEqual(outcome, .recovered)
+    }
+
+    func test_restartIfDeadDetailed_failed_active_whenLimitExceeded() {
+        let supervisor = makeSupervisor(mode: .active, pingResult: false, ensureError: nil)
+
+        _ = supervisor.restartIfDeadDetailed()  // 1
+        _ = supervisor.restartIfDeadDetailed()  // 2
+        _ = supervisor.restartIfDeadDetailed()  // 3
+        let outcome = supervisor.restartIfDeadDetailed()  // превышает лимит
+
+        XCTAssertEqual(outcome, .failed, "4-й restart превышает лимит")
+    }
+
+    /// `restartIfDead()` остаётся Bool-контрактом для существующих вызывающих
+    /// (main+IPCRecovery.swift и все тесты выше) — `.failed` это единственный
+    /// случай false, .alreadyAlive и .recovered оба означают «можно продолжать».
+    func test_restartIfDead_boolContract_matches_detailedOutcome() {
+        let alive = makeSupervisor(mode: .passive, pingResult: true)
+        XCTAssertEqual(alive.restartIfDead(), true)
+
+        let recovers = makeSupervisor(mode: .passive, pingResult: false, ensureError: nil)
+        XCTAssertEqual(recovers.restartIfDead(), true)
+
+        let fails = makeSupervisor(
+            mode: .passive, pingResult: false,
+            ensureError: IPCError.socketConnectFailed("x")
+        )
+        XCTAssertEqual(fails.restartIfDead(), false)
+    }
+
     // MARK: stopBackend — passive mode
 
     func test_stopBackend_passive_isNoOp_processRemainsNil() {
