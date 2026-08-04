@@ -1271,6 +1271,18 @@ Health-check `scripts/krab_ear_runner_health_check.py` + LaunchAgent
   `restartIfDead`; тест в CI, ходящий в ЖИВОЙ LM Studio (замокать); решение
   владельца по macOS python-джобу CI на self-hosted (дублирует ubuntu-гейт,
   жрёт машину на каждый push).
+- **2026-08-04 — 🟢 `llm_idle_keepalive` уважает выключенную постобработку** (`cbe3e26e`).
+  Живая находка того же дня: владелец выключил «постобработку» (`llm_rewrite_enabled=
+  False`), но LM Studio загрузила модель (6.86 ГБ) через ~25 минут. Причина — sibling-
+  toggle: `_idle_keepalive_loop` гейтился ДРУГИМ тумблером (`llm_idle_keepalive_enabled`,
+  `DEFAULT_SETTINGS=True`), не связанным с тем, что реально выключил владелец в UI, и
+  безусловно слал `warmup_probe()` (реальный `max_tokens: 1` completion → JIT-загрузка).
+  Тик выделен в `_idle_keepalive_tick()` и читает `llm_rewrite_enabled` через уже
+  существующий late-injected `_settings_getter`. Fail-CLOSED на ошибке чтения настройки
+  (осознанное отклонение от соседнего паттерна для timeout-значений — цена ошибки здесь
+  асимметрична). 5 тестов, мутация роняет, ubuntu-parity зелёный. Мини-волна хвостов
+  инцидента закрыта ПОЛНОСТЬЮ (4 из 4 пунктов) — единственное оставшееся: найти CI-тест,
+  ходящий в живой LM Studio (замокать), не блокер.
 - **2026-08-04 — 🟢 Мини-волна хвостов инцидента закрыта: честный тост + GigaAM zombie-detect + Fable-гейт автовставки.**
   (1) `bcae48de` — `restartIfDead()` больше не врёт: новый `BackendRestartOutcome
   {.alreadyAlive/.recovered/.failed}` различает «ничего не трогали» (тугой 2с-таймаут
