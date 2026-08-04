@@ -163,3 +163,94 @@ def test_supports_wait_and_force_flags() -> None:
     text = INSTALLER.read_text(encoding="utf-8")
     assert "--wait" in text, "install_backend_launchagent.command не поддерживает --wait N"
     assert "--force" in text, "install_backend_launchagent.command не поддерживает --force"
+
+
+# ---------------------------------------------------------------------------
+# S3-хвост (2026-08-04/05) — фиксированный `sleep 1` после bootout не
+# гарантирует, что launchd реально освободил label.
+#
+# На загруженной машине (сегодняшний живой пример: load average 294 при
+# индексации после перезагрузки) `launchctl bootout` может занять больше
+# секунды. Следующий `bootstrap` того же label рискует race'ом со старым,
+# ещё не до конца выгруженным сервисом на том же socket path (EADDRINUSE
+# на bind() или launchd путается, у какого экземпляра владение сокетом).
+# Опрос вместо слепого ожидания — тот же принцип, что уже применён ниже по
+# скрипту (smoke-test ping ждёт готовности до 15с циклом, а не одним sleep).
+# ---------------------------------------------------------------------------
+
+def _run_wait_for_bootout(
+    tmp_path: Path, *, still_loaded_calls: int, timeout_sec: int
+) -> subprocess.CompletedProcess:
+    """Извлекает wait_for_bootout() из скрипта и гоняет с фейковым launchctl.
+
+    Фейковый launchctl возвращает 0 (label ещё загружен) первые
+    ``still_loaded_calls`` обращений к `launchctl print`, затем 1 (не найден —
+    выгружен). Реальный интервал опроса (1с) не подменяется — тест держит
+    ``timeout_sec`` небольшим (1-2с), чтобы не раздувать время прогона.
+    """
+    source = INSTALLER.read_text(encoding="utf-8")
+    fn_src = _extract_function(source, "wait_for_bootout")
+
+    driver = tmp_path / "driver.sh"
+    driver.write_text(
+        "#!/bin/sh\n"
+        "UID_NUM=501\n"
+        + fn_src
+        + f'\nwait_for_bootout "test.label" {timeout_sec}\n'
+        "echo \"EXIT:$?\"\n",
+        encoding="utf-8",
+    )
+    driver.chmod(0o755)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    counter_file = tmp_path / "counter"
+    counter_file.write_text("0", encoding="utf-8")
+    launchctl_stub = fake_bin / "launchctl"
+    launchctl_stub.write_text(
+        "#!/bin/sh\n"
+        f'COUNTER_FILE="{counter_file}"\n'
+        'n=$(cat "$COUNTER_FILE")\n'
+        'n=$((n + 1))\n'
+        'echo "$n" > "$COUNTER_FILE"\n'
+        f'if [ "$n" -le {still_loaded_calls} ]; then exit 0; else exit 1; fi\n',
+        encoding="utf-8",
+    )
+    launchctl_stub.chmod(0o755)
+
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    return subprocess.run(
+        ["/bin/sh", str(driver)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+
+def test_wait_for_bootout_returns_promptly_once_unloaded(tmp_path: Path) -> None:
+    """RED до фикса: wait_for_bootout() не существует — блокирует sleep-1 регрессию."""
+    result = _run_wait_for_bootout(tmp_path, still_loaded_calls=1, timeout_sec=5)
+    assert "EXIT:0" in result.stdout, result.stdout + result.stderr
+
+
+def test_wait_for_bootout_gives_up_after_timeout_without_hanging(tmp_path: Path) -> None:
+    """launchctl никогда не отпускает label — функция обязана вернуться (не зависнуть)
+    с ненулевым кодом за разумное время, а не ждать вечно."""
+    result = _run_wait_for_bootout(tmp_path, still_loaded_calls=999, timeout_sec=1)
+    assert "EXIT:1" in result.stdout, result.stdout + result.stderr
+
+
+def test_bootout_call_site_uses_wait_for_bootout_not_bare_sleep() -> None:
+    """Голый `sleep 1` сразу после bootout — источник живого бага (S3-хвост).
+    Вызывающий код обязан пройти через wait_for_bootout(), а не слепо спать."""
+    text = INSTALLER.read_text(encoding="utf-8")
+    bootout_idx = text.find('launchctl bootout "gui/$UID_NUM/$LABEL"')
+    assert bootout_idx != -1, "bootout call site не найден — тест устарел"
+    tail = text[bootout_idx:bootout_idx + 300]
+    assert "wait_for_bootout" in tail, (
+        "После bootout ожидается вызов wait_for_bootout(), а не голый sleep 1 — "
+        f"нашёл: {tail!r}"
+    )

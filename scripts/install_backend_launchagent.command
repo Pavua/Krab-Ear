@@ -38,6 +38,28 @@ done
 log() { printf '[install] %s\n' "$*"; }
 fail() { printf '[install] ❌ %s\n' "$*" >&2; exit 1; }
 
+# S3-хвост (2026-08-04/05): фиксированный `sleep 1` после bootout не
+# гарантирует, что launchd реально освободил label — на загруженной машине
+# (живой пример того же дня: load average 294 после перезагрузки) bootout
+# может занять больше секунды, и следующий bootstrap того же label рискует
+# race'ом со старым, ещё не до конца выгруженным сервисом на том же
+# socket path. Опрос вместо слепого ожидания — тот же принцип, что уже
+# использует smoke-test ping ниже по скрипту (цикл до 15с, а не один sleep).
+wait_for_bootout() {
+  local label="$1"
+  local timeout_sec="${2:-5}"
+  local waited=0
+  while launchctl print "gui/$UID_NUM/$label" >/dev/null 2>&1; do
+    if [ "$waited" -ge "$timeout_sec" ]; then
+      log "⚠️ bootout не подтверждён за ${timeout_sec}с — продолжаю (launchd мог не успеть обновить состояние)"
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  return 0
+}
+
 # Дословная копия ipc_call()/busy_reason() из safe_backend_restart.command —
 # единый источник правды по семантике занятости backend (S3/Р3). Дублирование
 # осознанное: оба скрипта самодостаточны (без общего source'а), а
@@ -140,7 +162,7 @@ fi
 if launchctl print "gui/$UID_NUM/$LABEL" >/dev/null 2>&1; then
   log "bootout gui/$UID_NUM/$LABEL (была загружена старая версия)"
   launchctl bootout "gui/$UID_NUM/$LABEL" 2>&1 || true
-  sleep 1
+  wait_for_bootout "$LABEL" 5
 fi
 
 # 2. Substitution template → target. sed с | разделителем потому что пути и
