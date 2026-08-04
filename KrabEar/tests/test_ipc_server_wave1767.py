@@ -714,5 +714,75 @@ class IPCHandlerLifecycleTestCase(unittest.TestCase):
         self.assertFalse(stopper.is_alive())
 
 
+# ---------------------------------------------------------------------------
+# Живой инцидент 2026-08-04 — handle_request может зависнуть НАВСЕГДА и
+# перманентно утечь семафор-слот.
+#
+# conn.settimeout(IPC_CONN_RECV_TIMEOUT_SEC) защищает ТОЛЬКО recv()/sendall()
+# на сокете — на чистый Python-код между ними (self.service.handle_request(...))
+# он не действует вообще. Если бизнес-логика зависает (deadlock на локе,
+# который никогда не освободится) — finally: semaphore.release() НИКОГДА не
+# срабатывает, потому что поток навсегда застревает ВНУТРИ try, до finally.
+# Живое наблюдение: 11667 срабатываний "лимит 64 коннектов исчерпан" в логе
+# backend.log за 8 дней, растущее в реальном времени — то есть у сервера
+# накапливаются перманентно потерянные слоты, и в какой-то момент отклоняются
+# ВСЕ новые подключения, включая HealthMonitor-пинги и попытки диктовки.
+# ---------------------------------------------------------------------------
+
+class HandleRequestDeadlockGuardTestCase(unittest.TestCase):
+    """handle_request обязан быть bounded — зависшая бизнес-логика не должна
+    держать семафор-слот вечно."""
+
+    def test_hanging_handle_request_still_releases_semaphore(self):
+        """Зависший (никогда не возвращающийся) handle_request не должен
+        навсегда занимать слот семафора — backstop-таймаут обязан сработать."""
+        never_returns = threading.Event()  # никогда не .set() — эмуляция deadlock
+        fake_service = MagicMock()
+        fake_service.handle_request.side_effect = lambda payload: never_returns.wait()
+
+        ipc = _make_ipc_server()
+        ipc.service = fake_service
+        # Backstop обязан быть настраиваемым: прод использует щедрый потолок
+        # (180с, с запасом над самым долгим клиентским IPC-таймаутом 120с),
+        # тест — короткий, чтобы не ждать реальные 180с.
+        ipc._request_timeout_sec = 0.3
+
+        # Освобождаем все слоты кроме одного, занимаем этот один вручную —
+        # тот же паттерн, что test_silent_conn_closes_within_timeout_and_frees_semaphore.
+        drained = 0
+        while ipc._conn_semaphore.acquire(blocking=False):
+            drained += 1
+        ipc._conn_semaphore.release()
+        drained -= 1
+        acquired = ipc._conn_semaphore.acquire(blocking=False)
+        self.assertTrue(acquired)
+
+        payload = json.dumps({"id": "1", "method": "stop_recording", "params": {}}) + "\n"
+        mock_conn = MagicMock()
+        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.__exit__ = MagicMock(return_value=False)
+        mock_conn.recv.side_effect = [payload.encode("utf-8"), b""]
+
+        t = threading.Thread(target=ipc._handle_connection, args=(mock_conn,), daemon=True)
+        t.start()
+        t.join(timeout=3.0)
+
+        self.assertFalse(
+            t.is_alive(),
+            "_handle_connection обязан вернуться даже если handle_request "
+            "никогда не завершается (backstop-таймаут)"
+        )
+        re_acquired = ipc._conn_semaphore.acquire(blocking=False)
+        self.assertTrue(
+            re_acquired,
+            "Семафор обязан освободиться даже при зависшем handle_request "
+            "(живой инцидент 2026-08-04: 11667 утечек за 8 дней)"
+        )
+        ipc._conn_semaphore.release()
+        for _ in range(drained):
+            ipc._conn_semaphore.release()
+        never_returns.set()  # отпускаем осиротевший фоновый поток
+
+
 if __name__ == "__main__":
     unittest.main()

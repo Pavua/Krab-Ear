@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import os
@@ -39,6 +40,25 @@ _IPC_MAX_CONNECTIONS: int = 64
 # Размер чанка для сборки потокового сообщения (W1767 #4 MED).
 _IPC_RECV_CHUNK: int = 4096
 
+# Живой инцидент 2026-08-04: conn.settimeout(IPC_CONN_RECV_TIMEOUT_SEC) защищает
+# ТОЛЬКО recv()/sendall() на сокете — на self.service.handle_request(payload)
+# (чистый Python-код между ними) таймаут сокета не действует вообще. Если
+# бизнес-логика зависает (deadlock на локе, который никогда не освободится),
+# finally: semaphore.release() никогда не срабатывает — поток навсегда
+# застревает ВНУТРИ try, до finally. Наблюдение: 11667 срабатываний "лимит 64
+# коннектов исчерпан" в логе за 8 дней, растущее в реальном времени — сервер
+# накапливает перманентно потерянные слоты, пока не отклоняет ВСЕ подключения,
+# включая HealthMonitor-пинги и попытки диктовки.
+#
+# Потолок ЩЕДРЫЙ и НАМЕРЕННО НЕ равен таймауту конкретного метода: цель —
+# не оборвать легитимно долгую операцию, а гарантировать, что связанный с ней
+# семафор-слот ОБЯЗАТЕЛЬНО вернётся в пул, даже если бизнес-логика зависла
+# навсегда. 180с — с запасом над самым долгим клиентским IPC-таймаутом (Swift
+# agent: stop_recording, timeoutSec=120). Абандон рабочего потока (Python не
+# умеет принудительно прервать чужой поток) — меньшее зло по сравнению с
+# перманентной утечкой слота, которая рано или поздно валит ВЕСЬ IPC-сервер.
+IPC_REQUEST_TIMEOUT_SEC: float = 180.0
+
 
 class IPCServer:
     """Unix socket сервер, который проксирует запросы в BackendService."""
@@ -57,6 +77,10 @@ class IPCServer:
         # иначе service может закрыть STT-ресурсы под выполняющимся запросом.
         self._handler_threads: set[threading.Thread] = set()
         self._handler_threads_lock = threading.Lock()
+        # Backstop против навсегда зависшего handle_request (2026-08-04) —
+        # см. комментарий у IPC_REQUEST_TIMEOUT_SEC. Instance-атрибут (не
+        # константа напрямую), чтобы тесты могли подставить короткое значение.
+        self._request_timeout_sec = IPC_REQUEST_TIMEOUT_SEC
 
     def request_stop_from_signal(self) -> None:
         """Попросить accept-loop завершиться без lock, I/O и логирования."""
@@ -231,6 +255,26 @@ class IPCServer:
                 self._conn_semaphore.release()
         return False
 
+    def _call_handle_request_bounded(self, payload: dict) -> dict:
+        """Вызывает ``self.service.handle_request`` с backstop-таймаутом.
+
+        См. комментарий у ``IPC_REQUEST_TIMEOUT_SEC``. ``ThreadPoolExecutor``
+        с одним воркером — тот же паттерн, что уже используется в
+        ``core/engine.py`` для ограничения адаптеров STT-цепочки по времени.
+
+        :raises concurrent.futures.TimeoutError: business-логика не вернулась
+            за ``self._request_timeout_sec`` — вызывающая сторона обязана
+            перехватить это исключение и вернуть клиенту честный ответ.
+        """
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            future = pool.submit(self.service.handle_request, payload)
+            return future.result(timeout=self._request_timeout_sec)
+        finally:
+            # wait=False: НЕ ждём абандонённый воркер — иначе backstop
+            # бессмысленен (снова заблокируемся на той же зависшей операции).
+            pool.shutdown(wait=False)
+
     def _handle_connection(self, conn: socket.socket) -> None:
         """Чтение одной JSON-команды и возврат JSON-ответа.
 
@@ -285,7 +329,28 @@ class IPCServer:
                     return
 
                 try:
-                    response = self.service.handle_request(payload)
+                    response = self._call_handle_request_bounded(payload)
+                except concurrent.futures.TimeoutError:
+                    # Живой инцидент 2026-08-04: зависшая бизнес-логика (deadlock)
+                    # без этого backstop'а держит семафор-слот НАВСЕГДА — не
+                    # symptom-фикс, а страховка независимо от конкретной причины
+                    # зависания. Рабочий поток абандонится (Python не может
+                    # принудительно прервать чужой поток) — это меньшее зло
+                    # по сравнению с перманентной утечкой connection-слота.
+                    logger.error(
+                        "handle_request завис дольше %.0fс (method=%s) — "
+                        "backstop-таймаут, слот освобождён, рабочий поток абандонен",
+                        self._request_timeout_sec,
+                        payload.get("method", "?"),
+                    )
+                    response = {
+                        "id": payload.get("id"),
+                        "ok": False,
+                        "error": {
+                            "code": "internal_error",
+                            "message": "backend завис при обработке запроса (backstop timeout)",
+                        },
+                    }
                 except Exception as exc:
                     logger.exception("Непойманная ошибка в handle_request")
                     response = {
