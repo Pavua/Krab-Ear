@@ -469,6 +469,19 @@ class AudioEngine:
         elif getattr(settings, "STT_GIGAAM_ENABLED", False) and skip_gigaam_warmup:
             logger.info("GigaAM warmup пропущен (skip_gigaam_warmup=True) — этот engine не spawn'ит worker")
 
+    def close(self) -> None:
+        """Останавливает фоновые ресурсы движка (живой инцидент 2026-08-04).
+
+        Единственный владелец GigaAM subprocess-воркера, спавненного background-
+        warmup-тредом в __init__, — self._router. Без этого вызова процесс
+        остаётся сиротой при остановке владельца (Transcriber/BackendService).
+        Never raises — вызывается из чужих finally/close-цепочек.
+        """
+        try:
+            self._router.close()
+        except Exception:
+            logger.warning("AudioEngine.close: ошибка закрытия STTRouter", exc_info=True)
+
     def warmup(self) -> dict[str, Any]:
         """Prewarm Whisper model to eliminate first-dictation cold-start latency.
 

@@ -2126,6 +2126,21 @@ class BackendService:
             except Exception:
                 wake_word_stopped = False
                 logger.exception("OpenWakeWordAdapter.stop() raised during close()")
+
+        # Живой инцидент 2026-08-04: реальный Transcriber (AudioEngine без
+        # инжектированного fake) держит background-warmup'нутый GigaAM
+        # subprocess-воркер; без явного close() он остаётся сиротой.
+        # getattr(..., "close", None) — duck-typed guard: fake-транскрайберы в
+        # тестах (FakeTranscriber и т.п.) не обязаны иметь close(), это тихий
+        # no-op, не AttributeError-шум в логе.
+        transcriber = getattr(self, "transcriber", None)
+        close_transcriber = getattr(transcriber, "close", None) if transcriber is not None else None
+        if close_transcriber is not None:
+            try:
+                close_transcriber()
+            except Exception:
+                logger.exception("Transcriber.close() raised during close()")
+
         return all_workers_stopped and wake_word_stopped
 
     # ------------------------------------------------------------------ #

@@ -141,6 +141,20 @@ class Transcriber:
         finally:
             lock.release()
 
+    def close(self) -> None:
+        """Останавливает фоновые ресурсы обёрнутого engine (2026-08-04).
+
+        Duck-typed: engine может быть fake-объектом без close() (тесты) — тогда
+        это тихий no-op, не AttributeError. Never raises.
+        """
+        engine_close = getattr(self.engine, "close", None)
+        if engine_close is None:
+            return
+        try:
+            engine_close()
+        except Exception:
+            logger.warning("Transcriber.close: ошибка закрытия engine", exc_info=True)
+
     # ------------------------------------------------------------------
     # Phase B.1 — error_bus integration (late-injection, same as LLMRewriter)
     # ------------------------------------------------------------------

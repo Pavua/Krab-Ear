@@ -735,5 +735,53 @@ class TestSTTRouterHandlesAllAdaptersFailed(unittest.TestCase):
         self.assertEqual(best.name, "whisper-mlx")
 
 
+# ---------------------------------------------------------------------------
+# Живой инцидент 2026-08-04 — утечка GigaAM subprocess-воркера в юнит-тестах
+#
+# STTRouter кэширует _gigaam_adapter (GigaAMAdapter → _GigaAMSubprocessSession,
+# реальный subprocess.Popen на gigaam_worker.py). Уже есть приватный
+# _close_cached_gigaam_adapter() (вызывается при смене конфига), но НИКТО не
+# зовёт его при остановке процесса-владельца — ни AudioEngine, ни Transcriber,
+# ни BackendService.close(). Итог: тесты, конструирующие реальный AudioEngine
+# без skip_gigaam_warmup=True (например BackendService(store=...) без
+# инжектированного fake-transcriber), спавнят настоящий gigaam_worker.py и
+# НИКОГДА его не закрывают — обнаружено гейтом pre_merge_py312_check.sh
+# ("НОВЫЙ WORKER... сигналы им НЕ отправлялись") после прогона
+# test_backend_service.py.
+# ---------------------------------------------------------------------------
+
+class TestSTTRouterClose(unittest.TestCase):
+    """STTRouter.close() — публичная точка входа для внешних владельцев."""
+
+    def setUp(self):
+        self.router = STTRouter(_make_settings())
+
+    def test_close_closes_cached_adapter(self):
+        mock_adapter = MagicMock()
+        self.router._gigaam_adapter = mock_adapter
+
+        self.router.close()
+
+        mock_adapter.close.assert_called_once()
+
+    def test_close_clears_cache_after_closing(self):
+        self.router._gigaam_adapter = MagicMock()
+
+        self.router.close()
+
+        self.assertIsNone(self.router._gigaam_adapter)
+
+    def test_close_noop_when_no_cached_adapter(self):
+        self.assertIsNone(self.router._gigaam_adapter)
+        self.router.close()  # не должен бросить
+
+    def test_close_swallows_adapter_close_exception(self):
+        mock_adapter = MagicMock()
+        mock_adapter.close.side_effect = RuntimeError("subprocess wait failed")
+        self.router._gigaam_adapter = mock_adapter
+
+        self.router.close()  # не должен бросить — тот же контракт, что private-версия
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -501,6 +501,16 @@ class STTRouter:
             logger.warning("STTRouter.get_gigaam_adapter: ошибка создания адаптера: %s", exc)
             return None
 
+    def close(self) -> None:
+        """Публичная точка входа для владельца (AudioEngine) при остановке.
+
+        Живой инцидент 2026-08-04: кэшированный GigaAM-адаптер держит реальный
+        subprocess.Popen на gigaam_worker.py; без явного close() при остановке
+        владельца процесс остаётся сиротой. Ранее закрытие происходило только
+        реактивно — при смене конфига (см. _close_cached_gigaam_adapter).
+        """
+        self._close_cached_gigaam_adapter()
+
     def _close_cached_gigaam_adapter(self) -> None:
         """Закрывает кэшированный адаптер и безусловно сбрасывает fingerprint."""
         adapter = self._gigaam_adapter

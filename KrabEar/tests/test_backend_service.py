@@ -2544,5 +2544,56 @@ class FeatureFlagsInitOrderTestCase(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# Живой инцидент 2026-08-04 — BackendService.close() обязан закрыть transcriber
+#
+# Гейт pre_merge_py312_check.sh обнаружил висящий gigaam_worker.py после
+# прогона этого файла. Корень: реальный Transcriber (сконструированный, когда
+# BackendService(store=...) вызван БЕЗ transcriber= — см.
+# BackendServiceLLMInitializationTestCase выше) держит background-warmup'нутый
+# GigaAM subprocess-воркер; close() никогда его не закрывал. Цепочка фикса:
+# Transcriber.close() → AudioEngine.close() → STTRouter.close() (см.
+# test_engine_transcriber_close_lifecycle_2026_08_04.py,
+# test_stt_router.py::TestSTTRouterClose).
+# ---------------------------------------------------------------------------
+
+class BackendServiceCloseTranscriberTestCase(unittest.TestCase):
+    """close() обязан закрыть transcriber, но не падать на fake без close()."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.tmp.cleanup)
+        self.store = StateStore(Path(self.tmp.name) / "data")
+
+    def test_close_calls_transcriber_close_when_present(self):
+        from unittest.mock import MagicMock
+
+        service = BackendService(
+            store=self.store,
+            recorder=FakeRecorder(),
+            transcriber=FakeTranscriber(),
+            translator=FakeTranslator(),
+        )
+        mock_close = MagicMock()
+        service.transcriber.close = mock_close  # инжектируем close() поверх FakeTranscriber
+
+        service.close()
+
+        mock_close.assert_called_once()
+
+    def test_close_does_not_raise_when_transcriber_has_no_close(self):
+        """FakeTranscriber (как определён в этом файле) НЕ имеет close() —
+        duck-typed guard в BackendService.close() обязан тихо это пропустить."""
+        service = BackendService(
+            store=self.store,
+            recorder=FakeRecorder(),
+            transcriber=FakeTranscriber(),
+            translator=FakeTranslator(),
+        )
+        self.assertFalse(hasattr(service.transcriber, "close"))
+
+        service.close()  # не должен бросить AttributeError
+
+
 if __name__ == "__main__":
     unittest.main()
