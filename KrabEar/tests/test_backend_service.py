@@ -1594,17 +1594,37 @@ class BackendServiceLLMInitializationTestCase(unittest.TestCase):
                 service.close()
 
     def test_llm_rewriter_created_when_admin_enabled(self):
-        """settings.LLM_ENABLED=True → _llm_rewriter is LLMRewriter instance."""
+        """settings.LLM_ENABLED=True → _llm_rewriter is LLMRewriter instance.
+
+        2026-08-04: раньше патчился `backend.llm_rewriter.requests.get` — модульный
+        уровень, никак не связанный с реальным вызовом. `LLMRewriter.ping()` ходит
+        через `self._session.get(...)` (инстанс `requests.Session()`, созданный в
+        `__init__`), а не через модульную функцию `requests.get`. Мок никогда не
+        перехватывал вызов (0 обращений при `assert_called_once()`), и тест уходил
+        в РЕАЛЬНЫЙ `GET http://localhost:1234/api/v1/models` — на CI просто быстро
+        падал по connection-refused (тест зелёный не благодаря моку, а благодаря
+        тому, что `ping()` глотает любое исключение и `_llm_rewriter` возвращается
+        независимо от результата ping), а на машине владельца с реально запущенным
+        LM Studio — бил в него по-настоящему при каждом прогоне юнит-тестов.
+        Патчим правильный МЕТОД КЛАССА `requests.Session.get` — тот, что реально
+        резолвится для `self._session.get(...)` (тот же класс TDD-урока, что и
+        сиблинг-баги MRO в CLAUDE.md: патчить нужно то, откуда объект РЕАЛЬНО
+        берёт метод).
+        """
         from unittest.mock import patch
         import core.config as _cfg
         with patch.object(_cfg.settings, "LLM_ENABLED", True), \
-                patch("backend.llm_rewriter.requests.get") as mock_get:
+                patch("requests.Session.get") as mock_get:
             mock_get.return_value.status_code = 200
             from backend.service import BackendService
             from backend.llm_rewriter import LLMRewriter
             service = BackendService(store=self.store)
             try:
                 self.assertIsInstance(service._llm_rewriter, LLMRewriter)
+                # Доказываем, что мок РЕАЛЬНО перехватил вызов — не декоративен.
+                mock_get.assert_called_once()
+                called_url = mock_get.call_args.args[0]
+                self.assertIn("/api/v1/models", called_url)
             finally:
                 service.close()
 
