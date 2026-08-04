@@ -280,6 +280,13 @@ extension AgentAppDelegate {
 
     func recoverFromPreviewFallback(reason: String, completion: @escaping (Bool) -> Void) {
         logger.warn("Запуск fallback из realtime preview: \(reason)")
+        // Fable-ревью L2 (2026-08-04): recoverFromPreviewFallback вызывается СИНХРОННО
+        // из stopRecording() ДО terminal cleanup, но ТЕЛО асинхронно — 2 раунда IPC на
+        // фоновой очереди. Terminal cleanup выполняется сразу после этого вызова, не
+        // дожидаясь его завершения, и успевает обнулить recordingTargetApp раньше, чем
+        // фоновая работа дойдёт до handleTranscriptionResult. Захват здесь, СЕЙЧАС, пока
+        // поле ещё достоверно — тот же класс фикса, что M1/основной путь.
+        let capturedTarget = recordingTargetApp
         let client = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else {
@@ -314,7 +321,11 @@ extension AgentAppDelegate {
             }
 
             DispatchQueue.main.async {
-                self.handleTranscriptionResult(text: previewText, historyId: historyId)
+                self.handleTranscriptionResult(
+                    text: previewText,
+                    historyId: historyId,
+                    pasteTargetOverride: capturedTarget
+                )
                 self.notify(
                     title: "Krab Ear",
                     body: "Использован fallback realtime-текста: \(reason)"

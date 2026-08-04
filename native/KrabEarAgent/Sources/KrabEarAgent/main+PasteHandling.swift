@@ -10,7 +10,20 @@ extension AgentAppDelegate {
 
     // MARK: - Transcription result & paste
 
-    func handleTranscriptionResult(text: String, historyId: String?) {
+    /// `pasteTargetOverride` — используется путями, где `handleTranscriptionResult`
+    /// вызывается АСИНХРОННО, уже после того, как terminal cleanup мог обнулить
+    /// `recordingTargetApp` (Fable-ревью L2, 2026-08-04: `recoverFromPreviewFallback`
+    /// делает 2 раунда IPC на фоновой очереди перед вызовом — за это время cleanup,
+    /// запущенный синхронно сразу после `recoverFromPreviewFallback(...)`, уже успевает
+    /// обнулить поле). Такие вызывающие стороны обязаны захватить цель ДО ухода на
+    /// фоновую очередь и передать сюда явным параметром. `nil` (дефолт, обычный
+    /// синхронный путь из main+HotkeyRecording.swift) — читаем `recordingTargetApp`
+    /// как раньше, поле там ещё достоверно.
+    func handleTranscriptionResult(
+        text: String,
+        historyId: String?,
+        pasteTargetOverride: NSRunningApplication? = nil
+    ) {
         let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanText.isEmpty else {
             logger.warn("handleTranscriptionResult получил пустой текст")
@@ -35,7 +48,7 @@ extension AgentAppDelegate {
         // continueTranscriptionResult и QuickEdit-замыкания, делает каждую диктовку
         // независимой — общего изменяемого состояния между двумя одновременными
         // диктовками больше нет.
-        let pasteTarget = recordingTargetApp
+        let pasteTarget = pasteTargetOverride ?? recordingTargetApp
 
         // Финализируем streaming-paste сессию АВТОРИТЕТНЫМ текстом из ответа IPC (не через
         // SSE realtime.final_transcript — тот структурно недостижим здесь: SSE уже закрыт

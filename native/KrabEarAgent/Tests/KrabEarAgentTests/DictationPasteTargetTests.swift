@@ -192,4 +192,53 @@ final class DictationPasteTargetTests: XCTestCase {
             "Политика диктовки не должна перехватывать явную пользовательскую вставку"
         )
     }
+
+    // MARK: - L2 (Fable-ревью 2026-08-04): preview-fallback путь тоже читает protuхшее поле
+
+    /// `recoverFromPreviewFallback()` вызывается СИНХРОННО из stopRecording()
+    /// ДО terminal cleanup (тот же порядок, что и `handleTranscriptionResult` в
+    /// основном пути — Fable подтвердила это построчно утром 2026-08-04). Но
+    /// ТЕЛО функции асинхронно: два раунда IPC (get_recording_state,
+    /// add_history_item) на фоновой очереди, и только ПОТОМ — на main —
+    /// вызов handleTranscriptionResult. К этому моменту terminal cleanup уже
+    /// успевает обнулить recordingTargetApp (он выполняется синхронно сразу
+    /// после вызова recoverFromPreviewFallback, не дожидаясь его завершения).
+    /// Итог: спасённый rescue-текст длинной диктовки при переключении
+    /// приложения уходит «куда ушёл», а не «где начал» — тот же баг, который
+    /// чинит вся эта волна, на ТРЕТЬЕМ канале (после прямого пути и QuickEdit).
+    ///
+    /// Фикс: захват `recordingTargetApp` — ПЕРВАЯ строка функции, до
+    /// `DispatchQueue.global`, пока поле ещё достоверно; захваченное значение
+    /// течёт явным override-параметром в handleTranscriptionResult.
+    func test_preview_fallback_captures_target_before_async_dispatch() throws {
+        let src = try source("main+RealtimeOverlay.swift")
+        let fallbackBody = try body(
+            of: "func recoverFromPreviewFallback",
+            in: src,
+            maxLength: 1000
+        )
+        guard let dispatchRange = fallbackBody.range(of: "DispatchQueue.global") else {
+            return XCTFail("DispatchQueue.global не найден — тест устарел")
+        }
+        let beforeDispatch = String(fallbackBody[..<dispatchRange.lowerBound])
+        XCTAssertTrue(
+            beforeDispatch.contains("recordingTargetApp"),
+            "recoverFromPreviewFallback обязан захватить recordingTargetApp ДО " +
+            "перехода на фоновую очередь — иначе terminal cleanup успевает его обнулить"
+        )
+    }
+
+    func test_preview_fallback_passes_captured_target_to_handler() throws {
+        let src = try source("main+RealtimeOverlay.swift")
+        let fallbackBody = try body(
+            of: "func recoverFromPreviewFallback",
+            in: src,
+            maxLength: 2600
+        )
+        XCTAssertTrue(
+            fallbackBody.contains("handleTranscriptionResult(") &&
+            fallbackBody.range(of: "handleTranscriptionResult\\([^)]*pasteTargetOverride", options: .regularExpression) != nil,
+            "Захваченная цель обязана дойти до handleTranscriptionResult явным параметром"
+        )
+    }
 }
