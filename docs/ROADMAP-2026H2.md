@@ -1390,3 +1390,13 @@ Health-check `scripts/krab_ear_runner_health_check.py` + LaunchAgent
   как локальная замена Gemini-перевода — это зона Voice Gateway, НЕ этого репо (передать
   брифом при случае). TTS-кандидат CosyVoice 3 (streaming, клонирование) — в бэклог без
   приоритета: Silero/Kokoro закрывают текущие нужды.
+- **2026-08-04 (вечер) — 🟢 S3-хвост: `scripts/install_backend_launchagent.command`
+  опрашивает bootout вместо слепого sleep 1** (`00a45b67`). Фиксированный `sleep 1`
+  после `launchctl bootout` предполагал гарантированное завершение за секунду — на
+  загруженной машине (сегодняшний живой пример: load average 294) это не так, следующий
+  bootstrap того же label рисковал race'ом со старым сервисом на том же socket path.
+  Новая `wait_for_bootout(label, timeout_sec=5)` опрашивает `launchctl print` вместо
+  слепого ожидания — тот же принцип, что уже применён в smoke-test ping ниже по этому
+  скрипту. Тесты извлекают функцию из текста скрипта (тот же приём, что
+  `busy_reason`/`ipc_call`), гоняют с фейковым `launchctl` в PATH. Install-time скрипт —
+  деплоя на живой backend/агент не требует.
