@@ -94,6 +94,12 @@ _DEFAULT_VENV_PYTHON = os.path.expanduser("~/.venv_krab_ear_gigaam/bin/python")
 _SUBPROCESS_TRANSCRIBE_TIMEOUT_SEC = 120.0
 _SUBPROCESS_LOAD_TIMEOUT_SEC = 180.0
 
+# Grace-период после terminate() внутри _timeout_kill(), прежде чем
+# эскалировать до kill() (SIGKILL). Значение зеркалит вторую фазу close()
+# (строка ~769: wait(timeout=1.0) перед kill()) — тот же класс операции,
+# тот же бюджет ожидания.
+_TIMEOUT_KILL_GRACE_SEC = 1.0
+
 
 class GigaAMAdapter:
     """Адаптер GigaAM v1-v3 для распознавания русскоязычной речи.
@@ -947,12 +953,37 @@ class _GigaAMSubprocessSession:
             pass  # must never raise
 
     def _timeout_kill(self) -> None:
-        """Вызывается Timer'ом если worker не ответил вовремя."""
+        """Вызывается Timer'ом если worker не ответил вовремя.
+
+        Живой инцидент 2026-08-03: под нагрузкой (D-state, застрявший в
+        native-коде GigaAM-инференс, задавленный планировщик ОС) SIGTERM не
+        гарантированно убивает процесс — тогда stdout-fd никогда не
+        закрывается, и заблокированный на readline() поток `_send()` виснет
+        НАВСЕГДА (наблюдаемый симптом: воркер `<defunct>`, backend ждёт ответа
+        вечно). Сиблинг `close()` уже делает terminate→wait→kill (graceful
+        shutdown escalation); здесь тот же паттерн — раньше отсутствовал.
+        Работает на Timer-треде, отдельном от блокированного на readline()
+        потока `_send()` — блокирующий `wait()` здесь безопасен, `os.waitpid`
+        не трогает stdout/stdin/stderr pipes.
+        """
         if self._proc is None or self._proc.poll() is not None:
             return
         logger.warning("_GigaAMSubprocessSession: worker timeout → terminating")
+        proc = self._proc
         try:
-            self._proc.terminate()
+            proc.terminate()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=_TIMEOUT_KILL_GRACE_SEC)
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "_GigaAMSubprocessSession: worker пережил terminate() — эскалация до kill()"
+            )
+            try:
+                proc.kill()
+            except Exception:
+                pass
         except Exception:
             pass
         # Wave 60: push stt.gigaam_worker_timeout to error bus (never raises)

@@ -564,6 +564,77 @@ class TestGigaAMWorkerTimeoutPushesError(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Live-инцидент 2026-08-03 — _timeout_kill не эскалировал terminate()→kill()
+#
+# Sibling-gate asymmetry: close() (строки 761-771) уже делает terminate→wait→
+# kill escalation при graceful shutdown; _timeout_kill() слал ТОЛЬКО terminate()
+# и возвращался, не проверяя, реально ли процесс умер. Под нагрузкой (D-state,
+# застрявший в native-коде GigaAM-инференс, задавленный планировщик ОС) SIGTERM
+# может не убить процесс вовсе — тогда stdout-fd никогда не закрывается, и
+# заблокированный на readline() поток _send() виснет НАВСЕГДА (наблюдаемый
+# симптом: воркер `<defunct>`, backend ждёт ответа вечно).
+# ---------------------------------------------------------------------------
+
+class TestGigaAMTimeoutKillEscalation(unittest.TestCase):
+    """_timeout_kill эскалирует до kill(), если terminate() не убил процесс."""
+
+    def test_escalates_to_kill_when_terminate_does_not_die(self):
+        from core.pipeline.stt_gigaam import _GigaAMSubprocessSession
+        import subprocess as sp
+
+        session = _GigaAMSubprocessSession.__new__(_GigaAMSubprocessSession)
+        session.oom_callback = None
+        session._error_bus = None
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None  # процесс всё ещё жив на входе
+        mock_proc.wait.side_effect = sp.TimeoutExpired(cmd="worker", timeout=1.0)
+        session._proc = mock_proc
+
+        session._timeout_kill()
+
+        mock_proc.terminate.assert_called_once()
+        mock_proc.wait.assert_called_once()
+        mock_proc.kill.assert_called_once()
+
+    def test_no_escalation_when_terminate_succeeds(self):
+        """wait() не бросает TimeoutExpired — SIGTERM сработал, kill() лишний."""
+        from core.pipeline.stt_gigaam import _GigaAMSubprocessSession
+
+        session = _GigaAMSubprocessSession.__new__(_GigaAMSubprocessSession)
+        session.oom_callback = None
+        session._error_bus = None
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        mock_proc.wait.return_value = 0  # процесс вышел сам, wait() не таймаутит
+        session._proc = mock_proc
+
+        session._timeout_kill()
+
+        mock_proc.terminate.assert_called_once()
+        mock_proc.wait.assert_called_once()
+        mock_proc.kill.assert_not_called()
+
+    def test_never_raises_when_wait_or_kill_error(self):
+        """Timer-тред: любое исключение здесь молча теряется, никогда не всплывает."""
+        from core.pipeline.stt_gigaam import _GigaAMSubprocessSession
+        import subprocess as sp
+
+        session = _GigaAMSubprocessSession.__new__(_GigaAMSubprocessSession)
+        session.oom_callback = None
+        session._error_bus = None
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        mock_proc.wait.side_effect = sp.TimeoutExpired(cmd="worker", timeout=1.0)
+        mock_proc.kill.side_effect = ProcessLookupError("already gone")
+        session._proc = mock_proc
+
+        session._timeout_kill()  # не должен бросить
+
+
+# ---------------------------------------------------------------------------
 # Wave 1742 — GigaAM worker subprocess PATH must include ffmpeg directory
 # Regression guard for launchd minimal-PATH bug:
 #   REST server starts with PATH=/usr/bin:/bin:/usr/sbin:/sbin
