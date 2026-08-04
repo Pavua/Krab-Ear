@@ -1294,6 +1294,21 @@ Health-check `scripts/krab_ear_runner_health_check.py` + LaunchAgent
   декоративен. Попутно найдена (НЕ вызвана этой правкой — воспроизведена на чистом HEAD
   ДО коммита) pre-existing утечка GigaAM-воркер-процесса в том же тестовом файле —
   зафиксирована отдельной задачей (chip), вне скоупа этой мини-волны.
+- **2026-08-04 (вечер) — 🟢 Утечка GigaAM-воркера ЗАКРЫТА** (`be4f7ed4`).
+  Корень: `AudioEngine.__init__` безусловно спавнит background-тред «GigaAM-warmup»
+  (дефолт `skip_gigaam_warmup=False`), который конструирует реальный
+  `_GigaAMSubprocessSession` — реальный `subprocess.Popen`. `STTRouter` уже умел
+  закрывать кэшированный адаптер (`_close_cached_gigaam_adapter`, вызывался реактивно
+  при смене конфига), но ни `AudioEngine`, ни `Transcriber`, ни `BackendService.close()`
+  не имели пути до него дотянуться — цепочка close() обрывалась на полпути. Фикс —
+  четыре слоя: `STTRouter.close()` (публичная точка входа) → `AudioEngine.close()` →
+  `Transcriber.close()` → `BackendService.close()`, везде duck-typed guard
+  (`getattr(..., "close", None)`) — фейки в тестах без `close()` не роняют вызов
+  AttributeError-шумом. 10 новых тестов, мутация (откат service.py-блока) роняет
+  ключевой. Решающая проверка: тот же ubuntu-parity гейт, что утром поймал утечку
+  (`pre_merge_py312_check.sh KrabEar/tests/test_backend_service.py`) — теперь ALL
+  GREEN без единого «НОВЫЙ WORKER» предупреждения. Мини-волна хвостов инцидента
+  потери диктовок полностью закрыта — все пункты, найденные за день, зачинены.
 - **2026-08-04 — 🟢 Мини-волна хвостов инцидента закрыта: честный тост + GigaAM zombie-detect + Fable-гейт автовставки.**
   (1) `bcae48de` — `restartIfDead()` больше не врёт: новый `BackendRestartOutcome
   {.alreadyAlive/.recovered/.failed}` различает «ничего не трогали» (тугой 2с-таймаут
