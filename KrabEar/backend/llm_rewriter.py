@@ -377,26 +377,59 @@ class LLMRewriter:
         self._fallback_timeout = float(value)
 
     def _idle_keepalive_loop(self) -> None:
-        """Фоновый loop: каждые idle_keepalive_sec вызывает warmup_probe чтобы
-        предотвратить выгрузку модели из памяти LM Studio по idle TTL.
+        """Фоновый loop: каждые idle_keepalive_sec вызывает _idle_keepalive_tick
+        чтобы предотвратить выгрузку модели из памяти LM Studio по idle TTL.
 
         Использует _shutdown_event.wait() — корректно завершается при close().
-        Ошибки warmup_probe проглатываются (они уже логируются внутри).
         """
         logger.info(
             "LLM idle keepalive started: interval=%ds model=%s",
             self._idle_keepalive_sec, self._model,
         )
         while not self._shutdown_event.wait(self._idle_keepalive_sec):
-            try:
-                result = self.warmup_probe(timeout_sec=60.0)
-                logger.info(
-                    "LLM idle keepalive ping: ok=%s latency_ms=%s model=%s",
-                    result.get("ok"), result.get("latency_ms"), self._model,
-                )
-            except Exception as exc:  # never raise from keepalive
-                logger.warning("LLM idle keepalive failed: %s", exc)
+            self._idle_keepalive_tick()
         logger.info("LLM idle keepalive stopped")
+
+    def _idle_keepalive_tick(self) -> None:
+        """Один цикл keepalive. Выделен из _idle_keepalive_loop для тестируемости
+        без реальных тредов/таймеров.
+
+        Живая находка 2026-08-04: `llm_idle_keepalive_enabled` (гейт самого
+        треда, DEFAULT_SETTINGS=True) — ДРУГОЙ тумблер, не связанный с тем,
+        что владелец реально выключает в UI («постобработка»,
+        `llm_rewrite_enabled`). Без этой проверки тред безусловно пинговал
+        LM Studio каждые idle_keepalive_sec, триггеря JIT-загрузку модели
+        (6.86 ГБ) даже когда постобработка выключена — держать модель тёплой
+        незачем для фичи, которой пользователь не пользуется.
+
+        Fail-CLOSED при ошибке чтения настройки (не fail-open): цена ошибки
+        асимметрична — пропущенный пинг стоит одного холодного старта при
+        следующем реальном rewrite; лишняя загрузка при явно выключенной
+        постобработке — реальный баг, который эта проверка чинит.
+        """
+        getter = self._settings_getter
+        if getter is not None:
+            try:
+                rewrite_enabled = bool(getter("llm_rewrite_enabled", False))
+            except Exception:
+                logger.debug(
+                    "LLM idle keepalive: не удалось прочитать llm_rewrite_enabled — пинг пропущен"
+                )
+                return
+            if not rewrite_enabled:
+                logger.debug(
+                    "LLM idle keepalive: постобработка выключена (llm_rewrite_enabled=False) — "
+                    "пинг пропущен"
+                )
+                return
+        try:
+            result = self.warmup_probe(timeout_sec=60.0)
+            logger.info(
+                "LLM idle keepalive ping: ok=%s latency_ms=%s model=%s",
+                result.get("ok"), result.get("latency_ms"), self._model,
+            )
+        except Exception as exc:  # never raise from keepalive
+            logger.warning("LLM idle keepalive failed: %s", exc)
 
     def _lm_studio_headers(self) -> dict:
         """Build HTTP headers for LM Studio POST requests.
