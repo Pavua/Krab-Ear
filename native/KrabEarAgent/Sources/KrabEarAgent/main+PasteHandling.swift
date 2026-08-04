@@ -18,15 +18,24 @@ extension AgentAppDelegate {
             return
         }
 
-        // Фиксируем адресата вставки СЕЙЧАС, пока terminal cleanup ещё не обнулил
-        // recordingTargetApp (main+HotkeyRecording.swift чистит его сразу после этого
-        // вызова) и пока сменившийся frontmost не перебил выбор. Инцидент 2026-08-03:
-        // за 38 с финализации активным стал Safari, и диктовка из Claude Desktop
-        // улетела туда. Намеренно БЕЗ `?? lastExternalApp`: то поле переписывается на
-        // каждую активацию внешнего приложения, поэтому «последнее внешнее» к этому
-        // моменту означает «куда пользователь ушёл», а не «откуда диктовал». Когда
-        // запомненной цели нет, пусть решает политика в момент вставки.
-        dictationPasteTarget = recordingTargetApp
+        // Фиксируем адресата вставки СЕЙЧАС как ЛОКАЛЬНОЕ значение, пока terminal
+        // cleanup ещё не обнулил recordingTargetApp (main+HotkeyRecording.swift чистит
+        // его сразу после этого вызова) и пока сменившийся frontmost не перебил выбор.
+        // Инцидент 2026-08-03: за 38 с финализации активным стал Safari, и диктовка из
+        // Claude Desktop улетела туда. Намеренно БЕЗ `?? lastExternalApp`: то поле
+        // переписывается на каждую активацию внешнего приложения, поэтому «последнее
+        // внешнее» к этому моменту означает «куда пользователь ушёл», а не «откуда
+        // диктовал». Когда запомненной цели нет, пусть решает политика в момент вставки.
+        //
+        // Fable-ревью M1 (2026-08-03): ЛОКАЛЬНОЕ значение, а НЕ поле делегата — поле было
+        // ЕДИНЫМ на все диктовки, и пока QuickEdit-оверлей диктовки A ждёт пользователя
+        // (isProcessing уже снят к этому моменту — main+HotkeyRecording.swift, ничто не
+        // мешает начать диктовку B), захват B перезаписывал общее поле раньше, чем A
+        // успевала его прочитать в performAutoPaste. Параметр, прокинутый через
+        // continueTranscriptionResult и QuickEdit-замыкания, делает каждую диктовку
+        // независимой — общего изменяемого состояния между двумя одновременными
+        // диктовками больше нет.
+        let pasteTarget = recordingTargetApp
 
         // Финализируем streaming-paste сессию АВТОРИТЕТНЫМ текстом из ответа IPC (не через
         // SSE realtime.final_transcript — тот структурно недостижим здесь: SSE уже закрыт
@@ -42,13 +51,25 @@ extension AgentAppDelegate {
         // вешал AppHang (Sentry KRAB-EAR-AGENT-8). Continuation запускает полный paste flow
         // только после того, как IPC ответил (или не ответил → id == nil, fallback path).
         ensureHistoryItem(text: cleanText, existingId: historyId) { [weak self] effectiveHistoryId in
-            self?.continueTranscriptionResult(cleanText: cleanText, historyId: effectiveHistoryId)
+            self?.continueTranscriptionResult(
+                cleanText: cleanText,
+                historyId: effectiveHistoryId,
+                pasteTarget: pasteTarget
+            )
         }
     }
 
     /// Continuation для `handleTranscriptionResult` после async-resolve history_id.
     /// Вызывается на main thread (см. `ensureHistoryItem` completion dispatch).
-    func continueTranscriptionResult(cleanText: String, historyId effectiveHistoryId: String?) {
+    ///
+    /// `pasteTarget` — снэпшот адресата, зафиксированный в `handleTranscriptionResult`
+    /// ДО этого вызова; течёт параметром, а не полем делегата (Fable-ревью M1,
+    /// 2026-08-03) — см. комментарий на месте захвата.
+    func continueTranscriptionResult(
+        cleanText: String,
+        historyId effectiveHistoryId: String?,
+        pasteTarget: NSRunningApplication?
+    ) {
         if lastResult == nil || lastResult?.finalText != cleanText {
             lastResult = LastTranscriptionSnapshot(
                 finalText: cleanText,
@@ -109,7 +130,7 @@ extension AgentAppDelegate {
                     switch result {
                     case .paste(let editedText):
                         self.logger.info("QuickEdit: пользователь отредактировал текст, paste")
-                        self.performAutoPaste(text: editedText, historyId: effectiveHistoryId)
+                        self.performAutoPaste(text: editedText, historyId: effectiveHistoryId, target: pasteTarget)
                     case .cancel:
                         self.logger.info("QuickEdit: пользователь отменил вставку")
                         self.markPasteStatus(historyId: effectiveHistoryId, status: "failed")
@@ -117,23 +138,23 @@ extension AgentAppDelegate {
                         self.notify(title: "Krab Ear", body: "Вставка отменена")
                     case .timeout(let originalText):
                         self.logger.info("QuickEdit: таймаут — вставляем исходный текст")
-                        self.performAutoPaste(text: originalText, historyId: effectiveHistoryId)
+                        self.performAutoPaste(text: originalText, historyId: effectiveHistoryId, target: pasteTarget)
                     }
                 }
             )
             return
         }
 
-        performAutoPaste(text: cleanText, historyId: effectiveHistoryId)
+        performAutoPaste(text: cleanText, historyId: effectiveHistoryId, target: pasteTarget)
     }
 
     // MARK: - Core paste helper
 
-    func performAutoPaste(text: String, historyId: String?) {
-        // Захваченная цель живёт ровно до конца этой попытки: держать её дольше
-        // незачем, а протухшая ссылка увела бы следующую вставку не туда.
-        defer { dictationPasteTarget = nil }
-
+    /// `target` — снэпшот адресата диктовки, зафиксированный в `handleTranscriptionResult`
+    /// и прокинутый через `continueTranscriptionResult`/QuickEdit-замыкания. Параметр, а не
+    /// поле делегата (Fable-ревью M1, 2026-08-03) — исключает переналожение двух
+    /// одновременных диктовок на общем изменяемом состоянии.
+    func performAutoPaste(text: String, historyId: String?, target: NSRunningApplication?) {
         // Если streaming paste уже вставил текст по мере диктовки — пропускаем финальную
         // полную вставку, чтобы не задваивать текст. Сбрасываем флаг после принятия решения.
         if settings.streamingPasteEnabled,
@@ -147,7 +168,7 @@ extension AgentAppDelegate {
             return
         }
 
-        guard let targetApp = resolveDictationPasteTargetApp() else {
+        guard let targetApp = resolveDictationPasteTargetApp(captured: target) else {
             markPasteStatus(historyId: historyId, status: "failed")
             historyPanel?.onHistoryDidUpdate()
             logger.warn("Не найден target app для вставки")
@@ -341,9 +362,9 @@ extension AgentAppDelegate {
     /// принципиально другой запрос — пользователь прямо сейчас указал, куда
     /// вставить, и там верным адресатом остаётся текущее активное приложение.
     /// Урок S34: одна общая точка вредит, когда у вызывающих сторон разные роли.
-    func resolveDictationPasteTargetApp() -> NSRunningApplication? {
+    func resolveDictationPasteTargetApp(captured: NSRunningApplication?) -> NSRunningApplication? {
         let selfPID = ProcessInfo.processInfo.processIdentifier
-        let captured = dictationPasteTarget.flatMap { $0.isTerminated ? nil : $0 }
+        let captured = captured.flatMap { $0.isTerminated ? nil : $0 }
         let frontmost = NSWorkspace.shared.frontmostApplication.flatMap {
             ($0.processIdentifier != selfPID && $0.activationPolicy == .regular) ? $0 : nil
         }

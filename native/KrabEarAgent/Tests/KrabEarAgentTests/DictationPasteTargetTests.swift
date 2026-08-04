@@ -111,15 +111,57 @@ final class DictationPasteTargetTests: XCTestCase {
         return try String(contentsOf: url, encoding: .utf8)
     }
 
+    /// Извлекает тело функции по её сигнатуре — та же техника, что уже
+    /// использовал `test_snapshot_paste_keeps_frontmost_first_resolver`.
+    ///
+    /// Fable-ревью 2026-08-03 (M1/L1) нашло, что предыдущая версия этих тестов
+    /// грепала подстроку по ВСЕМУ файлу без скоупа — `"dictationPasteTarget ="`
+    /// матчил и захват, и НИКАК не связанный `defer { dictationPasteTarget =
+    /// nil }`; `"resolveDictationPasteTargetApp()"` матчил само ОБЪЯВЛЕНИЕ
+    /// функции, так что тест был бы зелёным, даже удали кто-то вызов из
+    /// `performAutoPaste`. Оба теста «валидировали дыру» — были декоративны.
+    private func body(of signature: String, in src: String, maxLength: Int = 1400) throws -> String {
+        guard let range = src.range(of: signature) else {
+            throw XCTSkip("\(signature) не найдена в исходнике — тест устарел")
+        }
+        return String(src[range.lowerBound...].prefix(maxLength))
+    }
+
+    /// Fable-ревью M1 (2026-08-03): единое ПОЛЕ делегата для цели диктовки
+    /// давало возможность наложения. `isProcessing` описывает только ожидание
+    /// ответа `stop_recording` и снимается ДО того, как открывается QuickEdit-
+    /// оверлей — ничто не мешает начать и завершить диктовку B, пока оверлей
+    /// диктовки A ещё ждёт пользователя. Общее поле означало: захват B
+    /// перезаписывает поле раньше, чем A успевает его прочитать в
+    /// performAutoPaste — тот же класс «текст ушёл не туда», который эта волна
+    /// чинит, воспроизведённый через второй канал. Фикс убирает общее
+    /// изменяемое состояние ВООБЩЕ — цель течёт параметром через
+    /// continueTranscriptionResult и QuickEdit-замыкания, у каждой диктовки
+    /// свой независимый снэпшот.
+    func test_no_shared_dictationPasteTarget_field() throws {
+        let mainSrc = try source("main.swift")
+        XCTAssertFalse(
+            mainSrc.contains("dictationPasteTarget"),
+            "Цель диктовки не должна быть полем делегата — общее состояние " +
+            "между диктовками ловит переналожение через QuickEdit (M1, 2026-08-03)"
+        )
+    }
+
     /// Цель обязана захватываться в момент готовности текста, а не читаться из
     /// `recordingTargetApp` в момент вставки: terminal cleanup обнуляет поле, а
     /// `performAutoPaste` может выполниться СИЛЬНО позже (async `ensureHistoryItem`
     /// при отсутствии history_id, таймаут QuickEdit).
     func test_transcription_result_captures_paste_target() throws {
         let src = try source("main+PasteHandling.swift")
+        let handlerBody = try body(of: "func handleTranscriptionResult", in: src, maxLength: 2200)
         XCTAssertTrue(
-            src.contains("dictationPasteTarget ="),
-            "handleTranscriptionResult обязан захватить цель вставки до асинхронных ветвей"
+            handlerBody.contains("recordingTargetApp"),
+            "handleTranscriptionResult обязан захватить цель вставки из recordingTargetApp " +
+            "до асинхронных ветвей"
+        )
+        XCTAssertTrue(
+            handlerBody.contains("continueTranscriptionResult"),
+            "Захваченная цель обязана течь дальше параметром в continueTranscriptionResult"
         )
     }
 
@@ -127,8 +169,9 @@ final class DictationPasteTargetTests: XCTestCase {
     /// frontmost-first резолвер.
     func test_autopaste_resolves_through_dictation_policy() throws {
         let src = try source("main+PasteHandling.swift")
+        let pasteBody = try body(of: "func performAutoPaste", in: src)
         XCTAssertTrue(
-            src.contains("resolveDictationPasteTargetApp()"),
+            pasteBody.contains("resolveDictationPasteTargetApp("),
             "performAutoPaste обязан выбирать цель через политику диктовки"
         )
     }
@@ -139,16 +182,13 @@ final class DictationPasteTargetTests: XCTestCase {
     /// вызывающих сторон разные роли.
     func test_snapshot_paste_keeps_frontmost_first_resolver() throws {
         let src = try source("main+PasteHandling.swift")
-        guard let snapshotRange = src.range(of: "func pasteSnapshotText") else {
-            return XCTFail("pasteSnapshotText не найдена — тест устарел")
-        }
-        let snapshotBody = String(src[snapshotRange.lowerBound...].prefix(1400))
+        let snapshotBody = try body(of: "func pasteSnapshotText", in: src)
         XCTAssertTrue(
             snapshotBody.contains("resolvePreferredPasteTargetApp()"),
             "Быстрая вставка обязана целиться в текущее активное приложение"
         )
         XCTAssertFalse(
-            snapshotBody.contains("resolveDictationPasteTargetApp()"),
+            snapshotBody.contains("resolveDictationPasteTargetApp("),
             "Политика диктовки не должна перехватывать явную пользовательскую вставку"
         )
     }

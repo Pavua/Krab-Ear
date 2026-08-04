@@ -17,7 +17,7 @@
  ли случайно под рукой чужое текстовое поле.
 
  Связи модуля:
- 1) main+PasteHandling.swift: `resolveDictationPasteTargetApp()` отображает выбор
+ 1) main+PasteHandling.swift: `resolveDictationPasteTargetApp(captured:)` отображает выбор
     на конкретные `NSRunningApplication`.
  2) DictationPasteTargetTests.swift: чистая логика + source-контракт проводки.
 
