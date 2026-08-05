@@ -16,6 +16,11 @@ native/KrabEarAgent/.build/
 native/runtime/
 native/Frameworks/
 
+# Bundled Python runtime (scripts/build_bundled_runtime.command output, ~2.5GB
+# — build artifact, never commit). build/.runtime_cache/ caches the downloaded
+# python-build-standalone tarball across rebuilds.
+build/
+
 # Runtime-логи и pid
 *.log
 *.pid
