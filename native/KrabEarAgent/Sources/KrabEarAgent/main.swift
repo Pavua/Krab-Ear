@@ -1313,18 +1313,41 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// AGENT-3 / Sentry KRAB-EAR-AGENT-Q (2026-08-05): раньше здесь был синхронный
+    /// `callWithRecovery` прямо в @objc menu-handler'ах (~40 call site) — main thread
+    /// блокировался на `read()` Unix-сокета, а при мёртвом backend ещё и на
+    /// `isBackendAlive()`/`ensureBackendRunning()` (до 60+20с). `callAsyncWithRecovery`
+    /// уже существовал для этого класса багов (см. main+IPCRecovery.swift), но
+    /// persistSettingsPayload никогда не был на него переведён — sibling-gap.
+    ///
+    /// Оптимистичное локальное обновление синхронно (те же значения, что backend
+    /// почти всегда эхо подтвердит) — вызывающие ~40 @objc-хендлеров продолжают
+    /// читать актуальный `settings` сразу после вызова без изменений. Реальный
+    /// round-trip уходит в фоновый Task; авторитетный ответ backend применяется
+    /// повторно ТОЛЬКО если разошёлся с оптимистичным (applySettingsSideEffects
+    /// сравнивает previous/current поле-в-поле и no-op'ает на совпадении).
     func persistSettingsPayload(_ payload: [String: Any]) {
         let previous = settings
-        do {
-            let response = try callWithRecovery(method: "set_settings", params: payload)
-            guard let result = response["result"] as? [String: Any] else {
-                return
+        let optimistic = AgentSettings(from: payload)
+        settings = optimistic
+        applySettingsSideEffects(previous: previous, current: optimistic)
+        applyMode(optimistic.mode, persist: false)
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let response = try await self.callAsyncWithRecovery(method: "set_settings", params: payload)
+                guard let result = response["result"] as? [String: Any] else {
+                    return
+                }
+                let confirmed = AgentSettings(from: result)
+                let priorForEffects = self.settings
+                self.settings = confirmed
+                self.applySettingsSideEffects(previous: priorForEffects, current: confirmed)
+                self.applyMode(confirmed.mode, persist: false)
+            } catch {
+                self.notify(title: "Krab Ear", body: "Не удалось сохранить настройки")
             }
-            settings = AgentSettings(from: result)
-            applySettingsSideEffects(previous: previous, current: settings)
-            applyMode(settings.mode, persist: false)
-        } catch {
-            notify(title: "Krab Ear", body: "Не удалось сохранить настройки")
         }
     }
 

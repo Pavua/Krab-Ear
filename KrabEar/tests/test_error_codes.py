@@ -156,6 +156,11 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             # восстановили /health); ever_served/tombstone гейтят лечение,
             # см. backend/rest_watchdog.py.
             "rest.wedged",
+            # recording.long_duration_warning — RecordingDurationWatchdog
+            # (2026-08-05). Живой инцидент: незамеченная 52-минутная диктовка
+            # обвалила весь STT-fallback конвейер; warn задолго до порога
+            # деградации, dedupe 300с.
+            "recording.long_duration_warning",
         }
         self.assertEqual(set(ERROR_REGISTRY.keys()), expected)
 
@@ -260,7 +265,9 @@ class ErrorRegistryShapeTests(unittest.TestCase):
         tombstone, distinct from the fail-open port_conflict path) = 66;
         S3 Задача 7a (2026-07-31) added rest.wedged (RestWatchdog escalation
         after anti-storm exhaustion) = 67;
+        2026-08-05 recording-duration watchdog added
+        recording.long_duration_warning = 68;
         test_expected_codes_present guards the exact set so this count test is a
         redundant but cheap invariant.
         """
-        self.assertEqual(len(ERROR_REGISTRY), 67)
+        self.assertEqual(len(ERROR_REGISTRY), 68)

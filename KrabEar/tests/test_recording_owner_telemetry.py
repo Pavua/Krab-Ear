@@ -472,7 +472,9 @@ class RecordingOwnerConfigurationContractTest(unittest.TestCase):
         # (RestWatchdog, backend/rest_watchdog.py) — это уже 67 записей.
         # Этот счётчик и без того отставал от rest.startup_failed (Задача 4,
         # 66 записей) на момент правки — обновлён до актуального значения.
-        self.assertEqual(len(ERROR_REGISTRY), 67)
+        # 2026-08-05: recording.long_duration_warning (RecordingDurationWatchdog)
+        # добавлен в реестр — 68 записей.
+        self.assertEqual(len(ERROR_REGISTRY), 68)
 
     def test_backend_service_wires_error_bus_into_recording_core(self) -> None:
         source = (
