@@ -378,6 +378,76 @@ def _suppress_startup_diagnostics(request):
 
 
 # ---------------------------------------------------------------------------
+# 2026-08-05: LLMRewriter.ping()/warmup_probe()/summarize() hit real LM Studio
+# (loopback 127.0.0.1) via requests.Session — _block_real_network above
+# deliberately allows loopback (it would otherwise break legitimate local
+# mock servers), so this specific hole stayed open. When LM Studio is
+# unreachable/slow, the underlying socket.recv has no timeout the guard
+# enforces, and tests hang for minutes instead of failing fast — hit
+# repeatedly across unrelated test files (test_backend_service.py,
+# test_error_bus_integration.py, test_dispatch_complete.py, and others) on a
+# session where LM Studio was down all day. Neither of the two fixtures above
+# catches this: _disable_llm_warmup patches warmup_sync (a different method);
+# _suppress_startup_diagnostics patches StartupDiagnostics, not
+# BackendService._init_llm_rewriter()'s direct rewriter.ping() call.
+#
+# Scope deliberately does NOT include rewrite()/_rewrite_impl() — that's
+# LLMRewriter's primary API with the widest test surface (chatbot guard,
+# length-ratio guard, circuit breaker, fallback chain); blanket-patching it
+# here risks silently defeating existing per-test requests.Session mocks
+# that assert on real call behavior, without a full audit of every
+# rewrite-touching test. Only the entry points actually observed hanging
+# today are covered — extend deliberately, not preemptively, if a new one
+# surfaces.
+#
+# Exclusion matches the FILE component only (nodeid.split("::")[0]), not a
+# whole-nodeid substring — a whole-nodeid check would (and once did, by
+# coincidence) also match unrelated test METHODS merely named
+# "test_llm_rewriter_..." in a different file, silently exempting them from
+# this guard for the wrong reason. A single test living OUTSIDE those files
+# but still needing the real implementation (e.g. proving a requests.Session
+# mock actually intercepts the call, not decorative) opts out via the
+# `llm_network_live` marker instead of another filename special-case.
+@pytest.fixture(autouse=True)
+def _block_real_lm_studio_calls(request):
+    file_stem = Path(request.node.nodeid.split("::")[0]).stem.lower()
+    if (
+        file_stem.startswith("test_llm_rewriter")
+        or file_stem == "test_rewriter_warmup"
+        or request.node.get_closest_marker("llm_network_live")
+    ):
+        yield
+        return
+    try:
+        from unittest.mock import patch
+        from backend.llm_rewriter import LLMRewriter, LLMRewriteResult
+
+        with (
+            patch.object(LLMRewriter, "ping", lambda self: False),
+            patch.object(
+                LLMRewriter,
+                "warmup_probe",
+                lambda self, timeout_sec=None: {
+                    "ok": False,
+                    "latency_ms": 0,
+                    "error": "test_network_blocked",
+                },
+            ),
+            patch.object(
+                LLMRewriter,
+                "summarize",
+                lambda self, text, max_sentences=3: LLMRewriteResult(
+                    ok=False, text=None, fallback_reason="test_network_blocked",
+                    latency_ms=0,
+                ),
+            ),
+        ):
+            yield
+    except Exception:
+        yield
+
+
+# ---------------------------------------------------------------------------
 # Wave 1748: reset global ErrorBus ring-buffer + WarnBatcher state after each
 # test.  BackendService wires a per-instance ErrorBus, but the module-level
 # singleton (backend.event_bus.bus / backend.error_bus module state) can

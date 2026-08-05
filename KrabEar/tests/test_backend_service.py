@@ -1593,6 +1593,7 @@ class BackendServiceLLMInitializationTestCase(unittest.TestCase):
             finally:
                 service.close()
 
+    @pytest.mark.llm_network_live
     def test_llm_rewriter_created_when_admin_enabled(self):
         """settings.LLM_ENABLED=True → _llm_rewriter is LLMRewriter instance.
 

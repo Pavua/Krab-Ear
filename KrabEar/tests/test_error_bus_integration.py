@@ -253,7 +253,11 @@ class ErrorBusIntegrationTestCase(unittest.TestCase):
                 self.assertIn("rss_mb", proc)
                 self.assertIn("vsz_mb", proc)
                 self.assertIn("kind", proc)
-                self.assertIn(proc["kind"], ("agent", "backend", "worker"))
+                # "rest" — отдельный вид (standalone rest_server.py, см. комментарий
+                # в service.py::handle_get_memory_stats) — не отражён в этом тесте
+                # раньше; live-прогон на машине с реально запущенным standalone
+                # rest_server.py его ловит.
+                self.assertIn(proc["kind"], ("agent", "backend", "worker", "rest"))
                 self.assertIsInstance(proc["rss_mb"], float)
                 self.assertIsInstance(proc["vsz_mb"], float)
         else:
