@@ -472,6 +472,11 @@ class TestIpcIntegration(unittest.TestCase):
             mock_settings.IPC_SIGNING_ENABLED = False
             mock_settings.PIPELINE_V2 = False
             mock_settings.TELEGRAM_BRIDGE_URL = "http://localhost:8080"
+            # Recording-duration watchdog (2026-08-05): __init__ compares these
+            # two numerically — real defaults from core/config.py, not just any
+            # placeholder, so the mock behaves like the actual settings object.
+            mock_settings.RECORDING_DURATION_WARN_SEC = 600.0
+            mock_settings.MAX_DICTATION_DURATION_SEC = 2700.0
             svc = BackendService(store=store)
         return svc
 
@@ -560,6 +565,11 @@ class TestExportSchedulerPeriodicWorker(unittest.TestCase):
             mock_settings.IPC_SIGNING_ENABLED = False
             mock_settings.PIPELINE_V2 = False
             mock_settings.TELEGRAM_BRIDGE_URL = "http://localhost:8080"
+            # Recording-duration watchdog (2026-08-05): __init__ compares these
+            # two numerically — real defaults from core/config.py, not just any
+            # placeholder, so the mock behaves like the actual settings object.
+            mock_settings.RECORDING_DURATION_WARN_SEC = 600.0
+            mock_settings.MAX_DICTATION_DURATION_SEC = 2700.0
             svc = BackendService(store=store)
         return svc
 
@@ -615,6 +625,11 @@ class TestExportSchedulerPeriodicWorker(unittest.TestCase):
             mock_settings.IPC_SIGNING_ENABLED = False
             mock_settings.PIPELINE_V2 = False
             mock_settings.TELEGRAM_BRIDGE_URL = "http://localhost:8080"
+            # Recording-duration watchdog (2026-08-05): __init__ compares these
+            # two numerically — real defaults from core/config.py, not just any
+            # placeholder, so the mock behaves like the actual settings object.
+            mock_settings.RECORDING_DURATION_WARN_SEC = 600.0
+            mock_settings.MAX_DICTATION_DURATION_SEC = 2700.0
             svc = BackendService(store=store)
 
         # Stop the background thread immediately so it doesn't race.

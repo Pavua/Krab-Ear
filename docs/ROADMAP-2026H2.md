@@ -1458,3 +1458,103 @@ Health-check `scripts/krab_ear_runner_health_check.py` + LaunchAgent
   порождает заново на каждой итерации — для остановки долгоживущего
   `run_in_background`-цикла нужен `kill` PID самого цикла (не его текущего
   ребёнка), полученный из вывода запуска.
+
+### 2026-08-05 — AppHang-триаж Sentry krab-ear-agent (dSYM-пробел + sibling-gap)
+
+  Задача `task_0c905c78` из вчерашнего хендоффа: 3 живых AppHang issue
+  (Q/B/R) на триаже. По ходу расследования Sentry прислал ещё три новых
+  issue (T, S, V) — все того же класса, что и Q.
+
+  **Корень #1 — dSYM никогда не доезжал до Sentry для прод-путей.**
+  `release.yml` (официальный Sparkle-релизный пайплайн) НЕ делал `dsymutil`
+  вообще и не аплоадил в Sentry — только dev-инструмент
+  `build_and_deploy.command` это умел, а обычный быстрый `make sign`
+  (документированный как штатный dev-путь в CLAUDE.md) — нет. Проверено
+  живьём: `sentry-cli debug-files upload` list для UUID работающего
+  бинаря вернул `[]` (пусто) — символы были локально (`.build/.../release/
+  KrabEarAgent.dSYM`), но Sentry их никогда не получал → все стеки Q/B/R
+  приходили с `symbolicatorStatus: missing` на in-app фреймах. Фикс: (1)
+  ручной `sentry-cli debug-files upload` для UUID текущего живого билда —
+  закрыло дыру НЕМЕДЛЕННО (следующий issue, V, пришёл уже полностью
+  символицированным); (2) `release.yml` получил `dsymutil` шаг после
+  `swift build` + best-effort (`::warning`, не блокирует релиз) upload шаг
+  с `secrets.SENTRY_AUTH_TOKEN` — **владельцу нужно добавить этот секрет
+  в GitHub (`gh secret set SENTRY_AUTH_TOKEN --repo Pavua/Krab-Ear`),
+  иначе шаг молча warn'ит и релизы остаются несимволицированными** (не
+  делал сам — публичный репо, добавление секрета осознанно оставлено
+  владельцу). `make sign`/dev-путь остаётся без dSYM-аплоада (не тронуто —
+  риск переделки routine dev-loop не оправдан для одноразового
+  расследования; см. ниже).
+
+  **Корень #2 — sibling-gap: async-обёртка для `ensureBackendRunning()`/
+  `restartIfDeadDetailed()` существовала (`callAsyncWithRecovery`,
+  `ensureBackendRunningAsync`), но НЕ на все вызывающие.** После аплоада
+  dSYM issue V пришёл читаемым: `HealthMonitor.setupHealthMonitor`
+  closure → `MainActor.run { ... BackendSupervisor.restartIfDeadDetailed()
+  → ensureBackendRunning() }` — периодический health-check таймер (каждые
+  ~3с) вызывал синхронную цепочку (до 60с ping-таймаут + 20с retry-луп)
+  ПРЯМО внутри `MainActor.run`. Брейс-стек эвристика (`grep` + Python-скрипт,
+  211 sync `.call(` сайтов, 14 кандидатов без явного off-main на стеке
+  скобок) нашла второй реальный сайт: `persistSettingsPayload`/
+  `loadSettings` в `main.swift` — ~40 `@objc` menu-handler'ов (клик по
+  пункту статус-меню = main thread) звали синхронный `callWithRecovery`
+  напрямую, хотя async-твин `callAsyncWithRecovery` уже существовал в
+  `main+IPCRecovery.swift` именно для этого класса багов (доккомент
+  `IPCClient.swift` прямо ссылается на прошлые issue 4/8/A/B/C/D). Третий
+  подтверждённый сайт — не код-баг, а прямое совпадение сигнатуры: issue S
+  (`usleep`/`nanosleep`/`__semwait_signal`) — тот же `usleep(200_000)`
+  внутри retry-лупа `ensureBackendRunning()`, для которого прошлая волна
+  уже написала async-версию для startup-пути (докком ссылается на
+  «Sentry KRAB-EAR-AGENT-4»), но `restartIfDeadDetailed()` на неё не
+  перевели.
+
+  **Фиксы (2 коммита, оба задеплоены живьём, не просто закоммичены):**
+  1. `persistSettingsPayload` — оптимистичное локальное построение
+     `AgentSettings(from: payload)` синхронно (main thread не ждёт network
+     round-trip, ~40 вызывающих `@objc`-хендлеров не меняются), реальный
+     round-trip через `callAsyncWithRecovery` в фоновом `Task`;
+     `applySettingsSideEffects` сравнивает поле-в-поле и no-op'ает, если
+     backend подтвердил ровно то же самое (обычный случай).
+  2. `main+HealthMonitor.swift` — `restartIfDeadDetailed()` вынесен ИЗ
+     `MainActor.run` (callback от `HealthMonitor.tick()` — plain `@Sendable`
+     closure, изначально НЕ на MainActor; `MainActor.run` нужен только для
+     UI-хвоста toast/лога).
+  `loadSettings()` на старте (`completeStartupAfterBackendReady`) оставлен
+  БЕЗ фикса — единственный вызов сразу после подтверждённого живого ping
+  (риск ниже на порядок), переделка потребовала бы рефакторить всю
+  синхронную startup-последовательность без возможности живого тестирования
+  здесь — записано как известный остаточный риск, не тронуто намеренно.
+
+  **Деплой и живая проверка**: собран `swift build -c release` дважды
+  (после каждого фикса), бинарь скопирован в `native/runtime/` и
+  `Krab Ear.app/Contents/MacOS/`, подписан той же `Krab Ear Dev Local`
+  identity (TCC не тронут), dSYM UUID сверен и заново аплоаден в Sentry
+  после каждой сборки, Swift-агент перезапущен (НЕ backend — запись не
+  теряется). **Побочно найден и починен живой инцидент**: пока
+  верифицировал, backend оказался реально завис (`handle_request завис
+  дольше 180с (method=ping)` — backstop сам логировал это раз в несколько
+  секунд минимум 24 минуты подряд, мой собственный прямой ping тоже
+  словил 5с таймаут) — вылечено через `scripts/safe_backend_restart.command`
+  (без `--wait`, скрипт сам определил мёртвый/неотвечающий сокет как
+  «не занят записью» и разрешил kickstart — ровно документированный fail-safe
+  путь).
+
+  **Issue B/R — не app-баг.** Оба стека — целиком AppKit/QuartzCore/
+  libobjc/SkyLight фреймы, ноль in-app кадров: B = `CA::Transaction::commit
+  → mach_msg2_trap` (WindowServer compositor round-trip во время обычного
+  `stepTransactionFlush`), R = `NSWindow(NSDrag) unregisterDragTypes` во
+  время `dealloc` (обычная деаллокация, зависшая на `remote_context_notify`
+  к SkyLight). Оба — системные under-load артефакты (совпадают по времени с
+  сегодняшним load-average 30-43 кризисом), НЕ вызваны нашим кодом — ничего
+  не чинил, задокументировано как «мониторить, не app-fixable».
+
+  **Метод**: брейс-стек Python-эвристика (`.call(` + баланс `{}` на строку)
+  для 211 сайтов в 35 файлах оказалась дешевле и точнее, чем чтение каждого
+  файла вручную — 14 кандидатов из 211, из них после личной проверки только
+  2 реальных (persistSettingsPayload, HealthMonitor), остальные false
+  positives из-за cross-function границ (эвристика не видит вызовы через
+  `nonisolated static func` helper, обёрнутые off-main СНАРУЖИ). Верифицировано
+  третьим независимым сигналом — живым новым Sentry issue V, пришедшим
+  ПОСЛЕ dSYM-фикса с полностью читаемым стеком, указавшим ровно на второй
+  найденный сайт.
+  ребёнка), полученный из вывода запуска.
