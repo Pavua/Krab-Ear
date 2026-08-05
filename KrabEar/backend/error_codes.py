@@ -589,6 +589,19 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "dedupe_seconds": 180,
     },
 
+    # recording.long_duration_warning — RecordingDurationWatchdog (2026-08-05).
+    # Живой инцидент: незамеченная 52-минутная диктовка обвалила весь
+    # STT-fallback конвейер. Warn задолго до порога деградации; dedupe 300s
+    # даёт периодический напоминающий тост, а не спам на каждый тик.
+    "recording.long_duration_warning": {
+        "user_msg_ru": "Запись идёт больше 10 минут — не забыли остановить, если закончили?",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "warn",
+        "dedupe_seconds": 300,
+    },
+
     # ── Wave 78 (Wave 205): 5 production-discovered codes ────────────────────
 
     # stt.gigaam_hf_cache_miss — GigaAM longform path requires pyannote/segmentation-3.0

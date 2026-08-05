@@ -54,6 +54,28 @@ class _FakeRecorder:
         return None
 
 
+class _CapturingRecorder(_FakeRecorder):
+    """Recorder fake whose start() accepts max_recording_samples и запоминает,
+    что реально было передано (2026-08-05, HIGH-1 regression guard). Также
+    отслеживает set_session_max_recording_samples() (HIGH-A: R2 promote/
+    rollback владельца БЕЗ нового физического start())."""
+
+    def __init__(self):
+        self.last_start_kwargs = None
+        self.session_max_history: list = []
+
+    def start(self, spill=None, max_recording_samples=None) -> bool:
+        self.last_start_kwargs = {
+            "spill": spill,
+            "max_recording_samples": max_recording_samples,
+        }
+        self.session_max_history.append(max_recording_samples)
+        return super().start(spill=spill)
+
+    def set_session_max_recording_samples(self, value) -> None:
+        self.session_max_history.append(value)
+
+
 class _SilentRecorder(_FakeRecorder):
     def stop(self, timeout_sec=3.0, trim_tail_ms=0):
         if not self.is_recording:
@@ -236,6 +258,95 @@ class TestStartRecording(unittest.TestCase):
         self.assertEqual(svc._active_generation["owner"], "meeting")
 
 
+class TestDictationMaxDurationCap(unittest.TestCase):
+    """2026-08-05, Fable HIGH-1 regression guard.
+
+    Общий AudioRecorder делится diction/quick_capture (тесный потолок
+    уместен — незамеченная 52-минутная запись обвалила STT-конвейер) с
+    meeting (C2 Live Meeting Overlay — легитимно длинная запись; тесный
+    потолок на конструкторе recorder'а тихо самофинализировал бы встречу
+    на 45-й минуте). Потолок должен приходить per-session, завися от owner.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+
+    def test_dictation_start_gets_max_recording_samples_override(self):
+        recorder = _CapturingRecorder()
+        svc = _make_service(self._tmp, recorder=recorder)
+        svc.handle_start_recording({"source": "dictation"})
+        self.assertIsNotNone(recorder.last_start_kwargs["max_recording_samples"])
+        self.assertGreater(recorder.last_start_kwargs["max_recording_samples"], 0)
+
+    def test_quick_capture_start_gets_max_recording_samples_override(self):
+        recorder = _CapturingRecorder()
+        svc = _make_service(self._tmp, recorder=recorder)
+        svc.handle_start_recording({"source": "quick_capture"})
+        self.assertIsNotNone(recorder.last_start_kwargs["max_recording_samples"])
+
+    def test_meeting_start_does_NOT_get_max_recording_samples_override(self):
+        """Критический regression guard: meeting owner НЕ получает тесный
+        потолок — иначе живая встреча самофинализируется на его пороге."""
+        recorder = _CapturingRecorder()
+        svc = _make_service(self._tmp, recorder=recorder)
+        svc.handle_start_recording({"source": "meeting"})
+        self.assertIsNone(recorder.last_start_kwargs["max_recording_samples"])
+
+    def test_legacy_recorder_without_kwarg_support_degrades_gracefully(self):
+        """Recorder без поддержки max_recording_samples в сигнатуре — старт
+        не падает, просто использует собственный дефолт recorder'а."""
+        recorder = _FakeRecorder()  # start(self, spill=None) — без override
+        svc = _make_service(self._tmp, recorder=recorder)
+        result = svc.handle_start_recording({"source": "dictation"})
+        self.assertEqual(result["status"], "recording")
+
+    def test_promote_dictation_to_meeting_clears_the_cap_WITHOUT_new_start(self):
+        """2026-08-05, Fable HIGH-A regression guard (round 2).
+
+        Дефект round-1 фикса: R2 promote (dictation→meeting adoption БЕЗ
+        нового физического recorder.start()) наследовал тесный dictation-
+        потолок, зафиксированный на исходном старте — adopted-встреча тихо
+        самофинализировалась бы на его пороге, watchdog при этом корректно
+        молчал (owner уже "meeting"). Потолок должен обновляться синхронно
+        с owner через set_session_max_recording_samples(), а не только при
+        свежем start().
+        """
+        recorder = _CapturingRecorder()
+        svc = _make_service(self._tmp, recorder=recorder)
+
+        start_result = svc.handle_start_recording({"source": "dictation"})
+        self.assertEqual(start_result["status"], "recording")
+        tight_cap = recorder.last_start_kwargs["max_recording_samples"]
+        self.assertIsNotNone(tight_cap)
+
+        promote_result = svc.handle_start_recording({"source": "meeting"})
+        self.assertTrue(promote_result.get("owner_promoted"))
+        self.assertEqual(promote_result["owner"], "meeting")
+
+        # Последнее, что видел recorder после promote, — снятие потолка.
+        self.assertIsNone(recorder.session_max_history[-1])
+
+    def test_rollback_meeting_to_dictation_restores_the_cap(self):
+        """CAS-rollback promote (MeetingSessionService setup упал) должен
+        вернуть тесный потолок так же, как прямой dictation-старт."""
+        recorder = _CapturingRecorder()
+        svc = _make_service(self._tmp, recorder=recorder)
+
+        svc.handle_start_recording({"source": "dictation"})
+        svc.handle_start_recording({"source": "meeting"})
+        self.assertIsNone(recorder.session_max_history[-1])
+
+        generation = svc._active_generation
+        rolled_back = svc.rollback_owner_transition(
+            expected_revision=int(generation["revision"]),
+            expected_owner="meeting",
+            restore_owner="dictation",
+        )
+        self.assertTrue(rolled_back)
+        self.assertIsNotNone(recorder.session_max_history[-1])
+        self.assertGreater(recorder.session_max_history[-1], 0)
+
+
 class TestStopRecording(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.mkdtemp()
@@ -268,6 +379,28 @@ class TestStopRecording(unittest.TestCase):
         svc.handle_stop_recording({"quality_profile": "balanced"})
         # Counter may or may not increment depending on guards; just verify it's >= 0
         self.assertGreaterEqual(counter_ref[0], 0)
+
+
+class TestCurrentRecordingOwner(unittest.TestCase):
+    """2026-08-05: лёгкий геттер для RecordingDurationWatchdog (MEDIUM-2)."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+
+    def test_none_when_idle(self):
+        svc = _make_service(self._tmp)
+        self.assertIsNone(svc.current_recording_owner())
+
+    def test_returns_owner_after_start(self):
+        svc = _make_service(self._tmp)
+        svc.handle_start_recording({"source": "meeting"})
+        self.assertEqual(svc.current_recording_owner(), "meeting")
+
+    def test_none_again_after_stop(self):
+        svc = _make_service(self._tmp)
+        svc.handle_start_recording({"source": "dictation"})
+        svc.handle_stop_recording({"quality_profile": "balanced"})
+        self.assertIsNone(svc.current_recording_owner())
 
 
 class TestGetRecordingState(unittest.TestCase):
@@ -336,6 +469,54 @@ class TestListAudioInputs(unittest.TestCase):
         svc._list_audio_inputs = lambda: []
         result = svc.handle_get_audio_devices({})
         self.assertIn("devices", result)
+
+
+class TestListAudioInputsRetry(unittest.TestCase):
+    """2026-08-05: один bounded retry вокруг sd.query_devices().
+
+    Не даёт единичному transient сбою (гонка/hiccup CoreAudio при активной
+    записи) молча превратиться в пустой список устройств для GUI.
+    """
+
+    _FAKE_DEVICES = [
+        {
+            "name": "MacBook Pro Microphone",
+            "max_input_channels": 1,
+            "hostapi": 0,
+            "default_samplerate": 44100.0,
+        }
+    ]
+
+    def test_recovers_on_transient_failure_via_retry(self):
+        with patch("time.sleep"), patch(
+            "sounddevice.query_devices",
+            side_effect=[OSError("PaErrorCode -9986"), self._FAKE_DEVICES],
+        ), patch("sounddevice.query_hostapis", return_value=[{"name": "Core Audio"}]), patch(
+            "sounddevice.default"
+        ) as mock_default:
+            mock_default.device = [0, 0]
+            result = RecordingCoreService._list_audio_inputs_static()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["name"], "MacBook Pro Microphone")
+
+    def test_returns_empty_when_both_attempts_fail(self):
+        with patch("time.sleep"), patch(
+            "sounddevice.query_devices",
+            side_effect=[OSError("PaErrorCode -9986"), OSError("PaErrorCode -9986")],
+        ):
+            result = RecordingCoreService._list_audio_inputs_static()
+        self.assertEqual(result, [])
+
+    def test_no_retry_needed_on_first_success(self):
+        with patch("time.sleep") as mock_sleep, patch(
+            "sounddevice.query_devices", return_value=self._FAKE_DEVICES
+        ), patch(
+            "sounddevice.query_hostapis", return_value=[{"name": "Core Audio"}]
+        ), patch("sounddevice.default") as mock_default:
+            mock_default.device = [0, 0]
+            result = RecordingCoreService._list_audio_inputs_static()
+        self.assertEqual(len(result), 1)
+        mock_sleep.assert_not_called()
 
 
 class TestTranscribeProgress(unittest.TestCase):

@@ -85,6 +85,20 @@ class Settings(BaseSettings):
     # Удалять записи старше N дней при авто-очистке.
     AUTO_CLEANUP_AFTER_DAYS: int = 365
 
+    # --- Watchdog длительности записи (backend/recording_duration_watchdog.py) --
+    # Живой инцидент 2026-08-05: незамеченная 52-минутная диктовка обвалила
+    # STT-fallback конвейер. True = фоновый поток запускается при старте backend.
+    RECORDING_DURATION_WATCHDOG_ENABLED: bool = True
+    # Порог предупреждения (секунды). Дефолт 10 мин — задолго до деградации.
+    RECORDING_DURATION_WARN_SEC: float = 600.0
+    # Интервал проверки (секунды).
+    RECORDING_DURATION_CHECK_INTERVAL_SEC: float = 30.0
+    # Жёсткий потолок обычной (не-meeting) записи в секундах — переопределяет
+    # 4-часовой MAX_RECORDING_SAMPLES по умолчанию в AudioRecorder для
+    # диктовки/quick-capture. 45 мин с запасом покрывает легитимные длинные
+    # диктовки, но остаётся далеко от порога, где деградирует STT-конвейер.
+    MAX_DICTATION_DURATION_SEC: float = 2700.0
+
     # --- Event-мост IPC->REST (backend/event_bridge.py, spec 2026-07-07) -------
     # True = EventBridge доставляет события из IPC-процесса в REST-процесс.
     # Killswitch, читается ОДИН РАЗ при старте (как DISK_MONITOR_ENABLED) —

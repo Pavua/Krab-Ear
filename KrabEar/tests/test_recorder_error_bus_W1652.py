@@ -89,19 +89,58 @@ class TestMaxDurationErrorPushedWhenBusWired(unittest.TestCase):
         """Without _error_bus, _push_max_duration_error must silently no-op."""
         self.assertFalse(hasattr(self.recorder, "_error_bus"))
         # Should not raise
-        self.recorder._push_max_duration_error()
+        self.recorder._push_max_duration_error(MAX_RECORDING_SAMPLES)
 
     def test_push_calls_bus_when_wired(self):
         """With _error_bus set, push() must be called exactly once."""
         mock_bus = MagicMock()
         self.recorder._error_bus = mock_bus
 
-        self.recorder._push_max_duration_error()
+        self.recorder._push_max_duration_error(MAX_RECORDING_SAMPLES)
 
         mock_bus.push.assert_called_once()
         # Verify the pushed error has the correct code
         pushed_err = mock_bus.push.call_args[0][0]
         self.assertEqual(pushed_err.code, "audio.max_duration_reached")
+
+    def test_push_uses_effective_session_cap_not_constructor_default(self):
+        """2026-08-05: сообщение отражает переданный (per-session) потолок,
+        а не всегда конструкторный self._max_recording_samples — иначе
+        diction/quick_capture записи с тесным override врали бы в тосте."""
+        mock_bus = MagicMock()
+        self.recorder._error_bus = mock_bus
+        tight_cap = 16000 * 60 * 45  # 45 минут
+
+        self.recorder._push_max_duration_error(tight_cap)
+
+        pushed_err = mock_bus.push.call_args[0][0]
+        self.assertEqual(pushed_err.context["max_samples"], tight_cap)
+        self.assertEqual(pushed_err.context["max_hours"], 0)
+        self.assertEqual(pushed_err.context["max_minutes"], 45)
+
+    def test_push_message_uses_minutes_for_sub_hour_cap(self):
+        """2026-08-05 LOW-C (Fable): sub-hour потолок (типичный dictation-
+        default 45 мин) не должен показывать вводящее в заблуждение "(0 ч)"."""
+        mock_bus = MagicMock()
+        self.recorder._error_bus = mock_bus
+        tight_cap = 16000 * 60 * 45  # 45 минут
+
+        self.recorder._push_max_duration_error(tight_cap)
+
+        pushed_err = mock_bus.push.call_args[0][0]
+        self.assertIn("45 мин", pushed_err.message_user)
+        self.assertNotIn("0 ч", pushed_err.message_user)
+
+    def test_push_message_uses_hours_for_hour_plus_cap(self):
+        """Потолки >= 1ч (например, конструкторный 4ч дефолт) по-прежнему
+        показываются в часах, не в сотнях минут."""
+        mock_bus = MagicMock()
+        self.recorder._error_bus = mock_bus
+
+        self.recorder._push_max_duration_error(MAX_RECORDING_SAMPLES)
+
+        pushed_err = mock_bus.push.call_args[0][0]
+        self.assertIn("4 ч", pushed_err.message_user)
 
     def test_push_never_raises_on_bus_exception(self):
         """_push_max_duration_error must swallow any exception from error_bus.push."""
@@ -110,7 +149,7 @@ class TestMaxDurationErrorPushedWhenBusWired(unittest.TestCase):
         self.recorder._error_bus = mock_bus
 
         # Must NOT propagate
-        self.recorder._push_max_duration_error()
+        self.recorder._push_max_duration_error(MAX_RECORDING_SAMPLES)
 
 
 # ---------------------------------------------------------------------------

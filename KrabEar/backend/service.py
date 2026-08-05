@@ -130,6 +130,7 @@ from backend.purge_scheduler import PurgeScheduler
 from backend.paste_app_memory import PasteAppMemory
 from backend.telegram_bridge import TelegramBridge
 from backend.disk_monitor import DiskSpaceMonitor
+from backend.recording_duration_watchdog import RecordingDurationWatchdog
 from backend.observability import (
     _BREADCRUMB_EXCLUDED_METHODS,
     add_breadcrumb,
@@ -415,7 +416,15 @@ class BackendService:
 
         # Use staging attr during init; after _recording_core_svc is created,
         # the 'recorder' property will proxy through to RecordingCoreService.
-        object.__setattr__(self, "_recorder_init", recorder or AudioRecorder(on_audio_level=_emit_audio_level))
+        # 2026-08-05: recorder — ОБЩИЙ объект между диктовкой/quick-capture И
+        # meeting (Fable HIGH-1). Тесный потолок для незамеченной диктовки
+        # (см. RecordingDurationWatchdog docstring) применяется per-session
+        # в RecordingCoreService._handle_start_recording_locked, а НЕ здесь —
+        # конструкторный дефолт остаётся 4ч (общий memory-safety net,
+        # включая long-form meeting).
+        object.__setattr__(
+            self, "_recorder_init", recorder or AudioRecorder(on_audio_level=_emit_audio_level)
+        )
 
         # D.10a: LLM rewriter initialization (admin flag check via settings)
         self._llm_rewriter = self._init_llm_rewriter()
@@ -1536,6 +1545,37 @@ class BackendService:
         # actually reach the ErrorBus and the Loud Errors UI toast.
         self._disk_monitor._error_bus = self._error_bus
 
+        # Watchdog длительности записи (2026-08-05, живой инцидент — см.
+        # recording_duration_watchdog.py). self.recorder — свойство, проксирует
+        # через уже сконструированный self._recording_core_svc.
+        # owner_is_dictation_like: Fable HIGH-1/MEDIUM-2/MEDIUM-B — recorder
+        # общий с meeting (C2) И Call Assist (владеет recorder напрямую,
+        # owner=None) — предупреждаем ТОЛЬКО за owner'ов, реально рискующих
+        # остаться забытыми (inclusion, не exclusion одного meeting).
+        # MEDIUM-3 (Fable): misconfig WARN >= MAX делает предупреждение
+        # НЕДОСТИЖИМЫМ (recorder auto-stop'ится и is_recording=False раньше,
+        # чем tick() успевает увидеть порог) — молча, без единого сигнала.
+        # Громкий лог вместо тихого no-op.
+        if settings.RECORDING_DURATION_WARN_SEC >= settings.MAX_DICTATION_DURATION_SEC:
+            logger.warning(
+                "RECORDING_DURATION_WARN_SEC (%.0fс) >= MAX_DICTATION_DURATION_SEC "
+                "(%.0fс) — предупреждение о длительности записи никогда не "
+                "успеет сработать до жёсткого авто-стопа",
+                settings.RECORDING_DURATION_WARN_SEC,
+                settings.MAX_DICTATION_DURATION_SEC,
+            )
+        _recording_core_for_watchdog = self._recording_core_svc
+        self._recording_duration_watchdog = RecordingDurationWatchdog(
+            settings=settings,
+            error_bus=self._error_bus,
+            recorder=self.recorder,
+            owner_is_dictation_like=lambda: (
+                _recording_core_for_watchdog.current_recording_owner()
+                in ("dictation", "quick_capture")
+            ),
+        )
+        self._recording_duration_watchdog.start()
+
         # R1: единый тред старт-recovery (Task 6 амендмент к Task 4).
         # Порядок ОБЯЗАТЕЛЕН: форензика прошлой жизни СНАЧАЛА (пока dirty-
         # маркер ещё несёт улику предыдущей жизни процесса), маркер ТЕКУЩЕЙ
@@ -2031,6 +2071,15 @@ class BackendService:
                 disk_monitor.stop()
             except Exception:
                 logger.exception("DiskSpaceMonitor.stop() raised during close()")
+
+        # Stop RecordingDurationWatchdog daemon thread — same CI daemon-thread
+        # teardown rule as DiskSpaceMonitor above (feedback_backendservice_teardown_ci.md).
+        recording_duration_watchdog = getattr(self, "_recording_duration_watchdog", None)
+        if recording_duration_watchdog is not None:
+            try:
+                recording_duration_watchdog.stop()
+            except Exception:
+                logger.exception("RecordingDurationWatchdog.stop() raised during close()")
 
         # Stop RecapScheduler daemon thread for the same reason.
         recap_scheduler = getattr(self, "_recap_scheduler", None)
@@ -5659,6 +5708,26 @@ def _trigger_sentry_release_async() -> None:
     thread.start()
 
 
+def _is_throwaway_data_dir(data_dir: Path) -> bool:
+    """True, если data_dir лежит под системным temp-каталогом.
+
+    2026-08-05: SENTRY_DSN — глобальная настройка (.env), не завязана на
+    --data-dir. Любой throwaway/e2e-инстанс (tempfile.TemporaryDirectory())
+    без этого гейта тихо шлёт события в ПРОД-Sentry, неотличимые от реальных
+    без ручной проверки sys.argv в каждом событии (живой инцидент — 3 таких
+    события за одну сессию e2e-тестирования). Никогда не бросает — путь
+    может быть относительным/некорректным, тогда просто False (fail-open в
+    сторону ВКЛЮЧЁННОГО Sentry — тот же fail-open, что и раньше).
+    """
+    try:
+        import tempfile
+        resolved = data_dir.resolve()
+        temp_root = Path(tempfile.gettempdir()).resolve()
+        return resolved == temp_root or temp_root in resolved.parents
+    except Exception:
+        return False
+
+
 def main() -> None:
     """CLI entrypoint backend-сервиса."""
     parser = argparse.ArgumentParser(description="Krab Ear backend service")
@@ -5685,13 +5754,19 @@ def main() -> None:
     # Sentry / GlitchTip crash telemetry (no-op если DSN не задан).
     # W704: release string читается из Info.plist через get_release_string()
     # (priority: env KRAB_EAR_RELEASE → Info.plist → __version__.py).
+    # 2026-08-05: throwaway (temp-dir) инстансы не шлют в прод-Sentry — см.
+    # _is_throwaway_data_dir() (живой инцидент: 3 события в прод-Sentry за
+    # одну сессию e2e-тестирования, DSN глобален и не завязан на data_dir).
+    _throwaway = _is_throwaway_data_dir(data_dir)
     sentry_ok = init_sentry(
-        dsn=settings.SENTRY_DSN or None,
+        dsn=(settings.SENTRY_DSN or None) if not _throwaway else None,
         environment=settings.SENTRY_ENVIRONMENT,
         release=get_release_string(),
         settings=_startup_settings,
     )
-    if sentry_ok:
+    if _throwaway:
+        logger.debug("Sentry telemetry отключена: throwaway data-dir (%s)", data_dir)
+    elif sentry_ok:
         logger.info("Sentry telemetry активна (env=%s)", settings.SENTRY_ENVIRONMENT)
     else:
         logger.debug("Sentry telemetry отключена (DSN не задан)")

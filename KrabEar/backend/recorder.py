@@ -79,6 +79,10 @@ class AudioRecorder:
         # W1670: буфер для аудио, собранного при авто-остановке по max-duration.
         # Устанавливается воркером при MAX_RECORDING_SAMPLES, очищается в start().
         self._pending_result: tuple[np.ndarray, float] | None = None
+        # 2026-08-05: per-session override потолка (см. start()). None между
+        # записями — каждый start() задаёт его заново, старое значение не
+        # протекает в следующую сессию.
+        self._session_max_recording_samples: int | None = None
         # R1: continuous spill writer (duck-typed .append/.close/.failed), см.
         # backend/recording_spill.py. None = spill выключен для этой записи.
         self._spill = None
@@ -89,13 +93,26 @@ class AudioRecorder:
         with self._lock:
             return self._is_recording
 
-    def start(self, spill: "object | None" = None) -> bool:
+    def start(
+        self,
+        spill: "object | None" = None,
+        max_recording_samples: "int | None" = None,
+    ) -> bool:
         """Запускает запись, если рекордер сейчас в idle состоянии.
 
         ``spill`` — опциональный открытый :class:`RecordingSpillWriter`
         (duck-typed .append/.close/.failed, R1). Recorder только дописывает
         и закрывает его; удаление (``discard()``) принадлежит вызывающей
         стороне (RecordingCoreService).
+
+        ``max_recording_samples`` — per-session override потолка для ЭТОЙ
+        записи (2026-08-05). None → потолок конструктора (``self.
+        _max_recording_samples``, дефолт 4ч — общий memory-safety net).
+        Recorder — ОБЩИЙ объект между диктовкой/quick-capture (тесный
+        потолок уместен) и meeting (Fable HIGH-1: конструкторный тесный
+        потолок тихо самофинализировал бы live-встречу C2 на её пороге) —
+        поэтому потолок задаётся владельцем ЗАПИСИ, а не владельцем
+        recorder'а.
         """
         # wave-1770 MED: serialise the whole start against a concurrent stop() so the
         # data-lock release window inside stop() cannot interleave with a new start.
@@ -120,6 +137,7 @@ class AudioRecorder:
                     # W1670: сброс результата предыдущей авто-остановки.
                     self._pending_result = None
                     self._spill = spill
+                    self._session_max_recording_samples = max_recording_samples
                     worker = threading.Thread(
                         target=self._worker,
                         daemon=True,
@@ -338,6 +356,20 @@ class AudioRecorder:
         with self._lock:
             self._device = device
 
+    def set_session_max_recording_samples(self, value: "int | None") -> None:
+        """Обновить потолок ТЕКУЩЕЙ (уже идущей) сессии записи.
+
+        2026-08-05, Fable HIGH-A: owner записи может смениться БЕЗ нового
+        физического start() — R2 promote (dictation→meeting adoption без
+        рестарта recorder'а) и его CAS-rollback идут через ОДНУ и ту же
+        RecordingCoreService._transition_generation_owner_locked, которая
+        вызывает этот сеттер. _worker() читает потолок заново на КАЖДОМ
+        чанке (не один раз до цикла), поэтому смена вступает в силу сразу,
+        без гонки с уже читающим старое значение воркером.
+        """
+        with self._lock:
+            self._session_max_recording_samples = value
+
     def get_duration_sec(self) -> float:
         """Возвращает длительность текущей записи в секундах."""
         with self._lock:
@@ -460,13 +492,25 @@ class AudioRecorder:
                         self._push_buffer_overflow_error()
                     _max_duration_exceeded = False
                     with self._lock:
+                        # 2026-08-05 (Fable HIGH-A): читаем потолок ЗАНОВО на
+                        # каждом чанке, а не один раз до цикла — owner записи
+                        # может смениться БЕЗ нового start() (R2 promote
+                        # dictation→meeting и его CAS-rollback идут через
+                        # set_session_max_recording_samples()); разовое
+                        # чтение до цикла навсегда заморозило бы старый cap.
+                        session_max = self._session_max_recording_samples
+                        effective_max_samples = (
+                            session_max
+                            if session_max is not None
+                            else self._max_recording_samples
+                        )
                         chunk_samples = data.reshape(-1).size
-                        if self._chunks_total_samples + chunk_samples > self._max_recording_samples:
+                        if self._chunks_total_samples + chunk_samples > effective_max_samples:
                             self._is_recording = False
                             logger.warning(
                                 "Достигнут лимит длительности записи (%d сек)",
-                                self._max_recording_samples // self.sample_rate,
-                                extra={"max_samples": self._max_recording_samples},
+                                effective_max_samples // self.sample_rate,
+                                extra={"max_samples": effective_max_samples},
                             )
                             _max_duration_exceeded = True
                             # W1670: собрать накопленные чанки в финальный массив и
@@ -502,7 +546,7 @@ class AudioRecorder:
                         # тем же lifecycle_lock; файлы остаются для восстановления).
                         if spill is not None:
                             spill.close()
-                        self._push_max_duration_error()
+                        self._push_max_duration_error(effective_max_samples)
                         break
                     if self._on_audio_level is not None:
                         now = time.monotonic()
@@ -521,11 +565,16 @@ class AudioRecorder:
             with self._lock:
                 self._is_recording = False
 
-    def _push_max_duration_error(self) -> None:
+    def _push_max_duration_error(self, max_samples: int) -> None:
         """Push audio.max_duration_reached to error bus. Never raises.
 
         W1652 (F3 fix): вызывается из _worker ПОСЛЕ освобождения self._lock во избежание
         deadlock: error_bus._lock → event_bus.emit() → SSE callback → recorder.is_recording.
+
+        ``max_samples`` — 2026-08-05: эффективный потолок ЭТОЙ сессии
+        (per-session override или конструкторный дефолт), а не всегда
+        конструкторный — иначе сообщение врало бы про фактически применённый
+        лимит для diction/quick_capture записей.
         """
         error_bus = getattr(self, "_error_bus", None)
         if error_bus is None:
@@ -533,15 +582,23 @@ class AudioRecorder:
         try:
             from backend.error_bus import KrabError
             from datetime import datetime, timezone
-            max_hours = self._max_recording_samples // (self.sample_rate * 3600)
+            max_hours = max_samples // (self.sample_rate * 3600)
+            max_minutes = max_samples // (self.sample_rate * 60)
+            # 2026-08-05 LOW-C (Fable): per-session dictation-потолок теперь
+            # обычно < 1ч (45 мин дефолт) — "(0 ч)" вводил в заблуждение.
+            duration_label = f"{max_hours} ч" if max_hours >= 1 else f"{max_minutes} мин"
             err = KrabError(
                 severity="warn",
                 component="audio",
                 code="audio.max_duration_reached",
-                message_user=f"Запись превысила максимальную длительность ({max_hours} ч) и была автоматически остановлена",
-                message_debug=f"MAX_RECORDING_SAMPLES={self._max_recording_samples} exceeded",
+                message_user=f"Запись превысила максимальную длительность ({duration_label}) и была автоматически остановлена",
+                message_debug=f"max_recording_samples={max_samples} exceeded",
                 timestamp=datetime.now(timezone.utc),
-                context={"max_samples": self._max_recording_samples, "max_hours": max_hours},
+                context={
+                    "max_samples": max_samples,
+                    "max_hours": max_hours,
+                    "max_minutes": max_minutes,
+                },
                 actionable=False,
                 action_id=None,
             )

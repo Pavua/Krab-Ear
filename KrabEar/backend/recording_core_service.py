@@ -414,6 +414,23 @@ class RecordingCoreService:
         self._active_generation = generation
         return generation
 
+    def _max_recording_samples_for_owner(self, owner: str) -> int | None:
+        """Потолок длительности (в сэмплах) для owner или None (без потолка).
+
+        2026-08-05 (Fable HIGH-1/HIGH-A): meeting (C2 Live Meeting Overlay)
+        — легитимно длинная запись, потолка не получает. Любой другой owner
+        (dictation/quick_capture/будущие) — тесный MAX_DICTATION_DURATION_SEC,
+        чтобы незамеченная запись не обваливала STT-fallback конвейер
+        (живой инцидент 2026-08-05: 52 минуты без остановки).
+        """
+        if owner == "meeting":
+            return None
+        # LOW-4 (Fable): env-опечатка (<=0) не должна давать cap=0 — тогда
+        # самый первый чанк уже превышал бы потолок и КАЖДАЯ запись
+        # мгновенно авто-останавливалась бы пустой.
+        max_dictation_sec = max(60.0, float(_cfg_settings.MAX_DICTATION_DURATION_SEC))
+        return int(max_dictation_sec * getattr(self.recorder, "sample_rate", 16000))
+
     def _transition_generation_owner_locked(
         self,
         owner: str,
@@ -428,6 +445,15 @@ class RecordingCoreService:
         generation["owner"] = str(owner)
         generation["promoted_from"] = promoted_from
         generation["revision"] = revision
+        # 2026-08-05 (Fable HIGH-A): владелец мог смениться БЕЗ нового
+        # физического start() (R2 promote dictation→meeting и его CAS-
+        # rollback) — потолок записи должен смениться синхронно с owner,
+        # иначе adopted-meeting наследует тесный dictation-потолок и тихо
+        # самофинализируется на его пороге (тот же класс бага, что HIGH-1,
+        # через другую дверь).
+        set_session_max = getattr(self.recorder, "set_session_max_recording_samples", None)
+        if callable(set_session_max):
+            set_session_max(self._max_recording_samples_for_owner(str(owner)))
         spill = getattr(self, "_active_spill", None)
         rewrite_source = getattr(spill, "rewrite_source", None)
         if callable(rewrite_source):
@@ -1117,24 +1143,45 @@ class RecordingCoreService:
                 logger.warning("RecordingSpill: не удалось создать writer — "
                                "запись продолжается без spill", exc_info=True)
                 spill = None
+        # 2026-08-05: жёсткий потолок диктовки/quick-capture — per-session
+        # override recorder.start(), а НЕ конструктор recorder'а (Fable
+        # HIGH-1: recorder ОБЩИЙ с meeting — конструкторный тесный потолок
+        # тихо самофинализировал бы live-встречу C2 на её пороге). meeting
+        # owner override не получает — recorder использует собственный
+        # class-level дефолт (4ч memory-safety net). См.
+        # _max_recording_samples_for_owner() — та же формула переиспользуется
+        # в _transition_generation_owner_locked() для R2 promote/rollback
+        # (Fable HIGH-A: owner может смениться БЕЗ нового физического start).
+        dictation_max_samples = self._max_recording_samples_for_owner(requested_owner)
+
         try:
             start_callable = self.recorder.start
             start_accepts_spill = True
+            start_extra_kwargs: dict[str, Any] = {}
             try:
                 start_signature = inspect.signature(start_callable)
             except (TypeError, ValueError):
                 # Для непрозрачного callable выполняем один современный вызов.
                 # Retry после TypeError опасен: первый вызов мог уже захватить
                 # микрофон, и второй создал бы две логические идентичности.
-                pass
-            else:
+                start_signature = None
+
+            if start_signature is not None:
                 try:
                     start_signature.bind(spill=spill)
                 except TypeError:
                     start_accepts_spill = False
+                if dictation_max_samples is not None:
+                    try:
+                        start_signature.bind(max_recording_samples=dictation_max_samples)
+                        start_extra_kwargs["max_recording_samples"] = dictation_max_samples
+                    except TypeError:
+                        # Старый/duck-typed recorder без поддержки — используем
+                        # его собственный (конструкторный) дефолт.
+                        pass
 
             if start_accepts_spill:
-                started = start_callable(spill=spill)
+                started = start_callable(spill=spill, **start_extra_kwargs)
             else:
                 # R1 fail-open для доказанного legacy-контракта без spill=.
                 # Совместимость выяснена ДО вызова, поэтому recorder.start()
@@ -1146,7 +1193,7 @@ class RecordingCoreService:
                 if spill is not None:
                     spill.discard()
                     spill = None
-                started = start_callable()
+                started = start_callable(**start_extra_kwargs)
         except Exception:
             # Реальный AudioRecorder.start() failure-atomic, но внешний/legacy
             # recorder может бросить уже после физического захвата. Тогда
@@ -1610,6 +1657,17 @@ class RecordingCoreService:
             "elapsed_sec": elapsed_sec,
             "session_id": session_id,
         }
+
+    def current_recording_owner(self) -> str | None:
+        """Владелец активного generation ("dictation"/"quick_capture"/"meeting")
+        или None, если записи сейчас нет. 2026-08-05: лёгкий геттер для
+        RecordingDurationWatchdog (нужен только owner, не весь снимок
+        handle_get_recording_state) — тот же lifecycle_lock-паттерн.
+        """
+        lifecycle_lock, _ = self._ensure_recording_lifecycle_state()
+        with lifecycle_lock:
+            generation = getattr(self, "_active_generation", None)
+            return generation.get("owner") if generation is not None else None
 
     def handle_list_audio_inputs(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает список доступных входных аудиоустройств."""
@@ -3631,11 +3689,28 @@ class RecordingCoreService:
         except Exception as exc:
             logger.warning("Failed to list audio inputs: %s", exc)
             return []
+        # 2026-08-05: sd.query_devices() ходит в CoreAudio без лока — при
+        # активной записи (открытый sd.InputStream в AudioRecorder._worker)
+        # теоретически возможна транзиентная гонка/hiccup на HAL. Один
+        # bounded retry не меняет поведение happy-path (0 стоимости при
+        # успехе первой попытки), но не даёт единичному transient сбою
+        # молча превратиться в пустой список устройств для GUI.
         try:
             devices = sd.query_devices()
-        except Exception:
-            logger.exception("Не удалось получить список аудиоустройств")
-            return []
+        except Exception as first_exc:
+            logger.warning(
+                "sd.query_devices() упал (%s: %s) — повторяю через 100мс",
+                type(first_exc).__name__,
+                first_exc,
+            )
+            time.sleep(0.1)
+            try:
+                devices = sd.query_devices()
+            except Exception:
+                logger.exception(
+                    "Не удалось получить список аудиоустройств (retry тоже упал)"
+                )
+                return []
         hostapis: list[str] = []
         try:
             hostapi_payload = sd.query_hostapis()
