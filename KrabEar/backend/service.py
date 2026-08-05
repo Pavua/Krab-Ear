@@ -5718,12 +5718,29 @@ def _is_throwaway_data_dir(data_dir: Path) -> bool:
     события за одну сессию e2e-тестирования). Никогда не бросает — путь
     может быть относительным/некорректным, тогда просто False (fail-open в
     сторону ВКЛЮЧЁННОГО Sentry — тот же fail-open, что и раньше).
+
+    2026-08-05, Fable-ревью HIGH: `tempfile.gettempdir()` один резолвится в
+    `$TMPDIR` (обычно `/private/var/folders/.../T` в нормальной user-сессии
+    на macOS) — а собственные штатные e2e-скрипты проекта
+    (`scripts/run_e2e_smokes.command`, `run_e2e_bridge_smoke.command`) кладут
+    data-dir буквально в `/tmp/krab_ear_e2e.XXXXXX`, что резолвится в
+    `/private/tmp/...` — ДРУГОЙ путь. Живая проверка на машине владельца
+    подтвердила: `gettempdir()`-путь эти скрипты не ловил. `/tmp` на macOS
+    boot-wiped и никогда не легитимный постоянный data-dir — добавлен как
+    второй корень, а не замена (нужны ОБА: gettempdir покрывает
+    tempfile.TemporaryDirectory(), /tmp покрывает штатные e2e-скрипты).
     """
     try:
         import tempfile
         resolved = data_dir.resolve()
-        temp_root = Path(tempfile.gettempdir()).resolve()
-        return resolved == temp_root or temp_root in resolved.parents
+        throwaway_roots = [
+            Path(tempfile.gettempdir()).resolve(),
+            Path("/tmp").resolve(),
+        ]
+        return any(
+            resolved == root or resolved.is_relative_to(root)
+            for root in throwaway_roots
+        )
     except Exception:
         return False
 
@@ -5765,7 +5782,10 @@ def main() -> None:
         settings=_startup_settings,
     )
     if _throwaway:
-        logger.debug("Sentry telemetry отключена: throwaway data-dir (%s)", data_dir)
+        # MEDIUM (Fable): info, не debug — false positive на реальном проде
+        # (нестандартный TMPDIR) иначе молча гасил бы crash reporting без
+        # единого видимого сигнала при дефолтном уровне логирования.
+        logger.info("Sentry telemetry отключена: throwaway data-dir (%s)", data_dir)
     elif sentry_ok:
         logger.info("Sentry telemetry активна (env=%s)", settings.SENTRY_ENVIRONMENT)
     else:

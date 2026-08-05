@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -32,6 +33,17 @@ class TestIsThrowawayDataDir(unittest.TestCase):
             nested = Path(d) / "sub" / "data"
             self.assertTrue(_is_throwaway_data_dir(nested))
 
+    def test_true_for_bare_slash_tmp_path(self):
+        """2026-08-05, Fable HIGH: собственные штатные e2e-скрипты проекта
+        (scripts/run_e2e_smokes.command, run_e2e_bridge_smoke.command) кладут
+        data-dir буквально в /tmp/krab_ear_e2e.XXXXXX — НЕ через
+        tempfile.gettempdir() (тот на macOS резолвится в /private/var/
+        folders/.../T, другой путь). Живая проверка на macOS подтвердила:
+        этот кейс НЕ ловился gettempdir()-only версией — этот тест упал бы
+        до фикса, доказывая разрыв."""
+        with tempfile.TemporaryDirectory(dir="/tmp") as d:
+            self.assertTrue(_is_throwaway_data_dir(Path(d)))
+
     def test_false_for_production_application_support_path(self):
         prod = Path.home() / "Library" / "Application Support" / "KrabEar"
         self.assertFalse(_is_throwaway_data_dir(prod))
@@ -43,6 +55,13 @@ class TestIsThrowawayDataDir(unittest.TestCase):
     def test_never_raises_on_weird_path(self):
         # Relative path без resolve() контекста — не должно бросать.
         self.assertIsInstance(_is_throwaway_data_dir(Path("relative/path")), bool)
+
+    def test_fails_open_when_gettempdir_raises(self):
+        """2026-08-05 (Fable LOW test-gap): exception-путь реально непокрыт
+        без этого — patch именно ту ветку, которая должна fail-open в сторону
+        ВКЛЮЧЁННОГО Sentry (False = не throwaway), не молча отключить прод."""
+        with patch("tempfile.gettempdir", side_effect=OSError("boom")):
+            self.assertFalse(_is_throwaway_data_dir(Path.home() / "some_dir"))
 
 
 if __name__ == "__main__":
