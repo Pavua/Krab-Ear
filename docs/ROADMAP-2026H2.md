@@ -1400,3 +1400,61 @@ Health-check `scripts/krab_ear_runner_health_check.py` + LaunchAgent
   скрипту. Тесты извлекают функцию из текста скрипта (тот же приём, что
   `busy_reason`/`ipc_call`), гоняют с фейковым `launchctl` в PATH. Install-time скрипт —
   деплоя на живой backend/агент не требует.
+- **2026-08-05 — 🟢 RecordingDurationWatchdog + max-duration cap для диктовки, две
+  волны Fable-ревью, обе нашли реальный HIGH.** Живой инцидент ночью: незамеченная
+  52-минутная хоткейная диктовка обвалила весь STT-fallback конвейер (GigaAM
+  деградировал до 9 символов на 151 чанке → Whisper упёрся в собственный предел →
+  Remote STT без ключа → критическая ошибка), спасена только вчерашним backstop-
+  таймаутом IPC. У звонков уже был `CallAutoEnd`, у диктовки предохранителя не было.
+  Новый `backend/recording_duration_watchdog.py` (паттерн `DiskSpaceMonitor`) —
+  предупреждает через error_bus за 10 мин до 45-минутного жёсткого потолка,
+  который теперь применяется **per-session** к общему `AudioRecorder` (не в
+  конструкторе — recorder делится с meeting и Call Assist).
+  **R1 Fable HIGH-1**: конструкторный оверрайд тихо самофинализировал бы live-
+  встречу (C2) на 45-й минуте — recorder действительно общий, meeting стартует
+  через тот же `handle_start_recording`. Фикс перенёс потолок на
+  `recorder.start(max_recording_samples=...)`, зависящий от owner.
+  **R2 Fable HIGH-A**: R2 promote (диктовка→meeting adoption БЕЗ нового
+  физического start — реальный поддерживаемый флоу, `MeetingSessionService`
+  явно на него рассчитан) наследовал старый потолок, зафиксированный на
+  исходном dictation-старте — adopted-встреча тихо самофинализировалась бы,
+  watchdog при этом корректно молчал (owner уже "meeting"). Фикс: потолок
+  читается ЗАНОВО на каждом чанке внутри уже держащегося per-chunk лока (не
+  один раз до цикла), новый `AudioRecorder.set_session_max_recording_samples()`
+  вызывается из `_transition_generation_owner_locked()` (единая точка и для
+  promote, и для его CAS-rollback). **R2 MEDIUM-B**: Call Assist владеет
+  recorder напрямую, без generation (`current_recording_owner()` → None) —
+  exclusion-логика watchdog'а («кроме meeting») его не ловила; переделано на
+  inclusion («только dictation/quick_capture»), устойчиво к любому будущему
+  безвладельческому caller'у. Побочные находки в том же раунде: сообщение
+  тоста показывало «(0 ч)» для sub-hour потолков (теперь минуты/часы по
+  масштабу); source-контракт тест против повторного попадания оверрайда в
+  конструктор (юнит-тест с фейком его не ловил — фейк туда не подставляется).
+  Параллельно — `list_audio_inputs=0` при активной записи: гипотеза
+  (CoreAudio race с открытым InputStream) НЕ подтвердилась живым тестом (100+
+  конкурентных `sd.query_devices()` за 5с при открытом стриме, 0 ошибок, оба
+  режима PortAudio) — вместо спекулятивного фикса добавлен дешёвый bounded
+  retry на exception-путь (harmless insurance, не заявленный как решающий
+  корень) с честным комментарием. Отдельно — throwaway/e2e backend-инстансы
+  (`tempfile.TemporaryDirectory()`) слали в ПРОД-Sentry: `SENTRY_DSN` глобален
+  (.env), не завязан на `--data-dir` — 3 события за сессию тестирования
+  (missing mlx_whisper от левого интерпретатора, свой же watchdog-warning,
+  shutdown-барьер от SIGTERM-очистки). Закрыто `_is_throwaway_data_dir()` —
+  detect temp-dir → `init_sentry(dsn=None)`. Живой e2e (throwaway backend,
+  реальный recorder): dictation-warn end-to-end подтверждён дважды; meeting-
+  exemption подтверждён живьём (0 предупреждений за окно теста); promote-путь
+  проверен на уровне юнитов через реальную `_transition_generation_owner_locked`
+  (не мок) — отдельный живой e2e promote-сценария не прогонялся (машина была
+  под аномальной нагрузкой — см. ниже). **150 тестов зелёных**, flake8/
+  orphan-imports/decorative-wiring чисто. Ещё НЕ задеплоено на прод-backend
+  (следующий плановый рестарт заберёт).
+  **Побочный инцидент той же сессии**: забытый фоновый цикл (`for f in
+  test_*.py`) продолжал молотить весь набор тестов уже ПОСЛЕ того, как
+  казалось, что он остановлен (`pkill` убил только текущий дочерний процесс,
+  не сам bash-цикл) — 20+ минут держал load average 30-40 на машине, которая
+  служит VPN-выходом для реальных клиентов (подтверждено алертами Краб-бота
+  и живым `uptime`). Убито явным `kill -9` PID самого цикла. **Урок**: `pkill`
+  по паттерну дочернего процесса не останавливает bash-цикл, который его
+  порождает заново на каждой итерации — для остановки долгоживущего
+  `run_in_background`-цикла нужен `kill` PID самого цикла (не его текущего
+  ребёнка), полученный из вывода запуска.
