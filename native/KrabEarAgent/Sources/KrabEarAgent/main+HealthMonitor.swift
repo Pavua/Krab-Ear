@@ -91,14 +91,22 @@ extension AgentAppDelegate {
         let loggerRef = AgentLogger.shared
         Task { @MainActor in
             await monitor.setOnHangDetected {
+                loggerRef.warn("HealthMonitor: backend hang detected → restartIfDead")
+                // Различаем ложную тревогу от настоящего события (2026-08-03):
+                // тугой таймаут пинга HealthMonitor (2с) под нагрузкой иногда не
+                // укладывается, хотя backend отвечает за доли секунды. Тост
+                // «Backend перезапущен» на процессе, который никто не трогал,
+                // вводит в заблуждение — restartIfDeadDetailed() отличает случаи.
+                //
+                // AGENT-3 / Sentry KRAB-EAR-AGENT-V (2026-08-05): restartIfDeadDetailed()
+                // синхронно блокирует до 60+20с (isBackendAlive + ensureBackendRunning).
+                // Этот callback — plain @Sendable closure, HealthMonitor.tick() зовёт
+                // его НЕ на MainActor; раньше вызов был обёрнут в MainActor.run вместе
+                // с UI-обновлениями и утаскивал main thread за собой. Считаем outcome
+                // ЗДЕСЬ (до хопа на MainActor), на MainActor уходит только UI-хвост.
+                let outcome = supervisor.restartIfDeadDetailed()
                 await MainActor.run {
-                    loggerRef.warn("HealthMonitor: backend hang detected → restartIfDead")
-                    // Различаем ложную тревогу от настоящего события (2026-08-03):
-                    // тугой таймаут пинга HealthMonitor (2с) под нагрузкой иногда не
-                    // укладывается, хотя backend отвечает за доли секунды. Тост
-                    // «Backend перезапущен» на процессе, который никто не трогал,
-                    // вводит в заблуждение — restartIfDeadDetailed() отличает случаи.
-                    switch supervisor.restartIfDeadDetailed() {
+                    switch outcome {
                     case .alreadyAlive:
                         loggerRef.info("HealthMonitor: backend был жив — ложная тревога (таймаут пинга)")
                     case .recovered:

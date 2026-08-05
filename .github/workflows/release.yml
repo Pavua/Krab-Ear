@@ -114,6 +114,14 @@ jobs:
       - name: Build Swift agent
         run: cd native/KrabEarAgent && swift build -c release
 
+      - name: Generate .dSYM (SwiftPM release builds не делают это сами)
+        run: |
+          BIN="native/KrabEarAgent/.build/release/KrabEarAgent"
+          DSYM="$BIN.dSYM"
+          rm -rf "$DSYM"
+          dsymutil "$BIN" -o "$DSYM"
+          dwarfdump --uuid "$DSYM"
+
       - name: Assemble + sign .app
         run: |
           scripts/assemble_signed_app.sh \
@@ -127,6 +135,27 @@ jobs:
           ditto -c -k --keepParent "dist/Krab Ear.app" "dist/Krab-Ear-v$VERSION.zip"
           # basename в .sha256 — иначе `shasum -c` у скачавшего ищет dist/… и падает
           ( cd dist && shasum -a 256 "Krab-Ear-v$VERSION.zip" > "Krab-Ear-v$VERSION.zip.sha256" )
+
+      - name: dSYM → Sentry (best-effort — не блокирует релиз)
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+        run: |
+          DSYM="native/KrabEarAgent/.build/release/KrabEarAgent.dSYM"
+          if [ -z "${SENTRY_AUTH_TOKEN:-}" ]; then
+            echo "::warning::SENTRY_AUTH_TOKEN не задан (repo secret) — dSYM НЕ загружен, крэши этого релиза не символицируются в Sentry"
+            exit 0
+          fi
+          if [ ! -d "$DSYM" ]; then
+            echo "::warning::$DSYM не найден — символикация недоступна для v${{ steps.ver.outputs.version }}"
+            exit 0
+          fi
+          if ! command -v sentry-cli &>/dev/null; then
+            brew install --quiet getsentry/tools/sentry-cli
+          fi
+          if ! sentry-cli --url https://de.sentry.io debug-files upload \
+                --org po-zm --project krab-ear-agent "$DSYM"; then
+            echo "::warning::sentry-cli upload не прошёл — символикация недоступна для v${{ steps.ver.outputs.version }} (релиз продолжается)"
+          fi
 
       - name: Sparkle sign_update
         id: sparkle
