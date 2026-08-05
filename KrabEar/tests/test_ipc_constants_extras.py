@@ -25,6 +25,7 @@ from backend.ipc_constants import (
     IPC_SOCKET_BACKLOG,
     IPC_SOCKET_PERMISSIONS,
     IPC_SOCKET_TIMEOUT_SEC,
+    RT_PARTIAL_START_STOP_TIMEOUT_SEC,
 )
 
 _ALL_KNOWN_CONSTANTS = {
@@ -33,6 +34,8 @@ _ALL_KNOWN_CONSTANTS = {
     "IPC_MAX_MESSAGE_BYTES",
     "IPC_PREVIEW_THREAD_TIMEOUT_SEC",
     "IPC_SOCKET_PERMISSIONS",
+    # recording_core_service.py RealtimePartialTranscriber start/stop guard.
+    "RT_PARTIAL_START_STOP_TIMEOUT_SEC",
 }
 
 
@@ -58,6 +61,10 @@ class TestConstantsArePositiveIntegers(unittest.TestCase):
     def test_preview_thread_timeout_positive_numeric(self):
         self.assertIsInstance(IPC_PREVIEW_THREAD_TIMEOUT_SEC, (int, float))
         self.assertGreater(IPC_PREVIEW_THREAD_TIMEOUT_SEC, 0)
+
+    def test_rt_partial_start_stop_timeout_positive_numeric(self):
+        self.assertIsInstance(RT_PARTIAL_START_STOP_TIMEOUT_SEC, (int, float))
+        self.assertGreater(RT_PARTIAL_START_STOP_TIMEOUT_SEC, 0)
 
     def test_backlog_is_not_float(self):
         """Backlog передаётся в listen() и должен быть int."""
