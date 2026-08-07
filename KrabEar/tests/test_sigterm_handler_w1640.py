@@ -106,8 +106,15 @@ class TestInstallSignalHandlersSkipsSigterm(unittest.TestCase):
             "main()._signal_handler owns SIGTERM (W1640)",
         )
 
-    def test_installs_sigabrt(self) -> None:
-        """install_signal_handlers() installs a handler for SIGABRT."""
+    def test_installs_no_python_handler_at_all(self) -> None:
+        """Ни один сигнал не получает Python-обработчик (инцидент 2026-08-07).
+
+        Раньше здесь стояло ``assertIn(SIGABRT, registered)`` — тест закреплял
+        ровно ту конструкцию, которая вешала прод: Python-колбэк на синхронный
+        аварийный сигнал зацикливает сбойную инструкцию (CPython ставит флаг и
+        возвращается) и дедлочится на локе внутри Sentry-флаша. Подробности и
+        живой sample — ``tests/test_fault_signal_handler_2026_08_07.py``.
+        """
         import signal as sig
         import backend.observability as obs
 
@@ -115,7 +122,11 @@ class TestInstallSignalHandlersSkipsSigterm(unittest.TestCase):
             obs.install_signal_handlers()
 
         registered = {args[0] for args, _ in mock_signal.call_args_list}
-        self.assertIn(sig.SIGABRT, registered)
+        self.assertEqual(
+            registered, set(),
+            "install_signal_handlers() снова регистрирует Python-обработчик "
+            "сигнала; аварийные сигналы обслуживает faulthandler (C-уровень)",
+        )
 
 
 class TestSigtermRequestOnlyAndCoordinatorOrder(unittest.TestCase):

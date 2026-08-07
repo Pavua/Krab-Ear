@@ -6,11 +6,11 @@
 
 from __future__ import annotations
 
+import faulthandler
 import logging
 import os
 import plistlib
 import re
-import signal
 import subprocess
 
 logger = logging.getLogger(__name__)
@@ -383,45 +383,47 @@ def mask_phone(phone: str) -> str:
 
 
 def install_signal_handlers() -> None:
-    """Установить Sentry-aware обработчики SIGABRT/SIGSEGV.
+    """Включить signal-safe диагностику аварийных сигналов (SIGSEGV и родня).
 
-    SIGTERM намеренно исключён: ``service.main()`` только просит IPC-loop выйти,
-    после чего единый ``finally`` выполняет IPC → workers → metadata → Sentry.
+    🔴 Python-обработчик синхронного сигнала ЗАПРЕЩЁН — живой инцидент
+    2026-08-07. Раньше здесь стоял ``signal.signal(SIGSEGV/SIGABRT, _handler)``,
+    который слал событие в Sentry перед смертью. CPython не исполняет такой
+    колбэк в момент сбоя: C-уровень ставит флаг и ВОЗВРАЩАЕТСЯ, ядро повторяет
+    сбойную инструкцию — и сегфолт зацикливается навсегда. В проде это дало
+    поток записи, застрявший в ``_sigtramp`` (97% сэмплов), 46 вложенных
+    Python-обработчиков на главном потоке и дедлок на локе внутри
+    ``sentry_sdk.flush()``. Процесс переставал принимать соединения, но не
+    умирал и не мог обработать SIGTERM: честный крэш, после которого launchd
+    поднял бы бэкенд за пару секунд, превращался в многочасовой тихий простой.
+    Разбор и sample: ``.remember/forensics/``,
+    тесты — ``tests/test_fault_signal_handler_2026_08_07.py``.
 
-    Перед передачей аварийного сигнала default-handler-у отправляет событие
-    Sentry с именем сигнала.
+    ``faulthandler`` делает ровно то, что было нужно, и делает это на C-уровне:
+    печатает трейсбек ВСЕХ потоков в stderr (у launchd это err.log) и передаёт
+    сигнал default-обработчику, так что процесс честно умирает → launchd его
+    перезапускает, а macOS пишет crash report. ``all_threads=True`` обязателен:
+    сбой прилетает в рабочий поток, а не в главный.
 
-    Идемпотентен; без инициализированного Sentry SDK ничего не делает.
+    Телеметрия сбоя при этом не теряется по существу — прежний обработчик до
+    Sentry всё равно не доходил (дедлочился), а факт нечистой смерти на
+    следующем старте детектирует ``shutdown_forensics.check_and_collect()``
+    по dirty-маркеру.
+
+    SIGTERM/SIGINT здесь не трогаем: ими владеет signal-safe callback из
+    ``service.main()``.
+
+    Идемпотентен; никогда не бросает — диагностика не должна мешать запуску.
     """
     if getattr(install_signal_handlers, "_installed", False):
         return
     install_signal_handlers._installed = True  # type: ignore[attr-defined]
 
-    def _handler(signum: int, frame: object) -> None:
-        signame = signal.Signals(signum).name
-        try:
-            import sentry_sdk  # noqa: PLC0415
-
-            if _sentry_initialized:
-                with sentry_sdk.push_scope() as scope:
-                    scope.set_tag("signal", signame)
-                    scope.set_level("fatal")
-                    sentry_sdk.capture_message(f"Backend received {signame}")
-                    sentry_sdk.flush(timeout=2.0)
-        except Exception:  # noqa: BLE001
-            pass  # телеметрия не должна мешать штатному завершению
-        # Возвращаем default-handler, чтобы аварийный сигнал завершил процесс.
-        signal.signal(signum, signal.SIG_DFL)
-        signal.raise_signal(signum)
-
-    # SIGTERM здесь нет: им владеет signal-safe callback из service.main().
-    for sig in (signal.SIGABRT, signal.SIGSEGV):
-        try:
-            signal.signal(sig, _handler)
-        except (ValueError, OSError):
-            # В некоторых контекстах (например, не-main thread) установка
-            # SIGSEGV / SIGABRT запрещена самим Python/runtime.
-            pass
+    try:
+        faulthandler.enable(all_threads=True)
+    except Exception:  # noqa: BLE001
+        # stderr может быть закрыт/подменён объектом без fileno() — тогда
+        # остаёмся на поведении по умолчанию (крэш + macOS crash report).
+        logger.debug("faulthandler.enable() недоступен", exc_info=True)
 
 
 def add_breadcrumb(
