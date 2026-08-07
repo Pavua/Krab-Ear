@@ -149,6 +149,7 @@ import backend.cloud_rewriter as cloud_rewriter
 
 import argparse
 from datetime import datetime, timedelta, timezone
+import json
 import logging
 import math
 import os
@@ -393,6 +394,46 @@ def llm_warmup_needed(settings_get: Any) -> bool:
         bool(settings_get("llm_rewrite_enabled", False))
         or bool(settings_get("stt_punctuation_llm_pass_enabled", False))
     )
+
+
+def _read_unclean_restart_state(path: Path) -> "tuple[float, int]":
+    """Прочитать состояние кросс-рестартового лимита отчётов о крэшах.
+
+    Возвращает ``(last_report_ts, suppressed_since_last)``. Отсутствующий,
+    пустой, усечённый или битый файл — это ``(0.0, 0)``: «отчётов ещё не было».
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return float(raw.get("last_report_ts", 0.0)), int(raw.get("suppressed_since_last", 0))
+    except Exception:  # noqa: BLE001 — нет файла / битый / чужой формат
+        return 0.0, 0
+
+
+def _write_unclean_restart_state(path: Path, last_ts: float, suppressed: int) -> bool:
+    """Атомарно сохранить состояние лимита. ``True`` — записано.
+
+    🔴 Атомарность здесь не педантизм, а защита от того самого отказа,
+    ради которого лимит и существует. Голый ``write_text`` сначала УСЕКАЕТ
+    файл, и только потом пишет: прерывание между этими шагами (ENOSPC на
+    полном диске, крэш в лупе) оставляет нулевой файл, который следующий старт
+    прочитает как «отчётов ещё не было» — лимит превращается в no-op ровно
+    тогда, когда он нужен. Это документированный класс
+    «read-modify-write without a fail-safe» из CLAUDE.md.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(
+            json.dumps({"last_report_ts": last_ts, "suppressed_since_last": suppressed}),
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+        return True
+    except Exception:  # noqa: BLE001
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+        return False
 
 
 class BackendService:
@@ -1643,8 +1684,16 @@ class BackendService:
 
             if _needs_background_recovery:
                 def _startup_recovery() -> None:
-                    check_and_collect(data_dir=_data_dir, log_dirs=_own_log_dirs)
+                    verdict = check_and_collect(data_dir=_data_dir, log_dirs=_own_log_dirs)
+                    # Маркер ТЕКУЩЕЙ жизни пишем ДО отчёта: ErrorBus.push →
+                    # EventBus → EventReplayManager → _is_privacy_mode() →
+                    # холодный кэш настроек → StateStore.load_settings() под
+                    # flock — документированный путь контенции. Залипание там
+                    # не должно расширять окно, в котором нештатная смерть уже
+                    # ТЕКУЩЕЙ жизни останется незамеченной, и не должно
+                    # оттягивать rescue-скан незавершённых записей.
                     write_alive_marker(_data_dir)
+                    self._report_unclean_restart(verdict, _data_dir)
                     run_rescue_scan(
                         rescue_dir=_rescue_dir,
                         recording_core=self._recording_core_svc,
@@ -1879,6 +1928,110 @@ class BackendService:
         except Exception:
             logger.exception("EventBridge: rest_inprocess.status() бросил при проверке подавления")
             return False
+
+    #: Минимальный интервал между отчётами о нештатном рестарте (секунды).
+    #: launchd держит юнит с ``KeepAlive=true`` и ``ThrottleInterval=5``, то
+    #: есть в крэш-лупе бэкенд поднимается до ~720 раз в час. Каждый подъём —
+    #: РОВНО ОДИН вызов ``_report_unclean_restart`` за жизнь процесса, поэтому
+    #: in-memory дедуп ``ErrorBus`` (``_last_emitted``) для этого кода не
+    #: срабатывает НИКОГДА: он живёт в памяти умершего процесса. Нужен
+    #: кросс-рестартовый лимит на диске — иначе крэш-луп положит квоту Sentry
+    #: (ровно так org-wide квота уже выгорала на PortAudioError-лупе).
+    UNCLEAN_RESTART_REPORT_MIN_GAP_SEC = 900.0
+
+    #: Файл кросс-рестартового лимита (рядом с данными, не в репозитории).
+    UNCLEAN_RESTART_STATE_FILE = "unclean_restart_report.json"
+
+    def _report_unclean_restart(self, verdict: str, data_dir: "Path | str") -> None:
+        """Превратить вердикт ``shutdown_forensics.check_and_collect()`` в сигнал.
+
+        До 2026-08-07 вердикт молча выбрасывался: единственным следом
+        нештатной смерти бэкенда была одна WARNING-строка в err.log, а
+        ``sentry_sdk`` по умолчанию (``LoggingIntegration.event_level=ERROR``)
+        превращает WARNING в breadcrumb, а не в issue — то есть крэши не
+        доходили до мониторинга. Нашло адверсариальное ревью волны
+        SIGSEGV-обработчика: волна убрала обработчик, который ХОТЯ БЫ
+        НАМЕРЕВАЛСЯ слать ``capture_message(level="fatal")``, поэтому без этого
+        метода наблюдаемость крэшей стала бы строго хуже.
+
+        Куда это реально видно: Sentry (severity=error уходит немедленно) и
+        вкладка «Диагностика» (``list_recent_errors`` без ``since_seq``).
+        🔴 Тоста у владельца, скорее всего, НЕ будет, и это не баг здесь:
+        ``ErrorBusTracker`` (Swift) намеренно гасит backlog новой сессии
+        бэкенда — новый процесс начинает ``seq`` с нуля, поллер видит
+        ``latestSeq < lastSeenSeq`` и трактует это как re-arm, чтобы не
+        показывать старые ошибки как новые. Менять то осознанное решение —
+        отдельная задача, а не побочный эффект этой волны.
+
+        Зовётся из фонового треда ``startup-recovery`` — тело целиком под
+        try/except: восстановление записей идёт следом и не должно падать
+        из-за телеметрии.
+        """
+        if verdict not in ("unclean_collected", "unclean_collect_failed"):
+            return
+        try:
+            from datetime import datetime, timezone
+
+            from backend.error_bus import KrabError
+            from backend.error_codes import ERROR_REGISTRY
+
+            state_path = Path(data_dir) / self.UNCLEAN_RESTART_STATE_FILE
+            now = time.time()
+            last_ts, suppressed = _read_unclean_restart_state(state_path)
+
+            # 🔴 Часы — wall clock, и они умеют уезжать (севший RTC до
+            # синхронизации NTP, шаг назад). Метка ИЗ БУДУЩЕГО — это не «окно
+            # ещё идёт», а испорченное состояние: без явной проверки
+            # elapsed >= 0 подавление стало бы вечным и молчаливым, причём лог
+            # рапортовал бы штатную работу.
+            elapsed = now - last_ts
+            within_window = 0.0 <= elapsed < self.UNCLEAN_RESTART_REPORT_MIN_GAP_SEC
+
+            if within_window:
+                _write_unclean_restart_state(state_path, last_ts, suppressed + 1)
+                logger.warning(
+                    "startup-recovery: нештатный рестарт (%s), отчёт подавлен "
+                    "лимитом (%d подряд за последние %.0f с)",
+                    verdict, suppressed + 1, self.UNCLEAN_RESTART_REPORT_MIN_GAP_SEC,
+                )
+                return
+
+            # Окно открыто. Сначала ЗАКРЫВАЕМ его на диске, потом шлём — и если
+            # записать не удалось, НЕ шлём вовсе (fail-closed): без сохранённого
+            # состояния лимита нет, а цена ошибки несимметрична — потерянный
+            # отчёт о крэше дешевле выжженной квоты Sentry на ~720 подъёмах в
+            # час. ENOSPC реалистичен: полный диск сам по себе типовая причина
+            # ровно тех нештатных смертей, о которых этот код и отчитывается.
+            if not _write_unclean_restart_state(state_path, now, 0):
+                logger.warning(
+                    "startup-recovery: нештатный рестарт (%s), отчёт подавлен — "
+                    "не удалось сохранить %s, кросс-рестартовый лимит не работает",
+                    verdict, self.UNCLEAN_RESTART_STATE_FILE,
+                )
+                return
+
+            code = "system.unclean_restart"
+            entry = ERROR_REGISTRY.get(code, {})
+            self._error_bus.push(KrabError(
+                severity=entry.get("severity", "error"),
+                component="system",
+                code=code,
+                message_user=entry.get(
+                    "user_msg_ru",
+                    "Бэкенд перезапустился после сбоя — диагностика сохранена",
+                ),
+                message_debug=f"shutdown_forensics verdict={verdict}",
+                timestamp=datetime.now(timezone.utc),
+                # Только вердикт и счётчик подавленных: пути и содержимое
+                # форензики наружу не отдаём. suppressed несёт интенсивность
+                # лупа — без него одно событие в 15 минут неотличимо от
+                # одиночного крэша.
+                context={"verdict": verdict, "suppressed_since_last": suppressed},
+                actionable=bool(entry.get("actionable", False)),
+                action_id=entry.get("action_id"),
+            ))
+        except Exception:
+            logger.exception("startup-recovery: _report_unclean_restart упал")
 
     def _push_rest_error(self, code: str, detail: str) -> None:
         """Колбэк для InProcessRestServer: заворачивает сбой в KrabError (M2).
@@ -5791,8 +5944,12 @@ def main() -> None:
     else:
         logger.debug("Sentry telemetry отключена (DSN не задан)")
 
-    # Phase C C.7: Sentry-aware signal handlers (SIGTERM/SIGABRT/SIGSEGV).
-    # Idempotent; no-op if Sentry not initialized.
+    # Signal-safe диагностика аварийных сигналов через faulthandler
+    # (SIGSEGV/SIGBUS/SIGFPE/SIGILL/SIGABRT). Идемпотентно.
+    # 🔴 НЕ no-op без Sentry (в отличие от остального модуля) и НЕ зависит от
+    # DSN — трейсбек крэша нужен и на локальной поставке без телеметрии,
+    # поэтому вызов обязан остаться ВНЕ любого `if sentry_ok`. SIGTERM/SIGINT
+    # эта функция не трогает: ими владеет _signal_handler ниже.
     install_signal_handlers()
 
     # Auto-create Sentry release + deploy when SENTRY_AUTO_RELEASE=1

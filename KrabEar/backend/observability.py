@@ -6,11 +6,11 @@
 
 from __future__ import annotations
 
+import faulthandler
 import logging
 import os
 import plistlib
 import re
-import signal
 import subprocess
 
 logger = logging.getLogger(__name__)
@@ -311,7 +311,13 @@ def flush_sentry(timeout: float = 2.0) -> None:
     """Flush pending Sentry events to the server.
 
     No-op if Sentry SDK is not initialized or not installed.
-    Safe to call from signal handlers — never raises.
+
+    🔴 Never raises — но это НЕ значит «можно звать из обработчика сигнала».
+    ``sentry_sdk.flush()`` берёт локи (очередь транспорта) и НЕ является
+    async-signal-safe: вызов из OS-колбэка даёт реентерабельность и заклинивает
+    процесс — ровно так прод завис 2026-08-07 (см. ``install_signal_handlers``).
+    Из signal-колбэка вызывать запрещено; телеметрию шлём из обычного
+    control-flow (``finally`` в ``service.main()``, startup-recovery).
 
     Args:
         timeout: максимальное время ожидания отправки (секунд).
@@ -383,45 +389,68 @@ def mask_phone(phone: str) -> str:
 
 
 def install_signal_handlers() -> None:
-    """Установить Sentry-aware обработчики SIGABRT/SIGSEGV.
+    """Включить signal-safe диагностику аварийных сигналов (SIGSEGV и родня).
 
-    SIGTERM намеренно исключён: ``service.main()`` только просит IPC-loop выйти,
-    после чего единый ``finally`` выполняет IPC → workers → metadata → Sentry.
+    🔴 Python-обработчик синхронного сигнала ЗАПРЕЩЁН — живой инцидент
+    2026-08-07. Раньше здесь стоял ``signal.signal(SIGSEGV/SIGABRT, _handler)``,
+    который слал событие в Sentry перед смертью. CPython не исполняет такой
+    колбэк в момент сбоя: C-уровень ставит флаг и ВОЗВРАЩАЕТСЯ, ядро повторяет
+    сбойную инструкцию — и сегфолт зацикливается навсегда.
 
-    Перед передачей аварийного сигнала default-handler-у отправляет событие
-    Sentry с именем сигнала.
+    Что ДОКАЗАНО sample'ом живого процесса: поток записи застрял в
+    ``_sigtramp`` на ``PaUtil_ReadRingBuffer`` (1902 сэмпла из 1966), а в том же
+    потоке разрешается цепочка общего C-обработчика CPython (``signal_handler``
+    → ``trip_signal`` → ``_PyEval_SignalReceived``), который ставится ТОЛЬКО для
+    сигналов с Python-колбэком; на главном потоке — 46 вложенных ``handle_signals``, и
+    самый глубокий кадр стоит на ``lock_PyThread_acquire_lock``. Процесс
+    переставал принимать соединения, но не умирал и не мог обработать SIGTERM.
 
-    Идемпотентен; без инициализированного Sentry SDK ничего не делает.
+    Чем именно кончалось вложение — дедлоком на локе внутри ``sentry_sdk.flush()``
+    или лайвлоком (ре-сбоящий поток взводит флаг быстрее, чем главный успевает
+    дренировать) — sample НЕ различает: все простаивающие треды процесса стоят
+    на том же ``_PyParkingLot_Park``, так что этот кадр сам по себе уликой
+    дедлока не является. Лечение в обоих случаях одно, поэтому различать не
+    потребовалось. Разбор с цитатами из sample:
+    ``docs/audit/2026-08-07-sigsegv-handler-wedge.md`` (сам sample —
+    ``.remember/forensics/``, вне репозитория);
+    тесты — ``tests/test_fault_signal_handler_2026_08_07.py``.
+
+    ``faulthandler`` делает ровно то, что было нужно, и делает это на C-уровне:
+    печатает трейсбек ВСЕХ потоков в stderr (у launchd это err.log) и передаёт
+    сигнал default-обработчику, так что процесс честно умирает → launchd его
+    перезапускает, а macOS пишет crash report. ``all_threads=True`` обязателен:
+    сбой прилетает в рабочий поток, а не в главный.
+
+    Телеметрия сбоя при этом не теряется: прежний обработчик до Sentry всё
+    равно не доходил (заклинивал), а факт нечистой смерти на следующем старте
+    детектирует ``shutdown_forensics.check_and_collect()`` по dirty-маркеру —
+    и ``BackendService._startup_recovery`` превращает его вердикт в
+    ``KrabError('system.unclean_restart')`` + Sentry-событие (см. там же;
+    до 2026-08-07 вердикт молча выбрасывался, и крэши были невидимы).
+
+    SIGTERM/SIGINT здесь не трогаем: ими владеет signal-safe callback из
+    ``service.main()``.
+
+    Идемпотентен; никогда не бросает — диагностика не должна мешать запуску.
     """
     if getattr(install_signal_handlers, "_installed", False):
         return
+
+    try:
+        faulthandler.enable(all_threads=True)
+    except Exception:  # noqa: BLE001
+        # stderr может быть закрыт/подменён объектом без fileno() (актуально
+        # для bundled-рантайма внутри .app) — остаёмся на поведении по
+        # умолчанию: крэш + macOS crash report, но без Python-трейсбека.
+        #
+        # 🔴 Защёлку НЕ взводим и пишем WARNING, а не debug: иначе один
+        # неудачный вызов молча выключал бы crash-диагностику на всю жизнь
+        # процесса без единого видимого следа при дефолтном уровне логов.
+        # Тот же класс, что уже ловили в service.main() («info, не debug»).
+        logger.warning("faulthandler.enable() недоступен — крэш-трейсбека не будет", exc_info=True)
+        return
+
     install_signal_handlers._installed = True  # type: ignore[attr-defined]
-
-    def _handler(signum: int, frame: object) -> None:
-        signame = signal.Signals(signum).name
-        try:
-            import sentry_sdk  # noqa: PLC0415
-
-            if _sentry_initialized:
-                with sentry_sdk.push_scope() as scope:
-                    scope.set_tag("signal", signame)
-                    scope.set_level("fatal")
-                    sentry_sdk.capture_message(f"Backend received {signame}")
-                    sentry_sdk.flush(timeout=2.0)
-        except Exception:  # noqa: BLE001
-            pass  # телеметрия не должна мешать штатному завершению
-        # Возвращаем default-handler, чтобы аварийный сигнал завершил процесс.
-        signal.signal(signum, signal.SIG_DFL)
-        signal.raise_signal(signum)
-
-    # SIGTERM здесь нет: им владеет signal-safe callback из service.main().
-    for sig in (signal.SIGABRT, signal.SIGSEGV):
-        try:
-            signal.signal(sig, _handler)
-        except (ValueError, OSError):
-            # В некоторых контекстах (например, не-main thread) установка
-            # SIGSEGV / SIGABRT запрещена самим Python/runtime.
-            pass
 
 
 def add_breadcrumb(

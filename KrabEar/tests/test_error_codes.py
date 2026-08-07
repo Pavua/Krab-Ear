@@ -86,6 +86,7 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             "mlx.semaphore_leak",
             "stt.empty_audio_warning",
             "system.malloc_env_leak",
+            "system.unclean_restart",
             # Added Wave 77 — 3 production-critical codes from Wave 151 log audit:
             # gigaam worker crashed (×3829) / IPC rate limit (×2779) / critical STT error (×68)
             "stt.gigaam_worker_crashed",
@@ -270,4 +271,4 @@ class ErrorRegistryShapeTests(unittest.TestCase):
         test_expected_codes_present guards the exact set so this count test is a
         redundant but cheap invariant.
         """
-        self.assertEqual(len(ERROR_REGISTRY), 68)
+        self.assertEqual(len(ERROR_REGISTRY), 69)

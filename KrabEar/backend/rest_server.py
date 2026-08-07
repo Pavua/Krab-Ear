@@ -2502,6 +2502,19 @@ if __name__ == "__main__":
     import errno as _errno
     import sys as _sys
 
+    # Сиблинг-паритет с IPC-процессом (найдено ревью волны 2026-08-07): REST —
+    # отдельный launchd-юнит, он тоже спавнит GigaAM-воркер и транскрибирует,
+    # то есть имеет ту же экспозицию к нативным сбоям (MLX/onnxruntime/
+    # PortAudio). Без этого его сегфолт умирал бы без единого трейсбека в
+    # krab-ear-rest.err.log (dirty-маркер здесь не ведётся). Обработчик
+    # сигнала из Python вешать ЗАПРЕЩЕНО — см. observability.install_signal_handlers.
+    try:
+        import faulthandler as _faulthandler
+
+        _faulthandler.enable(all_threads=True)
+    except Exception:  # noqa: BLE001
+        logger.warning("REST: faulthandler.enable() недоступен — крэш-трейсбека не будет")
+
     _auth_mode = (
         "token-store" if getattr(settings, "REST_API_AUTH_ENABLED", False)
         else "legacy-key" if settings.REST_API_KEY
