@@ -35,6 +35,7 @@ summary_profiles.json       # W1770: LLM summarization style profiles (prompt/fo
 
 # --- W1770: runtime / extensibility artefacts (not user PII) --------------
 shutdown_info.json       # W1770: last-shutdown metadata (pid, timestamp, reason) for diagnostics; no user content
+unclean_restart_report.json # 2026-08-07: кросс-рестартовый лимит отчётов о нештатной смерти — РОВНО два поля: last_report_ts (float) и suppressed_since_last (int). Ноль пользовательского контента, прямой сиблинг shutdown_info.json. Переживает purge намеренно: очистка сбросила бы окно лимита, а он существует ради того, чтобы крэш-луп (launchd ThrottleInterval=5 → до ~720 подъёмов/час) не выжег квоту Sentry.
 plugins/                 # W1770: installed plugin code + plugin.json manifests (extensibility), not transcript data
 
 # --- Compliance / security infrastructure ---------------------------------
