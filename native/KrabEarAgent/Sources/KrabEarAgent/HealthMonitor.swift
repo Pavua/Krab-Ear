@@ -37,6 +37,11 @@ enum HealthSuspendReason: String, CaseIterable, Sendable {
 actor HealthMonitor {
     private let pingInterval: TimeInterval
     private let hangThreshold: Int
+    /// Сколько подряд неудачных ping'ов, прежде чем ПРОВЕРЯТЬ гипотезу «завис».
+    /// Дефолт 20 × 3с = минута: заведомо дольше любого штатного затыка.
+    private let wedgeThreshold: Int
+    /// Не чаще этого повторно проверяем и эскалируем, пока отказы продолжаются.
+    private let wedgeReprobeInterval: TimeInterval
 
     private var consecutiveFailures: Int = 0
     private var state: HealthState = .stopped
@@ -44,6 +49,30 @@ actor HealthMonitor {
     private var pingProvider: (@Sendable () async -> Bool)?
     private var onHangDetected: (@Sendable () async -> Void)?
     private var hangFiredForCurrentEpisode: Bool = false
+
+    // MARK: Заклинивший (живой, но не отвечающий) backend — инцидент 2026-08-07
+    //
+    // onHangDetected одноразов на эпизод, а сбрасывается ТОЛЬКО успешным
+    // ping'ом; его обработчик зовёт restartIfDeadDetailed(), который на ЖИВОМ
+    // процессе возвращает .alreadyAlive и не делает ничего. Итог: на
+    // заклинившем backend'е выполнялась ровно одна безрезультатная попытка, и
+    // дальше self-heal молчал навсегда (класс «sticky state without an exit»).
+    // Прод так пролежал 8 часов.
+    //
+    // 🔴 Почему нельзя просто «рестартовать после N неудач»: под нагрузкой
+    // здоровый backend отвечает медленно (живой RTT доходил до 2.9 с при
+    // тугом таймауте ping'а 2 с), а kickstart под активной диктовкой теряет
+    // её безвозвратно (инцидент 2026-07-22). Поэтому эскалация требует ДВУХ
+    // независимых подтверждений:
+    //   1) wedgeProbe сказал, что соединение ОТВЕРГАЕТСЯ (а не таймаутит) —
+    //      медленный-но-живой backend соединение принимает;
+    //   2) backend хотя бы раз был здоров в этом эпизоде — иначе мы бы убивали
+    //      МЕДЛЕННО СТАРТУЮЩИЙ процесс (импорт torch под свопом занимает
+    //      минуты, сокета в это время ещё нет).
+    private var wedgeProbe: (@Sendable () async -> Bool)?
+    private var onWedgeDetected: (@Sendable () async -> Void)?
+    private var sawHealthyPing: Bool = false
+    private var lastWedgeCheckAt: Date?
     /// Причины, по которым backend ЛЕГИТИМНО может не отвечать на ping.
     /// Set (не счётчик) — идемпотентно по причине, как pausedReasons поллера.
     private var suspendedReasons: Set<HealthSuspendReason> = []
@@ -56,10 +85,14 @@ actor HealthMonitor {
     init(
         pingInterval: TimeInterval = 3.0,
         hangThreshold: Int = 2,
+        wedgeThreshold: Int = 20,
+        wedgeReprobeInterval: TimeInterval = 60.0,
         probeSubscriptionOperation: (@Sendable (URL) async -> Void)? = nil
     ) {
         self.pingInterval = pingInterval
         self.hangThreshold = hangThreshold
+        self.wedgeThreshold = wedgeThreshold
+        self.wedgeReprobeInterval = wedgeReprobeInterval
         self.probeSubscriptionOperation = probeSubscriptionOperation
     }
 
@@ -79,6 +112,21 @@ actor HealthMonitor {
         self.onHangDetected = callback
     }
 
+    /// Проба «заклинило ли»: `true` — соединение ОТВЕРГАЕТСЯ (backend жив, но
+    /// accept-loop мёртв), `false` — соединение принимается, backend просто
+    /// медленный. Без пробы эскалация не происходит НИКОГДА (fail-safe: лучше
+    /// не лечить, чем убить живую диктовку).
+    func setWedgeProbe(_ probe: @escaping @Sendable () async -> Bool) {
+        self.wedgeProbe = probe
+    }
+
+    /// Зовётся, когда заклинивание ПОДТВЕРЖДЕНО пробой. Рейт-лимит и кап
+    /// принудительных рестартов — на стороне обработчика
+    /// (`WedgedEscalationTracker`), здесь только детекция.
+    func setOnWedgeDetected(_ callback: @escaping @Sendable () async -> Void) {
+        self.onWedgeDetected = callback
+    }
+
     func currentState() -> HealthState {
         return state
     }
@@ -88,6 +136,11 @@ actor HealthMonitor {
         state = .healthy
         consecutiveFailures = 0
         hangFiredForCurrentEpisode = false
+        // Пока не увидели ЖИВОЙ ответ, эскалировать нельзя: агент мог
+        // стартовать раньше backend'а, и «не отвечает» означало бы «ещё
+        // грузится», а не «завис».
+        sawHealthyPing = false
+        lastWedgeCheckAt = nil
 
         monitorTask = Task { [weak self] in
             await self?.runLoop()
@@ -140,6 +193,8 @@ actor HealthMonitor {
         let ok = await provider()
         if ok {
             consecutiveFailures = 0
+            sawHealthyPing = true
+            lastWedgeCheckAt = nil
             if state == .hung {
                 state = .healthy
                 hangFiredForCurrentEpisode = false
@@ -157,7 +212,29 @@ actor HealthMonitor {
                     }
                 }
             }
+            await checkForWedgeIfNeeded()
         }
+    }
+
+    /// Отказы продолжаются дольше `wedgeThreshold` тиков — проверяем гипотезу
+    /// «backend жив, но заклинил», и только при подтверждении зовём эскалацию.
+    ///
+    /// Намеренно НЕ одноразово на эпизод: если принудительный рестарт не помог,
+    /// молчать навсегда — это ровно тот дефект, который здесь и чинится. Частоту
+    /// ограничивает `wedgeReprobeInterval`, число рестартов — обработчик.
+    private func checkForWedgeIfNeeded() async {
+        guard consecutiveFailures >= wedgeThreshold else { return }
+        guard sawHealthyPing else { return }
+        guard let probe = wedgeProbe, let callback = onWedgeDetected else { return }
+
+        let now = Date()
+        if let last = lastWedgeCheckAt, now.timeIntervalSince(last) < wedgeReprobeInterval {
+            return
+        }
+        lastWedgeCheckAt = now
+
+        guard await probe() else { return }
+        await callback()
     }
 }
 

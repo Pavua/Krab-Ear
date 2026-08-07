@@ -67,7 +67,11 @@ extension AgentAppDelegate {
         }
     }
 
-    static func isConnectionError(_ error: IPCError) -> Bool {
+    /// Чистая классификация ошибки IPC — состояния не трогает, поэтому
+    /// `nonisolated`: её зовёт wedge-проба HealthMonitor'а из @Sendable-колбэка
+    /// (2026-08-07). Без этого пришлось бы дублировать таблицу и получить дрейф
+    /// между двумя копиями решения «завис или просто медленный».
+    nonisolated static func isConnectionError(_ error: IPCError) -> Bool {
         switch error {
         case .socketCreateFailed, .socketConnectFailed, .writeFailed, .readFailed:
             return true

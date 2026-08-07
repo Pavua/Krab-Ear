@@ -26,6 +26,24 @@ private nonisolated(unsafe) var statusIndicatorViewKey: UInt8 = 0
 private nonisolated(unsafe) var privacyModeEnabledKey: UInt8 = 0
 private nonisolated(unsafe) var lastHealthStateKey: UInt8 = 0
 
+/// Владелец рейт-лимита принудительных рестартов заклинившего backend'а.
+///
+/// `WedgedEscalationTracker` — struct с mutating-методами, а колбэк детектора
+/// `@Sendable` и зовётся из актора HealthMonitor. Актор-обёртка даёт безопасную
+/// разделяемую мутацию без второго набора порогов: пороги (30 минут между
+/// попытками, кап 3 подряд) остаются едиными с wake-word-эскалацией.
+actor WedgeEscalationGate {
+    private var tracker = WedgedEscalationTracker()
+
+    /// `true` — принудительный рестарт разрешён прямо сейчас.
+    func shouldEscalate() -> Bool {
+        tracker.shouldEscalate(wedged: true, now: Date().timeIntervalSince1970)
+    }
+
+    /// Backend снова отвечает — кап подряд-эскалаций перевзводится.
+    func noteHealthy() { tracker.noteHealthy() }
+}
+
 @MainActor
 extension AgentAppDelegate {
     var healthMonitor: HealthMonitor? {
@@ -81,6 +99,7 @@ extension AgentAppDelegate {
         let monitor = HealthMonitor(pingInterval: 3.0, hangThreshold: 2)
         let socketPath = backendSupervisor.socketPath
         let supervisor = backendSupervisor
+        let wedgeGate = WedgeEscalationGate()
 
         monitor.setPingProvider {
             let client = IPCClient(socketPath: socketPath)
@@ -118,6 +137,57 @@ extension AgentAppDelegate {
                     }
                 }
             }
+            // Заклинивший backend (инцидент 2026-08-07): восемь часов процесс был
+            // жив, жёг CPU и отвергал IPC, а self-heal сделал ровно одну
+            // безрезультатную попытку и замолчал навсегда. Ниже — вторая,
+            // намеренно консервативная ступень.
+            await monitor.setWedgeProbe {
+                // Дискриминатор «завис» vs «медленный»: отказ СОЕДИНЕНИЯ против
+                // таймаута. Переиспользуем уже существующую классификацию из
+                // main+IPCRecovery (её комментарий формулирует тот же принцип:
+                // «Timeout means backend is alive but slow — do NOT trigger
+                // restart»). Здоровый-но-медленный backend соединение принимает,
+                // и его рестарт уничтожил бы активную диктовку (инцидент
+                // 2026-07-22), поэтому таймаут заклиниванием НЕ считается.
+                let client = IPCClient(socketPath: socketPath)
+                do {
+                    _ = try await client.callAsync(method: "ping", timeoutSec: 5)
+                    return false
+                } catch let error as IPCError {
+                    return AgentAppDelegate.isConnectionError(error)
+                } catch {
+                    return false
+                }
+            }
+
+            await monitor.setOnWedgeDetected {
+                // Рейт-лимит и кап — в WedgedEscalationTracker (30 минут между
+                // попытками, максимум 3 подряд без здорового сигнала): тот же
+                // страж, что у wake-word-эскалации, специально переиспользован,
+                // чтобы не заводить второй с другими порогами.
+                guard await wedgeGate.shouldEscalate() else {
+                    loggerRef.warn(
+                        "HealthMonitor: backend заклинил, но эскалация подавлена "
+                        + "(рейт-лимит или исчерпан кап принудительных рестартов)"
+                    )
+                    return
+                }
+                loggerRef.warn(
+                    "HealthMonitor: backend ЗАКЛИНИЛ (соединение отвергается) — "
+                    + "принудительный рестарт через launchctl kickstart"
+                )
+                // forceRestartBackend, а НЕ restartIfDead: последний
+                // short-circuit'ится на живом процессе и именно поэтому не
+                // вылечил инцидент.
+                let ok = supervisor.forceRestartBackend()
+                await MainActor.run {
+                    BackendToast.shared.show(
+                        ok ? "Backend завис — перезапускаю" : "⚠ Backend завис, рестарт не удался",
+                        duration: 10.0
+                    )
+                }
+            }
+
             await monitor.start()
             // Wave 656: log first health ping milestone.
             AgentRecoveryLogger.shared.logStage("first_health_ping")
