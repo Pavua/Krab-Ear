@@ -508,6 +508,30 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "dedupe_seconds": 3600,
     },
 
+    # system.unclean_restart — прошлая жизнь процесса умерла НЕ через
+    # graceful shutdown (крэш/SIGKILL/OOM): dirty-маркер пережил рестарт,
+    # форензика собрана в <data_dir>/forensics/<ts>/ (2026-08-07).
+    # До этой волны вердикт check_and_collect() молча выбрасывался — крэши
+    # бэкенда были невидимы и владельцу, и Sentry (WARNING у sentry_sdk по
+    # умолчанию становится breadcrumb'ом, а не issue). Не actionable: чинить
+    # тут нечего, это сигнал «загляни в форензику». Dedupe 300с — рестарт-луп
+    # не должен превратиться в шторм уведомлений.
+    #
+    # 🔴 severity=error, а НЕ warn, осознанно: warn-tier в ErrorBus уходит в
+    # WarnBatcher, который сбрасывается только следующим add() того же кода
+    # или flush_all() при ШТАТНОМ завершении. Для события «прошлая жизнь
+    # умерла нештатно» это ровно неверная семантика: в крэш-лупе штатного
+    # завершения не будет и одиночное событие потерялось бы навсегда.
+    # error-tier уходит в Sentry немедленно.
+    "system.unclean_restart": {
+        "user_msg_ru": "Бэкенд перезапустился после сбоя — диагностика сохранена",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "error",
+        "dedupe_seconds": 300,
+    },
+
     # ── Wave 61: final missing codes ─────────────────────────────
 
     # vgw.reconnect — VGWebSocketClient disconnected from Voice Gateway and

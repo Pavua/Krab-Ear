@@ -15,8 +15,12 @@ C-уровень (``signal_handler`` → ``trip_signal``) лишь ставит 
   отсюда «AudioRecorder worker не завершился за 3.0 с» в логе;
 * главный поток — 46 ВЛОЖЕННЫХ ``handle_signals``: каждый следующий сбой
   перевзводил Python-колбэк поверх незавершённого предыдущего, самый глубокий
-  заблокирован на ``lock_PyThread_acquire_lock`` (лок внутри
-  ``sentry_sdk.flush()``) — классический дедлок реентерабельности;
+  кадр стоит на ``lock_PyThread_acquire_lock``. 🔴 Чем именно кончалось
+  вложение — дедлоком на локе внутри ``sentry_sdk.flush()`` или лайвлоком
+  (ре-сбоящий поток взводит флаг быстрее, чем главный успевает дренировать) —
+  sample НЕ различает: все простаивающие треды процесса стоят на том же
+  ``_PyParkingLot_Park``, поэтому этот кадр сам по себе уликой дедлока не
+  является (поправка адверсариального ревью). Лечение в обоих случаях одно;
 * итог: процесс не принимает соединения (``ConnectionRefusedError`` на IPC),
   но и не умирает, и НЕ МОЖЕТ обработать SIGTERM — поэтому self-heal бессилен,
   лечит только SIGKILL. Честный крэш, после которого launchd поднял бы бэкенд
@@ -142,6 +146,38 @@ class FaultSignalsHaveNoPythonHandlerTest(unittest.TestCase):
             except Exception as exc:  # noqa: BLE001
                 self.fail(f"install_signal_handlers() пробросил {exc!r}")
 
+    def test_failed_enable_does_not_latch_diagnostics_off(self):
+        """Провал enable() не должен запирать диагностику на всю жизнь процесса.
+
+        Находка адверсариального ревью: защёлка ``_installed`` взводилась ДО
+        попытки, поэтому один неудачный вызов (закрытый stderr — реальный
+        сценарий для bundled-рантайма внутри .app) навсегда выключал бы
+        crash-диагностику, и повторить было бы некому.
+        """
+        with patch.object(faulthandler, "enable", side_effect=RuntimeError("no stderr")):
+            self.mod.install_signal_handlers()
+
+        self.assertFalse(
+            getattr(self.mod.install_signal_handlers, "_installed", False),
+            "защёлка взведена после ПРОВАЛА enable() — повторная попытка невозможна",
+        )
+
+        # Вторая попытка (stderr снова доступен) обязана реально сработать.
+        with patch.object(faulthandler, "enable") as enable:
+            self.mod.install_signal_handlers()
+        enable.assert_called_once()
+
+    def test_failure_is_logged_loudly_not_at_debug(self):
+        """Молчаливое отключение crash-диагностики — тот же класс, что уже ловили."""
+        with patch.object(faulthandler, "enable", side_effect=RuntimeError("no stderr")):
+            with self.assertLogs(self.mod.logger, level="WARNING") as captured:
+                self.mod.install_signal_handlers()
+
+        self.assertTrue(
+            any("faulthandler" in line for line in captured.output),
+            f"нет WARNING про недоступный faulthandler: {captured.output}",
+        )
+
 
 class InstallSignalHandlersSourceContractTest(unittest.TestCase):
     """AST-контракт: модуль наблюдаемости не регистрирует сигналы из Python.
@@ -182,6 +218,123 @@ class InstallSignalHandlersSourceContractTest(unittest.TestCase):
         ]
 
         self.assertEqual(calls, [], "raise_signal() внутри обработчика сбоя")
+
+
+class UncleanRestartIsReportedTest(unittest.TestCase):
+    """Вердикт форензики доходит до ErrorBus, а не выбрасывается.
+
+    Находка адверсариального ревью этой же волны: убрав обработчик, который
+    ХОТЯ БЫ НАМЕРЕВАЛСЯ послать ``capture_message(level="fatal")``, волна
+    сделала бы наблюдаемость крэшей строго хуже — ``check_and_collect()``
+    возвращал вердикт, а вызывающая сторона его игнорировала, и единственным
+    следом оставалась WARNING-строка в err.log (у ``sentry_sdk`` по умолчанию
+    WARNING — breadcrumb, а не issue).
+
+    Метод зовём как несвязанный, на лёгкой заглушке: конструировать настоящий
+    ``BackendService`` тут не нужно и вредно (демон-треды + обязательный
+    ``close()`` в tearDown — хронический источник CI-флейка чанков).
+    """
+
+    class _FakeBus:
+        def __init__(self):
+            self.pushed = []
+
+        def push(self, err):
+            self.pushed.append(err)
+
+    def _report(self, verdict):
+        from backend.service import BackendService
+
+        stub = type("Stub", (), {})()
+        stub._error_bus = self._FakeBus()
+        BackendService._report_unclean_restart(stub, verdict)
+        return stub._error_bus.pushed
+
+    def test_clean_verdicts_report_nothing(self):
+        for verdict in ("first_run", "clean"):
+            with self.subTest(verdict=verdict):
+                self.assertEqual(self._report(verdict), [])
+
+    def test_unclean_verdicts_push_error(self):
+        for verdict in ("unclean_collected", "unclean_collect_failed"):
+            with self.subTest(verdict=verdict):
+                pushed = self._report(verdict)
+                self.assertEqual(len(pushed), 1, "нештатная смерть не отражена в ErrorBus")
+                err = pushed[0]
+                self.assertEqual(err.code, "system.unclean_restart")
+                self.assertEqual(err.context.get("verdict"), verdict)
+
+    def test_severity_is_error_so_sentry_gets_it_immediately(self):
+        """warn-tier батчится и сбрасывается лишь при ШТАТНОМ завершении.
+
+        Для события «прошлая жизнь умерла нештатно» это ровно неверная
+        семантика: в крэш-лупе штатного завершения не будет и одиночное
+        событие потерялось бы навсегда.
+        """
+        err = self._report("unclean_collected")[0]
+        self.assertEqual(err.severity, "error")
+
+    def test_never_raises_when_error_bus_is_broken(self):
+        """Телеметрия не должна ронять тред startup-recovery.
+
+        Следом за этим вызовом идёт rescue-скан незавершённых записей — если
+        отчёт бросит, аудио пользователя не будет восстановлено.
+        """
+        from backend.service import BackendService
+
+        class _ExplodingBus:
+            def push(self, err):
+                raise RuntimeError("bus down")
+
+        stub = type("Stub", (), {})()
+        stub._error_bus = _ExplodingBus()
+        try:
+            BackendService._report_unclean_restart(stub, "unclean_collected")
+        except Exception as exc:  # noqa: BLE001
+            self.fail(f"_report_unclean_restart пробросил {exc!r}")
+
+
+class StartupRecoveryUsesVerdictSourceContractTest(unittest.TestCase):
+    """AST-контракт: вердикт ``check_and_collect()`` не выбрасывается.
+
+    Именно потерянное возвращаемое значение сделало крэши невидимыми —
+    проверяем сам факт использования, а не наличие подстроки.
+    """
+
+    def test_verdict_is_assigned_and_passed_on(self):
+        import backend.service as service_mod
+
+        source = textwrap.dedent(inspect.getsource(service_mod.BackendService.__init__))
+        tree = ast.parse(source)
+
+        assigned_names = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign):
+                continue
+            call = node.value
+            if not isinstance(call, ast.Call):
+                continue
+            func = call.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if name == "check_and_collect":
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        assigned_names.add(target.id)
+
+        self.assertTrue(
+            assigned_names,
+            "результат check_and_collect() никуда не присваивается — вердикт "
+            "нештатной смерти снова теряется",
+        )
+
+        used = {
+            n.id for n in ast.walk(tree)
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+        }
+        self.assertTrue(
+            assigned_names & used,
+            f"вердикт {assigned_names} присвоен, но нигде не читается",
+        )
 
 
 if __name__ == "__main__":

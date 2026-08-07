@@ -1643,7 +1643,8 @@ class BackendService:
 
             if _needs_background_recovery:
                 def _startup_recovery() -> None:
-                    check_and_collect(data_dir=_data_dir, log_dirs=_own_log_dirs)
+                    verdict = check_and_collect(data_dir=_data_dir, log_dirs=_own_log_dirs)
+                    self._report_unclean_restart(verdict)
                     write_alive_marker(_data_dir)
                     run_rescue_scan(
                         rescue_dir=_rescue_dir,
@@ -1879,6 +1880,50 @@ class BackendService:
         except Exception:
             logger.exception("EventBridge: rest_inprocess.status() бросил при проверке подавления")
             return False
+
+    def _report_unclean_restart(self, verdict: str) -> None:
+        """Превратить вердикт ``shutdown_forensics.check_and_collect()`` в сигнал.
+
+        До 2026-08-07 вердикт молча выбрасывался: единственным следом
+        нештатной смерти бэкенда была одна WARNING-строка в err.log, а
+        ``sentry_sdk`` по умолчанию (``LoggingIntegration.event_level=ERROR``)
+        превращает WARNING в breadcrumb, а не в issue — то есть крэши были
+        невидимы и владельцу, и мониторингу. Нашло адверсариальное ревью
+        волны SIGSEGV-обработчика: волна убрала обработчик, который ХОТЯ БЫ
+        НАМЕРЕВАЛСЯ слать ``capture_message(level="fatal")``, поэтому без этого
+        метода наблюдаемость крэшей стала бы строго хуже.
+
+        Зовётся из фонового треда ``startup-recovery`` — тело целиком под
+        try/except: восстановление записей идёт следом и не должно падать
+        из-за телеметрии.
+        """
+        if verdict not in ("unclean_collected", "unclean_collect_failed"):
+            return
+        try:
+            from datetime import datetime, timezone
+
+            from backend.error_bus import KrabError
+            from backend.error_codes import ERROR_REGISTRY
+
+            code = "system.unclean_restart"
+            entry = ERROR_REGISTRY.get(code, {})
+            self._error_bus.push(KrabError(
+                severity=entry.get("severity", "error"),
+                component="system",
+                code=code,
+                message_user=entry.get(
+                    "user_msg_ru",
+                    "Бэкенд перезапустился после сбоя — диагностика сохранена",
+                ),
+                message_debug=f"shutdown_forensics verdict={verdict}",
+                timestamp=datetime.now(timezone.utc),
+                # Только вердикт: пути и содержимое форензики наружу не отдаём.
+                context={"verdict": verdict},
+                actionable=bool(entry.get("actionable", False)),
+                action_id=entry.get("action_id"),
+            ))
+        except Exception:
+            logger.exception("startup-recovery: _report_unclean_restart упал")
 
     def _push_rest_error(self, code: str, detail: str) -> None:
         """Колбэк для InProcessRestServer: заворачивает сбой в KrabError (M2).
@@ -5791,8 +5836,12 @@ def main() -> None:
     else:
         logger.debug("Sentry telemetry отключена (DSN не задан)")
 
-    # Phase C C.7: Sentry-aware signal handlers (SIGTERM/SIGABRT/SIGSEGV).
-    # Idempotent; no-op if Sentry not initialized.
+    # Signal-safe диагностика аварийных сигналов через faulthandler
+    # (SIGSEGV/SIGBUS/SIGFPE/SIGILL/SIGABRT). Идемпотентно.
+    # 🔴 НЕ no-op без Sentry (в отличие от остального модуля) и НЕ зависит от
+    # DSN — трейсбек крэша нужен и на локальной поставке без телеметрии,
+    # поэтому вызов обязан остаться ВНЕ любого `if sentry_ok`. SIGTERM/SIGINT
+    # эта функция не трогает: ими владеет _signal_handler ниже.
     install_signal_handlers()
 
     # Auto-create Sentry release + deploy when SENTRY_AUTO_RELEASE=1

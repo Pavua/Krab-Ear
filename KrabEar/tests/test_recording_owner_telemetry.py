@@ -474,7 +474,9 @@ class RecordingOwnerConfigurationContractTest(unittest.TestCase):
         # 66 записей) на момент правки — обновлён до актуального значения.
         # 2026-08-05: recording.long_duration_warning (RecordingDurationWatchdog)
         # добавлен в реестр — 68 записей.
-        self.assertEqual(len(ERROR_REGISTRY), 68)
+        # 2026-08-07: system.unclean_restart (вердикт shutdown_forensics теперь
+        # доходит до ErrorBus/Sentry, а не выбрасывается) — 69 записей.
+        self.assertEqual(len(ERROR_REGISTRY), 69)
 
     def test_backend_service_wires_error_bus_into_recording_core(self) -> None:
         source = (
