@@ -1644,8 +1644,15 @@ class BackendService:
             if _needs_background_recovery:
                 def _startup_recovery() -> None:
                     verdict = check_and_collect(data_dir=_data_dir, log_dirs=_own_log_dirs)
-                    self._report_unclean_restart(verdict)
+                    # Маркер ТЕКУЩЕЙ жизни пишем ДО отчёта: ErrorBus.push →
+                    # EventBus → EventReplayManager → _is_privacy_mode() →
+                    # холодный кэш настроек → StateStore.load_settings() под
+                    # flock — документированный путь контенции. Залипание там
+                    # не должно расширять окно, в котором нештатная смерть уже
+                    # ТЕКУЩЕЙ жизни останется незамеченной, и не должно
+                    # оттягивать rescue-скан незавершённых записей.
                     write_alive_marker(_data_dir)
+                    self._report_unclean_restart(verdict, _data_dir)
                     run_rescue_scan(
                         rescue_dir=_rescue_dir,
                         recording_core=self._recording_core_svc,
@@ -1881,17 +1888,39 @@ class BackendService:
             logger.exception("EventBridge: rest_inprocess.status() бросил при проверке подавления")
             return False
 
-    def _report_unclean_restart(self, verdict: str) -> None:
+    #: Минимальный интервал между отчётами о нештатном рестарте (секунды).
+    #: launchd держит юнит с ``KeepAlive=true`` и ``ThrottleInterval=5``, то
+    #: есть в крэш-лупе бэкенд поднимается до ~720 раз в час. Каждый подъём —
+    #: РОВНО ОДИН вызов ``_report_unclean_restart`` за жизнь процесса, поэтому
+    #: in-memory дедуп ``ErrorBus`` (``_last_emitted``) для этого кода не
+    #: срабатывает НИКОГДА: он живёт в памяти умершего процесса. Нужен
+    #: кросс-рестартовый лимит на диске — иначе крэш-луп положит квоту Sentry
+    #: (ровно так org-wide квота уже выгорала на PortAudioError-лупе).
+    UNCLEAN_RESTART_REPORT_MIN_GAP_SEC = 900.0
+
+    #: Файл кросс-рестартового лимита (рядом с данными, не в репозитории).
+    UNCLEAN_RESTART_STATE_FILE = "unclean_restart_report.json"
+
+    def _report_unclean_restart(self, verdict: str, data_dir: "Path | str") -> None:
         """Превратить вердикт ``shutdown_forensics.check_and_collect()`` в сигнал.
 
         До 2026-08-07 вердикт молча выбрасывался: единственным следом
         нештатной смерти бэкенда была одна WARNING-строка в err.log, а
         ``sentry_sdk`` по умолчанию (``LoggingIntegration.event_level=ERROR``)
-        превращает WARNING в breadcrumb, а не в issue — то есть крэши были
-        невидимы и владельцу, и мониторингу. Нашло адверсариальное ревью
-        волны SIGSEGV-обработчика: волна убрала обработчик, который ХОТЯ БЫ
+        превращает WARNING в breadcrumb, а не в issue — то есть крэши не
+        доходили до мониторинга. Нашло адверсариальное ревью волны
+        SIGSEGV-обработчика: волна убрала обработчик, который ХОТЯ БЫ
         НАМЕРЕВАЛСЯ слать ``capture_message(level="fatal")``, поэтому без этого
         метода наблюдаемость крэшей стала бы строго хуже.
+
+        Куда это реально видно: Sentry (severity=error уходит немедленно) и
+        вкладка «Диагностика» (``list_recent_errors`` без ``since_seq``).
+        🔴 Тоста у владельца, скорее всего, НЕ будет, и это не баг здесь:
+        ``ErrorBusTracker`` (Swift) намеренно гасит backlog новой сессии
+        бэкенда — новый процесс начинает ``seq`` с нуля, поллер видит
+        ``latestSeq < lastSeenSeq`` и трактует это как re-arm, чтобы не
+        показывать старые ошибки как новые. Менять то осознанное решение —
+        отдельная задача, а не побочный эффект этой волны.
 
         Зовётся из фонового треда ``startup-recovery`` — тело целиком под
         try/except: восстановление записей идёт следом и не должно падать
@@ -1900,10 +1929,43 @@ class BackendService:
         if verdict not in ("unclean_collected", "unclean_collect_failed"):
             return
         try:
+            import json as _json
+            import time as _time
             from datetime import datetime, timezone
 
             from backend.error_bus import KrabError
             from backend.error_codes import ERROR_REGISTRY
+
+            state_path = Path(data_dir) / self.UNCLEAN_RESTART_STATE_FILE
+            now = _time.time()
+            suppressed = 0
+            try:
+                prev = _json.loads(state_path.read_text(encoding="utf-8"))
+                last_ts = float(prev.get("last_report_ts", 0.0))
+                suppressed = int(prev.get("suppressed_since_last", 0))
+            except Exception:  # noqa: BLE001 — нет файла/битый: считаем первым
+                last_ts = 0.0
+
+            within_window = (now - last_ts) < self.UNCLEAN_RESTART_REPORT_MIN_GAP_SEC
+            try:
+                state_path.write_text(_json.dumps({
+                    "last_report_ts": last_ts if within_window else now,
+                    "suppressed_since_last": (suppressed + 1) if within_window else 0,
+                }), encoding="utf-8")
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "startup-recovery: не удалось записать %s — "
+                    "кросс-рестартовый лимит отчётов не работает",
+                    self.UNCLEAN_RESTART_STATE_FILE,
+                )
+
+            if within_window:
+                logger.warning(
+                    "startup-recovery: нештатный рестарт (%s), отчёт подавлен "
+                    "лимитом (%d подряд за последние %.0f с)",
+                    verdict, suppressed + 1, self.UNCLEAN_RESTART_REPORT_MIN_GAP_SEC,
+                )
+                return
 
             code = "system.unclean_restart"
             entry = ERROR_REGISTRY.get(code, {})
@@ -1917,8 +1979,11 @@ class BackendService:
                 ),
                 message_debug=f"shutdown_forensics verdict={verdict}",
                 timestamp=datetime.now(timezone.utc),
-                # Только вердикт: пути и содержимое форензики наружу не отдаём.
-                context={"verdict": verdict},
+                # Только вердикт и счётчик подавленных: пути и содержимое
+                # форензики наружу не отдаём. suppressed несёт интенсивность
+                # лупа — без него одно событие в 15 минут неотличимо от
+                # одиночного крэша.
+                context={"verdict": verdict, "suppressed_since_last": suppressed},
                 actionable=bool(entry.get("actionable", False)),
                 action_id=entry.get("action_id"),
             ))

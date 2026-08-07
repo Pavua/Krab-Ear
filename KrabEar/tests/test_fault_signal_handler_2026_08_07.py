@@ -36,9 +36,12 @@ from __future__ import annotations
 import ast
 import faulthandler
 import inspect
+import json
 import signal
+import tempfile
 import textwrap
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 
@@ -242,12 +245,37 @@ class UncleanRestartIsReportedTest(unittest.TestCase):
         def push(self, err):
             self.pushed.append(err)
 
-    def _report(self, verdict):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _make_stub(self, bus=None):
+        """Заглушка «процесса»: только то, что метод реально трогает.
+
+        Константы берём из самого ``BackendService`` — единственный источник
+        правды; хардкод здесь разошёлся бы с продом молча.
+        """
         from backend.service import BackendService
 
-        stub = type("Stub", (), {})()
-        stub._error_bus = self._FakeBus()
-        BackendService._report_unclean_restart(stub, verdict)
+        stub = type("Stub", (), {
+            "UNCLEAN_RESTART_STATE_FILE": BackendService.UNCLEAN_RESTART_STATE_FILE,
+            "UNCLEAN_RESTART_REPORT_MIN_GAP_SEC": (
+                BackendService.UNCLEAN_RESTART_REPORT_MIN_GAP_SEC
+            ),
+        })()
+        stub._error_bus = bus if bus is not None else self._FakeBus()
+        return stub
+
+    def _report(self, verdict, stub=None, data_dir=None):
+        from backend.service import BackendService
+
+        stub = stub if stub is not None else self._make_stub()
+        BackendService._report_unclean_restart(
+            stub, verdict, data_dir if data_dir is not None else self.data_dir,
+        )
         return stub._error_bus.pushed
 
     def test_clean_verdicts_report_nothing(self):
@@ -258,7 +286,10 @@ class UncleanRestartIsReportedTest(unittest.TestCase):
     def test_unclean_verdicts_push_error(self):
         for verdict in ("unclean_collected", "unclean_collect_failed"):
             with self.subTest(verdict=verdict):
-                pushed = self._report(verdict)
+                # Своя data_dir на подтест: кросс-рестартовый лимит ниже
+                # иначе подавил бы второй вердикт.
+                with tempfile.TemporaryDirectory() as fresh:
+                    pushed = self._report(verdict, data_dir=Path(fresh))
                 self.assertEqual(len(pushed), 1, "нештатная смерть не отражена в ErrorBus")
                 err = pushed[0]
                 self.assertEqual(err.code, "system.unclean_restart")
@@ -274,6 +305,43 @@ class UncleanRestartIsReportedTest(unittest.TestCase):
         err = self._report("unclean_collected")[0]
         self.assertEqual(err.severity, "error")
 
+    def test_crash_loop_is_rate_limited_across_restarts(self):
+        """🔴 Главный риск фикса: каждый подъём — НОВЫЙ процесс.
+
+        In-memory дедуп ErrorBus живёт в памяти умершего процесса и для этого
+        кода не срабатывает никогда. launchd поднимает юнит с KeepAlive=true и
+        ThrottleInterval=5 — до ~720 раз в час; без кросс-рестартового лимита
+        это положило бы квоту Sentry (уже выгорала на PortAudioError-лупе).
+        Каждый вызов ниже имитирует ОТДЕЛЬНЫЙ процесс (свежая заглушка), но
+        одну и ту же data_dir — как в реальном крэш-лупе.
+        """
+        pushes = [len(self._report("unclean_collected")) for _ in range(20)]
+
+        self.assertEqual(pushes[0], 1, "первый крэш обязан быть отчитан")
+        self.assertEqual(
+            sum(pushes), 1,
+            f"крэш-луп прорвался в Sentry: {sum(pushes)} событий подряд",
+        )
+
+    def test_suppressed_count_conveys_loop_intensity(self):
+        """Одно событие в 15 минут неотличимо от одиночного крэша без счётчика."""
+        for _ in range(5):
+            self._report("unclean_collected")
+
+        # Сдвигаем окно в прошлое — следующий отчёт снова разрешён.
+        from backend.service import BackendService
+
+        state = self.data_dir / BackendService.UNCLEAN_RESTART_STATE_FILE
+        prev = json.loads(state.read_text(encoding="utf-8"))
+        prev["last_report_ts"] = 0.0
+        state.write_text(json.dumps(prev), encoding="utf-8")
+
+        err = self._report("unclean_collected")[0]
+        self.assertEqual(
+            err.context.get("suppressed_since_last"), 4,
+            "счётчик подавленных не доехал — интенсивность лупа не видна",
+        )
+
     def test_never_raises_when_error_bus_is_broken(self):
         """Телеметрия не должна ронять тред startup-recovery.
 
@@ -286,12 +354,19 @@ class UncleanRestartIsReportedTest(unittest.TestCase):
             def push(self, err):
                 raise RuntimeError("bus down")
 
-        stub = type("Stub", (), {})()
-        stub._error_bus = _ExplodingBus()
         try:
-            BackendService._report_unclean_restart(stub, "unclean_collected")
+            BackendService._report_unclean_restart(
+                self._make_stub(bus=_ExplodingBus()), "unclean_collected", self.data_dir,
+            )
         except Exception as exc:  # noqa: BLE001
             self.fail(f"_report_unclean_restart пробросил {exc!r}")
+
+    def test_never_raises_when_state_dir_is_unwritable(self):
+        """Недоступная data_dir не должна ни ронять, ни глушить отчёт."""
+        pushed = self._report(
+            "unclean_collected", data_dir=self.data_dir / "does" / "not" / "exist",
+        )
+        self.assertEqual(len(pushed), 1, "отчёт потерян из-за недоступного файла лимита")
 
 
 class StartupRecoveryUsesVerdictSourceContractTest(unittest.TestCase):
@@ -302,6 +377,12 @@ class StartupRecoveryUsesVerdictSourceContractTest(unittest.TestCase):
     """
 
     def test_verdict_is_assigned_and_passed_on(self):
+        """Требуем ИМЕННО передачу вердикта в отчёт, а не «где-то прочитан».
+
+        Слабая версия этого теста (вердикт присвоен + имя где-то читается)
+        обходилась одной строкой ``logger.debug("verdict=%s", verdict)`` при
+        полностью регрессировавшем баге — поймано пере-ревью правок.
+        """
         import backend.service as service_mod
 
         source = textwrap.dedent(inspect.getsource(service_mod.BackendService.__init__))
@@ -327,13 +408,25 @@ class StartupRecoveryUsesVerdictSourceContractTest(unittest.TestCase):
             "нештатной смерти снова теряется",
         )
 
-        used = {
-            n.id for n in ast.walk(tree)
-            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
-        }
+        reported_names = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if getattr(node.func, "attr", None) != "_report_unclean_restart":
+                continue
+            for arg in node.args:
+                if isinstance(arg, ast.Name):
+                    reported_names.add(arg.id)
+
         self.assertTrue(
-            assigned_names & used,
-            f"вердикт {assigned_names} присвоен, но нигде не читается",
+            reported_names,
+            "_report_unclean_restart() не вызывается — вердикт нештатной "
+            "смерти снова никуда не доходит",
+        )
+        self.assertTrue(
+            assigned_names & reported_names,
+            f"вердикт {assigned_names} присвоен, но в отчёт уходит что-то "
+            f"другое ({reported_names})",
         )
 
 

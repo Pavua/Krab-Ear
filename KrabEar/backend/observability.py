@@ -410,7 +410,9 @@ def install_signal_handlers() -> None:
     дренировать) — sample НЕ различает: все простаивающие треды процесса стоят
     на том же ``_PyParkingLot_Park``, так что этот кадр сам по себе уликой
     дедлока не является. Лечение в обоих случаях одно, поэтому различать не
-    потребовалось. Разбор и sample: ``.remember/forensics/``,
+    потребовалось. Разбор с цитатами из sample:
+    ``docs/audit/2026-08-07-sigsegv-handler-wedge.md`` (сам sample —
+    ``.remember/forensics/``, вне репозитория);
     тесты — ``tests/test_fault_signal_handler_2026_08_07.py``.
 
     ``faulthandler`` делает ровно то, что было нужно, и делает это на C-уровне:
