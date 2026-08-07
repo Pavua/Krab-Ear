@@ -71,6 +71,7 @@ actor HealthMonitor {
     //      минуты, сокета в это время ещё нет).
     private var wedgeProbe: (@Sendable () async -> Bool)?
     private var onWedgeDetected: (@Sendable () async -> Void)?
+    private var onHealthyPing: (@Sendable () async -> Void)?
     private var sawHealthyPing: Bool = false
     private var lastWedgeCheckAt: Date?
     /// Причины, по которым backend ЛЕГИТИМНО может не отвечать на ping.
@@ -125,6 +126,15 @@ actor HealthMonitor {
     /// (`WedgedEscalationTracker`), здесь только детекция.
     func setOnWedgeDetected(_ callback: @escaping @Sendable () async -> Void) {
         self.onWedgeDetected = callback
+    }
+
+    /// Зовётся на КАЖДЫЙ успешный ping. Нужен, чтобы кап подряд-эскалаций
+    /// перевзводился: без этого три эскалации за всю жизнь агента (пусть даже
+    /// разнесённые на дни и каждая успешно вылечившая backend) навсегда
+    /// выключали бы вторую ступень — тот же «замолчал навсегда», ради которого
+    /// всё и делалось, просто отложенный.
+    func setOnHealthyPing(_ callback: @escaping @Sendable () async -> Void) {
+        self.onHealthyPing = callback
     }
 
     func currentState() -> HealthState {
@@ -195,6 +205,9 @@ actor HealthMonitor {
             consecutiveFailures = 0
             sawHealthyPing = true
             lastWedgeCheckAt = nil
+            if let healthy = onHealthyPing {
+                await healthy()
+            }
             if state == .hung {
                 state = .healthy
                 hangFiredForCurrentEpisode = false
@@ -234,6 +247,12 @@ actor HealthMonitor {
         lastWedgeCheckAt = now
 
         guard await probe() else { return }
+
+        // Актор реентерабелен: пока проба висела (до 5 с), состояние могло
+        // измениться — например, пользователь дожал стоп диктовки и пришёл
+        // suspend(.finalizingRecording), или backend успел ответить. Без
+        // перепроверки мы бы дёрнули kickstart ровно во время финализации STT.
+        guard suspendedReasons.isEmpty, consecutiveFailures >= wedgeThreshold else { return }
         await callback()
     }
 }

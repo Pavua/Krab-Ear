@@ -159,6 +159,50 @@ final class WedgeWiringSourceContractTests: XCTestCase {
     }
 }
 
+/// Циклический паттерн ответов ping'а.
+final class PingPhases: @unchecked Sendable {
+    private let lock = NSLock()
+    private let pattern: [Bool]
+    private var index = 0
+
+    init(pattern: [Bool]) { self.pattern = pattern }
+
+    func next() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let value = pattern[index % pattern.count]
+        index += 1
+        return value
+    }
+}
+
+/// Парсер `ps -o etime=`. 🔴 На macOS НЕТ `etimes` (это GNU) — запрос такого
+/// поля печатает список ключей, и «возраст» молча становится мусором.
+final class ProcessElapsedParsingTests: XCTestCase {
+
+    func testParsesMinutesAndSeconds() {
+        XCTAssertEqual(parseProcessElapsedSeconds("05:30"), 330)
+        XCTAssertEqual(parseProcessElapsedSeconds("  00:07 "), 7)
+    }
+
+    func testParsesHours() {
+        XCTAssertEqual(parseProcessElapsedSeconds("01:01:27"), 3687)
+    }
+
+    func testParsesDays() {
+        XCTAssertEqual(parseProcessElapsedSeconds("2-03:00:00"), 2 * 86400 + 3 * 3600)
+    }
+
+    /// Мусор обязан давать nil, а не число: nil означает «возраст неизвестен»,
+    /// и вызывающая сторона тогда НЕ эскалирует (fail-safe).
+    func testGarbageIsNilNotANumber() {
+        XCTAssertNil(parseProcessElapsedSeconds(""))
+        XCTAssertNil(parseProcessElapsedSeconds("   "))
+        XCTAssertNil(parseProcessElapsedSeconds("%cpu%memacflag"))
+        XCTAssertNil(parseProcessElapsedSeconds("12"))
+        XCTAssertNil(parseProcessElapsedSeconds("aa:bb"))
+    }
+}
+
 final class HealthMonitorWedgeTests: XCTestCase {
 
     /// Порог заклинивания ещё не набран — эскалации быть не должно.
@@ -168,7 +212,10 @@ final class HealthMonitorWedgeTests: XCTestCase {
             pingInterval: 0.02, hangThreshold: 2,
             wedgeThreshold: 100, wedgeReprobeInterval: 0.0
         )
-        monitor.setPingProvider { PingScript(successes: 1).next() }
+        let script = PingScript(successes: 1)   // 🔴 вне замыкания: внутри
+        monitor.setPingProvider { script.next() }  // конструировался новый на
+                                                   // каждый вызов и отказы не
+                                                   // накапливались вовсе
         await monitor.setWedgeProbe { true }
         await monitor.setOnWedgeDetected { escalations.bump() }
 
@@ -285,14 +332,14 @@ final class HealthMonitorWedgeTests: XCTestCase {
         XCTAssertEqual(probes.count, 1, "проба дёргается чаще, чем раз в интервал")
     }
 
-    /// Успешный ping снимает подозрение: следующий эпизод считается с нуля.
-    func testHealthyPingClearsWedgeState() async {
+    /// На здоровом backend'е проба не дёргается вовсе.
+    func testNoProbeWhileBackendIsHealthy() async {
         let probes = WedgeCallCounter()
         let monitor = HealthMonitor(
             pingInterval: 0.02, hangThreshold: 2,
             wedgeThreshold: 3, wedgeReprobeInterval: 0.0
         )
-        monitor.setPingProvider { true }           // всегда здоров
+        monitor.setPingProvider { true }
         await monitor.setWedgeProbe { probes.bump(); return true }
         await monitor.setOnWedgeDetected { }
 
@@ -301,5 +348,61 @@ final class HealthMonitorWedgeTests: XCTestCase {
         await monitor.stop()
 
         XCTAssertEqual(probes.count, 0, "проба сработала на здоровом backend'е")
+    }
+
+    /// Выздоровление ОЧИЩАЕТ накопленное подозрение: отказы → здоров → отказы,
+    /// и счётчик считается заново, а не продолжает старый.
+    ///
+    /// Прежняя версия («ping всегда true») очистку не проверяла вовсе — была
+    /// зелёной при любом поведении сброса.
+    func testHealthyPingClearsAccumulatedFailures() async {
+        let escalations = WedgeCallCounter()
+        // Максимум 2 отказа подряд. Если успех НЕ обнуляет счётчик, отказы
+        // накопятся монотонно и порог 4 будет взят — тест это и ловит.
+        let phases = PingPhases(pattern: [false, false, true])
+        let monitor = HealthMonitor(
+            pingInterval: 0.02, hangThreshold: 2,
+            wedgeThreshold: 4, wedgeReprobeInterval: 0.0
+        )
+        monitor.setPingProvider { phases.next() }
+        await monitor.setWedgeProbe { true }
+        await monitor.setOnWedgeDetected { escalations.bump() }
+
+        await monitor.start()
+        try? await Task.sleep(nanoseconds: 250_000_000)   // ~12 тиков
+        await monitor.stop()
+
+
+        XCTAssertEqual(
+            escalations.count, 0,
+            "успешный ping не обнулил накопленные отказы"
+        )
+    }
+
+    /// 🔴 Актор реентерабелен: пока проба висит, может прийти suspend
+    /// (пользователь дожал стоп диктовки — backend занят финализацией STT).
+    /// Эскалация в этот момент убила бы запись.
+    func testSuspendArrivingDuringProbeCancelsEscalation() async {
+        let escalations = WedgeCallCounter()
+        let monitor = HealthMonitor(
+            pingInterval: 0.02, hangThreshold: 2,
+            wedgeThreshold: 3, wedgeReprobeInterval: 0.0
+        )
+        monitor.setPingProvider { false }
+        await monitor.setWedgeProbe {
+            //状态 меняется ровно в окне между пробой и колбэком.
+            await monitor.suspend(.finalizingRecording)
+            return true
+        }
+        await monitor.setOnWedgeDetected { escalations.bump() }
+
+        await monitor.start()
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        await monitor.stop()
+
+        XCTAssertEqual(
+            escalations.count, 0,
+            "kickstart во время финализации STT — потерянная диктовка"
+        )
     }
 }
