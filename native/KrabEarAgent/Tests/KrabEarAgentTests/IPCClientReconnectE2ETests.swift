@@ -2,60 +2,118 @@
  IPCClientReconnectE2ETests — E2E integration tests for Phase C C.2 IPC reconnect.
 
  Verifies that `callWithReconnect` exercises real exponential-backoff retry logic
- using a `FlakyMockSocketProvider` that fails N times then succeeds.  No Python
- backend process required — the mock implements `IPCSocketProviding` in-process.
+ using a `FakeIPCTransport` that fails N times then succeeds.  No Python backend
+ process required — the fake implements `IPCSocketProviding` in-process.
+
+ Детерминизм (2026-08-08). Тесты НЕ зависят ни от настенных часов, ни от порядка
+ планирования потоков:
+   1) Пауза бэкоффа инжектится (`IPCBackoffSleeping`) — фейк записывает запрошенные
+      интервалы и возвращается мгновенно. Расписание ретраев проверяется по
+      записанным задержкам, а не по замеру elapsed (старая версия мерила
+      `ContinuousClock` и падала под нагрузкой, когда 750 мс сна растягивались).
+   2) Фейк считает вызовы ПО ИМЕНИ МЕТОДА. `callWithReconnect` после удачного
+      ретрая шлёт fire-and-forget `report_reconnect` через тот же провайдер, и
+      общий счётчик догонялся этой detached-задачей уже после `return` —
+      ассерт «3 попытки» гонялся с телеметрией и наблюдал 4.
 
  Test cases:
-   1. recovers after 2 failures — 3 total attempts, elapsed ~750 ms
-   2. fails after max 5 retries — 6 total attempts, throws on exhaustion
-   3. non-transient errors rethrown immediately — 1 attempt, no retry
+   1. recovers after 2 failures — 3 вызова `ping`, задержки [0.25, 0.5]
+   2. fails after max 5 retries — 6 вызовов, все 5 задержек, throws on exhaustion
+   3. non-transient errors rethrown immediately — 1 вызов, ни одной задержки
+   4. telemetry report_reconnect отправляется после удачного ретрая
 */
 
 import XCTest
 @testable import KrabEarAgent
 
-// MARK: - FlakyMockSocketProvider
+// MARK: - RecordingBackoffSleeper
 
-/// In-process mock that fails the first `failuresBeforeSuccess` attempts with a
-/// transient `socketConnectFailed` error, then returns a canned success response.
-///
-/// Pass `raiseFatalError: true` to simulate a non-transient backend error on the
-/// first (and only) attempt — verifying that `callWithReconnect` does NOT retry.
-final class FlakyMockSocketProvider: IPCSocketProviding, @unchecked Sendable {
+/// Мгновенная замена `Task.sleep` для `callWithReconnect`: ничего не ждёт,
+/// только записывает запрошенные интервалы. Тест проверяет РАСПИСАНИЕ бэкоффа
+/// вместо реально проведённого времени.
+final class RecordingBackoffSleeper: @unchecked Sendable {
 
-    /// Number of calls made so far (read after the test to verify attempt count).
-    private(set) var attemptCount: Int = 0
-
-    private let failuresBeforeSuccess: Int
-    private let raiseFatalError: Bool
-
-    /// Lock protecting `attemptCount` across concurrent calls (Swift 6 strict concurrency).
     private let lock = NSLock()
+    private var storedDelays: [TimeInterval] = []
 
-    init(failuresBeforeSuccess: Int, raiseFatalError: Bool = false) {
-        self.failuresBeforeSuccess = failuresBeforeSuccess
-        self.raiseFatalError = raiseFatalError
+    /// Интервалы, которые `callWithReconnect` запросил, в порядке запроса.
+    var recordedDelays: [TimeInterval] {
+        lock.withLock { storedDelays }
+    }
+
+    /// Значение для параметра `backoffSleep:` инициализатора `IPCClient`.
+    var sleepFunction: IPCBackoffSleeping {
+        { [self] seconds in
+            lock.withLock { storedDelays.append(seconds) }
+        }
+    }
+}
+
+// MARK: - FakeIPCTransport
+
+/// In-process фейк транспорта: разбирает имя метода из JSON-пейлоада (тот же
+/// подход, что у `TooltipMockSocketProvider`) и ведёт счёт вызовов ПО МЕТОДУ.
+///
+/// Учёт по методу обязателен: телеметрия `report_reconnect` уходит через этот же
+/// провайдер из detached-задачи, и общий счётчик был бы недетерминирован.
+final class FakeIPCTransport: IPCSocketProviding, @unchecked Sendable {
+
+    private let lock = NSLock()
+    private var callsByMethod: [String: Int] = [:]
+
+    /// Сколько первых вызовов каждого метода должны упасть транзиентной ошибкой.
+    private let transientFailures: [String: Int]
+
+    /// Методы, отвечающие фатальной (не-транзиентной) ошибкой на любой вызов.
+    private let fatalErrorMethods: Set<String>
+
+    /// Наблюдатель: вызывается с именем метода на каждом запросе (для expectation).
+    private let onCall: (@Sendable (String) -> Void)?
+
+    init(
+        transientFailures: [String: Int] = [:],
+        fatalErrorMethods: Set<String> = [],
+        onCall: (@Sendable (String) -> Void)? = nil
+    ) {
+        self.transientFailures = transientFailures
+        self.fatalErrorMethods = fatalErrorMethods
+        self.onCall = onCall
+    }
+
+    /// Сколько раз запрашивался конкретный IPC-метод.
+    func callCount(for method: String) -> Int {
+        lock.withLock { callsByMethod[method] ?? 0 }
     }
 
     func send(payload: Data, timeoutSec: Int) async throws -> Data {
-        let myAttempt: Int = lock.withLock {
-            attemptCount += 1
-            return attemptCount
+        let method = Self.extractMethod(from: payload) ?? "<unparsed>"
+        let attemptForThisMethod: Int = lock.withLock {
+            let next = (callsByMethod[method] ?? 0) + 1
+            callsByMethod[method] = next
+            return next
         }
+        onCall?(method)
 
-        // Fatal (non-transient) error — rethrown immediately by callWithReconnect.
-        if raiseFatalError {
+        if fatalErrorMethods.contains(method) {
             throw IPCError.backendError("method_not_found")
         }
 
-        // Transient error — callWithReconnect will sleep and retry.
-        if myAttempt <= failuresBeforeSuccess {
-            throw IPCError.socketConnectFailed("mock: backend not ready (attempt \(myAttempt))")
+        if attemptForThisMethod <= (transientFailures[method] ?? 0) {
+            throw IPCError.socketConnectFailed(
+                "fake: backend not ready (\(method) attempt \(attemptForThisMethod))"
+            )
         }
 
-        // Success — return a minimal valid IPC response.
-        let response = #"{"id":"mock-1","ok":true,"result":{}}"# + "\n"
+        let response = #"{"id":"fake-1","ok":true,"result":{}}"# + "\n"
         return Data(response.utf8)
+    }
+
+    private static func extractMethod(from payload: Data) -> String? {
+        guard
+            let dict = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+            let method = dict["method"] as? String
+        else { return nil }
+        return method
     }
 }
 
@@ -65,34 +123,32 @@ final class IPCClientReconnectE2ETests: XCTestCase {
 
     // MARK: 1. Recovers after 2 transient failures
 
-    /// `callWithReconnect` must succeed after failing twice and sleeping the first two
-    /// backoff intervals (250 ms + 500 ms = 750 ms total minimum elapsed time).
+    /// `callWithReconnect` должен успешно завершиться после двух транзиентных
+    /// отказов, запросив ровно первые две паузы бэкоффа.
     func testCallWithReconnect_recoversAfter2Failures() async throws {
-        let mockProvider = FlakyMockSocketProvider(failuresBeforeSuccess: 2)
-        let client = IPCClient(socketProvider: mockProvider)
+        let transport = FakeIPCTransport(transientFailures: ["ping": 2])
+        let sleeper = RecordingBackoffSleeper()
+        let client = IPCClient(socketProvider: transport, backoffSleep: sleeper.sleepFunction)
 
-        let start = ContinuousClock.now
         let result = try await client.callWithReconnect(method: "ping", params: [:])
-        let elapsed = start.duration(to: ContinuousClock.now)
 
-        // Should have received the success response.
         XCTAssertEqual(result["ok"] as? Bool, true, "Expected ok:true in success response")
 
-        // 2 failures → slept 250 ms before attempt 2, 500 ms before attempt 3 → ~750 ms total.
-        XCTAssertGreaterThan(
-            elapsed,
-            .milliseconds(700),
-            "Expected at least ~750 ms elapsed for 2 backoff sleeps (actual: \(elapsed))"
+        // 2 отказа → две паузы перед попытками 2 и 3, ровно первые две из таблицы.
+        XCTAssertEqual(
+            sleeper.recordedDelays,
+            Array(IPCClient.backoffDelays.prefix(2)),
+            "Ожидались ровно первые две задержки таблицы бэкоффа"
         )
-        XCTAssertLessThan(
-            elapsed,
-            .milliseconds(3000),
-            "Should not exhaust all 5 retries — expected < 3 s (actual: \(elapsed))"
+        XCTAssertEqual(
+            sleeper.recordedDelays,
+            [0.25, 0.5],
+            "Расписание бэкоффа изменилось — обнови таблицу осознанно"
         )
 
-        // 2 failures + 1 success = 3 total attempts.
+        // 2 отказа + 1 успех = 3 вызова `ping`; телеметрия считается отдельно.
         XCTAssertEqual(
-            mockProvider.attemptCount,
+            transport.callCount(for: "ping"),
             3,
             "Expected 3 provider calls (2 failures + 1 success)"
         )
@@ -100,12 +156,13 @@ final class IPCClientReconnectE2ETests: XCTestCase {
 
     // MARK: 2. Fails after exhausting max retries
 
-    /// When the backend never recovers, `callWithReconnect` must exhaust all 5 retries
-    /// (6 total attempts: 1 initial + 5 backoff) and then throw.
+    /// Когда backend не поднимается, `callWithReconnect` обязан израсходовать все
+    /// 5 ретраев (6 попыток) и бросить последнюю транзиентную ошибку.
     func testCallWithReconnect_failsAfterMaxRetries() async throws {
-        // 999 > 6 total attempts — backend never comes back.
-        let mockProvider = FlakyMockSocketProvider(failuresBeforeSuccess: 999)
-        let client = IPCClient(socketProvider: mockProvider)
+        // 999 > 6 попыток — backend не возвращается.
+        let transport = FakeIPCTransport(transientFailures: ["ping": 999])
+        let sleeper = RecordingBackoffSleeper()
+        let client = IPCClient(socketProvider: transport, backoffSleep: sleeper.sleepFunction)
 
         var caughtError: Error?
         do {
@@ -115,7 +172,6 @@ final class IPCClientReconnectE2ETests: XCTestCase {
             caughtError = error
         }
 
-        // Must have thrown an IPCError (transient variant on exhaustion).
         XCTAssertNotNil(caughtError, "Expected error on exhaustion")
         if let ipcErr = caughtError as? IPCError {
             XCTAssertTrue(
@@ -126,21 +182,26 @@ final class IPCClientReconnectE2ETests: XCTestCase {
             XCTFail("Expected IPCError, got: \(String(describing: caughtError))")
         }
 
-        // 1 initial + 5 retries = 6 total attempts.
         XCTAssertEqual(
-            mockProvider.attemptCount,
+            transport.callCount(for: "ping"),
             6,
             "Expected 6 provider calls (1 initial + 5 retries)"
+        )
+        XCTAssertEqual(
+            sleeper.recordedDelays,
+            IPCClient.backoffDelays,
+            "Должны быть запрошены все паузы таблицы, по одной перед каждым ретраем"
         )
     }
 
     // MARK: 3. Non-transient errors are rethrown immediately (no retry)
 
-    /// A fatal backend error (non-transient `IPCError.backendError`) must NOT trigger
-    /// exponential-backoff retry — it should be rethrown after the very first attempt.
+    /// Фатальная (не-транзиентная) ошибка backend не должна запускать бэкофф —
+    /// она пробрасывается после первой же попытки.
     func testCallWithReconnect_nonTransientErrors_rethrownImmediately() async throws {
-        let mockProvider = FlakyMockSocketProvider(failuresBeforeSuccess: 0, raiseFatalError: true)
-        let client = IPCClient(socketProvider: mockProvider)
+        let transport = FakeIPCTransport(fatalErrorMethods: ["ping"])
+        let sleeper = RecordingBackoffSleeper()
+        let client = IPCClient(socketProvider: transport, backoffSleep: sleeper.sleepFunction)
 
         var caughtError: Error?
         do {
@@ -150,10 +211,8 @@ final class IPCClientReconnectE2ETests: XCTestCase {
             caughtError = error
         }
 
-        // Must have thrown immediately.
         XCTAssertNotNil(caughtError, "Expected error on fatal backend response")
 
-        // Non-transient error — should NOT have been retried.
         if let ipcErr = caughtError as? IPCError {
             XCTAssertFalse(
                 ipcErr.isTransient,
@@ -163,11 +222,44 @@ final class IPCClientReconnectE2ETests: XCTestCase {
             XCTFail("Expected IPCError, got: \(String(describing: caughtError))")
         }
 
-        // Exactly 1 attempt — no retries on fatal errors.
         XCTAssertEqual(
-            mockProvider.attemptCount,
+            transport.callCount(for: "ping"),
             1,
             "Expected exactly 1 provider call — non-transient errors must not be retried"
+        )
+        XCTAssertTrue(
+            sleeper.recordedDelays.isEmpty,
+            "Без ретраев не должно быть ни одной паузы бэкоффа: \(sleeper.recordedDelays)"
+        )
+    }
+
+    // MARK: 4. Reconnect telemetry
+
+    /// После удачного ретрая клиент шлёт best-effort `report_reconnect`.
+    /// Ждём событие (expectation), а не заданное время — именно эта detached-задача
+    /// раньше гонялась с ассертом счётчика попыток.
+    func testCallWithReconnect_reportsReconnectTelemetryAfterRecovery() async throws {
+        let telemetrySent = expectation(description: "report_reconnect отправлен")
+        let transport = FakeIPCTransport(
+            transientFailures: ["ping": 1],
+            onCall: { method in
+                if method == "report_reconnect" { telemetrySent.fulfill() }
+            }
+        )
+        let sleeper = RecordingBackoffSleeper()
+        let client = IPCClient(socketProvider: transport, backoffSleep: sleeper.sleepFunction)
+
+        _ = try await client.callWithReconnect(method: "ping", params: [:])
+
+        await fulfillment(of: [telemetrySent], timeout: 10)
+        // Клиент захвачен detached-задачей слабо — держим ссылку живой до доставки.
+        withExtendedLifetime(client) {}
+
+        XCTAssertEqual(transport.callCount(for: "report_reconnect"), 1)
+        XCTAssertEqual(
+            transport.callCount(for: "ping"),
+            2,
+            "Телеметрия не должна учитываться как попытка целевого метода"
         )
     }
 }

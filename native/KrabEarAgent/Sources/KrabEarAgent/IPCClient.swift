@@ -26,6 +26,16 @@ protocol IPCSocketProviding: Sendable {
     func send(payload: Data, timeoutSec: Int) async throws -> Data
 }
 
+// MARK: - IPCBackoffSleeping (testability injection point)
+
+/// Пауза между попытками reconnect в `IPCClient.callWithReconnect`.
+///
+/// Продакшн спит по реальным часам (`IPCClient.realBackoffSleep`). Тесты
+/// подставляют мгновенную реализацию, которая только записывает запрошенный
+/// интервал: расписание бэкоффа тогда проверяется как СПИСОК ЗАДЕРЖЕК, а не как
+/// замер прошедшего времени, и результат не зависит от загрузки машины.
+typealias IPCBackoffSleeping = @Sendable (TimeInterval) async throws -> Void
+
 // MARK: - Real provider (POSIX Unix socket)
 
 /// Default `IPCSocketProviding` implementation that connects to a Unix-domain socket.
@@ -180,17 +190,33 @@ final class IPCClient: @unchecked Sendable {
     /// reconnect/backoff logic without a real backend process.
     let socketProvider: (any IPCSocketProviding)?
 
+    /// Пауза перед очередной попыткой в `callWithReconnect`.
+    /// Подменяется в тестах, чтобы проверки бэкоффа не зависели от часов.
+    private let backoffSleep: IPCBackoffSleeping
+
+    /// Продакшн-реализация паузы: реальный сон на кооперативном пуле.
+    static let realBackoffSleep: IPCBackoffSleeping = { seconds in
+        try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+    }
+
     /// Production initialiser — uses POSIX Unix socket.
     init(socketPath: String) {
         self.socketPath = socketPath
         self.socketProvider = nil
+        self.backoffSleep = Self.realBackoffSleep
     }
 
     /// Testability initialiser — injects a custom socket provider.
     /// `socketPath` is unused when a provider is supplied (kept for `endpoint` consistency).
-    init(socketPath: String = "/tmp/krabear_mock.sock", socketProvider: any IPCSocketProviding) {
+    /// `backoffSleep` по умолчанию — реальный сон; тесты передают мгновенный рекордер.
+    init(
+        socketPath: String = "/tmp/krabear_mock.sock",
+        socketProvider: any IPCSocketProviding,
+        backoffSleep: IPCBackoffSleeping? = nil
+    ) {
         self.socketPath = socketPath
         self.socketProvider = socketProvider
+        self.backoffSleep = backoffSleep ?? Self.realBackoffSleep
     }
 
     /// Default socket timeout (seconds) для long-running operations
@@ -211,7 +237,8 @@ final class IPCClient: @unchecked Sendable {
 
     /// Backoff delays between reconnect attempts: 250ms → 500ms → 1s → 2s → 4s.
     /// Index 0 corresponds to the delay *before* attempt 2, etc.
-    private static let backoffDelays: [TimeInterval] = [0.25, 0.5, 1.0, 2.0, 4.0]
+    /// Internal (не private), чтобы тест сверял запрошенное расписание с таблицей.
+    static let backoffDelays: [TimeInterval] = [0.25, 0.5, 1.0, 2.0, 4.0]
 
     /// Calls `method` with automatic exponential-backoff reconnect on transient
     /// socket errors (ENOENT / ECONNRESET / EPIPE = socketConnectFailed /
@@ -233,7 +260,7 @@ final class IPCClient: @unchecked Sendable {
         for attempt in 0..<totalAttempts {
             if attempt > 0 {
                 let delay = Self.backoffDelays[attempt - 1]
-                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                try await backoffSleep(delay)
             }
             do {
                 let result = try await callAsync(method: method, params: params, timeoutSec: timeoutSec)
