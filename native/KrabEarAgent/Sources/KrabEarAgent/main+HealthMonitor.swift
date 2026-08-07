@@ -47,6 +47,26 @@ private nonisolated(unsafe) var lastHealthStateKey: UInt8 = 0
 ///
 /// Таймаут заклиниванием тоже не считается: под свопом живой RTT доходил до
 /// 2.9 с при таймауте ping'а 2 с.
+///
+/// 🔴 ОСОЗНАННОЕ ОГРАНИЧЕНИЕ (ревью 2026-08-08). Заклинивание бывает ДВУХ
+/// видов, и здесь лечится только первый:
+///
+/// 1. **accept-loop мёртв** — ровно инцидент 05:02→13:14: главный поток был
+///    погребён под 46 вложенными обработчиками сигналов, `accept()` не
+///    вызывался, backlog переполнился, и `connect()` отдавал ECONNREFUSED
+///    (замерено живьём). Это и лечит вторая ступень.
+/// 2. **accept-loop жив, но все обработчики висят** — жизнь 14:12→17:56:
+///    в логах видно `«лимит 64 коннектов исчерпан»`, то есть цикл крутился;
+///    клиент получал `timeout`/`invalidResponse`, а не отказ соединения.
+///
+/// Второй вид сюда НЕ добавлен намеренно: `timeout` — это ровно то, что
+/// выдаёт ЗДОРОВЫЙ, но занятый backend (длинная диктовка, STT под свопом), и
+/// расширение предиката перенесло бы риск на потерю записи. Плюс у второго
+/// вида уже есть СВОЙ штатный лекарь на стороне backend'а: при неподтверждённом
+/// shutdown-барьере процесс сам выходит с EX_SOFTWARE и launchd поднимает
+/// чистый экземпляр (в тот день это отработало в 14:07). Если второй вид
+/// когда-нибудь перестанет самолечиться — расширять предикат надо ПО
+/// ДЛИТЕЛЬНОСТИ серии (отдельный, много больший порог), а не по коду ошибки.
 func isBackendWedgeEvidence(_ error: Error) -> Bool {
     guard let ipcError = error as? IPCError else { return false }
     switch ipcError {
@@ -104,7 +124,7 @@ func backendProcessAgeSeconds() -> Int? {
     }
 
     guard let printOut = run("/bin/launchctl",
-                             ["print", "gui/\(getuid())/ai.krab.ear.backend"]) else { return nil }
+                             ["print", "gui/\(getuid())/\(BackendSupervisor.backendLaunchdLabel)"]) else { return nil }
     let pid = printOut
         .split(separator: "\n")
         .first { $0.contains("pid = ") }
@@ -268,7 +288,13 @@ extension AgentAppDelegate {
                 // безвозвратно (инцидент 2026-07-22), лучше остаться
                 // заклиненным до следующей попытки через 30 минут.
                 let busy = await MainActor.run {
-                    delegate.isRecording || delegate.activeGenerationOwner != nil
+                    delegate.isRecording
+                        || delegate.activeGenerationOwner != nil
+                        // 🔴 Встречу обязательно проверять ОТДЕЛЬНО: при
+                        // promoted-встрече оба флага выше намеренно очищены
+                        // (completePromotedMeetingHandoff), а встреча идёт.
+                        // Ровно на этом уже терялся item — амендмент 2026-07-16.
+                        || (delegate.meetingPanelController?.isMeetingLive ?? false)
                 }
                 guard !busy else {
                     loggerRef.warn(

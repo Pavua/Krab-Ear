@@ -107,6 +107,14 @@ final class BackendWedgeEvidenceTests: XCTestCase {
 /// Детектор заклинивания без проводки — такой же мёртвый код.
 final class WedgeWiringSourceContractTests: XCTestCase {
 
+    /// Текст между двумя маркерами — устойчиво к длине тела.
+    static func regionBetween(_ src: String, from: String, to: String) -> String {
+        guard let start = src.range(of: from) else { return "" }
+        let tail = src[start.upperBound...]
+        guard let end = tail.range(of: to) else { return String(tail) }
+        return String(tail[..<end.lowerBound])
+    }
+
     private func healthMonitorWiringSource() throws -> String {
         var url = URL(fileURLWithPath: #file)
         for _ in 0..<6 {
@@ -138,18 +146,40 @@ final class WedgeWiringSourceContractTests: XCTestCase {
     /// он не вылечил инцидент 2026-08-07.
     func test_escalation_uses_force_restart_not_restart_if_dead() throws {
         let src = try healthMonitorWiringSource()
-        guard let range = src.range(of: "setOnWedgeDetected") else {
-            return XCTFail("нет обработчика заклинивания")
-        }
-        let tail = String(src[range.lowerBound...].prefix(2000))
+        // Регион, а НЕ префикс фиксированной длины: окно на 2000 символов
+        // сломалось от одного добавленного гарда — хрупкий тест краснеет на
+        // безобидной правке и приучает игнорировать себя.
+        let body = Self.regionBetween(src, from: "setOnWedgeDetected", to: "await monitor.start()")
         XCTAssertTrue(
-            tail.contains("forceRestartBackend"),
+            body.contains("forceRestartBackend"),
             "эскалация не зовёт forceRestartBackend — на живом процессе лечения не будет"
         )
     }
 
     /// Рейт-лимит обязан быть: без него подтверждённое заклинивание
     /// перезапускало бы backend каждую минуту.
+    /// Весь фикс HIGH прошлого раунда держится на ОДНОЙ строке в пробе.
+    /// В проекте уже был случай отката тела при зелёных тестах — отсюда гард.
+    func test_probe_checks_process_age() throws {
+        let src = try healthMonitorWiringSource()
+        let body = Self.regionBetween(src, from: "setWedgeProbe", to: "setOnHealthyPing")
+        XCTAssertTrue(
+            body.contains("backendProcessAgeSeconds"),
+            "проба не проверяет возраст процесса — молодой (загружающийся) "
+            + "backend снова будет принят за заклинивший"
+        )
+    }
+
+    /// Живая встреча не выставляет isRecording/activeGenerationOwner —
+    /// её надо проверять отдельно (амендмент 2026-07-16, потерянный item).
+    func test_escalation_guards_live_meeting() throws {
+        let src = try healthMonitorWiringSource()
+        XCTAssertTrue(
+            src.contains("isMeetingLive"),
+            "эскалация не смотрит на живую встречу — kickstart посреди неё"
+        )
+    }
+
     func test_escalation_is_rate_limited() throws {
         let src = try healthMonitorWiringSource()
         XCTAssertTrue(
@@ -388,9 +418,16 @@ final class HealthMonitorWedgeTests: XCTestCase {
             pingInterval: 0.02, hangThreshold: 2,
             wedgeThreshold: 3, wedgeReprobeInterval: 0.0
         )
-        monitor.setPingProvider { false }
+        // 🔴 Нужен хотя бы ОДИН здоровый ping, иначе checkForWedgeIfNeeded
+        // выходит на guard sawHealthyPing и проба не вызывается вовсе — тест
+        // был бы вакуумным (прошлая версия именно такой и была; доказано
+        // мутацией: с удалённой перепроверкой она оставалась зелёной).
+        let script = PingScript(successes: 1)
+        let probes = WedgeCallCounter()
+        monitor.setPingProvider { script.next() }
         await monitor.setWedgeProbe {
-            //状态 меняется ровно в окне между пробой и колбэком.
+            probes.bump()
+            // Состояние меняется ровно в окне между пробой и колбэком.
             await monitor.suspend(.finalizingRecording)
             return true
         }
@@ -400,6 +437,7 @@ final class HealthMonitorWedgeTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 400_000_000)
         await monitor.stop()
 
+        XCTAssertGreaterThan(probes.count, 0, "проба не дёрнулась — тест вакуумный")
         XCTAssertEqual(
             escalations.count, 0,
             "kickstart во время финализации STT — потерянная диктовка"
