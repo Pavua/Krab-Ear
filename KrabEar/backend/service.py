@@ -149,6 +149,7 @@ import backend.cloud_rewriter as cloud_rewriter
 
 import argparse
 from datetime import datetime, timedelta, timezone
+import json
 import logging
 import math
 import os
@@ -393,6 +394,46 @@ def llm_warmup_needed(settings_get: Any) -> bool:
         bool(settings_get("llm_rewrite_enabled", False))
         or bool(settings_get("stt_punctuation_llm_pass_enabled", False))
     )
+
+
+def _read_unclean_restart_state(path: Path) -> "tuple[float, int]":
+    """Прочитать состояние кросс-рестартового лимита отчётов о крэшах.
+
+    Возвращает ``(last_report_ts, suppressed_since_last)``. Отсутствующий,
+    пустой, усечённый или битый файл — это ``(0.0, 0)``: «отчётов ещё не было».
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return float(raw.get("last_report_ts", 0.0)), int(raw.get("suppressed_since_last", 0))
+    except Exception:  # noqa: BLE001 — нет файла / битый / чужой формат
+        return 0.0, 0
+
+
+def _write_unclean_restart_state(path: Path, last_ts: float, suppressed: int) -> bool:
+    """Атомарно сохранить состояние лимита. ``True`` — записано.
+
+    🔴 Атомарность здесь не педантизм, а защита от того самого отказа,
+    ради которого лимит и существует. Голый ``write_text`` сначала УСЕКАЕТ
+    файл, и только потом пишет: прерывание между этими шагами (ENOSPC на
+    полном диске, крэш в лупе) оставляет нулевой файл, который следующий старт
+    прочитает как «отчётов ещё не было» — лимит превращается в no-op ровно
+    тогда, когда он нужен. Это документированный класс
+    «read-modify-write without a fail-safe» из CLAUDE.md.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(
+            json.dumps({"last_report_ts": last_ts, "suppressed_since_last": suppressed}),
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+        return True
+    except Exception:  # noqa: BLE001
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+        return False
 
 
 class BackendService:
@@ -1929,41 +1970,43 @@ class BackendService:
         if verdict not in ("unclean_collected", "unclean_collect_failed"):
             return
         try:
-            import json as _json
-            import time as _time
             from datetime import datetime, timezone
 
             from backend.error_bus import KrabError
             from backend.error_codes import ERROR_REGISTRY
 
             state_path = Path(data_dir) / self.UNCLEAN_RESTART_STATE_FILE
-            now = _time.time()
-            suppressed = 0
-            try:
-                prev = _json.loads(state_path.read_text(encoding="utf-8"))
-                last_ts = float(prev.get("last_report_ts", 0.0))
-                suppressed = int(prev.get("suppressed_since_last", 0))
-            except Exception:  # noqa: BLE001 — нет файла/битый: считаем первым
-                last_ts = 0.0
+            now = time.time()
+            last_ts, suppressed = _read_unclean_restart_state(state_path)
 
-            within_window = (now - last_ts) < self.UNCLEAN_RESTART_REPORT_MIN_GAP_SEC
-            try:
-                state_path.write_text(_json.dumps({
-                    "last_report_ts": last_ts if within_window else now,
-                    "suppressed_since_last": (suppressed + 1) if within_window else 0,
-                }), encoding="utf-8")
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "startup-recovery: не удалось записать %s — "
-                    "кросс-рестартовый лимит отчётов не работает",
-                    self.UNCLEAN_RESTART_STATE_FILE,
-                )
+            # 🔴 Часы — wall clock, и они умеют уезжать (севший RTC до
+            # синхронизации NTP, шаг назад). Метка ИЗ БУДУЩЕГО — это не «окно
+            # ещё идёт», а испорченное состояние: без явной проверки
+            # elapsed >= 0 подавление стало бы вечным и молчаливым, причём лог
+            # рапортовал бы штатную работу.
+            elapsed = now - last_ts
+            within_window = 0.0 <= elapsed < self.UNCLEAN_RESTART_REPORT_MIN_GAP_SEC
 
             if within_window:
+                _write_unclean_restart_state(state_path, last_ts, suppressed + 1)
                 logger.warning(
                     "startup-recovery: нештатный рестарт (%s), отчёт подавлен "
                     "лимитом (%d подряд за последние %.0f с)",
                     verdict, suppressed + 1, self.UNCLEAN_RESTART_REPORT_MIN_GAP_SEC,
+                )
+                return
+
+            # Окно открыто. Сначала ЗАКРЫВАЕМ его на диске, потом шлём — и если
+            # записать не удалось, НЕ шлём вовсе (fail-closed): без сохранённого
+            # состояния лимита нет, а цена ошибки несимметрична — потерянный
+            # отчёт о крэше дешевле выжженной квоты Sentry на ~720 подъёмах в
+            # час. ENOSPC реалистичен: полный диск сам по себе типовая причина
+            # ровно тех нештатных смертей, о которых этот код и отчитывается.
+            if not _write_unclean_restart_state(state_path, now, 0):
+                logger.warning(
+                    "startup-recovery: нештатный рестарт (%s), отчёт подавлен — "
+                    "не удалось сохранить %s, кросс-рестартовый лимит не работает",
+                    verdict, self.UNCLEAN_RESTART_STATE_FILE,
                 )
                 return
 

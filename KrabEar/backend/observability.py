@@ -398,10 +398,10 @@ def install_signal_handlers() -> None:
     сбойную инструкцию — и сегфолт зацикливается навсегда.
 
     Что ДОКАЗАНО sample'ом живого процесса: поток записи застрял в
-    ``_sigtramp`` на ``PaUtil_ReadRingBuffer`` (1902 сэмпла из 1966), причём
-    именно через общий C-обработчик CPython (``signal_handler`` → ``trip_signal``
-    → ``_PyEval_SignalReceived``), который ставится ТОЛЬКО для сигналов с
-    Python-колбэком; на главном потоке — 46 вложенных ``handle_signals``, и
+    ``_sigtramp`` на ``PaUtil_ReadRingBuffer`` (1902 сэмпла из 1966), а в том же
+    потоке разрешается цепочка общего C-обработчика CPython (``signal_handler``
+    → ``trip_signal`` → ``_PyEval_SignalReceived``), который ставится ТОЛЬКО для
+    сигналов с Python-колбэком; на главном потоке — 46 вложенных ``handle_signals``, и
     самый глубокий кадр стоит на ``lock_PyThread_acquire_lock``. Процесс
     переставал принимать соединения, но не умирал и не мог обработать SIGTERM.
 

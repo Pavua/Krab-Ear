@@ -361,12 +361,78 @@ class UncleanRestartIsReportedTest(unittest.TestCase):
         except Exception as exc:  # noqa: BLE001
             self.fail(f"_report_unclean_restart пробросил {exc!r}")
 
-    def test_never_raises_when_state_dir_is_unwritable(self):
-        """Недоступная data_dir не должна ни ронять, ни глушить отчёт."""
-        pushed = self._report(
-            "unclean_collected", data_dir=self.data_dir / "does" / "not" / "exist",
+    def test_unwritable_state_dir_suppresses_instead_of_storming(self):
+        """Не сохранили лимит — не отчитываемся (fail-closed), но и не падаем.
+
+        Направление отказа выбрано осознанно и несимметрично: потерять один
+        отчёт о крэше дешевле, чем выжечь квоту Sentry на ~720 подъёмах в час,
+        когда лимит фактически не работает.
+        """
+        try:
+            pushed = self._report(
+                "unclean_collected", data_dir=self.data_dir / "does" / "not" / "exist",
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.fail(f"_report_unclean_restart пробросил {exc!r}")
+
+        self.assertEqual(pushed, [], "лимит не сохранён, но отчёт всё равно ушёл")
+
+    def test_write_is_atomic_so_a_failed_write_cannot_truncate_the_limit(self):
+        """🔴 Прерванная запись НЕ должна оставлять усечённый файл.
+
+        Голый ``write_text`` сначала усекает файл и только потом пишет. Если
+        между этими шагами процесс умирает (крэш-луп) или диск полон (ENOSPC —
+        сам по себе типовая причина ровно таких нештатных смертей), остаётся
+        нулевой файл, который следующий старт прочитает как «отчётов ещё не
+        было» — лимит превращается в no-op именно тогда, когда он нужен
+        (адверсариальное ревью воспроизвело 10 отчётов из 10 «рестартов»).
+        Класс «read-modify-write without a fail-safe» из CLAUDE.md.
+        """
+        import backend.service as service_mod
+        from backend.service import BackendService
+
+        state = self.data_dir / BackendService.UNCLEAN_RESTART_STATE_FILE
+        self._report("unclean_collected")
+        intact = state.read_text(encoding="utf-8")
+        self.assertIn("last_report_ts", intact)
+
+        # Следующая запись обрывается на последнем шаге (публикация tmp).
+        with patch.object(service_mod.os, "replace", side_effect=OSError("ENOSPC")):
+            pushed = self._report("unclean_collected")
+
+        self.assertEqual(
+            state.read_text(encoding="utf-8"), intact,
+            "сорванная запись повредила состояние лимита — шлюз открыт",
         )
-        self.assertEqual(len(pushed), 1, "отчёт потерян из-за недоступного файла лимита")
+        self.assertEqual(pushed, [], "лимит не сохранён, а отчёт всё равно ушёл")
+        self.assertFalse(
+            list(self.data_dir.glob("*.tmp")),
+            "временный файл не убран за собой",
+        )
+
+    def test_clock_skew_into_the_future_does_not_silence_forever(self):
+        """Метка из будущего — испорченное состояние, а не «окно ещё идёт».
+
+        Реальный триггер: севший RTC до синхронизации NTP или шаг часов назад.
+        Без явной проверки elapsed >= 0 подавление становится вечным и
+        молчаливым, причём лог рапортует штатную работу.
+        """
+        import time as _t
+
+        from backend.service import BackendService
+
+        state = self.data_dir / BackendService.UNCLEAN_RESTART_STATE_FILE
+        state.write_text(
+            json.dumps({"last_report_ts": _t.time() + 365 * 24 * 3600,
+                        "suppressed_since_last": 0}),
+            encoding="utf-8",
+        )
+
+        pushed = self._report("unclean_collected")
+        self.assertEqual(
+            len(pushed), 1,
+            "метка из будущего заглушила отчёт — подавление стало бы вечным",
+        )
 
 
 class StartupRecoveryUsesVerdictSourceContractTest(unittest.TestCase):
@@ -427,6 +493,52 @@ class StartupRecoveryUsesVerdictSourceContractTest(unittest.TestCase):
             assigned_names & reported_names,
             f"вердикт {assigned_names} присвоен, но в отчёт уходит что-то "
             f"другое ({reported_names})",
+        )
+
+    def test_report_call_is_an_unconditional_statement(self):
+        """Вызов обязан быть ПРЯМЫМ оператором тела, а не спрятанным под ветвление.
+
+        Даже усиленная версия предыдущего теста остаётся зелёной при полностью
+        регрессировавшем баге — достаточно обернуть вызов в
+        ``if verdict == "clean":`` (поймано третьим раундом ревью). Достижимость
+        AST не доказывает в принципе; требуем хотя бы, чтобы вызов не был под
+        условием внутри функции восстановления.
+
+        🔴 Честное ограничение: внешний гейт ``_needs_background_recovery``
+        (спавнить ли тред вообще) этим тестом НЕ покрыт — сделать его
+        всегда-False по-прежнему тихо отключило бы отчёт.
+        """
+        import backend.service as service_mod
+
+        source = textwrap.dedent(inspect.getsource(service_mod.BackendService.__init__))
+        tree = ast.parse(source)
+
+        def _calls_check_and_collect(fn):
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Call):
+                    func = node.func
+                    name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+                    if name == "check_and_collect":
+                        return True
+            return False
+
+        bodies = [
+            fn.body for fn in ast.walk(tree)
+            if isinstance(fn, ast.FunctionDef) and _calls_check_and_collect(fn)
+        ]
+        self.assertTrue(bodies, "не нашли функцию восстановления с check_and_collect")
+
+        def _is_report_stmt(stmt):
+            return (
+                isinstance(stmt, ast.Expr)
+                and isinstance(stmt.value, ast.Call)
+                and getattr(stmt.value.func, "attr", None) == "_report_unclean_restart"
+            )
+
+        self.assertTrue(
+            any(any(_is_report_stmt(st) for st in body) for body in bodies),
+            "_report_unclean_restart не является безусловным оператором тела "
+            "функции восстановления — отчёт можно тихо отключить ветвлением",
         )
 
 
