@@ -1598,3 +1598,68 @@ Health-check `scripts/krab_ear_runner_health_check.py` + LaunchAgent
   priority-check на bundled vendor; подключение сборки в
   `assemble_signed_app.sh`/CI release; source-контракт + живой тест на
   чистой (без system Python) машине.
+
+---
+
+## 2026-08-07 — 🔴 Волна SIGSEGV-обработчика: прод лежал 8 часов молча
+
+**Как нашлось.** Не по алерту. При проверке состояния после вчерашней
+перезагрузки: launchd показывал юнит `ai.krab.ear.backend` как `running`
+(pid 1057, аптайм 8ч), а IPC отвечал `ConnectionRefusedError`. Процесс жёг
+CPU и не реагировал на SIGTERM — лечило только `kickstart -k`.
+
+**Корень** (найден `sample <pid>` на живом зависшем процессе — по коду этого
+не увидеть): `install_signal_handlers()` в `backend/observability.py` вешал
+**Python-обработчик на SIGSEGV/SIGABRT**, чтобы послать событие в Sentry перед
+смертью. CPython не исполняет такой колбэк в момент сбоя — C-уровень ставит
+флаг и ВОЗВРАЩАЕТСЯ, ядро повторяет сбойную инструкцию → бесконечный ре-сбой.
+Улики: поток записи 1902 сэмпла из 1966 в `_sigtramp` на
+`PaUtil_ReadRingBuffer` (отсюда «AudioRecorder worker не завершился за 3.0 с»
+в логе), главный поток — **46 вложенных** `handle_signals`.
+**Честный крэш, после которого launchd поднял бы бэкенд за пару секунд,
+превращался в многочасовой ТИХИЙ простой.** Sample сохранён:
+`.remember/forensics/backend-1057-sigsegv-storm-2026-08-07.sample.txt`.
+
+**Фикс:** `faulthandler.enable(all_threads=True)` — то же самое, но C-уровня и
+signal-safe. Доказано живьём в изолированном процессе: старый обработчик →
+процесс жив на 100% CPU через 8с; faulthandler → мгновенная смерть с кодом 139
+и полным трейсбеком всех потоков.
+
+**Два адверсариальных ревью подряд** (Opus, свежий контекст). Первое
+подтвердило диагноз независимо + 2 MEDIUM / 4 LOW; главная находка — волна
+убирала обработчик, который ХОТЯ БЫ НАМЕРЕВАЛСЯ послать crash-событие, не дав
+замены: вердикт `shutdown_forensics.check_and_collect()` молча выбрасывался.
+Добавлены `BackendService._report_unclean_restart()` + код
+`system.unclean_restart` (severity=**error**, не warn: warn-tier батчится и
+сбрасывается только при штатном завершении, которого в крэш-лупе не будет).
+Второе ревью поправило переуверенность в формулировках: «дедлок в
+`sentry_sdk.flush()`» уликами не подтверждён, равно согласован лайвлок —
+докстринги переписаны на доказанное.
+
+**Смежная находка того же дня — внешний монитор слеп.**
+`~/.openclaw/krab_runtime_state/krab_ear/ear_watcher.json`:
+`python_backend_down_count: 10013` при `last_alert: 96` — то есть ~103 дня
+подряд «бэкенд лежит» и ни одного алерта. Причины: (1) `EAR_SOCKET_PATH` по
+умолчанию `~/.krab_ear/ipc.sock`, которого не существует (реальный —
+`~/Library/Application Support/KrabEar/krabear.sock`), env-override plist не
+задаёт; (2) `check_python_backend()` проверяет `Path.exists()`, хотя докстринг
+обещает «exists + responsive» — во время простоя файл сокета СУЩЕСТВОВАЛ.
+Файл живёт в репозитории главного Краба (грязное дерево — не правила), бриф:
+`.remember/FOR_KRAB_ear-watcher-blind-2026-08-07.md`.
+
+**Открытые хвосты (задачи заведены, не в этой волне):**
+1. **Swift self-heal не лечит заклиненный бэкенд.**
+   `HealthMonitor.hangFiredForCurrentEpisode` сбрасывается ТОЛЬКО успешным
+   пингом, а `BackendSupervisor.restartIfDeadDetailed()` на живом-но-заклиненном
+   процессе возвращает `.alreadyAlive` и ничего не делает → ровно одна
+   безрезультатная попытка, дальше тишина навсегда (sticky state without an
+   exit). Лечение — эскалация к `forceRestartBackend()` под уже существующим
+   `WedgedEscalationTracker`. 🔴 Обязательный дискриминатор: эскалировать только
+   при `IPCError.socketConnectFailed` (отказ соединения = завис), НЕ при
+   `.timeout` — здоровый-но-медленный бэкенд соединение принимает, и его рестарт
+   уничтожит активную диктовку (инцидент 2026-07-22).
+2. **Сам сегфолт в `PaUtil_ReadRingBuffer` не разобран** — фикс превратил вечное
+   зависание в честный крэш с автоперезапуском (строго лучше), но теперь это
+   станет ВИДИМЫМ crash-loop'ом. С `faulthandler` следующий крэш даст полный
+   трейсбек в `logs/krab-ear-backend.err.log` — ждать первого дампа дешевле,
+   чем гадать.
