@@ -51,6 +51,114 @@ final class PingScript: @unchecked Sendable {
     }
 }
 
+/// Предикат «это доказательство заклинивания» — решение безопасности:
+/// `true` ведёт к принудительному рестарту, а тот под активной диктовкой
+/// уничтожает её безвозвратно.
+final class BackendWedgeEvidenceTests: XCTestCase {
+
+    /// Отказ на connect() — единственное доказательство заклинивания.
+    func testConnectFailureIsWedgeEvidence() {
+        XCTAssertTrue(isBackendWedgeEvidence(IPCError.socketConnectFailed("ECONNREFUSED")))
+    }
+
+    /// 🔴 Исчерпан лимит коннектов — backend ЗДОРОВ, просто перегружен.
+    ///
+    /// `ipc_server.py` при лимите делает `accept()` и сразу `conn.close()`,
+    /// поэтому клиент СОЕДИНЯЕТСЯ успешно и падает уже на чтении. В логах прода
+    /// 2026-08-07 это реально было («лимит 64 коннектов исчерпан»). Считать это
+    /// заклиниванием — значит убивать здоровый backend под нагрузкой вместе с
+    /// идущей диктовкой.
+    func testConnectionLimitRejectionIsNotWedgeEvidence() {
+        XCTAssertFalse(
+            isBackendWedgeEvidence(IPCError.readFailed),
+            "отказ по лимиту коннектов принят за зависание — рестарт убьёт диктовку"
+        )
+        XCTAssertFalse(isBackendWedgeEvidence(IPCError.writeFailed))
+    }
+
+    /// Таймаут — backend жив, просто медленный (под свопом RTT доходил до 2.9с).
+    func testTimeoutIsNotWedgeEvidence() {
+        XCTAssertFalse(isBackendWedgeEvidence(IPCError.timeout))
+    }
+
+    /// Локальная невозможность создать сокет — проблема агента, не backend'а.
+    func testLocalSocketCreateFailureIsNotWedgeEvidence() {
+        XCTAssertFalse(isBackendWedgeEvidence(IPCError.socketCreateFailed(errno: 24)))
+    }
+
+    /// Ответ получен (пусть и с ошибкой) — accept-loop жив по определению.
+    func testAnsweredRequestsAreNotWedgeEvidence() {
+        XCTAssertFalse(isBackendWedgeEvidence(IPCError.backendError("boom")))
+        XCTAssertFalse(isBackendWedgeEvidence(IPCError.invalidResponse))
+    }
+
+    /// Чужая ошибка (не IPC) доказательством не является.
+    func testNonIPCErrorIsNotWedgeEvidence() {
+        struct Other: Error {}
+        XCTAssertFalse(isBackendWedgeEvidence(Other()))
+    }
+}
+
+/// Source-контракт: вторая ступень реально проводится в продовом старте.
+///
+/// 🔴 В этом проекте уже был класс багов «функция определена, но её никогда не
+/// зовут» — `setupErrorBus` и сам `setupHealthMonitor` были МЁРТВЫМИ при 100%
+/// зелёных юнит-тестах, потому что тесты проверяли компоненты в изоляции.
+/// Детектор заклинивания без проводки — такой же мёртвый код.
+final class WedgeWiringSourceContractTests: XCTestCase {
+
+    private func healthMonitorWiringSource() throws -> String {
+        var url = URL(fileURLWithPath: #file)
+        for _ in 0..<6 {
+            let candidate = url.appendingPathComponent(
+                "Sources/KrabEarAgent/main+HealthMonitor.swift")
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return try String(contentsOf: candidate, encoding: .utf8)
+            }
+            url = url.deletingLastPathComponent()
+        }
+        XCTFail("не нашли main+HealthMonitor.swift")
+        return ""
+    }
+
+    func test_wedge_probe_is_wired_in_production_startup() throws {
+        let src = try healthMonitorWiringSource()
+        XCTAssertTrue(
+            src.contains("setWedgeProbe"),
+            "проба заклинивания не проводится — детектор мёртв"
+        )
+        XCTAssertTrue(
+            src.contains("setOnWedgeDetected"),
+            "обработчик заклинивания не проводится — детектор мёртв"
+        )
+    }
+
+    /// Лечить обязан forceRestartBackend: restartIfDeadDetailed на ЖИВОМ
+    /// процессе возвращает .alreadyAlive и ничего не делает — именно поэтому
+    /// он не вылечил инцидент 2026-08-07.
+    func test_escalation_uses_force_restart_not_restart_if_dead() throws {
+        let src = try healthMonitorWiringSource()
+        guard let range = src.range(of: "setOnWedgeDetected") else {
+            return XCTFail("нет обработчика заклинивания")
+        }
+        let tail = String(src[range.lowerBound...].prefix(2000))
+        XCTAssertTrue(
+            tail.contains("forceRestartBackend"),
+            "эскалация не зовёт forceRestartBackend — на живом процессе лечения не будет"
+        )
+    }
+
+    /// Рейт-лимит обязан быть: без него подтверждённое заклинивание
+    /// перезапускало бы backend каждую минуту.
+    func test_escalation_is_rate_limited() throws {
+        let src = try healthMonitorWiringSource()
+        XCTAssertTrue(
+            src.contains("WedgeEscalationGate") && src.contains("shouldEscalate"),
+            "принудительный рестарт без рейт-лимита — карусель рестартов"
+        )
+    }
+}
+
 final class HealthMonitorWedgeTests: XCTestCase {
 
     /// Порог заклинивания ещё не набран — эскалации быть не должно.

@@ -32,6 +32,38 @@ private nonisolated(unsafe) var lastHealthStateKey: UInt8 = 0
 /// `@Sendable` и зовётся из актора HealthMonitor. Актор-обёртка даёт безопасную
 /// разделяемую мутацию без второго набора порогов: пороги (30 минут между
 /// попытками, кап 3 подряд) остаются едиными с wake-word-эскалацией.
+/// Считать ли ошибку IPC доказательством того, что backend ЗАКЛИНИЛ —
+/// то есть процесс жив, но его accept-loop мёртв (инцидент 2026-08-07).
+///
+/// Решение безопасности: `true` здесь ведёт к `launchctl kickstart -k`, а
+/// рестарт под активной диктовкой уничтожает её безвозвратно (инцидент
+/// 2026-07-22). Поэтому заклиниванием считается ТОЛЬКО отказ на этапе
+/// `connect()`: у заклинившего backend'а accept-loop не работает, backlog
+/// переполняется и connect() возвращает ECONNREFUSED — ровно это наблюдалось
+/// живьём.
+///
+/// 🔴 Намеренно УЖЕ, чем `AgentAppDelegate.isConnectionError`. Та считает
+/// отказом ещё и `readFailed`/`writeFailed`, и для СВОЕЙ задачи
+/// (переподключение IPC) это правильно — но здесь дало бы ложный
+/// принудительный рестарт: при исчерпании лимита коннектов
+/// (`ipc_server.py`: «лимит 64 коннектов исчерпан») сервер делает `accept()` и
+/// сразу `conn.close()`, значит клиент СОЕДИНЯЕТСЯ успешно и падает уже на
+/// чтении. Перегруженный, но совершенно здоровый backend выглядел бы
+/// заклинившим — такое реально было в логах 2026-08-07.
+///
+/// Таймаут заклиниванием тоже не считается: под свопом живой RTT доходил до
+/// 2.9 с при таймауте ping'а 2 с.
+func isBackendWedgeEvidence(_ error: Error) -> Bool {
+    guard let ipcError = error as? IPCError else { return false }
+    switch ipcError {
+    case .socketConnectFailed:
+        return true
+    case .socketCreateFailed, .writeFailed, .readFailed, .timeout,
+         .invalidResponse, .backendError:
+        return false
+    }
+}
+
 actor WedgeEscalationGate {
     private var tracker = WedgedEscalationTracker()
 
@@ -142,21 +174,14 @@ extension AgentAppDelegate {
             // безрезультатную попытку и замолчал навсегда. Ниже — вторая,
             // намеренно консервативная ступень.
             await monitor.setWedgeProbe {
-                // Дискриминатор «завис» vs «медленный»: отказ СОЕДИНЕНИЯ против
-                // таймаута. Переиспользуем уже существующую классификацию из
-                // main+IPCRecovery (её комментарий формулирует тот же принцип:
-                // «Timeout means backend is alive but slow — do NOT trigger
-                // restart»). Здоровый-но-медленный backend соединение принимает,
-                // и его рестарт уничтожил бы активную диктовку (инцидент
-                // 2026-07-22), поэтому таймаут заклиниванием НЕ считается.
+                // Классификация — в isBackendWedgeEvidence (там же разбор,
+                // почему она УЖЕ, чем isConnectionError).
                 let client = IPCClient(socketPath: socketPath)
                 do {
                     _ = try await client.callAsync(method: "ping", timeoutSec: 5)
                     return false
-                } catch let error as IPCError {
-                    return AgentAppDelegate.isConnectionError(error)
                 } catch {
-                    return false
+                    return isBackendWedgeEvidence(error)
                 }
             }
 
