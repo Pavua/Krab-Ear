@@ -147,6 +147,18 @@
     <string>1</string>
   </dict>
 
+  <!-- Sentry KRAB-EAR-BACKEND-24 (2026-08-08): OSError [Errno 24] Too many
+       open files на StateStore._lock() под system-wide overload. Без явного
+       SoftResourceLimits процесс наследует дефолтный launchd soft-лимит
+       (`launchctl limit maxfiles` = 256) — тонкий запас для backend, держащего
+       десятки file-backed NDJSON-хранилищ + IPC socket-соединения + per-lock
+       fd (StateStore/error_bus/translation_cache/webhook_manager и т.д.). -->
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>4096</integer>
+  </dict>
+
   <key>StandardOutPath</key>
   <string>__PROJECT_ROOT__/logs/krab-ear-backend.out.log</string>
   <key>StandardErrorPath</key>
