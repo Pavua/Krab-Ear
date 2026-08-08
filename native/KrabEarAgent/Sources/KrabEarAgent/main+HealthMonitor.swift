@@ -26,6 +26,134 @@ private nonisolated(unsafe) var statusIndicatorViewKey: UInt8 = 0
 private nonisolated(unsafe) var privacyModeEnabledKey: UInt8 = 0
 private nonisolated(unsafe) var lastHealthStateKey: UInt8 = 0
 
+/// Считать ли ошибку IPC доказательством того, что backend ЗАКЛИНИЛ —
+/// то есть процесс жив, но его accept-loop мёртв (инцидент 2026-08-07).
+///
+/// Решение безопасности: `true` здесь ведёт к `launchctl kickstart -k`, а
+/// рестарт под активной диктовкой уничтожает её безвозвратно (инцидент
+/// 2026-07-22). Поэтому заклиниванием считается ТОЛЬКО отказ на этапе
+/// `connect()`: у заклинившего backend'а accept-loop не работает, backlog
+/// переполняется и connect() возвращает ECONNREFUSED — ровно это наблюдалось
+/// живьём.
+///
+/// 🔴 Намеренно УЖЕ, чем `AgentAppDelegate.isConnectionError`. Та считает
+/// отказом ещё и `readFailed`/`writeFailed`, и для СВОЕЙ задачи
+/// (переподключение IPC) это правильно — но здесь дало бы ложный
+/// принудительный рестарт: при исчерпании лимита коннектов
+/// (`ipc_server.py`: «лимит 64 коннектов исчерпан») сервер делает `accept()` и
+/// сразу `conn.close()`, значит клиент СОЕДИНЯЕТСЯ успешно и падает уже на
+/// чтении. Перегруженный, но совершенно здоровый backend выглядел бы
+/// заклинившим — такое реально было в логах 2026-08-07.
+///
+/// Таймаут заклиниванием тоже не считается: под свопом живой RTT доходил до
+/// 2.9 с при таймауте ping'а 2 с.
+///
+/// 🔴 ОСОЗНАННОЕ ОГРАНИЧЕНИЕ (ревью 2026-08-08). Заклинивание бывает ДВУХ
+/// видов, и здесь лечится только первый:
+///
+/// 1. **accept-loop мёртв** — ровно инцидент 05:02→13:14: главный поток был
+///    погребён под 46 вложенными обработчиками сигналов, `accept()` не
+///    вызывался, backlog переполнился, и `connect()` отдавал ECONNREFUSED
+///    (замерено живьём). Это и лечит вторая ступень.
+/// 2. **accept-loop жив, но все обработчики висят** — жизнь 14:12→17:56:
+///    в логах видно `«лимит 64 коннектов исчерпан»`, то есть цикл крутился;
+///    клиент получал `timeout`/`invalidResponse`, а не отказ соединения.
+///
+/// Второй вид сюда НЕ добавлен намеренно: `timeout` — это ровно то, что
+/// выдаёт ЗДОРОВЫЙ, но занятый backend (длинная диктовка, STT под свопом), и
+/// расширение предиката перенесло бы риск на потерю записи. Плюс у второго
+/// вида уже есть СВОЙ штатный лекарь на стороне backend'а: при неподтверждённом
+/// shutdown-барьере процесс сам выходит с EX_SOFTWARE и launchd поднимает
+/// чистый экземпляр (в тот день это отработало в 14:07). Если второй вид
+/// когда-нибудь перестанет самолечиться — расширять предикат надо ПО
+/// ДЛИТЕЛЬНОСТИ серии (отдельный, много больший порог), а не по коду ошибки.
+func isBackendWedgeEvidence(_ error: Error) -> Bool {
+    guard let ipcError = error as? IPCError else { return false }
+    switch ipcError {
+    case .socketConnectFailed:
+        return true
+    case .socketCreateFailed, .writeFailed, .readFailed, .timeout,
+         .invalidResponse, .backendError:
+        return false
+    }
+}
+
+/// Разбирает `ps -o etime=` (формат `[[dd-]hh:]mm:ss`) в секунды.
+///
+/// 🔴 На macOS нет `ps -o etimes=` (это GNU): запрос такого поля печатает
+/// список допустимых ключей и «возраст» молча превращается в мусор — ровно тот
+/// класс BSD-vs-GNU ловушек, что уже стоил проекту двух мёртвых инструментов.
+func parseProcessElapsedSeconds(_ raw: String) -> Int? {
+    let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !text.isEmpty else { return nil }
+
+    var days = 0
+    var rest = text
+    if let dash = text.firstIndex(of: "-") {
+        guard let d = Int(text[text.startIndex..<dash]) else { return nil }
+        days = d
+        rest = String(text[text.index(after: dash)...])
+    }
+
+    let parts = rest.split(separator: ":").map(String.init)
+    guard parts.count == 2 || parts.count == 3 else { return nil }
+    let numbers = parts.compactMap { Int($0) }
+    guard numbers.count == parts.count else { return nil }
+
+    let hours = parts.count == 3 ? numbers[0] : 0
+    let minutes = parts.count == 3 ? numbers[1] : numbers[0]
+    let seconds = parts.count == 3 ? numbers[2] : numbers[1]
+    return ((days * 24 + hours) * 60 + minutes) * 60 + seconds
+}
+
+/// Возраст процесса backend'а по данным launchd, в секундах. `nil` — узнать не
+/// удалось (юнит не загружен, процесса нет, ps не отдал разборчивый ответ).
+func backendProcessAgeSeconds() -> Int? {
+    func run(_ path: String, _ args: [String]) -> String? {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: path)
+        task.arguments = args
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+        guard (try? task.run()) != nil else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        guard task.terminationStatus == 0 else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    guard let printOut = run("/bin/launchctl",
+                             ["print", "gui/\(getuid())/\(BackendSupervisor.backendLaunchdLabel)"]) else { return nil }
+    let pid = printOut
+        .split(separator: "\n")
+        .first { $0.contains("pid = ") }
+        .flatMap { $0.split(separator: "=").last }
+        .flatMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+    guard let pid else { return nil }
+
+    guard let etime = run("/bin/ps", ["-o", "etime=", "-p", String(pid)]) else { return nil }
+    return parseProcessElapsedSeconds(etime)
+}
+
+/// Владелец рейт-лимита принудительных рестартов заклинившего backend'а.
+///
+/// `WedgedEscalationTracker` — struct с mutating-методами, а колбэк детектора
+/// `@Sendable` и зовётся из актора HealthMonitor. Актор-обёртка даёт безопасную
+/// разделяемую мутацию без второго набора порогов: пороги (30 минут между
+/// попытками, кап 3 подряд) остаются едиными с wake-word-эскалацией.
+actor WedgeEscalationGate {
+    private var tracker = WedgedEscalationTracker()
+
+    /// `true` — принудительный рестарт разрешён прямо сейчас.
+    func shouldEscalate() -> Bool {
+        tracker.shouldEscalate(wedged: true, now: Date().timeIntervalSince1970)
+    }
+
+    /// Backend снова отвечает — кап подряд-эскалаций перевзводится.
+    func noteHealthy() { tracker.noteHealthy() }
+}
+
 @MainActor
 extension AgentAppDelegate {
     var healthMonitor: HealthMonitor? {
@@ -81,6 +209,8 @@ extension AgentAppDelegate {
         let monitor = HealthMonitor(pingInterval: 3.0, hangThreshold: 2)
         let socketPath = backendSupervisor.socketPath
         let supervisor = backendSupervisor
+        let wedgeGate = WedgeEscalationGate()
+        let delegate = self
 
         monitor.setPingProvider {
             let client = IPCClient(socketPath: socketPath)
@@ -118,6 +248,88 @@ extension AgentAppDelegate {
                     }
                 }
             }
+            // Заклинивший backend (инцидент 2026-08-07): восемь часов процесс был
+            // жив, жёг CPU и отвергал IPC, а self-heal сделал ровно одну
+            // безрезультатную попытку и замолчал навсегда. Ниже — вторая,
+            // намеренно консервативная ступень.
+            await monitor.setWedgeProbe {
+                // 🔴 Молодой процесс — это ЗАГРУЗКА, а не заклинивание.
+                // socketConnectFailed возвращается и когда сокета ещё нет
+                // (backend минутами импортирует torch/mlx), и когда остался
+                // ПРОТУХШИЙ сокет от нечистой смерти: ipc_server снимает его
+                // только в момент bind(), то есть на всём окне загрузки
+                // состояние ФС неотличимо от заклинивания. А перезапуски стали
+                // чаще ровно из-за соседнего фикса (сегфолт теперь честно
+                // убивает процесс) — без этого гарда агент зациклил бы загрузку.
+                // Живой замер того дня: старт занял ~4 минуты, поэтому порог
+                // с запасом. Настоящее заклинивание длится часами, десять минут
+                // ожидания ему ничего не стоят.
+                guard let ageSec = backendProcessAgeSeconds(), ageSec >= 600 else { return false }
+
+                // Классификация — в isBackendWedgeEvidence (там же разбор,
+                // почему она УЖЕ, чем isConnectionError).
+                let client = IPCClient(socketPath: socketPath)
+                do {
+                    _ = try await client.callAsync(method: "ping", timeoutSec: 5)
+                    return false
+                } catch {
+                    return isBackendWedgeEvidence(error)
+                }
+            }
+
+            // Кап подряд-эскалаций перевзводится живым backend'ом.
+            await monitor.setOnHealthyPing {
+                await wedgeGate.noteHealthy()
+            }
+
+            await monitor.setOnWedgeDetected {
+                // Последняя линия: локальное состояние агента, БЕЗ IPC (он и
+                // сломан). Идёт запись/встреча — kickstart уничтожит её
+                // безвозвратно (инцидент 2026-07-22), лучше остаться
+                // заклиненным до следующей попытки через 30 минут.
+                let busy = await MainActor.run {
+                    delegate.isRecording
+                        || delegate.activeGenerationOwner != nil
+                        // 🔴 Встречу обязательно проверять ОТДЕЛЬНО: при
+                        // promoted-встрече оба флага выше намеренно очищены
+                        // (completePromotedMeetingHandoff), а встреча идёт.
+                        // Ровно на этом уже терялся item — амендмент 2026-07-16.
+                        || (delegate.meetingPanelController?.isMeetingLive ?? false)
+                }
+                guard !busy else {
+                    loggerRef.warn(
+                        "HealthMonitor: backend заклинил, но идёт запись — "
+                        + "принудительный рестарт отложен (диктовка дороже)"
+                    )
+                    return
+                }
+                // Рейт-лимит и кап — в WedgedEscalationTracker (30 минут между
+                // попытками, максимум 3 подряд без здорового сигнала): тот же
+                // страж, что у wake-word-эскалации, специально переиспользован,
+                // чтобы не заводить второй с другими порогами.
+                guard await wedgeGate.shouldEscalate() else {
+                    loggerRef.warn(
+                        "HealthMonitor: backend заклинил, но эскалация подавлена "
+                        + "(рейт-лимит или исчерпан кап принудительных рестартов)"
+                    )
+                    return
+                }
+                loggerRef.warn(
+                    "HealthMonitor: backend ЗАКЛИНИЛ (соединение отвергается) — "
+                    + "принудительный рестарт через launchctl kickstart"
+                )
+                // forceRestartBackend, а НЕ restartIfDead: последний
+                // short-circuit'ится на живом процессе и именно поэтому не
+                // вылечил инцидент.
+                let ok = supervisor.forceRestartBackend()
+                await MainActor.run {
+                    BackendToast.shared.show(
+                        ok ? "Backend завис — перезапускаю" : "⚠ Backend завис, рестарт не удался",
+                        duration: 10.0
+                    )
+                }
+            }
+
             await monitor.start()
             // Wave 656: log first health ping milestone.
             AgentRecoveryLogger.shared.logStage("first_health_ping")

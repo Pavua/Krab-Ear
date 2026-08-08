@@ -56,6 +56,14 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
 
     private(set) var uiState: UIState = .idle
     private var startedAt: TimeInterval?
+
+    /// Идёт ли живая встреча. Нужен агентским сторожам, которым НЕЛЬЗЯ
+    /// перезапускать backend посреди встречи: амендмент 2026-07-16 (d18c5e56)
+    /// — агент kickstart'ил backend посреди финальной транскрипции, item был
+    /// потерян. Локальные `isRecording`/`activeGenerationOwner` для этого не
+    /// годятся: при promoted-встрече они намеренно очищаются
+    /// (`completePromotedMeetingHandoff` → `.clearCurrentGeneration`).
+    var isMeetingLive: Bool { startedAt != nil && !finishedDelivered }
     private var timerTick: Timer?
 
     // MARK: - Данные (Task 2)
