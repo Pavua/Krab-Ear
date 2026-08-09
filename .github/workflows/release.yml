@@ -134,7 +134,14 @@ jobs:
           key: bundled-runtime-pbs-${{ hashFiles('scripts/build_bundled_runtime.command') }}
 
       - name: Build bundled Python runtime (закрывает T2/T3 онбординга — нет system Python >= 3.12)
-        run: scripts/build_bundled_runtime.command --output build/vendor
+        run: |
+          df -h . || true
+          # 🔴 --skip-download обязателен: без него скрипт безусловно качает
+          # тарбол заново (см. build_bundled_runtime.command) — шаг кэша выше
+          # был декоративным (ревью 2026-08-09, MEDIUM-2), восстановленный
+          # кэш ни разу не читался.
+          scripts/build_bundled_runtime.command --output build/vendor --skip-download
+          df -h . || true
 
       - name: Verify bundled runtime is self-contained (#9 — гейт на Homebrew/usr-local утечки)
         run: scripts/verify_bundled_runtime_selfcontained.command build/vendor
@@ -146,6 +153,11 @@ jobs:
             --version "${{ steps.ver.outputs.version }}" \
             --identity "Krab Ear CI Release" \
             --vendor-dir build/vendor
+
+      - name: Free disk (vendor уже внутри dist/Krab Ear.app — 2-я копия не нужна)
+        run: |
+          rm -rf build/vendor
+          df -h . || true
 
       - name: Zip (ditto — сохраняет симлинки внутри framework)
         run: |

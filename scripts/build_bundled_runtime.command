@@ -108,11 +108,46 @@ log "Проверяю импорт критичных пакетов ..."
 
 log "Копирую KrabEar/ (исходники backend) ..."
 mkdir -p "$OUTPUT_DIR/KrabEar"
-# --exclude тестов/кэшей: не нужны в рантайме, экономят место в DMG.
-rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='tests/' \
-  "$KRABEAR_SRC/" "$OUTPUT_DIR/KrabEar/"
+# 🔴 ALLOWLIST через `git ls-files`, НЕ blacklist-rsync (адверсариальный
+# ревью 2026-08-09, HIGH-1). Прежний `rsync --exclude=...` копировал ВСЁ,
+# что лежит рядом с исходниками на машине сборки, кроме трёх явных
+# исключений — а рядом на dev-машине годами накапливаются .env (реальные
+# секреты!), чужой .venv_krab_ear (py3.13, конфликтующий с этим бандлом),
+# .pytest_cache, *.log, data/. Живой замер: KrabEar/.env реально оказался
+# внутри build/vendor/KrabEar/.env на машине владельца. rsync-blacklist
+# ПРИНЦИПИАЛЬНО не может быть безопасным здесь: список того, что может
+# появиться в рабочем дереве, не ограничен и не проверяем на review-time.
+# git ls-files — единственный источник, который отвечает на вопрос «что
+# реально принадлежит проекту», а не «что сейчас лежит на диске».
+if ! command -v git &>/dev/null; then
+  fail "git не найден — allowlist-копирование требует git ls-files"
+fi
+# 🔴 БЕЗ trap ... EXIT: он бы ЗАМЕНИЛ (не дополнил) уже установленный на
+# строке выше `trap 'rm -rf "$BUILD_TMP"' EXIT` — bash/zsh не складывают
+# EXIT-обработчики. Файл живёт линейно и коротко — явный rm сразу после
+# использования, без нового trap.
+TRACKED_LIST="$(mktemp)"
+git -C "$ROOT_DIR" ls-files KrabEar \
+  | grep -v '^KrabEar/tests/' \
+  > "$TRACKED_LIST"
+if [[ ! -s "$TRACKED_LIST" ]]; then
+  rm -f "$TRACKED_LIST"
+  fail "git ls-files KrabEar пуст — allowlist сломан, копировать нечего"
+fi
+rsync -a --files-from="$TRACKED_LIST" --exclude='__pycache__' --exclude='*.pyc' \
+  "$ROOT_DIR/" "$OUTPUT_DIR/"
+rm -f "$TRACKED_LIST"
 [[ -f "$OUTPUT_DIR/KrabEar/backend/service.py" ]] \
   || fail "После копирования нет KrabEar/backend/service.py — bundle сломан"
+
+# 🔴 Байткомпилируем ДО подписи (ревью 2026-08-09, MEDIUM-3): без этого
+# Python допишет __pycache__/*.pyc внутрь Contents/Resources при первом
+# запуске у получателя — запись в подписанный бандл ломает codesign-печать
+# (Gatekeeper/Sparkle-проверки могут начать отклонять апдейты). ditto ниже
+# по конвейеру (assemble_signed_app.sh) сохраняет mtime .pyc, поэтому
+# CPython их не перезапишет повторно при следующем запуске.
+log "Байткомпилирую KrabEar/ (иначе Python допишет .pyc в подписанный бандл при первом запуске) ..."
+"$VENV_PY" -m compileall -q "$OUTPUT_DIR/KrabEar" || log "⚠ compileall частично не прошёл (не фатально)"
 
 SIZE_MB="$(du -sm "$OUTPUT_DIR" | awk '{print $1}')"
 log ""

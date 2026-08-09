@@ -42,6 +42,11 @@ if [[ -n "$VENDOR_DIR" ]]; then
     || { echo "--vendor-dir $VENDOR_DIR не похож на bundled-рантайм (нет KrabEar/backend/service.py)" >&2; exit 1; }
   [[ -x "$VENDOR_DIR/.venv_krab_ear/bin/python" ]] \
     || { echo "--vendor-dir $VENDOR_DIR: нет исполняемого .venv_krab_ear/bin/python" >&2; exit 1; }
+  # Krab Ear — Apple-Silicon-only продукт (mlx-whisper требует arm64).
+  # Без этой проверки чужой x86_64-венв, скопированный с другой машины,
+  # молча упаковался бы и умер у получателя с "Bad CPU type" (ревью 2026-08-09, LOW-1).
+  lipo -archs "$VENDOR_DIR/.venv_krab_ear/bin/python3.12" 2>/dev/null | grep -q arm64 \
+    || { echo "--vendor-dir $VENDOR_DIR: интерпретатор не arm64 — Krab Ear требует Apple Silicon" >&2; exit 1; }
 fi
 
 BUILT_BINARY="$NATIVE_DIR/.build/release/KrabEarAgent"

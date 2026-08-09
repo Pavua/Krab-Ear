@@ -22,7 +22,9 @@
  (`<repo>/Krab Ear.app`), `Contents/Resources/vendor` там не существует —
  значит новая проверка проваливается и код падает в прежнюю cwd/walk-up
  цепочку БЕЗ изменения поведения. Активируется только для настоящих
- bundled-дистрибутивов (после задачи #8, которая ещё не подключена).
+ bundled-дистрибутивов (после задачи #8 — build_bundled_runtime.command
+ подключён в release.yml, но реальный релизный workflow ещё не запускался,
+ см. коммит e8db8ae8).
 */
 
 import XCTest
@@ -109,8 +111,18 @@ final class LaunchOptionsBundledVendorRootTests: XCTestCase {
         let envRoot = tmpRoot.appendingPathComponent("env-checkout")
         plantProjectRootMarker(at: envRoot)
 
+        // Сохраняем/восстанавливаем прежнее значение, а не безусловный unset
+        // (ревью 2026-08-09, LOW-4) — если переменная уже была в окружении
+        // прогона, unset её бы стёр для остальных тестов процесса.
+        let previousEnvRoot = ProcessInfo.processInfo.environment["KRAB_EAR_PROJECT_ROOT"]
         setenv("KRAB_EAR_PROJECT_ROOT", envRoot.path, 1)
-        defer { unsetenv("KRAB_EAR_PROJECT_ROOT") }
+        defer {
+            if let previousEnvRoot {
+                setenv("KRAB_EAR_PROJECT_ROOT", previousEnvRoot, 1)
+            } else {
+                unsetenv("KRAB_EAR_PROJECT_ROOT")
+            }
+        }
 
         let options = LaunchOptions(arguments: [execPath])
 
