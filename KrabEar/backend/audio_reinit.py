@@ -39,6 +39,20 @@ _WAKE_WORD_THRESHOLD_DEFAULT = 0.5
 class ReinitOutcome(str, Enum):
     OK = "ok"
     DEFERRED_RECORDING = "deferred_recording"
+    # Ревью 2026-08-09 (F1, разбор PortAudio-сегфолта): DEFERRED_RECORDING
+    # раньше покрывал ДВА разных случая одним значением — настоящую диктовку
+    # (разрешится сама, когда пользователь остановит запись) И заклинивший
+    # worker-тред рекордера после stop()-таймаута (НЕ разрешится сам никогда
+    # без внешнего вмешательства — is_recording=False лжёт, но поток жив и
+    # заблокирован внутри PortAudio). WakeWordWatchdog/AudioSelfHealer
+    # трактуют DEFERRED_* как «попытка отложена, не потрачена» и молча ждут
+    # следующего тика вечно — для настоящей диктовки это корректно, для
+    # заклинившего треда это означало ПОСТОЯННОЕ отключение эскалации
+    # (wedged:true никогда не выставляется, Swift-агент никогда не рестартит
+    # backend). Отдельное значение позволяет обеим сторонам (watchdog,
+    # selfheal) считать именно этот случай ПОТРАЧЕННОЙ попыткой — тем же
+    # путём, что уже существующий THREAD_HUNG.
+    DEFERRED_WORKER_HUNG = "deferred_worker_hung"
     THREAD_HUNG = "thread_hung"
     BUSY = "busy"
     FAILED = "failed"
@@ -65,13 +79,33 @@ class AudioReinitCoordinator:
         reinit_audio_backend: Callable[[], None],
         is_recording: Callable[[], bool],
         wake_word_adapter: Any = None,
+        is_worker_hung: Callable[[], bool] | None = None,
     ) -> None:
         self._reinit_audio_backend = reinit_audio_backend
         self._is_recording = is_recording
         self._wake_word_adapter = wake_word_adapter
+        # Опционален для обратной совместимости с тестами/вызывающими,
+        # которые ещё не завели отдельный сигнал заклинившего треда — без
+        # него оба случая DEFERRED сливаются обратно в DEFERRED_RECORDING
+        # (прежнее поведение, безопасное, но неотличимое от эскалации).
+        self._is_worker_hung = is_worker_hung
         # Non-blocking single-flight: конкурент получает BUSY и приходит со
         # своим следующим триггером, а не ждёт в блокировке.
         self._flight_lock = threading.Lock()
+
+    def _deferred_outcome(self) -> "ReinitOutcome":
+        """DEFERRED_RECORDING vs DEFERRED_WORKER_HUNG — см. докстринг
+        ReinitOutcome.DEFERRED_WORKER_HUNG. Вызывается ТОЛЬКО когда
+        ``self._is_recording()`` уже подтвердил True (или неизвестен —
+        см. fail-closed ветку в ``_dance``); здесь остаётся только уточнить,
+        какой из двух сигналов дал True."""
+        if self._is_worker_hung is not None:
+            try:
+                if self._is_worker_hung():
+                    return ReinitOutcome.DEFERRED_WORKER_HUNG
+            except Exception:
+                logger.exception("AudioReinitCoordinator: is_worker_hung() упал")
+        return ReinitOutcome.DEFERRED_RECORDING
 
     def reinit_with_wake_word_restore(self) -> ReinitOutcome:
         if not self._flight_lock.acquire(blocking=False):
@@ -87,14 +121,19 @@ class AudioReinitCoordinator:
     def _dance(self) -> ReinitOutcome:
         try:
             if self._is_recording():
+                outcome = self._deferred_outcome()
                 logger.info(
-                    "AudioReinitCoordinator: идёт активная запись — reinit отложен"
+                    "AudioReinitCoordinator: идёт активная запись — reinit "
+                    "отложен (%s)", outcome.value,
                 )
-                return ReinitOutcome.DEFERRED_RECORDING
+                return outcome
         except Exception:
             # fail-closed: неизвестное состояние рекордера трактуем как идущую
-            # запись — DEFERRED (попытка отложена, не потрачена), а не танец
-            # дальше в сторону Pa_Terminate.
+            # запись — DEFERRED_RECORDING (попытка отложена, не потрачена), а
+            # не танец дальше в сторону Pa_Terminate. Намеренно НЕ
+            # _deferred_outcome() здесь: is_recording() сам упал, поэтому
+            # is_worker_hung() тоже не заслуживает доверия — консервативная
+            # ветка, не эскалирующая на непроверенном сигнале.
             logger.exception("AudioReinitCoordinator: is_recording() упал")
             return ReinitOutcome.DEFERRED_RECORDING
 
@@ -162,6 +201,7 @@ class AudioReinitCoordinator:
             # стримом рекордера — тот же crash-класс, что и THREAD_HUNG-инвариант.
             # Остаточное окно (µс между этим чеком и _terminate) неустранимо без
             # лока на уровне рекордера — принято.
+            mid_dance_outcome: ReinitOutcome | None = None
             try:
                 recording_started_mid_dance = bool(self._is_recording())
             except Exception:
@@ -169,10 +209,16 @@ class AudioReinitCoordinator:
                     "AudioReinitCoordinator: is_recording() упал (re-check)"
                 )
                 recording_started_mid_dance = True  # fail-closed
+                # Симметрично верхнему чеку: is_recording() сам упал, поэтому
+                # is_worker_hung() тоже не заслуживает доверия здесь.
+                mid_dance_outcome = ReinitOutcome.DEFERRED_RECORDING
             if recording_started_mid_dance:
+                if mid_dance_outcome is None:
+                    mid_dance_outcome = self._deferred_outcome()
                 logger.info(
                     "AudioReinitCoordinator: запись стартовала во время танца — "
-                    "reinit отложен, слушатель восстанавливается"
+                    "reinit отложен (%s), слушатель восстанавливается",
+                    mid_dance_outcome.value,
                 )
                 deferred_mid_dance = True
             else:
@@ -197,7 +243,8 @@ class AudioReinitCoordinator:
             self._restore_listener(
                 adapter, was_running, saved_model, saved_threshold, epoch_snapshot,
             )
-            return ReinitOutcome.DEFERRED_RECORDING
+            assert mid_dance_outcome is not None  # set on every path that set the flag
+            return mid_dance_outcome
 
         if not self._restore_listener(
             adapter, was_running, saved_model, saved_threshold, epoch_snapshot,

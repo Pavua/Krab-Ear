@@ -247,11 +247,21 @@ class WakeWordWatchdog:
             outcome = self._coordinator.reinit_with_wake_word_restore()
             if outcome in (ReinitOutcome.DEFERRED_RECORDING, ReinitOutcome.BUSY):
                 return None  # попытка отложена, не потрачена
-            if outcome == ReinitOutcome.THREAD_HUNG:
+            if outcome in (ReinitOutcome.THREAD_HUNG, ReinitOutcome.DEFERRED_WORKER_HUNG):
                 # THREAD_HUNG-танец тоже стоил 3с stop-join и оставил
                 # зомби-тред — анти-шторм обязан видеть и такие танцы
                 # (Fable-гейт волны, Finding 1b), иначе цикл
                 # respawn→hang→dance не капится никогда.
+                # DEFERRED_WORKER_HUNG (ревью 2026-08-09, F1): координатор
+                # даже не дошёл до adapter.stop() — рекордерский worker-тред
+                # уже заклинил (is_worker_thread_alive=True, is_recording
+                # лжёт False после stop()-таймаута). В отличие от настоящей
+                # диктовки (DEFERRED_RECORDING, которая разрешится сама),
+                # этот случай не разрешится без внешнего рестарта — трактуем
+                # как ПОТРАЧЕННУЮ попытку тем же путём, что THREAD_HUNG,
+                # иначе wedged:true недостижим и эскалация к Swift-агенту
+                # (единственному, кто умеет kickstart -k backend) не наступит
+                # никогда — тихий бессрочный простой wake-word подсистемы.
                 with self._lock:
                     self._heal_history.append(now)
                 self._escalate(staleness, str(getattr(outcome, "value", outcome)))

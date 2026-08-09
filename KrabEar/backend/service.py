@@ -1461,6 +1461,14 @@ class BackendService:
             reinit_audio_backend=_reinit_audio_backend,
             is_recording=self._reinit_is_recording_gate,
             wake_word_adapter=self._oww_adapter,
+            # 2026-08-09 (ревью F1): отдельно от is_recording= выше — без
+            # него координатор не может отличить настоящую диктовку
+            # (разрешится сама) от заклинившего worker-треда рекордера
+            # (не разрешится без рестарта), и watchdog/selfheal вечно ждут,
+            # никогда не эскалируя. См. ReinitOutcome.DEFERRED_WORKER_HUNG.
+            is_worker_hung=lambda: bool(
+                getattr(self.recorder, "is_worker_thread_alive", False)
+            ),
         )
         self._audio_selfheal = AudioSelfHealer(
             reinit_coordinator=self._audio_reinit_coordinator,
@@ -1937,6 +1945,15 @@ class BackendService:
     #: Минимальный интервал между отчётами о нештатном рестарте (секунды).
     #: launchd держит юнит с ``KeepAlive=true`` и ``ThrottleInterval=5``, то
     #: есть в крэш-лупе бэкенд поднимается до ~720 раз в час. Каждый подъём —
+    #: in-memory дедуп ``ErrorBus`` (``_last_emitted``) для этого кода не
+    #: срабатывает НИКОГДА: он живёт в памяти умершего процесса. Нужен
+    #: кросс-рестартовый лимит на диске — иначе крэш-луп положит квоту Sentry
+    #: (ровно так org-wide квота уже выгорала на PortAudioError-лупе).
+    UNCLEAN_RESTART_REPORT_MIN_GAP_SEC = 900.0
+
+    #: Файл кросс-рестартового лимита (рядом с данными, не в репозитории).
+    UNCLEAN_RESTART_STATE_FILE = "unclean_restart_report.json"
+
     def _reinit_is_recording_gate(self) -> bool:
         """Safety-гейт против ``Pa_Terminate`` под живым стримом рекордера.
 
@@ -1959,31 +1976,35 @@ class BackendService:
 
         ``recorder.is_worker_thread_alive`` — отдельный честный сигнал
         физической живости потока (см. докстринг в ``recorder.py``),
-        комбинируется здесь ТОЛЬКО для этого safety-гейта. Другие два
-        потребителя ``recorder.is_recording`` в этом же ``__init__``
-        (``OpenWakeWordAdapter`` — избегает второго входного тапа во время
-        диктовки, ``WakeWordWatchdog`` — трактует активную запись как
-        легитимную паузу) намеренно НЕ тронуты: обе ветки в конечном счёте
-        сами вызывают ``AudioReinitCoordinator.reinit_with_wake_word_restore()``,
-        у которого ЕСТЬ собственная внутренняя повторная проверка перед
-        ``Pa_Terminate`` — она использует ЭТОТ ЖЕ гейт, значит защита
-        транзитивна через единственную точку, где физически исполняется
-        ``Pa_Terminate``.
+        комбинируется здесь ТОЛЬКО для этого safety-гейта.
+
+        Правка ревью 2026-08-09 (F2): предыдущая версия этого докстринга
+        утверждала, что ``OpenWakeWordAdapter`` и ``WakeWordWatchdog`` —
+        два ДРУГИХ потребителя голого ``recorder.is_recording`` в этом же
+        ``__init__`` — защищены транзитивно, потому что «обе ветки в
+        конечном счёте сами вызывают
+        ``AudioReinitCoordinator.reinit_with_wake_word_restore()``». Это
+        неверно для ``OpenWakeWordAdapter``: он вообще никогда не вызывает
+        ``reinit_with_wake_word_restore()`` (грep подтверждает единственных
+        вызывающих — ``AudioSelfHealer.record_empty_result`` и
+        ``WakeWordWatchdog._check``). Явная проверка сейчас: у
+        ``OpenWakeWordAdapter`` голый ``is_recording`` защищает СОВСЕМ
+        ДРУГОЙ, не связанный с ``Pa_Terminate`` инвариант — избегает
+        второго конкурентного входного тапа CoreAudio во время диктовки
+        (``sd.InputStream`` открывается напрямую в его собственном
+        ``_listen_loop``, БЕЗ ``sd._terminate()``/``sd._initialize()``).
+        ``Pa_Terminate`` физически исполняется РОВНО в одном месте кода —
+        внутри ``AudioReinitCoordinator._dance()`` — и туда попадают
+        ТОЛЬКО вызовы из ``AudioSelfHealer``/``WakeWordWatchdog``, оба
+        передают именно ЭТОТ гейт как ``is_recording=``. Значит защита
+        Pa_Terminate полная не «транзитивно через оба вызывающих», а
+        тривиально: единственный путь к нему — единственная точка входа,
+        и она гейтится верно.
         """
         return (
             bool(getattr(self.recorder, "is_recording", False))
             or bool(getattr(self.recorder, "is_worker_thread_alive", False))
         )
-
-    #: РОВНО ОДИН вызов ``_report_unclean_restart`` за жизнь процесса, поэтому
-    #: in-memory дедуп ``ErrorBus`` (``_last_emitted``) для этого кода не
-    #: срабатывает НИКОГДА: он живёт в памяти умершего процесса. Нужен
-    #: кросс-рестартовый лимит на диске — иначе крэш-луп положит квоту Sentry
-    #: (ровно так org-wide квота уже выгорала на PortAudioError-лупе).
-    UNCLEAN_RESTART_REPORT_MIN_GAP_SEC = 900.0
-
-    #: Файл кросс-рестартового лимита (рядом с данными, не в репозитории).
-    UNCLEAN_RESTART_STATE_FILE = "unclean_restart_report.json"
 
     def _report_unclean_restart(self, verdict: str, data_dir: "Path | str") -> None:
         """Превратить вердикт ``shutdown_forensics.check_and_collect()`` в сигнал.

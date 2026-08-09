@@ -208,6 +208,20 @@ class HealAndEscalateTests(unittest.TestCase):
         self.assertEqual(len(bus.pushed), 1)
         self.assertEqual(bus.pushed[0].code, "audio.wakeword_wedged")
 
+    def test_deferred_worker_hung_escalates_immediately(self):
+        """Ревью 2026-08-09 (F1): DEFERRED_WORKER_HUNG обязан эскалировать
+        тем же путём, что THREAD_HUNG — координатор даже не дошёл до
+        adapter.stop() (worker-тред рекордера заклинил раньше), но исход
+        для watchdog одинаков: попытка потрачена, эскалация к Swift-агенту."""
+        bus = _FakeErrorBus()
+        coord = _FakeCoordinator(outcomes=[ReinitOutcome.DEFERRED_WORKER_HUNG])
+        wd, adapter, _, clock = _make(coordinator=coord, bus=bus)
+        self._stale(adapter, clock)
+        self.assertEqual(wd.check_once(), "escalated")
+        self.assertTrue(adapter.wedged)
+        self.assertEqual(len(bus.pushed), 1)
+        self.assertEqual(bus.pushed[0].code, "audio.wakeword_wedged")
+
     def test_deferred_keeps_retrying_without_burning_attempt(self):
         coord = _FakeCoordinator(outcomes=[
             ReinitOutcome.DEFERRED_RECORDING, ReinitOutcome.BUSY, ReinitOutcome.OK,

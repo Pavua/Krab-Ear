@@ -58,7 +58,7 @@ class _FakeAdapter:
         self.calls.append("end_maintenance")
 
 
-def _make(adapter=None, recording=False, reinit_exc=None):
+def _make(adapter=None, recording=False, reinit_exc=None, worker_hung=None):
     calls: list[str] = []
 
     def _reinit():
@@ -66,10 +66,15 @@ def _make(adapter=None, recording=False, reinit_exc=None):
         if reinit_exc:
             raise reinit_exc
 
+    kwargs = {}
+    if worker_hung is not None:
+        kwargs["is_worker_hung"] = worker_hung
+
     coord = AudioReinitCoordinator(
         reinit_audio_backend=_reinit,
         is_recording=lambda: recording,
         wake_word_adapter=adapter,
+        **kwargs,
     )
     return coord, calls
 
@@ -118,6 +123,79 @@ class GuardTests(unittest.TestCase):
         )
         self.assertEqual(adapter.calls, [])
         self.assertEqual(calls, [])
+
+    def test_worker_hung_returns_deferred_worker_hung_outcome(self):
+        """Ревью 2026-08-09 (F1): без is_worker_hung= настоящая диктовка и
+        заклинивший worker-тред неотличимы для watchdog/selfheal — оба
+        видят DEFERRED_RECORDING и ждут вечно, эскалация недостижима для
+        второго случая. Проверяем ветку самого верхнего чека _dance()."""
+        adapter = _FakeAdapter()
+        coord, calls = _make(adapter=adapter, recording=True, worker_hung=lambda: True)
+        self.assertEqual(
+            coord.reinit_with_wake_word_restore(),
+            ReinitOutcome.DEFERRED_WORKER_HUNG,
+        )
+        self.assertEqual(adapter.calls, [])  # Pa_Terminate-путь не тронут
+        self.assertEqual(calls, [])
+
+    def test_recording_without_worker_hung_stays_deferred_recording(self):
+        """Настоящая диктовка (worker_hung=False) обязана остаться
+        DEFERRED_RECORDING — эскалация недопустима, запись закончится сама."""
+        adapter = _FakeAdapter()
+        coord, calls = _make(adapter=adapter, recording=True, worker_hung=lambda: False)
+        self.assertEqual(
+            coord.reinit_with_wake_word_restore(),
+            ReinitOutcome.DEFERRED_RECORDING,
+        )
+        self.assertEqual(adapter.calls, [])
+        self.assertEqual(calls, [])
+
+    def test_no_is_worker_hung_callable_defaults_to_deferred_recording(self):
+        """Обратная совместимость: конструктор без is_worker_hung= (как в
+        большинстве других тестов этого файла) обязан вести себя как раньше."""
+        adapter = _FakeAdapter()
+        coord, calls = _make(adapter=adapter, recording=True)  # worker_hung=None
+        self.assertEqual(
+            coord.reinit_with_wake_word_restore(),
+            ReinitOutcome.DEFERRED_RECORDING,
+        )
+
+    def test_is_worker_hung_exception_falls_back_to_deferred_recording(self):
+        """is_worker_hung() сам упавший — недостаточно доверия, чтобы
+        эскалировать на непроверенном сигнале; консервативная ветка."""
+        def _boom():
+            raise RuntimeError("worker-hung probe broken")
+
+        adapter = _FakeAdapter()
+        coord, calls = _make(adapter=adapter, recording=True, worker_hung=_boom)
+        self.assertEqual(
+            coord.reinit_with_wake_word_restore(),
+            ReinitOutcome.DEFERRED_RECORDING,
+        )
+
+    def test_worker_hung_detected_only_mid_dance_still_escalatable(self):
+        """Симметрично test_recording_started_mid_dance_defers... — если
+        worker-hung проявляется только на re-check (после adapter.stop()),
+        итоговый outcome тоже обязан быть DEFERRED_WORKER_HUNG, не
+        DEFERRED_RECORDING, и слушатель всё равно восстанавливается."""
+        recording_answers = [False, True]
+        adapter = _FakeAdapter(running=True, model="krab_ru", threshold=0.42)
+        calls: list[str] = []
+
+        coord = AudioReinitCoordinator(
+            reinit_audio_backend=lambda: calls.append("reinit"),
+            is_recording=lambda: recording_answers.pop(0),
+            wake_word_adapter=adapter,
+            is_worker_hung=lambda: True,
+        )
+        self.assertEqual(
+            coord.reinit_with_wake_word_restore(),
+            ReinitOutcome.DEFERRED_WORKER_HUNG,
+        )
+        self.assertEqual(calls, [])  # Pa_Terminate НЕ вызывался
+        self.assertEqual(
+            [c for c in adapter.calls if c in ("stop", "start")], ["stop", "start"],
+        )
 
     def test_hung_thread_skips_reinit(self):
         adapter = _FakeAdapter(stop_result=False)

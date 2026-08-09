@@ -188,6 +188,14 @@ class ReinitIsRecordingGateTest(unittest.TestCase):
     def test_false_when_neither_signal_set(self) -> None:
         self.assertFalse(self._gate(is_recording=False, is_worker_thread_alive=False))
 
+    def test_true_when_both_signals_set(self) -> None:
+        """Ревью 2026-08-09 (F3): без этого случая XOR-мутант гейта
+        (``is_recording != is_worker_thread_alive`` вместо ``or``) проходит
+        все остальные тесты класса незамеченным — оба сигнала одновременно
+        True вполне реальны (например, воркер жив И is_recording ещё не
+        успел упасть до re-check внутри AudioReinitCoordinator)."""
+        self.assertTrue(self._gate(is_recording=True, is_worker_thread_alive=True))
+
     def test_never_raises_when_recorder_attribute_missing(self) -> None:
         """fail-safe: отсутствие атрибута трактуем как False, не как исключение —
         исключение здесь оборвало бы конструктор BackendService целиком."""
@@ -199,12 +207,49 @@ class ReinitIsRecordingGateTest(unittest.TestCase):
 
 
 class ReinitCoordinatorWiringSourceContractTest(unittest.TestCase):
-    """AST-контракт: AudioReinitCoordinator получает именно gate-метод.
+    """AST-контракт: AudioReinitCoordinator получает именно gate-методы.
 
     Голая лямбда read-only recorder.is_recording — это и был баг; регрессия
     на неё должна ронять этот тест, а не молча вернуться при следующей правке
     рядом.
     """
+
+    @staticmethod
+    def _find_coordinator_call(tree: ast.AST) -> "ast.Call | None":
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "AudioReinitCoordinator"
+            ):
+                return node
+        return None
+
+    def _assert_kwarg_is_self_attr(
+        self, call: ast.Call, kwarg_name: str, expected_attr: str
+    ) -> None:
+        """Ревью 2026-08-09 (F4): «не Lambda» одна не закрывает дыру —
+        ``functools.partial(...)`` (ast.Call, не ast.Lambda) или ссылка на
+        любой ДРУГОЙ метод/атрибут прошли бы старую проверку молча.
+        Позитивно пиновать ИМЕННО ``self.<expected_attr>`` — единственная
+        форма, которую нельзя обойти переименованием или обёрткой без
+        того, чтобы этот тест упал."""
+        kwarg = next((kw for kw in call.keywords if kw.arg == kwarg_name), None)
+        self.assertIsNotNone(kwarg, f"{kwarg_name}= не передан")
+        value = kwarg.value
+        is_expected_self_attr = (
+            isinstance(value, ast.Attribute)
+            and value.attr == expected_attr
+            and isinstance(value.value, ast.Name)
+            and value.value.id == "self"
+        )
+        self.assertTrue(
+            is_expected_self_attr,
+            f"{kwarg_name}= обязан быть ссылкой на self.{expected_attr} "
+            f"(без вызова) — получено {ast.dump(value)}. Голая лямбда, "
+            "functools.partial или ссылка на другой метод — все три "
+            "молча обходили бы прежнюю ast.Lambda-only проверку.",
+        )
 
     def test_audio_reinit_coordinator_uses_gate_method_not_bare_lambda(self) -> None:
         from backend.service import BackendService
@@ -212,25 +257,32 @@ class ReinitCoordinatorWiringSourceContractTest(unittest.TestCase):
         source = textwrap.dedent(inspect.getsource(BackendService.__init__))
         tree = ast.parse(source)
 
-        call = None
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "AudioReinitCoordinator"
-            ):
-                call = node
-                break
+        call = self._find_coordinator_call(tree)
         self.assertIsNotNone(call, "не нашли конструктор AudioReinitCoordinator")
-
-        is_recording_kwarg = next(
-            (kw for kw in call.keywords if kw.arg == "is_recording"), None
+        self._assert_kwarg_is_self_attr(
+            call, "is_recording", "_reinit_is_recording_gate"
         )
-        self.assertIsNotNone(is_recording_kwarg, "is_recording= не передан")
-        self.assertFalse(
-            isinstance(is_recording_kwarg.value, ast.Lambda),
-            "AudioReinitCoordinator снова получает голую лямбду вместо "
-            "_reinit_is_recording_gate — регрессия закрытого 2026-08-09 бага",
+
+    def test_audio_reinit_coordinator_wires_is_worker_hung_to_recorder_signal(
+        self,
+    ) -> None:
+        """Ревью 2026-08-09 (F1): без ``is_worker_hung=`` координатор не
+        может отличить заклинивший worker-тред от настоящей диктовки —
+        DEFERRED_WORKER_HUNG никогда не вернётся, эскалация недостижима.
+        Проверяем именно ЧТО передан non-lambda callable (реальная семантика
+        уже покрыта behaviour-тестами ReinitOutcome в test_audio_reinit_coordinator.py)."""
+        from backend.service import BackendService
+
+        source = textwrap.dedent(inspect.getsource(BackendService.__init__))
+        tree = ast.parse(source)
+
+        call = self._find_coordinator_call(tree)
+        self.assertIsNotNone(call, "не нашли конструктор AudioReinitCoordinator")
+        kwarg = next((kw for kw in call.keywords if kw.arg == "is_worker_hung"), None)
+        self.assertIsNotNone(
+            kwarg,
+            "is_worker_hung= не передан — координатор не отличит "
+            "заклинивший worker-тред от настоящей диктовки",
         )
 
 
