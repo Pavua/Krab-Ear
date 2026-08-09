@@ -68,6 +68,37 @@ struct LaunchOptions {
             }
         }
 
+        // Bundled Python-рантайм внутри самого .app (задача упаковки, 2026-08-09):
+        // scripts/build_bundled_runtime.command кладёт самодостаточный CPython
+        // (.venv_krab_ear/) + копию KrabEar/ в Contents/Resources/vendor —
+        // единственный источник backend'а для DMG-получателя без system Python
+        // >= 3.12 и без git-репозитория рядом (T2/T3 из onboarding-аудита).
+        //
+        // Проверяется РАНЬШЕ cwd/walk-up намеренно: bundled-копия — самый
+        // авторитетный источник для настоящей дистрибуции (в отличие от
+        // 8-уровневого walk-up её нельзя случайно перепутать с чужим
+        // dev-checkout'ом на диске), но explicit/env-override выше по цепочке
+        // всё ещё обязаны выигрывать для dev/CI-сценариев.
+        //
+        // Строго требуем форму "Contents/MacOS/<исполняемый>" (grandparent
+        // executablePath должен называться именно "Contents") — иначе
+        // вычисление годится и для legacy-пути native/runtime/KrabEarAgent, и
+        // тогда произвольный Resources/vendor рядом ложно подхватился бы.
+        if let executablePath {
+            let execURL = URL(fileURLWithPath: executablePath).standardizedFileURL
+            let macOSDir = execURL.deletingLastPathComponent()
+            let contentsDir = macOSDir.deletingLastPathComponent()
+            if contentsDir.lastPathComponent == "Contents" {
+                let vendorCandidate = contentsDir
+                    .appendingPathComponent("Resources")
+                    .appendingPathComponent("vendor")
+                    .path
+                if isProjectRoot(vendorCandidate) {
+                    return vendorCandidate
+                }
+            }
+        }
+
         let cwd = fileManager.currentDirectoryPath
         if isProjectRoot(cwd) {
             return cwd
