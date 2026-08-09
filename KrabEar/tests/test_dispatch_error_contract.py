@@ -23,6 +23,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
@@ -42,6 +43,20 @@ def _make_service() -> BackendService:
 class DispatchErrorContractTest(unittest.TestCase):
 
     def setUp(self) -> None:
+        # This is a dispatch-table contract test — it has no business exercising
+        # a real STT engine. AudioEngine.__init__ unconditionally spawns a
+        # background "GigaAM-warmup" thread whenever the ambient
+        # core.config.settings.STT_GIGAAM_ENABLED singleton is True (e.g. a dev
+        # machine's real settings.json has GigaAM enabled for production
+        # dictation). That thread races tearDown()'s service.close(): close()
+        # can run before the thread has cached an adapter to close, after which
+        # the thread spawns a real gigaam_worker.py subprocess with no owner
+        # left to terminate it — an orphaned worker (see CLAUDE.md "GigaAM v3"
+        # / STTRouter._spawn_lock notes). Disable it for the ambient singleton,
+        # matching how sibling engine tests isolate STT_GIGAAM_ENABLED.
+        gigaam_patcher = patch("core.config.settings.STT_GIGAAM_ENABLED", False)
+        gigaam_patcher.start()
+        self.addCleanup(gigaam_patcher.stop)
         self.service = _make_service()
 
     def tearDown(self) -> None:
