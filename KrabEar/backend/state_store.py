@@ -16,15 +16,57 @@ import json
 import logging
 import os
 from pathlib import Path
+import sys
 import threading
+import time
 from typing import Any, Iterator
 
 from core.parsing_utils import safe_json_loads
 
+from .ipc_errors import IpcOperationalError
 from .models import DEFAULT_SETTINGS, HistoryItem
 from core.search_index import SearchIndex
 
 logger = logging.getLogger("KrabEar.Backend.Store")
+
+# Sentry KRAB-EAR-BACKEND-1V follow-up (2026-08-09): _lock() is one
+# process-wide fcntl.flock(LOCK_EX), shared by ~50+ call sites. When a
+# thread gets stuck WHILE HOLDING it (e.g. abandoned by the 180s IPC
+# backstop-timeout but still blocked inside the syscall), every unrelated
+# method that touches this lock — even ones with no expensive work of their
+# own, like get_memory_stats via the post-handler privacy-gate read in
+# cached_settings() — freezes too, piling up worker threads + IPC connection
+# slots faster than the 180s backstop can reclaim them
+# ("IPC: лимит 64 коннектов исчерпан"). See
+# project_sentry_sweep_2026-08-05_ping_lock_contention.md for the full
+# investigation.
+#
+# _LOCK_SLOW_WARN_SEC gates a diagnostic-only WARNING (who holds it / how
+# long) that never changes behavior. _LOCK_ACQUIRE_TIMEOUT_SEC bounds actual
+# ACQUISITION: a caller that can't get the flock within this deadline raises
+# StateStoreLockTimeout instead of blocking forever. This affects ONLY
+# callers who are WAITING — a thread that already holds the lock (e.g.
+# migrate_history_encryption re-encrypting a large history under a single
+# `with self._lock():`) is completely unaffected and keeps it for as long
+# as it needs; the fix is bounding the QUEUE, not the WORK. 30s is chosen to
+# be comfortably above any known legitimate hold (in-memory dict ops, small
+# NDJSON appends/reads — observed sub-second even for large histories) while
+# staying well under the 180s IPC backstop, so a genuinely stuck holder now
+# frees up waiting connections in ~30s instead of ~180s-and-then-leaked.
+_LOCK_SLOW_WARN_SEC = 2.0
+_LOCK_ACQUIRE_TIMEOUT_SEC = 30.0
+_LOCK_POLL_INTERVAL_SEC = 0.05
+
+
+class StateStoreLockTimeout(IpcOperationalError):
+    """Raised when ``_lock()`` cannot acquire the exclusive flock within the
+    configured deadline (see ``_LOCK_ACQUIRE_TIMEOUT_SEC`` above).
+
+    Subclasses ``IpcOperationalError`` so ``handle_request`` treats it as a
+    genuine operational failure (loud: ``internal_error`` + Sentry), not a
+    normal validation outcome — this is a stuck/contended lock, not a bad
+    parameter.
+    """
 
 
 class StateStore:
@@ -34,9 +76,11 @@ class StateStore:
         self,
         data_dir: Path,
         compact_threshold_bytes: int = 25 * 1024 * 1024,
+        lock_acquire_timeout_sec: float = _LOCK_ACQUIRE_TIMEOUT_SEC,
     ) -> None:
         self.data_dir = data_dir
         self.compact_threshold_bytes = compact_threshold_bytes
+        self._lock_acquire_timeout_sec = lock_acquire_timeout_sec
 
         self.settings_path = self.data_dir / "settings.json"
         self.history_path = self.data_dir / "history.ndjson"
@@ -110,6 +154,10 @@ class StateStore:
         self._lock_reentry_guard = threading.Lock()
         self._lock_depth: dict[int, int] = {}
         self._lock_fileobj: dict[int, Any] = {}
+        # Slow-lock diagnostics (see _LOCK_SLOW_WARN_SEC above) — guarded by
+        # the same _lock_reentry_guard as depth/fileobj above.
+        self._lock_holder_label: str | None = None
+        self._lock_holder_since: float | None = None
 
         # Phase B.2 — error_bus late-injection
 
@@ -259,6 +307,19 @@ class StateStore:
         что лок уже держится (depth != 0), и навсегда пропускал бы реальный
         fcntl.flock — тихий обход взаимоисключения хуже громкого дедлока,
         который чинил сам реентерабельный фикс.
+
+        Sentry KRAB-EAR-BACKEND-1V follow-up (2026-08-09): захват ограничен
+        по времени (``_lock_acquire_timeout_sec``, дефолт
+        ``_LOCK_ACQUIRE_TIMEOUT_SEC``) через опрос ``LOCK_EX | LOCK_NB`` в
+        цикле вместо блокирующего ``LOCK_EX`` — иначе один навсегда
+        застрявший держатель (например абандонённый 180с IPC-backstop'ом,
+        но всё ещё живой поток) вечно блокирует ЛЮБОЙ другой вызов, который
+        копит рабочие потоки и IPC-коннекты быстрее, чем backstop успевает
+        их освобождать. Таймаут действует ТОЛЬКО на ожидание захвата — уже
+        держащий лок поток (например миграция шифрования всей истории под
+        одним ``with self._lock():``) им не ограничен и держит лок сколько
+        нужно; при истечении дедлайна бросается ``StateStoreLockTimeout``
+        (тот же путь отката, что и для ENOSPC/EMFILE выше).
         """
         tid = threading.get_ident()
         with self._lock_reentry_guard:
@@ -266,11 +327,38 @@ class StateStore:
             acquired_here = depth == 0
             self._lock_depth[tid] = depth + 1
         if acquired_here:
+            label = self._lock_caller_label()
+            with self._lock_reentry_guard:
+                holder_label = self._lock_holder_label
+                holder_since = self._lock_holder_since
+            if holder_label is not None and holder_since is not None:
+                held_for = time.monotonic() - holder_since
+                if held_for >= _LOCK_SLOW_WARN_SEC:
+                    logger.warning(
+                        "StateStore._lock(): %s ждёт эксклюзивный flock — уже держит %s %.1fс",
+                        label, holder_label, held_for,
+                        extra={"waiter": label, "holder": holder_label, "held_for_sec": held_for},
+                    )
+            wait_start = time.monotonic()
+            deadline = wait_start + self._lock_acquire_timeout_sec
             lock_file = None
             try:
                 self.lock_path.touch(exist_ok=True)
                 lock_file = self.lock_path.open("r+", encoding="utf-8")
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                while True:
+                    try:
+                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            with self._lock_reentry_guard:
+                                current_holder = self._lock_holder_label
+                            raise StateStoreLockTimeout(
+                                f"StateStore._lock(): {label} не получил эксклюзивный "
+                                f"flock за {self._lock_acquire_timeout_sec:.0f}с "
+                                f"(последний известный держатель: {current_holder or 'неизвестно'})"
+                            )
+                        time.sleep(_LOCK_POLL_INTERVAL_SEC)
             except BaseException:
                 with self._lock_reentry_guard:
                     depth = self._lock_depth[tid] - 1
@@ -285,23 +373,63 @@ class StateStore:
                     except OSError:
                         pass
                 raise
+            wait_elapsed = time.monotonic() - wait_start
+            if wait_elapsed >= _LOCK_SLOW_WARN_SEC:
+                logger.warning(
+                    "StateStore._lock(): %s ждал эксклюзивный flock %.1fс",
+                    label, wait_elapsed,
+                    extra={"waiter": label, "wait_sec": wait_elapsed},
+                )
             with self._lock_reentry_guard:
                 self._lock_fileobj[tid] = lock_file
+                self._lock_holder_label = label
+                self._lock_holder_since = time.monotonic()
         try:
             yield
         finally:
+            held_label: str | None = None
+            held_since: float | None = None
             with self._lock_reentry_guard:
                 depth = self._lock_depth[tid] - 1
                 if depth == 0:
                     del self._lock_depth[tid]
                     lock_file = self._lock_fileobj.pop(tid)
                     release_now = True
+                    held_label = self._lock_holder_label
+                    held_since = self._lock_holder_since
+                    self._lock_holder_label = None
+                    self._lock_holder_since = None
                 else:
                     self._lock_depth[tid] = depth
                     release_now = False
             if release_now:
+                if held_since is not None:
+                    held_total = time.monotonic() - held_since
+                    if held_total >= _LOCK_SLOW_WARN_SEC:
+                        logger.warning(
+                            "StateStore._lock(): %s держал эксклюзивный flock %.1fс",
+                            held_label, held_total,
+                            extra={"holder": held_label, "held_sec": held_total},
+                        )
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
                 lock_file.close()
+
+    @staticmethod
+    def _lock_caller_label() -> str:
+        """Best-effort ``file:line:func`` label of the real ``with self._lock():`` call site.
+
+        Diagnostic-only (see _LOCK_SLOW_WARN_SEC) — never allowed to affect
+        locking itself. sys._getframe(3) from here reaches past this method's
+        own frame, past the _lock() generator body that called it, and past
+        contextlib's __enter__ (which resumes the generator via next()) to
+        land on the actual caller.
+        """
+        try:
+            frame = sys._getframe(3)
+            filename = frame.f_code.co_filename.rsplit("/", 1)[-1]
+            return f"{filename}:{frame.f_lineno}:{frame.f_code.co_name}"
+        except Exception:
+            return "unknown"
 
     def reset_search_caches(self) -> None:
         """Сбрасывает все in-memory поисковые кэши (privacy-purge / wipe-all).
