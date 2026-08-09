@@ -93,6 +93,28 @@ class AudioRecorder:
         with self._lock:
             return self._is_recording
 
+    @property
+    def is_worker_thread_alive(self) -> bool:
+        """Физическая живость фонового потока захвата — НЕЗАВИСИМО от is_recording.
+
+        2026-08-09 (разбор PortAudio-сегфолта 2026-08-07). ``stop()`` кидает
+        ``self._is_recording = False`` ДО попытки ``thread.join()``; если join
+        таймаутит (``stream.read()`` завис внутри PortAudio), метод кидает
+        ``AudioRecorderStopTimeout``, но ``self._thread`` не обнуляется в этой
+        ветке — воркер физически жив и заблокирован, а ``is_recording`` уже
+        ``False``. ``AudioReinitCoordinator`` использует ``is_recording`` как
+        единственный гейт против ``Pa_Terminate`` под живым стримом рекордера
+        (см. ``audio_reinit.py`` — сам код документирует это как crash-класс);
+        в этом окне тот гейт слеп. Это свойство даёт отдельный честный сигнал
+        именно физической живости потока — используется ТОЛЬКО в
+        ``BackendService._reinit_is_recording_gate()``; остальные потребители
+        ``is_recording`` (call_assist/meeting/realtime_silence_filter/
+        recording_duration_watchdog) не меняются — им нужна пользовательская
+        семантика «идёт диктовка», не эта.
+        """
+        with self._lock:
+            return self._thread is not None and self._thread.is_alive()
+
     def start(
         self,
         spill: "object | None" = None,

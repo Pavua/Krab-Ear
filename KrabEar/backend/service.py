@@ -1452,9 +1452,14 @@ class BackendService:
         # 2026-07-15 (спека wake-word-watchdog): единый single-flight владелец
         # танца reinit — им пользуются пассивный AudioSelfHealer (пустые
         # диктовки) и активный WakeWordWatchdog (stale heartbeat).
+        #
+        # is_recording=self._reinit_is_recording_gate, НЕ голый
+        # recorder.is_recording (2026-08-09, разбор PortAudio-сегфолта
+        # 2026-08-07) — см. докстринг метода: recorder.is_recording один не
+        # достаточен как гейт против Pa_Terminate под живым стримом.
         self._audio_reinit_coordinator = AudioReinitCoordinator(
             reinit_audio_backend=_reinit_audio_backend,
-            is_recording=lambda: bool(getattr(self.recorder, "is_recording", False)),
+            is_recording=self._reinit_is_recording_gate,
             wake_word_adapter=self._oww_adapter,
         )
         self._audio_selfheal = AudioSelfHealer(
@@ -1932,6 +1937,44 @@ class BackendService:
     #: Минимальный интервал между отчётами о нештатном рестарте (секунды).
     #: launchd держит юнит с ``KeepAlive=true`` и ``ThrottleInterval=5``, то
     #: есть в крэш-лупе бэкенд поднимается до ~720 раз в час. Каждый подъём —
+    def _reinit_is_recording_gate(self) -> bool:
+        """Safety-гейт против ``Pa_Terminate`` под живым стримом рекордера.
+
+        Передаётся как ``is_recording=`` в ``AudioReinitCoordinator`` — сам
+        код там явно документирует ``Pa_Terminate`` под живым стримом
+        рекордера как crash-класс (``audio_reinit.py``).
+
+        Голого ``recorder.is_recording`` НЕДОСТАТОЧНО (найдено 2026-08-09 при
+        разборе PortAudio-сегфолта 2026-08-07, sample'а живого зависшего
+        процесса — ``Thread-4 (_worker)`` внутри ``PaUtil_ReadRingBuffer``):
+        ``AudioRecorder.stop()`` выставляет ``self._is_recording = False`` ДО
+        попытки ``thread.join()``; если join таймаутит, метод кидает
+        ``AudioRecorderStopTimeout``, но воркер-поток НЕ обнуляется — он
+        физически жив и заблокирован внутри PortAudio, а ``is_recording`` уже
+        ``False``. В этом окне единственный гейт был слеп: любой триггер
+        reinit (wake-word watchdog staleness, AudioSelfHealer на пустых
+        диктовках) видел бы «запись не идёт» и пропускал бы ``Pa_Terminate``
+        прямо на живой блокированный стрим — ровно тот crash-класс, от
+        которого код сам себя пытается защитить.
+
+        ``recorder.is_worker_thread_alive`` — отдельный честный сигнал
+        физической живости потока (см. докстринг в ``recorder.py``),
+        комбинируется здесь ТОЛЬКО для этого safety-гейта. Другие два
+        потребителя ``recorder.is_recording`` в этом же ``__init__``
+        (``OpenWakeWordAdapter`` — избегает второго входного тапа во время
+        диктовки, ``WakeWordWatchdog`` — трактует активную запись как
+        легитимную паузу) намеренно НЕ тронуты: обе ветки в конечном счёте
+        сами вызывают ``AudioReinitCoordinator.reinit_with_wake_word_restore()``,
+        у которого ЕСТЬ собственная внутренняя повторная проверка перед
+        ``Pa_Terminate`` — она использует ЭТОТ ЖЕ гейт, значит защита
+        транзитивна через единственную точку, где физически исполняется
+        ``Pa_Terminate``.
+        """
+        return (
+            bool(getattr(self.recorder, "is_recording", False))
+            or bool(getattr(self.recorder, "is_worker_thread_alive", False))
+        )
+
     #: РОВНО ОДИН вызов ``_report_unclean_restart`` за жизнь процесса, поэтому
     #: in-memory дедуп ``ErrorBus`` (``_last_emitted``) для этого кода не
     #: срабатывает НИКОГДА: он живёт в памяти умершего процесса. Нужен
