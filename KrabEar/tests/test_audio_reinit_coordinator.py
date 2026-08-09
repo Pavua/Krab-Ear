@@ -125,10 +125,14 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(calls, [])
 
     def test_worker_hung_returns_deferred_worker_hung_outcome(self):
-        """Ревью 2026-08-09 (F1): без is_worker_hung= настоящая диктовка и
-        заклинивший worker-тред неотличимы для watchdog/selfheal — оба
-        видят DEFERRED_RECORDING и ждут вечно, эскалация недостижима для
-        второго случая. Проверяем ветку самого верхнего чека _dance()."""
+        """Coordinator-механика, is_worker_hung инъецирован НАПРЯМУЮ и
+        НЕЗАВИСИМО от is_recording — проверяем ТОЛЬКО что _dance() зовёт
+        _deferred_outcome() и уважает True от колбэка. НЕ утверждает, что
+        комбинация (recording=True, worker_hung=True) реалистична в проде —
+        честная семантика самого прод-гейта (никогда не True одновременно с
+        recording=True) закрыта отдельно в
+        ReinitIsWorkerHungGateTest (test_recorder_worker_alive_safety_2026_08_09.py),
+        см. ревью 2026-08-09 NEW-1/NEW-2."""
         adapter = _FakeAdapter()
         coord, calls = _make(adapter=adapter, recording=True, worker_hung=lambda: True)
         self.assertEqual(
@@ -139,8 +143,11 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(calls, [])
 
     def test_recording_without_worker_hung_stays_deferred_recording(self):
-        """Настоящая диктовка (worker_hung=False) обязана остаться
-        DEFERRED_RECORDING — эскалация недопустима, запись закончится сама."""
+        """Coordinator-механика: worker_hung=False → DEFERRED_RECORDING, не
+        эскалация. После фикса NEW-1 эта комбинация (recording=True,
+        worker_hung=False) — РЕАЛИСТИЧНАЯ прод-семантика здоровой диктовки
+        (см. ReinitIsWorkerHungGateTest.test_false_during_healthy_active_recording),
+        не только изолированный юнит-тест координатора."""
         adapter = _FakeAdapter()
         coord, calls = _make(adapter=adapter, recording=True, worker_hung=lambda: False)
         self.assertEqual(
@@ -173,11 +180,15 @@ class GuardTests(unittest.TestCase):
             ReinitOutcome.DEFERRED_RECORDING,
         )
 
-    def test_worker_hung_detected_only_mid_dance_still_escalatable(self):
-        """Симметрично test_recording_started_mid_dance_defers... — если
-        worker-hung проявляется только на re-check (после adapter.stop()),
-        итоговый outcome тоже обязан быть DEFERRED_WORKER_HUNG, не
-        DEFERRED_RECORDING, и слушатель всё равно восстанавливается."""
+    def test_worker_hung_dispatch_reaches_mid_dance_recheck_too(self):
+        """Coordinator-механика: _deferred_outcome() вызывается на ОБОИХ
+        deferred-возвратах _dance() — не только верхнем чеке (уже покрыт
+        test_worker_hung_returns_deferred_worker_hung_outcome), но и
+        re-check после adapter.stop(). is_worker_hung=lambda: True здесь —
+        артефакт независимой инъекции для изоляции этой ВЕТКИ кода, НЕ
+        заявка о реалистичной комбинации сигналов (см. ревью 2026-08-09
+        NEW-2 — реалистичный сценарий «диктовка началась во время танца»
+        закрыт отдельно ниже, test_dictation_starting_mid_dance_stays_deferred_recording_not_worker_hung)."""
         recording_answers = [False, True]
         adapter = _FakeAdapter(running=True, model="krab_ru", threshold=0.42)
         calls: list[str] = []
@@ -196,6 +207,60 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(
             [c for c in adapter.calls if c in ("stop", "start")], ["stop", "start"],
         )
+
+    def test_dictation_starting_mid_dance_stays_deferred_recording_not_worker_hung(
+        self,
+    ):
+        """🔴 Регрессионный тест на NEW-1 (ревью 2026-08-09, второй раунд):
+        РЕАЛИСТИЧНАЯ прод-комбинация — обе колбэка читают ОДНО общее
+        состояние рекордера (как в service.py: оба произведены из
+        self.recorder), а не независимые списки ответов. Пользователь
+        начинает диктовку РОВНО во время adapter.stop()-джойна: и
+        is_recording, И is_worker_thread_alive синхронно становятся True
+        (AudioRecorder.start() поднимает поток live). Первая версия фикса
+        (голая lambda: recorder.is_worker_thread_alive) классифицировала бы
+        это как DEFERRED_WORKER_HUNG → ложная эскалация wedged:true ПОСРЕДИ
+        обычной диктовки, ровно тот классфинденг, что нашёл живой ревью."""
+
+        class _SharedRecorderState:
+            def __init__(self):
+                self.is_recording = False
+                self.is_worker_thread_alive = False
+
+            def start_dictation(self):
+                self.is_recording = True
+                self.is_worker_thread_alive = True
+
+        state = _SharedRecorderState()
+        adapter = _FakeAdapter(running=True, model="krab_ru", threshold=0.42)
+        calls: list[str] = []
+        checks = {"n": 0}
+
+        def _is_recording():
+            checks["n"] += 1
+            if checks["n"] == 2:
+                # Мид-танец: пользователь стартовал диктовку прямо во время
+                # adapter.stop()-джойна (та же точка, что и существующий
+                # test_recording_started_mid_dance_defers_and_restores_listener).
+                state.start_dictation()
+            return bool(state.is_recording or state.is_worker_thread_alive)
+
+        def _is_worker_hung():
+            return bool((not state.is_recording) and state.is_worker_thread_alive)
+
+        coord = AudioReinitCoordinator(
+            reinit_audio_backend=lambda: calls.append("reinit"),
+            is_recording=_is_recording,
+            wake_word_adapter=adapter,
+            is_worker_hung=_is_worker_hung,
+        )
+        self.assertEqual(
+            coord.reinit_with_wake_word_restore(),
+            ReinitOutcome.DEFERRED_RECORDING,
+            "здоровая диктовка, начавшаяся во время танца, классифицирована "
+            "как заклинивший worker — ложная эскалация wedged:true",
+        )
+        self.assertEqual(calls, [])  # Pa_Terminate НЕ вызывался
 
     def test_hung_thread_skips_reinit(self):
         adapter = _FakeAdapter(stop_result=False)

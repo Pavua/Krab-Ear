@@ -1461,14 +1461,10 @@ class BackendService:
             reinit_audio_backend=_reinit_audio_backend,
             is_recording=self._reinit_is_recording_gate,
             wake_word_adapter=self._oww_adapter,
-            # 2026-08-09 (ревью F1): отдельно от is_recording= выше — без
-            # него координатор не может отличить настоящую диктовку
-            # (разрешится сама) от заклинившего worker-треда рекордера
-            # (не разрешится без рестарта), и watchdog/selfheal вечно ждут,
-            # никогда не эскалируя. См. ReinitOutcome.DEFERRED_WORKER_HUNG.
-            is_worker_hung=lambda: bool(
-                getattr(self.recorder, "is_worker_thread_alive", False)
-            ),
+            # 2026-08-09 (ревью F1, затем NEW-1 во ВТОРОМ раунде того же
+            # ревью): именованный метод, НЕ голая лямбда — см. докстринг
+            # _reinit_is_worker_hung_gate для полной истории обеих правок.
+            is_worker_hung=self._reinit_is_worker_hung_gate,
         )
         self._audio_selfheal = AudioSelfHealer(
             reinit_coordinator=self._audio_reinit_coordinator,
@@ -2004,6 +2000,37 @@ class BackendService:
         return (
             bool(getattr(self.recorder, "is_recording", False))
             or bool(getattr(self.recorder, "is_worker_thread_alive", False))
+        )
+
+    def _reinit_is_worker_hung_gate(self) -> bool:
+        """Честный сигнал «worker-тред рекордера заклинил после stop()-
+        таймаута» — передаётся как ``is_worker_hung=`` в
+        ``AudioReinitCoordinator`` (см. ``ReinitOutcome.DEFERRED_WORKER_HUNG``).
+
+        Правка ВТОРОГО раунда адверсариального ревью 2026-08-09 (NEW-1,
+        HIGH) на ТОТ ЖЕ фикс F1: первая версия передавала голую лямбду
+        ``lambda: recorder.is_worker_thread_alive`` — этот сигнал ``True``
+        для ЛЮБОЙ ЗДОРОВОЙ активной диктовки (``AudioRecorder.start()``
+        выставляет ``self._thread`` и он остаётся ``is_alive()`` ВСЁ время
+        записи, не только в заклинившем окне после таймаута). Итог: КАЖДАЯ
+        настоящая диктовка классифицировалась бы как ``DEFERRED_WORKER_HUNG``
+        вместо ``DEFERRED_RECORDING`` → ``WakeWordWatchdog`` эскалировал бы
+        ``wedged:true`` и Swift-агент делал бы ``kickstart -k`` backend
+        ПОСРЕДИ обычной диктовки — заменяет «никогда не эскалирует»
+        (исходный баг F1) на «эскалирует ВСЕГДА» (строго хуже).
+
+        Честная семантика заклинившего окна — ``recorder.is_recording`` УЖЕ
+        упал (``AudioRecorder.stop()`` выставляет флаг ДО ``thread.join()``),
+        НО ``is_worker_thread_alive`` ещё ``True`` (см. докстринг
+        ``_reinit_is_recording_gate`` выше — то же самое расследование
+        2026-08-09, `Thread-4 (_worker)` внутри `PaUtil_ReadRingBuffer`).
+        Именно эта КОМБИНАЦИЯ (не флаг живости потока сам по себе) отличает
+        «заклинило» от «идёт обычная запись» — во время здоровой диктовки
+        оба флага ``True`` одновременно, здесь это намеренно ``False``.
+        """
+        return (
+            not bool(getattr(self.recorder, "is_recording", False))
+            and bool(getattr(self.recorder, "is_worker_thread_alive", False))
         )
 
     def _report_unclean_restart(self, verdict: str, data_dir: "Path | str") -> None:

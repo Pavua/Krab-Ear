@@ -96,9 +96,11 @@ class AudioReinitCoordinator:
     def _deferred_outcome(self) -> "ReinitOutcome":
         """DEFERRED_RECORDING vs DEFERRED_WORKER_HUNG — см. докстринг
         ReinitOutcome.DEFERRED_WORKER_HUNG. Вызывается ТОЛЬКО когда
-        ``self._is_recording()`` уже подтвердил True (или неизвестен —
-        см. fail-closed ветку в ``_dance``); здесь остаётся только уточнить,
-        какой из двух сигналов дал True."""
+        ``self._is_recording()`` уже подтвердил True — здесь остаётся
+        только уточнить, какой из двух сигналов дал это True. (Ревью
+        2026-08-09, NEW-4: fail-closed-ветка при упавшем ``is_recording()``
+        НЕ зовёт этот метод вовсе — она возвращает ``DEFERRED_RECORDING``
+        напрямую, см. оба ``except``-блока в ``_dance``.)"""
         if self._is_worker_hung is not None:
             try:
                 if self._is_worker_hung():
@@ -243,8 +245,13 @@ class AudioReinitCoordinator:
             self._restore_listener(
                 adapter, was_running, saved_model, saved_threshold, epoch_snapshot,
             )
-            assert mid_dance_outcome is not None  # set on every path that set the flag
-            return mid_dance_outcome
+            # Ревью 2026-08-09 (NEW-3): explicit fallback вместо assert в
+            # daemon-thread пути — assert пропадает под python -O, а
+            # project-идиома везде в этом файле — fail-safe явный дефолт,
+            # не assert. mid_dance_outcome в принципе всегда установлен на
+            # каждом пути, где deferred_mid_dance стал True (см. выше), но
+            # None здесь — консервативный DEFERRED_RECORDING, не крэш.
+            return mid_dance_outcome or ReinitOutcome.DEFERRED_RECORDING
 
         if not self._restore_listener(
             adapter, was_running, saved_model, saved_threshold, epoch_snapshot,

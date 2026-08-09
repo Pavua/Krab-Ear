@@ -206,6 +206,66 @@ class ReinitIsRecordingGateTest(unittest.TestCase):
         self.assertFalse(BackendService._reinit_is_recording_gate(stub))
 
 
+class ReinitIsWorkerHungGateTest(unittest.TestCase):
+    """BackendService._reinit_is_worker_hung_gate — отличает заклинивший
+    worker-тред от ЛЮБОЙ здоровой активной диктовки.
+
+    🔴 Ревью 2026-08-09, ВТОРОЙ раунд (NEW-1, HIGH): именно отсутствие ЭТОГО
+    класса тестов позволило первой версии фикса (голая лямбда
+    ``recorder.is_worker_thread_alive`` без учёта ``is_recording``) пройти
+    138/138 в кластере coordinator/watchdog/selfheal — ни один существующий
+    тест не проверял НАСТОЯЩУЮ комбинацию сигналов, которую видит прод-код
+    при обычной здоровой записи (``is_recording=True,
+    is_worker_thread_alive=True`` — worker стартует и остаётся живым ВСЮ
+    диктовку). Без этого класса регрессия обратно на голый
+    ``is_worker_thread_alive`` осталась бы незамеченной СНОВА."""
+
+    def _gate(self, is_recording: bool, is_worker_thread_alive: bool) -> bool:
+        from backend.service import BackendService
+
+        stub = type("Stub", (), {})()
+        stub.recorder = _FakeRecorder(is_recording, is_worker_thread_alive)
+        return BackendService._reinit_is_worker_hung_gate(stub)
+
+    def test_false_during_healthy_active_recording(self) -> None:
+        """🔴 Ядро NEW-1: именно эта комбинация — worker стартовал и жив,
+        is_recording ещё True — описывает КАЖДУЮ обычную диктовку. Гейт
+        обязан быть False, иначе watchdog эскалирует wedged:true на
+        каждой второй записи владельца."""
+        self.assertFalse(
+            self._gate(is_recording=True, is_worker_thread_alive=True)
+        )
+
+    def test_true_when_recording_flag_already_false_but_thread_still_alive(
+        self,
+    ) -> None:
+        """Настоящий заклинивший случай: stop() выставил is_recording=False
+        ДО join, join таймаутнул — worker физически жив, флаг уже лжёт."""
+        self.assertTrue(
+            self._gate(is_recording=False, is_worker_thread_alive=True)
+        )
+
+    def test_false_when_neither_signal_set(self) -> None:
+        self.assertFalse(
+            self._gate(is_recording=False, is_worker_thread_alive=False)
+        )
+
+    def test_false_when_recording_true_and_thread_flag_false(self) -> None:
+        """Не должно встречаться в реальности (is_recording=True без живого
+        потока), но гейт обязан остаться False — ни один компонент этой
+        комбинации не сигналит «заклинило»."""
+        self.assertFalse(
+            self._gate(is_recording=True, is_worker_thread_alive=False)
+        )
+
+    def test_never_raises_when_recorder_attribute_missing(self) -> None:
+        from backend.service import BackendService
+
+        stub = type("Stub", (), {})()
+        stub.recorder = object()
+        self.assertFalse(BackendService._reinit_is_worker_hung_gate(stub))
+
+
 class ReinitCoordinatorWiringSourceContractTest(unittest.TestCase):
     """AST-контракт: AudioReinitCoordinator получает именно gate-методы.
 
@@ -266,11 +326,19 @@ class ReinitCoordinatorWiringSourceContractTest(unittest.TestCase):
     def test_audio_reinit_coordinator_wires_is_worker_hung_to_recorder_signal(
         self,
     ) -> None:
-        """Ревью 2026-08-09 (F1): без ``is_worker_hung=`` координатор не
-        может отличить заклинивший worker-тред от настоящей диктовки —
-        DEFERRED_WORKER_HUNG никогда не вернётся, эскалация недостижима.
-        Проверяем именно ЧТО передан non-lambda callable (реальная семантика
-        уже покрыта behaviour-тестами ReinitOutcome в test_audio_reinit_coordinator.py)."""
+        """Ревью 2026-08-09 (F1, затем NEW-1 во втором раунде): без
+        ``is_worker_hung=`` координатор не может отличить заклинивший
+        worker-тред от настоящей диктовки — DEFERRED_WORKER_HUNG никогда не
+        вернётся, эскалация недостижима.
+
+        Правка NEW-1/F4-gap: первая версия этого теста проверяла только
+        ПРИСУТСТВИЕ kwarg'а — этого было недостаточно, первая версия прод-
+        кода передавала lambda с НЕВЕРНОЙ семантикой (голый
+        is_worker_thread_alive, True для любой здоровой записи), и этот тест
+        зелёным её пропустил. Теперь пиновано позитивно — именно
+        ``self._reinit_is_worker_hung_gate`` (та же форма, что
+        ``is_recording=``), а ЧЕСТНАЯ семантика самого гейта проверяется
+        отдельно в ``ReinitIsWorkerHungGateTest`` выше."""
         from backend.service import BackendService
 
         source = textwrap.dedent(inspect.getsource(BackendService.__init__))
@@ -278,11 +346,8 @@ class ReinitCoordinatorWiringSourceContractTest(unittest.TestCase):
 
         call = self._find_coordinator_call(tree)
         self.assertIsNotNone(call, "не нашли конструктор AudioReinitCoordinator")
-        kwarg = next((kw for kw in call.keywords if kw.arg == "is_worker_hung"), None)
-        self.assertIsNotNone(
-            kwarg,
-            "is_worker_hung= не передан — координатор не отличит "
-            "заклинивший worker-тред от настоящей диктовки",
+        self._assert_kwarg_is_self_attr(
+            call, "is_worker_hung", "_reinit_is_worker_hung_gate"
         )
 
 
