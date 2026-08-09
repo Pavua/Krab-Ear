@@ -106,8 +106,12 @@ class AudioRecorder:
         единственный гейт против ``Pa_Terminate`` под живым стримом рекордера
         (см. ``audio_reinit.py`` — сам код документирует это как crash-класс);
         в этом окне тот гейт слеп. Это свойство даёт отдельный честный сигнал
-        именно физической живости потока — используется ТОЛЬКО в
-        ``BackendService._reinit_is_recording_gate()``; остальные потребители
+        именно физической живости потока — используется в
+        ``BackendService._reinit_is_recording_gate()`` (combined OR-гейт) И
+        ``BackendService._reinit_is_worker_hung_gate()`` (правка 2026-08-09,
+        NEW-1: честная семантика заклинившего окна — ``not is_recording and
+        is_worker_thread_alive``, не голое свойство само по себе, которое
+        True для любой здоровой записи); остальные потребители
         ``is_recording`` (call_assist/meeting/realtime_silence_filter/
         recording_duration_watchdog) не меняются — им нужна пользовательская
         семантика «идёт диктовка», не эта.

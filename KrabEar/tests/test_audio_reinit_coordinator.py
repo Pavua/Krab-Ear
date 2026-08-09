@@ -222,6 +222,15 @@ class GuardTests(unittest.TestCase):
         это как DEFERRED_WORKER_HUNG → ложная эскалация wedged:true ПОСРЕДИ
         обычной диктовки, ровно тот классфинденг, что нашёл живой ревью."""
 
+        # Ревью 2026-08-09 (NEW-6): вызываем РЕАЛЬНЫЕ
+        # BackendService._reinit_is_recording_gate/_reinit_is_worker_hung_gate
+        # против stub-получателя, а не копию их логики локальными замыканиями
+        # — дрейф в любом из двух реальных методов теперь тоже красит этот
+        # сценарный тест (mutation-пробa ревьюера подтвердила: копия логики
+        # осталась зелёной при воспроизведении NEW-1-регрессии, реальные
+        # методы через ReinitIsWorkerHungGateTest — нет).
+        from backend.service import BackendService
+
         class _SharedRecorderState:
             def __init__(self):
                 self.is_recording = False
@@ -232,6 +241,8 @@ class GuardTests(unittest.TestCase):
                 self.is_worker_thread_alive = True
 
         state = _SharedRecorderState()
+        stub = type("Stub", (), {})()
+        stub.recorder = state
         adapter = _FakeAdapter(running=True, model="krab_ru", threshold=0.42)
         calls: list[str] = []
         checks = {"n": 0}
@@ -243,10 +254,10 @@ class GuardTests(unittest.TestCase):
                 # adapter.stop()-джойна (та же точка, что и существующий
                 # test_recording_started_mid_dance_defers_and_restores_listener).
                 state.start_dictation()
-            return bool(state.is_recording or state.is_worker_thread_alive)
+            return BackendService._reinit_is_recording_gate(stub)
 
         def _is_worker_hung():
-            return bool((not state.is_recording) and state.is_worker_thread_alive)
+            return BackendService._reinit_is_worker_hung_gate(stub)
 
         coord = AudioReinitCoordinator(
             reinit_audio_backend=lambda: calls.append("reinit"),
