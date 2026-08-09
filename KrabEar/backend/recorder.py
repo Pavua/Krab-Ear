@@ -406,15 +406,6 @@ class AudioRecorder:
                 # классифицируется как DEFERRED_RECORDING вместо
                 # DEFERRED_WORKER_HUNG и WakeWordWatchdog молчит вечно
                 # (ровно F1-класс, ради которого вся волна).
-                # NEW-5-доп. (Fable-ревью, третий раунд): симметрично ветке
-                # stop() — abort() вызывается НЕ ТОЛЬКО на shutdown, но и из
-                # рантайм-компенсации ошибки старта встречи
-                # (MeetingSessionService → abort_recording_if_owner) и
-                # recovery при её close. Заклин, обнаруженный ЗДЕСЬ, обязан
-                # поднимать тот же sticky-флаг — иначе он навсегда
-                # классифицируется как DEFERRED_RECORDING вместо
-                # DEFERRED_WORKER_HUNG и WakeWordWatchdog молчит вечно
-                # (ровно F1-класс, ради которого вся волна).
                 with self._lock:
                     self._stop_timed_out = True
                 return False
