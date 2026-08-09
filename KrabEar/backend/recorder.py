@@ -86,6 +86,14 @@ class AudioRecorder:
         # R1: continuous spill writer (duck-typed .append/.close/.failed), см.
         # backend/recording_spill.py. None = spill выключен для этой записи.
         self._spill = None
+        # NEW-5 (MEDIUM), третий раунд ревью PortAudio-фикса #12 (2026-08-09):
+        # sticky-флаг «stop() реально кинул AudioRecorderStopTimeout» —
+        # ИМЕННО факт исключения, не выводимый из комбинации is_recording/
+        # is_worker_thread_alive (та ложно совпадает с этим сигнатурой на
+        # каждом ОБЫЧНОМ stop(), пока join() ждёт нормально завершающийся
+        # worker — см. is_stop_timed_out ниже). Снимается следующим start()
+        # и успешным stop()/abort().
+        self._stop_timed_out = False
 
     @property
     def is_recording(self) -> bool:
@@ -118,6 +126,30 @@ class AudioRecorder:
         """
         with self._lock:
             return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def is_stop_timed_out(self) -> bool:
+        """Sticky-флаг: РОВНО факт, что ``stop()`` кинул
+        ``AudioRecorderStopTimeout`` (worker не вышел за отведённый
+        timeout_sec) — НЕ производный от комбинации is_recording/
+        is_worker_thread_alive.
+
+        NEW-5 (MEDIUM), третий раунд ревью 2026-08-09: та комбинация
+        (``not is_recording and is_worker_thread_alive``, см.
+        ``is_worker_thread_alive`` выше) — честный сигнал «поток жив, флаг
+        уже упал», но она ТАКЖЕ верна для каждого ОБЫЧНОГО stop() всё
+        время, пока ``thread.join(timeout_sec)`` ждёт нормально
+        завершающийся worker (0-150мс на обычном stop(), секунды на
+        max-duration авто-стопе, пока worker дособирает
+        ``np.concatenate`` вне лока) — это не заклин, а штатное окно.
+        ``BackendService._reinit_is_worker_hung_gate()`` читает ИМЕННО это
+        свойство, а не ту комбинацию.
+
+        Снимается следующим ``start()`` (новая сессия) и успешным
+        ``stop()``/``abort()`` (worker в итоге доиграл до конца).
+        """
+        with self._lock:
+            return self._stop_timed_out
 
     def start(
         self,
@@ -162,6 +194,12 @@ class AudioRecorder:
                     self._started_at = time.monotonic()
                     # W1670: сброс результата предыдущей авто-остановки.
                     self._pending_result = None
+                    # NEW-5: новая сессия начинается — старый sticky-флаг
+                    # (если был) относится к ПРЕДЫДУЩЕЙ записи и здесь
+                    # неактуален; сам факт, что мы прошли гейт выше
+                    # (``self._thread is None or not is_alive()``), уже
+                    # доказывает, что прежний воркер больше не заклинен.
+                    self._stop_timed_out = False
                     self._spill = spill
                     self._session_max_recording_samples = max_recording_samples
                     worker = threading.Thread(
@@ -236,6 +274,10 @@ class AudioRecorder:
                         self._spill = None
                         early_result = pending
                         early_return = True
+                        # NEW-5: этот stop() — успешный (нечего ждать,
+                        # результат уже был). Если предыдущий stop() когда-то
+                        # словил таймаут, воркер с тех пор доиграл — снимаем.
+                        self._stop_timed_out = False
                     # Живой handle после предыдущего таймаута обрабатывается
                     # ниже повторным join. Мёртвый handle с чанками означает,
                     # что worker завершился уже после того таймаута: аудио ещё
@@ -246,6 +288,8 @@ class AudioRecorder:
                         spill_local = self._spill
                         self._spill = None
                         early_return = True
+                        # NEW-5: см. комментарий выше — успешный stop().
+                        self._stop_timed_out = False
                     else:
                         self._is_recording = False
                 else:
@@ -267,6 +311,12 @@ class AudioRecorder:
                         timeout_sec,
                     )
                     # R1: воркер завис и может ещё дописывать — spill НЕ трогаем.
+                    # NEW-5: РОВНО эта ветка — единственное место, где sticky-
+                    # флаг вправе подняться: join() реально не вернулся за
+                    # полный timeout_sec, а не просто застал is_recording=False
+                    # в штатном окне до возврата join().
+                    with self._lock:
+                        self._stop_timed_out = True
                     raise AudioRecorderStopTimeout(
                         f"AudioRecorder worker не завершился за {timeout_sec:.1f} с"
                     )
@@ -274,6 +324,9 @@ class AudioRecorder:
                 with self._lock:
                     spill_local = self._spill
                     self._spill = None
+                    # NEW-5: join() вернулся, worker больше не жив — этот
+                    # stop() успешен (даже если ПРЕДЫДУЩИЙ вызов таймаутил).
+                    self._stop_timed_out = False
                     pending = self._pending_result
                     if pending is not None:
                         self._pending_result = None
@@ -344,6 +397,26 @@ class AudioRecorder:
                 # Handle и буфер нужны для безопасного повторного abort():
                 # worker всё ещё может дописать данные после этого возврата.
                 # R1: spill тоже не трогаем — воркер может ещё дописывать.
+                # NEW-5-доп. (Fable-ревью, третий раунд): симметрично ветке
+                # stop() — abort() вызывается НЕ ТОЛЬКО на shutdown, но и из
+                # рантайм-компенсации ошибки старта встречи
+                # (MeetingSessionService → abort_recording_if_owner) и
+                # recovery при её close. Заклин, обнаруженный ЗДЕСЬ, обязан
+                # поднимать тот же sticky-флаг — иначе он навсегда
+                # классифицируется как DEFERRED_RECORDING вместо
+                # DEFERRED_WORKER_HUNG и WakeWordWatchdog молчит вечно
+                # (ровно F1-класс, ради которого вся волна).
+                # NEW-5-доп. (Fable-ревью, третий раунд): симметрично ветке
+                # stop() — abort() вызывается НЕ ТОЛЬКО на shutdown, но и из
+                # рантайм-компенсации ошибки старта встречи
+                # (MeetingSessionService → abort_recording_if_owner) и
+                # recovery при её close. Заклин, обнаруженный ЗДЕСЬ, обязан
+                # поднимать тот же sticky-флаг — иначе он навсегда
+                # классифицируется как DEFERRED_RECORDING вместо
+                # DEFERRED_WORKER_HUNG и WakeWordWatchdog молчит вечно
+                # (ровно F1-класс, ради которого вся волна).
+                with self._lock:
+                    self._stop_timed_out = True
                 return False
 
             # Очищаем только после join: worker при авто-лимите может временно
@@ -357,6 +430,9 @@ class AudioRecorder:
                 if self._thread is thread:
                     self._thread = None
                 self._started_at = 0.0
+                # NEW-5: join() вернулся, worker больше не жив — этот
+                # abort() успешен, даже если ПРЕДЫДУЩИЙ stop() таймаутил.
+                self._stop_timed_out = False
             # R1 spill: close() строго вне self._lock (I/O под локом запрещено).
             if spill_local is not None:
                 spill_local.close()

@@ -2019,19 +2019,27 @@ class BackendService:
         ПОСРЕДИ обычной диктовки — заменяет «никогда не эскалирует»
         (исходный баг F1) на «эскалирует ВСЕГДА» (строго хуже).
 
-        Честная семантика заклинившего окна — ``recorder.is_recording`` УЖЕ
-        упал (``AudioRecorder.stop()`` выставляет флаг ДО ``thread.join()``),
-        НО ``is_worker_thread_alive`` ещё ``True`` (см. докстринг
-        ``_reinit_is_recording_gate`` выше — то же самое расследование
-        2026-08-09, `Thread-4 (_worker)` внутри `PaUtil_ReadRingBuffer`).
-        Именно эта КОМБИНАЦИЯ (не флаг живости потока сам по себе) отличает
-        «заклинило» от «идёт обычная запись» — во время здоровой диктовки
-        оба флага ``True`` одновременно, здесь это намеренно ``False``.
+        Правка ТРЕТЬЕГО раунда ревью 2026-08-09 (NEW-5, MEDIUM) на ТОТ ЖЕ
+        фикс: вторая версия комбинировала ``not is_recording and
+        is_worker_thread_alive`` — честная семантика для «is_recording лжёт
+        сразу после таймаута», НО эта же комбинация верна и для ЛЮБОГО
+        ОБЫЧНОГО ``stop()`` всё время, пока ``thread.join(timeout_sec)``
+        ждёт нормально завершающийся worker (0-150мс на обычном stop(),
+        секунды на max-duration авто-стопе, пока worker дособирает
+        ``np.concatenate`` вне лока) — это штатное окно, не заклин. Итог:
+        КАЖДОЕ завершение записи имело шанс кратковременно классифицироваться
+        как ``DEFERRED_WORKER_HUNG``, если reinit-триггер (``WakeWordWatchdog``
+        тик) сэмплировал сигналы именно в этом окне.
+
+        Теперь гейт читает ``recorder.is_stop_timed_out`` — sticky-флаг,
+        который ``AudioRecorder`` поднимает ИМЕННО в ветке, где ``stop()``
+        реально кинул ``AudioRecorderStopTimeout`` после полного ожидания
+        таймаута (не выводимый из комбинации is_recording/
+        is_worker_thread_alive), и снимает следующим ``start()`` или
+        успешным ``stop()``/``abort()`` (см. докстринг
+        ``AudioRecorder.is_stop_timed_out``).
         """
-        return (
-            not bool(getattr(self.recorder, "is_recording", False))
-            and bool(getattr(self.recorder, "is_worker_thread_alive", False))
-        )
+        return bool(getattr(self.recorder, "is_stop_timed_out", False))
 
     def _report_unclean_restart(self, verdict: str, data_dir: "Path | str") -> None:
         """Превратить вердикт ``shutdown_forensics.check_and_collect()`` в сигнал.

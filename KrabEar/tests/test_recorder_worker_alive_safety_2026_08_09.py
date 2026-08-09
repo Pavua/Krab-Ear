@@ -159,13 +159,23 @@ class IsWorkerThreadAliveSurvivesStopTimeoutTest(unittest.TestCase):
 
 class _FakeRecorder:
     """Лёгкая заглушка вместо реального AudioRecorder — тестируем ТОЛЬКО
-    комбинирование двух булевых сигналов, конструировать BackendService
+    комбинирование булевых сигналов, конструировать BackendService
     для этого не нужно и вредно (демон-треды + обязательный close() в
-    tearDown — хронический источник CI-флейка чанков)."""
+    tearDown — хронический источник CI-флейка чанков).
 
-    def __init__(self, is_recording: bool, is_worker_thread_alive: bool):
+    ``is_stop_timed_out`` (NEW-5, третий раунд ревью 2026-08-09) — по
+    умолчанию ``False``, нужен только ``ReinitIsWorkerHungGateTest`` ниже;
+    ``ReinitIsRecordingGateTest`` его не трогает."""
+
+    def __init__(
+        self,
+        is_recording: bool,
+        is_worker_thread_alive: bool,
+        is_stop_timed_out: bool = False,
+    ):
         self.is_recording = is_recording
         self.is_worker_thread_alive = is_worker_thread_alive
+        self.is_stop_timed_out = is_stop_timed_out
 
 
 class ReinitIsRecordingGateTest(unittest.TestCase):
@@ -218,13 +228,32 @@ class ReinitIsWorkerHungGateTest(unittest.TestCase):
     при обычной здоровой записи (``is_recording=True,
     is_worker_thread_alive=True`` — worker стартует и остаётся живым ВСЮ
     диктовку). Без этого класса регрессия обратно на голый
-    ``is_worker_thread_alive`` осталась бы незамеченной СНОВА."""
+    ``is_worker_thread_alive`` осталась бы незамеченной СНОВА.
 
-    def _gate(self, is_recording: bool, is_worker_thread_alive: bool) -> bool:
+    🔴 ТРЕТИЙ раунд (NEW-5, MEDIUM, см. ``test_recorder_stop_timed_out_
+    sticky_flag_2026_08_09.py`` для полного разбора и live-воспроизведения
+    гонки): комбинация ``not is_recording and is_worker_thread_alive`` САМА
+    ПО СЕБЕ тоже верна для каждого обычного (не заклинившего) ``stop()`` в
+    штатном окне join() — гейт больше НЕ комбинирует эти два сигнала, а
+    читает ИМЕННО ``recorder.is_stop_timed_out`` (sticky-флаг). Тесты ниже
+    обновлены под новый контракт — старая версия
+    (``test_true_when_recording_flag_already_false_but_thread_still_alive``,
+    ожидавшая True от одной этой комбинации) пиновала СЕМАНТИКУ БАГА и
+    удалена; полное покрытие «эта комбинация без sticky-флага — False»
+    живёт в новом файле."""
+
+    def _gate(
+        self,
+        is_recording: bool,
+        is_worker_thread_alive: bool,
+        is_stop_timed_out: bool = False,
+    ) -> bool:
         from backend.service import BackendService
 
         stub = type("Stub", (), {})()
-        stub.recorder = _FakeRecorder(is_recording, is_worker_thread_alive)
+        stub.recorder = _FakeRecorder(
+            is_recording, is_worker_thread_alive, is_stop_timed_out
+        )
         return BackendService._reinit_is_worker_hung_gate(stub)
 
     def test_false_during_healthy_active_recording(self) -> None:
@@ -236,13 +265,15 @@ class ReinitIsWorkerHungGateTest(unittest.TestCase):
             self._gate(is_recording=True, is_worker_thread_alive=True)
         )
 
-    def test_true_when_recording_flag_already_false_but_thread_still_alive(
-        self,
-    ) -> None:
-        """Настоящий заклинивший случай: stop() выставил is_recording=False
-        ДО join, join таймаутнул — worker физически жив, флаг уже лжёт."""
+    def test_true_when_sticky_stop_timed_out_flag_set(self) -> None:
+        """Настоящий заклинивший случай: ``stop()`` реально кинул
+        ``AudioRecorderStopTimeout`` — единственный источник True теперь."""
         self.assertTrue(
-            self._gate(is_recording=False, is_worker_thread_alive=True)
+            self._gate(
+                is_recording=False,
+                is_worker_thread_alive=True,
+                is_stop_timed_out=True,
+            )
         )
 
     def test_false_when_neither_signal_set(self) -> None:
@@ -256,6 +287,19 @@ class ReinitIsWorkerHungGateTest(unittest.TestCase):
         комбинации не сигналит «заклинило»."""
         self.assertFalse(
             self._gate(is_recording=True, is_worker_thread_alive=False)
+        )
+
+    def test_false_when_old_combo_true_but_sticky_flag_clear(self) -> None:
+        """🔴 NEW-5: ровно окно обычного (не заклинившего) stop() — старая
+        комбинация сигналов True, но без sticky-флага гейт обязан быть
+        False. Регрессия обратно на комбинацию вместо флага должна ронять
+        именно этот тест."""
+        self.assertFalse(
+            self._gate(
+                is_recording=False,
+                is_worker_thread_alive=True,
+                is_stop_timed_out=False,
+            )
         )
 
     def test_never_raises_when_recorder_attribute_missing(self) -> None:
