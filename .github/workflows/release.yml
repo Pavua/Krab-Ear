@@ -122,12 +122,30 @@ jobs:
           dsymutil "$BIN" -o "$DSYM"
           dwarfdump --uuid "$DSYM"
 
+      # Кэш только PBS-тарбола интерпретатора (~40 МБ, зафиксирован по SHA256
+      # в самом скрипте) — pip install requirements.txt каждый раз заново:
+      # requirements.txt может меняться между релизами, кэшировать сами
+      # site-packages без инвалидации по его хэшу опаснее, чем несколько
+      # лишних минут установки.
+      - name: Cache python-build-standalone tarball
+        uses: actions/cache@v4
+        with:
+          path: build/.runtime_cache
+          key: bundled-runtime-pbs-${{ hashFiles('scripts/build_bundled_runtime.command') }}
+
+      - name: Build bundled Python runtime (закрывает T2/T3 онбординга — нет system Python >= 3.12)
+        run: scripts/build_bundled_runtime.command --output build/vendor
+
+      - name: Verify bundled runtime is self-contained (#9 — гейт на Homebrew/usr-local утечки)
+        run: scripts/verify_bundled_runtime_selfcontained.command build/vendor
+
       - name: Assemble + sign .app
         run: |
           scripts/assemble_signed_app.sh \
             --output dist \
             --version "${{ steps.ver.outputs.version }}" \
-            --identity "Krab Ear CI Release"
+            --identity "Krab Ear CI Release" \
+            --vendor-dir build/vendor
 
       - name: Zip (ditto — сохраняет симлинки внутри framework)
         run: |
