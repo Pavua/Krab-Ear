@@ -1281,9 +1281,15 @@ class StateStore:
             return self._load_active_items_unlocked()
 
     def count_active_items(self) -> int:
-        """Возвращает количество активных (не удаленных) записей."""
+        """Возвращает количество активных (не удаленных) записей.
+
+        Переиспользует инкрементально поддерживаемый ``_active_ids`` (см.
+        ``_ensure_active_ids_unlocked``) вместо полного O(n) скана
+        history.ndjson + delta-журналов на КАЖДЫЙ вызов — этот метод
+        вызывается из ``handle_ping`` на каждый 3с heartbeat HealthMonitor.
+        """
         with self._lock():
-            return len(self._load_active_items_unlocked())
+            return len(self._ensure_active_ids_unlocked())
 
     def _compact_unlocked(self) -> None:
         """Собирает активные записи в новый основной журнал и очищает дельты.
