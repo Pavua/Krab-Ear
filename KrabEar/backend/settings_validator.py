@@ -122,6 +122,10 @@ _RANGE_FIELDS: dict[str, tuple[Any, Any, Any, type]] = {
     "meeting_diar_interval_sec": (60.0, 600.0, 90.0, float),
     "meeting_diar_window_sec": (30.0, 180.0, 90.0, float),
     "meeting_speaker_match_threshold": (0.5, 0.95, 0.72, float),
+    # F1 (спека 2026-08-12): гейт диаризации по длительности на пути диктовки.
+    # 0 разрешён явно (гейт выключен, прежнее поведение) — нижняя граница
+    # диапазона 0.0, не 1.0. Верх — 3600 (1 час), длиннее не имеет смысла.
+    "diarization_min_duration_sec": (0.0, 3600.0, 90.0, float),
 }
 
 # Bool-поля с дефолтными значениями

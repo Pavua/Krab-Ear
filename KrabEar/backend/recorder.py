@@ -94,6 +94,14 @@ class AudioRecorder:
         # worker — см. is_stop_timed_out ниже). Снимается следующим start()
         # и успешным stop()/abort().
         self._stop_timed_out = False
+        # F2 (спека 2026-08-12): счётчик переполнений аудиобуфера за ТЕКУЩУЮ
+        # запись. _preview_loop в recording_core_service.py использует рост
+        # этого счётчика как сигнал «система не успевает вычитывать поток
+        # захвата» — превью-воркер отступает (пропуск + экспоненциальный
+        # бэкофф), чтобы не усугублять переполнение конкурентным инференсом
+        # (живой инцидент: 9 превью-транскрибаций подряд, переполнение буфера,
+        # потерянные кадры → "заикания" в финальном тексте).
+        self._overflow_count = 0
 
     @property
     def is_recording(self) -> bool:
@@ -151,6 +159,15 @@ class AudioRecorder:
         with self._lock:
             return self._stop_timed_out
 
+    @property
+    def overflow_count(self) -> int:
+        """Число переполнений аудиобуфера (``stream.read`` ``overflowed=True``)
+        за ТЕКУЩУЮ запись. Обнуляется в ``start()``. F2 (спека 2026-08-12) —
+        см. комментарий на ``self._overflow_count`` в ``__init__``.
+        """
+        with self._lock:
+            return self._overflow_count
+
     def start(
         self,
         spill: "object | None" = None,
@@ -189,6 +206,9 @@ class AudioRecorder:
                         return False
                     self._chunks = []
                     self._chunks_total_samples = 0
+                    # F2: счётчик переполнений — про ТЕКУЩУЮ запись, старая
+                    # сессия не должна протекать в новую.
+                    self._overflow_count = 0
                     self._stop_event.clear()
                     self._is_recording = True
                     self._started_at = time.monotonic()
@@ -582,6 +602,10 @@ class AudioRecorder:
                         break
                     if overflowed:
                         logger.warning("Переполнение аудиобуфера во время записи")
+                        # F2: считаем переполнения ЭТОЙ записи — RecordingCoreService
+                        # ._preview_loop читает overflow_count как сигнал отступить.
+                        with self._lock:
+                            self._overflow_count += 1
                         self._push_buffer_overflow_error()
                     _max_duration_exceeded = False
                     with self._lock:

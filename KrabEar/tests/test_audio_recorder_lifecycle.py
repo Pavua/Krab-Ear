@@ -517,5 +517,77 @@ class TestClearBufferSafety(unittest.TestCase):
             rec.stop()
 
 
+# ---------------------------------------------------------------------------
+# 11. overflow_count (F2, спека 2026-08-12 — дистанция для превью)
+# ---------------------------------------------------------------------------
+
+def _make_overflow_stream_cm(chunk_size: int = 1600, overflow_at: frozenset = frozenset()) -> MagicMock:
+    """Stream mock, помечающий overflowed=True на заданных (1-based) вызовах read().
+
+    Каждый вызов подтормаживает на 4мс — иначе первый цикл _worker без throttle
+    крутится настолько быстро, что sleep()-окно теста не успевает накопить
+    нужное число вызовов до stop().
+    """
+    stream = MagicMock()
+    call_count = {"n": 0}
+
+    def _read(n: int) -> tuple[np.ndarray, bool]:
+        call_count["n"] += 1
+        time.sleep(0.004)
+        overflowed = call_count["n"] in overflow_at
+        return (np.ones((n, 1), dtype=np.float32) * 0.5, overflowed)
+
+    stream.read.side_effect = _read
+    cm = MagicMock()
+    cm.__enter__ = MagicMock(return_value=stream)
+    cm.__exit__ = MagicMock(return_value=False)
+    return cm
+
+
+class TestOverflowCount(unittest.TestCase):
+    """F2: _worker считает переполнения буфера ТЕКУЩЕЙ записи."""
+
+    def test_overflow_count_increments_on_overflowed_reads(self) -> None:
+        """Ровно два overflowed=True среди прочих reads → overflow_count == 2."""
+        with patch("sounddevice.InputStream", return_value=_make_overflow_stream_cm(overflow_at=frozenset({2, 4}))):
+            rec = AudioRecorder()
+            self.addCleanup(rec.abort)
+            rec.start()
+            time.sleep(0.08)
+            rec.stop()
+        self.assertEqual(rec.overflow_count, 2)
+
+    def test_overflow_count_zero_when_no_overflow(self) -> None:
+        """Обычная запись без переполнений — счётчик остаётся 0."""
+        with patch("sounddevice.InputStream", return_value=_make_stream_cm()):
+            rec = AudioRecorder()
+            self.addCleanup(rec.abort)
+            rec.start()
+            time.sleep(0.05)
+            rec.stop()
+        self.assertEqual(rec.overflow_count, 0)
+
+    def test_overflow_count_resets_on_new_start(self) -> None:
+        """Счётчик — про ТЕКУЩУЮ запись: новый start() обнуляет прошлый счёт."""
+        with patch("sounddevice.InputStream", return_value=_make_overflow_stream_cm(overflow_at=frozenset({1, 2, 3}))):
+            rec = AudioRecorder()
+            self.addCleanup(rec.abort)
+            rec.start()
+            time.sleep(0.05)
+            rec.stop()
+        self.assertGreater(rec.overflow_count, 0, "тест невалиден без хотя бы одного overflow в первой записи")
+
+        with patch("sounddevice.InputStream", return_value=_make_stream_cm()):
+            rec.start()
+            time.sleep(0.03)
+            rec.stop()
+        self.assertEqual(rec.overflow_count, 0, "новый start() должен обнулить счётчик прошлой записи")
+
+    def test_overflow_count_zero_before_any_start(self) -> None:
+        """Fail-safe: свежесозданный рекордер отдаёт 0, а не падает/None."""
+        rec = AudioRecorder()
+        self.assertEqual(rec.overflow_count, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
