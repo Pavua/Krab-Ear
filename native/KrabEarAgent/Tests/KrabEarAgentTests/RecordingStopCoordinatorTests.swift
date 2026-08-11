@@ -446,7 +446,9 @@ final class RecordingStopCoordinatorTests: XCTestCase {
 
     func test_hotkey_stop_uses_async_coordinator_and_token() throws {
         let src = try source("main+HotkeyRecording.swift")
-        guard let range = src.range(of: "func stopRecording() async") else {
+        // 2026-08-11: сигнатура получила autoRetried: Bool = false (мини-волна
+        // авто-дострела) — ищем по префиксу, не по точной старой сигнатуре.
+        guard let range = src.range(of: "func stopRecording(") else {
             XCTFail("Hotkey stop обязан быть асинхронным")
             return
         }

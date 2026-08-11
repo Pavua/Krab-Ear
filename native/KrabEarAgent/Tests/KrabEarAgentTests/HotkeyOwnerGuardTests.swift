@@ -165,8 +165,10 @@ final class HotkeyOwnerGuardTests: XCTestCase {
         let source = try source("main+HotkeyRecording.swift")
         guard
             let catchStart = source.range(of: "} catch {"),
+            // 2026-08-11: сигнатура получила autoRetried: Bool = false (мини-волна
+            // авто-дострела) — ищем по префиксу, не по точной старой сигнатуре.
             let stopStart = source.range(
-                of: "func stopRecording()",
+                of: "func stopRecording(",
                 range: catchStart.upperBound..<source.endIndex
             )
         else {

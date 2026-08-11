@@ -469,6 +469,8 @@ extension AgentAppDelegate {
             activeGenerationOwnerRevision = ownerRevision
             activeGenerationStartRequestID = returnedStartRequestID
             recordingStopRecoveryPending = false
+            dictationStopAutoRetryArmed = false
+            dictationStopAutoRetryBudget = DictationStopAutoRetryGate.fullBudget
             recordingStartRequestID = nil
             if activeGenerationToken == nil {
                 // Совместимость со старым backend: stop останется tokenless,
@@ -597,6 +599,8 @@ extension AgentAppDelegate {
             activeGenerationOwnerRevision = ownerRevision
             activeGenerationStartRequestID = requestID
             recordingStopRecoveryPending = false
+            dictationStopAutoRetryArmed = false
+            dictationStopAutoRetryBudget = DictationStopAutoRetryGate.fullBudget
             recordingStartAmbiguous = false
             recordingStartAmbiguousRequestID = nil
             recordingStartRequestID = nil
@@ -674,7 +678,27 @@ extension AgentAppDelegate {
         }
     }
 
-    func stopRecording() async {
+    /// Авто-дострел отложенного stop_recording после восстановления backend
+    /// (спека 2026-08-11-auto-refire-pending-stop-design.md). Вызывается из
+    /// onHealthyPing-обёртки (main+HealthMonitor.swift) fire-and-forget.
+    func attemptPendingDictationStopRecovery() async {
+        let snapshot = DictationStopAutoRetrySnapshot(
+            recoveryPending: recordingStopRecoveryPending,
+            generationOwner: activeGenerationOwner,
+            isProcessing: isProcessing,
+            quickCaptureActive: quickCaptureActive,
+            remainingBudget: dictationStopAutoRetryBudget
+        )
+        guard DictationStopAutoRetryGate.shouldAttempt(snapshot) else {
+            logger.info("Авто-дострел stop_recording: гейт отклонил (pending=\(snapshot.recoveryPending), owner=\(snapshot.generationOwner ?? "nil"), processing=\(snapshot.isProcessing), qc=\(snapshot.quickCaptureActive), budget=\(snapshot.remainingBudget))")
+            return
+        }
+        dictationStopAutoRetryBudget -= 1
+        logger.info("Авто-дострел отложенного stop_recording (остаток бюджета: \(dictationStopAutoRetryBudget))")
+        await stopRecording(autoRetried: true)
+    }
+
+    func stopRecording(autoRetried: Bool = false) async {
         logger.info("Остановка записи запрошена")
         stopRealtimeOverlayPolling()
         isProcessing = true
@@ -797,6 +821,8 @@ extension AgentAppDelegate {
             activeGenerationOwnerRevision = nil
             activeGenerationStartRequestID = nil
             recordingStopRecoveryPending = false
+            dictationStopAutoRetryArmed = false
+            dictationStopAutoRetryBudget = DictationStopAutoRetryGate.fullBudget
             isRecording = false
             recordingTargetApp = nil
             notify(
@@ -855,6 +881,15 @@ extension AgentAppDelegate {
                 handleTranscriptionResult(text: text, historyId: historyId)
                 // Обновляем индикатор STT движка после успешной транскрибации.
                 historyPanel?.fetchAndUpdateSTTEngineLabel()
+                if autoRetried {
+                    // Авто-дострел (спека 2026-08-11 §2.6): единственная новая
+                    // UX-строка, чтобы не удивлять юзера молчаливой вставкой
+                    // после того, как он уже смирился с ручным повтором.
+                    notify(
+                        title: "Krab Ear",
+                        body: "Остановка достреляна автоматически — текст обработан"
+                    )
+                }
             case "already_stopped":
                 // Идемпотентный stop: backend уже в idle, лишние уведомления пользователю не нужны.
                 logger.info("stop_recording: backend уже idle (already_stopped)")
@@ -885,6 +920,8 @@ extension AgentAppDelegate {
             activeGenerationOwnerRevision = nil
             activeGenerationStartRequestID = nil
             recordingStopRecoveryPending = false
+            dictationStopAutoRetryArmed = false
+            dictationStopAutoRetryBudget = DictationStopAutoRetryGate.fullBudget
             isRecording = false
             recordingTargetApp = nil
             audioDuckingService.restoreAfterRecording()
@@ -908,6 +945,8 @@ extension AgentAppDelegate {
         activeGenerationOwner = nil
         activeGenerationOwnerRevision = nil
         recordingStopRecoveryPending = false
+        dictationStopAutoRetryArmed = false
+        dictationStopAutoRetryBudget = DictationStopAutoRetryGate.fullBudget
         isRecording = false
         isProcessing = false
         audioDuckingService.restoreAfterRecording()
@@ -928,6 +967,12 @@ extension AgentAppDelegate {
     ) {
         activeGenerationOwner = "dictation"
         recordingStopRecoveryPending = true
+        // Авто-дострел (спека 2026-08-11): первый же здоровый ping после
+        // этого провала попробует стоп сам. Только dictation — quick
+        // capture имеет свой recovery-путь (панель), спека §2.7.
+        if activeGenerationOwner == "dictation" {
+            dictationStopAutoRetryArmed = true
+        }
         isRecording = true
         let rawPreview = (result?["preview_text"] as? String ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)

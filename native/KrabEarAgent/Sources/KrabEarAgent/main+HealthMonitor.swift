@@ -278,8 +278,23 @@ extension AgentAppDelegate {
             }
 
             // Кап подряд-эскалаций перевзводится живым backend'ом.
+            // + авто-дострел отложенного stop_recording (спека 2026-08-11):
+            // ОБА действия в ОДНОМ замыкании — слот setOnHealthyPing один,
+            // повторный вызов затёр бы предыдущего подписчика.
             await monitor.setOnHealthyPing {
                 await wedgeGate.noteHealthy()
+                let shouldFire = await MainActor.run { () -> Bool in
+                    guard delegate.dictationStopAutoRetryArmed else { return false }
+                    delegate.dictationStopAutoRetryArmed = false  // disarm ДО hop
+                    return true
+                }
+                if shouldFire {
+                    // fire-and-forget: stopRecording живёт секунды-минуты,
+                    // await заблокировал бы tick-цикл актора (спека §2.2).
+                    Task { @MainActor in
+                        await delegate.attemptPendingDictationStopRecovery()
+                    }
+                }
             }
 
             await monitor.setOnWedgeDetected {

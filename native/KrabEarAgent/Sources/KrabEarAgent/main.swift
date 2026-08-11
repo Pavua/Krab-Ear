@@ -193,6 +193,11 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     var settings: AgentSettings = .default
     var isRecording = false
     var isProcessing = false
+    // Мини-волна 2026-08-11 (авто-дострел отложенного stop_recording):
+    // armed — one-shot «стоп сдался, ждём первого здорового ping'а»;
+    // budget — кап попыток на эпизод recoveryPending (спека §2.2/2.5).
+    var dictationStopAutoRetryArmed = false
+    var dictationStopAutoRetryBudget = DictationStopAutoRetryGate.fullBudget
     /// Не даёт двум async start разделить один snapshot audio ducking.
     let recordingStartGate = RecordingStartGate()
     /// Пока backend ещё не вернул token старта, отпускание hold/второй toggle
