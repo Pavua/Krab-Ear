@@ -626,8 +626,13 @@ These top-level directories are created at runtime and are excluded from version
 `scripts/safe_backend_restart.command` (проверяет `get_recording_state`/`get_meeting_live_state`
 через IPC, отказывается под записью/встречей, `--wait N` — подождать, `--with-rest` — + REST-юнит,
 после kickstart ждёт ping-готовность). Голый kickstart — только когда сокет уже мёртв/завис**
-(скрипт сам это определяет и пропускает проверку). Открытый UX-хвост инцидента: GUI не ретраит
-stop_recording при переподнявшемся сокете и не спасает live-превью — кандидат мини-волны (ROADMAP).
+(скрипт сам это определяет и пропускает проверку). UX-хвост инцидента в основном ЗАКРЫТ волной
+R2 «владение записью» (конец июля): `RecordingStopCoordinator` ретраит транспорт (2×) и поллит
+`stop_in_progress` (до 5 мин), сохраняет generation-токен (`recordingStopRecoveryPending`) и
+повторяет стоп на следующем нажатии хоткея; backend `stop_recording` идемпотентен (replay
+терминального ответа по токену), аудио при рестарте спасает R1 rescue-скан («Восстановленные
+записи» + тост `audio.recording_rescued`). Оставшаяся дельта (проверено разведкой 2026-08-11):
+сохранённый стоп НЕ дострелится сам после реконнекта — только по ручному нажатию.
 
 ### Self-hosted CI runner (macOS ARM64, с 2026-07-24)
 
