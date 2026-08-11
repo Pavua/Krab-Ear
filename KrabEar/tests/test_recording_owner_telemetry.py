@@ -535,7 +535,12 @@ class RecordingOwnerSourceWiringContractTest(unittest.TestCase):
                 re.DOTALL,
             ),
         )
-        stop_start = source.index("func stopRecording()")
+        # 2026-08-12: сигнатура получила параметр (`autoRetried: Bool = false`,
+        # мини-волна авто-дострела) — ищем по префиксу объявления, а не по
+        # точной строке с пустыми скобками. Намерение теста (найти НАЧАЛО тела
+        # stopRecording и проверить owner-ключи внутри) не меняется, но тест
+        # больше не краснеет от любого будущего расширения списка параметров.
+        stop_start = source.index("func stopRecording(")
         stop_body = source[stop_start:]
         self.assertIn('let stopOwner = "dictation"', stop_body)
         self.assertIn('"source": stopOwner', stop_body)
