@@ -136,29 +136,41 @@ class TestAccumulateBelowThreshold(unittest.TestCase):
 
 
 class TestAccumulateAboveThreshold(unittest.TestCase):
-    """test_accumulate_above_3s_triggers_flush."""
+    """test_accumulate_above_3s_triggers_flush.
+
+    F3 (2026-08-12): non-final threshold-flush больше не выполняет STT
+    синхронно — ingest() возвращается немедленно (None), а результат
+    появляется в white-box _completed_result после wait_until_idle().
+    """
 
     def test_accumulate_above_3s_triggers_flush(self) -> None:
-        """Накопление ≥3 с автоматически запускает flush."""
+        """Накопление ≥3 с автоматически запускает (асинхронный) flush."""
         svc = _make_service(stt_text="auto flush")
         result = svc.ingest(_pcm_bytes(_FLUSH_THRESHOLD_SEC), 16000, "ru", False)
-        self.assertIsNotNone(result)
-        self.assertEqual(result["text"], "auto flush")
+        self.assertIsNone(result, "non-final flush асинхронный — ingest() не блокирует")
+        self.assertTrue(svc.wait_until_idle(timeout=2.0), "воркер не догнал очередь")
+        self.assertIsNotNone(svc._completed_result)
+        self.assertEqual(svc._completed_result["text"], "auto flush")
+        svc.close()
 
     def test_flush_resets_buffer_to_zero(self) -> None:
-        """После flush буфер обнуляется."""
+        """После flush буфер обнуляется (синхронно, независимо от асинхронности STT)."""
         svc = _make_service()
         svc.ingest(_pcm_bytes(_FLUSH_THRESHOLD_SEC), 16000, "ru", False)
         self.assertAlmostEqual(svc.buffer_duration_sec(16000), 0.0, places=5)
+        svc.close()
 
     def test_multiple_chunks_trigger_flush_at_boundary(self) -> None:
-        """Два чанка по 1.6 с → второй пересекает границу и вызывает flush."""
+        """Два чанка по 1.6 с → второй пересекает границу и запускает (асинхронный) flush."""
         svc = _make_service(stt_text="crossed boundary")
         r1 = svc.ingest(_pcm_bytes(1.6), 16000, "ru", False)
         self.assertIsNone(r1)
         r2 = svc.ingest(_pcm_bytes(1.6), 16000, "ru", False)
-        self.assertIsNotNone(r2)
-        self.assertEqual(r2["text"], "crossed boundary")
+        self.assertIsNone(r2, "non-final flush асинхронный — ingest() не блокирует")
+        self.assertTrue(svc.wait_until_idle(timeout=2.0), "воркер не догнал очередь")
+        self.assertIsNotNone(svc._completed_result)
+        self.assertEqual(svc._completed_result["text"], "crossed boundary")
+        svc.close()
 
 
 class TestIsFinalFlag(unittest.TestCase):
@@ -260,25 +272,34 @@ class TestEmitsLiveSubsResult(unittest.TestCase):
     """test_emits_live_subs_result_via_eventbus."""
 
     def test_emits_live_subs_result_via_eventbus(self) -> None:
-        """При flush emit_typed вызывается с EventType.LIVE_SUBS_RESULT."""
+        """При flush emit_typed вызывается с EventType.LIVE_SUBS_RESULT.
+
+        F3 (2026-08-12): emit_typed вызывается из фонового воркера — ждём
+        wait_until_idle() ВНУТРИ блока patch, иначе ассерт может выполниться
+        раньше воркера (гонка).
+        """
         from contracts.registry import EventType
         from contracts.live_subs_events import LiveSubsResult
 
         svc = _make_service(stt_text="event test")
         with patch("backend.live_subs_service.event_bus") as mock_bus:
             svc.ingest(_pcm_bytes(_FLUSH_THRESHOLD_SEC), 16000, "ru", False)
+            self.assertTrue(svc.wait_until_idle(timeout=2.0), "воркер не догнал очередь")
             mock_bus.emit_typed.assert_called_once()
             event_type_arg, payload_arg = mock_bus.emit_typed.call_args[0]
             self.assertEqual(event_type_arg, EventType.LIVE_SUBS_RESULT)
             self.assertIsInstance(payload_arg, LiveSubsResult)
+        svc.close()
 
     def test_emits_correct_text_in_payload(self) -> None:
         """Payload содержит корректный text из STT."""
         svc = _make_service(stt_text="payload check")
         with patch("backend.live_subs_service.event_bus") as mock_bus:
             svc.ingest(_pcm_bytes(_FLUSH_THRESHOLD_SEC), 16000, "ru", False)
+            self.assertTrue(svc.wait_until_idle(timeout=2.0), "воркер не догнал очередь")
             _, payload = mock_bus.emit_typed.call_args[0]
             self.assertEqual(payload.text, "payload check")
+        svc.close()
 
     def test_no_emit_without_flush(self) -> None:
         """emit_typed не вызывается, пока буфер не достиг порога."""
@@ -294,17 +315,22 @@ class TestTranslationFailureContinues(unittest.TestCase):
     def test_translation_failure_continues_with_stt_only(self) -> None:
         """Ошибка перевода не прерывает flush: text возвращается, translation=None."""
         svc = _make_service(stt_text="stt only", translate_raises=True)
-        result = svc.ingest(_pcm_bytes(_FLUSH_THRESHOLD_SEC), 16000, "ru", False)
+        svc.ingest(_pcm_bytes(_FLUSH_THRESHOLD_SEC), 16000, "ru", False)
+        self.assertTrue(svc.wait_until_idle(timeout=2.0), "воркер не догнал очередь")
+        result = svc._completed_result
         self.assertIsNotNone(result)
         self.assertEqual(result["text"], "stt only")
         self.assertIsNone(result["translation"])
+        svc.close()
 
     def test_translation_failure_event_still_emitted(self) -> None:
         """Даже при ошибке перевода событие EventBus эмитируется."""
         svc = _make_service(stt_text="emit anyway", translate_raises=True)
         with patch("backend.live_subs_service.event_bus") as mock_bus:
             svc.ingest(_pcm_bytes(_FLUSH_THRESHOLD_SEC), 16000, "ru", False)
+            self.assertTrue(svc.wait_until_idle(timeout=2.0), "воркер не догнал очередь")
             mock_bus.emit_typed.assert_called_once()
+        svc.close()
 
     def test_translation_not_called_when_target_is_none(self) -> None:
         """target_lang='none' → translator.translate не вызывается."""
@@ -340,9 +366,12 @@ class TestUnicodeTextInSubtitle(unittest.TestCase):
     def test_unicode_translation_returned(self) -> None:
         """Unicode перевод корректно передаётся в результате."""
         svc = _make_service(stt_text="hello", translated="Привет, мир! 🌏")
-        result = svc.ingest(_pcm_bytes(_FLUSH_THRESHOLD_SEC), 16000, "ru", False)
+        svc.ingest(_pcm_bytes(_FLUSH_THRESHOLD_SEC), 16000, "ru", False)
+        self.assertTrue(svc.wait_until_idle(timeout=2.0), "воркер не догнал очередь")
+        result = svc._completed_result
         self.assertIsNotNone(result)
         self.assertEqual(result["translation"], "Привет, мир! 🌏")
+        svc.close()
 
 
 class TestBufferGrowsCorrectly(unittest.TestCase):

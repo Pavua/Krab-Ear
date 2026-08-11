@@ -2347,6 +2347,18 @@ class BackendService:
             except Exception:
                 logger.exception("RecapScheduler.stop() raised during close()")
 
+        # Stop LiveSubsService flush-worker daemon thread (F3, live-subs backpressure,
+        # 2026-08-12) — same CI daemon-thread teardown rule as DiskSpaceMonitor/
+        # RecapScheduler above (feedback_backendservice_teardown_ci.md). The worker
+        # only starts lazily on the first ingest() that crosses the flush threshold,
+        # so most tests never spawn it — but close() must still cover the case.
+        live_subs = getattr(self, "_live_subs", None)
+        if live_subs is not None:
+            try:
+                live_subs.close()
+            except Exception:
+                logger.exception("LiveSubsService.close() raised during close()")
+
         # Stop PurgeScheduler daemon thread — mirrors the RecapScheduler stop above.
         purge_scheduler = getattr(self, "_purge_scheduler", None)
         if purge_scheduler is not None:

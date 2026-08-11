@@ -233,16 +233,26 @@ class TestPrivacyModeSkipsEmit(unittest.TestCase):
         self.assertTrue(result.get("flushed"), "flushed must be True when privacy off")
 
     def test_privacy_mode_off_flush_emits(self) -> None:
-        """_flush() emits event when privacy mode is off and buffer has data."""
+        """_process_window() emits event when privacy mode is off and buffer has data.
+
+        F3 (2026-08-12): _flush() было расщеплено на снапшот-под-локом
+        (теперь в ingest()/stop()) и обработку-в-воркере (_process_window()) —
+        последняя принимает уже готовый window-dict вместо (sample_rate,
+        target_lang) и self._buffer.
+        """
         svc = _make_service(stt_text="hello", privacy_enabled=False)
-        # Prime buffer with 1 s of audio
         sample_rate = 16000
-        with svc._lock:
-            svc._buffer.append(np.zeros(sample_rate, dtype=np.float32))
-            svc._buffer_samples = sample_rate
+        window = {
+            "seq": 1,
+            "audio": np.zeros(sample_rate, dtype=np.float32),
+            "sample_rate": sample_rate,
+            "target_lang": "off",
+            "start_ts": 0.0,
+            "end_ts": 1.0,
+        }
 
         with patch("backend.live_subs_service.event_bus") as mock_bus:
-            result = svc._flush(sample_rate=sample_rate, target_lang="off")
+            result = svc._process_window(window)
 
         mock_bus.emit_typed.assert_called_once()
         self.assertEqual(result["text"], "hello")

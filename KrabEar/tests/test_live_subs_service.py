@@ -87,53 +87,79 @@ class TestLiveSubsBuffer(unittest.TestCase):
 
 
 class TestLiveSubsFlush(unittest.TestCase):
-    """Тесты flush-логики."""
+    """Тесты flush-логики.
+
+    F3 (2026-08-12, backpressure): non-final threshold-flush больше не
+    выполняет STT синхронно в вызывающем треде — ingest() кладёт снапшот в
+    фоновый воркер и возвращается немедленно (None). Тесты, проверяющие
+    СОДЕРЖИМОЕ результата non-final flush, ждут воркер детерминированно через
+    wait_until_idle() и читают white-box _completed_result (тот же стиль
+    прямого доступа к внутренностям, что уже используется в этом файле для
+    _buffer/_lock/_translator). is_final=True остаётся синхронным (см.
+    test_flush_on_is_final_true) — контракт не менялся.
+    """
 
     def test_flush_on_3s_boundary(self) -> None:
-        """Чанк ≥3 с → возвращает результат с text."""
+        """Чанк ≥3 с → ingest() возвращается немедленно (None), воркер флашит асинхронно."""
         svc = _make_service(stt_text="world")
         result = svc.ingest(_pcm_chunk(3.0), 16000, "ru", False)
-        self.assertIsNotNone(result)
-        self.assertEqual(result["text"], "world")
+        self.assertIsNone(result, "non-final flush теперь асинхронный — ingest() не блокирует")
+        self.assertTrue(svc.wait_until_idle(timeout=2.0), "воркер не догнал очередь")
+        self.assertIsNotNone(svc._completed_result)
+        self.assertEqual(svc._completed_result["text"], "world")
+        svc.close()
 
     def test_flush_on_is_final_true(self) -> None:
-        """is_final=True → немедленный flush даже при малом буфере."""
+        """is_final=True → немедленный СИНХРОННЫЙ flush даже при малом буфере (контракт сохранён)."""
         svc = _make_service(stt_text="final text")
         result = svc.ingest(_pcm_chunk(0.5), 16000, "ru", True)
         self.assertIsNotNone(result)
         self.assertEqual(result["text"], "final text")
+        svc.close()
 
     def test_flush_resets_buffer(self) -> None:
-        """После flush буфер обнуляется."""
+        """После flush буфер обнуляется — синхронно, независимо от асинхронности STT."""
         svc = _make_service()
         svc.ingest(_pcm_chunk(3.0), 16000, "ru", False)
         self.assertAlmostEqual(svc.buffer_duration_sec(16000), 0.0, places=2)
+        svc.close()
 
     def test_flush_returns_translation(self) -> None:
-        """Flush включает перевод при указанном target_lang."""
+        """Flush включает перевод при указанном target_lang (проверено после wait_until_idle)."""
         svc = _make_service(stt_text="hello", translated="привет")
-        result = svc.ingest(_pcm_chunk(3.0), 16000, "ru", False)
-        self.assertIsNotNone(result)
-        self.assertEqual(result["translation"], "привет")
+        svc.ingest(_pcm_chunk(3.0), 16000, "ru", False)
+        self.assertTrue(svc.wait_until_idle(timeout=2.0))
+        self.assertIsNotNone(svc._completed_result)
+        self.assertEqual(svc._completed_result["translation"], "привет")
+        svc.close()
 
     def test_flush_no_translation_when_target_off(self) -> None:
         """target_lang='off' → translation=None, translator не вызывается."""
         svc = _make_service()
-        result = svc.ingest(_pcm_chunk(3.0), 16000, "off", False)
-        self.assertIsNotNone(result)
-        self.assertIsNone(result["translation"])
+        svc.ingest(_pcm_chunk(3.0), 16000, "off", False)
+        self.assertTrue(svc.wait_until_idle(timeout=2.0))
+        self.assertIsNotNone(svc._completed_result)
+        self.assertIsNone(svc._completed_result["translation"])
         svc._translator.translate.assert_not_called()
+        svc.close()
 
 
 class TestLiveSubsEventBus(unittest.TestCase):
-    """Тесты эмита EventBus при flush."""
+    """Тесты эмита EventBus при flush.
+
+    F3: emit_typed теперь вызывается из фонового воркера, а не синхронно
+    внутри ingest() — ждём wait_until_idle() ДО проверки мока, иначе
+    ассерт мог бы выполниться раньше, чем воркер успел обработать окно.
+    """
 
     def test_event_emitted_on_flush(self) -> None:
-        """При flush emit_typed вызывается ровно один раз."""
+        """При flush emit_typed вызывается ровно один раз (после того, как воркер догнал очередь)."""
         svc = _make_service(stt_text="bus test")
         with patch("backend.live_subs_service.event_bus") as mock_bus:
             svc.ingest(_pcm_chunk(3.0), 16000, "ru", False)
+            self.assertTrue(svc.wait_until_idle(timeout=2.0))
             mock_bus.emit_typed.assert_called_once()
+        svc.close()
 
     def test_event_type_is_live_subs_result(self) -> None:
         """Тип события — LIVE_SUBS_RESULT."""
@@ -141,8 +167,10 @@ class TestLiveSubsEventBus(unittest.TestCase):
         svc = _make_service()
         with patch("backend.live_subs_service.event_bus") as mock_bus:
             svc.ingest(_pcm_chunk(3.0), 16000, "ru", False)
+            self.assertTrue(svc.wait_until_idle(timeout=2.0))
             call_args = mock_bus.emit_typed.call_args
             self.assertEqual(call_args[0][0], EventType.LIVE_SUBS_RESULT)
+        svc.close()
 
 
 class TestLiveSubsStop(unittest.TestCase):
@@ -186,8 +214,14 @@ class TestLiveSubsIPCHandlers(unittest.TestCase):
         self.assertEqual(result["status"], "accepted")
         self.assertIn("buffer_duration_sec", result)
 
-    def test_handle_ingest_flushed(self) -> None:
-        """handle_ingest: чанк ≥3 с → status=flushed, содержит text."""
+    def test_handle_ingest_non_final_threshold_is_queued_not_flushed(self) -> None:
+        """F3: non-final чанк ≥3 с → status=accepted немедленно (flush уходит в фон).
+
+        Ранее (до F3) handle_ingest выполнял STT синхронно в этом же IPC-треде
+        и возвращал status=flushed с текстом сразу. Теперь STT никогда не
+        блокирует IPC-хендлер — воркер обработает окно асинхронно, а текст
+        уходит наружу только через EventBus (live_subs.result).
+        """
         svc = _make_service(stt_text="ipc test")
         params = {
             "audio_chunk": _b64_chunk(3.0),
@@ -196,8 +230,25 @@ class TestLiveSubsIPCHandlers(unittest.TestCase):
             "is_final": False,
         }
         result = svc.handle_ingest(params)
+        self.assertEqual(result["status"], "accepted")
+        self.assertTrue(svc.wait_until_idle(timeout=2.0), "воркер не догнал очередь")
+        self.assertIsNotNone(svc._completed_result)
+        self.assertEqual(svc._completed_result["text"], "ipc test")
+        svc.close()
+
+    def test_handle_ingest_is_final_flushed(self) -> None:
+        """handle_ingest: is_final=True → status=flushed синхронно, содержит text (контракт сохранён)."""
+        svc = _make_service(stt_text="ipc final test")
+        params = {
+            "audio_chunk": _b64_chunk(0.5),
+            "target_lang": "ru",
+            "sample_rate": 16000,
+            "is_final": True,
+        }
+        result = svc.handle_ingest(params)
         self.assertEqual(result["status"], "flushed")
-        self.assertEqual(result["text"], "ipc test")
+        self.assertEqual(result["text"], "ipc final test")
+        svc.close()
 
     def test_handle_ingest_invalid_base64(self) -> None:
         """handle_ingest: невалидный base64 → ValueError."""
@@ -227,25 +278,35 @@ class TestLiveSubsTranslationAttribute(unittest.TestCase):
         Before the fix: tr.translated_text raised AttributeError on the real
         TranslationResult dataclass (field is .text, not .translated_text).
         The except clause swallowed it → translation=None silently every time.
+
+        F3 (2026-08-12): non-final flush больше не синхронный — ждём
+        wait_until_idle() и читаем white-box _completed_result вместо
+        прямого return-значения ingest().
         """
         svc = _make_service(stt_text="hello world", translated="привет мир")
-        result = svc.ingest(_pcm_chunk(3.0), 16000, "ru", False)
+        svc.ingest(_pcm_chunk(3.0), 16000, "ru", False)
+        self.assertTrue(svc.wait_until_idle(timeout=2.0), "воркер не догнал очередь")
+        result = svc._completed_result
         self.assertIsNotNone(result, "flush должен вернуть результат")
         self.assertEqual(
             result["translation"],
             "привет мир",
             "translation должен содержать переведённый текст, а не None",
         )
+        svc.close()
 
     def test_translation_is_not_none_on_valid_target_lang(self) -> None:
         """translation в ответе никогда не None при валидном target_lang и тексте."""
         svc = _make_service(stt_text="test sentence", translated="тестовое предложение")
-        result = svc.ingest(_pcm_chunk(3.0), 16000, "ru", False)
+        svc.ingest(_pcm_chunk(3.0), 16000, "ru", False)
+        self.assertTrue(svc.wait_until_idle(timeout=2.0))
+        result = svc._completed_result
         self.assertIsNotNone(result)
         self.assertIsNotNone(
             result["translation"],
             "translation не должен быть None когда STT вернул текст и target_lang задан",
         )
+        svc.close()
 
     def test_real_translation_result_attribute_accessible(self) -> None:
         """TranslationResult.text существует и доступен (контракт dataclass)."""
@@ -267,6 +328,7 @@ class TestLiveSubsTranslationAttribute(unittest.TestCase):
         """translator.translate должен получать network_mode='offline_default', не 'offline'."""
         svc = _make_service(stt_text="check mode", translated="проверка режима")
         svc.ingest(_pcm_chunk(3.0), 16000, "ru", False)
+        self.assertTrue(svc.wait_until_idle(timeout=2.0), "воркер не догнал очередь")
         call_kwargs = svc._translator.translate.call_args
         self.assertIsNotNone(call_kwargs)
         network_mode_passed = call_kwargs.kwargs.get(
@@ -277,6 +339,7 @@ class TestLiveSubsTranslationAttribute(unittest.TestCase):
             "offline_default",
             "network_mode должен быть 'offline_default', не 'offline'",
         )
+        svc.close()
 
 
 class TestLiveSubsIsolation(unittest.TestCase):
