@@ -200,10 +200,20 @@ class RetentionTest(unittest.TestCase):
         # Имена ЗАВЕДОМО младше реальных ISO-timestamp имён (генерируются от
         # текущего UTC-года "20xx...") — сортировка строкой гарантированно
         # ставит их раньше нового каталога, который создаст check_and_collect.
+        import os as _os
+        import time as _time
+        from backend.shutdown_forensics import _COLLECT_MIN_GAP_SEC
+
         old_dirs = []
+        # mtime фикстур состариваем за окно crash-loop rate-limit'а
+        # (мини-волна 2026-08-11): намерение ЭТОГО теста — retention, а
+        # свежесозданные mkdir-каталоги иначе выглядят «только что собранной
+        # форензикой» и check_and_collect легитимно пропустил бы сбор.
+        stale = _time.time() - _COLLECT_MIN_GAP_SEC - 60
         for i in range(6):
             d = forensics_root / f"00000000_00000{i}_000000"
             d.mkdir()
+            _os.utime(d, (stale, stale))
             old_dirs.append(d)
 
         with patch(
@@ -334,6 +344,147 @@ class PersistMarkerIntegrationTest(unittest.TestCase):
         handler.bind(FakeService())
         handler.shutdown()  # не должно бросить
         self.assertTrue((self.data_dir / _SHUTDOWN_INFO_FILE).exists())
+
+
+class CollectRateLimitTest(unittest.TestCase):
+    """Rate-limit самого СБОРА форензики (мини-волна 2026-08-11).
+
+    Контекст: launchd (KeepAlive=true, ThrottleInterval=5) в crash-loop'е
+    поднимает backend до ~720 раз/час, и КАЖДЫЙ подъём прогонял полный
+    check_and_collect — два subprocess-вызова с таймаутами до 30с каждый +
+    новый каталог forensics/<ts>/. Существующий дисковый лимит
+    (UNCLEAN_RESTART_REPORT_MIN_GAP_SEC, service.py) ограничивает только
+    ОТПРАВКУ события в Sentry — стоимость самого сбора не трогал.
+
+    Семантика: UNCLEAN-вердикт с недавним (моложе _COLLECT_MIN_GAP_SEC)
+    уже собранным каталогом форензики → дорогие шаги пропускаются, вердикт
+    "unclean_rate_limited" (сам ФАКТ unclean-смерти НЕ теряется — отправка
+    события живёт своим лимитом). Источник правды о последнем сборе —
+    mtime новейшего подкаталога forensics/ (без нового state-файла).
+    Направление отказа: не смогли прочитать mtime → СОБИРАЕМ (fail-open в
+    сторону форензики — недостающая экономия лучше недостающей форензики).
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self._tmp.name)
+        write_alive_marker(self.data_dir)
+        self.marker_path = self.data_dir / _MARKER
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _collect_once(self):
+        with patch(
+            "backend.shutdown_forensics.subprocess.run",
+            return_value=_FakeCompletedProcess(stdout="pass one"),
+        ) as mock_run:
+            status = check_and_collect(
+                data_dir=self.data_dir, log_dirs=[], timeout_sec=5.0,
+            )
+        return status, mock_run
+
+    def test_second_unclean_within_gap_skips_collection(self):
+        status1, run1 = self._collect_once()
+        self.assertEqual(status1, "unclean_collected")
+        self.assertGreater(len(run1.call_args_list), 0)
+
+        # Вторая UNCLEAN-смерть сразу же (crash-loop): маркер снова на месте.
+        write_alive_marker(self.data_dir)
+        status2, run2 = self._collect_once()
+
+        self.assertEqual(
+            status2, "unclean_rate_limited",
+            "повторный сбор в пределах _COLLECT_MIN_GAP_SEC обязан быть "
+            "пропущен — каждый подъём crash-loop'а гонял 2 subprocess'а",
+        )
+        self.assertEqual(
+            run2.call_args_list, [],
+            "rate-limited ветка НЕ должна звать subprocess вовсе",
+        )
+        subdirs = list((self.data_dir / "forensics").iterdir())
+        self.assertEqual(
+            len(subdirs), 1,
+            "rate-limited ветка НЕ должна плодить новые каталоги форензики",
+        )
+        self.assertFalse(
+            self.marker_path.exists(),
+            "маркер обязан сниматься и в rate-limited ветке — иначе он "
+            "накапливает ложный UNCLEAN-сигнал поверх текущей жизни",
+        )
+
+    def test_stale_forensics_dir_older_than_gap_collects_again(self):
+        import os as _os
+        import time as _time
+
+        status1, _ = self._collect_once()
+        self.assertEqual(status1, "unclean_collected")
+
+        # Состариваем единственный собранный каталог за пределы окна.
+        from backend.shutdown_forensics import _COLLECT_MIN_GAP_SEC
+        old = _time.time() - _COLLECT_MIN_GAP_SEC - 60
+        forensics_root = self.data_dir / "forensics"
+        newest = sorted(forensics_root.iterdir())[-1]
+        _os.utime(newest, (old, old))
+
+        write_alive_marker(self.data_dir)
+        status2, run2 = self._collect_once()
+        self.assertEqual(status2, "unclean_collected")
+        self.assertGreater(
+            len(run2.call_args_list), 0,
+            "каталог старше окна — полный сбор обязан выполниться снова",
+        )
+
+    def test_mtime_read_failure_fails_open_to_collection(self):
+        status1, _ = self._collect_once()
+        self.assertEqual(status1, "unclean_collected")
+
+        write_alive_marker(self.data_dir)
+        with patch(
+            "backend.shutdown_forensics._latest_forensics_mtime",
+            side_effect=RuntimeError("stat broken"),
+        ):
+            status2, run2 = self._collect_once()
+        self.assertEqual(
+            status2, "unclean_collected",
+            "ошибка чтения mtime → fail-open в сторону СБОРА, не экономии",
+        )
+
+    def test_no_prior_forensics_dir_collects_normally(self):
+        # Пустой data_dir (forensics/ ещё не существует) — первый UNCLEAN
+        # всегда собирает; rate-limit включается только со второго.
+        status, run = self._collect_once()
+        self.assertEqual(status, "unclean_collected")
+        self.assertGreater(len(run.call_args_list), 0)
+
+
+class RateLimitedVerdictStillReportedSourceContractTest(unittest.TestCase):
+    """service.py::_report_unclean_restart обязан трактовать
+    "unclean_rate_limited" как unclean-вердикт для ОТПРАВКИ события — у
+    отправки СВОЙ дисковый лимит (UNCLEAN_RESTART_REPORT_MIN_GAP_SEC);
+    экономия на сборе не должна глушить сигнал о смертях. AST здесь
+    избыточен: пиним вхождение вердикта в тот же кортеж-allowlist, где
+    живут два существующих (проверяем оба, чтобы регекс не «прошёл» на
+    совсем другом кортеже)."""
+
+    def test_verdict_in_report_allowlist(self):
+        service_src = (
+            PROJECT_ROOT / "backend" / "service.py"
+        ).read_text(encoding="utf-8")
+        import re
+        m = re.search(
+            r"if verdict not in \(([^)]*)\)", service_src,
+        )
+        self.assertIsNotNone(m, "не найден вердикт-allowlist в _report_unclean_restart")
+        allowlist = m.group(1)
+        for expected in (
+            "unclean_collected", "unclean_collect_failed", "unclean_rate_limited",
+        ):
+            self.assertIn(
+                expected, allowlist,
+                f"вердикт {expected!r} обязан быть в allowlist отправки — "
+                "иначе смерти в crash-loop'е перестанут репортиться вовсе",
+            )
 
 
 if __name__ == "__main__":

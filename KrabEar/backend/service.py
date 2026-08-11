@@ -2066,7 +2066,13 @@ class BackendService:
         try/except: восстановление записей идёт следом и не должно падать
         из-за телеметрии.
         """
-        if verdict not in ("unclean_collected", "unclean_collect_failed"):
+        # "unclean_rate_limited" (2026-08-11) — смерть UNCLEAN, но дорогой
+        # СБОР пропущен crash-loop-защитой (shutdown_forensics). Для ОТПРАВКИ
+        # это полноценный unclean: у неё свой независимый дисковый лимит ниже;
+        # экономия на сборе не должна глушить сигнал о смертях.
+        if verdict not in (
+            "unclean_collected", "unclean_collect_failed", "unclean_rate_limited",
+        ):
             return
         try:
             from datetime import datetime, timezone
