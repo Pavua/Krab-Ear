@@ -1234,4 +1234,15 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # прежнее поведение (гейт выключен). Путь встречи (MeetingSessionService →
     # engine.diarize_window()) этот гейт НЕ затрагивает — другой метод.
     "diarization_min_duration_sec": 90.0,
+    # --- Read-path бюджет ожидания flock настроек (спека 2026-08-12
+    #     settings-read-nonblocking) ---
+    # cached_settings() на промахе TTL раньше уходил в StateStore.load_settings(),
+    # который берёт ТОТ ЖЕ эксклюзивный flock, что и вся история — долгая
+    # операция с историей (например _load_active_items_with_lock под зависшим
+    # MLX) подвешивала privacy-гейт КАЖДОГО IPC-хендлера на десятки секунд.
+    # Значение — верхняя граница ожидания ИМЕННО для этого read-path; сама
+    # блокировка (`_lock_acquire_timeout_sec`, 30с) для остальных ~50
+    # call sites не меняется. 0 — прежнее поведение (ждать сколько нужно,
+    # т.е. обычный таймаут StateStore._lock()).
+    "settings_read_lock_timeout_sec": 0.5,
 }

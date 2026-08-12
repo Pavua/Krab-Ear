@@ -26,6 +26,7 @@ from backend.models import DEFAULT_SETTINGS
 from backend.observability import add_breadcrumb
 from backend.settings_backup import SENSITIVE_FIELDS as _SENSITIVE_FIELDS_BACKUP, SettingsBackup
 from backend.settings_validator import CURRENT_SCHEMA_VERSION, SettingsValidator
+from backend.state_store import StateStoreLockTimeout
 
 _log = logging.getLogger(__name__)
 
@@ -122,6 +123,10 @@ class SettingsService:
         # BackendService registers a hook to propagate hot-reloaded values to
         # live collaborators (e.g. LLMRewriter.set_api_key).
         self._after_save_hooks: list[Any] = []
+        # Спека 2026-08-12 settings-read-nonblocking: гасит лог-шторм при
+        # затяжной контенции — WARNING пишется один раз на эпизод (пока не
+        # придёт УСПЕШНОЕ чтение), а не на каждый промах TTL-кэша.
+        self._read_lock_timeout_warned: bool = False
 
     def register_after_save_hook(self, hook: Any) -> None:
         """Register a callable(old_settings, new_settings) fired after each set_settings save."""
@@ -132,11 +137,35 @@ class SettingsService:
     # ------------------------------------------------------------------
 
     def cached_settings(self) -> dict[str, Any]:
-        """Возвращает копию настроек с TTL-кэшем (5 сек). Избегает повторного чтения файла."""
+        """Возвращает копию настроек с TTL-кэшем (5 сек). Избегает повторного чтения файла.
+
+        На промахе TTL раньше уходил в ``StateStore.load_settings()`` без
+        ограничения ожидания — тот берёт эксклюзивный flock, общий со всей
+        историей (спека 2026-08-12 settings-read-nonblocking). Долгая
+        операция с историей в другом потоке подвешивала privacy-гейт КАЖДОГО
+        IPC-хендлера на десятки секунд. Теперь чтение ограничено коротким
+        read-path бюджетом (``settings_read_lock_timeout_sec``); не уложились
+        — ``_on_read_lock_timeout()`` отдаёт fail-closed фоллбэк вместо
+        блокировки.
+        """
         now = time.monotonic()
         if self._cache is not None and (now - self._cache_ts) < self._cache_ttl:
             return dict(self._cache)
-        raw = self.store.load_settings()
+
+        read_timeout = self._read_lock_timeout_budget()
+        try:
+            if read_timeout > 0:
+                raw = self.store.load_settings(lock_timeout_sec=read_timeout)
+            else:
+                # 0 = прежнее поведение (без read-path override — просто
+                # обычный call site, ждёт сколько нужно инстансу StateStore).
+                raw = self.store.load_settings()
+        except StateStoreLockTimeout:
+            return self._on_read_lock_timeout(read_timeout)
+
+        # Успешное чтение закрывает эпизод контенции (если он был) — следующий
+        # промах TTL снова получит ровно одну WARNING, а не тишину навсегда.
+        self._read_lock_timeout_warned = False
         # Validate and auto-fix on load — warnings only, no hard errors
         result_v = self._validator.validate(raw)
         if result_v.warnings:
@@ -145,6 +174,65 @@ class SettingsService:
         self._cache = result_v.fixed
         self._cache_ts = now
         return dict(self._cache)
+
+    def _read_lock_timeout_budget(self) -> float:
+        """Бюджет ожидания flock для текущего чтения (settings_read_lock_timeout_sec).
+
+        Источник: последнее известное (пусть протухшее по TTL) значение
+        кэша, если оно уже было хоть раз успешно прочитано; иначе — дефолт
+        модуля ``DEFAULT_SETTINGS`` (холодный старт). Само значение уже
+        приходит клампленным диапазоном ``_RANGE_FIELDS`` из предыдущего
+        ``validate()`` — здесь только защита от испорченного/нечислового
+        значения, которое могло попасть сюда до первой валидации.
+        """
+        source = self._cache if self._cache is not None else DEFAULT_SETTINGS
+        try:
+            budget = float(source.get("settings_read_lock_timeout_sec", 0.5))
+        except (TypeError, ValueError):
+            budget = 0.5
+        if not math.isfinite(budget) or budget < 0:
+            budget = 0.5
+        return budget
+
+    def _on_read_lock_timeout(self, read_timeout: float) -> dict[str, Any]:
+        """Fail-closed фоллбэк на StateStoreLockTimeout из read-path бюджета.
+
+        Направление отказа — ВСЕГДА в сторону приватности (спека §"Направление
+        отказа — fail-closed по приватности"): неизвестность настроек под
+        контенцией трактуется как «приватность включена», никогда как
+        privacy_mode_enabled=False по умолчанию.
+
+        1. Есть последнее известное значение кэша (даже протухшее по TTL) —
+           отдаём его как есть: оно уже прошло валидацию и несёт РЕАЛЬНОЕ
+           значение privacy_mode_enabled, которое владелец выставил в прошлый
+           успешный раз.
+        2. Известного значения нет вовсе (холодный старт backend-а + контенция
+           settings.json сразу же) — отдаём дефолты, но с принудительным
+           privacy_mode_enabled=True: неизвестность ВСЕГДА трактуется как
+           «приватность включена», иначе транскрипты потекут в
+           аналитику/экспорт/Sentry, пока не разрешится контенция.
+        """
+        if not self._read_lock_timeout_warned:
+            # read_timeout<=0 значит read-path бюджет выключен (0 = прежнее
+            # поведение) — реально сработал ОБЩИЙ инстанс-таймаут StateStore,
+            # а не этот бюджет, поэтому не печатаем вводящие в заблуждение
+            # "0.00с" — это отдельная формулировка.
+            budget_desc = f"{read_timeout:.2f}с" if read_timeout > 0 else "выключенным read-path бюджетом"
+            _log.warning(
+                "SettingsService.cached_settings(): не удалось прочитать настройки за "
+                "%s (StateStore._lock() занят другим держателем) — отдаём %s вместо "
+                "блокировки хендлера",
+                budget_desc,
+                "последнее известное значение" if self._cache is not None else
+                "fail-closed дефолты (privacy_mode_enabled=True)",
+                extra={"read_timeout_sec": read_timeout, "has_cache": self._cache is not None},
+            )
+            self._read_lock_timeout_warned = True
+        if self._cache is not None:
+            return dict(self._cache)
+        fallback = dict(DEFAULT_SETTINGS)
+        fallback["privacy_mode_enabled"] = True
+        return fallback
 
     def invalidate_cache(self) -> None:
         """Сбрасывает кэш настроек (вызывать после save_settings)."""

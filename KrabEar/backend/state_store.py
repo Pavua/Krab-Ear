@@ -284,8 +284,16 @@ class StateStore:
             logger.exception("error_bus.push failed for code=%s", code)
 
     @contextmanager
-    def _lock(self) -> Iterator[None]:
+    def _lock(self, timeout_sec: float | None = None) -> Iterator[None]:
         """Глобальный lock для журналов истории и настроек.
+
+        ``timeout_sec``: опциональный override бюджета ожидания ИМЕННО для
+        этого вызова (спека 2026-08-12 settings-read-nonblocking — короткий
+        read-path бюджет для ``load_settings()`` из ``SettingsService.
+        cached_settings()``). ``None`` (по умолчанию) — обычное поведение,
+        используется общий ``self._lock_acquire_timeout_sec`` инстанса, как
+        и для всех остальных ~50 call sites этого метода — их поведение
+        этим параметром не затрагивается.
 
         Реентерабелен ПО ТРЕДУ (per-thread depth-counter): повторный вход с
         того же треда — no-op поверх уже взятого лока, вместо самозаклина на
@@ -328,6 +336,13 @@ class StateStore:
             self._lock_depth[tid] = depth + 1
         if acquired_here:
             label = self._lock_caller_label()
+            # timeout_sec=None → обычное поведение (общий инстанс-таймаут);
+            # явный override используется только вызывающей стороной, которая
+            # его передала (см. докстринг выше) — все остальные call sites
+            # не видят разницы.
+            effective_timeout = (
+                self._lock_acquire_timeout_sec if timeout_sec is None else timeout_sec
+            )
             with self._lock_reentry_guard:
                 holder_label = self._lock_holder_label
                 holder_since = self._lock_holder_since
@@ -340,7 +355,7 @@ class StateStore:
                         extra={"waiter": label, "holder": holder_label, "held_for_sec": held_for},
                     )
             wait_start = time.monotonic()
-            deadline = wait_start + self._lock_acquire_timeout_sec
+            deadline = wait_start + effective_timeout
             lock_file = None
             try:
                 self.lock_path.touch(exist_ok=True)
@@ -355,7 +370,7 @@ class StateStore:
                                 current_holder = self._lock_holder_label
                             raise StateStoreLockTimeout(
                                 f"StateStore._lock(): {label} не получил эксклюзивный "
-                                f"flock за {self._lock_acquire_timeout_sec:.0f}с "
+                                f"flock за {effective_timeout:.2f}с "
                                 f"(последний известный держатель: {current_holder or 'неизвестно'})"
                             )
                         time.sleep(_LOCK_POLL_INTERVAL_SEC)
@@ -452,9 +467,19 @@ class StateStore:
             self._recent_search_index = []
             self._recent_search_index_signature = None
 
-    def load_settings(self) -> dict[str, Any]:
-        """Читает настройки и дополняет их дефолтами."""
-        with self._lock():
+    def load_settings(self, lock_timeout_sec: float | None = None) -> dict[str, Any]:
+        """Читает настройки и дополняет их дефолтами.
+
+        ``lock_timeout_sec``: опциональный override read-path бюджета
+        ожидания flock (спека 2026-08-12 settings-read-nonblocking) — см.
+        ``_lock(timeout_sec=...)``. ``None`` (по умолчанию) — обычное
+        поведение, инстанс-таймаут. При истечении заданного бюджета бросает
+        ``StateStoreLockTimeout``; вызывающая сторона (``SettingsService.
+        cached_settings()``) обязана сама решить fail-closed фоллбэк — здесь
+        никакого тихого дефолта нет НАМЕРЕННО (иначе теряется разница между
+        «настроек нет» и «настроек не удалось прочитать вовремя»).
+        """
+        with self._lock(timeout_sec=lock_timeout_sec):
             if not self.settings_path.exists():
                 return dict(DEFAULT_SETTINGS)
 
