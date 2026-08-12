@@ -688,6 +688,67 @@ class TestCompactWithStats(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# count_active_items — must reuse the incrementally-maintained _active_ids
+# cache instead of rescanning history.ndjson + overrides on every call.
+# handle_ping calls this on every 3s HealthMonitor heartbeat (backend.log
+# 2026-08-09 storm: dozens of unrelated handle_request calls timed out at
+# 180s right after a long-recording finalize, tracing back to this O(n)
+# scan running under the global StateStore flock).
+# ---------------------------------------------------------------------------
+
+class TestCountActiveItemsReusesCache(unittest.TestCase):
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self.store = _make_store(self._tmp)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_does_not_rescan_when_active_ids_already_warm(self):
+        for i in range(5):
+            _add(self.store, f"item {i}")
+        # First call is a legitimate cold-start scan (_active_ids starts
+        # None) — it also warms the cache for everyone else.
+        first_count = self.store.count_active_items()
+        self.assertEqual(first_count, 5)
+        self.assertIsNotNone(self.store._active_ids)
+
+        from unittest.mock import patch
+
+        with patch.object(
+            self.store, "_load_active_items_unlocked",
+            wraps=self.store._load_active_items_unlocked,
+        ) as spy:
+            count = self.store.count_active_items()
+            count_again = self.store.count_active_items()
+
+        self.assertEqual(count, 5)
+        self.assertEqual(count_again, 5)
+        spy.assert_not_called()
+
+    def test_count_reflects_deletes_without_rescanning(self):
+        ids = [_add(self.store, f"item {i}") for i in range(6)]
+        self.store.delete_history_item(ids[0])
+        # Cold-start warm, same as any first read of the cache.
+        self.store.count_active_items()
+        self.store.delete_history_item(ids[1])
+        self.assertIsNotNone(self.store._active_ids)
+
+        from unittest.mock import patch
+
+        with patch.object(
+            self.store, "_load_active_items_unlocked",
+            wraps=self.store._load_active_items_unlocked,
+        ) as spy:
+            count = self.store.count_active_items()
+
+        self.assertEqual(count, 4)
+        spy.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # _normalize_ts_filter
 # ---------------------------------------------------------------------------
 

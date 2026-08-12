@@ -157,6 +157,38 @@ class TestSubprocessSessionLifecycle(unittest.TestCase):
                 sess.start()
         self.assertIn("worker", str(ctx.exception))
 
+    def test_start_send_exception_still_terminates_process(self):
+        """Regression: start() must clean up the spawned Popen when the load
+        handshake RAISES (worker crashed / empty read), not just when it
+        returns an explicit {ok: False} response.
+
+        _send() raises "empty response (worker exited or timed out)" when
+        readline() returns "" — this happens BEFORE start() ever inspects a
+        load_response dict, so the existing `if not load_response.get("ok")`
+        cleanup branch is never reached and the already-spawned subprocess
+        was leaked as an orphan (observed live: gigaam_worker.py surviving
+        with PPID=1 after BackendServiceLLMInitializationTestCase, which
+        builds a real Transcriber/AudioEngine and hits this exact path when
+        the dev machine's real settings.json has stt_gigaam_enabled=true).
+        """
+        from core.pipeline.stt_gigaam import _GigaAMSubprocessSession
+        fake_popen = _FakePopen([])  # readline() -> "" immediately
+        with patch("core.pipeline.stt_gigaam.subprocess.Popen", return_value=fake_popen):
+            sess = _GigaAMSubprocessSession("/fake/py", "/fake/w.py", "rnnt", "cpu")
+            with self.assertRaises(RuntimeError) as ctx:
+                sess.start()
+        self.assertIn("empty response", str(ctx.exception))
+        self.assertFalse(sess.is_loaded())
+        self.assertIsNone(
+            sess._proc,
+            "start() must clear _proc via close() on failure, not leak the Popen handle",
+        )
+        self.assertTrue(
+            fake_popen._stdin_closed,
+            "close() must run its shutdown sequence (stdin write+close) even when "
+            "the load handshake raised instead of returning ok=False",
+        )
+
 
 # ---------------------------------------------------------------------------
 # Тест 2: transcribe + close

@@ -210,6 +210,12 @@ class RecordingCoreService:
         self._preview_updated_at: float = 0.0
         self._preview_error_count: int = 0
         self._preview_error_last_reset_ts: float | None = None
+        # F2 (спека 2026-08-12): текущий бэкофф превью из-за переполнения
+        # аудиобуфера recorder-а (0.0 — бэкофф выключен, штатный режим).
+        # Инициализируется заново на КАЖДЫЙ вход в _preview_loop (свежий
+        # поток на каждую запись) — здесь только стартовое значение и
+        # публичная точка диагностики между запусками.
+        self._preview_overflow_backoff_sec: float = 0.0
 
         # Realtime partial transcriber state
         # wave-27 MED (race): concurrent start_recording/stop_recording mutate
@@ -285,6 +291,12 @@ class RecordingCoreService:
     @property
     def preview_error_last_reset_ts(self) -> float | None:
         return self._preview_error_last_reset_ts
+
+    @property
+    def preview_overflow_backoff_sec(self) -> float:
+        """F2 (спека 2026-08-12): текущий бэкофф превью-транскрибации из-за
+        переполнения аудиобуфера recorder-а. 0.0 — бэкофф выключен."""
+        return self._preview_overflow_backoff_sec
 
     @property
     def preview_thread_alive(self) -> bool:
@@ -2266,6 +2278,22 @@ class RecordingCoreService:
         _POLL_MAX = 1.5
         _POLL_BACKOFF = 1.5
 
+        # F2 (спека 2026-08-12): переполнение аудиобуфера — сигнал, что
+        # система не успевает вычитывать поток захвата. Приоритет — сама
+        # запись, превью — украшение; growing overflow_count заставляет
+        # превью пропустить транскрибацию этой итерации и отступить
+        # экспоненциально, вместо того чтобы продолжать конкурировать с
+        # захватом за GPU/CPU (живой инцидент: 9 превью-транскрибаций подряд
+        # + переполнение буфера в одном окне).
+        last_overflow_count = int(getattr(self.recorder, "overflow_count", 0) or 0)
+        # Свежий вход в loop — свежий эпизод бэкоффа (новый поток на каждую
+        # запись, см. комментарий на self._preview_overflow_backoff_sec).
+        self._preview_overflow_backoff_sec = 0.0
+        _PREVIEW_BACKOFF_MAX = 8.0
+        _PREVIEW_OVERFLOW_CLEAN_STREAK = 3
+        overflow_clean_streak = 0
+        overflow_backoff_logged = False
+
         while not worker_stop_event.is_set():
             if not bool(getattr(self.recorder, "is_recording", False)):
                 break
@@ -2304,6 +2332,38 @@ class RecordingCoreService:
             if duration_sec - last_refresh_duration < 0.9:
                 worker_stop_event.wait(_POLL_MIN)
                 continue
+
+            # F2: overflow_count вырос с прошлой проверки — система не
+            # тянет захват аудио. Пропускаем эту транскрибацию и отступаем
+            # экспоненциально (не ломая существующий poll_interval — тот
+            # управляет ТОЛЬКО реакцией на исключения/недостаток аудио).
+            current_overflow_count = int(getattr(self.recorder, "overflow_count", 0) or 0)
+            if current_overflow_count > last_overflow_count:
+                last_overflow_count = current_overflow_count
+                overflow_clean_streak = 0
+                self._preview_overflow_backoff_sec = min(
+                    max(self._preview_overflow_backoff_sec * 2, 0.5), _PREVIEW_BACKOFF_MAX
+                )
+                if not overflow_backoff_logged:
+                    logger.warning(
+                        "Realtime preview: переполнение аудиобуфера (overflow_count=%d), "
+                        "превью отступает: backoff=%.2fс",
+                        current_overflow_count, self._preview_overflow_backoff_sec,
+                    )
+                    overflow_backoff_logged = True
+                worker_stop_event.wait(self._preview_overflow_backoff_sec)
+                continue
+            elif self._preview_overflow_backoff_sec > 0.0:
+                # Плавное снятие: N чистых итераций подряд делят бэкофф
+                # пополам, а не сбрасывают его резко — система могла ещё не
+                # остыть от перегруза.
+                overflow_clean_streak += 1
+                if overflow_clean_streak >= _PREVIEW_OVERFLOW_CLEAN_STREAK:
+                    overflow_clean_streak = 0
+                    self._preview_overflow_backoff_sec /= 2
+                    if self._preview_overflow_backoff_sec < 0.05:
+                        self._preview_overflow_backoff_sec = 0.0
+                        overflow_backoff_logged = False
 
             try:
                 preview_payload = self.transcriber.transcribe_preview(
@@ -2799,6 +2859,36 @@ class RecordingCoreService:
 
         _phase_c_settings = self._settings_svc.cached_settings()
         _diarize_enabled = _phase_c_settings.get("diarization_enabled", False)
+        # F1 (спека 2026-08-12): гейт по длительности — прежде диаризация
+        # (~1x realtime на MPS) гонялась безусловно, единственные гейты были
+        # is_preview и отсутствие HF-токена; короткая диктовка (40-60с) тащила
+        # полный прогон наравне с часовой записью (живой инцидент: 44с
+        # диаризации на 42с диктовке). Гейт живёт ТОЛЬКО в этом методе — путь
+        # встречи диаризует ДРУГИМ методом (engine.diarize_window(), не
+        # _maybe_run_diarization(); см. source-контракт в
+        # test_dictation_latency_overflow_2026_08_12.py).
+        if _diarize_enabled:
+            _diar_min_duration = _phase_c_settings.get(
+                "diarization_min_duration_sec",
+                DEFAULT_SETTINGS.get("diarization_min_duration_sec", 90.0),
+            )
+            try:
+                _diar_min_duration_f = float(_diar_min_duration)
+                _duration_sec_f = float(duration_sec)
+            except (TypeError, ValueError):
+                # Fail-open: не смогли распарсить длительность/порог —
+                # диаризуем как раньше, а не теряем фичу молча.
+                _diar_min_duration_f = 0.0
+                _duration_sec_f = 0.0
+            if _diar_min_duration_f > 0 and _duration_sec_f < _diar_min_duration_f:
+                logger.info(
+                    "phase_c: диаризация пропущена — запись короче порога",
+                    extra={
+                        "duration_sec": round(_duration_sec_f, 2),
+                        "diarization_min_duration_sec": _diar_min_duration_f,
+                    },
+                )
+                _diarize_enabled = False
         _sil_ranges = getattr(self, "_last_silence_ranges", None) or None
 
         # Спасательная копия ДО транскрибации: зависший STT (дедлок mlx_lock,

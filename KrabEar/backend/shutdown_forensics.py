@@ -41,6 +41,15 @@ _MARKER = "runtime_alive.marker"
 _SHUTDOWN_INFO_FILE = "shutdown_info.json"
 _FORENSICS_DIR = "forensics"
 _MAX_RETAINED_DIRS = 5
+# Rate-limit самого СБОРА (мини-волна 2026-08-11): launchd (KeepAlive=true,
+# ThrottleInterval=5) в crash-loop'е поднимает процесс до ~720 раз/час, и
+# каждый подъём гонял полный сбор — два subprocess-вызова с таймаутами до
+# 30с + новый каталог. Значение симметрично UNCLEAN_RESTART_REPORT_MIN_GAP_SEC
+# (service.py, лимит ОТПРАВКИ события) — но это НЕЗАВИСИМЫЙ лимит: экономия
+# на сборе не глушит отправку (вердикт "unclean_rate_limited" остаётся
+# unclean для _report_unclean_restart). Источник правды о последнем сборе —
+# mtime новейшего подкаталога forensics/, без отдельного state-файла.
+_COLLECT_MIN_GAP_SEC = 900.0
 _LOG_TAIL_LINES = 300
 # Окно смерти не знаем точнее — берём фиксированный хвост перед моментом
 # сбора; свежий хвост ценнее точного окна (спека §4.3 п.2).
@@ -92,6 +101,9 @@ def check_and_collect(
         старт в этом data_dir); ``"clean"`` — маркера нет, прошлая жизнь
         завершилась через ``_persist``; ``"unclean_collected"`` — маркер был,
         форензика собрана (best-effort, отдельные шаги могли не удаться);
+        ``"unclean_rate_limited"`` — маркер был (смерть UNCLEAN — сигнал НЕ
+        теряется), но дорогой сбор пропущен: свежая форензика уже собрана
+        менее ``_COLLECT_MIN_GAP_SEC`` назад (crash-loop-защита);
         ``"unclean_collect_failed"`` — сам сбор упал катастрофически.
 
     Никогда не бросает исключений; вызывается из фонового треда
@@ -104,6 +116,41 @@ def check_and_collect(
 
         if not marker_path.exists():
             return "clean" if info_path.exists() else "first_run"
+
+        # Crash-loop-защита: недавний уже собранный каталог означает, что
+        # unified log/launchctl-состояние этой серии смертей уже снято —
+        # повторный сбор каждые ~5с не добавляет информации, но жжёт CPU
+        # (subprocess-таймауты) и диск. Fail-open: ЛЮБАЯ ошибка чтения
+        # mtime → собираем (недостающая экономия лучше недостающей
+        # форензики).
+        try:
+            last_collect_ts = _latest_forensics_mtime(data_dir / _FORENSICS_DIR)
+        except Exception:
+            logger.warning(
+                "shutdown_forensics: не удалось прочитать mtime последнего "
+                "сбора — rate-limit пропущен, собираем", exc_info=True,
+            )
+            last_collect_ts = None
+        if last_collect_ts is not None:
+            age_sec = datetime.now(timezone.utc).timestamp() - last_collect_ts
+            # Отрицательный age (mtime из будущего — скачок NTP) трактуем
+            # как «недавно»: та же защита от вечного подавления УЖЕ есть у
+            # лимита отправки (service.py) — здесь пропуск сбора на одну
+            # серию безопасен, отправка события живёт своим лимитом.
+            if age_sec < _COLLECT_MIN_GAP_SEC:
+                try:
+                    marker_path.unlink(missing_ok=True)
+                except Exception:
+                    logger.warning(
+                        "shutdown_forensics: не удалось удалить маркер в "
+                        "rate-limited ветке", exc_info=True,
+                    )
+                logger.warning(
+                    "shutdown_forensics: UNCLEAN-смерть, но форензика уже "
+                    "собиралась %.0fс назад (< %.0fс) — сбор пропущен "
+                    "(crash-loop-защита)", age_sec, _COLLECT_MIN_GAP_SEC,
+                )
+                return "unclean_rate_limited"
 
         return _collect_forensics(
             data_dir=data_dir,
@@ -171,6 +218,21 @@ def _collect_forensics(
     except Exception:
         logger.exception("shutdown_forensics: сбор форензики провалился целиком")
         return "unclean_collect_failed"
+
+
+def _latest_forensics_mtime(forensics_root: Path) -> "float | None":
+    """Epoch-mtime самого свежего подкаталога ``forensics/``; None — сборов
+    ещё не было (каталога нет / он пуст). Единственный потребитель —
+    crash-loop rate-limit в ``check_and_collect``; отдельного state-файла
+    о «последнем сборе» намеренно нет — mtime каталога и есть факт сбора."""
+    if not forensics_root.is_dir():
+        return None
+    mtimes = [
+        entry.stat().st_mtime
+        for entry in forensics_root.iterdir()
+        if entry.is_dir()
+    ]
+    return max(mtimes) if mtimes else None
 
 
 def _log_show_start_arg() -> str:

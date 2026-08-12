@@ -188,7 +188,10 @@ final class IPCClient: @unchecked Sendable {
 
     /// Testability initialiser — injects a custom socket provider.
     /// `socketPath` is unused when a provider is supplied (kept for `endpoint` consistency).
-    init(socketPath: String = "/tmp/krabear_mock.sock", socketProvider: any IPCSocketProviding) {
+    init(
+        socketPath: String = "/tmp/krabear_mock.sock",
+        socketProvider: any IPCSocketProviding
+    ) {
         self.socketPath = socketPath
         self.socketProvider = socketProvider
     }

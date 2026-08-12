@@ -170,6 +170,13 @@ class AudioSelfHealer:
                 self._empty_streak, threshold,
             )
             outcome = self._reinit_coordinator.reinit_with_wake_word_restore()
+            # 🔴 DEFERRED_WORKER_HUNG (ревью 2026-08-09, F1) НАМЕРЕННО не в
+            # этом кортеже: в отличие от DEFERRED_RECORDING (настоящая
+            # диктовка, разрешится сама), заклинивший worker-тред рекордера
+            # не разрешится без внешнего вмешательства — эта ветка обязана
+            # трактовать его как ПОТРАЧЕННУЮ попытку (падает в implicit-else
+            # ниже: eager-флаг не откатывается, следующий пустой стрик уходит
+            # в _escalate()), иначе тихий бессрочный простой без единого сигнала.
             if outcome in (ReinitOutcome.DEFERRED_RECORDING, ReinitOutcome.BUSY):
                 # Попытка отложена, не потрачена — откатываем eager-флаг.
                 # Rollback пишет False (то же направление, что record_success)

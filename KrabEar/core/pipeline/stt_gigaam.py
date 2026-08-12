@@ -682,10 +682,18 @@ class _GigaAMSubprocessSession:
         self._start_stderr_drain()
 
         # Сразу шлём load-команду — модель в памяти к моменту первого transcribe.
-        load_response = self._send(
-            {"op": "load", "mode": self._mode, "device": self._device},
-            timeout_sec=_SUBPROCESS_LOAD_TIMEOUT_SEC,
-        )
+        # _send() can RAISE (worker crashed / empty read / bad JSON) instead of
+        # returning an {ok: False} response — that path bypasses the cleanup
+        # below, orphaning the already-spawned subprocess. close() is idempotent,
+        # so it's safe to run here before re-raising the original exception.
+        try:
+            load_response = self._send(
+                {"op": "load", "mode": self._mode, "device": self._device},
+                timeout_sec=_SUBPROCESS_LOAD_TIMEOUT_SEC,
+            )
+        except Exception:
+            self.close()
+            raise
         if not load_response.get("ok"):
             err = load_response.get("error", "unknown")
             self.close()

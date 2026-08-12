@@ -1452,10 +1452,19 @@ class BackendService:
         # 2026-07-15 (спека wake-word-watchdog): единый single-flight владелец
         # танца reinit — им пользуются пассивный AudioSelfHealer (пустые
         # диктовки) и активный WakeWordWatchdog (stale heartbeat).
+        #
+        # is_recording=self._reinit_is_recording_gate, НЕ голый
+        # recorder.is_recording (2026-08-09, разбор PortAudio-сегфолта
+        # 2026-08-07) — см. докстринг метода: recorder.is_recording один не
+        # достаточен как гейт против Pa_Terminate под живым стримом.
         self._audio_reinit_coordinator = AudioReinitCoordinator(
             reinit_audio_backend=_reinit_audio_backend,
-            is_recording=lambda: bool(getattr(self.recorder, "is_recording", False)),
+            is_recording=self._reinit_is_recording_gate,
             wake_word_adapter=self._oww_adapter,
+            # 2026-08-09 (ревью F1, затем NEW-1 во ВТОРОМ раунде того же
+            # ревью): именованный метод, НЕ голая лямбда — см. докстринг
+            # _reinit_is_worker_hung_gate для полной истории обеих правок.
+            is_worker_hung=self._reinit_is_worker_hung_gate,
         )
         self._audio_selfheal = AudioSelfHealer(
             reinit_coordinator=self._audio_reinit_coordinator,
@@ -1932,7 +1941,6 @@ class BackendService:
     #: Минимальный интервал между отчётами о нештатном рестарте (секунды).
     #: launchd держит юнит с ``KeepAlive=true`` и ``ThrottleInterval=5``, то
     #: есть в крэш-лупе бэкенд поднимается до ~720 раз в час. Каждый подъём —
-    #: РОВНО ОДИН вызов ``_report_unclean_restart`` за жизнь процесса, поэтому
     #: in-memory дедуп ``ErrorBus`` (``_last_emitted``) для этого кода не
     #: срабатывает НИКОГДА: он живёт в памяти умершего процесса. Нужен
     #: кросс-рестартовый лимит на диске — иначе крэш-луп положит квоту Sentry
@@ -1941,6 +1949,97 @@ class BackendService:
 
     #: Файл кросс-рестартового лимита (рядом с данными, не в репозитории).
     UNCLEAN_RESTART_STATE_FILE = "unclean_restart_report.json"
+
+    def _reinit_is_recording_gate(self) -> bool:
+        """Safety-гейт против ``Pa_Terminate`` под живым стримом рекордера.
+
+        Передаётся как ``is_recording=`` в ``AudioReinitCoordinator`` — сам
+        код там явно документирует ``Pa_Terminate`` под живым стримом
+        рекордера как crash-класс (``audio_reinit.py``).
+
+        Голого ``recorder.is_recording`` НЕДОСТАТОЧНО (найдено 2026-08-09 при
+        разборе PortAudio-сегфолта 2026-08-07, sample'а живого зависшего
+        процесса — ``Thread-4 (_worker)`` внутри ``PaUtil_ReadRingBuffer``):
+        ``AudioRecorder.stop()`` выставляет ``self._is_recording = False`` ДО
+        попытки ``thread.join()``; если join таймаутит, метод кидает
+        ``AudioRecorderStopTimeout``, но воркер-поток НЕ обнуляется — он
+        физически жив и заблокирован внутри PortAudio, а ``is_recording`` уже
+        ``False``. В этом окне единственный гейт был слеп: любой триггер
+        reinit (wake-word watchdog staleness, AudioSelfHealer на пустых
+        диктовках) видел бы «запись не идёт» и пропускал бы ``Pa_Terminate``
+        прямо на живой блокированный стрим — ровно тот crash-класс, от
+        которого код сам себя пытается защитить.
+
+        ``recorder.is_worker_thread_alive`` — отдельный честный сигнал
+        физической живости потока (см. докстринг в ``recorder.py``),
+        комбинируется здесь ТОЛЬКО для этого safety-гейта.
+
+        Правка ревью 2026-08-09 (F2): предыдущая версия этого докстринга
+        утверждала, что ``OpenWakeWordAdapter`` и ``WakeWordWatchdog`` —
+        два ДРУГИХ потребителя голого ``recorder.is_recording`` в этом же
+        ``__init__`` — защищены транзитивно, потому что «обе ветки в
+        конечном счёте сами вызывают
+        ``AudioReinitCoordinator.reinit_with_wake_word_restore()``». Это
+        неверно для ``OpenWakeWordAdapter``: он вообще никогда не вызывает
+        ``reinit_with_wake_word_restore()`` (грep подтверждает единственных
+        вызывающих — ``AudioSelfHealer.record_empty_result`` и
+        ``WakeWordWatchdog._check``). Явная проверка сейчас: у
+        ``OpenWakeWordAdapter`` голый ``is_recording`` защищает СОВСЕМ
+        ДРУГОЙ, не связанный с ``Pa_Terminate`` инвариант — избегает
+        второго конкурентного входного тапа CoreAudio во время диктовки
+        (``sd.InputStream`` открывается напрямую в его собственном
+        ``_listen_loop``, БЕЗ ``sd._terminate()``/``sd._initialize()``).
+        ``Pa_Terminate`` физически исполняется РОВНО в одном месте кода —
+        внутри ``AudioReinitCoordinator._dance()`` — и туда попадают
+        ТОЛЬКО вызовы из ``AudioSelfHealer``/``WakeWordWatchdog``, оба
+        передают именно ЭТОТ гейт как ``is_recording=``. Значит защита
+        Pa_Terminate полная не «транзитивно через оба вызывающих», а
+        тривиально: единственный путь к нему — единственная точка входа,
+        и она гейтится верно.
+        """
+        return (
+            bool(getattr(self.recorder, "is_recording", False))
+            or bool(getattr(self.recorder, "is_worker_thread_alive", False))
+        )
+
+    def _reinit_is_worker_hung_gate(self) -> bool:
+        """Честный сигнал «worker-тред рекордера заклинил после stop()-
+        таймаута» — передаётся как ``is_worker_hung=`` в
+        ``AudioReinitCoordinator`` (см. ``ReinitOutcome.DEFERRED_WORKER_HUNG``).
+
+        Правка ВТОРОГО раунда адверсариального ревью 2026-08-09 (NEW-1,
+        HIGH) на ТОТ ЖЕ фикс F1: первая версия передавала голую лямбду
+        ``lambda: recorder.is_worker_thread_alive`` — этот сигнал ``True``
+        для ЛЮБОЙ ЗДОРОВОЙ активной диктовки (``AudioRecorder.start()``
+        выставляет ``self._thread`` и он остаётся ``is_alive()`` ВСЁ время
+        записи, не только в заклинившем окне после таймаута). Итог: КАЖДАЯ
+        настоящая диктовка классифицировалась бы как ``DEFERRED_WORKER_HUNG``
+        вместо ``DEFERRED_RECORDING`` → ``WakeWordWatchdog`` эскалировал бы
+        ``wedged:true`` и Swift-агент делал бы ``kickstart -k`` backend
+        ПОСРЕДИ обычной диктовки — заменяет «никогда не эскалирует»
+        (исходный баг F1) на «эскалирует ВСЕГДА» (строго хуже).
+
+        Правка ТРЕТЬЕГО раунда ревью 2026-08-09 (NEW-5, MEDIUM) на ТОТ ЖЕ
+        фикс: вторая версия комбинировала ``not is_recording and
+        is_worker_thread_alive`` — честная семантика для «is_recording лжёт
+        сразу после таймаута», НО эта же комбинация верна и для ЛЮБОГО
+        ОБЫЧНОГО ``stop()`` всё время, пока ``thread.join(timeout_sec)``
+        ждёт нормально завершающийся worker (0-150мс на обычном stop(),
+        секунды на max-duration авто-стопе, пока worker дособирает
+        ``np.concatenate`` вне лока) — это штатное окно, не заклин. Итог:
+        КАЖДОЕ завершение записи имело шанс кратковременно классифицироваться
+        как ``DEFERRED_WORKER_HUNG``, если reinit-триггер (``WakeWordWatchdog``
+        тик) сэмплировал сигналы именно в этом окне.
+
+        Теперь гейт читает ``recorder.is_stop_timed_out`` — sticky-флаг,
+        который ``AudioRecorder`` поднимает ИМЕННО в ветке, где ``stop()``
+        реально кинул ``AudioRecorderStopTimeout`` после полного ожидания
+        таймаута (не выводимый из комбинации is_recording/
+        is_worker_thread_alive), и снимает следующим ``start()`` или
+        успешным ``stop()``/``abort()`` (см. докстринг
+        ``AudioRecorder.is_stop_timed_out``).
+        """
+        return bool(getattr(self.recorder, "is_stop_timed_out", False))
 
     def _report_unclean_restart(self, verdict: str, data_dir: "Path | str") -> None:
         """Превратить вердикт ``shutdown_forensics.check_and_collect()`` в сигнал.
@@ -1967,7 +2066,13 @@ class BackendService:
         try/except: восстановление записей идёт следом и не должно падать
         из-за телеметрии.
         """
-        if verdict not in ("unclean_collected", "unclean_collect_failed"):
+        # "unclean_rate_limited" (2026-08-11) — смерть UNCLEAN, но дорогой
+        # СБОР пропущен crash-loop-защитой (shutdown_forensics). Для ОТПРАВКИ
+        # это полноценный unclean: у неё свой независимый дисковый лимит ниже;
+        # экономия на сборе не должна глушить сигнал о смертях.
+        if verdict not in (
+            "unclean_collected", "unclean_collect_failed", "unclean_rate_limited",
+        ):
             return
         try:
             from datetime import datetime, timezone
@@ -2241,6 +2346,18 @@ class BackendService:
                 recap_scheduler.stop()
             except Exception:
                 logger.exception("RecapScheduler.stop() raised during close()")
+
+        # Stop LiveSubsService flush-worker daemon thread (F3, live-subs backpressure,
+        # 2026-08-12) — same CI daemon-thread teardown rule as DiskSpaceMonitor/
+        # RecapScheduler above (feedback_backendservice_teardown_ci.md). The worker
+        # only starts lazily on the first ingest() that crosses the flush threshold,
+        # so most tests never spawn it — but close() must still cover the case.
+        live_subs = getattr(self, "_live_subs", None)
+        if live_subs is not None:
+            try:
+                live_subs.close()
+            except Exception:
+                logger.exception("LiveSubsService.close() raised during close()")
 
         # Stop PurgeScheduler daemon thread — mirrors the RecapScheduler stop above.
         purge_scheduler = getattr(self, "_purge_scheduler", None)

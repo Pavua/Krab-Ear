@@ -1582,12 +1582,21 @@ class BackendServiceLLMInitializationTestCase(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_llm_rewriter_none_when_admin_disabled(self):
-        """settings.LLM_ENABLED=False → _llm_rewriter is None."""
+        """settings.LLM_ENABLED=False → _llm_rewriter is None.
+
+        transcriber=FakeTranscriber(): this test only exercises _llm_rewriter
+        init, which is constructed BEFORE the transcriber branch in
+        BackendService.__init__ and is unaffected by it. Omitting the fake
+        used to build a REAL Transcriber/AudioEngine, which — when this dev
+        machine's real settings.json has stt_gigaam_enabled=true (see
+        test_construction_does_not_leak_gigaam_subprocess below) — leaked an
+        orphaned gigaam_worker.py subprocess.
+        """
         from unittest.mock import patch
         import core.config as _cfg
         with patch.object(_cfg.settings, "LLM_ENABLED", False):
             from backend.service import BackendService
-            service = BackendService(store=self.store)
+            service = BackendService(store=self.store, transcriber=FakeTranscriber())
             try:
                 self.assertIsNone(service._llm_rewriter)
             finally:
@@ -1619,7 +1628,10 @@ class BackendServiceLLMInitializationTestCase(unittest.TestCase):
             mock_get.return_value.status_code = 200
             from backend.service import BackendService
             from backend.llm_rewriter import LLMRewriter
-            service = BackendService(store=self.store)
+            # transcriber=FakeTranscriber(): see test_llm_rewriter_none_when_admin_disabled
+            # above — avoids constructing a real Transcriber/AudioEngine (and thus a real
+            # GigaAM subprocess attempt) which this test has no need for.
+            service = BackendService(store=self.store, transcriber=FakeTranscriber())
             try:
                 self.assertIsInstance(service._llm_rewriter, LLMRewriter)
                 # Доказываем, что мок РЕАЛЬНО перехватил вызов — не декоративен.
@@ -1628,6 +1640,42 @@ class BackendServiceLLMInitializationTestCase(unittest.TestCase):
                 self.assertIn("/api/v1/models", called_url)
             finally:
                 service.close()
+
+    def test_construction_does_not_leak_gigaam_subprocess(self):
+        """Regression: this class only exercises _llm_rewriter init and has no
+        need for a real STT engine, but omitting ``transcriber=`` used to build
+        a REAL Transcriber/AudioEngine. On a dev machine whose real
+        ``~/Library/Application Support/KrabEar/settings.json`` has
+        ``stt_gigaam_enabled: true`` (the actual production default — read by
+        ``core.config`` at import time regardless of test isolation), that
+        real AudioEngine spawns a background 'GigaAM-warmup' thread that
+        Popen()s ``core/workers/gigaam_worker.py``. Under this harness venv
+        the load handshake always fails, and the spawned subprocess leaked as
+        an orphan (PPID=1) — caught by ``scripts/pre_merge_py312_check.sh``.
+
+        Injecting FakeTranscriber (like every other test class in this file)
+        keeps this test hermetic and asserts no gigaam subprocess is ever
+        attempted, regardless of the runtime settings.json on whatever
+        machine the suite runs on.
+        """
+        from unittest.mock import patch
+        import core.config as _cfg
+        with patch.object(_cfg.settings, "LLM_ENABLED", False), \
+                patch("subprocess.Popen") as mock_popen:
+            from backend.service import BackendService
+            service = BackendService(store=self.store, transcriber=FakeTranscriber())
+            try:
+                pass
+            finally:
+                service.close()
+        for call in mock_popen.call_args_list:
+            args = call.args[0] if call.args else call.kwargs.get("args")
+            joined = " ".join(args) if isinstance(args, (list, tuple)) else str(args)
+            self.assertNotIn(
+                "gigaam_worker", joined,
+                "BackendService(store=...) must not spawn a real GigaAM subprocess "
+                "when a FakeTranscriber is injected",
+            )
 
 
 class VocabularyCapturingTranscriber(FakeTranscriber):

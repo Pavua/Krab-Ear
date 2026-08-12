@@ -106,17 +106,24 @@ class TestBufferCapForcesFlush(unittest.TestCase):
         )
 
     def test_buffer_cap_triggers_flush_via_transcriber(self) -> None:
-        """При достижении потолка STT (transcribe) вызывается — значит был flush."""
+        """При достижении потолка STT (transcribe) вызывается — значит был flush.
+
+        F3 (2026-08-12): flush теперь асинхронный (фоновый воркер) — ждём
+        wait_until_idle() перед проверкой мока, иначе ассерт мог бы
+        выполниться раньше, чем воркер успел вызвать transcribe().
+        """
         svc = _make_service(stt_text="")
         giant_sr = 1_000_000_000
         chunk_samples = _MAX_BUFFER_SAMPLES + 1  # одиночный чанк сразу пересекает потолок
 
         svc.ingest(_pcm_bytes(chunk_samples), giant_sr, "off", False)
+        self.assertTrue(svc.wait_until_idle(timeout=2.0), "воркер не догнал очередь")
 
         svc._transcriber.transcribe.assert_called()
-        # После форсированного flush буфер обнулён.
+        # После форсированного flush буфер обнулён (синхронно, внутри ingest()).
         with svc._lock:
             self.assertEqual(svc._buffer_samples, 0)
+        svc.close()
 
     def test_repeated_giant_sr_ingest_buffer_bounded(self) -> None:
         """Многократный ingest с гигантским sample_rate держит буфер ограниченным."""
@@ -166,6 +173,12 @@ class TestSampleRateClamp(unittest.TestCase):
 
         FAIL-BEFORE: sample_rate=int(1e9) принимался как есть → buffer_sec≈0 → нет flush.
         PASS-AFTER: клампится до 192000 → нормальный flush-gate, плюс абсолютный потолок.
+
+        F3 (2026-08-12): non-final flush асинхронный — handle_ingest возвращает
+        status=accepted немедленно (буфер уже сброшен синхронно), а фактический
+        flush (STT-вызов) проверяем через wait_until_idle() + white-box
+        _completed_result, чтобы убедиться, что клампинг действительно дал flush,
+        а не просто "тихо принял" без последующей обработки.
         """
         svc = _make_service(stt_text="")
         # Чанк меньше потолка, но при клампнутом sample_rate=192000 буфер_sec велик.
@@ -176,11 +189,14 @@ class TestSampleRateClamp(unittest.TestCase):
             "is_final": False,
         }
         result = svc.handle_ingest(params)
-        # При клампнутом SR=192000 и ~4 c аудио должен произойти flush (>3 c порог).
-        self.assertEqual(result.get("status"), "flushed",
-                         f"Клампнутый sample_rate должен дать корректный flush: {result}")
+        # При клампнутом SR=192000 и ~4 c аудио буфер уже сброшен (>3 c порог).
+        self.assertEqual(result.get("status"), "accepted",
+                         f"Клампнутый sample_rate должен дать корректный (асинхронный) flush: {result}")
         with svc._lock:
             self.assertEqual(svc._buffer_samples, 0)
+        self.assertTrue(svc.wait_until_idle(timeout=2.0), "воркер не догнал очередь")
+        svc._transcriber.transcribe.assert_called()
+        svc.close()
 
     def test_handle_ingest_rejects_negative_sample_rate_no_crash(self) -> None:
         """handle_ingest с отрицательным sample_rate не падает (клампится до min)."""
@@ -210,9 +226,14 @@ class TestNoTranscriptInLogs(unittest.TestCase):
         secret_translation = "SEKRETNYY_PEREVOD_QwE9"
         svc = _make_service(stt_text=secret_text, translated=secret_translation)
 
+        # F3 (2026-08-12): flush и его логирование теперь происходят в фоновом
+        # воркере — wait_until_idle() ВНУТРИ assertLogs гарантирует, что лог
+        # успел записаться до выхода из блока (без ожидания это гонка).
         with self.assertLogs("KrabEar.Backend.LiveSubsService", level="INFO") as cm:
             svc.ingest(_pcm_bytes(16000 * 3), 16000, "ru", False)  # 3 c → flush
+            self.assertTrue(svc.wait_until_idle(timeout=2.0), "воркер не догнал очередь")
 
+        svc.close()
         joined = "\n".join(cm.output)
         self.assertNotIn(secret_text, joined,
                          "Текст транскрипта НЕ должен присутствовать в логах (PII)")
@@ -244,9 +265,13 @@ class TestNoTranscriptInLogs(unittest.TestCase):
         lg.setLevel(logging.INFO)
         try:
             svc.ingest(_pcm_bytes(16000 * 3), 16000, "ru", False)
+            # F3: flush асинхронный — ждём воркер ДО снятия хендлера, иначе
+            # лог-запись может появиться уже после removeHandler() (гонка).
+            self.assertTrue(svc.wait_until_idle(timeout=2.0), "воркер не догнал очередь")
         finally:
             lg.removeHandler(handler)
             lg.setLevel(prev_level)
+            svc.close()
 
         ok_records = [r for r in records if "flush OK" in r.getMessage()]
         self.assertTrue(ok_records, "Ожидалась запись 'flush OK'")
@@ -274,10 +299,17 @@ class TestSTTRunsOutsideServiceLock(unittest.TestCase):
 
         Проверяем из колбэка transcribe: пробуем взять лок неблокирующе ИЗ ДРУГОГО
         потока (RLock реентрантен в текущем потоке, поэтому нужен отдельный поток).
+
+        F3 (2026-08-12): STT теперь вызывается в ФОНОВОМ воркере, а не в
+        треде, вызвавшем ingest() — используем threading.Event, чтобы
+        детерминированно дождаться, пока side_effect реально выполнится,
+        вместо предположения, что он успел отработать синхронно до возврата
+        из ingest() (ingest() теперь возвращается немедленно).
         """
         svc = _make_service(stt_text="x")
 
         lock_was_free: dict[str, bool] = {}
+        side_effect_done = threading.Event()
 
         def _probe_lock_from_other_thread() -> None:
             acquired = svc._lock.acquire(blocking=False)
@@ -289,17 +321,20 @@ class TestSTTRunsOutsideServiceLock(unittest.TestCase):
             t = threading.Thread(target=_probe_lock_from_other_thread)
             t.start()
             t.join(timeout=2.0)
+            side_effect_done.set()
             return {"text": "x", "language": "en"}
 
         svc._transcriber.transcribe.side_effect = _transcribe_side_effect
 
-        svc.ingest(_pcm_bytes(16000 * 3), 16000, "off", False)  # 3 c → flush
+        svc.ingest(_pcm_bytes(16000 * 3), 16000, "off", False)  # 3 c → flush (асинхронно)
+        self.assertTrue(side_effect_done.wait(timeout=3.0), "фоновый воркер не вызвал transcribe вовремя")
 
         self.assertIn("free", lock_was_free, "transcribe side-effect не выполнился")
         self.assertTrue(
             lock_was_free["free"],
             "service-лок был ЗАНЯТ во время STT — STT выполняется под self._lock (W1770 MED)",
         )
+        svc.close()
 
     def test_concurrent_ingest_during_slow_stt_not_blocked(self) -> None:
         """Пока медленный STT идёт в одном потоке, ingest в другом не блокируется.
