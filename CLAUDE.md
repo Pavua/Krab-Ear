@@ -328,6 +328,18 @@ Privacy-mode gate pattern (waves 23-30): any IPC handler that returns transcript
 - `report_paste_failure`, `report_hotkey_conflict`, `report_reconnect`,
 - `list_llm_models`, `handshake`.
 
+🔴 **Восстановление IPC после падения backend'а — РОВНО ОДИН механизм** (анти-rebuild,
+2026-08-08, PR #1910): `callWithRecovery` / `callAsyncWithRecovery` в
+`main+IPCRecovery.swift` — на транспортной ошибке зовут `restartIfDead()` и повторяют
+один раз (28 call sites). Не писать второй: конкурент уже был написан однажды
+(IPCClient.callWithReconnect, Phase C C.2, без бэктиков — удалён) и прожил три месяца
+без единого прод-вызова, потому что слепой бэкофф-сон слабее — мёртвый процесс от
+ожидания не воскресает. 🔴 Не подключать ретраи к `HealthMonitor.ping`: его политика
+«2 фейла × 3с → hang» рассчитана на быстрый отказ, ретраи внутри вызова растянут тик
+до ~20с и убьют детект зависания. Телеметрию восстановления шлёт
+`IPCReconnectTelemetry.swift` (`report_reconnect`, params `attempts` + `duration_ms`)
+из ОБОИХ путей — при правке одного проверить сиблинг.
+
 ### `.app` bundle (`Krab Ear.app/`):
 - Standard macOS app bundle (`com.antigravity.krab-ear`, LSUIElement=true, macOS 13+).
 - `Contents/MacOS/KrabEarAgent` is the compiled Swift binary (same as `native/runtime/KrabEarAgent`).

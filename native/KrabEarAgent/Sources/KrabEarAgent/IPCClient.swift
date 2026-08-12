@@ -26,16 +26,6 @@ protocol IPCSocketProviding: Sendable {
     func send(payload: Data, timeoutSec: Int) async throws -> Data
 }
 
-// MARK: - IPCBackoffSleeping (testability injection point)
-
-/// Пауза между попытками reconnect в `IPCClient.callWithReconnect`.
-///
-/// Продакшн спит по реальным часам (`IPCClient.realBackoffSleep`). Тесты
-/// подставляют мгновенную реализацию, которая только записывает запрошенный
-/// интервал: расписание бэкоффа тогда проверяется как СПИСОК ЗАДЕРЖЕК, а не как
-/// замер прошедшего времени, и результат не зависит от загрузки машины.
-typealias IPCBackoffSleeping = @Sendable (TimeInterval) async throws -> Void
-
 // MARK: - Real provider (POSIX Unix socket)
 
 /// Default `IPCSocketProviding` implementation that connects to a Unix-domain socket.
@@ -190,33 +180,20 @@ final class IPCClient: @unchecked Sendable {
     /// reconnect/backoff logic without a real backend process.
     let socketProvider: (any IPCSocketProviding)?
 
-    /// Пауза перед очередной попыткой в `callWithReconnect`.
-    /// Подменяется в тестах, чтобы проверки бэкоффа не зависели от часов.
-    private let backoffSleep: IPCBackoffSleeping
-
-    /// Продакшн-реализация паузы: реальный сон на кооперативном пуле.
-    static let realBackoffSleep: IPCBackoffSleeping = { seconds in
-        try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-    }
-
     /// Production initialiser — uses POSIX Unix socket.
     init(socketPath: String) {
         self.socketPath = socketPath
         self.socketProvider = nil
-        self.backoffSleep = Self.realBackoffSleep
     }
 
     /// Testability initialiser — injects a custom socket provider.
     /// `socketPath` is unused when a provider is supplied (kept for `endpoint` consistency).
-    /// `backoffSleep` по умолчанию — реальный сон; тесты передают мгновенный рекордер.
     init(
         socketPath: String = "/tmp/krabear_mock.sock",
-        socketProvider: any IPCSocketProviding,
-        backoffSleep: IPCBackoffSleeping? = nil
+        socketProvider: any IPCSocketProviding
     ) {
         self.socketPath = socketPath
         self.socketProvider = socketProvider
-        self.backoffSleep = backoffSleep ?? Self.realBackoffSleep
     }
 
     /// Default socket timeout (seconds) для long-running operations
@@ -231,72 +208,6 @@ final class IPCClient: @unchecked Sendable {
 
     func call(method: String, params: [String: Any] = [:]) throws -> [String: Any] {
         return try call(method: method, params: params, timeoutSec: Self.defaultTimeoutSec)
-    }
-
-    // MARK: – Exponential-backoff reconnect (Phase C C.2)
-
-    /// Backoff delays between reconnect attempts: 250ms → 500ms → 1s → 2s → 4s.
-    /// Index 0 corresponds to the delay *before* attempt 2, etc.
-    /// Internal (не private), чтобы тест сверял запрошенное расписание с таблицей.
-    static let backoffDelays: [TimeInterval] = [0.25, 0.5, 1.0, 2.0, 4.0]
-
-    /// Calls `method` with automatic exponential-backoff reconnect on transient
-    /// socket errors (ENOENT / ECONNRESET / EPIPE = socketConnectFailed /
-    /// writeFailed / readFailed). Up to 5 retries; raises on exhaustion or
-    /// non-transient errors. On success after ≥1 retry, fires `report_reconnect`
-    /// telemetry to the backend (best-effort, no throw on failure).
-    ///
-    /// Use in place of `callAsync` when the call site must survive a
-    /// backend restart (e.g. HealthMonitor.ping, HistoryPanel load).
-    func callWithReconnect(
-        method: String,
-        params: [String: Any] = [:],
-        timeoutSec: Int = IPCClient.defaultTimeoutSec
-    ) async throws -> [String: Any] {
-        let startTime = Date()
-        var lastError: Error = IPCError.invalidResponse
-        // Attempt 0 is the initial try (no delay). Attempts 1–5 apply backoff.
-        let totalAttempts = 1 + Self.backoffDelays.count  // = 6
-        for attempt in 0..<totalAttempts {
-            if attempt > 0 {
-                let delay = Self.backoffDelays[attempt - 1]
-                try await backoffSleep(delay)
-            }
-            do {
-                let result = try await callAsync(method: method, params: params, timeoutSec: timeoutSec)
-                // Successfully reconnected after at least one retry — report telemetry.
-                if attempt > 0 {
-                    let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-                    Task.detached { [weak self] in
-                        guard let self else { return }
-                        _ = try? await self.callAsync(
-                            method: "report_reconnect",
-                            params: [
-                                "attempts": attempt,
-                                "duration_ms": durationMs,
-                            ],
-                            timeoutSec: IPCClient.quickTimeoutSec
-                        )
-                    }
-                }
-                return result
-            } catch let err as IPCError where err.isTransient {
-                lastError = err
-                let attemptsLeft = totalAttempts - attempt - 1
-                if attemptsLeft > 0 {
-                    // Use os.log-compatible approach (no OSLog import needed here)
-                    NSLog(
-                        "[IPCClient] transient error attempt %d/%d: %@",
-                        attempt + 1, totalAttempts,
-                        err.localizedDescription
-                    )
-                }
-            } catch {
-                // Non-transient (timeout, invalidResponse, backendError) — rethrow immediately.
-                throw error
-            }
-        }
-        throw lastError
     }
 
     /// Performs the backend handshake on first connect.
