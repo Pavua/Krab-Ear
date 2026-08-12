@@ -964,6 +964,13 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Включено по умолчанию; используется router'ом когда hint_language=None.
     "stt_audio_lang_id_enabled": True,
     "stt_audio_lang_id_preview_sec": 5.0,
+    # --- Live subs language routing (2026-08-12) ---
+    # Явный язык live-субтитров системного звука: "ru" маршрутизирует детерминированно
+    # на GigaAM (не принимает initial_prompt вовсе — структурно не может утечь
+    # промптом), минуя per-window автодетекцию. "auto" — прежнее поведение (whisper
+    # сам определяет язык на каждом окне). См. docs/superpowers/specs/
+    # 2026-08-12-live-subs-language-routing-design.md.
+    "live_subs_language": "ru",
     # --- Russian Whisper fine-tune ---
     "stt_use_ru_finetune": False,
     "stt_ru_finetune_model": "antony66/whisper-large-v3-russian",

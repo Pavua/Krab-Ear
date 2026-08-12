@@ -545,6 +545,13 @@ class LiveSubsService:
             except Exception:
                 logger.exception("LiveSubsService: ресемплинг не удался, STT получит raw %d Hz", sample_rate)
 
+        # lang_hint (2026-08-12): язык субтитров задаётся независимо от языка
+        # диктовки. Без него `_effective_lang` в engine падал на общий
+        # TRANSCRIBE_LANGUAGE, то есть иностранное видео принудительно шло по
+        # RU-цепочке (GigaAM → RU-finetune). "auto" — прежнее поведение.
+        live_subs_lang = self._settings_get("live_subs_language", "ru")
+        lang_hint = None if live_subs_lang == "auto" else live_subs_lang
+
         # STT (skip_vad_prefilter=True для live_subs: VAD-модель тренирована на
         # mic input и speech_ratio=0.0 на компрессированном system-audio из YouTube
         # → STT никогда не вызывается. Для live субтитров VAD контрпродуктивен —
@@ -555,7 +562,8 @@ class LiveSubsService:
         # смысл 0 тяги" (см. core/engine.py и docs/superpowers/specs/
         # 2026-08-12-live-subs-prompt-leakage-design.md).
         stt_result = self._transcriber.transcribe(
-            audio, quality_profile="balanced", skip_vad_prefilter=True, context_free=True
+            audio, quality_profile="balanced", skip_vad_prefilter=True,
+            context_free=True, lang_hint=lang_hint,
         )
         text = stt_result.get("text", "").strip()
         language_detected = stt_result.get("language")

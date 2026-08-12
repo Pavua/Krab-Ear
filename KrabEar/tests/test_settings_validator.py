@@ -73,6 +73,28 @@ class TestValidateEnumFields(unittest.TestCase):
         self.assertTrue(result.valid)
         self.assertEqual(len(result.warnings), 3)
 
+    def test_valid_live_subs_language_ru(self):
+        """2026-08-12 live-subs-language-routing: enum, не диапазон (не в _RANGE_FIELDS)."""
+        result = self.v.validate({"live_subs_language": "ru"})
+        self.assertTrue(result.valid)
+        self.assertEqual(result.fixed["live_subs_language"], "ru")
+        self.assertEqual(result.warnings, [])
+
+    def test_valid_live_subs_language_all_allowed(self):
+        for lang in ("ru", "es", "en", "auto"):
+            with self.subTest(lang=lang):
+                result = self.v.validate({"live_subs_language": lang})
+                self.assertTrue(result.valid)
+                self.assertEqual(result.fixed["live_subs_language"], lang)
+                self.assertEqual(result.warnings, [])
+
+    def test_invalid_live_subs_language_auto_fixed_to_ru(self):
+        result = self.v.validate({"live_subs_language": "de"})
+        self.assertTrue(result.valid)  # no hard error, just warning
+        self.assertEqual(result.fixed["live_subs_language"], "ru")
+        self.assertEqual(len(result.warnings), 1)
+        self.assertIn("live_subs_language", result.warnings[0])
+
 
 class TestValidateUiLastTabField(unittest.TestCase):
     """ui_last_tab allowlist must cover every PanelTab rawValue the Swift agent

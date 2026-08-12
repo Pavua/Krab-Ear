@@ -64,6 +64,10 @@ _ENUM_FIELDS: dict[str, tuple[str, ...]] = {
     # Транспорт GigaAM: первый элемент — безопасный прод-дефолт (subprocess);
     # "mlx" маршрутизируется на GigaAMMLXAdapter в stt_router.
     "stt_gigaam_transport": ("subprocess", "auto", "in_process", "mlx"),
+    # live_subs_language: явный язык live-субтитров (2026-08-12). Первый элемент
+    # ("ru") — продуктовый дефолт владельца, безопасное значение при повреждённой
+    # настройке. См. docs/superpowers/specs/2026-08-12-live-subs-language-routing-design.md.
+    "live_subs_language": ("ru", "es", "en", "auto"),
 }
 
 # Диапазоны числовых полей: ключ → (min, max, default, type)
