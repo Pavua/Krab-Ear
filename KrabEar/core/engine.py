@@ -801,6 +801,7 @@ class AudioEngine:
         diarize: bool | None = None,
         skip_vad_prefilter: bool = False,
         context_free: bool = False,
+        single_pass: bool = False,
     ) -> dict[str, Any]:
         """Основной метод распознавания речи. Поддерживает динамические промпты и доменные подсказки.
 
@@ -826,6 +827,16 @@ class AudioEngine:
                        path. True → initial_prompt формируется пустым, БЕЗ остальных трёх
                        эффектов is_preview (диаризация/loop-детектор/LLM-passes остаются
                        включены — live subs не preview, а полноценный путь STT).
+            single_pass: 2026-08-12, живой инцидент — окно live-субтитров длиной 2.5с
+                       прошло GigaAM (пусто) → whisper-large-v3 (conf 0.61, retry) →
+                       whisper-large-v3-turbo (retry) = 9.49с на окно, которое приходит
+                       каждые ~3с. True → отключает ДВА прохода, спроектированных для
+                       диктовки, а не для потока: (1) confidence-driven multi-pass retry
+                       (_maybe_multipass_retry) не выполняется; (2) request-local fallback
+                       на Whisper после пустого успешного результата GigaAM не выполняется —
+                       что первый движок в chain вернул, то и есть финальный результат,
+                       включая пустоту. Путь диктовки (single_pass=False, по умолчанию)
+                       не меняется — там ретрай по уверенности оправдан.
         """
         def _report(stage: str) -> None:
             if progress_callback is not None:
@@ -1139,10 +1150,20 @@ class AudioEngine:
                             "diarization": None, "emotion": None}
                 audio_data = vad_result
 
-            result = self._transcribe_with_fallback(audio_data, prompt=dynamic_prompt, language=resolved_lang)
+            # single_pass=False (по умолчанию, путь диктовки) — НЕ передаём keyword
+            # вовсе: старые test doubles, мокающие _transcribe_with_fallback
+            # фиксированной сигнатурой (audio, prompt=None, language=None),
+            # не должны увидеть новый параметр, если он не используется.
+            _fallback_call_kwargs: dict[str, Any] = {}
+            if single_pass:
+                _fallback_call_kwargs["single_pass"] = single_pass
+            result = self._transcribe_with_fallback(
+                audio_data, prompt=dynamic_prompt, language=resolved_lang, **_fallback_call_kwargs,
+            )
 
-            # 3a. Confidence-driven multi-pass retry (только для финальных транскрибаций)
-            if not is_preview and settings.STT_MULTIPASS_ENABLED:
+            # 3a. Confidence-driven multi-pass retry (только для финальных транскрибаций).
+            # single_pass=True (live subs) отключает эту ветку — см. docstring выше.
+            if not is_preview and not single_pass and settings.STT_MULTIPASS_ENABLED:
                 result = self._maybe_multipass_retry(
                     audio_data, dynamic_prompt, resolved_lang, result,
                 )
@@ -1980,6 +2001,7 @@ class AudioEngine:
         prompt: str,
         language: str | None = None,
         audio_sample_rate: int | float | None = None,
+        single_pass: bool = False,
     ) -> dict[str, Any]:
         """Пробует несколько моделей при возникновении ошибок (например, нехватка VRAM).
 
@@ -1989,14 +2011,20 @@ class AudioEngine:
         with _profiler.start_span("stt_with_fallback"):
             # Старые test doubles и внутренние вызовы ожидают три аргумента.
             # Не передаём новый keyword для канонических 16 кГц/неизвестной
-            # частоты; non-16k chunked-путь использует расширенный контракт.
-            if audio_sample_rate is None:
+            # частоты и single_pass=False (default) — non-16k chunked-путь и
+            # single_pass=True используют расширенный контракт.
+            _extra_kwargs: dict[str, Any] = {}
+            if audio_sample_rate is not None:
+                _extra_kwargs["audio_sample_rate"] = audio_sample_rate
+            if single_pass:
+                _extra_kwargs["single_pass"] = single_pass
+            if not _extra_kwargs:
                 return self._transcribe_with_fallback_impl(audio_data, prompt, language)
             return self._transcribe_with_fallback_impl(
                 audio_data,
                 prompt,
                 language,
-                audio_sample_rate=audio_sample_rate,
+                **_extra_kwargs,
             )
 
     _SENSEVOICE_MARKER: str = "sensevoice:adapter"
@@ -2012,9 +2040,17 @@ class AudioEngine:
         prompt: str,
         language: str | None = None,
         audio_sample_rate: int | float | None = None,
+        single_pass: bool = False,
     ) -> dict[str, Any]:
         """Внутренняя реализация fallback chain. Отделена от публичной _transcribe_with_fallback
-        чтобы обернуть весь chain одним span'ом без изменения retry/timeout логики."""
+        чтобы обернуть весь chain одним span'ом без изменения retry/timeout логики.
+
+        single_pass: 2026-08-12, live subs — отключает request-local fallback на
+        Whisper после пустого успешного результата GigaAM (единственное место
+        этого класса в chain: остальные адаптеры при пустом тексте не ретраятся,
+        они просто возвращают его как обычный результат). Что первый движок
+        вернул, то и результат, включая пустоту.
+        """
         # Все локальные STT-адаптеры принимают голый ndarray как mono/16 кГц.
         # Поэтому файловый chunked-путь обязан нормализовать массив ДО выбора
         # кандидата, а не только внутри GigaAM: иначе его пустой результат
@@ -2217,6 +2253,19 @@ class AudioEngine:
                                 f"{_gigaam_error or _gigaam_engine or 'empty_text'}"
                             )
                         if not _gigaam_text:
+                            # single_pass=True (live subs, 2026-08-12): request-local
+                            # fallback на Whisper — второй тяжёлый проход на то же
+                            # окно — отключён. Пустой ответ GigaAM = в окне нет речи,
+                            # субтитр не показываем; это дешевле и честнее, чем
+                            # добывать из шума низкоуверенный текст. Путь диктовки
+                            # (single_pass=False) продолжает fallback как раньше.
+                            if single_pass:
+                                logger.info(
+                                    "GigaAM не распознал речь — single_pass: "
+                                    "пустой результат первого движка, fallback пропущен"
+                                )
+                                adapter_result["model_used"] = adapter_model
+                                return adapter_result
                             # Пустой успешный ответ бывает на тишине и не доказывает,
                             # что модель сломана. Переключаем только этот запрос на
                             # Whisper, не записывая GigaAM в 300-секундный blacklist.

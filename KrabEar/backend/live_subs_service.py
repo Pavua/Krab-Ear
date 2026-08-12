@@ -561,12 +561,38 @@ class LiveSubsService:
         # hotwords владельца утекают в субтитры чужого видео как "Сохраняй
         # смысл 0 тяги" (см. core/engine.py и docs/superpowers/specs/
         # 2026-08-12-live-subs-prompt-leakage-design.md).
+        # single_pass=True (2026-08-12, живой инцидент — 9.49с на окно 2.5с):
+        # цепочка диктовки (GigaAM → confidence-retry на whisper-large-v3 →
+        # whisper-large-v3-turbo) спроектирована для одного финального
+        # результата, за который пользователь готов подождать. Live subs
+        # флашит окна каждые ~3s — тот же путь втрое медленнее реального
+        # времени. single_pass отключает и confidence-retry, и request-local
+        # fallback после пустого GigaAM: что первый движок вернул, то и
+        # результат, включая пустоту (см. core/engine.py::AudioEngine.transcribe
+        # и docs/superpowers/specs/2026-08-12-live-subs-single-pass-design.md).
         stt_result = self._transcriber.transcribe(
             audio, quality_profile="balanced", skip_vad_prefilter=True,
-            context_free=True, lang_hint=lang_hint,
+            context_free=True, lang_hint=lang_hint, single_pass=True,
         )
         text = stt_result.get("text", "").strip()
         language_detected = stt_result.get("language")
+
+        # single_pass пустой результат (2026-08-12): первый движок в chain не
+        # распознал речь в окне — не показываем субтитр и не эмитим событие.
+        # Тот же паттерн раннего return без emit, что и у repetition-loop ниже.
+        if not text:
+            logger.info(
+                "LiveSubsService: flush EMPTY (STT вернул пустой текст) — "
+                "событие не эмитится",
+                extra={"lang": language_detected},
+            )
+            return {
+                "text": "",
+                "translation": None,
+                "start_ts": start_ts,
+                "end_ts": end_ts,
+                "language_detected": language_detected,
+            }
 
         # G2 (2026-08-12, живой инцидент — «Сохраняй смысл 0 тяги» x17 на экране
         # чужого YouTube-видео): зацикленное окно Whisper не должно доехать до
@@ -576,33 +602,34 @@ class LiveSubsService:
         # live subs правильная реакция — дроп, а не показ мусора. Переиспользуем
         # dropped_windows (F3) — тот же счётчик наблюдаемости для обеих причин
         # дропа (backpressure и repetition-loop), новый заводить не нужно.
-        if text:
-            _is_loop, _loop_reason = is_likely_repetition_loop(text)
-            if _is_loop:
-                with self._worker_cond:
-                    self._dropped_windows += 1
-                    _dropped_total = self._dropped_windows
-                # W1770 MED: не логируем сам текст/бигу/предложение из _loop_reason
-                # (потенциальный фрагмент чужой речи) — только тип эвристики.
-                logger.warning(
-                    "LiveSubsService: зацикленное окно дропнуто (repetition loop)",
-                    extra={
-                        "loop_heuristic": _loop_reason.split(":", 1)[0],
-                        "dropped_windows": _dropped_total,
-                        "text_len": len(text),
-                    },
-                )
-                return {
-                    "text": "",
-                    "translation": None,
-                    "start_ts": start_ts,
-                    "end_ts": end_ts,
-                    "language_detected": language_detected,
-                }
+        # text здесь гарантированно непуст — ранний return выше уже отсеял
+        # пустой результат.
+        _is_loop, _loop_reason = is_likely_repetition_loop(text)
+        if _is_loop:
+            with self._worker_cond:
+                self._dropped_windows += 1
+                _dropped_total = self._dropped_windows
+            # W1770 MED: не логируем сам текст/бигу/предложение из _loop_reason
+            # (потенциальный фрагмент чужой речи) — только тип эвристики.
+            logger.warning(
+                "LiveSubsService: зацикленное окно дропнуто (repetition loop)",
+                extra={
+                    "loop_heuristic": _loop_reason.split(":", 1)[0],
+                    "dropped_windows": _dropped_total,
+                    "text_len": len(text),
+                },
+            )
+            return {
+                "text": "",
+                "translation": None,
+                "start_ts": start_ts,
+                "end_ts": end_ts,
+                "language_detected": language_detected,
+            }
 
         # Translate
         translation: str | None = None
-        if text and target_lang and target_lang not in ("off", "none", ""):
+        if target_lang and target_lang not in ("off", "none", ""):
             try:
                 tr = self._translator.translate(
                     text=text,
@@ -624,20 +651,14 @@ class LiveSubsService:
         event_bus.emit_typed(EventType.LIVE_SUBS_RESULT, event_payload)
         # W1770 MED: НИКОГДА не логируем сам текст транскрипта/перевода (PII).
         # Только метаданные — гарантия metadata-only логирования.
-        if text:
-            logger.info(
-                "LiveSubsService: flush OK",
-                extra={
-                    "text_len": len(text),
-                    "lang": language_detected,
-                    "translation_len": len(translation) if translation else 0,
-                },
-            )
-        else:
-            logger.info(
-                "LiveSubsService: flush EMPTY (Whisper вернул пустой текст)",
-                extra={"lang": language_detected},
-            )
+        logger.info(
+            "LiveSubsService: flush OK",
+            extra={
+                "text_len": len(text),
+                "lang": language_detected,
+                "translation_len": len(translation) if translation else 0,
+            },
+        )
 
         return {
             "text": text,

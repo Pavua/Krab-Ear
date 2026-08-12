@@ -67,6 +67,7 @@ class Transcriber:
         silence_ranges: list[tuple[float, float]] | None = None,
         progress_callback: Any | None = None,
         context_free: bool = False,
+        single_pass: bool = False,
     ) -> dict[str, Any]:
         """Транскрибирует аудио с учётом выбранного профиля и контекста.
 
@@ -87,6 +88,11 @@ class Transcriber:
                           ни hotwords) — см. core/engine.py. Отдельный от is_preview
                           флаг: is_preview дополнительно гейтит диаризацию/loop-детектор/
                           LLM-passes, которые live subs не должны терять.
+            single_pass: 2026-08-12, живой инцидент 9.49с на окно live-субтитров.
+                          True → engine.transcribe отключает confidence-driven multi-pass
+                          retry и request-local fallback на Whisper после пустого GigaAM —
+                          см. core/engine.py::AudioEngine.transcribe. По умолчанию False —
+                          путь диктовки не меняется.
         """
         # Phase B.1 — guard: check HF_TOKEN before delegating to engine.
         # If diarization is requested (explicitly or via settings dict) but token
@@ -113,6 +119,7 @@ class Transcriber:
             silence_ranges=silence_ranges,
             progress_callback=progress_callback,
             context_free=context_free,
+            single_pass=single_pass,
         )
 
     def transcribe_preview(self, audio_data: Any, quality_profile: str = "balanced") -> dict[str, Any]:

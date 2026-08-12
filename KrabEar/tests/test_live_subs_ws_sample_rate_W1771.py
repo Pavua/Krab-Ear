@@ -22,12 +22,13 @@ from backend.live_subs_service import LiveSubsService, _MIN_SAMPLE_RATE, _MAX_SA
 
 
 class _FakeTranscriber:
-    def __init__(self):
+    def __init__(self, text: str = ""):
         self.last_audio_len = None
+        self._text = text
 
     def transcribe(self, audio, **kw):
         self.last_audio_len = len(audio)
-        return {"text": "", "language": "ru"}
+        return {"text": self._text, "language": "ru"}
 
 
 class WSSampleRateOOMTest(unittest.TestCase):
@@ -58,8 +59,12 @@ class WSSampleRateOOMTest(unittest.TestCase):
 
 
 class FlushPrivacyGateTest(unittest.TestCase):
-    def _svc(self, privacy):
-        tx = _FakeTranscriber()
+    def _svc(self, privacy, text: str = ""):
+        # single_pass (2026-08-12): пустой результат первого движка больше не
+        # эмитит событие (см. test_live_subs_single_pass_2026_08_12.py) — тесту
+        # privacy-гейта нужен НЕПУСТОЙ текст, иначе emit не произойдёт по ДРУГОЙ
+        # причине и тест перестанет проверять именно privacy.
+        tx = _FakeTranscriber(text=text)
         svc = LiveSubsService(
             transcriber=tx, translator=MagicMock(),
             settings_get=lambda k, d: (privacy if k == "privacy_mode_enabled" else d),
@@ -67,7 +72,7 @@ class FlushPrivacyGateTest(unittest.TestCase):
         return svc, tx
 
     def test_flush_emits_nothing_when_privacy_on(self):
-        svc, tx = self._svc(privacy=True)
+        svc, tx = self._svc(privacy=True, text="привет")
         pcm = np.zeros(16000 * 4, dtype=np.int16).tobytes()  # >3s -> would flush
         with patch("backend.live_subs_service.event_bus.emit_typed") as mock_emit:
             res = svc.ingest(audio_bytes=pcm, sample_rate=16000, target_lang="off", is_final=True)
@@ -76,7 +81,7 @@ class FlushPrivacyGateTest(unittest.TestCase):
         self.assertIsNone(tx.last_audio_len, "transcriber must not run under privacy mode")
 
     def test_flush_emits_when_privacy_off(self):
-        svc, _tx = self._svc(privacy=False)
+        svc, _tx = self._svc(privacy=False, text="привет")
         pcm = np.zeros(16000 * 4, dtype=np.int16).tobytes()
         with patch("backend.live_subs_service.event_bus.emit_typed") as mock_emit:
             svc.ingest(audio_bytes=pcm, sample_rate=16000, target_lang="off", is_final=True)
