@@ -66,6 +66,7 @@ class Transcriber:
         skip_vad_prefilter: bool = False,
         silence_ranges: list[tuple[float, float]] | None = None,
         progress_callback: Any | None = None,
+        context_free: bool = False,
     ) -> dict[str, Any]:
         """Транскрибирует аудио с учётом выбранного профиля и контекста.
 
@@ -80,6 +81,12 @@ class Transcriber:
                      diarization_enabled=True, но HF_TOKEN отсутствует — переопределяется в False.
             silence_ranges: Диапазоны тишины (start_sec, end_sec) от RealtimeSilenceFilter.
                             Если указаны, обнуляет тихие участки аудио перед STT.
+            context_free: 2026-08-12, живой инцидент утечки TRANSCRIBE_PROMPT в
+                          live-субтитры чужого видео. True → engine.transcribe получает
+                          пустой initial_prompt (ни инструкции, ни истории владельца,
+                          ни hotwords) — см. core/engine.py. Отдельный от is_preview
+                          флаг: is_preview дополнительно гейтит диаризацию/loop-детектор/
+                          LLM-passes, которые live subs не должны терять.
         """
         # Phase B.1 — guard: check HF_TOKEN before delegating to engine.
         # If diarization is requested (explicitly or via settings dict) but token
@@ -105,6 +112,7 @@ class Transcriber:
             skip_vad_prefilter=skip_vad_prefilter,
             silence_ranges=silence_ranges,
             progress_callback=progress_callback,
+            context_free=context_free,
         )
 
     def transcribe_preview(self, audio_data: Any, quality_profile: str = "balanced") -> dict[str, Any]:

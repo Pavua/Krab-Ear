@@ -800,6 +800,7 @@ class AudioEngine:
         silence_ranges: list[tuple[float, float]] | None = None,
         diarize: bool | None = None,
         skip_vad_prefilter: bool = False,
+        context_free: bool = False,
     ) -> dict[str, Any]:
         """Основной метод распознавания речи. Поддерживает динамические промпты и доменные подсказки.
 
@@ -818,6 +819,13 @@ class AudioEngine:
             silence_ranges: Диапазоны тишины (start_sec, end_sec) от RealtimeSilenceFilter.
                        Семплы в этих диапазонах будут обнулены перед STT (не удалены — таймстемпы сохранены).
                        Не применяется для preview-транскрибации.
+            context_free: 2026-08-12, живой инцидент — live-субтитры чужого YouTube-видео
+                       показали «Сохраняй смысл 0 тяги»: TRANSCRIBE_PROMPT (инструкция для
+                       Whisper) утёк в распознанный текст, потому что live subs флашит
+                       каждые ~3s — то же "короткие буферы", от которых уже защищён preview
+                       path. True → initial_prompt формируется пустым, БЕЗ остальных трёх
+                       эффектов is_preview (диаризация/loop-детектор/LLM-passes остаются
+                       включены — live subs не preview, а полноценный путь STT).
         """
         def _report(stage: str) -> None:
             if progress_callback is not None:
@@ -897,7 +905,16 @@ class AudioEngine:
         # TRANSCRIBE_PROMPT для пунктуации/брендов/имён. Defense-in-depth:
         # _postprocess_preview_text в service.py срезает известные фрагменты
         # промпта как safety net.
-        if is_preview:
+        # context_free (2026-08-12, живой инцидент — «Сохраняй смысл 0 тяги» в
+        # live-субтитрах чужого YouTube-видео): live subs флашит каждые ~3s,
+        # то есть та же «короткие буферы» ситуация, что и у preview, ПЛЮС
+        # инструкция и история/hotwords владельца вредны для чужого системного
+        # звука (смещают распознавание в лексику диктовок владельца). Не
+        # переиспользуем is_preview: тот дополнительно гейтит диаризацию/
+        # loop-детектор/LLM-passes, которые live subs использует как обычно —
+        # навесить на is_preview значило бы получить три незапрошенных
+        # изменения поведения.
+        if is_preview or context_free:
             dynamic_prompt = ""
         else:
             domain_desc = self.DOMAIN_PROMPTS.get(domain, self.DOMAIN_PROMPTS["casual"])

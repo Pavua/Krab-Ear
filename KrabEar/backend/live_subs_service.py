@@ -28,6 +28,7 @@ import numpy as np
 from backend.event_bus import bus as event_bus
 from contracts.live_subs_events import LiveSubsResult
 from contracts.registry import EventType
+from core.utils import is_likely_repetition_loop
 
 if TYPE_CHECKING:
     from backend.transcriber import Transcriber
@@ -548,11 +549,48 @@ class LiveSubsService:
         # mic input и speech_ratio=0.0 на компрессированном system-audio из YouTube
         # → STT никогда не вызывается. Для live субтитров VAD контрпродуктивен —
         # короткие чанки уже отфильтрованы на уровне Swift SystemAudioCapture.)
+        # context_free=True (2026-08-12, живой инцидент): live subs флашит окна
+        # каждые ~3s без initial_prompt — иначе TRANSCRIBE_PROMPT и история/
+        # hotwords владельца утекают в субтитры чужого видео как "Сохраняй
+        # смысл 0 тяги" (см. core/engine.py и docs/superpowers/specs/
+        # 2026-08-12-live-subs-prompt-leakage-design.md).
         stt_result = self._transcriber.transcribe(
-            audio, quality_profile="balanced", skip_vad_prefilter=True
+            audio, quality_profile="balanced", skip_vad_prefilter=True, context_free=True
         )
         text = stt_result.get("text", "").strip()
         language_detected = stt_result.get("language")
+
+        # G2 (2026-08-12, живой инцидент — «Сохраняй смысл 0 тяги» x17 на экране
+        # чужого YouTube-видео): зацикленное окно Whisper не должно доехать до
+        # субтитров. Отличие от пути диктовки (engine.py:~1138, «не врём про
+        # input»: пользователь видит реальный вывод + warning-тост и решает,
+        # перезаписать ли фразу) — чужое видео перезаписать нельзя, поэтому для
+        # live subs правильная реакция — дроп, а не показ мусора. Переиспользуем
+        # dropped_windows (F3) — тот же счётчик наблюдаемости для обеих причин
+        # дропа (backpressure и repetition-loop), новый заводить не нужно.
+        if text:
+            _is_loop, _loop_reason = is_likely_repetition_loop(text)
+            if _is_loop:
+                with self._worker_cond:
+                    self._dropped_windows += 1
+                    _dropped_total = self._dropped_windows
+                # W1770 MED: не логируем сам текст/бигу/предложение из _loop_reason
+                # (потенциальный фрагмент чужой речи) — только тип эвристики.
+                logger.warning(
+                    "LiveSubsService: зацикленное окно дропнуто (repetition loop)",
+                    extra={
+                        "loop_heuristic": _loop_reason.split(":", 1)[0],
+                        "dropped_windows": _dropped_total,
+                        "text_len": len(text),
+                    },
+                )
+                return {
+                    "text": "",
+                    "translation": None,
+                    "start_ts": start_ts,
+                    "end_ts": end_ts,
+                    "language_detected": language_detected,
+                }
 
         # Translate
         translation: str | None = None

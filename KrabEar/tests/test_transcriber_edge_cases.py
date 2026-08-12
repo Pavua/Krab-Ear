@@ -61,6 +61,7 @@ class FakeAudioEngine:
         silence_ranges: list[Any] | None = None,
         diarize: bool | None = None,
         skip_vad_prefilter: bool | None = None,  # added by cherry-pick a6213c0 (live_subs bypass VAD)
+        context_free: bool | None = None,  # 2026-08-12 live-subs-prompt-leakage (G1)
     ) -> dict[str, Any]:
         record = {
             "audio_data": audio_data,
