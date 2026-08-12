@@ -290,6 +290,31 @@ _ICLOUD_PATH_MARKERS = (
 # iCloud-заглушек (placeholder), к которым обращаются без NSFileCoordinator.
 _ICLOUD_ERRNO = 11
 
+# --- Гарды вырожденного аудио (живой инцидент 2026-08-12) -------------------
+# Окно нулевой длины доехало от live_subs до GigaAM и уронило адаптер на WAV
+# без фреймов ("both buffer length (0) and count (-1) must not be 0").
+
+# Ниже этой длины STT физически нечего распознавать: 10 мс при 16 кГц.
+# Порог намеренно минимальный — он чинит краш, но не отсекает короткие
+# реплики, которые Whisper/GigaAM ещё способны разобрать.
+_MIN_TRANSCRIBE_SAMPLES = 160
+
+# NoiseProfiler разбивает аудио на фреймы по 2048 сэмплов и на более коротком
+# входе возвращает _silent_profile() — то есть snr_db=0.0 без всякого измерения.
+_DENOISE_MIN_SAMPLES = 2048
+
+# |SNR| ниже этого значения — не измерение, а sentinel «оценить не смог»:
+# ровно 0.0 возвращают _silent_profile() и четыре ветки _compute_snr
+# (нулевой signal_rms, слишком короткий сегмент, пустой спектр, пустой floor).
+# Даже если 0.0 дБ действительно измерены, деноизить бессмысленно: порог маски
+# совпадает с уровнем сигнала, и spectral gating выжигает речь вместе с шумом.
+_SNR_UNRELIABLE_EPS_DB = 0.05
+
+# Доля исходной энергии, ниже которой выход деноизера считается разрушенным
+# сигналом, а не очищенным (0.01 = −20 дБ). Легитимное подавление даже в режиме
+# strong снижает энергию в разы, а не на два порядка.
+_DENOISE_MIN_ENERGY_RATIO = 0.01
+
 
 def _is_icloud_path(path: str) -> bool:
     """Возвращает True если путь выглядит как iCloud Drive расположение."""
@@ -752,12 +777,90 @@ class AudioEngine:
         logger.warning("Неизвестный lang_hint=%r, используем авто-определение", lang_hint)
         return None
 
+    @staticmethod
+    def _empty_transcription_result(engine: str, language: str | None) -> dict[str, Any]:
+        """Пустой результат транскрибации в контракте обычного ответа.
+
+        Единственный источник схемы для всех ранних возвратов «распознавать
+        нечего» (VAD отфильтровал тишину, вырожденное аудио): потребители
+        читают эти поля напрямую, и разъезд двух копий словаря обернулся бы
+        KeyError уже в проде.
+        """
+        return {
+            "text": "", "raw_text": "", "cleaned_text": "",
+            "llm_applied": False, "llm_latency_ms": None,
+            "llm_fallback_reason": None, "llm_diff": None,
+            "confidence": 0.0, "raw_confidence": 0.0,
+            "confidence_adjustments": [], "duration_ms": 0,
+            "engine": engine, "model": None,
+            "language": language, "segments": [],
+            "diarization": None, "emotion": None,
+        }
+
+    @staticmethod
+    def _audio_energy(audio: np.ndarray) -> float:
+        """Суммарная энергия сигнала (Σx²) в float64 — устойчиво к dtype входа."""
+        arr = np.asarray(audio, dtype=np.float64).ravel()
+        if arr.size == 0:
+            return 0.0
+        return float(np.dot(arr, arr))
+
+    @classmethod
+    def _guard_denoised(cls, original: np.ndarray, denoised: Any) -> np.ndarray:
+        """Отвергает выход деноизера, потерявший сигнал (инцидент 2026-08-12).
+
+        Проверяются три вида порчи: не-массив/пустой результат, изменившаяся
+        форма (сдвинет таймстемпы Whisper; сюда же попадает моно-даунмикс
+        многоканального входа — в STT-пути аудио всегда моно) и обвал энергии
+        ниже ``_DENOISE_MIN_ENERGY_RATIO`` от исходной.
+
+        Направление отказа выбрано намеренно: распознать шумное аудио лучше,
+        чем не распознать ничего, поэтому при любом сомнении возвращается
+        ИСХОДНЫЙ массив, а не результат обработки.
+        """
+        if not isinstance(denoised, np.ndarray) or denoised.size == 0:
+            logger.warning(
+                "[STT] denoising вернул пустой результат (%s) — используем исходное аудио",
+                type(denoised).__name__,
+            )
+            return original
+
+        if denoised.shape != original.shape:
+            logger.warning(
+                "[STT] denoising изменил форму аудио %s → %s — используем исходное аудио",
+                original.shape, denoised.shape,
+            )
+            return original
+
+        orig_energy = cls._audio_energy(original)
+        if orig_energy <= 0.0:
+            # Исходное аудио само по себе тишина — терять нечего, но и
+            # обрабатывать нечего: отдаём вход без изменений.
+            return original
+
+        ratio = cls._audio_energy(denoised) / orig_energy
+        if ratio < _DENOISE_MIN_ENERGY_RATIO:
+            logger.warning(
+                "[STT] denoising срезал энергию до %.4f от исходной (< %.4f) — "
+                "используем исходное аудио",
+                ratio, _DENOISE_MIN_ENERGY_RATIO,
+            )
+            return original
+
+        return denoised
+
     def _maybe_denoise(self, audio: np.ndarray) -> np.ndarray:
         """Проверяет SNR и применяет шумоподавление при необходимости.
 
         Использует NoiseProfiler для оценки SNR. Если SNR < порога из настроек →
         запускает AudioDenoiser с заданной силой. Возвращает (возможно обработанный)
         аудиомассив той же dtype и формы.
+
+        Деноизинг пропускается в двух случаях, когда оценка SNR недостоверна:
+        аудио короче окна NoiseProfiler и |SNR| ≈ 0 (sentinel «оценить не смог» —
+        см. ``_SNR_UNRELIABLE_EPS_DB``). Результат обработки проходит через
+        ``_guard_denoised`` — деноизер не имеет права вернуть в пайплайн пустое
+        или выжженное аудио.
 
         Исключения внутри не должны ломать транскрибацию — ловим и логируем.
         """
@@ -766,17 +869,39 @@ class AudioEngine:
             from core.audio_denoiser import AudioDenoiser
 
             sample_rate = 16000  # mlx-whisper ожидает 16 кГц
+
+            n_samples = int(np.asarray(audio).size)
+            if n_samples < _DENOISE_MIN_SAMPLES:
+                # NoiseProfiler на таком входе вернёт _silent_profile() с
+                # snr_db=0.0 — «денойзить» по этой цифре значит верить
+                # несуществующему измерению.
+                logger.warning(
+                    "[STT] аудио %d сэмплов (< %d) — оценка SNR недостоверна, "
+                    "denoising пропущен",
+                    n_samples, _DENOISE_MIN_SAMPLES,
+                )
+                return audio
+
             profile = NoiseProfiler().profile(audio, sample_rate)
             snr = profile.snr_db
             threshold = settings.STT_DENOISE_SNR_THRESHOLD_DB
             strength = settings.STT_DENOISE_STRENGTH
+
+            if abs(snr) < _SNR_UNRELIABLE_EPS_DB:
+                logger.warning(
+                    "[STT] noise SNR=%.2f dB — оценка недостоверна (sentinel "
+                    "NoiseProfiler), denoising пропущен",
+                    snr,
+                )
+                return audio
 
             if snr < threshold:
                 logger.info(
                     "[STT] noise SNR=%.1f dB < %.1f dB → denoising applied (strength=%s)",
                     snr, threshold, strength,
                 )
-                return AudioDenoiser().denoise(audio, sample_rate, strength=strength)  # type: ignore[arg-type]
+                denoised = AudioDenoiser().denoise(audio, sample_rate, strength=strength)  # type: ignore[arg-type]
+                return self._guard_denoised(audio, denoised)
             else:
                 logger.debug(
                     "[STT] noise SNR=%.1f dB ≥ %.1f dB → denoising skipped",
@@ -846,6 +971,26 @@ class AudioEngine:
                     pass
 
         start_time = time.time()
+
+        # --- Гард вырожденного аудио (живой инцидент 2026-08-12) ---
+        # Окно нулевой длины из live_subs проходило весь препроцессинг и падало
+        # уже в STT-адаптере (GigaAM: WAV без фреймов → ValueError в np.frombuffer).
+        # Отсекаем здесь, ДО pipeline_v2 и остальных веток, возвращая пустой
+        # результат по тому же контракту, что и vad_skip.
+        if (
+            isinstance(audio_data, np.ndarray)
+            and audio_data.size < _MIN_TRANSCRIBE_SAMPLES
+        ):
+            logger.warning(
+                "transcribe: вырожденное аудио (%d сэмплов < %d) — STT пропущен",
+                audio_data.size, _MIN_TRANSCRIBE_SAMPLES,
+            )
+            _empty_lang = (
+                self._resolve_language(lang_hint)
+                if lang_hint is not None
+                else settings.TRANSCRIBE_LANGUAGE
+            )
+            return self._empty_transcription_result("empty_audio", _empty_lang)
 
         # --- MAX_AUDIO_MB guard (MED wave-26 DoS fix) ---
         # Must run BEFORE pipeline_v2 early-return so that oversized files are
@@ -1140,14 +1285,7 @@ class AudioEngine:
                 vad_result = self._apply_vad_prefilter(audio_data)
                 if vad_result is None:
                     # Тишина или слишком мало речи — возвращаем пустой результат
-                    return {"text": "", "raw_text": "", "cleaned_text": "",
-                            "llm_applied": False, "llm_latency_ms": None,
-                            "llm_fallback_reason": None, "llm_diff": None,
-                            "confidence": 0.0, "raw_confidence": 0.0,
-                            "confidence_adjustments": [], "duration_ms": 0,
-                            "engine": "vad_skip", "model": None,
-                            "language": resolved_lang, "segments": [],
-                            "diarization": None, "emotion": None}
+                    return self._empty_transcription_result("vad_skip", resolved_lang)
                 audio_data = vad_result
 
             # single_pass=False (по умолчанию, путь диктовки) — НЕ передаём keyword
