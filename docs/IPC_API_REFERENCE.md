@@ -140,9 +140,21 @@ Returns: `{backend_version, protocol_version, capabilities}`
 
 ### `report_reconnect`
 *(service.py)*  
-Swift→backend телеметрия переподключения. Публикует `ipc.reconnect` info event.  
-Params: `{reason?}`  
+Swift→backend телеметрия переподключения. Публикует `ipc.reconnect` info event
+(severity=info, `actionable=false`).  
+Отправитель — `IPCReconnectTelemetry.report` (Swift), вызываемый из ОБОИХ путей
+восстановления `main+IPCRecovery.swift` (`callWithRecovery` и
+`callAsyncWithRecovery`) после успешного повтора вслед за `restartIfDead()`.
+Best-effort: сбой отправки не влияет на восстановленный вызов.  
+Params: `{attempts, duration_ms}` — оба int; `attempts` = число повторов до успеха
+(recovery-путь делает ровно один), `duration_ms` = время от первой неудачи до успеха.  
 Returns: `{ok: true}`
+
+> 🔴 До 2026-08-08 метод не вызывался НИКОГДА: телеметрия жила внутри
+> IPCClient.callWithReconnect (без бэктиков — метод удалён), у которого не было ни
+> одного продового call site с рождения (Phase C C.2, PR #367). Документированный
+> ранее параметр `reason` не существовал ни в одном отправителе и ни в хендлере —
+> справочник исправлен по факту `_handle_report_reconnect`.
 
 ### `report_paste_failure`
 *(service.py)*  
