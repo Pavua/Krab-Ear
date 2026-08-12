@@ -131,6 +131,10 @@ _RANGE_FIELDS: dict[str, tuple[Any, Any, Any, type]] = {
     # ждать сколько нужно), верх — 60с (заведомо больше практического
     # 5с TTL-кэша, чтобы не превратиться в скрытый unbounded-wait по факту).
     "settings_read_lock_timeout_sec": (0.0, 60.0, 0.5, float),
+    # Read-path бюджет ожидания flock для history_count внутри ping (спека
+    # 2026-08-12 ping-nonblocking). 0 разрешён явно (прежнее поведение),
+    # верх — 60с той же природы, что settings_read_lock_timeout_sec выше.
+    "ping_count_lock_timeout_sec": (0.0, 60.0, 0.3, float),
 }
 
 # Bool-поля с дефолтными значениями

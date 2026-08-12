@@ -11,11 +11,14 @@ HealthMonitor.swift проверяет поле status == "ok" по каждом
 from __future__ import annotations
 
 import logging
+import math
 import platform
 import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from backend.state_store import StateStoreLockTimeout
 
 if TYPE_CHECKING:
     from backend.event_bridge import EventBridge
@@ -82,6 +85,16 @@ class HealthCheckService:
         # же причине, что rest_inprocess: конструируется только когда
         # рубильник REST_IN_PROCESS_ENABLED включён (см. service.py).
         self._rest_watchdog = rest_watchdog
+        # Спека 2026-08-12 ping-nonblocking: последнее УСПЕШНО прочитанное
+        # значение history_count — фоллбэк, когда count_active_items() не
+        # укладывается в короткий read-path бюджет (StateStoreLockTimeout).
+        # 0 при холодном старте (ни разу не читали) — не хуже прежнего
+        # поведения "-1", но не выдумывает несуществующую историю.
+        self._last_known_history_count: int = 0
+        # WARNING один раз на эпизод контенции (ping — 3с heartbeat, лог-шторм
+        # иначе), сбрасывается успешным чтением — тот же паттерн, что
+        # SettingsService._read_lock_timeout_warned.
+        self._history_count_lock_timeout_warned: bool = False
 
     # ------------------------------------------------------------------
     # handle_ping
@@ -99,6 +112,80 @@ class HealthCheckService:
         except Exception:
             return False
 
+    def _ping_count_lock_timeout_budget(self) -> float:
+        """Бюджет ожидания flock для ``count_active_items()`` внутри ``handle_ping``
+        (спека 2026-08-12 ping-nonblocking, ``ping_count_lock_timeout_sec``, дефолт 0.3с).
+
+        Источник — ``SettingsService.cached_settings()`` (уже само fail-closed
+        и не блокируется на контенции — см. спеку settings-read-nonblocking),
+        тот же приём, что ``SettingsService._read_lock_timeout_budget()``.
+        Отсутствие ``settings_svc`` (не все конструкторы его передают) или
+        испорченное значение — дефолт модуля.
+        """
+        default_budget = 0.3
+        if self._settings_svc is None:
+            return default_budget
+        try:
+            raw = self._settings_svc.cached_settings().get(
+                "ping_count_lock_timeout_sec", default_budget
+            )
+            budget = float(raw)
+        except Exception:
+            return default_budget
+        if not math.isfinite(budget) or budget < 0:
+            return default_budget
+        return budget
+
+    def _read_history_count_for_ping(self) -> int:
+        """Читает ``count_active_items()`` с коротким read-path бюджетом, никогда
+        не блокируя ``handle_ping`` дольше бюджета (спека 2026-08-12 ping-nonblocking).
+
+        ``count_active_items()`` берёт ТОТ ЖЕ эксклюзивный flock, что и вся
+        история (``StateStore._lock()``, общий 30с инстанс-таймаут). ping —
+        3-секундный heartbeat ``HealthMonitor.swift`` (2 подряд неответа →
+        ``forceRestartBackend``/``launchctl kickstart -k``) — медленная
+        операция с историей в другом потоке НЕ ДОЛЖНА заставлять агента
+        убивать здоровый бэкенд (живой инцидент 2026-08-12 14:07:48, две
+        диктовки потеряны посреди работы владельца).
+
+        Не уложились в бюджет (``StateStoreLockTimeout``) → отдаём ПОСЛЕДНЕЕ
+        ИЗВЕСТНОЕ успешно прочитанное значение (0 при холодном старте) —
+        никогда не блокируемся и никогда не бросаем исключение наружу.
+        WARNING логируется один раз на эпизод контенции, не на каждый 3с тик.
+
+        Прочие исключения (повреждённый файл истории и т.п., НЕ связанные с
+        contention лока) сохраняют старое поведение — ``history_count=-1``.
+        """
+        budget = self._ping_count_lock_timeout_budget()
+        try:
+            if budget > 0:
+                count = self.store.count_active_items(lock_timeout_sec=budget)
+            else:
+                # 0 = прежнее поведение (без override — общий инстанс-таймаут).
+                count = self.store.count_active_items()
+        except StateStoreLockTimeout:
+            if not self._history_count_lock_timeout_warned:
+                logger.warning(
+                    "HealthCheckService.handle_ping(): count_active_items() не "
+                    "уложился в %.2fс (StateStore._lock() занят другим "
+                    "держателем) — отдаём последнее известное значение (%d) "
+                    "вместо блокировки ping",
+                    budget, self._last_known_history_count,
+                    extra={
+                        "budget_sec": budget,
+                        "last_known_history_count": self._last_known_history_count,
+                    },
+                )
+                self._history_count_lock_timeout_warned = True
+            return self._last_known_history_count
+        except Exception:
+            return -1
+        # Успешное чтение закрывает эпизод контенции — следующий промах
+        # снова получит ровно одну WARNING, а не тишину навсегда.
+        self._history_count_lock_timeout_warned = False
+        self._last_known_history_count = count
+        return count
+
     def handle_ping(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает статус сервиса. Используется HealthMonitor.swift (3-сек тик).
 
@@ -110,10 +197,7 @@ class HealthCheckService:
         if self._is_privacy_mode():
             history_count = 0
         else:
-            try:
-                history_count = self.store.count_active_items()
-            except Exception:
-                history_count = -1
+            history_count = self._read_history_count_for_ping()
         return {
             "status": "ok",
             "service": "krabear-backend",

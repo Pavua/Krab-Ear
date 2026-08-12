@@ -1433,15 +1433,25 @@ class StateStore:
         with self._lock():
             return self._load_active_items_unlocked()
 
-    def count_active_items(self) -> int:
+    def count_active_items(self, lock_timeout_sec: float | None = None) -> int:
         """Возвращает количество активных (не удаленных) записей.
 
         Переиспользует инкрементально поддерживаемый ``_active_ids`` (см.
         ``_ensure_active_ids_unlocked``) вместо полного O(n) скана
         history.ndjson + delta-журналов на КАЖДЫЙ вызов — этот метод
         вызывается из ``handle_ping`` на каждый 3с heartbeat HealthMonitor.
+
+        ``lock_timeout_sec``: опциональный override read-path бюджета
+        ожидания flock ИМЕННО для этого вызова (спека 2026-08-12
+        ping-nonblocking — тот же приём, что ``load_settings(lock_timeout_sec=
+        ...)`` для read-path настроек). ``None`` (по умолчанию) — обычное
+        поведение, общий инстанс-таймаут, поведение остальных call sites
+        (``auto_backup.py``, ``history_service.py``, ``health_checker.py``)
+        не меняется. При истечении заданного бюджета бросает
+        ``StateStoreLockTimeout`` — вызывающая сторона (``HealthCheckService.
+        handle_ping``) сама решает fail-closed фоллбэк.
         """
-        with self._lock():
+        with self._lock(timeout_sec=lock_timeout_sec):
             return len(self._ensure_active_ids_unlocked())
 
     def _compact_unlocked(self) -> None:

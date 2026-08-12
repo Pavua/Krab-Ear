@@ -1245,4 +1245,15 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # call sites не меняется. 0 — прежнее поведение (ждать сколько нужно,
     # т.е. обычный таймаут StateStore._lock()).
     "settings_read_lock_timeout_sec": 0.5,
+    # --- Read-path бюджет ожидания flock для history_count внутри ping
+    #     (спека 2026-08-12 ping-nonblocking, сиблинг settings-read-nonblocking) ---
+    # handle_ping — 3-секундный heartbeat HealthMonitor.swift (2 подряд
+    # неответа → forceRestartBackend). count_active_items() раньше брал ТОТ
+    # ЖЕ эксклюзивный flock, что и вся история, с общим 30с таймаутом —
+    # долгая операция с историей в другом потоке подвешивала ping и агент
+    # рестартовал ЗДОРОВЫЙ бэкенд (живой инцидент 2026-08-12 14:07:48, две
+    # диктовки потеряны). Значение — верхняя граница ожидания ИМЕННО для
+    # этого read-path внутри handle_ping; не уложились — отдаём последнее
+    # известное значение счётчика вместо блокировки. 0 — прежнее поведение.
+    "ping_count_lock_timeout_sec": 0.3,
 }
