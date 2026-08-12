@@ -11,7 +11,6 @@ HealthMonitor.swift проверяет поле status == "ok" по каждом
 from __future__ import annotations
 
 import logging
-import math
 import platform
 import sys
 import time
@@ -85,11 +84,14 @@ class HealthCheckService:
         # же причине, что rest_inprocess: конструируется только когда
         # рубильник REST_IN_PROCESS_ENABLED включён (см. service.py).
         self._rest_watchdog = rest_watchdog
-        # Спека 2026-08-12 ping-nonblocking: последнее УСПЕШНО прочитанное
-        # значение history_count — фоллбэк, когда count_active_items() не
-        # укладывается в короткий read-path бюджет (StateStoreLockTimeout).
-        # 0 при холодном старте (ни разу не читали) — не хуже прежнего
-        # поведения "-1", но не выдумывает несуществующую историю.
+        # Спека 2026-08-12 ping-zero-wait (заменяет предыдущую волну
+        # ping-nonblocking — бюджетный подход на живых замерах давал до
+        # 2.04с суммарного ожидания под контенцией): последнее УСПЕШНО
+        # прочитанное значение history_count — фоллбэк, когда
+        # count_active_items(nowait=True) не уложилось в РОВНО ОДНУ
+        # неблокирующую попытку (StateStoreLockTimeout). 0 при холодном
+        # старте (ни разу не читали) — не хуже прежнего поведения "-1", но
+        # не выдумывает несуществующую историю.
         self._last_known_history_count: int = 0
         # WARNING один раз на эпизод контенции (ping — 3с heartbeat, лог-шторм
         # иначе), сбрасывается успешным чтением — тот же паттерн, что
@@ -104,7 +106,14 @@ class HealthCheckService:
     # ------------------------------------------------------------------
 
     def _is_privacy_mode(self) -> bool:
-        """Returns True if privacy_mode_enabled is active via SettingsService."""
+        """Returns True if privacy_mode_enabled is active via SettingsService.
+
+        Бюджетный (не nowait) путь — используется ``get_diagnostics`` и
+        другими НЕ-latency-критичными вызывающими. ``handle_ping`` использует
+        отдельный ``_is_privacy_mode_nowait()`` ниже — см. его докстринг за
+        объяснением, почему privacy-чтение внутри ping не может позволить
+        себе даже короткий бюджет ожидания.
+        """
         if self._settings_svc is None:
             return False
         try:
@@ -112,43 +121,48 @@ class HealthCheckService:
         except Exception:
             return False
 
-    def _ping_count_lock_timeout_budget(self) -> float:
-        """Бюджет ожидания flock для ``count_active_items()`` внутри ``handle_ping``
-        (спека 2026-08-12 ping-nonblocking, ``ping_count_lock_timeout_sec``, дефолт 0.3с).
+    def _is_privacy_mode_nowait(self) -> bool:
+        """Zero-wait ``privacy_mode_enabled`` read, ИСКЛЮЧИТЕЛЬНО для ``handle_ping``
+        (спека 2026-08-12 ping-zero-wait).
 
-        Источник — ``SettingsService.cached_settings()`` (уже само fail-closed
-        и не блокируется на контенции — см. спеку settings-read-nonblocking),
-        тот же приём, что ``SettingsService._read_lock_timeout_budget()``.
-        Отсутствие ``settings_svc`` (не все конструкторы его передают) или
-        испорченное значение — дефолт модуля.
+        Тёплый TTL-кэш ``SettingsService`` (5с) отвечает мгновенно, как и
+        обычно — ``StateStore`` не трогается вовсе. Промах TTL под
+        контенцией → ``SettingsService.cached_settings(nowait=True)`` делает
+        РОВНО ОДНУ неблокирующую попытку (не ждёт ``settings_read_lock_
+        timeout_sec``, до 60с по валидатору) и, если лок занят, фейлится в
+        ТОТ ЖЕ fail-closed фоллбэк, что и обычный путь: последнее известное
+        значение, а при полном отсутствии кэша — privacy_mode_enabled=True
+        ПРИНУДИТЕЛЬНО (неизвестность трактуется как приватность включена,
+        тот же принцип, что и у ``SettingsService._on_read_lock_timeout``).
+        ping никогда не рискует утечкой history_count через эту проверку —
+        только точностью на один 3-секундный тик при холодном старте под
+        контенцией (самокорректируется на следующем успешном чтении).
         """
-        default_budget = 0.3
         if self._settings_svc is None:
-            return default_budget
+            return False
         try:
-            raw = self._settings_svc.cached_settings().get(
-                "ping_count_lock_timeout_sec", default_budget
-            )
-            budget = float(raw)
+            return bool(self._settings_svc.cached_settings(nowait=True).get("privacy_mode_enabled", False))
         except Exception:
-            return default_budget
-        if not math.isfinite(budget) or budget < 0:
-            return default_budget
-        return budget
+            return False
 
     def _read_history_count_for_ping(self) -> int:
-        """Читает ``count_active_items()`` с коротким read-path бюджетом, никогда
-        не блокируя ``handle_ping`` дольше бюджета (спека 2026-08-12 ping-nonblocking).
+        """Читает ``count_active_items()`` РОВНО ОДНОЙ неблокирующей попыткой,
+        никогда не ожидая flock (спека 2026-08-12 ping-zero-wait).
 
-        ``count_active_items()`` берёт ТОТ ЖЕ эксклюзивный flock, что и вся
-        история (``StateStore._lock()``, общий 30с инстанс-таймаут). ping —
-        3-секундный heartbeat ``HealthMonitor.swift`` (2 подряд неответа →
-        ``forceRestartBackend``/``launchctl kickstart -k``) — медленная
-        операция с историей в другом потоке НЕ ДОЛЖНА заставлять агента
-        убивать здоровый бэкенд (живой инцидент 2026-08-12 14:07:48, две
-        диктовки потеряны посреди работы владельца).
+        Заменяет предыдущую волну ping-nonblocking (бюджет
+        ``ping_count_lock_timeout_sec``, дефолт 0.3с): живой замер на проде
+        под реальной контенцией показал СУММАРНОЕ ожидание внутри одного
+        ``handle_ping`` (privacy-чтение + count-чтение, каждое со своим
+        бюджетом) до 2.04с — Swift-таймаут ping РОВНО 2с
+        (``main+HealthMonitor.swift:217``), два подряд промаха →
+        ``forceRestartBackend``/``launchctl kickstart -k`` (живой инцидент
+        2026-08-12 14:07:48, две диктовки потеряны). Бюджетный подход
+        принципиально не даёт жёсткой гарантии — сумма НЕСКОЛЬКИХ попыток
+        растёт с их числом, даже если каждая по отдельности мала. Теперь
+        ``count_active_items(nowait=True)`` — лок занят → немедленный
+        ``StateStoreLockTimeout``, БЕЗ единого цикла опроса.
 
-        Не уложились в бюджет (``StateStoreLockTimeout``) → отдаём ПОСЛЕДНЕЕ
+        Не уложились (``StateStoreLockTimeout``) → отдаём ПОСЛЕДНЕЕ
         ИЗВЕСТНОЕ успешно прочитанное значение (0 при холодном старте) —
         никогда не блокируемся и никогда не бросаем исключение наружу.
         WARNING логируется один раз на эпизод контенции, не на каждый 3с тик.
@@ -156,25 +170,16 @@ class HealthCheckService:
         Прочие исключения (повреждённый файл истории и т.п., НЕ связанные с
         contention лока) сохраняют старое поведение — ``history_count=-1``.
         """
-        budget = self._ping_count_lock_timeout_budget()
         try:
-            if budget > 0:
-                count = self.store.count_active_items(lock_timeout_sec=budget)
-            else:
-                # 0 = прежнее поведение (без override — общий инстанс-таймаут).
-                count = self.store.count_active_items()
+            count = self.store.count_active_items(nowait=True)
         except StateStoreLockTimeout:
             if not self._history_count_lock_timeout_warned:
                 logger.warning(
-                    "HealthCheckService.handle_ping(): count_active_items() не "
-                    "уложился в %.2fс (StateStore._lock() занят другим "
-                    "держателем) — отдаём последнее известное значение (%d) "
-                    "вместо блокировки ping",
-                    budget, self._last_known_history_count,
-                    extra={
-                        "budget_sec": budget,
-                        "last_known_history_count": self._last_known_history_count,
-                    },
+                    "HealthCheckService.handle_ping(): count_active_items() лок "
+                    "занят другим держателем (nowait-попытка) — отдаём последнее "
+                    "известное значение (%d) вместо ожидания",
+                    self._last_known_history_count,
+                    extra={"last_known_history_count": self._last_known_history_count},
                 )
                 self._history_count_lock_timeout_warned = True
             return self._last_known_history_count
@@ -190,11 +195,18 @@ class HealthCheckService:
         """Возвращает статус сервиса. Используется HealthMonitor.swift (3-сек тик).
 
         ВАЖНО: контракт bit-exact — не менять имена полей и типы.
+
+        Спека 2026-08-12 ping-zero-wait: НИ ОДНО обращение к
+        StateStore/настройкам на этом пути не смеет ждать flock ни секунды —
+        и privacy-гейт (``_is_privacy_mode_nowait``), и history_count
+        (``_read_history_count_for_ping``) используют РОВНО ОДНУ
+        неблокирующую попытку, независимо от значений
+        ``settings_read_lock_timeout_sec``/``ping_count_lock_timeout_sec``.
         """
         # wave-1770 HIGH: history_count reveals user activity pattern.
         # Schema stays identical (int), but returns 0 in privacy mode to avoid
         # leaking recording count through this 3-second polling endpoint.
-        if self._is_privacy_mode():
+        if self._is_privacy_mode_nowait():
             history_count = 0
         else:
             history_count = self._read_history_count_for_ping()

@@ -33,7 +33,7 @@ class FakeStore:
         self._count = count
         self._raise_on_count = raise_on_count
 
-    def count_active_items(self, lock_timeout_sec: float | None = None) -> int:
+    def count_active_items(self, lock_timeout_sec: float | None = None, nowait: bool = False) -> int:
         if self._raise_on_count:
             raise RuntimeError("store unavailable")
         return self._count
@@ -91,7 +91,7 @@ class FakeSettingsSvc:
     _cache_ttl = 5
     _cache = {}
 
-    def cached_settings(self) -> dict:
+    def cached_settings(self, nowait: bool = False) -> dict:
         return {}
 
 

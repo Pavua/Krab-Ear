@@ -30,7 +30,7 @@ class _FakeStore:
         self.data_dir = Path(data_dir)
         self._count = 5
 
-    def count_active_items(self, lock_timeout_sec=None):
+    def count_active_items(self, lock_timeout_sec=None, nowait=False):
         return self._count
 
 
@@ -80,7 +80,7 @@ class _FakeSettingsSvc:
     _cache_ttl = 5
     _cache = {}
 
-    def cached_settings(self):
+    def cached_settings(self, nowait=False):
         return {}
 
 

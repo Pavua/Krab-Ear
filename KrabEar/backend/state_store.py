@@ -284,7 +284,7 @@ class StateStore:
             logger.exception("error_bus.push failed for code=%s", code)
 
     @contextmanager
-    def _lock(self, timeout_sec: float | None = None) -> Iterator[None]:
+    def _lock(self, timeout_sec: float | None = None, nowait: bool = False) -> Iterator[None]:
         """Глобальный lock для журналов истории и настроек.
 
         ``timeout_sec``: опциональный override бюджета ожидания ИМЕННО для
@@ -294,6 +294,24 @@ class StateStore:
         используется общий ``self._lock_acquire_timeout_sec`` инстанса, как
         и для всех остальных ~50 call sites этого метода — их поведение
         этим параметром не затрагивается.
+
+        ``nowait``: спека 2026-08-12 ping-zero-wait. РОВНО ОДНА неблокирующая
+        попытка ``flock(LOCK_EX | LOCK_NB)`` — лок занят другим держателем →
+        немедленный ``StateStoreLockTimeout`` БЕЗ единого цикла опроса
+        (``_LOCK_POLL_INTERVAL_SEC``); лок свободен → обычный успех. Когда
+        ``nowait=True``, ``timeout_sec`` игнорируется целиком (эффективный
+        бюджет форсируется в ``0.0``). Технически эквивалентно явной передаче
+        ``timeout_sec=0.0`` (тот же ноль-раз-и-выход путь ниже), но НЕ
+        переиспользует число ``0`` как sentinel: на уровне пользовательских
+        настроек (``settings_read_lock_timeout_sec``, ``ping_count_lock_
+        timeout_sec``) ``0`` уже ИСТОРИЧЕСКИ означает «read-path бюджет
+        отключён, ждать сколько нужно инстансу» — противоположный смысл.
+        Отдельный булев параметр не даёт этим двум значениям столкнуться на
+        одном вызове. Используется ``HealthCheckService.handle_ping`` —
+        ping ОБЯЗАН вернуться за константное время независимо от контенции
+        (живой инцидент 2026-08-12 14:07:48: бюджетный подход предыдущей
+        волны давал до 2.04с суммарного ожидания при нескольких попытках
+        захвата на одном пути, Swift-таймаут ping — ровно 2с).
 
         Реентерабелен ПО ТРЕДУ (per-thread depth-counter): повторный вход с
         того же треда — no-op поверх уже взятого лока, вместо самозаклина на
@@ -339,10 +357,14 @@ class StateStore:
             # timeout_sec=None → обычное поведение (общий инстанс-таймаут);
             # явный override используется только вызывающей стороной, которая
             # его передала (см. докстринг выше) — все остальные call sites
-            # не видят разницы.
-            effective_timeout = (
-                self._lock_acquire_timeout_sec if timeout_sec is None else timeout_sec
-            )
+            # не видят разницы. nowait=True форсирует 0.0 безусловно, даже
+            # поверх явного timeout_sec (спека ping-zero-wait — см. докстринг).
+            if nowait:
+                effective_timeout = 0.0
+            else:
+                effective_timeout = (
+                    self._lock_acquire_timeout_sec if timeout_sec is None else timeout_sec
+                )
             with self._lock_reentry_guard:
                 holder_label = self._lock_holder_label
                 holder_since = self._lock_holder_since
@@ -467,7 +489,7 @@ class StateStore:
             self._recent_search_index = []
             self._recent_search_index_signature = None
 
-    def load_settings(self, lock_timeout_sec: float | None = None) -> dict[str, Any]:
+    def load_settings(self, lock_timeout_sec: float | None = None, nowait: bool = False) -> dict[str, Any]:
         """Читает настройки и дополняет их дефолтами.
 
         ``lock_timeout_sec``: опциональный override read-path бюджета
@@ -478,8 +500,12 @@ class StateStore:
         cached_settings()``) обязана сама решить fail-closed фоллбэк — здесь
         никакого тихого дефолта нет НАМЕРЕННО (иначе теряется разница между
         «настроек нет» и «настроек не удалось прочитать вовремя»).
+
+        ``nowait``: спека 2026-08-12 ping-zero-wait — см. ``_lock(nowait=...)``.
+        РОВНО одна неблокирующая попытка, ``lock_timeout_sec`` игнорируется.
+        Используется ``SettingsService.cached_settings(nowait=True)``.
         """
-        with self._lock(timeout_sec=lock_timeout_sec):
+        with self._lock(timeout_sec=lock_timeout_sec, nowait=nowait):
             if not self.settings_path.exists():
                 return dict(DEFAULT_SETTINGS)
 
@@ -1433,7 +1459,7 @@ class StateStore:
         with self._lock():
             return self._load_active_items_unlocked()
 
-    def count_active_items(self, lock_timeout_sec: float | None = None) -> int:
+    def count_active_items(self, lock_timeout_sec: float | None = None, nowait: bool = False) -> int:
         """Возвращает количество активных (не удаленных) записей.
 
         Переиспользует инкрементально поддерживаемый ``_active_ids`` (см.
@@ -1448,10 +1474,19 @@ class StateStore:
         поведение, общий инстанс-таймаут, поведение остальных call sites
         (``auto_backup.py``, ``history_service.py``, ``health_checker.py``)
         не меняется. При истечении заданного бюджета бросает
-        ``StateStoreLockTimeout`` — вызывающая сторона (``HealthCheckService.
-        handle_ping``) сама решает fail-closed фоллбэк.
+        ``StateStoreLockTimeout`` — вызывающая сторона сама решает fail-closed
+        фоллбэк.
+
+        ``nowait``: спека 2026-08-12 ping-zero-wait — см. ``_lock(nowait=...)``.
+        РОВНО одна неблокирующая попытка, ``lock_timeout_sec`` игнорируется.
+        ``HealthCheckService.handle_ping`` теперь использует ИМЕННО этот режим
+        (не бюджет) — живой замер под контенцией показал, что сумма НЕСКОЛЬКИХ
+        бюджетированных попыток на пути ping (settings read + count read) может
+        доходить до 2с и более, что уже сравнимо со Swift-таймаутом ping (2с).
+        ``lock_timeout_sec`` остаётся для прочих call sites, которым нужен
+        именно ограниченный, но НЕнулевой бюджет ожидания.
         """
-        with self._lock(timeout_sec=lock_timeout_sec):
+        with self._lock(timeout_sec=lock_timeout_sec, nowait=nowait):
             return len(self._ensure_active_ids_unlocked())
 
     def _compact_unlocked(self) -> None:

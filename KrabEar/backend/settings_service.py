@@ -136,7 +136,7 @@ class SettingsService:
     # Кэш
     # ------------------------------------------------------------------
 
-    def cached_settings(self) -> dict[str, Any]:
+    def cached_settings(self, nowait: bool = False) -> dict[str, Any]:
         """Возвращает копию настроек с TTL-кэшем (5 сек). Избегает повторного чтения файла.
 
         На промахе TTL раньше уходил в ``StateStore.load_settings()`` без
@@ -147,21 +147,40 @@ class SettingsService:
         read-path бюджетом (``settings_read_lock_timeout_sec``); не уложились
         — ``_on_read_lock_timeout()`` отдаёт fail-closed фоллбэк вместо
         блокировки.
+
+        ``nowait``: спека 2026-08-12 ping-zero-wait. Тёплый TTL-кэш ведёт себя
+        как обычно (StateStore не трогается вовсе); на промахе TTL — РОВНО
+        ОДНА неблокирующая попытка (``StateStore.load_settings(nowait=True)``)
+        вместо ожидания ``settings_read_lock_timeout_sec`` (до 60с по
+        валидатору). Единственный текущий вызывающий —
+        ``HealthCheckService._is_privacy_mode_nowait()`` внутри
+        ``handle_ping``: ping не может себе позволить ждать read-path бюджет
+        при высокой контенции (живой замер — сумма НЕСКОЛЬКИХ бюджетированных
+        попыток на одном пути ping доходила до ~2с, сравнимо со Swift-
+        таймаутом ping в 2с). Fail-closed направление отказа — то же самое,
+        что и у обычного пути (см. ``_on_read_lock_timeout``), WARNING
+        делит один общий эпизод-флаг с budgeted-путём.
         """
         now = time.monotonic()
         if self._cache is not None and (now - self._cache_ts) < self._cache_ttl:
             return dict(self._cache)
 
-        read_timeout = self._read_lock_timeout_budget()
-        try:
-            if read_timeout > 0:
-                raw = self.store.load_settings(lock_timeout_sec=read_timeout)
-            else:
-                # 0 = прежнее поведение (без read-path override — просто
-                # обычный call site, ждёт сколько нужно инстансу StateStore).
-                raw = self.store.load_settings()
-        except StateStoreLockTimeout:
-            return self._on_read_lock_timeout(read_timeout)
+        if nowait:
+            try:
+                raw = self.store.load_settings(nowait=True)
+            except StateStoreLockTimeout:
+                return self._on_read_lock_timeout(0.0, nowait=True)
+        else:
+            read_timeout = self._read_lock_timeout_budget()
+            try:
+                if read_timeout > 0:
+                    raw = self.store.load_settings(lock_timeout_sec=read_timeout)
+                else:
+                    # 0 = прежнее поведение (без read-path override — просто
+                    # обычный call site, ждёт сколько нужно инстансу StateStore).
+                    raw = self.store.load_settings()
+            except StateStoreLockTimeout:
+                return self._on_read_lock_timeout(read_timeout)
 
         # Успешное чтение закрывает эпизод контенции (если он был) — следующий
         # промах TTL снова получит ровно одну WARNING, а не тишину навсегда.
@@ -194,7 +213,7 @@ class SettingsService:
             budget = 0.5
         return budget
 
-    def _on_read_lock_timeout(self, read_timeout: float) -> dict[str, Any]:
+    def _on_read_lock_timeout(self, read_timeout: float, nowait: bool = False) -> dict[str, Any]:
         """Fail-closed фоллбэк на StateStoreLockTimeout из read-path бюджета.
 
         Направление отказа — ВСЕГДА в сторону приватности (спека §"Направление
@@ -211,13 +230,23 @@ class SettingsService:
            privacy_mode_enabled=True: неизвестность ВСЕГДА трактуется как
            «приватность включена», иначе транскрипты потекут в
            аналитику/экспорт/Sentry, пока не разрешится контенция.
+
+        ``nowait``: спека 2026-08-12 ping-zero-wait — только для формулировки
+        WARNING (вызывающая сторона попала сюда через ``cached_settings(
+        nowait=True)``, а не через бюджет), сам фоллбэк-механизм идентичен.
+        ``_read_lock_timeout_warned`` — ОБЩИЙ эпизод-флаг для обоих путей:
+        контендящийся nowait-вызов гасит WARNING для последующего budgeted-
+        вызова той же контенции и наоборот (не два независимых лог-шторма).
         """
         if not self._read_lock_timeout_warned:
-            # read_timeout<=0 значит read-path бюджет выключен (0 = прежнее
-            # поведение) — реально сработал ОБЩИЙ инстанс-таймаут StateStore,
-            # а не этот бюджет, поэтому не печатаем вводящие в заблуждение
-            # "0.00с" — это отдельная формулировка.
-            budget_desc = f"{read_timeout:.2f}с" if read_timeout > 0 else "выключенным read-path бюджетом"
+            if nowait:
+                budget_desc = "нулевым ожиданием (nowait, ровно одна неблокирующая попытка)"
+            else:
+                # read_timeout<=0 значит read-path бюджет выключен (0 = прежнее
+                # поведение) — реально сработал ОБЩИЙ инстанс-таймаут StateStore,
+                # а не этот бюджет, поэтому не печатаем вводящие в заблуждение
+                # "0.00с" — это отдельная формулировка.
+                budget_desc = f"{read_timeout:.2f}с" if read_timeout > 0 else "выключенным read-path бюджетом"
             _log.warning(
                 "SettingsService.cached_settings(): не удалось прочитать настройки за "
                 "%s (StateStore._lock() занят другим держателем) — отдаём %s вместо "
@@ -225,7 +254,7 @@ class SettingsService:
                 budget_desc,
                 "последнее известное значение" if self._cache is not None else
                 "fail-closed дефолты (privacy_mode_enabled=True)",
-                extra={"read_timeout_sec": read_timeout, "has_cache": self._cache is not None},
+                extra={"read_timeout_sec": read_timeout, "nowait": nowait, "has_cache": self._cache is not None},
             )
             self._read_lock_timeout_warned = True
         if self._cache is not None:
