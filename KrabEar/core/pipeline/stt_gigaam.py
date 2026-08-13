@@ -355,7 +355,7 @@ class GigaAMAdapter:
                 "(W1216 F1)"
             )
             try:
-                self._subprocess.close()
+                self._subprocess.diagnose_and_close()
             except Exception:
                 pass
             self._subprocess = None
@@ -371,7 +371,7 @@ class GigaAMAdapter:
             # a session that already died again between the outer check and lock acquire.
             if self._subprocess is not None and not self._subprocess.is_loaded():
                 try:
-                    self._subprocess.close()
+                    self._subprocess.diagnose_and_close()
                 except Exception:
                     pass
                 self._subprocess = None
@@ -756,6 +756,23 @@ class _GigaAMSubprocessSession:
             err = response.get("error", "unknown")
             raise RuntimeError(f"_GigaAMSubprocessSession: transcribe failed: {err}")
         return response
+
+    def diagnose_and_close(self) -> None:
+        """Close a session discovered ALREADY DEAD (not force-killed by us).
+
+        2026-08-13: _check_proc_oom_on_exit() — the only code path that reads
+        the exit code + stderr ring and fires oom_callback — is normally called
+        from _send() when an in-flight request gets no response. A worker that
+        dies while IDLE (no request in flight, e.g. between dictations) never
+        reaches _send(), so plain close() silently discards the exit code and
+        stderr ring with zero diagnosis: no oom_callback, no ErrorBus, no Sentry.
+        Call this instead of close() wherever a session is found dead via
+        is_loaded()==False before we ourselves terminate/kill it — running
+        diagnosis on a session we are about to force-kill would misattribute
+        our own SIGKILL as an OOM.
+        """
+        self._check_proc_oom_on_exit()
+        self.close()
 
     def close(self) -> None:
         """Graceful shutdown: shutdown-команда + wait + force kill при таймауте."""

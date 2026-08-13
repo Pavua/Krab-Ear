@@ -873,5 +873,65 @@ class TestResolveFfmpegDir(unittest.TestCase):
         self.assertIsNone(result)
 
 
+# ---------------------------------------------------------------------------
+# Живой инцидент 2026-08-13 — тихая смерть воркера в простое между диктовками
+#
+# _check_proc_oom_on_exit() (OOM-диагностика: exit code + stderr ring →
+# oom_callback → ErrorBus/Sentry) вызывается ТОЛЬКО из _send() при пустом
+# ответе — то есть только когда запрос был В ПОЛЁТЕ. Если воркер умирает
+# ПРОСТАИВАЯ (между диктовками, никакой _send() не выполняется), респавн-путь
+# _get_subprocess_session() (W1216 F1) просто видит is_loaded()==False и зовёт
+# close() — который НИКОГДА не читает exit code/stderr ring. Диагностика молча
+# теряется: ни oom_callback, ни ErrorBus, ни Sentry. Живой пример: воркер исчез
+# за ~1ч44м простоя без единой строки WARNING/ERROR в логе; следующая диктовка
+# просто тихо пересоздала воркера (holodный старт 10.95с → 1 переполнение
+# буфера), причина смерти осталась неизвестной навсегда.
+# ---------------------------------------------------------------------------
+
+class TestIdleDeathOomDiagnosis(unittest.TestCase):
+    """Респавн после тихой смерти в простое обязан прогнать OOM-диагностику
+    ДО того, как close() отбросит exit code и stderr ring."""
+
+    def test_respawn_after_idle_death_runs_oom_diagnosis(self):
+        """W1216 F1 respawn path must diagnose the dead session before discarding it."""
+        from core.pipeline.stt_gigaam import GigaAMAdapter, _GigaAMSubprocessSession
+
+        # Воркер уже мёртв ДО первого вызова _get_subprocess_session в этом тесте —
+        # смоделированная idle-смерть: poll() возвращает -9 (SIGKILL, OOM-сигнатура),
+        # но НИКАКОЙ _send() не выполнялся (никто не заметил в момент смерти).
+        dead_session = _GigaAMSubprocessSession.__new__(_GigaAMSubprocessSession)
+        dead_session._loaded = True
+        dead_proc = MagicMock()
+        dead_proc.poll.return_value = -9  # SIGKILL — kernel OOM killer signature
+        dead_proc.stdin = MagicMock()
+        dead_proc.stdin.closed = False
+        dead_session._proc = dead_proc
+        dead_session._stderr_ring = []
+        dead_session._error_bus = None
+        oom_calls = []
+        dead_session.oom_callback = lambda name, rc, stderr: oom_calls.append((name, rc, stderr))
+
+        adapter = GigaAMAdapter(
+            device="cpu",
+            mode="rnnt",
+            transport="subprocess",
+            venv_python_path="/usr/bin/python3",
+        )
+        self.addCleanup(adapter.close)
+        adapter._subprocess = dead_session
+
+        fake_popen = _FakePopen([_ok_load_response()])
+        with patch("core.pipeline.stt_gigaam.subprocess.Popen", return_value=fake_popen):
+            with patch("core.pipeline.stt_gigaam.os.path.exists", return_value=True):
+                adapter._get_subprocess_session()
+
+        self.assertEqual(
+            len(oom_calls), 1,
+            "idle-death respawn must run OOM diagnosis on the just-discovered-dead "
+            "session BEFORE close() throws away its exit code and stderr ring",
+        )
+        self.assertEqual(oom_calls[0][:2], ("gigaam_worker", -9))
+
+
 if __name__ == "__main__":
     unittest.main()

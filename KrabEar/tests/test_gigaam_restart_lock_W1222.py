@@ -101,8 +101,10 @@ class TestDeadWorkerAutoRestarts(unittest.TestCase):
              patch("core.pipeline.stt_gigaam._GigaAMSubprocessSession", StubSession):
             new_session = adapter._get_subprocess_session()
 
-        # Dead session should have been closed.
-        dead_session.close.assert_called_once()
+        # Dead session should have been diagnosed (OOM check) then closed — 2026-08-13:
+        # plain close() would silently discard the exit code/stderr ring of a session
+        # that died while idle (no _send() in flight to trigger _check_proc_oom_on_exit).
+        dead_session.diagnose_and_close.assert_called_once()
         # A new session was spawned.
         self.assertEqual(spawn_counter["n"], 1, "Expected exactly one new session spawned")
         # adapter._subprocess is now the new session, not the dead one.
