@@ -69,6 +69,25 @@ class StateStoreLockTimeout(IpcOperationalError):
     """
 
 
+class StateStoreLockUpgradeError(IpcOperationalError):
+    """Raised when the SAME thread, already holding a shared (``LOCK_SH``)
+    ``_lock()``, nests into an exclusive (``LOCK_EX``) request.
+
+    Спека 2026-08-13 (shared read lock): POSIX ``flock`` не даёт атомарного
+    апгрейда SH→EX на одном и том же файловом дескрипторе — блокирующая
+    попытка самозаклинила бы тред (он сам держит SH, который блокирует его
+    же EX-запрос), а слепое повторное использование per-thread
+    reentrancy-счётчика (фикс #1872) тихо продолжило бы работу ПОД
+    разделяемым локом — запись прошла бы без единой ошибки, конкурентно с
+    другими читателями. Это тише и хуже дедлока, поэтому апгрейд обязан
+    падать ГРОМКО, а не молча продолжать (см. §3 спеки).
+
+    Subclasses ``IpcOperationalError`` — это ошибка вызывающего кода
+    (симметричная ситуация с апгрейдом лока не должна возникать в
+    production), должна быть громкой (Sentry), а не тихим ``invalid_request``.
+    """
+
+
 class StateStore:
     """Фасад для настроек и истории backend-сервиса."""
 
@@ -154,6 +173,18 @@ class StateStore:
         self._lock_reentry_guard = threading.Lock()
         self._lock_depth: dict[int, int] = {}
         self._lock_fileobj: dict[int, Any] = {}
+        # 2026-08-13 (shared read lock): remembers the MODE (True=shared/
+        # LOCK_SH, False=exclusive/LOCK_EX) the outermost `with self._lock():`
+        # entry on this thread actually took. A nested call on the same
+        # thread is compared against this — nested shared-under-shared or
+        # shared-under-exclusive is a harmless no-op (real flock untouched),
+        # but nested EXCLUSIVE-under-SHARED is an illegal atomic upgrade and
+        # must raise StateStoreLockUpgradeError instead of silently running
+        # the write under a shared lock (see §3 of the design spec). Guarded
+        # by the same _lock_reentry_guard as depth/fileobj above; entry is
+        # only ever written/removed together with the matching _lock_depth
+        # transition (set on acquire, popped on final release).
+        self._lock_mode: dict[int, bool] = {}
         # Slow-lock diagnostics (see _LOCK_SLOW_WARN_SEC above) — guarded by
         # the same _lock_reentry_guard as depth/fileobj above.
         self._lock_holder_label: str | None = None
@@ -284,8 +315,37 @@ class StateStore:
             logger.exception("error_bus.push failed for code=%s", code)
 
     @contextmanager
-    def _lock(self, timeout_sec: float | None = None, nowait: bool = False) -> Iterator[None]:
+    def _lock(
+        self,
+        timeout_sec: float | None = None,
+        nowait: bool = False,
+        shared: bool = False,
+    ) -> Iterator[None]:
         """Глобальный lock для журналов истории и настроек.
+
+        ``shared``: спека 2026-08-13 (shared read lock). По умолчанию
+        ``False`` — поведение побайтово прежнее, ``fcntl.LOCK_EX``
+        (единственный писатель/читатель одновременно). ``True`` берёт
+        ``fcntl.LOCK_SH`` — несколько ЧИСТЫХ читателей держат лок
+        одновременно, писатель (``LOCK_EX``) по-прежнему ждёт всех
+        читателей и наоборот (обычная POSIX flock-семантика). Включать
+        ТОЛЬКО для call site, чья чистота (отсутствие записи в теле)
+        доказана чтением кода — см. ``_load_active_items_with_lock`` и
+        ``load_settings``; запись (``save_settings`` и ~50 прочих call
+        sites) остаётся ``LOCK_EX`` безусловно.
+
+        🔴 Реентерабельность (см. ниже) обязана помнить РЕЖИМ. Вложенный
+        запрос ``shared=False`` (эксклюзив) с того же треда, который уже
+        держит ``shared=True`` — это атомарный SH→EX апгрейд, которого
+        POSIX flock не даёт: блокирующая попытка самозаклинила бы тред (он
+        сам блокирует собственный EX-запрос своим же SH), а слепой
+        reentrancy-счётчик (фикс #1872) тихо продолжил бы работу ПОД
+        разделяемым локом — запись прошла бы конкурентно с другими
+        читателями без единой ошибки. Поэтому такой апгрейд ГРОМКО падает
+        ``StateStoreLockUpgradeError`` ДО инкремента depth-счётчика, вместо
+        молчаливого продолжения. Обратное — вложенный ``shared=True``
+        поверх уже held ``shared=False`` (эксклюзив) — безопасно и является
+        no-op (эксклюзив уже строже разделяемого), как и shared-поверх-shared.
 
         ``timeout_sec``: опциональный override бюджета ожидания ИМЕННО для
         этого вызова (спека 2026-08-12 settings-read-nonblocking — короткий
@@ -351,9 +411,27 @@ class StateStore:
         with self._lock_reentry_guard:
             depth = self._lock_depth.get(tid, 0)
             acquired_here = depth == 0
+            if not acquired_here and self._lock_mode.get(tid, False) and not shared:
+                # Апгрейд SH→EX на том же треде — см. докстринг выше.
+                # Раскрыт ДО инкремента depth-счётчика: тред остаётся
+                # legit-держателем своего внешнего shared-лока, отклонён
+                # только этот конкретный вложенный запрос.
+                upgrade_label = self._lock_caller_label()
+                raise StateStoreLockUpgradeError(
+                    f"StateStore._lock(): {upgrade_label} запросил ЭКСКЛЮЗИВНЫЙ "
+                    f"вход (shared=False), пока тот же тред уже держит "
+                    f"РАЗДЕЛЯЕМЫЙ (shared=True) _lock() на глубине {depth} — "
+                    f"POSIX flock не даёт атомарного апгрейда SH→EX. "
+                    f"Перепиши вызывающий код так, чтобы запись не выполнялась "
+                    f"внутри shared-чтения (см. спеку 2026-08-13-shared-read-lock)."
+                )
             self._lock_depth[tid] = depth + 1
+            if acquired_here:
+                self._lock_mode[tid] = shared
         if acquired_here:
             label = self._lock_caller_label()
+            lock_kind_ru = "разделяемый (shared)" if shared else "эксклюзивный"
+            lock_flag = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
             # timeout_sec=None → обычное поведение (общий инстанс-таймаут);
             # явный override используется только вызывающей стороной, которая
             # его передала (см. докстринг выше) — все остальные call sites
@@ -372,8 +450,8 @@ class StateStore:
                 held_for = time.monotonic() - holder_since
                 if held_for >= _LOCK_SLOW_WARN_SEC:
                     logger.warning(
-                        "StateStore._lock(): %s ждёт эксклюзивный flock — уже держит %s %.1fс",
-                        label, holder_label, held_for,
+                        "StateStore._lock(): %s ждёт %s flock — уже держит %s %.1fс",
+                        label, lock_kind_ru, holder_label, held_for,
                         extra={"waiter": label, "holder": holder_label, "held_for_sec": held_for},
                     )
             wait_start = time.monotonic()
@@ -384,14 +462,14 @@ class StateStore:
                 lock_file = self.lock_path.open("r+", encoding="utf-8")
                 while True:
                     try:
-                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        fcntl.flock(lock_file.fileno(), lock_flag | fcntl.LOCK_NB)
                         break
                     except BlockingIOError:
                         if time.monotonic() >= deadline:
                             with self._lock_reentry_guard:
                                 current_holder = self._lock_holder_label
                             raise StateStoreLockTimeout(
-                                f"StateStore._lock(): {label} не получил эксклюзивный "
+                                f"StateStore._lock(): {label} не получил {lock_kind_ru} "
                                 f"flock за {effective_timeout:.2f}с "
                                 f"(последний известный держатель: {current_holder or 'неизвестно'})"
                             )
@@ -404,6 +482,7 @@ class StateStore:
                     else:
                         self._lock_depth[tid] = depth
                     self._lock_fileobj.pop(tid, None)
+                    self._lock_mode.pop(tid, None)
                 if lock_file is not None:
                     try:
                         lock_file.close()
@@ -413,8 +492,8 @@ class StateStore:
             wait_elapsed = time.monotonic() - wait_start
             if wait_elapsed >= _LOCK_SLOW_WARN_SEC:
                 logger.warning(
-                    "StateStore._lock(): %s ждал эксклюзивный flock %.1fс",
-                    label, wait_elapsed,
+                    "StateStore._lock(): %s ждал %s flock %.1fс",
+                    label, lock_kind_ru, wait_elapsed,
                     extra={"waiter": label, "wait_sec": wait_elapsed},
                 )
             with self._lock_reentry_guard:
@@ -431,6 +510,7 @@ class StateStore:
                 if depth == 0:
                     del self._lock_depth[tid]
                     lock_file = self._lock_fileobj.pop(tid)
+                    self._lock_mode.pop(tid, None)
                     release_now = True
                     held_label = self._lock_holder_label
                     held_since = self._lock_holder_since
@@ -444,8 +524,8 @@ class StateStore:
                     held_total = time.monotonic() - held_since
                     if held_total >= _LOCK_SLOW_WARN_SEC:
                         logger.warning(
-                            "StateStore._lock(): %s держал эксклюзивный flock %.1fс",
-                            held_label, held_total,
+                            "StateStore._lock(): %s держал %s flock %.1fс",
+                            held_label, lock_kind_ru, held_total,
                             extra={"holder": held_label, "held_sec": held_total},
                         )
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
@@ -504,8 +584,13 @@ class StateStore:
         ``nowait``: спека 2026-08-12 ping-zero-wait — см. ``_lock(nowait=...)``.
         РОВНО одна неблокирующая попытка, ``lock_timeout_sec`` игнорируется.
         Используется ``SettingsService.cached_settings(nowait=True)``.
+
+        2026-08-13 (shared read lock, первая волна): ``shared=True`` — тело
+        доказано ЧИСТОЕ чтение (``exists()``/``read_text()``/``safe_json_loads``,
+        ни одной записи, ни одного вложенного ``self._lock(``). Write-path
+        (``save_settings``) остаётся ``LOCK_EX`` безусловно — сюда не входит.
         """
-        with self._lock(timeout_sec=lock_timeout_sec, nowait=nowait):
+        with self._lock(timeout_sec=lock_timeout_sec, nowait=nowait, shared=True):
             if not self.settings_path.exists():
                 return dict(DEFAULT_SETTINGS)
 
@@ -1455,8 +1540,17 @@ class StateStore:
         }
 
     def _load_active_items_with_lock(self) -> list[HistoryItem]:
-        """Возвращает все активные записи с захватом lock (публичный API для агрегации)."""
-        with self._lock():
+        """Возвращает все активные записи с захватом lock (публичный API для агрегации).
+
+        2026-08-13 (shared read lock, первая волна): ``shared=True`` —
+        ``_load_active_items_unlocked()`` доказано ЧИСТОЕ чтение (грепом по
+        всей транзитивной цепочке вызовов — ни одного ``.write``/``.replace(``/
+        ``flock``/вложенного ``self._lock(`` вне этого самого внешнего —
+        см. отчёт волны). Живой отказ 12:07 был ИМЕННО этим держателем
+        (10.2с эксклюзива на 12 600 записях), блокировавшим параллельные
+        чтения настроек privacy-гейтом.
+        """
+        with self._lock(shared=True):
             return self._load_active_items_unlocked()
 
     def count_active_items(self, lock_timeout_sec: float | None = None, nowait: bool = False) -> int:
