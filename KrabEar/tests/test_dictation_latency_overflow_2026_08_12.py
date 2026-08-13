@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import re
 import sys
 import tempfile
 import textwrap
@@ -393,8 +394,38 @@ class TestPreviewLoopOverflowBackoff(unittest.TestCase):
             transcriber.transcribe_preview_calls, 0,
             "рост overflow_count на каждой итерации — транскрибация не должна запускаться вовсе",
         )
-        self.assertEqual(stop_event.wait_calls, [0.5, 1.0, 2.0, 4.0, 8.0])
+        # 2026-08-13: нижняя граница поднята с 0.5 до _POLL_MAX*2 = 3.0.
+        # Прежний старт 0.5с был ВТРОЕ меньше наблюдаемой каденции превью
+        # (~1.45с), поэтому первые два срабатывания F2 не замедляли ничего —
+        # живой замер показал 4 переполнения буфера за запись УЖЕ ПОСЛЕ
+        # срабатывания бэкоффа. Прежний список [0.5, 1.0, 2.0, 4.0, 8.0]
+        # закреплял именно этот дефект.
+        self.assertEqual(stop_event.wait_calls, [3.0, 6.0, 8.0, 8.0, 8.0])
         self.assertEqual(svc.preview_overflow_backoff_sec, 8.0)
+
+    def test_first_backoff_exceeds_loop_own_max_poll_interval(self) -> None:
+        """Инвариант: ПЕРВОЕ же отступление обязано быть длиннее собственной
+        максимальной паузы цикла, иначе оно физически не меняет каденцию.
+
+        Проверяется структурно (сравнение с _POLL_MAX), а не сравнением с
+        числом — чтобы правка _POLL_MAX не разошлась с бэкоффом молча.
+        """
+        src = inspect.getsource(RecordingCoreService._preview_loop)
+        poll_max = float(re.search(r"_POLL_MAX\s*=\s*([0-9.]+)", src).group(1))
+
+        recorder = _OverflowPreviewRecorder([0, 5])
+        svc = _make_service(self._tmp, recorder=recorder,
+                            transcriber=_CountingPreviewTranscriber())
+        stop_event = _CountingStopEvent(max_iterations=1)
+
+        svc._preview_loop("balanced", stop_event=stop_event)
+
+        self.assertGreater(
+            svc.preview_overflow_backoff_sec, poll_max,
+            f"первое отступление ({svc.preview_overflow_backoff_sec}с) не превышает "
+            f"_POLL_MAX ({poll_max}с) — превью продолжит конкурировать с захватом "
+            f"аудио в прежнем темпе, а переполнения буфера останутся",
+        )
 
     def test_overflow_warning_logged_once_per_episode_not_every_iteration(self):
         recorder = _OverflowPreviewRecorder([0, 5, 10, 20, 30, 999])
@@ -412,7 +443,10 @@ class TestPreviewLoopOverflowBackoff(unittest.TestCase):
         )
 
     def test_three_clean_iterations_halve_the_backoff(self):
-        # [0, 10 (growth→0.5), 10, 10, 10 (3 чистых → halve 0.5→0.25)]
+        # [0, 10 (рост→3.0), 10, 10, 10 (3 чистых → 3.0/2=1.5 НИЖЕ рабочей
+        # границы 3.0 → снимается полностью)]. 2026-08-13: значение ниже
+        # _PREVIEW_BACKOFF_MIN не замедляет цикл, поэтому спад до 1.5/0.75/…
+        # был бы имитацией отступления — снимаем сразу.
         recorder = _OverflowPreviewRecorder([0, 10, 10, 10, 10])
         transcriber = _CountingPreviewTranscriber()
         svc = _make_service(self._tmp, recorder=recorder, transcriber=transcriber)
@@ -420,14 +454,16 @@ class TestPreviewLoopOverflowBackoff(unittest.TestCase):
 
         svc._preview_loop("balanced", stop_event=stop_event)
 
-        self.assertEqual(svc.preview_overflow_backoff_sec, 0.25)
+        self.assertEqual(svc.preview_overflow_backoff_sec, 0.0)
         # 3 чистые итерации всё же дошли до реальной транскрибации (снятие
         # бэкоффа не блокирует превью насовсем, только пока идёт рост).
         self.assertEqual(transcriber.transcribe_preview_calls, 3)
 
     def test_backoff_fully_clears_after_enough_clean_iterations(self):
-        # 1 рост (backoff=0.5) + 12 чистых итераций (4 деления пополам:
-        # 0.5→0.25→0.125→0.0625→0.03125<0.05→снято до 0.0).
+        # 1 рост (backoff=3.0) + 12 чистых итераций. 2026-08-13: первое же
+        # деление (3.0→1.5) опускает значение НИЖЕ рабочей границы 3.0, и
+        # бэкофф снимается полностью — тянуть спад через значения, которые
+        # короче собственной паузы цикла, значит имитировать отступление.
         overflow_sequence = [0, 10] + [10] * 12
         recorder = _OverflowPreviewRecorder(overflow_sequence)
         transcriber = _CountingPreviewTranscriber()

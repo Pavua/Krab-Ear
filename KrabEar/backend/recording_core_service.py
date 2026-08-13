@@ -2332,6 +2332,15 @@ class RecordingCoreService:
         # запись, см. комментарий на self._preview_overflow_backoff_sec).
         self._preview_overflow_backoff_sec = 0.0
         _PREVIEW_BACKOFF_MAX = 8.0
+        # 2026-08-13: НИЖНЯЯ граница бэкоффа обязана превышать собственную
+        # максимальную паузу цикла (_POLL_MAX). Иначе «отступление» ничего не
+        # замедляет: прежний старт 0.5с был ВТРОЕ меньше наблюдаемой каденции
+        # превью (~1.45с), поэтому первые два срабатывания F2 были фактическими
+        # no-op — живой замер 08-13 показал 4 переполнения буфера за одну
+        # запись УЖЕ ПОСЛЕ срабатывания бэкоффа. Выводим из _POLL_MAX, а не
+        # берём константой с потолка: связь «бэкофф > каденции» обязана
+        # пережить будущую правку _POLL_MAX.
+        _PREVIEW_BACKOFF_MIN = _POLL_MAX * 2
         _PREVIEW_OVERFLOW_CLEAN_STREAK = 3
         overflow_clean_streak = 0
         overflow_backoff_logged = False
@@ -2385,7 +2394,8 @@ class RecordingCoreService:
                 last_overflow_count = current_overflow_count
                 overflow_clean_streak = 0
                 self._preview_overflow_backoff_sec = min(
-                    max(self._preview_overflow_backoff_sec * 2, 0.5), _PREVIEW_BACKOFF_MAX
+                    max(self._preview_overflow_backoff_sec * 2, _PREVIEW_BACKOFF_MIN),
+                    _PREVIEW_BACKOFF_MAX,
                 )
                 if not overflow_backoff_logged:
                     logger.warning(
@@ -2404,7 +2414,14 @@ class RecordingCoreService:
                 if overflow_clean_streak >= _PREVIEW_OVERFLOW_CLEAN_STREAK:
                     overflow_clean_streak = 0
                     self._preview_overflow_backoff_sec /= 2
-                    if self._preview_overflow_backoff_sec < 0.05:
+                    # 2026-08-13: снимаем полностью, как только половина
+                    # опустилась НИЖЕ рабочей границы. Значение меньше
+                    # _PREVIEW_BACKOFF_MIN всё равно не замедляет цикл (оно
+                    # короче собственной паузы _POLL_MAX) — тянуть спад через
+                    # 1.5→0.75→0.37… было бы имитацией отступления, а не
+                    # отступлением. Прежний порог 0.05 достался от старой
+                    # нижней границы 0.5с.
+                    if self._preview_overflow_backoff_sec < _PREVIEW_BACKOFF_MIN:
                         self._preview_overflow_backoff_sec = 0.0
                         overflow_backoff_logged = False
 
