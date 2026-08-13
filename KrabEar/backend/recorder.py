@@ -595,6 +595,25 @@ class AudioRecorder:
                 last_level_emit_at = 0.0
                 while not self._stop_event.is_set():
                     data, overflowed = stream.read(self.chunk_size)
+                    # 2026-08-13 (дренаж, спека recorder-drain-on-availability):
+                    # блокирующее чтение выше забирает РОВНО chunk_size (100мс).
+                    # Если планировщик не дал треду процессор дольше — за паузу
+                    # накопилось больше, и отставание растёт с каждым циклом;
+                    # размер буфера этого не лечит, только отсрочивает. Живой
+                    # замер: при голодании 250 и 500мс дренаж даёт 0/12
+                    # переполнений против 8-10/12 без него.
+                    # Блокирующее чтение СОХРАНЕНО намеренно: отзывчивость на
+                    # _stop_event и нагрузка на CPU не меняются (нет опроса).
+                    # 🔴 Дренаж включается ТОЛЬКО на настоящем целом: тесты
+                    # подделывают поток через MagicMock, у которого
+                    # int(read_available) вернул бы 1 и мы прочитали бы фантом.
+                    _avail = getattr(stream, "read_available", 0)
+                    if isinstance(_avail, (int, np.integer)) and not isinstance(_avail, bool):
+                        _extra_frames = int(_avail)
+                        if _extra_frames > 0:
+                            _extra_data, _extra_of = stream.read(_extra_frames)
+                            overflowed = bool(overflowed) or bool(_extra_of)
+                            data = np.concatenate([data, _extra_data], axis=0)
                     # PortAudio read может разблокироваться уже после abort().
                     # Такой последний чанк нельзя добавлять или собирать в
                     # pending_result: shutdown требует только отбросить аудио.
@@ -630,6 +649,21 @@ class AudioRecorder:
                                 extra={"max_samples": effective_max_samples},
                             )
                             _max_duration_exceeded = True
+                            # 2026-08-13: влезающую ЧАСТЬ чанка сохраняем, а не
+                            # выбрасываем чанк целиком. Раньше терялось до 100мс
+                            # речи на границе; с дренажом (см. выше) чанк может
+                            # быть в разы длиннее, и потеря выросла бы вместе с
+                            # ним. Обрезка по границе корректна и без дренажа.
+                            # 🔴 Срез по КАДРАМ, а не по сэмплам, и без reshape:
+                            # _chunks хранит двумерные (frames, channels) массивы,
+                            # одномерный хвост сломал бы финальный np.concatenate.
+                            _room = effective_max_samples - self._chunks_total_samples
+                            _ch = data.shape[1] if data.ndim > 1 else 1
+                            _frames_room = _room // max(1, _ch)
+                            if _frames_room > 0:
+                                _head = data[:_frames_room].copy()
+                                self._chunks.append(_head)
+                                self._chunks_total_samples += _head.reshape(-1).size
                             # W1670: собрать накопленные чанки в финальный массив и
                             # сохранить в _pending_result, пока держим лок.
                             # Это гарантирует, что stop() вернёт аудио вместо None,
