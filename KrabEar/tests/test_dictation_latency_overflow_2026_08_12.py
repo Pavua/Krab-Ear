@@ -308,7 +308,13 @@ class _CountingStopEvent:
 class _OverflowPreviewRecorder:
     """Фейковый рекордер для _preview_loop: overflow_count управляется заранее
     заданной последовательностью значений — по одному на КАЖДОЕ обращение
-    свойства (включая единственное стартовое чтение до входа в while)."""
+    свойства (включая единственное стартовое чтение до входа в while).
+
+    R3 (2026-08-13): _preview_loop больше не зовёт snapshot_audio() — курсор
+    вместо окна, см. get_duration_sec()/snapshot_range() ниже (тот же
+    growth-per-call паттерн: длительность растёт на 1.0с за вызов
+    get_duration_sec(), что надёжно проходит гейт "хвост < 0.9с").
+    """
 
     is_recording = True
     sample_rate = 16000
@@ -316,7 +322,7 @@ class _OverflowPreviewRecorder:
     def __init__(self, overflow_sequence: list[int]):
         self._overflow_sequence = list(overflow_sequence)
         self._idx = 0
-        self._snapshot_calls = 0
+        self._duration_calls = 0
 
     @property
     def overflow_count(self) -> int:
@@ -325,11 +331,13 @@ class _OverflowPreviewRecorder:
         self._idx += 1
         return value
 
-    def snapshot_audio(self, max_duration_sec=12.0):
-        self._snapshot_calls += 1
-        # 16000 семплов >= min_samples (0.8*16000=12800 при sample_rate=16000);
-        # duration растёт на 1.0с за вызов — надёжно проходит гейт "< 0.9с новых данных".
-        return np.ones(16000, dtype=np.float32), float(self._snapshot_calls)
+    def get_duration_sec(self) -> float:
+        self._duration_calls += 1
+        return float(self._duration_calls)
+
+    def snapshot_range(self, from_sec: float, to_sec: float) -> np.ndarray:
+        n = max(0, int(round((to_sec - from_sec) * self.sample_rate)))
+        return np.ones(n, dtype=np.float32)
 
 
 class _NoOverflowAttrRecorder:
@@ -340,11 +348,15 @@ class _NoOverflowAttrRecorder:
     sample_rate = 16000
 
     def __init__(self) -> None:
-        self._snapshot_calls = 0
+        self._duration_calls = 0
 
-    def snapshot_audio(self, max_duration_sec=12.0):
-        self._snapshot_calls += 1
-        return np.ones(16000, dtype=np.float32), float(self._snapshot_calls)
+    def get_duration_sec(self) -> float:
+        self._duration_calls += 1
+        return float(self._duration_calls)
+
+    def snapshot_range(self, from_sec: float, to_sec: float) -> np.ndarray:
+        n = max(0, int(round((to_sec - from_sec) * self.sample_rate)))
+        return np.ones(n, dtype=np.float32)
 
 
 class _CountingPreviewTranscriber:

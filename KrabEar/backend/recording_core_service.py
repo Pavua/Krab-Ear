@@ -42,6 +42,7 @@ from contracts.stt_events import SttFailed, SttFinal, SttPartial
 from contracts.translation_events import TranslationCompleted, TranslationFailed
 from backend.event_bus import bus as event_bus
 from backend.models import DEFAULT_SETTINGS
+from core.silence_constants import SILENCE_THRESHOLD_DB_PRESERVE_WHISPER
 from core.utils import TextUtils
 
 logger = logging.getLogger("KrabEar.Backend.RecordingCore")
@@ -76,6 +77,19 @@ _OWNER_TELEMETRY_ALLOWLIST = frozenset({
 # Client lease остаётся непрозрачным, но ограничение длины не даёт удерживать
 # произвольные мегабайты во всех active-state ответах и снимках.
 _START_REQUEST_ID_MAX_CHARS = 256
+
+# R3 (спека 2026-08-13-incremental-preview-design.md): курсор вместо
+# скользящего окна в _preview_loop. Зафиксированный префикс (committed_text)
+# больше не перераспознаётся — превью распознаёт только НОВЫЙ хвост аудио
+# (snapshot_range(cursor_sec, upto), тот же примитив, что MeetingSessionService
+# ._job_chunk_stt уже использует для аккумулятора встреч).
+_PREVIEW_MIN_TAIL_SEC = 0.9      # короче — ждать новых сэмплов, STT не звать
+_PREVIEW_COMMIT_MIN_SEC = 3.0    # минимальный хвост, чтобы вообще фиксировать курсор
+_PREVIEW_MAX_TAIL_SEC = 8.0      # форс-фиксация без паузы, если хвост дорос досюда
+_PREVIEW_SILENCE_TAIL_SEC = 0.4  # окно RMS-проверки конца хвоста на тишину
+# Порог тишины — тот же, что RealtimeSilenceFilter уже использует для
+# STT-путей (сохраняет тихую речь/шёпот); новый порог "с потолка" не вводим.
+_PREVIEW_SILENCE_THRESHOLD_AMP = 10.0 ** (SILENCE_THRESHOLD_DB_PRESERVE_WHISPER / 20.0)
 
 
 def _sanitize_dedup_threshold(raw: Any) -> float:
@@ -2263,16 +2277,44 @@ class RecordingCoreService:
 
         return all_stopped
 
+    @staticmethod
+    def _preview_tail_is_silent(audio: Any, sample_rate: int) -> bool:
+        """RMS последних ``_PREVIEW_SILENCE_TAIL_SEC`` секунд хвоста ниже порога тишины.
+
+        Дёшево — не требует отдельной транскрибации хвоста (спека §2). Порог —
+        ``SILENCE_THRESHOLD_DB_PRESERVE_WHISPER`` (-55 дБ), тот же, что уже
+        использует ``RealtimeSilenceFilter`` для STT-путей: сохраняет тихую
+        речь и шёпот, не даёт ложно принять их за тишину.
+        """
+        flat = np.asarray(audio).reshape(-1)
+        if flat.size == 0:
+            return False
+        window_samples = max(1, int(sample_rate * _PREVIEW_SILENCE_TAIL_SEC))
+        window = flat[-window_samples:].astype(np.float64)
+        rms = float(np.sqrt(np.mean(window ** 2)))
+        return rms < _PREVIEW_SILENCE_THRESHOLD_AMP
+
     def _preview_loop(
         self,
         quality_profile: str,
         stop_event: threading.Event | None = None,
     ) -> None:
+        """Realtime-превью диктовки: курсор вместо скользящего окна (R3).
+
+        Спека 2026-08-13-incremental-preview-design.md. Зафиксированный
+        префикс (``committed_text``) больше не перераспознаётся — на каждой
+        итерации STT получает только НОВЫЙ хвост
+        ``snapshot_range(cursor_sec, upto)`` (тот же примитив, что
+        ``MeetingSessionService._job_chunk_stt`` уже использует для
+        аккумулятора встреч). Курсор сдвигается только когда хвост фиксации
+        достаточно вырос И (кончается тишиной ИЛИ дорос до потолка) — иначе
+        каждая итерация резала бы речь на произвольной границе.
+        """
         # Optional оставлен для legacy-тестов, вызывающих loop напрямую.
         worker_stop_event = stop_event or self._preview_stop_event
-        snapshot_audio = getattr(self.recorder, "snapshot_audio", None)
-        min_samples = int(getattr(self.recorder, "sample_rate", 16000) * 0.8)
-        last_refresh_duration = 0.0
+        get_duration_sec = getattr(self.recorder, "get_duration_sec", None)
+        snapshot_range = getattr(self.recorder, "snapshot_range", None)
+        sample_rate = int(getattr(self.recorder, "sample_rate", 16000) or 16000)
         poll_interval = 0.35
         _POLL_MIN = 0.35
         _POLL_MAX = 1.5
@@ -2294,19 +2336,24 @@ class RecordingCoreService:
         overflow_clean_streak = 0
         overflow_backoff_logged = False
 
+        # R3: оба поля инициализируются на КАЖДЫЙ вход в loop (новый поток на
+        # каждую запись) — тот же паттерн, что _preview_overflow_backoff_sec.
+        committed_text = ""
+        cursor_sec = 0.0
+
         while not worker_stop_event.is_set():
             if not bool(getattr(self.recorder, "is_recording", False)):
                 break
 
-            if not callable(snapshot_audio):
+            if not callable(get_duration_sec) or not callable(snapshot_range):
                 worker_stop_event.wait(poll_interval)
                 continue
 
             try:
-                audio_data, duration_sec = snapshot_audio(max_duration_sec=12.0)
+                upto = float(get_duration_sec())
             except Exception:
                 self._preview_error_count += 1
-                logger.exception("Realtime preview: ошибка snapshot_audio")
+                logger.exception("Realtime preview: ошибка get_duration_sec")
                 if self._preview_error_count > 10:
                     logger.warning(
                         "Realtime preview: %d ошибок подряд, возможна системная проблема",
@@ -2316,20 +2363,16 @@ class RecordingCoreService:
                 worker_stop_event.wait(poll_interval)
                 continue
 
-            # snapshot мог завершиться после shutdown request; новый STT уже
-            # нельзя запускать даже если полученный аудиобуфер валиден.
+            # get_duration_sec мог отработать уже после shutdown request;
+            # новый STT уже нельзя запускать даже если значение валидно.
             if worker_stop_event.is_set():
                 break
 
             with self._preview_lock:
-                self._preview_duration_sec = float(duration_sec)
+                self._preview_duration_sec = upto
 
-            current_size = int(getattr(audio_data, "size", 0))
-            if current_size < min_samples:
-                poll_interval = min(poll_interval * _POLL_BACKOFF, _POLL_MAX)
-                worker_stop_event.wait(poll_interval)
-                continue
-            if duration_sec - last_refresh_duration < 0.9:
+            tail_sec = upto - cursor_sec
+            if tail_sec < _PREVIEW_MIN_TAIL_SEC:
                 worker_stop_event.wait(_POLL_MIN)
                 continue
 
@@ -2366,8 +2409,31 @@ class RecordingCoreService:
                         overflow_backoff_logged = False
 
             try:
+                audio = snapshot_range(cursor_sec, upto)
+            except Exception:
+                self._preview_error_count += 1
+                logger.exception("Realtime preview: ошибка snapshot_range")
+                if self._preview_error_count > 10:
+                    logger.warning(
+                        "Realtime preview: %d ошибок подряд, возможна системная проблема",
+                        self._preview_error_count,
+                    )
+                poll_interval = min(poll_interval * _POLL_BACKOFF, _POLL_MAX)
+                worker_stop_event.wait(poll_interval)
+                continue
+
+            if worker_stop_event.is_set():
+                break
+
+            if int(getattr(audio, "size", 0)) == 0:
+                # Гонка курсора со свежими чанками рекордера (ещё не долетели
+                # до буфера) — не наш хвост потерян, просто ждём следующего тика.
+                worker_stop_event.wait(_POLL_MIN)
+                continue
+
+            try:
                 preview_payload = self.transcriber.transcribe_preview(
-                    audio_data,
+                    audio,
                     quality_profile=quality_profile,
                 )
                 preview_text = self._extract_transcribed_text(preview_payload)
@@ -2392,24 +2458,52 @@ class RecordingCoreService:
             if self._preview_error_count > 0:
                 self._preview_error_last_reset_ts = time.time()
             self._preview_error_count = 0
+
+            tail_silent = self._preview_tail_is_silent(audio, sample_rate)
+            # None — отображение не трогаем вовсе (см. else-ветку ниже).
+            display_text: str | None
+
             if preview_text:
-                with self._preview_lock:
-                    self._preview_text = preview_text[-900:]
-                    self._preview_updated_at = float(duration_sec)
-                # W1673 F2: privacy gate — do not leak transcript text via SSE in privacy mode.
-                _preview_settings = self._settings_svc.cached_settings()
-                if not bool(_preview_settings.get("privacy_mode_enabled", False)):
-                    event_bus.emit_typed(EventType.STT_PARTIAL, SttPartial(
-                        text=preview_text[-900:],
-                        duration_sec=float(duration_sec),
-                    ))
+                display_text = committed_text + preview_text
+                commit_now = tail_sec >= _PREVIEW_COMMIT_MIN_SEC and (
+                    tail_silent or tail_sec >= _PREVIEW_MAX_TAIL_SEC
+                )
+                if commit_now:
+                    committed_text = display_text
+                    cursor_sec = upto
                 poll_interval = _POLL_MIN
-            else:
-                with self._preview_lock:
-                    self._preview_text = ""
-                    self._preview_updated_at = float(duration_sec)
+            elif tail_silent:
+                # Тихий хвост фиксируется БЕЗ добавления текста: курсор идёт
+                # вперёд, committed_text не меняется — иначе минутная пауза
+                # раз за разом гоняла бы через STT одну и ту же тишину до
+                # MAX_TAIL_SEC на каждом проходе (спека §3).
+                if tail_sec >= _PREVIEW_COMMIT_MIN_SEC:
+                    cursor_sec = upto
+                display_text = committed_text
                 poll_interval = min(poll_interval * _POLL_BACKOFF, _POLL_MAX)
-            last_refresh_duration = float(duration_sec)
+            else:
+                # Пустой текст БЕЗ тишины на хвосте — например, transcribe_preview
+                # не получил bounded mlx_lock (transcriber.py) и вернул пустой
+                # маркер. Хвост мог содержать реальную речь: фиксировать нельзя
+                # (потеря диктовки навсегда), MAX_TAIL_SEC тут исключения не
+                # даёт, отображение не трогаем (без него был бы виден откат).
+                display_text = None
+                poll_interval = min(poll_interval * _POLL_BACKOFF, _POLL_MAX)
+
+            if display_text is not None:
+                capped = display_text[-900:]
+                with self._preview_lock:
+                    self._preview_text = capped
+                    self._preview_updated_at = upto
+                if capped:
+                    # W1673 F2: privacy gate — do not leak transcript text via SSE in privacy mode.
+                    _preview_settings = self._settings_svc.cached_settings()
+                    if not bool(_preview_settings.get("privacy_mode_enabled", False)):
+                        event_bus.emit_typed(EventType.STT_PARTIAL, SttPartial(
+                            text=capped,
+                            duration_sec=upto,
+                        ))
+
             worker_stop_event.wait(poll_interval)
 
     # ------------------------------------------------------------------ #
