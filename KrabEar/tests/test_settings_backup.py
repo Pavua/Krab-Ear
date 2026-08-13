@@ -91,7 +91,7 @@ def _make_store(settings: dict | None = None) -> MagicMock:
     store = MagicMock()
     current: dict = dict(settings or _BASE_SETTINGS)
 
-    def load_settings():
+    def load_settings(lock_timeout_sec: float | None = None, nowait: bool = False):
         return dict(current)
 
     def save_settings(new_settings):

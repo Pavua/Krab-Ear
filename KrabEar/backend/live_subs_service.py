@@ -169,8 +169,29 @@ class LiveSubsService:
                 return None
             start_ts = self._session_start
             end_ts = time.monotonic()
-            audio = np.concatenate(self._buffer).astype(np.float32)
+            audio = (
+                np.concatenate(self._buffer).astype(np.float32)
+                if self._buffer_samples > 0
+                else np.empty(0, dtype=np.float32)
+            )
             self._reset()
+
+        # Живой инцидент 2026-08-12: is_final форсирует flush безусловно, и если
+        # буфер к этому моменту уже опустошён автофлашем (или чанк пришёл
+        # пустым), снапшот получается нулевой длины. Такое окно доезжало до STT
+        # и роняло GigaAM на WAV без фреймов — распознавать в нём нечего,
+        # поэтому воркер его вообще не видит.
+        #
+        # is_final отвечает ПУСТЫМ результатом, а не None: None по контракту
+        # handle_ingest означает «воркер не успел за таймаут» (status=stopped,
+        # reason=flush_timeout) — выдавать этот диагноз там, где просто нечего
+        # распознавать, значит подменить один ложный сигнал другим.
+        if audio.size == 0:
+            logger.debug(
+                "LiveSubsService: пустой снапшот буфера (is_final=%s) — окно не сабмитим",
+                is_final,
+            )
+            return {"text": "", "translation": None} if is_final else None
 
         # Лок отпущен — дальше только сабмит снапшота в фоновый воркер (F3).
         seq = self._submit_window(
@@ -212,7 +233,11 @@ class LiveSubsService:
                 audio = None
                 start_ts = end_ts = 0.0
             else:
-                has_data = bool(self._buffer)
+                # Список буфера может содержать пустые чанки (клиент прислал
+                # нулевой PCM) — тогда bool(self._buffer) истинно, а сэмплов
+                # нет. Ориентируемся на количество сэмплов, иначе в воркер
+                # уходит окно нулевой длины (см. тот же гард в ingest()).
+                has_data = self._buffer_samples > 0
                 if has_data:
                     start_ts = self._session_start
                     end_ts = time.monotonic()
