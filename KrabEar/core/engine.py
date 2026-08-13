@@ -384,6 +384,16 @@ def _copy_to_tmp_with_icloud_download(path: str) -> Optional[str]:
         return None
 
 
+# Бюджет ожидания mlx_lock для НЕОБЯЗАТЕЛЬНОЙ очистки Metal-кэша при смене
+# профиля. Сама смена профиля уже произошла к этому моменту; очистка — только
+# оптимизация освобождения GPU-буферов. Ждать её дольше нескольких секунд
+# бессмысленно и опасно: живой инцидент 2026-08-13 показал, что ожидание
+# здесь блокирует финальную транскрибацию диктовки до backstop-таймаута 180с.
+# Сознательно больше, чем у превью (1.0с, transcriber.py): смена профиля —
+# редкая операция на пути, где результат ждёт пользователь.
+MLX_CACHE_FLUSH_LOCK_TIMEOUT_SEC = 2.0
+
+
 class AudioEngine:
     """Сервисный слой для STT ( Speech-to-Text) и TTS (Text-to-Speech)."""
 
@@ -694,12 +704,28 @@ class AudioEngine:
         # Явный flush Metal cache освобождает GPU буферы немедленно, не дожидаясь GC.
         # W1618/W63: clear_cache — MLX op, must hold mlx_lock to prevent concurrent SIGSEGV.
         # W1635: degrade_on_timeout=True — non-critical cache flush, not inference.
-        try:
-            import mlx.core as _mx
-            with mlx_inter_process_lock(degrade_on_timeout=True), mlx_lock():  # W1635
-                _mx.clear_cache()
-        except (ImportError, AttributeError):
-            pass  # MLX не установлен или старая версия без clear_cache
+        # 2026-08-13 (живой инцидент, диктовка владельца потеряна): внутрипроцессный
+        # mlx_lock брался БЕЗ таймаута, хотя соседний межпроцессный в той же строке
+        # уже деградировал (degrade_on_timeout=True) — асимметрия соседних гейтов.
+        # Пока превью держало лок повисшим под нехваткой памяти Whisper'ом,
+        # финальная транскрибация стояла ЗДЕСЬ — на необязательной очистке кэша —
+        # до backstop-таймаута 180с, после чего агент убивал бэкенд.
+        # Поля профиля выставлены ВЫШЕ, поэтому пропуск очистки безопасен.
+        _cache_lock = mlx_lock()
+        if _cache_lock.acquire(timeout=MLX_CACHE_FLUSH_LOCK_TIMEOUT_SEC):
+            try:
+                import mlx.core as _mx
+                with mlx_inter_process_lock(degrade_on_timeout=True):  # W1635
+                    _mx.clear_cache()
+            except (ImportError, AttributeError):
+                pass  # MLX не установлен или старая версия без clear_cache
+            finally:
+                _cache_lock.release()
+        else:
+            logger.debug(
+                "Смена профиля: GPU занят дольше %.1fс — очистка Metal-кэша пропущена",
+                MLX_CACHE_FLUSH_LOCK_TIMEOUT_SEC,
+            )
         return True
 
     def normalize_audio(self, audio_path: str) -> bool | str:
