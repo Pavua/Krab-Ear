@@ -25,7 +25,7 @@ from backend.call_assist_service import CallAssistService, VoiceGatewayClient  #
 # ---------------------------------------------------------------------------
 
 class FakeStore:
-    def load_settings(self) -> dict:
+    def load_settings(self, lock_timeout_sec: float | None = None, nowait: bool = False) -> dict:
         return {
             "voice_gateway_url": "http://127.0.0.1:8090",
             "voice_gateway_api_key": "",

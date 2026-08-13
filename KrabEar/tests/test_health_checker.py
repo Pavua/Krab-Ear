@@ -52,7 +52,7 @@ class FakeStore:
         self._count = count
         self._raise_on_count = raise_on_count
 
-    def count_active_items(self) -> int:
+    def count_active_items(self, lock_timeout_sec: float | None = None, nowait: bool = False) -> int:
         if self._raise_on_count:
             raise RuntimeError("store unavailable")
         return self._count

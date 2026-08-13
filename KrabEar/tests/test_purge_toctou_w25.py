@@ -352,7 +352,7 @@ class _BackupStore:
                   self.status_path, self.settings_path):
             p.write_text("{}", encoding="utf-8")
 
-    def count_active_items(self) -> int:
+    def count_active_items(self, lock_timeout_sec: float | None = None, nowait: bool = False) -> int:
         return 1
 
 

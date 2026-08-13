@@ -67,7 +67,7 @@ class _LockSpyStore:
         finally:
             self._lock_depth -= 1
 
-    def count_active_items(self) -> int:
+    def count_active_items(self, lock_timeout_sec: float | None = None, nowait: bool = False) -> int:
         # Если бы этот вызов оказался ВНУТРИ блока _lock — _lock_depth был бы > 0.
         if self._lock_depth > 0:
             self.reentrant_violation = True

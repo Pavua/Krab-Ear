@@ -94,7 +94,7 @@ class _FakeStateStore:
     def save_vocabulary(self, *a, **kw):
         pass
 
-    def load_settings(self):
+    def load_settings(self, lock_timeout_sec=None, nowait=False):
         return dict(self._settings)
 
 

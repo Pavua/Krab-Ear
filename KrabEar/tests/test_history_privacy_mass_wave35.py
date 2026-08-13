@@ -60,7 +60,7 @@ class _FakeStore:
         self._settings = settings if settings is not None else {}
 
     # privacy helper fallback (when no cached_settings callable is wired)
-    def load_settings(self) -> dict:
+    def load_settings(self, lock_timeout_sec: float | None = None, nowait: bool = False) -> dict:
         return dict(self._settings)
 
     def _lock(self):

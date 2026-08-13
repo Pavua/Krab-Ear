@@ -40,7 +40,7 @@ class FakeStore:
             self._settings.update(extra)
         self._history: list[Any] = []
 
-    def load_settings(self) -> dict[str, Any]:
+    def load_settings(self, lock_timeout_sec: float | None = None, nowait: bool = False) -> dict[str, Any]:
         return dict(self._settings)
 
     def save_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
