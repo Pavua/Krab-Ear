@@ -57,7 +57,7 @@ class TestSensitiveFieldsStrippedFromExport(unittest.TestCase):
                 if settings_override:
                     self._settings.update(settings_override)
 
-            def load_settings(self):
+            def load_settings(self, lock_timeout_sec: float | None = None, nowait: bool = False):
                 return dict(self._settings)
 
             def save_settings(self, s):

@@ -16,7 +16,7 @@ class FakeStore:
     def __init__(self):
         self._settings = dict(DEFAULT_SETTINGS)
 
-    def load_settings(self):
+    def load_settings(self, lock_timeout_sec: float | None = None, nowait: bool = False):
         return dict(self._settings)
 
     def save_settings(self, settings):
