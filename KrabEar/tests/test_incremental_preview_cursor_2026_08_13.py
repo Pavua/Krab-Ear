@@ -339,6 +339,45 @@ class TestPreviewLoopSilentTailCommitsCursorWithoutAddingText(unittest.TestCase)
         self.assertEqual(svc.preview_text, "")
 
 
+class _MlxBusyTranscriber:
+    """STT-фейк: ВСЕГДА возвращает маркер промаха bounded mlx_lock.
+
+    Реальный `Transcriber.transcribe_preview` отдаёт ровно такой словарь
+    (`transcriber.py:152`), когда не смог захватить лок за отведённый бюджет.
+    Пустой текст здесь НИЧЕГО не говорит о содержимом хвоста."""
+
+    def __init__(self) -> None:
+        self.calls: list[int] = []
+
+    def transcribe_preview(self, audio_data, **kwargs):
+        self.calls.append(int(np.asarray(audio_data).size))
+        return {"text": "", "skipped": "mlx_busy"}
+
+
+class TestPreviewLoopMlxBusyNeverCommitsEvenOnSilentTail(unittest.TestCase):
+    """Гейт-находка 2026-08-13: пустой текст имеет ДВА источника — реальная
+    тишина и промах mlx_lock. Совпадение «промах + последние 0.4с тихие»
+    двигало бы курсор через речь, прозвучавшую раньше в том же хвосте."""
+
+    def test_mlx_busy_marker_blocks_cursor_advance_on_silent_tail(self) -> None:
+        tmp = tempfile.mkdtemp()
+        # Хвост 3.5с: речь в начале, пауза в конце — последние 0.4с тихие,
+        # то есть без учёта маркера ветка tail_silent зафиксировала бы курсор.
+        duration_sequence = [3.5, 7.0]
+        silent_intervals = [(3.1, 3.5), (6.6, 7.0)]
+        recorder = _TimelineRecorder(duration_sequence, silent_intervals)
+        transcriber = _MlxBusyTranscriber()
+        svc = _make_service(tmp, recorder, transcriber)
+        stop_event = _CountingStopEvent(max_iterations=len(duration_sequence))
+
+        svc._preview_loop("balanced", stop_event=stop_event)
+
+        # Курсор НЕ двинулся: оба снимка начинаются с 0.0.
+        self.assertEqual([c[0] for c in recorder.snapshot_calls], [0.0, 0.0])
+        # Отображение не тронуто — отката показанного текста не случилось.
+        self.assertEqual(svc.preview_text, "")
+
+
 # ===========================================================================
 # Пустой текст БЕЗ тишины — не фиксируем, отображение не трогаем (DoD, §3)
 # ===========================================================================

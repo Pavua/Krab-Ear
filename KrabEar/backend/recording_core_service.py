@@ -2460,6 +2460,16 @@ class RecordingCoreService:
             self._preview_error_count = 0
 
             tail_silent = self._preview_tail_is_silent(audio, sample_rate)
+            # Пустой текст имеет ДВА несовместимых источника: в хвосте правда
+            # нет речи ИЛИ transcribe_preview не получил bounded mlx_lock и
+            # вернул маркер (transcriber.py:152). Второй случай ничего не
+            # говорит о содержимом хвоста, поэтому фиксировать курсор по нему
+            # нельзя даже при тихих последних 0.4с: речь могла звучать раньше
+            # в том же хвосте, а пауза в конце — просто совпадение.
+            preview_skipped = (
+                isinstance(preview_payload, dict)
+                and bool(preview_payload.get("skipped"))
+            )
             # None — отображение не трогаем вовсе (см. else-ветку ниже).
             display_text: str | None
 
@@ -2472,7 +2482,7 @@ class RecordingCoreService:
                     committed_text = display_text
                     cursor_sec = upto
                 poll_interval = _POLL_MIN
-            elif tail_silent:
+            elif tail_silent and not preview_skipped:
                 # Тихий хвост фиксируется БЕЗ добавления текста: курсор идёт
                 # вперёд, committed_text не меняется — иначе минутная пауза
                 # раз за разом гоняла бы через STT одну и ту же тишину до
@@ -2482,11 +2492,11 @@ class RecordingCoreService:
                 display_text = committed_text
                 poll_interval = min(poll_interval * _POLL_BACKOFF, _POLL_MAX)
             else:
-                # Пустой текст БЕЗ тишины на хвосте — например, transcribe_preview
-                # не получил bounded mlx_lock (transcriber.py) и вернул пустой
-                # маркер. Хвост мог содержать реальную речь: фиксировать нельзя
-                # (потеря диктовки навсегда), MAX_TAIL_SEC тут исключения не
-                # даёт, отображение не трогаем (без него был бы виден откат).
+                # Пустой текст, про который НЕЛЬЗЯ утверждать, что в хвосте не
+                # было речи: либо хвост не тих, либо пришёл маркер skipped
+                # (промах bounded mlx_lock). Фиксировать нельзя — превью
+                # потеряло бы фразу; MAX_TAIL_SEC тут исключения не даёт.
+                # Отображение не трогаем: иначе был бы виден откат текста.
                 display_text = None
                 poll_interval = min(poll_interval * _POLL_BACKOFF, _POLL_MAX)
 
