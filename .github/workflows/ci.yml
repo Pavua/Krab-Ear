@@ -328,6 +328,32 @@ jobs:
         # No user-controlled input is used in this step -- no injection risk.
         run: python3 scripts/audit_path_containment.py --fail-on-found
 
+  fake-store-signature-guard:
+    name: Fake StateStore signature-drift guard (#1916)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Self-check the classifier before trusting its verdict
+        # A guard that silently stops classifying is worse than no guard: it reports
+        # CLEAN forever and nobody notices. This runs the known-bad / known-good
+        # samples, so a broken classifier fails here instead of going quietly green.
+        # No user-controlled input is used in this step -- no injection risk.
+        run: python3 scripts/audit_fake_store_signatures.py --selftest
+
+      - name: Check test fakes still match the StateStore contract (#1916)
+        # Tests hand-roll fake StateStores; the real signature moves on (the
+        # lock-contention wave 2f27c547 added load_settings(lock_timeout_sec=, nowait=))
+        # and the fakes silently diverge. The break is DELAYED -- a diverged fake stays
+        # green until the code under test finally reaches the new kwarg, which is how 7
+        # files went red at once in #1916 while 22 more sat armed and unnoticed.
+        # Criterion: a fake must accept exactly the KEYWORD arguments production calls
+        # it with; positional call sites impose nothing (demanding the full signature
+        # produced 21 false positives on save_settings).
+        # No user-controlled input is used in this step -- no injection risk.
+        run: python3 scripts/audit_fake_store_signatures.py --fail-on-found
+
   dispatch-test-targets-guard:
     name: Dead in-class handler / test-validates-the-hole guard (#47)
     runs-on: ubuntu-latest
