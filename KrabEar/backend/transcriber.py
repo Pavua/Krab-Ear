@@ -152,7 +152,17 @@ class Transcriber:
             return {"text": "", "skipped": "mlx_busy"}
         try:
             self.engine.set_quality_profile("balanced")
-            return self.engine.transcribe(audio_data, cleanup_profile="soft", is_preview=True)
+            # single_pass (2026-08-13, живой инцидент — диктовка владельца
+            # потеряна): превью НЕ имеет права уходить в фоллбэк-цепочку.
+            # Пустой ответ GigaAM на коротком хвосте уводил превью в Whisper,
+            # тот вис под нехваткой памяти УДЕРЖИВАЯ mlx_lock — и финальная
+            # транскрибация блокировалась на этом же локе до backstop-таймаута
+            # 180с. Превью косметическое, его текст всё равно заменяется
+            # финальной транскрибацией: платить за него полной цепочкой
+            # моделей нельзя. Та же логика, что для live-субтитров.
+            return self.engine.transcribe(
+                audio_data, cleanup_profile="soft", is_preview=True, single_pass=True,
+            )
         finally:
             lock.release()
 
