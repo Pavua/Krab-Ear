@@ -92,6 +92,7 @@ class FakeStore:
         target_lang: str = "",
         translation_status: str = "not_requested",
         translation_engine: str = "",
+        **kwargs: Any,
     ) -> FakeHistoryItem:
         item = FakeHistoryItem(item_id="restored-" + text[:8], text=text)
         self._items[item.id] = item

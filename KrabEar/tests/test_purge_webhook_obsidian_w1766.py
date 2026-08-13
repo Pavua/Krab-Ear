@@ -71,7 +71,7 @@ class FakeStore:
     def compact_with_stats(self) -> dict:
         return {"before_active_count": len(self._items), "after_active_count": 0}
 
-    def load_settings(self) -> dict:
+    def load_settings(self, lock_timeout_sec: float | None = None, nowait: bool = False) -> dict:
         return {}
 
     def save_settings(self, settings: dict) -> dict:

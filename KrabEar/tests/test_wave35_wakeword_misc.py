@@ -56,7 +56,8 @@ class _FakeStore:
     def _load_active_items_with_lock(self):
         return []
 
-    def get_history_page_filtered(self, cursor, limit, paste_status, translation_mode):
+    def get_history_page_filtered(self, cursor, limit, paste_status, translation_mode,
+                                  translation_status=None, from_ts=None, to_ts=None):
         return [], None
 
 

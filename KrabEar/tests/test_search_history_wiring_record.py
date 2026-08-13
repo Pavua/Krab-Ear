@@ -62,7 +62,7 @@ class _FakeStore:
         """Возвращает один фиктивный элемент (чтобы results_count=1)."""
         return [{"id": "fake-1", "text": "тестовая запись", "ts": "2026-01-01T00:00:00Z"}], None
 
-    def load_settings(self) -> dict[str, Any]:
+    def load_settings(self, lock_timeout_sec: float | None = None, nowait: bool = False) -> dict[str, Any]:
         """Симулирует load_settings для _is_privacy_mode()."""
         return {"privacy_mode_enabled": self._privacy}
 

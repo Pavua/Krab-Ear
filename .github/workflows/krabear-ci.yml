@@ -168,6 +168,17 @@ jobs:
         # matching clear-call is wired — prevents silent purge regressions.
         run: python3 scripts/audit_inmemory_purge_coverage.py --fail-on-found
 
+      - name: Fake StateStore signature-drift guard (#1916)
+        # Tests hand-roll fake StateStores; the real signature moves on (the lock-contention
+        # wave added load_settings(lock_timeout_sec=, nowait=)) and the fakes silently diverge.
+        # The failure is DELAYED -- a diverged fake stays green until the code under test
+        # finally reaches the new kwarg, which is how 7 files went red at once in #1916 while
+        # 22 more sat armed. Criterion: a fake must accept exactly the KEYWORD arguments
+        # production actually calls it with (positional calls impose nothing -- requiring the
+        # full signature produced 21 false positives on save_settings).
+        # No user-controlled input is used in this step -- no injection risk.
+        run: python3 scripts/audit_fake_store_signatures.py --fail-on-found
+
       - name: IPC/SSE contract-drift guard (#seam)
         # Swift<->Python IPC method-name drift (Swift calls a method absent from the
         # dispatch table) + param-key + SSE dot/underscore drift -- the class that

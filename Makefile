@@ -1,4 +1,4 @@
-.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release reset-tcc clean-worktree-builds audit-orphans audit-handlers audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-inmemory-purge-coverage audit-path-containment audit-dispatch-test-targets audit-ipc-drift audit-all pre-merge-check dispatch-tests service-loc
+.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release reset-tcc clean-worktree-builds audit-orphans audit-handlers audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-inmemory-purge-coverage audit-path-containment audit-dispatch-test-targets audit-ipc-drift audit-fake-store-signatures audit-all pre-merge-check dispatch-tests service-loc
 
 VENV = .venv_krab_ear
 PYTHON = $(VENV)/bin/python
@@ -175,8 +175,21 @@ audit-inmemory-purge-coverage:
 audit-ipc-drift:
 	python3 scripts/audit_ipc_contract_drift.py $(ARGS)
 
+# Audit fake-StateStore signature drift in tests (#1916).
+# Tests hand-roll fake stores; the real StateStore signature moves on (the
+# lock-contention wave added load_settings(lock_timeout_sec=, nowait=)) and the
+# fakes silently diverge. The break is DELAYED — a diverged fake stays green
+# until the code under test finally reaches the new kwarg, which is why 7 files
+# went red at once in #1916 while 22 more sat armed and unnoticed.
+# Criterion: a fake must accept exactly the KEYWORD arguments production calls it
+# with; positional call sites impose nothing (demanding the full signature yielded
+# 21 false positives on save_settings, whose fakes just name the param differently).
+# Pass ARGS=--json for machine output, ARGS=--selftest for the known-bad/good check.
+audit-fake-store-signatures:
+	python3 scripts/audit_fake_store_signatures.py --fail-on-found $(ARGS)
+
 # Run all static audit checks (CI parity — runs same checks as CI guard jobs).
-audit-all: audit-orphans audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-path-containment audit-dispatch-test-targets audit-inmemory-purge-coverage audit-ipc-drift
+audit-all: audit-orphans audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-path-containment audit-dispatch-test-targets audit-inmemory-purge-coverage audit-ipc-drift audit-fake-store-signatures
 	@echo "All audit checks passed."
 
 # Reproduce the ubuntu krab-ear-ci env LOCALLY (Python 3.12, mlx ABSENT) and run

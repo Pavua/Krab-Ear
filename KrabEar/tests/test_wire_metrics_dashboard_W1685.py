@@ -33,7 +33,7 @@ class FakeStore:
         self.data_dir = Path("/tmp/krab_test_w1685")
         self._count = count
 
-    def count_active_items(self) -> int:
+    def count_active_items(self, lock_timeout_sec: float | None = None, nowait: bool = False) -> int:
         return self._count
 
 
