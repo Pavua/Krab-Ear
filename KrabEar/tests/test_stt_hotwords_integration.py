@@ -156,7 +156,11 @@ def make_service(test_case, tmp_dir: str, transcriber=None) -> BackendService:
 class SttHotwordsIntegrationTests(unittest.TestCase):
 
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
+        # ignore_cleanup_errors=True: фоновые треды BackendService (DiskSpaceMonitor,
+        # RecapScheduler, ExportScheduler) успевают писать в data dir уже после теста
+        # → OSError "Directory not empty" на cleanup. Локально не воспроизводится,
+        # на CI-раннере ловится. Тот же приём уже стоит в test_backend_service.py.
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.tmp.cleanup)
         self.svc = make_service(self, self.tmp.name)
 
