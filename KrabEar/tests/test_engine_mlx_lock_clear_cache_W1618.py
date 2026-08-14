@@ -30,24 +30,80 @@ if _PROJECT_ROOT not in sys.path:
 # AST helper — find `with mlx_lock(): ... clear_cache()` in a method source
 # ---------------------------------------------------------------------------
 
+def _call_name(node) -> str:
+    """Имя вызываемого у ast.Call: `mlx_lock()` → 'mlx_lock', `x.acquire()` → 'acquire'."""
+    if not isinstance(node, ast.Call):
+        return ""
+    func = node.func
+    return func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
+
+
 def _source_contains_lock_wrapping_clear_cache(method) -> bool:
-    """Return True if the method source contains `with mlx_lock()` around clear_cache."""
+    """True, если clear_cache вызывается ТОЛЬКО под удерживаемым mlx_lock.
+
+    Инвариант W1618/W63 один — clear_cache это MLX-операция, и без лока она
+    даёт SIGSEGV при конкурентном доступе к GPU. А вот форм взятия лока в
+    проде две, и обе легитимны:
+
+    A. ``with mlx_lock(): ... clear_cache()`` — как в transcribe();
+    B. ``lk = mlx_lock()`` / ``if lk.acquire(timeout=...): ... clear_cache()``
+       / ``finally: lk.release()`` — в set_quality_profile, где flush кэша
+       необязателен и не должен ждать лок дольше бюджета (живой инцидент
+       2026-08-13: зависшее превью держало лок, финальная транскрибация
+       стояла здесь до backstop-таймаута 180с и запись терялась).
+
+    Форма B засчитывается только целиком: имя должно происходить из
+    ``mlx_lock()``, ``clear_cache`` — лежать в теле ``if <имя>.acquire(...)``,
+    и в методе обязан быть ``<имя>.release()``. Голый ``clear_cache`` без лока
+    не проходит ни по одной ветке.
+    """
     src = textwrap.dedent(inspect.getsource(method))
     tree = ast.parse(src)
+
+    # --- форма A: with mlx_lock(): ... clear_cache() ---
     for node in ast.walk(tree):
         if isinstance(node, ast.With):
             for item in node.items:
-                ctx = item.context_expr
-                if isinstance(ctx, ast.Call):
-                    func = ctx.func
-                    name = (
-                        func.id if isinstance(func, ast.Name)
-                        else getattr(func, "attr", "")
-                    )
-                    if name == "mlx_lock":
-                        body_src = ast.dump(ast.Module(body=node.body, type_ignores=[]))
-                        if "clear_cache" in body_src:
-                            return True
+                if _call_name(item.context_expr) == "mlx_lock":
+                    body_src = ast.dump(ast.Module(body=node.body, type_ignores=[]))
+                    if "clear_cache" in body_src:
+                        return True
+
+    # --- форма B: lk = mlx_lock(); if lk.acquire(...): ... clear_cache() ---
+    lock_names = {
+        target.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign) and _call_name(node.value) == "mlx_lock"
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    if not lock_names:
+        return False
+
+    released = {
+        node.func.value.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "release"
+        and isinstance(node.func.value, ast.Name)
+    }
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If) or not isinstance(node.test, ast.Call):
+            continue
+        test = node.test
+        if not isinstance(test.func, ast.Attribute) or test.func.attr != "acquire":
+            continue
+        if not isinstance(test.func.value, ast.Name):
+            continue
+        name = test.func.value.id
+        if name not in lock_names or name not in released:
+            continue
+        body_src = ast.dump(ast.Module(body=node.body, type_ignores=[]))
+        if "clear_cache" in body_src:
+            return True
+
     return False
 
 
@@ -83,6 +139,16 @@ class TestSwitchProfileClearCacheHeldUnderMlxLock(unittest.TestCase):
         call_order: list[str] = []
 
         class _FakeLock:
+            """Дубль mlx_lock(): и context-manager, и acquire/release.
+
+            Прод берёт этот лок ДВУМЯ способами: `with mlx_lock():` в
+            transcribe() и `mlx_lock().acquire(timeout=...)` в
+            set_quality_profile (бюджет на необязательный flush кэша, чтобы
+            зависшее превью не держало финальную транскрибацию — живой
+            инцидент 2026-08-13). Фейк обязан отражать оба, иначе тест падает
+            на AttributeError вместо проверки инварианта.
+            """
+
             def __enter__(self):
                 call_order.append("mlx_lock_enter")
                 return self
@@ -90,6 +156,13 @@ class TestSwitchProfileClearCacheHeldUnderMlxLock(unittest.TestCase):
             def __exit__(self, *_):
                 call_order.append("mlx_lock_exit")
                 return False
+
+            def acquire(self, timeout=None):
+                call_order.append("mlx_lock_enter")
+                return True
+
+            def release(self):
+                call_order.append("mlx_lock_exit")
 
         from core import engine as _engine_mod  # noqa: PLC0415
         from core.config import settings as _settings  # noqa: PLC0415
@@ -189,6 +262,16 @@ class TestPostDiarizationClearCacheHeldUnderMlxLock(unittest.TestCase):
         call_order: list[str] = []
 
         class _FakeLock:
+            """Дубль mlx_lock(): и context-manager, и acquire/release.
+
+            Прод берёт этот лок ДВУМЯ способами: `with mlx_lock():` в
+            transcribe() и `mlx_lock().acquire(timeout=...)` в
+            set_quality_profile (бюджет на необязательный flush кэша, чтобы
+            зависшее превью не держало финальную транскрибацию — живой
+            инцидент 2026-08-13). Фейк обязан отражать оба, иначе тест падает
+            на AttributeError вместо проверки инварианта.
+            """
+
             def __enter__(self):
                 call_order.append("mlx_lock_enter")
                 return self
@@ -196,6 +279,13 @@ class TestPostDiarizationClearCacheHeldUnderMlxLock(unittest.TestCase):
             def __exit__(self, *_):
                 call_order.append("mlx_lock_exit")
                 return False
+
+            def acquire(self, timeout=None):
+                call_order.append("mlx_lock_enter")
+                return True
+
+            def release(self):
+                call_order.append("mlx_lock_exit")
 
         try:
             import mlx.core as _real_mx

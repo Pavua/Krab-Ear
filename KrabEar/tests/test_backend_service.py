@@ -7,6 +7,7 @@ from backend.state_store import StateStore
 from backend.service import BackendService
 
 from pathlib import Path
+import itertools
 import json
 import sys
 import tempfile
@@ -29,6 +30,7 @@ class FakeRecorder:
         self.is_recording = False
         self.sample_rate = 16000
         self._snapshot_counter = 0
+        self._virtual_elapsed_sec = 0.0
         self.last_stop_trim_ms = 0
         self.last_stop_timeout_sec = 3.0
 
@@ -54,6 +56,34 @@ class FakeRecorder:
     def snapshot_audio(self, max_duration_sec: float = 12.0):
         self._snapshot_counter += 1
         return np.ones(32000, dtype=np.float32), float(self._snapshot_counter)
+
+    # R3 (610f8712): _preview_loop перешёл со скользящего окна на курсор и
+    # требует именно эту пару методов — без них он молча уходит в continue
+    # («not callable») и превью не обновляется НИКОГДА. Фейк обязан повторять
+    # контракт AudioRecorder, а не только имена методов.
+
+    def get_duration_sec(self) -> float:
+        """Растущая длительность записи (реальный рекордер меряет от _started_at).
+
+        Каждый опрос двигает виртуальные часы на секунду: тесту не нужно ждать
+        настенного времени, а хвост детерминированно перерастает пороги
+        _PREVIEW_MIN_TAIL_SEC / _PREVIEW_COMMIT_MIN_SEC.
+        """
+        if not self.is_recording:
+            return 0.0
+        self._virtual_elapsed_sec += 1.0
+        return self._virtual_elapsed_sec
+
+    def snapshot_range(self, from_sec: float, to_sec: float):
+        """Срез буфера по диапазону от начала записи (контракт AudioRecorder).
+
+        Вырожденный диапазон → пустой массив: ровно так ведёт себя реальный
+        рекордер, и _preview_loop на это опирается (пустой срез = ждать чанков,
+        а не звать STT).
+        """
+        if to_sec <= from_sec:
+            return np.array([], dtype=np.float32)
+        return np.ones(int((to_sec - from_sec) * self.sample_rate), dtype=np.float32)
 
 
 class SilentRecorder(FakeRecorder):
@@ -231,6 +261,30 @@ class BackendServiceTestCase(unittest.TestCase):
         return self.service.handle_request(
             {"id": request_id, "method": method, "params": params or {}}
         )
+
+    def _stub_preview_stt(self, text: str) -> threading.Event:
+        """Подменяет transcribe_preview и сигналит, когда loop ПРОШЁЛ итерацию.
+
+        Событие ставится на ВТОРОМ вызове, а не на первом: к этому моменту loop
+        успел полностью обработать результат первого — значит, если бы он всё же
+        записывал забракованный текст в превью, запись уже случилась бы и
+        проверка на пустоту поймала бы это, а не проскочила по гонке.
+
+        Ждать ``_preview_updated_at`` здесь больше нельзя: после R3 (610f8712)
+        забракованный текст сознательно НЕ трогает отображение («иначе был бы
+        виден откат текста»), поэтому таймстемп и не обязан двигаться. Тест
+        проверяет своё исходное намерение — мусор не попадает в превью.
+        """
+        ran = threading.Event()
+        calls = itertools.count(1)
+
+        def _fake_preview(audio_data, quality_profile: str = "balanced") -> str:
+            if next(calls) >= 2:
+                ran.set()
+            return text
+
+        self.service.transcriber.transcribe_preview = _fake_preview  # type: ignore[method-assign]
+        return ran
 
     def _wait_for_preview_update(self, timeout: float = 5.0) -> bool:
         """Ждёт детерминистически, пока preview loop сделает хотя бы одну итерацию.
@@ -767,27 +821,21 @@ class BackendServiceTestCase(unittest.TestCase):
         self.assertTrue(self.request("stop_recording", {"quality_profile": "balanced"})["ok"])
 
     def test_preview_drops_prompt_echo_and_clears_state(self) -> None:
-        self.service.transcriber.transcribe_preview = (  # type: ignore[method-assign]
-            lambda audio_data, quality_profile="balanced": (
-                "Сохраняй смысл, ставь корректную пунктуацию, "
-                "сохраняй смысл, ставь корректную пунктуацию."
-            )
+        stt_ran = self._stub_preview_stt(
+            "Сохраняй смысл, ставь корректную пунктуацию, "
+            "сохраняй смысл, ставь корректную пунктуацию."
         )
         self.assertTrue(self.request("start_recording")["ok"])
-        # Ждём, пока preview loop обработает эхо промпта и обнулит _preview_text
-        self.assertTrue(self._wait_for_preview_update(timeout=5.0), "preview loop не сработал за 5s")
+        self.assertTrue(stt_ran.wait(timeout=5.0), "preview loop не прогнал STT за 5s")
         state = self.request("get_recording_state")
         self.assertTrue(state["ok"])
         self.assertEqual(state["result"]["preview_text"], "")
         self.assertTrue(self.request("stop_recording", {"quality_profile": "balanced"})["ok"])
 
     def test_preview_drops_looping_noise(self) -> None:
-        self.service.transcriber.transcribe_preview = (  # type: ignore[method-assign]
-            lambda audio_data, quality_profile="balanced": "ой ой ой ой ой ой ой ой"
-        )
+        stt_ran = self._stub_preview_stt("ой ой ой ой ой ой ой ой")
         self.assertTrue(self.request("start_recording")["ok"])
-        # Ждём, пока preview loop обработает повторяющийся шум и обнулит _preview_text
-        self.assertTrue(self._wait_for_preview_update(timeout=5.0), "preview loop не сработал за 5s")
+        self.assertTrue(stt_ran.wait(timeout=5.0), "preview loop не прогнал STT за 5s")
         state = self.request("get_recording_state")
         self.assertTrue(state["ok"])
         self.assertEqual(state["result"]["preview_text"], "")
