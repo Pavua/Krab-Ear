@@ -97,12 +97,11 @@ class TzAwareTimestampTestCase(unittest.TestCase):
     def test_timestamp_lexicographic_sort_still_works(self):
         """Два tz-aware UTC timestamp-а должны сортироваться лексикографически корректно."""
         from backend.models import HistoryItem
-        import time
+        from datetime import timedelta
         item_a = HistoryItem.create(text="первый")
-        time.sleep(0.01)  # ensure distinct seconds-precision might differ
-        # Simulate a slightly later timestamp manually to avoid sleep dependency
+        # Simulate a strictly later timestamp via timedelta to avoid modulo 60 rollover bug
         dt_a = datetime.fromisoformat(item_a.ts)
-        dt_b_aware = dt_a.replace(second=(dt_a.second + 1) % 60)
+        dt_b_aware = dt_a + timedelta(seconds=1)
         ts_b = dt_b_aware.isoformat(timespec="seconds")
 
         # Both end in +00:00 — strip suffix to get naive str for lex comparison
