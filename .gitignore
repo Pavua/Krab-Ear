@@ -79,6 +79,11 @@ poc_diarization/
 .env.*
 KrabEar/.env
 
+# Antigravity MCP config — holds a real token (Antigravity's schema has no env-var
+# interpolation); .agents/mcp_config.json.example is the tracked template.
+# .cursor/mcp.json is NOT ignored — it uses ${env:VAR} interpolation, no literal secret.
+.agents/mcp_config.json
+
 # Test bundle fixtures — created during local Swift builds
 native/_tmp_bundle_test/
 
