@@ -2011,3 +2011,35 @@ Source-контракт на факт вызова из обоих путей **
 запуска Swift-агента, а `SingleInstanceGuard` убил бы прод-копию владельца. Проверять
 при штатном деплое агента; parity-бинари в коммит не клались (практика репозитория —
 исходные Swift-коммиты идут без них).
+
+## 2026-08-15 — Сессия Antigravity (Gemini 3.7 Flash + High Reasoning): Hang fix 1V + LocalSIPAdapter
+
+Ветка `codex/krab-ear-v2`, коммиты `bc5ee07b`, `4f63fcd3`, `54c6a9a1`, `349a1eed`, `d10e09c2`, `114846ca`.
+
+1. **Ликвидация 180с зависания `stop_recording` (Sentry KRAB-EAR-BACKEND-1V)**:
+   - `MLX_HANG_HARD_KILL_SEC` снижен со 120с до 10с (`core/mlx_subprocess.py`).
+   - `MLX_TRANSCRIBE_TIMEOUT_SEC` установлен в 45с (`core/config.py`).
+   - `core/engine.py`: при `MLXTimeoutError` цикл по вариантам параметров прерывается немедленно без повторных попыток на зависшем GPU.
+   - `core/pipeline/stt_whisper_mlx_adapter.py`: вызов через `MLXWatchdog.run_with_timeout`.
+   - `core/mlx_lock.py`: добавлен `acquire_mlx_lock(timeout_sec=...)` с `MLXLockTimeoutError`.
+   - `backend/telegram_bridge.py`: прокинут заголовок `X-Krab-Web-Key`.
+   - TDD тест-сьюта: `test_stop_recording_hang_1v.py` (4/4 passed).
+
+2. **Починен flaky-тест timestamp sorting**:
+   - `test_models.py::TzAwareTimestampTestCase::test_timestamp_lexicographic_sort_still_works` падал на 59-й секунде из-за `(second + 1) % 60` — заменено на `+ timedelta(seconds=1)`.
+
+3. **Верификация UI Liquid Glass Realtime Overlay & In-Process REST**:
+   - Swift Realtime Overlay (`RealtimeOverlayController.swift`, `KrabEarTheme.swift`): все 7 публичных сигнатур сохранены, CALayer без глифов, `reduceMotion` соблюдён. `swift build -c release` чистый, `swift test` 1486/1486 GREEN.
+   - In-Process REST: верифицирован `InProcessRestServer` (36/36 тестов). Починен импорт в `test_rest_inprocess_runtime_toggle_S3_task9.py`.
+
+4. **Локальная On-Device SIP Телефония (`LocalSIPAdapter`)**:
+   - Реализован `LocalSIPAdapter` (`backend/sip_local_adapter.py`) под интерфейсом `CallProvider` (`dial`, `hangup`, `get_call_status`, `list_active_calls`, `is_configured`).
+   - Поддержка `PROVIDER_SIP_LOCAL = "sip_local"` в `call_provider_factory.py`.
+   - Настройки и валидация `SIP_SERVER`, `SIP_PORT`, `SIP_USER`, `SIP_PASSWORD`, `SIP_FROM_NUMBER`, `SIP_PROXY` в `core/config.py` и `backend/settings_validator.py`.
+   - Полный тестовый набор телефонии: 95/95 passed (`test_sip_local_adapter.py`, `test_call_provider_factory.py`, `test_call_provider_parity.py`).
+
+5. **Гейты и Handoff**:
+   - `make audit-all`: все 11 скриптов аудита чисты (0 orphan imports, 0 memory purge gaps, 0 IPC contract drift).
+   - `make pre-merge-check` (Ubuntu parity Python 3.12 без MLX): ALL GREEN.
+   - Создан и обновлён `docs/handoffs/2026-08-15-ecosystem-alignment-handoff.md` для параллельных сессий Главного Краба и Voice Gateway.
+
