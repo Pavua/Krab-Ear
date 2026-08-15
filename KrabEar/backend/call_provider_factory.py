@@ -22,8 +22,9 @@ logger = logging.getLogger("KrabEar.Backend.CallProviderFactory")
 # Допустимые значения CALL_PROVIDER
 PROVIDER_TELNYX = "telnyx"
 PROVIDER_TWILIO = "twilio"
+PROVIDER_SIP_LOCAL = "sip_local"
 PROVIDER_NONE = "none"
-_VALID_PROVIDERS = frozenset([PROVIDER_TELNYX, PROVIDER_TWILIO, PROVIDER_NONE])
+_VALID_PROVIDERS = frozenset([PROVIDER_TELNYX, PROVIDER_TWILIO, PROVIDER_SIP_LOCAL, PROVIDER_NONE])
 
 
 class NullCallProvider:
@@ -53,12 +54,10 @@ def get_provider(settings: Any) -> "CallProvider":
 
     Args:
         settings: объект настроек (core.config.Settings или совместимый).
-                  Читаются атрибуты: CALL_PROVIDER, TELNYX_API_KEY,
-                  TELNYX_CONNECTION_ID, TELNYX_FROM_NUMBER,
-                  TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER.
+                  Читаются атрибуты: CALL_PROVIDER, TELNYX_*, TWILIO_*, SIP_*.
 
     Returns:
-        Экземпляр TelnyxAdapter, TwilioAdapter или NullCallProvider.
+        Экземпляр TelnyxAdapter, TwilioAdapter, LocalSIPAdapter или NullCallProvider.
     """
     provider_name = (getattr(settings, "CALL_PROVIDER", PROVIDER_TELNYX) or "").lower().strip()
 
@@ -71,6 +70,34 @@ def get_provider(settings: Any) -> "CallProvider":
     if provider_name == PROVIDER_NONE:
         logger.info("CALL_PROVIDER=none, используется NullCallProvider")
         return NullCallProvider()  # type: ignore[return-value]
+
+    if provider_name == PROVIDER_SIP_LOCAL:
+        from backend.sip_local_adapter import LocalSIPAdapter
+
+        server = getattr(settings, "SIP_SERVER", "") or ""
+        port = int(getattr(settings, "SIP_PORT", 5060) or 5060)
+        user = getattr(settings, "SIP_USER", "") or ""
+        password = getattr(settings, "SIP_PASSWORD", "") or ""
+        from_number = getattr(settings, "SIP_FROM_NUMBER", "") or ""
+        proxy = getattr(settings, "SIP_PROXY", "") or ""
+
+        adapter = LocalSIPAdapter(
+            server=server,
+            port=port,
+            user=user,
+            password=password,
+            from_number=from_number,
+            proxy=proxy,
+        )
+        configured = adapter.is_configured()
+        logger.info(
+            "CallProvider=sip_local configured=%s server=%s:%d user=%s",
+            configured,
+            server or "(not set)",
+            port,
+            user or "(not set)",
+        )
+        return adapter  # type: ignore[return-value]
 
     if provider_name == PROVIDER_TWILIO:
         from backend.twilio_adapter import TwilioAdapter

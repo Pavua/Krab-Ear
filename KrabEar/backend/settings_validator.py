@@ -68,6 +68,8 @@ _ENUM_FIELDS: dict[str, tuple[str, ...]] = {
     # ("ru") — продуктовый дефолт владельца, безопасное значение при повреждённой
     # настройке. См. docs/superpowers/specs/2026-08-12-live-subs-language-routing-design.md.
     "live_subs_language": ("ru", "es", "en", "auto"),
+    # call_provider: выбор провайдера телефонии.
+    "call_provider": ("telnyx", "twilio", "sip_local", "none"),
 }
 
 # Диапазоны числовых полей: ключ → (min, max, default, type)

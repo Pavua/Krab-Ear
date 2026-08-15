@@ -200,6 +200,27 @@ class ProviderCredentialsTestCase(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "no_provider")
 
+    # 20 — CALL_PROVIDER=sip_local возвращает LocalSIPAdapter
+    def test_sip_local_provider_selection(self) -> None:
+        from backend.sip_local_adapter import LocalSIPAdapter
+
+        provider = get_provider(
+            _settings(
+                CALL_PROVIDER="sip_local",
+                SIP_SERVER="sip.example.com",
+                SIP_PORT=5060,
+                SIP_USER="user1",
+                SIP_PASSWORD="pwd",
+                SIP_FROM_NUMBER="+15551112233",
+            )
+        )
+        self.assertIsInstance(provider, LocalSIPAdapter)
+        self.assertTrue(provider.is_configured())
+        self.assertEqual(provider._server, "sip.example.com")
+        self.assertEqual(provider._port, 5060)
+        self.assertEqual(provider._user, "user1")
+        self.assertEqual(provider._from_number, "+15551112233")
+
 
 if __name__ == "__main__":
     unittest.main()

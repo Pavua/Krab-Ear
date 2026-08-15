@@ -515,8 +515,16 @@ class Settings(BaseSettings):
 
     # --- Call provider abstraction (Phase 3) ---
     # Выбор активного провайдера телефонии.
-    # Допустимые значения: "telnyx" | "twilio" | "none"
+    # Допустимые значения: "telnyx" | "twilio" | "sip_local" | "none"
     CALL_PROVIDER: str = "telnyx"
+
+    # --- Local On-Device SIP adapter (Phase 3 On-Device Telephony) ---
+    SIP_SERVER: str = ""
+    SIP_PORT: int = 5060
+    SIP_USER: str = ""
+    SIP_PASSWORD: str = ""
+    SIP_FROM_NUMBER: str = ""
+    SIP_PROXY: str = ""
 
     # --- Telnyx SIP/Call Control adapter (Phase 3 step 3/4) ---
     # Прямой REST-fallback к Telnyx Call Control API (без FreeSWITCH).
@@ -1263,9 +1271,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # 🔴 ВЕСТИГИАЛЬНО с волны ping-zero-wait (тот же день): повторный живой
     # замер ПОСЛЕ этого фикса показал суммарное ожидание на пути ping до
     # 2.04с (несколько бюджетированных попыток подряд) — сравнимо со
-    # Swift-таймаутом ping (2с). handle_ping() теперь использует
-    # count_active_items(nowait=True) — РОВНО одна неблокирующая попытка,
-    # это значение больше не читается. Оставлено в DEFAULT_SETTINGS/схеме
-    # валидатора для обратной совместимости settings.json.
-    "ping_count_lock_timeout_sec": 0.3,
+    # --- Local SIP On-Device Telephony (Phase 3) ---
+    "call_provider": "telnyx",
+    "sip_server": "",
+    "sip_port": 5060,
+    "sip_user": "",
+    "sip_password": "",
+    "sip_from_number": "",
+    "sip_proxy": "",
 }
