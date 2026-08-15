@@ -1,7 +1,7 @@
 # HANDOFF: Krab Ear & Ecosystem Alignment
 
 **Дата:** 2026-08-15  
-**Ветка Krab Ear:** `codex/krab-ear-v2` (коммиты `bc5ee07b`, `4f63fcd3`, `54c6a9a1`, `349a1eed`, `d10e09c2`)  
+**Ветка Krab Ear:** `codex/krab-ear-v2` (коммиты `bc5ee07b`, `4f63fcd3`, `54c6a9a1`, `349a1eed`, `d10e09c2`, `114846ca`, `f04594f7`)  
 **Статус Krab Ear:** Все тесты и аудит-гейты зелёные (1486 Swift тестов, 95 telephony тестов, 36 rest-inprocess тестов, make audit-all OK, pre-merge ubuntu-parity OK).
 
 ---
