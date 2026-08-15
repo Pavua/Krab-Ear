@@ -2591,19 +2591,20 @@ class AudioEngine:
                     else:
                         return mlx_whisper.transcribe(audio_data, **params)
                 except MLXTimeoutError as e:
-                    # W1604 F1 HIGH: watchdog timeout при одном variant — логируем + пробуем
-                    # следующий вариант параметров (fp32, меньший beam_size и т.д.).
-                    # После exhaustion всех вариантов last_err всплывёт наружу.
-                    logger.warning(
-                        "MLX watchdog timeout %.1fs (variant %d/%d, model=%s) — пробую следующий вариант",
-                        e.timeout_sec, variants.index(params) + 1, len(variants), model_name,
+                    # KRAB-EAR-BACKEND-1V: при таймауте watchdog (Metal GPU завис)
+                    # перебор вариантов kwargs бессмысленен (тот же GPU, та же модель).
+                    # Повторные попытки лишь умножали задержку (3x таймаут), приводя к
+                    # 180с IPC backstop. Прерываемся немедленно для перехода к fallback chain.
+                    logger.error(
+                        "MLX watchdog timeout %.1fs (model=%s) — прерываю variants loop для fallback",
+                        e.timeout_sec, model_name,
                     )
                     self._push_error(
                         "stt.mlx_timeout",
-                        f"MLXTimeoutError {e.timeout_sec}s (variant {variants.index(params) + 1}/{len(variants)}, model={model_name})",
+                        f"MLXTimeoutError {e.timeout_sec}s (model={model_name})",
                         severity="error",
                     )
-                    last_err = e
+                    raise
                 except TypeError as e:
                     last_err = e
                 except (MemoryError, RuntimeError) as e:

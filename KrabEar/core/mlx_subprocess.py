@@ -51,8 +51,9 @@ logger = logging.getLogger(__name__)
 # 2-fail-ping timeout.  So bounding the join to 120 s caps the worst case.
 #
 # Override via env: KRAB_EAR_MLX_HANG_HARD_KILL_SEC=<float>
+# KRAB-EAR-BACKEND-1V: дефолт 10с (вместо прежних 120с) предотвращает достижение 180с IPC backstop.
 MLX_HANG_HARD_KILL_SEC: float = float(
-    os.environ.get("KRAB_EAR_MLX_HANG_HARD_KILL_SEC", "120.0")
+    os.environ.get("KRAB_EAR_MLX_HANG_HARD_KILL_SEC", "10.0")
 )
 
 

@@ -12,6 +12,26 @@ from typing import Any
 
 from .stt_adapter import STTAdapterBase, STTResult
 
+try:
+    from core.mlx_lock import mlx_lock
+    from core.mlx_inter_lock import MLXInterLockTimeout, mlx_inter_process_lock
+    from core.mlx_subprocess import MLXTimeoutError, get_watchdog
+except ImportError:
+    import contextlib
+
+    mlx_lock = contextlib.nullcontext  # type: ignore[assignment]
+
+    def mlx_inter_process_lock(**_kw):  # type: ignore[assignment]
+        return contextlib.nullcontext()
+
+    class MLXInterLockTimeout(Exception):  # type: ignore[no-redef]
+        pass
+
+    class MLXTimeoutError(RuntimeError):  # type: ignore[no-redef]
+        pass
+
+    get_watchdog = None  # type: ignore[assignment]
+
 logger = logging.getLogger("KrabEar.STT.WhisperMLX")
 
 # Supported language codes for Whisper (non-exhaustive — commonly used ones).
@@ -93,21 +113,6 @@ class WhisperMLXAdapter(STTAdapterBase):
 
         effective_language = self._language_override or language
 
-        # Serialize MLX GPU access to prevent concurrent Metal hash table corruption.
-        # W1635: also acquire mlx_inter_process_lock (cross-process flock, env-var gated).
-        try:
-            from core.mlx_lock import mlx_lock
-            from core.mlx_inter_lock import MLXInterLockTimeout, mlx_inter_process_lock
-        except ImportError:
-            import contextlib
-            mlx_lock = contextlib.nullcontext  # type: ignore[assignment]
-
-            def mlx_inter_process_lock(**_kw):  # type: ignore[assignment]
-                return contextlib.nullcontext()
-
-            class MLXInterLockTimeout(Exception):  # type: ignore[no-redef]
-                pass
-
         params: dict[str, Any] = {
             "path_or_hf_repo": self._model_path,
             "language": effective_language,
@@ -125,14 +130,32 @@ class WhisperMLXAdapter(STTAdapterBase):
             params,
         ]
 
+        timeout_sec = float(getattr(self, "_timeout_sec", 45.0) or 45.0)
+
         with mlx_inter_process_lock(), mlx_lock():  # W1635: cross-process flock (outer) + intra-process RLock (inner)
             for p in variants:
                 try:
-                    result = mlx_whisper.transcribe(audio, **p)
+                    if get_watchdog is not None:
+                        captured_p = p
+                        result = get_watchdog().run_with_timeout(
+                            fn=lambda: mlx_whisper.transcribe(audio, **captured_p),
+                            timeout_sec=timeout_sec,
+                            model_name=self._model_path,
+                        )
+                    else:
+                        result = mlx_whisper.transcribe(audio, **p)
                     break
                 except TypeError as exc:
                     last_err = exc
                     continue
+                except MLXTimeoutError as exc:
+                    # KRAB-EAR-BACKEND-1V: не повторять variants при зависшем GPU
+                    logger.error(
+                        "WhisperMLXAdapter: watchdog timeout %.1fs (model=%s)",
+                        getattr(exc, "timeout_sec", timeout_sec),
+                        self._model_path,
+                    )
+                    raise
             else:
                 raise last_err or RuntimeError("mlx_whisper.transcribe failed")
 

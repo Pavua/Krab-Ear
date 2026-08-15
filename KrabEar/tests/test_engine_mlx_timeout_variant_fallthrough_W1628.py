@@ -97,80 +97,35 @@ class TestMLXTimeoutVariantFallthrough(unittest.TestCase):
                 return engine._transcribe_model(audio_data, model_name, prompt)
 
     # ------------------------------------------------------------------
-    # Test 1: timeout on first variant → falls through to second variant
+    # ------------------------------------------------------------------
+    # Test 1: MLXTimeoutError on first variant → aborts immediately (no multiplier)
     # ------------------------------------------------------------------
 
-    def test_mlx_timeout_falls_through_to_next_variant_when_recovery_enabled(self):
-        """W1628: MLXTimeoutError on first variant must NOT abort the loop;
-        second variant is tried and its result is returned."""
+    def test_mlx_timeout_aborts_immediately_when_recovery_enabled(self):
+        """KRAB-EAR-BACKEND-1V: MLXTimeoutError on first variant must abort the loop
+        immediately to avoid multiplying the stall time on a wedged Metal GPU."""
         engine = _make_engine_stub()
 
         timeout_exc = MLXTimeoutError(timeout_sec=30.0, model_name="mlx-community/whisper-base-mlx")
-        success_result = {"segments": [{"text": "hello"}], "text": "hello"}
 
-        # First call → timeout; second call → success
-        side_effects = [timeout_exc, success_result]
+        watchdog_mock = MagicMock()
+        watchdog_mock.run_with_timeout.side_effect = timeout_exc
 
         import numpy as np
         audio_data = np.zeros(16000, dtype=np.float32)
         model_name = "mlx-community/whisper-base-mlx"
 
-        watchdog_mock = MagicMock()
-        watchdog_mock.run_with_timeout.side_effect = side_effects
-
         with (
             patch("core.engine.settings") as mock_settings,
             patch("core.engine.get_watchdog", return_value=watchdog_mock),
             patch("core.engine.mlx_lock") as mlx_lock_mock,
+            patch("core.engine.mlx_inter_process_lock") as inter_lock_mock,
             patch("core.engine.mlx_whisper"),
         ):
             mlx_lock_mock.return_value.__enter__ = MagicMock(return_value=None)
             mlx_lock_mock.return_value.__exit__ = MagicMock(return_value=False)
-            mock_settings.TRANSCRIBE_LANGUAGE = None
-            mock_settings.MLX_CRASH_RECOVERY_ENABLED = True
-            mock_settings.MLX_TRANSCRIBE_TIMEOUT_SEC = 30.0
-
-            result = engine._transcribe_model(audio_data, model_name, "")
-
-        # Second variant succeeded
-        self.assertEqual(result["text"], "hello")
-
-        # Watchdog called twice (first variant timed out, second succeeded)
-        self.assertEqual(watchdog_mock.run_with_timeout.call_count, 2)
-
-        # _push_error("stt.mlx_timeout", ...) must be called for the timed-out variant
-        push_codes = [
-            c[0][0].code
-            for c in engine._error_bus.push.call_args_list
-        ]
-        self.assertIn("stt.mlx_timeout", push_codes)
-
-    # ------------------------------------------------------------------
-    # Test 2: all variants time out → MLXTimeoutError raised after loop
-    # ------------------------------------------------------------------
-
-    def test_mlx_timeout_after_all_variants_exhausted_raises(self):
-        """W1628: When all variants hit MLXTimeoutError, the last one is re-raised."""
-        engine = _make_engine_stub()
-
-        timeout_exc = MLXTimeoutError(timeout_sec=30.0, model_name="mlx-community/whisper-base-mlx")
-
-        import numpy as np
-        audio_data = np.zeros(16000, dtype=np.float32)
-        model_name = "mlx-community/whisper-base-mlx"
-
-        watchdog_mock = MagicMock()
-        # 3 variants → all time out
-        watchdog_mock.run_with_timeout.side_effect = [timeout_exc, timeout_exc, timeout_exc]
-
-        with (
-            patch("core.engine.settings") as mock_settings,
-            patch("core.engine.get_watchdog", return_value=watchdog_mock),
-            patch("core.engine.mlx_lock") as mlx_lock_mock,
-            patch("core.engine.mlx_whisper"),
-        ):
-            mlx_lock_mock.return_value.__enter__ = MagicMock(return_value=None)
-            mlx_lock_mock.return_value.__exit__ = MagicMock(return_value=False)
+            inter_lock_mock.return_value.__enter__ = MagicMock(return_value=None)
+            inter_lock_mock.return_value.__exit__ = MagicMock(return_value=False)
             mock_settings.TRANSCRIBE_LANGUAGE = None
             mock_settings.MLX_CRASH_RECOVERY_ENABLED = True
             mock_settings.MLX_TRANSCRIBE_TIMEOUT_SEC = 30.0
@@ -178,15 +133,54 @@ class TestMLXTimeoutVariantFallthrough(unittest.TestCase):
             with self.assertRaises(MLXTimeoutError):
                 engine._transcribe_model(audio_data, model_name, "")
 
-        # All 3 variants were tried
-        self.assertEqual(watchdog_mock.run_with_timeout.call_count, 3)
+        # Watchdog called exactly once (no wasteful retries on stuck GPU)
+        self.assertEqual(watchdog_mock.run_with_timeout.call_count, 1)
 
-        # _push_error must be called for each timed-out variant (3 times)
+        # _push_error("stt.mlx_timeout", ...) must be called
         push_codes = [
             c[0][0].code
             for c in engine._error_bus.push.call_args_list
         ]
-        self.assertEqual(push_codes.count("stt.mlx_timeout"), 3)
+        self.assertIn("stt.mlx_timeout", push_codes)
+
+    # ------------------------------------------------------------------
+    # Test 2: TypeError (kwarg incompatibility) falls through to next variant
+    # ------------------------------------------------------------------
+
+    def test_type_error_falls_through_to_next_variant_when_recovery_enabled(self):
+        """TypeError (unsupported kwarg) correctly falls through variants to find supported kwargs."""
+        engine = _make_engine_stub()
+
+        type_exc = TypeError("unexpected keyword argument 'no_speech_threshold'")
+        success_result = {"segments": [{"text": "hello"}], "text": "hello"}
+
+        watchdog_mock = MagicMock()
+        # First call -> TypeError; second call -> success
+        watchdog_mock.run_with_timeout.side_effect = [type_exc, success_result]
+
+        import numpy as np
+        audio_data = np.zeros(16000, dtype=np.float32)
+        model_name = "mlx-community/whisper-base-mlx"
+
+        with (
+            patch("core.engine.settings") as mock_settings,
+            patch("core.engine.get_watchdog", return_value=watchdog_mock),
+            patch("core.engine.mlx_lock") as mlx_lock_mock,
+            patch("core.engine.mlx_inter_process_lock") as inter_lock_mock,
+            patch("core.engine.mlx_whisper"),
+        ):
+            mlx_lock_mock.return_value.__enter__ = MagicMock(return_value=None)
+            mlx_lock_mock.return_value.__exit__ = MagicMock(return_value=False)
+            inter_lock_mock.return_value.__enter__ = MagicMock(return_value=None)
+            inter_lock_mock.return_value.__exit__ = MagicMock(return_value=False)
+            mock_settings.TRANSCRIBE_LANGUAGE = None
+            mock_settings.MLX_CRASH_RECOVERY_ENABLED = True
+            mock_settings.MLX_TRANSCRIBE_TIMEOUT_SEC = 30.0
+
+            result = engine._transcribe_model(audio_data, model_name, "")
+
+        self.assertEqual(result["text"], "hello")
+        self.assertEqual(watchdog_mock.run_with_timeout.call_count, 2)
 
     # ------------------------------------------------------------------
     # Test 3: no regression when recovery_enabled=False

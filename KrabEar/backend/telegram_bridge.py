@@ -17,6 +17,7 @@ TODO (integration):
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from typing import Any
@@ -25,6 +26,17 @@ from urllib.parse import urlparse
 import requests
 
 logger = logging.getLogger(__name__)
+
+
+def _panel_auth_headers() -> dict[str, str]:
+    """W-r22: панель Krab гейтит /api/* ключом WEB_API_KEY.
+
+    Ключ приходит через env ``KRAB_WEB_KEY`` (plist EnvironmentVariables
+    ai.krab.ear.backend). Пустой env → пустые headers → поведение как раньше
+    (безвредно и для негейтнутых эндпоинтов). Значение НЕ логируем.
+    """
+    key = (os.environ.get("KRAB_WEB_KEY") or "").strip()
+    return {"X-Krab-Web-Key": key} if key else {}
 
 
 class CircuitBreakerOpen(Exception):
@@ -153,7 +165,13 @@ class TelegramBridge:
             # allow_redirects=False: запрещаем следование 3xx-редиректам — allowlist
             # проверяется только на base_url при конструировании, а Location-заголовок
             # редиректа может указывать на любой хост (169.254.169.254 и т.д.).
-            resp = requests.post(url, json=payload, timeout=self._timeout_sec, allow_redirects=False)
+            resp = requests.post(
+                url,
+                json=payload,
+                headers=_panel_auth_headers(),
+                timeout=self._timeout_sec,
+                allow_redirects=False,
+            )
         except (requests.ConnectionError, requests.Timeout) as exc:
             self._record_failure()
             logger.warning("TelegramBridge: Krab недоступен: %s", exc)
@@ -200,7 +218,12 @@ class TelegramBridge:
         try:
             # allow_redirects=False: аналогично send_message — Location редиректа
             # не проходит через _ALLOWED_HOSTS allowlist.
-            resp = requests.get(url, timeout=self._timeout_sec, allow_redirects=False)
+            resp = requests.get(
+                url,
+                headers=_panel_auth_headers(),
+                timeout=self._timeout_sec,
+                allow_redirects=False,
+            )
         except (requests.ConnectionError, requests.Timeout) as exc:
             self._record_failure()
             logger.warning("TelegramBridge.get_chats: Krab недоступен: %s", exc)

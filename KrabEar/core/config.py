@@ -634,11 +634,9 @@ class Settings(BaseSettings):
     # False = watchdog полностью выключен (behavior до этого PR).
     MLX_CRASH_RECOVERY_ENABLED: bool = True
     # Таймаут одного mlx_whisper.transcribe() вызова (секунды).
-    # 120s: bumped с 60s (2026-05-12) — whisper-large-v3-mlx cold-load занимает
-    # до 90s на M4 Max при первом запуске после boot; 60s давал false-positive
-    # MLXTimeoutError (BACKEND-E, BACKEND-F в Sentry, тренд May 8-9).
-    # Для длинных файлов (> 5 мин) увеличьте до 300–600s.
-    MLX_TRANSCRIBE_TIMEOUT_SEC: float = 120.0
+    # KRAB-EAR-BACKEND-1V: 45s (с hard-kill 10s = 55s суммарно) гарантированно
+    # укладывается в Swift-таймаут (120s) и IPC backstop (180s).
+    MLX_TRANSCRIBE_TIMEOUT_SEC: float = 45.0
     # --- Auto-Glossary: автоматический глоссарий из истории (core/auto_glossary.py) ---
     # При AUTO_GLOSSARY_ENABLED=True: перед каждой транскрибацией AutoGlossaryBuilder
     # извлекает top-N часто встречающихся имён и терминов из истории за последние

@@ -24,7 +24,9 @@ hash-таблице MTL::Resource* вызывает повреждение со�
         with mlx_lock():            # inner: intra-process RLock
             mlx_whisper.transcribe(...)
 """
+import contextlib
 import threading
+from typing import Iterator
 
 _mlx_lock = threading.RLock()
 
@@ -34,6 +36,31 @@ def mlx_lock() -> threading.RLock:
     return _mlx_lock
 
 
+class MLXLockTimeoutError(TimeoutError):
+    """Исключение при невозможности захватить intra-process mlx_lock за таймаут."""
+
+
+@contextlib.contextmanager
+def acquire_mlx_lock(timeout_sec: float | None = None) -> Iterator[bool]:
+    """Безопасный захват mlx_lock с опциональным таймаутом."""
+    lock = mlx_lock()
+    if timeout_sec is None or timeout_sec < 0:
+        with lock:
+            yield True
+        return
+
+    acquired = lock.acquire(timeout=timeout_sec)
+    if not acquired:
+        raise MLXLockTimeoutError(
+            f"Не удалось захватить intra-process mlx_lock за {timeout_sec:.2f}с (GPU/STT занят)"
+        )
+    try:
+        yield True
+    finally:
+        lock.release()
+
+
 # Re-export inter-process lock helper for convenient single-import call-sites.
 # Wave 49 wire-in: from core.mlx_lock import mlx_lock, mlx_inter_process_lock
 from core.mlx_inter_lock import mlx_inter_process_lock  # noqa: E402,F401 — re-export
+
