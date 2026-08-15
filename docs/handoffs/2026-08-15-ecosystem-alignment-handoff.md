@@ -1,8 +1,8 @@
 # HANDOFF: Krab Ear & Ecosystem Alignment
 
 **Дата:** 2026-08-15  
-**Ветка Krab Ear:** `codex/krab-ear-v2` (коммиты `bc5ee07b`, `4f63fcd3`)  
-**Статус Krab Ear:** Все тесты и аудит-гейты зелёные (66/66 Python тестов, 1486 Swift тестов, make audit-all OK, pre-merge ubuntu-parity OK).
+**Ветка Krab Ear:** `codex/krab-ear-v2` (коммиты `bc5ee07b`, `4f63fcd3`, `54c6a9a1`, `349a1eed`, `d10e09c2`)  
+**Статус Krab Ear:** Все тесты и аудит-гейты зелёные (1486 Swift тестов, 95 telephony тестов, 36 rest-inprocess тестов, make audit-all OK, pre-merge ubuntu-parity OK).
 
 ---
 
@@ -20,11 +20,15 @@
    - Аудит и проверка `RealtimeOverlayController.swift` и `KrabEarTheme.swift`.
    - Все 7 публичных сигнатур сохранены, `CALayer` без глифов (Glyph-Guard OK), `reduceMotion` соблюдён, сборка `swift build -c release` чистая.
 
-3. **Стабильность Live-субтитров (`LiveSubsService`)**:
-   - Асинхронный воркер STT со слотом «последний выигрывает» и таймаутом финального флаша 15с (`test_live_subs_service.py` 23/23 OK).
+3. **In-Process REST Архитектура (Фаза 2 слияния)**:
+   - Верифицирован `InProcessRestServer` и тесты (`test_rest_inprocess_*.py` 36/36 OK).
+   - Починен импорт в `test_rest_inprocess_runtime_toggle_S3_task9.py`.
 
-4. **Устранён flaky-тест**:
-   - `test_models.py::TzAwareTimestampTestCase::test_timestamp_lexicographic_sort_still_works` переведён на `timedelta(seconds=1)`.
+4. **Локальная On-Device SIP Телефония (Zero-Cloud Cost)**:
+   - Реализован `LocalSIPAdapter` (`backend/sip_local_adapter.py`) со стандартным контрактом `CallProvider` (`dial`, `hangup`, `get_call_status`, `list_active_calls`).
+   - Зарегистрирован провайдер `PROVIDER_SIP_LOCAL = "sip_local"` в `call_provider_factory.py`.
+   - Добавлены поля и валидация настроек SIP (`SIP_SERVER`, `SIP_PORT`, `SIP_USER`, `SIP_PASSWORD`, `SIP_FROM_NUMBER`, `SIP_PROXY`).
+   - Полное покрытие unit-тестами (`test_sip_local_adapter.py`, `test_call_provider_factory.py` 95/95 OK).
 
 ---
 
@@ -32,7 +36,7 @@
 
 - **WS/REST контракты:** `/v1/stt`, `/v1/tts`, `/v1/stream` работают штатно.
 - **Шина событий:** `EventType.LIVE_SUBS_RESULT` генерируется через EventBus/EventBridge без блокировок.
-- **Готовность:** Krab Ear готов обслуживать голосовой поток без зависания при пиковых нагрузках.
+- **Телефония:** Krab Ear теперь поддерживает как облачные провайдеры (Telnyx, Twilio), так и локальный SIP (`sip_local`).
 
 ---
 
@@ -46,6 +50,6 @@
 
 ## 4. Следующие шаги в Krab Ear (Roadmap H2-2026)
 
-1. **Фаза 2 архитектуры:** слияние REST-сервера в единый backend-процесс (`create_app(service)`).
-2. **Локальная телефония (On-Device SIP):** подключение локального PJSIP/SIP-клиента через существующий `CallProvider` протокол.
-3. **C2 Live Meeting Overlay / C3 Quick Capture:** дальнейшее расширение возможностей продуктивности.
+1. **C2 Live Meeting Overlay / C3 Quick Capture:** вывод action items и спикеров прямо во время звонка/митинга (Liquid Glass HUD) и быстрый доступ к диктофону из статус-бара.
+2. **Финальный аудит боевого запуска на macOS.**
+
