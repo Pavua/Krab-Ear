@@ -43,7 +43,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from backend.service import BackendService  # noqa: E402
 from backend.state_store import StateStore  # noqa: E402
 from core.config import settings  # noqa: E402
-from tests.test_backend_service import (  # noqa: E402
+from test_backend_service import (  # noqa: E402
     FakeRecorder,
     FakeTranscriber,
     FakeTranslator,
