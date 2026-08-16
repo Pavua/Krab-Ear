@@ -23,6 +23,9 @@ final class HistoryPanelKeyboardShortcutsTests: XCTestCase {
         XCTAssertTrue(s.contains("⌘2"))
         XCTAssertTrue(s.contains("⌘3"))
         XCTAssertTrue(s.contains("⌘4"))
+        XCTAssertTrue(s.contains("⌘5"))
+        XCTAssertTrue(s.contains("⌘6"))
+        XCTAssertTrue(s.contains("⌘7"))
     }
 
     func test_helpText_containsNavigationShortcuts() {
@@ -58,6 +61,9 @@ final class HistoryPanelKeyboardShortcutsTests: XCTestCase {
         XCTAssertTrue(s.contains("Live перевод"))
         XCTAssertTrue(s.contains("История"))
         XCTAssertTrue(s.contains("AI"))
+        XCTAssertTrue(s.contains("Автозвонки"))
+        XCTAssertTrue(s.contains("Диагностика"))
+        XCTAssertTrue(s.contains("Архив"))
     }
 
     func test_helpText_validUTF8() {

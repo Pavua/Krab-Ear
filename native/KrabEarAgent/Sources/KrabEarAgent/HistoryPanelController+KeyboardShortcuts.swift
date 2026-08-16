@@ -42,6 +42,18 @@ extension HistoryPanelController {
                     self.tabSelector.selectedSegment = 3
                     self.mainTabView.selectTabViewItem(at: 3)
                     return nil
+                case "5":
+                    self.tabSelector.selectedSegment = 4
+                    self.mainTabView.selectTabViewItem(at: 4)
+                    return nil
+                case "6":
+                    self.tabSelector.selectedSegment = 5
+                    self.mainTabView.selectTabViewItem(at: 5)
+                    return nil
+                case "7":
+                    self.tabSelector.selectedSegment = 6
+                    self.mainTabView.selectTabViewItem(at: 6)
+                    return nil
                 case "f":
                     self.tabSelector.selectedSegment = 2
                     self.mainTabView.selectTabViewItem(at: 2)
@@ -102,6 +114,9 @@ extension HistoryPanelController {
         ⌘2  Live перевод
         ⌘3  История
         ⌘4  Разговор с AI
+        ⌘5  Автозвонки
+        ⌘6  Диагностика
+        ⌘7  Архив
         ⌘F  Поиск
         ⌘R  Обновить
         ⌘D  Диагностика
