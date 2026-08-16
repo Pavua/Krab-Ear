@@ -69,6 +69,16 @@
 Patched `~/.claude/scheduled-tasks/krab-ear-test-health/SKILL.md` (backup `/tmp/krab-ear-test-health.SKILL.md.bak`).
 Issue title pattern `ci: test suite failure — DATE` retired.
 
+## Closed issues
+
+48 закрыты (`gh issue close --reason "not planned"`; флаг `not_planned` эта версия `gh` не принимает):
+
+1907, 1906, 1901, 1898, 1896, 1892, 1889, 1888, 1887, 1886, 1885, 1882, 1878, 1877, 1874, 1867, 1866, 1865, 1857, 1849, 1848, 1845, 1838, 1830, 1825, 1822, 1820, 1797, 1786, 1784, 1773, 1772, 1771, 1770, 1769, 1668, 1568, 1506, 1403, 1402, 1069, 361, 340, 266, 227, 209, 156, 155.
+
+Оставлены открытыми по карточке: #1909, #1919.
+
+Не попали в фильтр `^ci: (test suite failure|flaky test)` (не закрывались): #1819, #1795, #1783, #1775, #1774.
+
 ## Untracked (не коммитить)
 
 - `wake_word_models/hard_negatives_raw/tts_phrases.json`
