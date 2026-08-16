@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -64,7 +65,12 @@ class _ObservingTranscriber:
         }
 
 
-def _make_service(tmp_dir: str, transcriber):
+class _KeepWavSettings(_FakeSettingsSvc):
+    def cached_settings(self):
+        return {"debug_keep_dictation_wav": True}
+
+
+def _make_service(tmp_dir: str, transcriber, settings_svc=None):
     store = StateStore(data_dir=Path(tmp_dir))
     vocab = MagicMock()
     vocab.load.return_value = []
@@ -76,7 +82,7 @@ def _make_service(tmp_dir: str, transcriber):
         translator=_FakeTranslator(),
         store=store,
         vocabulary=vocab,
-        settings_svc=_FakeSettingsSvc(),
+        settings_svc=settings_svc or _FakeSettingsSvc(),
         llm_rewriter=None,
         auto_glossary=None,
         semantic_searcher=_FakeSemanticSearcher(),
@@ -144,6 +150,31 @@ class TestAudioPresaveSurvivesHang(unittest.TestCase):
             (Path(store.data_dir) / recovery_rel).exists(),
             "спасательный WAV должен пережить краш STT",
         )
+
+    def test_keep_wav_on_success_when_debug_flag(self):
+        """W2b: opt-in keep после успеха — WAV в debug_duration_wav/, не в failed_recordings/."""
+        transcriber = _ObservingTranscriber(Path(self._tmp))
+        svc, store = _make_service(
+            self._tmp, transcriber, settings_svc=_KeepWavSettings(),
+        )
+        svc.handle_start_recording({})
+        svc.handle_stop_recording({})
+
+        data_dir = Path(store.data_dir)
+        kept = list((data_dir / "debug_duration_wav").glob("*.wav"))
+        leftovers = list((data_dir / "failed_recordings").glob("*.wav"))
+        self.assertEqual(leftovers, [], leftovers)
+        self.assertEqual(len(kept), 1, f"ожидали один WAV в debug_duration_wav/, есть: {kept}")
+        sidecar = kept[0].with_suffix(".json")
+        self.assertTrue(sidecar.is_file(), f"нет сидкара {sidecar}")
+        payload = json.loads(sidecar.read_text(encoding="utf-8"))
+        self.assertNotIn("text", payload)
+        self.assertNotIn("transcript", payload)
+        for key in (
+            "vad_total_sec", "chunker_duration_sec",
+            "wav_nframes", "sample_rate",
+        ):
+            self.assertIn(key, payload, key)
 
 
 if __name__ == "__main__":

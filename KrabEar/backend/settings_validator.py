@@ -181,6 +181,8 @@ _BOOL_FIELDS: dict[str, bool] = {
     "meeting_live_speakers_enabled": True,
     # R2: строка "false" не должна становиться truthy в owner-гейте.
     "recording_owner_enforce": False,
+    # W2b: opt-in keep WAV успешных диктовок для замера аномалии длительности.
+    "debug_keep_dictation_wav": False,
     # --- C3a Quick Capture ---
     "quick_capture_send_to_notes": False,
     "quick_capture_obsidian_sync": False,

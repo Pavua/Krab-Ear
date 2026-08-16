@@ -2055,3 +2055,9 @@ Source-контракт на факт вызова из обоих путей **
 - Спека стабильности: `docs/superpowers/specs/2026-08-16-w2-daily-stability-design.md` (код — только после явного Approve; HealthMonitor sticky-hang уже в проде, не перестраивать).
 - Handoff 2026-08-15 помечен: §4 «C2/C3 как следующие шаги» устарел — обе волны закрыты 2026-07-16/19.
 
+## 2026-08-16 — Волна W2a/W2b: стабильность ежедневки (частично)
+
+- W2a: `CLAUDE.md` больше не описывает sticky-hang HealthMonitor как открытый гэп. Код Swift не менялся.
+- W2b: opt-in `debug_keep_dictation_wav` (default False) переносит успешный presave WAV в `<data_dir>/debug_duration_wav/` + сидкар без текста транскрипта. Purge покрыт. CLI `scripts/measure_duration_anomaly.py` считает wav/VAD/chunker без GigaAM/MLX. Фикс чанкера — не эта волна.
+- Осталось W2c: per-request `deadline_sec` на `POST /v1/stt/transcribe` (VG timeout 30 с vs Ear 600 с).
+

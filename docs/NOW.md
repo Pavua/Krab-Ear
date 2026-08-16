@@ -12,10 +12,12 @@
 
 ## Следующая волна
 
-**W1 — гигиена репо: закрыта 2026-08-16.** Отчёт: `docs/hygiene/2026-08-16-w1-inventory.md`.
+**W2a — CLAUDE.md HealthMonitor: закрыта 2026-08-16** (sticky-hang уже в коде, починили drift доков).
 
-**Следующая: W2 — стабильность ежедневки** (код только после явного Approve владельца):
-[`docs/superpowers/specs/2026-08-16-w2-daily-stability-design.md`](superpowers/specs/2026-08-16-w2-daily-stability-design.md)
+**W2b — замер аномалии длительности: закрыта 2026-08-16.** Opt-in `debug_keep_dictation_wav` (дефолт выкл), каталог `debug_duration_wav/` + сидкар, CLI `scripts/measure_duration_anomaly.py`. Чанкер/GigaAM не патчили.
+
+**Следующая: W2c — per-request `deadline_sec` на REST STT** (бюджет VG, глобальные 600 с не трогать):
+[`docs/superpowers/specs/2026-08-16-w2-daily-stability-design.md`](superpowers/specs/2026-08-16-w2-daily-stability-design.md) §2.
 
 ## Не делать
 

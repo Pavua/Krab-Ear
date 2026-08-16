@@ -2,7 +2,7 @@
 (audit_purge_coverage.py --fail-on-found → 0).
 
 Покрывает удаление при handle_purge_all_data всех новых PII/секрет-хранилищ:
-  - audio/, failed_recordings/        — сырое аудио (голос пользователя)
+  - audio/, failed_recordings/, debug_duration_wav/ — сырое аудио (голос пользователя)
   - exports/, auto_exports/, timeline/ — экспортированные транскрипции (STT-текст)
   - export_schedule.json              — конфиг авто-экспорта PII-истории
   - sessions.ndjson                   — метаданные сессий (usage-pattern ПДн), #1605
@@ -130,6 +130,16 @@ class DirectStorePurgeTestCase(unittest.TestCase):
         self.assertTrue(result.get("ok"), result)
         self.assertFalse(failed.exists(), "failed_recordings/ должен быть удалён")
 
+    def test_debug_duration_wav_dir_removed(self) -> None:
+        """debug_duration_wav/ (opt-in keep успешных диктовок, W2b) удаляется."""
+        kept = self._dir / "debug_duration_wav"
+        kept.mkdir(parents=True, exist_ok=True)
+        (kept / "keep.wav").write_bytes(b"PCM")
+        (kept / "keep.json").write_text('{"sample_rate": 16000}', encoding="utf-8")
+        result = self._purge()
+        self.assertTrue(result.get("ok"), result)
+        self.assertFalse(kept.exists(), "debug_duration_wav/ должен быть удалён")
+
     def test_export_dirs_removed(self) -> None:
         """exports/, auto_exports/, timeline/ (экспорт транскрипций) удаляются."""
         for name in ("exports", "auto_exports", "timeline"):
@@ -218,7 +228,7 @@ class DirectStorePurgeTestCase(unittest.TestCase):
         result = self._purge()
         self.assertTrue(result.get("ok"), result)
         for step in (
-            "audio", "failed_recordings", "exports", "auto_exports", "timeline",
+            "audio", "failed_recordings", "debug_duration_wav", "exports", "auto_exports", "timeline",
             "export_schedule", "event_replay", "audit_logs", "auto_glossary",
             "search_history", "hotwords", "vocabulary_txt", "usage_stats",
             "recap_state", "scheduled_recordings", "api_tokens",
@@ -346,6 +356,8 @@ class PurgeAllDataE2EW1770TestCase(unittest.TestCase):
         (d / "audio" / "rec.wav").write_bytes(b"PCMDATA voice biometric")
         (d / "failed_recordings").mkdir(parents=True, exist_ok=True)
         (d / "failed_recordings" / "fail.wav").write_bytes(b"PCM")
+        (d / "debug_duration_wav").mkdir(parents=True, exist_ok=True)
+        (d / "debug_duration_wav" / "keep.wav").write_bytes(b"PCM")
 
         # --- экспорт транскрипций ---
         for name in ("exports", "auto_exports", "timeline"):
@@ -390,7 +402,7 @@ class PurgeAllDataE2EW1770TestCase(unittest.TestCase):
         self.assertTrue(result.get("complete"), f"purge должен быть полным: {result.get('errors')}")
 
         # все файлы/директории исчезли
-        gone_dirs = ["audio", "failed_recordings", "exports", "auto_exports", "timeline"]
+        gone_dirs = ["audio", "failed_recordings", "debug_duration_wav", "exports", "auto_exports", "timeline"]
         for name in gone_dirs:
             self.assertFalse((d / name).exists(), f"{name}/ должен быть удалён")
         gone_files = [

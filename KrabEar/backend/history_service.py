@@ -2569,6 +2569,19 @@ class HistoryService:
             logger.warning("purge_all_data: удаление failed_recordings/ не удалось", exc_info=True)
             secondary_errors.append("failed_recordings")
 
+        # --- 19b. W2b: удалить opt-in keep успешных диктовок (debug_duration_wav/) ---
+        # Тот же класс данных, что failed_recordings/ — сырой голос пользователя.
+        # Имя директории литералом, чтобы audit_purge_coverage зачёл покрытие.
+        try:
+            import shutil as _shutil
+            _debug_wav_dir = _data_dir / "debug_duration_wav"
+            if _debug_wav_dir.is_dir():
+                _shutil.rmtree(_debug_wav_dir, ignore_errors=True)
+                logger.info("purge_all_data: удалена директория debug_duration_wav/")
+        except Exception:
+            logger.warning("purge_all_data: удаление debug_duration_wav/ не удалось", exc_info=True)
+            secondary_errors.append("debug_duration_wav")
+
         # --- 20. W1770: удалить экспортированные транскрипции (exports/, auto_exports/, timeline/) ---
         # ExportScheduler/история пишут экспортированные транскрипции (SRT/CSV/MD/JSON/HTML)
         # и таймлайн-экспорты под эти директории. Все содержат полный STT-текст.

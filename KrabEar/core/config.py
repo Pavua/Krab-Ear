@@ -1279,4 +1279,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "sip_password": "",
     "sip_from_number": "",
     "sip_proxy": "",
+    # W2b: opt-in keep WAV успешных диктовок в <data_dir>/debug_duration_wav/
+    # для замера аномалии VAD vs chunker. Дефолт выкл — не копить голос.
+    "debug_keep_dictation_wav": False,
 }

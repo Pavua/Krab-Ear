@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import inspect
+import json
 import logging
 import math
 import re
@@ -3015,7 +3016,8 @@ class RecordingCoreService:
         # Спасательная копия ДО транскрибации: зависший STT (дедлок mlx_lock,
         # PortAudio-wedge) не бросает исключение — except ниже не выполнится, а
         # вотчдог перезапустит backend и аудио из памяти пропадёт (инцидент
-        # 01.08.2026, три диктовки подряд). Файл удаляется после успеха.
+        # 01.08.2026, три диктовки подряд). После успеха файл unlink'ается;
+        # opt-in debug_keep_dictation_wav переносит его в debug_duration_wav/.
         _presaved_path: Path | None = None
         audio_recovery_path: str | None = None
         try:
@@ -3072,17 +3074,71 @@ class RecordingCoreService:
                                      "audio_recovery_path": audio_recovery_path,
                                      "status": "stt_failed"}}
 
-        # STT дошёл до конца — спасательная копия больше не нужна. Пустой
-        # каталог тоже убираем: успешный прогон не должен оставлять следов
-        # в data_dir (иначе чужие cleanup-и падают на «Directory not empty»).
+        # STT дошёл до конца. По умолчанию спасательная копия больше не нужна.
+        # Opt-in W2b: debug_keep_dictation_wav переносит WAV в debug_duration_wav/
+        # для замера аномалии длительности (дефолт выкл).
         if _presaved_path is not None:
             try:
-                _presaved_path.unlink(missing_ok=True)
-                _presaved_path.parent.rmdir()
+                if bool(self._get_runtime_setting("debug_keep_dictation_wav", False)):
+                    self._keep_debug_dictation_wav(
+                        src=_presaved_path,
+                        audio=audio,
+                        sample_rate=int(getattr(self.recorder, "sample_rate", 16000) or 16000),
+                    )
+                else:
+                    _presaved_path.unlink(missing_ok=True)
+                    _presaved_path.parent.rmdir()
             except OSError:
                 pass  # каталог непустой (чужие спасённые записи) — так и надо
 
         return {"transcribe_payload": transcribe_payload}
+
+    def _keep_debug_dictation_wav(
+        self,
+        src: Path,
+        audio: Any,
+        sample_rate: int,
+    ) -> None:
+        """W2b: перенести успешный presave WAV в debug_duration_wav/ + сидкар.
+
+        Текст транскрипта в сидкар не пишется. history_id на этом этапе ещё
+        неизвестен (история пишется в phase_d) — ключ оставляем null.
+        """
+        dest_dir = Path(self.store.data_dir) / "debug_duration_wav"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / src.name
+        src.replace(dest)
+        try:
+            src.parent.rmdir()
+        except OSError:
+            pass
+
+        sr = int(sample_rate) if sample_rate else 16000
+        arr = np.asarray(audio)
+        nframes = int(arr.shape[0]) if arr.ndim >= 1 else 0
+        vad_total_sec = float(nframes / sr) if sr > 0 else 0.0
+        chunker_duration_sec = vad_total_sec
+        try:
+            from core.engine import AudioEngine
+
+            mono = AudioEngine._resample_audio_to_mono_16k(arr, sr)
+            chunker_duration_sec = float(len(mono) / 16000.0)
+        except Exception:
+            logger.warning(
+                "debug_keep_dictation_wav: не удалось посчитать chunker_duration_sec",
+                exc_info=True,
+            )
+        sidecar = {
+            "vad_total_sec": vad_total_sec,
+            "chunker_duration_sec": chunker_duration_sec,
+            "wav_nframes": nframes,
+            "sample_rate": sr,
+            "history_id": None,
+        }
+        dest.with_suffix(".json").write_text(
+            json.dumps(sidecar, ensure_ascii=True),
+            encoding="utf-8",
+        )
 
     def _stop_recording_phase_d(
         self,
