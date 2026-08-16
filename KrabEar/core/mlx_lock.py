@@ -63,4 +63,3 @@ def acquire_mlx_lock(timeout_sec: float | None = None) -> Iterator[bool]:
 # Re-export inter-process lock helper for convenient single-import call-sites.
 # Wave 49 wire-in: from core.mlx_lock import mlx_lock, mlx_inter_process_lock
 from core.mlx_inter_lock import mlx_inter_process_lock  # noqa: E402,F401 — re-export
-

@@ -22,7 +22,6 @@ from typing import Any, Dict, List, Optional
 from backend.call_provider import (
     ERR_INVALID_PHONE,
     ERR_MISSING_CALL_ID,
-    ERR_NOT_CONFIGURED,
     ERR_UNREACHABLE_NUMBER,
     _not_configured_result,
 )
