@@ -28,6 +28,20 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+_GATE_PATCH = None
+
+
+def setUpModule():
+    """macOS CI часто отдаёт vm_pressure=warn; без патча retry не зовёт executor."""
+    global _GATE_PATCH
+    _GATE_PATCH = patch("core.engine.should_skip_second_mlx_checkpoint", return_value=False)
+    _GATE_PATCH.start()
+
+
+def tearDownModule():
+    if _GATE_PATCH is not None:
+        _GATE_PATCH.stop()
+
 
 # ---------------------------------------------------------------------------
 # Helpers
