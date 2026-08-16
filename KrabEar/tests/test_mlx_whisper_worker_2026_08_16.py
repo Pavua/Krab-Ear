@@ -130,6 +130,41 @@ class MlxWhisperSessionProtocolTest(unittest.TestCase):
         self.assertEqual(result["text"], "привет")
         self.assertEqual(result["segments"], [])
 
+    def test_invalid_json_resets_session(self):
+        from core.mlx_whisper_session import (
+            MLXWorkerCrashed,
+            get_mlx_whisper_session,
+        )
+
+        proc = self._fake_popen("not-json\n", None)
+        session = get_mlx_whisper_session()
+        with patch("core.mlx_whisper_session.subprocess.Popen", return_value=proc):
+            session.start()
+            with self.assertRaises(MLXWorkerCrashed):
+                session.transcribe(
+                    "/tmp/a.wav",
+                    {"path_or_hf_repo": "mlx-community/whisper-large-v3-turbo"},
+                    timeout_sec=2.0,
+                    model_name="turbo",
+                )
+        self.assertIsNone(session._proc)
+
+    def test_kill_does_not_wait_on_shutdown_json(self):
+        from core.mlx_whisper_session import (
+            get_mlx_whisper_session,
+            kill_mlx_whisper_session,
+        )
+
+        proc = self._fake_popen("", None)
+        session = get_mlx_whisper_session()
+        with patch("core.mlx_whisper_session.subprocess.Popen", return_value=proc):
+            session.start()
+            kill_mlx_whisper_session()
+        proc.kill.assert_called()
+        proc.wait.assert_not_called()
+        from core.mlx_whisper_session import get_mlx_whisper_session as get_again
+        self.assertIsNot(session, get_again())
+
     def test_typeerror_payload_raises_typeerror(self):
         from core.mlx_whisper_session import get_mlx_whisper_session
 
@@ -261,6 +296,40 @@ class AdapterRoutesToWorkerTest(unittest.TestCase):
 
         self.assertEqual(result.text, "hola")
         mock_worker.assert_called()
+
+
+class RestPoisonedExitKillsWorkerTest(unittest.TestCase):
+    def test_poisoned_exit_kills_worker_before_os_exit(self):
+        import backend.rest_server as rs
+
+        with (
+            patch.object(rs.settings, "REST_IN_PROCESS_ENABLED", False),
+            patch("core.mlx_whisper_session.kill_mlx_whisper_session") as kill,
+            patch.object(rs.os, "_exit") as exit_fn,
+        ):
+            rs._exit_poisoned_rest_process(70)
+        kill.assert_called_once()
+        exit_fn.assert_called_once_with(70)
+
+    def test_atexit_closes_mlx_session_when_not_adopted(self):
+        import backend.rest_server as rs
+
+        with (
+            patch.object(rs, "_singletons_adopted", False),
+            patch("core.mlx_whisper_session.close_mlx_whisper_session") as close,
+        ):
+            rs._rest_engine_cleanup()
+        close.assert_called_once()
+
+    def test_atexit_skips_mlx_session_when_adopted(self):
+        import backend.rest_server as rs
+
+        with (
+            patch.object(rs, "_singletons_adopted", True),
+            patch("core.mlx_whisper_session.close_mlx_whisper_session") as close,
+        ):
+            rs._rest_engine_cleanup()
+        close.assert_not_called()
 
 
 if __name__ == "__main__":

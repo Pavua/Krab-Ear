@@ -1414,9 +1414,12 @@ class AudioEngine:
             # W1618/W63: clear_cache — MLX op, must hold mlx_lock to prevent concurrent SIGSEGV.
             # W1635: degrade_on_timeout=True — non-critical cache flush, not inference.
             try:
-                import mlx.core as _mx
-                with mlx_inter_process_lock(degrade_on_timeout=True), mlx_lock():  # W1635
-                    _mx.clear_cache()
+                from core.mlx_whisper_session import mlx_whisper_worker_enabled
+
+                if not mlx_whisper_worker_enabled():
+                    import mlx.core as _mx
+                    with mlx_inter_process_lock(degrade_on_timeout=True), mlx_lock():  # W1635
+                        _mx.clear_cache()
             except (ImportError, AttributeError):
                 pass  # MLX не установлен или старая версия без clear_cache
 
@@ -2632,8 +2635,8 @@ class AudioEngine:
         )
 
         if mlx_whisper_worker_enabled():
-            # P0c: Metal только в child. Родитель держит flock (если флаг ON),
-            # но НЕ mlx_lock — child его не берёт, иначе deadlock RPC↔flock.
+            # P0c: Metal только в child. Родитель держит flock (если флаг ON).
+            # Child flock не берёт — иначе deadlock: родитель ждёт JSON, child ждёт flock.
             with mlx_inter_process_lock():
                 for params in variants:
                     try:

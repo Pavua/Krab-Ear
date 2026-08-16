@@ -64,11 +64,8 @@ def _handle_transcribe(params: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(mlx_params, dict):
         return _err("invalid_params: params must be an object")
     try:
-        import mlx_whisper  # type: ignore[import]
-    except ImportError as exc:
-        return _err(f"mlx_whisper_not_installed: {exc}")
-    try:
         with redirect_stdout(sys.stderr):
+            import mlx_whisper  # type: ignore[import]
             result = mlx_whisper.transcribe(audio_path, **mlx_params)
         try:
             import mlx.core as mx
@@ -77,6 +74,8 @@ def _handle_transcribe(params: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             pass
         return {"ok": True, "result": json_safe(result)}
+    except ImportError as exc:
+        return _err(f"mlx_whisper_not_installed: {exc}")
     except TypeError as exc:
         return _err(f"TypeError: {exc}")
     except Exception as exc:

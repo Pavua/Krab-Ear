@@ -91,6 +91,21 @@ def close_mlx_whisper_session() -> None:
     reset_mlx_whisper_session()
 
 
+def kill_mlx_whisper_session() -> None:
+    """Hard-kill child без shutdown JSON. Для ``os._exit`` после REST 504.
+
+    ``os._exit`` не гоняет atexit и не ждёт 2с на graceful close — child
+    иначе остаётся на GPU, launchd поднимает новый REST, два mlx → SEGV.
+    """
+    global _session
+    with _session_lock:
+        sess = _session
+        _session = None
+    if sess is None:
+        return
+    sess.kill()
+
+
 def transcribe_via_mlx_worker(
     audio_data: Any,
     mlx_params: dict[str, Any],
@@ -149,6 +164,12 @@ class MLXWhisperSession:
     def start(self) -> None:
         if self._proc is not None:
             return
+        with self._lock:
+            if self._proc is not None:
+                return
+            self._spawn_unlocked()
+
+    def _spawn_unlocked(self) -> None:
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         env["KRAB_EAR_MLX_WHISPER_WORKER"] = "0"
@@ -230,6 +251,27 @@ class MLXWhisperSession:
                         pass
             self._proc = None
 
+    def kill(self) -> None:
+        """SIGKILL без wait. Не блокировать путь к ``os._exit``."""
+        proc = self._proc
+        self._proc = None
+        if proc is None:
+            return
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        for pipe in (
+            getattr(proc, "stdin", None),
+            getattr(proc, "stdout", None),
+            getattr(proc, "stderr", None),
+        ):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except (OSError, BrokenPipeError):
+                    pass
+
     def _send(
         self,
         request: dict[str, Any],
@@ -269,11 +311,13 @@ class MLXWhisperSession:
         try:
             parsed = json.loads(line)
         except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                f"mlx_whisper worker: invalid JSON: {exc}; line={line!r}"
-            ) from exc
+            rc = self._proc.poll() if self._proc is not None else None
+            self.close()
+            raise MLXWorkerCrashed(rc, model_name, stderr_tail=line[:500]) from exc
         if not isinstance(parsed, dict):
-            raise RuntimeError("mlx_whisper worker: response is not an object")
+            rc = self._proc.poll() if self._proc is not None else None
+            self.close()
+            raise MLXWorkerCrashed(rc, model_name, stderr_tail=line[:500])
         return parsed
 
     def _timeout_kill(self) -> None:

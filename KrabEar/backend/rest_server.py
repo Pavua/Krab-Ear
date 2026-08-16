@@ -629,6 +629,12 @@ def _exit_poisoned_rest_process(exit_code: int) -> None:
             "backend (scripts/safe_backend_restart.command).",
         )
         return
+    try:
+        from core.mlx_whisper_session import kill_mlx_whisper_session
+
+        kill_mlx_whisper_session()
+    except Exception:
+        logger.debug("REST timeout: mlx_whisper worker kill failed", exc_info=True)
     os._exit(exit_code)
 
 
@@ -875,6 +881,13 @@ def _rest_engine_cleanup() -> None:
                 logger.info("REST atexit: GigaAM адаптер закрыт")
     except Exception as exc:
         logger.debug("REST atexit cleanup error (non-critical): %s", exc)
+    try:
+        from core.mlx_whisper_session import close_mlx_whisper_session
+
+        close_mlx_whisper_session()
+        logger.info("REST atexit: mlx_whisper worker закрыт")
+    except Exception as exc:
+        logger.debug("REST atexit mlx_whisper cleanup error (non-critical): %s", exc)
 
 
 atexit.register(_rest_engine_cleanup)
