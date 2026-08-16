@@ -12,11 +12,10 @@
 
 ## Следующая волна
 
-**W1 — гигиена репо** (карточка готова, код продукта не трогать):
-[`docs/superpowers/plans/2026-08-16-w1-repo-hygiene.md`](superpowers/plans/2026-08-16-w1-repo-hygiene.md)
+**W1 — гигиена репо: закрыта 2026-08-16.** Отчёт: `docs/hygiene/2026-08-16-w1-inventory.md`.
 
-После W1, только по явному Approve на код: **W2 — стабильность ежедневки**
-(спека: [`docs/superpowers/specs/2026-08-16-w2-daily-stability-design.md`](superpowers/specs/2026-08-16-w2-daily-stability-design.md)).
+**Следующая: W2 — стабильность ежедневки** (код только после явного Approve владельца):
+[`docs/superpowers/specs/2026-08-16-w2-daily-stability-design.md`](superpowers/specs/2026-08-16-w2-daily-stability-design.md)
 
 ## Не делать
 
