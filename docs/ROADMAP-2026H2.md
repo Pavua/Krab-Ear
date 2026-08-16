@@ -2061,3 +2061,11 @@ Source-контракт на факт вызова из обоих путей **
 - W2b: opt-in `debug_keep_dictation_wav` (default False) переносит успешный presave WAV в `<data_dir>/debug_duration_wav/` + сидкар без текста транскрипта. Purge покрыт. CLI `scripts/measure_duration_anomaly.py` считает wav/VAD/chunker без GigaAM/MLX. Фикс чанкера — не эта волна.
 - W2c: optional `deadline_sec` на `POST /v1/stt/transcribe` (clamp [5, 120], мусор → 400). Глобальные `_TRANSCRIBE_TIMEOUT_SEC=600` не снижены. VG `deadline_sec=25` — отдельная карточка в репо шлюза.
 
+## 2026-08-16 — Волна W3: Sparkle v2.11.0
+
+Кумулятивный канал после W0–W2c. Релиз не начинали, пока `krab-ear-ci` был красный (flake8 F401/W391, затем три stale-теста).
+
+- Тесты подтянуты к прод, не наоборот: `MLX_HANG_HARD_KILL_SEC` = 10с (1V), SIP-креды в `allowed_empty`, startup-recovery на `.part` ловится spy-конструктором Thread (poll-по-имени пропускал быстрый daemon).
+- `krab-ear-ci` success @ `064467f6`; `gh workflow run release.yml -f version=2.11.0` → [v2.11.0](https://github.com/Pavua/Krab-Ear/releases/tag/v2.11.0); appcast `b2aaf527` `[skip ci]`.
+- Ежедневный `.app` в git-дереве Sparkle не обновляет (dev-guard). `debug_keep_dictation_wav` остаётся выкл.
+
