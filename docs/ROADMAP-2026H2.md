@@ -2069,3 +2069,12 @@ Source-контракт на факт вызова из обоих путей **
 - `krab-ear-ci` success @ `064467f6`; `gh workflow run release.yml -f version=2.11.0` → [v2.11.0](https://github.com/Pavua/Krab-Ear/releases/tag/v2.11.0); appcast `b2aaf527` `[skip ci]`.
 - Ежедневный `.app` в git-дереве Sparkle не обновляет (dev-guard). `debug_keep_dictation_wav` остаётся выкл.
 
+## 2026-08-16 — P0c: mlx_whisper OS-worker (SEGV не убивает REST)
+
+Живой инцидент: `ai.krab.ear.rest`, `EXC_BAD_ACCESS` в потоке `whisper-large-v3-turbo`. `core/mlx_subprocess.py` — in-process watchdog, не изоляция PID.
+
+- JSON-line worker (`KrabEar/core/workers/mlx_whisper_worker.py`) + сессия (`core/mlx_whisper_session.py`), паттерн GigaAM: stderr drain, Timer-kill, stdout только JSON.
+- Включение: argv содержит `rest_server.py` или `KRAB_EAR_MLX_WHISPER_WORKER=1`. IPC-диктовка по умолчанию in-process. Child получает `=0` (анти-рекурсия).
+- `AudioEngine._transcribe_model` / `warmup` / `WhisperMLXAdapter` идут через worker, когда флаг ON; Metal в child, родитель не берёт `mlx_lock` на RPC.
+- Прод REST подхватит после `scripts/safe_backend_restart.command --with-rest` (не kickstart под запись). Карточка: `docs/superpowers/plans/2026-08-16-p0c-mlx-whisper-worker.md`.
+

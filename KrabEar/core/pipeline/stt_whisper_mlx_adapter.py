@@ -104,13 +104,6 @@ class WhisperMLXAdapter(STTAdapterBase):
             language: ISO 639-1 language hint. None = Whisper auto-detect.
             max_duration_sec: not enforced (Whisper handles internally).
         """
-        try:
-            import mlx_whisper  # type: ignore[import]
-        except ImportError as exc:
-            raise ImportError(
-                "mlx_whisper not installed. Run: pip install mlx-whisper"
-            ) from exc
-
         effective_language = self._language_override or language
 
         params: dict[str, Any] = {
@@ -119,9 +112,6 @@ class WhisperMLXAdapter(STTAdapterBase):
             "temperature": self._temperature,
             "verbose": False,
         }
-
-        result: dict[str, Any] = {}
-        last_err: Exception | None = None
 
         # Try with optional params first, fall back if version doesn't support them.
         variants = [
@@ -132,40 +122,76 @@ class WhisperMLXAdapter(STTAdapterBase):
 
         timeout_sec = float(getattr(self, "_timeout_sec", 45.0) or 45.0)
 
-        with mlx_inter_process_lock(), mlx_lock():  # W1635: cross-process flock (outer) + intra-process RLock (inner)
-            for p in variants:
-                try:
-                    if get_watchdog is not None:
-                        captured_p = p
-                        result = get_watchdog().run_with_timeout(
-                            fn=lambda: mlx_whisper.transcribe(audio, **captured_p),
-                            timeout_sec=timeout_sec,
-                            model_name=self._model_path,
-                        )
-                    else:
-                        result = mlx_whisper.transcribe(audio, **p)
-                    break
-                except TypeError as exc:
-                    last_err = exc
-                    continue
-                except MLXTimeoutError as exc:
-                    # KRAB-EAR-BACKEND-1V: не повторять variants при зависшем GPU
-                    logger.error(
-                        "WhisperMLXAdapter: watchdog timeout %.1fs (model=%s)",
-                        getattr(exc, "timeout_sec", timeout_sec),
-                        self._model_path,
-                    )
-                    raise
-            else:
-                raise last_err or RuntimeError("mlx_whisper.transcribe failed")
+        from core.mlx_whisper_session import (
+            mlx_whisper_worker_enabled,
+            transcribe_via_mlx_worker,
+        )
 
-            # W63 rule: free MLX metal buffer cache after inference to prevent
-            # RAM growth on long sessions (same fix as engine.py line 545/920).
+        result: dict[str, Any] = {}
+        last_err: Exception | None = None
+
+        if mlx_whisper_worker_enabled():
+            with mlx_inter_process_lock():
+                for p in variants:
+                    try:
+                        result = transcribe_via_mlx_worker(
+                            audio, p, timeout_sec, self._model_path,
+                        )
+                        break
+                    except TypeError as exc:
+                        last_err = exc
+                        continue
+                    except MLXTimeoutError as exc:
+                        logger.error(
+                            "WhisperMLXAdapter: worker timeout %.1fs (model=%s)",
+                            getattr(exc, "timeout_sec", timeout_sec),
+                            self._model_path,
+                        )
+                        raise
+                else:
+                    raise last_err or RuntimeError("mlx_whisper.transcribe failed")
+        else:
             try:
-                import mlx.core as mx
-                mx.clear_cache()
-            except Exception:  # noqa: BLE001
-                pass  # MLX not installed or older version without clear_cache
+                import mlx_whisper  # type: ignore[import]
+            except ImportError as exc:
+                raise ImportError(
+                    "mlx_whisper not installed. Run: pip install mlx-whisper"
+                ) from exc
+
+            with mlx_inter_process_lock(), mlx_lock():  # W1635: cross-process flock (outer) + intra-process RLock (inner)
+                for p in variants:
+                    try:
+                        if get_watchdog is not None:
+                            captured_p = p
+                            result = get_watchdog().run_with_timeout(
+                                fn=lambda: mlx_whisper.transcribe(audio, **captured_p),
+                                timeout_sec=timeout_sec,
+                                model_name=self._model_path,
+                            )
+                        else:
+                            result = mlx_whisper.transcribe(audio, **p)
+                        break
+                    except TypeError as exc:
+                        last_err = exc
+                        continue
+                    except MLXTimeoutError as exc:
+                        # KRAB-EAR-BACKEND-1V: не повторять variants при зависшем GPU
+                        logger.error(
+                            "WhisperMLXAdapter: watchdog timeout %.1fs (model=%s)",
+                            getattr(exc, "timeout_sec", timeout_sec),
+                            self._model_path,
+                        )
+                        raise
+                else:
+                    raise last_err or RuntimeError("mlx_whisper.transcribe failed")
+
+                # W63 rule: free MLX metal buffer cache after inference to prevent
+                # RAM growth on long sessions (same fix as engine.py line 545/920).
+                try:
+                    import mlx.core as mx
+                    mx.clear_cache()
+                except Exception:  # noqa: BLE001
+                    pass  # MLX not installed or older version without clear_cache
 
         text: str = result.get("text", "") or ""
         # Whisper result may include segments with per-segment confidence-ish values.
