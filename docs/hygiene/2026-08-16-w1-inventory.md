@@ -79,6 +79,51 @@ Issue title pattern `ci: test suite failure — DATE` retired.
 
 Не попали в фильтр `^ci: (test suite failure|flaky test)` (не закрывались): #1819, #1795, #1783, #1775, #1774.
 
+## Worktree candidates
+
+Критерий `candidate_for_remove=yes`: dirty=no И commits_not_in_base=0. Ничего не удалялось.
+
+| path | branch | dirty | ahead | candidate |
+|---|---|---|---|---|
+| (primary) Krab Ear | codex/krab-ear-v2 | — | — | no |
+| .claude/worktrees/krab-ear-c3b-scratchpad-d7e2df | DETACHED | no | 0 | yes |
+| .claude/worktrees/stoic-haibt-629bc7 | claude/quirky-dewdney-fe7d13 | no | 0 | yes |
+| .claude/worktrees/zealous-shaw-157a1d | DETACHED | no | 0 | yes |
+| .worktrees/call-assist-lifecycle-20260720 | codex/call-assist-lifecycle-20260720 | no | 5 | no |
+| .worktrees/ci-bash32-chunk-guard-20260722 | codex/ci-bash32-chunk-guard-20260722 | no | 1 | no |
+| .worktrees/conversation-audio-rate-contract-20260720 | codex/conversation-audio-rate-contract-20260720 | no | 2 | no |
+| .worktrees/conversation-generation-hotkey-20260720 | codex/conversation-generation-hotkey-20260720 | no | 1 | no |
+| .worktrees/conversation-hotkey-lifecycle-20260720 | codex/conversation-hotkey-lifecycle-20260720 | no | 2 | no |
+| .worktrees/fallback-signal-hardening-20260720 | codex/fallback-signal-hardening-20260720 | no | 2 | no |
+| .worktrees/gigaam-cache-fingerprint-20260720 | codex/gigaam-cache-fingerprint-20260720 | no | 1 | no |
+| .worktrees/gigaam-input-contract-20260720 | codex/gigaam-input-contract-20260720 | no | 1 | no |
+| .worktrees/gigaam-warmup-lifecycle-20260720 | codex/gigaam-warmup-lifecycle-20260720 | no | 2 | no |
+| .worktrees/history-encryption-atomic-20260720 | codex/history-encryption-atomic-20260720 | no | 1 | no |
+| .worktrees/ipc-handler-lifecycle-20260720 | codex/ipc-handler-lifecycle-20260720 | no | 1 | no |
+| .worktrees/live-subtitles-sse-lifecycle-20260720 | codex/live-subtitles-sse-lifecycle-20260720 | no | 2 | no |
+| .worktrees/meeting-session-lifecycle-20260720 | codex/meeting-session-lifecycle-20260720 | no | 5 | no |
+| .worktrees/python-chunk-lifecycle-20260720 | codex/python-chunk-lifecycle-20260720 | no | 1 | no |
+| .worktrees/python-chunk2-lifecycle-20260720 | codex/python-chunk2-lifecycle-20260720 | no | 1 | no |
+| .worktrees/r2-recording-ownership-20260725 | codex/r2-recording-ownership-20260725 | yes | 0 | no |
+| .worktrees/rest-timeout-process-safety-20260720 | codex/rest-timeout-process-safety-20260720 | no | 2 | no |
+| .worktrees/rest-upload-dir-resilience-20260720 | codex/rest-upload-dir-resilience-20260720 | no | 1 | no |
+| .worktrees/shutdown-orchestration-20260720 | codex/shutdown-orchestration-20260720 | no | 2 | no |
+| .worktrees/single-instance-hardening-20260720 | codex/single-instance-hardening-20260720 | no | 1 | no |
+| .worktrees/sse-protocol-hardening-20260720 | codex/sse-protocol-hardening-20260720 | no | 1 | no |
+| .worktrees/swift-defaults-isolation-20260720 | codex/swift-defaults-isolation-20260720 | no | 1 | no |
+| .worktrees/swift-monitor-isolation-20260720 | codex/swift-monitor-isolation-20260720 | no | 2 | no |
+| .worktrees/system-test-optin-20260720 | codex/system-test-optin-20260720 | no | 2 | no |
+| .worktrees/user3-recording-rescue-20260722 | codex/user3-recording-rescue-20260722 | no | 1 | no |
+| .worktrees/w1-repo-hygiene | feat/w1-repo-hygiene | no | 1+ | no |
+| .worktrees/wake-word-watchdog-lifecycle-20260720 | codex/wake-word-watchdog-lifecycle-20260720 | no | 1 | no |
+| ../KrabEar_gigaam_mlx_wave_20260731 | claude/llm-warmup-gate | yes | 0 | no |
+
+Итого 32 worktree, prune-кандидатов 3 (все под `.claude/worktrees/`). Почти все `.worktrees/*-20260720` держат 1–5 коммитов вне `origin/codex/krab-ear-v2`. Dirty: `r2-recording-ownership-20260725` и соседний `KrabEar_gigaam_mlx_wave_20260731`.
+
+### Shadow .app cleanup
+
+Запущен `scripts/cleanup_worktree_shadows.command` из основного checkout (не из этого worktree — иначе не виден прод-бандл). Дошёл до «Re-registering canonical main bundle». `git worktree prune --verbose` пуст (живые деревья не трогал). Unregister 3 shadow `.app` под `.claude/worktrees/` (`lsregister -10814` = не были в LaunchServices DB). Исходники worktree не удалялись.
+
 ## Untracked (не коммитить)
 
 - `wake_word_models/hard_negatives_raw/tts_phrases.json`
