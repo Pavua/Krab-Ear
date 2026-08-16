@@ -92,6 +92,11 @@ class LanguageDetectionTestCase(unittest.TestCase):
         text = "Привет world"
         self.assertEqual(_detect_language(text), "ru")
 
+    def test_spanish_text_detected(self) -> None:
+        """Текст с испанскими маркерами -> es."""
+        text = "¡Hola señor! ¿Cómo estás?"
+        self.assertEqual(_detect_language(text), "es")
+
 
 # ── TTSService unit tests ──────────────────────────────────────────────────────
 
@@ -595,6 +600,27 @@ class RuSayFallbackVoiceTestCase(unittest.TestCase):
 
         _call_args, call_kwargs = mock_say.call_args
         self.assertIsNone(call_kwargs.get("voice"))
+
+    @patch("backend.tts_service.settings")
+    @patch("backend.tts_service._say_to_wav")
+    def test_es_say_fallback_voice_defaults_to_monica(
+        self, mock_say: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """ES-текст без настроенного SAY_VOICE должен по умолчанию использовать испанский голос Mónica."""
+        mock_settings.TTS_ENABLED = False
+        mock_settings.TTS_FALLBACK_SAY = True
+        mock_settings.TTS_SILERO_MODEL = "v4_ru"
+        mock_settings.TTS_SILERO_VOICE = "baya"
+        mock_settings.TTS_KOKORO_MODEL = "hexgrad/Kokoro-82M"
+        mock_settings.SAY_VOICE = ""
+        fake_wav = _make_wav_bytes()
+        mock_say.return_value = fake_wav
+
+        svc = self._make_service()
+        svc.synthesize_speech("¡Hola mundo!", language="es")
+
+        _call_args, call_kwargs = mock_say.call_args
+        self.assertEqual(call_kwargs.get("voice"), "Mónica")
 
     @patch("backend.tts_service.settings")
     def test_ru_text_never_reaches_kokoro(self, mock_settings: MagicMock) -> None:

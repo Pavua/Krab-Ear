@@ -73,19 +73,26 @@ MAX_TTS_TEXT_LEN = 5000
 # Таймауты для subprocess.run в _say_to_wav — блокирует daemon-поток без ограничения.
 _SAY_SUBPROCESS_TIMEOUT = 30   # секунд — достаточно для ~5000 символов на say
 _AFCONVERT_TIMEOUT = 15        # секунд — конвертация AIFF→WAV всегда быстрая
+_ES_DEFAULT_VOICE = "Mónica"
 
 
 def _detect_language(text: str) -> str:
     """Эвристика определения языка: доля кириллических символов.
 
     Returns:
-        "ru" если доля кириллических алфавитных символов > 30%, иначе "en".
+        "ru" если доля кириллических алфавитных символов > 30%, иначе "en" (или "es").
     """
     alpha_chars = [c for c in text if c.isalpha()]
     if not alpha_chars:
         return "en"
     cyrillic = sum(1 for c in alpha_chars if "\u0400" <= c <= "\u04FF")
-    return "ru" if (cyrillic / len(alpha_chars)) > _CYRILLIC_THRESHOLD else "en"
+    if (cyrillic / len(alpha_chars)) > _CYRILLIC_THRESHOLD:
+        return "ru"
+    # Проверка на испанские маркерные символы
+    es_markers = set("ñáéíóúüÑÁÉÍÓÚÜ¿¡")
+    if any(c in es_markers for c in text):
+        return "es"
+    return "en"
 
 
 # Lazy loader: Silero
@@ -493,12 +500,14 @@ class TTSService:
         # Последний резерв: macOS say
         if settings.TTS_FALLBACK_SAY:
             say_voice = voice or (settings.SAY_VOICE or None)
-            if say_voice is None and lang == "ru":
-                # RU-текст без явно заданного голоса ДОЛЖЕН звучать русским
-                # голосом (Milena), а не системным дефолтом macOS `say`
-                # (часто английский) -- см. module docstring
-                # fix/tts-ru-accent-routing.
-                say_voice = _SAY_DEFAULT_VOICE
+            if say_voice is None:
+                if lang == "ru":
+                    # RU-текст без явно заданного голоса ДОЛЖЕН звучать русским
+                    # голосом (Milena), а не системным дефолтом macOS `say`
+                    say_voice = _SAY_DEFAULT_VOICE
+                elif lang == "es":
+                    # ES-текст без явно заданного голоса звучит испанским голосом (Mónica)
+                    say_voice = _ES_DEFAULT_VOICE
             return _say_to_wav(text, voice=say_voice)
 
         return b""
@@ -508,7 +517,7 @@ class TTSService:
 
         Params:
             text (str): Текст для синтеза. Обязателен.
-            language (str): "ru" / "en" / "auto". По умолчанию "auto".
+            language (str): "ru" / "en" / "es" / "auto". По умолчанию "auto".
             voice (str | None): Голос. Опционально.
 
         Returns:
@@ -528,7 +537,7 @@ class TTSService:
             }
 
         language = str(params.get("language", "auto")).strip().lower()
-        if language not in ("ru", "en", "auto"):
+        if language not in ("ru", "en", "es", "auto"):
             language = "auto"
         voice = params.get("voice") or None
         if voice is not None:
