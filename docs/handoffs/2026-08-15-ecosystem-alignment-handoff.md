@@ -1,5 +1,7 @@
 # HANDOFF: Krab Ear & Ecosystem Alignment
 
+> **Устарело по «что дальше» (2026-08-16).** Сводка коммитов 15.08 (1V hang, SIP, in-process REST verify) остаётся фактом. **§4 ниже врала как очередь:** C2 Live Meeting Overlay и C3 Quick Capture **закрыты в июле 2026** (v2.9.0 / последующие волны). Не брать их в работу. Оперативный фронт: [`docs/NOW.md`](../NOW.md). Журнал: [`docs/ROADMAP-2026H2.md`](../ROADMAP-2026H2.md).
+
 **Дата:** 2026-08-15  
 **Ветка Krab Ear:** `codex/krab-ear-v2` (коммиты `bc5ee07b`, `4f63fcd3`, `54c6a9a1`, `349a1eed`, `d10e09c2`, `114846ca`, `f04594f7`)  
 **Статус Krab Ear:** Все тесты и аудит-гейты зелёные (1486 Swift тестов, 95 telephony тестов, 36 rest-inprocess тестов, make audit-all OK, pre-merge ubuntu-parity OK).
@@ -50,6 +52,11 @@
 
 ## 4. Следующие шаги в Krab Ear (Roadmap H2-2026)
 
-1. **C2 Live Meeting Overlay / C3 Quick Capture:** вывод action items и спикеров прямо во время звонка/митинга (Liquid Glass HUD) и быстрый доступ к диктофону из статус-бара.
-2. **Финальный аудит боевого запуска на macOS.**
+~~1. C2 Live Meeting Overlay / C3 Quick Capture~~ — **НЕ ДЕЛАТЬ.** Обе волны закрыты: C2 целиком в релизе v2.9.0 (2026-07-16), C3a/C3b — 2026-07-17/19. HUD встречи и панель быстрой заметки уже в проде.
+
+Актуально на 2026-08-16 (см. [`docs/NOW.md`](../NOW.md)):
+
+1. **W1 гигиена репо** — карточка `docs/superpowers/plans/2026-08-16-w1-repo-hygiene.md` (CI-auto-issues, инвентарь веток/worktree; без массового delete).
+2. **W2 стабильность ежедневки** — спека `docs/superpowers/specs/2026-08-16-w2-daily-stability-design.md`, код только после явного Approve.
+3. Sparkle v2.11 / S3 REST canary / Developer ID — только по отдельному «да» владельца.
 

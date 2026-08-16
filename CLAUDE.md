@@ -10,7 +10,7 @@ Krab Ear is a local voice assistant/transcriber for macOS. It runs as a two-proc
 
 The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels, and docs are in Russian.
 
-**Актуальный план развития: `docs/ROADMAP-2026H2.md`** (живой документ — статусы волн, приоритеты, post-Fable роутинг моделей; обновлять после каждой волны). Старый `docs/ROADMAP.md` — архив.
+**Оперативный фронт: `docs/NOW.md`** (одна страница). Журнал волн: `docs/ROADMAP-2026H2.md` (обновлять после каждой волны; не очередь задач для исполнителей). Рельсы: `docs/EXECUTOR_PLAYBOOK.md`. Старый `docs/ROADMAP.md` — архив.
 
 ## Architecture
 
