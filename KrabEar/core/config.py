@@ -645,6 +645,9 @@ class Settings(BaseSettings):
     # KRAB-EAR-BACKEND-1V: 45s (с hard-kill 10s = 55s суммарно) гарантированно
     # укладывается в Swift-таймаут (120s) и IPC backstop (180s).
     MLX_TRANSCRIBE_TIMEOUT_SEC: float = 45.0
+    # P0c: OS-worker для mlx_whisper. False = in-process (IPC-диктовка).
+    # REST включает через KRAB_EAR_MLX_WHISPER_WORKER=1 / argv rest_server.py.
+    MLX_WHISPER_WORKER_ENABLED: bool = False
     # --- Auto-Glossary: автоматический глоссарий из истории (core/auto_glossary.py) ---
     # При AUTO_GLOSSARY_ENABLED=True: перед каждой транскрибацией AutoGlossaryBuilder
     # извлекает top-N часто встречающихся имён и терминов из истории за последние

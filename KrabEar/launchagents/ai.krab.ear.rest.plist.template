@@ -66,6 +66,11 @@
          процессами. См. тот template за полным обоснованием. -->
     <key>KRAB_EAR_TTS_ENABLED</key>
     <string>1</string>
+
+    <!-- P0c 2026-08-16: mlx_whisper в OS-worker. SEGV убивает child, не REST PID.
+         Выключить: KRAB_EAR_MLX_WHISPER_WORKER=0. IPC-backend этот ключ не ставит. -->
+    <key>KRAB_EAR_MLX_WHISPER_WORKER</key>
+    <string>1</string>
   </dict>
 
   <key>StandardOutPath</key>

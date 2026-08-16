@@ -517,6 +517,15 @@ class AudioEngine:
             self._router.close()
         except Exception:
             logger.warning("AudioEngine.close: ошибка закрытия STTRouter", exc_info=True)
+        try:
+            from core.mlx_whisper_session import close_mlx_whisper_session
+
+            close_mlx_whisper_session()
+        except Exception:
+            logger.warning(
+                "AudioEngine.close: ошибка закрытия mlx_whisper worker",
+                exc_info=True,
+            )
 
     def warmup(self) -> dict[str, Any]:
         """Prewarm Whisper model to eliminate first-dictation cold-start latency.
@@ -535,8 +544,10 @@ class AudioEngine:
             "error": str | None, # error message if loaded=False
           }
         """
-        if mlx_whisper is None:
-            return {"loaded": False, "latency_ms": 0, "model_name": "", "error": "mlx_whisper not available"}
+        from core.mlx_whisper_session import (
+            mlx_whisper_worker_enabled,
+            transcribe_via_mlx_worker,
+        )
 
         model_name = self.current_model
         # 1 second of silence at 16 kHz — float32 zeros.
@@ -546,14 +557,38 @@ class AudioEngine:
         import time as _time
         t0 = _time.monotonic()
         try:
-            with mlx_inter_process_lock(), mlx_lock():  # W1635: cross-process flock + intra-process RLock
-                mlx_whisper.transcribe(
-                    silent_audio,
-                    path_or_hf_repo=model_name,
-                    language="ru",
-                    temperature=0.0,
-                    verbose=False,
-                )
+            if mlx_whisper_worker_enabled():
+                # P0c: warmup в child, иначе REST всё равно грузит Metal в родителе.
+                with mlx_inter_process_lock():
+                    transcribe_via_mlx_worker(
+                        silent_audio,
+                        {
+                            "path_or_hf_repo": model_name,
+                            "language": "ru",
+                            "temperature": 0.0,
+                            "verbose": False,
+                        },
+                        timeout_sec=float(
+                            getattr(settings, "MLX_TRANSCRIBE_TIMEOUT_SEC", 45.0)
+                        ),
+                        model_name=model_name,
+                    )
+            elif mlx_whisper is None:
+                return {
+                    "loaded": False,
+                    "latency_ms": 0,
+                    "model_name": "",
+                    "error": "mlx_whisper not available",
+                }
+            else:
+                with mlx_inter_process_lock(), mlx_lock():  # W1635: cross-process flock + intra-process RLock
+                    mlx_whisper.transcribe(
+                        silent_audio,
+                        path_or_hf_repo=model_name,
+                        language="ru",
+                        temperature=0.0,
+                        verbose=False,
+                    )
             latency_ms = int((_time.monotonic() - t0) * 1000)
             logger.info("STT warmup завершён: модель=%s, latency=%dms", model_name, latency_ms)
             return {"loaded": True, "latency_ms": latency_ms, "model_name": model_name, "error": None}
@@ -1379,9 +1414,12 @@ class AudioEngine:
             # W1618/W63: clear_cache — MLX op, must hold mlx_lock to prevent concurrent SIGSEGV.
             # W1635: degrade_on_timeout=True — non-critical cache flush, not inference.
             try:
-                import mlx.core as _mx
-                with mlx_inter_process_lock(degrade_on_timeout=True), mlx_lock():  # W1635
-                    _mx.clear_cache()
+                from core.mlx_whisper_session import mlx_whisper_worker_enabled
+
+                if not mlx_whisper_worker_enabled():
+                    import mlx.core as _mx
+                    with mlx_inter_process_lock(degrade_on_timeout=True), mlx_lock():  # W1635
+                        _mx.clear_cache()
             except (ImportError, AttributeError):
                 pass  # MLX не установлен или старая версия без clear_cache
 
@@ -2590,6 +2628,56 @@ class AudioEngine:
         timeout_sec = getattr(settings, "MLX_TRANSCRIBE_TIMEOUT_SEC", 60.0)
 
         last_err: Exception | None = None
+        from core.mlx_whisper_session import (
+            MLXWorkerCrashed,
+            mlx_whisper_worker_enabled,
+            transcribe_via_mlx_worker,
+        )
+
+        if mlx_whisper_worker_enabled():
+            # P0c: Metal только в child. Родитель держит flock (если флаг ON).
+            # Child flock не берёт — иначе deadlock: родитель ждёт JSON, child ждёт flock.
+            with mlx_inter_process_lock():
+                for params in variants:
+                    try:
+                        return transcribe_via_mlx_worker(
+                            audio_data,
+                            params,
+                            timeout_sec=float(timeout_sec),
+                            model_name=model_name,
+                        )
+                    except MLXTimeoutError as e:
+                        logger.error(
+                            "MLX worker timeout %.1fs (model=%s) — fallback",
+                            e.timeout_sec, model_name,
+                        )
+                        self._push_error(
+                            "stt.mlx_timeout",
+                            f"MLXTimeoutError {e.timeout_sec}s (model={model_name})",
+                            severity="error",
+                        )
+                        raise
+                    except MLXWorkerCrashed:
+                        logger.error(
+                            "mlx_whisper worker crashed (model=%s) — REST PID жив",
+                            model_name,
+                        )
+                        raise
+                    except TypeError as e:
+                        last_err = e
+                    except (MemoryError, RuntimeError) as e:
+                        _emsg = str(e).lower()
+                        if isinstance(e, MemoryError) or any(
+                            kw in _emsg for kw in ("allocat", "out of memory", "metal", "oom")
+                        ):
+                            self._push_error(
+                                "mlx.oom",
+                                f"{type(e).__name__}: {e} (model={model_name})",
+                                severity="critical",
+                            )
+                        last_err = e
+            raise last_err or RuntimeError("Ошибка вызова mlx_whisper.transcribe")
+
         # Сериализуем доступ к GPU через глобальный MLX lock.
         # W1635: also wrap with mlx_inter_process_lock for cross-process GPU safety.
         # Raises MLXInterLockTimeout — let it propagate to transcribe() callers.
