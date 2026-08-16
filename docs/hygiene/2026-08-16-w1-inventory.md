@@ -124,6 +124,38 @@ Issue title pattern `ci: test suite failure — DATE` retired.
 
 Запущен `scripts/cleanup_worktree_shadows.command` из основного checkout (не из этого worktree — иначе не виден прод-бандл). Дошёл до «Re-registering canonical main bundle». `git worktree prune --verbose` пуст (живые деревья не трогал). Unregister 3 shadow `.app` под `.claude/worktrees/` (`lsregister -10814` = не были в LaunchServices DB). Исходники worktree не удалялись.
 
+## Remote audit branches
+
+Count: 360. Oldest 20:
+
+```
+2026-04-20 origin/chore/audit-unused-hallucination-handlers
+2026-05-20 origin/audit/wave177-main-swift-split
+2026-05-26 origin/feature/audit-script-improve-W771
+2026-05-26 origin/feature/audit-tests-coverage-W776
+2026-05-26 origin/feature/audit-recording-handlers-W796
+2026-05-26 origin/feature/audit-event-bus-W800
+2026-05-26 origin/feature/audit-rest-server-W809
+2026-05-26 origin/feature/audit-tests-flakefix-W806
+2026-05-26 origin/feature/audit-makefile-targets-W810
+2026-05-26 origin/feature/audit-data-migrator-W820
+2026-05-26 origin/feature/audit-llm-rewriter-W818
+2026-05-26 origin/feature/audit-mlx-call-sites-W816
+2026-05-26 origin/feature/audit-event-replay-W829
+2026-05-26 origin/feature/audit-search-index-W823
+2026-05-26 origin/feature/audit-test-suite-time-W825
+2026-05-26 origin/feature/audit-call-assist-W830
+2026-05-26 origin/feature/audit-startup-time-W827
+2026-05-26 origin/feature/audit-translator-W834
+2026-05-26 origin/feature/audit-history-svc-W835
+2026-05-26 origin/feature/audit-recorder-W836
+```
+
+Mass delete is out of scope for W1.
+Next wave (owner-gated): delete only refs with no open PR
+(`gh pr list --head <branch>` empty) and last commit older than 30 days.
+PR #1875 (`feat/wake-word-hard-negatives`) is not an audit branch — keep.
+
 ## Untracked (не коммитить)
 
 - `wake_word_models/hard_negatives_raw/tts_phrases.json`
