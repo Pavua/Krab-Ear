@@ -134,7 +134,7 @@ class TestMLXWatchdogTimeout(unittest.TestCase):
             # MLXTimeoutError не наступал (2026-07-23, второй раунд после
             # прошлого фикса). Без таймера thread гарантированно жив на
             # отметке timeout_sec (запас 450мс) и завершается сам к 0.5с —
-            # задолго до MLX_HANG_HARD_KILL_SEC (120с default).
+            # задолго до MLX_HANG_HARD_KILL_SEC (10с default, KRAB-EAR-BACKEND-1V).
             release.wait(timeout=initial_delay)  # returns when event set or timeout
 
         return _hang, release

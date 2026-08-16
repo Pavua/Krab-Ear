@@ -203,7 +203,7 @@ class MLXWatchdog:
             # не завершится ИЛИ пока не истечёт MLX_HANG_HARD_KILL_SEC.
             # Ограниченное ожидание (wave-20 MED fix): ранее join() был
             # unbounded — бэкенд мог висеть вечно если Metal GPU полностью зависал.
-            # Теперь join ограничен MLX_HANG_HARD_KILL_SEC (default 120s).
+            # Теперь join ограничен MLX_HANG_HARD_KILL_SEC (default 10s, KRAB-EAR-BACKEND-1V).
             thread.join(timeout=MLX_HANG_HARD_KILL_SEC)
             if thread.is_alive():
                 # Daemon thread не завершился за hard-kill timeout.

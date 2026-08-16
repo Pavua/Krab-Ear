@@ -165,6 +165,12 @@ class TestAllDefaultSettingsHaveDefaults(unittest.TestCase):
             "cloud_rewriter_base_url",
             "cloud_rewriter_custom_model",
             "cloud_rewriter_api_key",
+            # LocalSIP credentials — пустые = stub-режим, пользователь вводит сам.
+            "sip_server",
+            "sip_user",
+            "sip_password",
+            "sip_from_number",
+            "sip_proxy",
         }
         empty_strings = [
             k

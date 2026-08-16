@@ -170,20 +170,29 @@ class PendingRescuePartsSpawnThreadTest(unittest.TestCase):
         w.close()
 
     def test_thread_spawns_when_pending_part_exists(self) -> None:
+        # Poll-по-имени ловит гонку: без dirty-маркера check_and_collect быстрый,
+        # тред успевает завершиться до первого sleep (тот же класс, что
+        # CleanStartNoThreadTest — шпион на конструктор Thread).
+        real_thread_cls = threading.Thread
+        spawned_names: list[str] = []
+
+        class _SpyThread(real_thread_cls):
+            def __init__(self, *args, **kwargs):
+                if kwargs.get("name") == "startup-recovery":
+                    spawned_names.append("startup-recovery")
+                super().__init__(*args, **kwargs)
+
         store = StateStore(self.data_dir)
-        service = BackendService(
-            store=store, recorder=FakeRecorder(),
-            transcriber=FakeTranscriber(), translator=FakeTranslator(),
-        )
+        with patch("backend.service.threading.Thread", _SpyThread):
+            service = BackendService(
+                store=store, recorder=FakeRecorder(),
+                transcriber=FakeTranscriber(), translator=FakeTranslator(),
+            )
         try:
-            deadline = time.monotonic() + 5.0
-            spawned = False
-            while time.monotonic() < deadline:
-                if _startup_recovery_thread_names():
-                    spawned = True
-                    break
-                time.sleep(0.05)
-            self.assertTrue(spawned, "startup-recovery обязан спавниться при незавершённой записи")
+            self.assertIn(
+                "startup-recovery", spawned_names,
+                "startup-recovery обязан спавниться при незавершённой записи",
+            )
             deadline2 = time.monotonic() + 20.0
             while _startup_recovery_thread_names() and time.monotonic() < deadline2:
                 time.sleep(0.05)

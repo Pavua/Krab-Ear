@@ -54,9 +54,9 @@ class TestMLXHangHardKillConstant(unittest.TestCase):
         self.assertIsInstance(MLX_HANG_HARD_KILL_SEC, float)
         self.assertGreater(MLX_HANG_HARD_KILL_SEC, 0.0)
 
-    def test_default_value_is_120(self):
-        """Default hard-kill window should be 120 seconds."""
-        self.assertEqual(MLX_HANG_HARD_KILL_SEC, 120.0)
+    def test_default_value_is_10(self):
+        """KRAB-EAR-BACKEND-1V: дефолт 10с, не прежние 120с (IPC backstop 180с)."""
+        self.assertEqual(MLX_HANG_HARD_KILL_SEC, 10.0)
 
     def test_constant_exported(self):
         """MLX_HANG_HARD_KILL_SEC must be importable from the module."""
