@@ -2059,5 +2059,5 @@ Source-контракт на факт вызова из обоих путей **
 
 - W2a: `CLAUDE.md` больше не описывает sticky-hang HealthMonitor как открытый гэп. Код Swift не менялся.
 - W2b: opt-in `debug_keep_dictation_wav` (default False) переносит успешный presave WAV в `<data_dir>/debug_duration_wav/` + сидкар без текста транскрипта. Purge покрыт. CLI `scripts/measure_duration_anomaly.py` считает wav/VAD/chunker без GigaAM/MLX. Фикс чанкера — не эта волна.
-- Осталось W2c: per-request `deadline_sec` на `POST /v1/stt/transcribe` (VG timeout 30 с vs Ear 600 с).
+- W2c: optional `deadline_sec` на `POST /v1/stt/transcribe` (clamp [5, 120], мусор → 400). Глобальные `_TRANSCRIBE_TIMEOUT_SEC=600` не снижены. VG `deadline_sec=25` — отдельная карточка в репо шлюза.
 

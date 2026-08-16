@@ -563,6 +563,27 @@ _MAX_AUDIO_DURATION_SEC = 3600  # 1 hour
 
 # Wall-clock timeout for a single transcription call at the REST layer.
 _TRANSCRIBE_TIMEOUT_SEC = 600  # 10 minutes
+# W2c: optional per-request override via form-field deadline_sec (VG budget).
+# Отсутствует → 600. Мусор / ≤0 / >120 → 400. (0, 5) → clamp к 5.
+_DEADLINE_SEC_MIN = 5.0
+_DEADLINE_SEC_MAX = 120.0
+
+
+def _resolve_transcribe_deadline_sec(raw: _Any) -> tuple[float | None, str | None]:
+    """Разобрать optional ``deadline_sec``. ``(None, None)`` → дефолт 600."""
+    if raw is None:
+        return None, None
+    text = str(raw).strip()
+    if text == "":
+        return None, None
+    try:
+        value = float(text)
+    except (TypeError, ValueError):
+        return None, "invalid deadline_sec"
+    if not math.isfinite(value) or value <= 0 or value > _DEADLINE_SEC_MAX:
+        return None, "invalid deadline_sec"
+    return float(max(_DEADLINE_SEC_MIN, value)), None
+
 
 # EX_SOFTWARE из sysexits.h. Отдельный код отличает намеренный fail-fast после
 # зависшей транскрибации от обычного исключения приложения в launchd/gunicorn.
@@ -1576,6 +1597,9 @@ def transcribe_audio():
           for callers streaming ephemeral utterances (e.g. Voice Gateway's
           "Разговор с AI" conversation turns) that should not pollute permanent
           history. privacy_mode_enabled ALWAYS wins over this flag — see below.
+        - deadline_sec (W2c, optional): wall-clock бюджет Future.result вместо
+          глобальных 600 с. Пусто/нет поля → 600. Число clamp [5, 120].
+          Мусор / ≤0 / >120 → 400 ``invalid deadline_sec`` без транскрибации.
 
     Returns 403 {"ok": false, "skipped": "privacy_mode"} when IPC privacy
     mode is active (privacy_mode_enabled=true in settings.json) — enforced by
@@ -1671,6 +1695,15 @@ def transcribe_audio():
             else _diarize_raw.strip().lower() in ("true", "1", "yes")
         )
 
+        _deadline_sec, _deadline_err = _resolve_transcribe_deadline_sec(
+            request.form.get("deadline_sec"),
+        )
+        if _deadline_err is not None:
+            return jsonify({"error": "invalid deadline_sec"}), 400
+        _transcribe_timeout_sec = (
+            _TRANSCRIBE_TIMEOUT_SEC if _deadline_sec is None else _deadline_sec
+        )
+
         # F2: ограничиваем весь вызов транскрайбера wall-clock таймаутом.
         # ThreadPoolExecutor создаёт non-daemon worker, поэтому cancel_futures
         # не может остановить уже начавшийся MLX-вызов. На таймауте сначала
@@ -1691,7 +1724,7 @@ def transcribe_audio():
         try:
             _future = _pool.submit(deps.transcriber.transcribe, _transcribe_path, **_transcribe_kwargs)
             try:
-                result = _future.result(timeout=_TRANSCRIBE_TIMEOUT_SEC)
+                result = _future.result(timeout=_transcribe_timeout_sec)
             except concurrent.futures.TimeoutError:
                 if _future.done():
                     # Сам транскрайбер тоже может завершиться исключением
@@ -1704,7 +1737,7 @@ def transcribe_audio():
                     # poisoned процесса нет, поэтому обычный 504 безопасен.
                     logger.warning(
                         "Transcription timed out before worker start after %ss for %s",
-                        _TRANSCRIBE_TIMEOUT_SEC,
+                        _transcribe_timeout_sec,
                         safe_base,
                     )
                     timeout_response = jsonify({"error": "Transcription timeout"})
@@ -1722,7 +1755,7 @@ def transcribe_audio():
                     _pool.shutdown(wait=False, cancel_futures=True)
                     logger.error(
                         "Transcription timed out after %ss for %s",
-                        _TRANSCRIBE_TIMEOUT_SEC,
+                        _transcribe_timeout_sec,
                         safe_base,
                     )
                     timeout_response = jsonify({"error": "Transcription timeout"})
@@ -1738,7 +1771,7 @@ def transcribe_audio():
                     _pool.shutdown(wait=False, cancel_futures=True)
                     logger.error(
                         "Transcription Future entered an unknown state after %ss for %s",
-                        _TRANSCRIBE_TIMEOUT_SEC,
+                        _transcribe_timeout_sec,
                         safe_base,
                     )
                     timeout_response = jsonify({"error": "Transcription timeout"})

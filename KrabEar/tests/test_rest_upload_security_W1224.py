@@ -839,5 +839,87 @@ class TestValidateAudioMagicBytesUnit(unittest.TestCase):
         self.assertFalse(self._fn(b"RIFF\x00\x00\x00\x00AVI " + b"\x00" * 4))
 
 
+# ===========================================================================
+# W2c — per-request deadline_sec на REST STT (бюджет VG, не глобальные 600 с)
+# ===========================================================================
+
+@unittest.skipUnless(_REST_AVAILABLE, "REST server dependencies not available")
+class TestDeadlineSecW2c(_Base):
+    """Optional form-поле deadline_sec: clamp [5, 120], мусор → 400."""
+
+    def test_deadline_zero_and_over_max_return_400_without_transcribe(self):
+        wav_data = _make_wav_bytes()
+        mock_info = MagicMock()
+        mock_info.duration = 5.0
+        for raw in ("0", "999", "nope", "-1"):
+            with self.subTest(raw=raw):
+                self.transcriber.transcribe.reset_mock()
+                with patch("soundfile.info", return_value=mock_info):
+                    resp = self.client.post(
+                        "/v1/stt/transcribe",
+                        data={
+                            "file": (io.BytesIO(wav_data), "voice.wav"),
+                            "deadline_sec": raw,
+                        },
+                        content_type="multipart/form-data",
+                    )
+                self.assertEqual(resp.status_code, 400, raw)
+                body = resp.get_json()
+                self.assertEqual(body.get("error"), "invalid deadline_sec")
+                self.transcriber.transcribe.assert_not_called()
+
+    def test_deadline_sec_5_on_hung_transcribe_returns_504_before_global_600(self):
+        """deadline_sec=5 при зависшем transcribe → 504 быстрее глобальных 600."""
+        import threading
+        import time as _time
+
+        wav_data = _make_wav_bytes()
+        mock_info = MagicMock()
+        mock_info.duration = 5.0
+        _never = threading.Event()
+        self.addCleanup(_never.set)
+
+        def _hung_transcribe(*_a, **_kw):
+            _never.wait(timeout=20.0)
+            return {
+                "text": "слишком поздно",
+                "confidence": 0.5,
+                "duration_ms": 100,
+                "engine": "mlx-whisper",
+                "model": "whisper-small",
+                "language": "ru",
+                "segments": [],
+                "diarization": {},
+            }
+
+        self.transcriber.transcribe.side_effect = _hung_transcribe
+        resp = None
+        response_closed = False
+        try:
+            t0 = _time.monotonic()
+            with patch("soundfile.info", return_value=mock_info):
+                resp = self.client.post(
+                    "/v1/stt/transcribe",
+                    data={
+                        "file": (io.BytesIO(wav_data), "hung.wav"),
+                        "deadline_sec": "5",
+                    },
+                    content_type="multipart/form-data",
+                )
+            elapsed = _time.monotonic() - t0
+            self.assertEqual(resp.status_code, 504, elapsed)
+            self.assertLess(
+                elapsed, 8.0,
+                f"504 за {elapsed:.3f}s — deadline_sec не применился (ждали бы ~20с/600с)",
+            )
+            self.process_exit.assert_not_called()
+            resp.close()
+            response_closed = True
+        finally:
+            if resp is not None and not response_closed:
+                resp.close()
+            _never.set()
+
+
 if __name__ == "__main__":
     unittest.main()

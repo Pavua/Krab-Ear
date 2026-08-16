@@ -16,8 +16,9 @@
 
 **W2b — замер аномалии длительности: закрыта 2026-08-16.** Opt-in `debug_keep_dictation_wav` (дефолт выкл), каталог `debug_duration_wav/` + сидкар, CLI `scripts/measure_duration_anomaly.py`. Чанкер/GigaAM не патчили.
 
-**Следующая: W2c — per-request `deadline_sec` на REST STT** (бюджет VG, глобальные 600 с не трогать):
-[`docs/superpowers/specs/2026-08-16-w2-daily-stability-design.md`](superpowers/specs/2026-08-16-w2-daily-stability-design.md) §2.
+**W2c — REST `deadline_sec`: закрыта 2026-08-16.** Optional form-поле на `POST /v1/stt/transcribe`, clamp [5, 120], глобальные 600 с не тронуты, `REST_IN_PROCESS_ENABLED` по-прежнему false. Карточка VG (`deadline_sec=25`) — в репо шлюза, не здесь.
+
+**Следующая: ожидание замера владельца по W2b** (флаг в проде не включать из агента) **или W3 релиз** — только по явному «релизы».
 
 ## Не делать
 
