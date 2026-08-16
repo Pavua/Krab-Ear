@@ -74,10 +74,16 @@ _LIVEKIT_RATES: dict[str, float] = {
     "default": 0.005,
 }
 
+# Local SIP: On-Device / Zero-Cloud Cost (прямой SIP-транк)
+_SIP_LOCAL_RATES: dict[str, float] = {
+    "default": 0.0,
+}
+
 _PROVIDER_TABLES: dict[str, dict[str, float]] = {
     "telnyx": _TELNYX_RATES,
     "twilio": _TWILIO_RATES,
     "livekit": _LIVEKIT_RATES,
+    "sip_local": _SIP_LOCAL_RATES,
 }
 
 # Предупреждение: running cost превышает этот порог в USD

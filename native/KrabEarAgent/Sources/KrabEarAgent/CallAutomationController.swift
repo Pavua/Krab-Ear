@@ -120,10 +120,12 @@ final class CallAutomationController: NSViewController {
     enum CallProvider: Int {
         case telnyx = 0
         case twilio = 1
+        case sipLocal = 2
         var settingKey: String {
             switch self {
             case .telnyx: return "telnyx"
             case .twilio: return "twilio"
+            case .sipLocal: return "sip_local"
             }
         }
     }
@@ -132,7 +134,7 @@ final class CallAutomationController: NSViewController {
     // MARK: - UI: Provider switcher
 
     private let providerSegmented: NSSegmentedControl = {
-        let sc = NSSegmentedControl(labels: ["Telnyx", "Twilio"], trackingMode: .selectOne, target: nil, action: nil)
+        let sc = NSSegmentedControl(labels: ["Telnyx", "Twilio", "SIP Local"], trackingMode: .selectOne, target: nil, action: nil)
         sc.selectedSegment = 0
         sc.font = KrabEarTheme.Typography.caption
         sc.translatesAutoresizingMaskIntoConstraints = false
@@ -777,7 +779,11 @@ final class CallAutomationController: NSViewController {
     }
 
     @objc private func onProviderChanged() {
-        selectedProvider = providerSegmented.selectedSegment == 0 ? .telnyx : .twilio
+        switch providerSegmented.selectedSegment {
+        case 0: selectedProvider = .telnyx
+        case 1: selectedProvider = .twilio
+        default: selectedProvider = .sipLocal
+        }
         refreshProviderStatus()
         // Если уже введён корректный номер — обновить estimate
         let raw = phoneField.stringValue.trimmingCharacters(in: .whitespaces)
@@ -794,7 +800,7 @@ final class CallAutomationController: NSViewController {
 
     // MARK: - Provider status
 
-    /// Опрашивает IPC get_settings → проверяет настроены ли API ключ + from_number
+    /// Опрашивает IPC get_settings → проверяет настроены ли параметры провайдера
     private func refreshProviderStatus() {
         let provider = selectedProvider.settingKey
         DispatchQueue.global(qos: .utility).async { [weak self] in
@@ -813,16 +819,22 @@ final class CallAutomationController: NSViewController {
             let key  = (settings["telnyx_api_key"]    as? String) ?? ""
             let from = (settings["telnyx_from_number"] as? String) ?? ""
             isConfigured = !key.isEmpty && !from.isEmpty
-        } else {
+        } else if provider == "twilio" {
             let sid  = (settings["twilio_account_sid"] as? String) ?? ""
             let tok  = (settings["twilio_auth_token"]  as? String) ?? ""
             let from = (settings["twilio_from_number"] as? String) ?? ""
             isConfigured = !sid.isEmpty && !tok.isEmpty && !from.isEmpty
+        } else if provider == "sip_local" {
+            let server = (settings["sip_server"] as? String) ?? ""
+            let user   = (settings["sip_user"]   as? String) ?? ""
+            isConfigured = !server.isEmpty && !user.isEmpty
+        } else {
+            isConfigured = false
         }
         providerStatusDot.contentTintColor = isConfigured ? NSColor.systemGreen : NSColor.systemGray
         providerStatusDot.toolTip   = isConfigured
             ? "\(provider.capitalized) настроен"
-            : "\(provider.capitalized): API key или from-number не задан в Настройках"
+            : "\(provider.capitalized): параметры провайдера не заданы в Настройках"
     }
 
     // MARK: - Transcript modal
@@ -836,33 +848,29 @@ final class CallAutomationController: NSViewController {
 
         let scroll = NSScrollView(frame: NSRect(x: 12, y: 48, width: 496, height: 320))
         scroll.autoresizingMask = [.width, .height]
-        scroll.hasVerticalScroller = true
-        scroll.borderType = .bezelBorder
-
         let tv = NSTextView(frame: scroll.bounds)
-        tv.autoresizingMask = [.width]
         tv.isEditable = false
-        tv.isSelectable = true
-        tv.font = .systemFont(ofSize: 12)
-        let text = item.summary.isEmpty ? "(транскрипт недоступен)" : item.summary
+        let text = item.summary.isEmpty ? "(нет записей транскрипта)" : item.summary
         tv.string = "Цель: \(item.goal)\nНомер: \(item.phone)\nДлительность: \(item.durationFormatted)\nСтоимость: \(item.costUSD > 0 ? String(format: "$%.3f", item.costUSD) : "—")\n\n\(text)"
+        tv.font = KrabEarTheme.Typography.body
         scroll.documentView = tv
 
-        let closeBtn = NSButton(title: "Закрыть", target: panel, action: #selector(NSWindow.close))
-        closeBtn.frame = NSRect(x: 420, y: 10, width: 90, height: 28)
-        closeBtn.bezelStyle = .rounded
+        let closeBtn = ThemeSecondaryButton(title: "Закрыть", target: nil, action: nil)
+        closeBtn.frame = NSRect(x: 420, y: 12, width: 88, height: 28)
+        closeBtn.target = self
+        closeBtn.action = #selector(onCloseTranscriptModal(_:))
 
         panel.contentView?.addSubview(scroll)
         panel.contentView?.addSubview(closeBtn)
-
-        if let window = view.window {
-            window.beginSheet(panel, completionHandler: nil)
-        } else {
-            panel.makeKeyAndOrderFront(nil)
-        }
+        panel.center()
+        panel.makeKeyAndOrderFront(nil)
     }
 
-    // MARK: - IPC response handling
+    @objc private func onCloseTranscriptModal(_ sender: NSButton) {
+        sender.window?.close()
+    }
+
+    // MARK: - Dial response handler
 
     private func handleDialResponse(_ response: [String: Any]?, phone: String, goal: String) {
         startButton.isEnabled = true
@@ -873,10 +881,10 @@ final class CallAutomationController: NSViewController {
             return
         }
 
-        // Graceful: telnyx_not_configured
+        // Graceful: not_configured for any provider
         if let error = response["error"] as? [String: Any],
            let code = error["code"] as? String,
-           code == "telnyx_not_configured" {
+           code == "telnyx_not_configured" || code == "twilio_not_configured" || code == "sip_local_not_configured" {
             showConfigBanner(true)
             return
         }
@@ -1063,6 +1071,10 @@ final class CallAutomationController: NSViewController {
     }
 
     func showConfigBanner(_ show: Bool) {
+        if show {
+            let providerName = selectedProvider.settingKey.capitalized
+            configBannerLabel.stringValue = "Настройте параметры \(providerName) в разделе «Автозвонки» в Настройках, затем вернитесь сюда."
+        }
         configBannerCard.isHidden = !show
     }
 }

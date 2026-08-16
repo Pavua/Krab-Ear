@@ -99,6 +99,13 @@ struct AgentSettings {
     var callMaxDurationMin: Int
     var callCostWarnUSD: Double
     var callAutoEndOnSilence: Bool
+    // Phase 3 — Local SIP / On-Device Telephony
+    var sipServer: String
+    var sipPort: Int
+    var sipUser: String
+    var sipPassword: String
+    var sipFromNumber: String
+    var sipProxy: String
     // Quick Edit before paste
     var quickEditEnabled: Bool
     var quickEditTimeoutSec: Double
@@ -178,6 +185,12 @@ struct AgentSettings {
         callMaxDurationMin: 30,
         callCostWarnUSD: 5.0,
         callAutoEndOnSilence: true,
+        sipServer: "",
+        sipPort: 5060,
+        sipUser: "",
+        sipPassword: "",
+        sipFromNumber: "",
+        sipProxy: "",
         quickEditEnabled: false,
         quickEditTimeoutSec: 5.0,
         privacyModeEnabled: false,
@@ -268,6 +281,12 @@ struct AgentSettings {
         self.callMaxDurationMin = (payload["call_max_duration_min"] as? Int) ?? Self.default.callMaxDurationMin
         self.callCostWarnUSD = (payload["call_cost_warn_usd"] as? Double) ?? Self.default.callCostWarnUSD
         self.callAutoEndOnSilence = (payload["call_auto_end_on_silence"] as? Bool) ?? Self.default.callAutoEndOnSilence
+        self.sipServer = (payload["sip_server"] as? String) ?? Self.default.sipServer
+        self.sipPort = (payload["sip_port"] as? Int) ?? Self.default.sipPort
+        self.sipUser = (payload["sip_user"] as? String) ?? Self.default.sipUser
+        self.sipPassword = (payload["sip_password"] as? String) ?? Self.default.sipPassword
+        self.sipFromNumber = (payload["sip_from_number"] as? String) ?? Self.default.sipFromNumber
+        self.sipProxy = (payload["sip_proxy"] as? String) ?? Self.default.sipProxy
         self.quickEditEnabled = (payload["quick_edit_enabled"] as? Bool) ?? Self.default.quickEditEnabled
         self.quickEditTimeoutSec = (payload["quick_edit_timeout_sec"] as? Double) ?? Self.default.quickEditTimeoutSec
         self.privacyModeEnabled = (payload["privacy_mode_enabled"] as? Bool) ?? Self.default.privacyModeEnabled
@@ -334,6 +353,12 @@ struct AgentSettings {
         callMaxDurationMin: Int,
         callCostWarnUSD: Double,
         callAutoEndOnSilence: Bool,
+        sipServer: String = "",
+        sipPort: Int = 5060,
+        sipUser: String = "",
+        sipPassword: String = "",
+        sipFromNumber: String = "",
+        sipProxy: String = "",
         quickEditEnabled: Bool,
         quickEditTimeoutSec: Double,
         privacyModeEnabled: Bool = false,
@@ -398,6 +423,12 @@ struct AgentSettings {
         self.callMaxDurationMin = callMaxDurationMin
         self.callCostWarnUSD = callCostWarnUSD
         self.callAutoEndOnSilence = callAutoEndOnSilence
+        self.sipServer = sipServer
+        self.sipPort = sipPort
+        self.sipUser = sipUser
+        self.sipPassword = sipPassword
+        self.sipFromNumber = sipFromNumber
+        self.sipProxy = sipProxy
         self.quickEditEnabled = quickEditEnabled
         self.quickEditTimeoutSec = quickEditTimeoutSec
         self.privacyModeEnabled = privacyModeEnabled
@@ -464,6 +495,12 @@ struct AgentSettings {
             "call_max_duration_min": callMaxDurationMin,
             "call_cost_warn_usd": callCostWarnUSD,
             "call_auto_end_on_silence": callAutoEndOnSilence,
+            "sip_server": sipServer,
+            "sip_port": sipPort,
+            "sip_user": sipUser,
+            "sip_password": sipPassword,
+            "sip_from_number": sipFromNumber,
+            "sip_proxy": sipProxy,
             "bookmarks_hotkey_enabled": bookmarksHotkeyEnabled,
             "quick_edit_enabled": quickEditEnabled,
             "quick_edit_timeout_sec": quickEditTimeoutSec,

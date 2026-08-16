@@ -315,6 +315,12 @@ private func isTwilioConfigured(in settings: [String: Any]) -> Bool {
     return !sid.isEmpty && !tok.isEmpty && !from.isEmpty
 }
 
+private func isSIPLocalConfigured(in settings: [String: Any]) -> Bool {
+    let server = (settings["sip_server"] as? String) ?? ""
+    let user   = (settings["sip_user"]   as? String) ?? ""
+    return !server.isEmpty && !user.isEmpty
+}
+
 final class ProviderStatusTests: XCTestCase {
 
     func test_telnyxConfigured_bothPresent() {
@@ -350,13 +356,38 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertFalse(isTwilioConfigured(in: s))
     }
 
+    func test_sipLocalConfigured_bothPresent() {
+        let s: [String: Any] = [
+            "sip_server": "127.0.0.1",
+            "sip_user": "1001",
+        ]
+        XCTAssertTrue(isSIPLocalConfigured(in: s))
+    }
+
+    func test_sipLocalNotConfigured_missingServer() {
+        let s: [String: Any] = [
+            "sip_server": "",
+            "sip_user": "1001",
+        ]
+        XCTAssertFalse(isSIPLocalConfigured(in: s))
+    }
+
+    func test_sipLocalNotConfigured_missingUser() {
+        let s: [String: Any] = [
+            "sip_server": "127.0.0.1",
+            "sip_user": "",
+        ]
+        XCTAssertFalse(isSIPLocalConfigured(in: s))
+    }
+
     func test_emptySettingsNotConfigured() {
         XCTAssertFalse(isTelnyxConfigured(in: [:]))
         XCTAssertFalse(isTwilioConfigured(in: [:]))
+        XCTAssertFalse(isSIPLocalConfigured(in: [:]))
     }
 }
 
-// MARK: - AgentSettings Telnyx roundtrip
+// MARK: - AgentSettings Telnyx & SIP Local roundtrip
 
 final class AgentSettingsTelnyxTests: XCTestCase {
 
@@ -364,6 +395,9 @@ final class AgentSettingsTelnyxTests: XCTestCase {
         let s = AgentSettings.default
         XCTAssertEqual(s.telnyxAPIKey, "")
         XCTAssertEqual(s.telnyxFromNumber, "")
+        XCTAssertEqual(s.sipServer, "")
+        XCTAssertEqual(s.sipPort, 5060)
+        XCTAssertEqual(s.sipUser, "")
         XCTAssertEqual(s.callMaxDurationMin, 30)
         XCTAssertEqual(s.callCostWarnUSD, 5.0, accuracy: 0.001)
         XCTAssertTrue(s.callAutoEndOnSilence)
@@ -373,6 +407,9 @@ final class AgentSettingsTelnyxTests: XCTestCase {
         let payload: [String: Any] = [
             "telnyx_api_key":          "KEY123",
             "telnyx_from_number":      "+79991234567",
+            "sip_server":              "192.168.1.50",
+            "sip_port":                5060,
+            "sip_user":                "2001",
             "call_max_duration_min":   45,
             "call_cost_warn_usd":      10.0,
             "call_auto_end_on_silence": false,
@@ -380,15 +417,21 @@ final class AgentSettingsTelnyxTests: XCTestCase {
         let s = AgentSettings(from: payload)
         XCTAssertEqual(s.telnyxAPIKey, "KEY123")
         XCTAssertEqual(s.telnyxFromNumber, "+79991234567")
+        XCTAssertEqual(s.sipServer, "192.168.1.50")
+        XCTAssertEqual(s.sipPort, 5060)
+        XCTAssertEqual(s.sipUser, "2001")
         XCTAssertEqual(s.callMaxDurationMin, 45)
         XCTAssertEqual(s.callCostWarnUSD, 10.0, accuracy: 0.001)
         XCTAssertFalse(s.callAutoEndOnSilence)
     }
 
-    func test_toPayloadContainsTelnyxKeys() {
+    func test_toPayloadContainsTelnyxAndSIPKeys() {
         var s = AgentSettings.default
         s.telnyxAPIKey       = "MYKEY"
         s.telnyxFromNumber   = "+12223334444"
+        s.sipServer          = "10.0.0.1"
+        s.sipPort            = 5060
+        s.sipUser            = "100"
         s.callMaxDurationMin = 20
         s.callCostWarnUSD    = 3.0
         s.callAutoEndOnSilence = false
@@ -396,6 +439,9 @@ final class AgentSettingsTelnyxTests: XCTestCase {
         let payload = s.toPayload()
         XCTAssertEqual(payload["telnyx_api_key"] as? String, "MYKEY")
         XCTAssertEqual(payload["telnyx_from_number"] as? String, "+12223334444")
+        XCTAssertEqual(payload["sip_server"] as? String, "10.0.0.1")
+        XCTAssertEqual(payload["sip_port"] as? Int, 5060)
+        XCTAssertEqual(payload["sip_user"] as? String, "100")
         XCTAssertEqual(payload["call_max_duration_min"] as? Int, 20)
         XCTAssertEqual(payload["call_cost_warn_usd"] as? Double ?? -1, 3.0, accuracy: 0.001)
         XCTAssertEqual(payload["call_auto_end_on_silence"] as? Bool, false)
@@ -791,5 +837,29 @@ final class IPCErrorHandlingTests: XCTestCase {
             return
         }
         XCTAssertEqual(code, "telnyx_not_configured")
+    }
+
+    func test_sip_local_not_configured_error_detected() {
+        let response: [String: Any] = [
+            "error": ["code": "sip_local_not_configured", "message": "Set SIP server and user first"]
+        ]
+        guard let error = response["error"] as? [String: Any],
+              let code = error["code"] as? String else {
+            XCTFail("Error dict not accessible")
+            return
+        }
+        XCTAssertEqual(code, "sip_local_not_configured")
+    }
+
+    func test_twilio_not_configured_error_detected() {
+        let response: [String: Any] = [
+            "error": ["code": "twilio_not_configured", "message": "Set Twilio credentials first"]
+        ]
+        guard let error = response["error"] as? [String: Any],
+              let code = error["code"] as? String else {
+            XCTFail("Error dict not accessible")
+            return
+        }
+        XCTAssertEqual(code, "twilio_not_configured")
     }
 }

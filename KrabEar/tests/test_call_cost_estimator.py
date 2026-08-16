@@ -32,6 +32,14 @@ class TestEstimateMinuteCost(unittest.TestCase):
         rate = self.est.estimate_minute_cost("livekit", "us")
         self.assertAlmostEqual(rate, 0.001)
 
+    def test_sip_local_rate_is_zero(self) -> None:
+        rate_us = self.est.estimate_minute_cost("sip_local", "us")
+        rate_ru = self.est.estimate_minute_cost("sip_local", "ru")
+        rate_default = self.est.estimate_minute_cost("sip_local", "unknown")
+        self.assertEqual(rate_us, 0.0)
+        self.assertEqual(rate_ru, 0.0)
+        self.assertEqual(rate_default, 0.0)
+
     def test_case_insensitive_provider(self) -> None:
         rate_lower = self.est.estimate_minute_cost("telnyx", "ru")
         rate_upper = self.est.estimate_minute_cost("TELNYX", "RU")

@@ -36,6 +36,7 @@ class CallSessionService:
         self,
         store: Any,
         settings_get: Optional[Callable[[str, Any], Any]] = None,
+        get_provider_fn: Optional[Callable[[Any], Any]] = None,
     ) -> None:
         """
         Args:
@@ -45,13 +46,11 @@ class CallSessionService:
                 Используется для privacy_mode_enabled gate в handle_call_session_get
                 и handle_call_session_list (C1, wave-31).
                 None → gate выключен (privacy_mode считается False).
-
-        NB (W1775): параметр `auto_end` удалён — он сохранялся в `self._auto_end`,
-        но нигде не читался (assigned-and-never-read). Auto-end вызывается напрямую
-        из BackendService (`call_check_auto_end`), а не отсюда.
+            get_provider_fn: callable(settings) → CallProvider — фабрика провайдера телефонии.
         """
         self._store = store
         self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
+        self._get_provider_fn = get_provider_fn
         # Transient in-memory flag: tracks whether bot autopilot is active per session.
         # Mirrors Voice Gateway's agent.mode ("takeover" vs "autopilot").
         # Not persisted — resets to True (bot active) when the process restarts.
