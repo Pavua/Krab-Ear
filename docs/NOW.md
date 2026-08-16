@@ -4,11 +4,11 @@
 
 ## P0 interrupt — SIGSEGV `whisper-large-v3-turbo` (2026-08-16 16:21)
 
-Не чинить в Главном Крабе. Коалиция краша: **`ai.krab.ear.rest`**, Homebrew Python 3.14.6, `EXC_BAD_ACCESS` / `KERN_INVALID_ADDRESS at 0x2`, поток `whisper-large-v3-turbo`. KeepAlive уже поднял REST (`runs=2`).
+Не чинить в Главном Крабе. Коалиция краша: **`ai.krab.ear.rest`**. Каскад: `balanced` (turbo) → retry `whisper-large-v3-mlx` при confidence < 0.65 → retry turbo, параллельно LM Studio на 36 ГБ.
 
-Каскад в `logs/krab-ear-rest.err.log`: `balanced` → retry `whisper-large-v3-mlx` (confidence < 0.65) → retry turbo, **параллельно 10 LM Studio MLX** в личке Краба. Два Whisper + LM Studio на 36 ГБ — типичный триггер native SEGV.
+**P0a закрыта в коде (2026-08-16):** второй MLX-чекпоинт не грузится при `kern.memorystatus_vm_pressure_level >= 1` (и turbo→turbo skip); REST `/v1/stt/transcribe` — process-wide singleflight, 503 `stt_busy`. Карточка: [`docs/superpowers/plans/2026-08-16-p0-mlx-second-checkpoint.md`](superpowers/plans/2026-08-16-p0-mlx-second-checkpoint.md). `mlx_subprocess` — in-process watchdog, не изоляция PID.
 
-Карточка: [`HANDOFF_WHISPER_TURBO_SEGV_2026-08-16_RU.md`](HANDOFF_WHISPER_TURBO_SEGV_2026-08-16_RU.md). Кратко: не грузить второй Whisper при vm_pressure; вынести `mlx_whisper` в worker-процесс (сейчас SEGV убивает весь REST); singleflight STT. Не stash/reset, не коммитить `wake_word_models/hard_negatives_raw/`.
+**Ещё открыто (P0c):** вынести `mlx_whisper` в OS-worker, чтобы SEGV не убивал весь REST. Не `REST_IN_PROCESS_ENABLED`. Не рестартовать Ear/VG из агента под post-call. Не коммитить `wake_word_models/hard_negatives_raw/`. Handoff: [`HANDOFF_WHISPER_TURBO_SEGV_2026-08-16_RU.md`](HANDOFF_WHISPER_TURBO_SEGV_2026-08-16_RU.md).
 
 ## База
 
@@ -28,7 +28,7 @@
 
 **W3 — Sparkle v2.11.0: закрыта 2026-08-16.** `krab-ear-ci` зелёный на `064467f6` (три stale-теста подтянуты к прод: hang-kill 10с, пустые SIP-креды, spy на startup-recovery). Dispatch `release.yml -f version=2.11.0` → success. `debug_keep_dictation_wav` в проде не включать.
 
-**Следующая: P0 interrupt сверху** (SEGV turbo / REST worker / singleflight STT). Не новая фича, пока P0 открыт.
+**Следующая: P0c** — OS-worker для mlx_whisper (SEGV не должен убивать PID REST). P0a (pressure-gate + singleflight) в коде. Не новая фича.
 
 ## Не делать
 

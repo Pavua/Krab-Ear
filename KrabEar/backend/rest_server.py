@@ -11,6 +11,7 @@ import json
 import math
 import os
 import queue
+import threading
 import time
 import uuid
 import logging
@@ -583,6 +584,20 @@ def _resolve_transcribe_deadline_sec(raw: _Any) -> tuple[float | None, str | Non
     if not math.isfinite(value) or value <= 0 or value > _DEADLINE_SEC_MAX:
         return None, "invalid deadline_sec"
     return float(max(_DEADLINE_SEC_MIN, value)), None
+
+
+# P0 2026-08-16: один native STT в REST-процессе. Каждый POST раньше поднимал
+# свой ThreadPoolExecutor — два /v1/stt/transcribe грузили MLX параллельно.
+_STT_SINGLEFLIGHT = threading.Lock()
+
+
+def try_acquire_stt_singleflight(timeout_sec: float) -> bool:
+    """Захватить STT-слот. False → 503 stt_busy, transcribe не стартует."""
+    return _STT_SINGLEFLIGHT.acquire(timeout=max(0.0, float(timeout_sec)))
+
+
+def release_stt_singleflight() -> None:
+    _STT_SINGLEFLIGHT.release()
 
 
 # EX_SOFTWARE из sysexits.h. Отдельный код отличает намеренный fail-fast после
@@ -1704,6 +1719,14 @@ def transcribe_audio():
             _TRANSCRIBE_TIMEOUT_SEC if _deadline_sec is None else _deadline_sec
         )
 
+        if not try_acquire_stt_singleflight(_transcribe_timeout_sec):
+            logger.warning(
+                "REST STT singleflight busy after %.1fs for %s",
+                _transcribe_timeout_sec,
+                safe_base,
+            )
+            return jsonify({"error": "stt_busy"}), 503
+
         # F2: ограничиваем весь вызов транскрайбера wall-clock таймаутом.
         # ThreadPoolExecutor создаёт non-daemon worker, поэтому cancel_futures
         # не может остановить уже начавшийся MLX-вызов. На таймауте сначала
@@ -1778,6 +1801,11 @@ def transcribe_audio():
                     timeout_response.status_code = 504
                     return timeout_response
         finally:
+            try:
+                release_stt_singleflight()
+            except RuntimeError:
+                # release без acquire не должен маскировать таймаут/ошибку STT.
+                pass
             if not _pool_shutdown_nonblocking:
                 # На success/error/cancelled-pending Future нет работающей
                 # задачи, поэтому wait=True гарантирует отсутствие хвоста.

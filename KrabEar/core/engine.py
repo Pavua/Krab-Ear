@@ -38,6 +38,7 @@ except Exception:
 from core.mlx_lock import mlx_lock  # noqa: E402 — после try/except блока MLX импорта
 from core.mlx_inter_lock import MLXInterLockTimeout, mlx_inter_process_lock  # noqa: E402
 from core.mlx_subprocess import MLXTimeoutError, get_watchdog  # noqa: E402
+from core.mlx_memory_gate import should_skip_second_mlx_checkpoint  # noqa: E402
 from core.transcript_context import build_initial_prompt
 
 try:
@@ -1795,11 +1796,29 @@ class AudioEngine:
         best_conf = first_conf
 
         retries_done = 0
+        first_model = str(first_result.get("model_used") or getattr(self, "current_model", "") or "")
+        skip_second_mlx = should_skip_second_mlx_checkpoint()
         for candidate in retry_candidates:
             if retries_done >= max_retries:
                 break
 
             model_label = candidate["name"]
+            if candidate["kind"] == "model":
+                if first_model and model_label == first_model:
+                    logger.info("[STT] skip same-checkpoint retry %s", model_label)
+                    continue
+                if skip_second_mlx:
+                    logger.warning(
+                        "[STT] skip second MLX checkpoint %s (vm_pressure); keep %s conf=%.2f",
+                        model_label, first_model, first_conf,
+                    )
+                    attempts.append({
+                        "model": model_label,
+                        "confidence": round(first_conf, 4),
+                        "latency_ms": 0,
+                        "skipped": "vm_pressure",
+                    })
+                    continue
             logger.info(
                 "[STT] balanced→%s retry: confidence %.2f < %.2f threshold",
                 model_label, best_conf, threshold,
