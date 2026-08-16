@@ -64,6 +64,11 @@
 - close candidates: все остальные open с заголовком
   `ci: test suite failure — YYYY-MM-DD` или `ci: flaky test —`
 
+## Scheduled task
+
+Patched `~/.claude/scheduled-tasks/krab-ear-test-health/SKILL.md` (backup `/tmp/krab-ear-test-health.SKILL.md.bak`).
+Issue title pattern `ci: test suite failure — DATE` retired.
+
 ## Untracked (не коммитить)
 
 - `wake_word_models/hard_negatives_raw/tts_phrases.json`
