@@ -2105,3 +2105,9 @@ P0c вынес inference в OS-child, но `MLXWhisperSession.start()` early-ret
 - In-flight пустой stdout по-прежнему `MLXWorkerCrashed` наружу — не ретраить то же аудио.
 - Карточка: `docs/superpowers/plans/2026-08-17-p0f-mlx-worker-respawn.md`.
 
+## 2026-08-17 — сверка GigaAM v3 + живой wake-word PortAudio
+
+Владелец спросил, v2 или v3. Факт: **v3**. `stt_gigaam_mode=v3_e2e_rnnt` в прод-settings; venv git `559d88d6` / пакет 0.2.0; worker `mode=v3_e2e_rnnt`. Миф — IPC-лейбл `"GigaAM v2 (RU)"` в `list_stt_engines` (Swift берёт `display_name` как есть). Лейбл → `"GigaAM v3 (RU)"`.
+
+Sentry 48ч KRAB-EAR пусто; за 7д `KRAB-EAR-BACKEND-1K`/`1T`/`1M` last seen 4д. Логи сегодня: wake-word THREAD_HUNG после диктовок → kickstart 20:17/20:47/21:17; после 21:17 — `PaMacCore -50` и `recorder_timeout`. Следующая волна W7, не W6. Карточка: `docs/superpowers/plans/2026-08-17-wakeword-portaudio-after-dictation.md`.
+

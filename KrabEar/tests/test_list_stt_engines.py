@@ -216,6 +216,15 @@ class TestDisabledEngine(unittest.TestCase):
         self.assertIsNotNone(gigaam)
         self.assertTrue(gigaam["enabled"])
 
+    def test_gigaam_display_name_is_v3_not_v2(self):
+        """Прод грузит v3_e2e_rnnt; UI-лейбл v2 — миф (живой IPC 2026-08-17)."""
+        svc = _make_svc({"stt_gigaam_enabled": True})
+        engines = svc.handle_list_stt_engines({})["engines"]
+        gigaam = next((e for e in engines if e["name"] == "gigaam"), None)
+        self.assertIsNotNone(gigaam)
+        self.assertEqual(gigaam["display_name"], "GigaAM v3 (RU)")
+        self.assertNotIn("v2", gigaam["display_name"])
+
     def test_all_optional_engines_have_toggle_keys(self):
         """All non-whisper engines must have a non-null toggle_key."""
         svc = _make_svc()
