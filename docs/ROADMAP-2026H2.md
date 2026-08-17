@@ -2088,3 +2088,12 @@ Source-контракт на факт вызова из обоих путей **
 - `safe_backend_restart --with-rest`: REST kickstart после IPC ping, не параллельно с backend.
 - Карточка: `docs/superpowers/plans/2026-08-17-p0d-event-bridge-token-reload.md`.
 
+## 2026-08-17 — P0e: `/v1/stream` native STT под REST singleflight
+
+VG бьёт POST `/v1/stt/transcribe` и WS `/v1/stream` в тот же REST PID. POST уже ждал слот (`deadline_sec`); WS — нет.
+
+- Гейт не на `ingest()` (F3: снапшот + слот-1). Только вокруг `LiveSubsService._process_window` → `transcribe`.
+- Optional `stt_acquire`/`stt_release` (default None). REST WS передаёт `try_acquire_stt_singleflight` / `release_stt_singleflight`; IPC `BackendService` — нет.
+- Live subs: `acquire(0)` — занято POST → дроп окна, не копить лаг. `finally: release` даже если transcribe бросает. Cloud `/v1/stream` не тронут.
+- Карточка: `docs/superpowers/plans/2026-08-17-p0e-stream-stt-singleflight.md`.
+

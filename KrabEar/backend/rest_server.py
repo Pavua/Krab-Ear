@@ -2376,11 +2376,14 @@ def _ws_stream_handler(ws):
     mode = config.get("mode", "transcribe")
     target_lang = config.get("target_lang", "off") if mode == "translate" else "off"
 
-    # Instantiate the streaming service for this connection
+    # P0e: native WS делит REST STT-слот с POST; acquire(0) внутри _process_window.
+    # Cloud-ветка ниже LiveSubsService не использует. IPC BackendService gate не получает.
     live_subs = LiveSubsService(
         transcriber=deps.transcriber,
         translator=deps.translator,
-        settings_get=lambda k, d=None: deps.store.load_settings().get(k, d)
+        settings_get=lambda k, d=None: deps.store.load_settings().get(k, d),
+        stt_acquire=try_acquire_stt_singleflight,
+        stt_release=release_stt_singleflight,
     )
 
     cloud_audio_buffer = bytearray()
