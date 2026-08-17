@@ -355,6 +355,13 @@ class EventBridge:
         if not batch:
             return
         ok = self._post_fn(self._url, {"events": batch}, self._token or "", POST_TIMEOUT_SEC)
+        if not ok:
+            refreshed = read_bridge_token(self._data_dir)
+            if refreshed and refreshed != (self._token or ""):
+                self._token = refreshed
+                ok = self._post_fn(
+                    self._url, {"events": batch}, self._token, POST_TIMEOUT_SEC,
+                )
         if ok:
             with self._lock:
                 for _ in range(len(batch)):

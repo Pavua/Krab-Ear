@@ -1,6 +1,6 @@
 # NOW — что делать сейчас (Krab Ear)
 
-Обновлено: 2026-08-16. Читай **этот файл + одну карточку волны**. Не читай `ROADMAP-2026H2.md` как очередь задач — это журнал. Как работать: [`EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md).
+Обновлено: 2026-08-17. Читай **этот файл + одну карточку волны**. Не читай `ROADMAP-2026H2.md` как очередь задач — это журнал. Как работать: [`EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md).
 
 ## P0 interrupt — SIGSEGV `whisper-large-v3-turbo` (2026-08-16 16:21)
 
@@ -8,7 +8,9 @@
 
 **P0a закрыта в коде (2026-08-16):** второй MLX-чекпоинт не грузится при `kern.memorystatus_vm_pressure_level >= 1` (и turbo→turbo skip); REST `/v1/stt/transcribe` — process-wide singleflight, 503 `stt_busy`. Карточка: [`docs/superpowers/plans/2026-08-16-p0-mlx-second-checkpoint.md`](superpowers/plans/2026-08-16-p0-mlx-second-checkpoint.md). `mlx_subprocess` — in-process watchdog, не изоляция PID.
 
-**P0c закрыта в коде (2026-08-16):** `mlx_whisper.transcribe` для REST уходит в OS-worker (`core/mlx_whisper_session.py` + `core/workers/mlx_whisper_worker.py`). SEGV убивает child. Включение: argv `rest_server.py` или `KRAB_EAR_MLX_WHISPER_WORKER=1` (plist REST + gunicorn-скрипт). IPC-диктовка остаётся in-process. Живой REST подхватит после `scripts/safe_backend_restart.command --with-rest` вне звонка — агент сам не рестартует. Карточка: [`docs/superpowers/plans/2026-08-16-p0c-mlx-whisper-worker.md`](superpowers/plans/2026-08-16-p0c-mlx-whisper-worker.md). Handoff: [`HANDOFF_WHISPER_TURBO_SEGV_2026-08-16_RU.md`](HANDOFF_WHISPER_TURBO_SEGV_2026-08-16_RU.md).
+**P0c закрыта и живая (2026-08-17):** `mlx_whisper` для REST в OS-worker. Живой REST pid 84983, child `mlx_whisper_worker.py`; `POST /v1/stt/transcribe` 200 за 0.56с; P0a скипнула второй чекпоинт под vm_pressure. IPC-диктовка in-process. Карточка: [`docs/superpowers/plans/2026-08-16-p0c-mlx-whisper-worker.md`](superpowers/plans/2026-08-16-p0c-mlx-whisper-worker.md).
+
+**P0d закрыта в коде (2026-08-17):** после парного kickstart `/internal/event` 12 мин сыпал 401 (протухший bridge-токен). REST на mismatch один раз перечитывает файл; EventBridge после неуспешного POST перечитывает токен и ретраит только если он сменился; `safe_backend_restart --with-rest` поднимает REST после IPC ping. Карточка: [`docs/superpowers/plans/2026-08-17-p0d-event-bridge-token-reload.md`](superpowers/plans/2026-08-17-p0d-event-bridge-token-reload.md).
 
 ## База
 
@@ -28,9 +30,9 @@
 
 **W3 — Sparkle v2.11.0: закрыта 2026-08-16.** `krab-ear-ci` зелёный на `064467f6` (три stale-теста подтянуты к прод: hang-kill 10с, пустые SIP-креды, spy на startup-recovery). Dispatch `release.yml -f version=2.11.0` → success. `debug_keep_dictation_wav` в проде не включать.
 
-**P0a/P0c — SEGV turbo в REST: закрыты в коде 2026-08-16.** Pressure-gate + REST singleflight (P0a); OS-worker для mlx_whisper (P0c). Живой REST не рестартовали из агента. Смоук `:5005` без параллельного LM Studio — только по просьбе владельца + `safe_backend_restart.command --with-rest`.
+**P0a/P0c — SEGV turbo в REST: закрыты 2026-08-16/17.** Pressure-gate + REST POST singleflight (P0a); OS-worker жив на прод-REST (P0c). **P0d (2026-08-17):** token reload после dual restart. Не `REST_IN_PROCESS_ENABLED`.
 
-**Следующая:** не новая фича. Live-проверка P0c на REST, когда владелец скажет (вне звонка). Не `REST_IN_PROCESS_ENABLED`.
+**Следующая:** не новая фича. `/v1/stream` по-прежнему вне POST-singleflight (JSON RPC воркера сериализован своим lock). Не включать `REST_IN_PROCESS_ENABLED`.
 
 ## Не делать
 

@@ -2077,4 +2077,14 @@ Source-контракт на факт вызова из обоих путей **
 - Включение: argv содержит `rest_server.py` или `KRAB_EAR_MLX_WHISPER_WORKER=1`. IPC-диктовка по умолчанию in-process. Child получает `=0` (анти-рекурсия).
 - `AudioEngine._transcribe_model` / `warmup` / `WhisperMLXAdapter` идут через worker, когда флаг ON; Metal в child, родитель не берёт `mlx_lock` на RPC.
 - Прод REST подхватит после `scripts/safe_backend_restart.command --with-rest` (не kickstart под запись). Карточка: `docs/superpowers/plans/2026-08-16-p0c-mlx-whisper-worker.md`.
+- Живой смок 2026-08-17: REST pid 84983, child `mlx_whisper_worker.py`, `POST /v1/stt/transcribe` 200 за 0.56с; P0a скипнула второй MLX-чекпоинт под vm_pressure.
+
+## 2026-08-17 — P0d: EventBridge token reload после dual restart
+
+Парный `kickstart` backend+REST оставил `/internal/event` на 401 ~12 мин (REST кэш / RAM-токен IPC разошлись с файлом). SSE/тосты молчали.
+
+- REST: mismatch Bearer → сброс `_event_bridge_token_cache`, один re-read файла, повторный compare.
+- EventBridge: неуспешный POST → `read_bridge_token`; retry один раз только если токен сменился (connection-refused не дублируется).
+- `safe_backend_restart --with-rest`: REST kickstart после IPC ping, не параллельно с backend.
+- Карточка: `docs/superpowers/plans/2026-08-17-p0d-event-bridge-token-reload.md`.
 
