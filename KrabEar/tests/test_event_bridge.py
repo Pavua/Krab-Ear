@@ -104,6 +104,51 @@ class EventBridgeUnitTestCase(unittest.TestCase):
         self.assertEqual(diag["queue_depth"], 1, "неотправленный батч должен остаться в очереди, не быть выброшенным")
         self.assertEqual(bridge._current_backoff, BACKOFF_MIN_SEC * 2)
 
+    def test_drain_reloads_disk_token_and_retries_once(self):
+        """401 из‑за stale RAM-токена: файл уже новый → один retry, state up."""
+        token_path = Path(self._tmpdir) / EVENT_BRIDGE_TOKEN_FILENAME
+        token_path.write_text("fresh-token", encoding="utf-8")
+        seen = []
+
+        def fake_post(url, payload, token, timeout):
+            seen.append(token)
+            return token == "fresh-token"
+
+        bridge = EventBridge(
+            settings=_fake_settings(), data_dir=Path(self._tmpdir), post_fn=fake_post,
+        )
+        bridge._token = "stale-token"
+        bridge.on_event("x", {"i": 1})
+        bridge._drain_and_send()
+
+        self.assertEqual(seen, ["stale-token", "fresh-token"])
+        diag = bridge.get_diagnostics()
+        self.assertEqual(diag["state"], "up")
+        self.assertEqual(diag["sent"], 1)
+        self.assertEqual(diag["failed"], 0)
+        self.assertEqual(bridge._token, "fresh-token")
+
+    def test_drain_does_not_retry_when_disk_token_unchanged(self):
+        """Connection refused / 5xx: тот же токен на диске — не дублировать POST."""
+        token_path = Path(self._tmpdir) / EVENT_BRIDGE_TOKEN_FILENAME
+        token_path.write_text("same-token", encoding="utf-8")
+        seen = []
+
+        def fake_post(url, payload, token, timeout):
+            seen.append(token)
+            return False
+
+        bridge = EventBridge(
+            settings=_fake_settings(), data_dir=Path(self._tmpdir), post_fn=fake_post,
+        )
+        bridge._token = "same-token"
+        bridge.on_event("x", {"i": 1})
+        bridge._drain_and_send()
+
+        self.assertEqual(seen, ["same-token"])
+        self.assertEqual(bridge.get_diagnostics()["state"], "down")
+        self.assertEqual(bridge.get_diagnostics()["failed"], 1)
+
     def test_backoff_caps_at_max(self):
         bridge = EventBridge(settings=_fake_settings(), data_dir=Path(self._tmpdir),
                              post_fn=lambda *a, **k: False)

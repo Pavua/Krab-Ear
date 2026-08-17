@@ -118,6 +118,21 @@ class InternalEventEndpointTestCase(unittest.TestCase):
             )
         self.assertEqual(resp.status_code, 400)
 
+    def test_stale_cache_rereads_file_token_and_accepts(self):
+        """После dual-kickstart REST кэш может держать чужой токен; файл уже новый."""
+        _rest_mod._event_bridge_token_cache = "stale-cached-token"
+        with patch("backend.event_bridge.read_bridge_token", return_value=self._token), \
+                patch.object(_rest_mod.event_bus, "emit_envelope"):
+            resp = self._post([], token=self._token)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(_rest_mod._event_bridge_token_cache, self._token)
+
+    def test_stale_cache_reread_still_rejects_wrong_bearer(self):
+        _rest_mod._event_bridge_token_cache = "stale-cached-token"
+        with patch("backend.event_bridge.read_bridge_token", return_value=self._token):
+            resp = self._post([], token="attacker-token")
+        self.assertEqual(resp.status_code, 401)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

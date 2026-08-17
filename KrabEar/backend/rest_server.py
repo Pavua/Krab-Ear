@@ -519,6 +519,14 @@ def _get_event_bridge_token() -> str | None:
     return _event_bridge_token_cache
 
 
+def _bridge_tokens_match(supplied: str, expected: str) -> bool:
+    """hmac.compare_digest; разная длина / не-ASCII → False, не исключение."""
+    try:
+        return hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
+    except Exception:
+        return False
+
+
 def _require_loopback_and_bridge_token(f):
     """Декоратор: /internal/event — loopback-only (403) + bridge-токен (401).
 
@@ -540,13 +548,15 @@ def _require_loopback_and_bridge_token(f):
         if not auth_header.startswith("Bearer "):
             return jsonify({"error": "Missing or invalid Authorization header"}), 401
         supplied = auth_header[len("Bearer "):]
-        try:
-            match = hmac.compare_digest(supplied.encode("utf-8"), token.encode("utf-8"))
-        except Exception:
-            match = False
-        if not match:
-            logger.warning("event_bridge: неверный bridge-токен")
-            return jsonify({"error": "invalid bridge token"}), 401
+        if not _bridge_tokens_match(supplied, token):
+            # Dual kickstart: REST успел закэшировать токен до того, как
+            # backend перезаписал файл. Один re-read, не вечный 401.
+            global _event_bridge_token_cache
+            _event_bridge_token_cache = None
+            token = _get_event_bridge_token()
+            if not token or not _bridge_tokens_match(supplied, token):
+                logger.warning("event_bridge: неверный bridge-токен")
+                return jsonify({"error": "invalid bridge token"}), 401
         return f(*args, **kwargs)
     return _wrapper
 

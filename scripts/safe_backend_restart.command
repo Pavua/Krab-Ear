@@ -93,19 +93,22 @@ fi
 
 echo "[safe-restart] kickstart $BACKEND_UNIT"
 launchctl kickstart -k "$BACKEND_UNIT"
-if [ "$WITH_REST" -eq 1 ]; then
-  echo "[safe-restart] kickstart $REST_UNIT"
-  launchctl kickstart -k "$REST_UNIT"
-fi
 
 # Ожидание готовности: ping до 60с (warmup тяжёлых моделей идёт дольше, но
 # сокет поднимается раньше; нам важна IPC-доступность для GUI).
+# REST поднимаем ТОЛЬКО после ping: параллельный kickstart даёт новому REST
+# закэшировать bridge-токен до того, как новый backend допишет файл → 401
+# на /internal/event (SSE/тосты молчат).
 for _ in $(seq 1 30); do
   sleep 2
   RESP=$(ipc_call ping)
   if [ -n "$RESP" ] && printf '%s' "$RESP" | grep -q '"ok": true'; then
     NEW_PID=$(launchctl print "$BACKEND_UNIT" 2>/dev/null | grep -m1 'pid = ' | tr -dc '0-9')
     echo "[safe-restart] OK: backend жив (pid=${NEW_PID:-?}), IPC ping ok."
+    if [ "$WITH_REST" -eq 1 ]; then
+      echo "[safe-restart] kickstart $REST_UNIT (после IPC ping)"
+      launchctl kickstart -k "$REST_UNIT"
+    fi
     exit 0
   fi
 done
