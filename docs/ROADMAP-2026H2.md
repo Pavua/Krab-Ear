@@ -2097,3 +2097,11 @@ VG бьёт POST `/v1/stt/transcribe` и WS `/v1/stream` в тот же REST PID
 - Live subs: `acquire(0)` — занято POST → дроп окна, не копить лаг. `finally: release` даже если transcribe бросает. Cloud `/v1/stream` не тронут.
 - Карточка: `docs/superpowers/plans/2026-08-17-p0e-stream-stt-singleflight.md`.
 
+## 2026-08-17 — P0f: mlx_whisper worker respawn после idle-смерти child
+
+P0c вынес inference в OS-child, но `MLXWhisperSession.start()` early-return при `_proc is not None` без `poll()`. Тот же класс, что GigaAM W1216 F1: idle SEGV/OOM между запросами оставляет мёртвый Popen, первый POST после этого — `MLXWorkerCrashed`/`BrokenPipe`, REST жив, STT нет до рестарта процесса.
+
+- `start()`: живой `poll() is None` → return; мёртвый → `_reap_dead_unlocked()` (kill, без shutdown JSON) + один spawn. Не крутить цикл «пока poll None» (мок с rc=-11 сразу после spawn не должен зациклиться).
+- In-flight пустой stdout по-прежнему `MLXWorkerCrashed` наружу — не ретраить то же аудио.
+- Карточка: `docs/superpowers/plans/2026-08-17-p0f-mlx-worker-respawn.md`.
+
