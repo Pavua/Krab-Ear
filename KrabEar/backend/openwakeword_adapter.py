@@ -63,11 +63,15 @@ class OpenWakeWordAdapter:
         data_dir: str | Path,
         settings_get: Optional[Callable[[str, Any], Any]] = None,
         is_recording: Optional[Callable[[], bool]] = None,
+        is_start_blocked: Optional[Callable[[], bool]] = None,
     ) -> None:
         self._data_dir = Path(data_dir)
         # 2026-08-01 (F6): активная диктовка запрещает открывать второй тап.
-        # Тот же колбэк, что у AudioReinitCoordinator и WakeWordWatchdog.
+        # stop()/_listen_loop читают голый is_recording (wedged под записью
+        # нельзя — 2026-08-03). handle_wake_word_start дополнительно смотрит
+        # is_start_blocked (W7): worker рекордера ещё жив после stop().
         self._is_recording = is_recording
+        self._is_start_blocked = is_start_blocked
         self._custom_dir = self._data_dir / _CUSTOM_MODELS_DIR
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
@@ -481,13 +485,24 @@ class OpenWakeWordAdapter:
         # WakeWordWatchdog, где тот же колбэк fail-open: там ошибка в другую
         # сторону отключила бы сторожа, здесь — сломала бы основную функцию.
         # Сбой логируем WARNING: тихий fail-closed убил бы wake word навсегда.
-        if self._is_recording is not None:
+        #
+        # W7 (2026-08-17): is_start_blocked закрывает окно после stop(), когда
+        # is_recording уже False, а worker рекордера ещё держит CoreAudio
+        # (join / recorder_timeout). Reason тот же, что F6 — поллер не жжёт
+        # бюджет self-heal.
+        _busy_cb = (
+            self._is_start_blocked
+            if self._is_start_blocked is not None
+            else self._is_recording
+        )
+        if _busy_cb is not None:
             try:
-                _recording = bool(self._is_recording())
+                _recording = bool(_busy_cb())
             except Exception:
                 logger.warning(
                     "OpenWakeWordAdapter.handle_wake_word_start: "
-                    "is_recording() упал — считаем, что запись идёт (fail-closed)",
+                    "is_recording()/is_start_blocked() упал — считаем, что "
+                    "запись идёт (fail-closed)",
                     exc_info=True,
                 )
                 _recording = True

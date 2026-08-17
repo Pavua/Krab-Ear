@@ -77,28 +77,48 @@ struct WedgedEscalationTracker {
     /// без капа kickstart повторялся бы каждые 30 минут навсегда, каждый раз
     /// убивая in-flight работу backend'а.
     static let maxConsecutive = 3
+    /// Сколько подряд тиков «running + last_chunk_ts» считаем устойчивым
+    /// здоровьем. ~6 с при интервале поллера 0.75 с. Живой инцидент 2026-08-17:
+    /// 1–2 чанка сразу после kickstart обнуляли кап через noteHealthy() —
+    /// цикл 20:17 / 20:47 / 21:17, give-up maxConsecutive=3 не срабатывал.
+    static let minHealthyPolls = 8
 
     private var lastEscalationAt: TimeInterval?
     private(set) var consecutiveEscalations = 0
+    private var consecutiveHealthyPolls = 0
 
     var exhausted: Bool { consecutiveEscalations >= Self.maxConsecutive }
 
-    /// Реально захваченный чанк (last_chunk_ts != nil) — микрофон жив,
-    /// кап перевзводится. wedged-флап (start() временно сбрасывает флаг)
-    /// здоровым сигналом НЕ считается.
+    /// Явный «устойчиво здоров» для тестов и HealthMonitor.
+    /// Поллер wake word больше не зовёт это на каждом last_chunk_ts != nil.
     mutating func noteHealthy() { consecutiveEscalations = 0 }
+
+    /// Тик wake-word статуса: кап снимается только после устойчивой серии
+    /// живых чанков, не после одного-двух сразу после kickstart.
+    mutating func notePoll(running: Bool, hasRecentChunk: Bool) {
+        if running && hasRecentChunk {
+            consecutiveHealthyPolls += 1
+            if consecutiveHealthyPolls >= Self.minHealthyPolls {
+                consecutiveEscalations = 0
+            }
+        } else {
+            consecutiveHealthyPolls = 0
+        }
+    }
 
     mutating func shouldEscalate(wedged: Bool, now: TimeInterval) -> Bool {
         guard wedged, !exhausted else { return false }
         if let last = lastEscalationAt, now - last < Self.minGapSec { return false }
         lastEscalationAt = now
         consecutiveEscalations += 1
+        consecutiveHealthyPolls = 0
         return true
     }
 
     mutating func reset() {
         lastEscalationAt = nil
         consecutiveEscalations = 0
+        consecutiveHealthyPolls = 0
     }
 }
 
@@ -254,10 +274,12 @@ final class WakeWordPoller {
                 // отказы старта из-за maintenance-окна танца (ok:false)
                 // не должны навсегда выжигать 3 попытки (Fable-гейт, F4).
                 if running { self.failedStartAttempts = 0 }
-                // Реально захваченный чанк — микрофон жив: перевзводим
-                // give-up кап (wedged-флап здоровьем не считается).
-                if (result["last_chunk_ts"] as? Double) != nil {
-                    self.wedgedTracker.noteHealthy()
+                // Устойчивый heartbeat, не один тик после kickstart:
+                // короткий last_chunk_ts больше не обнуляет give-up кап
+                // (живой цикл 2026-08-17 20:17 / 20:47 / 21:17).
+                let hasRecentChunk = (result["last_chunk_ts"] as? Double) != nil
+                self.wedgedTracker.notePoll(running: running, hasRecentChunk: hasRecentChunk)
+                if !self.wedgedTracker.exhausted {
                     self.gaveUpNotified = false
                 }
                 let ts = (result["last_detection"] as? [String: Any])?["ts"] as? Double
