@@ -76,10 +76,16 @@ class LiveSubsService:
         transcriber: "Transcriber",
         translator: "Translator",
         settings_get: Callable[[str, Any], Any] | None = None,
+        stt_acquire: Callable[[float], bool] | None = None,
+        stt_release: Callable[[], None] | None = None,
     ) -> None:
         self._transcriber = transcriber
         self._translator = translator
         self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
+        # P0e: REST /v1/stream делит MLX с POST /v1/stt/transcribe в том же PID.
+        # IPC BackendService эти колбэки не передаёт (другой процесс) — default None.
+        self._stt_acquire = stt_acquire
+        self._stt_release = stt_release
         self._lock = threading.RLock()
         self._buffer: list[np.ndarray] = []
         self._buffer_samples: int = 0
@@ -595,10 +601,45 @@ class LiveSubsService:
         # fallback после пустого GigaAM: что первый движок вернул, то и
         # результат, включая пустоту (см. core/engine.py::AudioEngine.transcribe
         # и docs/superpowers/specs/2026-08-12-live-subs-single-pass-design.md).
-        stt_result = self._transcriber.transcribe(
-            audio, quality_profile="balanced", skip_vad_prefilter=True,
-            context_free=True, lang_hint=lang_hint, single_pass=True,
-        )
+        # P0e: гейт ТОЛЬКО вокруг transcribe — не ingest(), не resample, не
+        # translate/emit, не всё WS-соединение. timeout=0: занято POST → дроп
+        # окна (субтитры эфемерны), не копить лаг ожиданием deadline_sec.
+        acquired = False
+        if self._stt_acquire is not None:
+            try:
+                acquired = bool(self._stt_acquire(0.0))
+            except Exception:
+                logger.exception(
+                    "LiveSubsService: stt_acquire упал — окно дропнуто fail-safe",
+                )
+                acquired = False
+            if not acquired:
+                with self._worker_cond:
+                    self._dropped_windows += 1
+                    dropped_total = self._dropped_windows
+                logger.warning(
+                    "LiveSubsService: REST STT busy — окно дропнуто (singleflight)",
+                    extra={"dropped_windows": dropped_total},
+                )
+                return {
+                    "text": "",
+                    "translation": None,
+                    "start_ts": start_ts,
+                    "end_ts": end_ts,
+                    "language_detected": None,
+                }
+
+        try:
+            stt_result = self._transcriber.transcribe(
+                audio, quality_profile="balanced", skip_vad_prefilter=True,
+                context_free=True, lang_hint=lang_hint, single_pass=True,
+            )
+        finally:
+            if acquired and self._stt_release is not None:
+                try:
+                    self._stt_release()
+                except Exception:
+                    logger.exception("LiveSubsService: stt_release упал")
         text = stt_result.get("text", "").strip()
         language_detected = stt_result.get("language")
 
