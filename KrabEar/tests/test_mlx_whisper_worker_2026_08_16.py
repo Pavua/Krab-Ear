@@ -113,6 +113,57 @@ class MlxWhisperSessionProtocolTest(unittest.TestCase):
         self.assertEqual(ctx.exception.returncode, -11)
         self.assertIsNone(session._proc)
 
+    def test_dead_child_respawns_before_next_transcribe(self):
+        """W1216 F1 sibling: poll()!=None → новый child, этот запрос успешен."""
+        from core.mlx_whisper_session import get_mlx_whisper_session
+
+        dead = self._fake_popen("", -11)
+        live = self._fake_popen(
+            '{"ok": true, "result": {"text": "ok", "segments": []}}\n',
+            None,
+        )
+        pops = [dead, live]
+        session = get_mlx_whisper_session()
+        with patch(
+            "core.mlx_whisper_session.subprocess.Popen",
+            side_effect=lambda *a, **k: pops.pop(0),
+        ):
+            session.start()
+            self.assertIs(session._proc, dead)
+            result = session.transcribe(
+                "/tmp/a.wav",
+                {"path_or_hf_repo": "mlx-community/whisper-large-v3-turbo"},
+                timeout_sec=2.0,
+                model_name="turbo",
+            )
+        self.assertEqual(result["text"], "ok")
+        self.assertIs(session._proc, live)
+        self.assertEqual(pops, [])
+
+    def test_live_child_start_does_not_respawn(self):
+        from core.mlx_whisper_session import get_mlx_whisper_session
+
+        live = self._fake_popen(
+            '{"ok": true, "result": {"text": "ok", "segments": []}}\n',
+            None,
+        )
+        session = get_mlx_whisper_session()
+        with patch(
+            "core.mlx_whisper_session.subprocess.Popen",
+            return_value=live,
+        ) as popen:
+            session.start()
+            session.start()
+            result = session.transcribe(
+                "/tmp/a.wav",
+                {"path_or_hf_repo": "mlx-community/whisper-large-v3-turbo"},
+                timeout_sec=2.0,
+                model_name="turbo",
+            )
+        self.assertEqual(popen.call_count, 1)
+        self.assertEqual(result["text"], "ok")
+        self.assertIs(session._proc, live)
+
     def test_ok_json_returns_result_dict(self):
         from core.mlx_whisper_session import get_mlx_whisper_session
 

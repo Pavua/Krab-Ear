@@ -14,11 +14,13 @@
 
 **P0e закрыта в коде (2026-08-17):** native `/v1/stream` берёт тот же REST STT-singleflight, что POST. Гейт в `LiveSubsService._process_window` вокруг `transcribe` (`acquire(0)` — занято POST → дроп окна). `ingest()` не оборачивать (F3). IPC `LiveSubsService` без gate. Cloud `/v1/stream` не тронут. Карточка: [`docs/superpowers/plans/2026-08-17-p0e-stream-stt-singleflight.md`](superpowers/plans/2026-08-17-p0e-stream-stt-singleflight.md).
 
+**P0f закрыта в коде (2026-08-17):** мёртвый mlx_whisper child (`poll() is not None`) больше не блокирует следующий REST STT. `MLXWhisperSession.start()` респавнит — сиблинг GigaAM W1216 F1. In-flight SEGV по-прежнему `MLXWorkerCrashed` наружу. Карточка: [`docs/superpowers/plans/2026-08-17-p0f-mlx-worker-respawn.md`](superpowers/plans/2026-08-17-p0f-mlx-worker-respawn.md).
+
 ## База
 
 - Репозиторий: [Pavua/Krab-Ear](https://github.com/Pavua/Krab-Ear)
 - Default / прод-колея: **`codex/krab-ear-v2`** (ветки `main`/`master` нет)
-- HEAD на момент записи: `afc30fe8` — `fix(ipc): перечитывать event-bridge токен после dual restart (#1922)` (P0d). Sparkle-appcast: `b2aaf527`. Код релиза v2.11.0: `064467f6`.
+- HEAD на момент записи: `e33509d8` — `fix(stt): /v1/stream native STT под REST singleflight (#1923)` (P0e). Sparkle-appcast: `b2aaf527`. Код релиза v2.11.0: `064467f6`.
 - Новые волны: `git worktree add .worktrees/<slug> -b feat/<slug> origin/codex/krab-ear-v2`
 - Последний Sparkle-тег: **v2.11.0 (2026-08-16)** — [GitHub Release](https://github.com/Pavua/Krab-Ear/releases/tag/v2.11.0). Dev-guard: Sparkle не трогает `.app` внутри git-дерева; ежедневка владельца — только `scripts/build_and_deploy.command` по явной просьбе.
 
@@ -32,9 +34,9 @@
 
 **W3 — Sparkle v2.11.0: закрыта 2026-08-16.** `krab-ear-ci` зелёный на `064467f6` (три stale-теста подтянуты к прод: hang-kill 10с, пустые SIP-креды, spy на startup-recovery). Dispatch `release.yml -f version=2.11.0` → success. `debug_keep_dictation_wav` в проде не включать.
 
-**P0a/P0c/P0d/P0e — SEGV turbo в REST: закрыты 2026-08-16/17.** Pressure-gate + POST singleflight (P0a); OS-worker (P0c); token reload (P0d); `/v1/stream` native STT под тот же singleflight (P0e). Не `REST_IN_PROCESS_ENABLED`.
+**P0a/P0c/P0d/P0e/P0f — SEGV turbo в REST: закрыты 2026-08-16/17.** Pressure-gate + POST singleflight (P0a); OS-worker (P0c); token reload (P0d); `/v1/stream` native STT под тот же singleflight (P0e); dead-child respawn (P0f, сиблинг GigaAM W1216 F1). Не `REST_IN_PROCESS_ENABLED`. IPC-диктовка in-process.
 
-**Следующая:** нет назначенной волны. Живой REST подхватит P0d/P0e только после явного `scripts/safe_backend_restart.command --with-rest` (не kickstart под запись). Не включать `REST_IN_PROCESS_ENABLED`.
+**Следующая:** нет назначенной волны. Живой REST подхватит P0d/P0e/P0f только после явного `scripts/safe_backend_restart.command --with-rest` (не kickstart под запись). Не включать `REST_IN_PROCESS_ENABLED`.
 
 ## Не делать
 

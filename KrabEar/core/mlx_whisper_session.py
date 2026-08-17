@@ -7,6 +7,7 @@
 Включён: ``KRAB_EAR_MLX_WHISPER_WORKER=1`` или argv содержит ``rest_server.py``.
 Юнит-тесты (pytest argv) остаются in-process, пока env явно не включён.
 Child получает ``KRAB_EAR_MLX_WHISPER_WORKER=0``, иначе рекурсия.
+``start()`` респавнит мёртвый child (``poll() is not None``) — сиблинг GigaAM W1216 F1.
 """
 from __future__ import annotations
 
@@ -162,12 +163,38 @@ class MLXWhisperSession:
         self._timed_out = False
 
     def start(self) -> None:
-        if self._proc is not None:
-            return
+        """Idempotent spawn. Мёртвый child (poll()!=None) — сиблинг GigaAM W1216 F1."""
         with self._lock:
-            if self._proc is not None:
+            if self._proc is not None and self._proc.poll() is None:
                 return
+            if self._proc is not None:
+                logger.warning(
+                    "mlx_whisper worker dead rc=%s — respawn (W1216 F1 sibling)",
+                    self._proc.poll(),
+                )
+                self._reap_dead_unlocked()
             self._spawn_unlocked()
+
+    def _reap_dead_unlocked(self) -> None:
+        """Снять мёртвый Popen без shutdown JSON (pipe уже мёртв)."""
+        proc = self._proc
+        self._proc = None
+        if proc is None:
+            return
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        for pipe in (
+            getattr(proc, "stdin", None),
+            getattr(proc, "stdout", None),
+            getattr(proc, "stderr", None),
+        ):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except (OSError, BrokenPipeError):
+                    pass
 
     def _spawn_unlocked(self) -> None:
         env = os.environ.copy()
