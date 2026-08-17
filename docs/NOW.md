@@ -26,13 +26,13 @@
 
 **W2b — замер аномалии длительности: закрыта 2026-08-16.** Opt-in `debug_keep_dictation_wav` (дефолт выкл), каталог `debug_duration_wav/` + сидкар, CLI `scripts/measure_duration_anomaly.py`. Чанкер/GigaAM не патчили.
 
-**W2c — REST `deadline_sec`: закрыта 2026-08-16 на стороне Ear.** Optional form-поле на `POST /v1/stt/transcribe`, clamp [5, 120]. Карточка VG (`deadline_sec=25` в `KrabEarSTTEngine`, HTTP timeout 30.0) — репо шлюза, ветка `codex/ear-stt-deadline`.
+**W2c — REST `deadline_sec`: закрыта 2026-08-16 Ear + 2026-08-17 VG.** Optional form-поле на `POST /v1/stt/transcribe`, clamp [5, 120]. VG `KrabEarSTTEngine` шлёт `deadline_sec=25` при HTTP timeout 30.0 — [PR #229](https://github.com/Pavua/Krab-Voice-Gateway/pull/229), прод pid 72437.
 
 **W3 — Sparkle v2.11.0: закрыта 2026-08-16.** `krab-ear-ci` зелёный на `064467f6` (три stale-теста подтянуты к прод: hang-kill 10с, пустые SIP-креды, spy на startup-recovery). Dispatch `release.yml -f version=2.11.0` → success. `debug_keep_dictation_wav` в проде не включать.
 
 **P0a/P0c/P0d/P0e/P0f — SEGV turbo в REST: закрыты 2026-08-16/17.** Pressure-gate + POST singleflight (P0a); OS-worker (P0c); token reload (P0d); `/v1/stream` native STT под тот же singleflight (P0e); dead-child respawn (P0f, сиблинг GigaAM W1216 F1). Не `REST_IN_PROCESS_ENABLED`. IPC-диктовка in-process.
 
-**Следующая:** VG `deadline_sec=25` (репо шлюза). Живой REST уже на P0d/P0e/P0f. Не включать `REST_IN_PROCESS_ENABLED`. Не второй `safe_backend_restart` без нужды.
+**Следующая:** нет назначенной волны. Живой REST на P0d/P0e/P0f (pid 36880). VG на `deadline_sec=25` (pid 72437). Не включать `REST_IN_PROCESS_ENABLED`. Не второй `safe_backend_restart` без нужды.
 
 ## Не делать
 
