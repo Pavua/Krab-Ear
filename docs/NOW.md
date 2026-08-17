@@ -16,7 +16,7 @@
 
 - Репозиторий: [Pavua/Krab-Ear](https://github.com/Pavua/Krab-Ear)
 - Default / прод-колея: **`codex/krab-ear-v2`** (ветки `main`/`master` нет)
-- HEAD на момент записи: `e425c5ee` — `docs(now): W2c VG deadline_sec=25 закрыт и задеплоен (#1926)`. Sparkle-appcast: `b2aaf527`. Код релиза v2.11.0: `064467f6`. P0f в истории: `a5b6f517`.
+- HEAD на момент записи: `1dad53d5` — `fix(stt): подпись GigaAM v3 в list_stt_engines, карточка W7 (#1927)`. Sparkle-appcast: `b2aaf527`. Код релиза v2.11.0: `064467f6`. P0f в истории: `a5b6f517`.
 - Новые волны: `git worktree add .worktrees/<slug> -b feat/<slug> origin/codex/krab-ear-v2`
 - Последний Sparkle-тег: **v2.11.0 (2026-08-16)** — [GitHub Release](https://github.com/Pavua/Krab-Ear/releases/tag/v2.11.0). Dev-guard: Sparkle не трогает `.app` внутри git-дерева; ежедневка владельца — только `scripts/build_and_deploy.command` по явной просьбе.
 
@@ -32,11 +32,11 @@
 
 **P0a/P0c/P0d/P0e/P0f — SEGV turbo в REST: закрыты 2026-08-16/17.** Pressure-gate + POST singleflight (P0a); OS-worker (P0c); token reload (P0d); `/v1/stream` native STT под тот же singleflight (P0e); dead-child respawn (P0f, сиблинг GigaAM W1216 F1). Не `REST_IN_PROCESS_ENABLED`. IPC-диктовка in-process.
 
-**GigaAM = v3 (не апгрейдить).** Прод `stt_gigaam_mode=v3_e2e_rnnt`, enabled; venv `~/.venv_krab_ear_gigaam` git `559d88d6` (пакет 0.2.0, не PyPI 0.1.0); worker log `mode=v3_e2e_rnnt`. Миф «в Крабе v2» — IPC `list_stt_engines.display_name` был `"GigaAM v2 (RU)"` (лейбл, не модель). Лейбл чинится в этой волне. Голое `"rnnt"` в git-пакете алиасится в `v3_rnnt`.
+**GigaAM = v3 (не апгрейдить).** Прод `stt_gigaam_mode=v3_e2e_rnnt`. Лейбл IPC `list_stt_engines.display_name` = `"GigaAM v3 (RU)"` после [#1927](https://github.com/Pavua/Krab-Ear/pull/1927) и `safe_backend_restart` (живой IPC проверен). Голое `"rnnt"` в git-пакете алиасится в `v3_rnnt`.
 
-**Следующая: W7 — wake-word PortAudio после диктовки.** Карточка: [`docs/superpowers/plans/2026-08-17-wakeword-portaudio-after-dictation.md`](superpowers/plans/2026-08-17-wakeword-portaudio-after-dictation.md). Живой цикл 2026-08-17: THREAD_HUNG → wedged → `forceRestartBackend` **20:17 / 20:47 / 21:17**; после рестарта `PaMacCore -50` и `recorder_timeout` на stop. Give-up кап 3 не срабатывает: короткий `last_chunk_ts` зовёт `noteHealthy()`. Не W6. Не kickstart под запись — стоп уже зависал.
+**W7 — wake-word PortAudio после диктовки: закрыта 2026-08-17.** Карточка: [`docs/superpowers/plans/2026-08-17-wakeword-portaudio-after-dictation.md`](superpowers/plans/2026-08-17-wakeword-portaudio-after-dictation.md). Give-up кап больше не сбрасывается 1–2 тиками `last_chunk_ts` после kickstart (`notePoll`, 8 тиков ≈ 6 с). `wake_word_start` отвергается, пока worker рекордера ещё жив после `stop()` (`is_start_blocked=_reinit_is_recording_gate`). Не чинили сам PortAudio / `_listen_loop`. Не клали parity-бинари.
 
-Sentry 48ч KRAB-EAR: пусто. REST `/health` 200, SIGSEGV turbo в rest.err — 16 августа (P0), не сегодня. Не включать `REST_IN_PROCESS_ENABLED`. Не второй `safe_backend_restart` без нужды.
+**Следующая:** нет назначенной волны. Живой REST на P0d/P0e/P0f. Не включать `REST_IN_PROCESS_ENABLED`. Не kickstart под запись.
 
 ## Не делать
 
@@ -48,7 +48,6 @@ Sentry 48ч KRAB-EAR: пусто. REST `/health` 200, SIGSEGV turbo в rest.err 
 - Не `git add -A`. Не коммитить `wake_word_models/hard_negatives_raw/tts_phrases.json`.
 - Не удалять remote-ветки `audit/*` пачкой. Не трогать Main Krab runtime и VG `.env`.
 - Не второй EventBridge. Не возвращать wake word на SSE. Не дообучать `krab_ru` синтетикой.
-- Не W6 `audit_dead_swift_methods.py`, пока жив цикл wake-word kickstart (карточка W7).
 
 ## Уже закрыто (не очередь)
 

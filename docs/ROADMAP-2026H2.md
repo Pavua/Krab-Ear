@@ -2109,5 +2109,14 @@ P0c вынес inference в OS-child, но `MLXWhisperSession.start()` early-ret
 
 Владелец спросил, v2 или v3. Факт: **v3**. `stt_gigaam_mode=v3_e2e_rnnt` в прод-settings; venv git `559d88d6` / пакет 0.2.0; worker `mode=v3_e2e_rnnt`. Миф — IPC-лейбл `"GigaAM v2 (RU)"` в `list_stt_engines` (Swift берёт `display_name` как есть). Лейбл → `"GigaAM v3 (RU)"`.
 
-Sentry 48ч KRAB-EAR пусто; за 7д `KRAB-EAR-BACKEND-1K`/`1T`/`1M` last seen 4д. Логи сегодня: wake-word THREAD_HUNG после диктовок → kickstart 20:17/20:47/21:17; после 21:17 — `PaMacCore -50` и `recorder_timeout`. Следующая волна W7, не W6. Карточка: `docs/superpowers/plans/2026-08-17-wakeword-portaudio-after-dictation.md`.
+Sentry 48ч KRAB-EAR пусто; за 7д `KRAB-EAR-BACKEND-1K`/`1T`/`1M` last seen 4д. Логи сегодня: wake-word THREAD_HUNG после диктовок → kickstart 20:17/20:47/21:17; после 21:17 — `PaMacCore -50` и `recorder_timeout`. Следующая волна W7, не W6. Карточка: `docs/superpowers/plans/2026-08-17-wakeword-portaudio-after-dictation.md`. Лейбл GigaAM закрыт в [#1927](https://github.com/Pavua/Krab-Ear/pull/1927).
+
+## 2026-08-17 — W7: wake-word PortAudio после диктовки
+
+Живой цикл: после диктовки `stop()` слушателя не join'ит за 3 с → `wake_word_start` «предыдущий поток завис внутри PortAudio» → wedged → `forceRestartBackend` каждые 30 мин. Give-up кап 3 не срабатывал: короткий `last_chunk_ts` после kickstart звал `noteHealthy()`.
+
+- Swift: `WedgedEscalationTracker.notePoll` — кап снимается только после 8 подряд тиков running+chunk (~6 с). Поллер больше не зовёт `noteHealthy()` на одном `last_chunk_ts`.
+- Python: `wake_word_start` гейт `is_start_blocked=_reinit_is_recording_gate` — не открывать второй тап, пока worker рекордера ещё жив после `stop()` (is_recording уже False). Reason тот же `"recording in progress"`.
+- Не чинили PortAudio / `_listen_loop`. Не `Pa_Terminate` при THREAD_HUNG. Не parity-бинари.
+- Карточка: `docs/superpowers/plans/2026-08-17-wakeword-portaudio-after-dictation.md`.
 
