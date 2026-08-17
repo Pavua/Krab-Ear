@@ -329,7 +329,7 @@ class STTManagementService:
         _ENGINE_META = [
             {
                 "name": "gigaam",
-                "display_name": "GigaAM v2 (RU)",
+                "display_name": "GigaAM v3 (RU)",
                 "toggle_key": "stt_gigaam_enabled",
                 "note": "Лучший для RU, subprocess ~1.5 ГБ",
                 "adapter_class": "core.pipeline.stt_gigaam_adapter.GigaAMSTTAdapter",
