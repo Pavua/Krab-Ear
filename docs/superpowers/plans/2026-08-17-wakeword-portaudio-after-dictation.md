@@ -30,7 +30,7 @@
 - Modify: `native/KrabEarAgent/Sources/KrabEarAgent/WakeWordPoller.swift` (`WedgedEscalationTracker`, вызов `noteHealthy` в поллере)
 - Test: `native/KrabEarAgent/Tests/KrabEarAgentTests/WedgedEscalationTrackerTests.swift`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```swift
 func test_briefHealthyPolls_do_not_rearmCap() {
@@ -76,13 +76,13 @@ func test_notePoll_gap_resets_sustain_counter() {
 
 Старый `test_noteHealthy_rearmsCap` оставить: `noteHealthy()` = явный «устойчиво здоров» для тестов/HealthMonitor. Поллер wake word больше не зовёт его на каждом `last_chunk_ts != nil`.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd native/KrabEarAgent && swift test --filter WedgedEscalationTrackerTests.test_briefHealthyPolls_do_not_rearmCap`
 
 Expected: FAIL — `notePoll` нет / кап сброшен после 1–2 тиков.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 В `WedgedEscalationTracker`:
 
@@ -116,13 +116,13 @@ if (result["last_chunk_ts"] as? Double) != nil {
 
 звать `notePoll(running: running, hasRecentChunk: last_chunk_ts != nil)` и `gaveUpNotified = false` только когда `!wedgedTracker.exhausted` после этого (кап реально снят).
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd native/KrabEarAgent && swift test --filter WedgedEscalationTrackerTests`
 
 Expected: PASS, включая старые `test_noteHealthy_rearmsCap` / `test_capAfterMaxConsecutive_stopsEscalating`.
 
-- [ ] **Step 5: Commit** (только если нет чужого WIP)
+- [x] **Step 5: Commit** (только если нет чужого WIP)
 
 ```bash
 git add native/KrabEarAgent/Sources/KrabEarAgent/WakeWordPoller.swift \
@@ -141,9 +141,9 @@ git commit -m "fix(wake-word): не сбрасывать give-up кап коро
 - Modify: `KrabEar/backend/recording_core_service.py` (признак «stop in progress / worker hung»)
 - Test: существующий файл тестов wake-word start gate (найти `wake_word_start` / `THREAD_HUNG` в `KrabEar/tests/`)
 
-- [ ] **Step 1:** RED-тест: `wake_word_start` во время `recorder.stop()` timeout → `ok:false`, без второго `InputStream`.
-- [ ] **Step 2:** Минимальный гейт: если `AudioRecorder` worker `is_alive` после stop-timeout, start слушателя отвергается (тот же maintenance-класс, что stop→reinit).
-- [ ] **Step 3:** `PYTHONPATH=$(pwd)/KrabEar python -m pytest` названного файла; `scripts/pre_merge_py312_check.sh` на нём.
-- [ ] **Step 4:** Не `Pa_Terminate`. Не kickstart.
+- [x] **Step 1:** RED-тест: `wake_word_start` во время `recorder.stop()` timeout → `ok:false`, без второго `InputStream`.
+- [x] **Step 2:** Минимальный гейт: если `AudioRecorder` worker `is_alive` после stop-timeout, start слушателя отвергается (тот же maintenance-класс, что stop→reinit).
+- [x] **Step 3:** `PYTHONPATH=$(pwd)/KrabEar python -m pytest` названного файла; `scripts/pre_merge_py312_check.sh` на нём.
+- [x] **Step 4:** Не `Pa_Terminate`. Не kickstart.
 
 Живой смок только если карточка явно просит и `is_recording=false`.

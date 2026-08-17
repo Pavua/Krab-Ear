@@ -51,6 +51,7 @@ def _make_adapter(
     tmp_dir: str | Path,
     settings: dict | None = None,
     is_recording=None,
+    is_start_blocked=None,
 ) -> OpenWakeWordAdapter:
     settings = settings or {"wake_word_enabled": True}
     kwargs = {
@@ -59,6 +60,8 @@ def _make_adapter(
     }
     if is_recording is not None:
         kwargs["is_recording"] = is_recording
+    if is_start_blocked is not None:
+        kwargs["is_start_blocked"] = is_start_blocked
     adapter = OpenWakeWordAdapter(**kwargs)
     # Движок недоступен: гейт обязан отработать РАНЬШЕ любой попытки открыть
     # микрофон, поэтому отсутствие openwakeword тесту не мешает.
@@ -87,6 +90,45 @@ class TestRecordingGateBlocksStart(unittest.TestCase):
     def test_missing_callback_keeps_legacy_behaviour(self) -> None:
         """Без колбэка (старый вызывающий код) гейт не срабатывает."""
         adapter = _make_adapter(self._tmp, is_recording=None)
+        result = adapter.handle_wake_word_start({"model": "hey_jarvis"})
+        self.assertNotEqual(result.get("reason"), _RECORDING_REASON)
+
+
+class TestStartBlockedWhileRecorderWorkerAlive(unittest.TestCase):
+    """W7: после stop() флаг is_recording уже False, а worker ещё жив.
+
+    Живой инцидент 2026-08-17: resume после диктовки слал wake_word_start,
+    пока AudioRecorder.join() ещё не вышел / после recorder_timeout —
+    второй InputStream на том же устройстве, THREAD_HUNG, PaMacCore -50.
+    Reason тот же, что F6: поллер не жжёт бюджет self-heal.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.mkdtemp()
+
+    def test_worker_alive_after_stop_blocks_wake_word_start(self) -> None:
+        opened = {"n": 0}
+
+        def _start_side_effect(*_a, **_k):
+            opened["n"] += 1
+
+        adapter = _make_adapter(
+            self._tmp,
+            is_recording=lambda: False,
+            is_start_blocked=lambda: True,
+        )
+        adapter.start = _start_side_effect  # type: ignore[method-assign]
+        result = adapter.handle_wake_word_start({"model": "hey_jarvis"})
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result.get("reason"), _RECORDING_REASON)
+        self.assertEqual(opened["n"], 0, "второй InputStream/start() не должен вызываться")
+
+    def test_idle_worker_does_not_use_start_blocked_reason(self) -> None:
+        adapter = _make_adapter(
+            self._tmp,
+            is_recording=lambda: False,
+            is_start_blocked=lambda: False,
+        )
         result = adapter.handle_wake_word_start({"model": "hey_jarvis"})
         self.assertNotEqual(result.get("reason"), _RECORDING_REASON)
 
@@ -180,6 +222,42 @@ class TestGateIsActuallyWired(unittest.TestCase):
                 kwargs,
                 "OpenWakeWordAdapter сконструирован без is_recording — гейт F6 декоративен",
             )
+            self.assertIn(
+                "is_start_blocked",
+                kwargs,
+                "OpenWakeWordAdapter без is_start_blocked — гейт W7 "
+                "(worker жив после stop) декоративен",
+            )
+
+    def test_service_wires_start_blocked_to_recording_gate(self) -> None:
+        """W7: start-гейт — тот же OR (is_recording | worker_alive), что
+        защищает Pa_Terminate. Голая лямбда только на is_recording слепа
+        после stop()-таймаута."""
+        import ast
+
+        src = (PROJECT_ROOT / "backend" / "service.py").read_text()
+        tree = ast.parse(src)
+        call = None
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = getattr(func, "id", None) or getattr(func, "attr", None)
+            if name == "OpenWakeWordAdapter":
+                call = node
+                break
+        self.assertIsNotNone(call, "конструкция OpenWakeWordAdapter не найдена")
+        kwarg = next((kw for kw in call.keywords if kw.arg == "is_start_blocked"), None)
+        self.assertIsNotNone(kwarg, "is_start_blocked= не передан")
+        value = kwarg.value
+        self.assertTrue(
+            isinstance(value, ast.Attribute)
+            and value.attr == "_reinit_is_recording_gate"
+            and isinstance(value.value, ast.Name)
+            and value.value.id == "self",
+            f"is_start_blocked= обязан быть self._reinit_is_recording_gate, "
+            f"получено {ast.dump(value)}",
+        )
 
 
 class TestStopUnderRecordingDoesNotWedge(unittest.TestCase):
@@ -306,6 +384,16 @@ class TestSwiftPollerReasonContract(unittest.TestCase):
         inc_pos = src.find("failedStartAttempts += 1")
         self.assertGreater(inc_pos, cmp_pos,
                            "инкремент бюджета стоит ДО проверки транзиентной причины")
+
+    def test_poller_does_not_rearm_cap_on_single_last_chunk_ts(self) -> None:
+        """W7: короткий heartbeat после kickstart не должен звать noteHealthy()."""
+        src = self._SWIFT.read_text()
+        self.assertNotIn(
+            "self.wedgedTracker.noteHealthy()",
+            src,
+            "поллер снова обнуляет give-up кап на одном last_chunk_ts",
+        )
+        self.assertIn("notePoll(running:", src)
 
 
 if __name__ == "__main__":

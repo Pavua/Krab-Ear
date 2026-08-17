@@ -1403,6 +1403,10 @@ class BackendService:
             data_dir=self.store.data_dir,
             settings_get=self._get_runtime_setting,
             is_recording=lambda: bool(getattr(self.recorder, "is_recording", False)),
+            # W7: start не открывает второй тап, пока worker рекордера ещё
+            # жив после stop() (is_recording уже False). stop()/_listen_loop
+            # продолжают голый is_recording — wedged под записью нельзя.
+            is_start_blocked=self._reinit_is_recording_gate,
         )
         # Wave 172: RecordingCoreService owns all recording lifecycle, preview worker,
         # transcription pipeline, and async job tracking.
@@ -1996,6 +2000,13 @@ class BackendService:
         Pa_Terminate полная не «транзитивно через оба вызывающих», а
         тривиально: единственный путь к нему — единственная точка входа,
         и она гейтится верно.
+
+        W7 (2026-08-17): тот же OR дополнительно передаётся в
+        ``OpenWakeWordAdapter(is_start_blocked=)``. Голый ``is_recording``
+        адаптера остаётся для ``stop()``/``_listen_loop`` (не ставить
+        wedged под записью). После ``stop()`` флаг уже False, а worker
+        может ещё держать CoreAudio — ``wake_word_start`` не должен
+        открывать второй тап.
         """
         return (
             bool(getattr(self.recorder, "is_recording", False))
