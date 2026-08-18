@@ -17,6 +17,18 @@ from pydantic import BaseModel, field_serializer
 
 logger = logging.getLogger("KrabEar.Backend.ErrorBus")
 
+# W9 (2026-08-18): клиентский потолок исходящего потока в Sentry.
+# Живой инцидент: один код (`KRAB-EAR-BACKEND-1V`, зависание stop_recording) дал
+# 2488 событий и выжег 55% месячной квоты проекта; организация упёрлась в
+# бесплатные 5000/мес и ослепла на 22 дня из 30. Серверный Key Rate Limit на
+# бесплатном плане недоступен — Sentry отвечает HTTP 200 и молча оставляет
+# rateLimit=null, поэтому потолок обязан жить здесь.
+# 🔴 Режем ТОЛЬКО исходящий поток: ring buffer и событие на шине сохраняют всё,
+# иначе лечение слепоты само стало бы слепотой.
+SENTRY_CAP_WINDOW_SEC = 3600.0
+SENTRY_HOURLY_CAP_PER_CODE = 12
+SENTRY_HOURLY_CAP_TOTAL = 40
+
 Severity = Literal["info", "warn", "error", "critical"]
 Component = Literal[
     "stt", "rewriter", "paste", "diarization",
@@ -182,6 +194,11 @@ class ErrorBus:
         # that persisted a ``since_seq`` across a ring clear never mistakes an
         # old high seq for "already seen" once the ring refills from empty).
         self._ring_seq: deque[int] = deque(maxlen=ring_buffer_size)
+        # W9: скользящее окно отправок в Sentry (см. константы модуля).
+        self._cap_lock = threading.Lock()
+        self._sentry_sent_per_code: dict[str, deque] = {}
+        self._sentry_sent_all: deque = deque()
+        self._sentry_suppressed: dict[str, int] = {}
         self._next_seq = 0
         # code -> last_emitted monotonic timestamp
         self._last_emitted: dict[str, float] = {}
@@ -308,6 +325,38 @@ class ErrorBus:
             return float(value)
         return float(entry)
 
+    def _sentry_cap_allows(self, code: str) -> int | None:
+        """Разрешена ли отправка кода наружу. Возвращает число подавленных с
+        прошлой удачной отправки (0 или больше), либо None если отправлять нельзя.
+
+        Потолок скользящий: это ограничитель, а не выключатель — через окно
+        поток открывается сам, без ручного вмешательства.
+        """
+        now = time.monotonic()
+        cutoff = now - SENTRY_CAP_WINDOW_SEC
+        with self._cap_lock:
+            per = self._sentry_sent_per_code.setdefault(code, deque())
+            while per and per[0] < cutoff:
+                per.popleft()
+            while self._sentry_sent_all and self._sentry_sent_all[0] < cutoff:
+                self._sentry_sent_all.popleft()
+            over_code = len(per) >= SENTRY_HOURLY_CAP_PER_CODE
+            over_total = len(self._sentry_sent_all) >= SENTRY_HOURLY_CAP_TOTAL
+            if over_code or over_total:
+                prev = self._sentry_suppressed.get(code, 0)
+                self._sentry_suppressed[code] = prev + 1
+                if prev == 0:
+                    logger.warning(
+                        "ErrorBus: потолок Sentry достигнут для кода %s "
+                        "(%s) — дальнейшие события этого кода видны только "
+                        "локально (ring buffer + лог)",
+                        code, "per-code" if over_code else "общий",
+                    )
+                return None
+            per.append(now)
+            self._sentry_sent_all.append(now)
+            return self._sentry_suppressed.pop(code, 0)
+
     def _route_to_sentry(self, err: KrabError) -> None:
         """Route error to Sentry according to severity tier.
 
@@ -322,10 +371,18 @@ class ErrorBus:
             if self._warn_batcher:
                 self._warn_batcher.add(err)
             return
-        # error / critical — immediate
+        # error / critical — immediate, но под клиентским потолком (W9)
+        suppressed = self._sentry_cap_allows(err.code)
+        if suppressed is None:
+            return
+        extras = dict(err.context)
+        if suppressed:
+            # Факт подавления не теряется: он уезжает вместе со следующим
+            # прошедшим событием того же кода.
+            extras["suppressed_since_last_send"] = suppressed
         self._sentry.capture_message(
             err.message_debug,
             level=err.severity,
             tags={"phase": "b", "code": err.code, "component": err.component},
-            extras=err.context,
+            extras=extras,
         )
