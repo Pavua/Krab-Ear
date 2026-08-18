@@ -48,10 +48,10 @@
 - [x] **Step 1 — RED (Python).** Тесты: (а) `handle_wake_word_start` при `is_recording=False, is_start_blocked=True` возвращает reason `"recorder worker hung"`, а при реальной записи — прежний `"recording in progress"` (контракт для Swift); (б) `WakeWordWatchdog._check` при `running=False, model=None, is_recording()=False, is_worker_hung()=True` НЕ сбрасывает эпизод и по достижении `wake_word_stale_sec` эскалирует (`wedged` + ErrorBus), а при `is_recording()=True` — сбрасывает, как раньше.
 - [x] **Step 2 — GREEN (Python).** Adapter принимает оба колбэка и различает причину. Watchdog принимает `is_worker_hung`, в ветке «чистая пауза» ведёт аномалию по нему вместо безусловного `_reset_episode()`. `service.py` прокидывает `is_worker_hung=lambda: bool(recorder.is_worker_thread_alive) and not bool(recorder.is_recording)`.
 - [x] **Step 3 — Swift-парность (ОБЯЗАТЕЛЬНО в том же коммите).** Константа нового reason; условие транзиентности принимает ОБА; для worker-hung — WARN однократно (видно в `agent.log`), бюджет не жжётся.
-- [ ] **Step 4 — гейт.** `pytest` изменённых файлов; `scripts/pre_merge_py312_check.sh` (ubuntu-parity); `flake8` CI-командой; `make audit-all`; `swift build -c release`.
+- [x] **Step 4 — гейт.** `pytest` изменённых файлов; `scripts/pre_merge_py312_check.sh` (ubuntu-parity); `flake8` CI-командой; `make audit-all`; `swift build -c release`.
 
 ### Task 3: деплой и живая проверка
 
-- [ ] PR в `codex/krab-ear-v2`, дождаться зелёного `krab-ear-ci` по ПОЛНОМУ SHA.
-- [ ] После мержа — `scripts/build_and_deploy.command` (проверив `is_recording=false`), `launchctl kickstart -k gui/501/ai.krab.ear.agent`, parity-бинари коммитом.
-- [ ] Живая проверка: `wake_word_status` даёт `running/not wedged`; в `agent.log` (только `grep -a`!) нет всплеска отказов; обновить `docs/NOW.md`.
+- [x] PR [#1929](https://github.com/Pavua/Krab-Ear/pull/1929) в `codex/krab-ear-v2`, дождаться зелёного `krab-ear-ci` по ПОЛНОМУ SHA.
+- [x] После мержа — `scripts/build_and_deploy.command` (проверив `is_recording=false`), `launchctl kickstart -k gui/501/ai.krab.ear.agent`, parity-бинари коммитом.
+- [x] Живая проверка: `wake_word_status` даёт `running/not wedged`; в `agent.log` (только `grep -a`!) нет всплеска отказов; обновить `docs/NOW.md`.

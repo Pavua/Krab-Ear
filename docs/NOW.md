@@ -1,6 +1,6 @@
 # NOW — что делать сейчас (Krab Ear)
 
-Обновлено: 2026-08-18 (утро). Читай **этот файл + одну карточку волны**. Не читай `ROADMAP-2026H2.md` как очередь задач — это журнал. Как работать: [`EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md).
+Обновлено: 2026-08-18 (день). Читай **этот файл + одну карточку волны**. Не читай `ROADMAP-2026H2.md` как очередь задач — это журнал. Как работать: [`EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md).
 
 ## P0 interrupt — SIGSEGV `whisper-large-v3-turbo` (2026-08-16 16:21)
 
@@ -36,7 +36,9 @@
 
 **W7 — wake-word PortAudio после диктовки: закрыта 2026-08-17.** Карточка: [`docs/superpowers/plans/2026-08-17-wakeword-portaudio-after-dictation.md`](superpowers/plans/2026-08-17-wakeword-portaudio-after-dictation.md). Give-up кап больше не сбрасывается 1–2 тиками `last_chunk_ts` после kickstart (`notePoll`, 8 тиков ≈ 6 с). `wake_word_start` отвергается, пока worker рекордера ещё жив после `stop()` (`is_start_blocked=_reinit_is_recording_gate`). Не чинили сам PortAudio / `_listen_loop`. **Parity-бинари положены и задеплоены 2026-08-18 11:00** (`LC_UUID C015A3D8-3DD4-3FF9-8D67-C3D42043C993`, подпись «Krab Ear Dev Local», агент pid 80544, dSYM в Sentry). До этого прод бегал на бинаре от 08-12, то есть Swift-половина фикса не работала, а вместе с ней в прод впервые уехали `b8198311` (шорткаты ⌘1–⌘7) и `33a6c9ca` (Local SIP) — они лежали в git с 08-16.
 
-**Следующая:** нет назначенной волны. Swift-агент в проде = HEAD `39f92f8b` (деплой 2026-08-18, `AX trusted: true`, хоткеи активированы, wake word `running/not wedged`). Живой REST на P0d/P0e/P0f. Не включать `REST_IN_PROCESS_ENABLED`. Не kickstart под запись.
+**W8 — наблюдаемость заблокированного `wake_word_start` + честный heartbeat: закрыта и задеплоена 2026-08-18.** Карточка: [`docs/superpowers/plans/2026-08-18-w8-blocked-start-observability.md`](superpowers/plans/2026-08-18-w8-blocked-start-observability.md). Fable-ревью диапазона `e425c5ee..39f92f8b` нашло два дефекта W7, оба подтверждены построчным гейтом. (A, HIGH) Гейт W7 отвергал старт тем же reason, что и настоящая запись → Swift ретраил вечно, сессия не создавалась, watchdog принимал это за легитимную паузу и сбрасывал эпизод → `wedged` недостижим, путь `DEFERRED_WORKER_HUNG` (введён 2026-08-09 против «тихого бессрочного простоя») обойдён; пока worker рекордера жив после `stop()`-таймаута, wake word и диктовка были мертвы без уведомления. Теперь отдельный `RECORDER_WORKER_HUNG_REASON`, watchdog ведёт по `is_worker_hung` аномалию до `wedged` + ErrorBus, Swift держит обе строки транзиентными и логирует клин WARN. (B, MEDIUM) `notePoll` проверял `last_chunk_ts` на наличие — замороженный штамп при живом треде снимал give-up кап за ~6 с; теперь здоровье = РОСТ штампа. Кросс-языковой контракт-тест фиксирует обе строки: Swift сравнивает reason ТОЧНОЙ строкой, рассинхрон сжёг бы бюджет self-heal за 3 попытки. Прод после деплоя: агент `LC_UUID 3615DACD`, backend pid 70114, `wake_word running/not wedged`, watchdog `session_active`.
+
+**Следующая:** нет назначенной волны. Swift-агент в проде = HEAD `6e00b68f` (деплой W8 2026-08-18 12:38, `AX trusted: true`, хоткеи активированы, wake word `running/not wedged`). Живой REST на P0d/P0e/P0f. Не включать `REST_IN_PROCESS_ENABLED`. Не kickstart под запись.
 
 ## Не делать
 
