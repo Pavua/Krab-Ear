@@ -2111,6 +2111,31 @@ P0c вынес inference в OS-child, но `MLXWhisperSession.start()` early-ret
 
 Sentry 48ч KRAB-EAR пусто; за 7д `KRAB-EAR-BACKEND-1K`/`1T`/`1M` last seen 4д. Логи сегодня: wake-word THREAD_HUNG после диктовок → kickstart 20:17/20:47/21:17; после 21:17 — `PaMacCore -50` и `recorder_timeout`. Следующая волна W7, не W6. Карточка: `docs/superpowers/plans/2026-08-17-wakeword-portaudio-after-dictation.md`. Лейбл GigaAM закрыт в [#1927](https://github.com/Pavua/Krab-Ear/pull/1927).
 
+## 2026-08-18 — W10: объём логов REST + W6: гард мёртвых Swift-методов
+
+**W10 (PR #1931).** На каждый HTTP-запрос писались ДВЕ строки без времени: `logging.basicConfig`
+ставил root-обработчику формат `"%(message)s"`, werkzeug независимо вёл свой access-лог.
+`backend/rest_log_config.py` — формат с временем + `werkzeug` на WARNING. Живой замер после
+деплоя: дельта 0 строк на запрос (было 2), время в каждой строке. Ротацию `Krab Ear/logs`
+чинит Главный Краб (их PR #140).
+
+**W6 (PR #1932).** Python закрыт пятью гардами мёртвого кода, Swift — ничем, при том что класс
+там живой (`setupErrorBus`/`setupHealthMonitor` месяцами были мертвы за 100% зелёными тестами).
+🔴 Критерий важнее сканера: наивное «нет `name(`» даёт 95 находок, ~78 ложных. Восемь правил
+(override, trailing-closure без скобок, протокол ТОЛЬКО с именем требования, lifecycle-имена,
+bare-reference, частые имена → needs_review, вызовы из Tests → test_only). На живом дереве
+**19 мёртвых + 45 test-only**, все 19 прогейчены машинно — 0 ложных. Гард нашёл дефект в себе:
+срезались только `//`, доккомментарий `/** … */` засчитывался как вызов и занижал dead → test_only
+(16 → 19 после фикса). Реальная находка: `onSummarizeItem`/`onAutoSummaryBatch` — @objc-хендлеры
+меню, которых не зовёт никто; «Резюме» живёт через победившего конкурента `+QuickActions.swift`.
+Стартует **report-only**, вне `audit-all`: красный с первого дня гейт начинают игнорировать.
+- Карточка: `docs/superpowers/plans/2026-08-18-w6-audit-dead-swift-methods.md`.
+
+**Попутно, НЕ починено (см. `docs/NOW.md`):** мост IPC→REST после dual kickstart отбивался 401
+~30 минут (~1600 отказов), при этом `get_diagnostics.event_bridge` показывал `sent=0, failed=0` —
+HTTP ≥400 не считается ни успехом, ни провалом. P0d обещает мгновенное восстановление, но
+повторяет «только если токен сменился», а `mtime` файла токена не менялся с 8 июля.
+
 ## 2026-08-17 — W7: wake-word PortAudio после диктовки
 
 Живой цикл: после диктовки `stop()` слушателя не join'ит за 3 с → `wake_word_start` «предыдущий поток завис внутри PortAudio» → wedged → `forceRestartBackend` каждые 30 мин. Give-up кап 3 не срабатывал: короткий `last_chunk_ts` после kickstart звал `noteHealthy()`.
