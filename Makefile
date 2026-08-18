@@ -1,4 +1,4 @@
-.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release reset-tcc clean-worktree-builds audit-orphans audit-handlers audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-inmemory-purge-coverage audit-path-containment audit-dispatch-test-targets audit-ipc-drift audit-fake-store-signatures audit-all pre-merge-check dispatch-tests service-loc
+.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release reset-tcc clean-worktree-builds audit-orphans audit-handlers audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-inmemory-purge-coverage audit-path-containment audit-dispatch-test-targets audit-ipc-drift audit-fake-store-signatures audit-dead-swift audit-all pre-merge-check dispatch-tests service-loc
 
 VENV = .venv_krab_ear
 PYTHON = $(VENV)/bin/python
@@ -189,6 +189,17 @@ audit-fake-store-signatures:
 	python3 scripts/audit_fake_store_signatures.py --fail-on-found $(ARGS)
 
 # Run all static audit checks (CI parity — runs same checks as CI guard jobs).
+# Audit dead Swift methods (W6 guard).
+# The Python side has five dead-code guards; the Swift agent had none, and the class
+# is live there too -- setupErrorBus was dead in production for months behind 100%
+# green tests. Report-only for now (NO --fail-on-found): the first live run returns
+# 16 dead + 45 test-only methods, and the owner has not yet approved that list.
+# Flip to --fail-on-found (and add to audit-all) once the backlog is cleared.
+# Pass ARGS=--json for machine-readable output.
+audit-dead-swift:
+	python3 scripts/audit_dead_swift_methods.py --selftest
+	python3 scripts/audit_dead_swift_methods.py $(ARGS)
+
 audit-all: audit-orphans audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-path-containment audit-dispatch-test-targets audit-inmemory-purge-coverage audit-ipc-drift audit-fake-store-signatures
 	@echo "All audit checks passed."
 
