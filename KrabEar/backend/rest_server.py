@@ -46,7 +46,13 @@ from backend.cloud_stt import get_cloud_stt_provider, MAX_CLOUD_AUDIO_BYTES
 from backend.tts_service import TTSService
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO)
+# W10: единая настройка — время в строке + глушение дублирующего access-лога
+# werkzeug (см. backend/rest_log_config.py). Раньше здесь был голый
+# basicConfig(level=INFO): строки шли без времени, а werkzeug писал вторую
+# строку на каждый запрос.
+from backend.rest_log_config import configure_rest_logging  # noqa: E402
+
+configure_rest_logging()
 logger = logging.getLogger("KrabEar.REST")
 
 # ---------------------------------------------------------------------------
