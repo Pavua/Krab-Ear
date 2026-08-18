@@ -45,6 +45,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from backend.openwakeword_adapter import OpenWakeWordAdapter  # noqa: E402
 
 _RECORDING_REASON = "recording in progress"
+_WORKER_HUNG_REASON = "recorder worker hung"
 
 
 def _make_adapter(
@@ -100,7 +101,11 @@ class TestStartBlockedWhileRecorderWorkerAlive(unittest.TestCase):
     Живой инцидент 2026-08-17: resume после диктовки слал wake_word_start,
     пока AudioRecorder.join() ещё не вышел / после recorder_timeout —
     второй InputStream на том же устройстве, THREAD_HUNG, PaMacCore -50.
-    Reason тот же, что F6: поллер не жжёт бюджет self-heal.
+
+    W8 (2026-08-18): reason больше НЕ совпадает с настоящей записью. Общая
+    строка делала состояние невидимым — Swift ретраил вечно, а watchdog считал
+    отсутствие сессии легитимной паузой и сбрасывал эпизод, из-за чего wedged
+    был недостижим. Обе строки остаются транзиентными для бюджета self-heal.
     """
 
     def setUp(self) -> None:
@@ -120,7 +125,10 @@ class TestStartBlockedWhileRecorderWorkerAlive(unittest.TestCase):
         adapter.start = _start_side_effect  # type: ignore[method-assign]
         result = adapter.handle_wake_word_start({"model": "hey_jarvis"})
         self.assertFalse(result["ok"], result)
-        self.assertEqual(result.get("reason"), _RECORDING_REASON)
+        self.assertEqual(result.get("reason"), _WORKER_HUNG_REASON)
+        self.assertNotEqual(
+            result.get("reason"), _RECORDING_REASON,
+            "зависший worker обязан отличаться от настоящей записи (W8)")
         self.assertEqual(opened["n"], 0, "второй InputStream/start() не должен вызываться")
 
     def test_idle_worker_does_not_use_start_blocked_reason(self) -> None:

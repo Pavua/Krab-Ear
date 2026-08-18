@@ -1487,6 +1487,12 @@ class BackendService:
             # Инцидент 2026-07-16: активная запись (meeting-путь не снимает
             # слушатель) — легитимная пауза, не staleness-эпизод.
             is_recording=lambda: bool(getattr(self.recorder, "is_recording", False)),
+            # W8: «worker жив, записи нет» — старт слушателя заблокирован гейтом
+            # W7, и без этого сигнала watchdog принимал бы тишину за паузу.
+            is_worker_hung=lambda: (
+                bool(getattr(self.recorder, "is_worker_thread_alive", False))
+                and not bool(getattr(self.recorder, "is_recording", False))
+            ),
             settings_get=self._get_runtime_setting,
         )
         self._wake_word_watchdog.start()

@@ -93,16 +93,42 @@ struct WedgedEscalationTracker {
     /// Поллер wake word больше не зовёт это на каждом last_chunk_ts != nil.
     mutating func noteHealthy() { consecutiveEscalations = 0 }
 
+    /// База последнего наблюдённого `last_chunk_ts`. Здоровье — РОСТ штампа,
+    /// не его наличие: `_last_chunk_ts` штампуется только ненулевым чанком и
+    /// зануляется лишь в stop()/reinit, поэтому при зависании `stream.read()`
+    /// (класс 13-07) он ЗАМЕРЗАЕТ non-nil при живом треде (running=true).
+    /// Проверка «!= nil» засчитывала такие тики здоровыми и снимала give-up кап
+    /// за ~6 с у мёртвого микрофона (Fable-ревью 2026-08-18, дефект B).
+    private var chunkTsBaseline: Double?
+
     /// Тик wake-word статуса: кап снимается только после устойчивой серии
-    /// живых чанков, не после одного-двух сразу после kickstart.
-    mutating func notePoll(running: Bool, hasRecentChunk: Bool) {
-        if running && hasRecentChunk {
-            consecutiveHealthyPolls += 1
-            if consecutiveHealthyPolls >= Self.minHealthyPolls {
-                consecutiveEscalations = 0
-            }
-        } else {
+    /// РАСТУЩИХ штампов, не после одного-двух сразу после kickstart.
+    /// Идиома роста заимствована у `WakeWordDetectionTracker.shouldTrigger`.
+    mutating func notePoll(running: Bool, chunkTs: Double?) {
+        guard running, let ts = chunkTs else {
+            // Сессии нет или штампа нет: серия рвётся. nil — сигнал сброса
+            // состояния backend'ом (stop/reinit), база тоже обнуляется, иначе
+            // следующая серия досчитывала бы старую.
             consecutiveHealthyPolls = 0
+            if chunkTs == nil { chunkTsBaseline = nil }
+            return
+        }
+        guard let base = chunkTsBaseline else {
+            // Первый штамп после разрыва только задаёт базу: роста ещё не видно.
+            chunkTsBaseline = ts
+            consecutiveHealthyPolls = 0
+            return
+        }
+        chunkTsBaseline = ts
+        guard ts > base else {
+            // Замер (клин mid-read) или убывание (монотонные часы сброшены
+            // новой сессией) — не здоровье.
+            consecutiveHealthyPolls = 0
+            return
+        }
+        consecutiveHealthyPolls += 1
+        if consecutiveHealthyPolls >= Self.minHealthyPolls {
+            consecutiveEscalations = 0
         }
     }
 
@@ -119,6 +145,7 @@ struct WedgedEscalationTracker {
         lastEscalationAt = nil
         consecutiveEscalations = 0
         consecutiveHealthyPolls = 0
+        chunkTsBaseline = nil
     }
 }
 
@@ -141,6 +168,12 @@ final class WakeWordPoller {
     /// «идёт запись». Строка сверяется буква-в-букву source-контрактным тестом
     /// test_wake_word_recording_gate_2026_08_01.py — менять ОБЕ стороны разом.
     static let recordingInProgressReason = "recording in progress"
+    /// W8 (2026-08-18): worker рекордера физически жив после stop()-таймаута,
+    /// хотя is_recording уже False. Тоже НЕ жжёт бюджет self-heal (гейт
+    /// самоочищается, как только тред выйдет), но логируется отдельно — это
+    /// хронический клин, а не обычная диктовка. Строка обязана совпадать с
+    /// `RECORDER_WORKER_HUNG_REASON` в KrabEar/backend/openwakeword_adapter.py.
+    static let recorderWorkerHungReason = "recorder worker hung"
 
     /// Все wake word IPC идут через ОДНУ серийную очередь: конкурентная
     /// global не гарантирует порядок ЗАВЕРШЕНИЯ независимых async-блоков,
@@ -168,6 +201,7 @@ final class WakeWordPoller {
     /// Лог «отложен: идёт запись» — один раз на эпизод, не каждые 10 секунд
     /// (часовая встреча дала бы сотни одинаковых строк).
     private var recordingRejectionLogged = false
+    private var workerHungRejectionLogged = false
     /// Последний известный engine_available (для Settings-статуса).
     private(set) var lastEngineAvailable: Bool?
 
@@ -277,8 +311,8 @@ final class WakeWordPoller {
                 // Устойчивый heartbeat, не один тик после kickstart:
                 // короткий last_chunk_ts больше не обнуляет give-up кап
                 // (живой цикл 2026-08-17 20:17 / 20:47 / 21:17).
-                let hasRecentChunk = (result["last_chunk_ts"] as? Double) != nil
-                self.wedgedTracker.notePoll(running: running, hasRecentChunk: hasRecentChunk)
+                self.wedgedTracker.notePoll(
+                    running: running, chunkTs: result["last_chunk_ts"] as? Double)
                 if !self.wedgedTracker.exhausted {
                     self.gaveUpNotified = false
                 }
@@ -361,6 +395,18 @@ final class WakeWordPoller {
                 if ok {
                     self.failedStartAttempts = 0
                     self.recordingRejectionLogged = false
+                    self.workerHungRejectionLogged = false
+                } else if why == Self.recorderWorkerHungReason {
+                    // Бюджет НЕ жжём (гейт снимется сам, когда тред выйдет), но
+                    // это состояние хроническое: watchdog backend'а ведёт по
+                    // нему аномалию и эскалирует в wedged, а здесь — заметный
+                    // WARN, чтобы простой не был совсем немым в agent.log.
+                    if !self.workerHungRejectionLogged {
+                        self.workerHungRejectionLogged = true
+                        AgentLogger.shared.warn(
+                            "[WakeWord] старт заблокирован: worker рекордера завис после stop() "
+                            + "(бюджет self-heal не расходуется, watchdog эскалирует при затяжном клине)")
+                    }
                 } else if why == Self.recordingInProgressReason {
                     // F6 (2026-08-01, находка Fable-ревью): «идёт запись» —
                     // ТРАНЗИЕНТНЫЙ отказ: запись кончится сама, и следующий

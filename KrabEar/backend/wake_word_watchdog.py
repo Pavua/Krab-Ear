@@ -59,6 +59,7 @@ class WakeWordWatchdog:
         reinit_coordinator: Any,
         error_bus: Any = None,
         is_recording: Callable[[], bool] | None = None,
+        is_worker_hung: Callable[[], bool] | None = None,
         settings_get: Callable[[str, Any], Any] | None = None,
         clock: Callable[[], float] = time.monotonic,
         check_interval_sec: float = _CHECK_INTERVAL_SEC_DEFAULT,
@@ -72,6 +73,10 @@ class WakeWordWatchdog:
         # шторм доводил до wedged-эскалации и kickstart'а backend'а ПОСРЕДИ
         # финальной транскрипции встречи.
         self._is_recording = is_recording
+        # W8: «worker рекордера жив, но записи нет» — состояние, в котором
+        # wake_word_start отвергается гейтом W7, сессия не создаётся, и без
+        # этого сигнала watchdog считал бы тишину легитимной паузой.
+        self._is_worker_hung = is_worker_hung
         self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda _k, d: d)
         self._clock = clock
         self._check_interval_sec = check_interval_sec
@@ -97,6 +102,18 @@ class WakeWordWatchdog:
             return bool(self._settings_get("wake_word_watchdog_enabled", True))
         except Exception:
             return True
+
+    def _worker_hung_active(self) -> bool:
+        """Заблокирован ли старт живым зависшим worker'ом рекордера."""
+        if self._is_worker_hung is None:
+            return False
+        try:
+            return bool(self._is_worker_hung())
+        except Exception:
+            # fail-safe в сторону МОЛЧАНИЯ: ложная эскалация = kickstart
+            # backend'а посреди работы владельца, это дороже пропуска.
+            logger.exception("WakeWordWatchdog: is_worker_hung() упал")
+            return False
 
     def _recording_active(self) -> bool:
         if self._is_recording is None:
@@ -190,6 +207,16 @@ class WakeWordWatchdog:
                 # иначе полностью мёртвый слушатель маскировался бы под паузу
                 # (worst case ревью Task 4).
                 return self._handle_dead_session()
+            if self._worker_hung_active() and not self._recording_active():
+                # W8 (2026-08-18): сессии нет НЕ потому, что владелец диктует, а
+                # потому что wake_word_start отвергается гейтом W7 — worker
+                # рекордера физически жив после stop()-таймаута. Само это не
+                # рассосётся (класс 08-07 держит PortAudio часами), а Swift
+                # ретраит вечно, не жгя бюджет. Без этой ветки эпизод
+                # сбрасывался каждый тик, wedged был недостижим, и подсистема
+                # молча простаивала — ровно то, против чего 2026-08-09 вводился
+                # DEFERRED_WORKER_HUNG.
+                return self._handle_blocked_start()
             # Чистая пауза (recording/conversation/TTS/privacy): Swift снял
             # слушатель через stop(). Эпизод и аномалия сбрасываются.
             with self._lock:
@@ -275,6 +302,27 @@ class WakeWordWatchdog:
         return "escalated"
 
     # ------------------------------------------------------------------
+
+    def _handle_blocked_start(self) -> str | None:
+        """Старт слушателя заблокирован живым зависшим worker'ом рекордера.
+
+        Таймер тот же, что у dead-session: даём `stale_sec` на естественный
+        выход worker'а (гейт самоочищается по `is_worker_thread_alive`), затем
+        эскалируем. Мягкое лечение не пробуем: координатор сам откажется —
+        `Pa_Terminate` под живым стримом рекордера это crash-класс.
+        """
+        now = self._clock()
+        with self._lock:
+            if self._escalated_this_episode:
+                return None
+            if self._anomaly_since is None:
+                self._anomaly_since = now
+                return None
+            elapsed = now - self._anomaly_since
+        if elapsed < self._stale_sec():
+            return None
+        self._escalate(elapsed, "blocked_start_worker_hung")
+        return "escalated"
 
     def _handle_dead_session(self) -> str | None:
         """Сессия должна жить, но треда нет: даём поллер-self-heal'у
