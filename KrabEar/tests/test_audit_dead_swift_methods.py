@@ -128,6 +128,18 @@ class CategoryTest(unittest.TestCase):
         }
         self.assertEqual(_verdicts(src).get("record"), NEEDS_REVIEW)
 
+    def test_block_comment_mention_does_not_count_as_a_call(self):
+        """🔴 Живой дефект (W6): доккомментарий /** … */ в тест-файле упоминал
+        onSummarizeItem, и гард занизил вердикт dead → test_only. Метод не зовёт
+        НИКТО: фича «Резюме» переехала в QuickActions. Занижение опаснее пропуска —
+        test_only читается как «жив для тестов» и снимает вопрос."""
+        src = {
+            "Sources/A.swift": "class A {\n    @objc func zzOrphanHandler() {}\n}\n",
+            "Tests/ATests.swift": ("/**\n * Покрывает zzOrphanHandler и соседей.\n */\n"
+                                   "class T {\n    func t() {}\n}\n"),
+        }
+        self.assertEqual(_verdicts(src).get("zzOrphanHandler"), DEAD)
+
 
 class SelftestContractTest(unittest.TestCase):
     def test_selftest_passes_on_its_own_samples(self):

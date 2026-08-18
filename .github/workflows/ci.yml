@@ -372,7 +372,7 @@ jobs:
         # The Python side has five dead-code guards; the Swift agent had none, and the
         # class is live there: setupErrorBus + setupHealthMonitor were fully written,
         # never called, and stayed invisible behind 100% green tests for months.
-        # REPORT-ONLY on purpose -- the first live run finds 16 dead + 45 test-only
+        # REPORT-ONLY on purpose -- the first live run finds 19 dead + 45 test-only
         # methods, and deleting them is a separate owner-approved decision. Flip to
         # --fail-on-found once that backlog is cleared, or the gate is red from day one
         # and gets ignored (which is how a guard dies).

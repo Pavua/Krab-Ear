@@ -134,6 +134,25 @@ def _strip_comment(line: str) -> str:
     return line[:idx] if idx >= 0 else line
 
 
+_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+
+
+def _strip_block_comments(text: str) -> str:
+    """Вырезает /* … */, СОХРАНЯЯ переводы строк (номера строк не должны съехать).
+
+    🔴 Не косметика. Доккомментарий `/** Покрывает onSummarizeItem … */` в тест-файле
+    засчитывался как вызов, и живой прогон занизил вердикт dead → test_only на двух
+    @objc-хендлерах меню, которых не зовёт НИКТО (фича «Резюме» переехала в
+    HistoryPanelController+QuickActions). Занижение опаснее пропуска: test_only
+    читается как «жив для тестов» и снимает вопрос.
+
+    Вложенные блочные комментарии (Swift их допускает) не разбираются — в дереве
+    агента их нет, а нежадный разбор здесь безопаснее: он может оставить лишний
+    текст, то есть ошибиться в сторону «живой», но не выдумать мёртвый метод.
+    """
+    return _BLOCK_COMMENT_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+
+
 def _is_test_path(path: str) -> bool:
     return "/Tests/" in f"/{path}" or path.startswith("Tests/")
 
@@ -189,6 +208,7 @@ def _protocol_requirement(decl: _Decl) -> bool:
 
 def find_dead_methods(sources: dict[str, str]) -> list[Finding]:
     """Чистая функция от исходников — её же использует ``--selftest``."""
+    sources = {path: _strip_block_comments(text) for path, text in sources.items()}
     findings: list[Finding] = []
     for decl in _collect_decls(sources):
         if "override" in decl.mods:

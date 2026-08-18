@@ -193,7 +193,7 @@ audit-fake-store-signatures:
 # The Python side has five dead-code guards; the Swift agent had none, and the class
 # is live there too -- setupErrorBus was dead in production for months behind 100%
 # green tests. Report-only for now (NO --fail-on-found): the first live run returns
-# 16 dead + 45 test-only methods, and the owner has not yet approved that list.
+# 19 dead + 45 test-only methods, and the owner has not yet approved that list.
 # Flip to --fail-on-found (and add to audit-all) once the backlog is cleared.
 # Pass ARGS=--json for machine-readable output.
 audit-dead-swift:
