@@ -24,6 +24,16 @@ from typing import Any, Callable, Optional
 
 logger = logging.getLogger("KrabEar.Backend.OpenWakeWordAdapter")
 
+# 🔴 Swift сравнивает reason ТОЧНОЙ строкой (WakeWordPoller.recordingInProgressReason),
+# поэтому обе константы — контракт между процессами: менять только парно с
+# native/KrabEarAgent/Sources/KrabEarAgent/WakeWordPoller.swift.
+RECORDING_IN_PROGRESS_REASON = "recording in progress"
+# W8 (2026-08-18, Fable-ревью дефект A): worker рекордера физически жив после
+# stop()-таймаута, хотя is_recording уже False. Отдельная строка нужна, чтобы
+# это состояние было ВИДНО (в логе агента и watchdog'у), а не сливалось с
+# обычной диктовкой в вечный тихий ретрай.
+RECORDER_WORKER_HUNG_REASON = "recorder worker hung"
+
 # Встроенные модели openWakeWord
 _BUILTIN_MODELS: list[str] = [
     "alexa",
@@ -507,13 +517,29 @@ class OpenWakeWordAdapter:
                 )
                 _recording = True
             if _recording:
+                # W8: отделяем настоящую диктовку от зависшего worker'а. Голый
+                # is_recording честен для первой; комбинированный гейт —
+                # единственный, кто знает про вторую (is_worker_thread_alive).
+                _reason = RECORDING_IN_PROGRESS_REASON
+                if self._is_start_blocked is not None and self._is_recording is not None:
+                    try:
+                        if not bool(self._is_recording()):
+                            _reason = RECORDER_WORKER_HUNG_REASON
+                    except Exception:
+                        # Не знаем — оставляем прежнюю строку: она заведомо
+                        # безопасна для Swift (транзиентная ветка, бюджет цел).
+                        logger.warning(
+                            "OpenWakeWordAdapter.handle_wake_word_start: "
+                            "is_recording() упал при уточнении причины",
+                            exc_info=True,
+                        )
                 # DEBUG, а не INFO: поллер стучится каждые ~10 секунд, и на
                 # каждой диктовке INFO залил бы err.log (как это делает F5).
                 logger.debug(
                     "OpenWakeWordAdapter.handle_wake_word_start: "
-                    "отклонён — идёт запись"
+                    "отклонён — %s", _reason,
                 )
-                return {"ok": False, "reason": "recording in progress"}
+                return {"ok": False, "reason": _reason}
 
         model_name = str(params.get("model", "hey_jarvis"))
 
