@@ -10,6 +10,9 @@
     — allErrors=[] → emptyStateLabel.isHidden == false.
  4. test_actionable_button_calls_handle_error_action
     — handleActionButtonTap(at:) с actionable payload → IPC вызов confirm.
+ 5. test_action_button_label_from_context_overrides_default
+    — context["action_label"] переопределяет дефолтный лейбл "Исправить"
+    (симметрично ErrorToastViewTests.test_action_label_from_context_overrides_default).
 */
 
 import XCTest
@@ -21,7 +24,8 @@ private func makePayload(
     severity: String,
     component: String,
     actionable: Bool = false,
-    actionId: String? = nil
+    actionId: String? = nil,
+    context: [String: AnyCodable] = [:]
 ) -> KrabErrorPayload {
     KrabErrorPayload(
         severity: severity,
@@ -30,7 +34,7 @@ private func makePayload(
         message_user: "Test message [\(severity)/\(component)]",
         message_debug: "debug",
         timestamp: "2026-05-04T12:00:00.000Z",
-        context: [:],
+        context: context,
         actionable: actionable,
         action_id: actionId
     )
@@ -262,5 +266,70 @@ final class DiagnosticsTabViewTests: XCTestCase {
         XCTAssertEqual(vc.filteredErrors.count, 2)
         XCTAssertTrue(vc.filteredErrors.allSatisfy { $0.component == "stt" })
         XCTAssertTrue(vc.filteredErrors.allSatisfy { ["error", "warn"].contains($0.severity) })
+    }
+
+    // MARK: 8. Action button label — context["action_label"] overrides default
+
+    func test_action_button_label_from_context_overrides_default() throws {
+        let ipcClient = IPCClient(socketPath: "/tmp/unused_actionlabel_\(UUID().uuidString).sock")
+        let vc = DiagnosticsTabViewController(ipcClient: ipcClient)
+
+        let payload = makePayload(
+            severity: "error",
+            component: "mlx",
+            actionable: true,
+            actionId: "unload_model",
+            context: ["action_label": AnyCodable(value: "Выгрузить модель")]
+        )
+        vc.allErrors = [payload]
+        vc.activeSeverities = ["error"]
+        vc.activeComponent = nil
+        vc.applyFilter()
+
+        let actionColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("action"))
+        let container = try XCTUnwrap(
+            vc.tableView(NSTableView(), viewFor: actionColumn, row: 0),
+            "Action column должна вернуть контейнер для actionable payload"
+        )
+        let button = try XCTUnwrap(
+            container.subviews.compactMap { $0 as? NSButton }.first,
+            "Контейнер должен содержать NSButton"
+        )
+
+        XCTAssertEqual(
+            button.title,
+            "Выгрузить модель",
+            "Подпись кнопки должна браться из context['action_label'], а не быть литералом 'Исправить'"
+        )
+    }
+
+    // MARK: 9. Action button label — default "Исправить" when no context
+
+    func test_action_button_label_default_when_no_context() throws {
+        let ipcClient = IPCClient(socketPath: "/tmp/unused_actionlabel_default_\(UUID().uuidString).sock")
+        let vc = DiagnosticsTabViewController(ipcClient: ipcClient)
+
+        let payload = makePayload(
+            severity: "error",
+            component: "mlx",
+            actionable: true,
+            actionId: "unload_model"
+        )
+        vc.allErrors = [payload]
+        vc.activeSeverities = ["error"]
+        vc.activeComponent = nil
+        vc.applyFilter()
+
+        let actionColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("action"))
+        let container = try XCTUnwrap(
+            vc.tableView(NSTableView(), viewFor: actionColumn, row: 0)
+        )
+        let button = try XCTUnwrap(container.subviews.compactMap { $0 as? NSButton }.first)
+
+        XCTAssertEqual(
+            button.title,
+            "Исправить",
+            "Дефолтная подпись при отсутствии context['action_label'] должна остаться прежней"
+        )
     }
 }

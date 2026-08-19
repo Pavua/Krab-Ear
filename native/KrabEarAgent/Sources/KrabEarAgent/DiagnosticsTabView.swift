@@ -657,7 +657,7 @@ extension DiagnosticsTabViewController: NSTableViewDelegate {
                 let container = NSTableCellView()
                 container.identifier = NSUserInterfaceItemIdentifier("action_cell")
 
-                let btn = NSButton(title: "Исправить", target: self, action: #selector(onActionButtonTapped(_:)))
+                let btn = NSButton(title: actionButtonLabel(for: payload), target: self, action: #selector(onActionButtonTapped(_:)))
                 btn.bezelStyle = .inline
                 btn.tag = row
                 btn.identifier = NSUserInterfaceItemIdentifier("action_\(actionId)")
@@ -686,6 +686,17 @@ extension DiagnosticsTabViewController: NSTableViewDelegate {
     }
 
     // MARK: - Cell helpers
+
+    /// Label from context["action_label"] if present, else default "Исправить".
+    /// Symmetric to ErrorToastView.buildActionButton(payload:actionId:) — same
+    /// source of truth (backend ERROR_REGISTRY via ErrorBus.push), different default.
+    private func actionButtonLabel(for payload: KrabErrorPayload) -> String {
+        if let codable = payload.context["action_label"],
+           let str = codable.value as? String {
+            return str
+        }
+        return "Исправить"
+    }
 
     private func makeTextCell(id: String) -> NSTableCellView {
         let cell = NSTableCellView()
