@@ -187,8 +187,8 @@ ERROR_REGISTRY: dict[str, _Entry] = {
     "mlx.oom": {
         "user_msg_ru": "Не хватило памяти — выгрузи LM Studio или другие MLX-приложения",
         "actionable": True,
-        "action_id": "kill_lm_studio_via_telegram",
-        "action_label": "Выгрузить через Telegram",
+        "action_id": "unload_lm_studio_model",
+        "action_label": "Выгрузить модель",
         "severity": "critical",
         "dedupe_seconds": 5,
     },
