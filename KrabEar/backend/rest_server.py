@@ -1864,7 +1864,7 @@ def transcribe_audio():
             confidence=result.get("confidence", 0.0),
         )
 
-        return jsonify({
+        response_payload = {
             "status": "ok",
             "text": text,
             "confidence": result.get("confidence", 0.0),
@@ -1875,7 +1875,20 @@ def transcribe_audio():
             "segments": result.get("segments", []),
             "diarization": result.get("diarization", {}),
             "history_id": history_item_id,
-        })
+        }
+        # W-2026-08-19: пустой text скрывал ДВЕ разных причины (тишина vs не
+        # смогли распознать — вырожденный вход/VAD-скип), клиент (Voice
+        # Gateway) вынужден был гадать по длительности ответа. Причина уже
+        # известна внутри (AudioEngine._empty_transcription_result "reason":
+        # "empty_audio"/"vad_skip") — пробрасываем её АДДИТИВНО: поле
+        # присутствует ТОЛЬКО когда текст пуст и причина известна, чтобы не
+        # засорять ответ при нормальном распознавании и не ломать контракт
+        # старых клиентов, не ожидающих новый ключ.
+        if not text:
+            _empty_reason = result.get("reason")
+            if _empty_reason:
+                response_payload["reason"] = _empty_reason
+        return jsonify(response_payload)
 
     except Exception:
         logger.exception("Ошибка при обработке аудио-запроса")
