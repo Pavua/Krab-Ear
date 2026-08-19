@@ -2597,6 +2597,35 @@ class AudioEngine:
 
         raise RuntimeError("Все доступные STT-движки вышли из строя.")
 
+    @staticmethod
+    def _classify_mlx_error_code(_emsg: str, is_memory_error: bool) -> str | None:
+        """Classify a caught (MemoryError, RuntimeError) from mlx transcribe into an ErrorBus code.
+
+        2026-08-19 fix: the two `_transcribe_model` exception handlers (worker-enabled
+        path and direct in-process/watchdog path) independently duplicated this
+        classification — a sibling-asymmetry class bug (see CLAUDE.md). The oom
+        keyword set includes bare "metal", which is a substring of "iogpumetal" —
+        so an IOGPUMetal command-buffer assertion (Wave 64, self-recovers via the
+        subprocess worker, not an OOM) was ALSO matching the oom check whenever both
+        conditions were tested independently, pushing a false-positive critical
+        "not enough memory" toast to the owner. The assertion signature is more
+        specific, so it MUST be checked first (if/elif, not two independent ifs) —
+        a genuine OOM message ("failed to allocate ... metal buffer") never contains
+        any of the assertion keywords, so it still falls through to the oom branch.
+        """
+        if any(
+            kw in _emsg for kw in (
+                "iogpumetal", "validate failed assertion",
+                "commit command buffer", "uncommitted encoder",
+            )
+        ):
+            return "mlx.metal_assertion_failure"
+        if is_memory_error or any(
+            kw in _emsg for kw in ("allocat", "out of memory", "metal", "oom")
+        ):
+            return "mlx.oom"
+        return None
+
     def _transcribe_model(self, audio_data: Any, model_name: str, prompt: str, language: str | None = None) -> dict[str, Any]:
         """Низкоуровневый вызов MLX Whisper с обработкой несовместимых аргументов.
 
@@ -2667,13 +2696,12 @@ class AudioEngine:
                         last_err = e
                     except (MemoryError, RuntimeError) as e:
                         _emsg = str(e).lower()
-                        if isinstance(e, MemoryError) or any(
-                            kw in _emsg for kw in ("allocat", "out of memory", "metal", "oom")
-                        ):
+                        _code = self._classify_mlx_error_code(_emsg, isinstance(e, MemoryError))
+                        if _code is not None:
                             self._push_error(
-                                "mlx.oom",
+                                _code,
                                 f"{type(e).__name__}: {e} (model={model_name})",
-                                severity="critical",
+                                severity="critical" if _code == "mlx.oom" else "error",
                             )
                         last_err = e
             raise last_err or RuntimeError("Ошибка вызова mlx_whisper.transcribe")
@@ -2715,28 +2743,16 @@ class AudioEngine:
                 except TypeError as e:
                     last_err = e
                 except (MemoryError, RuntimeError) as e:
-                    # Phase B.2: mlx.oom — MLX Metal GPU ran out of memory during inference.
+                    # Phase B.2: mlx.oom / Wave 64: mlx.metal_assertion_failure —
+                    # classification centralized in _classify_mlx_error_code (2026-08-19
+                    # sibling-asymmetry fix: assertion is more specific, checked first).
                     _emsg = str(e).lower()
-                    if isinstance(e, MemoryError) or any(
-                        kw in _emsg for kw in ("allocat", "out of memory", "metal", "oom")
-                    ):
+                    _code = self._classify_mlx_error_code(_emsg, isinstance(e, MemoryError))
+                    if _code is not None:
                         self._push_error(
-                            "mlx.oom",
+                            _code,
                             f"{type(e).__name__}: {e} (model={model_name})",
-                            severity="critical",
-                        )
-                    # Wave 64: mlx.metal_assertion_failure — IOGPUMetal command-buffer
-                    # assertion or uncommitted encoder; recovery is automatic (subprocess).
-                    if any(
-                        kw in _emsg for kw in (
-                            "iogpumetal", "validate failed assertion",
-                            "commit command buffer", "uncommitted encoder",
-                        )
-                    ):
-                        self._push_error(
-                            "mlx.metal_assertion_failure",
-                            f"{type(e).__name__}: {e} (model={model_name})",
-                            severity="error",
+                            severity="critical" if _code == "mlx.oom" else "error",
                         )
                     last_err = e
         raise last_err or RuntimeError("Ошибка вызова mlx_whisper.transcribe")
