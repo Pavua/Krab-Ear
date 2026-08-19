@@ -648,6 +648,7 @@ class BackendService:
 
         # Phase B.1 — error bus + active LLM probe
         from backend.error_bus import ErrorBus
+        from backend.oom_auto_relief import OomAutoRelief
         from backend.error_codes import ERROR_REGISTRY
         from backend.llm_probe import LLMHttpProbe
         from backend import error_actions as _error_actions  # noqa: F401  side-effect: registers ACTION_HANDLERS for ErrorActionRouter
@@ -663,6 +664,14 @@ class BackendService:
             default_dedupe_window_sec=30.0,
             ring_buffer_size=200,
         )
+
+        # Реактивное освобождение памяти: на mlx.oom выгружаем brain-модель сами,
+        # а не только по кнопке тоста (до 2026-08-19 выгрузка была лишь проактивной,
+        # на старте записи). 🔴 Листенер шины вызывается СИНХРОННО в потоке эмиттера
+        # (STT-пайплайн), поэтому OomAutoRelief.handle_event возвращается немедленно
+        # и уводит всю блокирующую работу в свой поток.
+        self._oom_auto_relief = OomAutoRelief(settings_service=self._settings_svc)
+        event_bus.add_listener(self._oom_auto_relief.handle_event)
 
         # Wire error_bus into rewriter so it can push timeout/connection/etc errors
         if self._llm_rewriter is not None:

@@ -1195,6 +1195,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # тяжёлый inference на Metal GPU одновременно (→ GPU stuck → reboot).
     # Lock file: ~/.openclaw/lm_studio_brain.lock (кросс-проектный contract).
     # True по умолчанию — безопасная деградация (lease errors → True, Ear не блокируется).
+    # Реактивное освобождение памяти: на mlx.oom выгрузить brain-модель автоматически,
+    # а не только по кнопке тоста. До 2026-08-19 выгрузка была ТОЛЬКО проактивной
+    # (на старте записи), на реальную нехватку памяти система не реагировала никак.
+    "mlx_oom_auto_unload_enabled": True,
+    # Одна попытка выгрузки на окно: OOM приходит штормом, а выгрузка разрушительна.
+    "mlx_oom_auto_unload_cooldown_sec": 600.0,
     "llm_brain_lease_enabled": True,
     # TTL одного lease в секундах. Краш процесса не «вешает» lock: следующий acquire
     # заберёт лиз по истёкшему TTL. 30 с достаточно для recording цикла.
