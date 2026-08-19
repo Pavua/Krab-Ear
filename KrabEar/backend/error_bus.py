@@ -218,7 +218,16 @@ class ErrorBus:
 
         Returns ``True`` if the error was emitted (i.e. not deduped),
         ``False`` if it was suppressed within the dedupe window.
+
+        Before dedupe/storage, ``err.context`` is enriched with this code's
+        ``action_label`` from the registry (see ``_apply_action_label``) —
+        this is the single funnel every ``KrabError`` passes through, so the
+        enrichment lands in the ring buffer, the ``krab_error`` event
+        payload, AND every IPC ``list_recent_errors``/``list_recent_since``
+        response without needing to touch the ~30 individual call sites that
+        construct ``KrabError``.
         """
+        self._apply_action_label(err)
         with self._lock:
             now = time.monotonic()
             window = self._dedupe_window_for(err.code)
@@ -324,6 +333,39 @@ class ErrorBus:
             value = entry.get("dedupe_seconds", self._default_dedupe_window_sec)
             return float(value)
         return float(entry)
+
+    def _apply_action_label(self, err: KrabError) -> None:
+        """Copy this code's ``action_label`` from the registry into ``err.context``.
+
+        2026-08-19 bug: every ``KrabError`` construction site pulls
+        ``actionable``/``action_id`` from the same ``ERROR_REGISTRY`` entry,
+        but no call site ever copied ``action_label`` into ``context`` —
+        the field existed only in the registry and never reached the wire.
+        ``ErrorToastView.swift`` reads ``payload.context["action_label"]``
+        for the toast button text and silently fell back to the generic
+        "Действие" for EVERY actionable error in production.
+
+        A caller-supplied ``context["action_label"]`` always wins — this
+        only fills the key in when the caller left it out. Non-actionable
+        entries (and any code absent from the registry, e.g. a legacy flat
+        ``{code: seconds}`` registry passed in tests) have an empty/missing
+        ``action_label`` and are left untouched, so ``list_recent_errors``
+        stays unchanged for them.
+
+        This mutates the same dict object that later feeds Sentry's
+        ``extras=dict(err.context)`` (see ``_route_to_sentry``) — a plain
+        button-label string is harmless there, same as any other context
+        value already sent today.
+        """
+        if "action_label" in err.context:
+            return
+        entry = self._registry.get(err.code)
+        if not isinstance(entry, dict):
+            return
+        label = entry.get("action_label")
+        if not label:
+            return
+        err.context = {**err.context, "action_label": label}
 
     def _sentry_cap_allows(self, code: str) -> int | None:
         """Разрешена ли отправка кода наружу. Возвращает число подавленных с
