@@ -847,6 +847,14 @@ class AudioEngine:
         нечего» (VAD отфильтровал тишину, вырожденное аудио): потребители
         читают эти поля напрямую, и разъезд двух копий словаря обернулся бы
         KeyError уже в проде.
+
+        ``reason`` (2026-08-19) дублирует значение ``engine`` отдельным явным
+        ключом: у обоих вызывающих мест ``engine`` на деле несёт не имя STT-
+        движка, а причину пустого результата ("empty_audio" / "vad_skip") —
+        переименовывать/трогать сам ``engine`` этой волной не стали (риск для
+        потребителей, читающих его как есть), но REST-граница нуждается в
+        НЕДВУСМЫСЛЕННО названном поле, чтобы отличить «тишина» от «не смогли
+        распознать» (см. backend/rest_server.py::transcribe_audio).
         """
         return {
             "text": "", "raw_text": "", "cleaned_text": "",
@@ -857,6 +865,7 @@ class AudioEngine:
             "engine": engine, "model": None,
             "language": language, "segments": [],
             "diarization": None, "emotion": None,
+            "reason": engine,
         }
 
     @staticmethod
