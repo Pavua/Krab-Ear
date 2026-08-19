@@ -519,7 +519,11 @@ def _get_event_bridge_token() -> str | None:
     if _event_bridge_token_cache:
         return _event_bridge_token_cache
     from backend.event_bridge import read_bridge_token
-    token = read_bridge_token(settings.DATA_DIR)
+    # log_source=True: REST обязан сказать, ОТКУДА читает токен. Путь сюда приходит
+    # другим каналом конфигурации, чем у моста (env против CLI-аргумента), и без
+    # полного пути в логе расхождение каналов невидимо — обе стороны рапортуют
+    # «файл прочитан», просто файлы разные (инцидент 2026-07-12).
+    token = read_bridge_token(settings.DATA_DIR, log_source=True)
     if token:
         _event_bridge_token_cache = token
     return _event_bridge_token_cache

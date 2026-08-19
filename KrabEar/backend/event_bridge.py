@@ -85,13 +85,37 @@ _TOKEN_BYTES = 32                # secrets.token_hex(32) -> 64 hex-символ�
 # создаёт, спека §2.2: порядок старта процессов произволен).
 # ---------------------------------------------------------------------------
 
-def read_bridge_token(data_dir: Path | str) -> str | None:
+def resolve_token_path(data_dir: Path | str) -> Path:
+    """ЕДИНАЯ формула пути к файлу токена. Абсолютный путь.
+
+    🔴 Зачем отдельная функция. Путь разрешается ДВУМЯ независимыми каналами
+    конфигурации: мост (IPC-процесс) берёт ``data_dir`` из CLI ``--data-dir``,
+    а REST-процесс — из ``settings.DATA_DIR`` (env ``KRAB_EAR_DATA_DIR``,
+    дефолт ``~/.krab_ear_data``). Слить каналы нельзя — это разные процессы с
+    разным способом запуска. Но формула вычисления пути обязана быть ОДНА,
+    иначе стороны разъедутся ещё и по ней.
+
+    При расхождении каналов обе половины самолечения (P0d) перечитывают КАЖДАЯ
+    СВОЙ файл, mtime ни одного не двигается, и 401 становится вечным — ровно
+    инцидент 2026-07-12 (rest.plist без KRAB_EAR_DATA_DIR). Абсолютный путь
+    нужен для того, чтобы две стороны можно было СВЕРИТЬ глазами.
+    """
+    return (Path(data_dir).expanduser() / EVENT_BRIDGE_TOKEN_FILENAME).resolve()
+
+
+def read_bridge_token(data_dir: Path | str, log_source: bool = False) -> str | None:
     """Читает токен моста, НЕ создавая файл. None если отсутствует/пуст/битый.
 
     Вызывается REST-стороной лениво на первый запрос — REST может стартовать
     раньше IPC-процесса, который единственный создаёт файл.
+
+    ``log_source=True`` печатает ПОЛНЫЙ путь читаемого файла. Это единственный
+    способ увидеть расхождение каналов конфигурации: без него обе стороны
+    рапортуют «файл прочитан», просто файлы разные.
     """
-    token_path = Path(data_dir) / EVENT_BRIDGE_TOKEN_FILENAME
+    token_path = resolve_token_path(data_dir)
+    if log_source:
+        logger.info("EventBridge: токен читается из %s", token_path)
     try:
         content = token_path.read_text(encoding="utf-8").strip()
         return content or None
@@ -110,7 +134,7 @@ def _load_or_create_token(data_dir: Path) -> str:
     if existing:
         return existing
 
-    token_path = data_dir / EVENT_BRIDGE_TOKEN_FILENAME
+    token_path = resolve_token_path(data_dir)
     token = secrets.token_hex(_TOKEN_BYTES)
     tmp_path = None
     try:
@@ -184,6 +208,9 @@ class EventBridge:
     ) -> None:
         self._settings = settings
         self._data_dir = Path(data_dir)
+        # Полный путь к токену считаем ОДИН раз общей формулой — он же уходит
+        # в диагностику, чтобы стороны можно было сверить глазами.
+        self._token_path = resolve_token_path(data_dir)
         self._post_fn = post_fn or _default_post_fn
 
         # S3/Задача 6: рубильник REST_IN_PROCESS_ENABLED больше НЕ читается
@@ -409,4 +436,8 @@ class EventBridge:
                 "dropped": self._dropped_count,
                 "dropped_stale": self._dropped_stale_count,
                 "failed": self._failed_count,
+                # 🔴 Путь и факт наличия — РАЗНЫЕ вопросы, нужны оба: расхождение
+                # каналов конфигурации иначе невидимо (обе стороны читают «свой» файл).
+                "token_path": str(self._token_path),
+                "token_present": self._token_path.exists(),
             }
