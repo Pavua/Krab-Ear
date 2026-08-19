@@ -74,6 +74,9 @@ _ENUM_FIELDS: dict[str, tuple[str, ...]] = {
 
 # Диапазоны числовых полей: ключ → (min, max, default, type)
 _RANGE_FIELDS: dict[str, tuple[Any, Any, Any, type]] = {
+    # Окно между попытками автовыгрузки при mlx.oom. 0 → каждый OOM (нагрузочно),
+    # верх ограничен сутками: большее окно означало бы "фича выключена", для этого есть флаг.
+    "mlx_oom_auto_unload_cooldown_sec": (0.0, 86400.0, 600.0, float),
     "history_page_size": (10, 500, 50, int),
     "audio_ducking_percent": (0, 100, 50, int),
     "overlay_opacity_percent": (15, 90, 45, int),
