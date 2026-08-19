@@ -19,11 +19,18 @@ class ActionDispatcherTests(unittest.TestCase):
         params = call_args[0][0] if call_args[0] else call_args[1]
         self.assertEqual(params.get("llm_rewrite_enabled"), False)
 
-    def test_kill_lm_studio_via_telegram_feature_disabled(self):
-        # B.1: feature flag default False — should return feature_disabled
-        result = handle_action("kill_lm_studio_via_telegram", settings_service=MagicMock())
-        self.assertFalse(result["executed"])
-        self.assertEqual(result["reason"], "feature_disabled")
+    def test_unload_lm_studio_model_actually_unloads(self):
+        # 2026-08-19: заглушка feature_disabled заменена реальной выгрузкой.
+        svc = MagicMock()
+        svc.cached_settings.return_value = {
+            "llm_brain_model": "qwen/qwen3.6-27b",
+            "LLM_BASE_URL": "http://localhost:1234/v1",
+        }
+        with patch("backend.error_actions.unload_model_async") as unload, \
+                patch("backend.error_actions.current_lease_holder", return_value=None):
+            result = handle_action("unload_lm_studio_model", settings_service=svc)
+        unload.assert_called_once()
+        self.assertTrue(result["executed"])
 
     @patch("backend.error_actions.subprocess.run")
     def test_open_privacy_settings_invokes_subprocess(self, mock_run):

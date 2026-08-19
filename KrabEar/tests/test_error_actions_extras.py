@@ -180,19 +180,18 @@ class RetryHistorySaveTests(unittest.TestCase):
 
 class FeatureGatedHandlerTests(unittest.TestCase):
 
-    def test_kill_lm_studio_via_telegram_feature_disabled(self):
-        """kill_lm_studio_via_telegram returns feature_disabled (Phase B.1 stub)."""
-        result = handle_action("kill_lm_studio_via_telegram", settings_service=_svc())
-        self.assertFalse(result["executed"])
-        self.assertEqual(result["reason"], "feature_disabled")
-        self.assertIsNone(result["side_effect"])
-
-
-# ---------------------------------------------------------------------------
-# 7. open_hf_token_setting, open_hotkey_settings
-# ---------------------------------------------------------------------------
-
-class SwiftFocusHandlerTests(unittest.TestCase):
+    def test_unload_lm_studio_model_actually_unloads(self):
+        """2026-08-19: заглушка feature_disabled заменена реальной выгрузкой."""
+        svc = MagicMock()
+        svc.cached_settings.return_value = {
+            "llm_brain_model": "qwen/qwen3.6-27b",
+            "LLM_BASE_URL": "http://localhost:1234/v1",
+        }
+        with patch("backend.error_actions.unload_model_async") as unload, \
+                patch("backend.error_actions.current_lease_holder", return_value=None):
+            result = handle_action("unload_lm_studio_model", settings_service=svc)
+        unload.assert_called_once()
+        self.assertTrue(result["executed"])
 
     def test_open_hf_token_setting_returns_swift_side_effect(self):
         """open_hf_token_setting must return executed=True and a

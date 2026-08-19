@@ -10,9 +10,15 @@ from __future__ import annotations
 
 import logging
 import subprocess
+
+from backend.brain_lease import current_lease_holder
+from backend.lm_studio_lifecycle import unload_model_async
 from typing import Callable
 
 logger = logging.getLogger("KrabEar.Backend.ErrorActions")
+
+# Владелец brain-лизы, которым представляется этот процесс (см. recording_core_service).
+_OWN_LEASE_OWNER = "krab_ear"
 
 # Privacy preference URLs (macOS deep links)
 _PRIVACY_ACCESSIBILITY_URL = (
@@ -69,9 +75,48 @@ def _retry_history_save(*, settings_service, store=None, **kwargs) -> dict:
         return {"executed": False, "reason": f"retry_failed: {exc}", "side_effect": None}
 
 
-def _kill_lm_studio_via_telegram(*, settings_service, **kwargs) -> dict:
-    # B.1: feature-flagged off. Real Telegram bridge integration pending separate spec.
-    return {"executed": False, "reason": "feature_disabled", "side_effect": None}
+def _unload_lm_studio_model(*, settings_service, **kwargs) -> dict:
+    """Освободить память: выгрузить brain-модель из LM Studio.
+
+    🔴 До 2026-08-19 здесь стояла заглушка `feature_disabled` (Phase B.1, «pending
+    separate spec»), которая безусловно ничего не делала — владелец жал кнопку
+    «выгрузить» под тостом о нехватке памяти, и не происходило ровным счётом ничего.
+    Механизм выгрузки при этом в проекте есть и работает, он просто никогда отсюда
+    не звался.
+
+    🔴 Гейт на чужую работу: `brain_lease` — advisory-координация одного Metal GPU
+    между Krab Ear и Главным Крабом. Если лизу держит ДРУГОЙ владелец, выгрузка
+    оборвала бы его inference, поэтому отказываемся. Направление отказа fail-safe:
+    не уверены — не выгружаем (тост остаётся, но чужая работа цела).
+
+    Выгрузка асинхронная (fire-and-forget), подтверждения от LM Studio нет — поэтому
+    честно сообщаем «запрошена», а не «выполнена».
+    """
+    holder = current_lease_holder()
+    if holder and holder.get("owner") != _OWN_LEASE_OWNER:
+        return {
+            "executed": False,
+            "reason": f"brain lease held by {holder.get('owner')!r} — чужой inference не обрываем",
+            "side_effect": None,
+        }
+
+    settings = settings_service.cached_settings() if settings_service else {}
+    model_id = (settings or {}).get("llm_brain_model") or ""
+    base_url = (settings or {}).get("LLM_BASE_URL") or ""
+    if not model_id:
+        return {
+            "executed": False,
+            "reason": "llm_brain_model не задан в настройках — нечего выгружать",
+            "side_effect": None,
+        }
+
+    unload_model_async(base_url, model_id)
+    logger.info("mlx.oom action: запрошена выгрузка модели", extra={"model_id": model_id})
+    return {
+        "executed": True,
+        "reason": None,
+        "side_effect": f"unload_requested:{model_id}",
+    }
 
 
 def _switch_to_stable_rewriter(*, settings_service, **kwargs) -> dict:
@@ -156,12 +201,12 @@ def _open_terminal_make_release(*, settings_service, **kwargs) -> dict:
 
 ACTION_HANDLERS: dict[str, Callable] = {
     "open_privacy_settings": _open_privacy_settings,
+    "unload_lm_studio_model": _unload_lm_studio_model,
     "open_hf_token_setting": _open_hf_token_setting,
     "disable_rewriter": _disable_rewriter,
     "open_hotkey_settings": _open_hotkey_settings,
     "switch_to_balanced_profile": _switch_to_balanced_profile,
     "retry_history_save": _retry_history_save,
-    "kill_lm_studio_via_telegram": _kill_lm_studio_via_telegram,
     "switch_to_stable_rewriter": _switch_to_stable_rewriter,
     "open_lm_studio_settings": _open_lm_studio_settings,
     # Wave 50 — wire-in for new actionable codes (diarization.vad_gated,
