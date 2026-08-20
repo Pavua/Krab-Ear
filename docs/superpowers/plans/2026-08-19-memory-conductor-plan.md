@@ -182,8 +182,6 @@ class LedgerClient:
             fcntl.flock(lock_fd, fcntl.LOCK_UN); os.close(lock_fd)
 ```
 
- if False else None` line — it is a
-plan artefact; `remove_own` body starts at the try/_acquire.)
 - [ ] **Step 4: tests green** — `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_memory_ledger_2026_08_19.py -q`
 - [ ] **Step 5: gates + commit** `feat(memory): write-only ledger client (sidecar flock, TTL fail-closed GC)`
 
