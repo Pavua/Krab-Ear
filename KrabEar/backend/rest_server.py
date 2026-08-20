@@ -2598,6 +2598,146 @@ ws_stream = _ws_stream_handler
 api = None
 
 
+# ---------------------------------------------------------------------------
+# Memory Conductor T6 (спека 2026-08-19-memory-conductor-design.md §3
+# C-EXECUTOR-LOCALITY, §6): REST-side idle-reaper для mlx_whisper_worker.
+#
+# Кто ВЛАДЕЕТ резидентом — тот его и выгружает: mlx_whisper-сессия живёт
+# синглтоном в core.mlx_whisper_session ЭТОГО процесса (REST, не IPC-backend),
+# поэтому реапер живёт здесь же, а не в IPC-стороннем conductor'е (тот ведает
+# gigaam/rewriter/brain — другие резиденты, другой процесс).
+#
+# 🔴 Локус старта (round-2 констрейнт): ТОЛЬКО run-путь — блок `__main__`
+# ниже И `InProcessRestServer.start()` (rest_inprocess.py), НИКОГДА на
+# импорте модуля. rest_server.py импортируется chunked-тестами — daemon-тред
+# на импорте протёк бы в процесс каждого файла того же чанка (класс #1782).
+# ---------------------------------------------------------------------------
+
+_WHISPER_LEDGER_OWNER = "krab_ear_rest"
+_WHISPER_RESIDENT_NAME = "mlx_whisper_worker"
+_WHISPER_RESIDENT_SIZE_MB = 1800
+_DEFAULT_WHISPER_IDLE_UNLOAD_SEC = 900.0
+
+# DI-шов для тестов (тот же приём, что module-level store/engine выше):
+# тест подставляет сюда LedgerClient(path=tmpdir) ДО первого тика, чтобы
+# реапер никогда не касался настоящего ~/.openclaw/memory_ledger.json.
+_whisper_ledger_client = None
+# Идемпотентность старта: RestWatchdog зовёт InProcessRestServer.start()
+# повторно (restart = stop()+start()) — двойной вызов обязан дать РОВНО один
+# тред за жизнь процесса, а не респавнить второй параллельно с первым.
+_whisper_reaper_started = threading.Event()
+_whisper_reaper_start_lock = threading.Lock()
+
+
+def _whisper_ledger():
+    global _whisper_ledger_client
+    if _whisper_ledger_client is None:
+        from backend.memory_ledger import LedgerClient
+
+        _whisper_ledger_client = LedgerClient(owner=_WHISPER_LEDGER_OWNER)
+    return _whisper_ledger_client
+
+
+def _whisper_idle_reaper_tick() -> None:
+    """Один тик REST idle-reaper'а: публикует леджер, затем shadow-лог или
+    реальный close_if_idle (в зависимости от master-гейта + enforce-флага).
+
+    ``peek_session()`` НИКОГДА не создаёт сессию (C-EXECUTOR-LOCALITY) — до
+    первой транскрибации в этом процессе тик молча выходит, не порождая
+    worker ради самого прохода.
+    """
+    from core.mlx_whisper_session import peek_session
+
+    sess = peek_session()
+    if sess is None:
+        return
+
+    inflight = sess.inflight
+    last_used = sess.last_used_ts
+    state = "active" if inflight > 0 else "idle"
+    idle_since_ts = None if inflight > 0 else last_used
+
+    try:
+        _whisper_ledger().publish_own({
+            _WHISPER_RESIDENT_NAME: {
+                "size_mb": _WHISPER_RESIDENT_SIZE_MB,
+                "state": state,
+                "idle_since_ts": idle_since_ts,
+                "reload_cost": "cheap",
+                "pid": os.getpid(),
+            }
+        })
+    except Exception:
+        logger.exception("whisper idle-reaper: publish_own бросил")
+
+    if state != "idle":
+        return
+
+    idle_threshold = float(
+        _load_settings_field("whisper_idle_unload_sec", _DEFAULT_WHISPER_IDLE_UNLOAD_SEC)
+    )
+    elapsed = time.monotonic() - last_used
+    if elapsed < idle_threshold:
+        return
+
+    # Global Constraint: memory_conductor_enforce=False по умолчанию — до
+    # явного включения (master-гейт memory_conductor_enabled И один из
+    # enforce-флагов) реапер только ЛОГИРУЕТ решение; леджер уже опубликован
+    # выше в любом случае (write-only observability, не зависит от policy).
+    conductor_enabled = bool(_load_settings_field("memory_conductor_enabled", False))
+    enforce = bool(_load_settings_field("memory_conductor_enforce", False)) or bool(
+        _load_settings_field("memory_conductor_enforce_whisper", False)
+    )
+    if not (conductor_enabled and enforce):
+        logger.info(
+            "whisper idle-reaper: SHADOW would evict mlx_whisper_worker "
+            "(idle %.0fs >= %.0fs)", elapsed, idle_threshold,
+        )
+        return
+
+    if sess.close_if_idle(idle_threshold):
+        logger.info(
+            "whisper idle-reaper: evicted mlx_whisper_worker (idle >= %.0fs)",
+            idle_threshold,
+        )
+
+
+def _whisper_idle_reaper_loop(interval_sec: float) -> None:
+    while True:
+        try:
+            _whisper_idle_reaper_tick()
+        except Exception:
+            logger.exception("whisper idle-reaper: tick бросил")
+        time.sleep(interval_sec)
+
+
+def start_whisper_idle_reaper(interval_sec: float = 60.0) -> None:
+    """Запускает daemon idle-reaper mlx_whisper_worker (T6).
+
+    🔴 Вызывать ТОЛЬКО из run-путей (см. докстринг секции выше) — НИКОГДА на
+    импорте модуля.
+
+    Идемпотентен через module-level ``threading.Event``: и `__main__`
+    serve-блок, и ``InProcessRestServer.start()`` (тот может дёрнуться
+    повторно — RestWatchdog делает restart() = stop()+start()) обязаны дать
+    РОВНО один тред за жизнь процесса.
+    """
+    from core.mlx_whisper_session import mlx_whisper_worker_enabled
+
+    if not mlx_whisper_worker_enabled():
+        return
+    with _whisper_reaper_start_lock:
+        if _whisper_reaper_started.is_set():
+            return
+        _whisper_reaper_started.set()
+        threading.Thread(
+            target=_whisper_idle_reaper_loop,
+            args=(interval_sec,),
+            name="whisper-idle-reaper",
+            daemon=True,
+        ).start()
+
+
 if __name__ == "__main__":
     # Запуск сервера на локальном интерфейсе.
     #
@@ -2652,6 +2792,12 @@ if __name__ == "__main__":
     # With this guard: a structured logger.error fires (visible in
     # krab-ear-rest.err.log), Sentry captures the event if a DSN is wired,
     # and sys.exit(1) terminates cleanly so launchd does NOT tight-loop.
+
+    # T6 Memory Conductor: серв-путь standalone REST — единственное
+    # разрешённое место запуска idle-reaper'а mlx_whisper_worker в этом
+    # режиме (НИКОГДА на импорте модуля, см. докстринг start_whisper_idle_reaper).
+    start_whisper_idle_reaper()
+
     try:
         app.run(host="127.0.0.1", port=settings.REST_SERVER_PORT)
     except OSError as _e:

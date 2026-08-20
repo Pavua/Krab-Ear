@@ -243,6 +243,7 @@ class InProcessRestServer:
 
         with self._lock:
             if self._server is not None:
+                self._start_whisper_idle_reaper()
                 return True
             try:
                 from werkzeug.serving import make_server
@@ -292,7 +293,32 @@ class InProcessRestServer:
             self._error = None
 
         logger.info("InProcessRestServer: слушает 127.0.0.1:%s", self._port)
+        self._start_whisper_idle_reaper()
         return True
+
+    def _start_whisper_idle_reaper(self) -> None:
+        """Запускает REST idle-reaper mlx_whisper_worker (Memory Conductor T6,
+        C-EXECUTOR-LOCALITY) из M2 run-пути — сиблинг вызова в `__main__`
+        serve-блоке rest_server.py для standalone-режима.
+
+        Ленивый импорт: ``backend.rest_server`` уже импортирован к этому
+        моменту (``create_app()`` вызывается ДО конструктора
+        ``InProcessRestServer`` — см. service.py), top-level импорт здесь
+        добавил бы лишнее ребро в граф зависимостей ``rest_inprocess`` ради
+        одной функции. Fail-open (как весь остальной этот модуль, см.
+        докстринг файла): сбой запуска реапера НЕ должен ронять REST.
+        ``start_whisper_idle_reaper()`` сама идемпотентна (module-level
+        ``threading.Event`` в rest_server.py) — повторные вызовы отсюда
+        (restart() = stop()+start(), «уже запущен» fast-path выше) безопасны.
+        """
+        try:
+            from backend import rest_server
+
+            rest_server.start_whisper_idle_reaper()
+        except Exception:
+            logger.exception(
+                "InProcessRestServer: не удалось запустить whisper idle-reaper"
+            )
 
     def _serve(self, server: Any) -> None:
         # Сервер приходит АРГУМЕНТОМ, а не читается из self._server: поле
