@@ -31,9 +31,9 @@ reads ONLY in-process state (C-POLICY-SOURCE).
 ### Task 1: backend/memory_ledger.py
 
 **Files:** Create `KrabEar/backend/memory_ledger.py`, Test `KrabEar/tests/test_memory_ledger_2026_08_19.py`
-**Produces:** `resolve_ledger_path() -> Path`; `class LedgerClient(owner: str, path: Path | None = None, lock_timeout_sec: float = 1.0)` with `publish_own(entries: dict[str, dict]) -> bool` (True=published; False=lock contention, counted in `self.skipped_publishes`), `read_all(nowait: bool = False) -> dict` (full ledger doc; `{"v":1,"entries":{}}` when unreadable/locked-nowait).
+**Produces:** `resolve_ledger_path() -> Path`; `class LedgerClient(owner: str, path: Path | None = None, lock_timeout_sec: float = 1.0)` with `publish_own(entries: dict[str, dict]) -> bool` (True=published; False=lock contention, counted in `self.skipped_publishes`), `read_all(nowait: bool = False) -> dict` (докстринг обязан назвать side-effect: `_load` может ротировать `.corrupt-*`; full ledger doc; `{"v":1,"entries":{}}` when unreadable/locked-nowait).
 
-- [ ] **Step 1: failing tests** — cover: (a) resolve path is `~/.openclaw/memory_ledger.json`, absolute, no env influence (set fake env var, assert unchanged); (b) publish_own writes ONLY `<owner>/`-prefixed keys and preserves other owners' fresh entries (RMW-delta); (c) entry with `updated_ts` older than 120s OR missing → dropped by next publish (fail-closed GC); (d) corrupt JSON → backed up as `.corrupt-<ts>`, retention max 5, publish succeeds on fresh file; (e) two LedgerClients (different owners) publishing concurrently (threads×50) lose nothing of each other; (f) sidecar lock: data file itself is NEVER flocked (assert lock file separate); (g) read_all(nowait=True) under held lock → empty doc, not a hang.
+- [ ] **Step 1: failing tests** — cover: (a) resolve path is `~/.openclaw/memory_ledger.json`, absolute, no env influence (set fake env var, assert unchanged); (b) publish_own writes ONLY `<owner>/`-prefixed keys and preserves other owners' fresh entries (RMW-delta); (c) entry with `updated_ts` older than 120s OR missing → dropped by next publish (fail-closed GC); (d) corrupt JSON → backed up as `.corrupt-<ts>`, retention max 5, publish succeeds on fresh file; (e) two LedgerClients (different owners) publishing concurrently (threads×50) lose nothing of each other; (f) sidecar lock: data file itself is NEVER flocked — source-контракт: единственный target `fcntl.flock` в модуле — fd lock-файла (проверка grep/AST по исходнику); (g) read_all(nowait=True) under held lock → empty doc, not a hang.
 - [ ] **Step 2: run — expect ModuleNotFoundError**
 - [ ] **Step 3: implement**
 
@@ -182,7 +182,7 @@ class LedgerClient:
             fcntl.flock(lock_fd, fcntl.LOCK_UN); os.close(lock_fd)
 ```
 
-(Worker: remove the dead `publish_own({}) if False else None` line — it is a
+ if False else None` line — it is a
 plan artefact; `remove_own` body starts at the try/_acquire.)
 - [ ] **Step 4: tests green** — `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_memory_ledger_2026_08_19.py -q`
 - [ ] **Step 5: gates + commit** `feat(memory): write-only ledger client (sidecar flock, TTL fail-closed GC)`
@@ -215,9 +215,14 @@ finally:
         self._last_used_ts = time.monotonic()
 ```
 
-Split close: public `close()` = `with self._lock: self._close_unlocked()`; rename the
-current body to `_close_unlocked()`; every `self.close()` call already inside the
-lock (in \_send) becomes `self._close_unlocked()`. Add:
+Split close (EXACT lines, verified): rename current body to `_close_unlocked()`.
+Only line **320** (`self.close()` inside `with self._lock:`) becomes
+`self._close_unlocked()`; lines **334/342/346** are ALREADY OUTSIDE the lock —
+they KEEP `self.close()`. Public `close(timeout: float = 5.0)` uses
+`self._lock.acquire(timeout=timeout)` — on timeout log WARNING and return
+(a stuck 120 s readline must not hang `reset_mlx_whisper_session`, which holds
+the module `_session_lock`). 🔴 Invariant: `kill_mlx_whisper_session()` stays
+LOCK-FREE by design (REST-504 escape hatch) — do NOT "fix" it. Add:
 
 ```python
 def close_if_idle(self, idle_sec: float) -> bool:
@@ -229,6 +234,7 @@ def close_if_idle(self, idle_sec: float) -> bool:
         self._close_unlocked()
         return True
 
+# MODULE-LEVEL function (after the class), NOT a method:
 def peek_session():
     with _session_lock:
         return _session
@@ -239,12 +245,27 @@ def peek_session():
 
 ---
 
+### Task 2b: GigaAM adapter idle hardening (sibling of Task 2)
+
+**Files:** Modify `KrabEar/core/pipeline/stt_gigaam.py`, Test `KrabEar/tests/test_gigaam_close_if_idle_2026_08_19.py`
+**Produces:** `GigaAMAdapter.close_if_idle(idle_sec: float) -> bool`; `adapter.last_used_ts: float` (monotonic, bumped under `_spawn_lock` at transcribe entry/exit); `adapter.inflight: int`.
+
+- [ ] Failing tests: (a) close_if_idle False while a transcribe is in flight; (b) True + close executed when loaded and idle ≥ threshold; (c) not loaded → False without side effects.
+- [ ] Implement mirroring Task 2's shape: `_inflight` + `last_used_ts` под `_spawn_lock` в transcribe-пути; `close_if_idle` берёт `_spawn_lock`, проверяет `is_loaded() and _inflight == 0 and idle`, зовёт существующий `close()` через unlocked-split ТОЛЬКО если close() сам берёт этот лок (проверь сначала).
+- [ ] Gates + commit `fix(gigaam): in-flight-safe close_if_idle for the conductor ladder`.
+
+---
+
 ### Task 3: lm_studio model_loaded helper
 
 **Files:** Modify `KrabEar/backend/lm_studio_lifecycle.py`, Test `KrabEar/tests/test_lm_studio_model_loaded_2026_08_19.py`
 **Produces:** `model_loaded(base_url: str, model_id: str, timeout: float = 5.0) -> bool | None` — True/False from LM Studio's model list (reuse THIS module's existing endpoint constants/normalization — do not invent URLs, #396/#1815); **None = unknown** (HTTP error/timeout) — the three-state lesson: callers must not read None as False.
 
-- [ ] Steps: failing tests (loaded / not loaded / connection error → None; mock requests) → implement (~25 lines, mirror \_try_rest_unload's URL building) → green → gates → commit `feat(lmstudio): model_loaded three-state probe`.
+- [ ] Endpoint (pinned, verified in prod code): `GET {base_url.rstrip('/')}/models` —
+  the SAME passive list llm_probe uses (`GET /v1/models`, never triggers JIT reload;
+  base_url is e.g. `http://localhost:1234/v1`). Criterion: `model_id` present among
+  `data[].id`. Any HTTP/parse error → None.
+- [ ] Steps: failing tests (loaded / not loaded / connection error → None; mock requests) → implement (~25 lines) → green → gates → commit `feat(lmstudio): model_loaded three-state probe`.
 
 ---
 
@@ -261,14 +282,22 @@ def peek_session():
 
 **Files:** Create `KrabEar/backend/memory_conductor.py`, Test `KrabEar/tests/test_memory_conductor_2026_08_19.py`
 **Consumes:** LedgerClient (T1), model_loaded (T3), `unload_model_async`/`load_model_async`, `current_lease_holder`.
-**Produces:** `class MemoryConductor(settings_service, ledger, *, is_recording, is_conversation_active, pressure_fn, gigaam_evict_fn, tick_sec=30.0)` with `start()/stop()`, `handle_oom_event(event_type, payload)` (EventBus listener — returns immediately, work on own thread), `get_diagnostics() -> dict` (thread_alive, last_tick_ts, shadow_since, pressure_streak, per-resident counters attempted/succeeded/skipped_gate + last decisions ring ≤20), `on_recording_start()` (sequenced LM Studio worker), `reload_brain_allowed() -> bool` (for T7's no-pingpong).
+**Produces:** `class MemoryConductor(settings_service, ledger, *, is_recording, is_meeting_active, pressure_fn, gigaam_close_if_idle, gigaam_idle_sec_fn, last_stt_activity_ts_fn, tick_sec=30.0)`.
+Pinned providers (T7 wires, T5 tests fake): `pressure_fn` = `core.mlx_memory_gate.vm_pressure_level` (int|None; **None → 0**); `gigaam_*` из Task 2b; rewriter idleness = `now - last_stt_activity_ts_fn()` (rewriter живёт только после записей — внутрь rewriter не лезем); `is_meeting_active` вместо "is_conversation_active" (собственный разговор идёт через мозг Краба — уже закрыт foreign-lease гейтом) with `start()/stop()`, `handle_oom_event(event_type, payload)` (EventBus listener — returns immediately, work on own thread), `get_diagnostics() -> dict` (thread_alive, last_tick_ts, shadow_since, pressure_streak, per-resident counters attempted/succeeded/skipped_gate + last decisions ring ≤20), `on_recording_start()` (sequenced LM Studio worker), `reload_brain_allowed() -> bool` (for T7's no-pingpong). 🔴 Shadow-семантика (pinned): в shadow ВСЕГДА True + лог «would-be skip» + счётчик `would_skip_brain_reload`; False только при enforce во время pressure-streak. Вызов в T7: `if conductor is None or conductor.reload_brain_allowed():`.
 
 Ladder per tick (spec §5, ALL decisions logged with reason; enforce flag checked
 LAST so shadow logs the would-be action):
 1. gigaam: idle ≥ `gigaam_idle_unload_sec` (600) AND not is_recording() → evict via injected fn (adapter's own lock inside).
 2. rewriter: idle ≥ `rewriter_idle_unload_sec` (1800) → unload_model_async + verify via model_loaded (three-state; None → outcome "unknown", cooldown NOT burned).
 3. brain: pressure_fn() ≥ 2 on ≥3 consecutive ticks AND lease holder not foreign AND not is_conversation_active() AND not is_recording() → unload + verify. Cooldown 600 s только после verified success.
-4. `handle_oom_event`: mlx.oom CONFIRMED by pressure_fn() ≥ 2 → same brain branch (single decision point; OomAutoRelief wiring change is T7).
+4. `handle_oom_event`: mlx.oom CONFIRMED by pressure_fn() ≥ 2 → same brain branch.
+   🔴 SINGLE TAP (double-write класс): conductor — ЕДИНСТВЕННЫЙ листенер шины для
+   mlx.oom. T7 снимает OomAutoRelief целиком: construction + add_listener из
+   service.py, файл backend/oom_auto_relief.py УДАЛЯЕТСЯ (иначе сработает
+   audit_dead_extracted_modules), его гейт-кейсы (foreign lease / disabled /
+   never-raises / неблокирующий листенер ≤0.3с) переезжают в тесты кондуктора.
+   Ручная кнопка тоста (`error_actions.unload_lm_studio_model`) ОСТАЁТСЯ —
+   осознанный owner-initiated путь вне автоматики.
 5. `on_recording_start()`: ONE worker thread: brain unload → poll model_loaded until False (≤10 s) → rewriter load. Shadow-gated like everything.
 
 - [ ] **Step 1: failing tests** — state-matrix: shadow logs but никогда не вызывает executors; hysteresis needs exactly 3 ticks (2 не хватает); recording blocks gigaam+brain; foreign lease blocks brain; conversation blocks brain; verify-None не жжёт cooldown; verify-True жжёт; sequencing: rewriter load не стартует до подтверждённой выгрузки brain; handle_oom без давления → skipped_gate; thread liveness fields present; ladder module does NOT import ledger reader (AST: no `read_all` usage — C-POLICY-SOURCE; publish is fine).
@@ -282,8 +311,8 @@ LAST so shadow logs the would-be action):
 **Files:** Modify `KrabEar/backend/rest_server.py` (+ `KrabEar/backend/rest_inprocess.py` start hook), Test `KrabEar/tests/test_rest_idle_reaper_2026_08_19.py`
 **Consumes:** T1 LedgerClient(owner="krab_ear_rest"), T2 close_if_idle/peek_session.
 
-- [ ] Failing tests: (a) reaper thread NOT started at module import (import rest_server in a fresh subprocess, assert no thread named "whisper-idle-reaper"); (b) start hook launches it in serve path; (c) tick with idle session → close_if_idle called; (d) peek only — no session created when none exists; (e) publishes `krab_ear_rest/mlx_whisper_worker` with state active|idle from inflight/last_used.
-- [ ] Implement: `def start_whisper_idle_reaper(interval_sec=60.0)` — daemon thread, guarded by `mlx_whisper_worker_enabled()`; called from BOTH run paths: the `__main__` serve block AND `InProcessRestServer.start` (M2 mode — иначе реапер мёртв там). Threshold/classification читаются из settings snapshot на тик (cheap: REST уже умеет читать settings).
+- [ ] Failing tests: (a) reaper thread NOT started at module import (import rest_server in a fresh subprocess, assert no thread named "whisper-idle-reaper"); (b) start hook launches it in serve path; (c) tick with idle session → close_if_idle called; (d) peek only — no session created when none exists; (e) publishes `krab_ear_rest/mlx_whisper_worker` with state active|idle from `session.inflight`/`session.last_used_ts`.
+- [ ] Implement: `def start_whisper_idle_reaper(interval_sec=60.0)` — daemon thread, guarded by `mlx_whisper_worker_enabled()`; 🔴 ИДЕМПОТЕНТНЫЙ через module-level `threading.Event` (RestWatchdog зовёт `InProcessRestServer.start()` повторно — двойной start обязан дать ОДИН тред; тест обязателен); called from BOTH run paths: the `__main__` serve block AND `InProcessRestServer.start` (M2 mode — иначе реапер мёртв там). Threshold/classification читаются из settings snapshot на тик (cheap: REST уже умеет читать settings).
 - [ ] Gates (включая chunk-repro осторожность: никаких module-level стартов) + commit `feat(rest): whisper idle-reaper (run-path start only)`
 
 ---
@@ -292,10 +321,11 @@ LAST so shadow logs the would-be action):
 
 **Files:** Modify `KrabEar/backend/service.py` (рядом с ErrorBus, ~660), `KrabEar/core/config.py` (DEFAULT_SETTINGS), `KrabEar/backend/settings_validator.py` (_RANGE_FIELDS), `KrabEar/backend/recording_core_service.py` (start ~1304, stop ~2781), `KrabEar/backend/oom_auto_relief.py`; Tests: `KrabEar/tests/test_memory_conductor_wiring_2026_08_19.py`.
 
-- [ ] Settings (+bounds): `memory_conductor_enabled=True`, `memory_conductor_enforce=False`, `gigaam_idle_unload_sec=600 (60..86400)`, `whisper_idle_unload_sec=900 (60..86400)` (adjust per T4 bench), `rewriter_idle_unload_sec=1800 (300..86400)`, `memory_pressure_streak_ticks=3 (2..20)`, `memory_evict_cooldown_sec=600 (60..86400)`.
+- [ ] Settings (+bounds): `memory_conductor_enabled=True`, master `memory_conductor_enforce=False`, per-resident `memory_conductor_enforce_gigaam/_whisper/_rewriter/_brain/_recording_sequence` (все False; effective = master OR resident; `conductor.enforce_for(name)` — публичный аксессор), `gigaam_idle_unload_sec=600 (60..86400)`, `whisper_idle_unload_sec=900 (60..86400)` (adjust per T4 bench), `rewriter_idle_unload_sec=1800 (300..86400)`, `memory_pressure_streak_ticks=3 (2..20)`, `memory_evict_cooldown_sec=600 (60..86400)`.
 - [ ] service.py: construct `LedgerClient("krab_ear")` + `MemoryConductor(...)`, `event_bus.add_listener(conductor.handle_oom_event)` (🔴 синхронный листенер — handle_oom_event обязан возвращаться мгновенно, как OomAutoRelief), conductor.start(); close() зовёт conductor.stop() + ledger.remove_own(). Source-contract тест на все три вызова (урок setupErrorBus).
-- [ ] OomAutoRelief: перестаёт действовать сам — его триггер делегирует в conductor (single decision point). Обновить его тесты соответственно (они закрепляют старое поведение — переписать, не удалять классы гейтов).
-- [ ] recording_core_service: (a) start ~1304 — заменить прямой unload_model_async на `conductor.on_recording_start()` (sequenced); (b) stop ~2781 — обернуть reload гейтом `if conductor.reload_brain_allowed():` + лог/счётчик skip (C-NO-PINGPONG).
+- [ ] OomAutoRelief: УДАЛЯЕТСЯ (см. T5 SINGLE TAP): снять construction+add_listener из service.py, удалить `backend/oom_auto_relief.py` и `KrabEar/tests/test_oom_auto_relief_2026_08_19.py` (гейт-кейсы уже живут в тестах кондуктора из T5). `event_bus.add_listener(conductor.handle_oom_event)` — единственная регистрация; листенер обязан возвращаться ≤0.3с (синхронная шина).
+- [ ] recording_core_service: (a) start ~1304 — 🔴 H2: НЕ убирать легаси-путь.
+  `if conductor is not None and conductor.enforce_for("recording_sequence"): conductor.on_recording_start()` — `else: <существующий прямой unload-блок БЕЗ изменений>`; иначе shadow-неделя молча отключает живую выгрузку 19 ГБ перед диктовкой (регрессия хуже статус-кво). Инъекция conductor в RecordingCoreService — сеттером из service.py. (b) stop ~2781 — `if conductor is None or conductor.reload_brain_allowed():` + лог/счётчик skip (C-NO-PINGPONG).
 - [ ] IPC `get_memory_ledger {}` → `{ok, ledger: read_all(nowait=True), conductor: get_diagnostics()}` (nowait — health-probe lesson) + секция в get_diagnostics + запись в docs/IPC_API_REFERENCE.md.
 - [ ] Gates: полный смежный прогон (recording tests, oom tests, dispatch invariants), e2e smoke `scripts/run_e2e_smokes.command`, commit `feat(memory): wire conductor (shadow), no-pingpong, get_memory_ledger`.
 
@@ -304,6 +334,7 @@ LAST so shadow logs the would-be action):
 ### Task 8: Swift menu-bar line
 
 **Files:** Create `native/KrabEarAgent/Sources/KrabEarAgent/main+MemoryLine.swift` (образец: `main+BrainLease.swift` — B3 pattern), Test `native/KrabEarAgent/Tests/KrabEarAgentTests/MainMemoryLineWiringTests.swift`.
+- [ ] Контракт IPC (pinned буква в букву — урок «гейт agy IPC-ключей»): метод `get_memory_ledger`, params `{}` → `{ok, ledger: {v, entries: {"<owner>/<resident>": {owner, resident, size_mb, state, idle_since_ts?, reload_cost, pid, updated_ts}}}, conductor: {thread_alive, last_tick_ts, shadow_since, pressure_streak, residents}}`. Строка рендерится из entries: имя после «/», size_mb→«19Г», state + минуты от idle_since_ts.
 - [ ] Disabled-строка в статус-меню после brain-lease строки: «Память: brain 19Г · whisper idle 4м»; refresh в menuWillOpen через `get_memory_ledger` (IPC off-main — AGENT-3); скрыта при `memory_conductor_enabled=false`; при shadow ≥7 дней — суффикс «· shadow N дн». IPC-провал → «Память: —» (не скрывать).
 - [ ] Source-contract тест на реальный вызов setup из main.swift (класс setupErrorBus). Глиф-гейт: только уже используемые символы. `swift build -c release` + `swift test`.
 - [ ] Commit `feat(agent): memory line in status menu (B3 pattern)`.
