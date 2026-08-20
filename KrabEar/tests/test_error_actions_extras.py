@@ -185,7 +185,7 @@ class FeatureGatedHandlerTests(unittest.TestCase):
         svc = MagicMock()
         svc.cached_settings.return_value = {
             "llm_brain_model": "qwen/qwen3.6-27b",
-            "LLM_BASE_URL": "http://localhost:1234/v1",
+            "llm_base_url": "http://localhost:1234/v1",
         }
         with patch("backend.error_actions.unload_model_async") as unload, \
                 patch("backend.error_actions.current_lease_holder", return_value=None):

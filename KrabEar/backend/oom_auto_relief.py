@@ -142,7 +142,7 @@ class OomAutoRelief:
                 return
             settings = self._settings()
             model_id = settings.get("llm_brain_model") or ""
-            base_url = settings.get("LLM_BASE_URL") or ""
+            base_url = settings.get("llm_base_url") or ""
             if not model_id:
                 logger.info("OomAutoRelief: llm_brain_model не задан — выгружать нечего")
                 return

@@ -102,7 +102,7 @@ def _unload_lm_studio_model(*, settings_service, **kwargs) -> dict:
 
     settings = settings_service.cached_settings() if settings_service else {}
     model_id = (settings or {}).get("llm_brain_model") or ""
-    base_url = (settings or {}).get("LLM_BASE_URL") or ""
+    base_url = (settings or {}).get("llm_base_url") or ""
     if not model_id:
         return {
             "executed": False,

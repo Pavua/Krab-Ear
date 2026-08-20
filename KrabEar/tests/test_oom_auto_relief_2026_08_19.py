@@ -33,7 +33,11 @@ def _settings(**overrides):
         "mlx_oom_auto_unload_enabled": True,
         "mlx_oom_auto_unload_cooldown_sec": 600.0,
         "llm_brain_model": "qwen/qwen3.6-27b",
-        "LLM_BASE_URL": "http://localhost:1234/v1",
+        # Реальный рантайм-ключ (SettingsService/settings.json) — нижний регистр,
+        # как везде в проекте (llm_ops_service.py, recording_core_service.py,
+        # rest_server.py). НЕ "LLM_BASE_URL" — та Pydantic-константа живёт
+        # только в core/config.py::Settings, а не в этом словаре.
+        "llm_base_url": "http://localhost:1234/v1",
     }
     base.update(overrides)
     svc = MagicMock()
@@ -113,6 +117,23 @@ class OomAutoReliefTest(unittest.TestCase):
         relief = OomAutoRelief(settings_service=None)  # намеренно сломанная зависимость
         relief.handle_event(*_oom_event())  # не должно бросить
         relief.wait_for_idle(timeout=5.0)
+
+    def test_unload_receives_real_llm_base_url_not_empty(self):
+        """🔴 2026-08-20: `_relieve` читал ключ `LLM_BASE_URL` (верхний регистр) из
+        рантайм-словаря настроек, который на деле хранит `llm_base_url` (нижний,
+        как везде в SettingsService/settings.json) — `.get()` всегда мазал мимо,
+        base_url всегда был "", и `lm_studio_lifecycle` отказывался выгружать
+        модель (`_scheme_allowed("")` == False). Прод падал в OOM-крэш повторно,
+        потому что аварийная разгрузка молча не срабатывала. Сигнатура бага —
+        ИМЕННО значение base_url, а не факт вызова unload_model_async.
+        """
+        distinctive_url = "http://127.0.0.1:1234/v1"
+        relief = OomAutoRelief(settings_service=_settings(**{"llm_base_url": distinctive_url}))
+        with patch("backend.oom_auto_relief.unload_model_async") as unload, \
+                patch("backend.oom_auto_relief.current_lease_holder", return_value=None):
+            relief.handle_event(*_oom_event())
+            relief.wait_for_idle(timeout=5.0)
+        unload.assert_called_once_with(distinctive_url, "qwen/qwen3.6-27b")
 
     def test_cooldown_expires(self):
         relief = OomAutoRelief(settings_service=_settings(mlx_oom_auto_unload_cooldown_sec=0.0))
