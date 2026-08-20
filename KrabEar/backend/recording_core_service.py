@@ -48,6 +48,19 @@ from core.utils import TextUtils
 
 logger = logging.getLogger("KrabEar.Backend.RecordingCore")
 
+# Memory Conductor: rewriter живёт только после записей, его idle меряется от
+# последней STT-активности (спека v2.1 — внутрь rewriter не лезем).
+_LAST_STT_ACTIVITY = {"ts": time.monotonic()}
+
+
+def last_stt_activity_ts() -> float:
+    return _LAST_STT_ACTIVITY["ts"]
+
+
+def _bump_stt_activity() -> None:
+    _LAST_STT_ACTIVITY["ts"] = time.monotonic()
+
+
 # wave-25 MED: default auto-dedup similarity threshold. Used as the safe fallback when a
 # persisted/overridden value is non-finite or outside [0.0, 1.0].
 _DEFAULT_DEDUP_THRESHOLD = 0.9
@@ -1303,12 +1316,20 @@ class RecordingCoreService:
         settings = _settings_pre
         # LM Studio brain unload: освобождаем ~19 GB unified memory под Whisper+pyannote.
         try:
+            _bump_stt_activity()
             brain_model = str(settings.get("llm_brain_model", "")).strip()
             unload_enabled = bool(settings.get("llm_brain_unload_on_recording", True))
+            conductor = getattr(self, "_memory_conductor", None)
             if brain_model and unload_enabled:
-                from backend.lm_studio_lifecycle import unload_model_async
-                base_url = str(settings.get("llm_base_url", "http://localhost:1234/v1"))
-                unload_model_async(base_url, brain_model)
+                # 🔴 H2 (ревью спеки): секвенс кондуктора включается ТОЛЬКО при
+                # enforce; иначе живёт ЛЕГАСИ-путь — shadow-неделя не смеет молча
+                # отключить выгрузку 19 ГБ перед диктовкой.
+                if conductor is not None and conductor.enforce_for("recording_sequence"):
+                    conductor.on_recording_start()
+                else:
+                    from backend.lm_studio_lifecycle import unload_model_async
+                    base_url = str(settings.get("llm_base_url", "http://localhost:1234/v1"))
+                    unload_model_async(base_url, brain_model)
         except Exception as exc:
             logger.debug("LM Studio brain unload hook failed: %s", exc)
         # Brain lease coordination: release the brain lease so Krab userbot can use
@@ -2778,14 +2799,21 @@ class RecordingCoreService:
                     settings.get("llm_brain_preload_on_stop", True)
                 )
                 if brain_model and preload_enabled:
-                    from backend.lm_studio_lifecycle import load_model_async
-                    base_url = str(
-                        settings.get(
-                            "llm_base_url",
-                            "http://localhost:1234/v1",
+                    _bump_stt_activity()
+                    conductor = getattr(self, "_memory_conductor", None)
+                    # C-NO-PINGPONG: под enforced pressure-streak reload 19 ГБ
+                    # пропускается (иначе лестница и reload дерутся за память).
+                    if conductor is None or conductor.reload_brain_allowed():
+                        from backend.lm_studio_lifecycle import load_model_async
+                        base_url = str(
+                            settings.get(
+                                "llm_base_url",
+                                "http://localhost:1234/v1",
+                            )
                         )
-                    )
-                    load_model_async(base_url, brain_model)
+                        load_model_async(base_url, brain_model)
+                    else:
+                        logger.info("brain reload skipped by memory conductor (pressure)")
             except Exception as exc:
                 logger.debug(
                     "LM Studio brain preload hook failed: %s",

@@ -648,7 +648,8 @@ class BackendService:
 
         # Phase B.1 — error bus + active LLM probe
         from backend.error_bus import ErrorBus
-        from backend.oom_auto_relief import OomAutoRelief
+        from backend.memory_conductor import MemoryConductor
+        from backend.memory_ledger import LedgerClient
         from backend.error_codes import ERROR_REGISTRY
         from backend.llm_probe import LLMHttpProbe
         from backend import error_actions as _error_actions  # noqa: F401  side-effect: registers ACTION_HANDLERS for ErrorActionRouter
@@ -665,13 +666,42 @@ class BackendService:
             ring_buffer_size=200,
         )
 
-        # Реактивное освобождение памяти: на mlx.oom выгружаем brain-модель сами,
-        # а не только по кнопке тоста (до 2026-08-19 выгрузка была лишь проактивной,
-        # на старте записи). 🔴 Листенер шины вызывается СИНХРОННО в потоке эмиттера
-        # (STT-пайплайн), поэтому OomAutoRelief.handle_event возвращается немедленно
-        # и уводит всю блокирующую работу в свой поток.
-        self._oom_auto_relief = OomAutoRelief(settings_service=self._settings_svc)
-        event_bus.add_listener(self._oom_auto_relief.handle_event)
+        # Memory Conductor (спека v2.1): единая точка решений о выгрузке для
+        # gigaam/rewriter/brain. Single-tap: ровно один листенер
+        # mlx.oom (прежний отдельный релиф-модуль снят). 🔴 Листенер шины СИНХРОННЫЙ в потоке STT-пайплайна —
+        # handle_oom_event возвращается мгновенно, работа в своих потоках.
+        # C-POLICY-SOURCE: провайдеры — только in-process состояние.
+        from backend import recording_core_service as _rcs_mod
+
+        def _gigaam_adapter():
+            eng = getattr(self.transcriber, "engine", None)
+            router = getattr(eng, "_router", None)
+            return router.get_gigaam_adapter() if router is not None else None
+
+        def _gigaam_idle_sec() -> float:
+            a = _gigaam_adapter()
+            if a is None or not a.is_loaded():
+                raise RuntimeError("gigaam adapter not loaded")
+            return max(0.0, time.monotonic() - float(a.last_used_ts))
+
+        def _gigaam_close_if_idle(threshold: float) -> bool:
+            a = _gigaam_adapter()
+            return bool(a is not None and a.close_if_idle(threshold))
+
+        self._memory_ledger = LedgerClient("krab_ear")
+        self._memory_conductor = MemoryConductor(
+            settings_service=self._settings_svc,
+            ledger=self._memory_ledger,
+            is_recording=lambda: bool(getattr(self.recorder, "is_recording", False)),
+            is_meeting_active=lambda: bool(
+                getattr(getattr(self, "_meeting_svc", None), "_session", None) is not None
+            ),
+            gigaam_close_if_idle=_gigaam_close_if_idle,
+            gigaam_idle_sec_fn=_gigaam_idle_sec,
+            last_stt_activity_ts_fn=_rcs_mod.last_stt_activity_ts,
+        )
+        event_bus.add_listener(self._memory_conductor.handle_oom_event)
+        self._memory_conductor.start()
 
         # Wire error_bus into rewriter so it can push timeout/connection/etc errors
         if self._llm_rewriter is not None:
@@ -1441,6 +1471,8 @@ class BackendService:
             auto_deduplicator=self._auto_deduplicator,
             rescue_dir=Path(self.store.data_dir) / "rescue",
         )
+        # Memory Conductor: гейты H2/no-pingpong читают этот атрибут.
+        self._recording_core_svc._memory_conductor = self._memory_conductor
         # R2 Task 6: owner-mismatch обязан попадать не только в WARNING, но и
         # в тот же ErrorBus, который опрашивает native-agent. Core создаётся
         # после ErrorBus, поэтому явный late-inject не зависит от глобалов.
@@ -1569,6 +1601,7 @@ class BackendService:
             llm_probe=self._llm_probe,
             metrics_collector=_metrics_singleton,
             event_bridge=self._event_bridge,
+            memory_conductor=self._memory_conductor,
             transcriber=self.transcriber,
             llm_rewriter=self._llm_rewriter,
             settings_svc=self._settings_svc,
@@ -2295,7 +2328,24 @@ class BackendService:
                 logger.exception("export_scheduler tick failed")
             stop.wait(self._EXPORT_SCHEDULER_INTERVAL_SEC)
 
+    def _handle_get_memory_ledger(self, params: dict) -> dict:
+        """Витрина дирижёра памяти: леджер (nowait — health-probe урок) + диагностика."""
+        ledger = {}
+        try:
+            ledger = self._memory_ledger.read_all(nowait=True)
+        except Exception:
+            logger.debug("get_memory_ledger: read failed", exc_info=True)
+        return {
+            "ok": True,
+            "ledger": ledger,
+            "conductor": self._memory_conductor.get_diagnostics(),
+        }
+
     def close(self) -> bool:
+        try:
+            self._memory_conductor.stop()
+        except Exception:
+            logger.debug("memory conductor stop failed", exc_info=True)
         """Graceful shutdown: останавливает фоновые потоки (LLM probe и др.).
 
         Идемпотентен — безопасно вызывать несколько раз. Используется в
@@ -2784,6 +2834,7 @@ class BackendService:
             "get_audit_log": self._handle_get_audit_log,  # последние записи IPC audit log; privacy_mode блокирует
             "handle_error_action": self._handle_handle_error_action,  # выполнить actionable-действие из toast/diagnostics
             "probe_llm_http": self._handle_probe_llm_http,  # однократный ping LM Studio HTTP endpoint
+            "get_memory_ledger": self._handle_get_memory_ledger,
             "get_brain_lease_status": self._health_check_svc.handle_get_brain_lease_status,  # B3: кто держит LM Studio brain-лиз
             "warmup_stt": self._stt_mgmt_svc.handle_warmup_stt,  # ручной запуск STT warmup (после смены профиля/модели)
             "warmup_rewriter": self._text_scoring_svc.handle_warmup_rewriter,  # явный warmup-probe для "Load Model" кнопки

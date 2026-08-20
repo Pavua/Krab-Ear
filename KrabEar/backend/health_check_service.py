@@ -46,6 +46,7 @@ class HealthCheckService:
         llm_probe: "LLMHttpProbe | None" = None,
         metrics_collector: "MetricsCollector | None" = None,
         event_bridge: "EventBridge | None" = None,
+        memory_conductor=None,
         # Optional collaborators for get_diagnostics
         transcriber: "Transcriber | None" = None,
         llm_rewriter: "LLMRewriter | None" = None,
@@ -65,6 +66,7 @@ class HealthCheckService:
         self._llm_probe = llm_probe
         self._metrics_collector = metrics_collector
         self._event_bridge = event_bridge
+        self._memory_conductor = memory_conductor
         self._transcriber = transcriber
         self._llm_rewriter = llm_rewriter
         self._settings_svc = settings_svc
@@ -306,6 +308,7 @@ class HealthCheckService:
             "metrics_summary": self._get_metrics_summary(),
             # Event-мост IPC->REST (spec 2026-07-07-event-bridge-design.md) diagnostics.
             "event_bridge": self._get_event_bridge_summary(),
+            "memory_conductor": self._get_memory_conductor_summary(),
             # In-process REST (spec 2026-07-16 §4.2): enabled/running/port/error.
             "rest_in_process": self._get_rest_inprocess_summary(),
             # S3/Задача 7b (спека 2026-07-31-s3-rest-flip-design.md §Р6):
@@ -390,6 +393,14 @@ class HealthCheckService:
         (урок get_stt_model_status #1814).
         """
         return {"ok": True, **self._build_brain_lease_summary()}
+
+    def _get_memory_conductor_summary(self) -> dict:
+        if self._memory_conductor is None:
+            return {"enabled": False}
+        try:
+            return self._memory_conductor.get_diagnostics()
+        except Exception:
+            return {"enabled": False, "error": "unavailable"}
 
     def _get_event_bridge_summary(self) -> dict[str, Any]:
         """Возвращает EventBridge.get_diagnostics() либо schema-parity fallback.
