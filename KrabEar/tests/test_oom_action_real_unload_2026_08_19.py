@@ -34,7 +34,7 @@ def _settings_service(**overrides):
     """Фейк SettingsService: отдаёт ровно те ключи, что читает обработчик."""
     base = {
         "llm_brain_model": "qwen/qwen3.6-27b",
-        "LLM_BASE_URL": "http://localhost:1234/v1",
+        "llm_base_url": "http://localhost:1234/v1",
     }
     base.update(overrides)
     svc = MagicMock()
