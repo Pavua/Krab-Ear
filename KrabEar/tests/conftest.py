@@ -676,3 +676,17 @@ def _purge_leaked_module_stubs():
         _is_sd_mock = isinstance(_sd, (_Mock, _MagicMock))
         if _is_sd_bare or _is_sd_mock:
             del sys.modules["sounddevice"]
+
+
+@pytest.fixture(autouse=True)
+def _memory_ledger_tmp_path(tmp_path):
+    """🔴 Финальный гейт волны Memory Conductor (HIGH-3): без подмены каждый тест
+    с BackendService писал/стирал записи в РЕАЛЬНОМ ~/.openclaw/memory_ledger.json
+    владельца (conductor.stop() -> remove_own()). Обратимо в finally."""
+    from backend import memory_ledger as _ml
+    prev = _ml._TEST_PATH_OVERRIDE
+    _ml._TEST_PATH_OVERRIDE = tmp_path
+    try:
+        yield
+    finally:
+        _ml._TEST_PATH_OVERRIDE = prev

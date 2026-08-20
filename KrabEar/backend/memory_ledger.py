@@ -25,6 +25,14 @@ _CORRUPT_KEEP = 5
 _SCHEMA_V = 1
 
 
+# 🔴 Тестовый шов (финальный гейт волны, HIGH-3): сотни юнит-тестов создают
+# BackendService; без подмены пути они писали/стирали бы записи в РЕАЛЬНОМ
+# ~/.openclaw владельца (класс «tests writing to production data»). Это НЕ
+# env-канал (C-ONE-PATH запрещает env для ПРОДА) — прод поле не трогает,
+# ставит только conftest, обратимо.
+_TEST_PATH_OVERRIDE = None
+
+
 def resolve_ledger_path() -> Path:
     """ЕДИНАЯ формула пути к общему leger-файлу. Абсолютный путь.
 
@@ -32,6 +40,8 @@ def resolve_ledger_path() -> Path:
     — без env-канала. Оба процесса (Krab Ear и Krab) обязаны вычислять этот
     путь ОДИНАКОВО и логировать его при первом касании (см. _log_path_once).
     """
+    if _TEST_PATH_OVERRIDE is not None:
+        return (Path(_TEST_PATH_OVERRIDE) / LEDGER_FILENAME).resolve()
     return (Path.home() / ".openclaw" / LEDGER_FILENAME).resolve()
 
 

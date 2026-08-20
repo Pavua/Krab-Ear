@@ -2655,7 +2655,9 @@ def _whisper_idle_reaper_tick() -> None:
     inflight = sess.inflight
     last_used = sess.last_used_ts
     state = "active" if inflight > 0 else "idle"
-    idle_since_ts = None if inflight > 0 else last_used
+    # 🔴 Шов T6↔T8 (финальный гейт, HIGH-2): last_used — MONOTONIC, а Swift и
+    # кондуктор считают idle от epoch. Публикуем epoch-момент начала простоя.
+    idle_since_ts = None if inflight > 0 else (time.time() - (time.monotonic() - last_used))
 
     try:
         _whisper_ledger().publish_own({

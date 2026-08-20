@@ -302,20 +302,22 @@ class MemoryConductor:
         try:
             if event_type != "krab_error" or (payload or {}).get("code") != "mlx.oom":
                 return
-            level = self._pressure_fn()
-            level = 0 if level is None else int(level)
-            if level < 2:
-                # mlx.oom имеет историю ложных срабатываний — подтверждаем sysctl
-                self._counters["brain"]["skipped_gate"] += 1
-                self._note("oom trigger unconfirmed by pressure (level=%d)" % level)
-                return
-            self._spawn(lambda: self._brain_oom_worker())
+            # 🔴 MED-1 финального гейта: sysctl = subprocess.run, а мы в потоке
+            # STT-пайплайна; подтверждение давления делает ВОРКЕР, не эмиттер.
+            self._spawn(self._brain_oom_worker)
         except Exception:
             logger.exception("handle_oom_event failed")
 
     def _brain_oom_worker(self) -> None:
-        recording = self._safe_bool(self._is_recording)
         c = self._counters["brain"]
+        level = self._pressure_fn()
+        level = 0 if level is None else int(level)
+        if level < 2:
+            # mlx.oom имеет историю ложных срабатываний — подтверждаем sysctl
+            c["skipped_gate"] += 1
+            self._note("oom trigger unconfirmed by pressure (level=%d)" % level)
+            return
+        recording = self._safe_bool(self._is_recording)
         if recording or self._safe_bool(self._is_meeting_active):
             c["skipped_gate"] += 1
             return
@@ -326,7 +328,15 @@ class MemoryConductor:
         if time.monotonic() < self._cooldown_until.get("brain", 0.0):
             return
         if not self.enforce_for("brain"):
-            c["would"] += 1
+            # 🔴 H1 финального гейта: прежний OOM-релиф был БОЕВЫМ по умолчанию
+            # (mlx_oom_auto_unload_enabled=True) — shadow не смеет молча снять
+            # взведённую страховочную сеть. Легаси-флаг сохраняет прод-поведение
+            # до включения enforce_brain.
+            if self._get("mlx_oom_auto_unload_enabled", True):
+                self._note("oom relief via legacy flag (conductor still shadow)")
+                self._evict_model("brain", self._get("llm_brain_model", ""))
+            else:
+                c["would"] += 1
             return
         self._evict_model("brain", self._get("llm_brain_model", ""))
 

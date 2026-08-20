@@ -305,7 +305,10 @@ class WhisperReaperTickTest(unittest.TestCase):
         (payload,), _kwargs = ledger.publish_own.call_args
         entry = payload["mlx_whisper_worker"]
         self.assertEqual(entry["state"], "idle")
-        self.assertEqual(entry["idle_since_ts"], last_used)
+        # 🔴 HIGH-2 финального гейта: публикуется EPOCH-момент начала простоя
+        # (Swift вычитает из timeIntervalSince1970), не сырой monotonic.
+        expected_epoch = time.time() - (time.monotonic() - last_used)
+        self.assertAlmostEqual(entry["idle_since_ts"], expected_epoch, delta=2.0)
 
     def test_no_session_publishes_nothing(self):
         ledger = MagicMock()

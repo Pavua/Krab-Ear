@@ -52,12 +52,17 @@ class ResolveLedgerPathTestCase(unittest.TestCase):
     """(a) one pure formula, absolute path, no env influence (C-ONE-PATH)."""
 
     def test_path_is_openclaw_memory_ledger_json(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            fake_home = Path(tmp)
-            with patch("backend.memory_ledger.Path.home", return_value=fake_home):
-                resolved = resolve_ledger_path()
-        self.assertTrue(resolved.is_absolute())
-        self.assertEqual(resolved, (fake_home / ".openclaw" / "memory_ledger.json").resolve())
+        """Прод-формула. Conftest-шов (HIGH-3 финального гейта) снимается явно —
+        здесь проверяется именно ПРОДОВЫЙ путь."""
+        import backend.memory_ledger as ml
+        prev = ml._TEST_PATH_OVERRIDE
+        ml._TEST_PATH_OVERRIDE = None
+        try:
+            path = ml.resolve_ledger_path()
+        finally:
+            ml._TEST_PATH_OVERRIDE = prev
+        self.assertEqual(path, (Path.home() / ".openclaw" / "memory_ledger.json").resolve())
+        self.assertTrue(path.is_absolute())
 
     def test_env_var_does_not_influence_path(self):
         with tempfile.TemporaryDirectory() as tmp:

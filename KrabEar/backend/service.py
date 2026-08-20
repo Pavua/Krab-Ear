@@ -2342,16 +2342,16 @@ class BackendService:
         }
 
     def close(self) -> bool:
-        try:
-            self._memory_conductor.stop()
-        except Exception:
-            logger.debug("memory conductor stop failed", exc_info=True)
         """Graceful shutdown: останавливает фоновые потоки (LLM probe и др.).
 
         Идемпотентен — безопасно вызывать несколько раз. Используется в
         signal handler run_server() и в finally serve_forever(). Возвращает
         False, когда любой нативный/audio worker не подтвердил завершение.
         """
+        try:
+            self._memory_conductor.stop()
+        except Exception:
+            logger.debug("memory conductor stop failed", exc_info=True)
         all_workers_stopped = True
         meeting_service = getattr(self, "_meeting_svc", None)
         if meeting_service is not None:

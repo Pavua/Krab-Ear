@@ -213,6 +213,28 @@ class OomTriggerTest(unittest.TestCase):
         c.wait_workers(3.0)
 
 
+class LegacyOomReliefTest(unittest.TestCase):
+    """🔴 H1 финального гейта: прежний OOM-релиф был боевым по умолчанию —
+    shadow-неделя не смеет молча снять взведённую страховочную сеть."""
+
+    def test_shadow_with_legacy_flag_still_evicts_on_confirmed_oom(self):
+        c = _mk(_settings(memory_conductor_enforce=False,
+                          mlx_oom_auto_unload_enabled=True),
+                pressure=4, model_loaded=False)
+        c.handle_oom_event("krab_error", {"code": "mlx.oom"})
+        c.wait_workers(2.0)
+        c.unload_model_fn.assert_called_once()
+
+    def test_shadow_with_legacy_flag_off_only_counts_would(self):
+        c = _mk(_settings(memory_conductor_enforce=False,
+                          mlx_oom_auto_unload_enabled=False),
+                pressure=4)
+        c.handle_oom_event("krab_error", {"code": "mlx.oom"})
+        c.wait_workers(2.0)
+        c.unload_model_fn.assert_not_called()
+        self.assertGreater(c.get_diagnostics()["residents"]["brain"]["would"], 0)
+
+
 class ReloadGateTest(unittest.TestCase):
     def test_reload_allowed_true_in_shadow_with_would_log(self):
         c = _mk(_settings(memory_conductor_enforce=False), pressure=4)
