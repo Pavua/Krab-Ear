@@ -295,6 +295,67 @@ def load_model_sync(base_url: str, model_id: str, timeout_sec: float = 90.0) -> 
         return False
 
 
+def model_loaded(base_url: str, model_id: str, timeout: float = 5.0) -> bool | None:
+    """Проверяет "модель загружена в LM Studio?" через пассивный GET /api/v1/models.
+
+    Endpoint пинован (verified in prod): та же passive-listing точка, что
+    ``LLMRewriter.passive_health_check`` / ``LLMOpsService.handle_list_llm_models`` /
+    ``rest_server.py`` (Wave 68, PR #415) — ``{host}/api/v1/models``, НЕ голый
+    ``/v1/models`` (LM Studio отвечает на него 200, но логирует ERROR внутри себя).
+    Нормализация base_url — существующая конвенция этого модуля
+    (``.rstrip("/").removesuffix("/v1")``), та же что в ``_try_rest_load``/
+    ``_try_rest_unload``. Никогда не триггерит JIT-перезагрузку модели (только GET).
+
+    Три состояния (C-EFFECT-CHECK, docs/superpowers/specs/2026-08-19-memory-conductor-design.md §3):
+      - ``True``  — model_id присутствует среди ``data[].id`` ответа.
+      - ``False`` — LM Studio отвечает 200 с валидным списком, но модели в нём нет.
+      - ``None``  — состояние НЕИЗВЕСТНО: сеть недоступна/таймаут/не-2xx/битый JSON/
+        неожиданная форма ответа (нет ключа "data")/запрещённая схема base_url/
+        пустой model_id.
+
+    🔴 None ≠ False. Вызывающая сторона НЕ ДОЛЖНА трактовать None как "не
+    загружена" — так же, как SNR=0.0 не значит "тишина", а значит "не смог
+    оценить" (см. reference_snr_zero_is_sentinel_not_measurement). Решение,
+    основанное на None, обязано fail-safe в сторону "не знаю, не действую".
+
+    Args:
+        base_url: LLM_BASE_URL из settings (например "http://localhost:1234/v1").
+        model_id: идентификатор модели в LM Studio.
+        timeout: таймаут HTTP-запроса в секундах (default 5.0 — та же величина,
+            что у ``passive_health_check``: /models — быстрый metadata call).
+
+    Returns:
+        True/False/None — см. выше.
+    """
+    if not model_id:
+        return None
+    # SSRF guard (Wave 1768, зеркало _try_rest_load/_try_rest_unload): отклоняем
+    # file://, ftp://, data:// и пр. до любого сетевого вызова.
+    if not _scheme_allowed(base_url):
+        logger.warning(
+            "LM Studio: refusing model_loaded probe — base_url scheme not in %s: %r",
+            sorted(_ALLOWED_SCHEMES), base_url,
+        )
+        return None
+    api_root = base_url.rstrip("/").removesuffix("/v1")
+    url = f"{api_root}/api/v1/models"
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with _SAFE_OPENER.open(req, timeout=timeout) as resp:
+            if resp.status != 200:
+                return None
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            if not isinstance(data, dict) or "data" not in data:
+                # Не форма /v1/models ответа (не dict или нет ключа "data") —
+                # неизвестно, а не "список пуст", поэтому None, а не False.
+                return None
+            ids = [m.get("id") for m in data["data"]]
+            return model_id in ids
+    except Exception as exc:
+        logger.debug("LM Studio model_loaded probe %s: %s", model_id, exc)
+        return None
+
+
 def unload_model_async(base_url: str, model_id: str) -> None:
     """Fire-and-forget unload. Не блокирует caller, errors silently logged.
 
