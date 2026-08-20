@@ -195,11 +195,20 @@ extension AgentAppDelegate {
             systemSymbolName: "brain.head.profile", accessibilityDescription: nil)
         menu.addItem(brainItem)
         self.brainLeaseMenuItem = brainItem
+        // T8 (Memory Conductor): «Память: …» СРАЗУ ПОСЛЕ brain-lease строки —
+        // тот же паттерн (disabled-пункт, обновление в menuWillOpen,
+        // main+MemoryLine.swift). Скрыт при memory_conductor_enabled=false.
+        let memoryItem = NSMenuItem(title: "Память: —", action: nil, keyEquivalent: "")
+        memoryItem.image = NSImage(
+            systemSymbolName: "memorychip", accessibilityDescription: nil)
+        menu.addItem(memoryItem)
+        self.memoryLineMenuItem = memoryItem
         menu.addItem(.separator())
         self.menuBarRecapView = recapView
         menu.delegate = self
         recapView.refresh(ipcClient: ipcClient)   // первичный fetch при построении меню
         refreshBrainLeaseMenuItem()               // первичный fetch brain-lease строки
+        refreshMemoryLineMenuItem()                // первичный fetch строки «Память»
         // ─────────────────────────────────────────────────────────────────────
 
         let recordItem = NSMenuItem(

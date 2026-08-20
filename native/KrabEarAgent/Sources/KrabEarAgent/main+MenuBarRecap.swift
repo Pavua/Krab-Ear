@@ -309,5 +309,7 @@ extension AgentAppDelegate: NSMenuDelegate {
         refreshQuickNotesSubmenu()
         // B3: строка «кто держит LM Studio» — тот же паттерн (main+BrainLease.swift).
         refreshBrainLeaseMenuItem()
+        // T8: строка «Память: …» — тот же паттерн (main+MemoryLine.swift).
+        refreshMemoryLineMenuItem()
     }
 }

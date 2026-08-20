@@ -250,6 +250,10 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     /// B3: инфо-строка «кто держит LM Studio» в status-меню — создаётся в
     /// rebuildStatusMenu, обновляется из menuWillOpen (main+BrainLease.swift).
     var brainLeaseMenuItem: NSMenuItem?
+    /// T8 (Memory Conductor): инфо-строка «Память: …» СРАЗУ ПОСЛЕ brain-lease
+    /// строки — создаётся в rebuildStatusMenu, обновляется из menuWillOpen
+    /// (main+MemoryLine.swift).
+    var memoryLineMenuItem: NSMenuItem?
     var lastToggleRequestAt: TimeInterval = 0
     let toggleDebounceSec: TimeInterval = 0.35
     var recordingTargetApp: NSRunningApplication?
