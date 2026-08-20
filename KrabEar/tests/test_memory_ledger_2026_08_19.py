@@ -287,5 +287,39 @@ class ReadAllNowaitTestCase(LedgerClientBase):
             os.close(holder_fd)
 
 
+class RemoveOwnQuietTest(unittest.TestCase):
+    """🔴 remove_own не смеет шуметь flock'ом, когда удалять нечего.
+
+    Тесты в чанке патчат fcntl.flock ГЛОБАЛЬНО (объект модуля один на процесс).
+    Наш служебный захват при close() попадал в чужой spy, и чужой тест ловил
+    LOCK_EX|LOCK_NB вместо своего LOCK_SH — падение в CI, невоспроизводимое
+    в изоляции. Ровно класс «наш код загрязняет чужие тесты»."""
+
+    def test_no_flock_when_file_absent(self):
+        import fcntl as _fcntl
+        with tempfile.TemporaryDirectory() as tmp:
+            client = LedgerClient("krab_ear", path=Path(tmp) / "memory_ledger.json")
+            calls = []
+            real = _fcntl.flock
+
+            def spy(fd, flags):
+                calls.append(flags)
+                return real(fd, flags)
+
+            with patch("backend.memory_ledger.fcntl.flock", side_effect=spy):
+                client.remove_own()
+            self.assertEqual(calls, [], "remove_own флокнул при отсутствующем файле")
+
+    def test_still_removes_when_file_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memory_ledger.json"
+            client = LedgerClient("krab_ear", path=path)
+            client.publish_own({"brain": {"size_mb": 1, "state": "warm"}})
+            self.assertTrue(path.exists())
+            client.remove_own()
+            doc = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(doc["entries"], {})
+
+
 if __name__ == "__main__":
     unittest.main()

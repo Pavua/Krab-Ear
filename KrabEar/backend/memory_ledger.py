@@ -165,6 +165,13 @@ class LedgerClient:
     def remove_own(self) -> None:
         """Graceful shutdown: убирает собственные записи (spec L2). Best-effort,
         никогда не бросает исключение наружу."""
+        # 🔴 Ранний выход без flock, если удалять нечего. Не оптимизация:
+        # тесты в чанке патчат fcntl.flock ГЛОБАЛЬНО (объект модуля один на
+        # процесс), и наш служебный захват попадал в чужой spy — чужой тест
+        # ловил LOCK_EX|LOCK_NB вместо своего LOCK_SH. Молчим, когда нечего
+        # делать: это и корректнее по смыслу, и не шумит в общем процессе.
+        if not self._path.exists():
+            return
         try:
             lock_fd = self._acquire(nowait=True)
         except OSError:
