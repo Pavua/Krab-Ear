@@ -165,4 +165,32 @@ final class MainMemoryLineWiringTests: XCTestCase {
             memoryLineMenuTitle(from: result, enabled: true, now: refDate),
             "Память: tts_kokoro 1Г")
     }
+
+    // MARK: три состояния brain (условие enforce-волны)
+
+    func test_unloaded_state_says_so_instead_of_zero_gigabytes() throws {
+        let result: [String: Any] = [
+            "ledger": ["entries": ["krab_ear/brain": [
+                "state": "unloaded", "size_mb": 0, "updated_ts": 1.0,
+            ]]],
+            "conductor": [:],
+        ]
+        let title = memoryLineMenuTitle(from: result, enabled: true, now: refDate)
+        XCTAssertNotNil(title)
+        XCTAssertTrue(title!.contains("brain выгружен"), "получено: \(title!)")
+        XCTAssertFalse(title!.contains("0Г"), "выгруженная модель не должна выглядеть как «0Г»")
+    }
+
+    func test_unknown_size_renders_dash_not_zero() throws {
+        let result: [String: Any] = [
+            "ledger": ["entries": ["krab_ear/brain": [
+                "state": "unknown", "updated_ts": 1.0,
+            ]]],
+            "conductor": [:],
+        ]
+        let title = memoryLineMenuTitle(from: result, enabled: true, now: refDate)
+        XCTAssertNotNil(title)
+        XCTAssertTrue(title!.contains("brain —"), "получено: \(title!)")
+        XCTAssertFalse(title!.contains("0Г"))
+    }
 }

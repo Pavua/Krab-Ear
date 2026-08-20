@@ -186,6 +186,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     /// Ссылка на карточку «Сводка дня» в status-меню — хранится для refresh в NSMenuDelegate.
     /// Объявлена здесь, т.к. stored-property в extension Swift не поддерживает.
     var menuBarRecapView: MenuBarRecapView?
+    var memoryDashboardWindowController: NSWindowController?
     // PR 1.5: Wake word listener (Porcupine)
     private var quickStartController: QuickStartWindowController?
     var realtimeOverlayTimer: Timer?
@@ -788,6 +789,16 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func onOpenHistory() {
         openHistoryPanel(forceMenubar: false)
+    }
+
+    @objc func onOpenMemoryDashboard() {
+        if memoryDashboardWindowController == nil {
+            let wc = MemoryDashboardWindowController(ipcClient: ipcClient)
+            self.memoryDashboardWindowController = wc
+        }
+        memoryDashboardWindowController?.showWindow(nil)
+        memoryDashboardWindowController?.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc func onOpenTranscriptsInFinder() {
