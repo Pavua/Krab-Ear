@@ -1,7 +1,7 @@
-# Memory Conductor (Дирижёр памяти) — design v2
+# Memory Conductor (Дирижёр памяти) — design v2.1
 
-Date: 2026-08-19 · Status: reworked after adversarial review (3H/8M/5L, all HIGHs
-confirmed against code by hand); pending second-round review.
+Date: 2026-08-19 · Status: v2 reworked after review round 1 (3H/8M/5L); v2.1 applies round 2
+(H3 CLOSED, H1/H2 PARTIAL + 1 new HIGH, all gated by hand). Ready for owner review.
 Owner decisions: scope (в) full; symmetric ledger, no arbiter; moderate policy;
 UI = menu-bar line now, agy panel later.
 
@@ -33,19 +33,33 @@ side's residents; no RPC negotiation — declarations + shared rules only.
   output; no policy code imports the ledger reader. Pinned by an AST/source test.
 - **C-INFLIGHT (H2):** every eviction executes through the resident's OWN lock so
   "idle check + evict" is atomic with in-flight work: whisper →
-  `MLXWhisperSession.close_if_idle(threshold)` taking `self._lock` (today's
-  `close()` does NOT take it — that gap is part of this wave); gigaam → under its
-  `_spawn_lock` with in-flight check; brain/rewriter → LM Studio API (no process
-  kill). `is_recording` is NOT a sufficient gate: recorder.py flips it False at
-  stop BEFORE final transcription (verified recorder.py:239) — finalization is
-  protected by the in-flight locks, not by recording state.
+  `MLXWhisperSession.close_if_idle(threshold)` taking `self._lock`; gigaam →
+  under its `_spawn_lock` with in-flight check; brain/rewriter → LM Studio API
+  (no process kill). `is_recording` is NOT a sufficient gate: recorder.py flips
+  it False at stop BEFORE final transcription (recorder.py:239) — finalization
+  is protected by the in-flight locks, not by recording state.
+  🔴 Two implementation constraints (round-2, verified): (a) `_send()` calls
+  `self.close()` INSIDE its own `with self._lock:` (lines ~313-346) and the lock
+  is a non-reentrant `threading.Lock` — naive "close() takes the lock" is a
+  prescribed self-deadlock (W-#1872 class). Required shape: split
+  `close()`/`_close_unlocked()`; public close/close_if_idle take the lock,
+  internal error paths call `_close_unlocked()`. (b) `transcribe()` releases the
+  lock between `start()` and `_send()` — a reaper firing in that gap kills a
+  just-started request. Fix: set an in-flight marker / bump `last_used_ts` under
+  the lock at `transcribe()` ENTRY; the §10 race test must target exactly this
+  window.
 - **C-EXECUTOR-LOCALITY (H1):** whoever OWNS a resident runs the eviction for it.
   IPC backend conductor: gigaam, rewriter, brain. REST process: its
   mlx_whisper_worker via its own lightweight idle-reaper thread (tick 60 s,
   calls `close_if_idle`). No cross-process kills, no pid signalling via ledger.
+  Reaper start locus (round-2): in the RUN path only (`__main__` serve path AND
+  `InProcessRestServer.start`), NEVER at module import — rest_server.py is
+  imported by chunked tests and module-level daemon threads are the #1782 class.
+  The reaper must NOT call `get_mlx_whisper_session()` (it CREATES a session);
+  it peeks the existing `_session` under `_session_lock` only.
 - **C-PRESSURE-HYSTERESIS (H3):** brain eviction requires
-  `kern.memorystatus_vm_pressure_level >= 2` on ≥2 CONSECUTIVE conductor ticks
-  (≥60 s), never a single observation. `mlx.oom` as a trigger must be CONFIRMED
+  `kern.memorystatus_vm_pressure_level >= 2` on ≥3 CONSECUTIVE conductor ticks
+  (covers ≥60 s at tick 30 s), never a single observation. `mlx.oom` as a trigger must be CONFIRMED
   by the same sysctl (M7: the oom classifier has a false-positive history).
 - **C-NO-PINGPONG (H3):** while pressure-streak is active, the unconditional
   brain reload in `stop_recording` (recording_core_service.py:2781-2788) is
@@ -96,6 +110,11 @@ vanish from the UI picture — policy is unaffected (C-POLICY-SOURCE), documente
    Bench is a plan task with a numeric gate written into settings docs.
 3. rewriter: idle 1800 s + PROACTIVE reload on recording start (M4: otherwise
    the first paste after a pause eats a synchronous ~90 s self-heal load).
+   Ordering (round-2): recording-start actions to LM Studio are SEQUENCED in one
+   worker thread — brain unload → verified → rewriter reload; never two
+   concurrent fire-and-forget threads (transient +5 GB on top of undischarged
+   19 GB exactly at Whisper start). M4-reload is part of the ladder: it is
+   shadow-gated like evictions and has its own per-resident enforce flag.
 4. brain: pressure-streak only (C-PRESSURE-HYSTERESIS), gated by
    C-OWN-WORK-GATE. Cooldown per resident 600 s AFTER a verified success;
    failed attempts do not burn the cooldown (reserve-before-send lesson).
@@ -128,6 +147,10 @@ in menuWillOpen, hidden when disabled. v2: agy/Gemini panel, data only via
 Brief after core merges: same LedgerClient contract, `krab/` prefix, same ladder
 over their residents. Until then we run solo. Malformed partner entries are
 ignored fail-closed (§4); their absence never blocks our policy (C-POLICY-SOURCE).
+Accepted residual (round-2): under sustained pressure Ear evicts brain, Krab's
+next message JIT-loads it via LM Studio itself — a slow cycle bounded by the
+600 s cooldown. Accepted for v1; revisit with the budget protocol if it shows up
+in shadow logs.
 
 ## 9. Failure directions
 
@@ -146,4 +169,6 @@ Live smoke on dev instance: idle→evict→respawn round-trip; injected pressure
 run of the brain branch (emergency-mechanism lesson).
 **Rollout: week one in SHADOW mode — ladder logs decisions, executes nothing**
 (risky-change rule; also gives the pressure branch a real-machine dry run);
-enforce flips per-resident after shadow logs look sane.
+enforce flips per-resident after shadow logs look sane. Shadow must be VISIBLE
+(the never-flipped-flag class): `shadow_since` in diagnostics; after 7 days the
+menu-bar line shows «Дирижёр: shadow N дн» until the owner flips enforce.
