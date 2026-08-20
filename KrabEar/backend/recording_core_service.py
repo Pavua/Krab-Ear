@@ -57,7 +57,22 @@ def last_stt_activity_ts() -> float:
     return _LAST_STT_ACTIVITY["ts"]
 
 
-def _bump_stt_activity() -> None:
+def bump_stt_activity() -> None:
+    """Отмечает "STT/rewriter только что использовались" — единая точка для
+    ВСЕХ путей, реально прогоняющих аудио через транскрайбер (и, транзитивно,
+    через LLM-rewriter пост-обработку внутри engine.transcribe).
+
+    Memory Conductor MED-3 (адверсариальный гейт волны): раньше бамп на
+    стоп-пути диктовки был гейтован ``brain_model and preload_enabled`` —
+    настройками brain-preload, НЕ ФАКТОМ реальной STT-работы, а batch-импорт
+    (``_transcribe_paths_core``) и CHUNK_STT живой встречи (``meeting_session_
+    service._job_chunk_stt``) не бампали вовсе. Под enforce это давало
+    выгрузку rewriter'а посреди активного использования → следующая вставка
+    ловила синхронный ~90с self-heal load. Вызывается симметрично из ВСЕХ
+    точек входа, где транскрайбер реально задействован: start_recording (об
+    активности STT известно заранее), stop_recording (безусловно — STT точно
+    отработает дальше по коду), batch-импорт (per-file) и meeting CHUNK_STT.
+    """
     _LAST_STT_ACTIVITY["ts"] = time.monotonic()
 
 
@@ -1316,7 +1331,7 @@ class RecordingCoreService:
         settings = _settings_pre
         # LM Studio brain unload: освобождаем ~19 GB unified memory под Whisper+pyannote.
         try:
-            _bump_stt_activity()
+            bump_stt_activity()
             brain_model = str(settings.get("llm_brain_model", "")).strip()
             unload_enabled = bool(settings.get("llm_brain_unload_on_recording", True))
             conductor = getattr(self, "_memory_conductor", None)
@@ -2792,6 +2807,12 @@ class RecordingCoreService:
                     )
 
             try:
+                # MED-3: бамп безусловный (не гейтован brain_model/preload) —
+                # ниже по коду STT точно отработает независимо от настроек
+                # brain-preload; сиблинг-асимметрия со start-path раньше
+                # позволяла кондуктору посчитать rewriter простаивающим
+                # ровно тогда, когда он вот-вот понадобится финализации.
+                bump_stt_activity()
                 brain_model = str(
                     settings.get("llm_brain_model", "")
                 ).strip()
@@ -2799,7 +2820,6 @@ class RecordingCoreService:
                     settings.get("llm_brain_preload_on_stop", True)
                 )
                 if brain_model and preload_enabled:
-                    _bump_stt_activity()
                     conductor = getattr(self, "_memory_conductor", None)
                     # C-NO-PINGPONG: под enforced pressure-streak reload 19 ГБ
                     # пропускается (иначе лестница и reload дерутся за память).
@@ -3666,6 +3686,11 @@ class RecordingCoreService:
                     pass
 
                 import_lang_hint = lang_hint if lang_hint else "auto"
+                # MED-3: batch-импорт реально гоняет транскрайбер (+ rewriter
+                # внутри engine.transcribe) — раньше эта активность вообще не
+                # отражалась в last_stt_activity_ts, и длинный импорт мог
+                # схватить выгрузку rewriter'а посреди себя.
+                bump_stt_activity()
                 if progress_callback is not None:
                     self.transcriber.engine.set_quality_profile(quality_profile)
                     transcribe_payload = self.transcriber.engine.transcribe(

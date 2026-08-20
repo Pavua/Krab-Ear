@@ -1192,6 +1192,13 @@ class MeetingSessionService:
         audio = self._recorder.snapshot_range(s.cursor_sec, upto)
         if getattr(audio, "size", 0) == 0:
             return
+        # Memory Conductor MED-3: живая встреча реально гоняет транскрайбер
+        # каждый CHUNK_STT-тик, но эта активность нигде не отражалась —
+        # длинная встреча (в отличие от хоткейной диктовки, которую
+        # WakeWordPoller/AudioReinit видят по-другому) могла схватить
+        # выгрузку rewriter'а прямо посреди себя.
+        from backend.recording_core_service import bump_stt_activity
+        bump_stt_activity()
         payload = self._transcriber.transcribe_preview(
             audio_data=audio, quality_profile="balanced")
         text = payload.get("text") if isinstance(payload, dict) else str(payload or "")

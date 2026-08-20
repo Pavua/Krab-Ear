@@ -240,6 +240,33 @@ class ChunkSttJobTestCase(unittest.TestCase):
         svc.close()
 
 
+class ChunkSttBumpsSttActivityTestCase(unittest.TestCase):
+    """Memory Conductor MED-3: CHUNK_STT реально гоняет транскрайбер каждый тик
+    живой встречи, но эта активность нигде не отражалась в
+    last_stt_activity_ts — долгая встреча могла схватить выгрузку rewriter'а
+    посреди себя (см. также test_recording_core_service.TestBumpSttActivitySymmetry)."""
+
+    def setUp(self) -> None:
+        from backend import recording_core_service as rcs_module
+        self._rcs_module = rcs_module
+        self._prev_ts = rcs_module._LAST_STT_ACTIVITY["ts"]
+        self.addCleanup(lambda: rcs_module._LAST_STT_ACTIVITY.__setitem__("ts", self._prev_ts))
+
+    def test_chunk_stt_bumps_activity(self) -> None:
+        svc, _, _ = _make_svc()
+        svc.handle_meeting_start({})
+        self._rcs_module._LAST_STT_ACTIVITY["ts"] = 0.0
+
+        ran = svc._run_due_job_once(now=svc._next_due[MeetingJob.CHUNK_STT] + 0.1)
+
+        self.assertEqual(ran, MeetingJob.CHUNK_STT)
+        self.assertGreater(
+            self._rcs_module.last_stt_activity_ts(), 0.0,
+            "CHUNK_STT реально вызвал transcribe_preview, но не бампнул активность",
+        )
+        svc.close()
+
+
 class _SlowFakeRecordingCore(_FakeRecordingCore):
     """Как _FakeRecordingCore, но handle_start_recording искусственно медленный —
     расширяет окно гонки, чтобы тест надёжно ловил check-then-act баг."""

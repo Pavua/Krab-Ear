@@ -113,6 +113,61 @@ class HysteresisTest(unittest.TestCase):
         c.unload_model_fn.assert_not_called()
 
 
+class DisabledConductorResetsStreakTest(unittest.TestCase):
+    """LOW финального гейта: tick_once() при memory_conductor_enabled=False
+    возвращался ДО обновления _pressure_streak — счётчик залипал. Комбо:
+    выключили кондуктора ПОСРЕДИ давления → reload_brain_allowed() при
+    enforce_brain навсегда возвращает False, даже когда реального давления
+    давно нет и кондуктора снова включили."""
+
+    def test_disabling_mid_pressure_resets_streak_not_sticky(self):
+        c = _mk(pressure=4)
+        for _ in range(3):
+            c.tick_once()
+        self.assertGreaterEqual(
+            c._pressure_streak, 3, "тест не воспроизвёл предусловие — streak не набрался",
+        )
+
+        base = dict(c._settings_service.cached_settings.return_value)
+        c._settings_service.cached_settings.return_value = {
+            **base, "memory_conductor_enabled": False,
+        }
+        c.tick_once()
+        self.assertEqual(
+            c._pressure_streak, 0,
+            "выключенный кондуктор обязан сбрасывать streak, а не хранить его залипшим",
+        )
+
+    def test_full_combo_reload_not_blocked_immediately_after_re_enable(self):
+        """Полное комбо из находки: набрали streak под давлением → выключили
+        кондуктора ПОСРЕДИ давления → снова включили — reload_brain_allowed()
+        не смеет быть залипшим False СРАЗУ после re-enable, ДО первого нового
+        тика (иначе фикс полагался бы на побочный сброс от следующего
+        спокойного тика, а не на честный сброс во время самого disabled-тика)."""
+        c = _mk(pressure=4)
+        for _ in range(3):
+            c.tick_once()
+        self.assertFalse(
+            c.reload_brain_allowed(),
+            "тест не воспроизвёл предусловие — streak должен блокировать reload",
+        )
+
+        base = dict(c._settings_service.cached_settings.return_value)
+        c._settings_service.cached_settings.return_value = {
+            **base, "memory_conductor_enabled": False,
+        }
+        c.tick_once()  # выключен посреди давления — streak обязан сброситься ЗДЕСЬ
+
+        c._settings_service.cached_settings.return_value = {
+            **base, "memory_conductor_enabled": True,
+        }
+        # НЕ зовём tick_once() снова — проверяем состояние сразу после re-enable.
+        self.assertTrue(
+            c.reload_brain_allowed(),
+            "reload остался заблокирован залипшим streak от ДО-выключения давления",
+        )
+
+
 class GatesTest(unittest.TestCase):
     def test_recording_blocks_gigaam_and_brain(self):
         c = _mk(pressure=4, recording=True, gigaam_idle=10_000.0)
@@ -250,6 +305,65 @@ class ReloadGateTest(unittest.TestCase):
         self.assertFalse(c.reload_brain_allowed())
         calm = _mk(pressure=0)
         self.assertTrue(calm.reload_brain_allowed())
+
+
+class BrainStateHonestyTest(unittest.TestCase):
+    """LOW финального гейта: _publish раньше публиковал brain как
+    state="warm"/size_mb=20000 БЕЗУСЛОВНО — даже сразу после подтверждённой
+    выгрузки. Три состояния (warm/unloaded/unknown), кэшированные с последней
+    verify-проверки, НЕ HTTP на каждый тик (тик — 30с, _publish зовётся из
+    tick_once)."""
+
+    @staticmethod
+    def _last_brain_entry(c) -> dict:
+        args, kwargs = c._ledger.publish_own.call_args
+        entries = args[0] if args else kwargs["entries"]
+        return entries["brain"]
+
+    def test_defaults_to_unknown_not_warm(self):
+        """До первой проверки — честное "unknown", не унаследованное "warm"."""
+        c = _mk()  # pressure=0 по умолчанию → brain eviction ни разу не пробовался
+        c.tick_once()
+        brain = self._last_brain_entry(c)
+        self.assertEqual(brain["state"], "unknown")
+        self.assertIsNone(brain["size_mb"])
+
+    def test_after_verified_eviction_state_is_unloaded_with_zero_size(self):
+        c = _mk(pressure=4, model_loaded=False)  # verify подтвердил выгрузку
+        for _ in range(3):
+            c.tick_once()
+        brain = self._last_brain_entry(c)
+        self.assertEqual(brain["state"], "unloaded")
+        self.assertEqual(brain["size_mb"], 0)
+
+    def test_still_loaded_after_failed_eviction_state_is_warm(self):
+        c = _mk(pressure=4, model_loaded=True)  # verify: модель всё ещё загружена
+        for _ in range(3):
+            c.tick_once()
+        brain = self._last_brain_entry(c)
+        self.assertEqual(brain["state"], "warm")
+        self.assertEqual(brain["size_mb"], 20000)
+
+    def test_unknown_verify_outcome_does_not_claim_warm(self):
+        c = _mk(pressure=4)
+        c.model_loaded_fn.return_value = None  # сеть недоступна/таймаут
+        for _ in range(3):
+            c.tick_once()
+        brain = self._last_brain_entry(c)
+        self.assertEqual(
+            brain["state"], "unknown",
+            "verify вернул None (неизвестно) — публиковать его как warm нельзя",
+        )
+        self.assertIsNone(brain["size_mb"])
+
+    def test_publish_never_probes_lm_studio_itself(self):
+        """_publish не смеет сам ходить по HTTP на каждый тик — только читает
+        закэшированное состояние, обновляемое verify-путями."""
+        c = _mk()  # pressure=0 → давление никогда не набирает streak → eviction
+        # ни разу не пробуется → model_loaded_fn не должен звониться ИЗ _publish.
+        for _ in range(5):
+            c.tick_once()
+        c.model_loaded_fn.assert_not_called()
 
 
 class LivenessAndPolicySourceTest(unittest.TestCase):
