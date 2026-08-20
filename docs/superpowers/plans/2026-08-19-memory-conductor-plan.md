@@ -157,10 +157,6 @@ class LedgerClient:
     def remove_own(self) -> None:
         """Graceful shutdown: drop own entries (spec L2). Best-effort."""
         try:
-            self.publish_own({}) if False else None
-        except Exception:
-            pass
-        try:
             lock_fd = self._acquire(nowait=True)
         except OSError:
             return
