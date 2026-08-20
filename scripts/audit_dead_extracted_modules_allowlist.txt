@@ -42,3 +42,12 @@ module:KrabEar/core/retry_strategy.py
 #     тишины (Swift-агент / audio-pipeline). Production-импортёров пока ноль по
 #     дизайну, поэтому allowlist.
 module:KrabEar/backend/call_silence_probe.py
+
+# --- Memory Conductor T1 (2026-08-19): LedgerClient — write-only ledger
+#     foundation module (spec docs/superpowers/specs/2026-08-19-memory-conductor-
+#     design.md §4), покрыт test_memory_ledger_2026_08_19.py (10 тестов: RMW-
+#     delta, fail-closed GC, corrupt-recovery, конкурентная публикация двух
+#     владельцев, sidecar-lock source-контракт, nowait-read). Production-
+#     подключение (IPC-процесс публикует свои резиденты, REST — свои) — задача
+#     последующей волны того же плана (T2+), намеренно НЕ в этой задаче.
+module:KrabEar/backend/memory_ledger.py
