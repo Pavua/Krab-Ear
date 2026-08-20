@@ -28,7 +28,15 @@ private func memoryEntryTitle(key: String, entry: [String: Any], nowTs: Double) 
         }
         return "\(name) idle"
     }
-    let sizeMB = entry["size_mb"] as? Double ?? 0
+    // Три состояния brain (условие enforce-волны): выгруженная модель не должна
+    // рендериться как «0Г» — это выглядит поломкой, а не фактом. size_mb=null
+    // означает «состояние неизвестно», и врать про размер тоже нельзя.
+    if state == "unloaded" {
+        return "\(name) выгружен"
+    }
+    guard let sizeMB = entry["size_mb"] as? Double else {
+        return "\(name) —"
+    }
     let sizeGB = Int((sizeMB / 1024.0).rounded())
     return "\(name) \(sizeGB)Г"
 }

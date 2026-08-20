@@ -203,6 +203,14 @@ extension AgentAppDelegate {
             systemSymbolName: "memorychip", accessibilityDescription: nil)
         menu.addItem(memoryItem)
         self.memoryLineMenuItem = memoryItem
+        
+        let memoryDashboardItem = NSMenuItem(
+            title: "Память (подробно)...",
+            action: #selector(onOpenMemoryDashboard),
+            keyEquivalent: ""
+        )
+        memoryDashboardItem.target = self
+        menu.addItem(memoryDashboardItem)
         menu.addItem(.separator())
         self.menuBarRecapView = recapView
         menu.delegate = self
