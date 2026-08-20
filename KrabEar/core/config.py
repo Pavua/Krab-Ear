@@ -1201,6 +1201,20 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "mlx_oom_auto_unload_enabled": True,
     # Одна попытка выгрузки на окно: OOM приходит штормом, а выгрузка разрушительна.
     "mlx_oom_auto_unload_cooldown_sec": 600.0,
+    # Memory Conductor (спека 2026-08-19-memory-conductor-design v2.1).
+    # Shadow-first: enforce-флаги ВЫКЛЮЧЕНЫ — первую неделю лестница только логирует.
+    "memory_conductor_enabled": True,
+    "memory_conductor_enforce": False,
+    "memory_conductor_enforce_gigaam": False,
+    "memory_conductor_enforce_whisper": False,
+    "memory_conductor_enforce_rewriter": False,
+    "memory_conductor_enforce_brain": False,
+    "memory_conductor_enforce_recording_sequence": False,
+    "gigaam_idle_unload_sec": 600.0,
+    "whisper_idle_unload_sec": 900.0,
+    "rewriter_idle_unload_sec": 1800.0,
+    "memory_pressure_streak_ticks": 3,
+    "memory_evict_cooldown_sec": 600.0,
     "llm_brain_lease_enabled": True,
     # TTL одного lease в секундах. Краш процесса не «вешает» lock: следующий acquire
     # заберёт лиз по истёкшему TTL. 30 с достаточно для recording цикла.

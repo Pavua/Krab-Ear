@@ -34,6 +34,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import wave
 from collections import deque
 from typing import Optional
@@ -161,6 +162,15 @@ class GigaAMAdapter:
         # calls cannot both pass the `_model is None` guard and load twice
         # (memory pressure / OOM).  Mirrors ParakeetSTTAdapter._load_lock (W1218).
         self._model_lock = threading.Lock()
+        # Memory Conductor T2b (C-INFLIGHT, docs/superpowers/specs/2026-08-19-
+        # memory-conductor-design.md §3): public bookkeeping the conductor's
+        # idle-reaper reads directly (C-POLICY-SOURCE — in-process state only,
+        # never the ledger). Bumped under _spawn_lock at transcribe() entry AND
+        # exit (see _mark_inflight_start/_mark_inflight_end) so close_if_idle()
+        # can check "loaded AND inflight==0 AND idle >= threshold" atomically
+        # against the exact same lock transcribe() uses.
+        self.last_used_ts: float = time.monotonic()
+        self.inflight: int = 0
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -191,47 +201,103 @@ class GigaAMAdapter:
 
         При ошибке кидает исключение (ImportError / RuntimeError).
         """
-        # Resolve transport единожды (auto → in_process | subprocess).
-        transport = self._resolve_transport()
-
-        # Resample выполняем одинаково для обоих транспортов.
-        audio_16k = self._ensure_16k(audio, sample_rate)
-
-        # Пишем temp WAV (gigaam в обоих транспортах принимает путь к файлу).
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            tmp_path = tmp.name
-
+        # C-INFLIGHT (Memory Conductor T2b): бампаем ДО начала фактической
+        # работы — иначе reaper, сработавший в узком окне между входом сюда и
+        # стартом транскрипции, может выселить адаптер посреди только что
+        # начатого запроса (round-2 finding спеки §3).
+        self._mark_inflight_start()
         try:
-            self._write_wav(tmp_path, audio_16k)
-            if transport == "in_process":
-                text, engine_name = self._transcribe_in_process(
-                    tmp_path, longform=longform, hf_token=hf_token,
-                )
-            else:  # subprocess
-                text, engine_name = self._transcribe_subprocess(
-                    tmp_path, longform=longform, hf_token=hf_token,
-                )
-        finally:
+            # Resolve transport единожды (auto → in_process | subprocess).
+            transport = self._resolve_transport()
+
+            # Resample выполняем одинаково для обоих транспортов.
+            audio_16k = self._ensure_16k(audio, sample_rate)
+
+            # Пишем temp WAV (gigaam в обоих транспортах принимает путь к файлу).
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp_path = tmp.name
+
             try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+                self._write_wav(tmp_path, audio_16k)
+                if transport == "in_process":
+                    text, engine_name = self._transcribe_in_process(
+                        tmp_path, longform=longform, hf_token=hf_token,
+                    )
+                else:  # subprocess
+                    text, engine_name = self._transcribe_subprocess(
+                        tmp_path, longform=longform, hf_token=hf_token,
+                    )
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
-        logger.debug(
-            "GigaAMAdapter: транскрибировано %d символов (engine=%s, transport=%s)",
-            len(text),
-            engine_name,
-            transport,
-        )
+            logger.debug(
+                "GigaAMAdapter: транскрибировано %d символов (engine=%s, transport=%s)",
+                len(text),
+                engine_name,
+                transport,
+            )
 
-        return {
-            "text": text.strip(),
-            "language": "ru",
-            # GigaAM не возвращает логарифмические вероятности сегментов;
-            # используем константу 0.9 — типичное качество модели на RU речи.
-            "confidence": 0.9,
-            "engine": engine_name,
-        }
+            return {
+                "text": text.strip(),
+                "language": "ru",
+                # GigaAM не возвращает логарифмические вероятности сегментов;
+                # используем константу 0.9 — типичное качество модели на RU речи.
+                "confidence": 0.9,
+                "engine": engine_name,
+            }
+        finally:
+            self._mark_inflight_end()
+
+    def _mark_inflight_start(self) -> None:
+        """C-INFLIGHT: инкремент inflight + bump last_used_ts под _spawn_lock
+        на входе в transcribe() — тем же локом, что close_if_idle() использует
+        для атомарной проверки "loaded and inflight==0 and idle"."""
+        with self._spawn_lock:
+            self.inflight += 1
+            self.last_used_ts = time.monotonic()
+
+    def _mark_inflight_end(self) -> None:
+        """Симметричный выход из in-flight-окна: декремент + повторный bump
+        last_used_ts, чтобы idle-отсчёт для close_if_idle() стартовал от
+        МОМЕНТА ОКОНЧАНИЯ работы, а не от входа в transcribe()."""
+        with self._spawn_lock:
+            self.inflight = max(0, self.inflight - 1)
+            self.last_used_ts = time.monotonic()
+
+    def close_if_idle(self, idle_sec: float) -> bool:
+        """Выгружает адаптер если он простаивает ≥ idle_sec и ничего не в работе.
+
+        Часть Memory Conductor ladder (Task 2b, C-INFLIGHT): вызывается
+        idle-реапером conductor'а, НЕ читает леджер (C-POLICY-SOURCE) — только
+        собственное in-process состояние (is_loaded/inflight/last_used_ts).
+
+        Атомарность "проверка простоя + evict" обеспечивает _spawn_lock — тот
+        же лок, под которым transcribe() инкрементирует/декрементирует
+        inflight (см. _mark_inflight_start/_mark_inflight_end), поэтому evict
+        не может проскочить в окне только что стартовавшего запроса.
+
+        Unlocked-split (как для whisper's close()/_send()) здесь НЕ нужен:
+        close() ниже НЕ берёт _spawn_lock сам — он трогает только
+        self._subprocess через собственный _GigaAMSubprocessSession._lock,
+        поэтому вызывать close() прямо из-под _spawn_lock безопасно (никакого
+        self-deadlock, W-#1872 класс сюда не применим).
+
+        Возвращает True если реально что-то выгрузили; False — если нечего
+        было выгружать (не загружено), шла работа (inflight != 0), или
+        простой ещё не достиг порога.
+        """
+        with self._spawn_lock:
+            if not self.is_loaded():
+                return False
+            if self.inflight != 0:
+                return False
+            if (time.monotonic() - self.last_used_ts) < idle_sec:
+                return False
+            self.close()
+            return True
 
     def is_loaded(self) -> bool:
         """Возвращает True если модель уже загружена (in-process ИЛИ subprocess)."""

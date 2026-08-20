@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import wave
 from collections import deque
 from pathlib import Path
@@ -76,6 +77,13 @@ def get_mlx_whisper_session() -> "MLXWhisperSession":
     with _session_lock:
         if _session is None:
             _session = MLXWhisperSession()
+        return _session
+
+
+def peek_session() -> Optional["MLXWhisperSession"]:
+    """Читает текущий singleton, НИКОГДА его не создаёт (Memory Conductor —
+    сканер пробегает резидентов, не порождая новые ради самого прохода)."""
+    with _session_lock:
         return _session
 
 
@@ -161,6 +169,18 @@ class MLXWhisperSession:
         self._stderr_ring: deque[str] = deque(maxlen=200)
         self._stderr_drain_thread: Optional[threading.Thread] = None
         self._timed_out = False
+        self._inflight = 0
+        self._last_used_ts = time.monotonic()
+
+    @property
+    def inflight(self) -> int:
+        """Сколько transcribe() сейчас в полёте (C-INFLIGHT gate для Memory Conductor)."""
+        return self._inflight
+
+    @property
+    def last_used_ts(self) -> float:
+        """monotonic-таймстемп последнего входа/выхода transcribe()."""
+        return self._last_used_ts
 
     def start(self) -> None:
         """Idempotent spawn. Мёртвый child (poll()!=None) — сиблинг GigaAM W1216 F1."""
@@ -226,27 +246,62 @@ class MLXWhisperSession:
         timeout_sec: float,
         model_name: str,
     ) -> dict[str, Any]:
-        self.start()
-        response = self._send(
-            {
-                "op": "transcribe",
-                "audio_path": audio_path,
-                "params": mlx_params,
-            },
-            timeout_sec=timeout_sec,
-            model_name=model_name,
-        )
-        if not response.get("ok"):
-            err = str(response.get("error", "unknown"))
-            if err.startswith("TypeError"):
-                raise TypeError(err)
-            raise RuntimeError(f"mlx_whisper worker: {err}")
-        result = response.get("result")
-        if not isinstance(result, dict):
-            raise RuntimeError("mlx_whisper worker: missing result dict")
-        return result
+        # C-INFLIGHT: короткие вход/выход-захваты self._lock только для счётчика —
+        # НЕ держим лок через весь start()+_send() (не реентерабелен, _send()
+        # сам берёт self._lock на время записи+чтения ответа).
+        with self._lock:
+            self._inflight += 1
+            self._last_used_ts = time.monotonic()
+        try:
+            self.start()
+            response = self._send(
+                {
+                    "op": "transcribe",
+                    "audio_path": audio_path,
+                    "params": mlx_params,
+                },
+                timeout_sec=timeout_sec,
+                model_name=model_name,
+            )
+            if not response.get("ok"):
+                err = str(response.get("error", "unknown"))
+                if err.startswith("TypeError"):
+                    raise TypeError(err)
+                raise RuntimeError(f"mlx_whisper worker: {err}")
+            result = response.get("result")
+            if not isinstance(result, dict):
+                raise RuntimeError("mlx_whisper worker: missing result dict")
+            return result
+        finally:
+            with self._lock:
+                self._inflight -= 1
+                self._last_used_ts = time.monotonic()
 
-    def close(self) -> None:
+    def close(self, timeout: float = 5.0) -> None:
+        """Публичный close(): берёт self._lock С ТАЙМАУТОМ, чтобы залипший
+        readline() внутри _send() (до timeout_sec, вплоть до 120с) не вешал
+        вызывающих — в первую очередь reset_mlx_whisper_session(), который
+        сам держит модульный _session_lock. Тело — в _close_unlocked() для
+        вызовов ИЗНУТРИ уже удерживаемого self._lock (см. _send())."""
+        if self._proc is None:
+            return
+        acquired = self._lock.acquire(timeout=timeout)
+        if not acquired:
+            logger.warning(
+                "mlx_whisper session close(): лок не получен за %.1fs "
+                "(вероятно активный _send держит его) — close пропущен, "
+                "процесс не тронут",
+                timeout,
+            )
+            return
+        try:
+            self._close_unlocked()
+        finally:
+            self._lock.release()
+
+    def _close_unlocked(self) -> None:
+        """Тело close() БЕЗ захвата self._lock — вызывать только когда
+        self._lock уже держит вызывающий (см. _send() write-failure path)."""
         if self._proc is None:
             return
         try:
@@ -277,6 +332,21 @@ class MLXWhisperSession:
                     except (OSError, BrokenPipeError):
                         pass
             self._proc = None
+
+    def close_if_idle(self, idle_sec: float) -> bool:
+        """Memory Conductor C-INFLIGHT: атомарная (под self._lock) проверка
+        «резидент простаивает» + закрытие. inflight>0 всегда побеждает —
+        даже если формально прошло достаточно времени с last_used_ts (тот
+        обновляется и на ВХОДЕ в transcribe(), так что во время работы
+        разница почти всегда мала, но именно inflight — авторитетный
+        источник правды на границе start()→_send())."""
+        with self._lock:
+            if self._proc is None or self._inflight > 0:
+                return False
+            if (time.monotonic() - self._last_used_ts) < idle_sec:
+                return False
+            self._close_unlocked()
+            return True
 
     def kill(self) -> None:
         """SIGKILL без wait. Не блокировать путь к ``os._exit``."""
@@ -317,7 +387,10 @@ class MLXWhisperSession:
                 self._proc.stdin.flush()
             except (BrokenPipeError, OSError) as exc:
                 rc = self._proc.poll()
-                self.close()
+                # self._lock уже держим (мы внутри `with self._lock:` выше) —
+                # self.close() здесь самозаклинил бы (не реентерабельный лок,
+                # W-#1872 class); _close_unlocked() — тело close() без acquire.
+                self._close_unlocked()
                 raise MLXWorkerCrashed(rc, model_name) from exc
 
             timer = threading.Timer(timeout_sec, self._timeout_kill)

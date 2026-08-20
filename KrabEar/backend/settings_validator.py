@@ -74,6 +74,12 @@ _ENUM_FIELDS: dict[str, tuple[str, ...]] = {
 
 # Диапазоны числовых полей: ключ → (min, max, default, type)
 _RANGE_FIELDS: dict[str, tuple[Any, Any, Any, type]] = {
+    # Memory Conductor: пороги лестницы выгрузки (спека v2.1 §5).
+    "gigaam_idle_unload_sec": (60.0, 86400.0, 600.0, float),
+    "whisper_idle_unload_sec": (60.0, 86400.0, 900.0, float),
+    "rewriter_idle_unload_sec": (300.0, 86400.0, 1800.0, float),
+    "memory_pressure_streak_ticks": (2, 20, 3, int),
+    "memory_evict_cooldown_sec": (60.0, 86400.0, 600.0, float),
     # Окно между попытками автовыгрузки при mlx.oom. 0 → каждый OOM (нагрузочно),
     # верх ограничен сутками: большее окно означало бы "фича выключена", для этого есть флаг.
     "mlx_oom_auto_unload_cooldown_sec": (0.0, 86400.0, 600.0, float),

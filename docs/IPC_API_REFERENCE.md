@@ -2942,3 +2942,9 @@ Returns: `{context_words: [...], recent_topics: [...], size}`
 ---
 
 *Документ сгенерирован из `service.py` (строки 905–1233) + делегированных сервисных модулей. Живое количество хэндлеров: `grep -cE '"[a-z_]+":\s*self\._' KrabEar/backend/service.py`.*
+
+
+### get_memory_ledger
+
+Memory Conductor (2026-08-19). Params: `{}` → `{ok, ledger: {v, entries: {"<owner>/<resident>": {owner, resident, size_mb, state, idle_since_ts?, reload_cost, pid, updated_ts}}}, conductor: {enabled, thread_alive, last_tick_ts, shadow_since, pressure_streak, would_skip_brain_reload, residents, decisions}}`.
+Леджер читается nowait (health-probe урок): под контеншеном возвращается пустой документ, не ожидание.
