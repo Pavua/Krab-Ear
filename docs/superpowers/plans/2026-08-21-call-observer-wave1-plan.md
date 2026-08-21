@@ -4,14 +4,14 @@
 
 **Goal:** macOS observer client for Voice Gateway agent calls: auto-appearing HUD → expandable panel, live two-sided transcript with translation, live audio listen, hangup button.
 
-**Architecture:** Swift-only client of VG's verified WS/REST contract (spec `docs/superpowers/specs/2026-08-21-call-observer-wave1-design.md` — READ IT FIRST, it is the source of truth for every behavior below). Python diff is 2 settings keys + a `vg_client_token` file writer. Call-end lifecycle is a ONE-SHOT automaton keyed by per-session observation generations (spec §4.1).
+**Architecture:** Swift-only client of VG's verified WS/REST contract (spec `docs/superpowers/specs/2026-08-21-call-observer-wave1-design.md` — READ IT FIRST, it is the source of truth for every behavior below). Python diff is exactly 2 settings keys; the VG credential comes from the EXISTING `get_voice_gateway_credential` IPC (W1892), cached in memory. Call-end lifecycle is a ONE-SHOT automaton keyed by per-session observation generations (spec §4.1).
 
 **Tech Stack:** Swift 6 / AppKit / URLSessionWebSocketTask / AVAudioEngine / GCD; Python 3 (token writer); flask + flask-sock (fake VG for e2e).
 
 ## Global Constraints
 
 - Base branch: `feat/call-observer-w1` (already exists, spec committed). Every task commits there.
-- VG base URL from setting `voice_gateway_url` (default `http://127.0.0.1:8090`); auth token ONLY from file `<data_dir>/vg_client_token`, never IPC (IPC redacts secrets).
+- VG base URL + api key ONLY via the dedicated IPC `get_voice_gateway_credential` (W1892, `settings_service.py:393`; general `get_settings` redacts the key), cached in memory; `tokenProvider` reads the cache.
 - All network and IPC strictly off-main; UI mutations on main (AGENT-3 rule).
 - No `runModal` — only `presentAlertSheet`/`presentPanelSheet` from `AlertHelpers.swift`.
 - No emoji/Unicode glyph buttons — SF Symbols `speaker.wave.2` / `phone.down.fill` (CoreText hang class AGENT-J/M). Any NEW non-ASCII glyph in Swift string literals must already exist in `native/` (glyph gate).
@@ -24,11 +24,7 @@
 
 | File | Responsibility |
 |---|---|
-| `KrabEar/backend/vg_client_token.py` (new) | effective-key resolution + atomic 0600 write of `<data_dir>/vg_client_token` |
 | `KrabEar/core/config.py` (modify ~:879) | +2 bool keys in `DEFAULT_SETTINGS` |
-| `KrabEar/backend/service.py` (modify ~:450) | write token at startup |
-| `KrabEar/backend/settings_service.py` (modify ~:410) | rewrite token after settings save |
-| `scripts/purge_coverage_allowlist.txt` (modify) | allowlist `vg_client_token` |
 | `native/.../VGCallEvent.swift` (new) | typed decoder of VG stream events (exact-match dispatch) |
 | `native/.../MuLawDecoder.swift` (new) | G.711 μ-law → PCM16/Float LUT |
 | `native/.../VGWebSocketConnection.swift` (new) | shared WS transport: Bearer, backoff, ping-timer lifecycle, generation stamp |
@@ -47,136 +43,52 @@ Swift sources dir: `native/KrabEarAgent/Sources/KrabEarAgent/`; tests dir: `nati
 
 ---
 
-### Task 1: Python — vg_client_token writer + settings keys + purge allowlist
+### Task 1: Python — the two settings keys
 
 **Files:**
-- Create: `KrabEar/backend/vg_client_token.py`
-- Modify: `KrabEar/core/config.py` (after line with `"voice_gateway_api_key": "",` ~:879)
-- Modify: `KrabEar/backend/service.py` (anchor: line `self.vocabulary = VocabularyStore(data_dir=store.data_dir)` ~:450)
-- Modify: `KrabEar/backend/settings_service.py` (anchor: `def handle_set_settings` ~:410)
-- Modify: `scripts/purge_coverage_allowlist.txt`
-- Test: `KrabEar/tests/test_vg_client_token_w1.py`
+- Modify: `KrabEar/core/config.py` (after the line `"voice_gateway_api_key": "",` ~:879)
+- Test: `KrabEar/tests/test_call_observer_settings_w1.py`
 
 **Interfaces:**
-- Produces: `write_vg_client_token(data_dir: Path, settings: dict) -> None`; `effective_vg_api_key(settings: dict) -> str`; constant `VG_CLIENT_TOKEN_FILENAME = "vg_client_token"`. File consumed by Swift Task 8.
+- Produces: `DEFAULT_SETTINGS["call_observer_hud_enabled"] = True`, `DEFAULT_SETTINGS["call_observer_autoplay_audio"] = False` — read by Swift via `get_settings` (booleans are not sensitive). The VG credential channel is NOT built here: it already exists (`get_voice_gateway_credential`, W1892, `settings_service.py:393`, dispatch `service.py:2730`, live consumer `HistoryPanelController+VoiceTab.swift`) and is consumed by Swift Task 8. An earlier draft invented a `vg_client_token` file — rejected by plan review as a rebuild of W1892.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the failing test**
 
 ```python
-"""Тесты vg_client_token (Call Observer w1): атомарная 0600-запись эффективного ключа."""
-import os
-import stat
+"""Call Observer w1: два ключа настроек наблюдателя звонков."""
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import tempfile
-
-from backend.vg_client_token import (
-    VG_CLIENT_TOKEN_FILENAME,
-    effective_vg_api_key,
-    write_vg_client_token,
-)
 from core.config import DEFAULT_SETTINGS
 
 
-class VgClientTokenTest(unittest.TestCase):
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.data_dir = Path(self._tmp.name)
-
-    def tearDown(self):
-        self._tmp.cleanup()
-
-    def test_writes_settings_key_0600(self):
-        write_vg_client_token(self.data_dir, {"voice_gateway_api_key": "sk-abc"})
-        f = self.data_dir / VG_CLIENT_TOKEN_FILENAME
-        self.assertEqual(f.read_text(), "sk-abc")
-        self.assertEqual(stat.S_IMODE(f.stat().st_mode), 0o600)
-
-    def test_env_override_wins(self):
-        with patch.dict(os.environ, {"KRAB_EAR_VOICE_GATEWAY_API_KEY": "env-key"}):
-            self.assertEqual(effective_vg_api_key({"voice_gateway_api_key": "json-key"}), "env-key")
-
-    def test_empty_key_writes_empty_file(self):
-        write_vg_client_token(self.data_dir, {})
-        self.assertEqual((self.data_dir / VG_CLIENT_TOKEN_FILENAME).read_text(), "")
-
-    def test_key_change_rewrites(self):
-        write_vg_client_token(self.data_dir, {"voice_gateway_api_key": "one"})
-        write_vg_client_token(self.data_dir, {"voice_gateway_api_key": "two"})
-        self.assertEqual((self.data_dir / VG_CLIENT_TOKEN_FILENAME).read_text(), "two")
-
-    def test_write_failure_never_raises(self):
-        with patch("backend.vg_client_token.os.replace", side_effect=OSError("disk full")):
-            write_vg_client_token(self.data_dir, {"voice_gateway_api_key": "x"})  # не бросает
-
+class CallObserverSettingsTest(unittest.TestCase):
     def test_default_settings_keys(self):
         self.assertIs(DEFAULT_SETTINGS["call_observer_hud_enabled"], True)
         self.assertIs(DEFAULT_SETTINGS["call_observer_autoplay_audio"], False)
+
+    def test_keys_are_not_sensitive(self):
+        """Булы обязаны доходить до Swift через get_settings нередактированными."""
+        from backend.settings_backup import SENSITIVE_FIELDS
+        self.assertNotIn("call_observer_hud_enabled", SENSITIVE_FIELDS)
+        self.assertNotIn("call_observer_autoplay_audio", SENSITIVE_FIELDS)
 
 
 if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: Run tests — verify they fail**
+- [ ] **Step 2: Run — verify FAIL**
 
-Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_vg_client_token_w1.py -v -p no:cacheprovider`
-Expected: FAIL — `ModuleNotFoundError: No module named 'backend.vg_client_token'`
+Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_call_observer_settings_w1.py -v -p no:cacheprovider`
+Expected: FAIL — `KeyError: 'call_observer_hud_enabled'`
 
-- [ ] **Step 3: Create `KrabEar/backend/vg_client_token.py`**
-
-```python
-"""Файл-токен для Swift-агента Call Observer (spec 2026-08-21 §2/§5).
-
-IPC get_settings отдаёт секреты как REDACTED (wave-35), поэтому Swift читает
-voice_gateway_api_key из <data_dir>/vg_client_token (0600, атомарная запись).
-Зеркало паттерна event_bridge_token. Пустой ключ → пустой файл (VG auth-off).
-Содержимое — ЭФФЕКТИВНОЕ runtime-значение: env-override важнее settings.json.
-"""
-from __future__ import annotations
-
-import logging
-import os
-import tempfile
-from pathlib import Path
-
-logger = logging.getLogger(__name__)
-
-VG_CLIENT_TOKEN_FILENAME = "vg_client_token"
-
-
-def effective_vg_api_key(settings: dict) -> str:
-    env = os.environ.get("KRAB_EAR_VOICE_GATEWAY_API_KEY")
-    if env is not None:
-        return env.strip()
-    return str(settings.get("voice_gateway_api_key", "") or "").strip()
-
-
-def write_vg_client_token(data_dir: Path, settings: dict) -> None:
-    """Атомарно (tmp+replace) пишет ключ; сбой записи НИКОГДА не роняет вызывающего."""
-    try:
-        data_dir = Path(data_dir)
-        data_dir.mkdir(parents=True, exist_ok=True)
-        key = effective_vg_api_key(settings)
-        fd, tmp = tempfile.mkstemp(dir=str(data_dir), prefix=".vg_token_")
-        try:
-            os.write(fd, key.encode("utf-8"))
-        finally:
-            os.close(fd)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, data_dir / VG_CLIENT_TOKEN_FILENAME)
-    except OSError as exc:
-        logger.warning("vg_client_token write failed: %s", exc)
-```
-
-- [ ] **Step 4: Add the two settings keys**
+- [ ] **Step 3: Add the two keys**
 
 In `KrabEar/core/config.py`, directly after the line `"voice_gateway_api_key": "",`:
 
@@ -185,68 +97,20 @@ In `KrabEar/core/config.py`, directly after the line `"voice_gateway_api_key": "
     "call_observer_autoplay_audio": False,
 ```
 
-- [ ] **Step 5: Startup write in `service.py`**
+- [ ] **Step 4: Run — verify PASS** (same command → 2 passed)
 
-Directly after the line `self.vocabulary = VocabularyStore(data_dir=store.data_dir)` (~:450) insert:
+- [ ] **Step 5: Guards + commit**
 
-```python
-        # Call Observer w1: файл-токен для Swift (IPC редактирует секреты).
-        try:
-            from backend.vg_client_token import write_vg_client_token
-            write_vg_client_token(Path(store.data_dir), store.load_settings())
-        except Exception as exc:  # noqa: BLE001 — токен не смеет ронять старт
-            logger.warning("vg_client_token startup write skipped: %s", exc)
-```
-
-Check the imports at the top of `service.py`: `Path` and `logger` already exist there (verify with `grep -n "^from pathlib\|^logger = " KrabEar/backend/service.py`); add `from pathlib import Path` only if missing.
-
-- [ ] **Step 6: Rewrite after settings save**
-
-In `KrabEar/backend/settings_service.py`, replace the body of `handle_set_settings` (~:410):
-
-```python
-    def handle_set_settings(self, params: dict[str, Any]) -> dict[str, Any]:
-        with self._save_lock:  # W1437
-            result = self._handle_set_settings_locked(params)
-        if result.get("ok"):
-            # Call Observer w1: пересобрать файл-токен VG (ключ мог смениться).
-            try:
-                from backend.vg_client_token import write_vg_client_token
-                write_vg_client_token(Path(self.store.data_dir), self.store.load_settings())
-            except Exception:  # noqa: BLE001 — не ронять успешный save
-                pass
-        return result
-```
-
-Add `from pathlib import Path` to the file's imports if missing.
-
-- [ ] **Step 7: Allowlist entry**
-
-In `scripts/purge_coverage_allowlist.txt`, next to the `event_bridge_token/` entry add:
-
-```
-vg_client_token          # ключ VG для Swift-агента (Call Observer w1); security key, не пользовательские данные — точный аналог event_bridge_token
-```
-
-- [ ] **Step 8: Run tests — verify they pass**
-
-Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_vg_client_token_w1.py -v -p no:cacheprovider`
-Expected: 6 passed.
-
-- [ ] **Step 9: Guards**
-
-Run: `python scripts/audit_purge_coverage.py --fail-on-found` → exit 0.
-Run: `scripts/pre_merge_py312_check.sh KrabEar/tests/test_vg_client_token_w1.py` → PASS.
+Run: `scripts/pre_merge_py312_check.sh KrabEar/tests/test_call_observer_settings_w1.py` → PASS.
 Run: `make audit-all` → green.
 
-- [ ] **Step 10: Commit**
-
 ```bash
-git add KrabEar/backend/vg_client_token.py KrabEar/core/config.py KrabEar/backend/service.py KrabEar/backend/settings_service.py scripts/purge_coverage_allowlist.txt KrabEar/tests/test_vg_client_token_w1.py
-git commit -m "feat(call-observer): vg_client_token writer + 2 settings keys (w1 T1)
+git add KrabEar/core/config.py KrabEar/tests/test_call_observer_settings_w1.py
+git commit -m "feat(call-observer): 2 ключа настроек наблюдателя звонков (w1 T1)
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
+
 
 ---
 
@@ -598,7 +462,7 @@ protocol VGWebSocketConnecting: AnyObject {
 }
 
 /// Общий WS-транспорт двух клиентов VG (events-stream + audio-monitor).
-/// Bearer-заголовок из tokenProvider (файл vg_client_token, читается на
+/// Bearer-заголовок из tokenProvider (кэш креденшела W1892, читается на
 /// каждом коннекте), exp backoff 1→30с ±25% джиттера, ping каждые 25с.
 /// Каждое сообщение доставляется со generation-штампом; отмена ВСЕГДА
 /// инвалидирует ping-таймер (§4 спеки: таймеры не копятся между реконнектами).
@@ -1125,17 +989,27 @@ final class VGSessionWatcher {
         guard Self.liveStatuses.contains(s.status) else { return false }
         guard !s.phone.isEmpty || !s.callDirection.isEmpty else { return false }
         // stale-гард; непарсибельная дата — fail-open в сторону показа звонка.
-        if let updated = Self.isoFormatter.date(from: s.updatedAt) {
+        if let updated = Self.parseISO(s.updatedAt) {
             if now().timeIntervalSince(updated) > Self.staleCutoff { return false }
         }
         return true
     }
 
-    private static let isoFormatter: ISO8601DateFormatter = {
+    private static let isoFractional: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return f
     }()
+    private static let isoPlain: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
+    /// VG отдаёт ISO и с долями секунды, и без — принимаем оба.
+    static func parseISO(_ s: String) -> Date? {
+        isoFractional.date(from: s) ?? isoPlain.date(from: s)
+    }
 
     private static func parse(_ raw: [String: Any]) -> VGSessionInfo? {
         guard let id = raw["id"] as? String, let status = raw["status"] as? String else { return nil }
@@ -1155,7 +1029,15 @@ final class VGSessionWatcher {
 }
 ```
 
-⚠️ ISO8601 nuance: VG timestamps may come with or without fractional seconds. Implement `isoFormatter` fallback: try with `.withFractionalSeconds`, on nil retry a second formatter without it (two static formatters, helper `static func parseISO(_ s: String) -> Date?`). Update `isLiveLocked` to use the helper. Add a test case with both `2026-08-21T10:00:00Z` and `2026-08-21T10:00:00.123Z`.
+Add one more test to the T5 test file (both ISO variants must parse — VG
+emits with and without fractional seconds):
+
+```swift
+    func test_iso_both_variants_parse() {
+        XCTAssertNotNil(VGSessionWatcher.parseISO("2026-08-21T10:00:00Z"))
+        XCTAssertNotNil(VGSessionWatcher.parseISO("2026-08-21T10:00:00.123Z"))
+    }
+```
 
 - [ ] **Step 4: Run — verify PASS** (`swift test --filter VGSessionWatcherTests`)
 
@@ -1179,7 +1061,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `VGCallEvent.decode` (T2); `VGWebSocketConnecting`, `VGWebSocketConnection` (T4).
-- Produces: `final class VGCallStreamClient` with `var onEvent: ((VGCallEvent, UInt64) -> Void)?` (main queue, generation-stamped), `func connect(baseURL: URL, sessionId: String, generation: UInt64, tokenProvider: @escaping () -> String)`, `func disconnect()`, and test-only injectable `var connectionFactoryForTests: ((URL, UInt64, @escaping (VGWebSocketConnection.Message, UInt64) -> Void) -> VGWebSocketConnecting)?` (nil → real `VGWebSocketConnection` with `autoReconnect: true`).
+- Produces: `final class VGCallStreamClient` with `var onEvent: ((VGCallEvent, UInt64) -> Void)?` (main queue, generation-stamped), `func connect(baseURL: URL, sessionId: String, generation: UInt64, tokenProvider: @escaping () -> String)`, `func disconnect()`, and test-only injectable `var connectionFactoryForTests: ((URL, UInt64, @escaping (VGWebSocketConnection.Message, UInt64) -> Void) -> VGWebSocketConnecting)?` (nil → real `VGWebSocketConnection` with `autoReconnect: true`); `var onConnectionState: ((Bool, UInt64) -> Void)?` for the reconnecting badge.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1266,18 +1148,16 @@ import Foundation
 
 /// Клиент событий VG WS `/v1/sessions/{id}/stream` (spec §3 комп. 2).
 /// Подключается на callAppeared выбранной сессии; авто-реконнект внутри
-/// транспорта; call.closed → permanentStop (терминал для ЛЮБОГО звонка,
-/// не только удалённого). Каждое событие доставляется на main со
-/// generation-штампом; события не-текущего поколения отбрасываются ДО UI.
+/// транспорта; call.closed → permanentStop (терминал ЛЮБОГО звонка).
+/// Каждое событие — на main со generation-штампом; чужое поколение
+/// отбрасывается ДО UI. onConnectionState → бейдж «переподключение…».
 final class VGCallStreamClient {
     var onEvent: ((VGCallEvent, UInt64) -> Void)?
+    var onConnectionState: ((Bool, UInt64) -> Void)?
 
-    /// Инъекция для тестов; дефолт — реальный транспорт с autoReconnect.
-    var connectionFactory: (URL, UInt64, @escaping (VGWebSocketConnection.Message, UInt64) -> Void) -> VGWebSocketConnecting = { url, gen, onMessage in
-        VGWebSocketConnection(url: url, generation: gen, autoReconnect: true,
-                              tokenProvider: { "" },
-                              onMessage: onMessage, onStateChange: nil, onClose: nil)
-    }
+    /// Только для тестов; nil → реальный транспорт с autoReconnect.
+    var connectionFactoryForTests: ((URL, UInt64,
+        @escaping (VGWebSocketConnection.Message, UInt64) -> Void) -> VGWebSocketConnecting)?
 
     private var connection: VGWebSocketConnecting?
     private(set) var generation: UInt64 = 0
@@ -1288,19 +1168,6 @@ final class VGCallStreamClient {
         self.generation = generation
         guard let url = VGWebSocketConnection.wsURL(httpBase: baseURL,
                                                     path: "/v1/sessions/\(sessionId)/stream") else { return }
-        // Реальный factory должен получить tokenProvider — см. Step 3a ниже.
-        let conn = makeConnection(url: url, generation: generation, tokenProvider: tokenProvider)
-        connection = conn
-        conn.connect()
-    }
-
-    func disconnect() {
-        connection?.permanentStop()
-        connection = nil
-    }
-
-    private func makeConnection(url: URL, generation: UInt64,
-                                tokenProvider: @escaping () -> String) -> VGWebSocketConnecting {
         let handler: (VGWebSocketConnection.Message, UInt64) -> Void = { [weak self] msg, gen in
             guard case .text(let s) = msg, let data = s.data(using: .utf8),
                   let event = VGCallEvent.decode(data) else { return }
@@ -1311,16 +1178,31 @@ final class VGCallStreamClient {
                 self.onEvent?(event, gen)
             }
         }
-        realTokenProvider = tokenProvider
-        return connectionFactory(url, generation, handler)
+        let conn: VGWebSocketConnecting
+        if let factory = connectionFactoryForTests {
+            conn = factory(url, generation, handler)
+        } else {
+            conn = VGWebSocketConnection(
+                url: url, generation: generation, autoReconnect: true,
+                tokenProvider: tokenProvider, onMessage: handler,
+                onStateChange: { [weak self] connected, gen in
+                    DispatchQueue.main.async {
+                        guard let self, gen == self.generation else { return }
+                        self.onConnectionState?(connected, gen)
+                    }
+                },
+                onClose: nil)
+        }
+        connection = conn
+        conn.connect()
     }
 
-    /// Токен для дефолтного factory (тестовый factory его игнорирует).
-    private var realTokenProvider: () -> String = { "" }
+    func disconnect() {
+        connection?.permanentStop()
+        connection = nil
+    }
 }
 ```
-
-⚠️ Implementation note for Step 3: the default `connectionFactory` above cannot see `tokenProvider` through the closure signature. Restructure: make `connectionFactory` an optional test-only override (`var connectionFactoryForTests: ((URL, UInt64, @escaping (VGWebSocketConnection.Message, UInt64) -> Void) -> VGWebSocketConnecting)?`), and in `makeConnection` use it when set, else construct `VGWebSocketConnection(url:generation:autoReconnect:true, tokenProvider: tokenProvider, onMessage: handler, onStateChange: nil, onClose: nil)` directly. Update the tests to set `connectionFactoryForTests`. Delete the `realTokenProvider` stub — it must NOT survive into the final code.
 
 - [ ] **Step 4: Run — verify PASS** (`swift test --filter VGCallStreamClientTests`)
 
@@ -1471,6 +1353,7 @@ final class CallAudioPlayerTests: XCTestCase {
 - [ ] **Step 3: Implement `CallAudioPlayer.swift`**
 
 ```swift
+import AppKit
 import AVFoundation
 import Foundation
 
@@ -1543,6 +1426,23 @@ final class CallAudioPlayer {
     private(set) var generation: UInt64 = 0
     private var state: ListenState = .idle
     private var metadataValidated = false
+    private var lastConnect: (baseURL: URL, sessionId: String, tokenProvider: () -> String)?
+    private var wakeObserver: NSObjectProtocol?
+
+    init() {
+        // Сон/пробуждение: WS умирает при «живом» на вид состоянии — переподключаемся
+        // (spec §3 комп. 3: кнопка не смеет врать про играющий звук).
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self, self.state == .listening || self.state == .connecting,
+                  let p = self.lastConnect else { return }
+            let gen = self.generation
+            self.teardownLocked(newState: .idle)
+            self.startListening(baseURL: p.baseURL, sessionId: p.sessionId,
+                                generation: gen, tokenProvider: p.tokenProvider)
+        }
+    }
 
     func startListening(baseURL: URL, sessionId: String, generation: UInt64,
                         tokenProvider: @escaping () -> String) {
@@ -1553,6 +1453,7 @@ final class CallAudioPlayer {
             teardownLocked(newState: nil)
             self.generation = generation
             metadataValidated = false
+            lastConnect = (baseURL, sessionId, tokenProvider)
             guard let url = VGWebSocketConnection.wsURL(httpBase: baseURL,
                                                         path: "/v1/sessions/\(sessionId)/monitor/audio") else {
                 setState(.failed); return
@@ -1681,11 +1582,12 @@ private final class SpyHUD: CallObserverHUDPresenting {
 private final class SpyPanel: CallObserverPanelPresenting {
     var shown: [String] = []; var transcripts: [[TranscriptEntry]] = []
     var terminals: [String] = []; var lives = 0; var sheetCloses = 0
-    var costs: [String] = []
+    var costs: [String] = []; var badges: [String?] = []; var hangupPrompts = 0
     var isPanelVisible = false
     func showPanel(session: VGSessionInfo) { shown.append(session.id); isPanelVisible = true }
     func updateTranscript(_ entries: [TranscriptEntry]) { transcripts.append(entries) }
-    func updateStatus(status: String, muted: Bool?, held: Bool?, badge: String?) {}
+    func updateStatus(status: String, muted: Bool?, held: Bool?, badge: String?) { badges.append(badge) }
+    func presentHangupConfirm() { hangupPrompts += 1 }
     func updateCost(_ text: String) { costs.append(text) }
     func setTerminal(message: String) { terminals.append(message) }
     func setLive() { lives += 1 }
@@ -1739,7 +1641,9 @@ final class CallObserverCoordinatorTests: XCTestCase {
         let c = CallObserverCoordinator(hud: hud, panel: panel, poster: poster,
                                         settings: settings, stream: stream, player: player,
                                         tokenProvider: { "" },
-                                        lingerSeconds: 0.1)
+                                        lingerSeconds: 0.1,
+                                        costPollInterval: 0.05,
+                                        uiCoalesceInterval: 0)
         return c
     }
 
@@ -1891,9 +1795,12 @@ final class CallObserverCoordinatorTests: XCTestCase {
         c.watcherCallGone(sessionId: "s1", generation: 1); drain()
         XCTAssertTrue(hud.lingers.isEmpty, "linger при живом втором звонке запрещён")
         XCTAssertTrue(hud.isHUDVisible)
-        // панель осталась на терминальной A до ручного свитча
+        // панель осталась на терминальной A до ручного свитча;
+        // setLive: №1 — openPanelFromMenu (живой A), №2 — свитч на живой B.
+        // 🔴 НЕ «чинить» реализацию под ==1, убирая setLive из openPanelFromMenu:
+        // ручное открытие живого звонка навсегда потеряло бы бейдж «в эфире».
         c.userSelectedSession("s2"); drain()
-        XCTAssertEqual(panel.lives, 1)
+        XCTAssertEqual(panel.lives, 2)
     }
 
     func test_manually_closed_hud_not_resurrected_by_linger() {
@@ -1918,9 +1825,51 @@ final class CallObserverCoordinatorTests: XCTestCase {
         c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
         c.openPanelFromMenu(); drain()
         for i in 0..<510 {
-            emit(#"{"type":"stt.final","ts":"t","data":{"text":"m\#(i)"}}"#, gen: 1)
+            streamHandler?(.text(#"{"type":"stt.final","ts":"t","data":{"text":"m\#(i)"}}"#), 1)
         }
+        drain()
         XCTAssertLessThanOrEqual(panel.transcripts.last?.count ?? 0, 500)
+    }
+
+    func test_cost_polling_updates_and_stops_at_terminal() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.openPanelFromMenu(); drain(0.2)
+        XCTAssertEqual(panel.costs.last, "$0.42")
+        poster.costValue = nil
+        drain(0.15)
+        XCTAssertEqual(panel.costs.last, "—")
+        emit(#"{"type":"call.ended","ts":"t","data":{}}"#, gen: 1)
+        let frozen = panel.costs.count
+        drain(0.2)
+        XCTAssertEqual(panel.costs.count, frozen, "терминал остановил cost-поллинг")
+    }
+
+    func test_hangup_502_badge_no_terminal() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.openPanelFromMenu(); drain()
+        poster.hangupResult = .success(502)
+        c.userRequestedHangupConfirmed(); drain()
+        XCTAssertTrue(hud.lingers.isEmpty, "502 — не терминал")
+        XCTAssertTrue(panel.badges.compactMap { $0 }.contains { $0.contains("Не удалось") })
+    }
+
+    func test_hangup_404_after_end_terminal_silent() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        poster.hangupResult = .success(404)
+        c.userRequestedHangupConfirmed(); drain()
+        XCTAssertEqual(hud.lingers.count, 1, "404 → терминал без error-тоста")
+        XCTAssertFalse(panel.badges.compactMap { $0 }.contains { $0.contains("Не удалось") })
+    }
+
+    func test_hangup_from_hud_opens_panel_with_confirm() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.userRequestedHangupFromHUD(); drain()
+        XCTAssertTrue(panel.isPanelVisible)
+        XCTAssertEqual(panel.hangupPrompts, 1)
     }
 }
 ```
@@ -1958,6 +1907,7 @@ protocol CallObserverPanelPresenting: AnyObject {
     func setTerminal(message: String)
     func setLive()
     func closeHangupSheetIfOpen()
+    func presentHangupConfirm()
     var isPanelVisible: Bool { get }
 }
 
@@ -1991,6 +1941,8 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
     private let player: CallAudioPlayer
     private let tokenProvider: () -> String
     private let lingerSeconds: TimeInterval
+    private let costPollInterval: TimeInterval
+    private let uiCoalesceInterval: TimeInterval
 
     private var observed: [String: ObservedCall] = [:]
     private var selectedId: String?
@@ -2000,6 +1952,7 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
     private var listenStartedManually = false
     private var hangupInFlight = false
     private var lingerWork: DispatchWorkItem?
+    private var pushWork: DispatchWorkItem?
     private var costTimer: DispatchSourceTimer?
     private var listenState: CallAudioPlayer.ListenState = .idle
 
@@ -2014,7 +1967,9 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
          poster: VGCommandPosting, settings: CallObserverSettingsProviding,
          stream: VGCallStreamClient, player: CallAudioPlayer,
          tokenProvider: @escaping () -> String,
-         lingerSeconds: TimeInterval = 3.0) {
+         lingerSeconds: TimeInterval = 3.0,
+         costPollInterval: TimeInterval = 3.0,
+         uiCoalesceInterval: TimeInterval = 0.1) {
         self.hud = hud
         self.panel = panel
         self.poster = poster
@@ -2023,11 +1978,19 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
         self.player = player
         self.tokenProvider = tokenProvider
         self.lingerSeconds = lingerSeconds
+        self.costPollInterval = costPollInterval
+        self.uiCoalesceInterval = uiCoalesceInterval
         super.init()
         stream.onEvent = { [weak self] event, gen in self?.handleStreamEvent(event, gen) }
         player.onStateChange = { [weak self] state, _ in
             self?.listenState = state
             self?.refreshHUD()
+        }
+        stream.onConnectionState = { [weak self] connected, _ in
+            guard let self, let id = self.selectedId,
+                  let call = self.observed[id], !call.terminalDelivered else { return }
+            self.panel.updateStatus(status: call.session.status, muted: nil, held: nil,
+                                    badge: connected ? nil : "переподключение…")
         }
         refreshSettings()
     }
@@ -2045,7 +2008,11 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
             call.transcript = old.transcript  // VG не реплеит историю — не стирать
         }
         observed[s.id] = call
-        if selectedId == nil || observed[selectedId!] == nil { selectedId = s.id }
+        // HUD следит за НОВЕЙШИМ живым: пока панель закрыта, selection следует
+        // за новым звонком; открытая панель = ручная супервизия (§4.1).
+        if selectedId == nil || observed[selectedId!] == nil || !panel.isPanelVisible {
+            selectedId = s.id
+        }
         if s.id == selectedId {
             connectStreams(for: call)
             if resurrected, panel.isPanelVisible { panel.setLive() }
@@ -2053,7 +2020,7 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
         }
         if resurrected { hudManuallyClosed = false }
         maybeAutoShowHUD(for: s)
-        if autoplay && !privacyMode && s.id == selectedId {
+        if autoplay && !privacyMode && !resurrected && s.id == selectedId {
             player.startListening(baseURL: baseURL, sessionId: s.id,
                                   generation: generation, tokenProvider: tokenProvider)
         }
@@ -2065,11 +2032,7 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
         call.session = s
         observed[s.id] = call
         refreshSettings()
-        // privacy включили мид-колл: авто-показанный HUD прячем, autoplay-аудио глушим.
-        if privacyMode {
-            if hudAutoShown && hud.isHUDVisible { hud.hideHUD(); hudAutoShown = false }
-            if !listenStartedManually && listenState != .idle { player.stopListening() }
-        }
+        applyPrivacySuppressionIfNeeded()
         refreshHUD()
     }
 
@@ -2084,10 +2047,11 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
     }
 
     func watcherAuthRejected() {
-        NSLog("CallObserver: VG auth rejected — проверьте vg_client_token")
+        NSLog("CallObserver: VG отверг токен — форс-обновление креденшела W1892")
+        refreshSettings()  // провайдер перечитает get_voice_gateway_credential
         if panel.isPanelVisible {
             panel.updateStatus(status: "", muted: nil, held: nil,
-                               badge: "VG отверг токен — проверьте vg_client_token")
+                               badge: "VG отверг токен — проверьте voice_gateway_api_key")
         }
     }
 
@@ -2259,6 +2223,12 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
         }
     }
 
+    /// Трубка из HUD: панель откроется и поднимет confirm-sheet (HUD без окна для sheet).
+    func userRequestedHangupFromHUD() {
+        userExpandedHUD()
+        panel.presentHangupConfirm()
+    }
+
     func userSelectedSession(_ id: String) {
         guard let call = observed[id], id != selectedId else { return }
         selectedId = id
@@ -2318,7 +2288,21 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
 
     private func pushTranscript() {
         guard panel.isPanelVisible, let id = selectedId, let call = observed[id] else { return }
-        panel.updateTranscript(call.transcript)
+        if uiCoalesceInterval <= 0 {
+            panel.updateTranscript(call.transcript)
+            return
+        }
+        // Коалесируем шторм событий (§8): не чаще одного рендера в uiCoalesceInterval.
+        if pushWork != nil { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pushWork = nil
+            guard self.panel.isPanelVisible, let id = self.selectedId,
+                  let call = self.observed[id] else { return }
+            self.panel.updateTranscript(call.transcript)
+        }
+        pushWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + uiCoalesceInterval, execute: work)
     }
 
     private func refreshSettings() {
@@ -2336,11 +2320,25 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
         }
     }
 
+    /// Чекбоксы настроек зовут это напрямую (generic-нотификации в агенте НЕТ).
+    func settingsDidChange() {
+        refreshSettings()
+        applyPrivacySuppressionIfNeeded()
+    }
+
+    /// privacy включили мид-колл: авто-показанный HUD прячем, autoplay-аудио глушим;
+    /// вручную открытое/включённое остаётся (явные действия владельца).
+    private func applyPrivacySuppressionIfNeeded() {
+        guard privacyMode else { return }
+        if hudAutoShown && hud.isHUDVisible { hud.hideHUD(); hudAutoShown = false }
+        if !listenStartedManually && listenState != .idle { player.stopListening() }
+    }
+
     private func startCostTimer() {
         stopCostTimer()
         guard let id = selectedId else { return }
         let t = DispatchSource.makeTimerSource(queue: .main)
-        t.schedule(deadline: .now() + 0.5, repeating: 3.0)
+        t.schedule(deadline: .now() + costPollInterval, repeating: costPollInterval)
         t.setEventHandler { [weak self] in
             guard let self, let call = self.observed[id], !call.terminalDelivered else { return }
             self.poster.fetchCostUsd(baseURL: self.baseURL, sessionId: id) { usd in
@@ -2364,31 +2362,28 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
 
 - [ ] **Step 4: Write `main+CallObserver.swift`** — real wiring:
 
-First, VERIFY the two anchors (exact commands):
-- `grep -n "completeStartupAfterBackendReady\|applicationDidFinishLaunching" native/KrabEarAgent/Sources/KrabEarAgent/main.swift | head -5` → note the startup method names.
-- `grep -rn "krabear.sock\|Application Support/KrabEar" native/KrabEarAgent/Sources/KrabEarAgent/main.swift native/KrabEarAgent/Sources/KrabEarAgent/IPCClient.swift | head -5` → find the canonical socket-path helper; the token file is `URL(fileURLWithPath: <socketPath>).deletingLastPathComponent().appendingPathComponent("vg_client_token")`.
-- `grep -n "func setupBrainLeaseMenuItem\|menuWillOpen" native/KrabEarAgent/Sources/KrabEarAgent/main+BrainLease.swift | head -5` → mirror the status-menu-item pattern.
+First, VERIFY the anchors (exact commands):
+- `grep -n "completeStartupAfterBackendReady\|applicationWillTerminate" native/KrabEarAgent/Sources/KrabEarAgent/main.swift | head -5` → the startup/shutdown methods to hook.
+- `grep -n "get_voice_gateway_credential" native/KrabEarAgent/Sources/KrabEarAgent/HistoryPanelController+VoiceTab.swift | head -3` → the EXISTING call-site pattern for the credential IPC (W1892) — mirror its off-main invocation style.
+- `grep -n "func \|menuWillOpen" native/KrabEarAgent/Sources/KrabEarAgent/main+BrainLease.swift | head -8` → the status-menu-item pattern to mirror.
+- `grep -rn "callAsyncWithRecovery\|callWithRecovery" native/KrabEarAgent/Sources/KrabEarAgent/main+IPCRecovery.swift | head -3` → the project's ONE IPC-recovery helper (28 call sites; do not write a second).
 
 ```swift
 import AppKit
 import Foundation
 
 /// Проводка Call Observer (spec §3 комп. 6): единственный владелец —
-/// AgentAppDelegate.callObserverCoordinator. Стартует НЕЗАВИСИМО от здоровья
-/// Python-backend: настройки по IPC с фоллбэком на дефолты, токен — из файла.
+/// AgentAppDelegate.callObserverCoordinator. Креденшел VG — через
+/// существующий IPC get_voice_gateway_credential (W1892), кэш в памяти;
+/// backend, умерший мид-сессии, оставляет кэш живым.
 extension AgentAppDelegate {
     func setupCallObserver() {
-        let tokenURL = Self.vgClientTokenURL()
-        let tokenProvider: () -> String = {
-            (try? String(contentsOf: tokenURL, encoding: .utf8))?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        }
         let settings = IPCCallObserverSettings(ipcCall: { [weak self] method, params, cb in
-            // Использовать СУЩЕСТВУЮЩИЙ off-main IPC helper проекта
-            // (callAsyncWithRecovery / ipcClient.call на background queue —
-            // взять точное имя из main+IPCRecovery.swift, см. verification grep).
+            // СУЩЕСТВУЮЩИЙ off-main IPC-хелпер проекта (см. verification grep) —
+            // тот же путь, каким VoiceTab зовёт get_voice_gateway_credential.
             self?.callObserverIPC(method: method, params: params, completion: cb)
         })
+        let tokenProvider: () -> String = { settings.lastApiKey }
         let hudController = CallObserverHUD()
         let panelController = CallObserverPanelController()
         let coordinator = CallObserverCoordinator(
@@ -2409,13 +2404,6 @@ extension AgentAppDelegate {
 
     func tearDownCallObserver() {
         callObserverWatcher?.stop()
-    }
-
-    static func vgClientTokenURL() -> URL {
-        // Тот же каталог, что у IPC-сокета (см. verification grep выше).
-        URL(fileURLWithPath: Self.backendSocketPath())
-            .deletingLastPathComponent()
-            .appendingPathComponent("vg_client_token")
     }
 }
 
@@ -2474,43 +2462,55 @@ final class URLSessionVGCommandPoster: VGCommandPosting {
         url.append(path: "/v1/sessions/\(sessionId)/diagnostics")
         let req = VGWebSocketConnection.makeRequest(url: url, token: tokenProvider())
         session.dataTask(with: req) { data, _, _ in
+            // Реальный VG кладёт costs НА ВЕРХНИЙ уровень ({**diag, status, ...}).
             guard let data,
                   let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                  let costs = ((obj["diag"] as? [String: Any]) ?? obj)["costs"] as? [String: Any],
+                  let costs = obj["costs"] as? [String: Any],
                   let total = costs["total_usd"] as? Double else { completion(nil); return }
             completion(total)
         }.resume()
     }
 }
 
-/// Настройки через IPC get_settings с фоллбэком на дефолты (backend может лежать).
+/// Настройки + креденшел через IPC, кэш в памяти (backend может умереть мид-сессии).
 final class IPCCallObserverSettings: CallObserverSettingsProviding {
     private let ipcCall: (String, [String: Any], @escaping ([String: Any]?) -> Void) -> Void
     private(set) var lastBaseURL = URL(string: "http://127.0.0.1:8090")!
+    private(set) var lastApiKey = ""
 
     init(ipcCall: @escaping (String, [String: Any], @escaping ([String: Any]?) -> Void) -> Void) {
         self.ipcCall = ipcCall
     }
 
     func refresh(completion: @escaping (Bool, Bool, Bool, URL) -> Void) {
-        ipcCall("get_settings", [:]) { [weak self] result in
-            let s = (result?["settings"] as? [String: Any]) ?? result ?? [:]
-            let hud = s["call_observer_hud_enabled"] as? Bool ?? true
-            let autoplay = s["call_observer_autoplay_audio"] as? Bool ?? false
-            let privacy = s["privacy_mode_enabled"] as? Bool ?? false
-            let base = (s["voice_gateway_url"] as? String).flatMap(URL.init(string:))
-                ?? URL(string: "http://127.0.0.1:8090")!
-            self?.lastBaseURL = base
-            completion(hud, autoplay, privacy, base)
+        // Два вызова: булы+privacy из get_settings; url+key из узкого W1892-хендлера
+        // (get_settings редактирует ключ — wave-35 CRIT).
+        ipcCall("get_voice_gateway_credential", [:]) { [weak self] cred in
+            if let cred, cred["ok"] as? Bool == true {
+                if let url = (cred["voice_gateway_url"] as? String).flatMap(URL.init(string:)) {
+                    self?.lastBaseURL = url
+                }
+                if let key = cred["voice_gateway_api_key"] as? String {
+                    self?.lastApiKey = key  // IPC-провал → живёт последний успешный кэш
+                }
+            }
+            self?.ipcCall("get_settings", [:]) { result in
+                let s = (result?["settings"] as? [String: Any]) ?? result ?? [:]
+                let hud = s["call_observer_hud_enabled"] as? Bool ?? true
+                let autoplay = s["call_observer_autoplay_audio"] as? Bool ?? false
+                let privacy = s["privacy_mode_enabled"] as? Bool ?? false
+                completion(hud, autoplay, privacy,
+                           self?.lastBaseURL ?? URL(string: "http://127.0.0.1:8090")!)
+            }
         }
     }
 }
 ```
 
 Wiring verification steps the implementer MUST do (exact identifiers differ from this sketch):
-1. `AgentAppDelegate` stored properties `callObserverCoordinator` / `callObserverWatcher` — add them where sibling controllers are stored in `main.swift` (grep `quickCapturePanelController`).
-2. Call `setupCallObserver()` from the SAME place `setupHealthMonitor()` is called at startup, and `tearDownCallObserver()` from `applicationWillTerminate` (grep both; the ErrorBus/HealthMonitor wiring lesson: a defined-but-never-called setup is the project's known decorative-wiring bug class).
-3. `callObserverIPC` + `Self.backendSocketPath()` + `get_settings` response envelope: use the EXISTING IPC helper and settings-response shape — verify with `grep -n "get_settings" native/KrabEarAgent/Sources/KrabEarAgent/*.swift | head -5` and mirror a call site. IPC strictly off-main.
+1. `AgentAppDelegate` stored properties `callObserverCoordinator` / `callObserverWatcher` — add where sibling controllers are stored in `main.swift` (grep `quickCapturePanelController`).
+2. Call `setupCallObserver()` from the SAME place `setupHealthMonitor()` is called at startup, and `tearDownCallObserver()` from `applicationWillTerminate` (decorative-wiring bug class: defined-but-never-called setup).
+3. `callObserverIPC` = thin wrapper over the project's existing off-main IPC helper (verification grep above); `get_settings` response envelope — mirror an existing call site (`grep -n "get_settings" native/KrabEarAgent/Sources/KrabEarAgent/*.swift | head -5`). IPC strictly off-main.
 4. Status-menu item «Звонок агента…» — mirror `main+BrainLease.swift` (insert item, enable only when `coordinator.hasLiveCall`, action → `openPanelFromMenu()`).
 
 - [ ] **Step 5: Write `MainCallObserverWiringTests.swift`** — source-contract (the decorative-wiring guard):
@@ -2660,6 +2660,7 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
     private let linesLabel = NSTextField(wrappingLabelWithString: "")
     private let listenButton = NSButton()
     private let hangupButton = NSButton()
+    private let closeButton = NSButton()
     private var mouseDownPoint: NSPoint?
     private var elapsedTimer: Timer?
     private var callCreatedAt: Date?
@@ -2685,7 +2686,7 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
             case .remote(let text, let tr):
                 return tr.map { "Он: \(text) / \($0)" } ?? "Он: \(text)"
             case .agent(let text, let ru, _, let interrupted, let spoken, _):
-                let shown = interrupted ? (spoken ?? text) + " ⋯" : text
+                let shown = interrupted ? (spoken ?? text) + " …" : text
                 return ru.map { "Агент: \(shown) / \($0)" } ?? "Агент: \(shown)"
             case .system(let msg):
                 return "· \(msg)"
@@ -2746,10 +2747,13 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
             self?.coordinator?.userToggledListen()
         }
         configure(hangupButton, symbol: "phone.down.fill", accessibility: "Положить трубку") { [weak self] in
-            self?.coordinator?.userExpandedHUD()  // hangup-confirm живёт в панели (sheet нужен window)
+            self?.coordinator?.userRequestedHangupFromHUD()
+        }
+        configure(closeButton, symbol: "xmark", accessibility: "Скрыть") { [weak self] in
+            self?.coordinator?.userClosedHUD()
         }
 
-        let buttons = NSStackView(views: [listenButton, hangupButton])
+        let buttons = NSStackView(views: [listenButton, hangupButton, closeButton])
         buttons.orientation = .horizontal
         let stack = NSStackView(views: [statusLabel, linesLabel, buttons])
         stack.orientation = .vertical
@@ -2889,6 +2893,8 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
         hangupSheetOpen = false
     }
 
+    func presentHangupConfirm() { onHangupTapped() }
+
     @objc private func onListenTapped() { coordinator?.userToggledListen() }
 
     @objc private func onHangupTapped() {
@@ -2912,14 +2918,14 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
         label.font = .systemFont(ofSize: 12)
         switch entry.kind {
         case .remote(let text, let translation):
-            label.stringValue = translation.map { "Собеседник: \(text)\n  ↳ \($0)" } ?? "Собеседник: \(text)"
+            label.stringValue = translation.map { "Собеседник: \(text)\n  → \($0)" } ?? "Собеседник: \(text)"
         case .agent(let text, let ru, _, let interrupted, let spoken, let fraction):
             if interrupted {
                 let pct = fraction.map { Int($0 * 100) } ?? 0
                 label.stringValue = "Агент: \(spoken ?? text) [прервано \(pct) %]"
                 label.textColor = .secondaryLabelColor
             } else {
-                label.stringValue = ru.map { "Агент: \(text)\n  ↳ \($0)" } ?? "Агент: \(text)"
+                label.stringValue = ru.map { "Агент: \(text)\n  → \($0)" } ?? "Агент: \(text)"
             }
         case .system(let msg):
             label.stringValue = "· \(msg)"
@@ -2952,9 +2958,7 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
         transcriptStack.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
         transcriptStack.translatesAutoresizingMaskIntoConstraints = false
 
-        let clip = NSClipView()
         scrollView.documentView = transcriptStack
-        scrollView.contentView = clip
         scrollView.hasVerticalScroller = true
 
         let root = NSStackView(views: [header, scrollView])
@@ -3013,7 +3017,7 @@ In `HistoryPanelController+LiveSubsSettings.swift`, mirror the EXISTING checkbox
 - «Панель звонка агента при звонке» → key `call_observer_hud_enabled`
 - «Сразу включать звук звонка» → key `call_observer_autoplay_audio`
 
-Both: read current value from the section's settings load path, write via the section's existing `set_settings` helper (off-main), and after a successful save call `(NSApp.delegate as? AgentAppDelegate)?.callObserverCoordinator` — no generic settings notification exists (spec §5); the coordinator also re-reads on each poll tick, so the direct call is best-effort freshness, not correctness.
+Both: read current value from the section's settings load path, write via the section's existing `set_settings` helper (off-main), and after a successful save call `(NSApp.delegate as? AgentAppDelegate)?.callObserverCoordinator?.settingsDidChange()` — no generic settings notification exists (spec §5); the coordinator also re-reads on each poll tick, so the direct call is best-effort freshness, not correctness.
 
 - [ ] **Step 6: Run — verify PASS** (`swift test --filter CallObserverUITests`)
 
@@ -3022,8 +3026,8 @@ Both: read current value from the section's settings load path, write via the se
 ```bash
 cd native/KrabEarAgent && swift build -c release && cd ../..
 # Глиф-гейт: новые non-ASCII строки — только кириллица/типографика, уже живущие в native/
-grep -o '[^\x00-\x7F]' native/KrabEarAgent/Sources/KrabEarAgent/CallObserverHUD.swift native/KrabEarAgent/Sources/KrabEarAgent/CallObserverPanelController.swift | sort -u
-# Ожидаемо: кириллица, «», ·, ↳, ⋯, % — НИКАКИХ эмодзи. Для каждого нового символа: grep -rF '<символ>' native/ | head -1 — должен встречаться и вне новых файлов; иначе заменить.
+grep -o '[^\x00-\x7F]' native/KrabEarAgent/Sources/KrabEarAgent/CallObserverHUD.swift native/KrabEarAgent/Sources/KrabEarAgent/CallObserverPanelController.swift native/KrabEarAgent/Sources/KrabEarAgent/CallObserverCoordinator.swift native/KrabEarAgent/Sources/KrabEarAgent/main+CallObserver.swift | sort -u
+# Ожидаемо: кириллица, «», ·, →, …, % — НИКАКИХ эмодзи. Для каждого нового символа: grep -rF '<символ>' native/ | head -1 — должен встречаться и вне новых файлов; иначе заменить.
 git add native/KrabEarAgent/Sources/KrabEarAgent/CallObserverHUD.swift native/KrabEarAgent/Sources/KrabEarAgent/CallObserverPanelController.swift native/KrabEarAgent/Sources/KrabEarAgent/HistoryPanelController+LiveSubsSettings.swift native/KrabEarAgent/Tests/KrabEarAgentTests/CallObserverUITests.swift
 git commit -m "feat(call-observer): HUD + панель (функциональный UI, SF Symbols) + чекбоксы настроек (w1 T9)
 
@@ -3101,8 +3105,10 @@ def list_sessions():
 
 @app.get(f"/v1/sessions/{SESSION_ID}/diagnostics")
 def diagnostics():
-    return jsonify({"ok": True, "diag": {"costs": {"total_usd": 0.07,
-                                                   "breakdown": {"twilio": 0.05, "ai": 0.02}}}})
+    # Реальный VG мержит diag на верхний уровень: {**diag, "status": ...}.
+    return jsonify({"ok": True, "status": STATE["status"], "timeline_size": 3,
+                    "costs": {"total_usd": 0.07,
+                              "breakdown": {"twilio": 0.05, "ai": 0.02}}})
 
 
 @app.post(f"/v1/telephony/calls/{SESSION_ID}/hangup")
@@ -3112,7 +3118,7 @@ def hangup():
         already = STATE["status"] in {"stopped", "failed"}
         STATE["status"] = "stopped"
     return jsonify({"ok": True, "session_id": SESSION_ID, "call_sid": "CA-e2e",
-                    "status": "stopped", "already_terminal": already})
+                    "status": "completed", "already_terminal": already})
 
 
 @app.get("/e2e/hangup_count")
@@ -3122,19 +3128,19 @@ def hangup_count():
 
 _EVENTS = [
     (0.2, "call.state", {"session_id": SESSION_ID, "status": "running"}),
-    (0.5, "stt.final", {"text": "hola, quería preguntar", "engine": "e2e",
+    (0.2, "stt.final", {"text": "hola, quería preguntar", "engine": "e2e",
                         "confidence": 0.9, "duration_ms": 900, "language": "es"}),
-    (0.7, "translation.final", {"text": "привет, хотел спросить", "source_text": "hola, quería preguntar",
+    (0.2, "translation.final", {"text": "привет, хотел спросить", "source_text": "hola, quería preguntar",
                                 "src_lang": "es", "tgt_lang": "ru", "provider": "e2e"}),
-    (1.0, "agent.response", {"text": "Claro, dígame", "text_ru": "Конечно, слушаю",
+    (0.2, "agent.response", {"text": "Claro, dígame", "text_ru": "Конечно, слушаю",
                              "role": "assistant", "lang": "es", "utterance_ts": "u1",
                              "action": "continue", "goal_reached": False, "summary": ""}),
-    (1.3, "agent.suggestion.auto_spoken", {"text": "Uno momento", "text_ru": "Минуту",
+    (0.2, "agent.suggestion.auto_spoken", {"text": "Uno momento", "text_ru": "Минуту",
                                            "action": "continue", "digits": "",
                                            "goal_reached": False, "summary": "", "result": ""}),
-    (1.6, "agent.interrupted", {"utterance_ts": "u1", "spoken_fraction": 0.4,
+    (0.2, "agent.interrupted", {"utterance_ts": "u1", "spoken_fraction": 0.4,
                                 "spoken_text": "Claro, dí"}),
-    (1.8, "weird.unknown_event", {"x": 1}),  # forward-compat: клиент обязан молча съесть
+    (0.2, "weird.unknown_event", {"x": 1}),  # forward-compat: клиент обязан молча съесть
 ]
 
 
@@ -3247,8 +3253,10 @@ final class CallObserverE2ETests: XCTestCase {
         var events: [VGCallEvent] = []
         let ended = XCTestExpectation(description: "call.ended")
         let closed = XCTestExpectation(description: "call.closed")
+        let gotInterrupted = XCTestExpectation(description: "agent.interrupted доехал")
         stream.onEvent = { event, _ in
             events.append(event)
+            if case .agentInterrupted = event { gotInterrupted.fulfill() }
             if case .callEnded = event { ended.fulfill() }
             if case .callClosed = event { closed.fulfill() }
         }
@@ -3274,6 +3282,9 @@ final class CallObserverE2ETests: XCTestCase {
         player.startListening(baseURL: baseURL, sessionId: session.id,
                               generation: collector.generation, tokenProvider: { "" })
         wait(for: [engine.exp], timeout: 15)
+        // 🔴 Весь скрипт событий обязан доехать ДО hangup — иначе fake-стрим
+        // оборвётся на terminal-проверке и auto_spoken/interrupted потеряются.
+        wait(for: [gotInterrupted], timeout: 20)
 
         // Hangup — сервер переводит сессию в stopped → терминальная цепочка стрима.
         let poster = URLSessionVGCommandPoster(tokenProvider: { "" })

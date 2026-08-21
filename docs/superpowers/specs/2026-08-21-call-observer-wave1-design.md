@@ -8,7 +8,7 @@ Date: 2026-08-21 · Status: draft for review · Owner decision log at bottom.
 клик разворачивает в полное окно; живой транскрипт обеих сторон с переводом; живое
 аудио по кнопке (настройка); кнопка «положить трубку». Чисто Swift-клиент к
 существующему WS/REST-контракту Voice Gateway — их бэкенд не меняем, наш Python
-в тракте звонка не участвует (2 ключа настроек + файл-токен для auth). Волна 2 (takeover,
+в тракте звонка не участвует (2 ключа настроек; auth — существующий IPC get_voice_gateway_credential, W1892). Волна 2 (takeover,
 whisper, быстрые ответы) — отдельная спека.
 
 ## 1. Scope
@@ -29,22 +29,22 @@ All endpoints require auth (`_auth_required`, `app/main.py:2244`): Bearer
 client sets the header on the WS URLRequest, `GatewayStreamClient.swift:213`)
 or `?token=` query. Empty key on VG side = auth-off dev mode (`dev_owner`).
 
-🔴 **Swift token channel (verified constraint):** the owner's prod HAS a real
-key (43 chars in live settings.json) and our existing setting
-`voice_gateway_api_key` (`core/config.py:879`) is in `SENSITIVE_FIELDS`
-(`settings_backup.py:30`), so IPC `get_settings` returns `REDACTED` — the
-Swift client can NEVER obtain the key via IPC. Resolution: the backend
-maintains `<data_dir>/vg_client_token` (0600, atomic tmp+replace write) —
-written at startup and on every settings save that changes the key; content =
-the EFFECTIVE runtime value of `voice_gateway_api_key` (i.e. after any
-`KRAB_EAR_*` env override, not the raw settings.json field — otherwise the
-file and the key VG actually expects diverge; may be empty). Swift reads this file when
-connecting; empty/absent → no Authorization header (matches VG auth-off).
-This mirrors the existing `event_bridge_token` pattern (same trust boundary:
-same-user local processes; settings.json already stores the secret on the
-same disk). Purge guard: `vg_client_token` goes into
-`scripts/purge_coverage_allowlist.txt` with a reason comment — security key,
-not user content (exact precedent: `event_bridge_token`, allowlist line 43).
+🔴 **Swift token channel (corrected by plan review — anti-rebuild):** the
+owner's prod HAS a real key (43 chars in live settings.json); the general
+IPC `get_settings` redacts it (`SENSITIVE_FIELDS`, wave-35 CRIT). BUT a
+dedicated narrow-scope IPC already exists for EXACTLY this scenario:
+`get_voice_gateway_credential` (W1892, `settings_service.py:393`, dispatched
+at `service.py:2730`) — returns un-redacted
+`{voice_gateway_url, voice_gateway_api_key}` and nothing else, built for
+"Swift opens a WS to VG directly", already used by
+`HistoryPanelController+VoiceTab.swift`. The Call Observer uses THIS channel:
+the coordinator refreshes the credential via off-main IPC (at start and on
+each poll tick alongside the settings bools) and caches url+key in memory;
+`tokenProvider` reads the cache; empty key → no Authorization header
+(matches VG auth-off). A backend dying mid-session leaves the cache intact
+(and the agent cannot even start without the backend), so no file channel is
+needed. An earlier draft invented a `vg_client_token` file — rejected as a
+rebuild of W1892 plus a second on-disk copy of the secret.
 
 ### 2.1 Session discovery
 `GET /v1/sessions?status=&source=&limit=` (`app/main.py:3051`) →
@@ -125,8 +125,7 @@ error. Idempotent on terminal sessions (`already_terminal: true`).
 ## 3. Architecture
 
 Swift-only client inside the existing agent (`native/KrabEarAgent`). Our Python
-backend is NOT in the call path; its whole diff is 2 settings keys + the
-`vg_client_token` file writer (§5). All VG
+backend is NOT in the call path; its whole diff is 2 settings keys (§5). All VG
 traffic is loopback (`voice_gateway_url` setting, default `http://127.0.0.1:8090`).
 
 ### Components (new files, flat in `Sources/KrabEarAgent/` per project convention)
@@ -139,11 +138,11 @@ traffic is loopback (`voice_gateway_url` setting, default `http://127.0.0.1:8090
      running). Unreachable → silent (log at DEBUG once per state change, no
      ERROR spam — this is the exact "dead cloud STT fallback noise" class we
      just paid for).
-   - 401/403 is NOT "unreachable": auth-reject means a stale/missing
-     `vg_client_token` (fresh install, agent started before backend wrote
-     it). Re-read the token file before the next poll; if it persists, a
-     one-time DEBUG line + «auth mismatch» hint on the manual panel entry —
-     never a silent backoff that hides every future call.
+   - 401/403 is NOT "unreachable": auth-reject means a stale/empty cached
+     credential. Force-refresh it via `get_voice_gateway_credential` before
+     the next poll; if it persists, a one-time DEBUG line + «auth mismatch»
+     hint on the manual panel entry — never a silent backoff that
+     hides every future call.
    - Live-call predicate: `status ∈ {created, running, paused}` ∧
      (`phone ≠ ""` ∨ `call_direction ≠ ""`) ∧ `updated_at` within 6 h.
      Confirmed by the VG session against their code (2026-08-21): inbound
@@ -238,10 +237,10 @@ traffic is loopback (`voice_gateway_url` setting, default `http://127.0.0.1:8090
    auto-hides (linger, §4.1).
 6. **`main+CallObserver.swift`** — wiring: single owner
    (`callObserverCoordinator`) in `AgentAppDelegate`; starts the watcher at
-   agent startup INDEPENDENTLY of backend health: settings bools come via IPC
-   off-main, but IPC failure falls back to defaults (true/false) and the
-   token is read from the file, never IPC — a dead Python backend must not
-   blind us to VG calls. Status-menu item «Звонок агента…» (disabled when no
+   agent startup: settings bools + credential come via off-main IPC with
+   in-memory caching; a later IPC failure keeps the last cached values
+   (defaults true/false + empty key before the first success) — a backend
+   dying mid-session must not blind us to VG calls. Status-menu item «Звонок агента…» (disabled when no
    live call) as manual entry to the panel.
    - Settings propagation: there is NO generic settings-change notification
      in the agent (verified) — the two checkboxes in the settings UI call
@@ -367,16 +366,17 @@ Add to `DEFAULT_SETTINGS` (`core/config.py`) + docs — TWO new keys only:
 
 `voice_gateway_url` AND `voice_gateway_api_key` already exist
 (`core/config.py:878-879`; the key is already sensitive/redacted — do not
-re-add). New backend behavior: maintain `<data_dir>/vg_client_token` (§2 auth
-note) — write on startup + on settings save; add to purge-coverage allowlist.
+re-add). NO new backend behavior beyond the two keys: the credential
+channel is the existing `get_voice_gateway_credential` IPC (§2 auth note).
 
 Settings UI checkboxes: small addition to the existing LiveSubs/VG settings
 section (`HistoryPanelController+LiveSubsSettings.swift`) in the same wave.
 Swift reads the two bools via IPC on coordinator start; changes propagate by
 the §3 component-6 mechanism ONLY (checkbox handler calls the coordinator
 directly after `set_settings` + re-read on each poll tick — there is NO
-generic settings-change notification in the agent). The token comes from the
-file, never IPC.
+generic settings-change notification in the agent). The credential comes
+from the dedicated `get_voice_gateway_credential` IPC, cached in memory —
+never from `get_settings` (which redacts it).
 
 Privacy: wave 1 renders live data only, persists nothing, all traffic
 loopback → no `privacy_mode` gate required (gates guard persisted/derived
@@ -428,10 +428,9 @@ transcript data). Revisit if a later wave saves call transcripts into history.
 - Source-contract: `runModal` allowlist guard (existing CI test) must stay
   green; glyph gate for new symbols.
 
-**Python:** tests that the 2 new keys exist in `DEFAULT_SETTINGS` with correct
-defaults; that `vg_client_token` is written 0600/atomic on startup and on
-settings save, rewritten on key change, emptied when the key is cleared; and
-that `audit_purge_coverage` stays green with the new allowlist entry.
+**Python:** a test that the 2 new keys exist in `DEFAULT_SETTINGS` with
+correct defaults (the credential path reuses W1892 — already covered by its
+own tests).
 
 **Live e2e (autonomous, no owner needed):**
 - `scripts/fake_vg_server.py` — tiny stdlib/flask stub implementing
