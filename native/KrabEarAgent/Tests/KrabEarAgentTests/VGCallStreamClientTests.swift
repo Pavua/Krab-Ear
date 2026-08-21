@@ -68,4 +68,17 @@ final class VGCallStreamClientTests: XCTestCase {
         drainMain()
         XCTAssertEqual(got, 0)
     }
+
+    func test_disconnect_screens_out_old_generation_in_flight() {
+        let (client, _, capture) = makeClient()
+        var got = 0
+        client.onEvent = { _, _ in got += 1 }
+        client.connect(baseURL: URL(string: "http://127.0.0.1:8090")!, sessionId: "s1", generation: 9, tokenProvider: { "" })
+        let oldHandler = capture()!
+        client.disconnect()  // bumps generation from 9 → 10
+        // Deliver event with old generation (9) after disconnect
+        oldHandler(.text(#"{"type":"stt.final","ts":"t","data":{"text":"dead"}}"#), 9)
+        drainMain()
+        XCTAssertEqual(got, 0, "stt.final from old generation after disconnect should not reach onEvent")
+    }
 }

@@ -52,6 +52,7 @@ final class VGCallStreamClient {
     }
 
     func disconnect() {
+        generation &+= 1  // Screen out dead generation: in-flight stamps carry old values and are rejected by the guard
         connection?.permanentStop()
         connection = nil
     }
