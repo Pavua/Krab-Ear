@@ -82,7 +82,7 @@ in the post-call timeline. Document, don't work around |
 | `call.state` | `status`; `muted, held` OPTIONAL (mute/hold paths, `app/main.py:4624, 4656`; hold flips status to `paused`) | status dot + «mute»/«hold» badges |
 | `call.ringing` / `call.answered` | `call_sid, twilio_status, provider` — NO `status` field (`app/main.py:5553-5567`) | lifecycle markers only |
 | `call.ended` | `reason, provider` | into the §4.1 automaton |
-| `call.closed` | `{session_id}` | terminal for EVERY call (not only deleted sessions; may arrive delayed after auto-summary) → fifth input of the §4.1 automaton + permanent stop of reconnect (generation-scoped) |
+| `call.closed` | `{session_id}` | terminal for EVERY call (not only deleted sessions; may arrive delayed after auto-summary; same chain on reconnect to a `failed` session as to `stopped`) → fifth input of the §4.1 automaton + permanent stop of reconnect (generation-scoped) |
 | `diagnostic.error` | error info | badge «реплика не переведена» (their iOS shows an 8 s plaque — same treatment) |
 | `screening.started` | screening info (`app/main.py:5135`) | badge «скрининг» — the flagship inbound scenario |
 | `cost.alert` | `level, threshold_usd, current_usd, message` (`app/main.py:2176`) | threshold ALARM only (fire-once per session/day) — an alert badge, NOT a ticker |
@@ -187,7 +187,8 @@ traffic is loopback (`voice_gateway_url` setting, default `http://127.0.0.1:8090
      session picker only if >1 (rare; simple segmented control) — the events
      WS, audio WS and cost polling all follow the SELECTED session only.
      Elapsed timer counts from the session's `created_at`.
-2. **`VGCallStreamClient.swift`** — events WS. Port of VG's own
+2. **`VGCallStreamClient.swift`** — events WS, connected on `callAppeared`
+   for the observed (selected) session. Port of VG's own
    `ios/KrabVoiceiOS/GatewayStreamClient.swift`: `URLSessionWebSocketTask`,
    Bearer header, exponential backoff 1 s → 30 s ±25 % jitter, ping every
    25 s, decode envelope → typed Swift enum. `call.closed` → permanent stop.
@@ -290,19 +291,48 @@ stop events-WS + audio player, close an open hangup confirm-sheet, panel →
 terminal state (stays open, §3 component 5), HUD → 3 s linger «Звонок
 завершён» / for `vgLost` — «связь с VG потеряна».
 
-🔴 EVERYTHING terminal is keyed by ONE observation-generation token, never by
-session id (review round 2, closes four findings at once): the one-shot
-guard, the stream-client's permanent-stop flag, the linger timer, the
-watcher's tracked-set entry. `callAppeared` mints a new generation and
-resets ALL of them — so call B starting inside call A's linger window keeps
-its HUD (A's stale timer cancels), a delayed `call.closed` from A cannot
-block reused clients from connecting to B, and a post-`vgLost` resurrection
-of the same session id observes again under its fresh generation.
+🔴 EVERYTHING terminal is keyed by an observation-generation token, never by
+session id — and generations are PER-SESSION entries in the watcher's
+tracked-set, not a global singleton (review round 3: two concurrent calls
+hold two generations). Keyed per generation: the one-shot guard, the
+stream-client's permanent-stop flag, the linger timer. `callAppeared` mints
+a fresh generation for ITS session and resets that session's state — so
+call B starting inside call A's linger window keeps its HUD (A's stale
+timer cancels), a delayed `call.closed` from A cannot block reused clients
+from connecting to B, and a post-`vgLost` resurrection of the same session
+id observes again under its fresh generation. 🔴 Generation-filtering
+applies to ALL events, not only terminal ones: every event is delivered to
+the UI stamped with its WS-task's generation, and events of a non-current
+generation are dropped BEFORE render — an `stt.final` of call A already in
+flight on the main queue must never land in call B's feed.
+
+Concurrent calls (>1 live): no automatic selection switch — the panel stays
+on (and, at end, in the terminal state of) the selected session until the
+owner switches the picker, which performs the per-session reset under the
+new session's generation. The HUD tracks the newest LIVE call and never
+shows a linger while another live call exists («Звонок завершён» must not
+cover a call that is still running).
+
+Resurrection exits terminal: on a post-`vgLost` `callAppeared` for the same
+session id the panel returns from terminal to live. The listen-state reset
+is DELIBERATE (2-subscriber budget): audio requires a fresh click, and
+autoplay is not re-applied to an already-open panel.
 
 - **HUD lifecycle:** appears on `callAppeared` when `call_observer_hud_enabled`
   (default true) and the panel is not already open; hides via the terminal
   automaton's linger (§4.1). Manual close of
   HUD does not kill the watcher; the status-menu item remains as re-entry.
+- **Windows ≠ connections:** the events-WS, listen-audio and transcript
+  accumulation are bound to the call generation, NOT to window visibility.
+  Manually closing the HUD/panel mid-call tears nothing: the transcript
+  keeps accumulating (cap 500) for re-open, and active listening keeps
+  playing (deliberate — listen while working; stop it via the reopened
+  panel). A linger never re-shows a manually closed HUD. Only cost polling
+  is visibility-bound («while panel open») — it feeds nothing but the panel.
+- **privacy_mode flips ON mid-call** (coordinator sees it on a poll tick):
+  an AUTO-shown HUD hides and AUTOPLAY-started audio stops; a manually
+  opened panel and manually started listening stay (explicit owner actions —
+  same split as auto-suppression in §3 component 6).
 - **Audio autoplay:** `call_observer_autoplay_audio` (default false) → if true,
   CallAudioPlayer connects as soon as HUD/panel appears.
 - **Per-session reset:** HUD/panel/WS clients are reused across calls, so a
@@ -386,7 +416,12 @@ transcript data). Revisit if a later wave saves call transcripts into history.
   under a fresh generation; failed poll ≠ `callGone`; `callGone` fires on
   status-turned-terminal (predicate), streak=2; `vgLost` = 3 fails AND
   ≥ 30 s since last success (a 6 s hiccup does not terminate); 401/403 →
-  token re-read, not backoff-blindness.
+  token re-read, not backoff-blindness; terminal of the SELECTED session
+  while a second call is live (no linger over a live call, no auto-switch);
+  privacy flip mid-call (auto-shown hides, manual stays); manually closed
+  panel + `call.ended` (terminal actions still run once, no HUD
+  resurrection); stale-generation `stt.final` in flight → dropped before
+  render.
 - Listen toggle: rapid double-toggle and HUD+panel simultaneous press yield
   exactly one socket (generation token); ping timer invalidated on
   reconnect.
