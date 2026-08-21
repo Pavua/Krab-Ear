@@ -2,11 +2,26 @@ import XCTest
 @testable import KrabEarAgent
 
 private final class ScriptedFetcher: VGSessionFetching {
-    var script: [Result<(statusCode: Int, body: Data), Error>] = []
-    private(set) var calls = 0
+    // Тест I1 (loopEpoch) реально гоняет внутренний таймерный цикл watcher'а на
+    // его собственной серийной очереди, а читает счётчик — тест-поток. Без лока это
+    // была бы гонка данных на _calls/_script (пусть и обычно безобидная для Int, но
+    // не гарантированная).
+    private let lock = NSLock()
+    private var _script: [Result<(statusCode: Int, body: Data), Error>] = []
+    private var _calls = 0
+
+    var script: [Result<(statusCode: Int, body: Data), Error>] {
+        get { lock.lock(); defer { lock.unlock() }; return _script }
+        set { lock.lock(); _script = newValue; lock.unlock() }
+    }
+    var calls: Int { lock.lock(); defer { lock.unlock() }; return _calls }
+
     func fetchSessions(completion: @escaping (Result<(statusCode: Int, body: Data), Error>) -> Void) {
-        calls += 1
-        completion(script.isEmpty ? .failure(URLError(.cannotConnectToHost)) : script.removeFirst())
+        lock.lock()
+        _calls += 1
+        let result = _script.isEmpty ? .failure(URLError(.cannotConnectToHost)) : _script.removeFirst()
+        lock.unlock()
+        completion(result)
     }
 }
 
@@ -16,7 +31,13 @@ private final class SpyDelegate: VGSessionWatcherDelegate {
     var gone: [(String, UInt64)] = []
     var lost: [(String, UInt64)] = []
     var authRejects = 0
-    func watcherCallAppeared(_ s: VGSessionInfo, generation: UInt64, resurrected: Bool) { appeared.append((s.id, generation, resurrected)) }
+    // M6(a): каждый колбэк должен приходить строго на main — записываем факт, тест
+    // ассертит значение, а не полагается на то, что XCTest сам крутится на main.
+    var appearedOnMainThread: [Bool] = []
+    func watcherCallAppeared(_ s: VGSessionInfo, generation: UInt64, resurrected: Bool) {
+        appearedOnMainThread.append(Thread.isMainThread)
+        appeared.append((s.id, generation, resurrected))
+    }
     func watcherCallUpdated(_ s: VGSessionInfo, generation: UInt64) { updated.append((s.id, generation)) }
     func watcherCallGone(sessionId: String, generation: UInt64) { gone.append((sessionId, generation)) }
     func watcherVGLost(sessionId: String, generation: UInt64) { lost.append((sessionId, generation)) }
@@ -157,5 +178,76 @@ final class VGSessionWatcherTests: XCTestCase {
     func test_iso_both_variants_parse() {
         XCTAssertNotNil(VGSessionWatcher.parseISO("2026-08-21T10:00:00Z"))
         XCTAssertNotNil(VGSessionWatcher.parseISO("2026-08-21T10:00:00.123Z"))
+    }
+
+    // MARK: - M6(a) main-thread delivery
+
+    func test_delegate_callback_fires_on_main_thread() {
+        let w = makeWatcher()
+        fetcher.script = [.success((200, body([session("s1")])))]
+        poll(w)
+        XCTAssertEqual(spy.appearedOnMainThread, [true])
+    }
+
+    // MARK: - M6(b) 401 counts toward failedStreak like any other failure
+
+    func test_401_counts_as_failure_and_reaches_vgLost() {
+        let w = makeWatcher()
+        fetcher.script = [.success((200, body([session("s1")]))),
+                          .success((401, Data())), .success((401, Data())), .success((401, Data()))]
+        poll(w)
+        poll(w); fakeUptime += 5
+        poll(w); fakeUptime += 5      // 3 фейла (все 401), но лишь 10с — рано
+        poll(w)
+        XCTAssertTrue(spy.lost.isEmpty)
+        fetcher.script = [.success((401, Data()))]
+        fakeUptime += 25              // теперь ≥30с с последнего успеха
+        poll(w)
+        XCTAssertEqual(spy.lost.map(\.0), ["s1"], "401 должен продвигать failedStreak точно как generic failure")
+        XCTAssertEqual(spy.authRejects, 1, "auth-хинт one-shot даже когда 401 повторяется много поллов")
+    }
+
+    // MARK: - M6(c) 5xx и битый JSON — тоже фейлы, не callGone
+
+    func test_5xx_and_malformed_json_are_failures_not_gone() {
+        let w = makeWatcher()
+        fetcher.script = [
+            .success((200, body([session("s1")]))),
+            .success((500, Data())),
+            .success((200, Data("not json".utf8))),
+        ]
+        poll(w); poll(w); poll(w)
+        XCTAssertTrue(spy.gone.isEmpty, "5xx/битый JSON — фейл, не авторитетное отсутствие")
+        XCTAssertTrue(spy.lost.isEmpty, "всего 2 фейла — ниже порога vgLost")
+    }
+
+    // MARK: - I1 loopEpoch: stop()→start() не должен запускать второй самоподдерживающийся цикл
+
+    func test_stop_then_start_does_not_double_poll_loop() {
+        // Инжектируем маленькую каденцию, чтобы за короткое окно теста набежало
+        // достаточно поллов для различения одного цикла от двух.
+        // Прогонялось вручную 5 раз подряд при гейте (флейк-проверка) — стабильно.
+        fetcher.script = Array(repeating: .success((200, body([]))), count: 400)
+        let w = VGSessionWatcher(fetcher: fetcher,
+                                  now: { self.fakeNow },
+                                  monotonic: { self.fakeUptime },
+                                  idleCadence: 0.05,
+                                  liveCadence: 0.05)
+        w.delegate = spy
+
+        w.start()
+        Thread.sleep(forTimeInterval: 0.15)   // даём первому поллу цикла отработать
+        w.stop()
+        w.start()                             // старый отложенный таймер/completion не должен ожить
+
+        let before = fetcher.calls
+        Thread.sleep(forTimeInterval: 0.5)
+        w.stop()
+        let callsInWindow = fetcher.calls - before
+
+        // Один цикл при cadence=0.05 за 0.5с даёт ~9-10 поллов; двойной — ~18-20+.
+        // Запас ×1.5 над однопоточной оценкой (см. бриф) — потолок 13.
+        XCTAssertLessThanOrEqual(callsInWindow, 13,
+            "stop()→start() породил второй поллинг-цикл (\(callsInWindow) поллов за 0.5с)")
     }
 }

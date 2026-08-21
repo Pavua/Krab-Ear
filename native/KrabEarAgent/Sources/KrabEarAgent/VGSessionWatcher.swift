@@ -13,7 +13,12 @@ struct VGSessionInfo: Equatable {
 }
 
 protocol VGSessionFetching {
-    /// GET {voice_gateway_url}/v1/sessions?limit=20 — completion на любой очереди.
+    /// GET {voice_gateway_url}/v1/sessions?limit=100 — совпадает с серверным дефолтом
+    /// VG `list_sessions(limit: int = 100)`. missing-from-page ≠ авторитетное отсутствие:
+    /// при >100 живых сессий за 6ч (staleCutoff) страница может не показать реально живую
+    /// сессию — нужна point-GET подтверждалка для tracked-id, отсутствующих в странице
+    /// (заметка волне 2, не реализовано здесь).
+    /// completion ровно один раз; таймаут — ответственность реализации.
     func fetchSessions(completion: @escaping (Result<(statusCode: Int, body: Data), Error>) -> Void)
 }
 
@@ -34,8 +39,11 @@ final class VGSessionWatcher {
     private struct Tracked {
         var generation: UInt64
         var goneStreak: Int = 0
+        // Общий терминальный флаг для двух путей ухода — предикатный callGone (streak=2)
+        // и vgLost (VG недоступен ≥30с). Возврат такой записи в живые тоже отдаёт
+        // resurrected=true в обоих случаях — осознанно: с точки зрения подписчика это
+        // одна и та же семантика "трекались как ушедшую, теперь снова живая".
         var terminal: Bool = false
-        var lastStatus: String = ""
     }
 
     weak var delegate: VGSessionWatcherDelegate?
@@ -43,12 +51,21 @@ final class VGSessionWatcher {
     private let fetcher: VGSessionFetching
     private let now: () -> Date
     private let monotonic: () -> TimeInterval
+    private let idleCadence: TimeInterval
+    private let liveCadence: TimeInterval
     private let queue = DispatchQueue(label: "krab.vg.watcher")
     private var tracked: [String: Tracked] = [:]
     private var failedStreak = 0
     private var lastSuccessUptime: TimeInterval?
     private var authHintFired = false
     private var running = false
+    // Токен текущего поллинг-цикла. start()/stop() каждый инкрементируют его;
+    // scheduleNextLocked захватывает эпоху на момент вызова и сверяет её перед
+    // КАЖДЫМ продолжением цепочки. Без этого stop()→start() создавал ВТОРОЙ
+    // самоподдерживающийся цикл: отложенный asyncAfter от старой цепочки видел
+    // `running == true` (флаг общий, выставлен уже новым start()) и продолжал
+    // поллить параллельно новой цепочке.
+    private var loopEpoch: UInt64 = 0
     private static var generationCounter: UInt64 = 0
     private static let genLock = NSLock()
 
@@ -60,27 +77,41 @@ final class VGSessionWatcher {
 
     init(fetcher: VGSessionFetching,
          now: @escaping () -> Date = Date.init,
-         monotonic: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+         monotonic: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         idleCadence: TimeInterval = 3.0,
+         liveCadence: TimeInterval = 2.0) {
         self.fetcher = fetcher
         self.now = now
         self.monotonic = monotonic
+        self.idleCadence = idleCadence
+        self.liveCadence = liveCadence
     }
 
     func start() {
         queue.async {
             guard !self.running else { return }
             self.running = true
-            self.scheduleNextLocked(after: 0.1)
+            self.loopEpoch += 1
+            self.scheduleNextLocked(epoch: self.loopEpoch, after: 0.1)
         }
     }
 
-    func stop() { queue.async { self.running = false } }
+    func stop() {
+        queue.async {
+            self.running = false
+            self.loopEpoch += 1
+        }
+    }
 
     /// Тестовый вход: один полл без таймера.
     func pollOnce(completion: (() -> Void)? = nil) {
         fetcher.fetchSessions { [weak self] result in
             guard let self else { completion?(); return }
             self.queue.async {
+                // handleLocked нарочно НЕ гейтится по epoch: сетевой запрос, начатый ДО
+                // stop(), вправе доставить результат и после него — потребитель (one-shot
+                // автомат по generation на стороне UI) устойчив к такому позднему сигналу
+                // по построению. Гейтим по epoch только ПРОДОЛЖЕНИЕ цикла (reschedule) ниже.
                 self.handleLocked(result)
                 completion?()
             }
@@ -93,13 +124,16 @@ final class VGSessionWatcher {
         return generationCounter
     }
 
-    private func scheduleNextLocked(after delay: TimeInterval) {
-        guard running else { return }
+    private func scheduleNextLocked(epoch: UInt64, after delay: TimeInterval) {
+        guard running, epoch == loopEpoch else { return }
         queue.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self, self.running else { return }
+            guard let self, self.running, epoch == self.loopEpoch else { return }
             self.pollOnce { [weak self] in
                 guard let self else { return }
-                self.queue.async { self.scheduleNextLocked(after: self.currentCadenceLocked()) }
+                self.queue.async {
+                    guard self.running, epoch == self.loopEpoch else { return }
+                    self.scheduleNextLocked(epoch: epoch, after: self.currentCadenceLocked())
+                }
             }
         }
     }
@@ -107,7 +141,7 @@ final class VGSessionWatcher {
     private func currentCadenceLocked() -> TimeInterval {
         if failedStreak > 0 { return min(60, 15 * Double(failedStreak)) }
         let hasLive = tracked.values.contains { !$0.terminal }
-        return hasLive ? 2 : 3
+        return hasLive ? liveCadence : idleCadence
     }
 
     private func handleLocked(_ result: Result<(statusCode: Int, body: Data), Error>) {
@@ -162,18 +196,17 @@ final class VGSessionWatcher {
                     // Resurrection (post-vgLost) — терминальный СТАТУС сюда не попадает,
                     // liveById уже отфильтрован предикатом.
                     let gen = Self.nextGeneration()
-                    entry = Tracked(generation: gen, lastStatus: info.status)
+                    entry = Tracked(generation: gen)
                     tracked[id] = entry
                     notify { $0.watcherCallAppeared(info, generation: gen, resurrected: true) }
                 } else {
                     entry.goneStreak = 0
-                    entry.lastStatus = info.status
                     tracked[id] = entry
                     notify { $0.watcherCallUpdated(info, generation: entry.generation) }
                 }
             } else {
                 let gen = Self.nextGeneration()
-                tracked[id] = Tracked(generation: gen, lastStatus: info.status)
+                tracked[id] = Tracked(generation: gen)
                 notify { $0.watcherCallAppeared(info, generation: gen, resurrected: false) }
             }
         }
@@ -187,7 +220,11 @@ final class VGSessionWatcher {
             tracked[id] = entry
         }
 
-        // Cleanup: терминальные записи, чьих id уже нет в ответе вовсе.
+        // Cleanup: терминальные записи, чьих id уже нет в ответе вовсе. VG хранит строки
+        // вечно (SQLite, рестарт патчит в failed), поэтому эта ветка на практике срабатывает
+        // редко — id обычно продолжает появляться со статусом failed/completed; рост
+        // словаря `tracked` ограничен окном выдачи (see VGSessionFetching, limit=100), а не
+        // этой веткой.
         for (id, entry) in tracked where entry.terminal && !seenIds.contains(id) {
             tracked.removeValue(forKey: id)
         }
