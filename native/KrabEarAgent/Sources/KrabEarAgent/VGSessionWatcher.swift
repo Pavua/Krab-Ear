@@ -12,6 +12,9 @@ struct VGSessionInfo: Equatable {
     let callBrief: String
 }
 
+/// Страница дискавери: T8-fetcher ОБЯЗАН слать limit=sessionsPageLimit (не хардкод).
+let vgSessionsPageLimit = 100
+
 protocol VGSessionFetching {
     /// GET {voice_gateway_url}/v1/sessions?limit=100 — совпадает с серверным дефолтом
     /// VG `list_sessions(limit: int = 100)`. missing-from-page ≠ авторитетное отсутствие:

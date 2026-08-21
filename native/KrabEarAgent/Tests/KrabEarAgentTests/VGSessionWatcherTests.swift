@@ -249,5 +249,7 @@ final class VGSessionWatcherTests: XCTestCase {
         // Запас ×1.5 над однопоточной оценкой (см. бриф) — потолок 13.
         XCTAssertLessThanOrEqual(callsInWindow, 13,
             "stop()→start() породил второй поллинг-цикл (\(callsInWindow) поллов за 0.5с)")
+        XCTAssertGreaterThanOrEqual(callsInWindow, 4,
+            "цикл после restart должен жить (epoch-guard не смеет убивать НОВУЮ цепочку)")
     }
 }
