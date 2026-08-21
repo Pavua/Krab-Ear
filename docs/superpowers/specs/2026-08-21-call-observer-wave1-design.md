@@ -309,7 +309,10 @@ of the same session id observes again under its fresh generation.
   new `callAppeared` performs an explicit reset: transcript feed, cost line,
   listen-state, elapsed timer — and every (re)connect cancels the previous
   WS task and invalidates its ping timer (generation token) so ping timers
-  never accumulate across reconnects.
+  never accumulate across reconnects. Exception: when the new generation
+  observes the SAME session id (post-`vgLost` resurrection), the transcript
+  feed is PRESERVED — VG replays no history on reconnect, so a reset there
+  would erase the only copy of the first half of a still-live call.
 - **No partials:** the server publishes NO remote-speech partials (§2.2) —
   the transcript renders finals as they arrive, same granularity their iOS
   client has. No dimmed-partial mechanics anywhere.
