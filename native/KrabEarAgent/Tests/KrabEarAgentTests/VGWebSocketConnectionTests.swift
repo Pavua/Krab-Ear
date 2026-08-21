@@ -49,9 +49,14 @@ final class VGWebSocketConnectionTests: XCTestCase {
         wait(for: [exp], timeout: 2)
     }
 
-    // I1: onStateChange обязан говорить правду — permanentStop эмитит false
-    // РОВНО один раз, даже если позвать его дважды подряд (idempotent).
-    func test_permanentStop_emits_false_exactly_once_even_when_called_twice() {
+    // I1/M7: onStateChange обязан говорить правду по ДЕТЕРМИНИРОВАННОМУ
+    // контракту (round 2 review) — false эмитится ⟺ true был эмитирован
+    // раньше. Дохлый порт: didOpen никогда не срабатывает → lastReportedState
+    // остаётся nil → permanentStop (даже вызванный дважды) не эмитит НИЧЕГО
+    // (нечего "закрывать", клиенту никогда не говорили "открыто"). Это
+    // заменяет старую эвристику `hadTask` (round 1), которая эмитила false
+    // просто потому, что task != nil, даже без единого подтверждённого true.
+    func test_permanentStop_without_prior_true_emits_nothing_even_when_called_twice() {
         let lock = NSLock()
         var states: [(Bool, UInt64)] = []
         let conn = VGWebSocketConnection(
@@ -71,30 +76,53 @@ final class VGWebSocketConnectionTests: XCTestCase {
         wait(for: [exp], timeout: 2)
 
         lock.lock()
-        let falseCount = states.filter { $0.0 == false }.count
-        let trueCount = states.filter { $0.0 == true }.count
+        let snapshot = states
         lock.unlock()
-        // Ровно один false (permanentStop нашёл активный task); true мог
-        // не случиться вовсе (дохлый порт — didOpen никогда не срабатывает),
-        // но никогда не эмитится СИНХРОННО до реального хендшейка (I1).
-        XCTAssertEqual(falseCount, 1)
-        XCTAssertEqual(trueCount, 0)
+        XCTAssertTrue(snapshot.isEmpty,
+                       "true никогда не сообщался (дохлый порт) → false тоже не должен сообщаться")
+    }
+
+    // C1 (round 2, Critical): без weak-delegate proxy self↔session образовывал
+    // ARC-цикл (URLSession держит delegate сильно до invalidate) — забытый
+    // permanentStop() оставлял бы объект бессмертным зомби. Проверяем именно
+    // ЭТОТ сценарий: connect() БЕЗ permanentStop(), снятие последней сильной
+    // ссылки — инстанс обязан реально деаллоцироваться. Событийно (deinit-хук
+    // + expectation), без настенного sleep (M5).
+    func test_deinit_without_permanentStop_still_deallocates() {
+        weak var weakConn: VGWebSocketConnection?
+        let expDeinit = expectation(description: "deinit fired")
+        autoreleasepool {
+            let conn = VGWebSocketConnection(
+                url: URL(string: "ws://127.0.0.1:1/dead")!, generation: 99,
+                autoReconnect: false, tokenProvider: { "" },
+                onMessage: { _, _ in }, onStateChange: nil, onClose: nil)
+            weakConn = conn
+            conn.onDeinitForTests = { expDeinit.fulfill() }
+            conn.connect()
+            let expConnected = expectation(description: "connect queued")
+            conn.testHook_onQueue { expConnected.fulfill() }
+            wait(for: [expConnected], timeout: 2)
+            // Намеренно НЕ зовём permanentStop() здесь.
+        }
+        wait(for: [expDeinit], timeout: 5)
+        XCTAssertNil(weakConn, "объект обязан деаллоцироваться даже без permanentStop (C1 fix)")
+        XCTAssertEqual(VGWebSocketConnection.liveTimerCount, 0)
     }
 
     // I2: deinit не копит session/timer — после permanentStop (контрактный
     // терминал объекта) и снятия последней сильной ссылки инстанс реально
     // освобождается, а счётчик живых ping-таймеров возвращается в 0.
-    // Note: без permanentStop объект НЕ деаллоцируется — URLSession держит
-    // delegate сильной ссылкой до invalidate, это ожидаемый контракт (см.
-    // doc-comment у permanentStop), поэтому тест обязательно зовёт его.
+    // Событийно (deinit-хук + expectation) — без asyncAfter (M5, round 2).
     func test_permanentStop_then_release_deallocates_and_resets_timer_count() {
         weak var weakConn: VGWebSocketConnection?
+        let expDeinit = expectation(description: "deinit fired")
         autoreleasepool {
             let conn = VGWebSocketConnection(
                 url: URL(string: "ws://127.0.0.1:1/dead")!, generation: 42,
                 autoReconnect: false, tokenProvider: { "" },
                 onMessage: { _, _ in }, onStateChange: nil, onClose: nil)
             weakConn = conn
+            conn.onDeinitForTests = { expDeinit.fulfill() }
             conn.connect()
             let expConnected = expectation(description: "connect queued")
             conn.testHook_onQueue { expConnected.fulfill() }
@@ -105,11 +133,7 @@ final class VGWebSocketConnectionTests: XCTestCase {
             conn.testHook_onQueue { expStopped.fulfill() }
             wait(for: [expStopped], timeout: 2)
         }
-        // Даём ARC/URLSession-инвалидации время осесть после выхода из скоупа.
-        let expSettle = expectation(description: "settle")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { expSettle.fulfill() }
-        wait(for: [expSettle], timeout: 2)
-
+        wait(for: [expDeinit], timeout: 5)
         XCTAssertNil(weakConn, "инстанс обязан деаллоцироваться после permanentStop + снятия сильной ссылки")
         XCTAssertEqual(VGWebSocketConnection.liveTimerCount, 0)
     }

@@ -22,18 +22,23 @@ final class VGWebSocketConnection: NSObject, VGWebSocketConnecting {
     private let onClose: ((Int, UInt64) -> Void)?
 
     private let queue = DispatchQueue(label: "krab.vg.ws")
-    // Не lazy: session нужна СРАЗУ после super.init() (delegate = self), иначе
-    // deinit мог бы форсировать создание session только затем, чтобы её же
-    // инвалидировать (пустая работа при объекте, который так и не подключался).
+    // Не lazy: session нужна СРАЗУ после super.init(). Delegate — НЕ self
+    // напрямую (см. WeakWSDelegate ниже): URLSession держит delegate СИЛЬНОЙ
+    // ссылкой до invalidate, а self держит session сильно → self-как-delegate
+    // давал бы ретеин-цикл self↔session, недостижимый deinit при забытом
+    // permanentStop (найдено ре-ревью C1) — забытый объект остался бы
+    // пинговать/реконнектиться вечно.
     private var session: URLSession!
     private var task: URLSessionWebSocketTask?
     private var pingTimer: DispatchSourceTimer?
     private var reconnectAttempt = 0
     private var stopped = false
     /// Последнее ЭМИТИРОВАННОЕ наружу состояние — единая точка правды для
-    /// onStateChange, чтобы не слать false (или true) дважды подряд.
+    /// onStateChange, чтобы не слать false (или true) дважды подряд И чтобы
+    /// не слать false, если true никогда не эмитился (см. reportConnectIfNeeded/
+    /// reportDisconnectIfNeeded — M7: детерминированный контракт, без эвристик).
     private var lastReportedState: Bool?
-    /// Гасит спам NSLog при затяжной серии ретраев одного и того же обрыва:
+    /// Гасит спам логов при затяжной серии ретраев одного и того же обрыва:
     /// один лог на смену состояния, не один на каждый backoff-цикл.
     private var loggedFailureSinceLastSuccess = false
 
@@ -50,6 +55,10 @@ final class VGWebSocketConnection: NSObject, VGWebSocketConnecting {
     private static func bumpLiveTimerCount(_ delta: Int) {
         liveTimerCountLock.lock(); _liveTimerCount += delta; liveTimerCountLock.unlock()
     }
+    /// Событийный крючок для тестов деаллокации — вызывается из deinit,
+    /// НЕ читает/трогает self после этой точки. Заменяет настенное время
+    /// (asyncAfter) на реальное событие "объект освобождён".
+    var onDeinitForTests: (() -> Void)?
     #endif
 
     init(url: URL, generation: UInt64, autoReconnect: Bool,
@@ -65,7 +74,9 @@ final class VGWebSocketConnection: NSObject, VGWebSocketConnecting {
         self.onStateChange = onStateChange
         self.onClose = onClose
         super.init()
-        self.session = URLSession(configuration: .ephemeral, delegate: self, delegateQueue: nil)
+        self.session = URLSession(configuration: .ephemeral,
+                                   delegate: WeakWSDelegate(target: self),
+                                   delegateQueue: nil)
     }
 
     deinit {
@@ -77,6 +88,9 @@ final class VGWebSocketConnection: NSObject, VGWebSocketConnecting {
         pingTimer?.cancel()
         task?.cancel(with: .goingAway, reason: nil)
         session.invalidateAndCancel()
+        #if DEBUG
+        onDeinitForTests?()
+        #endif
     }
 
     static func backoffBounds(attempt: Int) -> (min: Double, max: Double) {
@@ -105,17 +119,16 @@ final class VGWebSocketConnection: NSObject, VGWebSocketConnecting {
 
     /// Терминал поколения / call.closed: больше НИКОГДА не реконнектится.
     /// Объект одноразовый per-generation — переиспользование после
-    /// permanentStop не поддерживается (contract).
+    /// permanentStop не поддерживается (contract). invalidateAndCancel()
+    /// здесь — не только уборка ресурсов: она рвёт (уже некруговую, см.
+    /// WeakWSDelegate) но всё ещё желательную к явному завершению связь
+    /// session→delegate пораньше, не дожидаясь ARC.
     func permanentStop() {
         queue.async {
-            let hadTask = self.task != nil
             self.stopped = true
             self.teardownLocked()
             self.session.invalidateAndCancel()
-            if hadTask, self.lastReportedState != false {
-                self.lastReportedState = false
-                self.onStateChange?(false, self.generation)
-            }
+            self.reportDisconnectIfNeeded()
         }
     }
 
@@ -128,9 +141,38 @@ final class VGWebSocketConnection: NSObject, VGWebSocketConnecting {
         t.resume()
         startPingLocked(for: t)
         // onStateChange(true) больше НЕ эмитится здесь — только из
-        // urlSession(_:webSocketTask:didOpenWithProtocol:) после реального
-        // хендшейка (см. extension ниже).
+        // handleDidOpen(_:), вызываемого WeakWSDelegate после реального
+        // хендшейка сервера.
         receiveLoop(t)
+    }
+
+    /// Единая точка правды для onStateChange(true, ...) — вызывается ТОЛЬКО
+    /// из WeakWSDelegate.urlSession(didOpenWithProtocol:), т.е. после
+    /// реального хендшейка, никогда сразу после resume().
+    fileprivate func handleDidOpen(_ t: URLSessionWebSocketTask) {
+        queue.async {
+            guard t === self.task, !self.stopped else { return }
+            self.reportConnectIfNeeded()
+        }
+    }
+
+    /// M7: детерминированный контракт без эвристик (`hadTask` и т.п.) —
+    /// true эмитится ⟺ последнее эмитированное состояние не было true.
+    private func reportConnectIfNeeded() {
+        guard lastReportedState != true else { return }
+        lastReportedState = true
+        loggedFailureSinceLastSuccess = false
+        onStateChange?(true, generation)
+    }
+
+    /// M7: симметричный детерминированный контракт — false эмитится ⟺
+    /// последнее эмитированное состояние БЫЛО true. Если true никогда не
+    /// сообщался (например, коннект так и не открылся), false тоже не
+    /// сообщается — клиенту нечего "закрывать".
+    private func reportDisconnectIfNeeded() {
+        guard lastReportedState == true else { return }
+        lastReportedState = false
+        onStateChange?(false, generation)
     }
 
     private func receiveLoop(_ t: URLSessionWebSocketTask) {
@@ -156,13 +198,11 @@ final class VGWebSocketConnection: NSObject, VGWebSocketConnecting {
                     let code = t.closeCode.rawValue
                     if !self.loggedFailureSinceLastSuccess {
                         self.loggedFailureSinceLastSuccess = true
-                        NSLog("VGWS[\(self.generation)] receive failed: \(error.localizedDescription), closeCode=\(code)")
+                        AgentLogger.shared.info(
+                            "[VGWS \(self.generation)] receive failed: \(error.localizedDescription), closeCode=\(code)")
                     }
                     self.onClose?(code, self.generation)
-                    if self.lastReportedState != false {
-                        self.lastReportedState = false
-                        self.onStateChange?(false, self.generation)
-                    }
+                    self.reportDisconnectIfNeeded()
                     self.teardownLocked()
                     guard self.autoReconnect, !self.stopped else { return }
                     let bounds = Self.backoffBounds(attempt: self.reconnectAttempt)
@@ -209,17 +249,25 @@ final class VGWebSocketConnection: NSObject, VGWebSocketConnecting {
     #endif
 }
 
-extension VGWebSocketConnection: URLSessionWebSocketDelegate {
-    /// Единственный источник правды для onStateChange(true, ...) — только
-    /// после реального хендшейка сервера, не сразу после resume().
+/// Тонкий делегат-прокси со СЛАБОЙ ссылкой на владельца. `URLSession` держит
+/// СВОЙ delegate сильно до `invalidate()` — если бы `VGWebSocketConnection`
+/// был delegate'ом сама себе, а сама владела `session`, получился бы
+/// нерушимый ARC-цикл self→session→delegate(self): забытый `permanentStop()`
+/// оставлял бы объект бессмертным зомби (пингующим, реконнектящимся,
+/// дёргающим onMessage/onStateChange мёртвого поколения) — deinit был бы
+/// физически недостижим. Прокси разрывает цикл: session владеет прокси
+/// сильно, прокси держит connection слабо → connection деаллоцируется, как
+/// только у него не остаётся внешних сильных ссылок, независимо от того,
+/// был ли вызван permanentStop().
+private final class WeakWSDelegate: NSObject, URLSessionWebSocketDelegate {
+    weak var target: VGWebSocketConnection?
+
+    init(target: VGWebSocketConnection) {
+        self.target = target
+    }
+
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask,
                      didOpenWithProtocol protocol: String?) {
-        queue.async {
-            guard webSocketTask === self.task, !self.stopped else { return }
-            guard self.lastReportedState != true else { return }
-            self.lastReportedState = true
-            self.loggedFailureSinceLastSuccess = false
-            self.onStateChange?(true, self.generation)
-        }
+        target?.handleDidOpen(webSocketTask)
     }
 }
