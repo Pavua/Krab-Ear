@@ -280,10 +280,14 @@ class GigaAMAdapter:
         не может проскочить в окне только что стартовавшего запроса.
 
         Unlocked-split (как для whisper's close()/_send()) здесь НЕ нужен:
-        close() ниже НЕ берёт _spawn_lock сам — он трогает только
-        self._subprocess через собственный _GigaAMSubprocessSession._lock,
-        поэтому вызывать close() прямо из-под _spawn_lock безопасно (никакого
-        self-deadlock, W-#1872 класс сюда не применим).
+        close() ниже НЕ берёт _spawn_lock сам — subprocess-путь трогает только
+        self._subprocess через собственный _GigaAMSubprocessSession._lock, а
+        in-process путь просто обнуляет self._model (никакой отдельный лок ему
+        не нужен: _model_lock защищает только САМУ загрузку, а inflight==0 под
+        _spawn_lock здесь уже гарантирует, что ни один поток не выполняет
+        _get_model()/transcribe() прямо сейчас) — поэтому вызывать close()
+        прямо из-под _spawn_lock безопасно (никакого self-deadlock, W-#1872
+        класс сюда не применим).
 
         Возвращает True если реально что-то выгрузили; False — если нечего
         было выгружать (не загружено), шла работа (inflight != 0), или
@@ -308,13 +312,58 @@ class GigaAMAdapter:
         return False
 
     def close(self) -> None:
-        """Освобождает ресурсы: subprocess worker (если запущен)."""
+        """Освобождает ресурсы: subprocess worker (если запущен) И in-process
+        модель (если загружена этим транспортом).
+
+        Memory Conductor MED-2 (адверсариальный гейт волны): раньше close()
+        трогал ТОЛЬКО self._subprocess — на in-process транспорте (~2 ГБ
+        torch-модель в self._model) close_if_idle() возвращал True и
+        кондуктор писал «evicted», хотя память оставалась занятой. Оба
+        транспорта теперь освобождаются симметрично; is_loaded()/is_loaded
+        после close() честно False для обоих.
+        """
         if self._subprocess is not None:
             try:
                 self._subprocess.close()
             except Exception as exc:
                 logger.debug("GigaAMAdapter.close: %s", exc)
             self._subprocess = None
+        if self._model is not None:
+            try:
+                self._release_in_process_model(self._model)
+            except Exception as exc:
+                logger.debug("GigaAMAdapter.close: in-process model release failed: %s", exc)
+            self._model = None
+
+    @staticmethod
+    def _release_in_process_model(model: object) -> None:
+        """Best-effort освобождение памяти torch-модели GigaAM.
+
+        Порядок важен: сначала снимаем модель с MPS/CUDA (``.to("cpu")``) —
+        иначе веса продолжат числиться в device-аллокаторе даже после
+        ``del``/``gc.collect()``; затем чистим device-кэш. Каждый шаг
+        обёрнут отдельно — сбой одного (нет torch, нет MPS) не должен
+        помешать остальным попыткам освободить память.
+        """
+        try:
+            if hasattr(model, "to"):
+                model.to("cpu")
+        except Exception:
+            pass
+        del model
+        try:
+            import gc
+            gc.collect()
+        except Exception:
+            pass
+        try:
+            import torch  # type: ignore[import]
+            if torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+            elif torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
 
     def __del__(self) -> None:
         # Best-effort cleanup; не raise — иначе garbage collector ругается.

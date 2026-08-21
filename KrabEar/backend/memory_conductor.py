@@ -99,6 +99,15 @@ class MemoryConductor:
         self._decisions: deque[str] = deque(maxlen=20)
         self._last_tick_ts: Optional[float] = None
         self._shadow_since: Optional[float] = None
+        # LOW финального гейта: витрина брала "warm"+20000MB БЕЗУСЛОВНО, даже
+        # сразу после подтверждённой выгрузки — Swift-строка показывала
+        # несуществующие 19 ГБ. Кэш последней ДОСТОВЕРНОЙ проверки/выгрузки
+        # (never пингуем LM Studio из _publish — тик 30с, отдельный HTTP на
+        # каждый тик того не стоит); обновляется ТОЛЬКО там, где мы реально
+        # получили verify-исход (_evict_model / _recording_sequence_worker).
+        # Дефолт "unknown" — до первой попытки мы честно не знаем состояние
+        # (не выдаём его за "warm", см. §3 C-EFFECT-CHECK три исхода).
+        self._brain_state: str = "unknown"
 
     # -- настройки -----------------------------------------------------------
 
@@ -168,6 +177,15 @@ class MemoryConductor:
 
     def tick_once(self) -> None:
         if not self._get("memory_conductor_enabled", True):
+            # LOW финального гейта: раньше возвращались ДО обновления
+            # _pressure_streak — счётчик залипал на последнем значении.
+            # Комбо-баг: выключили кондуктора ПОСРЕДИ давления → streak
+            # застрял на ≥ need → reload_brain_allowed() при enforce_brain
+            # навсегда возвращает False, даже когда кондуктор снова включат
+            # и реального давления давно нет. Выключенный кондуктор не смеет
+            # хранить состояние, влияющее на будущие решения — сброс streak,
+            # как при спокойном тике (level < 2).
+            self._pressure_streak = 0
             return
         self._last_tick_ts = time.time()
         if self._shadow_since is None and not self.enforce_for("brain"):
@@ -294,6 +312,24 @@ class MemoryConductor:
         else:
             c["failed"] += 1
             self._note("evict %s: still loaded after %.0fs" % (resident, self._verify_timeout))
+        if resident == "brain":
+            self._update_brain_state(outcome)
+
+    def _update_brain_state(self, loaded: Optional[bool]) -> None:
+        """Обновляет кэш последнего ДОСТОВЕРНОГО состояния brain для _publish.
+
+        loaded=False (verify подтвердил выгрузку) → "unloaded"; loaded=True
+        (verify подтвердил, что модель всё ещё загружена) → "warm"; loaded=None
+        (сеть/таймаут/битый ответ — C-EFFECT-CHECK "неизвестно") → "unknown",
+        а НЕ предыдущее значение — устаревшая уверенность так же лжёт, как
+        захардкоженное "warm" (см. §3, "None ≠ False", в этот раз симметрично
+        и в сторону True)."""
+        if loaded is True:
+            self._brain_state = "warm"
+        elif loaded is False:
+            self._brain_state = "unloaded"
+        else:
+            self._brain_state = "unknown"
 
     # -- внешние точки входа (чужие потоки!) ---------------------------------
 
@@ -366,10 +402,17 @@ class MemoryConductor:
                 logger.exception("sequence: brain unload failed")
                 return
             deadline = time.monotonic() + self._verify_timeout
+            outcome: Optional[bool] = True
             while time.monotonic() < deadline:
-                if self.model_loaded_fn(base, brain) is not True:
+                outcome = self.model_loaded_fn(base, brain)
+                if outcome is not True:
                     break
                 time.sleep(self._verify_poll)
+            # LOW финального гейта: та же витрина, тот же verify-исход — этот
+            # секвенс тоже authoritative-проверяет brain, _publish не смеет
+            # его игнорировать (иначе после enforce'd recording-sequence
+            # состояние осталось бы "unknown" даже после реального verify).
+            self._update_brain_state(outcome)
         if rewriter:
             try:
                 self.load_model_fn(base, rewriter)
@@ -433,8 +476,21 @@ class MemoryConductor:
                     "idle_since_ts": time.time() - stt_idle,
                     "reload_cost": "expensive", "pid": None,
                 }
+            # LOW финального гейта: раньше "brain" ВСЕГДА публиковался как
+            # state="warm"/size_mb=20000 — даже сразу после подтверждённой
+            # выгрузки, витрина врала про несуществующие 19 ГБ. size_mb
+            # отражает то же состояние, что и "state": честные 0 при
+            # unloaded, null (неизвестно — не 0 и не полный размер) при
+            # unknown, реальный размер только при подтверждённом warm.
+            brain_size_mb: Optional[int]
+            if self._brain_state == "warm":
+                brain_size_mb = _SIZE_MB["brain"]
+            elif self._brain_state == "unloaded":
+                brain_size_mb = 0
+            else:
+                brain_size_mb = None
             entries["brain"] = {
-                "size_mb": _SIZE_MB["brain"], "state": "warm",
+                "size_mb": brain_size_mb, "state": self._brain_state,
                 "reload_cost": "expensive", "pid": None,
             }
             self._ledger.publish_own(entries)

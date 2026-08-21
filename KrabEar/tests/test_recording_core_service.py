@@ -19,6 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from backend import recording_core_service as rcs_module
 from backend.recording_core_service import RecordingCoreService
 from backend.state_store import StateStore
 
@@ -379,6 +380,61 @@ class TestStopRecording(unittest.TestCase):
         svc.handle_stop_recording({"quality_profile": "balanced"})
         # Counter may or may not increment depending on guards; just verify it's >= 0
         self.assertGreaterEqual(counter_ref[0], 0)
+
+
+class TestBumpSttActivitySymmetry(unittest.TestCase):
+    """Memory Conductor MED-3 (адверсариальный гейт волны): last_stt_activity_ts
+    обязан обновляться СИММЕТРИЧНО из ЛЮБОГО пути, реально гоняющего STT/rewriter
+    — а не только из start-пути и гейтованной ветки stop-пути (brain_model and
+    preload_enabled). Раньше batch-импорт вообще не бампал активность, а
+    stop-путь бампал только если был настроен brain preload — оба расхождения
+    давали кондуктору повод посчитать rewriter простаивающим прямо во время
+    реальной работы."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        # Изолируем модульный глобальный счётчик между тестами.
+        self._prev_ts = rcs_module._LAST_STT_ACTIVITY["ts"]
+        self.addCleanup(self._restore_ts)
+
+    def _restore_ts(self):
+        rcs_module._LAST_STT_ACTIVITY["ts"] = self._prev_ts
+
+    def test_start_recording_bumps_activity(self):
+        svc = _make_service(self._tmp)
+        rcs_module._LAST_STT_ACTIVITY["ts"] = 0.0
+        svc.handle_start_recording({})
+        self.assertGreater(rcs_module.last_stt_activity_ts(), 0.0)
+
+    def test_stop_recording_bumps_activity_even_without_brain_preload(self):
+        """Ядро находки: brain_model пуст (дефолт _FakeSettingsSvc) → старый
+        код НИКОГДА не бампал на stop-пути, хотя STT реально отрабатывает
+        строчками ниже по коду независимо от brain-preload настроек."""
+        svc = _make_service(self._tmp)  # _FakeSettingsSvc.cached_settings() == {}
+        svc.handle_start_recording({})
+        rcs_module._LAST_STT_ACTIVITY["ts"] = 0.0
+
+        svc.handle_stop_recording({"quality_profile": "balanced"})
+
+        self.assertGreater(
+            rcs_module.last_stt_activity_ts(), 0.0,
+            "stop_recording обязан бампать активность независимо от "
+            "llm_brain_model/llm_brain_preload_on_stop — STT уже отработал",
+        )
+
+    def test_batch_import_bumps_activity(self):
+        svc = _make_service(self._tmp)
+        audio_path = Path(self._tmp) / "sample.wav"
+        audio_path.write_bytes(b"\x00" * 64)  # содержимое неважно — фейковый транскрайбер
+        rcs_module._LAST_STT_ACTIVITY["ts"] = 0.0
+
+        result = svc.handle_transcribe_paths({"paths": [str(audio_path)]})
+
+        self.assertEqual(result.get("errors"), [])
+        self.assertGreater(
+            rcs_module.last_stt_activity_ts(), 0.0,
+            "batch-импорт реально гоняет транскрайбер, но не бампал активность",
+        )
 
 
 class TestCurrentRecordingOwner(unittest.TestCase):

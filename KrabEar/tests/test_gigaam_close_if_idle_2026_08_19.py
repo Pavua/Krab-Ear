@@ -113,6 +113,63 @@ class CloseIfIdleBasicsTestCase(unittest.TestCase):
         mock_session.close.assert_not_called()
 
 
+class InProcessModelReleaseTestCase(unittest.TestCase):
+    """MED-2 (финальный адверсариальный гейт волны Memory Conductor):
+    close_if_idle() на in-process транспорте раньше возвращал True (ложный
+    успех выгрузки) не освобождая self._model (~2 ГБ torch-модель) — close()
+    трогал только self._subprocess. Тест ловит именно ЛОЖНЫЙ УСПЕХ: либо
+    модель реально освобождена (self._model is None), либо close_if_idle
+    честно возвращает False."""
+
+    def test_in_process_close_if_idle_actually_frees_model(self):
+        adapter = _make_adapter(transport="in_process")
+        mock_model = MagicMock()
+        adapter._model = mock_model
+        adapter.inflight = 0
+        adapter.last_used_ts = time.monotonic() - 1000.0
+
+        result = adapter.close_if_idle(idle_sec=1.0)
+
+        if result:
+            # Заявлен успех выгрузки → модель ОБЯЗАНА быть реально освобождена,
+            # не просто "забыта" (ложный успех, который ловит этот тест).
+            self.assertIsNone(
+                adapter._model,
+                "close_if_idle() вернул True, но self._model всё ещё занята "
+                "(ложный успех выгрузки — счётчик кондуктора соврёт)",
+            )
+            self.assertFalse(adapter.is_loaded())
+        else:
+            # Альтернативный валидный дизайн: честный отказ на in-process.
+            self.assertIsNotNone(adapter._model)
+
+    def test_in_process_close_directly_releases_model(self):
+        """close() напрямую (не через close_if_idle) тоже обязан освобождать
+        in-process модель — is_loaded() честно False после."""
+        adapter = _make_adapter(transport="in_process")
+        adapter._model = MagicMock()
+
+        adapter.close()
+
+        self.assertIsNone(adapter._model)
+        self.assertFalse(adapter.is_loaded())
+
+    def test_subprocess_still_released_when_both_transports_loaded(self):
+        """Регрессия: фикс in-process пути не должен сломать существующее
+        освобождение subprocess-сессии (оба могут теоретически быть
+        выставлены — защитный тест на симметрию, а не реальный сценарий)."""
+        adapter = _make_adapter(transport="subprocess")
+        mock_session = _make_mock_session(loaded=True)
+        adapter._subprocess = mock_session
+        adapter._model = MagicMock()
+
+        adapter.close()
+
+        mock_session.close.assert_called_once()
+        self.assertIsNone(adapter._subprocess)
+        self.assertIsNone(adapter._model)
+
+
 class TranscribeInflightBookkeepingTestCase(unittest.TestCase):
     """transcribe() обязан инкрементировать/декрементировать inflight и
     обновлять last_used_ts под _spawn_lock на входе/выходе (C-INFLIGHT)."""
