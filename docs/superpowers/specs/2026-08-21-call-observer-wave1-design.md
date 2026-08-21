@@ -102,9 +102,18 @@ traffic is loopback (`voice_gateway_url` setting, default `http://127.0.0.1:8090
      ERROR spam — this is the exact "dead cloud STT fallback noise" class we
      just paid for).
    - Live-call predicate: `status ∈ {created, running, paused}` ∧
-     (`phone ≠ ""` ∨ `call_direction ≠ ""`) ∧ `updated_at` within 6 h (stale
-     "running" rows are a known VG failure mode — they built a recency guard
-     for the same reason, `app/main.py:3058`).
+     (`phone ≠ ""` ∨ `call_direction ≠ ""`) ∧ `updated_at` within 6 h.
+     Confirmed by the VG session against their code (2026-08-21): inbound
+     calls fill `phone`/`call_direction` in the same webhook handling right
+     after create (`app/main.py:4919-4940` — the race window is not observable
+     at poll cadence); 6 h matches their own
+     `stale_running_session_max_age_hours = 6.0` (`app/config.py:267`), the
+     constant guarding the exact same stuck-"running" failure mode. No
+     server-side `?source=` filter: Telegram-transport calls share
+     `source="twilio_pstn_outbound"`, so the client predicate is the filter.
+   - Telegram-transport agent calls pass the predicate too — INCLUDED by
+     design: they are real calls on the same audio path/contract, and the
+     owner wants to observe agent calls regardless of transport.
    - Emits `callAppeared(SessionState)` / `callGone(id)` to the coordinator.
      Multiple concurrent calls: track all, HUD shows the newest, panel has a
      session picker only if >1 (rare; simple segmented control).
@@ -241,12 +250,15 @@ that `audit_purge_coverage` stays green with the new allowlist entry.
    stage), live e2e, merge, deploy via `safe_backend_restart` ritual + binary
    parity, NOW.md card.
 
-Immediately after spec approval (parallel to implementation): cross-session
-brief to VG — (a) wave-2 ask: extend assisted-mode to 2–3 suggestion
-options; (b) confirm our live-call predicate matches their intent; (c)
-heads-up: we become a second `monitor/audio` subscriber — consider raising
-`KRAB_MONITOR_MAX_SUBSCRIBERS` to 3 in their prod env so iOS + macOS + spare
-coexist.
+Cross-session brief to VG — SENT and ANSWERED (2026-08-21, verified by them
+against their code): (a) multi-suggestion extension ACCEPTED into their
+backlog (`pending_suggestions: [{id, text, text_ru}]`, `speak` with optional
+`id`, back-compat; ~1 their session; start pending owner priority
+confirmation); (b) live-call predicate CONFIRMED (details folded into §3.1);
+(c) `KRAB_MONITOR_MAX_SUBSCRIBERS` default 2 confirmed (`app/config.py:253`);
+raising to 3 = one-line `.env` + `launchctl kickstart -k ai.krab.voice-gateway`
+on their side — they hold it until the owner's explicit "go" (live prod
+config).
 
 ## 8. Risks / open items
 
