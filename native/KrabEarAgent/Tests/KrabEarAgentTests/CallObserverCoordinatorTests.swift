@@ -86,6 +86,12 @@ final class CallObserverCoordinatorTests: XCTestCase {
                                         lingerSeconds: 0.1,
                                         costPollInterval: 0.05,
                                         uiCoalesceInterval: 0)
+        // M-2 (ревью round 2): дренируем один такт здесь, централизованно, а не
+        // per-test — init()'ный refreshSettings() (FixedSettings.refresh теперь
+        // честно асинхронен, I-5) обязан успеть примениться ДО первого действия
+        // теста. Страховка от ложно-зелёных БУДУЩИХ тестов с не-дефолтными
+        // settings, которые забудут собственный drain().
+        drain()
         return c
     }
 
@@ -200,11 +206,7 @@ final class CallObserverCoordinatorTests: XCTestCase {
 
     func test_privacy_on_suppresses_auto_show_manual_stays() {
         settings.privacy = true
-        let c = makeCoordinator()
-        // I-5: FixedSettings.refresh теперь честно асинхронен (DispatchQueue.main.async,
-        // как реальный IPC) — дренируем один такт, чтобы init()'ный refreshSettings()
-        // успел применить privacy=true ДО первого watcherCallAppeared этого теста.
-        drain()
+        let c = makeCoordinator()  // M-2: settling drain() now happens inside makeCoordinator()
         c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
         XCTAssertTrue(hud.shown.isEmpty, "privacy: авто-показ подавлен")
         c.openPanelFromMenu(); drain()
@@ -369,5 +371,63 @@ final class CallObserverCoordinatorTests: XCTestCase {
         c.watcherCallAppeared(session("s2"), generation: 2, resurrected: false); drain()
         XCTAssertEqual(hud.updates.last?.0, "s2",
                        "HUD-контент обязан отражать НОВЕЙШИЙ живой звонок (s2), не selected (s1)")
+    }
+
+    // MARK: - Fix round 2 (reviewer P-1/P-2)
+
+    /// P-1: выбор НЕ уезжает из-под ОТКРЫТОЙ панели. Панель открыта на
+    /// терминальном A; появляется живой B — панель обязана ПРОДОЛЖАТЬ
+    /// показывать A (транскрипт не затёрт пустым updateTranscript от B,
+    /// запись A не удалена prune'ом), пока владелец не переключится сам. До
+    /// фикса C-1-условие переключало selectedId на B, потому что смотрело
+    /// только на "старый выбор не живой", игнорируя открытую панель —
+    /// комбинация двух половинок правила чинит это.
+    func test_open_panel_on_terminal_call_not_preempted_by_new_arrival() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.openPanelFromMenu(); drain()
+        emit(#"{"type":"stt.final","ts":"t","data":{"text":"hola"}}"#, gen: 1)
+        c.watcherCallGone(sessionId: "s1", generation: 1); drain()
+        let transcriptsBeforeArrival = panel.transcripts.count
+        c.watcherCallAppeared(session("s2"), generation: 2, resurrected: false); drain()
+        XCTAssertEqual(panel.transcripts.count, transcriptsBeforeArrival,
+                       "появление B не должно перерисовать панель, открытую на терминальном A")
+        XCTAssertTrue(c.observedSessions().contains { $0.id == "s1" },
+                      "терминальная A обязана остаться в observed — панель может её показывать")
+        c.userRequestedHangupConfirmed(); drain()
+        XCTAssertTrue(poster.hangups.isEmpty,
+                      "A уже терминальна — hangup не должен уйти вообще (не подставлять живой B)")
+    }
+
+    /// P-2: HUD рисует hudTrackedId (новейший живой), действие с HUD обязано
+    /// целиться туда же, а не в неизменный selectedId. Два живых звонка;
+    /// selectedId остаётся s1 (панель закрыта, s1 жив — C-1), HUD следит за s2
+    /// (новейший). Хангап, инициированный ИЗ HUD, должен положить трубку s2.
+    func test_hangup_from_hud_targets_hud_tracked_call_not_selected() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.watcherCallAppeared(session("s2"), generation: 2, resurrected: false); drain()
+        c.userRequestedHangupFromHUD(); drain()
+        c.userRequestedHangupConfirmed(); drain()
+        XCTAssertEqual(poster.hangups, ["s2"],
+                       "хангап из HUD обязан целиться в то, что HUD реально показывает (s2), не в selectedId (s1)")
+    }
+
+    /// P-2 (userToggledListen сиблинг): та же ре-таргетировка для прослушки —
+    /// проверяем через URL, который дошёл до connectionFactoryForTests
+    /// (содержит sessionId в пути).
+    func test_toggle_listen_targets_hud_tracked_call_not_selected() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.watcherCallAppeared(session("s2"), generation: 2, resurrected: false); drain()
+        var capturedURL: URL?
+        player.connectionFactoryForTests = { url, _, _, _ in
+            capturedURL = url
+            final class NoopConn: VGWebSocketConnecting { func connect() {}; func permanentStop() {} }
+            return NoopConn()
+        }
+        c.userToggledListen(); drain()
+        XCTAssertEqual(capturedURL?.path, "/v1/sessions/s2/monitor/audio",
+                       "прослушка из HUD обязана целиться в s2 (что HUD реально показывает), не в selectedId (s1)")
     }
 }

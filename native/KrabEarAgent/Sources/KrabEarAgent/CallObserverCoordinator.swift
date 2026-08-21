@@ -46,6 +46,14 @@ protocol VGCommandPosting {
 }
 
 protocol CallObserverSettingsProviding {
+    /// Инвариант (M-3, ревью round 2): реализация ОБЯЗАНА доставлять completion
+    /// на main thread — это реальная опора безопасности вызывающей стороны:
+    /// координатор мутирует hudEnabled/autoplay/privacyMode/baseURL напрямую,
+    /// без лока, полагаясь на single-threaded main-очередь. `refreshSettings`
+    /// в координаторе действительно несёт defensive fallback
+    /// (`DispatchQueue.main.async`, если !Thread.isMainThread) — но это
+    /// СТРАХОВКА на случай нарушения контракта, а не замена ему: реализация не
+    /// вправе полагаться на неё и обязана сама доставлять на main.
     // @Sendable (I-5 fix-round follow-up): тестовая реализация (FixedSettings)
     // теперь честно диспетчерит completion через DispatchQueue.main.async —
     // KrabEarAgentTests таргет компилируется в СТРОГОМ Swift 6 concurrency
@@ -83,9 +91,11 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
     private var selectedId: String?
     private var hudManuallyClosed = false
     private var hudAutoShown = false
-    /// I-4: HUD в данный момент показывает linger-текст ("Звонок завершён"/
-    /// "Связь с VG потеряна"), а не живой рендер — сбрасывается любым showHUD
-    /// (см. maybeAutoShowHUD/clearLingerIfShowingAndLive) или hideHUD.
+    /// I-4/M-1: HUD в данный момент показывает linger-текст ("Звонок завершён"/
+    /// "Связь с VG потеряна"), а не живой рендер. Инвариант: true ТОЛЬКО пока
+    /// hud.isHUDVisible тоже true — сбрасывается КАЖДЫМ вызовом hud.hideHUD()
+    /// (userClosedHUD, userExpandedHUD, applyPrivacySuppressionIfNeeded, таймер
+    /// лингера) и любым showHUD (maybeAutoShowHUD/clearLingerIfShowingAndLive).
     private var hudShowingLinger = false
     private var listenStartedManually = false
     private var hangupInFlight = false
@@ -154,17 +164,23 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
             call.transcript = old.transcript  // VG не реплеит историю — не стирать
         }
         observed[s.id] = call
-        // C-1 (ревью): selectedId (панель+стримы) переключается ТОЛЬКО когда
-        // ТЕКУЩИЙ выбранный звонок уже не живой (terminalDelivered или пропал) —
-        // живой выбранный никогда не уступает место новому, ни при каких
-        // условиях панели (spec §4.1 "no automatic selection switch" для
-        // конкурентных звонков). Старая проверка смотрела лишь на nil/пропажу
-        // записи, а `observed` никогда не чистит ЖИВЫЕ записи → после первого
-        // завершившегося звонка второй звонок никогда бы не наблюдался
-        // (наблюдатель становился одноразовым — C-1). HUD, наоборот, следит за
-        // НОВЕЙШИМ живым независимо от selectedId — через hudTrackedId ниже.
+        // C-1 + P-1 (ревью round 1 + round 2 — обе половинки одного правила):
+        // selectedId (панель+стримы) переключается ТОЛЬКО когда (а) ТЕКУЩИЙ
+        // выбранный звонок уже не живой (terminalDelivered или пропал) И (б)
+        // панель СЕЙЧАС ЗАКРЫТА. C-1 сам по себе (без б) чинил одноразовость
+        // наблюдателя, но ломал открытую панель: B появляется, пока панель
+        // открыта на терминальном A → без (б) selectedId тихо уезжал на B,
+        // затирая читаемый на панели транскрипт A пустым updateTranscript([])
+        // и подставляя A под чужой hangup/prune (P-1). Открытая панель = ручная
+        // супервизия (spec §4.1) — выбор двигает ТОЛЬКО пикер/меню
+        // (userSelectedSession/openPanelFromMenu), никогда appeared. Закрытая
+        // панель — выбор вправе следовать по единственному правилу C-1: только
+        // когда старый выбор МЁРТВ (иначе второй звонок никогда бы не
+        // наблюдался — `observed` не чистит ЖИВЫЕ записи). HUD, наоборот,
+        // следит за НОВЕЙШИМ живым независимо от selectedId — через
+        // hudTrackedId ниже, не через эту ветку.
         let selectedIsLive = selectedId.flatMap { observed[$0] }.map { !$0.terminalDelivered } ?? false
-        if !selectedIsLive {
+        if !selectedIsLive && !panel.isPanelVisible {
             selectedId = s.id
         }
         if s.id == selectedId {
@@ -344,6 +360,7 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
         guard let id = selectedId, let call = observed[id] else { return }
         hud.hideHUD()
         hudAutoShown = false  // I-4 minor: expand — явное действие владельца, не "авто" больше
+        hudShowingLinger = false  // M-1: инвариант — каждый hideHUD гасит флаг linger'а
         panel.showPanel(session: call.session)
         if call.terminalDelivered {
             panel.setTerminal(message: "Звонок завершён")
@@ -367,7 +384,15 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
         // Соединения не рвём (§4): транскрипт копится, аудио играет дальше.
     }
 
+    /// P-2 (ревью): HUD рисует hudTrackedId (новейший живой), а не обязательно
+    /// selectedId — действие с HUD ОБЯЗАНО целиться в то, что владелец реально
+    /// видит. Если они разошлись, сперва легитимно ре-байндим панель/стримы
+    /// через userSelectedSession (тот же путь, что ручной пикер), и только
+    /// потом выполняем действие над (уже актуальным) selectedId.
     func userToggledListen() {
+        if let tracked = hudTrackedId, tracked != selectedId {
+            userSelectedSession(tracked)
+        }
         guard let id = selectedId, let call = observed[id], !call.terminalDelivered else { return }
         if listenState == .idle || listenState == .subscriberLimit || listenState == .failed {
             listenStartedManually = true
@@ -403,8 +428,13 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
         }
     }
 
-    /// Трубка из HUD: панель откроется и поднимет confirm-sheet (HUD без окна для sheet).
+    /// Трубка из HUD: панель откроется и поднимет confirm-sheet (HUD без окна
+    /// для sheet). P-2: сначала ре-байнд на hudTrackedId (см. userToggledListen) —
+    /// иначе подтверждение хангапа кладёт трубку тому, что HUD НЕ показывал.
     func userRequestedHangupFromHUD() {
+        if let tracked = hudTrackedId, tracked != selectedId {
+            userSelectedSession(tracked)
+        }
         userExpandedHUD()
         panel.presentHangupConfirm()
     }
@@ -491,8 +521,14 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
     /// ЧУЖИХ (не только что появившегося и не выбранного) звонков не нужны ни
     /// для памяти, ни для будущего пикера (observedSessions()). Выбранный
     /// звонок сохраняется — панель может ещё показывать его terminal-состояние.
+    /// P-1 доп.: явно защищаем и hudTrackedId (в fallback-случае "живых нет"
+    /// он равен selectedId, уже защищённому строкой ниже — но защита пишется
+    /// явно, чтобы будущая правка fallback-логики hudTrackedId не открыла
+    /// тихую дыру здесь).
     private func pruneStaleTerminalObserved(keeping newId: String) {
-        for (id, entry) in observed where entry.terminalDelivered && id != newId && id != selectedId {
+        let trackedId = hudTrackedId
+        for (id, entry) in observed
+        where entry.terminalDelivered && id != newId && id != selectedId && id != trackedId {
             observed.removeValue(forKey: id)
         }
     }
@@ -552,7 +588,10 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
     /// вручную открытое/включённое остаётся (явные действия владельца).
     private func applyPrivacySuppressionIfNeeded() {
         guard privacyMode else { return }
-        if hudAutoShown && hud.isHUDVisible { hud.hideHUD(); hudAutoShown = false }
+        if hudAutoShown && hud.isHUDVisible {
+            hud.hideHUD(); hudAutoShown = false
+            hudShowingLinger = false  // M-1: инвариант — каждый hideHUD гасит флаг linger'а
+        }
         if !listenStartedManually && listenState != .idle { player.stopListening() }
     }
 
