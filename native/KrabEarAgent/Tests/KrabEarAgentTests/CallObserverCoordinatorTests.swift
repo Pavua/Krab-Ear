@@ -1,0 +1,308 @@
+import XCTest
+@testable import KrabEarAgent
+
+private final class SpyHUD: CallObserverHUDPresenting {
+    var shown: [String] = []; var lingers: [String] = []; var hides = 0
+    var updates: [(String, Int, CallAudioPlayer.ListenState)] = []
+    var isHUDVisible = false
+    func showHUD(session: VGSessionInfo) { shown.append(session.id); isHUDVisible = true }
+    func updateHUD(status: String, lastEntries: [TranscriptEntry], listenState: CallAudioPlayer.ListenState) {
+        updates.append((status, lastEntries.count, listenState))
+    }
+    func showLinger(message: String) { lingers.append(message) }
+    func hideHUD() { hides += 1; isHUDVisible = false }
+}
+
+private final class SpyPanel: CallObserverPanelPresenting {
+    var shown: [String] = []; var transcripts: [[TranscriptEntry]] = []
+    var terminals: [String] = []; var lives = 0; var sheetCloses = 0
+    var costs: [String] = []; var badges: [String?] = []; var hangupPrompts = 0
+    var isPanelVisible = false
+    func showPanel(session: VGSessionInfo) { shown.append(session.id); isPanelVisible = true }
+    func updateTranscript(_ entries: [TranscriptEntry]) { transcripts.append(entries) }
+    func updateStatus(status: String, muted: Bool?, held: Bool?, badge: String?) { badges.append(badge) }
+    func presentHangupConfirm() { hangupPrompts += 1 }
+    func updateCost(_ text: String) { costs.append(text) }
+    func setTerminal(message: String) { terminals.append(message) }
+    func setLive() { lives += 1 }
+    func closeHangupSheetIfOpen() { sheetCloses += 1 }
+}
+
+private final class SpyPoster: VGCommandPosting {
+    var hangups: [String] = []
+    var hangupResult: Result<Int, Error> = .success(200)
+    var costValue: Double? = 0.42
+    func hangup(baseURL: URL, sessionId: String, completion: @escaping (Result<Int, Error>) -> Void) {
+        hangups.append(sessionId); completion(hangupResult)
+    }
+    func fetchCostUsd(baseURL: URL, sessionId: String, completion: @escaping (Double?) -> Void) {
+        completion(costValue)
+    }
+}
+
+private final class FixedSettings: CallObserverSettingsProviding {
+    var hudEnabled = true; var autoplay = false; var privacy = false
+    func refresh(completion: @escaping (Bool, Bool, Bool, URL) -> Void) {
+        completion(hudEnabled, autoplay, privacy, URL(string: "http://127.0.0.1:8090")!)
+    }
+}
+
+final class CallObserverCoordinatorTests: XCTestCase {
+    private var hud = SpyHUD()
+    private var panel = SpyPanel()
+    private var poster = SpyPoster()
+    private var settings = FixedSettings()
+    private var stream = VGCallStreamClient()
+    private var player = CallAudioPlayer()
+    private var streamHandler: ((VGWebSocketConnection.Message, UInt64) -> Void)?
+
+    private func resetFixtures() {
+        hud = SpyHUD(); panel = SpyPanel(); poster = SpyPoster()
+        settings = FixedSettings(); stream = VGCallStreamClient(); player = CallAudioPlayer()
+        streamHandler = nil
+    }
+
+    private func makeCoordinator() -> CallObserverCoordinator {
+        stream.connectionFactoryForTests = { _, _, onMessage in
+            self.streamHandler = onMessage
+            final class NoopConn: VGWebSocketConnecting { func connect() {}; func permanentStop() {} }
+            return NoopConn()
+        }
+        player.connectionFactoryForTests = { _, _, _, _ in
+            final class NoopConn: VGWebSocketConnecting { func connect() {}; func permanentStop() {} }
+            return NoopConn()
+        }
+        let c = CallObserverCoordinator(hud: hud, panel: panel, poster: poster,
+                                        settings: settings, stream: stream, player: player,
+                                        tokenProvider: { "" },
+                                        lingerSeconds: 0.1,
+                                        costPollInterval: 0.05,
+                                        uiCoalesceInterval: 0)
+        return c
+    }
+
+    private func session(_ id: String) -> VGSessionInfo {
+        VGSessionInfo(id: id, status: "running", phone: "+341", callDirection: "outbound",
+                      createdAt: "2026-08-21T10:00:00Z", updatedAt: "2026-08-21T10:00:00Z",
+                      srcLang: "es", tgtLang: "ru", callBrief: "")
+    }
+
+    private func drain(_ t: TimeInterval = 0.05) { RunLoop.main.run(until: Date().addingTimeInterval(t)) }
+
+    private func emit(_ json: String, gen: UInt64) {
+        streamHandler?(.text(json), gen); drain()
+    }
+
+    func test_happy_path_appear_transcript_end_once() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        XCTAssertEqual(hud.shown, ["s1"])
+        emit(#"{"type":"stt.final","ts":"t","data":{"text":"hola"}}"#, gen: 1)
+        emit(#"{"type":"translation.final","ts":"t","data":{"text":"привет","source_text":"hola","src_lang":"es","tgt_lang":"ru"}}"#, gen: 1)
+        emit(#"{"type":"agent.response","ts":"t","data":{"text":"Claro","text_ru":"Конечно","utterance_ts":"u1"}}"#, gen: 1)
+        emit(#"{"type":"call.ended","ts":"t","data":{"reason":"hangup"}}"#, gen: 1)
+        // дублирующие терминалы — no-op
+        c.watcherCallGone(sessionId: "s1", generation: 1); drain()
+        emit(#"{"type":"call.closed","ts":"t","data":{"session_id":"s1"}}"#, gen: 1)
+        XCTAssertEqual(hud.lingers.count, 1, "терминал ровно один раз")
+        XCTAssertEqual(panel.terminals.count, panel.isPanelVisible ? 1 : 0)
+    }
+
+    func test_all_five_signals_each_terminal_once() {
+        let signals: [(String, (CallObserverCoordinator) -> Void)] = [
+            ("call.ended", { c in self.emit(#"{"type":"call.ended","ts":"t","data":{}}"#, gen: 1) }),
+            ("call.closed", { c in self.emit(#"{"type":"call.closed","ts":"t","data":{}}"#, gen: 1) }),
+            ("callGone", { c in c.watcherCallGone(sessionId: "s1", generation: 1); self.drain() }),
+            ("vgLost", { c in c.watcherVGLost(sessionId: "s1", generation: 1); self.drain() }),
+            ("hangupTerminal", { c in
+                self.poster.hangupResult = .success(409)
+                c.userRequestedHangupConfirmed(); self.drain()
+            }),
+        ]
+        for (name, fire) in signals {
+            resetFixtures()  // свежие спаи (инлайн-инициализация не сбрасывается setUp-ом)
+            let c = makeCoordinator()
+            c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+            fire(c)
+            fire(c)
+            XCTAssertEqual(hud.lingers.count, 1, "сигнал \(name): терминал дважды")
+        }
+    }
+
+    func test_linger_hides_hud_after_delay_and_new_call_cancels_stale_linger() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        emit(#"{"type":"call.ended","ts":"t","data":{}}"#, gen: 1)
+        // B появился в linger-окне A
+        c.watcherCallAppeared(session("s2"), generation: 2, resurrected: false); drain()
+        drain(0.2)  // linger A истёк
+        XCTAssertTrue(hud.isHUDVisible, "linger A спрятал HUD живого B")
+    }
+
+    func test_vgLost_message_differs() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.watcherVGLost(sessionId: "s1", generation: 1); drain()
+        XCTAssertTrue(hud.lingers[0].contains("VG") || hud.lingers[0].contains("связь"),
+                      "vgLost должен отличаться от обычного конца")
+    }
+
+    func test_resurrection_preserves_transcript() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.openPanelFromMenu(); drain()
+        emit(#"{"type":"stt.final","ts":"t","data":{"text":"hola"}}"#, gen: 1)
+        c.watcherVGLost(sessionId: "s1", generation: 1); drain()
+        c.watcherCallAppeared(session("s1"), generation: 3, resurrected: true); drain()
+        XCTAssertGreaterThanOrEqual(panel.lives, 1, "панель вышла из terminal в live")
+        XCTAssertEqual(panel.terminals.count, 1)
+        XCTAssertFalse(panel.transcripts.isEmpty)
+        XCTAssertEqual(panel.transcripts.last?.count, 1, "транскрипт сохранён при resurrection")
+    }
+
+    func test_agent_interrupted_matches_by_utterance_ts_not_last() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.openPanelFromMenu(); drain()
+        emit(#"{"type":"agent.response","ts":"t","data":{"text":"Первая","utterance_ts":"u1"}}"#, gen: 1)
+        emit(#"{"type":"agent.response","ts":"t","data":{"text":"Вторая","utterance_ts":"u2"}}"#, gen: 1)
+        emit(#"{"type":"agent.interrupted","ts":"t","data":{"utterance_ts":"u1","spoken_fraction":0.5,"spoken_text":"Пер"}}"#, gen: 1)
+        guard case .agent(_, _, _, let interrupted1, let spoken1, _)? =
+                panel.transcripts.last?.first?.kind else { return XCTFail() }
+        XCTAssertTrue(interrupted1); XCTAssertEqual(spoken1, "Пер")
+        guard case .agent(_, _, _, let interrupted2, _, _)? =
+                panel.transcripts.last?.last?.kind else { return XCTFail() }
+        XCTAssertFalse(interrupted2, "прервана ПЕРВАЯ, не последняя")
+    }
+
+    func test_auto_spoken_renders_as_agent_line() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.openPanelFromMenu(); drain()
+        emit(#"{"type":"agent.suggestion.auto_spoken","ts":"t","data":{"text":"Uno","text_ru":"Один"}}"#, gen: 1)
+        guard case .agent(let text, _, _, _, _, _)? = panel.transcripts.last?.last?.kind else { return XCTFail() }
+        XCTAssertEqual(text, "Uno")
+    }
+
+    func test_privacy_on_suppresses_auto_show_manual_stays() {
+        settings.privacy = true
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        XCTAssertTrue(hud.shown.isEmpty, "privacy: авто-показ подавлен")
+        c.openPanelFromMenu(); drain()
+        XCTAssertEqual(panel.shown, ["s1"], "ручной вход разрешён")
+    }
+
+    func test_privacy_flip_midcall_hides_auto_hud_keeps_manual_panel() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.openPanelFromMenu(); drain()
+        settings.privacy = true
+        c.watcherCallUpdated(session("s1"), generation: 1); drain()  // полл-тик перечитывает
+        XCTAssertEqual(hud.hides, 1, "авто-показанный HUD скрыт")
+        XCTAssertTrue(panel.isPanelVisible, "вручную открытая панель остаётся")
+    }
+
+    func test_hangup_single_flight_and_409_terminal_silent() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        poster.hangupResult = .success(409)
+        c.userRequestedHangupConfirmed()
+        c.userRequestedHangupConfirmed(); drain()
+        XCTAssertEqual(poster.hangups.count, 1, "single-flight")
+        XCTAssertEqual(hud.lingers.count, 1, "409 → терминал, без error-тоста")
+    }
+
+    func test_terminal_closes_open_hangup_sheet() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.openPanelFromMenu(); drain()
+        emit(#"{"type":"call.ended","ts":"t","data":{}}"#, gen: 1)
+        XCTAssertGreaterThanOrEqual(panel.sheetCloses, 1)
+    }
+
+    func test_terminal_of_selected_with_second_live_no_linger_over_live() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.watcherCallAppeared(session("s2"), generation: 2, resurrected: false); drain()
+        c.openPanelFromMenu(); drain()
+        c.watcherCallGone(sessionId: "s1", generation: 1); drain()
+        XCTAssertTrue(hud.lingers.isEmpty, "linger при живом втором звонке запрещён")
+        XCTAssertTrue(hud.isHUDVisible)
+        // панель осталась на терминальной A до ручного свитча;
+        // setLive: №1 — openPanelFromMenu (живой A), №2 — свитч на живой B.
+        // 🔴 НЕ «чинить» реализацию под ==1, убирая setLive из openPanelFromMenu:
+        // ручное открытие живого звонка навсегда потеряло бы бейдж «в эфире».
+        c.userSelectedSession("s2"); drain()
+        XCTAssertEqual(panel.lives, 2)
+    }
+
+    func test_manually_closed_hud_not_resurrected_by_linger() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.userClosedHUD(); drain()
+        emit(#"{"type":"call.ended","ts":"t","data":{}}"#, gen: 1)
+        XCTAssertTrue(hud.lingers.isEmpty, "linger не воскрешает вручную закрытый HUD")
+    }
+
+    func test_stale_generation_events_dropped() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.openPanelFromMenu(); drain()
+        let before = panel.transcripts.count
+        emit(#"{"type":"stt.final","ts":"t","data":{"text":"stale"}}"#, gen: 99)
+        XCTAssertEqual(panel.transcripts.count, before)
+    }
+
+    func test_transcript_capped_at_500() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.openPanelFromMenu(); drain()
+        for i in 0..<510 {
+            streamHandler?(.text(#"{"type":"stt.final","ts":"t","data":{"text":"m\#(i)"}}"#), 1)
+        }
+        drain()
+        XCTAssertLessThanOrEqual(panel.transcripts.last?.count ?? 0, 500)
+    }
+
+    func test_cost_polling_updates_and_stops_at_terminal() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.openPanelFromMenu(); drain(0.2)
+        XCTAssertEqual(panel.costs.last, "$0.42")
+        poster.costValue = nil
+        drain(0.15)
+        XCTAssertEqual(panel.costs.last, "—")
+        emit(#"{"type":"call.ended","ts":"t","data":{}}"#, gen: 1)
+        let frozen = panel.costs.count
+        drain(0.2)
+        XCTAssertEqual(panel.costs.count, frozen, "терминал остановил cost-поллинг")
+    }
+
+    func test_hangup_502_badge_no_terminal() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.openPanelFromMenu(); drain()
+        poster.hangupResult = .success(502)
+        c.userRequestedHangupConfirmed(); drain()
+        XCTAssertTrue(hud.lingers.isEmpty, "502 — не терминал")
+        XCTAssertTrue(panel.badges.compactMap { $0 }.contains { $0.contains("Не удалось") })
+    }
+
+    func test_hangup_404_after_end_terminal_silent() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        poster.hangupResult = .success(404)
+        c.userRequestedHangupConfirmed(); drain()
+        XCTAssertEqual(hud.lingers.count, 1, "404 → терминал без error-тоста")
+        XCTAssertFalse(panel.badges.compactMap { $0 }.contains { $0.contains("Не удалось") })
+    }
+
+    func test_hangup_from_hud_opens_panel_with_confirm() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.userRequestedHangupFromHUD(); drain()
+        XCTAssertTrue(panel.isPanelVisible)
+        XCTAssertEqual(panel.hangupPrompts, 1)
+    }
+}

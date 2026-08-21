@@ -248,6 +248,12 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     /// ensureQuickCapturePanelController() в main+QuickCapture.swift) — тот же
     /// паттерн, что meetingPanelController выше.
     var quickCapturePanelController: QuickCapturePanelController?
+    /// Call Observer w1 T8 (spec §3 комп. 6): единственный владелец координатора —
+    /// создаётся в setupCallObserver() (main+CallObserver.swift), останавливается
+    /// в tearDownCallObserver() из applicationWillTerminate.
+    var callObserverCoordinator: CallObserverCoordinator?
+    /// Дискавери живых сессий VG поллингом (см. callObserverCoordinator выше).
+    var callObserverWatcher: VGSessionWatcher?
     /// B3: инфо-строка «кто держит LM Studio» в status-меню — создаётся в
     /// rebuildStatusMenu, обновляется из menuWillOpen (main+BrainLease.swift).
     var brainLeaseMenuItem: NSMenuItem?
@@ -474,6 +480,10 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         // main+Errors.swift.
         setupErrorBus(toastPresenter: ErrorToastPresenter())
 
+        // Call Observer w1 T8 (spec §3 комп. 6): дискавери живых VG-сессий +
+        // one-shot терминальный автомат. См. main+CallObserver.swift.
+        setupCallObserver()
+
         // PermissionWizard удален, используем QuickStartWindowController
         historyPanel = HistoryPanelController(
             ipcClient: ipcClient,
@@ -607,6 +617,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         wakeWordPoller?.deactivate()
         tearDownHealthMonitor()
         tearDownErrorBus()
+        tearDownCallObserver()
         selectionTranslator?.stop()
         stopQuickCaptureHotkeyMonitor()
         pasteUndoService?.stop()
