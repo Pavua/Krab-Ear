@@ -18,6 +18,9 @@ final class CallAudioEngine: CallAudioEngineProtocol {
     private var observer: NSObjectProtocol?
 
     func start() throws {
+        // Снять предыдущий observer, если есть (защита от двойного start)
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: format)
         try engine.start()
@@ -42,11 +45,13 @@ final class CallAudioEngine: CallAudioEngineProtocol {
     }
 
     func schedule(_ samples: [Float]) {
+        guard !samples.isEmpty else { return }
         guard let buf = AVAudioPCMBuffer(pcmFormat: format,
                                          frameCapacity: AVAudioFrameCount(samples.count)) else { return }
         buf.frameLength = AVAudioFrameCount(samples.count)
         samples.withUnsafeBufferPointer { src in
-            buf.floatChannelData![0].update(from: src.baseAddress!, count: samples.count)
+            guard let base = src.baseAddress else { return }
+            buf.floatChannelData![0].update(from: base, count: samples.count)
         }
         player.scheduleBuffer(buf, completionHandler: nil)
     }
@@ -86,6 +91,12 @@ final class CallAudioPlayer {
             self.teardownLocked(newState: .idle)
             self.startListening(baseURL: p.baseURL, sessionId: p.sessionId,
                                 generation: gen, tokenProvider: p.tokenProvider)
+        }
+    }
+
+    deinit {
+        if let observer = wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
     }
 
@@ -149,6 +160,8 @@ final class CallAudioPlayer {
             setState(.listening)
         case .binary(let frame):
             guard metadataValidated, let engine else { return }
+            // Сеть: пустой кадр не доверяем (краш при force-unwrap в schedule)
+            guard !frame.isEmpty else { return }
             engine.schedule(MuLawDecoder.decodeToFloat(frame))
         }
     }

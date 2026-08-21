@@ -109,4 +109,16 @@ final class CallAudioPlayerTests: XCTestCase {
         XCTAssertEqual(conn.stops, 1)
         XCTAssertEqual(states.last?.0, .idle)
     }
+
+    func test_empty_binary_frame_does_not_crash() {
+        let p = makePlayer()
+        start(p)
+        onMessage?(.text(#"{"format":"mulaw_8k","frame_ms":100}"#), 1); drain()
+        XCTAssertEqual(states.last?.0, .listening)
+        // Сеть: пустой кадр не должен вызвать краш (force-unwrap guard)
+        onMessage?(.binary(Data()), 1); drain()
+        XCTAssertTrue(engine.scheduled.isEmpty, "пустой frame не должен запланирован")
+        XCTAssertEqual(states.last?.0, .listening, "состояние остаётся .listening")
+        // Процесс не упал (иначе тест не дошёл бы сюда)
+    }
 }
