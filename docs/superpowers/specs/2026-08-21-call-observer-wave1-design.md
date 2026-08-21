@@ -69,7 +69,12 @@ Events consumed in wave 1 (payload shapes verified at publish sites):
 
 | type | data | notes |
 |---|---|---|
-| `stt.final` | `text` (required); `language, confidence, engine` OPTIONAL — truncated variants exist: takeover path `{text, language}` (`app/main.py:9043`), realtime engine `{text}` (`app/engines/realtime.py:867`) | remote-party speech in agent calls. 🔴 Known limitation: the owner-mic path of translator-mode calls publishes owner speech as the SAME `stt.final` with no distinguishing field (`app/main.py:3296`) — misattributed until VG adds an `origin` field (asked, brief item e) |
+| `stt.final` | `text` (required); `language, confidence, engine` OPTIONAL — truncated variants exist: takeover path `{text, language}` (`app/main.py:9043`), realtime engine `{text}` (`app/engines/realtime.py:867`) | remote-party speech in agent calls. 🔴 Known limitation: the owner-mic path of translator-mode calls publishes owner speech as the SAME `stt.final` with no distinguishing field (`app/main.py:3296`) — misattributed until VG adds an `origin` field (brief item e — ACCEPTED into
+their backlog with (a), pending owner "go"). Second limitation (VG's own
+finding, `app/engines/realtime.py:867+960`): on realtime-engine calls
+(`call_engine=realtime`) owner speech is never published to the WS at all —
+the live transcript shows only the remote side there; owner lines exist only
+in the post-call timeline. Document, don't work around |
 | `translation.final` | `text, source_text, src_lang, tgt_lang, provider` (field is `provider`, not `engine`) | translation of the above |
 | `agent.response` | `text` (required); `text_ru, lang, utterance_ts, action` OPTIONAL — FOUR publish sites with different field sets (`app/main.py:8338, 8899`, `app/routers/prompt_call.py:691`, `app/engines/realtime.py:942` — the last has no `text_ru`/`action`) | agent reply; render `text_ru` under `text` when present |
 | `agent.suggestion.auto_spoken` | `text, text_ru, action, digits, goal_reached` (`app/main.py:8277`) | 🔴 Assisted-mode auto-timeout speaks WITHOUT emitting `agent.response` — without this event the panel silently loses agent speech; render as an agent line |
@@ -378,10 +383,12 @@ confirmation); (b) live-call predicate CONFIRMED (details folded into §3.1);
 raising to 3 = one-line `.env` + `launchctl kickstart -k ai.krab.voice-gateway`
 on their side — they hold it until the owner's explicit "go" (live prod
 config); (d) cost source = diagnostics polling (folded into §2.2/§3).
-Follow-up ask (e), pending their answer: add an `origin: "remote"|"owner_mic"`
-field to `stt.final`/`translation.final` payloads — trivial server-side (each
-publish site knows its path), removes the translator-mode misattribution
-limitation for good.
+Follow-up ask (e) — ACCEPTED into their backlog (2026-08-21, ~2-3 h with
+tests, same owner-"go" gate as (a)): `origin: "remote"|"owner_mic"` on all
+4 `stt.final` + 3 `translation.final` publish sites; removes the
+translator-mode misattribution limitation for good. They also confirmed both
+our FYI findings and fixed their own CLAUDE.md event catalog (phantom
+`stt.partial`).
 
 ## 8. Risks / open items
 
