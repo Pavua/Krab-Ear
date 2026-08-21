@@ -35,6 +35,10 @@ extension AgentAppDelegate {
     }
 
     func tearDownCallObserver() {
+        // Минор (ревью, Fix round 1): явно закрыть events-stream и прослушку на
+        // выходе из приложения — раньше teardown трогал только watcher (poll-цикл),
+        // оставляя VG WS-соединения висеть до process exit.
+        callObserverCoordinator?.tearDown()
         callObserverWatcher?.stop()
     }
 }
@@ -111,10 +115,27 @@ final class URLSessionVGCommandPoster: VGCommandPosting {
 /// синхронный ipcClient.call(...) в DispatchQueue.global().async (см.
 /// main+BrainLease.swift refreshBrainLeaseMenuItem, HistoryPanelController+Settings
 /// refreshQuickCaptureSectionState).
+///
+/// I-3 (ревью, Fix round 1): `lastApiKey`/`lastBaseURL` записываются на фоновой
+/// очереди (внутри refresh's DispatchQueue.global block), а читаются из
+/// `tokenProvider`/`baseURLProvider` closures, которые дёргаются с РАЗНЫХ потоков
+/// (main — из userAction-методов координатора; приватная serial-очередь
+/// VGWebSocketConnection — из openLocked() при коннекте). Без синхронизации это
+/// гонка данных на String/URL. Обе величины теперь под NSLock.
 final class IPCCallObserverSettings: CallObserverSettingsProviding {
     private let ipcClient: IPCClient
-    private(set) var lastBaseURL = URL(string: "http://127.0.0.1:8090")!
-    private(set) var lastApiKey = ""
+    private let lock = NSLock()
+    private var _lastBaseURL = URL(string: "http://127.0.0.1:8090")!
+    private var _lastApiKey = ""
+
+    var lastBaseURL: URL {
+        lock.lock(); defer { lock.unlock() }
+        return _lastBaseURL
+    }
+    var lastApiKey: String {
+        lock.lock(); defer { lock.unlock() }
+        return _lastApiKey
+    }
 
     init(ipcClient: IPCClient) {
         self.ipcClient = ipcClient
@@ -129,10 +150,10 @@ final class IPCCallObserverSettings: CallObserverSettingsProviding {
             if let resp = try? client.call(method: "get_voice_gateway_credential", params: [:]),
                let cred = resp["result"] as? [String: Any], cred["ok"] as? Bool == true {
                 if let urlStr = cred["voice_gateway_url"] as? String, let url = URL(string: urlStr) {
-                    self.lastBaseURL = url
+                    self.lock.lock(); self._lastBaseURL = url; self.lock.unlock()
                 }
                 if let key = cred["voice_gateway_api_key"] as? String {
-                    self.lastApiKey = key  // IPC-провал → живёт последний успешный кэш
+                    self.lock.lock(); self._lastApiKey = key; self.lock.unlock()  // IPC-провал → живёт последний успешный кэш
                 }
             }
             var hudEnabled = true
@@ -159,7 +180,8 @@ final class IPCCallObserverSettings: CallObserverSettingsProviding {
 final class CallObserverHUDStub: CallObserverHUDPresenting {
     private(set) var isHUDVisible = false
     func showHUD(session: VGSessionInfo) { isHUDVisible = true }
-    func updateHUD(status: String, lastEntries: [TranscriptEntry], listenState: CallAudioPlayer.ListenState) {}
+    func updateHUD(session: VGSessionInfo, status: String, lastEntries: [TranscriptEntry],
+                   listenState: CallAudioPlayer.ListenState) {}
     func showLinger(message: String) {}
     func hideHUD() { isHUDVisible = false }
 }

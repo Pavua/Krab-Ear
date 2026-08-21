@@ -3,11 +3,12 @@ import XCTest
 
 private final class SpyHUD: CallObserverHUDPresenting {
     var shown: [String] = []; var lingers: [String] = []; var hides = 0
-    var updates: [(String, Int, CallAudioPlayer.ListenState)] = []
+    var updates: [(String, String, Int, CallAudioPlayer.ListenState)] = []
     var isHUDVisible = false
     func showHUD(session: VGSessionInfo) { shown.append(session.id); isHUDVisible = true }
-    func updateHUD(status: String, lastEntries: [TranscriptEntry], listenState: CallAudioPlayer.ListenState) {
-        updates.append((status, lastEntries.count, listenState))
+    func updateHUD(session: VGSessionInfo, status: String, lastEntries: [TranscriptEntry],
+                   listenState: CallAudioPlayer.ListenState) {
+        updates.append((session.id, status, lastEntries.count, listenState))
     }
     func showLinger(message: String) { lingers.append(message) }
     func hideHUD() { hides += 1; isHUDVisible = false }
@@ -40,10 +41,17 @@ private final class SpyPoster: VGCommandPosting {
     }
 }
 
+/// I-5 (ревью): completion ОБЯЗАН доставляться асинхронно (DispatchQueue.main.async),
+/// как реальный IPCCallObserverSettings (IPC-роундтрип, никогда не синхронно
+/// same-call-stack) — синхронный мок маскировал баг, где
+/// applyPrivacySuppressionIfNeeded читал ещё не применённые значения.
 private final class FixedSettings: CallObserverSettingsProviding {
     var hudEnabled = true; var autoplay = false; var privacy = false
-    func refresh(completion: @escaping (Bool, Bool, Bool, URL) -> Void) {
-        completion(hudEnabled, autoplay, privacy, URL(string: "http://127.0.0.1:8090")!)
+    func refresh(completion: @escaping @Sendable (Bool, Bool, Bool, URL) -> Void) {
+        let hudEnabled = hudEnabled, autoplay = autoplay, privacy = privacy
+        DispatchQueue.main.async {
+            completion(hudEnabled, autoplay, privacy, URL(string: "http://127.0.0.1:8090")!)
+        }
     }
 }
 
@@ -160,19 +168,25 @@ final class CallObserverCoordinatorTests: XCTestCase {
         XCTAssertEqual(panel.transcripts.last?.count, 1, "транскрипт сохранён при resurrection")
     }
 
+    /// Rewritten per review I-1: прерываем ВТОРУЮ реплику (u2), а не первую —
+    /// interrupting u1 (which also happens to be the first/only-so-far entry)
+    /// wouldn't distinguish "matched by ts" from a buggy "always matches the
+    /// first .agent entry" implementation, since both would land on the same
+    /// index. Targeting u2 forces a genuine ts-based match.
     func test_agent_interrupted_matches_by_utterance_ts_not_last() {
         let c = makeCoordinator()
         c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
         c.openPanelFromMenu(); drain()
         emit(#"{"type":"agent.response","ts":"t","data":{"text":"Первая","utterance_ts":"u1"}}"#, gen: 1)
         emit(#"{"type":"agent.response","ts":"t","data":{"text":"Вторая","utterance_ts":"u2"}}"#, gen: 1)
-        emit(#"{"type":"agent.interrupted","ts":"t","data":{"utterance_ts":"u1","spoken_fraction":0.5,"spoken_text":"Пер"}}"#, gen: 1)
-        guard case .agent(_, _, _, let interrupted1, let spoken1, _)? =
+        emit(#"{"type":"agent.interrupted","ts":"t","data":{"utterance_ts":"u2","spoken_fraction":0.5,"spoken_text":"Втор"}}"#, gen: 1)
+        guard case .agent(_, _, _, let interrupted1, _, _)? =
                 panel.transcripts.last?.first?.kind else { return XCTFail() }
-        XCTAssertTrue(interrupted1); XCTAssertEqual(spoken1, "Пер")
-        guard case .agent(_, _, _, let interrupted2, _, _)? =
+        XCTAssertFalse(interrupted1, "первая реплика (u1) не тронута")
+        guard case .agent(_, _, _, let interrupted2, let spoken2, _)? =
                 panel.transcripts.last?.last?.kind else { return XCTFail() }
-        XCTAssertFalse(interrupted2, "прервана ПЕРВАЯ, не последняя")
+        XCTAssertTrue(interrupted2, "прервана ВТОРАЯ реплика (u2) — матч по ts, не по позиции")
+        XCTAssertEqual(spoken2, "Втор")
     }
 
     func test_auto_spoken_renders_as_agent_line() {
@@ -187,6 +201,10 @@ final class CallObserverCoordinatorTests: XCTestCase {
     func test_privacy_on_suppresses_auto_show_manual_stays() {
         settings.privacy = true
         let c = makeCoordinator()
+        // I-5: FixedSettings.refresh теперь честно асинхронен (DispatchQueue.main.async,
+        // как реальный IPC) — дренируем один такт, чтобы init()'ный refreshSettings()
+        // успел применить privacy=true ДО первого watcherCallAppeared этого теста.
+        drain()
         c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
         XCTAssertTrue(hud.shown.isEmpty, "privacy: авто-показ подавлен")
         c.openPanelFromMenu(); drain()
@@ -304,5 +322,52 @@ final class CallObserverCoordinatorTests: XCTestCase {
         c.userRequestedHangupFromHUD(); drain()
         XCTAssertTrue(panel.isPanelVisible)
         XCTAssertEqual(panel.hangupPrompts, 1)
+    }
+
+    // MARK: - Fix round 1 (reviewer C-1/C-2/I-2)
+
+    /// C-1: наблюдатель НЕ одноразовый. Первый звонок завершается, второй
+    /// появляется без ручного вмешательства — openPanelFromMenu обязан открыть
+    /// НОВЫЙ живой звонок (не застрять на мёртвом s1), и события s2 обязаны
+    /// доезжать до панели. До фикса selectedId навсегда оставался на s1, потому
+    /// что `observed[selectedId!]` никогда не становится nil (терминальные
+    /// записи не удаляются) — второй звонок был бы никогда не наблюдаем.
+    func test_second_call_after_first_ends_is_observed_and_openable() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.watcherCallGone(sessionId: "s1", generation: 1); drain()
+        c.watcherCallAppeared(session("s2"), generation: 2, resurrected: false); drain()
+        c.openPanelFromMenu(); drain()
+        XCTAssertEqual(panel.shown.last, "s2",
+                       "openPanelFromMenu обязан открыть НОВЫЙ живой звонок, не мёртвый s1")
+        emit(#"{"type":"stt.final","ts":"t","data":{"text":"hola"}}"#, gen: 2)
+        XCTAssertEqual(panel.transcripts.last?.count, 1, "события s2 обязаны доезжать до панели")
+    }
+
+    /// C-2: hudManuallyClosed принадлежит КОНКРЕТНОМУ звонку, не залипает
+    /// навсегда. Владелец закрывает HUD для s1 → s1 завершается → появляется
+    /// НОВЫЙ (несвязанный) звонок s2 — HUD обязан авто-показаться для s2. До
+    /// фикса сброс срабатывал на resurrected (наоборот), так что после первого
+    /// закрытия HUD никогда бы не показался автоматически снова ни для какого
+    /// будущего звонка.
+    func test_hud_manually_closed_resets_for_new_call_after_previous_ends() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.userClosedHUD(); drain()
+        c.watcherCallGone(sessionId: "s1", generation: 1); drain()
+        c.watcherCallAppeared(session("s2"), generation: 2, resurrected: false); drain()
+        XCTAssertTrue(hud.shown.contains("s2"),
+                      "новый звонок после закрытия HUD прежним обязан авто-показаться")
+    }
+
+    /// I-2: HUD-контент обязан отражать НОВЕЙШИЙ живой звонок, а не selectedId
+    /// (который после C-1-фикса намеренно НЕ переключается автоматически между
+    /// конкурентными звонками — панель/стримы остаются на s1).
+    func test_hud_content_tracks_newest_live_call_not_selected() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.watcherCallAppeared(session("s2"), generation: 2, resurrected: false); drain()
+        XCTAssertEqual(hud.updates.last?.0, "s2",
+                       "HUD-контент обязан отражать НОВЕЙШИЙ живой звонок (s2), не selected (s1)")
     }
 }
