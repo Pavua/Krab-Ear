@@ -77,18 +77,21 @@ the live transcript shows only the remote side there; owner lines exist only
 in the post-call timeline. Document, don't work around |
 | `translation.final` | `text, source_text, src_lang, tgt_lang, provider` (field is `provider`, not `engine`) | translation of the above |
 | `agent.response` | `text` (required); `text_ru, lang, utterance_ts, action` OPTIONAL — FOUR publish sites with different field sets (`app/main.py:8338, 8899`, `app/routers/prompt_call.py:691`, `app/engines/realtime.py:942` — the last has no `text_ru`/`action`) | agent reply; render `text_ru` under `text` when present |
-| `agent.suggestion.auto_spoken` | `text, text_ru, action, digits, goal_reached` (`app/main.py:8277`) | 🔴 Assisted-mode auto-timeout speaks WITHOUT emitting `agent.response` — without this event the panel silently loses agent speech; render as an agent line |
+| `agent.suggestion.auto_spoken` | `text, text_ru, action, digits, goal_reached, summary, result` (`app/main.py:8277-8289`) | 🔴 Assisted-mode auto-timeout speaks WITHOUT emitting `agent.response` — without this event the panel silently loses agent speech; render as an agent line |
 | `agent.interrupted` | `utterance_ts, spoken_fraction, spoken_text` (`app/main.py:7149`) | match strictly by `utterance_ts` (VG hard rule); replace the displayed reply with `spoken_text` + badge «прервано (N %)» — show what the caller actually HEARD, not just a strikethrough |
 | `call.state` | `status`; `muted, held` OPTIONAL (mute/hold paths, `app/main.py:4624, 4656`; hold flips status to `paused`) | status dot + «mute»/«hold» badges |
 | `call.ringing` / `call.answered` | `call_sid, twilio_status, provider` — NO `status` field (`app/main.py:5553-5567`) | lifecycle markers only |
 | `call.ended` | `reason, provider` | into the §4.1 automaton |
-| `call.closed` | `{session_id}` | terminal for EVERY call (not only deleted sessions; may arrive delayed after auto-summary) → permanent stop of reconnect |
+| `call.closed` | `{session_id}` | terminal for EVERY call (not only deleted sessions; may arrive delayed after auto-summary) → fifth input of the §4.1 automaton + permanent stop of reconnect (generation-scoped) |
 | `diagnostic.error` | error info | badge «реплика не переведена» (their iOS shows an 8 s plaque — same treatment) |
 | `screening.started` | screening info (`app/main.py:5135`) | badge «скрининг» — the flagship inbound scenario |
 | `cost.alert` | `level, threshold_usd, current_usd, message` (`app/main.py:2176`) | threshold ALARM only (fire-once per session/day) — an alert badge, NOT a ticker |
 
-Explicit ignore-list for wave 1 (decoder skips silently; unknown types too —
-forward-compat): `translation.partial` (owner quick-phrase, different fields),
+Event-type dispatch is EXACT string match — never prefix match (ignored
+`agent.suggestion` must not swallow consumed `agent.suggestion.auto_spoken`).
+The server's `pong` reply may lack `ts` — the envelope decoder requires only
+`type`. Explicit ignore-list for wave 1 (decoder skips silently; unknown
+types too — forward-compat): `translation.partial` (owner quick-phrase, different fields),
 `agent.suggestion` (pending-suggestion UI is wave 2), `agent.whisper.ack`,
 `agent.bridge_spoken` (empty payload), `tts.ready`, `dtmf.received/sent`,
 `stt.numbers_uncertain`, `post_call.ready` (wave-2 candidate: free final
@@ -98,7 +101,9 @@ Live cost source (VG answer d, verified by them against code): poll
 `GET /v1/sessions/{id}/diagnostics` (`app/main.py:3557`) while the panel is
 open (3 s cadence) and read `costs.total_usd` — present from session creation
 (default 0.0, `app/main.py:1392`), updated on every session event
-(`app/main.py:1706`). No push event for cost growth exists.
+(`app/main.py:1706`). No push event for cost growth exists. `diag` is
+in-memory: after a VG restart the value resets to 0.0 — display as-is, it is
+their source of truth.
 
 ### 2.3 Live audio monitor
 WS `/v1/sessions/{id}/monitor/audio` (`app/main.py:4271`,
@@ -134,6 +139,11 @@ traffic is loopback (`voice_gateway_url` setting, default `http://127.0.0.1:8090
      running). Unreachable → silent (log at DEBUG once per state change, no
      ERROR spam — this is the exact "dead cloud STT fallback noise" class we
      just paid for).
+   - 401/403 is NOT "unreachable": auth-reject means a stale/missing
+     `vg_client_token` (fresh install, agent started before backend wrote
+     it). Re-read the token file before the next poll; if it persists, a
+     one-time DEBUG line + «auth mismatch» hint on the manual panel entry —
+     never a silent backoff that hides every future call.
    - Live-call predicate: `status ∈ {created, running, paused}` ∧
      (`phone ≠ ""` ∨ `call_direction ≠ ""`) ∧ `updated_at` within 6 h.
      Confirmed by the VG session against their code (2026-08-21): inbound
@@ -153,15 +163,30 @@ traffic is loopback (`voice_gateway_url` setting, default `http://127.0.0.1:8090
      poll tick, accepted. Prompt-calls set `phone` at create
      (`app/routers/prompt_call.py:162`).
    - 🔴 Fail ≠ absent: a failed/timed-out poll is UNKNOWN, never `callGone`.
-     `callGone` fires only from a SUCCESSFUL poll whose items lack the
-     session, and only after 2 consecutive such polls (absent-streak — the
-     project's "single observation instead of streak" lesson). While a live
-     call is being observed, 3 consecutive FAILED polls (≈ ≥ 30 s
-     unreachable) emit a one-shot `vgLost` into the call-end automaton
-     (§4.1): every sticky "reconnecting…" state owns its timeout exit.
+   - 🔴 `callGone` is PREDICATE-based, not absence-based (review round 2):
+     VG sessions never leave the list — natural end keeps the row with
+     `status="stopped"` (`GET /v1/sessions` has no default status filter,
+     `app/main.py:3052`), and VG startup-recovery patches running/paused →
+     `failed` with `emit_event=False` (`app/main.py:995-1035`). So `callGone`
+     fires from a SUCCESSFUL poll where the session is absent OR no longer
+     satisfies the live predicate (status turned terminal), after 2
+     consecutive such polls (streak — the project's "single observation"
+     lesson). This is also the heal path for a missed `call.ended`/VG
+     restart.
+   - `vgLost` (unreachable timeout): on poll failures during a live call the
+     cadence switches to the backoff series (15 s → 60 s); `vgLost` fires
+     after 3 consecutive failures AND ≥ 30 s since the last successful poll —
+     a 6-second network hiccup must not one-shot-terminate a live call. Every
+     sticky "reconnecting…" state owns its timeout exit (§4.1).
+   - Resurrection after `vgLost`: a later successful poll showing the SAME
+     session still live emits `callAppeared` with a NEW observation
+     generation — the one-shot guard is keyed by generation, not session id
+     (§4.1), so the observer is never blind until call end.
    - Emits `callAppeared(SessionState)` / `callGone(id)` to the coordinator.
      Multiple concurrent calls: track all, HUD shows the newest, panel has a
-     session picker only if >1 (rare; simple segmented control).
+     session picker only if >1 (rare; simple segmented control) — the events
+     WS, audio WS and cost polling all follow the SELECTED session only.
+     Elapsed timer counts from the session's `created_at`.
 2. **`VGCallStreamClient.swift`** — events WS. Port of VG's own
    `ios/KrabVoiceiOS/GatewayStreamClient.swift`: `URLSessionWebSocketTask`,
    Bearer header, exponential backoff 1 s → 30 s ±25 % jitter, ping every
@@ -252,18 +277,27 @@ would be noise). Single-flight guard (bool) against double-click.
 
 ### 4.1 🔴 Call-end: ONE-SHOT terminal automaton (review round 1, 3×HIGH root)
 
-Four independent paths can signal "this call is over": `call.ended` on the
-events WS, `callGone` from the watcher, `already_terminal` in the hangup
-response, and `vgLost` (watcher unreachable-timeout, §3.1). ALL of them
-route through a per-session one-shot guard (`terminalDelivered`, precedent:
-`deliverFinished` in `MeetingLivePanelController`); the first signal wins,
-the rest are no-ops. Terminal actions run exactly once: stop events-WS +
-audio player, close an open hangup confirm-sheet, panel → terminal state
-(stays open, §3 component 5), HUD → 3 s linger «Звонок завершён» / for `vgLost` —
-«связь с VG потеряна». The linger timer is BOUND to the session generation
-(pattern: `sseGeneration` in `LiveSubtitlesOverlay`): a `callAppeared` for a
-NEW session cancels a previous session's linger — call B appearing inside
-call A's linger window must not have its HUD hidden by A's stale timer.
+FIVE independent paths can signal "this call is over": `call.ended` on the
+events WS, `call.closed` on the events WS (a reconnect to a finished session
+receives `call.state{stopped}` → optional `post_call.ready` → `call.closed`
++ close 1000, `app/main.py:4200-4220` — the real delivery channel for an end
+missed during a WS drop), `callGone` from the watcher (predicate-based,
+§3.1), `already_terminal`/409 in the hangup response, and `vgLost` (watcher
+unreachable-timeout, §3.1). ALL of them route through a ONE-SHOT terminal
+guard (precedent: `deliverFinished` in `MeetingLivePanelController`); the
+first signal wins, the rest are no-ops. Terminal actions run exactly once:
+stop events-WS + audio player, close an open hangup confirm-sheet, panel →
+terminal state (stays open, §3 component 5), HUD → 3 s linger «Звонок
+завершён» / for `vgLost` — «связь с VG потеряна».
+
+🔴 EVERYTHING terminal is keyed by ONE observation-generation token, never by
+session id (review round 2, closes four findings at once): the one-shot
+guard, the stream-client's permanent-stop flag, the linger timer, the
+watcher's tracked-set entry. `callAppeared` mints a new generation and
+resets ALL of them — so call B starting inside call A's linger window keeps
+its HUD (A's stale timer cancels), a delayed `call.closed` from A cannot
+block reused clients from connecting to B, and a post-`vgLost` resurrection
+of the same session id observes again under its fresh generation.
 
 - **HUD lifecycle:** appears on `callAppeared` when `call_observer_hud_enabled`
   (default true) and the panel is not already open; hides via the terminal
@@ -305,8 +339,11 @@ note) — write on startup + on settings save; add to purge-coverage allowlist.
 
 Settings UI checkboxes: small addition to the existing LiveSubs/VG settings
 section (`HistoryPanelController+LiveSubsSettings.swift`) in the same wave.
-Swift reads the two bools via IPC on coordinator start and on settings-change
-notification (existing pattern); the token comes from the file, never IPC.
+Swift reads the two bools via IPC on coordinator start; changes propagate by
+the §3 component-6 mechanism ONLY (checkbox handler calls the coordinator
+directly after `set_settings` + re-read on each poll tick — there is NO
+generic settings-change notification in the agent). The token comes from the
+file, never IPC.
 
 Privacy: wave 1 renders live data only, persists nothing, all traffic
 loopback → no `privacy_mode` gate required (gates guard persisted/derived
@@ -319,7 +356,10 @@ transcript data). Revisit if a later wave saves call transcripts into history.
   silence, extremes) + round-trip against VG's `pcm16_to_mulaw` reference
   values baked as fixtures.
 - Event decoding: fixtures copied VERBATIM from VG publish sites (wire-format
-  rule — test the wire, not a hand-made wrapper): `stt.final` in ALL THREE
+  rule — test the wire, not a hand-made wrapper), dispatch exact-match (the
+  `agent.suggestion` prefix trap), `call.ended` with optional
+  `call_sid`/`duration_seconds`/`twilio_status` (webhook path), `pong`
+  without `ts`: `stt.final` in ALL THREE
   shapes (full / takeover `{text, language}` / realtime `{text}`),
   `translation.final` (with `provider`), `agent.response` in all four
   publish-site shapes (incl. the minimal realtime one WITHOUT `text_ru`),
@@ -336,10 +376,14 @@ transcript data). Revisit if a later wave saves call transcripts into history.
   (stubbed); 404/409-after-terminal are silent.
 - Cost polling: reads `costs.total_usd` from a stubbed diagnostics payload;
   stops at terminal; missing field renders «—» (never crashes).
-- §4.1 automaton: all four end-signals fire in every order → terminal
-  actions run exactly once; linger is generation-bound (B's HUD survives
-  A's stale linger); failed poll ≠ `callGone`; absent-streak=2; `vgLost`
-  after 3 failed polls during a live call.
+- §4.1 automaton: all FIVE end-signals fire in every order → terminal
+  actions run exactly once; everything terminal is generation-keyed: B's HUD
+  survives A's stale linger, delayed `call.closed` of A does not block B's
+  reused clients, post-`vgLost` resurrection re-observes the same session id
+  under a fresh generation; failed poll ≠ `callGone`; `callGone` fires on
+  status-turned-terminal (predicate), streak=2; `vgLost` = 3 fails AND
+  ≥ 30 s since last success (a 6 s hiccup does not terminate); 401/403 →
+  token re-read, not backoff-blindness.
 - Listen toggle: rapid double-toggle and HUD+panel simultaneous press yield
   exactly one socket (generation token); ping timer invalidated on
   reconnect.
