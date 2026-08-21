@@ -877,6 +877,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "overlay_opacity_percent": 45,
     "voice_gateway_url": "http://127.0.0.1:8090",
     "voice_gateway_api_key": "",
+    "call_observer_hud_enabled": True,
+    "call_observer_autoplay_audio": False,
     "update_channel": "stable",
     "call_notify_default": True,
     "call_auto_summary": True,
