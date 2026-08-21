@@ -186,7 +186,7 @@ traffic is loopback (`voice_gateway_url` setting, default `http://127.0.0.1:8090
 4. **`CallObserverHUD.swift`** — floating `NSPanel` (pattern:
    `LiveSubtitlesOverlay`): always-on-top, draggable, ~340 px wide. Shows
    status dot + direction + phone + elapsed timer, last 2 replicas (each:
-   original + translation, dimmed partials), listen-toggle and hangup
+   original + translation), listen-toggle and hangup
    buttons — SF Symbols `speaker.wave.2` / `phone.down.fill`, NOT emoji/
    Unicode glyphs (CoreText first-render hang class, AGENT-J/M precedent;
    StatusIndicatorView migrated to SF Symbols for the same reason). Click
@@ -348,8 +348,9 @@ that `audit_purge_coverage` stays green with the new allowlist entry.
 
 **Live e2e (autonomous, no owner needed):**
 - `scripts/fake_vg_server.py` — tiny stdlib/flask stub implementing
-  `/v1/sessions`, `/stream` (scripted event sequence incl. partial→final,
-  agent.response, interrupt, ended), `/monitor/audio` (JSON header + μ-law
+  `/v1/sessions`, `/stream` (scripted event sequence: stt/translation
+  finals, agent.response, auto_spoken, interrupt, ended), `/diagnostics`
+  (cost), `/monitor/audio` (JSON header + μ-law
   sine frames), hangup endpoint. Driven by
   `scripts/e2e_call_observer_smoke.command`: launch agent against the fake,
   assert HUD appears (AX), transcript lines render, hangup POST arrives,
