@@ -221,7 +221,7 @@ route through a per-session one-shot guard (`terminalDelivered`, precedent:
 `deliverFinished` in `MeetingLivePanelController`); the first signal wins,
 the rest are no-ops. Terminal actions run exactly once: stop events-WS +
 audio player, close an open hangup confirm-sheet, panel → terminal state
-(stays open, §3.5), HUD → 3 s linger «Звонок завершён» / for `vgLost` —
+(stays open, §3 component 5), HUD → 3 s linger «Звонок завершён» / for `vgLost` —
 «связь с VG потеряна». The linger timer is BOUND to the session generation
 (pattern: `sseGeneration` in `LiveSubtitlesOverlay`): a `callAppeared` for a
 NEW session cancels a previous session's linger — call B appearing inside
