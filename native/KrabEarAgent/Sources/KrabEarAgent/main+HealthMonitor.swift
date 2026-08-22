@@ -25,6 +25,9 @@ private nonisolated(unsafe) var statusUpdateTimerKey: UInt8 = 0
 private nonisolated(unsafe) var statusIndicatorViewKey: UInt8 = 0
 private nonisolated(unsafe) var privacyModeEnabledKey: UInt8 = 0
 private nonisolated(unsafe) var lastHealthStateKey: UInt8 = 0
+private nonisolated(unsafe) var statusErrorBadgeSeverityKey: UInt8 = 0
+private nonisolated(unsafe) var statusBadgeBlinkTimerKey: UInt8 = 0
+private nonisolated(unsafe) var statusBadgeBlinkOpacityKey: UInt8 = 0
 
 /// Считать ли ошибку IPC доказательством того, что backend ЗАКЛИНИЛ —
 /// то есть процесс жив, но его accept-loop мёртв (инцидент 2026-08-07).
@@ -201,6 +204,84 @@ extension AgentAppDelegate {
             objc_setAssociatedObject(self, &statusIndicatorViewKey, view, .OBJC_ASSOCIATION_RETAIN)
             return view
         }
+    }
+
+    /// Severity последней ошибки ErrorBus для ВИДИМОГО menu-bar image.
+    /// `nil` означает, что overlay не показывается.
+    var statusErrorBadgeSeverity: String? {
+        get { objc_getAssociatedObject(self, &statusErrorBadgeSeverityKey) as? String }
+        set {
+            objc_setAssociatedObject(
+                self,
+                &statusErrorBadgeSeverityKey,
+                newValue,
+                .OBJC_ASSOCIATION_COPY_NONATOMIC
+            )
+        }
+    }
+
+    private var statusBadgeBlinkTimer: Timer? {
+        get { objc_getAssociatedObject(self, &statusBadgeBlinkTimerKey) as? Timer }
+        set {
+            objc_setAssociatedObject(
+                self,
+                &statusBadgeBlinkTimerKey,
+                newValue,
+                .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+            )
+        }
+    }
+
+    private var statusBadgeBlinkOpacity: CGFloat {
+        get { (objc_getAssociatedObject(self, &statusBadgeBlinkOpacityKey) as? NSNumber)?.doubleValue ?? 1.0 }
+        set {
+            objc_setAssociatedObject(
+                self,
+                &statusBadgeBlinkOpacityKey,
+                NSNumber(value: Double(newValue)),
+                .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+            )
+        }
+    }
+
+    /// Применяет severity ErrorBus к реальному NSStatusItem.image.
+    /// `info` и неизвестный severity снимают badge; у critical меняется opacity
+    /// на том же видимом image раз в секунду.
+    func applyErrorSeverityBadge(_ severity: String) {
+        let visibleSeverity = StatusIndicatorImage.visibleBadgeSeverity(severity)
+        statusErrorBadgeSeverity = visibleSeverity
+        statusIndicatorView.applyErrorBadge(severity: severity)
+        updateStatusBadgeBlinking(for: visibleSeverity)
+        applyHealthStateToStatusItem(lastHealthState)
+    }
+
+    /// Останавливает lifecycle visible badge при завершении ErrorBus/app.
+    func clearErrorSeverityBadge() {
+        statusErrorBadgeSeverity = nil
+        statusIndicatorView.hideBadge()
+        updateStatusBadgeBlinking(for: nil)
+        applyHealthStateToStatusItem(lastHealthState)
+    }
+
+    private func updateStatusBadgeBlinking(for severity: String?) {
+        guard severity == "critical" else {
+            statusBadgeBlinkTimer?.invalidate()
+            statusBadgeBlinkTimer = nil
+            statusBadgeBlinkOpacity = 1.0
+            return
+        }
+        guard statusBadgeBlinkTimer == nil else { return }
+
+        statusBadgeBlinkOpacity = 1.0
+        let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.statusErrorBadgeSeverity == "critical" else { return }
+                self.statusBadgeBlinkOpacity = self.statusBadgeBlinkOpacity == 1.0 ? 0.5 : 1.0
+                self.applyHealthStateToStatusItem(self.lastHealthState)
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        statusBadgeBlinkTimer = timer
     }
 
     /// Запускает HealthMonitor + status update timer.
@@ -380,6 +461,7 @@ extension AgentAppDelegate {
     func tearDownHealthMonitor() {
         statusUpdateTimer?.invalidate()
         statusUpdateTimer = nil
+        clearErrorSeverityBadge()
 
         if let monitor = healthMonitor {
             Task {
@@ -395,7 +477,13 @@ extension AgentAppDelegate {
         guard let button = statusItem?.button else { return }
 
         // Создаем image для menu-bar с учетом privacyModeEnabled
-        let dotImage = StatusIndicatorImage.image(for: state, privacyMode: self.privacyModeEnabled, size: 14)
+        let dotImage = StatusIndicatorImage.image(
+            for: state,
+            privacyMode: self.privacyModeEnabled,
+            errorSeverity: self.statusErrorBadgeSeverity,
+            badgeOpacity: self.statusBadgeBlinkOpacity,
+            size: 14
+        )
         button.image = dotImage
         button.imagePosition = .imageLeft  // dot слева от title
 

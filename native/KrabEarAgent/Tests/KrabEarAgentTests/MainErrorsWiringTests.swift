@@ -313,6 +313,28 @@ final class MainErrorsWiringTests: XCTestCase {
         )
     }
 
+    /// Severity не должна останавливаться на скрытом StatusIndicatorView:
+    /// батч ErrorBus обязан обновить state AgentAppDelegate, а реальный menu-bar
+    /// image обязан получить это state при следующем render.
+    func test_error_bus_severity_reaches_visible_menu_bar_image() throws {
+        let errorsSource = try String(contentsOf: Self.agentSourcesURL.appendingPathComponent("main+Errors.swift"), encoding: .utf8)
+        let healthSource = try String(contentsOf: Self.agentSourcesURL.appendingPathComponent("main+HealthMonitor.swift"), encoding: .utf8)
+
+        XCTAssertTrue(
+            errorsSource.contains("applyErrorSeverityBadge(payload.severity)"),
+            "ErrorBus callback обязан передать severity payload в AgentAppDelegate, а не только показать toast."
+        )
+        XCTAssertTrue(
+            healthSource.contains("errorSeverity: self.statusErrorBadgeSeverity"),
+            "Видимый NSStatusItem.image обязан рендериться с сохранённым severity badge."
+        )
+        XCTAssertTrue(
+            healthSource.contains("updateStatusBadgeBlinking(for: visibleSeverity)")
+                && healthSource.contains("badgeOpacity: self.statusBadgeBlinkOpacity"),
+            "Critical badge обязан мигать в том же видимом menu-bar image, а не в скрытом view."
+        )
+    }
+
     /// Resolves native/KrabEarAgent/Sources/KrabEarAgent/main.swift from the test bundle,
     /// falling back to a #file-relative walk-up (same pattern as SFSymbolVerificationTests).
     private static var mainSwiftURL: URL {
@@ -331,5 +353,9 @@ final class MainErrorsWiringTests: XCTestCase {
             .deletingLastPathComponent()  // Tests
             .deletingLastPathComponent()  // KrabEarAgent (package root)
             .appendingPathComponent("Sources/KrabEarAgent/main.swift")
+    }
+
+    private static var agentSourcesURL: URL {
+        mainSwiftURL.deletingLastPathComponent()
     }
 }
