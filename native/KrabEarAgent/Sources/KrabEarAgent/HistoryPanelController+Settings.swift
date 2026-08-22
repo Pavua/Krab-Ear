@@ -532,7 +532,6 @@ extension HistoryPanelController {
         quickEditTimeoutStepper.isEnabled = settings.quickEditEnabled
         quickEditTimeoutStepper.alphaValue = timeoutAlpha
         quickEditTimeoutValueLabel.alphaValue = timeoutAlpha
-        privacyModeButton.state = settings.privacyModeEnabled ? .on : .off
         syncVoiceCommandsToggles(enabled: settings.voiceCommandsEnabled, strictMode: settings.voiceCommandsStrictMode)
         syncRetentionSettings(enabled: settings.autoPurgeEnabled, retentionDays: settings.autoPurgeRetentionDays)
         if let t = objc_getAssociatedObject(self, &STTVocabAssocKeys.autoLearnToggle) as? NSButton {

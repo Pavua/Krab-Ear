@@ -198,7 +198,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let quickEditTimeoutStepper = NSStepper()
     let quickEditTimeoutValueLabel = NSTextField(labelWithString: "5 сек")
     /// Privacy Mode (D.5): when ON, disables Sentry telemetry + forces translation offline.
-    let privacyModeButton = NSButton(checkboxWithTitle: "Режим приватности", target: nil, action: nil)
     let startSoundButton = NSButton(checkboxWithTitle: "Звук старта", target: nil, action: nil)
     let realtimePreviewButton = NSButton(checkboxWithTitle: "Realtime превью", target: nil, action: nil)
     let translateAndPasteButton = NSButton(checkboxWithTitle: "Перевод + вставка", target: nil, action: nil)
