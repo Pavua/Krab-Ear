@@ -254,6 +254,11 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     var callObserverCoordinator: CallObserverCoordinator?
     /// Дискавери живых сессий VG поллингом (см. callObserverCoordinator выше).
     var callObserverWatcher: VGSessionWatcher?
+    /// T9 (2б): пункт статус-меню «Звонок агента…» — создаётся в
+    /// rebuildStatusMenu, enabled-состояние обновляется из menuWillOpen
+    /// (тот же паттерн, что brainLeaseMenuItem, см. main+CallObserver.swift
+    /// refreshCallObserverMenuItem()).
+    var callObserverMenuItem: NSMenuItem?
     /// B3: инфо-строка «кто держит LM Studio» в status-меню — создаётся в
     /// rebuildStatusMenu, обновляется из menuWillOpen (main+BrainLease.swift).
     var brainLeaseMenuItem: NSMenuItem?

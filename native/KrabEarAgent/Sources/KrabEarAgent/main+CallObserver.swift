@@ -6,26 +6,23 @@ import Foundation
 /// через существующий IPC get_voice_gateway_credential (W1892), кэш в памяти;
 /// backend, умерший мид-сессии, оставляет кэш живым.
 ///
-/// 🔴 T9 ("HUD + Panel — functional UI") ещё не выполнена в этой ветке — файлы
-/// CallObserverHUD.swift / CallObserverPanelController.swift (её собственный
-/// Files-список) физически не существуют. CallObserverHUDStub/CallObserverPanelStub
-/// ниже — МИНИМАЛЬНАЯ заглушка (только трекинг isHUDVisible/isPanelVisible ради
-/// протокола, БЕЗ реального UI — "функциональный UI" явно вынесен в T9 по плану
-/// wave), нужна ТОЛЬКО чтобы координатор+проводка реально компилировались и были
-/// вызваны из старта агента уже сейчас. T9 должен заменить их использование здесь
-/// на реальные CallObserverHUD()/CallObserverPanelController() при своей проводке.
+/// T9: реальные CallObserverHUD/CallObserverPanelController (functional UI) —
+/// заменили T8-заглушки CallObserverHUDStub/CallObserverPanelStub (файлы этой
+/// задачи: CallObserverHUD.swift, CallObserverPanelController.swift).
 extension AgentAppDelegate {
     func setupCallObserver() {
         let settings = IPCCallObserverSettings(ipcClient: ipcClient)
         let tokenProvider: () -> String = { settings.lastApiKey }
-        let hudController = CallObserverHUDStub()
-        let panelController = CallObserverPanelStub()
+        let hudController = CallObserverHUD()
+        let panelController = CallObserverPanelController()
         let coordinator = CallObserverCoordinator(
             hud: hudController, panel: panelController,
             poster: URLSessionVGCommandPoster(tokenProvider: tokenProvider),
             settings: settings,
             stream: VGCallStreamClient(), player: CallAudioPlayer(),
             tokenProvider: tokenProvider)
+        hudController.coordinator = coordinator
+        panelController.coordinator = coordinator
         self.callObserverCoordinator = coordinator
         let watcher = VGSessionWatcher(fetcher: URLSessionVGSessionFetcher(
             baseURLProvider: { settings.lastBaseURL }, tokenProvider: tokenProvider))
@@ -40,6 +37,23 @@ extension AgentAppDelegate {
         // оставляя VG WS-соединения висеть до process exit.
         callObserverCoordinator?.tearDown()
         callObserverWatcher?.stop()
+    }
+
+    // MARK: - Status-menu item «Звонок агента…» (T9, доп.скоуп 2б)
+
+    /// Открывает панель звонка агента из пункта статус-меню — тот же путь, что
+    /// клик по HUD (`openPanelFromMenu`, а не `userSelectedSession`: пункт меню
+    /// не выбирает КОНКРЕТНУЮ сессию, только показывает текущий выбор).
+    @objc func onOpenCallObserverPanel() {
+        callObserverCoordinator?.openPanelFromMenu()
+    }
+
+    /// Обновляет enabled-состояние пункта меню — вызывается из rebuildStatusMenu
+    /// (первичное построение) и menuWillOpen (main+MenuBarRecap.swift), тот же
+    /// паттерн, что refreshBrainLeaseMenuItem/refreshMemoryLineMenuItem. Никакого
+    /// IPC не нужно — `hasLiveCall` уже в памяти координатора.
+    func refreshCallObserverMenuItem() {
+        callObserverMenuItem?.isEnabled = callObserverCoordinator?.hasLiveCall ?? false
     }
 }
 
@@ -171,29 +185,4 @@ final class IPCCallObserverSettings: CallObserverSettingsProviding {
             }
         }
     }
-}
-
-// MARK: - T8 placeholder presenters (T9 replaces with real CallObserverHUD /
-// CallObserverPanelController — see file header comment). Только трекинг
-// состояния для протокола, БЕЗ реального UI.
-
-final class CallObserverHUDStub: CallObserverHUDPresenting {
-    private(set) var isHUDVisible = false
-    func showHUD(session: VGSessionInfo) { isHUDVisible = true }
-    func updateHUD(session: VGSessionInfo, status: String, lastEntries: [TranscriptEntry],
-                   listenState: CallAudioPlayer.ListenState) {}
-    func showLinger(message: String) {}
-    func hideHUD() { isHUDVisible = false }
-}
-
-final class CallObserverPanelStub: CallObserverPanelPresenting {
-    private(set) var isPanelVisible = false
-    func showPanel(session: VGSessionInfo) { isPanelVisible = true }
-    func updateTranscript(_ entries: [TranscriptEntry]) {}
-    func updateStatus(status: String, muted: Bool?, held: Bool?, badge: String?) {}
-    func updateCost(_ text: String) {}
-    func setTerminal(message: String) {}
-    func setLive() {}
-    func closeHangupSheetIfOpen() {}
-    func presentHangupConfirm() {}
 }

@@ -21,8 +21,14 @@ protocol CallObserverHUDPresenting: AnyObject {
     /// зовёт это ТОЛЬКО для живых звонков (никогда во время активного linger),
     /// так что реализация вправе полагаться на то, что вызов сам по себе
     /// означает "рендерить живое", а не сохранять стейл linger-состояние.
+    /// T9 (2г): `listeningSessionId` — id сессии, которую СЕЙЧАС реально слушает
+    /// CallAudioPlayer (nil, если прослушка не идёт). HUD обязан гасить
+    /// зелёный индикатор прослушки, когда `listeningSessionId != session.id` —
+    /// hudTrackedId (новейший живой) и прослушиваемая сессия МОГУТ разойтись
+    /// (владелец слушал s1, появился новейший s2 — HUD переключился на s2, но
+    /// звук всё ещё играет s1; показывать «слушаю» на карточке s2 было бы ложью).
     func updateHUD(session: VGSessionInfo, status: String, lastEntries: [TranscriptEntry],
-                   listenState: CallAudioPlayer.ListenState)
+                   listenState: CallAudioPlayer.ListenState, listeningSessionId: String?)
     func showLinger(message: String)
     func hideHUD()
     var isHUDVisible: Bool { get }
@@ -98,6 +104,11 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
     /// лингера) и любым showHUD (maybeAutoShowHUD/clearLingerIfShowingAndLive).
     private var hudShowingLinger = false
     private var listenStartedManually = false
+    /// T9 (2г): id сессии, которую реально слушает player прямо сейчас — вычисляется
+    /// заново на каждый onStateChange по generation (не запоминается «кто нажал
+    /// кнопку»), чтобы пережить самовосстановление player'а после сна (тот же
+    /// generation резюмируется без нового явного userToggledListen).
+    private var listeningSessionId: String?
     private var hangupInFlight = false
     private var lingerWork: DispatchWorkItem?
     private var pushWork: DispatchWorkItem?
@@ -130,9 +141,16 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
         self.uiCoalesceInterval = uiCoalesceInterval
         super.init()
         stream.onEvent = { [weak self] event, gen in self?.handleStreamEvent(event, gen) }
-        player.onStateChange = { [weak self] state, _ in
-            self?.listenState = state
-            self?.refreshHUD()
+        player.onStateChange = { [weak self] state, gen in
+            guard let self else { return }
+            self.listenState = state
+            // Вычисляем ЗАНОВО из observed по generation, а не запоминаем id
+            // с момента вызова startListening — переживает молчаливый
+            // self-reconnect player'а после сна/смены аудио-устройства.
+            self.listeningSessionId = (state == .listening || state == .connecting)
+                ? self.observed.first { $0.value.generation == gen }?.key
+                : nil
+            self.refreshHUD()
         }
         stream.onConnectionState = { [weak self] connected, _ in
             guard let self, let id = self.selectedId,
@@ -382,16 +400,26 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
     func userClosedPanel() {
         stopCostTimer()
         // Соединения не рвём (§4): транскрипт копится, аудио играет дальше.
+        // T9 (2д): пока панель была ОТКРЫТА, выбор был приклеен к ней (P-1) —
+        // даже если он уже терминален и рядом есть живой звонок. Теперь панель
+        // закрыл сам владелец: это его действие, не кража чужого выбора у
+        // открытого окна, поэтому свободно перевыбираем новейший живой —
+        // следующее открытие покажет актуальный звонок, а не мёртвый навсегда.
+        if let id = selectedId, observed[id]?.terminalDelivered == true,
+           let tracked = hudTrackedId, tracked != id {
+            rebind(to: tracked)
+        }
     }
 
     /// P-2 (ревью): HUD рисует hudTrackedId (новейший живой), а не обязательно
     /// selectedId — действие с HUD ОБЯЗАНО целиться в то, что владелец реально
-    /// видит. Если они разошлись, сперва легитимно ре-байндим панель/стримы
-    /// через userSelectedSession (тот же путь, что ручной пикер), и только
+    /// видит. Если они разошлись, сперва легитимно ре-байндим стримы/cost через
+    /// `rebind(to:)` (T9 2в: БЕЗ показа панели — иначе клик по HUD внезапно
+    /// выкатывал бы владельцу окно панели, которое он не открывал), и только
     /// потом выполняем действие над (уже актуальным) selectedId.
     func userToggledListen() {
         if let tracked = hudTrackedId, tracked != selectedId {
-            userSelectedSession(tracked)
+            rebind(to: tracked)
         }
         guard let id = selectedId, let call = observed[id], !call.terminalDelivered else { return }
         if listenState == .idle || listenState == .subscriberLimit || listenState == .failed {
@@ -431,9 +459,12 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
     /// Трубка из HUD: панель откроется и поднимет confirm-sheet (HUD без окна
     /// для sheet). P-2: сначала ре-байнд на hudTrackedId (см. userToggledListen) —
     /// иначе подтверждение хангапа кладёт трубку тому, что HUD НЕ показывал.
+    /// Здесь панель ПОКАЗЫВАЕТСЯ намеренно (через userExpandedHUD ниже) — в
+    /// отличие от userToggledListen, хангап требует confirm-sheet, а sheet
+    /// нечем показать без окна панели.
     func userRequestedHangupFromHUD() {
         if let tracked = hudTrackedId, tracked != selectedId {
-            userSelectedSession(tracked)
+            rebind(to: tracked)
         }
         userExpandedHUD()
         panel.presentHangupConfirm()
@@ -441,16 +472,12 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
 
     func userSelectedSession(_ id: String) {
         guard let call = observed[id], id != selectedId else { return }
-        selectedId = id
-        stream.disconnect()
-        player.stopListening()
+        rebind(to: id)
         panel.showPanel(session: call.session)  // showPanel НЕ трогает state-бейдж
         if call.terminalDelivered {
             panel.setTerminal(message: "Звонок завершён")
         } else {
             panel.setLive()
-            connectStreams(for: call)
-            startCostTimer()
         }
         pushTranscript()
     }
@@ -475,6 +502,26 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
     }
 
     // MARK: - Internals
+
+    /// T9 (2в): общая половина выбора — переключает selectedId и переводит
+    /// стримы/cost-таймер на новую сессию. НЕ трогает панель (ни showPanel,
+    /// ни setTerminal/setLive, ни pushTranscript) — вызывающая сторона решает,
+    /// показывать ли что-то владельцу: `userSelectedSession` показывает панель
+    /// сама (пикер/меню — явный выбор ПОКАЗАТЬ), а HUD-действия
+    /// (userToggledListen/userRequestedHangupFromHUD) зовут ТОЛЬКО rebind —
+    /// иначе клик по кнопке на HUD, нацеленный на другую сессию
+    /// (hudTrackedId != selectedId), тихо выкатывал бы владельцу окно панели,
+    /// которое он не открывал.
+    private func rebind(to id: String) {
+        guard let call = observed[id], id != selectedId else { return }
+        selectedId = id
+        stream.disconnect()
+        player.stopListening()
+        if !call.terminalDelivered {
+            connectStreams(for: call)
+            startCostTimer()
+        }
+    }
 
     private func connectStreams(for call: ObservedCall) {
         stream.connect(baseURL: baseURL, sessionId: call.session.id,
@@ -537,7 +584,7 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
         guard hud.isHUDVisible, let id = hudTrackedId, let call = observed[id] else { return }
         hud.updateHUD(session: call.session, status: call.session.status,
                       lastEntries: Array(call.transcript.suffix(2)),
-                      listenState: listenState)
+                      listenState: listenState, listeningSessionId: listeningSessionId)
     }
 
     private func pushTranscript() {

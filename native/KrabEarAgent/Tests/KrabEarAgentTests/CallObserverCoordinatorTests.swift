@@ -3,12 +3,12 @@ import XCTest
 
 private final class SpyHUD: CallObserverHUDPresenting {
     var shown: [String] = []; var lingers: [String] = []; var hides = 0
-    var updates: [(String, String, Int, CallAudioPlayer.ListenState)] = []
+    var updates: [(String, String, Int, CallAudioPlayer.ListenState, String?)] = []
     var isHUDVisible = false
     func showHUD(session: VGSessionInfo) { shown.append(session.id); isHUDVisible = true }
     func updateHUD(session: VGSessionInfo, status: String, lastEntries: [TranscriptEntry],
-                   listenState: CallAudioPlayer.ListenState) {
-        updates.append((session.id, status, lastEntries.count, listenState))
+                   listenState: CallAudioPlayer.ListenState, listeningSessionId: String?) {
+        updates.append((session.id, status, lastEntries.count, listenState, listeningSessionId))
     }
     func showLinger(message: String) { lingers.append(message) }
     func hideHUD() { hides += 1; isHUDVisible = false }
@@ -429,5 +429,49 @@ final class CallObserverCoordinatorTests: XCTestCase {
         c.userToggledListen(); drain()
         XCTAssertEqual(capturedURL?.path, "/v1/sessions/s2/monitor/audio",
                        "прослушка из HUD обязана целиться в s2 (что HUD реально показывает), не в selectedId (s1)")
+    }
+
+    // MARK: - T9 doп.скоуп (2в/2г/2д): rebind без показа панели + listeningSessionId
+
+    /// 2в: клик прослушки на HUD, когда hudTrackedId != selectedId, ретаргетит
+    /// выбор ЧЕРЕЗ rebind (без показа панели) — панель, которую владелец не
+    /// открывал, не обязана внезапно появляться от нажатия кнопки на HUD.
+    func test_toggle_listen_from_hud_does_not_open_panel_when_retargeting() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.watcherCallAppeared(session("s2"), generation: 2, resurrected: false); drain()
+        XCTAssertTrue(panel.shown.isEmpty, "панель ещё не была открыта владельцем")
+        c.userToggledListen(); drain()
+        XCTAssertTrue(panel.shown.isEmpty,
+                      "клик прослушки на HUD не должен сам по себе выкатывать окно панели")
+    }
+
+    /// 2г: HUD-контент несёт listeningSessionId независимо от того, какую
+    /// карточку HUD сейчас показывает (hudTrackedId) — реализация HUD обязана
+    /// гасить зелёный индикатор, когда они разошлись.
+    func test_hud_update_carries_listening_session_id_of_actually_played_call() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.userToggledListen(); drain()  // слушаем s1 — единственный живой на тот момент
+        c.watcherCallAppeared(session("s2"), generation: 2, resurrected: false); drain()  // HUD переезжает на s2
+        guard let last = hud.updates.last else { return XCTFail() }
+        XCTAssertEqual(last.0, "s2", "HUD-карточка показывает новейший живой (s2)")
+        XCTAssertEqual(last.4, "s1",
+                       "реально слушаем всё ещё s1 — listeningSessionId обязан отражать это, не s2")
+    }
+
+    /// 2д: панель закрыл сам владелец (не кража выбора у открытого окна, P-1
+    /// защищает только ОТКРЫТУЮ панель) — если выбор терминален и есть живой
+    /// звонок, следующее открытие обязано показать его, а не мёртвый s1 навсегда.
+    func test_user_closed_panel_reselects_newest_live_when_selected_is_terminal() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.openPanelFromMenu(); drain()
+        c.watcherCallGone(sessionId: "s1", generation: 1); drain()
+        c.watcherCallAppeared(session("s2"), generation: 2, resurrected: false); drain()
+        c.userClosedPanel(); drain()
+        c.openPanelFromMenu(); drain()
+        XCTAssertEqual(panel.shown.last, "s2",
+                       "после закрытия панели выбор обязан перейти на новейший живой звонок")
     }
 }

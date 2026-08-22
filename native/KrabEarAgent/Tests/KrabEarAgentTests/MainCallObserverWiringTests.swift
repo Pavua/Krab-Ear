@@ -20,4 +20,16 @@ final class MainCallObserverWiringTests: XCTestCase {
         let main = try sourceText("main.swift")
         XCTAssertTrue(main.contains("tearDownCallObserver()"))
     }
+
+    /// T9 (доп.скоуп 2а): fail-until-swapped гард — до замены T8-заглушек
+    /// (CallObserverHUDStub/CallObserverPanelStub) на реальные CallObserverHUD/
+    /// CallObserverPanelController этот тест обязан быть КРАСНЫМ. Держит
+    /// проводку честной: main+CallObserver.swift не смеет тихо откатиться на
+    /// заглушки в будущей правке.
+    func test_main_call_observer_wiring_uses_no_stubs() throws {
+        let source = try sourceText("main+CallObserver.swift")
+        XCTAssertFalse(source.contains("Stub()"),
+                       "main+CallObserver.swift обязан использовать реальные " +
+                       "CallObserverHUD()/CallObserverPanelController(), не заглушки T8")
+    }
 }

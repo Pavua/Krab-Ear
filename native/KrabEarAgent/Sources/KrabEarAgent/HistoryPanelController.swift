@@ -1979,6 +1979,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let voiceCommandsSection = buildVoiceCommandsSection()
         settingsBar.addArrangedSubview(voiceCommandsSection)
 
+        // Наблюдатель звонков агента (Call Observer w1 T9): HUD/панель + автопрослушка.
+        let callObserverSettingsSection = buildCallObserverSettingsSection()
+        settingsBar.addArrangedSubview(callObserverSettingsSection)
+
         // Текстовые сниппеты
         let textSnippetsSection = buildTextSnippetsSection()
         settingsBar.addArrangedSubview(textSnippetsSection)
