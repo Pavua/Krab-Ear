@@ -445,8 +445,15 @@ class BackendService:
         recorder: AudioRecorder | None = None,
         transcriber: Transcriber | None = None,
         translator: Translator | None = None,
+        *,
+        socket_path: Path | None = None,
+        socket_ownership_snapshot_getter: Callable[[], Any] | None = None,
     ) -> None:
         self.store = store
+        # Спека 2026-08-22 socket-ownership: точный endpoint и snapshot claim'а
+        # для честной startup-диагностики (без них — прежний data_dir-фоллбэк).
+        self._socket_path_cfg = socket_path
+        self._socket_ownership_snapshot_getter = socket_ownership_snapshot_getter
         self.vocabulary = VocabularyStore(data_dir=store.data_dir)
         self._text_snippet_svc = TextSnippetService(data_dir=store.data_dir)
         self._phonetic_vocab_svc = PhoneticVocabService(data_dir=store.data_dir)
@@ -1582,6 +1589,8 @@ class BackendService:
         from backend.startup_diagnostics import StartupDiagnostics
         self._startup_diagnostics = StartupDiagnostics(
             data_dir=self.store.data_dir,
+            socket_path=self._socket_path_cfg,
+            socket_ownership_snapshot_getter=self._socket_ownership_snapshot_getter,
         )
         # W1622 (W1615 F1 HIGH): wire error_bus so _push_stt_cache_miss_error
         # actually fires instead of silently returning.  _error_bus is guaranteed
@@ -6015,13 +6024,22 @@ def configure_logging(data_dir: Path) -> None:
     logging.basicConfig(level=logging.INFO, handlers=handlers)
 
 
-def build_service(data_dir: Path) -> BackendService:
+def build_service(
+    data_dir: Path,
+    *,
+    socket_path: Path | None = None,
+    socket_ownership_snapshot_getter: Callable[[], Any] | None = None,
+) -> BackendService:
     """Фабрика backend-сервиса с запуском проверок на старте."""
     store = StateStore(data_dir=data_dir)
     # Гарантируем наличие полного набора дефолтных настроек.
     store.save_settings(store.load_settings() or dict(DEFAULT_SETTINGS))
     store.maybe_compact()
-    return BackendService(store=store)
+    return BackendService(
+        store=store,
+        socket_path=socket_path,
+        socket_ownership_snapshot_getter=socket_ownership_snapshot_getter,
+    )
 
 
 def _trigger_sentry_release_async() -> None:
