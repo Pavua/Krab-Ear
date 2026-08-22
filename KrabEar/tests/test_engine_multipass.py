@@ -289,13 +289,78 @@ class BestResultWinsTest(unittest.TestCase):
 class RemoteFallbackTest(unittest.TestCase):
     """Если max models не помогли → remote STT пробуется (network_mode online)."""
 
+    def test_remote_not_called_when_provider_key_is_missing(self):
+        """Пустой ключ — конфигурация, поэтому cloud-кандидат даже не запускается."""
+        engine = _make_engine()
+        engine._settings_get = lambda key, default=None: {
+            "cloud_stt_provider": "openai",
+            "openai_api_key": "",
+        }.get(key, default)
+        remote_result = _stt_result(0.78, "remote")
+
+        with patch.object(engine, "_transcribe_remote", return_value=remote_result) as mock_rem, \
+             patch("backend.cloud_stt._load_settings", return_value={"openai_api_key": ""}), \
+             patch("core.engine.settings") as mock_cfg:
+            mock_cfg.STT_MULTIPASS_ENABLED = True
+            mock_cfg.STT_MIN_CONFIDENCE_THRESHOLD = 0.65
+            mock_cfg.STT_MAX_RETRIES = 1
+            mock_cfg.MODEL_BALANCED = "balanced-model"
+            mock_cfg.model_max_list = []
+            mock_cfg.NETWORK_MODE = "online_preferred"
+            mock_cfg.TRANSCRIBE_TIMEOUT_SEC = 30
+
+            first = _stt_result(0.25)
+            with self.assertLogs("KrabEar.Engine", level="DEBUG") as log_ctx:
+                result = engine._maybe_multipass_retry(
+                    b"audio", "prompt", "ru", first
+                )
+
+        mock_rem.assert_not_called()
+        self.assertEqual(result["model_used"], "balanced-model")
+        self.assertTrue(
+            any("openai" in message and "API key" in message for message in log_ctx.output),
+            log_ctx.output,
+        )
+
+    def test_key_preflight_failure_preserves_existing_remote_retry_path(self):
+        """Сбой settings-reader не должен выбросить уже полученный локальный результат."""
+        engine = _make_engine()
+        engine._settings_get = lambda key, default=None: (
+            "openai" if key == "cloud_stt_provider" else default
+        )
+        remote_result = _stt_result(0.78, "remote")
+
+        with patch.object(engine, "_transcribe_remote", return_value=remote_result) as mock_rem, \
+             patch("backend.cloud_stt._load_settings", side_effect=OSError("settings unavailable")), \
+             patch("core.engine.settings") as mock_cfg:
+            mock_cfg.STT_MULTIPASS_ENABLED = True
+            mock_cfg.STT_MIN_CONFIDENCE_THRESHOLD = 0.65
+            mock_cfg.STT_MAX_RETRIES = 1
+            mock_cfg.MODEL_BALANCED = "balanced-model"
+            mock_cfg.model_max_list = []
+            mock_cfg.NETWORK_MODE = "online_preferred"
+            mock_cfg.TRANSCRIBE_TIMEOUT_SEC = 30
+
+            first = _stt_result(0.25)
+            result = engine._maybe_multipass_retry(
+                b"audio", "prompt", "ru", first
+            )
+
+        mock_rem.assert_called_once()
+        self.assertEqual(result["model_used"], "remote")
+
     def test_remote_called_when_online(self):
         engine = _make_engine()
+        engine._settings_get = lambda key, default=None: {
+            "cloud_stt_provider": "openai",
+            "openai_api_key": "configured-test-key",
+        }.get(key, default)
         low_max = _stt_result(0.30, "max-model")
         remote_result = _stt_result(0.78, "remote")
 
         with patch.object(engine, "_transcribe_model", return_value=low_max), \
              patch.object(engine, "_transcribe_remote", return_value=remote_result) as mock_rem, \
+             patch("backend.cloud_stt._load_settings", return_value={"openai_api_key": "configured-test-key"}), \
              patch("core.engine.settings") as mock_cfg:
             mock_cfg.STT_MULTIPASS_ENABLED = True
             mock_cfg.STT_MIN_CONFIDENCE_THRESHOLD = 0.65
