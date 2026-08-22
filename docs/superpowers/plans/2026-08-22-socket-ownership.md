@@ -501,3 +501,28 @@ git commit -m "fix(ipc): close socket ownership review findings"
 ```
 
 Then rerun Steps 1–4 and update the handoff to the new exact HEAD.
+
+---
+
+## Ревью-заметки приёмки (Claude, 2026-08-22) — учесть при исполнении
+
+Спека и план одобрены (все три предпосылки сверены с живым кодом:
+`startup_diagnostics.py:337` действительно проверяет `backend.sock`,
+`ipc_server.py:158/216` действительно делает безусловный unlink). Три
+дополнения к исполнению:
+
+1. **Purge-гард**: `<socket>.lock` — намеренный survivor purge. Если после
+   Task 1 `make audit-all` (audit_purge_coverage) пометит sidecar как
+   непокрытый store — добавить строку в
+   `scripts/purge_coverage_allowlist.txt` с `# reason: flock sidecar,
+   не содержит данных, удаление под живым flock = inode-swap дыра`.
+   Если гард молчит (путь не data-dir-rooted в модуле) — ничего не делать.
+2. **Родительский каталог sidecar**: при кастомном `--socket-path` каталог
+   может не существовать (штатный `default_socket_path` делает mkdir, кастомная
+   ветка в `service.py:6103` — нет). `acquire()` обязан либо `mkdir(parents=True)`
+   родителя ДО open, либо давать `UnsafeSocketPathError` с внятным текстом —
+   выбрать mkdir (симметрично default-пути), покрыть тестом.
+3. **AF_UNIX лимит пути (~104 байта на macOS)**: `canonical_socket_path`
+   может УДЛИНИТЬ путь (resolve родителя). Bind обязан использовать тот же
+   строковый путь, что и сейчас (не канонизированный), канонизация — только
+   для lock-domain и probe-identity; в тестах держать temp-пути короткими.
