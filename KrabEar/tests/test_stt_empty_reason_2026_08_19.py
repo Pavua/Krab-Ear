@@ -60,6 +60,14 @@ class EmptyTranscriptionResultReasonTest(unittest.TestCase):
         result = AudioEngine._empty_transcription_result("empty_audio", None)
         self.assertEqual(result.get("reason"), "empty_audio")
 
+    def test_stt_engine_is_none_when_vad_skips_transcription(self):
+        """VAD прервал путь до вызова STT, поэтому имя движка не выдумываем."""
+        from core.engine import AudioEngine
+
+        result = AudioEngine._empty_transcription_result("vad_skip", "ru")
+        self.assertIn("stt_engine", result)
+        self.assertIsNone(result["stt_engine"])
+
     def test_existing_keys_unchanged(self):
         """Контракт докстринга: потребители читают старые ключи без .get() —
         новый ключ добавляется аддитивно, старые не переименовываются и не
@@ -181,6 +189,21 @@ class TranscribeReasonRestContractTest(unittest.TestCase):
         self.assertEqual(body.get("text"), "")
         self.assertEqual(body.get("reason"), "empty_audio")
 
+    def test_empty_result_exposes_null_stt_engine_without_changing_legacy_engine(self):
+        from core.engine import AudioEngine
+
+        empty_result = AudioEngine._empty_transcription_result("vad_skip", "ru")
+        deps = _deps_with_transcribe(empty_result)
+
+        resp = _post_transcribe(deps)
+
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertEqual(body["engine"], "vad_skip")
+        self.assertEqual(body["reason"], "vad_skip")
+        self.assertIn("stt_engine", body)
+        self.assertIsNone(body["stt_engine"])
+
     def test_normal_recognition_has_no_reason_field(self):
         """Непустой текст — ответ НЕ засоряется полем reason."""
         normal_result = {
@@ -197,6 +220,7 @@ class TranscribeReasonRestContractTest(unittest.TestCase):
         body = resp.get_json()
         self.assertEqual(body.get("text"), "привет мир")
         self.assertNotIn("reason", body)
+        self.assertEqual(body.get("stt_engine"), "mlx-whisper")
 
     def test_existing_response_fields_unchanged(self):
         """Контракт для старых клиентов (Voice Gateway): все поля, что были
