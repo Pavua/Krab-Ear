@@ -59,20 +59,6 @@ extension AgentAppDelegate {
         return nil
     }
 
-    /// Записывает ассоциацию bundle_id → profile в backend.
-    /// Вызывается когда пользователь вручную выбирает профиль вставки.
-    func recordPasteProfileForApp(bundleId: String, profile: String) {
-        guard !bundleId.isEmpty, !profile.isEmpty else { return }
-        let client = ipcClient
-        DispatchQueue.global(qos: .utility).async {
-            _ = try? client.call(
-                method: "record_paste_app_profile",
-                params: ["bundle_id": bundleId, "profile": profile]
-            )
-        }
-        logger.info("PasteAppMemory: записан профиль bundle=\(bundleId) → profile=\(profile)")
-    }
-
     /// Применяет профиль вставки к тексту если профиль определён для активного приложения.
     /// Возвращает (обработанный текст, профиль) или (оригинальный текст, nil).
     func applyPasteProfileIfNeeded(text: String, targetApp: NSRunningApplication) -> (String, String?) {

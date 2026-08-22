@@ -114,92 +114,6 @@ extension HistoryPanelController {
         }
     }
 
-    // MARK: - auto_summarize_batch
-
-    @objc func onAutoSummaryBatch() {
-        // Collect selected rows; fall back to first 50 loaded items
-        var targetIDs: [String]
-        let selectedRows = tableView.selectedRowIndexes
-        if selectedRows.count > 0 {
-            targetIDs = selectedRows.compactMap { idx -> String? in
-                guard idx < items.count else { return nil }
-                return items[idx].id
-            }
-        } else {
-            targetIDs = Array(items.prefix(50).map { $0.id })
-        }
-
-        guard !targetIDs.isEmpty else {
-            showDiagnosticsOutput("Нет записей для авто-саммари.")
-            return
-        }
-
-        showDiagnosticsOutput("Авто-саммари: обрабатываю \(targetIDs.count) записей…")
-
-        let ipcClient = self.ipcClient
-        let idsCopy = targetIDs
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let response = try? ipcClient.call(
-                method: "auto_summarize_batch",
-                params: ["ids": idsCopy]
-            ),
-            let result = response["result"] as? [String: Any] else {
-                DispatchQueue.main.async {
-                    self?.showDiagnosticsOutput("Ошибка: авто-саммари не выполнено.")
-                }
-                return
-            }
-
-            // Gate/early-return paths (e.g. privacy mode) return {ok:false, reason:...}
-            // wrapped in `result` — surface the reason instead of rendering an empty
-            // "(нет данных)" digest with no explanation.
-            if let isOk = result["ok"] as? Bool, !isOk {
-                let reason = (result["reason"] as? String) ?? "недоступно"
-                DispatchQueue.main.async {
-                    self?.showDiagnosticsOutput("Авто-саммари недоступно: \(reason)")
-                }
-                return
-            }
-
-            // Backend handle_auto_summarize_batch (history_service.py:2923) отдаёт
-            // ПЛОСКИЙ дайджест одного пакета — {summary, key_points, items_processed,
-            // total_words, llm, fallback, error} — а НЕ per-item массив. Ранее код
-            // читал несуществующие processed/failed/summaries → шапка всегда
-            // «(0 обработано, 0 ошибок)» и пустое тело.
-            let processed = result["items_processed"] as? Int ?? 0
-            let totalWords = result["total_words"] as? Int ?? 0
-            let isLLM = result["llm"] as? Bool ?? false
-            let fallback = result["fallback"] as? Bool ?? false
-            let summary = (result["summary"] as? String ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let keyPoints = result["key_points"] as? [String] ?? []
-            let errorMsg = (result["error"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-
-            let llmTag = isLLM ? (fallback ? "LLM: fallback" : "LLM: да") : "LLM: нет"
-            var lines: [String] = ["=== Авто-саммари (\(processed) записей, \(totalWords) слов, \(llmTag)) ==="]
-            if let errorMsg, !errorMsg.isEmpty {
-                lines.append("Ошибка: \(errorMsg)")
-            }
-            if !summary.isEmpty {
-                lines.append("\n\(summary)")
-            }
-            if !keyPoints.isEmpty {
-                lines.append("\nКлючевые моменты:")
-                for point in keyPoints {
-                    lines.append("• \(point)")
-                }
-            }
-            if summary.isEmpty && keyPoints.isEmpty && (errorMsg?.isEmpty ?? true) {
-                lines.append("(нет данных)")
-            }
-
-            let output = lines.joined(separator: "\n")
-            DispatchQueue.main.async {
-                self?.showDiagnosticsOutput(output)
-            }
-        }
-    }
-
     // MARK: - get_history_item (double-click detail)
 
     @objc func onTableViewDoubleClick() {
@@ -246,42 +160,6 @@ extension HistoryPanelController {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(textForCopy, forType: .string)
                 }
-            }
-        }
-    }
-
-    // MARK: - summarize_item (single item by ID)
-
-    @objc func onSummarizeItem() {
-        let selected = tableView.selectedRow
-        guard selected >= 0, selected < items.count else {
-            showDiagnosticsOutput("Выберите запись для summary.")
-            return
-        }
-        let item = items[selected]
-        showDiagnosticsOutput("Summary: обрабатываю запись \(item.id.prefix(8))…")
-
-        let ipcClient = self.ipcClient
-        let itemID = item.id
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let response = try? ipcClient.call(method: "summarize_item", params: ["id": itemID]),
-                  let result = response["result"] as? [String: Any] else {
-                DispatchQueue.main.async {
-                    self?.showDiagnosticsOutput("Ошибка: не удалось построить summary для записи.")
-                }
-                return
-            }
-            let summary = result["summary"] as? String ?? "(нет текста)"
-            let isLLM = result["llm"] as? Bool ?? false
-            let sourceChars = result["source_chars"] as? Int ?? 0
-            let text = """
-            === Summary (ID: \(itemID.prefix(8))…) ===
-            \(summary)
-
-            [LLM: \(isLLM ? "да" : "нет"), источник: \(sourceChars) символов]
-            """
-            DispatchQueue.main.async {
-                self?.showDiagnosticsOutput(text)
             }
         }
     }

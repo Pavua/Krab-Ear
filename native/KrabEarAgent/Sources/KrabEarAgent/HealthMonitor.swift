@@ -300,11 +300,6 @@ extension HealthMonitor {
         }
     }
 
-    /// Отменяет probe-подписку, в том числе из тестов или при stop().
-    func cancelProbeSubscription() {
-        probeSubscriptionTask?.cancel()
-        probeSubscriptionTask = nil
-    }
 }
 
 // MARK: - Транспорт probe SSE

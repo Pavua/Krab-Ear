@@ -1446,13 +1446,6 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         notificationService.notify(title: title, body: body)
     }
 
-    func isBackendNotRecordingError(_ error: Error) -> Bool {
-        let lowered = error.localizedDescription.lowercased()
-        return lowered.contains("запись не была запущена")
-            || lowered.contains("recording was not started")
-            || lowered.contains("not recording")
-    }
-
     func stopAgent() {
         SentryConfig.recordTerminate(callsite: "stopAgent")
         NSApp.terminate(nil)

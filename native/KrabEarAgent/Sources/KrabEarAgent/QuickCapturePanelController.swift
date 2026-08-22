@@ -474,12 +474,6 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
         BackendToast.shared.show("Скопировано")
     }
 
-    // MARK: - «→ Notes» видимость (Task 2 читает quick_capture_send_to_notes)
-
-    func setSendToNotesVisible(_ visible: Bool) {
-        sendToNotesButton.isHidden = !visible
-    }
-
     // MARK: - Button actions
 
     @objc private func onToggleTapped() {
@@ -661,9 +655,7 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
 
         sendToNotesButton.target = self
         sendToNotesButton.action = #selector(onSendToNotesTapped)
-        // Видимость управляется владельцем через setSendToNotesVisible(_:) —
-        // по умолчанию скрыта до того, как Task 2 прочитает
-        // quick_capture_send_to_notes из настроек.
+        // Опциональное действие пока не включено в панель и скрыто по умолчанию.
         sendToNotesButton.isHidden = true
 
         let rightButtons = NSStackView(views: [copyAllButton, sendToNotesButton])

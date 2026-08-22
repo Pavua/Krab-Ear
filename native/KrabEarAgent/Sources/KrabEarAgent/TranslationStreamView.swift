@@ -313,20 +313,6 @@ final class TranslationStreamView: NSView {
         durationLabel.stringValue = String(format: "%02d:%02d", m, s)
     }
 
-    // MARK: - Public mutators
-
-    /// Меняет лейбл языковой пары (вызывается извне на settings change).
-    func setLanguagePair(source: String, target: String) {
-        langPairLabel.stringValue = "Пара: \(source) → \(target)"
-    }
-
-    /// Сбрасывает оба text views (новая сессия).
-    func clearHistory() {
-        entries.removeAll()
-        originalText.string = ""
-        translationText.string = ""
-    }
-
     // MARK: - SSE
 
     private func startSSE() {

@@ -300,65 +300,6 @@ public final class RealtimeOverlayController: NSObject {
         CATransaction.commit()
     }
 
-    // MARK: - Reveal Animation API
-
-    /// Показывает 3-стадийный reveal после stop_recording.
-    /// Stage 1 (raw Whisper) → Stage 2 (D.7 cleaned) → Stage 3 (LLM/итог).
-    /// По истечении `duration` автоматически вызывает hide().
-    public func showRevealAnimation(
-        rawText: String,
-        cleanedText: String,
-        finalText: String,
-        llmApplied: Bool,
-        duration: TimeInterval = 2.5
-    ) {
-        revealTask?.cancel()
-        stopAllPulse()
-        stopBreathing()    // F7-1: remove breathing when entering reveal
-        recordingDot.isHidden = true
-
-        if overlayState == .hidden {
-            setPrimaryText(rawText.isEmpty ? "…" : rawText)  // F7-4: kern-attributed
-            positionNearCursor()
-            panel.alphaValue = 0
-            panel.orderFront(nil)
-            animateShow()
-        }
-
-        overlayState = .reveal
-        // 4b: accent tint during transcribing (F7 token: 0.08)
-        tintView.tintColor = KrabEarTheme.Colors.accent.withAlphaComponent(0.04)
-
-        let stageInterval = duration / 3.0
-
-        revealTask = Task { @MainActor in
-            // Stage 1 — Распознано
-            showStage(text: rawText.isEmpty ? "…" : rawText, label: "Распознано")
-
-            try? await Task.sleep(nanoseconds: UInt64(stageInterval * 1_000_000_000))
-            guard !Task.isCancelled else { return }
-
-            // Stage 2 — Очищено
-            crossfadeStage(
-                text: cleanedText.isEmpty ? rawText : cleanedText,
-                label: "Очищено"
-            )
-
-            try? await Task.sleep(nanoseconds: UInt64(stageInterval * 1_000_000_000))
-            guard !Task.isCancelled else { return }
-
-            // Stage 3 — LLM или Итог
-            let finalLabel = llmApplied ? "LLM rewrite" : "Итог"
-            let finalContent = finalText.isEmpty ? (cleanedText.isEmpty ? rawText : cleanedText) : finalText
-            crossfadeStage(text: finalContent, label: finalLabel)
-
-            try? await Task.sleep(nanoseconds: UInt64((stageInterval + 0.4) * 1_000_000_000))
-            guard !Task.isCancelled else { return }
-
-            hide()
-        }
-    }
-
     // MARK: - Panel / View Setup
 
     private func setupPanel() {
@@ -604,48 +545,6 @@ public final class RealtimeOverlayController: NSObject {
         stopLabelPulse()
     }
 
-    // MARK: - Reveal animation helpers
-
-    private func showStage(text: String, label: String) {
-        stageBadge.stageText   = label
-        stageBadge.isHidden    = false
-        setPrimaryText(text)   // F7-4: kern-attributed
-        adjustHeight()
-    }
-
-    private func crossfadeStage(text: String, label: String) {
-        if reduceMotion {
-            stageBadge.stageText     = label
-            primaryLabel.stringValue = text
-            adjustHeight()
-            return
-        }
-        // F7-3: ease-out spring curve for liquid reveal (cubic-bezier 0.25/1/0.25/1)
-        let revealEasing = CAMediaTimingFunction(controlPoints: 0.25, 1.0, 0.25, 1.0)
-        NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = KrabEarTheme.Motion.Duration.short
-            ctx.timingFunction = revealEasing
-            ctx.allowsImplicitAnimation = true
-            primaryLabel.animator().alphaValue = 0
-            stageBadge.animator().alphaValue   = 0
-        }, completionHandler: { [weak self] in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.stageBadge.stageText      = label
-                self.stageBadge.isHidden       = false
-                self.setPrimaryText(text)      // F7-4: kern-attributed
-                self.adjustHeight()
-                NSAnimationContext.runAnimationGroup { ctx in
-                    ctx.duration = KrabEarTheme.Motion.Duration.short
-                    ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.25, 1.0, 0.25, 1.0)
-                    ctx.allowsImplicitAnimation = true
-                    self.primaryLabel.animator().alphaValue = 1.0
-                    self.stageBadge.animator().alphaValue   = 1.0
-                }
-            }
-        })
-    }
-
     // MARK: - Positioning
 
     private func positionNearCursor() {
@@ -779,11 +678,6 @@ public final class RealtimeOverlayController: NSObject {
         panel.setFrame(candidate, display: true)
         borderLayer.frame = effectView.bounds
         return true
-    }
-
-    /// Returns true if the user has a valid saved position (i.e., they've dragged the overlay before).
-    private func hasSavedPosition() -> Bool {
-        return UserDefaults.standard.dictionary(forKey: savedOriginKey) != nil
     }
 
     /// Saves the current panel origin to UserDefaults.
