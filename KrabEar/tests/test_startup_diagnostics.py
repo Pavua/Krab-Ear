@@ -968,3 +968,126 @@ class TestWave122RequiredNames(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ===========================================================================
+# Socket ownership (спека 2026-08-22): точный путь + self-owner матрица
+# ===========================================================================
+
+import socket as _socket_mod
+
+from backend.socket_ownership import (  # noqa: E402
+    SocketIdentity,
+    SocketOwnershipSnapshot,
+    SocketOwnershipState,
+)
+
+
+class SocketOwnershipDiagnosticsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="diagown_")
+        self.addCleanup(self.tmp.cleanup)
+        self.tmpdir = self.tmp.name
+        self.socket_path = Path(self.tmpdir) / "krab.sock"
+
+    def _listener(self) -> _socket_mod.socket:
+        s = _socket_mod.socket(_socket_mod.AF_UNIX, _socket_mod.SOCK_STREAM)
+        s.bind(str(self.socket_path))
+        s.listen(8)
+        self.addCleanup(s.close)
+        return s
+
+    def _snapshot(self, state, identity=None):
+        return SocketOwnershipSnapshot(
+            socket_path=self.socket_path, state=state, bound_identity=identity
+        )
+
+    def test_default_socket_path_uses_data_dir_krabear_sock(self):
+        diag = StartupDiagnostics(data_dir=self.tmpdir)
+        result = diag._check_socket_path_available()
+        self.assertEqual(
+            result.details["path"], str(Path(self.tmpdir) / "krabear.sock")
+        )
+
+    def test_custom_path_lands_verbatim_in_details(self):
+        diag = StartupDiagnostics(data_dir=self.tmpdir, socket_path=self.socket_path)
+        result = diag._check_socket_path_available()
+        self.assertEqual(result.details["path"], str(self.socket_path))
+
+    def test_claimed_plus_missing_is_self_ok(self):
+        diag = StartupDiagnostics(
+            data_dir=self.tmpdir,
+            socket_path=self.socket_path,
+            socket_ownership_snapshot_getter=lambda: self._snapshot(
+                SocketOwnershipState.CLAIMED
+            ),
+        )
+        result = diag._check_socket_path_available()
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.details["owner"], "self")
+        self.assertEqual(result.details["ownership_state"], "claimed")
+
+    def test_owned_listener_with_matching_inode_is_self_ok(self):
+        self._listener()
+        st = self.socket_path.lstat()
+        diag = StartupDiagnostics(
+            data_dir=self.tmpdir,
+            socket_path=self.socket_path,
+            socket_ownership_snapshot_getter=lambda: self._snapshot(
+                SocketOwnershipState.LISTENING,
+                SocketIdentity(st.st_dev, st.st_ino),
+            ),
+        )
+        result = diag._check_socket_path_available()
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.details["owner"], "self")
+        self.assertEqual(result.details["ownership_state"], "listening")
+
+    def test_listening_state_with_missing_socket_is_warning(self):
+        diag = StartupDiagnostics(
+            data_dir=self.tmpdir,
+            socket_path=self.socket_path,
+            socket_ownership_snapshot_getter=lambda: self._snapshot(
+                SocketOwnershipState.LISTENING,
+                SocketIdentity(1, 2),
+            ),
+        )
+        result = diag._check_socket_path_available()
+        self.assertEqual(result.status, "warning")
+
+    def test_listening_state_with_mismatched_inode_is_warning(self):
+        self._listener()
+        diag = StartupDiagnostics(
+            data_dir=self.tmpdir,
+            socket_path=self.socket_path,
+            socket_ownership_snapshot_getter=lambda: self._snapshot(
+                SocketOwnershipState.LISTENING,
+                SocketIdentity(0xDEAD, 0xBEEF),
+            ),
+        )
+        result = diag._check_socket_path_available()
+        self.assertEqual(result.status, "warning")
+
+    def test_foreign_listener_without_snapshot_is_warning(self):
+        self._listener()
+        diag = StartupDiagnostics(data_dir=self.tmpdir, socket_path=self.socket_path)
+        result = diag._check_socket_path_available()
+        self.assertEqual(result.status, "warning")
+        self.assertEqual(result.details.get("path_status"), "listening")
+
+    def test_stale_socket_without_snapshot_is_ok(self):
+        s = _socket_mod.socket(_socket_mod.AF_UNIX, _socket_mod.SOCK_STREAM)
+        s.bind(str(self.socket_path))
+        s.listen(1)
+        s.close()
+        diag = StartupDiagnostics(data_dir=self.tmpdir, socket_path=self.socket_path)
+        result = diag._check_socket_path_available()
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.details.get("path_status"), "stale")
+
+    def test_occupied_regular_file_is_warning_and_untouched(self):
+        self.socket_path.write_text("keep", encoding="utf-8")
+        diag = StartupDiagnostics(data_dir=self.tmpdir, socket_path=self.socket_path)
+        result = diag._check_socket_path_available()
+        self.assertEqual(result.status, "warning")
+        self.assertEqual(self.socket_path.read_text(encoding="utf-8"), "keep")

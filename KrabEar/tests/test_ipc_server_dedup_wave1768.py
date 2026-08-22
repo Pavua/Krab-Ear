@@ -88,7 +88,10 @@ class ProductionUsesHardenedClassTestCase(unittest.TestCase):
     def test_main_instantiates_ipcserver_with_expected_kwargs(self):
         """main() инстанцирует IPCServer(socket_path=..., service=...) и пишет _ipc_server."""
         main_src = inspect.getsource(svc_mod.main)
-        self.assertIn("IPCServer(socket_path=socket_path, service=service)", main_src)
+        self.assertIn(
+            "IPCServer(socket_path=socket_path, service=service, ownership=ownership)",
+            main_src,
+        )
         self.assertIn("service._ipc_server = server", main_src)
 
     def test_hardened_instance_has_slow_loris_guard(self):

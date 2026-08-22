@@ -878,10 +878,13 @@ class BackendServiceTestCase(unittest.TestCase):
         store_access_after_close = threading.Event()
         original_load_settings = self.service.store.load_settings
 
-        def tracked_load_settings():
+        def tracked_load_settings(*args, **kwargs):
+            # 🔴 Класс «фейк отстал от StateStore»: прод зовёт
+            # load_settings(lock_timeout_sec=…/nowait=…) — замыкание обязано
+            # принимать те же kwargs (мина взводится сдвигом чанков CI).
             if close_returned.is_set():
                 store_access_after_close.set()
-            return original_load_settings()
+            return original_load_settings(*args, **kwargs)
 
         self.service.store.load_settings = tracked_load_settings  # type: ignore[method-assign]
         self.service._settings_svc._cache_ttl = 0.0

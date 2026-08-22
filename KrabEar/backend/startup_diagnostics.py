@@ -11,12 +11,13 @@ import logging
 import os
 import shutil
 import socket
+import stat
 import sys
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from KrabEar.__version__ import __version__ as APP_VERSION
 from backend.observability import add_breadcrumb
@@ -92,9 +93,14 @@ class StartupDiagnostics:
         data_dir: Path | str | None = None,
         socket_path: Path | str | None = None,
         cache_ttl_sec: float = 60.0,
+        *,
+        socket_ownership_snapshot_getter: Callable[[], Any] | None = None,
     ) -> None:
         self._data_dir: Path | None = Path(data_dir) if data_dir else None
         self._socket_path: Path | str | None = socket_path
+        # Спека 2026-08-22 socket-ownership: immutable snapshot текущего claim
+        # позволяет отличить СЕБЯ (claimed/listening) от чужого listener'а.
+        self._socket_ownership_snapshot_getter = socket_ownership_snapshot_getter
         self._cache_ttl_sec = cache_ttl_sec
         self._cached_report: StartupReport | None = None
         self._cache_ts: float = 0.0
@@ -327,56 +333,156 @@ class StartupDiagnostics:
             )
 
     def _check_socket_path_available(self) -> CheckResult:
-        """Unix socket path не занят существующим файлом (или занят нашим процессом)."""
+        """Состояние canonical socket endpoint'а с учётом собственного claim'а.
+
+        Спека 2026-08-22 socket-ownership: путь — ТОЧНЫЙ (переданный или
+        ``default_socket_path``), «занято» отличает себя от чужого listener'а
+        по snapshot'у claim'а + identity inode; probe read-only.
+        """
         t0 = time.monotonic()
+        from backend.socket_ownership import (
+            SocketOwnershipState,
+            SocketPathStatus,
+            default_socket_path,
+            probe_unix_socket_path,
+        )
+
+        def _result(status: str, message: str, **details: Any) -> CheckResult:
+            return CheckResult(
+                name="socket_path",
+                status=status,
+                message=message,
+                duration_ms=(time.monotonic() - t0) * 1000.0,
+                details=details,
+            )
+
         try:
-            if self._socket_path is None:
-                # Используем дефолтный путь из конфига
+            if self._socket_path is not None:
+                sock_path = Path(self._socket_path)
+            elif self._data_dir is not None:
+                sock_path = default_socket_path(self._data_dir)
+            else:
                 try:
                     from core.config import settings
-                    sock_path = Path(settings.DATA_DIR) / "backend.sock"
+                    sock_path = default_socket_path(Path(settings.DATA_DIR))
                 except Exception:
-                    sock_path = Path.home() / ".krab_ear_data" / "backend.sock"
-            else:
-                sock_path = Path(self._socket_path)
+                    sock_path = default_socket_path(
+                        Path.home() / ".krab_ear_data"
+                    )
 
-            if sock_path.exists():
-                # Проверяем, жив ли процесс на другом конце
+            snapshot = None
+            if self._socket_ownership_snapshot_getter is not None:
                 try:
-                    test_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                    test_sock.settimeout(0.5)
-                    test_sock.connect(str(sock_path))
-                    test_sock.close()
-                    return CheckResult(
-                        name="socket_path",
-                        status="warning",
-                        message=f"На сокете {sock_path} уже слушает другой процесс",
-                        duration_ms=(time.monotonic() - t0) * 1000.0,
-                        details={"path": str(sock_path), "stale": False},
+                    snapshot = self._socket_ownership_snapshot_getter()
+                except Exception:
+                    snapshot = None
+
+            own_state = snapshot.state if snapshot is not None else None
+
+            # Ревью F7: доказательство «слушаем мы» — БЕЗ connect'а к самому
+            # себе (каждый TTL-прогон занимал бы слот семафора и handler-тред,
+            # а под нагрузкой connect-таймаут давал бы ложный warning).
+            # lstat + сравнение с bound_identity достаточно: state=LISTENING
+            # держим мы сами, значит совпавший inode = наш живой listener.
+            if (
+                own_state is SocketOwnershipState.LISTENING
+                and snapshot.bound_identity is not None
+            ):
+                try:
+                    _st = os.lstat(sock_path)
+                except OSError:
+                    _st = None
+                if _st is not None and stat.S_ISSOCK(_st.st_mode) and (
+                    (_st.st_dev, _st.st_ino)
+                    == (snapshot.bound_identity.device, snapshot.bound_identity.inode)
+                ):
+                    return _result(
+                        "ok",
+                        f"На {sock_path} слушаем мы (inode совпадает)",
+                        path=str(sock_path),
+                        path_status="listening",
+                        ownership_state=own_state.value,
+                        owner="self",
+                        stale=False,
+                        exists=True,
                     )
-                except (ConnectionRefusedError, OSError):
-                    # Сокет-файл есть, но никто не слушает — стейл
-                    return CheckResult(
-                        name="socket_path",
-                        status="ok",
-                        message=f"Обнаружен стейловый сокет {sock_path}, будет перезаписан",
-                        duration_ms=(time.monotonic() - t0) * 1000.0,
-                        details={"path": str(sock_path), "stale": True},
+
+            probe = probe_unix_socket_path(sock_path)
+            base = {
+                "path": str(sock_path),
+                "path_status": probe.status.value,
+                "ownership_state": (
+                    snapshot.state.value if snapshot is not None else None
+                ),
+                "owner": None,
+                # Совместимость прежней схемы details (спека: ключи только
+                # добавляются): stale/exists выводимы из path_status.
+                "stale": probe.status is SocketPathStatus.STALE,
+                "exists": probe.status is not SocketPathStatus.MISSING,
+            }
+
+            if own_state is not None and own_state is not SocketOwnershipState.UNCLAIMED:
+                if (
+                    own_state is SocketOwnershipState.CLAIMED
+                    and probe.status is SocketPathStatus.MISSING
+                ):
+                    base["owner"] = "self"
+                    return _result(
+                        "ok",
+                        f"Endpoint {sock_path} закреплён за нами (до bind)",
+                        **base,
                     )
-            return CheckResult(
-                name="socket_path",
-                status="ok",
-                message=f"Путь к сокету доступен: {sock_path}",
-                duration_ms=(time.monotonic() - t0) * 1000.0,
-                details={"path": str(sock_path), "exists": False},
+                if (
+                    own_state is SocketOwnershipState.LISTENING
+                    and probe.status is SocketPathStatus.LISTENING
+                    and snapshot.bound_identity is not None
+                    and probe.identity is not None
+                    and (probe.identity.device, probe.identity.inode)
+                    == (
+                        snapshot.bound_identity.device,
+                        snapshot.bound_identity.inode,
+                    )
+                ):
+                    base["owner"] = "self"
+                    return _result(
+                        "ok",
+                        f"На {sock_path} слушаем мы (inode совпадает)",
+                        **base,
+                    )
+                # Self-state противоречит probe — не маскируем поломку.
+                return _result(
+                    "warning",
+                    (
+                        f"Состояние claim'а ({own_state.value}) противоречит "
+                        f"наблюдению пути ({probe.status.value})"
+                    ),
+                    **base,
+                )
+
+            if probe.status is SocketPathStatus.MISSING:
+                return _result(
+                    "ok", f"Путь к сокету доступен: {sock_path}", **base
+                )
+            if probe.status is SocketPathStatus.STALE:
+                return _result(
+                    "ok",
+                    f"Обнаружен стейловый сокет {sock_path} — будет очищен под claim'ом",
+                    **base,
+                )
+            if probe.status is SocketPathStatus.LISTENING:
+                base["owner"] = "other"
+                return _result(
+                    "warning",
+                    f"На сокете {sock_path} уже слушает другой процесс",
+                    **base,
+                )
+            return _result(
+                "warning",
+                f"Путь {sock_path} занят не-сокетом или неоднозначен ({probe.error})",
+                **base,
             )
         except Exception as exc:
-            return CheckResult(
-                name="socket_path",
-                status="warning",
-                message=f"Не удалось проверить путь к сокету: {exc}",
-                duration_ms=(time.monotonic() - t0) * 1000.0,
-            )
+            return _result("warning", f"Не удалось проверить путь к сокету: {exc}")
 
     def _check_ffmpeg_available(self) -> CheckResult:
         """ffmpeg доступен в PATH."""
