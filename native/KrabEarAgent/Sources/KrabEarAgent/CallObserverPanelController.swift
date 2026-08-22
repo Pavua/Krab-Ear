@@ -8,6 +8,9 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
 
     private let stateBadge = NSTextField(labelWithString: "")
     private let costLabel = NSTextField(labelWithString: "—")
+    /// MED-4 (w1 final): липкий cost-alert бейдж — ОТДЕЛЬНОЕ поле от costLabel
+    /// (которое перетирается периодическим cost-поллером координатора).
+    private let costAlertLabel = NSTextField(labelWithString: "")
     private let listenButton = NSButton()
     private let hangupButton = NSButton()
     private let transcriptStack = NSStackView()
@@ -55,6 +58,11 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
 
     func updateCost(_ text: String) { costLabel.stringValue = text }
 
+    func setCostAlert(_ text: String?) {
+        costAlertLabel.stringValue = text ?? ""
+        costAlertLabel.isHidden = text?.isEmpty ?? true
+    }
+
     func setTerminal(message: String) {
         stateBadge.stringValue = message
         listenButton.isEnabled = false
@@ -76,7 +84,9 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
 
     func presentHangupConfirm() { onHangupTapped() }
 
-    @objc private func onListenTapped() { coordinator?.userToggledListen() }
+    // HIGH-1 (w1 final): панельная кнопка целится строго в selectedId — она не
+    // смеет угонять выбор панели на hudTrackedId (см. coordinator doc-comment).
+    @objc private func onListenTapped() { coordinator?.userToggledListenFromPanel() }
 
     @objc private func onHangupTapped() {
         guard let window, !hangupSheetOpen else { return }
@@ -129,7 +139,11 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
         sessionPicker.target = self
         sessionPicker.action = #selector(onSessionPicked)
         sessionPicker.isHidden = true
-        let header = NSStackView(views: [stateBadge, sessionPicker, NSView(), costLabel, listenButton, hangupButton])
+        costAlertLabel.textColor = .systemOrange
+        costAlertLabel.font = .boldSystemFont(ofSize: 12)
+        costAlertLabel.isHidden = true
+        let header = NSStackView(views: [stateBadge, sessionPicker, NSView(), costAlertLabel,
+                                         costLabel, listenButton, hangupButton])
         header.orientation = .horizontal
         header.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 4, right: 12)
 

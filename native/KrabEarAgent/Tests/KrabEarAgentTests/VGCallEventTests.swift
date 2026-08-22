@@ -82,4 +82,25 @@ final class VGCallEventTests: XCTestCase {
         XCTAssertNil(decode("not json"))
         XCTAssertNil(decode(#"{"no_type":1}"#))
     }
+
+    // MARK: - T2 (w1 final): фикстуры РЕАЛЬНОЙ формы VG (сверено с app/main.py,
+    // app/engines/realtime.py, app/telephony/telegram.py в Krab Voice Gateway).
+
+    /// Все 3 publish-сайта diagnostic.error в VG шлют РОВНО {"msg": "..."} —
+    /// "message"/"detail" — только бэккомпат-фоллбэк декодера, ни один живой
+    /// сайт их не несёт.
+    func test_diagnosticError_real_vg_shape_uses_msg_key() {
+        let e = decode(#"{"type":"diagnostic.error","ts":"t","data":{"msg":"realtime_ws_closed"}}"#)
+        XCTAssertEqual(e, .diagnosticError(message: "realtime_ws_closed"))
+    }
+
+    func test_screeningStarted_real_vg_shape() {
+        let e = decode(#"{"type":"screening.started","ts":"t","data":{"phone":"+34600000000","contact_name":"Ana","session_id":"s1"}}"#)
+        XCTAssertEqual(e, .screeningStarted)
+    }
+
+    func test_callAnswered_real_vg_shape() {
+        let e = decode(#"{"type":"call.answered","ts":"t","data":{"call_sid":"CA1","twilio_status":"in-progress","provider":"twilio"}}"#)
+        XCTAssertEqual(e, .callAnswered)
+    }
 }

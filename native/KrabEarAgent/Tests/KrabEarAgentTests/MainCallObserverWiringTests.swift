@@ -32,4 +32,19 @@ final class MainCallObserverWiringTests: XCTestCase {
                        "main+CallObserver.swift обязан использовать реальные " +
                        "CallObserverHUD()/CallObserverPanelController(), не заглушки T8")
     }
+
+    /// MED-2 (w1 final): пункт «Звонок агента…» обязан гейтиться через
+    /// NSMenuItemValidation — с autoenablesItems=true (default) ручной
+    /// isEnabled без этого conformance декоративен, AppKit перезаписывает его
+    /// при каждом открытии меню (см. refreshCallObserverMenuItem doc-comment).
+    func test_validateMenuItem_gates_call_observer_menu_item() throws {
+        let source = try sourceText("main+CallObserver.swift")
+        XCTAssertTrue(source.contains("AgentAppDelegate: NSMenuItemValidation"),
+                      "AgentAppDelegate обязан conform-иться к NSMenuItemValidation")
+        XCTAssertTrue(source.contains("func validateMenuItem"),
+                      "validateMenuItem обязан быть реализован — иначе гейт декоративен")
+        XCTAssertTrue(source.contains("#selector(onOpenCallObserverPanel)") &&
+                      source.contains("hasLiveCall"),
+                      "validateMenuItem обязан гейтить именно onOpenCallObserverPanel по hasLiveCall")
+    }
 }

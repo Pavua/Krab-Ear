@@ -24,7 +24,10 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
 
     func showHUD(session: VGSessionInfo) {
         if panel == nil { buildPanel() }
-        callCreatedAt = ISO8601DateFormatter().date(from: session.createdAt)
+        // L3 (w1 final, sibling-асимметрия): VG отдаёт ISO и с долями секунды, и
+        // без — общий VGSessionWatcher.parseISO уже принимает оба формата, свой
+        // одноразовый ISO8601DateFormatter() здесь ловил только один из них.
+        callCreatedAt = VGSessionWatcher.parseISO(session.createdAt)
         statusLabel.stringValue = "\(session.callDirection) \(session.phone)"
         // I-4 (координатор): ЛЮБОЙ showHUD — включая повторный для уже видимого
         // HUD — обязан очистить ранее показанный linger-текст.

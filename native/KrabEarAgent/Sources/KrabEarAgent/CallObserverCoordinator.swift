@@ -39,6 +39,12 @@ protocol CallObserverPanelPresenting: AnyObject {
     func updateTranscript(_ entries: [TranscriptEntry])
     func updateStatus(status: String, muted: Bool?, held: Bool?, badge: String?)
     func updateCost(_ text: String)
+    /// MED-4 (w1 final): липкий cost-alert бейдж — ОТДЕЛЬНОЕ поле от updateCost:
+    /// updateCost перетирается периодическим cost-поллером (каждые
+    /// costPollInterval секунд), а alert обязан пережить эти тики (не смыться
+    /// до terminal). nil — скрыть (например при восстановлении состояния
+    /// звонка без активного алерта).
+    func setCostAlert(_ text: String?)
     func setTerminal(message: String)
     func setLive()
     func closeHangupSheetIfOpen()
@@ -80,6 +86,10 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
         var generation: UInt64
         var terminalDelivered = false
         var transcript: [TranscriptEntry] = []
+        /// MED-4 (w1 final): последний cost.alert текст этого звонка — липкий,
+        /// живёт в модели (не в UI), переживает close/reopen панели и
+        /// resurrection; restoring его — дело presentCallState(_:).
+        var costAlertText: String?
     }
 
     private let hud: CallObserverHUDPresenting
@@ -174,12 +184,12 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
     // MARK: - Watcher delegate (main queue)
 
     func watcherCallAppeared(_ s: VGSessionInfo, generation: UInt64, resurrected: Bool) {
-        refreshSettings()
         lingerWork?.cancel()  // B в linger-окне A: чужой таймер не смеет спрятать живой HUD
         lingerWork = nil
         var call = ObservedCall(session: s, generation: generation)
         if resurrected, let old = observed[s.id] {
             call.transcript = old.transcript  // VG не реплеит историю — не стирать
+            call.costAlertText = old.costAlertText  // MED-4: липкий бейдж переживает resurrection
         }
         observed[s.id] = call
         // C-1 + P-1 (ревью round 1 + round 2 — обе половинки одного правила):
@@ -204,8 +214,9 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
         if s.id == selectedId {
             connectStreams(for: call)
             if resurrected, panel.isPanelVisible {
-                panel.setLive()
-                startCostTimer()  // I-6: cost-поллинг был остановлен terminal'ом до resurrection
+                // I-6: cost-поллинг был остановлен terminal'ом до resurrection.
+                // MED-4: presentCallState тоже реставрирует липкий cost-alert.
+                presentCallState(call)
             }
             pushTranscript()
         }
@@ -217,14 +228,24 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
         // закрытия HUD никогда бы не показался автоматически снова, даже для
         // совершенно НЕСВЯЗАННОГО будущего звонка.
         if !resurrected { hudManuallyClosed = false }
-        maybeAutoShowHUD(for: s)
-        if autoplay && !privacyMode && !resurrected && s.id == selectedId {
-            player.startListening(baseURL: baseURL, sessionId: s.id,
-                                  generation: generation, tokenProvider: tokenProvider)
-        }
         clearLingerIfShowingAndLive()  // I-4: живой звонок гасит стейл linger-надпись
         pruneStaleTerminalObserved(keeping: s.id)  // память + будущий пикер
         refreshHUD()
+        // MED-1 (w1 final, паттерн I-5 из watcherCallUpdated): refreshSettings
+        // асинхронен в проде (IPC-роундтрип) — maybeAutoShowHUD/autoplay читают
+        // hudEnabled/autoplay/privacyMode и ОБЯЗАНЫ ждать completion этого
+        // конкретного refresh, а не читать ещё стейл-ивары синхронно "сразу
+        // после" вызова refreshSettings(). До фикса первый callAppeared мог на
+        // мгновение показать HUD на стейл privacyMode=false ДО того, как
+        // свежий privacy=true успевал примениться (flash-and-hide).
+        refreshSettings { [weak self] in
+            guard let self else { return }
+            self.maybeAutoShowHUD(for: s)
+            if self.autoplay && !self.privacyMode && !resurrected && s.id == self.selectedId {
+                self.player.startListening(baseURL: self.baseURL, sessionId: s.id,
+                                           generation: generation, tokenProvider: self.tokenProvider)
+            }
+        }
     }
 
     func watcherCallUpdated(_ s: VGSessionInfo, generation: UInt64) {
@@ -269,11 +290,27 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
         switch event {
         case .sttFinal(let text, _, _):
             append(&call, .init(kind: .remote(text: text, translation: nil)))
-        case .translationFinal(let text, _, _, _):
-            // Перевод приклеивается к последней remote-строке без перевода.
-            if let idx = call.transcript.lastIndex(where: {
-                if case .remote(_, nil) = $0.kind { return true } else { return false }
-            }), case .remote(let orig, _) = call.transcript[idx].kind {
+        case .translationFinal(let text, let sourceText, _, _):
+            // MED-3 (w1 final): матчим СНАЧАЛА по sourceText == тексту remote-строки
+            // без перевода — при двух remote-репликах "в полёте" переводы
+            // выполняются НЕЗАВИСИМО и могут прийти в обратном порядке (короткая
+            // вторая фраза перевелась быстрее длинной первой); старый матч
+            // "последняя непереведённая" в этом случае клеил перевод не к той
+            // реплике. Фоллбэк на lastIndex остаётся — не все publish-сайты VG
+            // несут source_text (см. VGCallEvent.decode).
+            var idx: Int?
+            if let sourceText {
+                idx = call.transcript.firstIndex(where: {
+                    if case .remote(let orig, nil) = $0.kind { return orig == sourceText }
+                    return false
+                })
+            }
+            if idx == nil {
+                idx = call.transcript.lastIndex(where: {
+                    if case .remote(_, nil) = $0.kind { return true } else { return false }
+                })
+            }
+            if let idx, case .remote(let orig, _) = call.transcript[idx].kind {
                 call.transcript[idx] = .init(kind: .remote(text: orig, translation: text))
             } else {
                 append(&call, .init(kind: .remote(text: "", translation: text)))
@@ -314,7 +351,12 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
         case .screeningStarted:
             append(&call, .init(kind: .system("Скрининг входящего")))
         case .costAlert(_, let usd, _):
-            panel.updateCost(usd.map { String(format: "⚠ $%.2f", $0) } ?? "⚠")
+            // MED-4 (w1 final): липкий бейдж, НЕ costLabel — costLabel перетирается
+            // периодическим cost-поллером (startCostTimer). Модель (ObservedCall)
+            // хранит текст, чтобы пережить close/reopen панели до terminal.
+            call.costAlertText = usd.map { String(format: "⚠ $%.2f", $0) } ?? "⚠"
+            observed[id] = call
+            if panel.isPanelVisible { panel.setCostAlert(call.costAlertText) }
             return
         case .callRinging, .callAnswered, .ignored:
             return
@@ -380,12 +422,7 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
         hudAutoShown = false  // I-4 minor: expand — явное действие владельца, не "авто" больше
         hudShowingLinger = false  // M-1: инвариант — каждый hideHUD гасит флаг linger'а
         panel.showPanel(session: call.session)
-        if call.terminalDelivered {
-            panel.setTerminal(message: "Звонок завершён")
-        } else {
-            panel.setLive()
-            startCostTimer()
-        }
+        presentCallState(call)
         pushTranscript()
     }
 
@@ -411,21 +448,43 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
         }
     }
 
-    /// P-2 (ревью): HUD рисует hudTrackedId (новейший живой), а не обязательно
-    /// selectedId — действие с HUD ОБЯЗАНО целиться в то, что владелец реально
-    /// видит. Если они разошлись, сперва легитимно ре-байндим стримы/cost через
-    /// `rebind(to:)` (T9 2в: БЕЗ показа панели — иначе клик по HUD внезапно
-    /// выкатывал бы владельцу окно панели, которое он не открывал), и только
-    /// потом выполняем действие над (уже актуальным) selectedId.
+    /// P-2 (ревью) + HIGH-1 (w1 final): HUD рисует hudTrackedId (новейший живой),
+    /// а не обязательно selectedId — HUD-действие ОБЯЗАНО целиться в то, что
+    /// владелец реально видит на плашке. Когда панель ЗАКРЫТА, ничто больше не
+    /// владеет выбором — разрешаем HUD ре-байндить стримы/cost на hudTrackedId
+    /// (T9 2в: БЕЗ показа панели — иначе клик по HUD внезапно выкатывал бы
+    /// владельцу окно панели, которое он не открывал). Когда панель ОТКРЫТА,
+    /// она уже владеет selectedId (P-1 invariant) — HUD-клик НЕ смеет его
+    /// угнать: слушаем hudTrackedId НАПРЯМУЮ (player берёт sessionId явным
+    /// параметром, не читает selectedId), а расхождение selectedId и реально
+    /// слушаемой сессии честно отражает listeningSessionId в updateHUD (T9 2г).
+    /// Панельная кнопка прослушки идёт через отдельный userToggledListenFromPanel
+    /// ниже — она не смеет угонять выбор панели вовсе, даже когда панель закрыта.
     func userToggledListen() {
-        if let tracked = hudTrackedId, tracked != selectedId {
-            rebind(to: tracked)
+        guard let trackedId = hudTrackedId, let trackedCall = observed[trackedId],
+              !trackedCall.terminalDelivered else { return }
+        if !panel.isPanelVisible, trackedId != selectedId {
+            rebind(to: trackedId)
         }
+        toggleListen(sessionId: trackedId, generation: trackedCall.generation)
+    }
+
+    /// HIGH-1 (w1 final): панельная кнопка прослушки целится СТРОГО в selectedId —
+    /// панель уже владеет выбором (см. rebind/P-1), её собственная кнопка не
+    /// смеет его сдвинуть, даже когда hudTrackedId указывает на другой (более
+    /// новый) звонок. Без этого разделения нажатие «Слушать» в открытой панели
+    /// на s1 могло тихо угнать selectedId на новейший s2 — и последующий hangup
+    /// из ТОЙ ЖЕ панели улетел бы не в тот звонок.
+    func userToggledListenFromPanel() {
         guard let id = selectedId, let call = observed[id], !call.terminalDelivered else { return }
+        toggleListen(sessionId: id, generation: call.generation)
+    }
+
+    private func toggleListen(sessionId: String, generation: UInt64) {
         if listenState == .idle || listenState == .subscriberLimit || listenState == .failed {
             listenStartedManually = true
-            player.startListening(baseURL: baseURL, sessionId: id,
-                                  generation: call.generation, tokenProvider: tokenProvider)
+            player.startListening(baseURL: baseURL, sessionId: sessionId,
+                                  generation: generation, tokenProvider: tokenProvider)
         } else {
             listenStartedManually = false
             player.stopListening()
@@ -474,23 +533,14 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
         guard let call = observed[id], id != selectedId else { return }
         rebind(to: id)
         panel.showPanel(session: call.session)  // showPanel НЕ трогает state-бейдж
-        if call.terminalDelivered {
-            panel.setTerminal(message: "Звонок завершён")
-        } else {
-            panel.setLive()
-        }
+        presentCallState(call)
         pushTranscript()
     }
 
     func openPanelFromMenu() {
         guard let id = selectedId, let call = observed[id] else { return }
         panel.showPanel(session: call.session)
-        if call.terminalDelivered {
-            panel.setTerminal(message: "Звонок завершён")
-        } else {
-            panel.setLive()
-            startCostTimer()
-        }
+        presentCallState(call)
         pushTranscript()
     }
 
@@ -512,6 +562,20 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
     /// иначе клик по кнопке на HUD, нацеленный на другую сессию
     /// (hudTrackedId != selectedId), тихо выкатывал бы владельцу окно панели,
     /// которое он не открывал.
+    /// MED-4 (w1 final): единая точка "показать состояние звонка на панели" —
+    /// live/terminal-бейдж + реставрация липкого cost-alert (ObservedCall.costAlertText,
+    /// НЕ costLabel/поллер). Вызывающая сторона уже гарантирует видимость панели
+    /// (только что вызвала showPanel или проверила panel.isPanelVisible).
+    private func presentCallState(_ call: ObservedCall) {
+        if call.terminalDelivered {
+            panel.setTerminal(message: "Звонок завершён")
+        } else {
+            panel.setLive()
+            startCostTimer()
+        }
+        panel.setCostAlert(call.costAlertText)
+    }
+
     private func rebind(to id: String) {
         guard let call = observed[id], id != selectedId else { return }
         selectedId = id
@@ -519,7 +583,9 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
         player.stopListening()
         if !call.terminalDelivered {
             connectStreams(for: call)
-            startCostTimer()
+            // L1 (w1 final): cost-таймер кормит только panel.updateCost — нет
+            // смысла его гонять, пока панель не видна никому.
+            if panel.isPanelVisible { startCostTimer() }
         }
     }
 

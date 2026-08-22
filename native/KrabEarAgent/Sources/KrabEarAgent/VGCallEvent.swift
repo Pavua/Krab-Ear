@@ -57,7 +57,10 @@ enum VGCallEvent: Equatable {
         case "call.answered": return .callAnswered
         case "call.ended": return .callEnded(reason: s("reason"))
         case "call.closed": return .callClosed
-        case "diagnostic.error": return .diagnosticError(message: s("message") ?? s("detail"))
+        // T2 (w1 final): реальные VG publish-сайты (app/main.py, engines/realtime.py,
+        // telephony/telegram.py) шлют РОВНО {"msg": "..."} — "message"/"detail"
+        // остаются лишь бэккомпат-фоллбэком, ни один живой сайт их не несёт.
+        case "diagnostic.error": return .diagnosticError(message: s("msg") ?? s("message") ?? s("detail"))
         case "screening.started": return .screeningStarted
         case "cost.alert":
             return .costAlert(level: s("level"), currentUsd: dbl("current_usd"), message: s("message"))

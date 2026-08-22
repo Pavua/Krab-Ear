@@ -52,8 +52,30 @@ extension AgentAppDelegate {
     /// (первичное построение) и menuWillOpen (main+MenuBarRecap.swift), тот же
     /// паттерн, что refreshBrainLeaseMenuItem/refreshMemoryLineMenuItem. Никакого
     /// IPC не нужно — `hasLiveCall` уже в памяти координатора.
+    ///
+    /// MED-2 (w1 final): NSMenu.autoenablesItems (default) без conformance к
+    /// NSMenuItemValidation игнорирует ручной isEnabled — AppKit сам решает
+    /// "target отвечает на action ⇒ enabled=true" при каждом открытии меню, так
+    /// что эта строка была декоративной (см. AgentAppDelegate: NSMenuItemValidation
+    /// ниже — теперь единственный контракт, который реально управляет
+    /// enabled-состоянием). Оставлено как belt-and-braces для начального вида
+    /// пункта СРАЗУ после rebuildStatusMenu(), до первого menuWillOpen — не
+    /// вредит, просто избыточно с этого момента.
     func refreshCallObserverMenuItem() {
         callObserverMenuItem?.isEnabled = callObserverCoordinator?.hasLiveCall ?? false
+    }
+}
+
+// MARK: - MED-2 (w1 final): NSMenuItemValidation — единственный реальный контракт
+// enabled-состояния при autoenablesItems=true (см. refreshCallObserverMenuItem
+// doc-comment выше). Список пополняется по мере появления других
+// selection/state-зависимых пунктов статус-меню.
+extension AgentAppDelegate: NSMenuItemValidation {
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(onOpenCallObserverPanel) {
+            return callObserverCoordinator?.hasLiveCall ?? false
+        }
+        return true
     }
 }
 

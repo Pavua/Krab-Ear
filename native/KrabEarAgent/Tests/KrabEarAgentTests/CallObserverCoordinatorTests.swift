@@ -17,13 +17,15 @@ private final class SpyHUD: CallObserverHUDPresenting {
 private final class SpyPanel: CallObserverPanelPresenting {
     var shown: [String] = []; var transcripts: [[TranscriptEntry]] = []
     var terminals: [String] = []; var lives = 0; var sheetCloses = 0
-    var costs: [String] = []; var badges: [String?] = []; var hangupPrompts = 0
+    var costs: [String] = []; var costAlerts: [String?] = []
+    var badges: [String?] = []; var hangupPrompts = 0
     var isPanelVisible = false
     func showPanel(session: VGSessionInfo) { shown.append(session.id); isPanelVisible = true }
     func updateTranscript(_ entries: [TranscriptEntry]) { transcripts.append(entries) }
     func updateStatus(status: String, muted: Bool?, held: Bool?, badge: String?) { badges.append(badge) }
     func presentHangupConfirm() { hangupPrompts += 1 }
     func updateCost(_ text: String) { costs.append(text) }
+    func setCostAlert(_ text: String?) { costAlerts.append(text) }
     func setTerminal(message: String) { terminals.append(message) }
     func setLive() { lives += 1 }
     func closeHangupSheetIfOpen() { sheetCloses += 1 }
@@ -473,5 +475,86 @@ final class CallObserverCoordinatorTests: XCTestCase {
         c.openPanelFromMenu(); drain()
         XCTAssertEqual(panel.shown.last, "s2",
                        "после закрытия панели выбор обязан перейти на новейший живой звонок")
+    }
+
+    // MARK: - Final fix wave (w1 final)
+
+    /// HIGH-1: панельная кнопка прослушки НЕ угоняет выбор панели. Два живых
+    /// звонка; панель открыта на s1 (s2 — новее, hudTrackedId == s2).
+    /// userToggledListenFromPanel обязан слушать s1 (то, что реально
+    /// показывает панель), НЕ перетаскивать selectedId на s2 — иначе
+    /// следующий hangup из ТОЙ ЖЕ панели улетел бы не туда.
+    func test_panel_listen_targets_selected_not_hud_tracked_and_does_not_rebind() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.openPanelFromMenu(); drain()  // панель открыта на s1
+        c.watcherCallAppeared(session("s2"), generation: 2, resurrected: false); drain()  // s2 новее — HUD переезжает
+        var capturedURL: URL?
+        player.connectionFactoryForTests = { url, _, _, _ in
+            capturedURL = url
+            final class NoopConn: VGWebSocketConnecting { func connect() {}; func permanentStop() {} }
+            return NoopConn()
+        }
+        c.userToggledListenFromPanel(); drain()
+        XCTAssertEqual(capturedURL?.path, "/v1/sessions/s1/monitor/audio",
+                       "панельная кнопка обязана слушать s1 (то, что панель реально показывает), не hudTrackedId (s2)")
+        c.userRequestedHangupConfirmed(); drain()
+        XCTAssertEqual(poster.hangups, ["s1"], "selectedId не должен был уехать на s2")
+    }
+
+    /// MED-1: refreshSettings асинхронен в проде (IPC-роундтрип) — maybeAutoShowHUD/
+    /// autoplay обязаны ждать completion ИМЕННО этого refresh, а не читать ещё
+    /// не обновлённые hudEnabled/privacyMode ивары синхронно. До фикса первый
+    /// callAppeared мог мигнуть HUD на стейл-значении ДО применения свежего
+    /// privacy=true (flash-and-hide).
+    func test_watcher_call_appeared_waits_for_settings_before_auto_show_hud() {
+        let c = makeCoordinator()  // drain внутри makeCoordinator — privacyMode field уже false (дефолт)
+        settings.privacy = true  // источник поменялся, кэшированный ивар координатора ещё false
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false)
+        // ДО дренажа: если бы maybeAutoShowHUD звался синхронно на стейл-ивар,
+        // HUD уже "мигнул" бы здесь.
+        XCTAssertTrue(hud.shown.isEmpty, "HUD не смеет показаться на стейл-настройках до completion")
+        drain()
+        XCTAssertTrue(hud.shown.isEmpty, "и после применения privacy=true — HUD ни разу не показан")
+    }
+
+    /// MED-3: перевод приклеивается по source_text, а не по позиции "последняя
+    /// непереведённая". Две remote-реплики в полёте; перевод КОРОТКОЙ первой
+    /// фразы (hola) готов раньше перевода второй (adios) — порядок готовности
+    /// переводов не совпадает с порядком произнесения. Старый lastIndex-матч
+    /// приклеил бы первый пришедший перевод к ПОСЛЕДНЕЙ непереведённой строке
+    /// (adios) — не к той, для которой он реально предназначен.
+    func test_translation_final_matches_by_source_text_out_of_order() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.openPanelFromMenu(); drain()
+        emit(#"{"type":"stt.final","ts":"t","data":{"text":"hola"}}"#, gen: 1)
+        emit(#"{"type":"stt.final","ts":"t","data":{"text":"adios"}}"#, gen: 1)
+        emit(#"{"type":"translation.final","ts":"t","data":{"text":"privet","source_text":"hola","src_lang":"es","tgt_lang":"ru"}}"#, gen: 1)
+        emit(#"{"type":"translation.final","ts":"t","data":{"text":"adiós-ru","source_text":"adios","src_lang":"es","tgt_lang":"ru"}}"#, gen: 1)
+        let entries = panel.transcripts.last ?? []
+        XCTAssertEqual(entries.count, 2)
+        guard case .remote(let t0, let tr0)? = entries.first?.kind,
+              case .remote(let t1, let tr1)? = entries.last?.kind else { return XCTFail() }
+        XCTAssertEqual(t0, "hola")
+        XCTAssertEqual(tr0, "privet", "перевод hola обязан приклеиться к hola по source_text")
+        XCTAssertEqual(t1, "adios")
+        XCTAssertEqual(tr1, "adiós-ru", "перевод adios обязан приклеиться к adios по source_text")
+    }
+
+    /// MED-4: cost.alert — липкий бейдж, идёт НЕ через costLabel (его перетирает
+    /// периодический cost-поллер) и не смывается следующими тиками поллера до
+    /// terminal.
+    func test_cost_alert_is_sticky_and_not_overwritten_by_poller() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        c.openPanelFromMenu(); drain(0.2)  // поллер успел тикнуть — обычный $-костлейбл
+        XCTAssertEqual(panel.costs.last, "$0.42")
+        emit(#"{"type":"cost.alert","ts":"t","data":{"level":"session","current_usd":1.5,"message":"m"}}"#, gen: 1)
+        XCTAssertEqual(panel.costAlerts.last ?? nil, "⚠ $1.50" as String?)
+        drain(0.2)  // поллер тикает снова — alert не должен исчезнуть
+        XCTAssertEqual(panel.costAlerts.last ?? nil, "⚠ $1.50" as String?,
+                       "поллер не смывает липкий cost-alert бейдж")
+        XCTAssertFalse(panel.costs.contains("⚠ $1.50"), "cost-alert не идёт через costLabel")
     }
 }
