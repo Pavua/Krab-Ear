@@ -4,9 +4,9 @@
  Проверяет:
  1. label == "com.antigravity.krab-ear" (канонический bundle ID).
  2. legacyLabel == "com.krabear.agent".
- 3. buildPlistContent() содержит /usr/bin/open -W <bundle> (НЕ start_agent.command).
- 4. buildPlistContent() НЕ содержит /bin/zsh и start_agent.command.
- 5. buildPlistContent() содержит канонический label.
+ 3. makePlistContent() содержит /usr/bin/open -W <bundle> (НЕ start_agent.command).
+ 4. makePlistContent() НЕ содержит /bin/zsh и start_agent.command.
+ 5. makePlistContent() содержит канонический label.
  6. plistPath содержит label "com.antigravity.krab-ear".
  7. bundlePath содержит расширение ".app" рядом с projectRoot.
  8. isAutostartEnabled: false/true для plist в изолированном каталоге.
@@ -148,7 +148,7 @@ final class LaunchAgentManagerTests: XCTestCase {
 
     func testPlistUsesOpenNotZsh() throws {
         let manager = try makeManager()
-        let content = manager.buildPlistContent()
+        let content = manager.makePlistContent()
         XCTAssertTrue(content.contains("/usr/bin/open"),
                       "ProgramArguments must use /usr/bin/open (not /bin/zsh), got:\n\(content)")
         XCTAssertFalse(content.contains("/bin/zsh"),
@@ -157,28 +157,28 @@ final class LaunchAgentManagerTests: XCTestCase {
 
     func testPlistUsesWFlag() throws {
         let manager = try makeManager()
-        let content = manager.buildPlistContent()
+        let content = manager.makePlistContent()
         XCTAssertTrue(content.contains("<string>-W</string>"),
                       "ProgramArguments must include -W flag for /usr/bin/open, got:\n\(content)")
     }
 
     func testPlistDoesNotReferenceStartAgentCommand() throws {
         let manager = try makeManager()
-        let content = manager.buildPlistContent()
+        let content = manager.makePlistContent()
         XCTAssertFalse(content.contains("start_agent.command"),
                        "ProgramArguments must NOT reference start_agent.command (Phase C.6.2), got:\n\(content)")
     }
 
     func testPlistDoesNotReferenceLaunchedByLaunchd() throws {
         let manager = try makeManager()
-        let content = manager.buildPlistContent()
+        let content = manager.makePlistContent()
         XCTAssertFalse(content.contains("--launched-by-launchd"),
                        "ProgramArguments must NOT include --launched-by-launchd, got:\n\(content)")
     }
 
     func testPlistContainsCanonicalLabel() throws {
         let manager = try makeManager()
-        let content = manager.buildPlistContent()
+        let content = manager.makePlistContent()
         XCTAssertTrue(content.contains("com.antigravity.krab-ear"),
                       "Plist Label must be com.antigravity.krab-ear, got:\n\(content)")
         XCTAssertFalse(content.contains("com.krabear.agent"),
@@ -187,7 +187,7 @@ final class LaunchAgentManagerTests: XCTestCase {
 
     func testPlistContainsBundleAppExtension() throws {
         let manager = try makeManager()
-        let content = manager.buildPlistContent()
+        let content = manager.makePlistContent()
         // Аргумент bundle path обязан указывать на .app.
         XCTAssertTrue(content.contains(".app"),
                       "ProgramArguments must include a .app bundle path, got:\n\(content)")
@@ -195,14 +195,14 @@ final class LaunchAgentManagerTests: XCTestCase {
 
     func testPlistContainsRunAtLoad() throws {
         let manager = try makeManager()
-        let content = manager.buildPlistContent()
+        let content = manager.makePlistContent()
         XCTAssertTrue(content.contains("<key>RunAtLoad</key>"),
                       "Plist must contain RunAtLoad key, got:\n\(content)")
     }
 
     func testPlistContainsKeepAlive() throws {
         let manager = try makeManager()
-        let content = manager.buildPlistContent()
+        let content = manager.makePlistContent()
         XCTAssertTrue(content.contains("<key>KeepAlive</key>"),
                       "Plist must contain KeepAlive key, got:\n\(content)")
     }
@@ -210,7 +210,7 @@ final class LaunchAgentManagerTests: XCTestCase {
     func testPlistDoesNotContainWorkingDirectory() throws {
         // WorkingDirectory удалён: `/usr/bin/open` в нём не нуждается.
         let manager = try makeManager()
-        let content = manager.buildPlistContent()
+        let content = manager.makePlistContent()
         XCTAssertFalse(content.contains("<key>WorkingDirectory</key>"),
                        "Plist must NOT contain WorkingDirectory (not needed for /usr/bin/open), got:\n\(content)")
     }
@@ -390,7 +390,7 @@ final class LaunchAgentManagerTests: XCTestCase {
 
     func test_plist_format_valid_xml() throws {
         let manager = try makeManager()
-        let content = manager.buildPlistContent()
+        let content = manager.makePlistContent()
 
         // XML обязан начинаться декларацией.
         XCTAssertTrue(content.contains("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"),
@@ -421,7 +421,7 @@ final class LaunchAgentManagerTests: XCTestCase {
         parser.delegate = delegate
         let ok = parser.parse()
         XCTAssertTrue(ok && !delegate.hadError,
-                      "buildPlistContent() must produce parseable XML. Error: \(delegate.errorDescription ?? "none")")
+                      "makePlistContent() must produce parseable XML. Error: \(delegate.errorDescription ?? "none")")
     }
 
     // MARK: - Безопасность параллельного install

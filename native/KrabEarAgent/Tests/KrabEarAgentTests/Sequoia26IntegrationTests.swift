@@ -353,11 +353,11 @@ final class Sequoia26LaunchdPlistTests: XCTestCase {
             "Backend plist template должен быть валидным XML. Ошибка: \(delegate.errorDescription ?? "none")")
     }
 
-    /// LaunchAgentManager.buildPlistContent() (Swift agent plist) тоже валидный XML.
+    /// LaunchAgentManager.makePlistContent() (Swift agent plist) тоже валидный XML.
     @MainActor
-    func test_launchd_agent_plist_buildPlistContent_is_valid_xml() {
+    func test_launchd_agent_plist_makePlistContent_is_valid_xml() {
         let manager = LaunchAgentManager(projectRoot: "/tmp/krab_test_wave521")
-        let content = manager.buildPlistContent()
+        let content = manager.makePlistContent()
 
         let data = Data(content.utf8)
         let parser = XMLParser(data: data)
@@ -366,14 +366,14 @@ final class Sequoia26LaunchdPlistTests: XCTestCase {
         let ok = parser.parse()
 
         XCTAssertTrue(ok && !delegate.hadError,
-            "LaunchAgentManager.buildPlistContent() должен производить валидный XML. Ошибка: \(delegate.errorDescription ?? "none")")
+            "LaunchAgentManager.makePlistContent() должен производить валидный XML. Ошибка: \(delegate.errorDescription ?? "none")")
     }
 
     /// LaunchAgentManager plist содержит KeepAlive key.
     @MainActor
     func test_launchd_agent_plist_contains_KeepAlive() {
         let manager = LaunchAgentManager(projectRoot: "/tmp/krab_test_wave521")
-        let content = manager.buildPlistContent()
+        let content = manager.makePlistContent()
         XCTAssertTrue(content.contains("<key>KeepAlive</key>"),
             "Agent plist должен содержать KeepAlive key (Phase A supervisor)")
     }
