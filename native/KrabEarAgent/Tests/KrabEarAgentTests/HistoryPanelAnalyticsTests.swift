@@ -104,6 +104,16 @@ final class HistoryPanelAnalyticsTests: XCTestCase {
         XCTAssertEqual(text, "Статистика ошибок:\n")
     }
 
+    /// UI action обязан использовать тот же formatter, что и unit-тесты;
+    /// иначе два почти одинаковых пути могут разойтись незаметно для CI.
+    func test_fetchErrorStatsAction_uses_production_formatter() throws {
+        let source = try String(contentsOf: Self.analyticsSourceURL, encoding: .utf8)
+        XCTAssertTrue(
+            source.contains("HistoryPanelController.errorStatsText(from: result)"),
+            "fetchErrorStatsAction должен делегировать форматирование production helper-у."
+        )
+    }
+
     // MARK: - componentHealthy (health_check маппинг)
     // Backend health_check → {checks: {<имя>: {status: "ok"|"error"|...}}, status: "..."}.
 
@@ -162,5 +172,13 @@ final class HistoryPanelAnalyticsTests: XCTestCase {
         XCTAssertFalse(HistoryPanelController.backendOverallHealthy(["status": "degraded"]))
         XCTAssertFalse(HistoryPanelController.backendOverallHealthy(["status": "unhealthy"]))
         XCTAssertFalse(HistoryPanelController.backendOverallHealthy([:]))
+    }
+
+    private static var analyticsSourceURL: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/KrabEarAgent/HistoryPanelController+Analytics.swift")
     }
 }
