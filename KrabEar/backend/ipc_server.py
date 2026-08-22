@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from backend.socket_ownership import SocketOwnershipClaim
 from backend.ipc_constants import (
     IPC_MAX_MESSAGE_BYTES,
     IPC_SOCKET_BACKLOG,
@@ -63,8 +64,18 @@ IPC_REQUEST_TIMEOUT_SEC: float = 180.0
 class IPCServer:
     """Unix socket сервер, который проксирует запросы в BackendService."""
 
-    def __init__(self, socket_path: Path, service: "BackendService") -> None:
+    def __init__(
+        self,
+        socket_path: Path,
+        service: "BackendService",
+        *,
+        ownership: SocketOwnershipClaim | None = None,
+    ) -> None:
         self.socket_path = socket_path
+        # Спека 2026-08-22 socket-ownership: production передаёт claim,
+        # захваченный в main() ДО тяжёлых side effects; None — embedded/unit
+        # вызовы, тогда serve_forever() захватывает и освобождает локальный.
+        self._ownership = ownership
         self.service = service
         self._stop_event = threading.Event()
         # Python вызывает signal callback между произвольными bytecode main-
@@ -154,9 +165,20 @@ class IPCServer:
 
     def serve_forever(self) -> None:
         """Основной цикл обработки входящих подключений."""
-        self.socket_path.parent.mkdir(parents=True, exist_ok=True)
-        if self.socket_path.exists():
-            self.socket_path.unlink()
+        # Спека 2026-08-22: bind разрешён только под sidecar-flock claim'ом.
+        # prepare_for_bind() удаляет ТОЛЬКО доказанный stale inode (identity
+        # re-check под claim'ом); живой listener и не-сокет — отказ без unlink.
+        claim = self._ownership
+        local_claim = claim is None
+        if local_claim:
+            claim = SocketOwnershipClaim(self.socket_path)
+            claim.acquire()
+        try:
+            claim.prepare_for_bind()
+        except BaseException:
+            if local_claim:
+                claim.release()
+            raise
 
         # W1767 #5 (MED): сокет создаём ВНУТРИ try/finally — bind() failure
         # (EADDRINUSE, нет прав) больше не утечёт файловый дескриптор.
@@ -165,15 +187,23 @@ class IPCServer:
         # Wave 58 LOW-2: umask сужаем ДО bind(), чтобы сокет сразу создавался
         # с owner-only правами (umask 0o022 → нач. perms 0o755 → race window).
         _old_umask = os.umask(0o077)
-        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        except BaseException:
+            os.umask(_old_umask)
+            if local_claim:
+                claim.release()
+            raise
         try:
             try:
                 server.bind(str(self.socket_path))
             finally:
                 # Восстанавливаем umask сразу после bind — не задерживаем.
                 os.umask(_old_umask)
+            claim.record_bound_socket()
             os.chmod(str(self.socket_path), IPC_SOCKET_PERMISSIONS)
             server.listen(IPC_SOCKET_BACKLOG)
+            claim.mark_listening()
             server.settimeout(IPC_SOCKET_TIMEOUT_SEC)
 
             logger.info("IPC сервер запущен на %s", self.socket_path)
@@ -213,8 +243,12 @@ class IPCServer:
                 self._start_connection_handler(conn)
         finally:
             server.close()
-            if self.socket_path.exists():
-                self.socket_path.unlink()
+            # Удаляем ТОЛЬКО собственный bound inode (тип + st_dev/st_ino);
+            # replacement inode чужого процесса не трогаем. Production-claim
+            # остаётся захваченным — им владеет lifecycle main().
+            claim.cleanup_bound_socket()
+            if local_claim:
+                claim.release()
             logger.info("IPC сервер остановлен")
 
     def _start_connection_handler(self, conn: socket.socket) -> bool:

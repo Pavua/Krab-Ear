@@ -786,3 +786,153 @@ class HandleRequestDeadlockGuardTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Socket ownership (спека 2026-08-22): claim-гейт bind'а и identity-safe cleanup
+# ---------------------------------------------------------------------------
+
+from backend.socket_ownership import (  # noqa: E402
+    SocketAlreadyOwnedError,
+    SocketOwnershipClaim,
+    UnsafeSocketPathError,
+)
+
+
+class SocketOwnershipIntegrationTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="ipcown_")
+        self.addCleanup(self.tmp.cleanup)
+        self.socket_path = Path(self.tmp.name) / "krab.sock"
+        self.assertLess(len(str(self.socket_path)), 90, "AF_UNIX path too long")
+
+    def _server(self) -> IPCServer:
+        fake_service = MagicMock()
+        fake_service.handle_request.return_value = {"id": "x", "ok": True, "result": {}}
+        return IPCServer(socket_path=self.socket_path, service=fake_service)
+
+    def _expect_serve_raises(self, server: IPCServer, exc_type: type) -> None:
+        """serve_forever обязан бросить exc_type, не зависая в accept-цикле.
+
+        Текущий (до-фиксовый) код вместо raise уходит в вечный accept — тест
+        обязан упасть, а не повиснуть: ждём тред с таймаутом и стопаем сервер.
+        """
+        raised: list[BaseException] = []
+
+        def _target() -> None:
+            try:
+                server.serve_forever()
+            except BaseException as exc:  # noqa: BLE001 — фиксируем всё
+                raised.append(exc)
+
+        t = threading.Thread(target=_target, daemon=True)
+        t.start()
+        t.join(timeout=3.0)
+        if t.is_alive():
+            server.stop()
+            t.join(timeout=10.0)
+            self.fail(f"serve_forever не бросил {exc_type.__name__} — ушёл в accept")
+        self.assertTrue(raised, "serve_forever завершился без исключения")
+        self.assertIsInstance(raised[0], exc_type)
+
+    def _run_in_thread(self, server: IPCServer) -> threading.Thread:
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if self.socket_path.exists():
+                probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                try:
+                    probe.settimeout(0.5)
+                    probe.connect(str(self.socket_path))
+                    probe.close()
+                    return t
+                except OSError:
+                    probe.close()
+            time.sleep(0.05)
+        self.fail("сервер не начал слушать за 5с")
+
+    def test_contender_server_preserves_live_listener(self):
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(self.socket_path))
+        listener.listen(8)
+        original = self.socket_path.lstat()
+        try:
+            contender = self._server()
+            self._expect_serve_raises(contender, SocketAlreadyOwnedError)
+            current = self.socket_path.lstat()
+            self.assertEqual(
+                (current.st_dev, current.st_ino),
+                (original.st_dev, original.st_ino),
+            )
+        finally:
+            listener.close()
+
+    def test_regular_file_survives_startup(self):
+        self.socket_path.write_text("precious", encoding="utf-8")
+        contender = self._server()
+        self._expect_serve_raises(contender, UnsafeSocketPathError)
+        self.assertEqual(self.socket_path.read_text(encoding="utf-8"), "precious")
+
+    def test_normal_stop_removes_own_inode_and_releases_local_claim(self):
+        server = self._server()
+        t = self._run_in_thread(server)
+        server.stop()
+        t.join(timeout=10.0)
+        self.assertFalse(t.is_alive())
+        self.assertFalse(self.socket_path.exists(), "свой inode должен быть удалён")
+        # Локальный claim освобождён — свежий захват проходит.
+        claim = SocketOwnershipClaim(self.socket_path)
+        claim.acquire()
+        claim.release()
+
+    def test_cleanup_preserves_replacement_inode(self):
+        server = self._server()
+        t = self._run_in_thread(server)
+        # Чужой процесс: срывает pathname и вешает СВОЙ listener на то же имя.
+        self.socket_path.unlink()
+        other = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        other.bind(str(self.socket_path))
+        other.listen(1)
+        self.addCleanup(other.close)
+        replacement = self.socket_path.lstat()
+
+        server.stop()
+        t.join(timeout=10.0)
+        self.assertFalse(t.is_alive())
+        self.assertTrue(self.socket_path.exists(), "replacement inode не трогаем")
+        current = self.socket_path.lstat()
+        self.assertEqual(
+            (current.st_dev, current.st_ino),
+            (replacement.st_dev, replacement.st_ino),
+        )
+
+    def test_injected_claim_stays_held_after_serve(self):
+        claim = SocketOwnershipClaim(self.socket_path)
+        claim.acquire()
+        self.addCleanup(claim.release)
+        fake_service = MagicMock()
+        fake_service.handle_request.return_value = {"id": "x", "ok": True, "result": {}}
+        server = IPCServer(
+            socket_path=self.socket_path, service=fake_service, ownership=claim
+        )
+        t = self._run_in_thread(server)
+        server.stop()
+        t.join(timeout=10.0)
+        self.assertFalse(t.is_alive())
+        # Production-клейм НЕ освобождён сервером: contender по-прежнему отвергается.
+        contender = SocketOwnershipClaim(self.socket_path)
+        with self.assertRaises(SocketAlreadyOwnedError):
+            contender.acquire()
+
+    def test_listen_failure_cleans_own_inode_and_releases_local_claim(self):
+        server = self._server()
+        with patch.object(
+            socket.socket, "listen", side_effect=OSError(23, "ENFILE")
+        ):
+            with self.assertRaises(OSError):
+                server.serve_forever()  # listen падает сразу — зависание невозможно
+        self.assertFalse(self.socket_path.exists(), "свой inode после сбоя listen удалён")
+        claim = SocketOwnershipClaim(self.socket_path)
+        claim.acquire()
+        claim.release()
