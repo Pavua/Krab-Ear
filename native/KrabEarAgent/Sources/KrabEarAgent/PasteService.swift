@@ -407,15 +407,6 @@ final class PasteService {
         return true
     }
 
-    private func postCommandVToHID() -> Bool {
-        guard let source = CGEventSource(stateID: .hidSystemState) else { return false }
-        guard let (keyDown, keyUp) = makeCommandVEvents(source: source) else { return false }
-        keyDown.post(tap: .cghidEventTap)
-        usleep(cmdVKeypressDelayUs)
-        keyUp.post(tap: .cghidEventTap)
-        return true
-    }
-
     private func makeCommandVEvents(source: CGEventSource) -> (CGEvent, CGEvent)? {
         let vKeyCode = Keycode.v.rawValue
         guard

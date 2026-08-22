@@ -258,14 +258,15 @@ class OomTriggerTest(unittest.TestCase):
         t0 = time.monotonic()
         c.handle_oom_event("krab_error", {"code": "mlx.oom"})
         self.assertLess(time.monotonic() - t0, 0.3)
-        broken = MemoryConductor(
-            settings_service=None, ledger=None, is_recording=None,
-            is_meeting_active=None, pressure_fn=None,
-            gigaam_close_if_idle=None, gigaam_idle_sec_fn=None,
-            last_stt_activity_ts_fn=None,
-        )
-        broken.handle_oom_event("krab_error", {"code": "mlx.oom"})  # не бросает
         c.wait_workers(3.0)
+
+    def test_oom_pressure_callable_returning_none_is_treated_as_zero(self):
+        c = _mk()
+        c._pressure_fn = lambda: None
+        c.handle_oom_event("krab_error", {"code": "mlx.oom"})
+        c.wait_workers(1.0)
+        self.assertGreater(c.get_diagnostics()["residents"]["brain"]["skipped_gate"], 0)
+        c.unload_model_fn.assert_not_called()
 
 
 class LegacyOomReliefTest(unittest.TestCase):

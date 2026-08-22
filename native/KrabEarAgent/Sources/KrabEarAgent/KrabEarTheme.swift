@@ -147,14 +147,6 @@ public enum KrabEarTheme {
             layer.shadowRadius = 6
         }
 
-        /// Popup/dropdown shadow.
-        public static func applyPopup(to layer: CALayer) {
-            layer.shadowColor = NSColor.black.cgColor
-            layer.shadowOpacity = 0.20
-            layer.shadowOffset = CGSize(width: 0, height: -6)
-            layer.shadowRadius = 16
-        }
-
         /// Main overlay (RealtimeOverlay panel) — отрыв от всех окон.
         public static func applyOverlay(to layer: CALayer) {
             layer.shadowColor = NSColor.black.cgColor

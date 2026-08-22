@@ -94,4 +94,18 @@ final class InlineTranslationCacheTests: XCTestCase {
             HistoryPanelController.inlineTranslationCacheHit(cache: cache, itemID: "k3")
         )
     }
+
+    func test_production_toggle_uses_shared_cache_and_visibility_helpers() throws {
+        let source = try String(contentsOf: Self.historySourceURL, encoding: .utf8)
+        XCTAssertTrue(source.contains("HistoryPanelController.inlineTranslationNextVisible("))
+        XCTAssertTrue(source.contains("HistoryPanelController.inlineTranslationCacheHit("))
+    }
+
+    private static var historySourceURL: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/KrabEarAgent/HistoryPanelController+History.swift")
+    }
 }

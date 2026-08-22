@@ -163,16 +163,6 @@ extension HistoryPanelController {
         return sep
     }
 
-    /// Section label (like System Settings section header above a group).
-    @MainActor
-    private func cdMakeSectionLabel(_ text: String) -> NSTextField {
-        let label = NSTextField(labelWithString: text.uppercased())
-        label.font = .systemFont(ofSize: 10, weight: .semibold)
-        label.textColor = KrabEarTheme.Colors.textSecondary
-        label.letterSpacing = 0.4
-        return label
-    }
-
     /// Small badge pill — rounded background (CD design token #FF9500 warning, #0066FF accent).
     @MainActor
     private func cdMakeBadge(text: String, color: NSColor) -> NSView {

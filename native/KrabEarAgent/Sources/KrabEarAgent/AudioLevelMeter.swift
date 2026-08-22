@@ -11,7 +11,6 @@ import AppKit
 import QuartzCore
 
 /// A minimal VU (volume unit) meter NSView backed by two CALayers.
-/// Call `setLevel(_:)` on the main thread to animate the bar width and color.
 @MainActor
 public final class AudioLevelMeter: NSView {
 
@@ -62,24 +61,6 @@ public final class AudioLevelMeter: NSView {
         trackLayer.frame = bounds
         let targetWidth = bounds.width * CGFloat(currentLevel)
         barLayer.frame = CGRect(x: 0, y: 0, width: targetWidth, height: bounds.height)
-        CATransaction.commit()
-    }
-
-    // MARK: - Public API
-
-    /// Update the meter to a new RMS level (0.0 = silence, 1.0 = clipping).
-    /// Animates bar width and color at 33 ms (~30 Hz).
-    public func setLevel(_ rms: Float) {
-        let clamped = max(0.0, min(1.0, rms))
-        currentLevel = clamped
-        let targetWidth = bounds.width * CGFloat(clamped)
-        let color = barColor(for: clamped)
-
-        CATransaction.begin()
-        CATransaction.setAnimationDuration(0.033)
-        CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .linear))
-        barLayer.frame = CGRect(x: 0, y: 0, width: targetWidth, height: bounds.height)
-        barLayer.backgroundColor = color.cgColor
         CATransaction.commit()
     }
 

@@ -1874,6 +1874,10 @@ def transcribe_audio():
             "confidence": result.get("confidence", 0.0),
             "duration_ms": result.get("duration_ms", int(elapsed_sec * 1000)),
             "engine": result.get("engine", "mlx-whisper"),
+            # Legacy engine у раннего empty-result исторически содержит reason.
+            # Новый ключ не выдумывает имя движка до фактического STT-вызова;
+            # при обычном результате он равен реальному result.engine.
+            "stt_engine": result.get("stt_engine", result.get("engine", "mlx-whisper")),
             "model": result.get("model", ""),
             "language": result.get("language"),
             "segments": result.get("segments", []),

@@ -443,3 +443,98 @@ extension StatusIndicatorView {
     /// Тест-хук: даёт доступ к private blinkTimer для проверки в T2.
     var blinkTimerForTesting: Timer? { blinkTimer }
 }
+
+// MARK: - Visible menu-bar image severity badge
+
+@MainActor
+final class StatusIndicatorImageSeverityTests: XCTestCase {
+
+    func test_warn_severity_is_drawn_on_visible_menu_bar_image() {
+        let image = StatusIndicatorImage.image(
+            for: .healthy,
+            privacyMode: false,
+            errorSeverity: "warn",
+            size: 14
+        )
+        let imageWithoutBadge = StatusIndicatorImage.image(
+            for: .healthy,
+            privacyMode: false,
+            size: 14
+        )
+
+        XCTAssertEqual(StatusIndicatorImage.badgeColor(for: "warn")?.cgColor, NSColor.systemYellow.cgColor)
+        XCTAssertGreaterThan(
+            differingTopRightPixelCount(image, imageWithoutBadge),
+            0,
+            "Severity overlay обязан менять пиксели верхнего правого угла видимого menu-bar image."
+        )
+    }
+
+    func test_info_severity_clears_visible_menu_bar_badge() {
+        let image = StatusIndicatorImage.image(
+            for: .healthy,
+            privacyMode: false,
+            errorSeverity: "info",
+            size: 14
+        )
+
+        let imageWithoutBadge = StatusIndicatorImage.image(
+            for: .healthy,
+            privacyMode: false,
+            size: 14
+        )
+        XCTAssertNil(StatusIndicatorImage.badgeColor(for: "info"))
+        XCTAssertEqual(differingTopRightPixelCount(image, imageWithoutBadge), 0)
+    }
+
+    func test_critical_badge_opacity_changes_visible_menu_bar_image() {
+        let opaque = StatusIndicatorImage.image(
+            for: .healthy,
+            privacyMode: false,
+            errorSeverity: "critical",
+            badgeOpacity: 1.0,
+            size: 14
+        )
+        let dimmed = StatusIndicatorImage.image(
+            for: .healthy,
+            privacyMode: false,
+            errorSeverity: "critical",
+            badgeOpacity: 0.5,
+            size: 14
+        )
+
+        XCTAssertGreaterThan(differingTopRightPixelCount(opaque, dimmed), 0)
+    }
+
+    private func differingTopRightPixelCount(_ lhs: NSImage, _ rhs: NSImage) -> Int {
+        guard let lhsTiff = lhs.tiffRepresentation,
+              let rhsTiff = rhs.tiffRepresentation,
+              let lhsBitmap = NSBitmapImageRep(data: lhsTiff),
+              let rhsBitmap = NSBitmapImageRep(data: rhsTiff),
+              lhsBitmap.pixelsWide == rhsBitmap.pixelsWide,
+              lhsBitmap.pixelsHigh == rhsBitmap.pixelsHigh else {
+            XCTFail("Не удалось сопоставить bitmap двух menu-bar image")
+            return 0
+        }
+
+        let startX = Int((8.0 * CGFloat(lhsBitmap.pixelsWide) / lhs.size.width).rounded(.down))
+        // NSImage drawing coordinates start at bottom-left, TIFF rows at top-left.
+        let topRightHeight = Int((6.0 * CGFloat(lhsBitmap.pixelsHigh) / lhs.size.height).rounded(.up))
+        var different = 0
+        for x in startX..<lhsBitmap.pixelsWide {
+            for y in 0..<topRightHeight {
+                guard let left = lhsBitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                      let right = rhsBitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else {
+                    continue
+                }
+                if abs(left.redComponent - right.redComponent) > 0.01
+                    || abs(left.greenComponent - right.greenComponent) > 0.01
+                    || abs(left.blueComponent - right.blueComponent) > 0.01
+                    || abs(left.alphaComponent - right.alphaComponent) > 0.01 {
+                    different += 1
+                }
+            }
+        }
+        return different
+    }
+}

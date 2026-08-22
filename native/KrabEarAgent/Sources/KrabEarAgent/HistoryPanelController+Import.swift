@@ -461,25 +461,12 @@ extension HistoryPanelController {
 
     /// Русские подписи стадий пайплайна транскрибации для статус-строки.
     private func stageRu(_ stage: String) -> String {
-        switch stage {
-        case "audio_load": return "загрузка"
-        case "normalize": return "нормализация"
-        case "stt": return "распознавание"
-        case "cleanup": return "обработка текста"
-        case "diarize": return "разделение говорящих"
-        case "translate": return "перевод"
-        case "llm_rewrite": return "LLM-правка"
-        case "idle": return "ожидание"
-        default: return stage
-        }
+        HistoryPanelController.stageRuStatic(stage)
     }
 
     /// Форматирует секунды в строку MM:SS (напр. 754.2 → "12:34").
     private func mmss(_ sec: Double) -> String {
-        let total = max(0, Int(sec.rounded()))
-        let minutes = total / 60
-        let seconds = total % 60
-        return String(format: "%02d:%02d", minutes, seconds)
+        HistoryPanelController.mmssStatic(sec)
     }
 
     func finishImportQueueIfNeeded() {
@@ -507,14 +494,7 @@ extension HistoryPanelController {
         let reportPath = writeImportQueueReport(summary: summary)
         lastImportReportPath = reportPath
         openImportReportButton.isEnabled = (reportPath != nil)
-        let errorsPreview: String
-        if importErrorMessages.isEmpty {
-            errorsPreview = ""
-        } else {
-            let shown = importErrorMessages.prefix(3).map { "• \($0)" }.joined(separator: "\n")
-            let more = importErrorMessages.count > 3 ? "\n… +ещё \(importErrorMessages.count - 3) (см. отчёт)" : ""
-            errorsPreview = "\n\nОшибки:\n\(shown)\(more)"
-        }
+        let errorsPreview = HistoryPanelController.errorsPreviewText(errorMessages: importErrorMessages)
         if let reportPath {
             showInfoAlert(title: "Импорт аудио", body: "\(summary)\(errorsPreview)\nОтчёт: \(reportPath)")
         } else {
@@ -610,11 +590,7 @@ extension HistoryPanelController {
     }
 
     func normalizedImportSignature(_ paths: [String]) -> String {
-        let normalized = paths
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .sorted()
-        return normalized.joined(separator: "|")
+        HistoryPanelController.normalizedImportSignatureStatic(paths)
     }
 
     func writeImportQueueReport(summary: String) -> String? {

@@ -30,6 +30,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import re
@@ -174,25 +175,36 @@ def _enumerate_swift_call_sites(src_dir: Path) -> list[SwiftCallSite]:
 
 
 def _enumerate_python_dispatch_methods(service_py: Path) -> dict[str, int]:
-    """Extract all method-name string keys from the Python dispatch table.
+    """Extract literal keys from ``BackendService._build_dispatch_table`` only.
 
-    Scans lines matching: ^\\s*"[a-z0-9_]+": self. inside service.py.
-    Returns {method_name: line_number}.
+    This includes lambda handlers and excludes every other dictionary in
+    ``service.py`` so the audit reflects the live runtime dispatch contract.
     """
-    methods: dict[str, int] = {}
     if not service_py.exists():
-        return methods
-    # Pattern: optional whitespace, "method_name": self.
-    pat = re.compile(r'^\s*"([a-z][a-z0-9_]+)":\s*self\.')
+        return {}
     try:
         text = service_py.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return methods
-    for lineno, line in enumerate(text.splitlines(), 1):
-        m = pat.match(line)
-        if m:
-            methods[m.group(1)] = lineno
-    return methods
+        tree = ast.parse(text, filename=str(service_py))
+    except (OSError, SyntaxError):
+        return {}
+    for class_node in tree.body:
+        if not isinstance(class_node, ast.ClassDef) or class_node.name != "BackendService":
+            continue
+        for member in class_node.body:
+            if not isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if member.name != "_build_dispatch_table":
+                continue
+            for statement in member.body:
+                if not isinstance(statement, ast.Return) or not isinstance(statement.value, ast.Dict):
+                    continue
+                methods: dict[str, int] = {}
+                for key in statement.value.keys:
+                    if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                        if re.fullmatch(r"[a-z][a-z0-9_]*", key.value):
+                            methods[key.value] = key.lineno
+                return methods
+    return {}
 
 
 def check_part_a(

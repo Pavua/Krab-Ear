@@ -298,8 +298,7 @@ extension HistoryPanelController {
                 let r = try ipcClient.call(method: "get_error_stats", params: [:])
                 nonisolated(unsafe) let result = r["result"] as? [String: Any] ?? [:]
                 DispatchQueue.main.async {
-                    let text = result.map { "\($0.key): \($0.value)" }.joined(separator: "\n")
-                    self?.showDiagnosticsOutput("Статистика ошибок:\n\(text)")
+                    self?.showDiagnosticsOutput(HistoryPanelController.errorStatsText(from: result))
                 }
             } catch {
                 DispatchQueue.main.async {

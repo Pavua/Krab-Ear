@@ -10,9 +10,8 @@
  - Spinner во время IPC in-flight
 
  Связи:
- 1) tableView(_:viewFor:row:) в +History.swift вызывает makeInlineTranslateCell()
- 2) ipcClient: translate_text
- 3) InlineTranslationCache: singleton NSCache
+ 1) ipcClient: translate_text
+ 2) InlineTranslationCache: singleton NSCache
 */
 
 import AppKit
@@ -268,87 +267,5 @@ final class InlineTranslateCellView: NSTableCellView {
             }
             parent = v.superview
         }
-    }
-}
-
-// MARK: - HistoryPanelController extension
-
-extension HistoryPanelController {
-
-    /// Строит InlineTranslateCellView для text-колонки истории.
-    func makeInlineTranslateCell(
-        for item: HistoryItem,
-        row: Int,
-        badgePrefix: String
-    ) -> NSView {
-        let cell = InlineTranslateCellView(frame: .zero)
-        cell.itemID = item.id
-        cell.sourceText = item.sourceText.isEmpty ? item.text : item.sourceText
-        cell.ipcClient = ipcClient
-        cell.translationStyle = settingsProvider().translationStyle
-        cell.networkMode = settingsProvider().networkMode
-
-        let bodyFont = historyBodyFont()
-        cell.originalLabel.font = bodyFont
-        cell.originalLabel.stringValue = badgePrefix + item.text
-
-        // Если кэш уже содержит перевод для этого item — восстанавливаем состояние
-        if let cached = InlineTranslationCache.shared.get(itemID: item.id) {
-            // Мы не показываем кэш автоматически (пользователь явно не тоглил).
-            // При следующем клике будет показан мгновенно без IPC.
-            _ = cached
-        }
-
-        // Confidence bar (аналогично оригинальному коду в +History.swift)
-        if let confidence = item.confidence {
-            let bar = NSView()
-            bar.wantsLayer = true
-            bar.translatesAutoresizingMaskIntoConstraints = false
-            bar.layer?.backgroundColor = confidenceColor(for: confidence).cgColor
-            bar.layer?.cornerRadius = 1.5
-            bar.alphaValue = 0
-            KrabEarTheme.Motion.animate(
-                duration: KrabEarTheme.Motion.Duration.micro,
-                easing: KrabEarTheme.Motion.Easing.easeOut
-            ) {
-                bar.alphaValue = 1
-            }
-            cell.addSubview(bar)
-            NSLayoutConstraint.activate([
-                bar.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
-                bar.trailingAnchor.constraint(equalTo: cell.translationLabel.trailingAnchor),
-                bar.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -4),
-                bar.heightAnchor.constraint(equalToConstant: 3),
-                // translationLabel bottom стала -4 внутри InlineTranslateCellView,
-                // поэтому bar перекрывает нижний отступ — удовлетворительно.
-            ])
-        }
-
-        return cell
-    }
-
-    /// Возвращает высоту строки с учётом видимой строки перевода.
-    func inlineTranslationExtraHeight(for row: Int) -> CGFloat {
-        guard row < items.count else { return 0 }
-        let item = items[row]
-        guard let cached = InlineTranslationCache.shared.get(itemID: item.id) else { return 0 }
-
-        // Найти cell в tableView и проверить видимость
-        // (ищем уже отрендеренную ячейку)
-        if let cellView = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? InlineTranslateCellView,
-           cellView.isShowingTranslation
-        {
-            let textColumn = tableView.tableColumns.first { $0.identifier.rawValue == "text" }
-            let colWidth = max(180, (textColumn?.width ?? 700) - 8)
-            let translationText = cached as NSString
-            let extraHeight = translationText.boundingRect(
-                with: NSSize(width: colWidth, height: .greatestFiniteMagnitude),
-                options: [.usesLineFragmentOrigin, .usesFontLeading],
-                attributes: [.font: NSFont.systemFont(ofSize: 11)],
-                context: nil
-            ).height
-            return ceil(extraHeight) + 4
-        }
-        return 0
     }
 }

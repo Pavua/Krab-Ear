@@ -167,13 +167,6 @@ extension HistoryPanelController {
         applySettingsPatch(["quick_edit_timeout_sec": seconds])
     }
 
-    @objc func onPrivacyModeChanged() {
-        guard !isSyncingSettings else { return }
-        let enabled = privacyModeButton.state == .on
-        applySettingsPatch(["privacy_mode_enabled": enabled])
-        (NSApp.delegate as? AgentAppDelegate)?.setPrivacyMode(enabled)
-    }
-
     @objc func onStartSoundChanged() {
         guard !isSyncingSettings else { return }
         let playStartSound = startSoundButton.state == .on
@@ -1655,82 +1648,6 @@ extension HistoryPanelController {
                 self.quickCaptureHotkeySelector.selectItem(at: idx)
             }
         }
-    }
-
-    // MARK: - Privacy & Security Section (Phase D.5)
-
-    /// Секция «Безопасность и приватность» в Dictation tab.
-    /// Содержит единственный toggle Privacy Mode:
-    ///   - Sentry telemetry полностью отключается.
-    ///   - Перевод принудительно переводится в offline_only режим.
-    ///   - LM Studio (127.0.0.1) остаётся разрешённым — он локальный.
-    func buildPrivacySection() -> CollapsibleSectionView {
-        let section = CollapsibleSectionView(
-            sectionId: "settings_privacy_security",
-            title: "Безопасность и приватность",
-            isExpanded: true,
-            iconSymbol: "shield"
-        )
-        let card = ThemeCardView()
-
-        privacyModeButton.title = ""
-        privacyModeButton.setButtonType(.switch)
-        privacyModeButton.target = self
-        privacyModeButton.action = #selector(onPrivacyModeChanged)
-        privacyModeButton.setAccessibilityLabel(
-            "Режим приватности: отключает Sentry telemetry и принудительно переводит перевод в offline-режим."
-        )
-
-        let shieldBadge = makeBadge(
-            text: "приватность",
-            color: KrabEarTheme.Colors.accent,
-            tooltip: "Данные не покидают устройство. LM Studio (127.0.0.1) по-прежнему доступен.",
-            symbol: "lock.fill"
-        )
-
-        let privacyRow = makeSwitchRow(
-            label: "Режим приватности",
-            description: "Отключает Sentry crash-telemetry и принудительно переводит перевод в offline-режим. Никакие данные не покидают устройство. LM Studio (127.0.0.1) остаётся разрешённым. По умолчанию выключен — opt-in.",
-            button: privacyModeButton,
-            statusBadge: shieldBadge
-        )
-
-        card.contentStackView.addArrangedSubview(privacyRow)
-        card.contentStackView.addArrangedSubview(makeSeparator())
-
-        // Кнопка «Просмотр audit log» — открывает PrivacyAuditViewerWindowController
-        let auditButton = ThemeSecondaryButton(
-            title: "Просмотр audit log",
-            target: self,
-            action: #selector(onShowPrivacyAuditLog)
-        )
-        auditButton.setAccessibilityLabel(
-            "Открыть журнал событий режима конфиденциальности: заблокированные Sentry-отчёты, принудительный offline-перевод."
-        )
-
-        let auditRow = makeSettingRow(
-            label: "Журнал событий",
-            description: "События режима приватности: Sentry blocked, translate forced offline.",
-            control: auditButton
-        )
-        card.contentStackView.addArrangedSubview(auditRow)
-
-        section.contentStackView.addArrangedSubview(card)
-        return section
-    }
-
-    // MARK: - Privacy Audit Viewer
-
-    @objc func onShowPrivacyAuditLog() {
-        let viewer = PrivacyAuditViewerWindowController(ipcClient: ipcClient)
-        // Держим сильную ссылку пока окно открыто
-        objc_setAssociatedObject(
-            self,
-            &PrivacyAuditAssocKeys.auditViewer,
-            viewer,
-            .OBJC_ASSOCIATION_RETAIN
-        )
-        viewer.showAndLoad()
     }
 
     @objc func onQuickPresetButtonClicked(_ sender: NSButton) {

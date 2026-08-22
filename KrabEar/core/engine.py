@@ -635,6 +635,42 @@ class AudioEngine:
             return False
         return bool(self._settings_get("cloud_rewriter_enabled", False))
 
+    def _remote_stt_retry_configured(self) -> bool:
+        """Проверяет ключ выбранного cloud STT до добавления retry-кандидата.
+
+        Неизвестный provider намеренно пропускается дальше: `_transcribe_remote`
+        сохранит прежний явный RuntimeError о неверной конфигурации. Для известного
+        provider пустой ключ — штатное состояние конфигурации, а не ошибка горячего
+        STT-пути, поэтому remote retry даже не запускается.
+        """
+        from backend.cloud_stt import has_cloud_stt_api_key  # noqa: PLC0415
+
+        provider_name = str(
+            self._settings_get("cloud_stt_provider", "openai") or "openai"
+        ).lower()
+        try:
+            has_api_key = has_cloud_stt_api_key(provider_name)
+        except Exception as exc:
+            logger.warning(
+                "[STT] remote retry key preflight failed for provider=%s: %s; "
+                "preserving existing retry path",
+                provider_name,
+                exc,
+                extra={"provider": provider_name, "reason": "key_preflight_failed"},
+            )
+            return True
+        if has_api_key is None:
+            return True
+        if has_api_key:
+            return True
+
+        logger.debug(
+            "[STT] skip remote retry: provider=%s API key is not configured",
+            provider_name,
+            extra={"provider": provider_name, "reason": "no_api_key"},
+        )
+        return False
+
     def _is_model_unavailable(self, model_id: str) -> bool:
         """Проверяет, заблокирован ли адаптер/модель в _unavailable_models с учётом TTL.
 
@@ -852,9 +888,10 @@ class AudioEngine:
         ключом: у обоих вызывающих мест ``engine`` на деле несёт не имя STT-
         движка, а причину пустого результата ("empty_audio" / "vad_skip") —
         переименовывать/трогать сам ``engine`` этой волной не стали (риск для
-        потребителей, читающих его как есть), но REST-граница нуждается в
-        НЕДВУСМЫСЛЕННО названном поле, чтобы отличить «тишина» от «не смогли
-        распознать» (см. backend/rest_server.py::transcribe_audio).
+        потребителей, читающих его как есть). ``stt_engine`` добавлен как
+        честный контрактный ключ: на раннем возврате STT ещё не запускался,
+        поэтому его значение ``None``. REST подставляет реальное имя движка
+        только для обычного результата (см. backend/rest_server.py::transcribe_audio).
         """
         return {
             "text": "", "raw_text": "", "cleaned_text": "",
@@ -863,6 +900,7 @@ class AudioEngine:
             "confidence": 0.0, "raw_confidence": 0.0,
             "confidence_adjustments": [], "duration_ms": 0,
             "engine": engine, "model": None,
+            "stt_engine": None,
             "language": language, "segments": [],
             "diarization": None, "emotion": None,
             "reason": engine,
@@ -1836,7 +1874,10 @@ class AudioEngine:
         for model in settings.model_max_list:
             if not self._is_model_unavailable(model):
                 retry_candidates.append({"kind": "model", "name": model})
-        if settings.NETWORK_MODE != "offline_strict":
+        if (
+            settings.NETWORK_MODE != "offline_strict"
+            and self._remote_stt_retry_configured()
+        ):
             retry_candidates.append({"kind": "remote", "name": "remote"})
 
         best_result = first_result
@@ -4129,12 +4170,15 @@ class AudioEngine:
 
         result = provider.transcribe(pcm_bytes, sample_rate, source_lang)
         if "error" in result:
-            logger.error(
-                "Ошибка Remote STT (провайдер=%s): %s %s",
-                provider_name, result.get("error"), result.get("message", ""),
+            error_code = result.get("error")
+            log_method = logger.info if error_code == "no_api_key" else logger.error
+            log_method(
+                "Remote STT не сработал (провайдер=%s): %s %s",
+                provider_name, error_code, result.get("message", ""),
+                extra={"provider": provider_name, "error_code": error_code},
             )
             raise RuntimeError(
-                f"Remote STT ({provider_name}) недоступен: {result.get('error')}"
+                f"Remote STT ({provider_name}) недоступен: {error_code}"
             )
 
         # Privacy audit trail: аудио покинуло устройство (симметрично cloud_rewrite).
