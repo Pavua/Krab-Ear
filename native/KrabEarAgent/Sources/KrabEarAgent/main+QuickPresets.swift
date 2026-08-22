@@ -114,7 +114,4 @@ extension AgentAppDelegate {
         applyRecordingPreset(presets[sender.tag].id, source: "menu")
     }
 
-    @objc func onCyclePreset() {
-        cycleToNextPreset()
-    }
 }
