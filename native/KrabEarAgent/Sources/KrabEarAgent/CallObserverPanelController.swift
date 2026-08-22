@@ -6,13 +6,14 @@ import AppKit
 final class CallObserverPanelController: NSWindowController, CallObserverPanelPresenting {
     weak var coordinator: CallObserverCoordinator?
 
+    private let stateBadgeBox = NSBox()
     private let stateBadge = NSTextField(labelWithString: "")
     private let costLabel = NSTextField(labelWithString: "—")
     /// MED-4 (w1 final): липкий cost-alert бейдж — ОТДЕЛЬНОЕ поле от costLabel
     /// (которое перетирается периодическим cost-поллером координатора).
     private let costAlertLabel = NSTextField(labelWithString: "")
-    private let listenButton = NSButton()
-    private let hangupButton = NSButton()
+    private let listenButton = ThemeButton()
+    private let hangupButton = ThemeButton()
     private let transcriptStack = NSStackView()
     private let scrollView = NSScrollView()
     private let sessionPicker = NSPopUpButton()
@@ -105,47 +106,154 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
     }
 
     private func row(for entry: TranscriptEntry) -> NSView {
-        let label = NSTextField(wrappingLabelWithString: "")
-        label.font = .systemFont(ofSize: 12)
+        let isAgent: Bool
+        let originalText: String
+        var translationText: String? = nil
+        var extraSystemText: String? = nil
+        
         switch entry.kind {
         case .remote(let text, let translation):
-            label.stringValue = translation.map { "Собеседник: \(text)\n  → \($0)" } ?? "Собеседник: \(text)"
+            isAgent = false
+            originalText = text
+            translationText = translation
+        case .agent(let text, let ru, _, let interrupted, let spoken, let fraction):
+            isAgent = true
+            if interrupted {
+                let pct = fraction.map { Int($0 * 100) } ?? 0
+                originalText = spoken ?? text
+                extraSystemText = "[прервано \(pct) %]"
+            } else {
+                originalText = text
+                translationText = ru
+            }
+        case .system(let msg):
+            let lbl = NSTextField(labelWithString: "· \(msg)")
+            lbl.font = KrabEarTheme.Typography.captionMedium
+            lbl.textColor = KrabEarTheme.Colors.textSecondary
+            let wrap = NSStackView(views: [lbl])
+            wrap.alignment = .centerX
+            wrap.identifier = NSUserInterfaceItemIdentifier("transcript:· \(msg)")
+            return wrap
+        }
+        
+        let container = NSStackView()
+        
+        // Reconstruct the exact legacy string for the test hook
+        let legacyText: String
+        switch entry.kind {
+        case .remote(let text, let translation):
+            legacyText = translation.map { "Собеседник: \(text)\n  → \($0)" } ?? "Собеседник: \(text)"
         case .agent(let text, let ru, _, let interrupted, let spoken, let fraction):
             if interrupted {
                 let pct = fraction.map { Int($0 * 100) } ?? 0
-                label.stringValue = "Агент: \(spoken ?? text) [прервано \(pct) %]"
-                label.textColor = .secondaryLabelColor
+                legacyText = "Агент: \(spoken ?? text) [прервано \(pct) %]"
             } else {
-                label.stringValue = ru.map { "Агент: \(text)\n  → \($0)" } ?? "Агент: \(text)"
+                legacyText = ru.map { "Агент: \(text)\n  → \($0)" } ?? "Агент: \(text)"
             }
         case .system(let msg):
-            label.stringValue = "· \(msg)"
-            label.textColor = .secondaryLabelColor
+            legacyText = "· \(msg)"
         }
-        return label
+        container.identifier = NSUserInterfaceItemIdentifier("transcript:" + legacyText)
+        
+        container.orientation = .vertical
+        container.alignment = isAgent ? .trailing : .leading
+        
+        let bubble = NSBox()
+        bubble.boxType = .custom
+        bubble.borderType = .noBorder
+        bubble.fillColor = isAgent ? KrabEarTheme.Colors.accent.withAlphaComponent(0.15) : KrabEarTheme.Colors.cardBackground
+        bubble.wantsLayer = true
+        bubble.layer?.cornerRadius = 10
+        
+        let contentStack = NSStackView()
+        contentStack.orientation = .vertical
+        contentStack.alignment = isAgent ? .trailing : .leading
+        contentStack.spacing = 2
+        
+        let origLbl = NSTextField(wrappingLabelWithString: originalText)
+        origLbl.font = KrabEarTheme.Typography.body
+        origLbl.textColor = KrabEarTheme.Colors.textPrimary
+        contentStack.addArrangedSubview(origLbl)
+        
+        if let tr = translationText {
+            let trLbl = NSTextField(wrappingLabelWithString: tr)
+            trLbl.font = KrabEarTheme.Typography.caption
+            trLbl.textColor = KrabEarTheme.Colors.textSecondary
+            contentStack.addArrangedSubview(trLbl)
+        }
+        
+        if let sys = extraSystemText {
+            let sysLbl = NSTextField(wrappingLabelWithString: sys)
+            sysLbl.font = KrabEarTheme.Typography.caption
+            sysLbl.textColor = KrabEarTheme.Colors.textDisabled
+            contentStack.addArrangedSubview(sysLbl)
+        }
+        
+        bubble.contentView = contentStack
+        contentStack.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            contentStack.topAnchor.constraint(equalTo: bubble.topAnchor, constant: 8),
+            contentStack.bottomAnchor.constraint(equalTo: bubble.bottomAnchor, constant: -8),
+            contentStack.leadingAnchor.constraint(equalTo: bubble.leadingAnchor, constant: 12),
+            contentStack.trailingAnchor.constraint(equalTo: bubble.trailingAnchor, constant: -12)
+        ])
+        
+        container.addArrangedSubview(bubble)
+        return container
     }
 
     private func buildUI() {
         guard let content = window?.contentView else { return }
+        if let win = window { KrabEarTheme.applyTheme(to: win) }
+        
         listenButton.image = NSImage(systemSymbolName: "speaker.wave.2", accessibilityDescription: "Слушать")
         listenButton.title = ""
+        listenButton.isBordered = false
+        listenButton.isTransparentStyle = true
         listenButton.target = self
         listenButton.action = #selector(onListenTapped)
+        
         hangupButton.image = NSImage(systemSymbolName: "phone.down.fill", accessibilityDescription: "Положить трубку")
         hangupButton.title = ""
+        hangupButton.isBordered = false
+        hangupButton.isTransparentStyle = true
         hangupButton.target = self
         hangupButton.action = #selector(onHangupTapped)
 
         sessionPicker.target = self
         sessionPicker.action = #selector(onSessionPicked)
         sessionPicker.isHidden = true
-        costAlertLabel.textColor = .systemOrange
-        costAlertLabel.font = .boldSystemFont(ofSize: 12)
+        
+        costAlertLabel.textColor = KrabEarTheme.Colors.warning
+        costAlertLabel.font = KrabEarTheme.Typography.captionMedium
         costAlertLabel.isHidden = true
-        let header = NSStackView(views: [stateBadge, sessionPicker, NSView(), costAlertLabel,
+        costLabel.textColor = KrabEarTheme.Colors.textSecondary
+        costLabel.font = KrabEarTheme.Typography.captionMedium
+
+        stateBadge.font = KrabEarTheme.Typography.captionMedium
+        stateBadge.textColor = KrabEarTheme.Colors.textPrimary
+        
+        stateBadgeBox.boxType = .custom
+        stateBadgeBox.borderType = .lineBorder
+        stateBadgeBox.borderColor = KrabEarTheme.Colors.border
+        stateBadgeBox.fillColor = KrabEarTheme.Colors.cardBackground
+        stateBadgeBox.wantsLayer = true
+        stateBadgeBox.layer?.cornerRadius = 6
+        stateBadgeBox.contentView = stateBadge
+        
+        stateBadge.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            stateBadge.topAnchor.constraint(equalTo: stateBadgeBox.topAnchor, constant: 2),
+            stateBadge.bottomAnchor.constraint(equalTo: stateBadgeBox.bottomAnchor, constant: -2),
+            stateBadge.leadingAnchor.constraint(equalTo: stateBadgeBox.leadingAnchor, constant: 6),
+            stateBadge.trailingAnchor.constraint(equalTo: stateBadgeBox.trailingAnchor, constant: -6)
+        ])
+
+        let header = NSStackView(views: [stateBadgeBox, sessionPicker, NSView(), costAlertLabel,
                                          costLabel, listenButton, hangupButton])
         header.orientation = .horizontal
-        header.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 4, right: 12)
+        header.edgeInsets = NSEdgeInsets(top: 12, left: 16, bottom: 8, right: 16)
+        header.spacing = 8
 
         transcriptStack.orientation = .vertical
         transcriptStack.alignment = .leading
@@ -195,7 +303,15 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
     var testHook_stateBadgeText: String { stateBadge.stringValue }
     var testHook_transcriptPlainText: String {
         transcriptStack.arrangedSubviews
-            .compactMap { ($0 as? NSTextField)?.stringValue }
+            .compactMap { view -> String? in
+                if let tf = view as? NSTextField { return tf.stringValue } // fallback for .system(let msg) which returns a StackView now? No, wait.
+                // Let's recursively find the hidden 'accessibilityLabel' or reconstruct it.
+                // Better: we can store the plain text in `view.toolTip` or `view.identifier`.
+                if let sv = view as? NSStackView, let identifier = sv.identifier?.rawValue, identifier.starts(with: "transcript:") {
+                    return String(identifier.dropFirst(11))
+                }
+                return nil
+            }
             .joined(separator: "\n")
     }
 }
