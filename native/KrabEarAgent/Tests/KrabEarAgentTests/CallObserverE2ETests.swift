@@ -13,6 +13,20 @@ final class CallObserverE2ETests: XCTestCase {
         baseURL = URL(string: "http://127.0.0.1:\(port)")!
     }
 
+    /// Мелкий GET-хелпер для служебных /e2e/* эндпойнтов фейка (не часть
+    /// контракта VG — только чтобы доказать, ЧТО реально ушло на провод).
+    private func fetchE2EJSON(_ path: String, completion: @escaping ([String: Any]?) -> Void) {
+        var url = baseURL!
+        url.append(path: path)
+        URLSession.shared.dataTask(with: url) { data, _, _ in
+            guard let data,
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                completion(nil); return
+            }
+            completion(obj)
+        }.resume()
+    }
+
     /// T4-хэндофф (ревью прошлых задач): единственный непокрытый юнитами контракт
     /// транспорта — «onStateChange: ровно ОДИН true после РЕАЛЬНОГО хендшейка →
     /// ровно ОДИН false при разрыве/permanentStop». Существующие юнит-тесты
@@ -84,6 +98,18 @@ final class CallObserverE2ETests: XCTestCase {
         watcher.stop()
         let session = collector.appeared[0]
 
+        // T5-мандат (P1 фикс): дискавери обязан слать limit=100 НА ПРОВОДЕ
+        // (совпадает с VG серверным дефолтом list_sessions(limit=100)) — не
+        // только константа vgSessionsPageLimit в исходнике, а реально ушедший
+        // query-параметр. Хотя бы один полл к этому моменту уже случился
+        // (appearExp уже отработал), значение стабильно между поллами.
+        let limitExp = XCTestExpectation(description: "limit=100 на проводе")
+        fetchE2EJSON("/e2e/last_limit") { obj in
+            XCTAssertEqual(obj?["limit"] as? String, "100", "GET /v1/sessions обязан слать limit=100")
+            limitExp.fulfill()
+        }
+        wait(for: [limitExp], timeout: 10)
+
         // События стрима: финалы + auto_spoken + interrupt + терминальная пара.
         let stream = VGCallStreamClient()
         var events: [VGCallEvent] = []
@@ -129,6 +155,15 @@ final class CallObserverE2ETests: XCTestCase {
             if case .success(200) = result { hungUp.fulfill() }
         }
         wait(for: [hungUp, ended, closed], timeout: 15)
+
+        // Оживляем /e2e/hangup_count (P1 фикс): ровно один hangup дошёл до
+        // фейка — сам тест шлёт hangup ровно один раз.
+        let hangupCountExp = XCTestExpectation(description: "hangup_count == 1")
+        fetchE2EJSON("/e2e/hangup_count") { obj in
+            XCTAssertEqual(obj?["count"] as? Int, 1)
+            hangupCountExp.fulfill()
+        }
+        wait(for: [hangupCountExp], timeout: 10)
 
         // Контент-проверки.
         XCTAssertTrue(events.contains { if case .sttFinal(let t, _, _) = $0 { return t.contains("hola") } ; return false })

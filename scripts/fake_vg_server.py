@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_sock import Sock
 
 app = Flask(__name__)
@@ -25,7 +25,7 @@ sock = Sock(app)
 
 START_TS = time.time()
 SESSION_ID = "e2e-call-1"
-STATE = {"status": "running", "hangup_calls": 0, "started": START_TS + 1.0}
+STATE = {"status": "running", "hangup_calls": 0, "started": START_TS + 1.0, "last_limit": None}
 LOCK = threading.Lock()
 
 
@@ -45,15 +45,24 @@ def _session_row() -> dict:
 
 @app.get("/v1/sessions")
 def list_sessions():
+    with LOCK:
+        STATE["last_limit"] = request.args.get("limit")
     if time.time() < STATE["started"]:
         return jsonify({"ok": True, "count": 0, "items": []})
     return jsonify({"ok": True, "count": 1, "items": [_session_row()]})
 
 
+@app.get("/e2e/last_limit")
+def last_limit():
+    with LOCK:
+        return jsonify({"limit": STATE["last_limit"]})
+
+
 @app.get(f"/v1/sessions/{SESSION_ID}/diagnostics")
 def diagnostics():
     # Реальный VG мержит diag на верхний уровень: {**diag, "status": ...}.
-    return jsonify({"ok": True, "status": STATE["status"], "timeline_size": 3,
+    # Реальный VG НЕ кладёт сюда "ok" — это поле только у /v1/sessions.
+    return jsonify({"status": STATE["status"], "timeline_size": 3,
                     "costs": {"total_usd": 0.07,
                               "breakdown": {"twilio": 0.05, "ai": 0.02}}})
 
@@ -62,10 +71,18 @@ def diagnostics():
 def hangup():
     with LOCK:
         STATE["hangup_calls"] += 1
-        already = STATE["status"] in {"stopped", "failed"}
+        if STATE["status"] in {"stopped", "failed"}:
+            # Повторный hangup — реальный VG отдаёт прежний терминальный статус
+            # и already_terminal, БЕЗ provider_id_pending (первая форма уже
+            # состоялась, дублировать асинхронное подтверждение провайдера
+            # нечего).
+            return jsonify({"ok": True, "session_id": SESSION_ID, "call_sid": "CA-e2e",
+                            "status": STATE["status"], "already_terminal": True})
         STATE["status"] = "stopped"
+    # Первый вызов — реальный VG инициировал hangup у провайдера асинхронно,
+    # already_terminal сюда не кладёт (сессия только что была живой).
     return jsonify({"ok": True, "session_id": SESSION_ID, "call_sid": "CA-e2e",
-                    "status": "completed", "already_terminal": already})
+                    "status": "completed", "provider_id_pending": True})
 
 
 @app.get("/e2e/hangup_count")
