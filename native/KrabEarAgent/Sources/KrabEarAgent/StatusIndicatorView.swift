@@ -323,9 +323,30 @@ final class StatusIndicatorView: NSView {
 
 // MARK: - StatusIndicatorImage
 
-/// Helper: создаёт NSImage с dot указанного цвета — для NSStatusItem.button.image.
+/// Helper: создаёт NSImage с dot и severity overlay — для NSStatusItem.button.image.
 enum StatusIndicatorImage {
-    static func image(for state: HealthState, privacyMode: Bool = false, size: CGFloat = 14) -> NSImage {
+    static func badgeColor(for severity: String?) -> NSColor? {
+        switch severity {
+        case "critical": return .systemRed
+        case "error":    return .systemOrange
+        case "warn":     return .systemYellow
+        default:           return nil
+        }
+    }
+
+    /// Возвращает только severity, которые являются видимым error badge.
+    /// `info` и неизвестные значения одновременно служат явным clear-сигналом.
+    static func visibleBadgeSeverity(_ severity: String?) -> String? {
+        badgeColor(for: severity) == nil ? nil : severity
+    }
+
+    static func image(
+        for state: HealthState,
+        privacyMode: Bool = false,
+        errorSeverity: String? = nil,
+        badgeOpacity: CGFloat = 1.0,
+        size: CGFloat = 14
+    ) -> NSImage {
         let img = NSImage(size: NSSize(width: size, height: size))
         img.lockFocus()
         let color: NSColor
@@ -337,6 +358,18 @@ enum StatusIndicatorImage {
         color.setFill()
         let rect = NSRect(x: 2, y: 2, width: size - 4, height: size - 4)
         NSBezierPath(ovalIn: rect).fill()
+
+        if let badgeColor = badgeColor(for: errorSeverity) {
+            badgeColor.withAlphaComponent(badgeOpacity).setFill()
+            let badgeSize: CGFloat = 6.0
+            let badgeRect = NSRect(
+                x: size - badgeSize,
+                y: size - badgeSize,
+                width: badgeSize,
+                height: badgeSize
+            )
+            NSBezierPath(ovalIn: badgeRect).fill()
+        }
 
         if privacyMode {
             // lock.fill in bottom-left corner

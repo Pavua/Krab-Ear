@@ -101,8 +101,11 @@ extension AgentAppDelegate {
                 // сохраняет порядок тостов, если за один тик пришло несколько
                 // новых ошибок сразу.
                 Task { @MainActor in
-                    guard let handler = self?.errorActionHandler else { return }
+                    guard let self, let handler = self.errorActionHandler else { return }
                     for payload in payloads {
+                        // В отличие от старого StatusIndicatorView, это обновляет
+                        // реальный NSStatusItem.button.image через AppDelegate.
+                        self.applyErrorSeverityBadge(payload.severity)
                         await handler.handleErrorEvent(payload)
                     }
                 }
@@ -125,6 +128,7 @@ extension AgentAppDelegate {
         errorBusPoller?.deactivate()
         errorBusPoller = nil
         errorActionHandler = nil
+        clearErrorSeverityBadge()
         logger.info("ErrorActionHandler остановлен")
     }
 }
