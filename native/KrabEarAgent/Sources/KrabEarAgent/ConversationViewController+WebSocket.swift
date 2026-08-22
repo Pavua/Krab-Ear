@@ -34,20 +34,13 @@ extension ConversationViewController {
 
     // MARK: - Session start / stop
 
-    /// Открыть WS-соединение с Voice Gateway и начать receive-loop.
-    func startWebSocketSession(generation: UUID) {
-        guard let url = URL(string: config.wsURLString) else {
-            AgentLogger.shared.info("[WS] Невалидный URL: \(config.wsURLString)")
-            conversationState = .error("Невалидный Gateway URL")
-            return
-        }
-        // URL-валидация выше остаётся чистой семантикой протокола. Ниже начинается
-        // системный сетевой ввод-вывод, запрещённый изолированным unit-тестам.
-        guard runtimeOptions.opensWebSocket else { return }
-
-        let configuration = URLSessionConfiguration.default
-        configuration.timeoutIntervalForRequest = 30
-        let session = URLSession(configuration: configuration)
+    /// Собирает request Voice Gateway без сетевого I/O.
+    ///
+    /// Это production source of truth для URL, Authorization и параметров
+    /// engine/brain/lang/brain_mode; изолированные тесты вызывают тот же
+    /// builder, а не DEBUG-копию.
+    func makeWebSocketRequest(for urlString: String) -> URLRequest? {
+        guard let url = URL(string: urlString) else { return nil }
 
         var request = URLRequest(url: url)
         if !config.apiKey.isEmpty {
@@ -62,20 +55,35 @@ extension ConversationViewController {
             // brain_mode (Волна 3b) — ВСЕГДА передаём явно, даже "auto":
             // Voice Gateway полагается на явный сигнал от клиента, не на умолчание сервера.
             items.append(URLQueryItem(name: "brain_mode", value: config.brainMode))
-            if !items.isEmpty {
-                components.queryItems = items
-                if let newURL = components.url {
-                    request.url = newURL
-                }
+            components.queryItems = items
+            if let newURL = components.url {
+                request.url = newURL
             }
         }
+        return request
+    }
+
+    /// Открыть WS-соединение с Voice Gateway и начать receive-loop.
+    func startWebSocketSession(generation: UUID) {
+        guard let request = makeWebSocketRequest(for: config.wsURLString) else {
+            AgentLogger.shared.info("[WS] Невалидный URL: \(config.wsURLString)")
+            conversationState = .error("Невалидный Gateway URL")
+            return
+        }
+        // URL-валидация выше остаётся чистой семантикой протокола. Ниже начинается
+        // системный сетевой ввод-вывод, запрещённый изолированным unit-тестам.
+        guard runtimeOptions.opensWebSocket else { return }
+
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 30
+        let session = URLSession(configuration: configuration)
 
         let task = session.webSocketTask(with: request)
         wsHolder.session = session
         wsHolder.task    = task
         task.resume()
 
-        AgentLogger.shared.info("[WS] Connecting → \(url.absoluteString)")
+        AgentLogger.shared.info("[WS] Connecting → \(request.url?.absoluteString ?? config.wsURLString)")
         startReceiveLoop(task: task, generation: generation)
     }
 
@@ -199,26 +207,5 @@ extension ConversationViewController {
         _testSentMessages = []
     }
 
-    /// Собирает URLRequest, который был бы отправлен при connect(url:), без открытия сокета.
-    /// Возвращает итоговый URL с query-параметрами для проверки в тестах.
-    func _buildWSRequest(for urlString: String) -> URLRequest? {
-        guard let url = URL(string: urlString) else { return nil }
-        var request = URLRequest(url: url)
-        if !config.apiKey.isEmpty {
-            request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
-        }
-        if var components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
-            var items = components.queryItems ?? []
-            if config.engine != "auto" { items.append(URLQueryItem(name: "engine", value: config.engine)) }
-            if config.brain  != "auto" { items.append(URLQueryItem(name: "brain",  value: config.brain))  }
-            if config.languageHint != "auto" { items.append(URLQueryItem(name: "lang", value: config.languageHint)) }
-            items.append(URLQueryItem(name: "brain_mode", value: config.brainMode))
-            if !items.isEmpty {
-                components.queryItems = items
-                if let newURL = components.url { request.url = newURL }
-            }
-        }
-        return request
-    }
 }
 #endif
