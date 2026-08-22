@@ -6126,86 +6126,121 @@ def main() -> None:
 
     configure_logging(data_dir)
 
-    # W1634 / W1631 F2 HIGH: load persisted settings BEFORE init_sentry so that
-    # privacy_mode_enabled from settings.json is respected at startup.
-    # StateStore.load_settings() is a lightweight read-only JSON parse — safe to
-    # call here before build_service() (which will reload and normalise later).
-    _early_store = StateStore(data_dir=data_dir)
-    _startup_settings: dict = _early_store.load_settings() or {}
-
-    # Sentry / GlitchTip crash telemetry (no-op если DSN не задан).
-    # W704: release string читается из Info.plist через get_release_string()
-    # (priority: env KRAB_EAR_RELEASE → Info.plist → __version__.py).
-    # 2026-08-05: throwaway (temp-dir) инстансы не шлют в прод-Sentry — см.
-    # _is_throwaway_data_dir() (живой инцидент: 3 события в прод-Sentry за
-    # одну сессию e2e-тестирования, DSN глобален и не завязан на data_dir).
-    _throwaway = _is_throwaway_data_dir(data_dir)
-    sentry_ok = init_sentry(
-        dsn=(settings.SENTRY_DSN or None) if not _throwaway else None,
-        environment=settings.SENTRY_ENVIRONMENT,
-        release=get_release_string(),
-        settings=_startup_settings,
+    # Спека 2026-08-22 socket-ownership: claim захватывается ДО любых тяжёлых
+    # side effects (StateStore/Sentry/моделей) — contender выходит мгновенно
+    # и НЕ трогает сокет живого владельца. Смерть процесса снимает flock ядром.
+    from backend.socket_ownership import (
+        SocketAlreadyOwnedError,
+        SocketOwnershipClaim,
+        UnsafeSocketPathError,
+        canonical_socket_path,
     )
-    if _throwaway:
-        # MEDIUM (Fable): info, не debug — false positive на реальном проде
-        # (нестандартный TMPDIR) иначе молча гасил бы crash reporting без
-        # единого видимого сигнала при дефолтном уровне логирования.
-        logger.info("Sentry telemetry отключена: throwaway data-dir (%s)", data_dir)
-    elif sentry_ok:
-        logger.info("Sentry telemetry активна (env=%s)", settings.SENTRY_ENVIRONMENT)
-    else:
-        logger.debug("Sentry telemetry отключена (DSN не задан)")
 
-    # Signal-safe диагностика аварийных сигналов через faulthandler
-    # (SIGSEGV/SIGBUS/SIGFPE/SIGILL/SIGABRT). Идемпотентно.
-    # 🔴 НЕ no-op без Sentry (в отличие от остального модуля) и НЕ зависит от
-    # DSN — трейсбек крэша нужен и на локальной поставке без телеметрии,
-    # поэтому вызов обязан остаться ВНЕ любого `if sentry_ok`. SIGTERM/SIGINT
-    # эта функция не трогает: ими владеет _signal_handler ниже.
-    install_signal_handlers()
-
-    # Auto-create Sentry release + deploy when SENTRY_AUTO_RELEASE=1
-    if os.environ.get("SENTRY_AUTO_RELEASE") == "1" and sentry_ok:
-        _trigger_sentry_release_async()
-
-    service = build_service(data_dir)
-    server = IPCServer(socket_path=socket_path, service=service)
-
-    # Даём metadata-handler ссылку на сервис, но не право перехватывать сигналы:
-    # production-порядком IPC → workers → metadata владеет один finally ниже.
-    service._ipc_server = server
-    service._shutdown_handler.bind(service)
-
-    def _signal_handler(signum: int, frame: Any) -> None:
-        """Снять форензический контекст сигнала (R1 Task 5) и попросить
-        accept-loop выйти; полный teardown выполнит finally ниже.
-
-        R1 Task 8 амендмент (найдено живым e2e-смоком, 2026-07-24):
-        GracefulShutdownHandler._signal_handler САМ по себе НИКОГДА не
-        регистрируется как OS-обработчик сигнала в production — bind() (в
-        отличие от legacy register()) намеренно не трогает регистрацию
-        сигналов ОС, единственный владелец сигналов здесь. Без явного
-        вызова _capture_signal_context()
-        signal/recording_active/meeting_active в shutdown_info.json всегда
-        оставались бы дефолтными (None/False) на КАЖДОМ реальном сигнале —
-        unit-тесты этого не ловили, т.к. вызывали handler._signal_handler()
-        напрямую, в обход этой функции.
-        """
-        del frame
-        service._shutdown_handler._capture_signal_context(signum)
-        server.request_stop_from_signal()
-
-    signal.signal(signal.SIGINT, _signal_handler)
-    signal.signal(signal.SIGTERM, _signal_handler)
+    socket_path = canonical_socket_path(socket_path)
+    ownership = SocketOwnershipClaim(socket_path)
+    try:
+        ownership.acquire()
+        ownership.prepare_for_bind()
+    except SocketAlreadyOwnedError as exc:
+        logger.error(
+            "Endpoint %s уже занят другим backend'ом: %s — выходим (EX_TEMPFAIL)",
+            socket_path, exc,
+        )
+        raise SystemExit(os.EX_TEMPFAIL) from exc
+    except UnsafeSocketPathError as exc:
+        logger.error(
+            "Небезопасный socket/lock path %s: %s — выходим (EX_CANTCREAT)",
+            socket_path, exc,
+        )
+        raise SystemExit(os.EX_CANTCREAT) from exc
 
     try:
-        server.serve_forever()
-    finally:
-        _shutdown_backend(
-            service,
-            server,
-            service._shutdown_handler,
+        # W1634 / W1631 F2 HIGH: load persisted settings BEFORE init_sentry so that
+        # privacy_mode_enabled from settings.json is respected at startup.
+        # StateStore.load_settings() is a lightweight read-only JSON parse — safe to
+        # call here before build_service() (which will reload and normalise later).
+        _early_store = StateStore(data_dir=data_dir)
+        _startup_settings: dict = _early_store.load_settings() or {}
+
+        # Sentry / GlitchTip crash telemetry (no-op если DSN не задан).
+        # W704: release string читается из Info.plist через get_release_string()
+        # (priority: env KRAB_EAR_RELEASE → Info.plist → __version__.py).
+        # 2026-08-05: throwaway (temp-dir) инстансы не шлют в прод-Sentry — см.
+        # _is_throwaway_data_dir() (живой инцидент: 3 события в прод-Sentry за
+        # одну сессию e2e-тестирования, DSN глобален и не завязан на data_dir).
+        _throwaway = _is_throwaway_data_dir(data_dir)
+        sentry_ok = init_sentry(
+            dsn=(settings.SENTRY_DSN or None) if not _throwaway else None,
+            environment=settings.SENTRY_ENVIRONMENT,
+            release=get_release_string(),
+            settings=_startup_settings,
         )
+        if _throwaway:
+            # MEDIUM (Fable): info, не debug — false positive на реальном проде
+            # (нестандартный TMPDIR) иначе молча гасил бы crash reporting без
+            # единого видимого сигнала при дефолтном уровне логирования.
+            logger.info("Sentry telemetry отключена: throwaway data-dir (%s)", data_dir)
+        elif sentry_ok:
+            logger.info("Sentry telemetry активна (env=%s)", settings.SENTRY_ENVIRONMENT)
+        else:
+            logger.debug("Sentry telemetry отключена (DSN не задан)")
+
+        # Signal-safe диагностика аварийных сигналов через faulthandler
+        # (SIGSEGV/SIGBUS/SIGFPE/SIGILL/SIGABRT). Идемпотентно.
+        # 🔴 НЕ no-op без Sentry (в отличие от остального модуля) и НЕ зависит от
+        # DSN — трейсбек крэша нужен и на локальной поставке без телеметрии,
+        # поэтому вызов обязан остаться ВНЕ любого `if sentry_ok`. SIGTERM/SIGINT
+        # эта функция не трогает: ими владеет _signal_handler ниже.
+        install_signal_handlers()
+
+        # Auto-create Sentry release + deploy when SENTRY_AUTO_RELEASE=1
+        if os.environ.get("SENTRY_AUTO_RELEASE") == "1" and sentry_ok:
+            _trigger_sentry_release_async()
+
+        service = build_service(
+            data_dir,
+            socket_path=socket_path,
+            socket_ownership_snapshot_getter=ownership.snapshot,
+        )
+        server = IPCServer(socket_path=socket_path, service=service, ownership=ownership)
+
+        # Даём metadata-handler ссылку на сервис, но не право перехватывать сигналы:
+        # production-порядком IPC → workers → metadata владеет один finally ниже.
+        service._ipc_server = server
+        service._shutdown_handler.bind(service)
+
+        def _signal_handler(signum: int, frame: Any) -> None:
+            """Снять форензический контекст сигнала (R1 Task 5) и попросить
+            accept-loop выйти; полный teardown выполнит finally ниже.
+
+            R1 Task 8 амендмент (найдено живым e2e-смоком, 2026-07-24):
+            GracefulShutdownHandler._signal_handler САМ по себе НИКОГДА не
+            регистрируется как OS-обработчик сигнала в production — bind() (в
+            отличие от legacy register()) намеренно не трогает регистрацию
+            сигналов ОС, единственный владелец сигналов здесь. Без явного
+            вызова _capture_signal_context()
+            signal/recording_active/meeting_active в shutdown_info.json всегда
+            оставались бы дефолтными (None/False) на КАЖДОМ реальном сигнале —
+            unit-тесты этого не ловили, т.к. вызывали handler._signal_handler()
+            напрямую, в обход этой функции.
+            """
+            del frame
+            service._shutdown_handler._capture_signal_context(signum)
+            server.request_stop_from_signal()
+
+        signal.signal(signal.SIGINT, _signal_handler)
+        signal.signal(signal.SIGTERM, _signal_handler)
+
+        try:
+            server.serve_forever()
+        finally:
+            _shutdown_backend(
+                service,
+                server,
+                service._shutdown_handler,
+            )
+    finally:
+        ownership.release()
 
 
 if __name__ == "__main__":

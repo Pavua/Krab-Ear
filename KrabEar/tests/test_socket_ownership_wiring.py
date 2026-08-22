@@ -50,3 +50,37 @@ class BuildServiceForwardingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MainLifecycleOrderTest(unittest.TestCase):
+    """Source-контракт: main() захватывает claim ДО тяжёлых side effects."""
+
+    @staticmethod
+    def _main_src() -> str:
+        import inspect
+
+        import backend.service as service_mod
+
+        return inspect.getsource(service_mod.main)
+
+    def test_claim_acquired_before_store_sentry_and_service(self):
+        src = self._main_src()
+        acq = src.index("ownership.acquire()")
+        self.assertLess(acq, src.index("_early_store = StateStore"))
+        self.assertLess(acq, src.index("init_sentry("))
+        self.assertLess(acq, src.index("build_service("))
+
+    def test_release_after_shutdown_backend(self):
+        src = self._main_src()
+        self.assertLess(src.index("_shutdown_backend("), src.rindex("ownership.release()"))
+
+    def test_server_gets_production_claim_and_diag_gets_snapshot(self):
+        src = self._main_src()
+        self.assertIn("ownership=ownership", src)
+        self.assertIn("socket_ownership_snapshot_getter=ownership.snapshot", src)
+
+    def test_contention_exits_tempfail_without_service(self):
+        src = self._main_src()
+        self.assertIn("SocketAlreadyOwnedError", src)
+        self.assertIn("os.EX_TEMPFAIL", src)
+        self.assertIn("os.EX_CANTCREAT", src)
