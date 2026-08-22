@@ -84,3 +84,34 @@ class MainLifecycleOrderTest(unittest.TestCase):
         self.assertIn("SocketAlreadyOwnedError", src)
         self.assertIn("os.EX_TEMPFAIL", src)
         self.assertIn("os.EX_CANTCREAT", src)
+
+
+class MainContenderBehaviorTest(unittest.TestCase):
+    """Ревью F2/F6: живой contender-путь main() — EX_TEMPFAIL и освобождённый claim."""
+
+    def test_main_exits_tempfail_and_releases_claim_on_live_listener(self):
+        import os
+        import socket as socket_mod
+
+        import backend.service as service_mod
+        from backend.socket_ownership import SocketOwnershipClaim
+
+        tmp = tempfile.TemporaryDirectory(prefix="mainconf_")
+        self.addCleanup(tmp.cleanup)
+        sock_path = Path(tmp.name) / "krabear.sock"
+        listener = socket_mod.socket(socket_mod.AF_UNIX, socket_mod.SOCK_STREAM)
+        listener.bind(str(sock_path))
+        listener.listen(8)
+        self.addCleanup(listener.close)
+
+        argv = ["service.py", "--data-dir", tmp.name]
+        with patch.object(sys, "argv", argv):
+            with self.assertRaises(SystemExit) as ctx:
+                service_mod.main()
+        self.assertEqual(ctx.exception.code, os.EX_TEMPFAIL)
+        # Claim освобождён (F2): свежий захват в ЭТОМ ЖЕ процессе проходит.
+        claim = SocketOwnershipClaim(sock_path)
+        claim.acquire()
+        claim.release()
+        # Живой listener не тронут.
+        self.assertTrue(sock_path.exists())

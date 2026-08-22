@@ -372,3 +372,34 @@ class CrossProcessTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FlockErrnoClassificationTest(unittest.TestCase):
+    """Ревью F1: contention — только EWOULDBLOCK/EAGAIN/EACCES; остальное — Unsafe."""
+
+    def setUp(self) -> None:
+        self.tmp = _short_tmpdir()
+        self.addCleanup(self.tmp.cleanup)
+        self.sock_path = Path(self.tmp.name) / "krab.sock"
+
+    def _acquire_with_flock_errno(self, err: int):
+        import fcntl
+        ownership = _mod()
+        claim = ownership.SocketOwnershipClaim(self.sock_path)
+        with patch.object(fcntl, "flock", side_effect=OSError(err, os.strerror(err))):
+            claim.acquire()
+
+    def test_enolck_is_unsafe_not_contended(self):
+        ownership = _mod()
+        with self.assertRaises(ownership.UnsafeSocketPathError):
+            self._acquire_with_flock_errno(errno.ENOLCK)
+
+    def test_eopnotsupp_is_unsafe_not_contended(self):
+        ownership = _mod()
+        with self.assertRaises(ownership.UnsafeSocketPathError):
+            self._acquire_with_flock_errno(errno.EOPNOTSUPP)
+
+    def test_ewouldblock_is_contended(self):
+        ownership = _mod()
+        with self.assertRaises(ownership.SocketAlreadyOwnedError):
+            self._acquire_with_flock_errno(errno.EWOULDBLOCK)

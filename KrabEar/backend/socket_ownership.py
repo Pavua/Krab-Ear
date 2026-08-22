@@ -229,8 +229,17 @@ class SocketOwnershipClaim:
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except OSError as exc:
-                    raise SocketAlreadyOwnedError(
-                        f"endpoint {self._socket_path} уже занят другим процессом"
+                    # Контенция — ТОЛЬКО EWOULDBLOCK/EAGAIN/EACCES. ENOLCK,
+                    # EOPNOTSUPP (ФС без flock: SMB/NFS) и прочее — не «занят»,
+                    # а неспособность доказать владение: иначе ложный диагноз
+                    # уводит в вечный EX_TEMPFAIL-рестарт с неверной строкой лога.
+                    if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
+                        raise SocketAlreadyOwnedError(
+                            f"endpoint {self._socket_path} уже занят другим процессом"
+                        ) from exc
+                    raise UnsafeSocketPathError(
+                        f"flock на {self._lock_path} невозможен "
+                        f"(errno={exc.errno}): {exc}"
                     ) from exc
             except BaseException:
                 try:

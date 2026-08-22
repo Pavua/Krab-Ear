@@ -6142,12 +6142,16 @@ def main() -> None:
         ownership.acquire()
         ownership.prepare_for_bind()
     except SocketAlreadyOwnedError as exc:
+        # Ревью F2: этот путь идёт ДО внешнего try/finally — release обязателен
+        # явно, иначе fd/flock живут до конца процесса (тест-загрязнение).
+        ownership.release()
         logger.error(
             "Endpoint %s уже занят другим backend'ом: %s — выходим (EX_TEMPFAIL)",
             socket_path, exc,
         )
         raise SystemExit(os.EX_TEMPFAIL) from exc
     except UnsafeSocketPathError as exc:
+        ownership.release()
         logger.error(
             "Небезопасный socket/lock path %s: %s — выходим (EX_CANTCREAT)",
             socket_path, exc,
@@ -6239,6 +6243,18 @@ def main() -> None:
                 server,
                 service._shutdown_handler,
             )
+    except SocketAlreadyOwnedError as exc:
+        logger.error(
+            "Endpoint %s занят (обнаружено на позднем prepare): %s — EX_TEMPFAIL",
+            socket_path, exc,
+        )
+        raise SystemExit(os.EX_TEMPFAIL) from exc
+    except UnsafeSocketPathError as exc:
+        logger.error(
+            "Небезопасный socket path %s (поздний prepare): %s — EX_CANTCREAT",
+            socket_path, exc,
+        )
+        raise SystemExit(os.EX_CANTCREAT) from exc
     finally:
         ownership.release()
 

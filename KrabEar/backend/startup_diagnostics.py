@@ -11,6 +11,7 @@ import logging
 import os
 import shutil
 import socket
+import stat
 import sys
 import threading
 import time
@@ -376,6 +377,36 @@ class StartupDiagnostics:
                 except Exception:
                     snapshot = None
 
+            own_state = snapshot.state if snapshot is not None else None
+
+            # Ревью F7: доказательство «слушаем мы» — БЕЗ connect'а к самому
+            # себе (каждый TTL-прогон занимал бы слот семафора и handler-тред,
+            # а под нагрузкой connect-таймаут давал бы ложный warning).
+            # lstat + сравнение с bound_identity достаточно: state=LISTENING
+            # держим мы сами, значит совпавший inode = наш живой listener.
+            if (
+                own_state is SocketOwnershipState.LISTENING
+                and snapshot.bound_identity is not None
+            ):
+                try:
+                    _st = os.lstat(sock_path)
+                except OSError:
+                    _st = None
+                if _st is not None and stat.S_ISSOCK(_st.st_mode) and (
+                    (_st.st_dev, _st.st_ino)
+                    == (snapshot.bound_identity.device, snapshot.bound_identity.inode)
+                ):
+                    return _result(
+                        "ok",
+                        f"На {sock_path} слушаем мы (inode совпадает)",
+                        path=str(sock_path),
+                        path_status="listening",
+                        ownership_state=own_state.value,
+                        owner="self",
+                        stale=False,
+                        exists=True,
+                    )
+
             probe = probe_unix_socket_path(sock_path)
             base = {
                 "path": str(sock_path),
@@ -384,9 +415,12 @@ class StartupDiagnostics:
                     snapshot.state.value if snapshot is not None else None
                 ),
                 "owner": None,
+                # Совместимость прежней схемы details (спека: ключи только
+                # добавляются): stale/exists выводимы из path_status.
+                "stale": probe.status is SocketPathStatus.STALE,
+                "exists": probe.status is not SocketPathStatus.MISSING,
             }
 
-            own_state = snapshot.state if snapshot is not None else None
             if own_state is not None and own_state is not SocketOwnershipState.UNCLAIMED:
                 if (
                     own_state is SocketOwnershipState.CLAIMED
