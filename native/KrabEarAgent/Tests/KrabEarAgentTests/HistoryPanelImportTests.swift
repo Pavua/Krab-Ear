@@ -48,6 +48,16 @@ final class HistoryPanelImportTests: XCTestCase {
         XCTAssertEqual(sig, "", "Пустой массив → пустая сигнатура")
     }
 
+    func test_production_import_uses_shared_helpers() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/KrabEarAgent/HistoryPanelController+Import.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(source.contains("HistoryPanelController.stageRuStatic("))
+        XCTAssertTrue(source.contains("HistoryPanelController.mmssStatic("))
+        XCTAssertTrue(source.contains("HistoryPanelController.normalizedImportSignatureStatic("))
+    }
+
     // MARK: - mmss (форматирование секунд)
 
     /// 0 секунд → "00:00".
