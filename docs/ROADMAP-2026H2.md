@@ -2189,3 +2189,21 @@ HTTP ≥400 не считается ни успехом, ни провалом. 
 - Не чинили PortAudio / `_listen_loop`. Не `Pa_Terminate` при THREAD_HUNG. Не parity-бинари.
 - Карточка: `docs/superpowers/plans/2026-08-17-wakeword-portaudio-after-dictation.md`.
 
+
+## 2026-08-22 — Приёмка codex-волны: 13 веток a–m (PR #1942)
+
+Codex-сессия за сутки закрыла бриф `FOR_CODEX_2026-08-21` (A: облачный STT-ретрай без ключа не пытается — было 60 err/час; B: −601 строка мёртвого Swift, гард 19→1; C: таблица-вердикт 46 test_only) и сама развила находки C: d — root-fix невидимого severity-бейджа (overlay в `StatusIndicatorImage`, состояние на AppDelegate, critical blink, info=clear — паритет старого `_applyErrorBadge`); f–j — 5 рефакторов «прод делегирует хелперу» (сняты DEBUG-реплики: WS request, plist, error stats, inline translation, import); e — аддитивный `stt_engine` в REST-ответе; k — false-green тест memory-conductor; l — AST-парсинг живой dispatch-таблицы в drift-аудите; m — спека+план «socket ownership» (реализация ждёт codex, ревью-заметки приёмки в хвосте плана).
+
+- Приёмка: каждая ветка построчно координатором (Fable max); pytest 65 PASS, ubuntu-parity GREEN, audit-all PASS, swift test 1622/0 fail, CI GREEN на полном headSha `690ba308`.
+- Инцидент приёмки: CI-джоб Python 3.12 поймал `agent.binary_drift` — parity-коммит `b0840804` включал только bundle-бинарь, `git checkout` откатил runtime к старому UUID. Урок в памяти (parity сверять и working-копию против git-блоба; в parity-коммите ОБА бинаря).
+- Деплой: агент `C7539BDB` (parity `0097eac8`), backend/REST через `safe_backend_restart --with-rest`. Живые проверки: REST 200, `stt_engine` в ответе, 0 `no_api_key` после рестарта, wake word running/not wedged.
+- Открыто: судьба Privacy Audit viewer (1 dead в гарде) — отдельная сессия владельца; реализация socket-ownership — брифом в codex.
+
+## 2026-08-22 — Socket ownership: атомарное владение endpoint'ом (PR #1944)
+
+Реализация спеки codex-ветки m силами Claude-сессии (codex-квота исчерпана). Три подтверждённых дефекта закрыты: StartupDiagnostics смотрел `backend.sock` вместо `krabear.sock`; `IPCServer` безусловно unlink'ал путь до bind (второй backend отрывал сокет живого) и на shutdown (сносил чужой replacement). Новый `backend/socket_ownership.py`: canonical path, fail-closed probe (только ECONNREFUSED=STALE), sidecar `<socket>.lock` под `flock(LOCK_EX|LOCK_NB)`; main() захватывает claim ДО StateStore/Sentry, contender выходит EX_TEMPFAIL, release во внешнем finally.
+
+- Adversarial-ревью (Opus, свежий контекст): 2 MED + 6 LOW; MED-1 (errno-классификация flock — ENOLCK/SMB не «занят»), MED-2 (release на contender-пути) и LOW-5/7/9 пофикшены с поведенческими тестами; MED-3 (Swift `cleanupStaleSocket` безусловный unlink, dev-режим) — chip-follow-up.
+- 🔴 ubuntu-CI поймал **inode-reuse на Linux**: (dev, ino) недостаточно для «тот же файл», replacement получил освобождённый номер; контракт удаления усилен до (dev, ino, mtime_ns). macOS маскирует класс.
+- Попутно: chunk-сдвиг взвёл хронику «фейк отстал от StateStore» — closure-фейк `tracked_load_settings` без kwargs (test_backend_service); починен, слепая зона гарда (closure-присвоения) — chip.
+- Живые e2e: throwaway-бэкенд `ALL SMOKES GREEN` (37 методов + privacy 21/21); contender-смок — второй main() вышел 75 за секунды, первый жив, сокет цел.
