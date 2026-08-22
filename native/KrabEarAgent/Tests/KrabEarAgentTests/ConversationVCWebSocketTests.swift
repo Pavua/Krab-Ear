@@ -5,8 +5,8 @@
  1. ConversationEvent.decode — парсинг всех 5 downlink-типов + невалидный JSON.
  2. ConversationControlMessage.jsonData — структура uplink JSON.
  3. ConversationState equality — все комбинации == / !=.
- 4. URL-сборка — query params движка/мозга/языка через _buildWSRequest (DEBUG hook).
- 5. Заголовок Authorization через _buildWSRequest.
+ 4. URL-сборка — query params движка/мозга/языка через production builder.
+ 5. Заголовок Authorization через production builder.
  6. State transitions: startConversation → .connecting, stopConversation → .idle (@MainActor).
  7. sendControlMessage не крашит при nil task (guard wsHolder.task).
 */
@@ -204,7 +204,7 @@ final class ConversationStateTests: XCTestCase {
     }
 }
 
-// MARK: - URL building (DEBUG hook)
+// MARK: - URL building (production builder)
 
 @MainActor
 final class ConversationVCURLBuildingTests: XCTestCase {
@@ -224,7 +224,7 @@ final class ConversationVCURLBuildingTests: XCTestCase {
             brain: "auto"
         )
         let vc = makeVC(config: config)
-        let req = vc._buildWSRequest(for: config.wsURLString)
+        let req = vc.makeWebSocketRequest(for: config.wsURLString)
         XCTAssertNotNil(req)
         let items = URLComponents(url: req!.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
         XCTAssertEqual(items.count, 1,
@@ -237,7 +237,7 @@ final class ConversationVCURLBuildingTests: XCTestCase {
         var config = ConversationConfig.default
         config.engine = "moshi"
         let vc = makeVC(config: config)
-        let req = vc._buildWSRequest(for: config.wsURLString)!
+        let req = vc.makeWebSocketRequest(for: config.wsURLString)!
         let items = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
         let engineParam = items.first(where: { $0.name == "engine" })
         XCTAssertEqual(engineParam?.value, "moshi")
@@ -247,7 +247,7 @@ final class ConversationVCURLBuildingTests: XCTestCase {
         var config = ConversationConfig.default
         config.brain = "qwen3-4b"
         let vc = makeVC(config: config)
-        let req = vc._buildWSRequest(for: config.wsURLString)!
+        let req = vc.makeWebSocketRequest(for: config.wsURLString)!
         let items = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
         let brainParam = items.first(where: { $0.name == "brain" })
         XCTAssertEqual(brainParam?.value, "qwen3-4b")
@@ -257,7 +257,7 @@ final class ConversationVCURLBuildingTests: XCTestCase {
         var config = ConversationConfig.default
         config.languageHint = "ru"
         let vc = makeVC(config: config)
-        let req = vc._buildWSRequest(for: config.wsURLString)!
+        let req = vc.makeWebSocketRequest(for: config.wsURLString)!
         let items = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
         let langParam = items.first(where: { $0.name == "lang" })
         XCTAssertEqual(langParam?.value, "ru")
@@ -272,7 +272,7 @@ final class ConversationVCURLBuildingTests: XCTestCase {
             brain: "llama-3.2-3b"
         )
         let vc = makeVC(config: config)
-        let req = vc._buildWSRequest(for: config.wsURLString)!
+        let req = vc.makeWebSocketRequest(for: config.wsURLString)!
         let items = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
         let names = Set(items.map(\.name))
         XCTAssertTrue(names.contains("engine"), "engine param должен присутствовать")
@@ -286,7 +286,7 @@ final class ConversationVCURLBuildingTests: XCTestCase {
         var config = ConversationConfig.default
         config.brainMode = "auto"
         let vc = makeVC(config: config)
-        let req = vc._buildWSRequest(for: config.wsURLString)!
+        let req = vc.makeWebSocketRequest(for: config.wsURLString)!
         let items = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
         let brainModeParam = items.first(where: { $0.name == "brain_mode" })
         XCTAssertEqual(brainModeParam?.value, "auto",
@@ -297,7 +297,7 @@ final class ConversationVCURLBuildingTests: XCTestCase {
         var config = ConversationConfig.default
         config.brainMode = "krab"
         let vc = makeVC(config: config)
-        let req = vc._buildWSRequest(for: config.wsURLString)!
+        let req = vc.makeWebSocketRequest(for: config.wsURLString)!
         let items = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
         let brainModeParam = items.first(where: { $0.name == "brain_mode" })
         XCTAssertEqual(brainModeParam?.value, "krab")
@@ -307,7 +307,7 @@ final class ConversationVCURLBuildingTests: XCTestCase {
         var config = ConversationConfig.default
         config.brainMode = "fast"
         let vc = makeVC(config: config)
-        let req = vc._buildWSRequest(for: config.wsURLString)!
+        let req = vc.makeWebSocketRequest(for: config.wsURLString)!
         let items = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
         let brainModeParam = items.first(where: { $0.name == "brain_mode" })
         XCTAssertEqual(brainModeParam?.value, "fast")
@@ -319,7 +319,7 @@ final class ConversationVCURLBuildingTests: XCTestCase {
         var config = ConversationConfig.default
         config.apiKey = "tok-secret"
         let vc = makeVC(config: config)
-        let req = vc._buildWSRequest(for: config.wsURLString)!
+        let req = vc.makeWebSocketRequest(for: config.wsURLString)!
         XCTAssertEqual(req.value(forHTTPHeaderField: "Authorization"), "Bearer tok-secret")
     }
 
@@ -327,7 +327,7 @@ final class ConversationVCURLBuildingTests: XCTestCase {
         var config = ConversationConfig.default
         config.apiKey = ""
         let vc = makeVC(config: config)
-        let req = vc._buildWSRequest(for: config.wsURLString)!
+        let req = vc.makeWebSocketRequest(for: config.wsURLString)!
         XCTAssertNil(req.value(forHTTPHeaderField: "Authorization"),
                      "Пустой apiKey не должен добавлять заголовок Authorization")
     }
@@ -336,7 +336,7 @@ final class ConversationVCURLBuildingTests: XCTestCase {
 
     func test_buildWSRequest_invalidURL_returnsNil() {
         let vc = makeVC(config: .default)
-        let req = vc._buildWSRequest(for: "")
+        let req = vc.makeWebSocketRequest(for: "")
         XCTAssertNil(req, "Пустой URL должен давать nil из URL(string:)")
     }
 }
