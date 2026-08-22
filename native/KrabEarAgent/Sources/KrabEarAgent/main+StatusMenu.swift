@@ -275,6 +275,21 @@ extension AgentAppDelegate {
                                     accessibilityDescription: nil)  // уже используется в +MeetingMode
         menu.addItem(meetingItem)
 
+        // Call Observer w1 T9 (2б): пункт открывает панель звонка агента —
+        // enabled только когда координатор реально отслеживает живой звонок
+        // (disabled-строка вместо скрытия, паттерн main+BrainLease.swift:
+        // владелец видит пункт постоянно, он включается сам).
+        let callObserverItem = NSMenuItem(
+            title: "Звонок агента…",
+            action: #selector(onOpenCallObserverPanel),
+            keyEquivalent: "")
+        callObserverItem.target = self
+        callObserverItem.image = NSImage(systemSymbolName: "phone.and.waveform",
+                                         accessibilityDescription: nil)
+        menu.addItem(callObserverItem)
+        self.callObserverMenuItem = callObserverItem
+        refreshCallObserverMenuItem()
+
         let showPanelItem = NSMenuItem(
             title: "Показать панель",
             action: #selector(onOpenHistory),

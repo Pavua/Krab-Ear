@@ -311,5 +311,8 @@ extension AgentAppDelegate: NSMenuDelegate {
         refreshBrainLeaseMenuItem()
         // T8: строка «Память: …» — тот же паттерн (main+MemoryLine.swift).
         refreshMemoryLineMenuItem()
+        // Call Observer w1 T9: enabled-состояние «Звонок агента…» — в памяти,
+        // IPC не нужен (main+CallObserver.swift).
+        refreshCallObserverMenuItem()
     }
 }
