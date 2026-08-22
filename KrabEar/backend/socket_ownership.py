@@ -158,6 +158,12 @@ class SocketOwnershipClaim:
         self._fd: int | None = None
         self._state = SocketOwnershipState.UNCLAIMED
         self._bound_identity: SocketIdentity | None = None
+        # Linux (tmpfs/ext4) охотно переиспользует номера inode: (dev, ino)
+        # недостаточно для «это ТОТ ЖЕ файл» — replacement-сокет может получить
+        # только что освобождённый номер (поймано ubuntu-CI). mtime_ns
+        # выставляется ядром при bind и вместе с (dev, ino) даёт практически
+        # неподделываемую identity для пути удаления.
+        self._bound_mtime_ns: int | None = None
 
     # -- свойства -----------------------------------------------------------
 
@@ -311,6 +317,7 @@ class SocketOwnershipClaim:
             if self._fd is None:
                 raise SocketOwnershipError("record_bound_socket без claim")
             self._bound_identity = _identity_from_stat(st)
+            self._bound_mtime_ns = st.st_mtime_ns
 
     def mark_listening(self) -> None:
         with self._mutex:
@@ -327,7 +334,9 @@ class SocketOwnershipClaim:
         """
         with self._mutex:
             bound = self._bound_identity
+            bound_mtime = self._bound_mtime_ns
             self._bound_identity = None
+            self._bound_mtime_ns = None
             if self._state is SocketOwnershipState.LISTENING:
                 self._state = SocketOwnershipState.CLAIMED
         if bound is None:
@@ -340,6 +349,8 @@ class SocketOwnershipClaim:
             return
         if (st.st_dev, st.st_ino) != (bound.device, bound.inode):
             return  # replacement inode другого процесса — не трогаем
+        if bound_mtime is not None and st.st_mtime_ns != bound_mtime:
+            return  # тот же НОМЕР inode, но другой файл (reuse на Linux)
         try:
             os.unlink(self._socket_path)
         except OSError:
@@ -353,6 +364,7 @@ class SocketOwnershipClaim:
             fd, self._fd = self._fd, None
             self._state = SocketOwnershipState.UNCLAIMED
             self._bound_identity = None
+            self._bound_mtime_ns = None
         if fd is None:
             return
         try:
