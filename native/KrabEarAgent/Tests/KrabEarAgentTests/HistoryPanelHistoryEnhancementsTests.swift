@@ -6,10 +6,9 @@
  однако несколько чистых функций доступны для whitebox-тестирования:
    - updateHistoryFiltersBadge   → логика подсчёта активных фильтров (whitebox)
    - cleanupDaysSelector mapping → daysMap[index] → days
-   - onAutoSummaryBatch prefix   → items.prefix(50) логика на массиве
 
  UI-зависимые методы (onExportSrt, onCleanupHistory, onVocabSuggestions,
- onGlossarySuggestions, onAutoSummaryBatch, onTableViewDoubleClick, onSummarizeItem)
+ onGlossarySuggestions, onTableViewDoubleClick)
  пропускаем через XCTSkip с объяснением.
 */
 
@@ -117,7 +116,7 @@ final class HistoryPanelHistoryEnhancementsTests: XCTestCase {
         XCTAssertEqual(cleanupDaysForIndex(99), 30)
     }
 
-    // MARK: - onAutoSummaryBatch prefix logic
+    // MARK: - batch-prefix(50) logic (бывший onAutoSummaryBatch, метод удалён)
 
     /// prefix(50) на массиве < 50 элементов → берёт все.
     func test_autosummaryBatch_prefixAll_whenLessThan50() {
