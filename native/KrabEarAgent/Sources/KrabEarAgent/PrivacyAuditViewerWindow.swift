@@ -1,15 +1,18 @@
 /*
- PrivacyAuditViewerWindow — модальное окно просмотра Privacy Audit Log.
+ PrivacyAuditViewerWindow — окно просмотра Privacy Audit Log.
 
- Открывается из секции «Безопасность и приватность» в Settings tab.
+ Открывается кнопкой «Журнал аудита» из секции «Приватность и данные»
+ (HistoryPanelController+PrivacyDashboard.swift).
 
  IPC-методы:
    get_privacy_audit_log(limit: Int) → {entries: [...], total_count: Int}
      Каждая запись: {ts: String, category: String, action: String, details: {}}
-   clear_privacy_audit_log() → {ok: Bool}
+
+ Очистки лога здесь НЕТ намеренно: clear_privacy_audit_log удалён из IPC-диспетча
+ (W957 SECURITY — уничтожение compliance-трейла через неподписанный IPC запрещено).
 
  Columns: «Время» | «Категория / Действие» | «Подробности»
- Bottom row: Refresh + Очистить + Закрыть
+ Bottom row: Refresh + Закрыть
 */
 
 import AppKit
@@ -42,7 +45,6 @@ final class PrivacyAuditViewerWindowController: NSWindowController,
     private let scrollView  = NSScrollView()
     private let statusLabel = NSTextField(labelWithString: "Загрузка…")
     private let refreshButton = NSButton(title: "Обновить", target: nil, action: nil)
-    private let clearButton   = NSButton(title: "Очистить", target: nil, action: nil)
     private let closeButton   = NSButton(title: "Закрыть", target: nil, action: nil)
 
     // MARK: - Init
@@ -113,18 +115,13 @@ final class PrivacyAuditViewerWindowController: NSWindowController,
         refreshButton.target     = self
         refreshButton.action     = #selector(onRefresh)
 
-        clearButton.bezelStyle  = .rounded
-        clearButton.font        = KrabEarTheme.Typography.body
-        clearButton.target      = self
-        clearButton.action      = #selector(onClear)
-
         closeButton.bezelStyle  = .rounded
         closeButton.font        = KrabEarTheme.Typography.body
         closeButton.target      = self
         closeButton.action      = #selector(onClose)
         closeButton.keyEquivalent = "\u{1b}" // Escape
 
-        let bottomStack = NSStackView(views: [statusLabel, NSView(), refreshButton, clearButton, closeButton])
+        let bottomStack = NSStackView(views: [statusLabel, NSView(), refreshButton, closeButton])
         bottomStack.orientation  = .horizontal
         bottomStack.alignment    = .centerY
         bottomStack.distribution = .fill
@@ -212,50 +209,10 @@ final class PrivacyAuditViewerWindowController: NSWindowController,
         }
     }
 
-    private func clearLog() {
-        guard let ipc = ipcClient else { return }
-        clearButton.isEnabled   = false
-        statusLabel.stringValue = "Очистка…"
-
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            do {
-                _ = try ipc.call(method: "clear_privacy_audit_log", params: [:])
-                DispatchQueue.main.async {
-                    self.entries    = []
-                    self.totalCount = 0
-                    self.tableView.reloadData()
-                    self.statusLabel.stringValue = "Лог очищен"
-                    self.clearButton.isEnabled   = true
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.statusLabel.stringValue = "Ошибка очистки: \(error.localizedDescription)"
-                    self.clearButton.isEnabled   = true
-                }
-            }
-        }
-    }
-
     // MARK: - Actions
 
     @objc private func onRefresh() {
         fetchEntries()
-    }
-
-    @objc private func onClear() {
-        let alert = NSAlert()
-        alert.messageText    = "Очистить лог приватности?"
-        alert.informativeText = "Все записи privacy audit log будут удалены без возможности восстановления."
-        alert.addButton(withTitle: "Очистить")
-        alert.addButton(withTitle: "Отмена")
-        alert.alertStyle = .warning
-        guard let window else { return }
-        alert.beginSheetModal(for: window) { [weak self] response in
-            if response == .alertFirstButtonReturn {
-                self?.clearLog()
-            }
-        }
     }
 
     @objc private func onClose() {

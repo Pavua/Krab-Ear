@@ -1,8 +1,13 @@
 /*
- Приватность и данные: read-only секция настроек со сводкой приватности/безопасности.
+ Приватность и данные: секция настроек со сводкой приватности/безопасности.
  Показывает режим приватности, шифрование истории, объём хранилища, политику
- авто-очистки/purge и счётчик событий аудита приватности. Только чтение —
- никаких транскриптов/словарей/спикеров (их нет в payload).
+ авто-очистки/purge и счётчик событий аудита приватности. Два живых контрола
+ (2026-08-22, возврат privacy-UI после волны dead-swift-methods-b):
+   - тумблер «Режим приватности» (единственная точка включения privacy mode из UI —
+     секция Phase D.5 с прежним тумблером с рождения не вставлялась в таб);
+   - кнопка «Журнал аудита» → PrivacyAuditViewerWindowController (просмотр без
+     очистки: clear_privacy_audit_log удалён из IPC-диспетча, W957 SECURITY).
+ Остальное — только чтение, никаких транскриптов/словарей/спикеров (их нет в payload).
 
  IPC-контракт (только счётчики/флаги/размеры — никакого текста транскриптов):
    - get_privacy_dashboard {}
@@ -45,6 +50,7 @@ import Foundation
 private enum PrivacyDashboardAssocKeys {
     nonisolated(unsafe) static var card: UInt8 = 0
     nonisolated(unsafe) static var cdCard: UInt8 = 0
+    nonisolated(unsafe) static var auditViewer: UInt8 = 0
 }
 
 // MARK: - Модель приватности (internal, single-source)
@@ -206,11 +212,11 @@ extension HistoryPanelController {
             return
         }
 
-        // Режим приватности.
+        // Режим приватности — живой тумблер (единственная точка включения из UI).
         card.contentStackView.addArrangedSubview(
             makeSettingRow(
                 label: "Режим приватности",
-                control: pdValueLabel(pdOnOff(data.privacyMode)),
+                control: pdPrivacyModeToggle(on: data.privacyMode),
                 badge: pdToggleBadge(
                     on: data.privacyMode,
                     onSymbol: "lock.fill",
@@ -305,7 +311,7 @@ extension HistoryPanelController {
         }
 
         card.contentStackView.addArrangedSubview(
-            cdMakeRow(label: "Режим приватности", control: pdValueLabel(pdOnOff(data.privacyMode)))
+            cdMakeRow(label: "Режим приватности", control: pdPrivacyModeToggle(on: data.privacyMode))
         )
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(
@@ -347,7 +353,7 @@ extension HistoryPanelController {
         card.contentStackView.addArrangedSubview(pdButtonRow())
     }
 
-    // MARK: - Кнопка обновления
+    // MARK: - Кнопки секции
 
     @MainActor
     private func pdButtonRow() -> NSView {
@@ -358,17 +364,44 @@ extension HistoryPanelController {
         )
         refreshButton.setAccessibilityLabel("Обновить сводку приватности и данных")
 
+        let auditButton = ThemeSecondaryButton(
+            title: "Журнал аудита",
+            target: self,
+            action: #selector(onShowPrivacyAuditLog(_:))
+        )
+        auditButton.setAccessibilityLabel(
+            "Открыть журнал событий приватности: заблокированные Sentry-отчёты, "
+                + "принудительный offline-перевод, включения и выключения режима."
+        )
+
         let stack = NSStackView()
         stack.orientation = .horizontal
         stack.spacing = KrabEarTheme.Metrics.standard
         stack.alignment = .centerY
         stack.distribution = .fill
         stack.addArrangedSubview(refreshButton)
+        stack.addArrangedSubview(auditButton)
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         spacer.setAccessibilityElement(false)
         stack.addArrangedSubview(spacer)
         return stack
+    }
+
+    // MARK: - Живой тумблер privacy mode
+
+    /// Свежий switch на каждый rebuild карточки; состояние берётся из payload.
+    @MainActor
+    private func pdPrivacyModeToggle(on: Bool) -> NSButton {
+        let toggle = NSButton(checkboxWithTitle: "", target: self,
+                              action: #selector(onPrivacyModeToggled(_:)))
+        toggle.setButtonType(.switch)
+        toggle.state = on ? .on : .off
+        toggle.setAccessibilityLabel(
+            "Режим приватности: отключает Sentry telemetry и принудительно "
+                + "переводит перевод в offline-режим. LM Studio (127.0.0.1) остаётся разрешённым."
+        )
+        return toggle
     }
 
     // MARK: - Handlers
@@ -377,6 +410,33 @@ extension HistoryPanelController {
     @objc func onRefreshPrivacyDashboard(_ sender: NSButton) {
         fetchAndRebuildPrivacyDashboardCard(isClaudeDesign: false)
         fetchAndRebuildPrivacyDashboardCard(isClaudeDesign: true)
+    }
+
+    /// Переключает privacy mode из секции «Приватность и данные».
+    @objc func onPrivacyModeToggled(_ sender: NSButton) {
+        let enabled = sender.state == .on
+        applySettingsPatch(["privacy_mode_enabled": enabled])
+        (NSApp.delegate as? AgentAppDelegate)?.setPrivacyMode(enabled)
+        // set_settings уходит асинхронно (optimistic local + Task в persistSettingsPayload) —
+        // немедленный fetch прочитал бы с backend ещё старое значение.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            guard let self else { return }
+            self.fetchAndRebuildPrivacyDashboardCard(isClaudeDesign: false)
+            self.fetchAndRebuildPrivacyDashboardCard(isClaudeDesign: true)
+        }
+    }
+
+    /// Открывает Privacy Audit viewer (просмотр журнала, без очистки — W957).
+    @objc func onShowPrivacyAuditLog(_ sender: NSButton) {
+        let viewer = PrivacyAuditViewerWindowController(ipcClient: ipcClient)
+        // Держим сильную ссылку, пока окно открыто.
+        objc_setAssociatedObject(
+            self,
+            &PrivacyDashboardAssocKeys.auditViewer,
+            viewer,
+            .OBJC_ASSOCIATION_RETAIN
+        )
+        viewer.showAndLoad()
     }
 
     // MARK: - Вспомогательные элементы (только для этого extension)
