@@ -888,9 +888,10 @@ class AudioEngine:
         ключом: у обоих вызывающих мест ``engine`` на деле несёт не имя STT-
         движка, а причину пустого результата ("empty_audio" / "vad_skip") —
         переименовывать/трогать сам ``engine`` этой волной не стали (риск для
-        потребителей, читающих его как есть), но REST-граница нуждается в
-        НЕДВУСМЫСЛЕННО названном поле, чтобы отличить «тишина» от «не смогли
-        распознать» (см. backend/rest_server.py::transcribe_audio).
+        потребителей, читающих его как есть). ``stt_engine`` добавлен как
+        честный контрактный ключ: на раннем возврате STT ещё не запускался,
+        поэтому его значение ``None``. REST подставляет реальное имя движка
+        только для обычного результата (см. backend/rest_server.py::transcribe_audio).
         """
         return {
             "text": "", "raw_text": "", "cleaned_text": "",
@@ -899,6 +900,7 @@ class AudioEngine:
             "confidence": 0.0, "raw_confidence": 0.0,
             "confidence_adjustments": [], "duration_ms": 0,
             "engine": engine, "model": None,
+            "stt_engine": None,
             "language": language, "segments": [],
             "diarization": None, "emotion": None,
             "reason": engine,
