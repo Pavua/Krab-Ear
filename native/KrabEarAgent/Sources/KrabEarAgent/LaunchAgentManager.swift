@@ -105,58 +105,10 @@ final class LaunchAgentManager: AutostartManaging, @unchecked Sendable {
         return FileManager.default.fileExists(atPath: plistPath)
     }
 
-    func install() {
-        try? FileManager.default.createDirectory(
-            at: launchAgentsDirectory,
-            withIntermediateDirectories: true
-        )
-
-        // Phase C.6.2: идемпотентно удаляем старый com.krabear.agent.plist.
-        removeLegacyPlistIfPresent()
-
-        let bundlePathValue = bundlePath
-        let plist = """
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-            <key>Label</key>
-            <string>\(label)</string>
-            <key>ProgramArguments</key>
-            <array>
-                <string>/usr/bin/open</string>
-                <string>-W</string>
-                <string>\(bundlePathValue)</string>
-            </array>
-            <key>RunAtLoad</key>
-            <true/>
-            <key>KeepAlive</key>
-            <true/>
-            <key>StandardOutPath</key>
-            <string>\(NSString(string: "~/Library/Logs/KrabEarAgent.log").expandingTildeInPath)</string>
-            <key>StandardErrorPath</key>
-            <string>\(NSString(string: "~/Library/Logs/KrabEarAgent.error.log").expandingTildeInPath)</string>
-        </dict>
-        </plist>
-        """
-
-        try? plist.write(toFile: plistPath, atomically: true, encoding: .utf8)
-        reloadAgent()
-    }
-
-    /// Удаляет старый com.krabear.agent.plist при одноразовой миграции.
-    private func removeLegacyPlistIfPresent() {
-        let path = legacyPlistPath
-        guard FileManager.default.fileExists(atPath: path) else { return }
-        let uid = getuid()
-        _ = runLaunchctl(args: ["bootout", "gui/\(uid)", path])
-        try? FileManager.default.removeItem(atPath: path)
-    }
-
-#if DEBUG
-    /// Тест-хук: возвращает сгенерированный plist XML без записи на диск.
-    /// Используется в unit-тестах для проверки содержимого без файловых изменений.
-    func buildPlistContent() -> String {
+    /// Создаёт plist автозапуска без записи на диск или вызова launchctl.
+    /// Production install и тесты используют единый XML, чтобы изменение одного
+    /// пути не оставило второй зелёным только в изоляции.
+    func makePlistContent() -> String {
         let bundlePathValue = bundlePath
         return """
         <?xml version="1.0" encoding="UTF-8"?>
@@ -184,6 +136,31 @@ final class LaunchAgentManager: AutostartManaging, @unchecked Sendable {
         """
     }
 
+    func install() {
+        try? FileManager.default.createDirectory(
+            at: launchAgentsDirectory,
+            withIntermediateDirectories: true
+        )
+
+        // Phase C.6.2: идемпотентно удаляем старый com.krabear.agent.plist.
+        removeLegacyPlistIfPresent()
+
+        let plist = makePlistContent()
+
+        try? plist.write(toFile: plistPath, atomically: true, encoding: .utf8)
+        reloadAgent()
+    }
+
+    /// Удаляет старый com.krabear.agent.plist при одноразовой миграции.
+    private func removeLegacyPlistIfPresent() {
+        let path = legacyPlistPath
+        guard FileManager.default.fileExists(atPath: path) else { return }
+        let uid = getuid()
+        _ = runLaunchctl(args: ["bootout", "gui/\(uid)", path])
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+#if DEBUG
     /// Тест-хук: возвращает вычисленный путь к plist файлу без побочных эффектов.
     var plistPathForTest: String { plistPath }
 
