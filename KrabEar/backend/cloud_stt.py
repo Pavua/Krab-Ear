@@ -22,6 +22,31 @@ from core.config import settings
 
 logger = logging.getLogger("KrabEar.CloudSTT")
 
+_API_KEY_SETTING_BY_PROVIDER = {
+    "openai": "openai_api_key",
+    "deepgram": "deepgram_api_key",
+    "assemblyai": "assemblyai_api_key",
+}
+
+
+def get_cloud_stt_api_key_setting(name: str) -> Optional[str]:
+    """Возвращает имя настройки API-ключа для известного cloud STT provider."""
+    return _API_KEY_SETTING_BY_PROVIDER.get(str(name).lower())
+
+
+def has_cloud_stt_api_key(name: str) -> Optional[bool]:
+    """Проверяет ключ через тот же settings-reader, который использует provider.
+
+    ``None`` означает неизвестного provider: вызывающий должен сохранить явную
+    ошибку конфигурации, а не маскировать её как отсутствие ключа.
+    """
+    key_setting = get_cloud_stt_api_key_setting(name)
+    if key_setting is None:
+        return None
+    api_key = str((_load_settings() or {}).get(key_setting, "") or "").strip()
+    return bool(api_key)
+
+
 # S3/I-C: собственный module-level StateStore здесь был лок-миной. После
 # выравнивания DATA_DIR он смотрел бы на ТЕ ЖЕ файлы, что основной store
 # процесса, а per-thread depth-counter реентерабельности (#1872) живёт в поле

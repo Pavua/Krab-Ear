@@ -28,7 +28,10 @@ class TranscribeRemoteTestCase(unittest.TestCase):
         from core.engine import AudioEngine
         from core.config import settings
         os.makedirs(str(settings.DATA_DIR), exist_ok=True)
-        self.engine = AudioEngine()
+        self.engine = AudioEngine(skip_gigaam_warmup=True)
+
+    def tearDown(self):
+        self.engine.close()
 
     def _fake_provider(self, result: dict):
         provider = MagicMock()
@@ -149,7 +152,7 @@ class TranscribeRemoteTestCase(unittest.TestCase):
 
     @patch("backend.cloud_stt.get_cloud_stt_provider")
     def test_provider_error_result_raises_runtime_error_not_crash(self, mock_get_provider):
-        """Провайдер без API-ключа возвращает {"error": "no_api_key", ...} → RuntimeError, не падение."""
+        """Defensive no_api_key остаётся RuntimeError, но не шумит на ERROR-уровне."""
         import numpy as np
 
         provider = self._fake_provider({
@@ -159,10 +162,16 @@ class TranscribeRemoteTestCase(unittest.TestCase):
         })
         mock_get_provider.return_value = provider
 
-        with self.assertRaises(RuntimeError) as ctx:
-            self.engine._transcribe_remote(np.zeros(1600, dtype=np.float32), "prompt")
+        with self.assertLogs("KrabEar.Engine", level="INFO") as log_ctx:
+            with self.assertRaises(RuntimeError) as ctx:
+                self.engine._transcribe_remote(np.zeros(1600, dtype=np.float32), "prompt")
 
         self.assertIn("no_api_key", str(ctx.exception))
+        self.assertTrue(any("no_api_key" in message for message in log_ctx.output))
+        self.assertFalse(
+            any(record.levelno >= 40 for record in log_ctx.records),
+            log_ctx.output,
+        )
 
     @patch("backend.privacy_audit.get_privacy_audit_logger")
     @patch("backend.cloud_stt.get_cloud_stt_provider")
