@@ -81,7 +81,7 @@ sidecar claim. Вынос нужен потому, что им пользуют�
 
 #### Canonical path
 
-Формула одна:
+Публичный helper `canonical_socket_path(path)` реализует одну формулу:
 
 1. `expanduser()`;
 2. parent переводится в absolute и `resolve(strict=False)`;
@@ -131,6 +131,18 @@ fail-closed, а не как stale.
 - `snapshot()` — immutable read-only снимок: canonical socket path, state и
   сохранённый bound `(st_dev, st_ino)` для diagnostics.
 
+Исключения образуют явный контракт:
+
+- `SocketOwnershipError` — общий базовый класс;
+- `SocketAlreadyOwnedError` — sidecar contention либо доказанный живой
+  listener, включая legacy backend без нового flock;
+- `UnsafeSocketPathError` — небезопасный sidecar/path, `OCCUPIED`, смена inode
+  перед stale unlink или невозможность доказать корректное владение.
+
+`prepare_for_bind()` возвращает probe только для безопасных `MISSING` и
+очищенного `STALE`; для `LISTENING` и `OCCUPIED` бросает соответствующее
+исключение до открытия server socket.
+
 Sidecar открывается с `O_CREAT | O_RDWR | O_CLOEXEC`, mode `0600` и
 `O_NOFOLLOW`, где он доступен. После `fstat` принимается только regular file,
 принадлежащий effective UID. Невозможность доказать безопасный claim блокирует
@@ -179,9 +191,10 @@ lifecycle `main()` до конца `_shutdown_backend`.
 только свой inode, затем штатный coordinator закрывает построенный service, а
 внешний `finally` освобождает claim.
 
-Contention или живой legacy listener завершают startup ненулевым
+`SocketAlreadyOwnedError` (contention или живой legacy listener) завершает startup ненулевым
 `SystemExit(os.EX_TEMPFAIL)`. Небезопасный lock/socket path завершается
-`SystemExit(os.EX_CANTCREAT)`. В обоих случаях service не строится.
+`UnsafeSocketPathError` и `SystemExit(os.EX_CANTCREAT)`. В обоих случаях
+service не строится.
 
 Launchd `KeepAlive=true` может повторять попытку с `ThrottleInterval=5`; это
 существующая supervisor policy и не меняется этой задачей.
