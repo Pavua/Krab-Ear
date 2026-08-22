@@ -1207,7 +1207,10 @@ extension HistoryPanelController {
         guard row >= 0, row < items.count else { return }
         let item = items[row]
 
-        if inlineTranslationVisible.contains(item.id) {
+        if !HistoryPanelController.inlineTranslationNextVisible(
+            currentlyVisible: inlineTranslationVisible,
+            itemID: item.id
+        ) {
             // Toggle OFF — скрыть перевод.
             inlineTranslationVisible.remove(item.id)
             tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: textColumnIndex()))
@@ -1215,7 +1218,10 @@ extension HistoryPanelController {
         }
 
         // Toggle ON — проверяем кэш.
-        if let cached = inlineTranslationCache.object(forKey: item.id as NSString) as String?,
+        if HistoryPanelController.inlineTranslationCacheHit(
+            cache: inlineTranslationCache,
+            itemID: item.id
+        ), let cached = inlineTranslationCache.object(forKey: item.id as NSString) as String?,
            !cached.isEmpty {
             inlineTranslationVisible.insert(item.id)
             tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: textColumnIndex()))
