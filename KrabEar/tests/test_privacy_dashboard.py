@@ -468,10 +468,10 @@ class TestPrivacyDashboardGracefulDegradation(unittest.TestCase):
             log_path=Path(self.tmpdir.name) / "broken_audit.log"
         )
 
-        def boom_total(*a, **kw):
+        def boom_summarize(*a, **kw):
             raise OSError("simulated audit failure")
 
-        broken_audit.total_count = boom_total  # type: ignore[method-assign]
+        broken_audit.summarize = boom_summarize  # type: ignore[method-assign]
         with patch("backend.service.get_privacy_audit_logger",
                    return_value=broken_audit):
             resp = self.service.handle_request(

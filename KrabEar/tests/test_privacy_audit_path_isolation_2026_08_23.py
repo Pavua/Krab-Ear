@@ -165,3 +165,56 @@ def test_e2e_smoke_scripts_export_privacy_audit_dir(rel_path):
         "уйдут в боевой ~/Library/Application Support/KrabEar/privacy_audit.log. "
         f"Ожидается присваивание вида: {expected}"
     )
+
+
+def test_summarize_matches_legacy_two_pass_result(tmp_path, monkeypatch):
+    """summarize() воспроизводит ровно то, что считал прежний двойной проход."""
+    monkeypatch.setenv("KRAB_EAR_PRIVACY_AUDIT_DIR", str(tmp_path))
+    audit_logger = PrivacyAuditLogger()
+    audit_logger.log_event("privacy", "purge_all_data")
+    audit_logger.log_event("sentry", "blocked")
+    audit_logger.log_event("privacy", "purge_all_data")
+
+    legacy_total = audit_logger.total_count()
+    legacy_entries = audit_logger.read_entries(limit=max(legacy_total, 1))
+    legacy_by_type: dict[str, int] = {}
+    legacy_last_ts = None
+    for entry in legacy_entries:
+        action = str(entry.get("action", "unknown"))
+        legacy_by_type[action] = legacy_by_type.get(action, 0) + 1
+        ts = entry.get("ts")
+        if ts and (legacy_last_ts is None or ts > legacy_last_ts):
+            legacy_last_ts = ts
+
+    summary = audit_logger.summarize()
+
+    assert summary["total"] == legacy_total == 3
+    assert summary["by_type"] == legacy_by_type == {"purge_all_data": 2, "blocked": 1}
+    assert summary["last_ts"] == legacy_last_ts
+
+
+def test_summarize_counts_unparseable_line_like_total_count(tmp_path, monkeypatch):
+    """Битая строка считается в total, но не попадает в by_type.
+
+    Ровно так вела себя пара total_count() + read_entries(): счётчик берёт все
+    непустые строки, агрегаты — только разобранные. Расхождение здесь дало бы
+    дашборду total_events, не равный сумме by_type.
+    """
+    monkeypatch.setenv("KRAB_EAR_PRIVACY_AUDIT_DIR", str(tmp_path))
+    audit_logger = PrivacyAuditLogger()
+    audit_logger.log_event("privacy", "purge_all_data")
+    with (tmp_path / "privacy_audit.log").open("a", encoding="utf-8") as fh:
+        fh.write("{битая строка\n")
+
+    summary = audit_logger.summarize()
+
+    assert summary["total"] == 2
+    assert summary["by_type"] == {"purge_all_data": 1}
+
+
+def test_summarize_on_missing_log_is_empty(tmp_path, monkeypatch):
+    """Отсутствующий журнал — не ошибка: после архивации это норма."""
+    monkeypatch.setenv("KRAB_EAR_PRIVACY_AUDIT_DIR", str(tmp_path))
+    audit_logger = PrivacyAuditLogger()
+
+    assert audit_logger.summarize() == {"total": 0, "last_ts": None, "by_type": {}}

@@ -422,6 +422,51 @@ class PrivacyAuditLogger:
             except Exception:
                 logger.exception("PrivacyAuditLogger: ошибка удаления лога")
 
+    def summarize(self) -> dict[str, Any]:
+        """Агрегаты журнала за ОДИН потоковый проход.
+
+        Заменяет в get_privacy_dashboard пару total_count() +
+        read_entries(limit=total_events): та читала файл дважды и
+        материализовала весь журнал в список ради трёх чисел. На боевом
+        50k-журнале это стоило ~0.2 с и росло без потолка.
+
+        Семантика счётчиков сохранена побитово: total инкрементируется до
+        разбора строки (как total_count, который считает и битые строки),
+        by_type/last_ts наполняются после (как read_entries, который битые
+        пропускает). Иначе total_events в дашборде разошёлся бы с суммой by_type.
+
+        Returns:
+            {"total": int, "last_ts": str | None, "by_type": dict[str, int]}
+        """
+        summary: dict[str, Any] = {"total": 0, "last_ts": None, "by_type": {}}
+        if not self._log_path.exists():
+            return summary
+
+        try:
+            with self._log_path.open("r", encoding="utf-8") as fh:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_SH)
+                try:
+                    for raw_line in fh:
+                        line = raw_line.strip()
+                        if not line:
+                            continue
+                        summary["total"] += 1
+                        try:
+                            entry = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        action = str(entry.get("action", "unknown"))
+                        summary["by_type"][action] = summary["by_type"].get(action, 0) + 1
+                        ts = entry.get("ts")
+                        if ts and (summary["last_ts"] is None or ts > summary["last_ts"]):
+                            summary["last_ts"] = ts
+                finally:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            logger.exception("PrivacyAuditLogger: ошибка агрегации журнала")
+
+        return summary
+
 
 # Удобная точка доступа к singleton
 def get_privacy_audit_logger(log_path: Path | None = None) -> PrivacyAuditLogger:
