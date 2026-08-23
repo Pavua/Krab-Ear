@@ -1,6 +1,6 @@
 # NOW — что делать сейчас (Krab Ear)
 
-Обновлено: 2026-08-18 (вечер). Читай **этот файл + одну карточку волны**. Не читай `ROADMAP-2026H2.md` как очередь задач — это журнал. Как работать: [`EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md).
+Обновлено: 2026-08-23. Читай **этот файл + одну карточку волны**. Не читай `ROADMAP-2026H2.md` как очередь задач — это журнал. Как работать: [`EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md).
 
 ## P0 interrupt — SIGSEGV `whisper-large-v3-turbo` (2026-08-16 16:21)
 
@@ -64,7 +64,9 @@
 
 🟢 **Call Observer w1 — наблюдатель звонков VG (HUD+панель+аудио+трубка); спека 2026-08-21.** View-only клиент: poll-дискавери сессий (`VGSessionWatcher`), events-WS (`VGCallStreamClient`), прослушка `/monitor/audio` (μ-law → `CallAudioPlayer`), координатор-автомат (`CallObserverCoordinator`) + функциональный UI (HUD, панель, пункт статус-меню). Гейт волны: `scripts/e2e_call_observer_smoke.command` (fake VG на flask/flask-sock, `scripts/fake_vg_server.py`) — интеграционные XCTest `CallObserverE2ETests` (env-гейт `KRAB_E2E_VG_PORT`, юнит-CI герметичен). Наблюдение + одна команда завершения звонка (hangup с confirm-sheet); shadow-режим не нужен: никакой записи данных, единственное write-действие — явное, за подтверждением владельца. Волна 2 (вмешательство в звонок — подсказки/DTMF) ждёт (a)/(e) от VG.
 
-**Следующая:** нет назначенной волны. Известный хвост: `krab-ear-rest.err.log` 179 МБ — на каждый HTTP-запрос пишутся ДВЕ строки (своя + werkzeug) при 34к запросов; ротацию для `Krab Ear/logs` починил Главный Краб (их PR #140), объём записи — наша сторона. Swift-агент в проде = HEAD `6e00b68f` (деплой W8 2026-08-18 12:38, `AX trusted: true`, хоткеи активированы, wake word `running/not wedged`). Живой REST на P0d/P0e/P0f. Не включать `REST_IN_PROCESS_ENABLED`. Не kickstart под запись.
+🟢 **Socket ownership — Swift-хвост: закрыт и задеплоен 2026-08-23 (PR [#1945](https://github.com/Pavua/Krab-Ear/pull/1945)).** Закрывает MED-3 волны 2026-08-22 (см. ROADMAP): `BackendSupervisor.cleanupStaleSocket()` (active-режим, standalone dev-запуск/DMG без launchd-юнита) делал безусловный `removeItem` socket-пути перед спавном ребёнка — если ping не укладывался в таймаут на ЖИВОМ backend'е, супервизор срывал его имя, а contender упирался в sidecar-flock и выходил `EX_TEMPFAIL` (ноль достижимых backend'ов). Метод удалён целиком — единственный владелец pathname'а теперь `SocketOwnershipClaim.prepare_for_bind` (Python, flock + re-check dev/ino/mtime_ns), одинаково в active и passive. Прод (`.passive`) этот код никогда не звал, поэтому волна 08-22 его не заметила. TDD-гейт `BackendSupervisorSocketOwnershipTests` (живой AF_UNIX listener + source-контракт по коду без комментариев) + живой e2e на выброс (7/7, throwaway data-dir) + CI 22/22. Деплой скоординирован с параллельной сессией (её privacy-dashboard фикс #1946 уже в бинаре). Гейты: `swift build -c release`, `swift test` 1630/0 fail.
+
+**Следующая:** нет назначенной волны. Известный хвост: `krab-ear-rest.err.log` 179 МБ — на каждый HTTP-запрос пишутся ДВЕ строки (своя + werkzeug) при 34к запросов; ротацию для `Krab Ear/logs` починил Главный Краб (их PR #140), объём записи — наша сторона. Swift-агент в проде = LC_UUID `D0AC8079` (деплой socket-ownership 2026-08-23, pid 97653, `AX trusted: true`, хоткеи активированы, wake word `running/not wedged`). Живой REST на P0d/P0e/P0f. Не включать `REST_IN_PROCESS_ENABLED`. Не kickstart под запись.
 
 ## Не делать
 
