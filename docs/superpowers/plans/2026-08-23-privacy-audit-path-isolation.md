@@ -578,11 +578,15 @@ Expected: `✅ синтаксис обоих скриптов валиден`.
 - [ ] **Step 9: Коммит**
 
 ```bash
-git add scripts/run_e2e_smokes.command scripts/run_e2e_bridge_smoke.command scripts/e2e_owner_gate_smoke.py KrabEar/tests/test_privacy_audit_path_isolation_2026_08_23.py
+git add scripts/run_e2e_smokes.command scripts/run_e2e_bridge_smoke.command \
+        scripts/e2e_owner_gate_smoke.py scripts/e2e_rescue_smoke.py \
+        scripts/e2e_recommended_setup_smoke.py scripts/rest_inprocess_load_smoke.py \
+        scripts/s3_gpu_contention_smoke.py \
+        KrabEar/tests/test_privacy_audit_path_isolation_2026_08_23.py
 git commit -m "$(cat <<'EOF'
 fix(smoke): e2e-смоки уводят privacy-журнал в throwaway data-dir
 
-Все три смока поднимают backend на mktemp-каталоге и обещают не трогать
+Все семь смоков поднимают backend на mktemp-каталоге и обещают не трогать
 боевые данные, но privacy-события шли в home-rooted compliance-журнал.
 Source-контракт-тест держит обещание при будущих правках скриптов.
 
