@@ -75,3 +75,18 @@ def test_blank_env_falls_back_to_default(monkeypatch, blank):
     monkeypatch.setenv("KRAB_EAR_PRIVACY_AUDIT_DIR", blank)
 
     assert _default_log_path() == _PROD_LOG_PATH
+
+
+def test_running_test_session_is_not_on_prod_path():
+    """🔴 Главный гард инцидента: в ЛЮБОМ тестовом прогоне журнал не боевой.
+
+    Проверяем путь, а не «боевой файл не изменился» по mtime: на ubuntu-CI
+    боевого файла не существует, и такой тест был бы вечно-зелёным именно там,
+    где прогоняется настоящий гейт.
+    """
+    from backend.privacy_audit import get_privacy_audit_logger
+
+    logger = get_privacy_audit_logger()
+
+    assert logger._log_path != _PROD_LOG_PATH
+    assert _PROD_LOG_PATH.parent not in logger._log_path.parents
