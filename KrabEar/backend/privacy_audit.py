@@ -50,6 +50,7 @@ def _default_log_path() -> Path:
         return Path(raw).expanduser() / _LOG_FILENAME
     return Path.home() / "Library" / "Application Support" / "KrabEar" / _LOG_FILENAME
 
+
 # Имя файла-ключа относительно родительской директории лога
 _KEY_FILENAME = "privacy_audit.key"
 
