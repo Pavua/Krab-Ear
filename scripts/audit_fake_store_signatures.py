@@ -42,6 +42,26 @@ PR #1916 так рвануло сразу 7 файлов, а ещё 22 фейк�
   * он объявлен внутри функции-фабрики, чьё имя содержит ``store``
     (паттерн ``_make_store()`` с ``MagicMock`` и ``side_effect``).
 
+ТРЕТЬЯ ФОРМА: подмена атрибута (слепая зона, красный CI 2026-08-22)
+--------------------------------------------------------------------
+Первые две формы ищут ``def`` с именем метода стора внутри фейк-класса. Мимо
+них пролетает патч уже готового стора::
+
+    def tracked_load_settings(*args, **kwargs):   # имя НЕ load_settings
+        ...
+    self.service.store.load_settings = tracked_load_settings
+
+Тут промахиваются оба условия сразу: имя функции другое (сверка по имени не
+срабатывает), а объемлющая область — обычный ``test_*``-метод, а не фейк-класс.
+Контракт при этом устанавливается не объявлением, а ПРИСВОЕНИЕМ: с этой строки
+прод зовёт именно ``tracked_load_settings``. Поэтому вторая ось поиска —
+присвоение функции/``lambda`` на атрибут ``<получатель>.<метод стора>``, где имя
+получателя выдаёт стор (``store``/``fake``/``stub``/``mock``/``persistence``).
+Правая часть разрешается так: ``lambda`` — по месту; голое имя — до ``def`` в
+ближайшей объемлющей области; вызов (``MagicMock(...)``, ``partial(...)``) и
+неразрешимое имя (``store.load_settings = original_load``) пропускаются —
+у них нет статически известной сигнатуры, требовать с них нечего.
+
 Сигнатуры реального класса читаются AST-разбором исходника, БЕЗ импорта
 проекта: гард должен запускаться системным python3 в быстром CI-джобе, где
 зависимости backend'а не установлены (та же причина, по которой чисто-AST
@@ -78,21 +98,30 @@ class Finding:
     line: int
     method: str
     missing: tuple[str, ...]
+    # Для формы «подмена атрибута» — сама строка присвоения: без неё непонятно,
+    # почему постороннего вида функция обязана держать контракт стора.
+    via: str = ""
 
     def describe(self) -> str:
         args = ", ".join(sorted(self.missing))
-        return f"{self.file}:{self.line}  {self.method}() не принимает: {args}"
+        where = f" (подменяет {self.via})" if self.via else ""
+        return f"{self.file}:{self.line}  {self.method}(){where} не принимает: {args}"
 
 
 # ---------------------------------------------------------------------------
 # Реальные сигнатуры
 # ---------------------------------------------------------------------------
-def _param_names(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+# ``lambda`` несёт тот же ast.arguments, что и def — обе оси поиска считают
+# параметры одним кодом.
+_Callable = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+
+
+def _param_names(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) -> set[str]:
     a = node.args
     return {p.arg for p in (a.posonlyargs + a.args + a.kwonlyargs)} - {"self", "cls"}
 
 
-def _accepts_var_keyword(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+def _accepts_var_keyword(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) -> bool:
     return node.args.kwarg is not None
 
 
@@ -166,6 +195,54 @@ def _looks_like_fake_store(
     return False
 
 
+def _receiver_hint(expr: ast.expr) -> str:
+    """Имя объекта, которому присваивают атрибут: ``self.service.store`` → ``store``.
+
+    Берём ТОЛЬКО последнее звено цепочки — оно и называет подменяемый объект.
+    """
+    if isinstance(expr, ast.Attribute):
+        return expr.attr
+    if isinstance(expr, ast.Name):
+        return expr.id
+    return ""
+
+
+def _is_store_receiver(expr: ast.expr) -> bool:
+    name = _receiver_hint(expr).lower()
+    return bool(name) and any(hint in name for hint in _FAKE_NAME_HINTS)
+
+
+_SCOPE_NODES = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+
+
+def _resolve_local_function(
+    name: str,
+    scopes: list[ast.AST],
+) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    """``def`` с таким именем в ближайшей объемлющей области.
+
+    Не найдено — значит правая часть не функция этого файла (импорт, MagicMock,
+    сохранённый оригинал): статической сигнатуры нет, требовать нечего.
+    """
+    for scope in reversed(scopes):
+        if not isinstance(scope, _SCOPE_NODES):
+            continue
+        for item in getattr(scope, "body", []):
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if item.name == name:
+                    return item
+    return None
+
+
+def _missing_kwargs(node: ast.AST, needed: set[str]) -> set[str]:
+    """Каких требуемых kwargs не принимает вызываемое; ``**kwargs`` снимает всё."""
+    if not isinstance(node, _Callable):
+        return set()
+    if _accepts_var_keyword(node):
+        return set()
+    return needed - _param_names(node)
+
+
 def find_fake_drift(
     source: str,
     filename: str,
@@ -180,6 +257,76 @@ def find_fake_drift(
 
     findings: list[Finding] = []
 
+    def report(line: int, method: str, missing: set[str], via: str = "") -> None:
+        findings.append(Finding(
+            file=filename,
+            line=line,
+            method=method,
+            missing=tuple(sorted(missing)),
+            via=via,
+        ))
+
+    def check_patch(
+        receiver: ast.expr,
+        method: str,
+        value: ast.expr,
+        scopes: list[ast.AST],
+        via: str,
+    ) -> None:
+        """Общее ядро: на ``<стор>.<метод>`` кладут функцию — держит ли контракт."""
+        needed = required.get(method)
+        if not needed or not _is_store_receiver(receiver):
+            return
+
+        if isinstance(value, ast.Name):
+            resolved: ast.AST | None = _resolve_local_function(value.id, scopes)
+        elif isinstance(value, ast.Lambda):
+            resolved = value
+        else:
+            # Вызов (MagicMock(...), partial(...)), атрибут, литерал —
+            # сигнатура статически неизвестна.
+            resolved = None
+        if resolved is None:
+            return
+
+        missing = _missing_kwargs(resolved, needed)
+        if missing:
+            # Строка объявления, а не присвоения: чинить надо там.
+            report(resolved.lineno, method, missing, via=via)
+
+    def check_assignment(node: ast.Assign, scopes: list[ast.AST]) -> None:
+        """Форма «подмена атрибута»: ``<стор>.<метод> = функция|lambda``."""
+        for target in node.targets:
+            if isinstance(target, ast.Attribute):
+                check_patch(
+                    target.value, target.attr, node.value, scopes,
+                    via=ast.unparse(target),
+                )
+
+    def check_setattr(node: ast.Call, scopes: list[ast.AST]) -> None:
+        """Сиблинг присвоения: ``setattr(стор, "метод", fn)``.
+
+        Живых таких мест в тестах сейчас нет, но это ТА ЖЕ операция установки
+        контракта, записанная иначе. Оставить её мимо гарда — ровно класс
+        «асимметрия парных гейтов»: один путь усвоил урок, соседний нет.
+        """
+        func = node.func
+        if isinstance(func, ast.Name):
+            ok = func.id == "setattr"
+        elif isinstance(func, ast.Attribute):
+            ok = func.attr in ("setattr", "object")  # monkeypatch.setattr / patch.object
+        else:
+            ok = False
+        if not ok or len(node.args) < 3:
+            return
+        name_node = node.args[1]
+        if not (isinstance(name_node, ast.Constant) and isinstance(name_node.value, str)):
+            return
+        check_patch(
+            node.args[0], name_node.value, node.args[2], scopes,
+            via=f"{ast.unparse(node.args[0])}.{name_node.value}",
+        )
+
     def visit(node: ast.AST, ancestors: list[ast.AST]) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -188,16 +335,21 @@ def find_fake_drift(
                     if not _accepts_var_keyword(child):
                         missing = needed - _param_names(child)
                         if missing:
-                            findings.append(Finding(
-                                file=filename,
-                                line=child.lineno,
-                                method=child.name,
-                                missing=tuple(sorted(missing)),
-                            ))
+                            report(child.lineno, child.name, missing)
+            elif isinstance(child, ast.Assign):
+                check_assignment(child, [tree] + ancestors)
+            elif isinstance(child, ast.Call):
+                check_setattr(child, [tree] + ancestors)
             visit(child, ancestors + [child])
 
     visit(tree, [])
-    return findings
+
+    # Одна и та же функция может попасть под обе оси (объявлена в фейк-классе и
+    # ещё раз присвоена) — в отчёте это одна починка, не две.
+    unique: dict[tuple[str, int, str], Finding] = {}
+    for finding in findings:
+        unique.setdefault((finding.file, finding.line, finding.method), finding)
+    return sorted(unique.values(), key=lambda f: (f.line, f.method))
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +427,7 @@ def format_json(findings: list[Finding], required: dict[str, set[str]]) -> str:
                 "line": f.line,
                 "method": f.method,
                 "missing": list(f.missing),
+                "via": f.via,
             }
             for f in findings
         ],
@@ -313,6 +466,39 @@ class FakeStore:
     def load_settings(self, nowait=False):
         return {}
 '''),
+        # Слепая зона до 2026-08-22: имя функции другое, объемлющая область —
+        # обычный тест, контракт устанавливается присвоением.
+        ("замыкание без kwargs, присвоенное на store", '''
+class SomeTest:
+    def test_close(self):
+        def tracked_load_settings():
+            return {}
+        self.service.store.load_settings = tracked_load_settings
+'''),
+        ("замыкание с одним *args (kwargs не покрыты)", '''
+class SomeTest:
+    def test_close(self):
+        def tracked(*args):
+            return {}
+        self.service.store.load_settings = tracked
+'''),
+        ("lambda без параметров на атрибут фейка", '''
+class SomeTest:
+    def test_x(self):
+        fake_store.load_settings = lambda: {}
+'''),
+        ("setattr-сиблинг присвоения", '''
+class SomeTest:
+    def test_x(self):
+        def stub():
+            return {}
+        setattr(store, "load_settings", stub)
+'''),
+        ("monkeypatch.setattr", '''
+class SomeTest:
+    def test_x(self, monkeypatch):
+        monkeypatch.setattr(self.store, "load_settings", lambda: {})
+'''),
     ]
 
     good_cases = [
@@ -334,6 +520,55 @@ def load_settings():
 class FakeStore:
     def load_settings(self, *, lock_timeout_sec=None, nowait=False):
         return {}
+'''),
+        ("замыкание с *args/**kwargs, присвоенное на store", '''
+class SomeTest:
+    def test_close(self):
+        def tracked_load_settings(*args, **kwargs):
+            return original(*args, **kwargs)
+        self.service.store.load_settings = tracked_load_settings
+'''),
+        ("замыкание с полным набором именованных", '''
+class SomeTest:
+    def test_close(self):
+        def tracked(lock_timeout_sec=None, nowait=False):
+            return {}
+        self.service.store.load_settings = tracked
+'''),
+        ("lambda принимает нужные kwargs", '''
+class SomeTest:
+    def test_x(self):
+        store.load_settings = lambda lock_timeout_sec=None, nowait=False: {}
+'''),
+        ("MagicMock — сигнатуры нет, требований нет", '''
+class SomeTest:
+    def test_x(self):
+        store.load_settings = MagicMock(return_value={})
+'''),
+        ("восстановление сохранённого оригинала", '''
+class SomeTest:
+    def test_x(self):
+        original_load = store.load_settings
+        store.load_settings = original_load
+'''),
+        ("получатель не выдаёт стор", '''
+class SomeTest:
+    def test_x(self):
+        def load_settings():
+            return {}
+        config.load_settings = load_settings
+'''),
+        ("setattr с корректной сигнатурой", '''
+class SomeTest:
+    def test_x(self):
+        def stub(**kwargs):
+            return {}
+        setattr(store, "load_settings", stub)
+'''),
+        ("setattr с вычисляемым именем атрибута", '''
+class SomeTest:
+    def test_x(self):
+        setattr(store, attr_name, lambda: {})
 '''),
     ]
 
