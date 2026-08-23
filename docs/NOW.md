@@ -26,6 +26,8 @@
 
 **W2b — замер аномалии длительности: закрыта 2026-08-16.** Opt-in `debug_keep_dictation_wav` (дефолт выкл), каталог `debug_duration_wav/` + сидкар, CLI `scripts/measure_duration_anomaly.py`. Чанкер/GigaAM не патчили.
 
+**Изоляция `privacy_audit.log`: PR открыт 2026-08-23.** Боевой compliance-журнал на 90% состоял из тестового мусора (44 907 `purge_all_data` из 50 041) — путь был захардкожен мимо env и мимо `data_dir`, а логгер синглтон. Теперь `KRAB_EAR_PRIVACY_AUDIT_DIR` + принудительный throwaway в `conftest.py` до импорта приложения + семь e2e-смоков; дашборд переведён на одно-проходный `summarize()`. Боевой журнал заархивирован отдельной сессией (`privacy_audit.archive-2026-08-23.log`), фикс HMAC-цепочки — смежная волна. Спека: [`2026-08-23-privacy-audit-path-isolation-design.md`](superpowers/specs/2026-08-23-privacy-audit-path-isolation-design.md). 🔴 Прогон через `python -m unittest` НЕ изолируется — `KrabEar/tests/` не пакет, `conftest.py` это механизм pytest; канонический раннер репозитория и оба CI-гейта работают через pytest.
+
 **W2c — REST `deadline_sec`: закрыта 2026-08-16 Ear + 2026-08-17 VG.** Optional form-поле на `POST /v1/stt/transcribe`, clamp [5, 120]. VG `KrabEarSTTEngine` шлёт `deadline_sec=25` при HTTP timeout 30.0 — [PR #229](https://github.com/Pavua/Krab-Voice-Gateway/pull/229), прод pid 72437.
 
 **W3 — Sparkle v2.11.0: закрыта 2026-08-16.** `krab-ear-ci` зелёный на `064467f6` (три stale-теста подтянуты к прод: hang-kill 10с, пустые SIP-креды, spy на startup-recovery). Dispatch `release.yml -f version=2.11.0` → success. `debug_keep_dictation_wav` в проде не включать.
