@@ -878,6 +878,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "voice_gateway_url": "http://127.0.0.1:8090",
     "voice_gateway_api_key": "",
     "call_observer_hud_enabled": True,
+    # Guarded read аудио-потоков (спека 2026-08-23): killswitch на случай
+    # регресса — правка касается ОБОИХ путей захвата (wake word + диктовка).
+    "audio_guarded_read_enabled": True,
+    "audio_read_poll_sec": 0.05,
+    "audio_stream_starve_sec": 3.0,
     "call_observer_autoplay_audio": False,
     "update_channel": "stable",
     "call_notify_default": True,
