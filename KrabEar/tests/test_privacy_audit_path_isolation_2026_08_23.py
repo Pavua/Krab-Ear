@@ -218,3 +218,15 @@ def test_summarize_on_missing_log_is_empty(tmp_path, monkeypatch):
     audit_logger = PrivacyAuditLogger()
 
     assert audit_logger.summarize() == {"total": 0, "last_ts": None, "by_type": {}}
+
+
+@pytest.mark.parametrize("relative", ["tmp", "./logs", "../krab"])
+def test_relative_env_falls_back_to_default(monkeypatch, relative):
+    """Относительный путь трактуется как «не задано».
+
+    Иначе журнал привязался бы к текущему каталогу процесса — тот же исход, от
+    которого защищает guard на пустое значение, только через другую дверь.
+    """
+    monkeypatch.setenv("KRAB_EAR_PRIVACY_AUDIT_DIR", relative)
+
+    assert _default_log_path() == _PROD_LOG_PATH

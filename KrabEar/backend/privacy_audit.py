@@ -47,7 +47,12 @@ def _default_log_path() -> Path:
     """
     raw = os.environ.get(_ENV_DIR_VAR, "")
     if raw.strip():
-        return Path(raw).expanduser() / _LOG_FILENAME
+        candidate = Path(raw).expanduser()
+        # Относительный путь тоже считается незаданным: он привязал бы
+        # compliance-журнал к текущему каталогу процесса, а это ровно тот исход,
+        # от которого guard выше и защищает. Абсолютность требуем явно.
+        if candidate.is_absolute():
+            return candidate / _LOG_FILENAME
     return Path.home() / "Library" / "Application Support" / "KrabEar" / _LOG_FILENAME
 
 
