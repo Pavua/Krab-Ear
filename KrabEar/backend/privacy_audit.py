@@ -25,9 +25,30 @@ from typing import Any
 
 logger = logging.getLogger("KrabEar.Backend.PrivacyAudit")
 
-_DEFAULT_LOG_PATH = (
-    Path.home() / "Library" / "Application Support" / "KrabEar" / "privacy_audit.log"
-)
+_LOG_FILENAME = "privacy_audit.log"
+
+# Каталог журнала переопределяется этой переменной. Нужна для изоляции тестов и
+# dev-инстансов от боевого compliance-журнала (инцидент 2026-08-23: 44 907 из
+# 50 041 записи оказались тестовым мусором). Читаем os.environ напрямую, а не
+# settings из core/config.py: privacy_audit — листовой модуль без проектных
+# импортов, config втянул бы цикл через backend.service.
+_ENV_DIR_VAR = "KRAB_EAR_PRIVACY_AUDIT_DIR"
+
+
+def _default_log_path() -> Path:
+    """Путь журнала: env-переменная, иначе боевой home-rooted дефолт.
+
+    Резолвится ЛЕНИВО, при создании инстанса, а не на импорте модуля: константа
+    привязала бы изоляцию к порядку импортов — тот самый класс мин, что уже
+    кусал репозиторий (sys.modules-стабы, chunk-pollution rest_server).
+
+    Пустое/пробельное значение считается незаданным — fail-safe в сторону
+    боевого дефолта, иначе опечатка увела бы журнал в текущий каталог.
+    """
+    raw = os.environ.get(_ENV_DIR_VAR, "")
+    if raw.strip():
+        return Path(raw).expanduser() / _LOG_FILENAME
+    return Path.home() / "Library" / "Application Support" / "KrabEar" / _LOG_FILENAME
 
 # Имя файла-ключа относительно родительской директории лога
 _KEY_FILENAME = "privacy_audit.key"
@@ -121,7 +142,7 @@ class PrivacyAuditLogger:
     _class_lock: threading.Lock = threading.Lock()
 
     def __init__(self, log_path: Path | None = None) -> None:
-        self._log_path: Path = log_path if log_path is not None else _DEFAULT_LOG_PATH
+        self._log_path: Path = log_path if log_path is not None else _default_log_path()
         self._ensure_parent()
         # Загружаем/создаём HMAC-ключ
         self._secret_key: bytes = _load_or_create_key(self._log_path.parent)
