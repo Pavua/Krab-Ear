@@ -25,6 +25,13 @@ from typing import Any
 
 logger = logging.getLogger("KrabEar.Backend.PrivacyAudit")
 
+# Права журнала при СОЗДАНИИ: privacy-метаданные не для чтения всем подряд.
+# У существующего файла права не меняются — это решение владельца, не наше.
+_LOG_FILE_MODE = 0o600
+# Предел окна хвостового поиска tip'а: дальше честнее начать цепочку заново,
+# чем читать многомегабайтный лог на каждую запись.
+_MAX_TIP_SCAN_BYTES = 4 * 1024 * 1024
+
 _DEFAULT_LOG_PATH = (
     Path.home() / "Library" / "Application Support" / "KrabEar" / "privacy_audit.log"
 )
@@ -131,6 +138,55 @@ class PrivacyAuditLogger:
         # Читаем существующий лог и вычисляем текущий tip цепочки
         self._last_hash: str | None = self._read_chain_tip()
 
+    def _read_chain_tip_locked(self, fh: Any) -> str | None:
+        """Хвост цепочки из ФАЙЛА по уже открытому дескриптору под flock.
+
+        Вызывается только из ``log_event`` при удерживаемом ``LOCK_EX`` — это
+        единственный способ узнать актуальный tip, когда в лог пишет несколько
+        процессов (backend, REST, тесты): кэш ``self._last_hash`` к этому моменту
+        может быть устаревшим на произвольное число чужих записей.
+
+        Читает с КОНЦА расширяющимся окном, а не файл целиком: полное чтение на
+        каждую запись дало бы O(N²) на логе в десятки тысяч строк.
+        """
+        size = fh.seek(0, os.SEEK_END)
+        if size == 0:
+            return None
+
+        window = 8192
+        while True:
+            start = max(0, size - window)
+            fh.seek(start)
+            chunk = fh.read(size - start)
+            lines = chunk.split(b"\n")
+            # При start > 0 первая строка почти наверняка обрезана посередине.
+            if start > 0:
+                lines = lines[1:]
+
+            for raw_line in reversed(lines):
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line.decode("utf-8"))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                if isinstance(entry, dict) and "entry_hash" in entry:
+                    return entry["entry_hash"]
+
+            if start == 0:
+                # Дочитали до начала: хешированных записей нет (legacy-лог).
+                return None
+            if window >= _MAX_TIP_SCAN_BYTES:
+                # Хвост целиком из legacy/битых строк. Рвать цепочку молча нельзя.
+                logger.warning(
+                    "PrivacyAuditLogger: entry_hash не найден в последних %d байтах — "
+                    "цепочка начнётся заново",
+                    window,
+                )
+                return None
+            window *= 4
+
     def _read_chain_tip(self) -> str | None:
         """Возвращает entry_hash последней записи с хешем, или None."""
         if not self._log_path.exists():
@@ -191,9 +247,9 @@ class PrivacyAuditLogger:
             action:   действие (blocked, forced_offline, …).
             details:  дополнительные данные (опционально).
         """
-        # _log_lock сериализует весь цикл read→compute→write→update внутри процесса.
-        # Это предотвращает race condition на _last_hash при конкурентных вызовах
-        # из разных потоков (W1027 F1 HIGH / W1029 fix).
+        # _log_lock сериализует цикл внутри процесса (W1027 F1 HIGH / W1029 fix),
+        # flock — между процессами. Нужны ОБА: тредовый лок не виден соседнему
+        # процессу, файловый — не виден соседнему треду того же процесса.
         with self._log_lock:
             # Тело записи (без хеш-полей) — именно от него считается hash
             body: dict[str, Any] = {
@@ -203,29 +259,40 @@ class PrivacyAuditLogger:
                 "details": details or {},
             }
 
-            # Вычисляем хеш от тела и текущего tip'а
-            entry_hash = _compute_entry_hash(self._secret_key, self._last_hash, body)
-
-            # Полная запись с хеш-полями
-            entry: dict[str, Any] = dict(body)
-            entry["prev_hash"] = self._last_hash
-            entry["entry_hash"] = entry_hash
-
-            line = json.dumps(entry, ensure_ascii=False) + "\n"
-
             try:
                 self._ensure_parent()
-                # Открываем в режиме append (создаём файл если нет).
-                with self._log_path.open("a", encoding="utf-8") as fh:
+                # O_APPEND делает саму запись атомарной, O_RDWR нужен для чтения
+                # хвоста, 0o600 применяется ТОЛЬКО при создании файла: журнал
+                # приватности не должен быть доступен всем на чтение.
+                fd = os.open(
+                    self._log_path,
+                    os.O_RDWR | os.O_APPEND | os.O_CREAT,
+                    _LOG_FILE_MODE,
+                )
+                with os.fdopen(fd, "rb+") as fh:
+                    # 🔴 Хеш ОБЯЗАН вычисляться под тем же локом, что и запись.
+                    # Раньше prev_hash брался из кэша ДО flock — между вычислением
+                    # и записью успевал вклиниться другой процесс, и цепочка
+                    # разветвлялась (инцидент 2026-08-23: разрыв на записи 2784
+                    # из 50 041, две записи с одним prev_hash).
                     fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
                     try:
-                        fh.write(line)
+                        prev_hash = self._read_chain_tip_locked(fh)
+                        entry_hash = _compute_entry_hash(self._secret_key, prev_hash, body)
+
+                        entry: dict[str, Any] = dict(body)
+                        entry["prev_hash"] = prev_hash
+                        entry["entry_hash"] = entry_hash
+
+                        line = json.dumps(entry, ensure_ascii=False) + "\n"
+                        fh.write(line.encode("utf-8"))
                         fh.flush()
                         os.fsync(fh.fileno())
                     finally:
                         fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
-                # Обновляем tip только после успешной записи
+                # Кэш обновляем только после успешной записи. Источник истины —
+                # файл; это значение остаётся лишь подсказкой для диагностики.
                 self._last_hash = entry_hash
 
             except Exception:
