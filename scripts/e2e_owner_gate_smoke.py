@@ -101,6 +101,9 @@ def _result(resp: dict) -> dict:
 def _spawn_backend(data_dir: Path, log_path: Path) -> subprocess.Popen:
     env = dict(os.environ)
     env["PYTHONPATH"] = str(KRAB_EAR)
+    # Privacy-журнал тоже уводим в throwaway: логгер home-rooted по умолчанию и
+    # иначе пишет в боевой compliance-файл вопреки обещанию шапки скрипта.
+    env["KRAB_EAR_PRIVACY_AUDIT_DIR"] = str(data_dir)
     log_fh = log_path.open("wb")
     return subprocess.Popen(
         [str(VENV_PY), str(KRAB_EAR / "main.py"), "--data-dir", str(data_dir)],

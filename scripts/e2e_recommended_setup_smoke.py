@@ -88,6 +88,9 @@ def main() -> int:
 
     env = dict(os.environ)
     env["PYTHONPATH"] = str(REPO_ROOT / "KrabEar")
+    # Privacy-журнал тоже уводим в throwaway: логгер home-rooted по умолчанию и
+    # иначе пишет в боевой compliance-файл вопреки обещанию шапки скрипта.
+    env["KRAB_EAR_PRIVACY_AUDIT_DIR"] = str(data_dir)
 
     proc: subprocess.Popen | None = None
     rc = 0

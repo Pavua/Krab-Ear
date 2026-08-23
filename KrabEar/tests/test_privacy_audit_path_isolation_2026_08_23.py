@@ -90,3 +90,78 @@ def test_running_test_session_is_not_on_prod_path():
 
     assert logger._log_path != _PROD_LOG_PATH
     assert _PROD_LOG_PATH.parent not in logger._log_path.parents
+
+
+# Смоки поднимают throwaway-backend и обещают в своих шапках «never touches your
+# prod data» — но privacy-события писали в боевой журнал. Source-контракт: без
+# него правка скрипта тихо вернёт загрязнение.
+#
+# 🔴 Список получен grep'ом по '"--data-dir"' и '--data-dir' в scripts/, а не
+# на глаз: первая версия волны знала только о трёх скриптах и пропустила
+# четыре. НЕ включены сознательно: e2e_meeting_smoke.py (спавн только в
+# докстринге, скрипт сам backend не поднимает), build_bundled_runtime.command
+# (строка 155 — это log с ПОДСКАЗКОЙ команды, не запуск), memory_baseline.py и
+# history_health_report.py (подключаются к существующему инстансу, не спавнят),
+# validate_c1_mps_fix.command и observe_production.command (целятся в ПРОД
+# намеренно — им боевой журнал и нужен).
+_SMOKE_SCRIPTS = (
+    "scripts/run_e2e_smokes.command",
+    "scripts/run_e2e_bridge_smoke.command",
+    "scripts/e2e_owner_gate_smoke.py",
+    "scripts/e2e_rescue_smoke.py",
+    "scripts/e2e_recommended_setup_smoke.py",
+    "scripts/rest_inprocess_load_smoke.py",
+    "scripts/s3_gpu_contention_smoke.py",
+)
+
+# Проверяем ПРИСВАИВАНИЕ, а не вхождение имени переменной:
+# (1) голое "KRAB_EAR_PRIVACY_AUDIT_DIR" вечно-зеленится комментарием,
+# (2) присваивание ПУСТОГО значения прошло бы проверку, а fail-safe из C1 молча
+#     увёл бы журнал обратно в бой — слабый ассерт маскировал бы ровно тот отказ,
+#     ради которого тест написан.
+#
+# Python-скрипты разбираем AST (правило CLAUDE.md для source-inspection тестов:
+# матчить конструкцию, а не подстроку). Для .command AST неприменим — bash;
+# там требуем точную строку с непустым значением "$DATADIR".
+_ENV_VAR = "KRAB_EAR_PRIVACY_AUDIT_DIR"
+_BASH_ASSIGNMENT = f'export {_ENV_VAR}="$DATADIR"'
+
+
+def _python_assigns_env_var(source: str) -> bool:
+    """True, если в AST есть `<что-то>["KRAB_EAR_PRIVACY_AUDIT_DIR"] = <непустое>`."""
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if not isinstance(target, ast.Subscript):
+                continue
+            key = target.slice
+            if not (isinstance(key, ast.Constant) and key.value == _ENV_VAR):
+                continue
+            value = node.value
+            # Литеральная пустая/пробельная строка — не изоляция, а её видимость.
+            if isinstance(value, ast.Constant) and (
+                not isinstance(value.value, str) or not value.value.strip()
+            ):
+                return False
+            return True
+    return False
+
+
+@pytest.mark.parametrize("rel_path", _SMOKE_SCRIPTS)
+def test_e2e_smoke_scripts_export_privacy_audit_dir(rel_path):
+    """Каждый смок с throwaway data-dir обязан увести и privacy-журнал."""
+    source = (REPO_ROOT / rel_path).read_text(encoding="utf-8")
+
+    if rel_path.endswith(".py"):
+        assigned = _python_assigns_env_var(source)
+        expected = f'env["{_ENV_VAR}"] = str(data_dir)'
+    else:
+        assigned = _BASH_ASSIGNMENT in source
+        expected = _BASH_ASSIGNMENT
+
+    assert assigned, (
+        f"{rel_path} поднимает backend на throwaway data-dir, но privacy-события "
+        "уйдут в боевой ~/Library/Application Support/KrabEar/privacy_audit.log. "
+        f"Ожидается присваивание вида: {expected}"
+    )
