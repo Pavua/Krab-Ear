@@ -4481,21 +4481,11 @@ class BackendService:
 
         # --- audit: summary counts from PrivacyAuditLogger (no PII, no transcript content) ---
         try:
-            audit = get_privacy_audit_logger()
-            total_events = audit.total_count()
-            all_entries = audit.read_entries(limit=max(total_events, 1))
-            last_event_ts: str | None = None
-            by_type: dict[str, int] = {}
-            for entry in all_entries:
-                action = str(entry.get("action", "unknown"))
-                by_type[action] = by_type.get(action, 0) + 1
-                ts = entry.get("ts")
-                if ts and (last_event_ts is None or ts > last_event_ts):
-                    last_event_ts = ts
+            audit_summary = get_privacy_audit_logger().summarize()
             result["audit"] = {
-                "total_events": total_events,
-                "last_event_ts": last_event_ts,
-                "by_type": by_type,
+                "total_events": audit_summary["total"],
+                "last_event_ts": audit_summary["last_ts"],
+                "by_type": audit_summary["by_type"],
             }
         except Exception:
             logger.exception("get_privacy_dashboard: ошибка чтения privacy audit log")

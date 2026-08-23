@@ -1,0 +1,232 @@
+"""Изоляция пути privacy_audit.log (инцидент 2026-08-23).
+
+Боевой compliance-журнал ~/Library/Application Support/KrabEar/privacy_audit.log
+набрал 44 907 записей privacy/purge_all_data из 50 041 — тестовый мусор. Корень:
+путь был захардкожен модульной константой мимо env и мимо data_dir, а
+PrivacyAuditLogger — синглтон, поэтому 17 из 20 purge-тестов писали в боевой файл.
+Следствие: реальный purge владельца стал неотличим от тестового.
+"""
+from __future__ import annotations
+
+import ast
+import sys
+from pathlib import Path
+
+import pytest
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from backend.privacy_audit import (  # noqa: E402
+    PrivacyAuditLogger,
+    _default_log_path,
+)
+
+# Боевой путь, записанный ЯВНО: тест обязан ловить регрессию, даже если
+# продовый дефолт в модуле кто-то переопределит.
+_PROD_LOG_PATH = (
+    Path.home() / "Library" / "Application Support" / "KrabEar" / "privacy_audit.log"
+)
+
+
+def test_env_var_redirects_log_path(tmp_path, monkeypatch):
+    """Выставленная переменная уводит журнал в свой каталог."""
+    monkeypatch.setenv("KRAB_EAR_PRIVACY_AUDIT_DIR", str(tmp_path))
+
+    logger = PrivacyAuditLogger()
+
+    assert logger._log_path == tmp_path / "privacy_audit.log"
+
+
+def test_key_file_follows_log_dir(tmp_path, monkeypatch):
+    """HMAC-ключ создаётся рядом с журналом, а не в боевом каталоге.
+
+    _load_or_create_key берёт каталог как self._log_path.parent, поэтому ключ
+    обязан переехать вместе с журналом без отдельной переменной.
+    """
+    monkeypatch.setenv("KRAB_EAR_PRIVACY_AUDIT_DIR", str(tmp_path))
+
+    logger = PrivacyAuditLogger()
+    logger.log_event("test", "isolation_probe")
+
+    assert (tmp_path / "privacy_audit.key").exists()
+    assert (tmp_path / "privacy_audit.log").exists()
+
+
+def test_no_env_falls_back_to_home_default(monkeypatch):
+    """Без переменной — прежний боевой путь (обратная совместимость).
+
+    Зовём ТОЛЬКО чистую функцию: конструктор создал бы каталог и записал ключ
+    в боевую директорию, чего тест делать не имеет права.
+    """
+    monkeypatch.delenv("KRAB_EAR_PRIVACY_AUDIT_DIR", raising=False)
+
+    assert _default_log_path() == _PROD_LOG_PATH
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t"])
+def test_blank_env_falls_back_to_default(monkeypatch, blank):
+    """Пустое значение трактуется как «не задано» — fail-safe от опечатки.
+
+    Иначе Path("") / "privacy_audit.log" увёл бы compliance-журнал в CWD.
+    """
+    monkeypatch.setenv("KRAB_EAR_PRIVACY_AUDIT_DIR", blank)
+
+    assert _default_log_path() == _PROD_LOG_PATH
+
+
+def test_running_test_session_is_not_on_prod_path():
+    """🔴 Главный гард инцидента: в ЛЮБОМ тестовом прогоне журнал не боевой.
+
+    Проверяем путь, а не «боевой файл не изменился» по mtime: на ubuntu-CI
+    боевого файла не существует, и такой тест был бы вечно-зелёным именно там,
+    где прогоняется настоящий гейт.
+    """
+    from backend.privacy_audit import get_privacy_audit_logger
+
+    logger = get_privacy_audit_logger()
+
+    assert logger._log_path != _PROD_LOG_PATH
+    assert _PROD_LOG_PATH.parent not in logger._log_path.parents
+
+
+# Смоки поднимают throwaway-backend и обещают в своих шапках «never touches your
+# prod data» — но privacy-события писали в боевой журнал. Source-контракт: без
+# него правка скрипта тихо вернёт загрязнение.
+#
+# 🔴 Список получен grep'ом по '"--data-dir"' и '--data-dir' в scripts/, а не
+# на глаз: первая версия волны знала только о трёх скриптах и пропустила
+# четыре. НЕ включены сознательно: e2e_meeting_smoke.py (спавн только в
+# докстринге, скрипт сам backend не поднимает), build_bundled_runtime.command
+# (строка 155 — это log с ПОДСКАЗКОЙ команды, не запуск), memory_baseline.py и
+# history_health_report.py (подключаются к существующему инстансу, не спавнят),
+# validate_c1_mps_fix.command и observe_production.command (целятся в ПРОД
+# намеренно — им боевой журнал и нужен).
+_SMOKE_SCRIPTS = (
+    "scripts/run_e2e_smokes.command",
+    "scripts/run_e2e_bridge_smoke.command",
+    "scripts/e2e_owner_gate_smoke.py",
+    "scripts/e2e_rescue_smoke.py",
+    "scripts/e2e_recommended_setup_smoke.py",
+    "scripts/rest_inprocess_load_smoke.py",
+    "scripts/s3_gpu_contention_smoke.py",
+)
+
+# Проверяем ПРИСВАИВАНИЕ, а не вхождение имени переменной:
+# (1) голое "KRAB_EAR_PRIVACY_AUDIT_DIR" вечно-зеленится комментарием,
+# (2) присваивание ПУСТОГО значения прошло бы проверку, а fail-safe из C1 молча
+#     увёл бы журнал обратно в бой — слабый ассерт маскировал бы ровно тот отказ,
+#     ради которого тест написан.
+#
+# Python-скрипты разбираем AST (правило CLAUDE.md для source-inspection тестов:
+# матчить конструкцию, а не подстроку). Для .command AST неприменим — bash;
+# там требуем точную строку с непустым значением "$DATADIR".
+_ENV_VAR = "KRAB_EAR_PRIVACY_AUDIT_DIR"
+_BASH_ASSIGNMENT = f'export {_ENV_VAR}="$DATADIR"'
+
+
+def _python_assigns_env_var(source: str) -> bool:
+    """True, если в AST есть `<что-то>["KRAB_EAR_PRIVACY_AUDIT_DIR"] = <непустое>`."""
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if not isinstance(target, ast.Subscript):
+                continue
+            key = target.slice
+            if not (isinstance(key, ast.Constant) and key.value == _ENV_VAR):
+                continue
+            value = node.value
+            # Литеральная пустая/пробельная строка — не изоляция, а её видимость.
+            if isinstance(value, ast.Constant) and (
+                not isinstance(value.value, str) or not value.value.strip()
+            ):
+                return False
+            return True
+    return False
+
+
+@pytest.mark.parametrize("rel_path", _SMOKE_SCRIPTS)
+def test_e2e_smoke_scripts_export_privacy_audit_dir(rel_path):
+    """Каждый смок с throwaway data-dir обязан увести и privacy-журнал."""
+    source = (REPO_ROOT / rel_path).read_text(encoding="utf-8")
+
+    if rel_path.endswith(".py"):
+        assigned = _python_assigns_env_var(source)
+        expected = f'env["{_ENV_VAR}"] = str(data_dir)'
+    else:
+        assigned = _BASH_ASSIGNMENT in source
+        expected = _BASH_ASSIGNMENT
+
+    assert assigned, (
+        f"{rel_path} поднимает backend на throwaway data-dir, но privacy-события "
+        "уйдут в боевой ~/Library/Application Support/KrabEar/privacy_audit.log. "
+        f"Ожидается присваивание вида: {expected}"
+    )
+
+
+def test_summarize_matches_legacy_two_pass_result(tmp_path, monkeypatch):
+    """summarize() воспроизводит ровно то, что считал прежний двойной проход."""
+    monkeypatch.setenv("KRAB_EAR_PRIVACY_AUDIT_DIR", str(tmp_path))
+    audit_logger = PrivacyAuditLogger()
+    audit_logger.log_event("privacy", "purge_all_data")
+    audit_logger.log_event("sentry", "blocked")
+    audit_logger.log_event("privacy", "purge_all_data")
+
+    legacy_total = audit_logger.total_count()
+    legacy_entries = audit_logger.read_entries(limit=max(legacy_total, 1))
+    legacy_by_type: dict[str, int] = {}
+    legacy_last_ts = None
+    for entry in legacy_entries:
+        action = str(entry.get("action", "unknown"))
+        legacy_by_type[action] = legacy_by_type.get(action, 0) + 1
+        ts = entry.get("ts")
+        if ts and (legacy_last_ts is None or ts > legacy_last_ts):
+            legacy_last_ts = ts
+
+    summary = audit_logger.summarize()
+
+    assert summary["total"] == legacy_total == 3
+    assert summary["by_type"] == legacy_by_type == {"purge_all_data": 2, "blocked": 1}
+    assert summary["last_ts"] == legacy_last_ts
+
+
+def test_summarize_counts_unparseable_line_like_total_count(tmp_path, monkeypatch):
+    """Битая строка считается в total, но не попадает в by_type.
+
+    Ровно так вела себя пара total_count() + read_entries(): счётчик берёт все
+    непустые строки, агрегаты — только разобранные. Расхождение здесь дало бы
+    дашборду total_events, не равный сумме by_type.
+    """
+    monkeypatch.setenv("KRAB_EAR_PRIVACY_AUDIT_DIR", str(tmp_path))
+    audit_logger = PrivacyAuditLogger()
+    audit_logger.log_event("privacy", "purge_all_data")
+    with (tmp_path / "privacy_audit.log").open("a", encoding="utf-8") as fh:
+        fh.write("{битая строка\n")
+
+    summary = audit_logger.summarize()
+
+    assert summary["total"] == 2
+    assert summary["by_type"] == {"purge_all_data": 1}
+
+
+def test_summarize_on_missing_log_is_empty(tmp_path, monkeypatch):
+    """Отсутствующий журнал — не ошибка: после архивации это норма."""
+    monkeypatch.setenv("KRAB_EAR_PRIVACY_AUDIT_DIR", str(tmp_path))
+    audit_logger = PrivacyAuditLogger()
+
+    assert audit_logger.summarize() == {"total": 0, "last_ts": None, "by_type": {}}
+
+
+@pytest.mark.parametrize("relative", ["tmp", "./logs", "../krab"])
+def test_relative_env_falls_back_to_default(monkeypatch, relative):
+    """Относительный путь трактуется как «не задано».
+
+    Иначе журнал привязался бы к текущему каталогу процесса — тот же исход, от
+    которого защищает guard на пустое значение, только через другую дверь.
+    """
+    monkeypatch.setenv("KRAB_EAR_PRIVACY_AUDIT_DIR", relative)
+
+    assert _default_log_path() == _PROD_LOG_PATH

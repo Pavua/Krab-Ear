@@ -28,6 +28,10 @@ DATADIR="$(mktemp -d /tmp/krab_ear_e2e.XXXXXX)"
 SOCK="$DATADIR/krabear.sock"
 LOG="$DATADIR/backend.log"
 
+# Privacy-журнал тоже уводим в throwaway: логгер home-rooted по умолчанию и
+# иначе пишет в боевой compliance-файл вопреки обещанию шапки скрипта.
+export KRAB_EAR_PRIVACY_AUDIT_DIR="$DATADIR"
+
 cleanup() {
   if [ -n "${BPID:-}" ] && kill -0 "$BPID" 2>/dev/null; then
     kill -TERM "$BPID" 2>/dev/null

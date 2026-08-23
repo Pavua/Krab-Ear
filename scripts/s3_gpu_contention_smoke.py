@@ -137,6 +137,9 @@ def _percentile(values: list[float], pct: float) -> float:
 def _spawn_backend(data_dir: Path, port: int, log_path: Path) -> subprocess.Popen:
     env = dict(os.environ)
     env["PYTHONPATH"] = str(KRAB_EAR)
+    # Privacy-журнал тоже уводим в throwaway: логгер home-rooted по умолчанию и
+    # иначе пишет в боевой compliance-файл вопреки обещанию шапки скрипта.
+    env["KRAB_EAR_PRIVACY_AUDIT_DIR"] = str(data_dir)
     env["KRAB_EAR_REST_IN_PROCESS_ENABLED"] = "true"
     env["KRAB_EAR_REST_SERVER_PORT"] = str(port)
     log_fh = log_path.open("wb")

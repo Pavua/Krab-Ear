@@ -32,9 +32,36 @@ _LOG_FILE_MODE = 0o600
 # чем читать многомегабайтный лог на каждую запись.
 _MAX_TIP_SCAN_BYTES = 4 * 1024 * 1024
 
-_DEFAULT_LOG_PATH = (
-    Path.home() / "Library" / "Application Support" / "KrabEar" / "privacy_audit.log"
-)
+_LOG_FILENAME = "privacy_audit.log"
+
+# Каталог журнала переопределяется этой переменной. Нужна для изоляции тестов и
+# dev-инстансов от боевого compliance-журнала (инцидент 2026-08-23: 44 907 из
+# 50 041 записи оказались тестовым мусором). Читаем os.environ напрямую, а не
+# settings из core/config.py: privacy_audit — листовой модуль без проектных
+# импортов, config втянул бы цикл через backend.service.
+_ENV_DIR_VAR = "KRAB_EAR_PRIVACY_AUDIT_DIR"
+
+
+def _default_log_path() -> Path:
+    """Путь журнала: env-переменная, иначе боевой home-rooted дефолт.
+
+    Резолвится ЛЕНИВО, при создании инстанса, а не на импорте модуля: константа
+    привязала бы изоляцию к порядку импортов — тот самый класс мин, что уже
+    кусал репозиторий (sys.modules-стабы, chunk-pollution rest_server).
+
+    Пустое/пробельное значение считается незаданным — fail-safe в сторону
+    боевого дефолта, иначе опечатка увела бы журнал в текущий каталог.
+    """
+    raw = os.environ.get(_ENV_DIR_VAR, "")
+    if raw.strip():
+        candidate = Path(raw).expanduser()
+        # Относительный путь тоже считается незаданным: он привязал бы
+        # compliance-журнал к текущему каталогу процесса, а это ровно тот исход,
+        # от которого guard выше и защищает. Абсолютность требуем явно.
+        if candidate.is_absolute():
+            return candidate / _LOG_FILENAME
+    return Path.home() / "Library" / "Application Support" / "KrabEar" / _LOG_FILENAME
+
 
 # Имя файла-ключа относительно родительской директории лога
 _KEY_FILENAME = "privacy_audit.key"
@@ -128,7 +155,7 @@ class PrivacyAuditLogger:
     _class_lock: threading.Lock = threading.Lock()
 
     def __init__(self, log_path: Path | None = None) -> None:
-        self._log_path: Path = log_path if log_path is not None else _DEFAULT_LOG_PATH
+        self._log_path: Path = log_path if log_path is not None else _default_log_path()
         self._ensure_parent()
         # Загружаем/создаём HMAC-ключ
         self._secret_key: bytes = _load_or_create_key(self._log_path.parent)
@@ -467,6 +494,63 @@ class PrivacyAuditLogger:
                 self._last_hash = None
             except Exception:
                 logger.exception("PrivacyAuditLogger: ошибка удаления лога")
+
+    def summarize(self) -> dict[str, Any]:
+        """Агрегаты журнала за ОДИН потоковый проход.
+
+        Заменяет в get_privacy_dashboard пару total_count() +
+        read_entries(limit=total_events): та читала файл дважды и
+        материализовала весь журнал в список ради трёх чисел. На боевом
+        50k-журнале это стоило ~0.2 с и росло без потолка.
+
+        Семантика счётчиков сохранена побитово: total инкрементируется до
+        разбора строки (как total_count, который считает и битые строки),
+        by_type/last_ts наполняются после (как read_entries, который битые
+        пропускает). Иначе total_events в дашборде разошёлся бы с суммой by_type.
+
+        Парсинг JSON вынесен за пределы блокировки файла (как в read_entries() и
+        verify_chain()): под LOCK_SH только readlines(), потом парсинг и
+        агрегация вне критической секции.
+
+        Returns:
+            {"total": int, "last_ts": str | None, "by_type": dict[str, int]}
+        """
+        summary: dict[str, Any] = {"total": 0, "last_ts": None, "by_type": {}}
+        if not self._log_path.exists():
+            return summary
+
+        lines: list[str] = []
+        try:
+            with self._log_path.open("r", encoding="utf-8") as fh:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_SH)
+                try:
+                    lines = fh.readlines()
+                finally:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+            # Парсинг и агрегация вне критической секции
+            for raw_line in lines:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                summary["total"] += 1
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "PrivacyAuditLogger: не удалось разобрать строку в summarize: %r",
+                        line,
+                    )
+                    continue
+                action = str(entry.get("action", "unknown"))
+                summary["by_type"][action] = summary["by_type"].get(action, 0) + 1
+                ts = entry.get("ts")
+                if ts and (summary["last_ts"] is None or ts > summary["last_ts"]):
+                    summary["last_ts"] = ts
+        except Exception:
+            logger.exception("PrivacyAuditLogger: ошибка агрегации журнала")
+
+        return summary
 
 
 # Удобная точка доступа к singleton

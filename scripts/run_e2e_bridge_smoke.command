@@ -22,6 +22,10 @@ PY="$VENV/bin/python"
 DATADIR="$(mktemp -d /tmp/krab_ear_bridge_e2e.XXXXXX)"
 SOCK="$DATADIR/krabear.sock"
 
+# Privacy-журнал тоже уводим в throwaway: логгер home-rooted по умолчанию и
+# иначе пишет в боевой compliance-файл вопреки обещанию шапки скрипта.
+export KRAB_EAR_PRIVACY_AUDIT_DIR="$DATADIR"
+
 # Свободный порт — не хардкодим 5005, чтобы не конфликтовать с реальным launchd REST.
 REST_PORT="$("$PY" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
 

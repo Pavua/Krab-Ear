@@ -38,6 +38,29 @@ import socket  # noqa: E402
 from collections.abc import Iterator  # noqa: E402
 from typing import Any  # noqa: E402
 
+# ---------------------------------------------------------------------------
+# Изоляция privacy_audit.log (инцидент 2026-08-23). Боевой compliance-журнал
+# ~/Library/Application Support/KrabEar/privacy_audit.log набрал 44 907 из
+# 50 041 записи тестовым мусором: PrivacyAuditLogger — синглтон с захардкоженным
+# home-rooted путём, и 17 из 20 файлов, зовущих handle_purge_all_data, его не
+# патчили. Реальный purge владельца стал неотличим от тестового.
+#
+# Правило CLAUDE.md для КАЖДОГО persistence-пути: env-переменная для базового
+# пути + throwaway, принудительно выставленный в conftest ДО импорта приложения.
+# Именно ПРИСВАИВАНИЕ, не setdefault: унаследованное из оболочки значение не
+# должно побеждать изоляцию.
+#
+# Под pytest -n auto каждый xdist-воркер — отдельный процесс, импортирует
+# conftest сам и получает СВОЙ mkdtemp; гонки за один файл не возникает.
+# ---------------------------------------------------------------------------
+import atexit  # noqa: E402
+import shutil  # noqa: E402
+import tempfile  # noqa: E402
+
+_PRIVACY_AUDIT_TMPDIR = tempfile.mkdtemp(prefix="krab_ear_privacy_audit_")
+os.environ["KRAB_EAR_PRIVACY_AUDIT_DIR"] = _PRIVACY_AUDIT_TMPDIR
+atexit.register(shutil.rmtree, _PRIVACY_AUDIT_TMPDIR, True)
+
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "0.0.0.0", "localhost"})
 _ORIGINAL_SOCKET_CONNECT = socket.socket.connect
 
@@ -80,6 +103,36 @@ def _block_real_network(request: pytest.FixtureRequest) -> Iterator[None]:
         yield
     finally:
         socket.socket.connect = original  # type: ignore[method-assign]
+
+
+@pytest.fixture(autouse=True)
+def _isolate_privacy_audit_singleton() -> Iterator[None]:
+    """Сбрасывает синглтон логгера и чистит throwaway-журнал после теста.
+
+    Два эффекта связаны. Сброс не даёт тесту пронести путь и _last_hash в
+    соседний. Удаление файла держит журнал пустым: иначе _read_chain_tip() в
+    конструкторе стал бы O(N) по растущему за прогон файлу, и к концу сьюта
+    каждое создание инстанса платило бы за десятки тысяч строк.
+
+    Сброс перестал быть УСЛОВИЕМ корректности после того, как соседняя волна
+    научила log_event перечитывать tip цепочки из файла под локом: удалённый
+    журнал теперь честно даёт None вместо повисшего _last_hash. Остаётся как
+    гигиена — тест не должен проносить состояние синглтона в соседний. Ключ
+    privacy_audit.key не трогаем: он переиспользуется, генерировать 32 байта
+    энтропии на каждый тест незачем.
+
+    Модуль берётся из sys.modules, а не импортируется: если тест его не
+    импортировал, создавать инстанс незачем; если тест подменил backend.* стабом,
+    getattr-проверки не дадут упасть на чужом объекте.
+    """
+    yield
+    mod = sys.modules.get("backend.privacy_audit")
+    if mod is not None:
+        cls = getattr(mod, "PrivacyAuditLogger", None)
+        reset = getattr(cls, "reset_instance", None)
+        if callable(reset):
+            reset()
+    Path(_PRIVACY_AUDIT_TMPDIR, "privacy_audit.log").unlink(missing_ok=True)
 
 
 _BENCH_RE = re.compile(r"\[BENCH\]\s+(.+?):\s+([\d.]+)s")
