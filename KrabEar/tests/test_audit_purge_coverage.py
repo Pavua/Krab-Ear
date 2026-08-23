@@ -13,6 +13,7 @@ Verifies the static-analysis guard scripts/audit_purge_coverage.py:
 The guard is imported from scripts/ without installation (importlib), matching
 the pattern of the other audit-scanner tests.
 """
+import ast
 import importlib.util
 import json
 import sys
@@ -24,6 +25,29 @@ from pathlib import Path
 _TESTS_DIR = Path(__file__).parent
 _REPO_ROOT = _TESTS_DIR.parent.parent
 _SCRIPTS_DIR = _REPO_ROOT / "scripts"
+
+
+class _CountingAst:
+    """Прокси вокруг стандартного ``ast``, считающий вызовы ``walk``.
+
+    2026-08-23: подмена делается на ИМЯ ``ast`` внутри globals() гарда
+    (``self.guard.ast = ...``), а не на реальный модуль ``sys.modules["ast"]``
+    — иначе патч утёк бы во ВСЕ остальные файлы того же CI-чанка (см. память
+    reference_global_patch_pollutes_other_tests.md). Гард резолвит имя ``ast``
+    из СВОЕГО module-level namespace при каждом вызове, поэтому подмена
+    затрагивает только код scripts/audit_purge_coverage.py.
+    """
+
+    def __init__(self, real_module):
+        self._real = real_module
+        self.walk_calls = 0
+
+    def walk(self, node):
+        self.walk_calls += 1
+        return self._real.walk(node)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
 
 
 def _load_guard():
@@ -520,13 +544,65 @@ class TestRealRepo(_FixtureMixin):
         expected = 1 if self.result.gaps else 0
         self.assertEqual(rc, expected)
 
-    def test_runs_fast(self):
-        # The audit must be cheap enough for CI on every push (<5s budget).
-        import time
+    def _count_parsed_source_files(self):
+        """Тот же фильтр, что ``discover_all_stores`` — независимый от гарда
+        подсчёт .py-файлов, которые он реально сканирует (для нормировки
+        структурного порога на размер репозитория, а не на константу)."""
+        count = 0
+        for directory in (self.guard.BACKEND_DIR, self.guard.CORE_DIR):
+            for path in directory.rglob("*.py"):
+                if "/tests/" in str(path) or path.name.startswith("test_"):
+                    continue
+                count += 1
+        return count
 
-        t0 = time.monotonic()
-        self.guard.run_audit()
-        self.assertLess(time.monotonic() - t0, 5.0)
+    def test_ast_walk_invocations_bounded_per_source_file(self):
+        # 2026-08-23: было `assertLess(elapsed, 5.0)` — сторож мерил занятость
+        # self-hosted CI-машины (общей с Chrome/LM Studio владельца), а не
+        # качество кода: живой прогон уронил CI на 10.7с при load average
+        # 21.5/38.8/38.3, при этом та же ветка и НЕТРОНУТЫЙ origin показывали
+        # одинаковые 7-8с — регрессии не было, был неверный бюджет.
+        #
+        # Живой замер (см. .remember) нашёл РЕАЛЬНЫЙ источник стоимости —
+        # не повторное чтение/парсинг файлов (~1.08x дубликатов от
+        # collaborator-парсинга в extract_purge_coverage — почти не влияет),
+        # а fixpoint-цикл `_discover_derived_dirs` (`for _ in range(5)`,
+        # scripts/audit_purge_coverage.py:302): каждый проход гоняет ПОЛНЫЙ
+        # `ast.walk(tree)` дважды, до 5 раз на модуль. cProfile: 3.66М yield'ов
+        # ast.walk из-под 9034 РЕАЛЬНЫХ вызовов walk() на ~243 файла (~37
+        # вызовов/файл) — и это доминирующая доля времени run_audit().
+        #
+        # Число ВЫЗОВОВ ast.walk() (не число посещённых узлов) — структурная
+        # характеристика самого алгоритма: она зависит только от количества
+        # файлов/функций в репозитории и от того, сколько раз код сканирует
+        # одно и то же дерево, и НЕ зависит от загрузки машины/скорости CPU.
+        # Регрессия вроде range(5)->range(50) или новый O(n) сканирующий цикл
+        # подскочит именно здесь, а шум self-hosted раннера — не подскочит.
+        real_ast = ast
+        counting = _CountingAst(real_ast)
+        original_ast = self.guard.ast
+        self.guard.ast = counting
+        try:
+            self.guard.run_audit()
+        finally:
+            self.guard.ast = original_ast
+
+        file_count = self._count_parsed_source_files()
+        self.assertGreater(file_count, 0, "sanity: repo scan must see files")
+
+        # Эмпирика 2026-08-23: ~37 вызовов walk() на файл. Порог даёт запас
+        # ~1.6x на органический рост числа функций/коллабораторов, но всё
+        # ещё ловит переписывание фикспоинт-цикла в квадратичный/на порядок
+        # более широкий скан.
+        budget_per_file = 60
+        self.assertLess(
+            counting.walk_calls,
+            budget_per_file * file_count,
+            "ast.walk() invocations grew past the structural budget "
+            f"({counting.walk_calls} calls for {file_count} files) — "
+            "look at _discover_derived_dirs' fixpoint loop or any new "
+            "full-tree re-scan, not at wall-clock time",
+        )
 
 
 if __name__ == "__main__":
