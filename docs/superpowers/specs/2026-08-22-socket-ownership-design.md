@@ -321,3 +321,30 @@ Sidecar полностью закрывает гонку между cooperating 
 Никакие тесты не используют production data dir или production socket. Live
 backend не перезапускается. `kickstart` не вызывается. Все actual-socket и
 subprocess scenarios используют UUID/temp paths.
+
+## Амендмент 2026-08-23 — Swift-хвост (BackendSupervisor)
+
+Исходная спека вынесла Swift за скобки («Изменения Swift/… — не входит в scope»),
+и это оставило второго владельца pathname'а живым: `BackendSupervisor`
+в active/standalone-режиме делал безусловный `removeItem` socket-пути перед
+спавном ребёнка (две ветки — синхронная и async). Прод (`.passive`, launchd
+Variant B) этот код не звал, поэтому волна прошла мимо него.
+
+Класс отказа в dev-режиме: ping не уложился в таймаут на ЖИВОМ backend'е →
+супервизор срывал имя работающего сокета. Сам сокет остаётся жив на unlink'нутом
+inode (недостижим по пути), sidecar `krabear.sock.lock` — отдельный inode, он не
+удаляется никогда, поэтому новый ребёнок упирался в flock оригинала и выходил
+`EX_TEMPFAIL`. Итог — ноль достижимых backend'ов до ручного вмешательства.
+
+Выбрано удаление, а не connect-probe в Swift: probe-then-unlink на стороне агента
+воспроизводит ровно ту гонку, которую закрыл claim — между probe и unlink
+успевает забиндиться свежий backend, и его inode удаляют. Единственный владелец
+pathname'а — `SocketOwnershipClaim.prepare_for_bind` (flock + re-check
+`(dev, ino, mtime_ns)`), и он одинаково работает в обоих режимах: standalone-спавн
+передаёт `--socket-path`, который `main()` прогоняет через тот же claim.
+
+Гейт: `native/KrabEarAgent/Tests/KrabEarAgentTests/BackendSupervisorSocketOwnershipTests.swift`
+— живой AF_UNIX listener и stale-сокет переживают обе active-ветки, плюс
+source-контракт против возврата удаления под другим именем (сравнение идёт по
+коду с вырезанными комментариями). Гейты волны: `swift build -c release`,
+`swift test`. Прод не перезапускался.

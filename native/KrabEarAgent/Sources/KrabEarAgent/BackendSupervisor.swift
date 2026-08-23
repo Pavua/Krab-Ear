@@ -84,12 +84,23 @@ final class BackendSupervisor: @unchecked Sendable {
     /// Тест-хук: если задан, ensureBackendRunning() вызывает этот блок вместо
     /// реального spawn/wait (исключает 20-секундный sleep в тестах).
     var _testEnsureOverride: (() throws -> Void)? = nil
+
+    /// Тест-хук: подменяет реальный спавн child-процесса в active-режиме.
+    /// В отличие от `_testEnsureOverride` оставляет ВЕСЬ остальной active-путь
+    /// (обращение к socket-файлу, polling) настоящим — именно это нужно, чтобы
+    /// проверять, что супервизор не трогает чужой живой сокет.
+    var _testSpawnOverride: (() throws -> Void)? = nil
 #endif
 
-    init(projectRoot: String) {
+    /// `dataDir` переопределяется только тестами: прод-вызов всегда идёт с
+    /// дефолтом, а `socketPath` выводится из него по той же формуле, что и в
+    /// проде — чтобы тест работал с настоящим путём, а не с параллельной веткой.
+    init(projectRoot: String, dataDir: String? = nil) {
         self.projectRoot = projectRoot
-        self.dataDir = NSString(string: "~/Library/Application Support/KrabEar").expandingTildeInPath
-        self.socketPath = (self.dataDir as NSString).appendingPathComponent("krabear.sock")
+        let resolvedDataDir = dataDir
+            ?? NSString(string: "~/Library/Application Support/KrabEar").expandingTildeInPath
+        self.dataDir = resolvedDataDir
+        self.socketPath = (resolvedDataDir as NSString).appendingPathComponent("krabear.sock")
     }
 
     /// Определяет, загружен ли Variant B backend plist в launchd.
@@ -165,7 +176,7 @@ final class BackendSupervisor: @unchecked Sendable {
             // Whisper cold start ~5-8s). Максимум 20 секунд.
             for _ in 0..<100 {  // 100 * 200ms = 20s
                 usleep(200_000)
-                if (try? client.call(method: "ping")) != nil {
+                if pingOK() {
                     stateLock.lock()
                     consecutiveRestarts = 0
                     stateLock.unlock()
@@ -178,11 +189,12 @@ final class BackendSupervisor: @unchecked Sendable {
 
         case .active:
             // Standalone mode: Swift owns lifecycle, текущая логика сохраняется.
-            cleanupStaleSocket()
+            // Socket-путь НЕ трогаем: его единственный владелец — backend
+            // (см. комментарий у startBackendProcess и спеку 2026-08-22).
             try startBackendProcess()
             for _ in 0..<30 {  // 30 * 200ms = 6s — whisper cold start на fresh spawn
                 usleep(200_000)
-                if (try? client.call(method: "ping")) != nil {
+                if pingOK() {
                     stateLock.lock()
                     consecutiveRestarts = 0
                     stateLock.unlock()
@@ -237,7 +249,6 @@ final class BackendSupervisor: @unchecked Sendable {
                 "backend (launchd Variant B) не отвечает за 20 сек — проверь `launchctl print gui/\(getuid())/ai.krab.ear.backend`"
             )
         case .active:
-            cleanupStaleSocket()
             try startBackendProcess()
             for _ in 0..<30 {  // 30 * 200ms = 6s
                 try? await Task.sleep(nanoseconds: 200_000_000)
@@ -431,15 +442,25 @@ final class BackendSupervisor: @unchecked Sendable {
         }
     }
 
-    /// Удаляет stale Unix socket, оставшийся после убитого процесса.
-    private func cleanupStaleSocket() {
-        let fm = FileManager.default
-        if fm.fileExists(atPath: socketPath) {
-            try? fm.removeItem(atPath: socketPath)
-        }
-    }
-
+    /// Спавнит backend-процесс в active-режиме.
+    ///
+    /// 🔴 Здесь НЕТ и не должно быть удаления stale socket-файла. Спека
+    /// 2026-08-22 (socket-ownership) сделала backend единственным владельцем
+    /// pathname'а: он чистит stale только под sidecar-flock claim'ом с
+    /// re-check identity (dev, ino, mtime_ns) — единственный способ не удалить
+    /// сокет, забиндившийся между probe и unlink. Прежний безусловный
+    /// `removeItem(atPath: socketPath)` перед спавном срывал имя ЖИВОГО
+    /// backend'а всякий раз, когда ping не укладывался в таймаут: сам сокет
+    /// оставался жив на unlink'нутом inode (недостижим по пути), а новый
+    /// ребёнок упирался в flock оригинала и выходил с EX_TEMPFAIL — ноль
+    /// достижимых backend'ов. Гейт: BackendSupervisorSocketOwnershipTests.
     private func startBackendProcess() throws {
+#if DEBUG
+        if let spawn = _testSpawnOverride {
+            try spawn()
+            return
+        }
+#endif
         let fileManager = FileManager.default
         try fileManager.createDirectory(
             atPath: dataDir,
