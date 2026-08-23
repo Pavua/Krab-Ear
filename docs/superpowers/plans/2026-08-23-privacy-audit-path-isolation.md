@@ -808,7 +808,7 @@ Expected: **3 failed** — `AttributeError: 'PrivacyAuditLogger' object has no a
 
 Run (после возврата `try/except`):
 ```bash
-cd "$(git rev-parse --show-toplevel)" && PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_privacy_dashboard.py::PrivacyDashboardTestCase::test_audit_failure_returns_defaults -v
+cd "$(git rev-parse --show-toplevel)" && PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_privacy_dashboard.py::TestPrivacyDashboardGracefulDegradation::test_audit_failure_returns_defaults -v
 ```
 
 Expected: PASS.
@@ -829,7 +829,9 @@ Expected: PASS; в файле волны — **17 passed**.
 - [ ] **Step 6: Коммит**
 
 ```bash
-git add KrabEar/backend/privacy_audit.py KrabEar/backend/service.py KrabEar/tests/test_privacy_audit_path_isolation_2026_08_23.py
+git add KrabEar/backend/privacy_audit.py KrabEar/backend/service.py \
+        KrabEar/tests/test_privacy_audit_path_isolation_2026_08_23.py \
+        KrabEar/tests/test_privacy_dashboard.py
 git commit -m "$(cat <<'EOF'
 perf(privacy-dashboard): агрегаты журнала за один проход
 
