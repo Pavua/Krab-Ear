@@ -447,7 +447,10 @@ class TranslationGlossaryPurgeTestCase(unittest.TestCase):
         # Сломаем load_settings чтобы вызвать ошибку
         original_load = store.load_settings
 
-        def broken_load() -> dict:
+        def broken_load(*args, **kwargs) -> dict:
+            # kwargs прод-вызовов (lock_timeout_sec/nowait): иначе подмена
+            # однажды упадёт TypeError'ом, а тест этого не заметит — он ждёт
+            # исключения и здесь, и там (класс «дрейф фейка», отложенный).
             raise RuntimeError("ошибка чтения settings")
 
         store.load_settings = broken_load
