@@ -79,6 +79,37 @@ final class PrivacyDashboardAuditWiringTests: XCTestCase {
         )
     }
 
+    // MARK: - Из fallback «нет данных» обязан быть выход
+
+    /// Живой инцидент 2026-08-23: карточка ушла в ветку `guard let data else`
+    /// и унесла с собой ВСЕ кнопки — «Обновить» больше не нарисована, повторный
+    /// запрос из UI невозможен, состояние залипает до пересоздания панели
+    /// (класс «sticky state without an exit»).
+    func test_fallback_branch_keeps_retry_button() throws {
+        let src = try String(
+            contentsOf: Self.sourceURL("HistoryPanelController+PrivacyDashboard.swift"),
+            encoding: .utf8)
+        // Обе ветки fallback (Gemini + CD) обязаны добавлять строку кнопок
+        // ДО раннего return, иначе «нет данных» становится терминальным.
+        let fallbackChunks = src.components(separatedBy: "guard let data else {")
+        XCTAssertEqual(
+            fallbackChunks.count, 3,
+            "Ожидались ровно две fallback-ветки (Gemini + Claude Design)"
+        )
+        for (idx, chunk) in fallbackChunks.dropFirst().enumerated() {
+            guard let untilReturn = chunk.range(of: "return") else {
+                XCTFail("fallback-ветка \(idx + 1): не найден return")
+                continue
+            }
+            let body = chunk[chunk.startIndex..<untilReturn.lowerBound]
+            XCTAssertTrue(
+                body.contains("pdButtonRow()"),
+                "fallback-ветка \(idx + 1) обязана оставлять кнопку «Обновить» — "
+                    + "иначе из состояния «нет данных» нет выхода"
+            )
+        }
+    }
+
     // MARK: - Сирота privacyModeButton удалён
 
     func test_orphan_privacyModeButton_removed() throws {

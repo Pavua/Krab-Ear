@@ -4398,8 +4398,11 @@ class BackendService:
                                           auto_purge_enabled, auto_purge_retention_days.
             audit               (dict)  — total_events, last_event_ts, by_type.
             purge_available     (bool)  — всегда True.
+            ok                  (bool)  — всегда True; Swift гейтит разбор payload
+                                          на result["ok"], конверта ему мало.
         """
         result: dict[str, Any] = {
+            "ok": True,
             "privacy_mode": False,
             "encryption_enabled": False,
             "storage": {},
