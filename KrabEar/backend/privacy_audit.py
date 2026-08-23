@@ -435,6 +435,10 @@ class PrivacyAuditLogger:
         by_type/last_ts наполняются после (как read_entries, который битые
         пропускает). Иначе total_events в дашборде разошёлся бы с суммой by_type.
 
+        Парсинг JSON вынесен за пределы блокировки файла (как в read_entries() и
+        verify_chain()): под LOCK_SH только readlines(), потом парсинг и
+        агрегация вне критической секции.
+
         Returns:
             {"total": int, "last_ts": str | None, "by_type": dict[str, int]}
         """
@@ -442,26 +446,34 @@ class PrivacyAuditLogger:
         if not self._log_path.exists():
             return summary
 
+        lines: list[str] = []
         try:
             with self._log_path.open("r", encoding="utf-8") as fh:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_SH)
                 try:
-                    for raw_line in fh:
-                        line = raw_line.strip()
-                        if not line:
-                            continue
-                        summary["total"] += 1
-                        try:
-                            entry = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        action = str(entry.get("action", "unknown"))
-                        summary["by_type"][action] = summary["by_type"].get(action, 0) + 1
-                        ts = entry.get("ts")
-                        if ts and (summary["last_ts"] is None or ts > summary["last_ts"]):
-                            summary["last_ts"] = ts
+                    lines = fh.readlines()
                 finally:
                     fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+            # Парсинг и агрегация вне критической секции
+            for raw_line in lines:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                summary["total"] += 1
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "PrivacyAuditLogger: не удалось разобрать строку в summarize: %r",
+                        line,
+                    )
+                    continue
+                action = str(entry.get("action", "unknown"))
+                summary["by_type"][action] = summary["by_type"].get(action, 0) + 1
+                ts = entry.get("ts")
+                if ts and (summary["last_ts"] is None or ts > summary["last_ts"]):
+                    summary["last_ts"] = ts
         except Exception:
             logger.exception("PrivacyAuditLogger: ошибка агрегации журнала")
 
