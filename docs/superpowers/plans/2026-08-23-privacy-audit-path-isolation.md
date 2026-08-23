@@ -4,7 +4,7 @@
 
 **Goal:** Тестовый прогон и dev-backend больше не пишут в боевой compliance-журнал `~/Library/Application Support/KrabEar/privacy_audit.log`.
 
-**Architecture:** Путь журнала резолвится ленивой функцией `_default_log_path()`, читающей env-переменную `KRAB_EAR_PRIVACY_AUDIT_DIR`; боевой дефолт (home-rooted) не меняется. `conftest.py` принудительно выставляет throwaway-каталог до импорта приложения, три e2e-смока экспортируют переменную рядом со своим `--data-dir`. Отдельно дашборд приватности переводится с двух полных чтений журнала на один потоковый проход.
+**Architecture:** Путь журнала резолвится ленивой функцией `_default_log_path()`, читающей env-переменную `KRAB_EAR_PRIVACY_AUDIT_DIR`; боевой дефолт (home-rooted) не меняется. `conftest.py` принудительно выставляет throwaway-каталог до импорта приложения, семь e2e-смоков экспортируют переменную рядом со своим `--data-dir`. Отдельно дашборд приватности переводится с двух полных чтений журнала на один потоковый проход.
 
 **Tech Stack:** Python 3.14 (dev venv `.venv_krab_ear`) / Python 3.12 (ubuntu CI — настоящий гейт), pytest, unittest.TestCase, bash 3.2 для `.command`-скриптов.
 
@@ -13,7 +13,9 @@
 ## Global Constraints
 
 - **Ветка:** `claude/agitated-ritchie-5b33f1`. 🔴 В `codex/krab-ear-v2` НЕ пушить — только PR.
-- **🔴 ЧУЖАЯ ЗОНА — не трогать:** метод `PrivacyAuditLogger.log_event`, `_read_chain_tip`, права `600` при создании файла. Их правит параллельная сессия `xenodochial-cannon-3fc148` в этом же файле. Наша зона в `privacy_audit.py` — только резолв пути (строка 28 и первая строка `__init__`) плюс новый метод `summarize()` в конце класса.
+- **🔴 ЧУЖАЯ ЗОНА — не трогать:** метод `PrivacyAuditLogger.log_event`, `_read_chain_tip`, права `600` при создании файла. Их правит параллельная сессия `xenodochial-cannon-3fc148` в этом же файле (её фикс уже закоммичен: `7923f15b`). Наша зона в `privacy_audit.py` — только резолв пути (строка 28 и первая строка `__init__`) плюс новый метод `summarize()` в конце класса.
+- **🔴 Номера строк — подсказка, а не адрес.** Соседний коммит уже сдвинул `privacy_audit.py` на ~+7 строк (константы `_LOG_FILE_MODE` / `_MAX_TIP_SCAN_BYTES` вставлены НАД строкой 28). Все правки ниже заданы точным ТЕКСТОМ и переживут мерж — искать по тексту, сверять номер вторым.
+- **Рабочий каталог:** worktree этой ветки. Команды используют `cd "$(git rev-parse --show-toplevel)"` намеренно — прежняя версия плана содержала абсолютный путь на worktree, который был удалён вместе с веткой (восстановлена из dangling-объектов).
 - **TDD обязателен:** RED пишется первым и обязан падать по причине «фичи нет», а не из-за опечатки.
 - **Имя env-переменной ровно:** `KRAB_EAR_PRIVACY_AUDIT_DIR` (каталог, не файл).
 - **Боевой дефолт не меняется:** `Path.home() / "Library" / "Application Support" / "KrabEar" / "privacy_audit.log"`. Если после правок `make audit-purge-coverage` обнаружит новый store — это ошибка реализации (путь утёк под `data_dir`), а не повод править allowlist.
@@ -33,6 +35,11 @@
 | `scripts/run_e2e_smokes.command` | экспорт переменной рядом с throwaway data-dir | modify |
 | `scripts/run_e2e_bridge_smoke.command` | то же | modify |
 | `scripts/e2e_owner_gate_smoke.py` | то же, через `env` подпроцесса | modify |
+| `scripts/e2e_rescue_smoke.py` | то же (backend поднимается дважды) | modify |
+| `scripts/e2e_recommended_setup_smoke.py` | то же | modify |
+| `scripts/rest_inprocess_load_smoke.py` | то же | modify |
+| `scripts/s3_gpu_contention_smoke.py` | то же | modify |
+| `KrabEar/tests/test_privacy_dashboard.py` | перенацелить симуляцию отказа с `total_count` на `summarize` | modify |
 
 ---
 
@@ -133,7 +140,7 @@ def test_blank_env_falls_back_to_default(monkeypatch, blank):
 
 Run:
 ```bash
-cd "/Users/pablito/Antigravity_AGENTS/Krab Ear/.claude/worktrees/agitated-ritchie-5b33f1" && PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_privacy_audit_path_isolation_2026_08_23.py -v
+cd "$(git rev-parse --show-toplevel)" && PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_privacy_audit_path_isolation_2026_08_23.py -v
 ```
 
 Expected: **сбор падает** с `ImportError: cannot import name '_default_log_path' from 'backend.privacy_audit'`. Это корректный RED — символа нет, потому что фичи нет.
@@ -195,7 +202,7 @@ def _default_log_path() -> Path:
 
 Run:
 ```bash
-cd "/Users/pablito/Antigravity_AGENTS/Krab Ear/.claude/worktrees/agitated-ritchie-5b33f1" && PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_privacy_audit_path_isolation_2026_08_23.py -v
+cd "$(git rev-parse --show-toplevel)" && PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_privacy_audit_path_isolation_2026_08_23.py -v
 ```
 
 Expected: **6 passed** (4 теста, из них `test_blank_env_falls_back_to_default` параметризован тремя значениями).
@@ -204,7 +211,7 @@ Expected: **6 passed** (4 теста, из них `test_blank_env_falls_back_to_
 
 Run:
 ```bash
-cd "/Users/pablito/Antigravity_AGENTS/Krab Ear/.claude/worktrees/agitated-ritchie-5b33f1" && PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_privacy_audit.py KrabEar/tests/test_privacy_audit_hash_chain.py KrabEar/tests/test_privacy_audit_clear.py -v
+cd "$(git rev-parse --show-toplevel)" && PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_privacy_audit.py KrabEar/tests/test_privacy_audit_hash_chain.py KrabEar/tests/test_privacy_audit_clear.py -v
 ```
 
 Expected: PASS. Эти тесты конструируют логгер с ЯВНЫМ `log_path`, поэтому резолв дефолта их не касается; падение здесь означает, что правка задела не ту строку.
@@ -262,12 +269,19 @@ def test_running_test_session_is_not_on_prod_path():
 
 Run:
 ```bash
-cd "/Users/pablito/Antigravity_AGENTS/Krab Ear/.claude/worktrees/agitated-ritchie-5b33f1" && PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_privacy_audit_path_isolation_2026_08_23.py::test_running_test_session_is_not_on_prod_path -v
+cd "$(git rev-parse --show-toplevel)" && PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_privacy_audit_path_isolation_2026_08_23.py::test_running_test_session_is_not_on_prod_path -v
 ```
 
 Expected: **FAIL** — `assert PosixPath('/Users/…/KrabEar/privacy_audit.log') != PosixPath('/Users/…/KrabEar/privacy_audit.log')`. Именно это и есть инцидент: тест пишет в боевой путь.
 
 🔴 На ubuntu-CI этот тест до правки тоже падает (там `Path.home()` другой, но переменная не выставлена и путь совпадает с `_PROD_LOG_PATH`, вычисленным от того же `Path.home()`).
+
+🔴 **Побочный эффект самого RED-прогона.** До правки `conftest` вызов
+`get_privacy_audit_logger()` внутри теста идёт в конструктор, который делает `mkdir`
+боевого каталога и читает/создаёт `privacy_audit.key`. На машине владельца это
+безвредно (каталог и ключ уже есть), но на чистой машине RED-шаг создаст их. Это
+одноразово и исчезает сразу после Step 3 — но знать об этом надо, иначе выглядит как
+загрязнение от нашей же волны.
 
 - [ ] **Step 3: Добавить блок изоляции в conftest**
 
@@ -336,7 +350,7 @@ def _isolate_privacy_audit_singleton() -> Iterator[None]:
 
 Run:
 ```bash
-cd "/Users/pablito/Antigravity_AGENTS/Krab Ear/.claude/worktrees/agitated-ritchie-5b33f1" && PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_privacy_audit_path_isolation_2026_08_23.py -v
+cd "$(git rev-parse --show-toplevel)" && PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_privacy_audit_path_isolation_2026_08_23.py -v
 ```
 
 Expected: **7 passed**.
@@ -348,7 +362,7 @@ purge-тесты, сверить.
 
 Run:
 ```bash
-cd "/Users/pablito/Antigravity_AGENTS/Krab Ear/.claude/worktrees/agitated-ritchie-5b33f1" && \
+cd "$(git rev-parse --show-toplevel)" && \
 P="$HOME/Library/Application Support/KrabEar/privacy_audit.log" && \
 BEFORE="$(stat -f '%z %m' "$P" 2>/dev/null || echo 'ОТСУТСТВУЕТ')" && \
 PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_purge_all_data_w1730.py KrabEar/tests/test_purge_privacy_gaps_w1767.py -q > /dev/null 2>&1; \
@@ -397,10 +411,33 @@ EOF
 # Смоки поднимают throwaway-backend и обещают в своих шапках «never touches your
 # prod data» — но privacy-события писали в боевой журнал. Source-контракт: без
 # него правка скрипта тихо вернёт загрязнение.
+#
+# 🔴 Список получен grep'ом по '"--data-dir"' и '--data-dir' в scripts/, а не
+# на глаз: первая версия волны знала только о трёх скриптах и пропустила
+# четыре. НЕ включены сознательно: e2e_meeting_smoke.py (спавн только в
+# докстринге, скрипт сам backend не поднимает), build_bundled_runtime.command
+# (строка 155 — это log с ПОДСКАЗКОЙ команды, не запуск), memory_baseline.py и
+# history_health_report.py (подключаются к существующему инстансу, не спавнят),
+# validate_c1_mps_fix.command и observe_production.command (целятся в ПРОД
+# намеренно — им боевой журнал и нужен).
 _SMOKE_SCRIPTS = (
     "scripts/run_e2e_smokes.command",
     "scripts/run_e2e_bridge_smoke.command",
     "scripts/e2e_owner_gate_smoke.py",
+    "scripts/e2e_rescue_smoke.py",
+    "scripts/e2e_recommended_setup_smoke.py",
+    "scripts/rest_inprocess_load_smoke.py",
+    "scripts/s3_gpu_contention_smoke.py",
+)
+
+# Матчим ПОЛНЫЙ паттерн присваивания, а не одну подстроку с именем переменной:
+# (1) голое вхождение "KRAB_EAR_PRIVACY_AUDIT_DIR" вечно-зеленится комментарием,
+# (2) `export VAR=""` с пустым значением прошёл бы проверку, а fail-safe из C1
+# молча увёл бы журнал обратно в бой — то есть слабый ассерт маскировал бы
+# ровно тот отказ, ради которого тест написан.
+_EXPECTED_ASSIGNMENTS = (
+    'export KRAB_EAR_PRIVACY_AUDIT_DIR="$DATADIR"',
+    'env["KRAB_EAR_PRIVACY_AUDIT_DIR"] = str(data_dir)',
 )
 
 
@@ -409,9 +446,10 @@ def test_e2e_smoke_scripts_export_privacy_audit_dir(rel_path):
     """Каждый смок с throwaway data-dir обязан увести и privacy-журнал."""
     text = (REPO_ROOT / rel_path).read_text(encoding="utf-8")
 
-    assert "KRAB_EAR_PRIVACY_AUDIT_DIR" in text, (
+    assert any(pattern in text for pattern in _EXPECTED_ASSIGNMENTS), (
         f"{rel_path} поднимает backend на throwaway data-dir, но privacy-события "
-        "уйдут в боевой ~/Library/Application Support/KrabEar/privacy_audit.log"
+        "уйдут в боевой ~/Library/Application Support/KrabEar/privacy_audit.log. "
+        f"Ожидается одно из присваиваний: {_EXPECTED_ASSIGNMENTS}"
     )
 ```
 
@@ -419,10 +457,10 @@ def test_e2e_smoke_scripts_export_privacy_audit_dir(rel_path):
 
 Run:
 ```bash
-cd "/Users/pablito/Antigravity_AGENTS/Krab Ear/.claude/worktrees/agitated-ritchie-5b33f1" && PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_privacy_audit_path_isolation_2026_08_23.py -k smoke_scripts -v
+cd "$(git rev-parse --show-toplevel)" && PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_privacy_audit_path_isolation_2026_08_23.py -k smoke_scripts -v
 ```
 
-Expected: **3 failed** — по одному на скрипт, с текстом ассерта про боевой журнал.
+Expected: **7 failed** — по одному на каждый скрипт, с текстом ассерта про боевой журнал.
 
 - [ ] **Step 3: Правка `scripts/run_e2e_smokes.command`**
 
@@ -454,28 +492,50 @@ export KRAB_EAR_PRIVACY_AUDIT_DIR="$DATADIR"
     env["KRAB_EAR_PRIVACY_AUDIT_DIR"] = str(data_dir)
 ```
 
-- [ ] **Step 6: Прогнать тест и убедиться, что он проходит**
+- [ ] **Step 6: Правка четырёх остальных Python-смоков**
+
+🔴 Найдены ревью-гейтом: первая версия волны знала о трёх скриптах, а спавнеров семь.
+В каждом — та же одна строка в функцию, поднимающую backend, сразу после
+`env["PYTHONPATH"] = ...` (или перед `subprocess.Popen`, если `env` собирается иначе):
+
+```python
+    # Privacy-журнал тоже уводим в throwaway: логгер home-rooted по умолчанию и
+    # иначе пишет в боевой compliance-файл вопреки обещанию шапки скрипта.
+    env["KRAB_EAR_PRIVACY_AUDIT_DIR"] = str(data_dir)
+```
+
+| Файл | Функция / место |
+|---|---|
+| `scripts/e2e_rescue_smoke.py` | `_spawn_backend`, спавн на строке 130 (backend поднимается ДВАЖДЫ — одной правки `env` хватает на обе жизни) |
+| `scripts/e2e_recommended_setup_smoke.py` | спавн на строке 98 |
+| `scripts/rest_inprocess_load_smoke.py` | спавн на строке 221 |
+| `scripts/s3_gpu_contention_smoke.py` | спавн на строке 144 |
+
+🔴 В каждом файле сверить, что переменная с throwaway-каталогом называется именно
+`data_dir`; если имя другое — подставить фактическое, но НЕ хардкодить путь.
+
+- [ ] **Step 7: Прогнать тест и убедиться, что он проходит**
 
 Run:
 ```bash
-cd "/Users/pablito/Antigravity_AGENTS/Krab Ear/.claude/worktrees/agitated-ritchie-5b33f1" && PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_privacy_audit_path_isolation_2026_08_23.py -v
+cd "$(git rev-parse --show-toplevel)" && PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_privacy_audit_path_isolation_2026_08_23.py -v
 ```
 
-Expected: **10 passed**.
+Expected: **14 passed** (7 тестов волны + 7 параметров source-контракта).
 
-- [ ] **Step 7: Проверить bash-совместимость правок**
+- [ ] **Step 8: Проверить bash-совместимость правок**
 
 `.command`-скрипты исполняются на Bash 3.2 (macOS), где нет `mapfile`/`declare -A`.
 `export VAR="$DATADIR"` — базовый синтаксис, но синтаксис всё равно проверить явно.
 
 Run:
 ```bash
-cd "/Users/pablito/Antigravity_AGENTS/Krab Ear/.claude/worktrees/agitated-ritchie-5b33f1" && bash -n scripts/run_e2e_smokes.command && bash -n scripts/run_e2e_bridge_smoke.command && echo "✅ синтаксис обоих скриптов валиден"
+cd "$(git rev-parse --show-toplevel)" && bash -n scripts/run_e2e_smokes.command && bash -n scripts/run_e2e_bridge_smoke.command && echo "✅ синтаксис обоих скриптов валиден"
 ```
 
 Expected: `✅ синтаксис обоих скриптов валиден`.
 
-- [ ] **Step 8: Коммит**
+- [ ] **Step 9: Коммит**
 
 ```bash
 git add scripts/run_e2e_smokes.command scripts/run_e2e_bridge_smoke.command scripts/e2e_owner_gate_smoke.py KrabEar/tests/test_privacy_audit_path_isolation_2026_08_23.py
@@ -571,7 +631,7 @@ def test_summarize_on_missing_log_is_empty(tmp_path, monkeypatch):
 
 Run:
 ```bash
-cd "/Users/pablito/Antigravity_AGENTS/Krab Ear/.claude/worktrees/agitated-ritchie-5b33f1" && PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_privacy_audit_path_isolation_2026_08_23.py -k summarize -v
+cd "$(git rev-parse --show-toplevel)" && PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_privacy_audit_path_isolation_2026_08_23.py -k summarize -v
 ```
 
 Expected: **3 failed** — `AttributeError: 'PrivacyAuditLogger' object has no attribute 'summarize'`.
@@ -666,14 +726,57 @@ Expected: **3 failed** — `AttributeError: 'PrivacyAuditLogger' object has no a
 Ключи ответа (`total_events`, `last_event_ts`, `by_type`) не меняются — Swift-сторона
 читает именно их.
 
-- [ ] **Step 5: Прогнать тесты и убедиться, что проходят**
+- [ ] **Step 5: 🔴 Перенацелить тест graceful degradation — иначе он станет декоративным**
 
-Run:
+Найдено ревью-гейтом. `KrabEar/tests/test_privacy_dashboard.py:465-487`
+(`test_audit_failure_returns_defaults`) ломает `total_count`:
+
+```python
+        broken_audit.total_count = boom_total  # type: ignore[method-assign]
+```
+
+После Task 4 дашборд `total_count()` **не вызывает** — он зовёт `summarize()`. А
+`summarize()` на несуществующем `broken_audit.log` штатно вернёт `0 / None / {}` —
+ровно те значения, которые тест ждёт от ветки обработки ошибки. Тест останется
+**ЗЕЛЁНЫМ и перестанет проверять хоть что-нибудь**: это класс «test-validates-the-hole»,
+против которого в репозитории есть именной CI-гард (`audit_dispatch_test_targets.py`).
+
+🔴 Предупреждение «если тест упал — разбираться» тут не спасёт: падения НЕ будет.
+
+Заменить строку симуляции отказа на:
+
+```python
+        def boom_summarize(*a, **kw):
+            raise OSError("simulated audit failure")
+
+        broken_audit.summarize = boom_summarize  # type: ignore[method-assign]
+```
+
+и переименовать `boom_total` → `boom_summarize` в определении выше. Ассерты дефолтов
+(`total_events == 0`, `last_event_ts is None`, `by_type == {}`) оставить как есть — они
+и есть контракт graceful degradation.
+
+- [ ] **Step 6: Доказать, что перенацеленный тест реально ловит отказ**
+
+Временно убрать `try/except` вокруг audit-секции в `_handle_get_privacy_dashboard` и
+убедиться, что тест КРАСНЕЕТ; вернуть `try/except` — зеленеет. Без этой проверки нет
+доказательства, что тест снова живой.
+
+Run (после возврата `try/except`):
 ```bash
-cd "/Users/pablito/Antigravity_AGENTS/Krab Ear/.claude/worktrees/agitated-ritchie-5b33f1" && PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_privacy_audit_path_isolation_2026_08_23.py KrabEar/tests/test_privacy_dashboard.py KrabEar/tests/test_privacy_dashboard_ok_contract_2026_08_23.py -v
+cd "$(git rev-parse --show-toplevel)" && PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_privacy_dashboard.py::PrivacyDashboardTestCase::test_audit_failure_returns_defaults -v
 ```
 
 Expected: PASS.
+
+- [ ] **Step 7: Прогнать тесты и убедиться, что проходят**
+
+Run:
+```bash
+cd "$(git rev-parse --show-toplevel)" && PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_privacy_audit_path_isolation_2026_08_23.py KrabEar/tests/test_privacy_dashboard.py KrabEar/tests/test_privacy_dashboard_ok_contract_2026_08_23.py -v
+```
+
+Expected: PASS; в файле волны — **17 passed**.
 
 🔴 Если `test_privacy_dashboard.py` упал на `total_events` — разбираться как с настоящей
 находкой (изоляция изменила счётчик, и тест мог зависеть от накопленного боевого
@@ -717,7 +820,7 @@ EOF
 
 Run:
 ```bash
-cd "/Users/pablito/Antigravity_AGENTS/Krab Ear/.claude/worktrees/agitated-ritchie-5b33f1" && PYTHONPATH=$(pwd)/KrabEar python -m pytest \
+cd "$(git rev-parse --show-toplevel)" && PYTHONPATH=$(pwd)/KrabEar python -m pytest \
   KrabEar/tests/test_privacy_audit_path_isolation_2026_08_23.py \
   KrabEar/tests/test_privacy_audit.py \
   KrabEar/tests/test_privacy_audit_hash_chain.py \
@@ -739,7 +842,7 @@ Expected: все PASS.
 
 Run:
 ```bash
-cd "/Users/pablito/Antigravity_AGENTS/Krab Ear/.claude/worktrees/agitated-ritchie-5b33f1" && scripts/pre_merge_py312_check.sh KrabEar/tests/test_privacy_audit_path_isolation_2026_08_23.py
+cd "$(git rev-parse --show-toplevel)" && scripts/pre_merge_py312_check.sh KrabEar/tests/test_privacy_audit_path_isolation_2026_08_23.py
 ```
 
 Expected: PASS.
@@ -752,7 +855,7 @@ ubuntu-parity изолирует каждый файл и потому НЕ во
 
 Run:
 ```bash
-cd "/Users/pablito/Antigravity_AGENTS/Krab Ear/.claude/worktrees/agitated-ritchie-5b33f1" && PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_privacy_*.py KrabEar/tests/test_purge_*.py -p no:cacheprovider -q
+cd "$(git rev-parse --show-toplevel)" && PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_privacy_*.py KrabEar/tests/test_purge_*.py -p no:cacheprovider -q
 ```
 
 Expected: все PASS, процесс завершается кодом 0 (не 1 от фатального stderr-lock при выходе).
@@ -761,7 +864,7 @@ Expected: все PASS, процесс завершается кодом 0 (не 
 
 Run:
 ```bash
-cd "/Users/pablito/Antigravity_AGENTS/Krab Ear/.claude/worktrees/agitated-ritchie-5b33f1" && make audit-all
+cd "$(git rev-parse --show-toplevel)" && make audit-all
 ```
 
 Expected: все гарды зелёные.
@@ -774,7 +877,7 @@ Expected: все гарды зелёные.
 
 Run:
 ```bash
-cd "/Users/pablito/Antigravity_AGENTS/Krab Ear/.claude/worktrees/agitated-ritchie-5b33f1" && python -m flake8 KrabEar/backend/privacy_audit.py KrabEar/tests/conftest.py KrabEar/tests/test_privacy_audit_path_isolation_2026_08_23.py scripts/e2e_owner_gate_smoke.py
+cd "$(git rev-parse --show-toplevel)" && python -m flake8 KrabEar/backend/privacy_audit.py KrabEar/tests/conftest.py KrabEar/tests/test_privacy_audit_path_isolation_2026_08_23.py scripts/e2e_owner_gate_smoke.py
 ```
 
 Expected: без замечаний. W293 в тестах НЕ расслаблен — пустые строки не должны содержать пробелов.
@@ -793,7 +896,7 @@ Expected: без замечаний. W293 в тестах НЕ расслабл�
 - [ ] **Step 7: Открыть PR**
 
 ```bash
-cd "/Users/pablito/Antigravity_AGENTS/Krab Ear/.claude/worktrees/agitated-ritchie-5b33f1" && \
+cd "$(git rev-parse --show-toplevel)" && \
 git add docs/NOW.md && git commit -m "docs(now): волна изоляции privacy_audit.log
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>" && \
