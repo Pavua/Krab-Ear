@@ -209,6 +209,9 @@ extension HistoryPanelController {
             fallback.font = KrabEarTheme.Typography.caption
             fallback.textColor = KrabEarTheme.Colors.textSecondary
             card.contentStackView.addArrangedSubview(fallback)
+            // Кнопки остаются: без них «нет данных» — терминальное состояние,
+            // повторить запрос можно только пересоздав панель.
+            card.contentStackView.addArrangedSubview(pdButtonRow())
             return
         }
 
@@ -307,6 +310,8 @@ extension HistoryPanelController {
             fallback.font = .systemFont(ofSize: 12, weight: .regular)
             fallback.textColor = KrabEarTheme.Colors.textSecondary
             card.contentStackView.addArrangedSubview(fallback)
+            // Сиблинг Gemini-ветки: кнопка «Обновить» — единственный выход отсюда.
+            card.contentStackView.addArrangedSubview(pdButtonRow())
             return
         }
 
