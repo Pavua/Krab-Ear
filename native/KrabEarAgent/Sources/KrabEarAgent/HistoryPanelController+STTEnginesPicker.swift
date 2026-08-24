@@ -160,9 +160,51 @@ extension HistoryPanelController {
         )
 
         section.contentStackView.addArrangedSubview(card)
+
+        let cdTransportCard = cdBuildGigaamTransportCard()
+        section.contentStackView.addArrangedSubview(cdTransportCard)
+
         fetchAndRebuildSTTEnginesCard(isClaudeDesign: true)
 
         return section
+    }
+
+    /// Статическая карточка пикера транспорта GigaAM (Claude Design) —
+    /// аналог buildGigaamTransportCard(), но на CDSettingsCardView/cdMakeRow.
+    /// Скрыта по умолчанию (см. комментарий у Gemini-варианта) — видимость
+    /// пересчитывается в completion fetchAndRebuildSTTEnginesCard.
+    @MainActor
+    func cdBuildGigaamTransportCard() -> NSView {
+        let card = CDSettingsCardView()
+        card.isHidden = true
+
+        let picker = NSPopUpButton(frame: .zero, pullsDown: false)
+        picker.addItems(withTitles: ["Стабильный (subprocess)", "Быстрый (MLX, экспериментальный)"])
+        picker.target = self
+        picker.action = #selector(onGigaamTransportChanged(_:))
+        objc_setAssociatedObject(
+            self, &STTEnginesAssocKeys.cdGigaamTransportPicker, picker,
+            .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        )
+
+        let row = cdMakeRow(label: "Транспорт распознавания GigaAM", control: picker)
+        card.contentStackView.addArrangedSubview(row)
+
+        let warnLabel = NSTextField(labelWithString: "")
+        warnLabel.font = .systemFont(ofSize: 11, weight: .regular)
+        warnLabel.textColor = KrabEarTheme.Colors.warning
+        warnLabel.isHidden = true
+        objc_setAssociatedObject(
+            self, &STTEnginesAssocKeys.cdGigaamTransportWarnLabel, warnLabel,
+            .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        )
+        card.contentStackView.addArrangedSubview(warnLabel)
+
+        objc_setAssociatedObject(
+            self, &STTEnginesAssocKeys.cdGigaamTransportCard, card,
+            .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        )
+        return card
     }
 
     // MARK: - Загрузка движков с бэкенда
