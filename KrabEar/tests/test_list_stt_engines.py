@@ -365,6 +365,20 @@ class MlxAvailableFieldTestCase(unittest.TestCase):
         engines = {e["name"]: e for e in result["engines"]}
         self.assertTrue(engines["gigaam"]["mlx_available"])
 
+    def test_mlx_available_false_when_find_spec_raises(self):
+        """find_spec может бросить исключение (сломанный .pth/egg-link,
+        кастомный sys.meta_path finder) — метод обязан деградировать
+        мягко, а не уронить ВЕСЬ список движков."""
+        svc = _make_svc()
+        with patch("importlib.util.find_spec", side_effect=RuntimeError("boom")):
+            result = svc.handle_list_stt_engines({})
+
+        # Метод обязан вернуть ok=True несмотря на исключение
+        self.assertTrue(result.get("ok"))
+        engines = {e["name"]: e for e in result["engines"]}
+        # mlx_available обязана быть False при исключении
+        self.assertFalse(engines["gigaam"]["mlx_available"])
+
 
 class MlxAvailableUsesFindSpecNotImportTestCase(unittest.TestCase):
     """Source-контракт: проверка идёт через importlib.util.find_spec("gigaam_mlx"),

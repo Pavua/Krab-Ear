@@ -402,7 +402,10 @@ class STTManagementService:
                 # импортируется успешно и без библиотеки gigaam_mlx (ленивый
                 # импорт внутри методов адаптера) — импорт был бы
                 # ложноположительной проверкой.
-                entry["mlx_available"] = importlib.util.find_spec("gigaam_mlx") is not None
+                try:
+                    entry["mlx_available"] = importlib.util.find_spec("gigaam_mlx") is not None
+                except Exception:
+                    entry["mlx_available"] = False
             engines.append(entry)
 
         add_breadcrumb(
