@@ -271,6 +271,7 @@ extension HistoryPanelController {
                         card.isHidden = !gigaamEnabled
                     }
                 }
+                self.lastKnownGigaamMlxAvailable = mlxAvailable
                 self.syncGigaamTransportControls(
                     settings: self.settingsProvider(), mlxAvailable: mlxAvailable
                 )

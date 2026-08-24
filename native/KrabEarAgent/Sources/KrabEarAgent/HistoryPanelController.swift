@@ -86,6 +86,12 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     var nextCursor: String?
     var currentQuery: String = ""
     var isSyncingSettings = false
+    /// Последнее известное значение mlx_available из list_stt_engines.
+    /// syncSettingsControls не имеет доступа к свежему ответу IPC — использует
+    /// это кэшированное значение; completion fetchAndRebuildSTTEnginesCard
+    /// (Task 3 Step 5) обновляет его и вызывает syncGigaamTransportControls
+    /// повторно с актуальным значением.
+    var lastKnownGigaamMlxAvailable: Bool = false
     var importQueue: [ImportJob] = []
     var importJobSignatures: Set<String> = []
     var currentImportJob: ImportJob?
