@@ -7,7 +7,6 @@ scored routing decision, select_model, list_voice_commands.
 
 from __future__ import annotations
 
-import importlib.util
 import logging
 import re
 import time as _time
@@ -402,7 +401,17 @@ class STTManagementService:
                 # импортируется успешно и без библиотеки gigaam_mlx (ленивый
                 # импорт внутри методов адаптера) — импорт был бы
                 # ложноположительной проверкой.
+                #
+                # Локальный import (а не модульный) НАМЕРЕННО: чуть выше в этом
+                # же методе (см. "Best-effort availability probe") есть голый
+                # `import importlib` внутри try — Python трактует такое
+                # присваивание как ЛОКАЛЬНОЕ имя для ВСЕЙ функции, поэтому
+                # модульный `import importlib.util` был бы неиспользуемым
+                # (flake8 F401) и полагался бы на порядок исполнения внутри
+                # той же итерации цикла — хрупко при будущем рефакторинге
+                # соседнего блока.
                 try:
+                    import importlib.util
                     entry["mlx_available"] = importlib.util.find_spec("gigaam_mlx") is not None
                 except Exception:
                     entry["mlx_available"] = False
