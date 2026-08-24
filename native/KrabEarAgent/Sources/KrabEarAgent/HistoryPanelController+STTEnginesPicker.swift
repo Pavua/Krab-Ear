@@ -25,6 +25,16 @@ import Foundation
 private enum STTEnginesAssocKeys {
     nonisolated(unsafe) static var enginesCard: UInt8 = 0
     nonisolated(unsafe) static var cdEnginesCard: UInt8 = 0
+
+    // Карточка пикера транспорта GigaAM (Gemini)
+    nonisolated(unsafe) static var gigaamTransportCard: UInt8 = 0
+    nonisolated(unsafe) static var gigaamTransportPicker: UInt8 = 0
+    nonisolated(unsafe) static var gigaamTransportWarnLabel: UInt8 = 0
+
+    // Карточка пикера транспорта GigaAM (Claude Design)
+    nonisolated(unsafe) static var cdGigaamTransportCard: UInt8 = 0
+    nonisolated(unsafe) static var cdGigaamTransportPicker: UInt8 = 0
+    nonisolated(unsafe) static var cdGigaamTransportWarnLabel: UInt8 = 0
 }
 
 // MARK: - Модель строки движка (internal, single-source)
@@ -73,10 +83,51 @@ extension HistoryPanelController {
 
         section.contentStackView.addArrangedSubview(card)
 
+        let transportCard = buildGigaamTransportCard()
+        section.contentStackView.addArrangedSubview(transportCard)
+
         // Запускаем загрузку движков (off-main, AGENT-3).
         fetchAndRebuildSTTEnginesCard(isClaudeDesign: false)
 
         return section
+    }
+
+    /// Статическая карточка пикера транспорта GigaAM: отдельно от асинхронно
+    /// перестраиваемой карточки движков — та расставляет разделители по
+    /// индексу (index < engines.count - 1), вставка строки внутрь её цикла
+    /// сдвинула бы разделители. Видимость (isHidden) и mlxAvailable приходят
+    /// позже, из completion fetchAndRebuildSTTEnginesCard (см. Step 5).
+    @MainActor
+    func buildGigaamTransportCard() -> NSView {
+        let card = ThemeCardView()
+
+        let picker = NSPopUpButton(frame: .zero, pullsDown: false)
+        picker.addItems(withTitles: ["Стабильный (subprocess)", "Быстрый (MLX, экспериментальный)"])
+        picker.target = self
+        picker.action = #selector(onGigaamTransportChanged(_:))
+        objc_setAssociatedObject(
+            self, &STTEnginesAssocKeys.gigaamTransportPicker, picker,
+            .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        )
+
+        let row = makeSettingRow(label: "Транспорт распознавания GigaAM", control: picker)
+        card.contentStackView.addArrangedSubview(row)
+
+        let warnLabel = NSTextField(labelWithString: "")
+        warnLabel.font = KrabEarTheme.Typography.caption
+        warnLabel.textColor = KrabEarTheme.Colors.warning
+        warnLabel.isHidden = true
+        objc_setAssociatedObject(
+            self, &STTEnginesAssocKeys.gigaamTransportWarnLabel, warnLabel,
+            .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        )
+        card.contentStackView.addArrangedSubview(warnLabel)
+
+        objc_setAssociatedObject(
+            self, &STTEnginesAssocKeys.gigaamTransportCard, card,
+            .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        )
+        return card
     }
 
     // MARK: - Claude Design variant: секция для settingsBarCD
@@ -119,6 +170,7 @@ extension HistoryPanelController {
             guard let self else { return }
 
             let engines: [STTEngineRow]
+            var mlxAvailable = false
             do {
                 let resp = try ipc.call(method: "list_stt_engines", params: [:])
                 let result = resp["result"] as? [String: Any]
@@ -135,6 +187,9 @@ extension HistoryPanelController {
                         note: dict["note"] as? String ?? ""
                     )
                 }
+                for dict in rawList where (dict["name"] as? String) == "gigaam" {
+                    mlxAvailable = dict["mlx_available"] as? Bool ?? false
+                }
             } catch {
                 engines = []
             }
@@ -146,6 +201,32 @@ extension HistoryPanelController {
                 } else {
                     self.rebuildGeminiSTTEnginesCard(engines: engines)
                 }
+
+                // C5a(б): видимость карточки транспорта зависит от того,
+                // включён ли GigaAM — тумблер живёт в СОСЕДНЕЙ асинхронно
+                // перестраиваемой карточке, поэтому пересчёт здесь, а не
+                // только при построении секции.
+                // C5a(в): mlxAvailable приходит из ЭТОГО же асинхронного
+                // ответа — доставляется в статическую карточку тем же completion.
+                let gigaamRow = engines.first(where: { $0.name == "gigaam" })
+                let gigaamEnabled = gigaamRow?.enabled ?? false
+
+                if isClaudeDesign {
+                    if let cdCard = objc_getAssociatedObject(
+                        self, &STTEnginesAssocKeys.cdGigaamTransportCard
+                    ) as? NSView {
+                        cdCard.isHidden = !gigaamEnabled
+                    }
+                } else {
+                    if let card = objc_getAssociatedObject(
+                        self, &STTEnginesAssocKeys.gigaamTransportCard
+                    ) as? NSView {
+                        card.isHidden = !gigaamEnabled
+                    }
+                }
+                self.syncGigaamTransportControls(
+                    settings: self.settingsProvider(), mlxAvailable: mlxAvailable
+                )
             }
         }
     }
@@ -359,6 +440,74 @@ extension HistoryPanelController {
             // Перезагружаем список движков для обеих карточек — отражаем новое состояние из бэкенда.
             self.fetchAndRebuildSTTEnginesCard(isClaudeDesign: false)
             self.fetchAndRebuildSTTEnginesCard(isClaudeDesign: true)
+        }
+    }
+
+    // MARK: - Пикер транспорта GigaAM: обработчик + sync-хук
+
+    /// Обрабатывает выбор транспорта GigaAM. isSyncingSettings защищает от
+    /// цикла: syncSettingsControls выставляет этот флаг перед программной
+    /// установкой значения пикера (Step 5) — без гварда программная
+    /// синхронизация вызвала бы этот обработчик и записала настройку обратно.
+    @objc func onGigaamTransportChanged(_ sender: NSPopUpButton) {
+        guard !isSyncingSettings else { return }
+        let transport = sender.indexOfSelectedItem == 1 ? "mlx" : "subprocess"
+        applySettingsPatch(["stt_gigaam_transport": transport])
+    }
+
+    /// Синхронизирует пикер и предупреждающий бейдж с текущими settings.
+    /// ОБЯЗАН вызываться из syncSettingsControls (Task 3.5) — иначе пикер
+    /// не получит начальное значение и не ресинкнется после внешнего
+    /// set_settings/apply_profile_preset (та же декоративная проводка,
+    /// от которой уже страдал repo — MainErrorsWiringTests-класс).
+    ///
+    /// mlxAvailable приходит асинхронно из list_stt_engines (Task 1) — другим
+    /// путём, чем settings; вызывающая сторона (completion
+    /// fetchAndRebuildSTTEnginesCard, Task 3.5) обязана передать актуальное
+    /// значение, иначе бейдж будет неактуален.
+    @MainActor
+    func syncGigaamTransportControls(settings: AgentSettings, mlxAvailable: Bool) {
+        let transport = settings.gigaamTransport
+        let idx = (transport == "mlx") ? 1 : 0
+
+        if let picker = objc_getAssociatedObject(
+            self, &STTEnginesAssocKeys.gigaamTransportPicker
+        ) as? NSPopUpButton {
+            picker.selectItem(at: idx)
+            // 🔴 БЕЗ ЭТОЙ СТРОКИ item.isEnabled НИЖЕ НЕ СРАБОТАЕТ: NSMenu
+            // авто-валидирует пункты перед показом (autoenablesItems=true по
+            // умолчанию) и перезаписывает ручное disabled-состояние —
+            // прецедент main+CallObserver.swift:56, находка MED-2.
+            picker.menu?.autoenablesItems = false
+            if let mlxItem = picker.item(at: 1) {
+                mlxItem.isEnabled = mlxAvailable
+                mlxItem.toolTip = mlxAvailable ? nil : "Требуется библиотека gigaam_mlx"
+            }
+        }
+        if let cdPicker = objc_getAssociatedObject(
+            self, &STTEnginesAssocKeys.cdGigaamTransportPicker
+        ) as? NSPopUpButton {
+            cdPicker.selectItem(at: idx)
+            cdPicker.menu?.autoenablesItems = false
+            if let mlxItem = cdPicker.item(at: 1) {
+                mlxItem.isEnabled = mlxAvailable
+                mlxItem.toolTip = mlxAvailable ? nil : "Требуется библиотека gigaam_mlx"
+            }
+        }
+
+        let showWarning = (transport == "mlx") && !mlxAvailable
+        let warnText = "MLX выбран, но библиотека не найдена — GigaAM отключён"
+        if let warnLabel = objc_getAssociatedObject(
+            self, &STTEnginesAssocKeys.gigaamTransportWarnLabel
+        ) as? NSTextField {
+            warnLabel.stringValue = warnText
+            warnLabel.isHidden = !showWarning
+        }
+        if let cdWarnLabel = objc_getAssociatedObject(
+            self, &STTEnginesAssocKeys.cdGigaamTransportWarnLabel
+        ) as? NSTextField {
+            cdWarnLabel.stringValue = warnText
+            cdWarnLabel.isHidden = !showWarning
         }
     }
 
