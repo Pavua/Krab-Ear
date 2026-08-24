@@ -218,6 +218,7 @@ extension HistoryPanelController {
 
             let engines: [STTEngineRow]
             var mlxAvailable = false
+            var fetchSucceeded = false
             do {
                 let resp = try ipc.call(method: "list_stt_engines", params: [:])
                 let result = resp["result"] as? [String: Any]
@@ -237,6 +238,7 @@ extension HistoryPanelController {
                 for dict in rawList where (dict["name"] as? String) == "gigaam" {
                     mlxAvailable = dict["mlx_available"] as? Bool ?? false
                 }
+                fetchSucceeded = true
             } catch {
                 engines = []
             }
@@ -271,9 +273,17 @@ extension HistoryPanelController {
                         card.isHidden = !gigaamEnabled
                     }
                 }
-                self.lastKnownGigaamMlxAvailable = mlxAvailable
+                // Неудачное наблюдение не должно перезаписывать последнее
+                // известное хорошее значение — иначе временный сбой ОДНОГО
+                // IPC-запроса на секунду показал бы ложную тревогу «MLX не
+                // найден», хотя библиотека установлена и просто backend не
+                // успел ответить. Самоисцеляется следующим успешным refetch.
+                if fetchSucceeded {
+                    self.lastKnownGigaamMlxAvailable = mlxAvailable
+                }
                 self.syncGigaamTransportControls(
-                    settings: self.settingsProvider(), mlxAvailable: mlxAvailable
+                    settings: self.settingsProvider(),
+                    mlxAvailable: self.lastKnownGigaamMlxAvailable
                 )
             }
         }
