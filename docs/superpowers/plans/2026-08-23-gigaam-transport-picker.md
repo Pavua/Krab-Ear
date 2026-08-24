@@ -29,7 +29,7 @@
 | Файл | Ответственность | Действие |
 |---|---|---|
 | `KrabEar/backend/stt_management_service.py` | добавляет `mlx_available` к записи `gigaam` в `handle_list_stt_engines` | modify |
-| `KrabEar/tests/test_stt_management_service.py` (или ближайший существующий тестовый файл на `list_stt_engines`) | тесты на новое поле | modify/create |
+| `KrabEar/tests/test_list_stt_engines.py` | тесты на новое поле, дописаны в конец существующего файла | modify |
 | `native/KrabEarAgent/Sources/KrabEarAgent/Models.swift` | поле `gigaamTransport` в `AgentSettings`, 6 точек | modify |
 | `native/KrabEarAgent/Sources/KrabEarAgent/HistoryPanelController+STTEnginesPicker.swift` | карточка пикера, оба варианта, обработчик, sync-хук | modify |
 | `native/KrabEarAgent/Sources/KrabEarAgent/HistoryPanelController+Settings.swift` | вызов sync-хука из `syncSettingsControls` | modify |
@@ -41,63 +41,47 @@
 
 **Files:**
 - Modify: `KrabEar/backend/stt_management_service.py:10-16` (импорты), `:329-336` (GigaAM meta), `:366-393` (сборка словаря)
-- Test: найти существующий тестовый файл командой ниже; если отсутствует — создать `KrabEar/tests/test_stt_management_service_mlx_available.py`
+- Test: `KrabEar/tests/test_list_stt_engines.py` (существующий файл, дописываем в конец)
 
 **Interfaces:**
 - Consumes: ничего (первая задача).
 - Produces: ключ `"mlx_available": bool` в элементе `result["engines"]`, где `"name" == "gigaam"`. Отсутствует у остальных движков. Task 5 (Swift) полагается на это имя ключа буква-в-букву.
 
-- [ ] **Step 0: Найти существующий тестовый файл**
+- [ ] **Step 0: Существующий тестовый файл найден заранее**
 
-```bash
-cd "$(git rev-parse --show-toplevel)" && grep -rl "list_stt_engines" KrabEar/tests/*.py
-```
-
-Если найден файл (например `test_list_stt_engines.py` или похожий) — дописывать тесты Step 1 туда, в конец класса теста этого метода. Если не найден — создать `KrabEar/tests/test_stt_management_service_mlx_available.py` с телом из Step 1 целиком (включая шапку с импортами).
+`KrabEar/tests/test_list_stt_engines.py` уже существует и содержит `_FakeSettingsService`
+и хелпер `_make_svc(settings: dict | None = None) -> STTManagementService` (строки 28-44).
+Дописывать тесты Step 1 в конец этого файла, используя `_make_svc` — не изобретать
+свой fake.
 
 - [ ] **Step 1: Написать падающий тест**
 
-Шапка (нужна только если создаётся новый файл; если дописывается в существующий — взять только тела тестов и адаптировать `import`/`setUp` под существующий класс):
+Дописать в конец `KrabEar/tests/test_list_stt_engines.py` (после последнего класса,
+перед `if __name__ == "__main__":`, если он есть — иначе в самый конец файла):
 
 ```python
-"""mlx_available в list_stt_engines (2026-08-23).
-
-GigaAM v3 умеет транспорт "mlx" (core/pipeline/stt_gigaam_mlx.py), но UI не может
-сам узнать, установлена ли библиотека gigaam_mlx. handle_list_stt_engines отдаёт
-это одним полем, специфичным ТОЛЬКО для записи gigaam.
-
-Критично: проверка ОБЯЗАНА идти через importlib.util.find_spec, а не импортом
-core.pipeline.stt_gigaam_mlx — тот импорт успешен и без библиотеки (gigaam_mlx
-импортируется лениво внутри методов адаптера), проверка через импорт была бы
-ложноположительной.
-"""
-from __future__ import annotations
-
 import ast
-import sys
-import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.stt_management_service import STTManagementService  # noqa: E402
-
 
 class MlxAvailableFieldTestCase(unittest.TestCase):
-    def setUp(self):
-        self._settings = {}
-        settings_svc = type("FakeSettingsSvc", (), {
-            "cached_settings": lambda self_: dict(self._settings_ref),
-        })()
-        settings_svc._settings_ref = self._settings
-        self.svc = STTManagementService(settings_svc=settings_svc)
+    """mlx_available в list_stt_engines (2026-08-23).
+
+    GigaAM v3 умеет транспорт "mlx" (core/pipeline/stt_gigaam_mlx.py), но UI не
+    может сам узнать, установлена ли библиотека gigaam_mlx. handle_list_stt_engines
+    отдаёт это одним полем, специфичным ТОЛЬКО для записи gigaam.
+
+    Критично: проверка ОБЯЗАНА идти через importlib.util.find_spec, а не импортом
+    core.pipeline.stt_gigaam_mlx — тот импорт успешен и без библиотеки (gigaam_mlx
+    импортируется лениво внутри методов адаптера), проверка через импорт была бы
+    ложноположительной.
+    """
 
     def test_mlx_available_present_only_on_gigaam(self):
+        svc = _make_svc()
         with patch("importlib.util.find_spec", return_value=None):
-            result = self.svc.handle_list_stt_engines({})
+            result = svc.handle_list_stt_engines({})
 
         engines = {e["name"]: e for e in result["engines"]}
         self.assertIn("mlx_available", engines["gigaam"])
@@ -106,8 +90,9 @@ class MlxAvailableFieldTestCase(unittest.TestCase):
                 self.assertNotIn("mlx_available", engine)
 
     def test_mlx_available_false_when_spec_missing(self):
+        svc = _make_svc()
         with patch("importlib.util.find_spec", return_value=None) as mock_find:
-            result = self.svc.handle_list_stt_engines({})
+            result = svc.handle_list_stt_engines({})
 
         engines = {e["name"]: e for e in result["engines"]}
         self.assertFalse(engines["gigaam"]["mlx_available"])
@@ -115,9 +100,10 @@ class MlxAvailableFieldTestCase(unittest.TestCase):
         mock_find.assert_any_call("gigaam_mlx")
 
     def test_mlx_available_true_when_spec_present(self):
+        svc = _make_svc()
         fake_spec = object()
         with patch("importlib.util.find_spec", return_value=fake_spec):
-            result = self.svc.handle_list_stt_engines({})
+            result = svc.handle_list_stt_engines({})
 
         engines = {e["name"]: e for e in result["engines"]}
         self.assertTrue(engines["gigaam"]["mlx_available"])
@@ -129,7 +115,7 @@ class MlxAvailableUsesFindSpecNotImportTestCase(unittest.TestCase):
     Матчим AST, не подстроку — правило CLAUDE.md для source-inspection тестов."""
 
     def test_ast_calls_find_spec_with_gigaam_mlx_literal(self):
-        source = (PROJECT_ROOT / "backend" / "stt_management_service.py").read_text(
+        source = Path(KRAB_EAR_ROOT, "backend", "stt_management_service.py").read_text(
             encoding="utf-8"
         )
         tree = ast.parse(source)
@@ -152,17 +138,15 @@ class MlxAvailableUsesFindSpecNotImportTestCase(unittest.TestCase):
             "handle_list_stt_engines обязан вызывать "
             "importlib.util.find_spec('gigaam_mlx'), а не импортировать адаптер",
         )
-
-
-if __name__ == "__main__":
-    unittest.main()
 ```
+
+🔴 `PROJECT_ROOT`/`KRAB_EAR_ROOT`/`unittest`/`sys`/`os` уже импортированы в шапке файла — не дублировать.
 
 - [ ] **Step 2: Прогнать тест и убедиться, что он падает**
 
 Run:
 ```bash
-cd "$(git rev-parse --show-toplevel)" && PYTHONPATH=$(pwd)/KrabEar python3 -m pytest KrabEar/tests/test_stt_management_service_mlx_available.py -v
+cd "$(git rev-parse --show-toplevel)" && PYTHONPATH=$(pwd)/KrabEar python3 -m pytest KrabEar/tests/test_list_stt_engines.py -v
 ```
 
 Expected: **4 failed** — `KeyError: 'mlx_available'` в первых трёх, `AssertionError` в четвёртом (ключа ещё нет в исходнике).
@@ -215,7 +199,7 @@ import importlib.util
 
 Run:
 ```bash
-cd "$(git rev-parse --show-toplevel)" && PYTHONPATH=$(pwd)/KrabEar python3 -m pytest KrabEar/tests/test_stt_management_service_mlx_available.py -v
+cd "$(git rev-parse --show-toplevel)" && PYTHONPATH=$(pwd)/KrabEar python3 -m pytest KrabEar/tests/test_list_stt_engines.py -v
 ```
 
 Expected: **4 passed**.
@@ -243,7 +227,7 @@ Expected: все PASS — старое поведение (движки без `
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-git add KrabEar/backend/stt_management_service.py KrabEar/tests/test_stt_management_service_mlx_available.py
+git add KrabEar/backend/stt_management_service.py KrabEar/tests/test_list_stt_engines.py
 git commit -m "$(cat <<'EOF'
 feat(stt): mlx_available в list_stt_engines для записи gigaam
 
@@ -921,9 +905,9 @@ EOF
 
 Run:
 ```bash
-cd "$(git rev-parse --show-toplevel)" && PYTHONPATH=$(pwd)/KrabEar python3 -m pytest KrabEar/tests/test_stt_management_service_mlx_available.py -k "list_stt_engines or mlx_available" -v
-python3 -m flake8 KrabEar/backend/stt_management_service.py KrabEar/tests/test_stt_management_service_mlx_available.py
-scripts/pre_merge_py312_check.sh KrabEar/tests/test_stt_management_service_mlx_available.py
+cd "$(git rev-parse --show-toplevel)" && PYTHONPATH=$(pwd)/KrabEar python3 -m pytest KrabEar/tests/test_list_stt_engines.py -k "list_stt_engines or mlx_available" -v
+python3 -m flake8 KrabEar/backend/stt_management_service.py KrabEar/tests/test_list_stt_engines.py
+scripts/pre_merge_py312_check.sh KrabEar/tests/test_list_stt_engines.py
 make audit-all
 ```
 
