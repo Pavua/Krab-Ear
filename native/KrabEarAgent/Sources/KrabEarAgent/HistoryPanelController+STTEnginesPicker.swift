@@ -100,6 +100,11 @@ extension HistoryPanelController {
     @MainActor
     func buildGigaamTransportCard() -> NSView {
         let card = ThemeCardView()
+        // Скрыта по умолчанию — до completion fetchAndRebuildSTTEnginesCard,
+        // где пересчитывается по факту stt_gigaam_enabled. Без этого карточка
+        // на долю секунды видна при построении секции, пока не пришёл ответ
+        // IPC list_stt_engines (GigaAM выключен по умолчанию).
+        card.isHidden = true
 
         let picker = NSPopUpButton(frame: .zero, pullsDown: false)
         picker.addItems(withTitles: ["Стабильный (subprocess)", "Быстрый (MLX, экспериментальный)"])
