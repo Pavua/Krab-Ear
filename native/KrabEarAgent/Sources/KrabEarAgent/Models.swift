@@ -141,6 +141,8 @@ struct AgentSettings {
     var cloudRewriterOpenaiModel: String
     var cloudRewriterAnthropicModel: String
     var cloudRewriterApiKey: String
+    // GigaAM transport (subprocess = PyTorch-воркер / mlx = in-process MLX)
+    var gigaamTransport: String
 
     static let `default` = AgentSettings(
         mode: "headless",
@@ -216,7 +218,8 @@ struct AgentSettings {
         cloudRewriterCustomModel: "qwen2.5:7b",
         cloudRewriterOpenaiModel: "gpt-4o-mini",
         cloudRewriterAnthropicModel: "claude-haiku-4-5-20251001",
-        cloudRewriterApiKey: ""
+        cloudRewriterApiKey: "",
+        gigaamTransport: "subprocess"
     )
 
     init(from payload: [String: Any]) {
@@ -315,6 +318,7 @@ struct AgentSettings {
         self.cloudRewriterOpenaiModel = (payload["cloud_rewriter_openai_model"] as? String) ?? Self.default.cloudRewriterOpenaiModel
         self.cloudRewriterAnthropicModel = (payload["cloud_rewriter_anthropic_model"] as? String) ?? Self.default.cloudRewriterAnthropicModel
         self.cloudRewriterApiKey = (payload["cloud_rewriter_api_key"] as? String) ?? Self.default.cloudRewriterApiKey
+        self.gigaamTransport = (payload["stt_gigaam_transport"] as? String) ?? Self.default.gigaamTransport
     }
 
     init(
@@ -388,7 +392,8 @@ struct AgentSettings {
         cloudRewriterCustomModel: String = "qwen2.5:7b",
         cloudRewriterOpenaiModel: String = "gpt-4o-mini",
         cloudRewriterAnthropicModel: String = "claude-haiku-4-5-20251001",
-        cloudRewriterApiKey: String = ""
+        cloudRewriterApiKey: String = "",
+        gigaamTransport: String = "subprocess"
     ) {
         self.mode = mode
         self.showDockIcon = showDockIcon
@@ -461,6 +466,7 @@ struct AgentSettings {
         self.cloudRewriterOpenaiModel = cloudRewriterOpenaiModel
         self.cloudRewriterAnthropicModel = cloudRewriterAnthropicModel
         self.cloudRewriterApiKey = cloudRewriterApiKey
+        self.gigaamTransport = gigaamTransport
     }
 
     func toPayload() -> [String: Any] {
@@ -536,6 +542,7 @@ struct AgentSettings {
             "cloud_rewriter_openai_model": cloudRewriterOpenaiModel,
             "cloud_rewriter_anthropic_model": cloudRewriterAnthropicModel,
             "cloud_rewriter_api_key": cloudRewriterApiKey,
+            "stt_gigaam_transport": gigaamTransport,
         ]
     }
 }
