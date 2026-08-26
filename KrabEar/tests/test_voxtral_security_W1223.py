@@ -224,10 +224,19 @@ class TestVoxtralAdapterBranchUsesTranscribeTimeout(unittest.TestCase):
         # с floor'ом ADAPTER_MIN_BUDGET_SEC (внешний таймаут не смеет быть короче
         # внутренних таймаутов GigaAM-subprocess). Проверяем floor, а не старую
         # константу — settings.TRANSCRIBE_TIMEOUT_SEC в этой ветке больше не читается.
-        self.assertGreaterEqual(
+        # Fix-раунд 1: значение детерминировано и точно, а не просто "не меньше
+        # floor'а" — в этом тесте нет открытого budget-scope (remaining_sec()
+        # is None), поэтому дедлайн запроса не режет floor сверху: 90 (overhead) +
+        # 3600×3 (interactive factor на unknown-duration → cap) даёт ровно потолок
+        # interactive-профиля 1800.0, что и остаётся итоговым таймаутом adapter'а.
+        self.assertEqual(
             calls_with_timeout[0],
-            stt_budget.ADAPTER_MIN_BUDGET_SEC,
-            msg="Timeout passed to future.result() must respect ADAPTER_MIN_BUDGET_SEC floor (§4.8)",
+            1800.0,
+            msg=(
+                "Без открытого budget-scope adapter-таймаут обязан быть ровно "
+                "потолком interactive-профиля (1800.0), floor ADAPTER_MIN_BUDGET_SEC "
+                "здесь ничего не поднимает — он уже ниже потолка (§4.8)"
+            ),
         )
 
     @patch("core.engine.settings")

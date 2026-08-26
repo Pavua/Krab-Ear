@@ -2569,10 +2569,21 @@ class AudioEngine:
                     # быть короче внутренних таймаутов GigaAM-subprocess
                     # (120s shortform / 180s load), иначе брошенный
                     # subprocess осиротеет с моделью на GPU.
+                    # 🔴 Fix-раунд 1, находка 1: дедлайн ЗАПРОСА главнее floor'а —
+                    # floor поднимает бюджет (оптимизация ВНУТРИ дедлайна), но
+                    # остаток дедлайна режет сверху, когда дедлайн задан. Иначе
+                    # floor 200с переживает 30-секундный остаток на 170с.
+                    # Осиротевший subprocess не бессмертен: у него есть свой
+                    # внутренний таймаут (120/180с), цена его смерти ограничена —
+                    # в отличие от переживания дедлайна запроса.
                     _adapter_timeout = max(
                         stt_budget.resolve_attempt_timeout_sec(_chain_duration_sec),
                         stt_budget.ADAPTER_MIN_BUDGET_SEC,
                     )
+                    _adapter_remaining_sec = stt_budget.remaining_sec()
+                    if _adapter_remaining_sec is not None:
+                        _adapter_timeout = min(_adapter_timeout, _adapter_remaining_sec)
+                    _adapter_timeout = max(_adapter_timeout, stt_budget.MIN_USEFUL_ATTEMPT_SEC)
                     with _profiler.start_span(span_name):
                         _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
                         try:

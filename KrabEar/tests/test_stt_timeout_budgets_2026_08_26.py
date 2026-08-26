@@ -391,5 +391,174 @@ class MultipassBudgetBehaviorTests(unittest.TestCase):
         self.assertEqual(eng._unavailable_models, {})
 
 
+def _bare_voxtral_engine():
+    """Минимальный AudioEngine для adapter-ветки Voxtral (fix-раунд 1)."""
+    from core.engine import AudioEngine
+
+    engine = AudioEngine.__new__(AudioEngine)
+    engine.quality_profile = "balanced"
+    engine.current_model = "mlx-community/whisper-large-v3-turbo"
+    # Балансная whisper-модель заблокирована заранее — chain идёт прямо
+    # к единственному включённому адаптеру (Voxtral), без лишних веток.
+    engine._unavailable_models = {
+        "mlx-community/whisper-large-v3-turbo": time.monotonic()
+    }
+    engine._router = None
+    engine._voxtral_model = None
+    engine._voxtral_load_error = None
+    engine._sensevoice_model = None
+    engine._sensevoice_load_error = None
+    engine._whisperx_model = None
+    engine._whisperx_load_error = None
+    engine._parakeet_model = None
+    engine._parakeet_load_error = None
+    return engine
+
+
+def _apply_voxtral_only_settings(mock_settings):
+    """Явно гасит все прочие адаптеры — только Voxtral в chain (детерминизм)."""
+    mock_settings.STT_USE_RU_FINETUNE = False
+    mock_settings.STT_GIGAAM_ENABLED = False
+    mock_settings.PARAKEET_ENABLED = False
+    mock_settings.SENSEVOICE_ENABLED = False
+    mock_settings.WHISPERX_ENABLED = False
+    mock_settings.VOXTRAL_ENABLED = True
+    mock_settings.VOXTRAL_MODEL = "mistralai/Voxtral-Mini-3B-2507"
+    mock_settings.MODEL_BALANCED = "mlx-community/whisper-large-v3-turbo"
+    mock_settings.TRANSCRIBE_LANGUAGE = "ru"
+    mock_settings.NETWORK_MODE = "offline_strict"
+    mock_settings.model_max_list = ["mlx-community/whisper-large-v3-turbo"]
+
+
+def _run_voxtral_adapter_branch(engine, side_effect):
+    """Прогоняет adapter-ветку Voxtral через фейковый executor.
+
+    Возвращает список таймаутов, переданных в `future.result(timeout=...)`
+    (обычно ровно один — единственный включённый адаптер).
+    """
+    from unittest.mock import MagicMock, patch
+
+    calls_with_timeout: list[float] = []
+
+    class FakeFuture:
+        def __init__(self, fn):
+            self._fn = fn
+
+        def result(self, timeout=None):
+            if timeout is not None:
+                calls_with_timeout.append(timeout)
+            return self._fn()
+
+        def cancel(self):
+            pass
+
+    class FakeExecutor:
+        def __init__(self, *a, **kw):
+            pass
+
+        def submit(self, fn, *a, **kw):
+            return FakeFuture(fn)
+
+        def shutdown(self, wait=True, **kw):
+            pass
+
+    with patch("core.engine.settings") as mock_settings, \
+            patch("core.engine._profiler") as mock_profiler, \
+            patch("concurrent.futures.ThreadPoolExecutor", FakeExecutor), \
+            patch.object(engine, "_transcribe_voxtral", side_effect=side_effect):
+        _apply_voxtral_only_settings(mock_settings)
+        mock_profiler.start_span.return_value.__enter__ = lambda s: s
+        mock_profiler.start_span.return_value.__exit__ = MagicMock(return_value=False)
+        try:
+            engine._transcribe_with_fallback_impl(b"audio", "prompt", "ru")
+        except Exception:
+            pass  # каскад исчерпан после единственного кандидата — ожидаемо
+    return calls_with_timeout
+
+
+class AdapterFloorVsDeadlineTests(unittest.TestCase):
+    """Fix-раунд 1, находка 1 (§4.8): дедлайн запроса главнее floor'а адаптера.
+
+    До фикса `_adapter_timeout = max(resolve_attempt_timeout_sec(...),
+    ADAPTER_MIN_BUDGET_SEC)` безусловно поднимал таймаут до 200с даже когда
+    остаток дедлайна запроса — 30с: адаптер пережил бы дедлайн на 170с.
+    floor — оптимизация ВНУТРИ дедлайна (защита от осиротевшего GigaAM-
+    subprocess), а не отмена дедлайна.
+    """
+
+    @staticmethod
+    def _ok_result(*_a, **_kw):
+        return {
+            "text": "ok", "engine": "voxtral", "language": "ru",
+            "segments": [], "reasoning": None,
+        }
+
+    def test_short_remaining_deadline_clips_adapter_floor(self):
+        engine = _bare_voxtral_engine()
+        with stt_budget.stt_budget_scope(stt_budget.INTERACTIVE, deadline_sec=30.0):
+            calls = _run_voxtral_adapter_branch(engine, side_effect=self._ok_result)
+        self.assertTrue(calls, "adapter-ветка не дошла до future.result(timeout=...)")
+        self.assertLessEqual(
+            calls[0], 30.0,
+            "остаток дедлайна запроса (30с) обязан победить floor "
+            "ADAPTER_MIN_BUDGET_SEC (200с) — §4.8",
+        )
+        self.assertGreaterEqual(calls[0], stt_budget.MIN_USEFUL_ATTEMPT_SEC)
+
+    def test_no_deadline_still_applies_adapter_floor(self):
+        # Сиблинг: без дедлайна floor всё ещё поднимает бюджет — не регрессия §4.8.
+        engine = _bare_voxtral_engine()
+        calls = _run_voxtral_adapter_branch(engine, side_effect=self._ok_result)
+        self.assertTrue(calls)
+        self.assertGreaterEqual(calls[0], stt_budget.ADAPTER_MIN_BUDGET_SEC)
+
+
+class BlacklistGateLiveAttemptTests(unittest.TestCase):
+    """Fix-раунд 1, находка 2 (§4.7): регрессия на РЕАЛЬНЫЙ сценарий гейта.
+
+    Мутация `_blacklist_allowed_for -> return True` не красит ни один из 31
+    существующего теста волны — все они проверяют вырожденный случай, когда
+    попытка вообще не стартовала (нет открытого budget-scope, remaining_sec()
+    сразу None). Здесь попытка СТАРТУЕТ под живым бюджетом, а дедлайн
+    истекает ВО ВРЕМЯ самого вызова адаптера — именно так это происходит в
+    проде (GPU stall длится дольше, чем остаётся времени на попытку).
+    """
+
+    @staticmethod
+    def _slow_timeout(*_a, **_kw):
+        # Бюджет запроса тратится внутри вызова адаптера, не до него.
+        time.sleep(1.5)
+        raise concurrent.futures.TimeoutError()
+
+    @staticmethod
+    def _slow_crash(*_a, **_kw):
+        time.sleep(1.5)
+        raise RuntimeError("gigaam-подобный крах адаптера")
+
+    def test_timeout_during_live_attempt_with_near_exhausted_deadline_is_not_blacklisted(self):
+        engine = _bare_voxtral_engine()
+        with stt_budget.stt_budget_scope(stt_budget.INTERACTIVE, deadline_sec=6.0):
+            _run_voxtral_adapter_branch(engine, side_effect=self._slow_timeout)
+        self.assertNotIn(
+            engine._VOXTRAL_MARKER, engine._unavailable_models,
+            "TimeoutError с бюджетом ЗАПРОСА, исчерпанным во время попытки, "
+            "не смеет блэклистить модель (§4.7) — иначе следующая диктовка "
+            "через 10с уйдёт сразу в Remote STT на здоровом стеке",
+        )
+
+    def test_runtime_error_during_same_near_exhausted_deadline_is_blacklisted(self):
+        # Сиблинг: тот же почти исчерпанный бюджет, но исключение — НЕ
+        # таймаут. Доказывает, что гейт различает случаи, а не запрещает
+        # блэклист вообще при любом истёкшем бюджете.
+        engine = _bare_voxtral_engine()
+        with stt_budget.stt_budget_scope(stt_budget.INTERACTIVE, deadline_sec=6.0):
+            _run_voxtral_adapter_branch(engine, side_effect=self._slow_crash)
+        self.assertIn(
+            engine._VOXTRAL_MARKER, engine._unavailable_models,
+            "не-таймаут исключение обязано блэклистить модель независимо "
+            "от состояния бюджета запроса",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
