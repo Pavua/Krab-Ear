@@ -269,13 +269,21 @@ extension HistoryPanelController {
 
         llmModelSelector.removeAllItems()
 
-        // 1. Recommended at top
-        llmModelSelector.addItems(withTitles: HistoryPanelController.recommendedRewriterModels)
+        // 1. Recommended at top — но только те, что РЕАЛЬНО есть в LM Studio.
+        // 🔴 Список рекомендованных статичен и отражает прошлые bench-сессии:
+        // модели переименовываются и удаляются с диска, а dropdown продолжал
+        // предлагать несуществующие — выбор такой строки давал молчаливый отказ
+        // рерайта. Fail-open: если каталог не получен (LM Studio выключен),
+        // фильтровать нечем — показываем рекомендованные как есть, иначе
+        // список опустеет целиком.
+        let available = Set(lmStudioModels)
+        let recommended = available.isEmpty
+            ? HistoryPanelController.recommendedRewriterModels
+            : HistoryPanelController.recommendedRewriterModels.filter { available.contains($0) }
+        llmModelSelector.addItems(withTitles: recommended)
 
         // 2. Extras from LM Studio not already in recommended list
-        let extras = lmStudioModels.filter {
-            !HistoryPanelController.recommendedRewriterModels.contains($0)
-        }
+        let extras = lmStudioModels.filter { !recommended.contains($0) }
         if !extras.isEmpty {
             let separator = NSMenuItem.separator()
             llmModelSelector.menu?.addItem(separator)
@@ -285,6 +293,9 @@ extension HistoryPanelController {
         // 3. Ensure currentModel is always selectable (e.g. user-typed custom value)
         let allTitles = llmModelSelector.itemTitles
         if !currentModel.isEmpty && !allTitles.contains(currentModel) {
+            // Текущая модель обязана оставаться выбираемой, даже если её нет
+            // ни в рекомендованных, ни в каталоге (пользователь ввёл вручную
+            // или LM Studio сейчас недоступен).
             if extras.isEmpty {
                 // No extras section yet — add separator before custom model
                 let separator = NSMenuItem.separator()

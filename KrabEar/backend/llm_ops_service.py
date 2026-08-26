@@ -44,8 +44,23 @@ class LLMOpsService:
     # IPC handlers
     # ------------------------------------------------------------------
 
+    # Порядок опроса каталога LM Studio. 🔴 Замер 2026-08-26 (v0.4.21, 105
+    # моделей на диске, ни одной загруженной):
+    #   /api/v0/models → 200, 105 (нативный каталог: type/state/quantization)
+    #   /v1/models     → 200, 105 (OpenAI-compat, только id)
+    #   /api/v1/models → 200,   0 ← сюда бил backend после W68 (PR #415)
+    # Последний отвечает 200 с пустым телом, поэтому функция молчала месяцами:
+    # ошибки нет, данных нет, GUI показывал захардкоженный список.
+    _CATALOG_ENDPOINTS = ("/api/v0/models", "/v1/models")
+
+    # Эмбеддинг-модели не умеют chat/completions — в списке рерайта им не место.
+    # 🔴 vlm НЕ исключаем: мультимодальные модели отлично переписывают текст, и
+    # ровно такой тип у gemma-4-26b-a4b-it@4bit — фильтр "только llm" выкинул бы
+    # запрошенную владельцем модель.
+    _EXCLUDED_MODEL_TYPES = frozenset({"embeddings"})
+
     def handle_list_llm_models(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает список моделей доступных в LM Studio через /api/v1/models.
+        """Возвращает каталог моделей, ДОСТУПНЫХ в LM Studio (не только загруженных).
 
         Используется GUI для динамического заполнения dropdown'а выбора LLM-модели.
         При недоступности LM Studio возвращает пустой список с описанием ошибки.
@@ -64,35 +79,87 @@ class LLMOpsService:
             # в LM Studio. /api/v1/models — корректный endpoint. Same pattern as PR #396
             # для llm_rewriter.py:1064 (passive_health_check).
             _host = re.sub(r"/v\d+$", "", base_url)
-            _url = f"{_host}/api/v1/models"
-            # Wave 1741: SSRF guard — reject file://, gopher://, etc.
-            _validate_llm_url(_url)
-            resp = _requests.get(
-                _url,
-                headers=headers,
-                timeout=3,
-                allow_redirects=False,  # Wave 1741: no redirect-based SSRF
-            )
-            if resp.status_code != 200:
-                return {"models": [], "error": f"http_{resp.status_code}"}
-            data = resp.json()
-            ids = [
-                item.get("id")
-                for item in data.get("data", [])
-                if item.get("id")
-            ]
             recommended_models = [
                 "gemma-4-e4b-it-mlx",
                 "huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx",
                 "qwen3-8b-abliterated",
             ]
+
+            last_error: str | None = None
+            for endpoint in self._CATALOG_ENDPOINTS:
+                _url = f"{_host}{endpoint}"
+                # Wave 1741: SSRF guard — reject file://, gopher://, etc.
+                _validate_llm_url(_url)
+                try:
+                    resp = _requests.get(
+                        _url,
+                        headers=headers,
+                        timeout=3,
+                        allow_redirects=False,  # Wave 1741: no redirect-based SSRF
+                    )
+                except Exception as exc:      # сеть/таймаут — пробуем следующий
+                    last_error = str(exc)
+                    continue
+                if resp.status_code != 200:
+                    last_error = f"http_{resp.status_code}"
+                    continue
+                try:
+                    data = resp.json() or {}
+                except Exception as exc:
+                    last_error = f"bad_json: {exc}"
+                    continue
+
+                details = self._parse_catalog(data)
+                if not details:
+                    # 200 + пустой каталог — НЕ успех: именно так выглядел
+                    # сломанный endpoint. Пробуем следующий источник и, если
+                    # все пусты, отвечаем ошибкой, а не молчаливым «моделей нет».
+                    last_error = f"empty_catalog:{endpoint}"
+                    continue
+
+                return {
+                    "models": sorted(d["id"] for d in details),
+                    "model_details": details,
+                    "recommended_models": recommended_models,
+                    "error": None,
+                }
+
             return {
-                "models": sorted(ids),
+                "models": [],
+                "model_details": [],
                 "recommended_models": recommended_models,
-                "error": None,
+                "error": last_error or "no_catalog_endpoint",
             }
         except Exception as exc:
-            return {"models": [], "recommended_models": [], "error": str(exc)}
+            return {"models": [], "model_details": [], "recommended_models": [], "error": str(exc)}
+
+    @classmethod
+    def _parse_catalog(cls, data: dict[str, Any]) -> list[dict[str, Any]]:
+        """Нормализует ответ каталога в список моделей с метаданными.
+
+        Формат ``/api/v0/models`` богаче (type/state/quantization/arch), у
+        OpenAI-совместимого ``/v1/models`` есть только ``id`` — тогда поля
+        остаются пустыми, а ``loaded`` неизвестен (False).
+        """
+        out: list[dict[str, Any]] = []
+        for item in data.get("data", []) or []:
+            if not isinstance(item, dict):
+                continue
+            model_id = item.get("id")
+            if not model_id:
+                continue
+            model_type = str(item.get("type") or "").lower()
+            if model_type in cls._EXCLUDED_MODEL_TYPES:
+                continue
+            out.append({
+                "id": model_id,
+                "type": model_type or None,
+                "loaded": str(item.get("state") or "") == "loaded",
+                "arch": item.get("arch"),
+                "quantization": item.get("quantization"),
+                "max_context_length": item.get("max_context_length"),
+            })
+        return out
 
     def handle_get_last_llm_diff(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает последний word-level diff от LLM rewriter'а.
