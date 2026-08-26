@@ -778,11 +778,15 @@ ERROR_REGISTRY: dict[str, _Entry] = {
     # (или так и не начал) отдавать кадры. Раньше это выглядело как вечное
     # зависание stop_recording, теперь запись честно завершается с этим кодом.
     "audio.capture_starved": {
-        "severity": "error",
-        "component": "audio",
         "user_msg_ru": "Микрофон перестал передавать звук — запись остановлена, проверьте устройство ввода",
-        "action_label": None,
+        "actionable": False,
         "action_id": None,
+        "action_label": "",
+        "severity": "error",
+        # Класс повторяется сериями (устройство отвалилось / стрим родился
+        # мёртвым и поллер ретраит), поэтому окно дедупа как у соседа по
+        # семейству audio.max_duration_reached.
+        "dedupe_seconds": 60,
     },
     "audio.max_duration_reached": {
         "user_msg_ru": "Запись остановлена: достигнут лимит длительности",
