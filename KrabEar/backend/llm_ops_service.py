@@ -131,7 +131,18 @@ class LLMOpsService:
                 "error": last_error or "no_catalog_endpoint",
             }
         except Exception as exc:
-            return {"models": [], "model_details": [], "recommended_models": [], "error": str(exc)}
+            # Рекомендации статичны и не зависят от сети: пустой список здесь
+            # оставил бы GUI вообще без вариантов при недоступном LM Studio.
+            return {
+                "models": [],
+                "model_details": [],
+                "recommended_models": [
+                    "gemma-4-e4b-it-mlx",
+                    "huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx",
+                    "qwen3-8b-abliterated",
+                ],
+                "error": str(exc),
+            }
 
     @classmethod
     def _parse_catalog(cls, data: dict[str, Any]) -> list[dict[str, Any]]:
