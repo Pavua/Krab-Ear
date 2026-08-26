@@ -1291,6 +1291,9 @@ Expected: FAIL оба.
                     if isinstance(audio, np.ndarray) and len(audio) > 0
                     else None
                 ),
+                # quiet: окно приходит ~раз в 3 с (~1200 строк/час) — INFO
+                # на каждое окно утопил бы строки диктовки и импорта.
+                quiet=True,
             ):
                 stt_result = self._transcriber.transcribe(
                     audio, quality_profile="balanced", skip_vad_prefilter=True,
