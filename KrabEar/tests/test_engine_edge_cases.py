@@ -94,6 +94,11 @@ class FallbackChainBalancedToMaxTests(unittest.TestCase):
 
     def setUp(self):
         self.engine = _make_engine()
+        # Намерение этих тестов: облачный STT НАСТРОЕН. Гейт «нет ключа —
+        # не ходить в облако» (инцидент 2026-08-26) иначе обрывает каскад
+        # до remote, и проверялся бы не тот путь. Раньше проходило лишь
+        # потому, что гейта в основном каскаде не было вовсе.
+        self.engine._remote_stt_retry_configured = lambda: True
 
     def test_balanced_fail_max_succeeds(self):
         """balanced модель бросает ошибку → следующая в цепочке возвращает результат."""

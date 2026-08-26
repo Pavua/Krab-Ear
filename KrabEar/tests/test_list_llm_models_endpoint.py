@@ -1,6 +1,9 @@
 """Unit tests for _handle_list_llm_models URL construction (Wave 68 fix).
 
-Verifies that service._handle_list_llm_models uses /api/v1/models (LM Studio
+🔴 2026-08-26: файл закреплял СЛОМАННЫЙ endpoint. Замер на живом LM Studio
+0.4.21 (105 моделей): /api/v0/models → 200/105, /v1/models → 200/105,
+/api/v1/models → 200/0. Тесты перецелены на каталожный /api/v0/models.
+Было: verifies that service._handle_list_llm_models uses /api/v1/models (LM Studio
 correct endpoint) instead of /v1/models (which returns 200 but logs ERROR).
 Sister fix to PR #396 (llm_rewriter.py passive_health_check).
 """
@@ -15,7 +18,7 @@ if PROJECT_ROOT not in sys.path:
 
 
 class TestListLlmModelsEndpoint(unittest.TestCase):
-    """_handle_list_llm_models must call /api/v1/models, not /v1/models."""
+    """_handle_list_llm_models обязан звать каталожный /api/v0/models."""
 
     def _make_service(self, llm_base_url="http://127.0.0.1:1234/v1"):
         """Build the LIVE extracted LLMOpsService with only what handle_list_llm_models needs.
@@ -47,8 +50,8 @@ class TestListLlmModelsEndpoint(unittest.TestCase):
     # URL construction tests
     # ------------------------------------------------------------------
 
-    def test_default_base_url_uses_api_v1_models(self):
-        """Default http://127.0.0.1:1234/v1 → GET http://127.0.0.1:1234/api/v1/models."""
+    def test_default_base_url_uses_catalog_endpoint(self):
+        """Default http://127.0.0.1:1234/v1 → GET http://127.0.0.1:1234/api/v0/models."""
         svc = self._make_service("http://127.0.0.1:1234/v1")
         captured = []
 
@@ -60,8 +63,7 @@ class TestListLlmModelsEndpoint(unittest.TestCase):
             result = svc._handle_list_llm_models({})
 
         self.assertEqual(len(captured), 1, "requests.get должен вызваться ровно один раз")
-        self.assertIn("/api/v1/models", captured[0])
-        self.assertNotIn("/v1/models", captured[0].replace("/api/v1/models", ""))
+        self.assertIn("/api/v0/models", captured[0])
         self.assertIsNone(result["error"])
 
     def test_trailing_slash_stripped(self):
@@ -77,12 +79,12 @@ class TestListLlmModelsEndpoint(unittest.TestCase):
             svc._handle_list_llm_models({})
 
         self.assertTrue(
-            captured[0].endswith("/api/v1/models"),
-            f"URL должен заканчиваться на /api/v1/models, got: {captured[0]}",
+            captured[0].endswith("/api/v0/models"),
+            f"URL должен заканчиваться на /api/v0/models, got: {captured[0]}",
         )
 
     def test_base_url_without_v1_suffix(self):
-        """base_url without /v1 (e.g. http://host:1234) → /api/v1/models appended."""
+        """base_url without /v1 (e.g. http://host:1234) → /api/v0/models appended."""
         svc = self._make_service("http://127.0.0.1:1234")
         captured = []
 
@@ -93,7 +95,7 @@ class TestListLlmModelsEndpoint(unittest.TestCase):
         with patch("requests.get", side_effect=fake_get):
             svc._handle_list_llm_models({})
 
-        self.assertEqual(captured[0], "http://127.0.0.1:1234/api/v1/models")
+        self.assertEqual(captured[0], "http://127.0.0.1:1234/api/v0/models")
 
     def test_v2_suffix_stripped(self):
         """Regex strips any /vN suffix, not just /v1."""
@@ -107,7 +109,7 @@ class TestListLlmModelsEndpoint(unittest.TestCase):
         with patch("requests.get", side_effect=fake_get):
             svc._handle_list_llm_models({})
 
-        self.assertEqual(captured[0], "http://127.0.0.1:1234/api/v1/models")
+        self.assertEqual(captured[0], "http://127.0.0.1:1234/api/v0/models")
 
     # ------------------------------------------------------------------
     # Response handling tests
@@ -145,13 +147,18 @@ class TestListLlmModelsEndpoint(unittest.TestCase):
         self.assertIn("Connection refused", result["error"])
 
     def test_recommended_models_always_present(self):
-        """recommended_models list always present even on error."""
+        """recommended_models обязан присутствовать И быть непустым при ошибке.
+
+        🔴 До 2026-08-26 тест закреплял `== []`, противореча собственному
+        докстрингу: при выключенном LM Studio GUI оставался вообще без вариантов
+        выбора модели. Рекомендации статичны и от сети не зависят.
+        """
         svc = self._make_service()
         with patch("requests.get", side_effect=ConnectionError("refused")):
             result = svc._handle_list_llm_models({})
 
         self.assertIn("recommended_models", result)
-        self.assertEqual(result["recommended_models"], [])
+        self.assertTrue(result["recommended_models"])
 
 
 if __name__ == "__main__":
