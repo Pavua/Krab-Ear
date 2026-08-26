@@ -29,6 +29,7 @@ from backend.event_bus import bus as event_bus
 from contracts.live_subs_events import LiveSubsResult
 from contracts.registry import EventType
 from core.utils import is_likely_repetition_loop
+from core import stt_budget
 
 if TYPE_CHECKING:
     from backend.transcriber import Transcriber
@@ -630,10 +631,24 @@ class LiveSubsService:
                 }
 
         try:
-            stt_result = self._transcriber.transcribe(
-                audio, quality_profile="balanced", skip_vad_prefilter=True,
-                context_free=True, lang_hint=lang_hint, single_pass=True,
-            )
+            # Спека 2026-08-26 §5: live subs — interactive (окно ~3 с; scope
+            # в этом же worker-треде сервиса, ContextVar виден engine).
+            with stt_budget.stt_budget_scope(
+                stt_budget.INTERACTIVE,
+                settings_get=self._settings_get,
+                audio_duration_sec=(
+                    len(audio) / 16000.0
+                    if isinstance(audio, np.ndarray) and len(audio) > 0
+                    else None
+                ),
+                # quiet: окно приходит ~раз в 3 с (~1200 строк/час) — INFO
+                # на каждое окно утопил бы строки диктовки и импорта.
+                quiet=True,
+            ):
+                stt_result = self._transcriber.transcribe(
+                    audio, quality_profile="balanced", skip_vad_prefilter=True,
+                    context_free=True, lang_hint=lang_hint, single_pass=True,
+                )
         finally:
             if acquired and self._stt_release is not None:
                 try:

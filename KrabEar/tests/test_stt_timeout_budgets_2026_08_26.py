@@ -560,5 +560,25 @@ class BlacklistGateLiveAttemptTests(unittest.TestCase):
         )
 
 
+class ScopeWiringRemainingPathsTests(unittest.TestCase):
+    """§10.11: каждая точка §5 обёрнута в scope — bulk_reprocess, live_subs."""
+
+    def _assert_scope_in(self, rel_path: str, func_name: str) -> None:
+        src = (PROJECT_ROOT / rel_path).read_text(encoding="utf-8")
+        node = _function_node(ast.parse(src), func_name)
+        self.assertIn(
+            "stt_budget_scope", _attr_names(node),
+            f"{rel_path}::{func_name} обязана открывать stt_budget_scope",
+        )
+
+    def test_bulk_reprocess_opens_batch_scope(self):
+        self._assert_scope_in("backend/bulk_reprocess.py", "_run_locked")
+
+    def test_live_subs_opens_interactive_scope(self):
+        self._assert_scope_in(
+            "backend/live_subs_service.py", "_process_window"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
