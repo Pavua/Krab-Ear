@@ -677,5 +677,41 @@ class ScopeWiringOwnerTests(unittest.TestCase):
         )
 
 
+class RestScopeWiringTests(unittest.TestCase):
+    """§4.1/§6: REST сабмитит transcribe ЧЕРЕЗ call_in_scope — scope
+    открывается в worker-треде пула, deadline_sec связан с бюджетом."""
+
+    def test_rest_submits_transcribe_through_call_in_scope(self):
+        src = (PROJECT_ROOT / "backend" / "rest_server.py").read_text(
+            encoding="utf-8"
+        )
+        tree = ast.parse(src)
+        found_scoped_submit = False
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "submit"
+            ):
+                continue
+            if not node.args:
+                continue
+            first = node.args[0]
+            if (
+                isinstance(first, ast.Attribute)
+                and first.attr == "call_in_scope"
+            ):
+                found_scoped_submit = True
+            # Голый submit(deps.transcriber.transcribe, ...) запрещён:
+            # ContextVar не наследуется worker-тредом (§4.1).
+            self.assertFalse(
+                isinstance(first, ast.Attribute)
+                and first.attr == "transcribe",
+                "rest_server сабмитит transcribe напрямую — scope не "
+                "доедет до worker-треда",
+            )
+        self.assertTrue(found_scoped_submit)
+
+
 if __name__ == "__main__":
     unittest.main()

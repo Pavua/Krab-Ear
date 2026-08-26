@@ -30,6 +30,7 @@ from werkzeug.utils import secure_filename
 
 from core.config import settings
 from core.engine import AudioEngine
+from core import stt_budget
 # M1: event_bus/sse_stream/metrics (below) are read exclusively through
 # _deps() (deps.event_bus / deps.sse_stream / deps.metrics) — the bare names
 # stay live module attributes for _ModuleGlobalsDeps.__getattr__ to resolve.
@@ -1777,8 +1778,24 @@ def transcribe_audio():
         )
         _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         _pool_shutdown_nonblocking = False
+        # Спека 2026-08-26 §4.1/§6: scope открывается ВНУТРИ worker-треда
+        # (call_in_scope) — ContextVar не наследуется тредом пула. Снапшот
+        # настроек берётся здесь: engine в REST-процессе создан без
+        # settings_get и сам настройки прочитать не может (§4.2).
         try:
-            _future = _pool.submit(deps.transcriber.transcribe, _transcribe_path, **_transcribe_kwargs)
+            _budget_settings_snapshot = deps.store.load_settings(nowait=True)
+        except Exception:
+            _budget_settings_snapshot = None
+        try:
+            _future = _pool.submit(
+                stt_budget.call_in_scope,
+                deps.transcriber.transcribe,
+                _transcribe_path,
+                profile=stt_budget.INTERACTIVE,
+                deadline_sec=_transcribe_timeout_sec,
+                settings_snapshot=_budget_settings_snapshot,
+                **_transcribe_kwargs,
+            )
             try:
                 result = _future.result(timeout=_transcribe_timeout_sec)
             except concurrent.futures.TimeoutError:
