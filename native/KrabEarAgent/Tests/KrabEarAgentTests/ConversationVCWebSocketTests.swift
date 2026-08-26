@@ -243,14 +243,17 @@ final class ConversationVCURLBuildingTests: XCTestCase {
         XCTAssertEqual(engineParam?.value, "moshi")
     }
 
-    func test_buildWSRequest_nonAutoBrain_addsBrainParam() {
+    func test_buildWSRequest_neverSendsDeadBrainParam() {
         var config = ConversationConfig.default
+        // 🔴 2026-08-27: параметр `brain` больше НЕ отправляется. Voice Gateway
+        // его не объявляет вовсе (только `lang` и `brain_mode`), FastAPI молча
+        // отбрасывал — выбор модели был декоративным. Сверено с их кодом.
         config.brain = "qwen3-4b"
         let vc = makeVC(config: config)
         let req = vc.makeWebSocketRequest(for: config.wsURLString)!
         let items = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        let brainParam = items.first(where: { $0.name == "brain" })
-        XCTAssertEqual(brainParam?.value, "qwen3-4b")
+        XCTAssertNil(items.first(where: { $0.name == "brain" }),
+                     "мёртвый параметр не должен уходить в сеть")
     }
 
     func test_buildWSRequest_nonAutoLang_addsLangParam() {
@@ -276,8 +279,9 @@ final class ConversationVCURLBuildingTests: XCTestCase {
         let items = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
         let names = Set(items.map(\.name))
         XCTAssertTrue(names.contains("engine"), "engine param должен присутствовать")
-        XCTAssertTrue(names.contains("brain"),  "brain param должен присутствовать")
+        XCTAssertFalse(names.contains("brain"), "brain у VG не существует — не отправляем")
         XCTAssertTrue(names.contains("lang"),   "lang param должен присутствовать")
+        XCTAssertTrue(names.contains("brain_mode"), "brain_mode — единственный живой выбор мозга")
     }
 
     // MARK: brain_mode — ВСЕГДА присутствует (в отличие от engine/brain/lang)

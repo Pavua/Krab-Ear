@@ -240,7 +240,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let vaHotkeyToggle = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     let vaWakeWordToggle = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     let vaEngineSelector = NSPopUpButton(frame: .zero, pullsDown: false)
-    let vaBrainSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    // Выбор МОДЕЛИ мозга убран 2026-08-27: Voice Gateway не читает параметр
+    // `brain` вовсе. Вместо него — режим (порядок провайдеров), который VG
+    // валидирует и реально применяет.
+    let vaBrainModeSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     // Wake word (openWakeWord, spec 2026-07-05): статус движка, модель, порог.
     let vaWakeWordStatusLabel = NSTextField(labelWithString: "openWakeWord: проверяю состояние")
     let vaWakeWordModelSelector = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -2026,8 +2029,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         vaWakeWordThresholdSlider.action = #selector(onVAWakeWordThresholdChanged)
         vaEngineSelector.target = self
         vaEngineSelector.action = #selector(onVAEngineSelectorChanged)
-        vaBrainSelector.target = self
-        vaBrainSelector.action = #selector(onVABrainSelectorChanged)
+        vaBrainModeSelector.target = self
+        vaBrainModeSelector.action = #selector(onVABrainModeSelectorChanged)
         settingsBar.addArrangedSubview(vaSection)
 
         let selTransSection = buildSelectionTranslatorSection()

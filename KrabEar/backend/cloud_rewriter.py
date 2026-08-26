@@ -198,9 +198,19 @@ class CloudRewriterProvider(Protocol):
 # -------------------------------------------------------------------------
 
 class OpenAIRewriterProvider:
-    """Провайдер OpenAI (gpt-4o-mini) — дешёвый и быстрый для cleanup-задач."""
+    """Провайдер OpenAI — модель берётся из настроек (дефолт gpt-4o-mini)."""
 
-    _MODEL = "gpt-4o-mini"
+    _MODEL = "gpt-4o-mini"          # дефолт и фоллбэк, если настройка пуста
+    _MODEL_SETTING = "cloud_rewriter_openai_model"
+
+    def _model_name(self) -> str:
+        """Имя модели из настроек; пустая строка → дефолт.
+
+        Пустое значение нельзя отправлять в запрос: провайдер ответит 400, а
+        пользователь увидит невнятную ошибку вместо работающего рерайта.
+        """
+        raw = str((_load_settings() or {}).get(self._MODEL_SETTING, "") or "").strip()
+        return raw or self._MODEL
 
     def rewrite(self, text: str, language: str) -> Dict[str, Any]:
         api_key = _load_settings().get("openai_api_key", "").strip()
@@ -215,7 +225,7 @@ class OpenAIRewriterProvider:
         system_prompt = _CLEANUP_SYSTEM_PROMPTS.get(lang_key, _DEFAULT_SYSTEM_PROMPT)
 
         payload = json.dumps({
-            "model": self._MODEL,
+            "model": self._model_name(),
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": text},
@@ -253,9 +263,15 @@ class OpenAIRewriterProvider:
 # -------------------------------------------------------------------------
 
 class AnthropicRewriterProvider:
-    """Провайдер Anthropic (claude-haiku-4-5-20251001) — дёшево и быстро."""
+    """Провайдер Anthropic — модель берётся из настроек (дефолт claude-haiku)."""
 
-    _MODEL = "claude-haiku-4-5-20251001"
+    _MODEL = "claude-haiku-4-5-20251001"   # дефолт и фоллбэк
+    _MODEL_SETTING = "cloud_rewriter_anthropic_model"
+
+    def _model_name(self) -> str:
+        """См. OpenAIRewriterProvider._model_name."""
+        raw = str((_load_settings() or {}).get(self._MODEL_SETTING, "") or "").strip()
+        return raw or self._MODEL
     _API_VERSION = "2023-06-01"
 
     def rewrite(self, text: str, language: str) -> Dict[str, Any]:
@@ -271,7 +287,7 @@ class AnthropicRewriterProvider:
         system_prompt = _CLEANUP_SYSTEM_PROMPTS.get(lang_key, _DEFAULT_SYSTEM_PROMPT)
 
         payload = json.dumps({
-            "model": self._MODEL,
+            "model": self._model_name(),
             "max_tokens": min(max(256, len(text.split()) * 4 + 50), 4096),
             "system": system_prompt,
             "messages": [

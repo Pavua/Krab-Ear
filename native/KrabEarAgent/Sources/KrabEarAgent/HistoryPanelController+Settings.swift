@@ -1319,14 +1319,21 @@ extension HistoryPanelController {
             control: vaEngineSelector
         )
 
-        // 4. Brain (LLM) selector
-        vaBrainSelector.removeAllItems()
-        vaBrainSelector.addItems(withTitles: ["Авто", "qwen3-30b (точнее, 17 GB)", "qwen3-4b (быстрее, 4 GB)"])
-        vaBrainSelector.setAccessibilityLabel("Выбор LLM-мозга для разговора с AI")
+        // 4. Режим мозга (порядок провайдеров). Выбор КОНКРЕТНОЙ модели убран:
+        // Voice Gateway не читает параметр `brain`, а модель берёт из своего
+        // глобального env — прежний селектор был декоративным.
+        vaBrainModeSelector.removeAllItems()
+        vaBrainModeSelector.addItems(withTitles: [
+            "Авто — Краб первым, быстрый откат",   // "auto"
+            "Быстрый — локальная модель первой",   // "fast"
+            "Краб — ждать основной мозг",          // "krab"
+        ])
+        vaBrainModeSelector.setAccessibilityLabel("Режим выбора мозга для разговора с AI")
         let brainRow = makeSettingRow(
-            label: "Мозг LLM",
-            description: "qwen3-30b — лучшее качество русского. qwen3-4b — быстро, меньше памяти.",
-            control: vaBrainSelector
+            label: "Режим мозга",
+            description: "Авто — сначала Краб, при задержке уходим к запасным. "
+                + "Быстрый — сразу локальная модель. Краб — дожидаемся основного мозга.",
+            control: vaBrainModeSelector
         )
 
         card.contentStackView.addArrangedSubview(hotkeyToggleRow)
@@ -1428,15 +1435,18 @@ extension HistoryPanelController {
         UserDefaults.standard.set(value, forKey: "KrabEar_ConversationEngine")
     }
 
-    @objc func onVABrainSelectorChanged() {
-        let idx = vaBrainSelector.indexOfSelectedItem
+    @objc func onVABrainModeSelectorChanged() {
+        // Значения — allowlist Voice Gateway: {"auto", "fast", "krab"};
+        // неизвестное значение они тихо откатывают к дефолту, поэтому
+        // отправляем только эти три.
+        let idx = vaBrainModeSelector.indexOfSelectedItem
         let value: String
         switch idx {
-        case 1: value = "qwen3-30b"
-        case 2: value = "qwen3-4b"
+        case 1: value = "fast"
+        case 2: value = "krab"
         default: value = "auto"
         }
-        UserDefaults.standard.set(value, forKey: "KrabEar_ConversationBrain")
+        UserDefaults.standard.set(value, forKey: "KrabEar_ConversationBrainMode")
     }
 
     /// Синхронизировать состояние VA-контролей с UserDefaults.
@@ -1456,11 +1466,14 @@ extension HistoryPanelController {
         default:         vaEngineSelector.selectItem(at: 0)
         }
 
-        let brain = UserDefaults.standard.string(forKey: "KrabEar_ConversationBrain") ?? "auto"
-        switch brain {
-        case "qwen3-30b": vaBrainSelector.selectItem(at: 1)
-        case "qwen3-4b":  vaBrainSelector.selectItem(at: 2)
-        default:          vaBrainSelector.selectItem(at: 0)
+        // 🔴 Читаем НОВЫЙ ключ. Старый KrabEar_ConversationBrain хранил имя
+        // модели, которое всё равно никуда не отправлялось (VG не читает
+        // параметр `brain`), поэтому мигрировать нечего — начинаем с "auto".
+        let brainMode = UserDefaults.standard.string(forKey: "KrabEar_ConversationBrainMode") ?? "auto"
+        switch brainMode {
+        case "fast": vaBrainModeSelector.selectItem(at: 1)
+        case "krab": vaBrainModeSelector.selectItem(at: 2)
+        default:     vaBrainModeSelector.selectItem(at: 0)
         }
     }
 

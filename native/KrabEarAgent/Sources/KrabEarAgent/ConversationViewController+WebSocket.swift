@@ -50,7 +50,10 @@ extension ConversationViewController {
         if var components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
             var items = components.queryItems ?? []
             if config.engine != "auto" { items.append(URLQueryItem(name: "engine", value: config.engine)) }
-            if config.brain  != "auto" { items.append(URLQueryItem(name: "brain",  value: config.brain))  }
+            // 🔴 Параметр `brain` НЕ отправляем: у Voice Gateway его не существует
+            // (WS объявляет только `lang` и `brain_mode`, FastAPI молча отбрасывает
+            // лишнее). Сверено с их кодом 2026-08-27. Модель мозга у VG задаётся
+            // одним глобальным env на весь гейтвей; выбора на сессию сегодня нет.
             if config.languageHint != "auto" { items.append(URLQueryItem(name: "lang", value: config.languageHint)) }
             // brain_mode (Волна 3b) — ВСЕГДА передаём явно, даже "auto":
             // Voice Gateway полагается на явный сигнал от клиента, не на умолчание сервера.
