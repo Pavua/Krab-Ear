@@ -2639,11 +2639,22 @@ class AudioEngine:
                 logger.warning("Модель %s не сработала: %s", model_name, e)
                 self._unavailable_models[model_name] = time.monotonic()
 
-        # Если локально ничего не вышло — пробуем облако (если разрешено)
+        # Если локально ничего не вышло — пробуем облако (если разрешено И настроено).
+        # 🔴 Sibling-гейт (инцидент 2026-08-26): волна 22.08 закрыла ровно этот
+        # класс у ДРУГОГО вызывающего (retry_candidates в multipass), а здесь
+        # проверка осталась только на NETWORK_MODE. Итог у владельца: после
+        # часового таймаута локального движка каскад шёл в облако без ключа и
+        # выдавал «Критическая ошибка распознавания речи», подменяя настоящую
+        # причину (все локальные движки не справились) сообщением про облако.
         if settings.NETWORK_MODE != "offline_strict":
-            logger.info("Локальные модели недоступны, переключаюсь на Remote STT...")
-            with _profiler.start_span("stt_remote"):
-                return self._transcribe_remote(chain_audio_data, prompt)
+            if self._remote_stt_retry_configured():
+                logger.info("Локальные модели недоступны, переключаюсь на Remote STT...")
+                with _profiler.start_span("stt_remote"):
+                    return self._transcribe_remote(chain_audio_data, prompt)
+            logger.info(
+                "Локальные модели недоступны, облачный STT не настроен "
+                "(нет ключа провайдера) — остаёмся с локальной ошибкой"
+            )
 
         raise RuntimeError("Все доступные STT-движки вышли из строя.")
 
