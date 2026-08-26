@@ -123,14 +123,20 @@ class DrainOnAvailabilityTest(unittest.TestCase):
     def test_no_backlog_means_no_second_read(self) -> None:
         """Нет накопленного — лишнего чтения быть не должно (прежний путь)."""
         block = self.rec.chunk_size
-        stream = _DrainableStream(block, 0, max_reads=1)
+        # Guarded read (спека 2026-08-23) опрашивает read_available ДО read()
+        # и требует настоящий int >= chunk_size — backlog=0 заставил бы guard
+        # честно решить, что поток голодает, и вообще не дошёл бы до read().
+        # Заводим стрим с block «готовым» кадром для guard'а, а сразу после
+        # read() вручную обнуляем read_available — реалистичная модель
+        # «накопленного сверх блока нет», ровно то, что тест и проверяет.
+        stream = _DrainableStream(block, block, max_reads=1)
         stream.stop_event = self.rec._stop_event
 
-        # backlog=0 → второго чтения нет, поэтому событие ставим сами после первого
         orig_read = stream.read
 
         def read_and_stop(frames):
             out = orig_read(frames)
+            stream.read_available = 0
             self.rec._stop_event.set()
             return out
 
@@ -156,15 +162,34 @@ class DrainOnAvailabilityTest(unittest.TestCase):
     def test_magicmock_stream_keeps_old_behaviour(self) -> None:
         """🔴 Регресс-гард: у MagicMock `int(read_available)` вернул бы 1, и
         дренаж прочитал бы фантомный сэмпл, тихо ломая существующие тесты
-        рекордера. Дренаж обязан включаться ТОЛЬКО на настоящем целом."""
+        рекордера. Дренаж обязан включаться ТОЛЬКО на настоящем целом.
+
+        Guarded read (спека 2026-08-23) опрашивает то же read_available ДО
+        read() и требует настоящий int, иначе честно решает, что поток
+        голодает, и вообще не читает — а тест как раз проверяет, что чтение
+        СЛУЧАЕТСЯ, просто без дренажа. Поэтому read_available здесь —
+        одноразовое динамическое свойство: настоящий int для guard'а до
+        первого read(), а после него — обычный (не-int) MagicMock, как у
+        неконфигурированного теста-дублёра, чтобы дренажная ветка молчала.
+        """
         block = self.rec.chunk_size
-        mock_stream = MagicMock()
+        calls: list[int] = []
+        read_done = {"v": False}
+
+        def _read_available(_self: MagicMock):
+            if read_done["v"]:
+                return MagicMock()  # не int → дренаж выключен, замысел теста
+            return block
+
+        _StreamCls = type("_OneShotAvailabilityStream", (MagicMock,), {})
+        _StreamCls.read_available = property(_read_available)
+        mock_stream = _StreamCls()
         mock_stream.__enter__ = MagicMock(return_value=mock_stream)
         mock_stream.__exit__ = MagicMock(return_value=False)
-        calls: list[int] = []
 
         def fake_read(frames):
             calls.append(int(frames))
+            read_done["v"] = True
             self.rec._stop_event.set()
             return np.zeros((int(frames), 1), dtype=np.float32), False
 
@@ -188,13 +213,42 @@ class MaxDurationTruncationTest(unittest.TestCase):
         cap = block + block // 2
         with rec._lock:
             rec._max_recording_samples = cap
-        stream = _DrainableStream(block, 0, max_reads=99)
+        # Guarded read (спека 2026-08-23) требует настоящий int read_available
+        # >= chunk_size ДО КАЖДОГО read(), иначе guard решит, что поток
+        # голодает, и не прочитает вообще (cap так и не будет достигнут).
+        # Дренаж (спека 2026-08-13) не в фокусе этого теста — он проверяет
+        # обрезку РОВНО НА ГРАНИЦЕ второго блока, поэтому read_available —
+        # одноразовое свойство: полный блок готов до read(), 0 сразу после
+        # (равномерный приток без накопленного излишка). Свойство заведено
+        # на отдельном классе, а не на общем _DrainableStream, чтобы не
+        # задеть остальные тесты файла, которые используют его как обычный
+        # атрибут — иначе дренаж склеил бы оба блока в один чанк за одну
+        # итерацию, и тест перестал бы проверять именно границу обрезки.
+        class _EvenlyPacedStream:
+            def __init__(self, block_frames: int) -> None:
+                self.block_frames = block_frames
+                self.read_calls: list[int] = []
+                self._just_read = False
 
-        def read_two(frames):
-            stream.read_calls.append(int(frames))
-            return np.full((int(frames), 1), 0.5, dtype=np.float32), False
+            def __enter__(self):
+                return self
 
-        stream.read = read_two
+            def __exit__(self, *_a):
+                return False
+
+            @property
+            def read_available(self) -> int:
+                if self._just_read:
+                    self._just_read = False
+                    return 0
+                return self.block_frames
+
+            def read(self, frames):
+                self.read_calls.append(int(frames))
+                self._just_read = True
+                return np.full((int(frames), 1), 0.5, dtype=np.float32), False
+
+        stream = _EvenlyPacedStream(block)
         rec._stop_event.clear()
         with rec._lock:
             rec._is_recording = True

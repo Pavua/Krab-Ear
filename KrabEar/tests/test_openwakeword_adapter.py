@@ -696,6 +696,12 @@ class TestListenLoopPredictArgType(unittest.TestCase):
             return (chunk, False)
 
         stream.read.side_effect = _read
+        # Guarded read (спека 2026-08-23): цикл спрашивает доступность кадров
+        # ДО read() — иначе зависшее чтение делает тред неубиваемым. Фейк
+        # обязан отвечать настоящим int, а не MagicMock: адаптер намеренно
+        # трактует «не знаю» как голодание (fail-open вернул бы блокирующий
+        # read, ради устранения которого волна и делалась).
+        stream.read_available = chunk_size
         cm = MagicMock()
         cm.__enter__ = MagicMock(return_value=stream)
         cm.__exit__ = MagicMock(return_value=False)
