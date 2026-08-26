@@ -487,6 +487,11 @@ class RemoteFallbackTests(unittest.TestCase):
 
     def test_remote_called_when_all_local_fail(self):
         engine = _make_engine()
+        # Намерение теста: облачный STT НАСТРОЕН. Гейт «нет ключа — не ходить
+        # в облако» (инцидент 2026-08-26) иначе обрывает каскад до remote,
+        # и тест проверял бы не тот путь. Раньше проходило лишь потому,
+        # что гейта в этой ветке не было вовсе.
+        engine._remote_stt_retry_configured = lambda: True
         from core.config import settings
 
         remote_called = []

@@ -102,6 +102,11 @@ class UnavailableModelsTrackingTests(unittest.TestCase):
 
     def setUp(self):
         self.engine = _make_engine()
+        # Намерение этих тестов: облачный STT НАСТРОЕН. Гейт «нет ключа —
+        # не ходить в облако» (инцидент 2026-08-26) иначе обрывает каскад
+        # до remote, и проверялся бы не тот путь. Раньше проходило лишь
+        # потому, что гейта в основном каскаде не было вовсе.
+        self.engine._remote_stt_retry_configured = lambda: True
 
     def test_failed_model_added_to_unavailable_set(self):
         """Если mlx_whisper.transcribe бросает исключение — модель попадает в _unavailable_models."""
@@ -275,6 +280,11 @@ class FallbackChainTests(unittest.TestCase):
 
     def setUp(self):
         self.engine = _make_engine()
+        # Намерение этих тестов: облачный STT НАСТРОЕН. Гейт «нет ключа —
+        # не ходить в облако» (инцидент 2026-08-26) иначе обрывает каскад
+        # до remote, и проверялся бы не тот путь. Раньше проходило лишь
+        # потому, что гейта в основном каскаде не было вовсе.
+        self.engine._remote_stt_retry_configured = lambda: True
 
     def test_offline_strict_raises_when_all_models_unavailable(self):
         """При offline_strict и все локальные модели недоступны → RuntimeError (без remote)."""
