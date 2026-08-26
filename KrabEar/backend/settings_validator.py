@@ -17,6 +17,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from core.gigaam_compat import SUPPORTED_GIGAAM_ASR_MODES
+from core.stt_budget import KNOB_BOUNDS as _STT_BUDGET_KNOB_BOUNDS
 
 
 CURRENT_SCHEMA_VERSION = "2.0"
@@ -160,6 +161,14 @@ _RANGE_FIELDS: dict[str, tuple[Any, Any, Any, type]] = {
     # ни на что не влияет.
     "ping_count_lock_timeout_sec": (0.0, 60.0, 0.3, float),
 }
+
+# Спека 2026-08-26 stt-timeout-budgets (wave-34: клампить любой временной
+# тюнинг). Границы живут в core/stt_budget.py::KNOB_BOUNDS — единственном
+# источнике; здесь только проекция в формат валидатора (+ coerce=float).
+_RANGE_FIELDS.update({
+    _key: (_lo, _hi, _default, float)
+    for _key, (_lo, _hi, _default) in _STT_BUDGET_KNOB_BOUNDS.items()
+})
 
 # Bool-поля с дефолтными значениями
 _BOOL_FIELDS: dict[str, bool] = {

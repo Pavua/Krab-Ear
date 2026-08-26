@@ -246,5 +246,27 @@ class BudgetScopeTests(unittest.TestCase):
         )
 
 
+class BudgetSettingsWiringTests(unittest.TestCase):
+    """§9: DEFAULT_SETTINGS + _RANGE_FIELDS (правило wave-34) синхронны
+    с KNOB_BOUNDS — единственным источником границ в core."""
+
+    def test_default_settings_carry_all_knobs(self):
+        from core.config import DEFAULT_SETTINGS
+        for key, (_lo, _hi, default) in stt_budget.KNOB_BOUNDS.items():
+            self.assertIn(key, DEFAULT_SETTINGS, key)
+            self.assertEqual(DEFAULT_SETTINGS[key], default, key)
+
+    def test_range_fields_clamp_all_knobs_with_same_bounds(self):
+        # _RANGE_FIELDS достраивается из KNOB_BOUNDS импортом (validator уже
+        # импортирует core — см. SUPPORTED_GIGAAM_ASR_MODES, :19). Тест —
+        # guard от удаления этой достройки, не от рассинхрона литералов.
+        from backend.settings_validator import _RANGE_FIELDS
+        for key, (lo, hi, default) in stt_budget.KNOB_BOUNDS.items():
+            self.assertIn(key, _RANGE_FIELDS, key)
+            v_lo, v_hi, v_default, v_coerce = _RANGE_FIELDS[key]
+            self.assertEqual((v_lo, v_hi, v_default), (lo, hi, default), key)
+            self.assertIs(v_coerce, float, key)
+
+
 if __name__ == "__main__":
     unittest.main()

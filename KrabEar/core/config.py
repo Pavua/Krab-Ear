@@ -1226,6 +1226,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # По истечении загрузка прерывается с status="error"/reason="stalled".
     # Диапазон: 30–3600 с (wave2 fix F1-MED).
     "stt_download_stall_timeout_sec": 300.0,
+    # Спека 2026-08-26 stt-timeout-budgets: раздельные бюджеты STT.
+    # Границы клампов — core/stt_budget.py::KNOB_BOUNDS (тест сверяет).
+    "stt_timeout_overhead_sec": 90.0,
+    "stt_timeout_interactive_factor": 3.0,
+    "stt_timeout_batch_factor": 6.0,
+    "stt_timeout_interactive_max_sec": 1800.0,
+    "stt_timeout_batch_max_sec": 3600.0,
+    "stt_timeout_request_attempts": 4.0,
     # --- Cloud rewriter fallback (backend/cloud_rewriter.py) ---
     # PRIVACY-SENSITIVE: когда включён, транскрипт отправляется в облако.
     # Opt-in: False по умолчанию — пользователь должен явно включить.
