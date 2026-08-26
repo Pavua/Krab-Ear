@@ -517,8 +517,9 @@ class BudgetSettingsWiringTests(unittest.TestCase):
             self.assertEqual(DEFAULT_SETTINGS[key], default, key)
 
     def test_range_fields_clamp_all_knobs_with_same_bounds(self):
-        # settings_validator дублирует литералы (core не импортируется из
-        # validator намеренно) — этот тест и есть guard от рассинхрона.
+        # _RANGE_FIELDS достраивается из KNOB_BOUNDS импортом (validator уже
+        # импортирует core — см. SUPPORTED_GIGAAM_ASR_MODES, :19). Тест —
+        # guard от удаления этой достройки, не от рассинхрона литералов.
         from backend.settings_validator import _RANGE_FIELDS
         for key, (lo, hi, default) in stt_budget.KNOB_BOUNDS.items():
             self.assertIn(key, _RANGE_FIELDS, key)
@@ -547,21 +548,28 @@ Expected: FAIL — `AssertionError: 'stt_timeout_overhead_sec' not found in ...`
     "stt_timeout_request_attempts": 4.0,
 ```
 
-- [ ] **Step 4: Вставить блок в `_RANGE_FIELDS`**
+- [ ] **Step 4: Достроить `_RANGE_FIELDS` из `KNOB_BOUNDS`**
 
-В `KrabEar/backend/settings_validator.py`, внутрь словаря `_RANGE_FIELDS` (:76+), рядом с другими stt-полями:
+🔴 НЕ дублировать литералы: `settings_validator.py` уже импортирует из core
+(`from core.gigaam_compat import SUPPORTED_GIGAAM_ASR_MODES`, :19) — прецедент есть,
+дословная копия шести кортежей была бы рассинхроном, ждущим своего часа.
+
+В `KrabEar/backend/settings_validator.py` — импорт рядом с существующим core-импортом (:19):
 
 ```python
-    # Спека 2026-08-26 stt-timeout-budgets (wave-34: клампить любой временной
-    # тюнинг). Литералы намеренно продублированы из core/stt_budget.py::
-    # KNOB_BOUNDS — validator не импортирует core; синхронность держит
-    # test_stt_timeout_budgets_2026_08_26::BudgetSettingsWiringTests.
-    "stt_timeout_overhead_sec": (5.0, 600.0, 90.0, float),
-    "stt_timeout_interactive_factor": (0.5, 60.0, 3.0, float),
-    "stt_timeout_batch_factor": (0.5, 120.0, 6.0, float),
-    "stt_timeout_interactive_max_sec": (30.0, 7200.0, 1800.0, float),
-    "stt_timeout_batch_max_sec": (60.0, 21600.0, 3600.0, float),
-    "stt_timeout_request_attempts": (1.0, 10.0, 4.0, float),
+from core.stt_budget import KNOB_BOUNDS as _STT_BUDGET_KNOB_BOUNDS
+```
+
+И сразу ПОСЛЕ закрывающей скобки словаря `_RANGE_FIELDS` (найти строку `}` , завершающую литерал; следующая значимая строка — определение `_ENUM_FIELDS` или подобное):
+
+```python
+# Спека 2026-08-26 stt-timeout-budgets (wave-34: клампить любой временной
+# тюнинг). Границы живут в core/stt_budget.py::KNOB_BOUNDS — единственном
+# источнике; здесь только проекция в формат валидатора (+ coerce=float).
+_RANGE_FIELDS.update({
+    _key: (_lo, _hi, _default, float)
+    for _key, (_lo, _hi, _default) in _STT_BUDGET_KNOB_BOUNDS.items()
+})
 ```
 
 NaN/мусор/выход за границы обрабатывает существующий общий цикл `:305` (протестирован wave-19) — новых веток валидатора не нужно.
@@ -639,7 +647,12 @@ class EngineBudgetContractTests(unittest.TestCase):
             attrs = _attr_names(_function_node(tree, fname))
             self.assertIn("resolve_attempt_timeout_sec", attrs, fname)
             self.assertIn("budget_exhausted", attrs, fname)
-            self.assertIn("timeout_blacklist_allowed", attrs, fname)
+            # Гейт блэклиста — напрямую или через хелпер engine.
+            self.assertTrue(
+                "timeout_blacklist_allowed" in attrs
+                or "_blacklist_allowed_for" in attrs,
+                f"{fname} не гейтит запись в _unavailable_models (§4.7)",
+            )
 
     def test_adapter_branch_applies_min_budget_floor(self):
         # Спека-тест 17 (§4.8): floor против осиротевшего GigaAM-subprocess.
@@ -779,6 +792,24 @@ from core import stt_budget  # noqa: E402
                         )
 ```
 
+**(e0) Хелпер гейта блэклиста.** Добавить метод в класс `AudioEngine` рядом с `_is_model_unavailable` (:674) — общий для multipass и adapter-ветки, чтобы условие не жило в двух дословных копиях:
+
+```python
+    def _blacklist_allowed_for(self, exc: BaseException) -> bool:
+        """§4.7 (спека 2026-08-26): можно ли писать модель в
+        _unavailable_models по этому исключению.
+
+        Таймаут из-за исчерпанного бюджета ЗАПРОСА не доказывает нездоровье
+        модели: попытке просто не досталось времени. Записать её в блэклист
+        (TTL 300 с) — значит увести следующую диктовку сразу в Remote STT и
+        выдать «Критическая ошибка» на здоровом стеке. Любое другое
+        исключение (MLX watchdog, крах воркера, OOM) блэклист заслуживает.
+        """
+        if not isinstance(exc, (TimeoutError, concurrent.futures.TimeoutError)):
+            return True
+        return stt_budget.timeout_blacklist_allowed()
+```
+
 **(e) `_maybe_multipass_retry` — гейт блэклиста** (:1960-1964). Заменить:
 
 ```python
@@ -800,12 +831,7 @@ from core import stt_budget  # noqa: E402
                     "latency_ms": latency_ms,
                     "error": str(exc),
                 })
-                # §4.7: таймаут из-за исчерпанного бюджета ЗАПРОСА не
-                # доказывает нездоровье модели — блэклист не трогаем.
-                if (
-                    not isinstance(exc, (TimeoutError, concurrent.futures.TimeoutError))
-                    or stt_budget.timeout_blacklist_allowed()
-                ):
+                if self._blacklist_allowed_for(exc):
                     self._unavailable_models[model_label] = time.monotonic()
 ```
 
@@ -904,11 +930,7 @@ from core import stt_budget  # noqa: E402
 ```python
                 except Exception as exc:
                     logger.warning("%s adapter не сработал: %s — продолжаю chain", span_pfx, exc)
-                    # §4.7: budget-таймаут не блэклистит модель.
-                    if (
-                        not isinstance(exc, (TimeoutError, concurrent.futures.TimeoutError))
-                        or stt_budget.timeout_blacklist_allowed()
-                    ):
+                    if self._blacklist_allowed_for(exc):
                         self._unavailable_models[model_name] = time.monotonic()
                     continue
 ```
