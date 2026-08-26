@@ -1040,17 +1040,27 @@ class ScopeWiringOwnerTests(unittest.TestCase):
         self.assertEqual(stt_budget_profile_for_owner(""), "interactive")
 
     def test_stop_tail_and_batch_import_open_budget_scope(self):
-        # AST-контракт §10.11 для двух точек этого файла.
-        src = (
-            PROJECT_ROOT / "backend" / "recording_core_service.py"
-        ).read_text(encoding="utf-8")
-        tree = ast.parse(src)
-        for fname in ("_run_stop_recording_tail", "_transcribe_paths_core"):
-            node = _function_node(tree, fname)
-            self.assertIn(
-                "stt_budget_scope", _attr_names(node),
-                f"{fname} обязана открывать stt_budget_scope (спека §5)",
-            )
+        # AST-контракт §10.11. Используется строгий помощник из Task 5
+        # (`assert_stt_budget_scope_wraps_transcribe`), но с обобщением:
+        # 🔴 в `_run_stop_recording_tail` внутри scope стоит НЕ `transcribe`,
+        # а `_stop_recording_phase_c` (сам transcribe живёт внутри фазы), и
+        # профиль там — ВЫЧИСЛЯЕМАЯ переменная, а не литерал. Поэтому помощник
+        # надо расширить двумя необязательными параметрами:
+        #   inner_call_attr: str = "transcribe"   — что искать внутри тела with
+        #   expected_profile: str | None          — None = профиль не проверять
+        # Правку сделай в самом помощнике, существующие вызовы Task 5 не ломая
+        # (их поведение при дефолтах обязано остаться прежним).
+        assert_stt_budget_scope_wraps_transcribe(
+            "backend/recording_core_service.py",
+            "_run_stop_recording_tail",
+            expected_profile=None,
+            inner_call_attr="_stop_recording_phase_c",
+        )
+        assert_stt_budget_scope_wraps_transcribe(
+            "backend/recording_core_service.py",
+            "_transcribe_paths_core",
+            expected_profile="batch",
+        )
 ```
 
 - [ ] **Step 2: Verify RED**
