@@ -304,12 +304,12 @@ def _profile_from_scope_call(call: ast.Call) -> str | None:
     return None
 
 
-def _body_contains_transcribe_call(body: list[ast.stmt]) -> bool:
+def _body_contains_attr_call(body: list[ast.stmt], attr: str) -> bool:
     for node in ast.walk(ast.Module(body=body, type_ignores=[])):
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "transcribe"
+            and node.func.attr == attr
         ):
             return True
     return False
@@ -318,14 +318,15 @@ def _body_contains_transcribe_call(body: list[ast.stmt]) -> bool:
 def assert_stt_budget_scope_wraps_transcribe(
     rel_path: str,
     func_name: str,
-    expected_profile: str,
+    expected_profile: str | None = None,
+    inner_call_attr: str = "transcribe",
 ) -> None:
-    """AST-контракт §5: stt_budget_scope непосредственно оборачивает transcribe.
+    """AST-контракт §5: stt_budget_scope непосредственно оборачивает целевой вызов.
 
-    Проверяет три условия одновременно:
+    Проверяет:
     1. в теле функции есть ``with``, чей менеджер — вызов ``stt_budget_scope``;
-    2. внутри тела этого ``with`` есть вызов ``.transcribe(...)``;
-    3. первый аргумент ``stt_budget_scope`` — ожидаемый профиль.
+    2. внутри тела этого ``with`` есть вызов ``.{inner_call_attr}(...)``;
+    3. если ``expected_profile`` задан — первый аргумент ``stt_budget_scope`` совпадает.
     """
     src = (PROJECT_ROOT / rel_path).read_text(encoding="utf-8")
     func_node = _function_node(ast.parse(src), func_name)
@@ -338,13 +339,18 @@ def assert_stt_budget_scope_wraps_transcribe(
         if not _is_stt_budget_scope_call(ctx):
             continue
         profile = _profile_from_scope_call(ctx)
-        if profile != expected_profile:
+        if expected_profile is not None and profile != expected_profile:
             continue
-        if _body_contains_transcribe_call(stmt.body):
+        if _body_contains_attr_call(stmt.body, inner_call_attr):
             return
+    profile_msg = (
+        f"stt_budget_scope({expected_profile!r})"
+        if expected_profile is not None
+        else "stt_budget_scope"
+    )
     raise AssertionError(
-        f"{rel_path}::{func_name} обязана открывать stt_budget_scope({expected_profile!r}) "
-        f"с вызовом transcribe внутри тела with"
+        f"{rel_path}::{func_name} обязана открывать {profile_msg} "
+        f"с вызовом {inner_call_attr} внутри тела with"
     )
 
 
@@ -643,6 +649,31 @@ class ScopeWiringRemainingPathsTests(unittest.TestCase):
             "backend/live_subs_service.py",
             "_process_window",
             stt_budget.INTERACTIVE,
+        )
+
+
+class ScopeWiringOwnerTests(unittest.TestCase):
+    """Спека-тесты 11 (частично) и 15: профиль по владельцу поколения (R2)."""
+
+    def test_owner_profile_mapping(self):
+        from backend.recording_core_service import stt_budget_profile_for_owner
+        self.assertEqual(stt_budget_profile_for_owner("meeting"), "batch")
+        self.assertEqual(stt_budget_profile_for_owner("dictation"), "interactive")
+        self.assertEqual(stt_budget_profile_for_owner("quick_capture"), "interactive")
+        self.assertEqual(stt_budget_profile_for_owner(None), "interactive")
+        self.assertEqual(stt_budget_profile_for_owner(""), "interactive")
+
+    def test_stop_tail_and_batch_import_open_budget_scope(self):
+        assert_stt_budget_scope_wraps_transcribe(
+            "backend/recording_core_service.py",
+            "_run_stop_recording_tail",
+            expected_profile=None,
+            inner_call_attr="_stop_recording_phase_c",
+        )
+        assert_stt_budget_scope_wraps_transcribe(
+            "backend/recording_core_service.py",
+            "_transcribe_paths_core",
+            expected_profile="batch",
         )
 
 

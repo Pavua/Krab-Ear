@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 import numpy as np
 
 from core.config import settings as _cfg_settings
+from core import stt_budget
 from backend.ipc_constants import (
     IPC_PREVIEW_THREAD_TIMEOUT_SEC,
     RT_PARTIAL_START_STOP_TIMEOUT_SEC,
@@ -144,6 +145,14 @@ def _sanitize_dedup_threshold(raw: Any) -> float:
         )
         return _DEFAULT_DEDUP_THRESHOLD
     return value
+
+
+def stt_budget_profile_for_owner(owner: str | None) -> str:
+    """Профиль STT-бюджета по владельцу поколения записи (R2, спека
+    2026-08-26 §5). meeting — многочасовые записи, живой человек результата
+    в момент стопа не ждёт (панель уже показала транскрипт по ходу) → batch.
+    dictation/quick_capture/неизвестный owner → interactive (fail-fast)."""
+    return stt_budget.BATCH if owner == "meeting" else stt_budget.INTERACTIVE
 
 
 class RecordingCoreService:
@@ -1585,8 +1594,18 @@ class RecordingCoreService:
         silence_detected = phase_b["silence_detected"]
         background_guard_rejected = phase_b["background_guard_rejected"]
 
-        # Phase C: STT execution
-        phase_c = self._stop_recording_phase_c(audio, duration_sec, sr)
+        # Phase C: STT execution — под бюджет-scope (спека 2026-08-26):
+        # профиль по владельцу поколения, дедлайн от длительности записи.
+        # Тред тот же (phase_c синхронна) — ContextVar виден engine.
+        _budget_profile = stt_budget_profile_for_owner(
+            (phase_a.get("generation") or {}).get("owner")
+        )
+        with stt_budget.stt_budget_scope(
+            _budget_profile,
+            settings_get=lambda k, d: settings.get(k, d),
+            audio_duration_sec=duration_sec,
+        ):
+            phase_c = self._stop_recording_phase_c(audio, duration_sec, sr)
         if "early_return" in phase_c:
             # R1: STT упал — спилл ОСТАВИТЬ (восстановление на следующем старте
             # вернёт аудио, которое сейчас потеряно). close() уже сделан
@@ -3691,25 +3710,32 @@ class RecordingCoreService:
                 # отражалась в last_stt_activity_ts, и длинный импорт мог
                 # схватить выгрузку rewriter'а посреди себя.
                 bump_stt_activity()
-                if progress_callback is not None:
-                    self.transcriber.engine.set_quality_profile(quality_profile)
-                    transcribe_payload = self.transcriber.engine.transcribe(
-                        audio_path,
-                        cleanup_profile=cleanup_profile,
-                        is_preview=False,
-                        domain="casual",
-                        extra_vocabulary=user_vocabulary if user_vocabulary else None,
-                        lang_hint=import_lang_hint,
-                        progress_callback=progress_callback,
-                    )
-                else:
-                    transcribe_payload = self.transcriber.transcribe(
-                        audio_path,
-                        quality_profile=quality_profile,
-                        cleanup_profile=cleanup_profile,
-                        lang_hint=import_lang_hint,
-                        extra_vocabulary=user_vocabulary if user_vocabulary else None,
-                    )
+                # Спека 2026-08-26 §5: пакетный импорт → batch-бюджет,
+                # per-file (audio_duration_sec уже вычислен выше).
+                with stt_budget.stt_budget_scope(
+                    stt_budget.BATCH,
+                    settings_get=lambda k, d: settings.get(k, d),
+                    audio_duration_sec=audio_duration_sec,
+                ):
+                    if progress_callback is not None:
+                        self.transcriber.engine.set_quality_profile(quality_profile)
+                        transcribe_payload = self.transcriber.engine.transcribe(
+                            audio_path,
+                            cleanup_profile=cleanup_profile,
+                            is_preview=False,
+                            domain="casual",
+                            extra_vocabulary=user_vocabulary if user_vocabulary else None,
+                            lang_hint=import_lang_hint,
+                            progress_callback=progress_callback,
+                        )
+                    else:
+                        transcribe_payload = self.transcriber.transcribe(
+                            audio_path,
+                            quality_profile=quality_profile,
+                            cleanup_profile=cleanup_profile,
+                            lang_hint=import_lang_hint,
+                            extra_vocabulary=user_vocabulary if user_vocabulary else None,
+                        )
                 text = self._extract_transcribed_text(transcribe_payload)
                 elapsed = round(time.monotonic() - started_at, 3)
                 if not text:
