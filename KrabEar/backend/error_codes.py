@@ -774,6 +774,16 @@ ERROR_REGISTRY: dict[str, _Entry] = {
     # no dedupe window. Severity=warn (expected, user-triggered boundary),
     # actionable=False (no UI action needed — recording is already stopped).
     # Dedupe 60s: one toast per recording limit hit.
+    # Guarded read (спека 2026-08-23): микрофонный поток открылся, но перестал
+    # (или так и не начал) отдавать кадры. Раньше это выглядело как вечное
+    # зависание stop_recording, теперь запись честно завершается с этим кодом.
+    "audio.capture_starved": {
+        "severity": "error",
+        "component": "audio",
+        "user_msg_ru": "Микрофон перестал передавать звук — запись остановлена, проверьте устройство ввода",
+        "action_label": None,
+        "action_id": None,
+    },
     "audio.max_duration_reached": {
         "user_msg_ru": "Запись остановлена: достигнут лимит длительности",
         "actionable": False,

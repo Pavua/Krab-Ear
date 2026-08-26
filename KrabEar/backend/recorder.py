@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 
@@ -28,6 +28,14 @@ _AUDIO_LEVEL_EMIT_INTERVAL_SEC = 0.033  # ~30 Hz для VU meter
 # 4 часа @ 16 kHz = 230 400 000 семплов ≈ 880 МБ float32.
 # При превышении запись автоматически останавливается с ошибкой audio.max_duration_reached.
 MAX_RECORDING_SAMPLES = 16000 * 60 * 60 * 4  # 4 hours @ 16 kHz
+
+
+from core.audio_stream_guard import (  # noqa: E402
+    DEFAULT_POLL_SEC,
+    DEFAULT_STARVE_SEC,
+    StreamStarved,
+    wait_for_frames,
+)
 
 
 class AudioRecorderStopTimeout(RuntimeError):
@@ -49,7 +57,12 @@ class AudioRecorder:
         on_audio_level: Callable[[float], None] | None = None,
         device: "int | str | None" = None,
         max_recording_samples: int | None = None,
+        settings_get: Callable[[str, Any], Any] | None = None,
     ) -> None:
+        # Guarded read (спека 2026-08-23) читает через него killswitch и пороги.
+        # None → модульные дефолты: встроенные вызовы и тесты не обязаны знать
+        # про настройки, а прод получает реальный геттер из BackendService.
+        self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
         self.sample_rate = sample_rate
         self.channels = channels
         self.chunk_size = int(self.sample_rate * 0.1)
@@ -593,7 +606,29 @@ class AudioRecorder:
                 stream_kwargs["device"] = device
             with sd.InputStream(**stream_kwargs) as stream:
                 last_level_emit_at = 0.0
+                starved = False
                 while not self._stop_event.is_set():
+                    if self._guarded_read_enabled():
+                        try:
+                            if not wait_for_frames(
+                                stream,
+                                self.chunk_size,
+                                stop_event=self._stop_event,
+                                poll_sec=self._read_poll_sec(),
+                                starve_sec=self._stream_starve_sec(),
+                            ):
+                                break  # попросили остановиться
+                        except StreamStarved as exc:
+                            # §4.5: НЕ переоткрываем (дыра в аудио + рассинхрон
+                            # spill). Завершаем запись как max-duration и громко
+                            # сообщаем: молчание здесь = владелец диктует в
+                            # умерший захват и теряет всё сказанное.
+                            logger.error(
+                                "AudioRecorder: микрофонный поток перестал "
+                                "отдавать кадры (%s) — завершаю запись", exc,
+                            )
+                            starved = True
+                            break
                     data, overflowed = stream.read(self.chunk_size)
                     # 2026-08-13 (дренаж, спека recorder-drain-on-availability):
                     # блокирующее чтение выше забирает РОВНО chunk_size (100мс).
@@ -710,11 +745,80 @@ class AudioRecorder:
                                 self._on_audio_level(rms_clamped)
                             except Exception:
                                 logger.debug("Ошибка в on_audio_level callback", exc_info=True)
+
+            if starved:
+                # §4.5: финализируем как max-duration — накопленное аудио
+                # обязано дойти до пользователя, spill закрыт, ошибка громкая.
+                with self._lock:
+                    chunks = list(self._chunks)
+                if chunks:
+                    audio = np.concatenate(chunks, axis=0)
+                    duration = len(audio) / float(self.sample_rate)
+                else:
+                    audio = np.array([], dtype=np.float32)
+                    duration = 0.0
+                with self._lock:
+                    self._pending_result = (audio, duration)
+                if spill is not None:
+                    spill.close()
+                self._push_capture_starved_error()
         except Exception:
             logger.exception("Ошибка в потоке аудиозаписи")
         finally:
             with self._lock:
                 self._is_recording = False
+
+    def _guarded_read_enabled(self) -> bool:
+        """Killswitch guarded read (спека §9): False → прежний блокирующий путь."""
+        try:
+            return bool(self._settings_get("audio_guarded_read_enabled", True))
+        except Exception:
+            return True
+
+    def _read_poll_sec(self) -> float:
+        try:
+            return float(self._settings_get("audio_read_poll_sec", DEFAULT_POLL_SEC))
+        except Exception:
+            return DEFAULT_POLL_SEC
+
+    def _stream_starve_sec(self) -> float:
+        try:
+            return float(self._settings_get("audio_stream_starve_sec", DEFAULT_STARVE_SEC))
+        except Exception:
+            return DEFAULT_STARVE_SEC
+
+    def _push_capture_starved_error(self) -> None:
+        """Громкий сигнал «микрофонный поток умер». Никогда не бросает.
+
+        Вызывается ПОСЛЕ освобождения self._lock — тот же анти-дедлок контракт,
+        что у _push_max_duration_error (W1652 F3).
+        """
+        error_bus = getattr(self, "_error_bus", None)
+        if error_bus is None:
+            return
+        try:
+            from datetime import datetime, timezone
+
+            from backend.error_bus import KrabError
+            from backend.error_codes import ERROR_REGISTRY
+
+            entry = ERROR_REGISTRY.get("audio.capture_starved", {})
+            error_bus.push(KrabError(
+                severity=entry.get("severity", "error"),
+                component="audio",
+                code="audio.capture_starved",
+                message_user=entry.get(
+                    "user_msg_ru",
+                    "Микрофон перестал передавать звук — запись остановлена",
+                ),
+                message_debug="PortAudio stream stopped delivering frames",
+                timestamp=datetime.now(timezone.utc),
+                context={"starve_sec": self._stream_starve_sec()},
+                actionable=False,
+                action_id=None,
+            ))
+        except Exception:
+            logger.exception("AudioRecorder: push audio.capture_starved упал")
 
     def _push_max_duration_error(self, max_samples: int) -> None:
         """Push audio.max_duration_reached to error bus. Never raises.
