@@ -7,6 +7,7 @@ TRANSCRIBE_TIMEOUT_SEC=3600 дважды (7184 с суммарно), абанд�
 from __future__ import annotations
 
 import concurrent.futures
+import logging
 import sys
 import threading
 import time
@@ -112,6 +113,22 @@ class BudgetFormulaTests(unittest.TestCase):
         # max_sec заклампился к верхней границе 7200, не к 10**9.
         self.assertLessEqual(got, 7200.0)
 
+    def test_settings_getter_exception_falls_back_to_defaults(self):
+        # Находка 1: чтение настроек делит файловый лок с историей и умеет
+        # бросать StateStoreLockTimeout (и что угодно ещё) — сбой геттера не
+        # смеет ронять STT, обязан fail-open в дефолты профиля.
+        class _BoomError(Exception):
+            pass
+
+        def _boom_get(key, default):
+            raise _BoomError("settings unavailable under lock contention")
+
+        with stt_budget.stt_budget_scope(
+            stt_budget.INTERACTIVE, settings_get=_boom_get
+        ):
+            got = stt_budget.resolve_attempt_timeout_sec(4.71)
+        self.assertAlmostEqual(got, 104.13, delta=0.5)
+
     def test_timeout_blacklist_allowed_semantics(self):
         # §4.7: исчерпанный бюджет запроса → блэклист запрещён;
         # живой дедлайн / нет дедлайна → разрешён.
@@ -183,6 +200,50 @@ class BudgetScopeTests(unittest.TestCase):
         self.assertIsNotNone(seen["remaining"])
         self.assertLessEqual(seen["remaining"], 42.0)
         self.assertGreater(seen["remaining"], 30.0)
+
+
+    def test_quiet_scope_logs_at_debug_not_info(self):
+        # Находка 2: живые субтитры открывают scope раз в ~3с — INFO на
+        # каждый scope залил бы лог (~1200 строк/час). quiet=True обязан
+        # писать ту же строку на DEBUG, не на INFO.
+        with self.assertLogs(
+            "KrabEar.Core.STTBudget", level="DEBUG"
+        ) as cm:
+            with stt_budget.stt_budget_scope(
+                stt_budget.INTERACTIVE, quiet=True
+            ):
+                pass
+        self.assertFalse(
+            any(record.levelno >= logging.INFO for record in cm.records),
+            f"quiet=True не должен писать на INFO+: {cm.output}",
+        )
+
+    def test_default_scope_logs_at_info(self):
+        # Сиблинг предыдущего теста: диктовка/импорт (quiet=False, дефолт)
+        # обязаны сохранить существующую INFO-наблюдаемость.
+        with self.assertLogs(
+            "KrabEar.Core.STTBudget", level="INFO"
+        ) as cm:
+            with stt_budget.stt_budget_scope(stt_budget.INTERACTIVE):
+                pass
+        self.assertTrue(
+            any(record.levelno >= logging.INFO for record in cm.records)
+        )
+
+    def test_call_in_scope_propagates_quiet(self):
+        # quiet обязан пробрасываться через call_in_scope тем же кваргом.
+        def _noop(**kw):
+            return None
+
+        with self.assertLogs(
+            "KrabEar.Core.STTBudget", level="DEBUG"
+        ) as cm:
+            stt_budget.call_in_scope(
+                _noop, profile=stt_budget.INTERACTIVE, quiet=True
+            )
+        self.assertFalse(
+            any(record.levelno >= logging.INFO for record in cm.records)
+        )
 
 
 if __name__ == "__main__":

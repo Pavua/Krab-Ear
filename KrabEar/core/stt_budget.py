@@ -72,7 +72,11 @@ def _read_knob(
         return default
     try:
         value = float(settings_get(key, default))
-    except (TypeError, ValueError):
+    except Exception:
+        # Широкий except намеренно: чтение настроек делит файловый лок с
+        # историей (StateStore) и умеет бросать StateStoreLockTimeout (и
+        # что угодно ещё непредвиденное) под контенцией — сбой ЧТЕНИЯ
+        # НАСТРОЙКИ не смеет ронять STT на горячем пути; fail-open в дефолт.
         return default
     if not math.isfinite(value):
         return default
@@ -124,11 +128,16 @@ def stt_budget_scope(
     settings_get: Callable[[str, Any], Any] | None = None,
     audio_duration_sec: float | None = None,
     deadline_sec: float | None = None,
+    quiet: bool = False,
 ) -> Iterator[STTBudget]:
     """Открыть бюджет-контекст одного STT-запроса В ТЕКУЩЕМ ТРЕДЕ.
 
     deadline_sec не задан → вычисляется как attempt_budget × request_attempts
     (§4.6); задан явно (REST deadline_sec, W2c) — используется как есть.
+
+    quiet=True — для потребителей с высокочастотными короткими окнами
+    (живые субтитры открывают scope ~раз в 3 с, ~1200/час); та же строка
+    пишется на DEBUG вместо INFO, чтобы не залить лог диктовки/импорта.
     """
     base = _build_budget(profile, settings_get)
     attempt_sec = _attempt_budget(base, audio_duration_sec)
@@ -139,7 +148,8 @@ def stt_budget_scope(
     budget = replace(
         base, deadline_monotonic=time.monotonic() + float(deadline_sec)
     )
-    logger.info(
+    log = logger.debug if quiet else logger.info
+    log(
         "stt_budget: scope opened",
         extra={
             "profile": budget.profile,
@@ -203,6 +213,7 @@ def call_in_scope(
     settings_snapshot: dict[str, Any] | None = None,
     audio_duration_sec: float | None = None,
     deadline_sec: float | None = None,
+    quiet: bool = False,
     **kwargs: Any,
 ) -> Any:
     """Выполнить fn под бюджет-scope В ТРЕДЕ ВЫЗОВА.
@@ -210,6 +221,9 @@ def call_in_scope(
     Назначение — submit во внешний ThreadPoolExecutor (REST): ContextVar не
     наследуется worker-тредом, поэтому scope, открытый вокруг submit, там
     невидим; эта обёртка открывает его уже внутри воркера (§4.1).
+
+    quiet — пробрасывается в stt_budget_scope как есть; ставят потребители
+    с высокочастотными короткими окнами (см. stt_budget_scope).
     """
     snap = settings_snapshot or {}
     with stt_budget_scope(
@@ -217,5 +231,6 @@ def call_in_scope(
         settings_get=snap.get if snap else None,
         audio_duration_sec=audio_duration_sec,
         deadline_sec=deadline_sec,
+        quiet=quiet,
     ):
         return fn(*args, **kwargs)
