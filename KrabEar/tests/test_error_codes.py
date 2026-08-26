@@ -162,6 +162,10 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             # обвалила весь STT-fallback конвейер; warn задолго до порога
             # деградации, dedupe 300с.
             "recording.long_duration_warning",
+            # stt.budget_exhausted — спека 2026-08-26 stt-timeout-budgets: каскад
+            # STT прерван по исчерпанию бюджета ЗАПРОСА (не путать с
+            # stt.mlx_timeout/stt.load_fail — те про нездоровье модели).
+            "stt.budget_exhausted",
         }
         self.assertEqual(set(ERROR_REGISTRY.keys()), expected)
 
@@ -271,4 +275,4 @@ class ErrorRegistryShapeTests(unittest.TestCase):
         test_expected_codes_present guards the exact set so this count test is a
         redundant but cheap invariant.
         """
-        self.assertEqual(len(ERROR_REGISTRY), 69)
+        self.assertEqual(len(ERROR_REGISTRY), 70)

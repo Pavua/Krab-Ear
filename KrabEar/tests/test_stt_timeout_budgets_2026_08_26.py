@@ -6,6 +6,7 @@ TRANSCRIBE_TIMEOUT_SEC=3600 дважды (7184 с суммарно), абанд�
 """
 from __future__ import annotations
 
+import ast
 import concurrent.futures
 import logging
 import sys
@@ -266,6 +267,128 @@ class BudgetSettingsWiringTests(unittest.TestCase):
             v_lo, v_hi, v_default, v_coerce = _RANGE_FIELDS[key]
             self.assertEqual((v_lo, v_hi, v_default), (lo, hi, default), key)
             self.assertIs(v_coerce, float, key)
+
+
+def _engine_source() -> str:
+    return (PROJECT_ROOT / "core" / "engine.py").read_text(encoding="utf-8")
+
+
+def _function_node(tree: ast.Module, name: str) -> ast.FunctionDef:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"функция {name} не найдена в engine.py")
+
+
+def _attr_names(node: ast.AST) -> list[str]:
+    return [n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)]
+
+
+class EngineBudgetContractTests(unittest.TestCase):
+    """Спека-тесты 10/14/17 (AST, привязка к именам функций — не строкам)."""
+
+    FUNCS = ("_maybe_multipass_retry", "_transcribe_with_fallback_impl")
+
+    def test_no_direct_transcribe_timeout_sec_in_stt_loops(self):
+        # Спека-тест 10 (приём PR #1953): сиблинги не разойдутся снова.
+        tree = ast.parse(_engine_source())
+        for fname in self.FUNCS:
+            node = _function_node(tree, fname)
+            self.assertNotIn(
+                "TRANSCRIBE_TIMEOUT_SEC", _attr_names(node),
+                f"{fname} читает settings.TRANSCRIBE_TIMEOUT_SEC напрямую — "
+                "обязана идти через stt_budget.resolve_attempt_timeout_sec",
+            )
+
+    def test_budget_helpers_are_wired_into_both_loops(self):
+        tree = ast.parse(_engine_source())
+        for fname in self.FUNCS:
+            attrs = _attr_names(_function_node(tree, fname))
+            self.assertIn("resolve_attempt_timeout_sec", attrs, fname)
+            self.assertIn("budget_exhausted", attrs, fname)
+            # Гейт блэклиста — напрямую или через хелпер engine.
+            self.assertTrue(
+                "timeout_blacklist_allowed" in attrs
+                or "_blacklist_allowed_for" in attrs,
+                f"{fname} не гейтит запись в _unavailable_models (§4.7)",
+            )
+
+    def test_adapter_branch_applies_min_budget_floor(self):
+        # Спека-тест 17 (§4.8): floor против осиротевшего GigaAM-subprocess.
+        node = _function_node(
+            ast.parse(_engine_source()), "_transcribe_with_fallback_impl"
+        )
+        self.assertIn("ADAPTER_MIN_BUDGET_SEC", _attr_names(node))
+
+    def test_budget_exhausted_error_code_registered(self):
+        from backend.error_codes import ERROR_REGISTRY
+        self.assertIn("stt.budget_exhausted", ERROR_REGISTRY)
+        self.assertEqual(
+            ERROR_REGISTRY["stt.budget_exhausted"]["severity"], "error"
+        )
+
+
+class MultipassBudgetBehaviorTests(unittest.TestCase):
+    """Спека-тесты 12/14 (поведение): фейковый каскад ретраев multipass."""
+
+    def _make_engine(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from core.engine import AudioEngine
+
+        eng = object.__new__(AudioEngine)
+        eng.current_model = "balanced-model"
+        eng._unavailable_models = {}
+        # Детерминируем читателей result: без внутренностей segments-логики.
+        eng._raw_confidence_from_result = (
+            lambda r: float(r.get("confidence") or 0.0)
+        )
+        calls: list[str] = []
+
+        def _fake_transcribe_model(audio, model, prompt, language=None):
+            calls.append(model)
+            return {"text": "retry-text", "confidence": 0.99}
+
+        eng._transcribe_model = _fake_transcribe_model
+        fake_settings = SimpleNamespace(
+            STT_MIN_CONFIDENCE_THRESHOLD=0.9,
+            STT_MAX_RETRIES=2,
+            model_max_list=["big-a", "big-b"],
+            NETWORK_MODE="offline_strict",
+        )
+        return eng, calls, fake_settings, patch
+
+    def test_multipass_retries_when_budget_alive(self):
+        eng, calls, fake_settings, patch = self._make_engine()
+        first = {"text": "низко", "confidence": 0.1, "model_used": "gigaam"}
+        with patch("core.engine.settings", fake_settings), patch(
+            "core.engine.should_skip_second_mlx_checkpoint",
+            return_value=False,
+        ):
+            with stt_budget.stt_budget_scope(
+                stt_budget.INTERACTIVE, deadline_sec=600.0
+            ):
+                result = eng._maybe_multipass_retry(None, "", "ru", first)
+        self.assertEqual(calls, ["big-a"])  # 0.99 >= 0.9 → break после первой
+        self.assertEqual(result["text"], "retry-text")
+
+    def test_multipass_skips_all_retries_when_deadline_exhausted(self):
+        # Спека-тест 12: счётчик попыток = 0, следующая модель не пробуется.
+        eng, calls, fake_settings, patch = self._make_engine()
+        first = {"text": "низко", "confidence": 0.1, "model_used": "gigaam"}
+        with patch("core.engine.settings", fake_settings), patch(
+            "core.engine.should_skip_second_mlx_checkpoint",
+            return_value=False,
+        ):
+            with stt_budget.stt_budget_scope(
+                stt_budget.INTERACTIVE, deadline_sec=0.0
+            ):
+                result = eng._maybe_multipass_retry(None, "", "ru", first)
+        self.assertEqual(calls, [])
+        self.assertEqual(result["text"], "низко")
+        # Спека-тест 14: прерывание по бюджету НЕ отравляет блэклист.
+        self.assertEqual(eng._unavailable_models, {})
 
 
 if __name__ == "__main__":

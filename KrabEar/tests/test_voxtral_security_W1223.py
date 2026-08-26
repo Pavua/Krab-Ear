@@ -23,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import core.engine as _engine_mod
+from core import stt_budget
 from core.engine import AudioEngine, _VOXTRAL_REPO_ALLOWLIST
 
 
@@ -218,11 +219,15 @@ class TestVoxtralAdapterBranchUsesTranscribeTimeout(unittest.TestCase):
             len(calls_with_timeout) > 0,
             "adapter_fn() was not wrapped with future.result(timeout=...) — F2 regression",
         )
-        # Timeout value should match TRANSCRIBE_TIMEOUT_SEC (30 from mock settings)
-        self.assertAlmostEqual(
+        # Спека 2026-08-26 (§4.8): контракт "== TRANSCRIBE_TIMEOUT_SEC=30" снят —
+        # adapter-таймаут теперь идёт через stt_budget.resolve_attempt_timeout_sec
+        # с floor'ом ADAPTER_MIN_BUDGET_SEC (внешний таймаут не смеет быть короче
+        # внутренних таймаутов GigaAM-subprocess). Проверяем floor, а не старую
+        # константу — settings.TRANSCRIBE_TIMEOUT_SEC в этой ветке больше не читается.
+        self.assertGreaterEqual(
             calls_with_timeout[0],
-            30,
-            msg="Timeout passed to future.result() should be TRANSCRIBE_TIMEOUT_SEC=30",
+            stt_budget.ADAPTER_MIN_BUDGET_SEC,
+            msg="Timeout passed to future.result() must respect ADAPTER_MIN_BUDGET_SEC floor (§4.8)",
         )
 
     @patch("core.engine.settings")

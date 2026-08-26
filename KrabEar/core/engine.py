@@ -40,6 +40,7 @@ from core.mlx_inter_lock import MLXInterLockTimeout, mlx_inter_process_lock  # n
 from core.mlx_subprocess import MLXTimeoutError, get_watchdog  # noqa: E402
 from core.mlx_memory_gate import should_skip_second_mlx_checkpoint  # noqa: E402
 from core.transcript_context import build_initial_prompt
+from core import stt_budget  # noqa: E402
 
 try:
     import soundfile as sf  # type: ignore
@@ -686,6 +687,20 @@ class AudioEngine:
             self._unavailable_models.pop(model_id, None)
             return False
         return True
+
+    def _blacklist_allowed_for(self, exc: BaseException) -> bool:
+        """§4.7 (спека 2026-08-26): можно ли писать модель в
+        _unavailable_models по этому исключению.
+
+        Таймаут из-за исчерпанного бюджета ЗАПРОСА не доказывает нездоровье
+        модели: попытке просто не досталось времени. Записать её в блэклист
+        (TTL 300 с) — значит увести следующую диктовку сразу в Remote STT и
+        выдать «Критическая ошибка» на здоровом стеке. Любое другое
+        исключение (MLX watchdog, крах воркера, OOM) блэклист заслуживает.
+        """
+        if not isinstance(exc, (TimeoutError, concurrent.futures.TimeoutError)):
+            return True
+        return stt_budget.timeout_blacklist_allowed()
 
     def _push_error(self, code: str, message_debug: str, severity: str | None = None) -> None:
         """Push KrabError to attached ErrorBus if available. Late-injected attribute.
@@ -1883,11 +1898,22 @@ class AudioEngine:
         best_result = first_result
         best_conf = first_conf
 
+        # Спека 2026-08-26: бюджет ретрая масштабируется от длительности.
+        _mp_duration_sec: float | None = None
+        if isinstance(audio_data, np.ndarray) and len(audio_data) > 0:
+            _mp_duration_sec = len(audio_data) / 16000.0
+
         retries_done = 0
         first_model = str(first_result.get("model_used") or getattr(self, "current_model", "") or "")
         skip_second_mlx = should_skip_second_mlx_checkpoint()
         for candidate in retry_candidates:
             if retries_done >= max_retries:
+                break
+            if stt_budget.budget_exhausted(stt_budget.MIN_USEFUL_ATTEMPT_SEC):
+                logger.warning(
+                    "[STT] multipass: бюджет запроса исчерпан — ретраи "
+                    "прерваны перед %s", candidate["name"],
+                )
                 break
 
             model_label = candidate["name"]
@@ -1920,7 +1946,11 @@ class AudioEngine:
                         future = _executor.submit(
                             self._transcribe_model, audio_data, model_label, prompt, language,
                         )
-                        attempt_result = future.result(timeout=settings.TRANSCRIBE_TIMEOUT_SEC)
+                        attempt_result = future.result(
+                            timeout=stt_budget.resolve_attempt_timeout_sec(
+                                _mp_duration_sec
+                            )
+                        )
                     except (concurrent.futures.TimeoutError, concurrent.futures.CancelledError):
                         _executor.shutdown(wait=False, cancel_futures=True)
                         raise
@@ -1961,7 +1991,8 @@ class AudioEngine:
                     "latency_ms": latency_ms,
                     "error": str(exc),
                 })
-                self._unavailable_models[model_label] = time.monotonic()
+                if self._blacklist_allowed_for(exc):
+                    self._unavailable_models[model_label] = time.monotonic()
 
             retries_done += 1
 
@@ -2335,6 +2366,27 @@ class AudioEngine:
             )
             chain_sample_rate = 16000
 
+        # Спека 2026-08-26: длительность считается по chain_audio_data (после
+        # ресемпла) — chunked-путь подаёт сюда уже нарезанный кусок и потому
+        # бесплатно получает бюджет на чанк, а не на весь файл.
+        _chain_duration_sec: float | None = None
+        if isinstance(chain_audio_data, np.ndarray):
+            _sr_for_dur = (
+                16000.0 if chain_sample_rate is None else float(chain_sample_rate)
+            )
+            if _sr_for_dur > 0 and len(chain_audio_data) > 0:
+                _chain_duration_sec = len(chain_audio_data) / _sr_for_dur
+        elif isinstance(chain_audio_data, (str, Path)) and os.path.exists(
+            str(chain_audio_data)
+        ):
+            try:
+                import soundfile as _sf_dur
+                _chain_duration_sec = float(
+                    _sf_dur.info(str(chain_audio_data)).duration
+                )
+            except Exception:
+                _chain_duration_sec = None
+
         candidates = [self.current_model]
         if self.quality_profile == "max":
             candidates = list(dict.fromkeys(settings.model_max_list))
@@ -2493,6 +2545,19 @@ class AudioEngine:
         _adapter_map = {marker: (span_pfx, model, fn) for marker, span_pfx, model, fn in _adapter_dispatch}
 
         for model_name in candidates:
+            if stt_budget.budget_exhausted(stt_budget.MIN_USEFUL_ATTEMPT_SEC):
+                logger.warning(
+                    "STT: бюджет запроса исчерпан — каскад прерван перед %s",
+                    model_name,
+                )
+                self._push_error(
+                    "stt.budget_exhausted",
+                    f"budget exhausted before {model_name} "
+                    f"(duration={_chain_duration_sec}, "
+                    f"profile={stt_budget.current_profile()})",
+                    severity="error",
+                )
+                break
             # Adapter ветки (не whisper).
             if model_name in _adapter_map:
                 span_pfx, adapter_model, adapter_fn = _adapter_map[model_name]
@@ -2500,7 +2565,14 @@ class AudioEngine:
                     span_name = f"{span_pfx}_{_short_model_name(adapter_model)}"
                     # W1219 F2: guard adapter calls with same timeout used for Whisper
                     # branches — prevents GPU stall from blocking IPC indefinitely.
-                    _adapter_timeout = getattr(settings, "TRANSCRIBE_TIMEOUT_SEC", 120)
+                    # §4.8: floor поверх бюджета — внешний таймаут не смеет
+                    # быть короче внутренних таймаутов GigaAM-subprocess
+                    # (120s shortform / 180s load), иначе брошенный
+                    # subprocess осиротеет с моделью на GPU.
+                    _adapter_timeout = max(
+                        stt_budget.resolve_attempt_timeout_sec(_chain_duration_sec),
+                        stt_budget.ADAPTER_MIN_BUDGET_SEC,
+                    )
                     with _profiler.start_span(span_name):
                         _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
                         try:
@@ -2548,7 +2620,8 @@ class AudioEngine:
                     return adapter_result
                 except Exception as exc:
                     logger.warning("%s adapter не сработал: %s — продолжаю chain", span_pfx, exc)
-                    self._unavailable_models[model_name] = time.monotonic()
+                    if self._blacklist_allowed_for(exc):
+                        self._unavailable_models[model_name] = time.monotonic()
                     continue
 
             if self._is_model_unavailable(model_name):
@@ -2565,7 +2638,7 @@ class AudioEngine:
                     continue
 
             try:
-                timeout = settings.TRANSCRIBE_TIMEOUT_SEC
+                timeout = stt_budget.resolve_attempt_timeout_sec(_chain_duration_sec)
                 span_name = f"stt_model_{_short_model_name(model_name)}"
                 with _profiler.start_span(span_name):
                     _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
@@ -2589,11 +2662,14 @@ class AudioEngine:
                 result["model_used"] = model_name
                 return result
             except concurrent.futures.TimeoutError:
+                # Лог обязан называть СРАБОТАВШЕЕ число, не глобальную
+                # константу — иначе следующий разбор идёт по ложному следу.
                 logger.error(
-                    "Таймаут %ds при транскрибации моделью %s — пропускаю",
-                    settings.TRANSCRIBE_TIMEOUT_SEC, model_name,
+                    "Таймаут %.0fs (профиль %s) при транскрибации моделью %s — пропускаю",
+                    timeout, stt_budget.current_profile(), model_name,
                 )
-                self._unavailable_models[model_name] = time.monotonic()
+                if stt_budget.timeout_blacklist_allowed():
+                    self._unavailable_models[model_name] = time.monotonic()
             except MLXTimeoutError as e:
                 # Watchdog-таймаут: Metal GPU завис.
                 # Помечаем модель недоступной → fallback на следующий адаптер.

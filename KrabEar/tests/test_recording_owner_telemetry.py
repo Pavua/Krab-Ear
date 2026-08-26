@@ -476,7 +476,7 @@ class RecordingOwnerConfigurationContractTest(unittest.TestCase):
         # добавлен в реестр — 68 записей.
         # 2026-08-07: system.unclean_restart (вердикт shutdown_forensics теперь
         # доходит до ErrorBus/Sentry, а не выбрасывается) — 69 записей.
-        self.assertEqual(len(ERROR_REGISTRY), 69)
+        self.assertEqual(len(ERROR_REGISTRY), 70)
 
     def test_backend_service_wires_error_bus_into_recording_core(self) -> None:
         source = (
