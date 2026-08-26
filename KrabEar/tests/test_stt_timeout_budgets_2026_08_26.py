@@ -280,6 +280,74 @@ def _function_node(tree: ast.Module, name: str) -> ast.FunctionDef:
     raise AssertionError(f"функция {name} не найдена в engine.py")
 
 
+def _is_stt_budget_scope_call(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "stt_budget_scope"
+    )
+
+
+def _profile_from_scope_call(call: ast.Call) -> str | None:
+    if not call.args:
+        return None
+    arg = call.args[0]
+    if (
+        isinstance(arg, ast.Attribute)
+        and isinstance(arg.value, ast.Name)
+        and arg.value.id == "stt_budget"
+        and arg.attr in ("BATCH", "INTERACTIVE")
+    ):
+        return getattr(stt_budget, arg.attr)
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        return arg.value
+    return None
+
+
+def _body_contains_transcribe_call(body: list[ast.stmt]) -> bool:
+    for node in ast.walk(ast.Module(body=body, type_ignores=[])):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "transcribe"
+        ):
+            return True
+    return False
+
+
+def assert_stt_budget_scope_wraps_transcribe(
+    rel_path: str,
+    func_name: str,
+    expected_profile: str,
+) -> None:
+    """AST-контракт §5: stt_budget_scope непосредственно оборачивает transcribe.
+
+    Проверяет три условия одновременно:
+    1. в теле функции есть ``with``, чей менеджер — вызов ``stt_budget_scope``;
+    2. внутри тела этого ``with`` есть вызов ``.transcribe(...)``;
+    3. первый аргумент ``stt_budget_scope`` — ожидаемый профиль.
+    """
+    src = (PROJECT_ROOT / rel_path).read_text(encoding="utf-8")
+    func_node = _function_node(ast.parse(src), func_name)
+    for stmt in ast.walk(func_node):
+        if not isinstance(stmt, ast.With):
+            continue
+        if not stmt.items:
+            continue
+        ctx = stmt.items[0].context_expr
+        if not _is_stt_budget_scope_call(ctx):
+            continue
+        profile = _profile_from_scope_call(ctx)
+        if profile != expected_profile:
+            continue
+        if _body_contains_transcribe_call(stmt.body):
+            return
+    raise AssertionError(
+        f"{rel_path}::{func_name} обязана открывать stt_budget_scope({expected_profile!r}) "
+        f"с вызовом transcribe внутри тела with"
+    )
+
+
 def _attr_names(node: ast.AST) -> list[str]:
     return [n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)]
 
@@ -563,20 +631,18 @@ class BlacklistGateLiveAttemptTests(unittest.TestCase):
 class ScopeWiringRemainingPathsTests(unittest.TestCase):
     """§10.11: каждая точка §5 обёрнута в scope — bulk_reprocess, live_subs."""
 
-    def _assert_scope_in(self, rel_path: str, func_name: str) -> None:
-        src = (PROJECT_ROOT / rel_path).read_text(encoding="utf-8")
-        node = _function_node(ast.parse(src), func_name)
-        self.assertIn(
-            "stt_budget_scope", _attr_names(node),
-            f"{rel_path}::{func_name} обязана открывать stt_budget_scope",
+    def test_bulk_reprocess_opens_batch_scope(self):
+        assert_stt_budget_scope_wraps_transcribe(
+            "backend/bulk_reprocess.py",
+            "_run_locked",
+            stt_budget.BATCH,
         )
 
-    def test_bulk_reprocess_opens_batch_scope(self):
-        self._assert_scope_in("backend/bulk_reprocess.py", "_run_locked")
-
     def test_live_subs_opens_interactive_scope(self):
-        self._assert_scope_in(
-            "backend/live_subs_service.py", "_process_window"
+        assert_stt_budget_scope_wraps_transcribe(
+            "backend/live_subs_service.py",
+            "_process_window",
+            stt_budget.INTERACTIVE,
         )
 
 

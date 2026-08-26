@@ -420,10 +420,12 @@ class BulkReprocessor:
                     and len(audio_data) > 0
                     else None
                 )
-                with stt_budget.stt_budget_scope(
-                    stt_budget.BATCH, audio_duration_sec=_dur_sec
-                ):
-                    with mlx_inter_process_lock(), mlx_lock():  # W1635: cross-process flock + intra-process RLock
+                # Ожидание в очереди на GPU-локи — не работа STT; бюджет ограничивает
+                # удержание ресурса (инференс под локом), а не время до захвата.
+                with mlx_inter_process_lock(), mlx_lock():  # W1635: cross-process flock + intra-process RLock
+                    with stt_budget.stt_budget_scope(
+                        stt_budget.BATCH, audio_duration_sec=_dur_sec
+                    ):
                         result = self.transcriber.transcribe(
                             audio_data,
                             quality_profile="balanced",
