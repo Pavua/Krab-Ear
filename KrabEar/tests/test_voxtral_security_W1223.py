@@ -23,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import core.engine as _engine_mod
+from core import stt_budget
 from core.engine import AudioEngine, _VOXTRAL_REPO_ALLOWLIST
 
 
@@ -218,11 +219,24 @@ class TestVoxtralAdapterBranchUsesTranscribeTimeout(unittest.TestCase):
             len(calls_with_timeout) > 0,
             "adapter_fn() was not wrapped with future.result(timeout=...) — F2 regression",
         )
-        # Timeout value should match TRANSCRIBE_TIMEOUT_SEC (30 from mock settings)
-        self.assertAlmostEqual(
+        # Спека 2026-08-26 (§4.8): контракт "== TRANSCRIBE_TIMEOUT_SEC=30" снят —
+        # adapter-таймаут теперь идёт через stt_budget.resolve_attempt_timeout_sec
+        # с floor'ом ADAPTER_MIN_BUDGET_SEC (внешний таймаут не смеет быть короче
+        # внутренних таймаутов GigaAM-subprocess). Проверяем floor, а не старую
+        # константу — settings.TRANSCRIBE_TIMEOUT_SEC в этой ветке больше не читается.
+        # Fix-раунд 1: значение детерминировано и точно, а не просто "не меньше
+        # floor'а" — в этом тесте нет открытого budget-scope (remaining_sec()
+        # is None), поэтому дедлайн запроса не режет floor сверху: 90 (overhead) +
+        # 3600×3 (interactive factor на unknown-duration → cap) даёт ровно потолок
+        # interactive-профиля 1800.0, что и остаётся итоговым таймаутом adapter'а.
+        self.assertEqual(
             calls_with_timeout[0],
-            30,
-            msg="Timeout passed to future.result() should be TRANSCRIBE_TIMEOUT_SEC=30",
+            1800.0,
+            msg=(
+                "Без открытого budget-scope adapter-таймаут обязан быть ровно "
+                "потолком interactive-профиля (1800.0), floor ADAPTER_MIN_BUDGET_SEC "
+                "здесь ничего не поднимает — он уже ниже потолка (§4.8)"
+            ),
         )
 
     @patch("core.engine.settings")

@@ -30,6 +30,7 @@ from werkzeug.utils import secure_filename
 
 from core.config import settings
 from core.engine import AudioEngine
+from core import stt_budget
 # M1: event_bus/sse_stream/metrics (below) are read exclusively through
 # _deps() (deps.event_bus / deps.sse_stream / deps.metrics) — the bare names
 # stay live module attributes for _ModuleGlobalsDeps.__getattr__ to resolve.
@@ -585,8 +586,17 @@ _MAX_AUDIO_DURATION_SEC = 3600  # 1 hour
 # Wall-clock timeout for a single transcription call at the REST layer.
 _TRANSCRIBE_TIMEOUT_SEC = 600  # 10 minutes
 # W2c: optional per-request override via form-field deadline_sec (VG budget).
-# Отсутствует → 600. Мусор / ≤0 / >120 → 400. (0, 5) → clamp к 5.
-_DEADLINE_SEC_MIN = 5.0
+# Отсутствует → 600. Мусор / ≤0 / >120 → 400. (0, _DEADLINE_SEC_MIN) → clamp вверх.
+#
+# 🔴 Находка 3 (финальный гейт волны 2026-08-26): нижняя граница НЕ смеет
+# совпадать с stt_budget.MIN_USEFUL_ATTEMPT_SEC — deadline_sec становится
+# полным дедлайном запроса (stt_budget_scope(deadline_sec=...)), и к моменту
+# первой проверки budget_exhausted() в каскаде (после открытия scope, чтения
+# настроек, резолва пути) остаток уже < MIN_USEFUL_ATTEMPT_SEC. Легальное
+# входное значение приводило к нулю попыток распознавания — контракт
+# принимал число, которое не могло отработать никогда. Запас ×2 берётся от
+# ЕДИНСТВЕННОГО источника истины (stt_budget), а не новой магической константой.
+_DEADLINE_SEC_MIN = stt_budget.MIN_USEFUL_ATTEMPT_SEC * 2  # 10.0
 _DEADLINE_SEC_MAX = 120.0
 
 
@@ -1777,8 +1787,24 @@ def transcribe_audio():
         )
         _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         _pool_shutdown_nonblocking = False
+        # Спека 2026-08-26 §4.1/§6: scope открывается ВНУТРИ worker-треда
+        # (call_in_scope) — ContextVar не наследуется тредом пула. Снапшот
+        # настроек берётся здесь: engine в REST-процессе создан без
+        # settings_get и сам настройки прочитать не может (§4.2).
         try:
-            _future = _pool.submit(deps.transcriber.transcribe, _transcribe_path, **_transcribe_kwargs)
+            _budget_settings_snapshot = deps.store.load_settings(nowait=True)
+        except Exception:
+            _budget_settings_snapshot = None
+        try:
+            _future = _pool.submit(
+                stt_budget.call_in_scope,
+                deps.transcriber.transcribe,
+                _transcribe_path,
+                profile=stt_budget.INTERACTIVE,
+                deadline_sec=_transcribe_timeout_sec,
+                settings_snapshot=_budget_settings_snapshot,
+                **_transcribe_kwargs,
+            )
             try:
                 result = _future.result(timeout=_transcribe_timeout_sec)
             except concurrent.futures.TimeoutError:

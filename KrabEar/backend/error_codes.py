@@ -704,6 +704,20 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "dedupe_seconds": 10,
     },
 
+    # stt.budget_exhausted — спека 2026-08-26 stt-timeout-budgets: каскад STT
+    # прерван по исчерпанию бюджета ЗАПРОСА (профиль interactive/batch,
+    # масштабируется от длительности аудио). Отличает «запросу не хватило
+    # времени» от «модель нездорова» (stt.mlx_timeout / stt.load_fail);
+    # модель при этом коде в _unavailable_models НЕ попадает.
+    "stt.budget_exhausted": {
+        "user_msg_ru": "STT: распознавание не уложилось в бюджет времени",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "error",
+        "dedupe_seconds": 30,
+    },
+
     # ipc.audio_device_poll_flood — list_audio_inputs / get_audio_devices called
     # more than 10 times per second. Indicates a polling loop bug in Swift UI
     # (e.g. audio device picker refreshing on every keystroke). Breadcrumb only —

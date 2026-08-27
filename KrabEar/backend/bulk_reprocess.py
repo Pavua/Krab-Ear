@@ -26,6 +26,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
+from core import stt_budget
+
 if TYPE_CHECKING:
     from backend.state_store import StateStore
     from backend.transcriber import Transcriber
@@ -408,13 +410,28 @@ class BulkReprocessor:
                 # W1635: also acquire mlx_inter_process_lock for cross-process safety.
                 from core.mlx_lock import mlx_lock
                 from core.mlx_inter_lock import mlx_inter_process_lock
+                import numpy as _np_budget
+                # Спека 2026-08-26 §5: bulk-reprocess → batch-бюджет.
+                # settings_get=None → дефолты модуля (у reprocessor'а нет
+                # settings-коллаборатора; batch-дефолты достаточны).
+                _dur_sec = (
+                    len(audio_data) / 16000.0
+                    if isinstance(audio_data, _np_budget.ndarray)
+                    and len(audio_data) > 0
+                    else None
+                )
+                # Ожидание в очереди на GPU-локи — не работа STT; бюджет ограничивает
+                # удержание ресурса (инференс под локом), а не время до захвата.
                 with mlx_inter_process_lock(), mlx_lock():  # W1635: cross-process flock + intra-process RLock
-                    result = self.transcriber.transcribe(
-                        audio_data,
-                        quality_profile="balanced",
-                        cleanup_profile="soft",
-                        lang_hint=item.source_lang or None,
-                    )
+                    with stt_budget.stt_budget_scope(
+                        stt_budget.BATCH, audio_duration_sec=_dur_sec
+                    ):
+                        result = self.transcriber.transcribe(
+                            audio_data,
+                            quality_profile="balanced",
+                            cleanup_profile="soft",
+                            lang_hint=item.source_lang or None,
+                        )
                 new_text = str(result.get("text") or "").strip()
                 new_confidence = float(result.get("confidence") or 0.0)
 
