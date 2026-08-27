@@ -34,6 +34,14 @@ class _FakeStream:
         self._stop_event = stop_event
         self.reads = 0
 
+    @property
+    def read_available(self) -> int:
+        # Guarded read (спека 2026-08-23) не зовёт read(), пока кадров нет:
+        # отсутствие атрибута трактуется как голодание (fail-open запрещён —
+        # он вернул бы неубиваемый блокирующий Pa_ReadStream). Заготовленные
+        # чанки «всегда доступны», поэтому отдаём заведомо достаточное число.
+        return 1 << 20
+
     def __enter__(self):
         return self
 
@@ -322,6 +330,11 @@ class MaintenanceGuardTests(unittest.TestCase):
 class _RaisingStream:
     """Контекст-менеджер, падающий на входе — синхронная ошибка открытия
     микрофона (класс circuit breaker'а, KRAB-EAR-BACKEND-1J)."""
+
+    @property
+    def read_available(self) -> int:
+        # см. _FakeStream.read_available
+        return 1 << 20
 
     def __enter__(self):
         raise RuntimeError("mic busy")

@@ -476,7 +476,11 @@ class RecordingOwnerConfigurationContractTest(unittest.TestCase):
         # добавлен в реестр — 68 записей.
         # 2026-08-07: system.unclean_restart (вердикт shutdown_forensics теперь
         # доходит до ErrorBus/Sentry, а не выбрасывается) — 69 записей.
-        self.assertEqual(len(ERROR_REGISTRY), 70)
+        # 2026-08-23: audio.capture_starved (guarded read — микрофонный поток
+        # перестал отдавать кадры) — 70 записей.
+        # 2026-08-26: stt.budget_exhausted (раздельные бюджеты STT — каскад
+        # прерван по исчерпанию бюджета запроса) — 71 запись.
+        self.assertEqual(len(ERROR_REGISTRY), 71)
 
     def test_backend_service_wires_error_bus_into_recording_core(self) -> None:
         source = (

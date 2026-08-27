@@ -124,6 +124,9 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             # recorder.py:257 but was absent from ERROR_REGISTRY causing silent
             # empty-user_msg_ru toast.
             "audio.max_duration_reached",
+            # Guarded read (спека 2026-08-23): микрофонный поток перестал
+            # отдавать кадры — запись финализируется, а не висит до таймаута.
+            "audio.capture_starved",
             # Added W1759 merge-train — history.purge_incomplete: partial purge
             # operation left orphan records; dedicated code for observability.
             "history.purge_incomplete",
@@ -275,4 +278,4 @@ class ErrorRegistryShapeTests(unittest.TestCase):
         test_expected_codes_present guards the exact set so this count test is a
         redundant but cheap invariant.
         """
-        self.assertEqual(len(ERROR_REGISTRY), 70)
+        self.assertEqual(len(ERROR_REGISTRY), 71)

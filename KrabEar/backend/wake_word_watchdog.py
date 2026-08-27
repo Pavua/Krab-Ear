@@ -37,6 +37,12 @@ _CHECK_INTERVAL_SEC_DEFAULT = 5.0
 # тоже учитываются в окне (каждый стоит stop-join и зомби-тред).
 _HEAL_STORM_WINDOW_SEC = 600.0
 _HEAL_STORM_MAX = 3
+# Сколько подряд выходов цикла по голоданию стрима (без единого живого кадра
+# между ними) считаем неизлечимым клином. Таймлайн при поллере 10с: выходы на
+# ~t+3/+16/+29с → эскалация за 30-40с, сопоставимо со stale_sec=30 для обычной
+# staleness. 🔴 Критерий ИМЕННО счётчик, а не собственный таймер: два критерия
+# и два писателя wedged разъехались бы при первой же правке констант.
+_MAX_STARVE_EXITS = 3
 
 
 class WakeWordWatchdog:
@@ -217,6 +223,19 @@ class WakeWordWatchdog:
                 # молча простаивала — ровно то, против чего 2026-08-09 вводился
                 # DEFERRED_WORKER_HUNG.
                 return self._handle_blocked_start()
+            # Голодание стрима: сессии нет не из-за паузы, а потому что
+            # PortAudio-стрим не отдавал кадры и цикл вышел сам (guarded read,
+            # спека 2026-08-23). Без этой ветки причина попадала бы в «чистую
+            # паузу» ниже, эпизод сбрасывался бы каждый тик, и wedged был бы
+            # недостижим — подсистема молчала бы вечно.
+            if not self._recording_active():
+                try:
+                    hb_starve = self._adapter.heartbeat() or {}
+                except Exception:
+                    hb_starve = {}
+                if hb_starve.get("starvation_active"):
+                    return self._handle_starved_stream(hb_starve)
+
             # Чистая пауза (recording/conversation/TTS/privacy): Swift снял
             # слушатель через stop(). Эпизод и аномалия сбрасываются.
             with self._lock:
@@ -322,6 +341,37 @@ class WakeWordWatchdog:
         if elapsed < self._stale_sec():
             return None
         self._escalate(elapsed, "blocked_start_worker_hung")
+        return "escalated"
+
+    def _handle_starved_stream(self, heartbeat: dict[str, Any]) -> str | None:
+        """Стрим не отдаёт кадры: ведём аномалию и эскалируем ПО СЧЁТЧИКУ.
+
+        Мягкое лечение здесь не пробуем: перезапуск сессии — домен
+        поллер-self-heal'а, он и так ретраит каждые ~10 с. Наша задача —
+        не дать причине раствориться в «чистой паузе» и довести неизлечимый
+        случай до wedged, где его подхватит агент.
+
+        🔴 Порог — число подряд-выходов без живого кадра, а не время: адаптер
+        уже считает его сам, а второй (временной) критерий сделал бы двух
+        писателей одного side-effect с разъезжающимися порогами.
+        """
+        now = self._clock()
+        streak = 0
+        try:
+            streak = int(heartbeat.get("consecutive_starve_exits") or 0)
+        except (TypeError, ValueError):
+            streak = 0
+
+        with self._lock:
+            if self._escalated_this_episode:
+                return None
+            if self._anomaly_since is None:
+                self._anomaly_since = now
+            elapsed = now - self._anomaly_since
+
+        if streak < _MAX_STARVE_EXITS:
+            return None
+        self._escalate(elapsed, f"starved_stream:{streak}")
         return "escalated"
 
     def _handle_dead_session(self) -> str | None:

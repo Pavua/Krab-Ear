@@ -43,18 +43,34 @@ def _make_stream_cm(chunk_size: int = 1600, chunks_to_emit: int = 3) -> MagicMoc
     The stream emits *chunks_to_emit* chunks of ones, then blocks until
     the stop_event fires (simulated by raising StopIteration after limit).
     """
-    stream = MagicMock()
-
     call_count = {"n": 0}
+    # Guarded read (спека 2026-08-23) опрашивает read_available ДО read() и
+    # требует настоящий int >= chunk_size, иначе воркер решит, что поток
+    # мёртв, и не прочитает вообще. Дренаж излишка (спека 2026-08-13)
+    # проверяет ТО ЖЕ поле СРАЗУ ПОСЛЕ read() — если оставить его статичным
+    # ненулевым, каждый цикл получал бы фантомный второй read() и лишний
+    # np.concatenate, которого этот фейк не подразумевает. Поэтому значение
+    # одноразово переключается: полный чанк готов до read(), 0 — сразу после.
+    just_read = {"v": False}
 
     def _read(n: int) -> tuple[np.ndarray, bool]:
         call_count["n"] += 1
+        just_read["v"] = True
         # After we've emitted enough chunks, block briefly so the worker
         # loop keeps running until stop_event is set.
         if call_count["n"] > chunks_to_emit:
             time.sleep(0.005)
         return (np.ones((n, 1), dtype=np.float32) * 0.5, False)
 
+    def _read_available(_self: MagicMock) -> int:
+        if just_read["v"]:
+            just_read["v"] = False
+            return 0
+        return chunk_size
+
+    _StreamCls = type("_GuardableStream", (MagicMock,), {})
+    _StreamCls.read_available = property(_read_available)
+    stream = _StreamCls()
     stream.read.side_effect = _read
     cm = MagicMock()
     cm.__enter__ = MagicMock(return_value=stream)
@@ -186,6 +202,12 @@ class TestCaptureThreadLifecycle(unittest.TestCase):
 
         stream = MagicMock()
         stream.read.side_effect = _blocking_read
+        # Guarded read (спека 2026-08-23) опрашивает read_available ДО read();
+        # без настоящего int воркер решил бы, что поток голодает, и не дошёл
+        # бы до блокирующего read() вообще — тест ждал бы entered_read вечно.
+        # Тут не важно, что дренаж после read() тоже включится (нет ассерта
+        # на concatenate/число вызовов) — статичного значения достаточно.
+        stream.read_available = 1600
         stream_cm = MagicMock()
         stream_cm.__enter__ = MagicMock(return_value=stream)
         stream_cm.__exit__ = MagicMock(return_value=False)
@@ -324,13 +346,29 @@ class TestCaptureThreadLifecycle(unittest.TestCase):
         """Разблокированный после abort() read не создаёт pending_result."""
         entered = threading.Event()
         release = threading.Event()
-        stream = MagicMock()
+        chunk_size = 1600  # AudioRecorder(max_recording_samples=1) → sample_rate 16000 по умолчанию
+        # Одноразовое переключение read_available (см. _make_stream_cm выше):
+        # настоящий int ДО read() пускает guard к блокирующему вызову — иначе
+        # тест не дождался бы entered; 0 СРАЗУ ПОСЛЕ read() держит дренаж
+        # выключенным, потому что concatenate.assert_not_called() ниже
+        # проверяет именно отсутствие склейки второго чанка.
+        just_read = {"v": False}
 
         def _blocking_read(n: int) -> tuple[np.ndarray, bool]:
             entered.set()
             release.wait(timeout=2.0)
+            just_read["v"] = True
             return np.ones((n, 1), dtype=np.float32), False
 
+        def _read_available(_self: MagicMock) -> int:
+            if just_read["v"]:
+                just_read["v"] = False
+                return 0
+            return chunk_size
+
+        _StreamCls = type("_OneShotBlockingStream", (MagicMock,), {})
+        _StreamCls.read_available = property(_read_available)
+        stream = _StreamCls()
         stream.read.side_effect = _blocking_read
         stream_cm = MagicMock()
         stream_cm.__enter__ = MagicMock(return_value=stream)
@@ -392,15 +430,31 @@ class TestHandlesDeviceUnavailable(unittest.TestCase):
 class TestHandlesDeviceDisconnectMidRecording(unittest.TestCase):
     def test_handles_device_disconnect_mid_recording(self) -> None:
         """OSError raised by stream.read mid-recording resets is_recording cleanly."""
-        stream = MagicMock()
+        chunk_size = 1600  # AudioRecorder() по умолчанию: sample_rate=16000
         call_count = {"n": 0}
+        # Одноразовое переключение read_available (см. _make_stream_cm выше):
+        # без настоящего int guard решил бы, что поток голодает, и «третье
+        # чтение» (диагностика теста) не наступило бы за отведённые 0.1с сна.
+        # 0 сразу после read() держит дренаж выключенным, чтобы call_count
+        # считал именно читаемые тестом «логические» чтения, а не удвоенные.
+        just_read = {"v": False}
 
         def _read(n: int) -> tuple[np.ndarray, bool]:
             call_count["n"] += 1
+            just_read["v"] = True
             if call_count["n"] >= 3:
                 raise OSError("Device disconnected")
             return (np.ones((n, 1), dtype=np.float32), False)
 
+        def _read_available(_self: MagicMock) -> int:
+            if just_read["v"]:
+                just_read["v"] = False
+                return 0
+            return chunk_size
+
+        _StreamCls = type("_OneShotDisconnectStream", (MagicMock,), {})
+        _StreamCls.read_available = property(_read_available)
+        stream = _StreamCls()
         stream.read.side_effect = _read
         cm = MagicMock()
         cm.__enter__ = MagicMock(return_value=stream)
@@ -528,15 +582,30 @@ def _make_overflow_stream_cm(chunk_size: int = 1600, overflow_at: frozenset = fr
     крутится настолько быстро, что sleep()-окно теста не успевает накопить
     нужное число вызовов до stop().
     """
-    stream = MagicMock()
     call_count = {"n": 0}
+    # Одноразовое переключение read_available (см. _make_stream_cm выше):
+    # guard требует настоящий int ДО read(), дренаж после read() требует
+    # НЕ настоящего/нулевого — иначе overflow_at считал бы вперемешку
+    # основные и дренажные чтения, а тест проверяет overflow_count по
+    # ЛОГИЧЕСКИМ циклам воркера (1 инкремент = 1 итерация с overflowed=True).
+    just_read = {"v": False}
 
     def _read(n: int) -> tuple[np.ndarray, bool]:
         call_count["n"] += 1
+        just_read["v"] = True
         time.sleep(0.004)
         overflowed = call_count["n"] in overflow_at
         return (np.ones((n, 1), dtype=np.float32) * 0.5, overflowed)
 
+    def _read_available(_self: MagicMock) -> int:
+        if just_read["v"]:
+            just_read["v"] = False
+            return 0
+        return chunk_size
+
+    _StreamCls = type("_GuardableOverflowStream", (MagicMock,), {})
+    _StreamCls.read_available = property(_read_available)
+    stream = _StreamCls()
     stream.read.side_effect = _read
     cm = MagicMock()
     cm.__enter__ = MagicMock(return_value=stream)

@@ -75,6 +75,13 @@ _ENUM_FIELDS: dict[str, tuple[str, ...]] = {
 
 # Диапазоны числовых полей: ключ → (min, max, default, type)
 _RANGE_FIELDS: dict[str, tuple[Any, Any, Any, type]] = {
+    # Guarded read (спека 2026-08-23). 🔴 poll: Event.wait(timeout<=0) даёт
+    # CPU-spin (класс wave-34), поэтому низ строго положительный; верх — чтобы
+    # редкий опрос не съел отзывчивость на stop_event. starve: низ выше
+    # измеренного прогрева стрима (~0.2с) с запасом, верх — чтобы «детектор»
+    # не превратился в вечное ожидание.
+    "audio_read_poll_sec": (0.005, 0.5, 0.05, float),
+    "audio_stream_starve_sec": (1.0, 60.0, 3.0, float),
     # Memory Conductor: пороги лестницы выгрузки (спека v2.1 §5).
     "gigaam_idle_unload_sec": (60.0, 86400.0, 600.0, float),
     "whisper_idle_unload_sec": (60.0, 86400.0, 900.0, float),

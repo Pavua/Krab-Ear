@@ -22,6 +22,13 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from core.audio_stream_guard import (  # noqa: E402
+    DEFAULT_POLL_SEC,
+    DEFAULT_STARVE_SEC,
+    StreamStarved,
+    wait_for_frames,
+)
+
 logger = logging.getLogger("KrabEar.Backend.OpenWakeWordAdapter")
 
 # 🔴 Swift сравнивает reason ТОЧНОЙ строкой (WakeWordPoller.recordingInProgressReason),
@@ -125,6 +132,14 @@ class OpenWakeWordAdapter:
         # KRAB-EAR-BACKEND-1J: circuit breaker state for repeated immediate
         # sd.InputStream() open failures — protected by self._lock.
         self._consecutive_stream_failures: int = 0
+        # Guarded read (спека 2026-08-23 §4.3). 🔴 Жизненный цикл задан явно:
+        # поля ПЕРЕЖИВАЮТ _cleanup_session_after_loop_exit (иначе причина
+        # выхода умрёт вместе с сессией и watchdog примет мёртвый стрим за
+        # «чистую паузу»), но НЕ переживают публичный stop() (иначе
+        # выключенный владельцем слушатель дозреет до wedged и получит
+        # рестарт backend на пустом месте).
+        self._starved_since: float | None = None
+        self._consecutive_starve_exits: int = 0
         self._stream_failure_cooldown_until: float = 0.0
 
     # ------------------------------------------------------------------
@@ -285,6 +300,11 @@ class OpenWakeWordAdapter:
             # watchdog по свежему чанку или start() новой сессии.
             self._last_chunk_ts = None
             self._listen_started_ts = None
+            # 🔴 Симметрично _last_detection: остановка ПО ПРОСЬБЕ владельца
+            # (privacy, выключение фичи, пауза поллера) закрывает и лестницу
+            # голодания — иначе застывший флаг эскалирует выключённую фичу.
+            self._starved_since = None
+            self._consecutive_starve_exits = 0
             thread = self._thread
             # Сессионные поля чистим ВСЕГДА, включая мёртвый/отсутствующий
             # тред: тред мог умереть сам (exception-путь _listen_loop не
@@ -377,6 +397,10 @@ class OpenWakeWordAdapter:
             return {
                 "last_chunk_ts": self._last_chunk_ts,
                 "listen_started_ts": self._listen_started_ts,
+                # Голодание — НЕ «чистая пауза»: watchdog обязан различать
+                # (иначе эпизод сбрасывается и wedged недостижим).
+                "starvation_active": self._starved_since is not None,
+                "consecutive_starve_exits": self._consecutive_starve_exits,
             }
 
     def set_wedged(self, value: bool) -> None:
@@ -418,6 +442,27 @@ class OpenWakeWordAdapter:
                 "score": float(score),
                 "ts": time.monotonic(),
             }
+
+    def _guarded_read_enabled(self) -> bool:
+        """Killswitch guarded read (спека §9): False → прежний блокирующий путь."""
+        try:
+            return bool(self._settings_get("audio_guarded_read_enabled", True))
+        except Exception:
+            return True
+
+    def _read_poll_sec(self) -> float:
+        try:
+            return float(self._settings_get("audio_read_poll_sec", DEFAULT_POLL_SEC))
+        except Exception:
+            return DEFAULT_POLL_SEC
+
+    def _stream_starve_sec(self) -> float:
+        try:
+            return float(
+                self._settings_get("audio_stream_starve_sec", DEFAULT_STARVE_SEC)
+            )
+        except Exception:
+            return DEFAULT_STARVE_SEC
 
     def _privacy_blocked(self) -> bool:
         """True если privacy mode включён — держать микрофон wake word нельзя.
@@ -807,6 +852,40 @@ class OpenWakeWordAdapter:
                             "слушатель остановлен"
                         )
                         break
+                    if self._guarded_read_enabled():
+                        try:
+                            if not wait_for_frames(
+                                stream,
+                                chunk_size,
+                                stop_event=self._stop_event,
+                                poll_sec=self._read_poll_sec(),
+                                starve_sec=self._stream_starve_sec(),
+                                is_recording=self._is_recording,
+                            ):
+                                break  # попросили остановиться
+                            # Кадры пришли → стрим жив. Лестницу голодания
+                            # закрываем ЗДЕСЬ, а не по ненулевому чанку:
+                            # абсолютная тишина (все нули) — валидное аудио,
+                            # и привязка сброса к flat.any() оставила бы
+                            # starvation_active висеть на работающем стриме.
+                            with self._lock:
+                                if self._starved_since is not None or self._consecutive_starve_exits:
+                                    self._starved_since = None
+                                    self._consecutive_starve_exits = 0
+                        except StreamStarved as exc:
+                            # Тред НЕ лечит себя сам: перезапуск сессии —
+                            # домен поллера/координатора, wedged — домен
+                            # watchdog'а. Наше дело — выйти и оставить след.
+                            with self._lock:
+                                self._starved_since = time.monotonic()
+                                self._consecutive_starve_exits += 1
+                                streak = self._consecutive_starve_exits
+                            logger.warning(
+                                "OpenWakeWordAdapter: стрим не отдаёт кадры (%s); "
+                                "выходим из цикла, подряд голоданий=%d",
+                                exc, streak,
+                            )
+                            break
                     audio_chunk, _ = stream.read(chunk_size)
                     # openwakeword.Model.predict() требует numpy.ndarray —
                     # НЕ list (см. KRAB-EAR-BACKEND-1C/1D). sounddevice уже
