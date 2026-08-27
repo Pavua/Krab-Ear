@@ -586,8 +586,17 @@ _MAX_AUDIO_DURATION_SEC = 3600  # 1 hour
 # Wall-clock timeout for a single transcription call at the REST layer.
 _TRANSCRIBE_TIMEOUT_SEC = 600  # 10 minutes
 # W2c: optional per-request override via form-field deadline_sec (VG budget).
-# Отсутствует → 600. Мусор / ≤0 / >120 → 400. (0, 5) → clamp к 5.
-_DEADLINE_SEC_MIN = 5.0
+# Отсутствует → 600. Мусор / ≤0 / >120 → 400. (0, _DEADLINE_SEC_MIN) → clamp вверх.
+#
+# 🔴 Находка 3 (финальный гейт волны 2026-08-26): нижняя граница НЕ смеет
+# совпадать с stt_budget.MIN_USEFUL_ATTEMPT_SEC — deadline_sec становится
+# полным дедлайном запроса (stt_budget_scope(deadline_sec=...)), и к моменту
+# первой проверки budget_exhausted() в каскаде (после открытия scope, чтения
+# настроек, резолва пути) остаток уже < MIN_USEFUL_ATTEMPT_SEC. Легальное
+# входное значение приводило к нулю попыток распознавания — контракт
+# принимал число, которое не могло отработать никогда. Запас ×2 берётся от
+# ЕДИНСТВЕННОГО источника истины (stt_budget), а не новой магической константой.
+_DEADLINE_SEC_MIN = stt_budget.MIN_USEFUL_ATTEMPT_SEC * 2  # 10.0
 _DEADLINE_SEC_MAX = 120.0
 
 

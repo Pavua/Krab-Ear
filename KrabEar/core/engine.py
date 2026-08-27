@@ -688,19 +688,42 @@ class AudioEngine:
             return False
         return True
 
-    def _blacklist_allowed_for(self, exc: BaseException) -> bool:
-        """§4.7 (спека 2026-08-26): можно ли писать модель в
-        _unavailable_models по этому исключению.
+    def _blacklist_allowed_for(self, exc: BaseException, *, is_adapter: bool = False) -> bool:
+        """§4.7 (спека 2026-08-26), уточнено финальным гейтом волны (находка 1):
+        можно ли писать модель в _unavailable_models по этому исключению.
 
-        Таймаут из-за исчерпанного бюджета ЗАПРОСА не доказывает нездоровье
-        модели: попытке просто не досталось времени. Записать её в блэклист
-        (TTL 300 с) — значит увести следующую диктовку сразу в Remote STT и
-        выдать «Критическая ошибка» на здоровом стеке. Любое другое
-        исключение (MLX watchdog, крах воркера, OOM) блэклист заслуживает.
+        Любое НЕ-таймаутное исключение (MLX watchdog, крах воркера, OOM)
+        блэклист заслуживает независимо от ветки — проверяется первым.
+
+        Дальше ветки РАСХОДЯТСЯ по источнику многоминутного ожидания:
+
+        - whisper-каскад и multipass-ретраи (is_adapter=False, дефолт):
+          единственный НЕОГРАНИЧЕННЫЙ источник ожидания здесь — очередь за
+          внутрипроцессным mlx_lock() (общий GPU-лок с любой конкурентной
+          операцией, например часовым импортом), а НЕ зависший инференс.
+          Настоящее зависание ловит собственный watchdog MLX и приходит
+          отдельным типом (MLXTimeoutError, RuntimeError-наследник — не
+          матчится этой проверкой, у него своя ветка except, блэклистит
+          всегда). Проверка через budget_exhausted() бюджета ЗАПРОСА здесь
+          не годится: попытка истекает по СВОЕМУ бюджету (104-180с — в разы
+          меньше бюджета запроса), так что запрос почти всегда ещё "жив" —
+          инцидент 2026-08-26 показал именно это: 4.71с аудио держали общий
+          GPU-лок в очереди позади часового импорта и уходили в блэклист,
+          хотя обе модели были полностью здоровы. Поэтому здесь TimeoutError
+          НИКОГДА не блэклистит — сигнал попросту неотличим от очереди.
+        - adapter-ветка (is_adapter=True: GigaAM/Parakeet/SenseVoice/
+          WhisperX/Voxtral) — другой контракт: внешний таймаут там floor'ится
+          ADAPTER_MIN_BUDGET_SEC (200с), заведомо выше внутренних таймаутов
+          subprocess (120с shortform / 180с load) — сработавший внешний
+          таймаут означает, что subprocess не уложился даже в собственный
+          лимит, законный сигнал нездоровья; решает по остатку дедлайна
+          ЗАПРОСА, как и раньше (stt_budget.timeout_blacklist_allowed()).
         """
         if not isinstance(exc, (TimeoutError, concurrent.futures.TimeoutError)):
             return True
-        return stt_budget.timeout_blacklist_allowed()
+        if is_adapter:
+            return stt_budget.timeout_blacklist_allowed()
+        return False
 
     def _push_error(self, code: str, message_debug: str, severity: str | None = None) -> None:
         """Push KrabError to attached ErrorBus if available. Late-injected attribute.
@@ -1849,6 +1872,34 @@ class AudioEngine:
             return float(result.get("confidence") or 0.0)
         return float(np.mean([np.exp(s.get("avg_logprob", -1.0)) for s in segments]))
 
+    @staticmethod
+    def _estimate_audio_duration_sec(
+        audio_data: Any, sample_rate: int | float | None = None
+    ) -> float | None:
+        """Длительность аудио в секундах для бюджета попытки STT (§4.2).
+
+        Общий хелпер для _transcribe_with_fallback_impl (whisper-каскад) и
+        _maybe_multipass_retry (ретраи) — находка 4 финального гейта волны
+        2026-08-26: до этого multipass считал длительность ТОЛЬКО для
+        np.ndarray, для пути к файлу молча отдавал None (ретрай получал
+        потолок профиля вместо бюджета, масштабированного от реальной
+        длительности), а сиблинг честно читал файл через soundfile.
+        Неизвестный тип / отсутствующий файл / сбой чтения → None (вызывающая
+        сторона фолбэчится на потолок профиля — не на час).
+        """
+        if isinstance(audio_data, np.ndarray):
+            sr = 16000.0 if sample_rate is None else float(sample_rate)
+            if sr > 0 and len(audio_data) > 0:
+                return len(audio_data) / sr
+            return None
+        if isinstance(audio_data, (str, Path)) and os.path.exists(str(audio_data)):
+            try:
+                import soundfile as _sf_dur
+                return float(_sf_dur.info(str(audio_data)).duration)
+            except Exception:
+                return None
+        return None
+
     def _maybe_multipass_retry(
         self,
         audio_data: Any,
@@ -1899,9 +1950,9 @@ class AudioEngine:
         best_conf = first_conf
 
         # Спека 2026-08-26: бюджет ретрая масштабируется от длительности.
-        _mp_duration_sec: float | None = None
-        if isinstance(audio_data, np.ndarray) and len(audio_data) > 0:
-            _mp_duration_sec = len(audio_data) / 16000.0
+        # Находка 4: общий хелпер с _transcribe_with_fallback_impl — раньше
+        # здесь считался только np.ndarray, путь к файлу отдавал None.
+        _mp_duration_sec = self._estimate_audio_duration_sec(audio_data)
 
         retries_done = 0
         first_model = str(first_result.get("model_used") or getattr(self, "current_model", "") or "")
@@ -2368,24 +2419,12 @@ class AudioEngine:
 
         # Спека 2026-08-26: длительность считается по chain_audio_data (после
         # ресемпла) — chunked-путь подаёт сюда уже нарезанный кусок и потому
-        # бесплатно получает бюджет на чанк, а не на весь файл.
-        _chain_duration_sec: float | None = None
-        if isinstance(chain_audio_data, np.ndarray):
-            _sr_for_dur = (
-                16000.0 if chain_sample_rate is None else float(chain_sample_rate)
-            )
-            if _sr_for_dur > 0 and len(chain_audio_data) > 0:
-                _chain_duration_sec = len(chain_audio_data) / _sr_for_dur
-        elif isinstance(chain_audio_data, (str, Path)) and os.path.exists(
-            str(chain_audio_data)
-        ):
-            try:
-                import soundfile as _sf_dur
-                _chain_duration_sec = float(
-                    _sf_dur.info(str(chain_audio_data)).duration
-                )
-            except Exception:
-                _chain_duration_sec = None
+        # бесплатно получает бюджет на чанк, а не на весь файл. Общий хелпер
+        # с _maybe_multipass_retry (находка 4) — единственное отличие здесь:
+        # частота уже известна после ресемпла (chain_sample_rate).
+        _chain_duration_sec = self._estimate_audio_duration_sec(
+            chain_audio_data, chain_sample_rate
+        )
 
         candidates = [self.current_model]
         if self.quality_profile == "max":
@@ -2631,7 +2670,7 @@ class AudioEngine:
                     return adapter_result
                 except Exception as exc:
                     logger.warning("%s adapter не сработал: %s — продолжаю chain", span_pfx, exc)
-                    if self._blacklist_allowed_for(exc):
+                    if self._blacklist_allowed_for(exc, is_adapter=True):
                         self._unavailable_models[model_name] = time.monotonic()
                     continue
 
@@ -2672,14 +2711,14 @@ class AudioEngine:
                         _executor.shutdown(wait=False)
                 result["model_used"] = model_name
                 return result
-            except concurrent.futures.TimeoutError:
+            except concurrent.futures.TimeoutError as exc:
                 # Лог обязан называть СРАБОТАВШЕЕ число, не глобальную
                 # константу — иначе следующий разбор идёт по ложному следу.
                 logger.error(
                     "Таймаут %.0fs (профиль %s) при транскрибации моделью %s — пропускаю",
                     timeout, stt_budget.current_profile(), model_name,
                 )
-                if stt_budget.timeout_blacklist_allowed():
+                if self._blacklist_allowed_for(exc):
                     self._unavailable_models[model_name] = time.monotonic()
             except MLXTimeoutError as e:
                 # Watchdog-таймаут: Metal GPU завис.

@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import concurrent.futures
 import logging
+import os
 import sys
 import threading
 import time
@@ -20,6 +21,43 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core import stt_budget  # noqa: E402
+
+
+def _load_rest_deadline_helpers():
+    """Достаёт `_DEADLINE_SEC_MIN`/`_DEADLINE_SEC_MAX`/
+    `_resolve_transcribe_deadline_sec` из исходника rest_server.py БЕЗ
+    импорта модуля целиком.
+
+    `import backend.rest_server` на верхнем уровне конструирует Flask app и
+    (без предварительного патча) реальные Engine/StateStore/Transcriber —
+    либо требует мокать их ДО импорта, как делает
+    test_rest_upload_security_W1224.py. Второе в ЭТОМ файле смертельно: он
+    идёт ПЕРВЫМ в обязательной команде финального гейта волны, и мокнутый
+    импорт остаётся закэширован в sys.modules для всех файлов, что запускаются
+    следом в том же процессе (см. CLAUDE.md "rest_server module-level store
+    chunk pollution") — живой регресс, пойманный при подготовке этого фикса:
+    test_rest_e2e.py::test_vocabulary_post_too_many_words_returns_400
+    получал 200 вместо 400 из-за именно такого мокнутого импорта, оставленного
+    этим файлом. AST-экстракция читает только то, что реально нужно этим
+    тестам — две константы и чистую функцию валидации, без побочных эффектов.
+    """
+    src = (PROJECT_ROOT / "backend" / "rest_server.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    wanted_names = {"_DEADLINE_SEC_MIN", "_DEADLINE_SEC_MAX"}
+    nodes: list[ast.stmt] = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id in wanted_names for t in node.targets
+        ):
+            nodes.append(node)
+        elif isinstance(node, ast.FunctionDef) and node.name == "_resolve_transcribe_deadline_sec":
+            nodes.append(node)
+    module = ast.Module(body=nodes, type_ignores=[])
+    ast.fix_missing_locations(module)
+    from typing import Any as _Any
+    ns: dict[str, object] = {"math": __import__("math"), "_Any": _Any, "stt_budget": stt_budget}
+    exec(compile(module, "<rest_server_deadline_extract>", "exec"), ns)  # noqa: S102
+    return ns
 
 
 class BudgetFormulaTests(unittest.TestCase):
@@ -68,6 +106,40 @@ class BudgetFormulaTests(unittest.TestCase):
             got = stt_budget.resolve_attempt_timeout_sec(4.71)
         self.assertLessEqual(got, 30.0)
         self.assertGreaterEqual(got, stt_budget.MIN_USEFUL_ATTEMPT_SEC)
+
+    def test_no_explicit_deadline_uses_request_attempts_setting_as_multiplier(self):
+        # Находка 2 (финальный гейт волны): без явного deadline_sec §4.6
+        # обязан вычислять дедлайн как attempt_budget × настройка
+        # stt_timeout_request_attempts — а не захардкоженную константу.
+        # 7.0 намеренно отличается и от дефолта (4.0), и от замены-мутации
+        # (2.0), встреченной ревьюером — совпадение с любой из них красит
+        # тест только если множитель реально читается из снапшота настроек.
+        attempts_override = 7.0
+        settings_snapshot = {
+            "stt_timeout_overhead_sec": 90.0,
+            "stt_timeout_interactive_factor": 3.0,
+            "stt_timeout_interactive_max_sec": 1800.0,
+            "stt_timeout_request_attempts": attempts_override,
+        }
+        audio_duration_sec = 4.71
+        expected_attempt_sec = 90.0 + audio_duration_sec * 3.0
+        expected_deadline_sec = expected_attempt_sec * attempts_override
+
+        t0 = time.monotonic()
+        with stt_budget.stt_budget_scope(
+            stt_budget.INTERACTIVE,
+            settings_get=settings_snapshot.get,
+            audio_duration_sec=audio_duration_sec,
+        ):
+            remaining = stt_budget.remaining_sec()
+        elapsed = time.monotonic() - t0
+
+        self.assertAlmostEqual(
+            remaining, expected_deadline_sec, delta=elapsed + 0.5,
+            msg="deadline_sec не равен attempt_budget × "
+            "stt_timeout_request_attempts — множитель либо захардкожен, "
+            "либо читает не ту настройку",
+        )
 
     def test_expired_deadline_floors_at_min_useful_and_reports_exhausted(self):
         # Спека-тесты 6 и 16: future.result никогда не получит отрицательный
@@ -465,6 +537,84 @@ class MultipassBudgetBehaviorTests(unittest.TestCase):
         self.assertEqual(eng._unavailable_models, {})
 
 
+class MultipassFilePathDurationTests(unittest.TestCase):
+    """Находка 4 (финальный гейт волны): multipass не умел определять
+    длительность файлового пути.
+
+    `_transcribe_with_fallback_impl` честно читает длительность файла через
+    soundfile в try/except; `_maybe_multipass_retry` считал длительность
+    ТОЛЬКО для np.ndarray (`len(audio_data) / 16000.0`), для пути к файлу
+    молча оставлял None — ретрай получал потолок профиля вместо бюджета,
+    масштабированного от реальной длительности (§4.2).
+    """
+
+    def _make_engine(self):
+        from types import SimpleNamespace
+
+        from core.engine import AudioEngine
+
+        eng = object.__new__(AudioEngine)
+        eng.current_model = "balanced-model"
+        eng._unavailable_models = {}
+        eng._raw_confidence_from_result = (
+            lambda r: float(r.get("confidence") or 0.0)
+        )
+        eng._transcribe_model = (
+            lambda audio, model, prompt, language=None: {
+                "text": "retry-text", "confidence": 0.99,
+            }
+        )
+        fake_settings = SimpleNamespace(
+            STT_MIN_CONFIDENCE_THRESHOLD=0.9,
+            STT_MAX_RETRIES=2,
+            model_max_list=["big-a"],
+            NETWORK_MODE="offline_strict",
+        )
+        return eng, fake_settings
+
+    def test_multipass_reads_duration_for_file_path_audio(self):
+        import tempfile
+        import types
+        from unittest.mock import patch
+
+        eng, fake_settings = self._make_engine()
+        first = {"text": "низко", "confidence": 0.1, "model_used": "gigaam"}
+        fake_info = types.SimpleNamespace(duration=123.4)
+        captured = {}
+        real_resolve = stt_budget.resolve_attempt_timeout_sec
+
+        def _spy_resolve(duration_sec=None):
+            captured["duration_sec"] = duration_sec
+            return real_resolve(duration_sec)
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp.write(b"\x00")
+            tmp_path = tmp.name
+        self.addCleanup(lambda: os.remove(tmp_path))
+
+        with patch("core.engine.settings", fake_settings), \
+                patch(
+                    "core.engine.should_skip_second_mlx_checkpoint",
+                    return_value=False,
+                ), \
+                patch("soundfile.info", return_value=fake_info), \
+                patch.object(
+                    stt_budget, "resolve_attempt_timeout_sec",
+                    side_effect=_spy_resolve,
+                ):
+            with stt_budget.stt_budget_scope(
+                stt_budget.INTERACTIVE, deadline_sec=600.0
+            ):
+                eng._maybe_multipass_retry(tmp_path, "", "ru", first)
+
+        self.assertEqual(
+            captured.get("duration_sec"), 123.4,
+            "multipass не прочитал длительность файлового пути через "
+            "soundfile — находка 4 (сиблинг _transcribe_with_fallback_impl "
+            "уже делает это честно)",
+        )
+
+
 def _bare_voxtral_engine():
     """Минимальный AudioEngine для adapter-ветки Voxtral (fix-раунд 1)."""
     from core.engine import AudioEngine
@@ -634,6 +784,87 @@ class BlacklistGateLiveAttemptTests(unittest.TestCase):
         )
 
 
+class WhisperCascadeQueueWaitBlacklistTests(unittest.TestCase):
+    """Финальный гейт волны, находка 1 (§4.7 уточнение).
+
+    Инцидент 2026-08-26: диктовка 4.71с ждала позади часового импорта,
+    непрерывно державшего mlx_lock() ~760с — это ОЧЕРЕДЬ за GPU, а не
+    зависший инференс. Попытка истекает по СВОЕМУ бюджету (104-180с),
+    заведомо меньшему, чем бюджет ЗАПРОСА (в request_attempts раз больше,
+    дефолт ×4) — поэтому budget_exhausted() бюджета запроса в момент
+    таймаута почти всегда False, и старая проверка
+    `stt_budget.timeout_blacklist_allowed()` в whisper-ветке ошибочно
+    разрешала блэклист. Здесь бюджет ЗАПРОСА заведомо жив (deadline_sec=
+    600.0) — TimeoutError НЕ смеет блэклистить модель ни в этой ветке, ни
+    в multipass; настоящее зависание ловит отдельный MLXTimeoutError
+    (сиблинг-тест ниже), который блэклистит как раньше.
+    """
+
+    @staticmethod
+    def _bare_whisper_engine():
+        from core.engine import AudioEngine
+
+        engine = AudioEngine.__new__(AudioEngine)
+        engine.quality_profile = "balanced"
+        engine.current_model = "mlx-community/whisper-large-v3-turbo"
+        engine._unavailable_models = {}
+        engine._router = None
+        return engine
+
+    @staticmethod
+    def _mock_settings(mock):
+        # Все адаптеры выключены — chain идёт прямо в "model"-ветку whisper,
+        # минуя adapter-блок (is_adapter=True там сохраняет старую логику).
+        mock.STT_USE_RU_FINETUNE = False
+        mock.STT_GIGAAM_ENABLED = False
+        mock.PARAKEET_ENABLED = False
+        mock.SENSEVOICE_ENABLED = False
+        mock.WHISPERX_ENABLED = False
+        mock.VOXTRAL_ENABLED = False
+        mock.MODEL_BALANCED = "mlx-community/whisper-large-v3-turbo"
+        mock.TRANSCRIBE_LANGUAGE = "ru"
+        mock.NETWORK_MODE = "offline_strict"
+        mock.model_max_list = ["mlx-community/whisper-large-v3-turbo"]
+
+    def _run_chain(self, side_effect):
+        from unittest.mock import MagicMock, patch
+
+        engine = self._bare_whisper_engine()
+        with patch("core.engine.settings") as mock_settings, \
+                patch("core.engine._profiler") as mock_profiler, \
+                patch.object(engine, "_transcribe_model", side_effect=side_effect):
+            self._mock_settings(mock_settings)
+            mock_profiler.start_span.return_value.__enter__ = lambda s: s
+            mock_profiler.start_span.return_value.__exit__ = MagicMock(return_value=False)
+            with stt_budget.stt_budget_scope(stt_budget.INTERACTIVE, deadline_sec=600.0):
+                try:
+                    engine._transcribe_with_fallback_impl(b"audio", "prompt", "ru")
+                except Exception:
+                    pass  # единственный кандидат исчерпан после сбоя — ожидаемо
+        return engine
+
+    def test_timeout_during_queue_wait_with_live_request_budget_is_not_blacklisted(self):
+        engine = self._run_chain(side_effect=concurrent.futures.TimeoutError())
+        self.assertNotIn(
+            "mlx-community/whisper-large-v3-turbo", engine._unavailable_models,
+            "TimeoutError в whisper-каскаде при живом бюджете ЗАПРОСА не "
+            "смеет блэклистить модель (находка 1) — сигнал неотличим от "
+            "очереди за mlx_lock()",
+        )
+
+    def test_mlx_watchdog_timeout_still_blacklists_with_same_live_budget(self):
+        from core.mlx_subprocess import MLXTimeoutError
+
+        engine = self._run_chain(
+            side_effect=MLXTimeoutError(45.0, "mlx-community/whisper-large-v3-turbo")
+        )
+        self.assertIn(
+            "mlx-community/whisper-large-v3-turbo", engine._unavailable_models,
+            "MLXTimeoutError (настоящий watchdog-таймаут GPU) обязан "
+            "блэклистить модель независимо от бюджета запроса — сиблинг",
+        )
+
+
 class ScopeWiringRemainingPathsTests(unittest.TestCase):
     """§10.11: каждая точка §5 обёрнута в scope — bulk_reprocess, live_subs."""
 
@@ -711,6 +942,56 @@ class RestScopeWiringTests(unittest.TestCase):
                 "доедет до worker-треда",
             )
         self.assertTrue(found_scoped_submit)
+
+
+class RestDeadlineSecFloorTests(unittest.TestCase):
+    """Находка 3 (финальный гейт волны): REST-нижняя граница `deadline_sec`
+    обязана оставлять место хотя бы для одной осмысленной попытки.
+
+    До фикса `_DEADLINE_SEC_MIN == stt_budget.MIN_USEFUL_ATTEMPT_SEC` (5.0):
+    легальное входное значение 5.0 доходит до `stt_budget_scope(deadline_sec=
+    5.0)` — к моменту первой проверки `budget_exhausted()` в каскаде остаток
+    дедлайна уже < 5.0 (время на открытие scope), каскад ломается ПЕРЕД
+    первым кандидатом, ни одна модель не пробуется. Контракт принимал
+    значение, которое не может отработать никогда.
+    """
+
+    def setUp(self):
+        self.ns = _load_rest_deadline_helpers()
+
+    def test_min_bound_is_derived_from_budget_module_with_headroom(self):
+        # "с запасом" — не равно MIN_USEFUL_ATTEMPT_SEC, а строго больше.
+        self.assertGreater(
+            self.ns["_DEADLINE_SEC_MIN"], stt_budget.MIN_USEFUL_ATTEMPT_SEC,
+            "_DEADLINE_SEC_MIN обязан быть СТРОГО больше "
+            "stt_budget.MIN_USEFUL_ATTEMPT_SEC — иначе принятое значение "
+            "истощает бюджет прежде, чем каскад попробует хоть одну модель",
+        )
+
+    def test_min_bound_leaves_room_for_a_live_attempt(self):
+        # Открываем scope с ПРИНЯТЫМ нижним пределом REST и убеждаемся, что
+        # немедленно после этого бюджет ещё не считается исчерпанным —
+        # ровно то условие, которое ломало каскад при значении 5.0.
+        with stt_budget.stt_budget_scope(
+            stt_budget.INTERACTIVE, deadline_sec=self.ns["_DEADLINE_SEC_MIN"]
+        ):
+            self.assertFalse(
+                stt_budget.budget_exhausted(),
+                "новая нижняя граница REST всё ещё истощает бюджет сразу "
+                "после открытия scope — находка 3 не закрыта",
+            )
+
+    def test_value_below_new_min_is_clamped_up_not_left_broken(self):
+        resolved, err = self.ns["_resolve_transcribe_deadline_sec"]("1")
+        self.assertIsNone(err)
+        self.assertEqual(resolved, self.ns["_DEADLINE_SEC_MIN"])
+
+    def test_old_min_five_still_accepted_but_clamped_above_useful_floor(self):
+        # 5.0 остаётся легальным (contract не сужаем), но больше не
+        # проходит как есть — clamp поднимает его выше MIN_USEFUL_ATTEMPT_SEC.
+        resolved, err = self.ns["_resolve_transcribe_deadline_sec"]("5")
+        self.assertIsNone(err)
+        self.assertGreater(resolved, stt_budget.MIN_USEFUL_ATTEMPT_SEC)
 
 
 if __name__ == "__main__":

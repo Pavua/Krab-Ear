@@ -868,8 +868,14 @@ class TestDeadlineSecW2c(_Base):
                 self.assertEqual(body.get("error"), "invalid deadline_sec")
                 self.transcriber.transcribe.assert_not_called()
 
-    def test_deadline_sec_5_on_hung_transcribe_returns_504_before_global_600(self):
-        """deadline_sec=5 при зависшем transcribe → 504 быстрее глобальных 600."""
+    def test_deadline_sec_min_on_hung_transcribe_returns_504_before_global_600(self):
+        """deadline_sec=мин.граница при зависшем transcribe → 504 быстрее глобальных 600.
+
+        Раньше граница была буквально 5 (совпадала с
+        stt_budget.MIN_USEFUL_ATTEMPT_SEC); находка 3 финального гейта волны
+        2026-08-26 подняла её — тест берёт РЕАЛЬНУЮ константу модуля, а не
+        захардкоженное число, чтобы не расходиться с ней снова.
+        """
         import threading
         import time as _time
 
@@ -878,9 +884,10 @@ class TestDeadlineSecW2c(_Base):
         mock_info.duration = 5.0
         _never = threading.Event()
         self.addCleanup(_never.set)
+        _min_deadline = _rest_mod._DEADLINE_SEC_MIN
 
         def _hung_transcribe(*_a, **_kw):
-            _never.wait(timeout=20.0)
+            _never.wait(timeout=_min_deadline * 4)
             return {
                 "text": "слишком поздно",
                 "confidence": 0.5,
@@ -902,15 +909,16 @@ class TestDeadlineSecW2c(_Base):
                     "/v1/stt/transcribe",
                     data={
                         "file": (io.BytesIO(wav_data), "hung.wav"),
-                        "deadline_sec": "5",
+                        "deadline_sec": str(_min_deadline),
                     },
                     content_type="multipart/form-data",
                 )
             elapsed = _time.monotonic() - t0
             self.assertEqual(resp.status_code, 504, elapsed)
             self.assertLess(
-                elapsed, 8.0,
-                f"504 за {elapsed:.3f}s — deadline_sec не применился (ждали бы ~20с/600с)",
+                elapsed, _min_deadline + 3.0,
+                f"504 за {elapsed:.3f}s — deadline_sec не применился "
+                f"(ждали бы ~{_min_deadline * 4:.0f}с/600с)",
             )
             self.process_exit.assert_not_called()
             resp.close()
