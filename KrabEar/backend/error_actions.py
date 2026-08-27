@@ -119,15 +119,74 @@ def _unload_lm_studio_model(*, settings_service, **kwargs) -> dict:
     }
 
 
-def _switch_to_stable_rewriter(*, settings_service, **kwargs) -> dict:
-    """Switch LLM rewriter model to the historically stable qwen3-4b-abliterated.
+# Кандидаты в «стабильный рерайтер», в порядке предпочтения. Список — это
+# ПОЖЕЛАНИЕ, а не факт: каждое имя сверяется с живым каталогом LM Studio перед
+# записью в настройки.
+#
+# 🔴 Раньше здесь стояло одно зашитое имя `qwen3-4b-abliterated`, которого в
+# каталоге владельца не существует (живая сверка 2026-08-27: 105 моделей).
+# Это действие — кнопка «починить» в тосте `rewriter.channel_error`, то есть
+# нажатие делало эпизодический сбой рерайтера постоянным.
+#
+# Порядок — по замеру 2026-08-27 на 12 живых диктовках (тот же промпт и
+# параметры, что в проде): huihui-qwen3-14b-abl сохраняет текст дословно
+# (9/9 матерных слов, как 26B) при медиане 8.4 с против 24.7 с у 26B.
+_STABLE_REWRITER_CANDIDATES = (
+    "huihui-qwen3-14b-abl-v2",
+    "huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx",
+    "gemma-4-26b-a4b-it@4bit",
+    "gemma-4-e4b-it-mlx",
+)
 
-    Triggered by the 'rewriter.channel_error' actionable toast — gemma-4-e4b-it-mlx
-    (vision-capable MLX) emits tool_calls JSON or triggers mlx_lm UnboundLocalError
-    mid-stream, causing LM Studio 'Channel Error' within 1 second of inference start.
+
+def _live_model_catalog(llm_ops_svc) -> list:
+    """Имена моделей, реально доступных в LM Studio. Пустой список = не знаем."""
+    if llm_ops_svc is None:
+        return []
+    try:
+        payload = llm_ops_svc.handle_list_llm_models({}) or {}
+    except Exception as exc:
+        logger.warning("не удалось получить каталог моделей LM Studio: %s", exc)
+        return []
+    return [str(m) for m in (payload.get("models") or [])]
+
+
+def _switch_to_stable_rewriter(*, settings_service, llm_ops_svc=None, **kwargs) -> dict:
+    """Переключает рерайтер на модель, которая ЕСТЬ в каталоге LM Studio.
+
+    Вызывается кнопкой тоста 'rewriter.channel_error': gemma-4-e4b-it-mlx
+    (vision-capable MLX) отдаёт tool_calls JSON или роняет mlx_lm
+    UnboundLocalError на середине потока, что LM Studio показывает как
+    'Channel Error' через секунду после старта инференса.
+
+    Направление отказа fail-safe: нет каталога или нет живого кандидата —
+    рабочая настройка НЕ трогается.
     """
-    settings_service.handle_set_settings({"llm_model": "qwen3-4b-abliterated"})
-    return {"executed": True, "reason": None, "side_effect": "settings_updated"}
+    catalog = _live_model_catalog(llm_ops_svc)
+    if not catalog:
+        return {
+            "executed": False,
+            "reason": "каталог моделей LM Studio недоступен — не меняю настройку вслепую",
+            "side_effect": None,
+        }
+
+    settings = settings_service.cached_settings() if settings_service else {}
+    current = str((settings or {}).get("llm_model") or "")
+    available = set(catalog)
+    target = next(
+        (m for m in _STABLE_REWRITER_CANDIDATES if m in available and m != current),
+        None,
+    )
+    if target is None:
+        return {
+            "executed": False,
+            "reason": "в каталоге LM Studio нет ни одной проверенной модели на замену",
+            "side_effect": None,
+        }
+
+    settings_service.handle_set_settings({"llm_model": target})
+    logger.info("рерайтер переключён на проверенную модель", extra={"model": target})
+    return {"executed": True, "reason": None, "side_effect": f"settings_updated:{target}"}
 
 
 def _open_lm_studio_settings(*, settings_service, **kwargs) -> dict:
