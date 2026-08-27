@@ -42,7 +42,7 @@ from concurrent.futures import TimeoutError as FuturesTimeoutError
 from core.audio_chunker import AudioChunker
 from core.mlx_inter_lock import mlx_inter_process_lock
 from core.mlx_lock import mlx_lock
-from core.mlx_subprocess import MLXTimeoutError
+from core.mlx_subprocess import MLX_HANG_HARD_KILL_SEC, MLXTimeoutError
 
 logger = logging.getLogger("KrabEar.GigaAMMLX")
 
@@ -93,6 +93,16 @@ class GigaAMMLXAdapter:
         # Персистентный инференс-поток (см. докстроку модуля) + флаг прогрева.
         self._executor: Optional[ThreadPoolExecutor] = None
         self._warmed = False
+        # Отравление: рабочий поток пережил hard-kill окно и остался в Metal-вызове.
+        # Пока флаг стоит, инференс не запускается — иначе новый вызов пойдёт
+        # ПАРАЛЛЕЛЬНО живому зависшему потоку. Снимается успешным прогревом
+        # (см. _warmup) — липкое состояние обязано иметь выход.
+        self._poison_lock = threading.Lock()
+        self._poison_reason: Optional[str] = None
+        # Future зависшего инференса. Единственный честный признак того, что
+        # Metal освободился: этот future завершился. Ждать его нельзя (он и есть
+        # зависший вызов), опрашивать — можно.
+        self._stuck_future = None
 
     # ------------------------------------------------------------------
     # Публичный API (контракт GigaAMAdapter)
@@ -175,7 +185,61 @@ class GigaAMMLXAdapter:
             except OSError:
                 pass
 
+    def is_poisoned(self) -> bool:
+        """True, если прошлый инференс оставил живой поток внутри Metal-вызова.
+
+        Самовосстанавливается: как только зависший future завершается, Metal
+        свободен и отравление снимается. Без этого выхода состояние было бы
+        липким до перезапуска процесса — класс, который проект уже ловил на
+        state-machine состояниях без timeout-выхода.
+        """
+        with self._poison_lock:
+            if self._poison_reason is None:
+                return False
+            stuck = self._stuck_future
+            if stuck is not None and stuck.done():
+                logger.warning(
+                    "зависший инференс gigaam-mlx завершился — отравление снято, "
+                    "движок снова доступен без перезапуска backend"
+                )
+                self._poison_reason = None
+                self._stuck_future = None
+                return False
+            return True
+
+    def _mark_poisoned(self, reason: str, stuck_future=None) -> None:
+        with self._poison_lock:
+            self._poison_reason = reason
+            self._stuck_future = stuck_future
+
     def _run_with_timeout(self, fn):
+        """Выполняет один инференс под watchdog, НЕ отпуская mlx_lock под живым потоком.
+
+        🔴 Инвариант критической секции. Вызывающий (`_infer_chunk`) держит
+        `mlx_inter_process_lock()` и `mlx_lock()`, а рабочий поток исполняет fn()
+        БЕЗ них. Если бросить исключение, пока поток ещё внутри Metal-вызова,
+        вызывающий выйдет из `with` и отпустит замок — следующая транскрипция
+        запустит ВТОРОЙ параллельный MLX-инференс, ровно тот конкурентный
+        доступ, ради запрета которого mlx_lock и существует (SIGSEGV/зависание,
+        класс PR #71).
+
+        Живой инцидент 2026-08-27: после первого таймаута КАЖДАЯ следующая
+        диктовка вставала намертво (три `handle_request завис дольше 180с`
+        подряд), состояние лечил только перезапуск backend. В снимке процесса —
+        четыре потока на `rlock_acquire` при полностью спящем libmlx.
+
+        Паттерн взят у сиблинга `mlx_subprocess.MLXWatchdog.run_with_timeout`
+        (W1358 F1 MED), который этот же баг уже чинил bounded join'ом.
+        """
+        if self.is_poisoned():
+            poison = self._poison_reason
+            # Fail-fast вместо ожидания: каскад STT должен успеть уйти на
+            # резервный движок, а не упереться в IPC-backstop (180 с).
+            raise MLXTimeoutError(
+                self._watchdog_timeout_sec,
+                f"gigaam-mlx-{self._mlx_model_type} (отравлен: {poison})",
+            )
+
         if self._executor is None:
             self._executor = ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix="gigaam-mlx"
@@ -184,14 +248,45 @@ class GigaAMMLXAdapter:
         try:
             return future.result(timeout=self._watchdog_timeout_sec)
         except FuturesTimeoutError:
-            # Поток executor'а завис в Metal-вызове — бросаем его (daemon)
-            # и создаём чистый; следующий вызов заплатит прогрев заново.
-            self._executor.shutdown(wait=False, cancel_futures=True)
+            pass
+
+        # Watchdog сработал. НЕ выходим сразу: даём потоку доработать в
+        # ограниченном окне, удерживая замок вызывающего.
+        model_name = f"gigaam-mlx-{self._mlx_model_type}"
+        logger.error(
+            "инференс не уложился в %.1fс (%s) — держим mlx_lock до завершения "
+            "потока или %.1fс hard-kill окна",
+            self._watchdog_timeout_sec, model_name, MLX_HANG_HARD_KILL_SEC,
+        )
+        try:
+            future.result(timeout=MLX_HANG_HARD_KILL_SEC)
+        except FuturesTimeoutError:
+            # Поток пережил окно и всё ещё в Metal. Замок отпустить придётся —
+            # иначе бесконечный стол backend'а, — но повторять инференс поверх
+            # живого потока нельзя: отравляем адаптер до успешного прогрева.
+            self._mark_poisoned(
+                f"поток не завершился за {MLX_HANG_HARD_KILL_SEC:.1f}с после таймаута",
+                stuck_future=future,
+            )
+            self._warmed = False
+            logger.error(
+                "поток %s жив после hard-kill окна — адаптер отравлен, "
+                "инференс уходит на резервный движок до успешного прогрева",
+                model_name,
+            )
+        except Exception:
+            # fn() упала уже после срабатывания watchdog: поток МЁРТВ, замок
+            # держался всё это время — состояние чистое, отравлять нечего.
+            self._executor.shutdown(wait=False)
             self._executor = None
             self._warmed = False
-            raise MLXTimeoutError(
-                self._watchdog_timeout_sec, f"gigaam-mlx-{self._mlx_model_type}"
-            )
+        else:
+            # Поток успел доработать внутри окна: замок ни на миг не отпускался.
+            self._executor.shutdown(wait=False)
+            self._executor = None
+            self._warmed = False
+
+        raise MLXTimeoutError(self._watchdog_timeout_sec, model_name)
 
     def _warmup(self, gigaam_mlx, model, tokenizer) -> None:
         """Один прогрев на процесс: компиляция MLX-графа ~секунды."""
