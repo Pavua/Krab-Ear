@@ -3959,6 +3959,9 @@ class BackendService:
             action_id,
             settings_service=self._settings_svc,
             store=getattr(self, "store", None),
+            # Каталог LM Studio: действия, подменяющие модель, обязаны сверять
+            # кандидата с живым каталогом, а не писать зашитое имя.
+            llm_ops_svc=getattr(self, "_llm_ops_svc", None),
         )
 
     def _handle_report_paste_failure(self, params: dict) -> dict:

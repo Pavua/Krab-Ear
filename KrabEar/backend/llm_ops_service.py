@@ -53,6 +53,24 @@ class LLMOpsService:
     # ошибки нет, данных нет, GUI показывал захардкоженный список.
     _CATALOG_ENDPOINTS = ("/api/v0/models", "/v1/models")
 
+    # Рекомендованные модели рерайтера — ОДИН литерал на весь файл: раньше этот
+    # список собирался дважды (успешный путь и except-ветка), и дубль расходился
+    # молча — протухшее имя всплывало ровно тогда, когда LM Studio недоступна,
+    # то есть когда рекомендации нужнее всего.
+    #
+    # Порядок — по замеру 2026-08-27 на 12 живых диктовках, прод-промпт и
+    # параметры: 14b-abl сохраняет текст дословно (9/9 матерных слов, как 26B)
+    # при медиане 8.4 с; e4b быстрее (4.8 с), но срезает слова автора; 26B столь
+    # же точна, но 24.7 с медиана и 65 с холодной загрузки.
+    # 🔴 Имена сверены с живым каталогом: удалённое `qwen3-8b-abliterated`
+    # рекомендовалось до этой волны.
+    _RECOMMENDED_REWRITER_MODELS = (
+        "huihui-qwen3-14b-abl-v2",
+        "gemma-4-e4b-it-mlx",
+        "gemma-4-26b-a4b-it@4bit",
+        "huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx",
+    )
+
     # Эмбеддинг-модели не умеют chat/completions — в списке рерайта им не место.
     # 🔴 vlm НЕ исключаем: мультимодальные модели отлично переписывают текст, и
     # ровно такой тип у gemma-4-26b-a4b-it@4bit — фильтр "только llm" выкинул бы
@@ -79,11 +97,7 @@ class LLMOpsService:
             # в LM Studio. /api/v1/models — корректный endpoint. Same pattern as PR #396
             # для llm_rewriter.py:1064 (passive_health_check).
             _host = re.sub(r"/v\d+$", "", base_url)
-            recommended_models = [
-                "gemma-4-e4b-it-mlx",
-                "huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx",
-                "qwen3-8b-abliterated",
-            ]
+            recommended_models = list(self._RECOMMENDED_REWRITER_MODELS)
 
             last_error: str | None = None
             for endpoint in self._CATALOG_ENDPOINTS:
@@ -136,11 +150,7 @@ class LLMOpsService:
             return {
                 "models": [],
                 "model_details": [],
-                "recommended_models": [
-                    "gemma-4-e4b-it-mlx",
-                    "huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx",
-                    "qwen3-8b-abliterated",
-                ],
+                "recommended_models": list(self._RECOMMENDED_REWRITER_MODELS),
                 "error": str(exc),
             }
 

@@ -243,18 +243,26 @@ extension HistoryPanelController {
 
     /// Проверенные / рекомендованные модели — всегда наверху dropdown.
     /// Обновлять по результатам bench-сессий (см. комментарии в HistoryPanelController.swift).
+    ///
+    /// Порядок — по замеру 2026-08-27 на 12 живых диктовках владельца
+    /// (прод-промпт и параметры, латентность = медиана):
+    ///   huihui-qwen3-14b-abl  8.4 с — единственная средняя, что сохраняет текст
+    ///                                  дословно (9/9 матерных слов, как 26B)
+    ///   gemma-4-e4b           4.8 с — быстрее всех, но срезает слова автора (6/9)
+    ///   gemma-4-26b-a4b      24.7 с — та же точность, что 14b, + 65 с загрузки
+    /// Пять имён из прежнего списка (Qwen3-8B-MLX-4bit, qwen3.5-9b@6bit,
+    /// Qwen3.5-27B-4bit, Aya-Expanse-32B-abliterated, Hermes-3-Llama-8B)
+    /// в каталоге отсутствуют — их прятал фильтр по available, а не факт наличия.
+    /// gigachat3.1-10b намеренно НЕ включён: вдвое быстрее e4b, но на длинных
+    /// русских текстах переводит их на английский и пересказывает мат.
     private static let recommendedRewriterModels: [String] = [
-        "gemma-4-e4b-it-mlx",
-        "Qwen3-8B-MLX-4bit",
         "huihui-qwen3-14b-abl-v2",
-        "qwen3.5-9b@6bit",
-        "huihui-qwen3-30b-a3b-instruct-2507-abliterated-dwq4-mlx",
-        "aya-expanse-8b",
-        "Qwen3.5-27B-4bit",
-        "Aya-Expanse-32B-abliterated",
-        "qwen2.5-14b-uncensored-mlx",
-        "Hermes-3-Llama-8B",
+        "gemma-4-e4b-it-mlx",
+        "gemma-4-26b-a4b-it@4bit",
         "huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx",
+        "huihui-qwen3-30b-a3b-instruct-2507-abliterated-dwq4-mlx",
+        "qwen2.5-14b-uncensored-mlx",
+        "aya-expanse-8b",
     ]
 
     /// Заполняет dropdown llmModelSelector:

@@ -135,14 +135,25 @@ class SwitchToBalancedProfileTests(unittest.TestCase):
         self.assertEqual(result["side_effect"], "profile_switched")
 
     def test_switch_to_stable_rewriter_handler(self):
-        """switch_to_stable_rewriter must set llm_model to qwen3-4b-abliterated."""
+        """switch_to_stable_rewriter ставит модель, которая ЕСТЬ в каталоге LM Studio.
+
+        До 2026-08-27 здесь проверялось зашитое имя qwen3-4b-abliterated,
+        отсутствующее в реальном каталоге, — тест валидировал дыру.
+        """
         svc = _svc()
-        result = handle_action("switch_to_stable_rewriter", settings_service=svc)
+        svc.cached_settings.return_value = {"llm_model": "gemma-4-e4b-it-mlx"}
+        ops = MagicMock()
+        ops.handle_list_llm_models.return_value = {
+            "models": ["huihui-qwen3-14b-abl-v2"], "error": None,
+        }
+        result = handle_action(
+            "switch_to_stable_rewriter", settings_service=svc, llm_ops_svc=ops
+        )
         self.assertTrue(result["executed"])
         svc.handle_set_settings.assert_called_once_with(
-            {"llm_model": "qwen3-4b-abliterated"}
+            {"llm_model": "huihui-qwen3-14b-abl-v2"}
         )
-        self.assertEqual(result["side_effect"], "settings_updated")
+        self.assertEqual(result["side_effect"], "settings_updated:huihui-qwen3-14b-abl-v2")
 
 
 # ---------------------------------------------------------------------------

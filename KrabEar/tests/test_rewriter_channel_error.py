@@ -160,16 +160,42 @@ class TestDefaultRewriterModel(unittest.TestCase):
 class TestSwitchToStableRewriterAction(unittest.TestCase):
     """_switch_to_stable_rewriter handler calls handle_set_settings with correct model."""
 
+    @staticmethod
+    def _ops(models=("huihui-qwen3-14b-abl-v2",)):
+        ops = MagicMock()
+        ops.handle_list_llm_models.return_value = {"models": list(models), "error": None}
+        return ops
+
+    @staticmethod
+    def _settings(current="gemma-4-e4b-it-mlx"):
+        svc = MagicMock()
+        svc.cached_settings.return_value = {"llm_model": current}
+        return svc
+
     def test_switch_action_changes_setting(self):
         from backend.error_actions import _switch_to_stable_rewriter
 
-        settings_service = MagicMock()
-        result = _switch_to_stable_rewriter(settings_service=settings_service)
+        settings_service = self._settings()
+        result = _switch_to_stable_rewriter(
+            settings_service=settings_service, llm_ops_svc=self._ops()
+        )
 
         self.assertTrue(result["executed"])
         settings_service.handle_set_settings.assert_called_once_with(
-            {"llm_model": "qwen3-4b-abliterated"}
+            {"llm_model": "huihui-qwen3-14b-abl-v2"}
         )
+
+    def test_switch_action_without_catalog_keeps_working_setting(self):
+        """Каталог недоступен — рабочую модель не трогаем (fail-safe)."""
+        from backend.error_actions import _switch_to_stable_rewriter
+
+        settings_service = self._settings()
+        result = _switch_to_stable_rewriter(
+            settings_service=settings_service, llm_ops_svc=self._ops(models=())
+        )
+
+        self.assertFalse(result["executed"])
+        settings_service.handle_set_settings.assert_not_called()
 
     def test_switch_action_registered_in_action_handlers(self):
         from backend.error_actions import ACTION_HANDLERS
@@ -178,15 +204,16 @@ class TestSwitchToStableRewriterAction(unittest.TestCase):
     def test_switch_action_dispatched_via_handle_action(self):
         from backend.error_actions import handle_action
 
-        settings_service = MagicMock()
+        settings_service = self._settings()
         result = handle_action(
             "switch_to_stable_rewriter",
             settings_service=settings_service,
+            llm_ops_svc=self._ops(),
         )
 
         self.assertTrue(result["executed"])
         settings_service.handle_set_settings.assert_called_once_with(
-            {"llm_model": "qwen3-4b-abliterated"}
+            {"llm_model": "huihui-qwen3-14b-abl-v2"}
         )
 
 
