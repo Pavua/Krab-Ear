@@ -225,6 +225,20 @@ extension HistoryPanelController {
         applySettingsPatch(["cloud_rewriter_enabled": enabled])
     }
     
+    /// Текущий провайдер по состоянию пикера (для записи модели в верный ключ).
+    /// Читаем именно контрол, а не снапшот настроек: пользователь мог сменить
+    /// провайдера и тут же поправить модель, до прихода нового снапшота.
+    func currentCloudRewriterProvider() -> String {
+        guard let picker = objc_getAssociatedObject(
+            self, &CloudRewriterAssocKeys.providerPicker
+        ) as? NSPopUpButton else { return "openai" }
+        switch picker.indexOfSelectedItem {
+        case 1:  return "anthropic"
+        case 2:  return "custom"
+        default: return "openai"
+        }
+    }
+
     @objc func onCloudRewriterProviderChanged(_ sender: NSPopUpButton) {
         guard !isSyncingSettings else { return }
         let provider = sender.indexOfSelectedItem == 0 ? "openai" : (sender.indexOfSelectedItem == 1 ? "anthropic" : "custom")
@@ -240,7 +254,28 @@ extension HistoryPanelController {
     @objc func onCloudRewriterCustomModelChanged(_ sender: NSTextField) {
         guard !isSyncingSettings else { return }
         let val = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        applySettingsPatch(["cloud_rewriter_custom_model": val])
+        // Одно поле «Модель» на все провайдеры: пишем в ключ ТЕКУЩЕГО, иначе
+        // пользователь менял бы модель у одного, а видел её у другого.
+        applySettingsPatch([Self.cloudRewriterModelSettingKey(for: currentCloudRewriterProvider()): val])
+    }
+
+    /// Ключ настройки модели для провайдера. Разные провайдеры — разные линейки
+    /// имён, поэтому значения не переиспользуются между ними.
+    static func cloudRewriterModelSettingKey(for provider: String) -> String {
+        switch provider {
+        case "anthropic": return "cloud_rewriter_anthropic_model"
+        case "custom":    return "cloud_rewriter_custom_model"
+        default:          return "cloud_rewriter_openai_model"
+        }
+    }
+
+    /// Значение модели текущего провайдера из снапшота настроек.
+    static func cloudRewriterModelValue(for provider: String, settings: AgentSettings) -> String {
+        switch provider {
+        case "anthropic": return settings.cloudRewriterAnthropicModel
+        case "custom":    return settings.cloudRewriterCustomModel
+        default:          return settings.cloudRewriterOpenaiModel
+        }
     }
     
     @objc func onCloudRewriterApiKeyChanged(_ sender: NSSecureTextField) {
@@ -310,7 +345,9 @@ extension HistoryPanelController {
             }
             
             if let urlRow = objc_getAssociatedObject(self, customUrlRowKey) as? NSView { urlRow.isHidden = !isCustom }
-            if let modelRow = objc_getAssociatedObject(self, customModelRowKey) as? NSView { modelRow.isHidden = !isCustom }
+            // Строка «Модель» видна ВСЕГДА: модель есть у каждого провайдера,
+            // раньше её можно было задать только для self-hosted.
+            if let modelRow = objc_getAssociatedObject(self, customModelRowKey) as? NSView { modelRow.isHidden = false }
             if let customWarn = objc_getAssociatedObject(self, customWarnKey) as? NSView { customWarn.isHidden = !isCustom }
             
             if let urlField = objc_getAssociatedObject(self, customUrlFieldKey) as? NSTextField {
@@ -319,9 +356,11 @@ extension HistoryPanelController {
                 }
             }
             if let modelField = objc_getAssociatedObject(self, customModelFieldKey) as? NSTextField {
-                if modelField.stringValue != settings.cloudRewriterCustomModel {
-                    modelField.stringValue = settings.cloudRewriterCustomModel
+                let modelValue = Self.cloudRewriterModelValue(for: provider, settings: settings)
+                if modelField.stringValue != modelValue {
+                    modelField.stringValue = modelValue
                 }
+                modelField.placeholderString = isCustom ? "qwen2.5:7b" : "модель провайдера"
             }
             
             if let warnLabel = objc_getAssociatedObject(self, warnKey) as? NSTextField {
