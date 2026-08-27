@@ -136,6 +136,10 @@ struct AgentSettings {
     var anthropicApiKey: String
     var cloudRewriterBaseUrl: String
     var cloudRewriterCustomModel: String
+    // Модели облачных провайдеров: раньше были константами в Python и
+    // пользователь не мог ни сменить их, ни увидеть.
+    var cloudRewriterOpenaiModel: String
+    var cloudRewriterAnthropicModel: String
     var cloudRewriterApiKey: String
 
     static let `default` = AgentSettings(
@@ -210,6 +214,8 @@ struct AgentSettings {
         anthropicApiKey: "",
         cloudRewriterBaseUrl: "http://localhost:11434/v1",
         cloudRewriterCustomModel: "qwen2.5:7b",
+        cloudRewriterOpenaiModel: "gpt-4o-mini",
+        cloudRewriterAnthropicModel: "claude-haiku-4-5-20251001",
         cloudRewriterApiKey: ""
     )
 
@@ -306,6 +312,8 @@ struct AgentSettings {
         self.anthropicApiKey = (payload["anthropic_api_key"] as? String) ?? Self.default.anthropicApiKey
         self.cloudRewriterBaseUrl = (payload["cloud_rewriter_base_url"] as? String) ?? Self.default.cloudRewriterBaseUrl
         self.cloudRewriterCustomModel = (payload["cloud_rewriter_custom_model"] as? String) ?? Self.default.cloudRewriterCustomModel
+        self.cloudRewriterOpenaiModel = (payload["cloud_rewriter_openai_model"] as? String) ?? Self.default.cloudRewriterOpenaiModel
+        self.cloudRewriterAnthropicModel = (payload["cloud_rewriter_anthropic_model"] as? String) ?? Self.default.cloudRewriterAnthropicModel
         self.cloudRewriterApiKey = (payload["cloud_rewriter_api_key"] as? String) ?? Self.default.cloudRewriterApiKey
     }
 
@@ -378,6 +386,8 @@ struct AgentSettings {
         anthropicApiKey: String = "",
         cloudRewriterBaseUrl: String = "http://localhost:11434/v1",
         cloudRewriterCustomModel: String = "qwen2.5:7b",
+        cloudRewriterOpenaiModel: String = "gpt-4o-mini",
+        cloudRewriterAnthropicModel: String = "claude-haiku-4-5-20251001",
         cloudRewriterApiKey: String = ""
     ) {
         self.mode = mode
@@ -448,6 +458,8 @@ struct AgentSettings {
         self.anthropicApiKey = anthropicApiKey
         self.cloudRewriterBaseUrl = cloudRewriterBaseUrl
         self.cloudRewriterCustomModel = cloudRewriterCustomModel
+        self.cloudRewriterOpenaiModel = cloudRewriterOpenaiModel
+        self.cloudRewriterAnthropicModel = cloudRewriterAnthropicModel
         self.cloudRewriterApiKey = cloudRewriterApiKey
     }
 
@@ -521,6 +533,8 @@ struct AgentSettings {
             "anthropic_api_key": anthropicApiKey,
             "cloud_rewriter_base_url": cloudRewriterBaseUrl,
             "cloud_rewriter_custom_model": cloudRewriterCustomModel,
+            "cloud_rewriter_openai_model": cloudRewriterOpenaiModel,
+            "cloud_rewriter_anthropic_model": cloudRewriterAnthropicModel,
             "cloud_rewriter_api_key": cloudRewriterApiKey,
         ]
     }

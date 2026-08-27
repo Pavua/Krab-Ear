@@ -250,7 +250,10 @@ extension ConversationViewController {
         styleLabel(brainLabel, font: KrabEarTheme.Typography.body)
         brainLabel.textColor = KrabEarTheme.Colors.textSecondary
         brainLabel.widthAnchor.constraint(equalToConstant: 120).isActive = true
-        brainSelector.addItems(withTitles: ["Авто", "qwen3-4b", "llama-3.2-3b"])
+        // Список моделей убран: выбор не доезжал до Voice Gateway (см.
+        // BrainModeSelectorTests). Оставляем один пункт-заглушку, чтобы не
+        // ломать вёрстку строки; реальный выбор режима — в настройках.
+        brainSelector.addItems(withTitles: ["Авто"])
         brainSelector.target = self
         brainSelector.action = #selector(onBrainChanged)
         brainRow.addArrangedSubview(brainLabel)
@@ -289,9 +292,10 @@ extension ConversationViewController {
     }
 
     @objc func onBrainChanged() {
-        let titles = ["auto", "qwen3-4b", "llama-3.2-3b"]
-        let idx = brainSelector.indexOfSelectedItem
-        config.brain = (idx >= 0 && idx < titles.count) ? titles[idx] : "auto"
+        // Выбор модели мозга VG не поддерживает (параметра `brain` у него нет),
+        // поэтому значение всегда "auto" — сохраняем поле ради совместимости
+        // конфига, но никакого выбора пользователю не обещаем.
+        config.brain = "auto"
     }
 
     // MARK: - Private helpers

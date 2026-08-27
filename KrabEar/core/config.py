@@ -1253,6 +1253,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # укажи свой Ollama/vLLM или no-log провайдера. Транскрипт идёт ТОЛЬКО туда.
     "cloud_rewriter_base_url": "",       # напр. http://localhost:11434/v1
     "cloud_rewriter_custom_model": "",   # напр. qwen2.5:7b
+    # Модели облачного рерайтера. Раньше были классовыми константами в
+    # cloud_rewriter.py: владелец не мог ни сменить модель, ни увидеть,
+    # какая используется, — а линейки провайдеров обновляются чаще наших
+    # релизов. Дефолты равны прежнему хардкоду: поведение не меняется.
+    "cloud_rewriter_openai_model": "gpt-4o-mini",
+    "cloud_rewriter_anthropic_model": "claude-haiku-4-5-20251001",
     "cloud_rewriter_api_key": "",        # опционально (self-hosted часто без ключа)
     # --- Cloud STT fallback provider (core/engine.py::_transcribe_remote) ---
     # Используется ТОЛЬКО когда NETWORK_MODE != "offline_strict" И локальные
