@@ -140,13 +140,18 @@ class QuotaGuardTests(unittest.TestCase):
         )
 
     def test_pii_redaction_still_applied(self):
-        """Кап не должен отменять существующую очистку PII (W1193 F4)."""
+        """Кап не должен отменять существующую очистку PII (W1193 F4).
+
+        🔴 Путь задан ЯВНО как /Users/..., а не через expanduser('~'): редакция
+        сворачивает macOS-форму, а ubuntu-раннер живёт в /home/runner — тест на
+        expanduser зелен локально и красен в CI, проверяя не то, что заявляет.
+        """
         ev = observability._sentry_before_send(
-            _log_event(f"путь {os.path.expanduser('~')}/секрет.txt"), None
+            _log_event("путь /Users/someone/секрет.txt"), None
         )
         self.assertIsNotNone(ev)
         self.assertNotIn(
-            os.path.expanduser("~"), ev["logentry"]["message"],
+            "/Users/someone", ev["logentry"]["message"],
             "домашний путь утёк в Sentry — редакция PII сломана капом",
         )
 
