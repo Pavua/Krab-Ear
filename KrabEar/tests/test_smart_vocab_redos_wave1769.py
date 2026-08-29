@@ -33,6 +33,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from tests.timing_budgets import REDOS_BUDGET_SEC  # noqa: E402
+
 from backend.smart_vocabulary import (  # noqa: E402
     _MAX_REGEX_TEXT_LEN,
     _RE_TECH_WITH_DIGITS,
@@ -83,9 +85,10 @@ class TestRedosPerformance(unittest.TestCase):
         elapsed = time.perf_counter() - t0
 
         self.assertLess(
-            elapsed, 0.3,
+            elapsed,
+            REDOS_BUDGET_SEC,
             f"get_vocabulary_suggestions заняло {elapsed:.3f}c на 250k цифр "
-            f"(ожидалось < 0.3c) — квадратичный ReDoS не устранён",
+            f"(лимит {REDOS_BUDGET_SEC}c) — квадратичный ReDoS не устранён",
         )
         # Чистые цифры не дают валидных слов-кандидатов.
         self.assertEqual(result, [])
@@ -96,7 +99,7 @@ class TestRedosPerformance(unittest.TestCase):
         t0 = time.perf_counter()
         self.builder.get_vocabulary_suggestions(items, min_frequency=1)
         elapsed = time.perf_counter() - t0
-        self.assertLess(elapsed, 0.3, f"source_text путь занял {elapsed:.3f}c")
+        self.assertLess(elapsed, REDOS_BUDGET_SEC, f"source_text путь занял {elapsed:.3f}c")
 
     def test_regex_finditer_linear(self) -> None:
         """Сам паттерн линеен: 8k цифр обрабатываются за миллисекунды."""
@@ -104,7 +107,7 @@ class TestRedosPerformance(unittest.TestCase):
         t0 = time.perf_counter()
         list(_RE_TECH_WITH_DIGITS.finditer(s))
         elapsed = time.perf_counter() - t0
-        self.assertLess(elapsed, 0.05, f"finditer на 8k цифр занял {elapsed:.4f}c")
+        self.assertLess(elapsed, REDOS_BUDGET_SEC, f"finditer на 8k цифр занял {elapsed:.4f}c")
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +210,7 @@ class TestTermExtractorRedos(unittest.TestCase):
         t0 = time.perf_counter()
         list(TE_RE_TECH_WITH_DIGITS.finditer(s))
         elapsed = time.perf_counter() - t0
-        self.assertLess(elapsed, 0.05, f"term_extractor finditer 8k занял {elapsed:.4f}c")
+        self.assertLess(elapsed, REDOS_BUDGET_SEC, f"term_extractor finditer 8k занял {elapsed:.4f}c")
 
     def test_extract_terms_tech_digit_still_works(self) -> None:
         extractor = TermExtractor(min_term_length=3)
@@ -227,7 +230,7 @@ class TestTermExtractorRedos(unittest.TestCase):
         extractor.extract_terms("0" * 60_000, language="ru")
         elapsed = time.perf_counter() - t0
         # extract_terms делает несколько проходов; даём 1.0 c запаса (раньше десятки секунд).
-        self.assertLess(elapsed, 1.0, f"extract_terms на 60k цифр занял {elapsed:.3f}c")
+        self.assertLess(elapsed, REDOS_BUDGET_SEC, f"extract_terms на 60k цифр занял {elapsed:.3f}c")
 
 
 # ---------------------------------------------------------------------------

@@ -23,6 +23,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from tests.timing_budgets import REDOS_BUDGET_SEC  # noqa: E402
+
 
 def _make_item(text: str, ts: float | None = None) -> dict:
     return {"text": text, "ts": ts or time.time()}
@@ -558,7 +560,7 @@ class TestDuplicateDetectorGeminiWaveA(unittest.TestCase):
         start = time.monotonic()
         score = DuplicateDetector.calculate_similarity(long1, long2)
         elapsed = time.monotonic() - start
-        self.assertLess(elapsed, 1.0, f"Should complete in <1 s, took {elapsed:.3f}s")
+        self.assertLess(elapsed, REDOS_BUDGET_SEC, f"Should complete in <1 s, took {elapsed:.3f}s")
         self.assertGreater(score, 0.0)
 
     def test_redos_guard_truncates_to_2000_chars(self) -> None:

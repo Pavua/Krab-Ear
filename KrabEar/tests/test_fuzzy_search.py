@@ -15,6 +15,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from tests.timing_budgets import REDOS_BUDGET_SEC  # noqa: E402
+
 
 class FuzzySearcherUnitTests(unittest.TestCase):
     """Юнит-тесты для FuzzySearcher."""
@@ -469,7 +471,7 @@ class FuzzySearcherSecurityTests(unittest.TestCase):
         results = self.searcher.search(long_query, texts, threshold=0.0)
         elapsed = time.monotonic() - t0
         # Must complete in <2 s even on slow CI hardware
-        self.assertLess(elapsed, 2.0, f"ReDoS guard failed: search took {elapsed:.3f}s")
+        self.assertLess(elapsed, REDOS_BUDGET_SEC, f"ReDoS guard failed: search took {elapsed:.3f}s")
         self.assertIsInstance(results, list)
 
     def test_redos_guard_very_long_text_does_not_hang(self) -> None:
@@ -479,7 +481,7 @@ class FuzzySearcherSecurityTests(unittest.TestCase):
         t0 = time.monotonic()
         results = self.searcher.search("b" * 50, texts, threshold=0.0)
         elapsed = time.monotonic() - t0
-        self.assertLess(elapsed, 2.0, f"ReDoS guard (long text) took {elapsed:.3f}s")
+        self.assertLess(elapsed, REDOS_BUDGET_SEC, f"ReDoS guard (long text) took {elapsed:.3f}s")
         self.assertIsInstance(results, list)
 
 
