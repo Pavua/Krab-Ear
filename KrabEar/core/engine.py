@@ -37,6 +37,7 @@ except Exception:
 
 from core.mlx_lock import mlx_lock  # noqa: E402 — после try/except блока MLX импорта
 from core.mlx_inter_lock import MLXInterLockTimeout, mlx_inter_process_lock  # noqa: E402
+from core.mlx_lock import MLXLockTimeoutError  # noqa: E402
 from core.mlx_subprocess import MLXTimeoutError, get_watchdog  # noqa: E402
 from core.mlx_memory_gate import should_skip_second_mlx_checkpoint  # noqa: E402
 from core.transcript_context import build_initial_prompt
@@ -719,6 +720,14 @@ class AudioEngine:
           лимит, законный сигнал нездоровья; решает по остатку дедлайна
           ЗАПРОСА, как и раньше (stt_budget.timeout_blacklist_allowed()).
         """
+        # 🔴 Ожидание ОЧЕРЕДИ за GPU — не отказ движка (волна 2026-08-29).
+        # MLXLockTimeoutError означает «лок держит сосед» (превью, импорт,
+        # смена профиля), а сам движок здоров и GPU даже не трогал. Блэклист за
+        # это выбивает рабочий GigaAM на 300 с и отправляет следующую диктовку
+        # в облако, которого нет, — тот же дефект, что разбирала спека #1956,
+        # только в adapter-ветке, куда он попадает как наследник TimeoutError.
+        if isinstance(exc, MLXLockTimeoutError):
+            return False
         if not isinstance(exc, (TimeoutError, concurrent.futures.TimeoutError)):
             return True
         if is_adapter:

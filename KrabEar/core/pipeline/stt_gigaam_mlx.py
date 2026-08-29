@@ -41,12 +41,27 @@ from concurrent.futures import TimeoutError as FuturesTimeoutError
 
 from core.audio_chunker import AudioChunker
 from core.mlx_inter_lock import mlx_inter_process_lock
-from core.mlx_lock import mlx_lock
+from core.mlx_lock import MLXLockTimeoutError, mlx_lock
 from core.mlx_subprocess import MLX_HANG_HARD_KILL_SEC, MLXTimeoutError
 
 logger = logging.getLogger("KrabEar.GigaAMMLX")
 
 _REQUIRED_SAMPLE_RATE = 16000
+
+# Сколько ждать общий mlx_lock ПЕРЕД инференсом. Ожидание в очереди за GPU и
+# сам счёт на GPU — разные вещи и разные бюджеты (см. _watchdog_timeout_sec).
+#
+# 🔴 Живой инцидент 2026-08-28 (две диктовки владельца подряд): превью гоняет
+# whisper через общий transcribe(is_preview=True), то есть под этим же локом и
+# без ограничения. Финальная транскрипция вставала ЗДЕСЬ, на входе в секцию,
+# ещё до watchdog'а — в логе поэтому нет ни одной его строки. GigaAM съедал все
+# 200 с бюджета адаптера, whisper получал остаток и не укладывался в свои 92 с →
+# «Критическая ошибка распознавания» на здоровом стеке.
+#
+# Тот же сценарий уже чинили 2026-08-13 — но только для очистки Metal-кэша в
+# engine.set_quality_profile (MLX_CACHE_FLUSH_LOCK_TIMEOUT_SEC). Вход GigaAM в
+# секцию тогда пропустили: второй виток одной sibling-asymmetry.
+_LOCK_WAIT_TIMEOUT_SEC = 25.0
 
 # Жёсткий предел GigaAM — 25 c на массив; режем по 20 c с осознанным запасом
 # (см. engine._GIGAAM_MAX_CHUNK_SEC и инцидент «старый порог 30 s терял записи»).
@@ -77,6 +92,7 @@ class GigaAMMLXAdapter:
         mode: str = "rnnt",
         chunker: Optional[AudioChunker] = None,
         watchdog_timeout_sec: float = 120.0,
+        lock_wait_timeout_sec: float = _LOCK_WAIT_TIMEOUT_SEC,
     ) -> None:
         if mode not in _MODE_TO_MLX:
             raise ValueError(
@@ -86,6 +102,7 @@ class GigaAMMLXAdapter:
         self._mlx_model_type = _MODE_TO_MLX[mode]
         self._chunker = chunker or AudioChunker()
         self._watchdog_timeout_sec = watchdog_timeout_sec
+        self._lock_wait_timeout_sec = float(lock_wait_timeout_sec)
         self._model: Optional[object] = None
         self._tokenizer: Optional[object] = None
         # Сериализация тяжёлой lazy-загрузки (зеркало GigaAMAdapter._model_lock).
@@ -175,10 +192,28 @@ class GigaAMMLXAdapter:
         tmp_path = self._write_temp_wav(audio)
         try:
             # Critical section — минимальный: один инференс одного чанка.
-            with mlx_inter_process_lock(), mlx_lock():
-                return self._run_with_timeout(
-                    lambda: gigaam_mlx.transcribe(model, tokenizer, tmp_path)
-                )
+            with mlx_inter_process_lock():
+                lock = mlx_lock()
+                if not lock.acquire(timeout=self._lock_wait_timeout_sec):
+                    # 🔴 НЕ MLXTimeoutError: его engine.py трактует как отказ
+                    # движка и метит модель недоступной на 300 с. Очередь за GPU
+                    # отказом движка не является — блэклист за ожидание и есть
+                    # дефект, разобранный в спеке #1956.
+                    logger.warning(
+                        "GigaAM-MLX: mlx_lock занят дольше %.1fс — уступаю очередь, "
+                        "каскад пробует следующий движок с почти полным дедлайном",
+                        self._lock_wait_timeout_sec,
+                    )
+                    raise MLXLockTimeoutError(
+                        f"mlx_lock занят дольше {self._lock_wait_timeout_sec:.1f}с "
+                        f"(gigaam-mlx-{self._mlx_model_type})"
+                    )
+                try:
+                    return self._run_with_timeout(
+                        lambda: gigaam_mlx.transcribe(model, tokenizer, tmp_path)
+                    )
+                finally:
+                    lock.release()
         finally:
             try:
                 os.unlink(tmp_path)

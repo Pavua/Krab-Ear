@@ -60,6 +60,17 @@ class _FakeLockCtx:
         self._events.append((f"{self._name}_exit", self.depth))
         return False
 
+    # Волна 2026-08-29: адаптер входит в секцию через acquire(timeout=...), а не
+    # через `with`, — ожидание очереди за GPU обязано быть ограниченным. Настоящий
+    # mlx_lock() это RLock, у которого acquire/release есть; фейк дрейфовал от
+    # оригинала, пока прод пользовался только контекст-менеджером.
+    def acquire(self, timeout=-1):
+        self.__enter__()
+        return True
+
+    def release(self):
+        self.__exit__(None, None, None)
+
 
 class _FakeChunker:
     """Возвращает заранее заданное число чанков."""
