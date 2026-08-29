@@ -12,6 +12,9 @@ import os
 import plistlib
 import re
 import subprocess
+import threading
+import time
+from collections import deque
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +75,110 @@ def _redact_value(obj: object) -> object:
     return obj
 
 
+# --- Предохранитель квоты Sentry (волна 2026-08-29) ------------------------
+#
+# 🔴 Живой факт: последнее ПРИНЯТОЕ событие организации — 13.08.2026, дальше 16
+# суток слепоты (за неделю 789 rate_limited, 387 client_discard, accepted=0).
+# Квоту выжгла ОДНА повторяющаяся ошибка: 2488× «handle_request завис дольше
+# 180с». Ослепли при этом ВСЕ проекты организации, включая те, где в это время
+# были настоящие инциденты.
+#
+# `ErrorBus` свой часовой кап имеет (SENTRY_HOURLY_CAP_PER_CODE=12), но лидер
+# списка шёл МИМО него — обычным logger.error, который забирает
+# LoggingIntegration. Поэтому предохранитель стоит здесь: `before_send` —
+# единственная точка, через которую проходит КАЖДОЕ событие любого источника.
+SENTRY_HOURLY_CAP_PER_SIGNATURE = 12
+SENTRY_HOURLY_CAP_TOTAL = 60
+_SENTRY_RATE_WINDOW_SEC = 3600.0
+
+_sentry_rate_lock = threading.Lock()
+_sentry_sent_per_signature: "dict[str, deque]" = {}
+_sentry_sent_all: "deque" = deque()
+_sentry_suppressed_since_last: "dict[str, int]" = {}
+
+# Числа в сообщении — переменная часть ОДНОЙ ошибки (таймаут, имя метода, pid).
+# Без их схлопывания счётчик обнуляется на каждом новом значении и кап не
+# работает вовсе: ровно так выглядит инцидентная строка.
+_DIGITS_RE = re.compile(r"\d+")
+
+
+def _reset_sentry_rate_limiter() -> None:
+    """Сбрасывает состояние ограничителя (тесты и перезапуск телеметрии)."""
+    with _sentry_rate_lock:
+        _sentry_sent_per_signature.clear()
+        _sentry_sent_all.clear()
+        _sentry_suppressed_since_last.clear()
+
+
+def _event_signature(event: dict) -> "str | None":
+    """Ключ схлопывания: что это за ошибка, без переменных частей.
+
+    None означает «сигнатуру определить нечем» — такое событие ограничивать
+    НЕЛЬЗЯ. 🔴 Иначе всё безымянное (breadcrumb-only, служебные конверты)
+    схлопывается в один ключ и начинает глушить само себя: предохранитель от
+    слепоты сам бы её и создавал. Направление отказа здесь — в сторону
+    видимости.
+    """
+    try:
+        exception = event.get("exception") or {}
+        values = exception.get("values") or []
+        if values:
+            head = values[-1] or {}
+            raw = f"{head.get('type', '?')}:{head.get('value', '')}"
+        else:
+            logentry = event.get("logentry") or {}
+            body = (logentry.get("message") if isinstance(logentry, dict) else None) or event.get("message")
+            if not body:
+                return None
+            raw = f"{event.get('logger', '?')}:{body}"
+    except Exception:  # noqa: BLE001 — сигнатура не смеет ронять телеметрию
+        return None
+    return _DIGITS_RE.sub("N", raw)[:200]
+
+
+def _sentry_rate_limit_allows(event: dict) -> bool:
+    """Решает, отправлять ли событие; помечает пропущенное числом подавленных.
+
+    Подавленное НЕ теряется молча: следующее прошедшее событие той же сигнатуры
+    несёт тег `suppressed_since_last`, иначе в Sentry не виден масштаб.
+    """
+    # Транзакции живут на отдельной квоте и шумом ошибок не являются.
+    if event.get("type") == "transaction":
+        return True
+    signature = _event_signature(event)
+    if signature is None:
+        return True
+    now = time.monotonic()
+    cutoff = now - _SENTRY_RATE_WINDOW_SEC
+
+    with _sentry_rate_lock:
+        per = _sentry_sent_per_signature.setdefault(signature, deque())
+        while per and per[0] < cutoff:
+            per.popleft()
+        while _sentry_sent_all and _sentry_sent_all[0] < cutoff:
+            _sentry_sent_all.popleft()
+
+        if (
+            len(per) >= SENTRY_HOURLY_CAP_PER_SIGNATURE
+            or len(_sentry_sent_all) >= SENTRY_HOURLY_CAP_TOTAL
+        ):
+            _sentry_suppressed_since_last[signature] = (
+                _sentry_suppressed_since_last.get(signature, 0) + 1
+            )
+            return False
+
+        per.append(now)
+        _sentry_sent_all.append(now)
+        suppressed = _sentry_suppressed_since_last.pop(signature, 0)
+
+    tags = event.get("tags")
+    if not isinstance(tags, dict):
+        tags = {}
+        event["tags"] = tags
+    tags["suppressed_since_last"] = str(suppressed)
+    return True
+
+
 def _sentry_before_send(event: dict, hint: object) -> dict | None:  # noqa: ARG001
     """``before_send`` callback: redact PII / local paths from Sentry events.
 
@@ -89,7 +196,16 @@ def _sentry_before_send(event: dict, hint: object) -> dict | None:  # noqa: ARG0
     - ``breadcrumbs.values[]`` — each crumb's ``data`` dict and ``message`` string
     - ``logentry`` — ``message`` string and ``params`` (F2)
     - ``request`` — ``data``, ``query_string``, ``cookies`` (F2)
+
+    Волна 2026-08-29: перед редакцией работает предохранитель квоты — одна
+    повторяющаяся ошибка не должна выжигать месячный лимит и ослеплять
+    мониторинг всей организации (см. _sentry_rate_limit_allows).
     """
+    try:
+        if not _sentry_rate_limit_allows(event):
+            return None
+    except Exception:  # noqa: BLE001 — предохранитель не смеет ронять телеметрию
+        pass
     try:
         # Walk exception values → stacktrace frames → filename / abs_path / vars.
         exception = event.get("exception") or {}

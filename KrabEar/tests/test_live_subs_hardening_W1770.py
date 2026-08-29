@@ -39,6 +39,13 @@ from backend.live_subs_service import (  # noqa: E402
 )
 from backend.translator import TranslationResult  # noqa: E402
 
+# Ожидание фонового воркера — ЗАЩИТА ОТ ЗАВИСАНИЯ, а не замер скорости: тест
+# проверяет факт flush, а не то, за сколько он произошёл. 🔴 Прежние 2.0 с
+# роняли CI на загруженном раннере (2026-08-29, «воркер не догнал очередь»),
+# то есть красили зелёный код в красный. Порог поднят, смысл сохранён — вечное
+# зависание воркера тест по-прежнему поймает.
+_WORKER_IDLE_TIMEOUT_SEC = 30.0
+
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -117,7 +124,7 @@ class TestBufferCapForcesFlush(unittest.TestCase):
         chunk_samples = _MAX_BUFFER_SAMPLES + 1  # одиночный чанк сразу пересекает потолок
 
         svc.ingest(_pcm_bytes(chunk_samples), giant_sr, "off", False)
-        self.assertTrue(svc.wait_until_idle(timeout=2.0), "воркер не догнал очередь")
+        self.assertTrue(svc.wait_until_idle(timeout=_WORKER_IDLE_TIMEOUT_SEC), "воркер не догнал очередь")
 
         svc._transcriber.transcribe.assert_called()
         # После форсированного flush буфер обнулён (синхронно, внутри ingest()).
@@ -194,7 +201,7 @@ class TestSampleRateClamp(unittest.TestCase):
                          f"Клампнутый sample_rate должен дать корректный (асинхронный) flush: {result}")
         with svc._lock:
             self.assertEqual(svc._buffer_samples, 0)
-        self.assertTrue(svc.wait_until_idle(timeout=2.0), "воркер не догнал очередь")
+        self.assertTrue(svc.wait_until_idle(timeout=_WORKER_IDLE_TIMEOUT_SEC), "воркер не догнал очередь")
         svc._transcriber.transcribe.assert_called()
         svc.close()
 
@@ -231,7 +238,7 @@ class TestNoTranscriptInLogs(unittest.TestCase):
         # успел записаться до выхода из блока (без ожидания это гонка).
         with self.assertLogs("KrabEar.Backend.LiveSubsService", level="INFO") as cm:
             svc.ingest(_pcm_bytes(16000 * 3), 16000, "ru", False)  # 3 c → flush
-            self.assertTrue(svc.wait_until_idle(timeout=2.0), "воркер не догнал очередь")
+            self.assertTrue(svc.wait_until_idle(timeout=_WORKER_IDLE_TIMEOUT_SEC), "воркер не догнал очередь")
 
         svc.close()
         joined = "\n".join(cm.output)
@@ -267,7 +274,7 @@ class TestNoTranscriptInLogs(unittest.TestCase):
             svc.ingest(_pcm_bytes(16000 * 3), 16000, "ru", False)
             # F3: flush асинхронный — ждём воркер ДО снятия хендлера, иначе
             # лог-запись может появиться уже после removeHandler() (гонка).
-            self.assertTrue(svc.wait_until_idle(timeout=2.0), "воркер не догнал очередь")
+            self.assertTrue(svc.wait_until_idle(timeout=_WORKER_IDLE_TIMEOUT_SEC), "воркер не догнал очередь")
         finally:
             lg.removeHandler(handler)
             lg.setLevel(prev_level)

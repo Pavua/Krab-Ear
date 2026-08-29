@@ -44,14 +44,21 @@ def _make_item(text: str = "", duration_sec: float = 5.0, confidence: float = 0.
 
 # ── HIGH ReDoS-backstop тесты ─────────────────────────────────────────────────
 
+# Бюджет на враждебный ввод. Поднят с 0.3 с до 2.0 с ради загруженных CI-раннеров
+# (#1782) — при этом настоящий катастрофический ReDoS-бэктрекинг занимает секунды
+# и минуты, так что 2.0 с его по-прежнему ловят.
+#
+# 🔴 Живёт на уровне МОДУЛЯ, а не класса: 2026-08-29 тест
+# BackstopDoesNotBreakPrivacyTestCase упал на загруженном раннере (0.350 с и
+# 0.463 с), потому что классовую константу не видел и держал свои 0.3 с —
+# правку #1782 применили к одному классу, соседний остался с прежним порогом.
+TIMING_BUDGET_SEC: float = 2.0
+
+
 class ReDoSBackstopTimingTestCase(unittest.TestCase):
-    """W1765 HIGH: враждебные вводы должны завершаться за < 2.0 с.
+    """W1765 HIGH: враждебные вводы должны завершаться за < 2.0 с."""
 
-    Budget raised from 0.3 s to 2.0 s to accommodate loaded CI runners
-    while still catching true catastrophic ReDoS backtracking (seconds/minutes).
-    """
-
-    _TIMING_BUDGET_SEC: float = 2.0
+    _TIMING_BUDGET_SEC: float = TIMING_BUDGET_SEC
 
     def setUp(self) -> None:
         self._enricher = MetadataEnricher()
@@ -282,7 +289,12 @@ class BackstopDoesNotBreakPrivacyTestCase(unittest.TestCase):
         elapsed = time.perf_counter() - t0
         meta = result["metadata"]
         # Быстро
-        self.assertLess(elapsed, 0.3, f"Враждебный ввод + privacy занял {elapsed:.3f}с")
+        self.assertLess(
+            elapsed,
+            TIMING_BUDGET_SEC,
+            f"Враждебный ввод + privacy занял {elapsed:.3f}с "
+            f"(лимит {TIMING_BUDGET_SEC}с)",
+        )
         # Topics пусто
         self.assertEqual(meta["topics"], [])
         # Остальные поля присутствуют
