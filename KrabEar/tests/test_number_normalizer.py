@@ -22,6 +22,8 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+from tests.timing_budgets import REDOS_BUDGET_SEC  # noqa: E402
+
 from core.number_normalizer import NumberNormalizer
 
 
@@ -694,7 +696,7 @@ class TestNumberNormalizerSecurityFixes(unittest.TestCase):
         t0 = time.time()
         result = self.n.normalize(words, "ru")
         elapsed = time.time() - t0
-        self.assertLess(elapsed, 2.0, f"RU normalize took {elapsed:.2f}s — possible backtracking hang")
+        self.assertLess(elapsed, REDOS_BUDGET_SEC, f"RU normalize took {elapsed:.2f}s — possible backtracking hang")
         # Result must not be empty and must contain at least one digit
         self.assertIn("1", result, "Long RU sequence produced no digits")
 
@@ -705,7 +707,7 @@ class TestNumberNormalizerSecurityFixes(unittest.TestCase):
         t0 = time.time()
         result = self.n.normalize(words, "es")
         elapsed = time.time() - t0
-        self.assertLess(elapsed, 2.0, f"ES normalize took {elapsed:.2f}s — possible backtracking hang")
+        self.assertLess(elapsed, REDOS_BUDGET_SEC, f"ES normalize took {elapsed:.2f}s — possible backtracking hang")
         self.assertIn("1", result, "Long ES sequence produced no digits")
 
     def test_redos_long_sequence_en_completes_fast(self):
@@ -715,7 +717,7 @@ class TestNumberNormalizerSecurityFixes(unittest.TestCase):
         t0 = time.time()
         result = self.n.normalize(words, "en")
         elapsed = time.time() - t0
-        self.assertLess(elapsed, 2.0, f"EN normalize took {elapsed:.2f}s — possible backtracking hang")
+        self.assertLess(elapsed, REDOS_BUDGET_SEC, f"EN normalize took {elapsed:.2f}s — possible backtracking hang")
         self.assertIn("1", result, "Long EN sequence produced no digits")
 
     def test_redos_exactly_at_limit_ru(self):

@@ -17,6 +17,8 @@ import re
 import sys
 import time
 import unittest
+
+from tests.timing_budgets import REDOS_BUDGET_SEC  # noqa: E402
 from pathlib import Path
 
 # Настройка путей для standalone-запуска (без pytest PYTHONPATH)
@@ -209,7 +211,7 @@ class TestRunWithTimeout(unittest.TestCase):
         elapsed = time.perf_counter() - t0
 
         self.assertIsNone(result, "TRIGGER за пределами backstop не должен находиться")
-        self.assertLess(elapsed, 2.0, f"run_with_timeout завис на {elapsed:.2f}с > 2.0с")
+        self.assertLess(elapsed, REDOS_BUDGET_SEC, f"run_with_timeout завис на {elapsed:.2f}с > 2.0с")
 
     def test_match_found_within_backstop(self):
         """Совпадение в пределах backstop-лимита находится корректно."""
@@ -287,7 +289,7 @@ class TestHallucinationManagerSafeRegexIntegration(unittest.TestCase):
         matches = self.mgr.check_text(long_text)
         elapsed = time.perf_counter() - t0
         # Даже с большим текстом должно завершиться быстро (текст обрезается до 4096)
-        self.assertLess(elapsed, 2.0, f"check_text завис на {elapsed:.2f}с")
+        self.assertLess(elapsed, REDOS_BUDGET_SEC, f"check_text завис на {elapsed:.2f}с")
         # Совпадение может быть найдено или нет (зависит от _MAX_MATCH_INPUT_LEN),
         # главное — нет зависания
         self.assertIsInstance(matches, list)
