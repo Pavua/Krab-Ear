@@ -9,9 +9,11 @@ Python 3.12 with no mlx wheels, so such assertions are false-green locally.
 
 from __future__ import annotations
 
+import ast
 import os
 import sys
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -314,6 +316,99 @@ class TestListSttEnginesRobustness(unittest.TestCase):
         # All engines should be available=False when imports fail completely
         for engine in res["engines"]:
             self.assertFalse(engine["available"])
+
+
+# ---------------------------------------------------------------------------
+# 7. mlx_available для GigaAM (2026-08-23)
+# ---------------------------------------------------------------------------
+
+class MlxAvailableFieldTestCase(unittest.TestCase):
+    """mlx_available в list_stt_engines (2026-08-23).
+
+    GigaAM v3 умеет транспорт "mlx" (core/pipeline/stt_gigaam_mlx.py), но UI не
+    может сам узнать, установлена ли библиотека gigaam_mlx. handle_list_stt_engines
+    отдаёт это одним полем, специфичным ТОЛЬКО для записи gigaam.
+
+    Критично: проверка ОБЯЗАНА идти через importlib.util.find_spec, а не импортом
+    core.pipeline.stt_gigaam_mlx — тот импорт успешен и без библиотеки (gigaam_mlx
+    импортируется лениво внутри методов адаптера), проверка через импорт была бы
+    ложноположительной.
+    """
+
+    def test_mlx_available_present_only_on_gigaam(self):
+        svc = _make_svc()
+        with patch("importlib.util.find_spec", return_value=None):
+            result = svc.handle_list_stt_engines({})
+
+        engines = {e["name"]: e for e in result["engines"]}
+        self.assertIn("mlx_available", engines["gigaam"])
+        for name, engine in engines.items():
+            if name != "gigaam":
+                self.assertNotIn("mlx_available", engine)
+
+    def test_mlx_available_false_when_spec_missing(self):
+        svc = _make_svc()
+        with patch("importlib.util.find_spec", return_value=None) as mock_find:
+            result = svc.handle_list_stt_engines({})
+
+        engines = {e["name"]: e for e in result["engines"]}
+        self.assertFalse(engines["gigaam"]["mlx_available"])
+        # find_spec обязан быть вызван именно с "gigaam_mlx"
+        mock_find.assert_any_call("gigaam_mlx")
+
+    def test_mlx_available_true_when_spec_present(self):
+        svc = _make_svc()
+        fake_spec = object()
+        with patch("importlib.util.find_spec", return_value=fake_spec):
+            result = svc.handle_list_stt_engines({})
+
+        engines = {e["name"]: e for e in result["engines"]}
+        self.assertTrue(engines["gigaam"]["mlx_available"])
+
+    def test_mlx_available_false_when_find_spec_raises(self):
+        """find_spec может бросить исключение (сломанный .pth/egg-link,
+        кастомный sys.meta_path finder) — метод обязан деградировать
+        мягко, а не уронить ВЕСЬ список движков."""
+        svc = _make_svc()
+        with patch("importlib.util.find_spec", side_effect=RuntimeError("boom")):
+            result = svc.handle_list_stt_engines({})
+
+        # Метод обязан вернуть ok=True несмотря на исключение
+        self.assertTrue(result.get("ok"))
+        engines = {e["name"]: e for e in result["engines"]}
+        # mlx_available обязана быть False при исключении
+        self.assertFalse(engines["gigaam"]["mlx_available"])
+
+
+class MlxAvailableUsesFindSpecNotImportTestCase(unittest.TestCase):
+    """Source-контракт: проверка идёт через importlib.util.find_spec("gigaam_mlx"),
+    а НЕ через import core.pipeline.stt_gigaam_mlx (тот импорт успешен без библиотеки).
+    Матчим AST, не подстроку — правило CLAUDE.md для source-inspection тестов."""
+
+    def test_ast_calls_find_spec_with_gigaam_mlx_literal(self):
+        source = Path(KRAB_EAR_ROOT, "backend", "stt_management_service.py").read_text(
+            encoding="utf-8"
+        )
+        tree = ast.parse(source)
+
+        found = False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            is_find_spec = (
+                isinstance(func, ast.Attribute) and func.attr == "find_spec"
+            )
+            if not is_find_spec:
+                continue
+            for arg in node.args:
+                if isinstance(arg, ast.Constant) and arg.value == "gigaam_mlx":
+                    found = True
+        self.assertTrue(
+            found,
+            "handle_list_stt_engines обязан вызывать "
+            "importlib.util.find_spec('gigaam_mlx'), а не импортировать адаптер",
+        )
 
 
 if __name__ == "__main__":

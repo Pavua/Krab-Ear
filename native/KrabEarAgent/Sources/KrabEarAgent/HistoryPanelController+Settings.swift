@@ -612,6 +612,14 @@ extension HistoryPanelController {
         }
 
         syncCloudRewriterControls(settings: settings)
+        // mlxAvailable здесь всегда false: этот путь синхронизации не имеет
+        // доступа к последнему ответу list_stt_engines (тот приходит только
+        // из fetchAndRebuildSTTEnginesCard, см. Task 3 Step 5). syncSettingsControls
+        // покрывает значение пикера (subprocess/mlx) и бейдж по последнему
+        // ИЗВЕСТНОМУ mlxAvailable — актуализация после факта идёт через
+        // completion в Task 3 Step 5, который зовёт syncGigaamTransportControls
+        // повторно с настоящим значением.
+        syncGigaamTransportControls(settings: settings, mlxAvailable: lastKnownGigaamMlxAvailable)
         llmRewriteButton.state = settings.llmRewriteEnabled ? .on : .off
         // Ensure current model is always visible; fetch LM Studio models async to expand dropdown.
         let currentModel = settings.llmModel

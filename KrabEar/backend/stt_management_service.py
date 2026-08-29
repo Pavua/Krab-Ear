@@ -333,6 +333,7 @@ class STTManagementService:
                 "toggle_key": "stt_gigaam_enabled",
                 "note": "Лучший для RU, subprocess ~1.5 ГБ",
                 "adapter_class": "core.pipeline.stt_gigaam_adapter.GigaAMSTTAdapter",
+                "checks_mlx_availability": True,
             },
             {
                 "name": "parakeet",
@@ -386,7 +387,7 @@ class STTManagementService:
             except Exception:
                 available = False
 
-            engines.append({
+            entry = {
                 "name": meta["name"],
                 "display_name": meta["display_name"],
                 "available": available,
@@ -394,7 +395,27 @@ class STTManagementService:
                 "toggle_key": toggle_key,
                 "note": meta["note"],
                 "type": "local",
-            })
+            }
+            if meta.get("checks_mlx_availability"):
+                # find_spec, а НЕ импорт core.pipeline.stt_gigaam_mlx: тот модуль
+                # импортируется успешно и без библиотеки gigaam_mlx (ленивый
+                # импорт внутри методов адаптера) — импорт был бы
+                # ложноположительной проверкой.
+                #
+                # Локальный import (а не модульный) НАМЕРЕННО: чуть выше в этом
+                # же методе (см. "Best-effort availability probe") есть голый
+                # `import importlib` внутри try — Python трактует такое
+                # присваивание как ЛОКАЛЬНОЕ имя для ВСЕЙ функции, поэтому
+                # модульный `import importlib.util` был бы неиспользуемым
+                # (flake8 F401) и полагался бы на порядок исполнения внутри
+                # той же итерации цикла — хрупко при будущем рефакторинге
+                # соседнего блока.
+                try:
+                    import importlib.util
+                    entry["mlx_available"] = importlib.util.find_spec("gigaam_mlx") is not None
+                except Exception:
+                    entry["mlx_available"] = False
+            engines.append(entry)
 
         add_breadcrumb(
             category="stt",
