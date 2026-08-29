@@ -21,6 +21,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from tests.timing_budgets import REDOS_BUDGET_SEC  # noqa: E402
+
 from backend.email_sender import EmailSender
 
 
@@ -502,7 +504,7 @@ class TestW1764StripHtmlReDoSProtection(unittest.TestCase):
         t0 = time.monotonic()
         result = EmailSender._strip_html(hostile)
         elapsed = time.monotonic() - t0
-        self.assertLess(elapsed, 1.5,
+        self.assertLess(elapsed, REDOS_BUDGET_SEC,
                         f"_strip_html took {elapsed:.3f}s on hostile input — ReDoS not fixed")
         # Result must be a string (truncated, stripped, possibly empty)
         self.assertIsInstance(result, str)

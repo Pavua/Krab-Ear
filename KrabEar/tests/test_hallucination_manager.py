@@ -3,6 +3,8 @@
 from __future__ import annotations
 from core.hallucination_manager import HallucinationManager, HallucinationMatch
 
+from tests.timing_budgets import REDOS_BUDGET_SEC  # noqa: E402
+
 import json
 import sys
 import tempfile
@@ -519,7 +521,7 @@ class TestReDoSMitigation(unittest.TestCase):
         result = self.mgr.check_text(huge_text)
         elapsed = time.monotonic() - start
         self.assertIsInstance(result, list)
-        self.assertLess(elapsed, 2.0, f"check_text() took {elapsed:.3f}s on large input — Layer 3 cap may be broken")
+        self.assertLess(elapsed, REDOS_BUDGET_SEC, f"check_text() took {elapsed:.3f}s on large input — Layer 3 cap may be broken")
 
     def test_strip_hallucinations_truncates_very_long_input(self):
         """strip_hallucinations() must also complete fast on a 1 MB input."""
@@ -529,7 +531,7 @@ class TestReDoSMitigation(unittest.TestCase):
         result = self.mgr.strip_hallucinations(huge_text)
         elapsed = time.monotonic() - start
         self.assertIsInstance(result, str)
-        self.assertLess(elapsed, 2.0, f"strip_hallucinations() took {elapsed:.3f}s on large input")
+        self.assertLess(elapsed, REDOS_BUDGET_SEC, f"strip_hallucinations() took {elapsed:.3f}s on large input")
 
     # ── Regression: legitimate patterns still work after mitigation ──────────
 

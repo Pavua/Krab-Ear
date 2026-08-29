@@ -30,6 +30,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from tests.timing_budgets import REDOS_BUDGET_SEC  # noqa: E402
+
 from core.text_anonymizer import TextAnonymizer  # noqa: E402
 
 # Порог для timing-тестов (секунды).
@@ -128,7 +130,7 @@ class TestEmailReDoSW1758(unittest.TestCase):
         result = self.a.anonymize(text)
         elapsed = time.perf_counter() - t0
 
-        self.assertLess(elapsed, 5.0, "backstop: anonymize завис на тексте >500 KB")
+        self.assertLess(elapsed, REDOS_BUDGET_SEC, "backstop: anonymize завис на тексте >500 KB")
         # Email в начале — должен быть редактирован
         self.assertNotIn("admin@example.com", result.anonymized_text)
         self.assertIn("[EMAIL]", result.anonymized_text)
