@@ -193,8 +193,16 @@ jobs:
               # files). Re-run this chunk one file per fresh process: contamination-induced crashes
               # pass in isolation (-> green), genuine per-file failures are reported by filename.
               echo "::warning::chunk $((i+1)) exited $crc — re-running per-file to isolate"
+              # Бюджет на файл. 🔴 Замер 30.08.2026 в ТОМ ЖЕ окружении (py3.12 без
+              # mlx): test_backend_service 37с, оба тяжёлых аудита по 16с. При
+              # прежних 150с это запас 4-9x — и всё равно три файла подряд гибли
+              # по таймауту. Причина не в приоритете (nice=10 не помог) и не в
+              # окружении: изолированный прогон стартует ПОСЛЕ того, как машина
+              # прожевала 16 чанков за два часа, и упирается в накопленную
+              # деградацию. Таймаут здесь защищает от ВЕЧНОГО зависания, а не
+              # меряет скорость, поэтому запас выбран с большим полем.
               for f in "${sub[@]}"; do
-                "$timeout_cmd" 150 python -m pytest "$f" --tb=short -q -p no:xdist -p no:cacheprovider > /tmp/pf.log 2>&1
+                "$timeout_cmd" 600 python -m pytest "$f" --tb=short -q -p no:xdist -p no:cacheprovider > /tmp/pf.log 2>&1
                 fcode=$?
                 if [ $fcode -ne 0 ]; then
                   echo "::error::isolated FAIL($fcode): $f"; tail -20 /tmp/pf.log
