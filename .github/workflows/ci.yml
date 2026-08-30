@@ -313,6 +313,25 @@ jobs:
         # No user-controlled input is used in this step — no injection risk.
         run: python3 scripts/audit_dead_extracted_modules.py --fail-on-found
 
+  paired-thresholds-guard:
+    name: Paired thresholds guard (2026-08-30)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Ловит предел, выраженный в одном файле двумя способами: где-то именованной
+      # константой, где-то литералом. Ровно так 29.08.2026 упал
+      # test_metadata_enricher_W1765 — бюджет подняли в одном классе, соседний
+      # остался с прежними 0.3с. Первым шагом гоняем --selftest: гард, тихо
+      # переставший классифицировать, отчитывался бы CLEAN вечно.
+      # No user-controlled input is used in this step — no injection risk.
+      - name: Guard selftest
+        run: python3 scripts/audit_paired_thresholds.py --selftest
+
+      - name: Check paired thresholds do not drift
+        run: python3 scripts/audit_paired_thresholds.py --fail-on-found
+
   path-containment-guard:
     name: Path-containment startswith guard (#1674)
     runs-on: ubuntu-latest
