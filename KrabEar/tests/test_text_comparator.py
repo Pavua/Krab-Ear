@@ -19,6 +19,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from tests.timing_budgets import REDOS_BUDGET_SEC  # noqa: E402
+
 
 class TextComparatorTestCase(unittest.TestCase):
     def setUp(self) -> None:
@@ -206,7 +208,15 @@ class TextComparatorDoSGuardTestCase(unittest.TestCase):
         elapsed = time.perf_counter() - t0
 
         self.assertIsInstance(result, ComparisonResult)
-        self.assertLess(elapsed, 0.5, f"compare_texts на 50k-словных текстах занял {elapsed:.3f}s (лимит 0.5s)")
+        # Порог из общего модуля: защита ловит КВАДРАТИЧНЫЙ взрыв (секунды и
+        # минуты на 50k слов), а не отличает 0.4с от 0.6с. Прежние 0.5с падали
+        # на загруженном раннере при честных 1.0-1.2с (30.08.2026, два прогона).
+        self.assertLess(
+            elapsed,
+            REDOS_BUDGET_SEC,
+            f"compare_texts на 50k-словных текстах занял {elapsed:.3f}s "
+            f"(лимит {REDOS_BUDGET_SEC}s)",
+        )
 
     def test_long_text_phrase_count_bounded(self) -> None:
         """Число извлечённых фраз ограничено — не превышает MAX_COMPARE_WORDS × MAX_PHRASE_SIZE."""
