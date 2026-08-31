@@ -324,11 +324,19 @@ def _parse_number_ru(tokens: List[str]) -> Optional[int]:
     result = 0
     current = 0
     i = 0
+    # 🔴 Группа из ОДНИХ союзов числом не является. Союз попадает в паттерн
+    # числительных ради составных форм («двадцать и пять» → 25), но одиночное
+    # «и» матчилось как числовая группа, а при result=0 и пустом current
+    # возвращалось 0 — фраза «работаете и есть ли места» превращалась в
+    # «работаете 0 есть ли места». Замер 30.08.2026: 767 записей из 12807 (6%)
+    # истории владельца испорчены так, включая живые звонки скрининга спама.
+    seen_numeral = False
     while i < len(tokens):
         w = tokens[i].lower()
         if w in _RU_AND:
             i += 1
             continue
+        seen_numeral = True
         if w in _RU_HUNDREDS:
             current += _RU_HUNDREDS[w]
         elif w in _RU_TENS:
@@ -350,6 +358,8 @@ def _parse_number_ru(tokens: List[str]) -> Optional[int]:
         else:
             return None
         i += 1
+    if not seen_numeral:
+        return None
     return result + current
 
 
@@ -358,11 +368,19 @@ def _parse_number_es(tokens: List[str]) -> Optional[int]:
     result = 0
     current = 0
     i = 0
+    # 🔴 Группа из ОДНИХ союзов числом не является. Союз попадает в паттерн
+    # числительных ради составных форм («veinte y cinco» → 25), но одиночное
+    # «y» матчилось как числовая группа, а при result=0 и пустом current
+    # возвращалось 0 — фраза «abiertos hoy y si tienen» превращалась в
+    # «abiertos hoy 0 si tienen». Замер 30.08.2026: 767 записей из 12807 (6%)
+    # истории владельца испорчены так, включая живые звонки скрининга спама.
+    seen_numeral = False
     while i < len(tokens):
         w = tokens[i].lower()
         if w in _ES_AND:
             i += 1
             continue
+        seen_numeral = True
         if w in _ES_HUNDREDS:
             current += _ES_HUNDREDS[w]
         elif w in _ES_TENS:
@@ -384,6 +402,8 @@ def _parse_number_es(tokens: List[str]) -> Optional[int]:
         else:
             return None
         i += 1
+    if not seen_numeral:
+        return None
     return result + current
 
 
