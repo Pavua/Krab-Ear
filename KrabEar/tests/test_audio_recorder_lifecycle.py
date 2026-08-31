@@ -662,13 +662,21 @@ class TestOverflowCount(unittest.TestCase):
         self.assertEqual(rec.overflow_count, 0)
 
     def test_overflow_count_resets_on_new_start(self) -> None:
-        """Счётчик — про ТЕКУЩУЮ запись: новый start() обнуляет прошлый счёт."""
+        """Счётчик — про ТЕКУЩУЮ запись: новый start() обнуляет прошлый счёт.
+
+        🔴 Первая фаза ждёт СОБЫТИЕ по той же причине, что и сосед выше: она
+        требует overflow_count > 0, то есть падает ровно от той медленности
+        раннера, от которой сосед уже вылечен. Сиблинг остался на sleep(0.05)
+        при починке соседа — тот же класс асимметрии, что гард парных порогов
+        ловит в числах.
+        """
         with patch("sounddevice.InputStream", return_value=_make_overflow_stream_cm(overflow_at=frozenset({1, 2, 3}))):
             rec = AudioRecorder()
             self.addCleanup(rec.abort)
             rec.start()
-            time.sleep(0.05)
+            reached = _wait_until(lambda: rec.overflow_count > 0, timeout=_WORKER_WAIT_SEC)
             rec.stop()
+        self.assertTrue(reached, f"воркер не дошёл ни до одного переполнения за {_WORKER_WAIT_SEC}с")
         self.assertGreater(rec.overflow_count, 0, "тест невалиден без хотя бы одного overflow в первой записи")
 
         with patch("sounddevice.InputStream", return_value=_make_stream_cm()):
