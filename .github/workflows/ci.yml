@@ -148,7 +148,11 @@ jobs:
       - name: Run Python tests (chunked — bound peak RSS, reap orphan workers)
         env:
           PYTHONPATH: ${{ github.workspace }}/KrabEar
-        timeout-minutes: 90
+        # 120, не 90: раннер делит M4 Max с двумя соседними (Krab-openclaw,
+        # Voice-Gateway) и с работой владельца. При занятом соседе прогон
+        # честно растягивается — 31.08.2026 два прогона подряд были убиты
+        # именно лимитом, а не тестами (load average доходил до 17.75).
+        timeout-minutes: 120
         run: |
           # W1737: same chunking as krabear-ci backend-tests — whole-suite OOM-kills
           # the runner mid-run. 4 fresh-process chunks + orphan-worker reaping.
