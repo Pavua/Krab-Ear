@@ -26,6 +26,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import core.mlx_subprocess as _mod  # noqa: E402
+from tests.timing_budgets import NONBLOCKING_BUDGET_SEC
 from core.mlx_subprocess import (  # noqa: E402
     MLXTimeoutError,
     MLXWatchdog,
@@ -146,7 +147,9 @@ class TestBoundedJoinNormalTimeout(unittest.TestCase):
         def _hang():
             allow_finish.wait(timeout=_RELEASE_DELAY)
 
-        deadline = _RELEASE_DELAY + 0.4  # release + запас на CI-jitter
+        # Тот же структурный принцип: регресс — неограниченное ожидание (~10с),
+        # а не лишние сотые доли секунды на загруженном раннере.
+        deadline = NONBLOCKING_BUDGET_SEC
         t0 = time.monotonic()
         with self.assertRaises(MLXTimeoutError):
             self.watchdog.run_with_timeout(fn=_hang, timeout_sec=_INFERENCE_TIMEOUT)
@@ -196,8 +199,12 @@ class TestBoundedJoinHardKillExceeded(unittest.TestCase):
 
         with patch.object(_mod, "MLX_HANG_HARD_KILL_SEC", _HARD_KILL_SHORT):
             watchdog = MLXWatchdog()
-            # Allow generous slack: inference_timeout + hard_kill + 0.3s overhead
-            deadline = _INFERENCE_TIMEOUT + _HARD_KILL_SHORT + 0.3
+            # 🔴 Порог структурный, а не хронометрический. Регресс здесь —
+            # НЕОГРАНИЧЕННОЕ ожидание: непатченная MLX_HANG_HARD_KILL_SEC = 10.0
+            # дала бы ~10с. Прежний бюджет (timeout+hard_kill+0.3) отличал не
+            # «починено/сломано», а «раннер свободен/занят» — падал на 0.585с
+            # при лимите 0.490с (31.08.2026).
+            deadline = NONBLOCKING_BUDGET_SEC
             t0 = time.monotonic()
             try:
                 watchdog.run_with_timeout(
@@ -323,7 +330,8 @@ class TestEnvOverrideHardKillSec(unittest.TestCase):
         with patch.object(_mod, "MLX_HANG_HARD_KILL_SEC", tiny_timeout):
             watchdog = MLXWatchdog()
             # With tiny_timeout, the call must return quickly even on infinite hang
-            deadline = _INFERENCE_TIMEOUT + tiny_timeout + 0.3
+            # Патч обязан УЧИТЫВАТЬСЯ: дефолтные 10.0с не уложились бы в бюджет.
+            deadline = NONBLOCKING_BUDGET_SEC
             t0 = time.monotonic()
             try:
                 watchdog.run_with_timeout(

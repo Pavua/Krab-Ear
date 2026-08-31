@@ -182,7 +182,7 @@ jobs:
             sub=("${files[@]:$((i*chunk)):$chunk}")
             [ ${#sub[@]} -eq 0 ] && continue
             echo "::group::pytest chunk $((i+1))/$nchunks (${#sub[@]} files)"
-            "$timeout_cmd" 600 python -m pytest "${sub[@]}" --tb=short -q -p no:xdist -p no:cacheprovider
+            "$timeout_cmd" 300 python -m pytest "${sub[@]}" --tb=short -q -p no:xdist -p no:cacheprovider
             crc=$?
             echo "::endgroup::"
             reap
@@ -202,7 +202,7 @@ jobs:
               # деградацию. Таймаут здесь защищает от ВЕЧНОГО зависания, а не
               # меряет скорость, поэтому запас выбран с большим полем.
               for f in "${sub[@]}"; do
-                "$timeout_cmd" 600 python -m pytest "$f" --tb=short -q -p no:xdist -p no:cacheprovider > /tmp/pf.log 2>&1
+                "$timeout_cmd" 300 python -m pytest "$f" --tb=short -q -p no:xdist -p no:cacheprovider > /tmp/pf.log 2>&1
                 fcode=$?
                 if [ $fcode -ne 0 ]; then
                   echo "::error::isolated FAIL($fcode): $f"; tail -20 /tmp/pf.log
