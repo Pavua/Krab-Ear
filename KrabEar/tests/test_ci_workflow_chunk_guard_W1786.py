@@ -4,6 +4,7 @@
 ``mapfile``, а пустой список тестов обязан завершать gate ошибкой, а не ложным успехом.
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -51,5 +52,14 @@ def test_macos_gate_has_a_portable_timeout_command() -> None:
     assert "brew install ffmpeg coreutils" in source
     assert "command -v timeout" in source
     assert "command -v gtimeout" in source
-    assert '"$timeout_cmd" 600 python -m pytest' in source
-    assert '"$timeout_cmd" 150 python -m pytest' in source
+    # 🔴 Проверяем НАЛИЧИЕ таймаута у обоих прогонов (чанк и per-file), а не
+    # конкретные секунды: бюджет — настраиваемая величина, и его правка не
+    # должна ронять гейт. 30.08.2026 per-file подняли 150→600с (три прогона
+    # подряд гибли по таймауту на файлах, честно идущих 16-37с), и тест упал не
+    # на пропаже защиты, а на изменении числа. Исчезновение самого timeout —
+    # то, ради чего гейт существует, — по-прежнему ловится.
+    timed_runs = re.findall(r'"\$timeout_cmd" (\d+) python -m pytest', source)
+    assert len(timed_runs) >= 2, (
+        f"ожидались таймаут-обёртки для чанка и per-file прогона, найдено: {timed_runs}"
+    )
+    assert all(int(sec) > 0 for sec in timed_runs), f"нулевой бюджет: {timed_runs}"

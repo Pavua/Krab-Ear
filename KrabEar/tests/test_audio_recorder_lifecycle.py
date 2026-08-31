@@ -87,6 +87,22 @@ def _start_and_record(rec: AudioRecorder, duration: float = 0.05) -> None:
 # 1. Basic start / stop
 # ---------------------------------------------------------------------------
 
+# Ожидание СОБЫТИЯ вместо фиксированной паузы: тесты воркера не должны зависеть
+# от того, насколько занята машина. Таймаут здесь — предохранитель от настоящего
+# зависания, а не замер скорости, поэтому взят с большим запасом.
+_WORKER_WAIT_SEC = 10.0
+
+
+def _wait_until(predicate, timeout: float = _WORKER_WAIT_SEC, poll: float = 0.005) -> bool:
+    """True, если predicate стал истинным до истечения timeout."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(poll)
+    return predicate()
+
+
 class TestStartStopBasic(unittest.TestCase):
     def test_start_stop_basic(self) -> None:
         """start() returns True, is_recording becomes True; stop() returns audio tuple."""
@@ -617,13 +633,22 @@ class TestOverflowCount(unittest.TestCase):
     """F2: _worker считает переполнения буфера ТЕКУЩЕЙ записи."""
 
     def test_overflow_count_increments_on_overflowed_reads(self) -> None:
-        """Ровно два overflowed=True среди прочих reads → overflow_count == 2."""
+        """Ровно два overflowed=True среди прочих reads → overflow_count == 2.
+
+        🔴 Ждём СОБЫТИЕ, а не время. Прежний `time.sleep(0.08)` исходил из того,
+        что рабочий поток за 80 мс успеет прочитать пять чанков; на загруженном
+        CI-раннере он не успевал, и тест падал с `0 != 2` на здоровом коде
+        (30.08.2026, три прогона подряд). Ожидание по условию делает проверку
+        независимой от скорости машины, а таймаут остаётся предохранителем от
+        настоящего зависания воркера.
+        """
         with patch("sounddevice.InputStream", return_value=_make_overflow_stream_cm(overflow_at=frozenset({2, 4}))):
             rec = AudioRecorder()
             self.addCleanup(rec.abort)
             rec.start()
-            time.sleep(0.08)
+            reached = _wait_until(lambda: rec.overflow_count >= 2, timeout=_WORKER_WAIT_SEC)
             rec.stop()
+        self.assertTrue(reached, f"воркер не дошёл до двух переполнений за {_WORKER_WAIT_SEC}с")
         self.assertEqual(rec.overflow_count, 2)
 
     def test_overflow_count_zero_when_no_overflow(self) -> None:
@@ -637,13 +662,21 @@ class TestOverflowCount(unittest.TestCase):
         self.assertEqual(rec.overflow_count, 0)
 
     def test_overflow_count_resets_on_new_start(self) -> None:
-        """Счётчик — про ТЕКУЩУЮ запись: новый start() обнуляет прошлый счёт."""
+        """Счётчик — про ТЕКУЩУЮ запись: новый start() обнуляет прошлый счёт.
+
+        🔴 Первая фаза ждёт СОБЫТИЕ по той же причине, что и сосед выше: она
+        требует overflow_count > 0, то есть падает ровно от той медленности
+        раннера, от которой сосед уже вылечен. Сиблинг остался на sleep(0.05)
+        при починке соседа — тот же класс асимметрии, что гард парных порогов
+        ловит в числах.
+        """
         with patch("sounddevice.InputStream", return_value=_make_overflow_stream_cm(overflow_at=frozenset({1, 2, 3}))):
             rec = AudioRecorder()
             self.addCleanup(rec.abort)
             rec.start()
-            time.sleep(0.05)
+            reached = _wait_until(lambda: rec.overflow_count > 0, timeout=_WORKER_WAIT_SEC)
             rec.stop()
+        self.assertTrue(reached, f"воркер не дошёл ни до одного переполнения за {_WORKER_WAIT_SEC}с")
         self.assertGreater(rec.overflow_count, 0, "тест невалиден без хотя бы одного overflow в первой записи")
 
         with patch("sounddevice.InputStream", return_value=_make_stream_cm()):

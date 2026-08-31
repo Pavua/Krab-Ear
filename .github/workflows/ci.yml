@@ -148,7 +148,11 @@ jobs:
       - name: Run Python tests (chunked — bound peak RSS, reap orphan workers)
         env:
           PYTHONPATH: ${{ github.workspace }}/KrabEar
-        timeout-minutes: 90
+        # 120, не 90: раннер делит M4 Max с двумя соседними (Krab-openclaw,
+        # Voice-Gateway) и с работой владельца. При занятом соседе прогон
+        # честно растягивается — 31.08.2026 два прогона подряд были убиты
+        # именно лимитом, а не тестами (load average доходил до 17.75).
+        timeout-minutes: 120
         run: |
           # W1737: same chunking as krabear-ci backend-tests — whole-suite OOM-kills
           # the runner mid-run. 4 fresh-process chunks + orphan-worker reaping.
@@ -182,7 +186,7 @@ jobs:
             sub=("${files[@]:$((i*chunk)):$chunk}")
             [ ${#sub[@]} -eq 0 ] && continue
             echo "::group::pytest chunk $((i+1))/$nchunks (${#sub[@]} files)"
-            "$timeout_cmd" 600 python -m pytest "${sub[@]}" --tb=short -q -p no:xdist -p no:cacheprovider
+            "$timeout_cmd" 300 python -m pytest "${sub[@]}" --tb=short -q -p no:xdist -p no:cacheprovider
             crc=$?
             echo "::endgroup::"
             reap
@@ -193,8 +197,16 @@ jobs:
               # files). Re-run this chunk one file per fresh process: contamination-induced crashes
               # pass in isolation (-> green), genuine per-file failures are reported by filename.
               echo "::warning::chunk $((i+1)) exited $crc — re-running per-file to isolate"
+              # Бюджет на файл. 🔴 Замер 30.08.2026 в ТОМ ЖЕ окружении (py3.12 без
+              # mlx): test_backend_service 37с, оба тяжёлых аудита по 16с. При
+              # прежних 150с это запас 4-9x — и всё равно три файла подряд гибли
+              # по таймауту. Причина не в приоритете (nice=10 не помог) и не в
+              # окружении: изолированный прогон стартует ПОСЛЕ того, как машина
+              # прожевала 16 чанков за два часа, и упирается в накопленную
+              # деградацию. Таймаут здесь защищает от ВЕЧНОГО зависания, а не
+              # меряет скорость, поэтому запас выбран с большим полем.
               for f in "${sub[@]}"; do
-                "$timeout_cmd" 150 python -m pytest "$f" --tb=short -q -p no:xdist -p no:cacheprovider > /tmp/pf.log 2>&1
+                "$timeout_cmd" 300 python -m pytest "$f" --tb=short -q -p no:xdist -p no:cacheprovider > /tmp/pf.log 2>&1
                 fcode=$?
                 if [ $fcode -ne 0 ]; then
                   echo "::error::isolated FAIL($fcode): $f"; tail -20 /tmp/pf.log
@@ -312,6 +324,25 @@ jobs:
         # shadows the extracted one. Exits non-zero if any dead module or duplicate found.
         # No user-controlled input is used in this step — no injection risk.
         run: python3 scripts/audit_dead_extracted_modules.py --fail-on-found
+
+  paired-thresholds-guard:
+    name: Paired thresholds guard (2026-08-30)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Ловит предел, выраженный в одном файле двумя способами: где-то именованной
+      # константой, где-то литералом. Ровно так 29.08.2026 упал
+      # test_metadata_enricher_W1765 — бюджет подняли в одном классе, соседний
+      # остался с прежними 0.3с. Первым шагом гоняем --selftest: гард, тихо
+      # переставший классифицировать, отчитывался бы CLEAN вечно.
+      # No user-controlled input is used in this step — no injection risk.
+      - name: Guard selftest
+        run: python3 scripts/audit_paired_thresholds.py --selftest
+
+      - name: Check paired thresholds do not drift
+        run: python3 scripts/audit_paired_thresholds.py --fail-on-found
 
   path-containment-guard:
     name: Path-containment startswith guard (#1674)

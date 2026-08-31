@@ -188,6 +188,10 @@ audit-ipc-drift:
 audit-fake-store-signatures:
 	python3 scripts/audit_fake_store_signatures.py --fail-on-found $(ARGS)
 
+# Парные пороги: один предел, выраженный в файле и константой, и литералом.
+audit-paired-thresholds:
+	python3 scripts/audit_paired_thresholds.py --fail-on-found $(ARGS)
+
 # Run all static audit checks (CI parity — runs same checks as CI guard jobs).
 # Audit dead Swift methods (W6 guard).
 # The Python side has five dead-code guards; the Swift agent had none, and the class
@@ -200,7 +204,7 @@ audit-dead-swift:
 	python3 scripts/audit_dead_swift_methods.py --selftest
 	python3 scripts/audit_dead_swift_methods.py $(ARGS)
 
-audit-all: audit-orphans audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-path-containment audit-dispatch-test-targets audit-inmemory-purge-coverage audit-ipc-drift audit-fake-store-signatures
+audit-all: audit-orphans audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-path-containment audit-dispatch-test-targets audit-inmemory-purge-coverage audit-ipc-drift audit-fake-store-signatures audit-paired-thresholds
 	@echo "All audit checks passed."
 
 # Reproduce the ubuntu krab-ear-ci env LOCALLY (Python 3.12, mlx ABSENT) and run
