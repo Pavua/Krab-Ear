@@ -11,10 +11,25 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+# 🔴 mlx-nightly.yml, а не ci.yml: 01.09.2026 chunked-джоб уехал из ci.yml в
+# отдельный ночной workflow (self-hosted раннер терял TLS-соединение с GitHub
+# под нагрузкой и ронял PR без логов). Гард следует за КОДОМ, а не за именем
+# файла — иначе он молча перестал бы что-либо проверять, оставаясь зелёным.
 WORKFLOWS = (
-    REPO_ROOT / ".github" / "workflows" / "ci.yml",
+    REPO_ROOT / ".github" / "workflows" / "mlx-nightly.yml",
     REPO_ROOT / ".github" / "workflows" / "krabear-ci.yml",
 )
+
+
+def test_guarded_workflows_all_exist() -> None:
+    """🔴 Файлы гарда обязаны существовать.
+
+    Гард парametrized по путям: исчезни файл (переименование, перенос джоба) —
+    тесты бы просто не нашли, что проверять, и остались зелёными. Явная
+    проверка существования превращает молчаливую слепоту в честный красный.
+    """
+    missing = [p.name for p in WORKFLOWS if not p.exists()]
+    assert not missing, f"гард указывает на несуществующие workflow: {missing}"
 
 
 @pytest.mark.parametrize("workflow_path", WORKFLOWS, ids=lambda path: path.name)
@@ -35,11 +50,18 @@ def test_chunked_python_gate_fails_when_no_tests_are_found(workflow_path: Path) 
 
     source = workflow_path.read_text(encoding="utf-8")
 
-    guard_start = source.index('if [ "$n" -eq 0 ]; then')
+    # Гард проверяет ИНВАРИАНТ (пустое обнаружение = падение), а не дословную
+    # форму. Допустимы обе: `-eq 0` (нашли ноль файлов) и более строгая
+    # `-lt N` — последняя ловит ещё и тихую ПОЧТИ-пустоту, когда сломавшийся
+    # отбор оставляет три файла и job рапортует «всё покрыто». Закрепление
+    # дословного `-eq 0` роняло CI на законном усилении (01.09.2026).
+    m = re.search(r'if \[ "\$n" -(?:eq 0|lt \d+) \]; then', source)
+    assert m, "не найден fail-closed гард на размер списка тестов"
+    guard_start = m.start()
     guard_end = source.index("\n          fi", guard_start)
     guard = source[guard_start:guard_end]
 
-    assert "::error::Не найдено ни одного Python test-файла" in guard
+    assert "::error::" in guard, "гард обязан явно сообщать об ошибке"
     assert "exit 1" in guard
     assert guard_start < source.index("Total test files: $n")
 

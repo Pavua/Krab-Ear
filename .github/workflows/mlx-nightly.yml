@@ -1,0 +1,264 @@
+name: mlx nightly
+
+# 🔴 ПОЧЕМУ ОТДЕЛЬНО ОТ CI, А НЕ ГЕЙТОМ НА КАЖДЫЙ PR (01.09.2026).
+# Этот джоб обязан идти на self-hosted: GitHub-hosted macOS — VM без
+# полноценного Metal, и mlx-тесты там падают Abort trap: 6 (замерено, см.
+# комментарий у runs-on). А self-hosted раннер на машине владельца НЕ МОЖЕТ
+# держать роль обязательного гейта: под нагрузкой он теряет управляющее
+# TLS-соединение с GitHub и джоб падает БЕЗ логов и без шагов —
+# `SocketException (89): Operation canceled` в Runner_*.log, четыре обрыва
+# за 01.09 (04:42, 09:26, 09:49, 13:54), шестнадцать за всё время. Load
+# average на машине доходил до 278.
+#
+# Поэтому разделение: PR гейтит ubuntu (krabear-ci.yml backend-tests, ~22
+# минуты, hosted, надёжно), а mlx-покрытие идёт ночью, когда машина тише.
+# Это НЕ ослабление гейта: до этого mlx-джоб не отрабатывал вовсе, роняя
+# PR обрывами связи. Ночной прогон, который реально исполняется, строго
+# лучше обязательного, который не может завершиться.
+#
+# Красный ночной прогон = сигнал разобраться, а не блокировка мержа.
+# workflow_dispatch — прогнать вручную в любой момент (например, перед
+# релизом или после правки mlx-путей).
+
+on:
+  schedule:
+    # 04:00 UTC = 06:00 CEST. Время выбрано как компромисс, а не как
+    # доказанно тихое окно: у машины его может не быть вовсе. Если прогоны
+    # систематически рвутся — двигать, а не наращивать таймауты.
+    - cron: "0 4 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mlx:
+    # Только mlx-пути (01.09.2026). Полный гейт по всем ~1000 файлам живёт в
+    # krabear-ci.yml backend-tests (ubuntu, стабильно 22 минуты) — здесь он
+    # ДУБЛИРОВАЛСЯ и был причиной job-таймаутов: 01.09 на ОДНОМ И ТОМ ЖЕ
+    # коммите ubuntu дал success за 22 мин (02:04→02:26), а этот джоб был убит
+    # лимитом через 120 мин (02:04→04:24). Машину делят три раннера и работа
+    # владельца, load average доходил до 278.
+    # Уникальная ценность macOS — mlx-whisper (в requirements.txt первой
+    # строкой; на ubuntu колёс нет, ветки с mlx там не исполняются). Поэтому
+    # гоняем не всё, а только файлы, трогающие mlx: нагрузка на общую машину
+    # падает впятеро, покрытие сохраняется.
+    #
+    # 🔴 ЗАМЕРЕНО И ОТВЕРГНУТО: перенос на `macos-latest` (GitHub-hosted).
+    # Krab-Ear публичный, standard-раннеры для него бесплатны и безлимитны, и
+    # соблазн очевиден — но mlx-тесты там ПАДАЮТ: `Abort trap: 6` (SIGABRT,
+    # exit 134) в test_stt_adapter_migration/parity, плюс расхождения в
+    # test_audio_lang_id (mlx_lock не вызывается) и test_stt_warmup. На
+    # self-hosted M4 Max ровно эти файлы зелёные (три прогона подряд:
+    # 33355465018, 33355444670, 33349664586). Причина — GitHub-hosted macOS
+    # это VM без полноценного Metal, а mlx именно его и тестирует; форсировать
+    # CPU-путь бессмысленно, тогда тест проверял бы фантазию, а не прод.
+    # Не повторять этот перенос без нового замера.
+    name: mlx paths (Python ${{ matrix.python-version }})
+    runs-on: [self-hosted, macOS, ARM64]
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }} (self-hosted venv — bypass setup-python macOS tool-cache bug)
+        # 2026-07-24: actions/setup-python@v5 безусловно перезаписывает
+        # AGENT_TOOLSDIRECTORY на /Users/runner/hostedtoolcache на любом macOS
+        # (известный баг, не уважает RUNNER_TOOL_CACHE self-hosted раннера) —
+        # mkdir падает EACCES, т.к. /Users/runner на этой машине не существует
+        # и создать его без sudo нельзя. Обход: изолированный venv поверх уже
+        # установленного системного python3.12 (Homebrew), PATH через
+        # $GITHUB_PATH — тот же эффект (изолированный интерпретатор в PATH),
+        # без обращения к hostedtoolcache вообще. $RUNNER_TEMP уникален и
+        # авто-чистится раннером между джобами — venv не накапливается.
+        run: |
+          python${{ matrix.python-version }} -m venv "$RUNNER_TEMP/venv-py${{ matrix.python-version }}"
+          echo "$RUNNER_TEMP/venv-py${{ matrix.python-version }}/bin" >> "$GITHUB_PATH"
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/Library/Caches/pip
+          key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('KrabEar/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-${{ matrix.python-version }}-
+            ${{ runner.os }}-pip-
+
+      - name: Install ffmpeg and GNU timeout
+        # torchcodec ships libtorchcodec_core{4..8}.dylib which dlopen libavutil.{56..60}.dylib.
+        # macos-latest doesn't ship ffmpeg by default — install via brew so the test suite
+        # can collect modules that transitively import torchcodec without OSError.
+        # Wave 49 fix: was the sole remaining Python 3.12 CI fail.
+        run: |
+          # coreutils гарантирует timeout/gtimeout для chunk- и per-file-дедлайнов.
+          brew install ffmpeg coreutils
+          brew list --versions ffmpeg
+          brew list --versions coreutils
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r KrabEar/requirements.txt
+          pip install pytest pytest-cov flake8 pytest-xdist
+
+      - name: Lint (flake8)
+        run: |
+          # Production code: strict.
+          # Tests: relaxed — F401/F541/F841/E203/E303/E306/E401/W391 ok in tests
+          # (mock imports, intentionally-unused locals for fixture chaining,
+          # f-strings as templated narratives in assert messages).
+          flake8 KrabEar/ \
+            --max-line-length=150 \
+            --extend-ignore=E501 \
+            --exclude=KrabEar/.venv,KrabEar/tests/__pycache__,.venv_krab_ear,KrabEar/_legacy_tkinter_archive_2026-02-11 \
+            --per-file-ignores='KrabEar/tests/*:F401,F541,F841,E203,E301,E302,E303,E305,E306,E401,E402,W391' \
+            --statistics
+        continue-on-error: false
+
+      - name: Import check
+        env:
+          PYTHONPATH: ${{ github.workspace }}/KrabEar
+        run: |
+          python - << 'PYEOF'
+          import sys, importlib, pathlib
+
+          root = pathlib.Path('KrabEar')
+          errors = []
+
+          skip = {
+              'rest_server',       # requires running Flask app context
+          }
+
+          for py in sorted(root.rglob('*.py')):
+              parts = py.parts
+              if any(p.startswith('.') or p.startswith('_legacy') or p in ('tests', 'scripts') or 'venv' in p for p in parts):
+                  continue
+              rel = py.relative_to(root).with_suffix('')
+              mod = '.'.join(rel.parts)
+              if mod in skip or mod.startswith('__'):
+                  continue
+              try:
+                  importlib.import_module(mod)
+              except (ImportError, OSError) as e:
+                  msg = str(e)
+                  heavy = ('mlx', 'pyannote', 'torch', 'sounddevice', 'soundfile',
+                           'pyobjc', 'AppKit', 'Foundation', 'Cocoa', 'Vision',
+                           'numpy', 'websockets', 'gunicorn', 'flask_limiter',
+                           'flask_cors', 'flask_smorest', 'flask_sock', 'marshmallow',
+                           'pyperclip', 'requests', 'pydantic',
+                           'libav', 'torchcodec', 'cannot open shared', 'Library not loaded', 'libtorchcodec',
+                           'pynput', 'jiwer')
+                  if any(h in msg for h in heavy):
+                      print(f'  SKIP (missing optional dep): {mod} — {e}')
+                  else:
+                      errors.append(f'{mod}: {e}')
+                      print(f'  FAIL: {mod} — {e}')
+              except Exception as e:
+                  errors.append(f'{mod}: {e}')
+                  print(f'  FAIL: {mod} — {e}')
+
+          if errors:
+              print(f'\n{len(errors)} import error(s) found:')
+              for err in errors:
+                  print(f'  - {err}')
+              sys.exit(1)
+          else:
+              print('All modules imported cleanly (or skipped optional deps).')
+          PYEOF
+
+      - name: Run Python tests (chunked — bound peak RSS, reap orphan workers)
+        env:
+          PYTHONPATH: ${{ github.workspace }}/KrabEar
+        # 60 хватает с запасом: 167 файлов вместо 1007, на выделенном
+        # GitHub-hosted раннере без конкуренции за машину. Прежние 120 были
+        # подпоркой под перегруженный self-hosted — причина устранена, а не
+        # замаскирована.
+        timeout-minutes: 60
+        run: |
+          # W1737: same chunking as krabear-ci backend-tests — whole-suite OOM-kills
+          # the runner mid-run. 4 fresh-process chunks + orphan-worker reaping.
+          # W1754: each chunk runs -p no:xdist (sequential) — under -n 2 orphan daemon
+          # threads blocked clean xdist worker teardown ("node down") and xdist
+          # mis-attributed the dead worker to a random victim test.
+          set +e
+          # macOS запускает шаги через Bash 3.2, где нет mapfile/readarray.
+          files=()
+          for file in KrabEar/tests/test_*.py; do
+            [ -f "$file" ] || continue
+            # Только файлы, реально трогающие mlx: остальные ~840 уже покрыты
+            # ubuntu-гейтом (krabear-ci.yml backend-tests) и здесь были чистым
+            # дублем. Отбор grep'ом, а не маркером, — новые mlx-тесты попадают
+            # сюда сами, без правки workflow.
+            grep -qE "mlx|MLX" "$file" || continue
+            files[${#files[@]}]="$file"
+          done
+          n=${#files[@]}
+          # 🔴 Fail-closed И пол по количеству. Пустой список читался бы как
+          # успех, но опаснее тихая ПОЧТИ-пустота: сломайся grep-паттерн — job
+          # прогнал бы три файла и отчитался зелёным «всё покрыто». На
+          # 01.09.2026 таких файлов 189; пол 50 ловит поломку отбора, не требуя
+          # правки при обычном росте/убыли тестов.
+          if [ "$n" -lt 50 ]; then
+            echo "::error::mlx-подмножество подозрительно мало ($n файлов, ожидалось >=50) — вероятно сломан отбор"
+            exit 1
+          fi
+          if command -v timeout >/dev/null 2>&1; then
+            timeout_cmd=timeout
+          elif command -v gtimeout >/dev/null 2>&1; then
+            timeout_cmd=gtimeout
+          else
+            echo "::error::Не найден GNU timeout/gtimeout"
+            exit 1
+          fi
+          nchunks=8; chunk=$(( (n + nchunks - 1) / nchunks )); rc=0; failed=""
+          echo "Total test files: $n, chunks: $nchunks, chunk size: $chunk"
+          reap() { pkill -9 -f "import sys;ex" 2>/dev/null || true; pkill -9 -f "mlx_subprocess" 2>/dev/null || true; pkill -9 -f "gigaam_worker" 2>/dev/null || true; }
+          for i in $(seq 0 $((nchunks - 1))); do
+            sub=("${files[@]:$((i*chunk)):$chunk}")
+            [ ${#sub[@]} -eq 0 ] && continue
+            echo "::group::pytest chunk $((i+1))/$nchunks (${#sub[@]} files)"
+            "$timeout_cmd" 300 python -m pytest "${sub[@]}" --tb=short -q -p no:xdist -p no:cacheprovider
+            crc=$?
+            echo "::endgroup::"
+            reap
+            if [ $crc -ne 0 ]; then
+              # W1755: a chunk exit!=0 can be a SIGSEGV (exit 139) from cross-file C-extension
+              # contamination (an MLX/GigaAM/torch stub test poisons a LATER file's numpy/torch
+              # state -> the whole chunk process dies, masking the culprit and failing 162 innocent
+              # files). Re-run this chunk one file per fresh process: contamination-induced crashes
+              # pass in isolation (-> green), genuine per-file failures are reported by filename.
+              echo "::warning::chunk $((i+1)) exited $crc — re-running per-file to isolate"
+              # Бюджет на файл. 🔴 Замер 30.08.2026 в ТОМ ЖЕ окружении (py3.12 без
+              # mlx): test_backend_service 37с, оба тяжёлых аудита по 16с. При
+              # прежних 150с это запас 4-9x — и всё равно три файла подряд гибли
+              # по таймауту. Причина не в приоритете (nice=10 не помог) и не в
+              # окружении: изолированный прогон стартует ПОСЛЕ того, как машина
+              # прожевала 16 чанков за два часа, и упирается в накопленную
+              # деградацию. Таймаут здесь защищает от ВЕЧНОГО зависания, а не
+              # меряет скорость, поэтому запас выбран с большим полем.
+              # 🔴 Бюджет 120с, а не 300с — арифметика худшего случая. Чанк ~21
+              # файл; при 300с одна изоляция съедала бы до 105 минут и job
+              # умирал бы по лимиту, маскируя настоящую причину (ровно это
+              # случилось 31.08 и 01.09). При ~3с на файл 120с — сорокакратный
+              # запас, а худший случай изоляции ограничен 42 минутами.
+              for f in "${sub[@]}"; do
+                "$timeout_cmd" 120 python -m pytest "$f" --tb=short -q -p no:xdist -p no:cacheprovider > /tmp/pf.log 2>&1
+                fcode=$?
+                if [ $fcode -ne 0 ]; then
+                  echo "::error::isolated FAIL($fcode): $f"; tail -20 /tmp/pf.log
+                  rc=$fcode; failed="$failed $f($fcode)"
+                fi
+                reap
+              done
+            fi
+          done
+          echo "Aggregate rc=$rc; failed files:$failed"
+          exit $rc
