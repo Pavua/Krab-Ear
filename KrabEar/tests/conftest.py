@@ -743,3 +743,54 @@ def _memory_ledger_tmp_path(tmp_path):
         yield
     finally:
         _ml._TEST_PATH_OVERRIDE = prev
+
+
+# ---------------------------------------------------------------------------
+# Волна 2026-09-01: teardown незакрытых BackendService.
+# 73 из 102 тестовых файлов создают BackendService и не зовут close() — каждый
+# экземпляр оставляет ~11 фоновых потоков (DiskSpaceMonitor, EventBridge,
+# LLMHttpProbe, PurgeScheduler, RecordingDurationWatchdog, WakeWordWatchdog,
+# memory-conductor, export-scheduler, …; замер 2026-08-31). Чанк CI копит их
+# десятками: test_backend_service шёл 35с локально и выпадал в per-file
+# таймаут. Реестр — backend.service._LIVE_INSTANCES (WeakSet, прод не меняет).
+# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _close_backend_services_created_in_test():
+    """Закрывает BackendService, созданные ВНУТРИ теста и не закрытые им.
+
+    🔴 Снимок «до» обязателен: test_full_workflow и test_handler_dispatch_perf
+    держат сервис в setUpClass и переиспользуют между тестами класса —
+    закрытие всего подряд ломало бы их. Такие экземпляры добирает
+    session-финализатор ниже.
+
+    Сверка идентичности — `is`, не id(): id переиспользуется после GC.
+    """
+    try:
+        from backend.service import live_backend_services
+    except Exception:
+        yield  # backend в этом окружении не импортируется — фикстура пассивна
+        return
+    before = live_backend_services()  # сильные ссылки на время теста — ок
+    yield
+    for svc in live_backend_services():
+        if any(svc is prev for prev in before):
+            continue
+        try:
+            svc.close()  # идемпотентен по контракту (service.py)
+        except Exception:
+            pass
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _close_backend_services_at_session_end():
+    """Добирает сервисы уровня класса/модуля (setUpClass) в конце сессии."""
+    yield
+    try:
+        from backend.service import live_backend_services
+    except Exception:
+        return
+    for svc in live_backend_services():
+        try:
+            svc.close()
+        except Exception:
+            pass

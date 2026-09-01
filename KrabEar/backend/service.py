@@ -159,6 +159,7 @@ import signal
 import subprocess
 import sys
 import threading
+import weakref
 import time
 from typing import Any, Callable
 
@@ -434,6 +435,19 @@ def _write_unclean_restart_state(path: Path, last_ts: float, suppressed: int) ->
         except Exception:  # noqa: BLE001
             pass
         return False
+
+
+# Реестр живых BackendService — читает ТОЛЬКО тестовый teardown
+# (autouse-фикстура в tests/conftest.py). WeakSet не удерживает объекты:
+# время жизни сервиса в проде не меняется. Причина: 73 из 102 тестовых
+# файлов создают сервис без close(), каждый оставляет ~11 фоновых потоков
+# (замер 2026-08-31) — чанк CI копит их десятками и деградирует вчетверо.
+_LIVE_INSTANCES: "weakref.WeakSet[BackendService]" = weakref.WeakSet()
+
+
+def live_backend_services() -> list["BackendService"]:
+    """Снимок живых экземпляров для тестового teardown."""
+    return list(_LIVE_INSTANCES)
 
 
 class BackendService:
@@ -1810,6 +1824,9 @@ class BackendService:
         self._dispatch_table: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = (
             self._build_dispatch_table()
         )
+        # Регистрация ПОСЛЕДНЕЙ: упавший на середине __init__ экземпляр не
+        # попадает в реестр — teardown не позовёт close() у полусобранного.
+        _LIVE_INSTANCES.add(self)
 
     def _init_llm_rewriter(self):
         """Создаёт LLMRewriter если settings.LLM_ENABLED. Возвращает None иначе."""
