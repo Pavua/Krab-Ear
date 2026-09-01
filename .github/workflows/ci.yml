@@ -26,20 +26,29 @@ jobs:
               - 'native/**'
 
   python:
-    # 🔴 Только mlx-пути, и ТОЛЬКО на GitHub-hosted (01.09.2026).
-    # Полный гейт по всем ~1000 файлам живёт в krabear-ci.yml backend-tests
-    # (ubuntu, стабильно 22 минуты). Здесь он ДУБЛИРОВАЛСЯ на self-hosted
-    # M4 Max и падал по job-лимиту: 01.09 на ОДНОМ И ТОМ ЖЕ коммите ubuntu
-    # дал success за 22 мин (02:04→02:26), а self-hosted был убит лимитом
-    # через 120 мин (02:04→04:24) — машину делят три раннера и работа
+    # Только mlx-пути (01.09.2026). Полный гейт по всем ~1000 файлам живёт в
+    # krabear-ci.yml backend-tests (ubuntu, стабильно 22 минуты) — здесь он
+    # ДУБЛИРОВАЛСЯ и был причиной job-таймаутов: 01.09 на ОДНОМ И ТОМ ЖЕ
+    # коммите ubuntu дал success за 22 мин (02:04→02:26), а этот джоб был убит
+    # лимитом через 120 мин (02:04→04:24). Машину делят три раннера и работа
     # владельца, load average доходил до 278.
     # Уникальная ценность macOS — mlx-whisper (в requirements.txt первой
-    # строкой; на ubuntu колёс нет, ветки с mlx там не исполняются).
-    # Krab-Ear публичный → standard GitHub-hosted раннеры бесплатны и
-    # безлимитны; заодно снимается связка «public repo + self-hosted runner»,
-    # против которой GitHub прямо предупреждает.
+    # строкой; на ubuntu колёс нет, ветки с mlx там не исполняются). Поэтому
+    # гоняем не всё, а только файлы, трогающие mlx: нагрузка на общую машину
+    # падает впятеро, покрытие сохраняется.
+    #
+    # 🔴 ЗАМЕРЕНО И ОТВЕРГНУТО: перенос на `macos-latest` (GitHub-hosted).
+    # Krab-Ear публичный, standard-раннеры для него бесплатны и безлимитны, и
+    # соблазн очевиден — но mlx-тесты там ПАДАЮТ: `Abort trap: 6` (SIGABRT,
+    # exit 134) в test_stt_adapter_migration/parity, плюс расхождения в
+    # test_audio_lang_id (mlx_lock не вызывается) и test_stt_warmup. На
+    # self-hosted M4 Max ровно эти файлы зелёные (три прогона подряд:
+    # 33355465018, 33355444670, 33349664586). Причина — GitHub-hosted macOS
+    # это VM без полноценного Metal, а mlx именно его и тестирует; форсировать
+    # CPU-путь бессмысленно, тогда тест проверял бы фантазию, а не прод.
+    # Не повторять этот перенос без нового замера.
     name: Python ${{ matrix.python-version }} (mlx paths)
-    runs-on: macos-latest
+    runs-on: [self-hosted, macOS, ARM64]
 
     strategy:
       fail-fast: false
@@ -50,13 +59,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        # Обход через ручной venv был нужен ТОЛЬКО на self-hosted: там
-        # setup-python@v5 ломался о несуществующий /Users/runner/hostedtoolcache.
-        # На GitHub-hosted раннере действие работает штатно.
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
+      - name: Set up Python ${{ matrix.python-version }} (self-hosted venv — bypass setup-python macOS tool-cache bug)
+        # 2026-07-24: actions/setup-python@v5 безусловно перезаписывает
+        # AGENT_TOOLSDIRECTORY на /Users/runner/hostedtoolcache на любом macOS
+        # (известный баг, не уважает RUNNER_TOOL_CACHE self-hosted раннера) —
+        # mkdir падает EACCES, т.к. /Users/runner на этой машине не существует
+        # и создать его без sudo нельзя. Обход: изолированный venv поверх уже
+        # установленного системного python3.12 (Homebrew), PATH через
+        # $GITHUB_PATH — тот же эффект (изолированный интерпретатор в PATH),
+        # без обращения к hostedtoolcache вообще. $RUNNER_TEMP уникален и
+        # авто-чистится раннером между джобами — venv не накапливается.
+        run: |
+          python${{ matrix.python-version }} -m venv "$RUNNER_TEMP/venv-py${{ matrix.python-version }}"
+          echo "$RUNNER_TEMP/venv-py${{ matrix.python-version }}/bin" >> "$GITHUB_PATH"
 
       - name: Cache pip dependencies
         uses: actions/cache@v4

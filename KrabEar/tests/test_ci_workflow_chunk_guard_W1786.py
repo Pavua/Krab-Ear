@@ -35,11 +35,18 @@ def test_chunked_python_gate_fails_when_no_tests_are_found(workflow_path: Path) 
 
     source = workflow_path.read_text(encoding="utf-8")
 
-    guard_start = source.index('if [ "$n" -eq 0 ]; then')
+    # Гард проверяет ИНВАРИАНТ (пустое обнаружение = падение), а не дословную
+    # форму. Допустимы обе: `-eq 0` (нашли ноль файлов) и более строгая
+    # `-lt N` — последняя ловит ещё и тихую ПОЧТИ-пустоту, когда сломавшийся
+    # отбор оставляет три файла и job рапортует «всё покрыто». Закрепление
+    # дословного `-eq 0` роняло CI на законном усилении (01.09.2026).
+    m = re.search(r'if \[ "\$n" -(?:eq 0|lt \d+) \]; then', source)
+    assert m, "не найден fail-closed гард на размер списка тестов"
+    guard_start = m.start()
     guard_end = source.index("\n          fi", guard_start)
     guard = source[guard_start:guard_end]
 
-    assert "::error::Не найдено ни одного Python test-файла" in guard
+    assert "::error::" in guard, "гард обязан явно сообщать об ошибке"
     assert "exit 1" in guard
     assert guard_start < source.index("Total test files: $n")
 
