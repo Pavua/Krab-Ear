@@ -11,10 +11,25 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+# 🔴 mlx-nightly.yml, а не ci.yml: 01.09.2026 chunked-джоб уехал из ci.yml в
+# отдельный ночной workflow (self-hosted раннер терял TLS-соединение с GitHub
+# под нагрузкой и ронял PR без логов). Гард следует за КОДОМ, а не за именем
+# файла — иначе он молча перестал бы что-либо проверять, оставаясь зелёным.
 WORKFLOWS = (
-    REPO_ROOT / ".github" / "workflows" / "ci.yml",
+    REPO_ROOT / ".github" / "workflows" / "mlx-nightly.yml",
     REPO_ROOT / ".github" / "workflows" / "krabear-ci.yml",
 )
+
+
+def test_guarded_workflows_all_exist() -> None:
+    """🔴 Файлы гарда обязаны существовать.
+
+    Гард парametrized по путям: исчезни файл (переименование, перенос джоба) —
+    тесты бы просто не нашли, что проверять, и остались зелёными. Явная
+    проверка существования превращает молчаливую слепоту в честный красный.
+    """
+    missing = [p.name for p in WORKFLOWS if not p.exists()]
+    assert not missing, f"гард указывает на несуществующие workflow: {missing}"
 
 
 @pytest.mark.parametrize("workflow_path", WORKFLOWS, ids=lambda path: path.name)
