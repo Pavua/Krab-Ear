@@ -848,7 +848,19 @@ class AudioEngine:
         if clean_profile == self.quality_profile and new_model == self.current_model:
             return False
 
-        logger.info("Смена профиля STT: %s -> %s (модель: %s)", self.quality_profile, clean_profile, new_model)
+        # 🔴 Модель могла НЕ измениться: у владельца (01.09.2026)
+        # MODEL_BALANCED и model_max_list[0] оба указывают на
+        # whisper-large-v3-mlx, поэтому «смена профиля» balanced↔max меняла
+        # только строку профиля. Гард выше требует совпадения ОБОИХ полей и
+        # потому не срабатывал, а очистка кэша ниже выбрасывала ровно ту
+        # модель, которая сейчас снова понадобится, — и следующая
+        # транскрипция грузила те же 3 ГБ заново. Дважды на каждую диктовку.
+        _model_changed = new_model != self.current_model
+        logger.info(
+            "Смена профиля STT: %s -> %s (модель: %s%s)",
+            self.quality_profile, clean_profile, new_model,
+            "" if _model_changed else ", модель не менялась — кэш сохранён",
+        )
         self.quality_profile = clean_profile
         self.current_model = new_model
         # H2: при смене профиля balanced↔max старая модель выгружается из MLX.
@@ -862,8 +874,11 @@ class AudioEngine:
         # финальная транскрибация стояла ЗДЕСЬ — на необязательной очистке кэша —
         # до backstop-таймаута 180с, после чего агент убивал бэкенд.
         # Поля профиля выставлены ВЫШЕ, поэтому пропуск очистки безопасен.
-        _cache_lock = mlx_lock()
-        if _cache_lock.acquire(timeout=MLX_CACHE_FLUSH_LOCK_TIMEOUT_SEC):
+        # Чистить кэш имеет смысл ТОЛЬКО когда действительно сменилась модель:
+        # flush существует, чтобы освободить буферы СТАРОЙ модели. При той же
+        # модели он лишь выбрасывает нужное и оплачивается перезагрузкой.
+        _cache_lock = mlx_lock() if _model_changed else None
+        if _cache_lock is not None and _cache_lock.acquire(timeout=MLX_CACHE_FLUSH_LOCK_TIMEOUT_SEC):
             try:
                 import mlx.core as _mx
                 with mlx_inter_process_lock(degrade_on_timeout=True):  # W1635
@@ -872,7 +887,7 @@ class AudioEngine:
                 pass  # MLX не установлен или старая версия без clear_cache
             finally:
                 _cache_lock.release()
-        else:
+        elif _model_changed:
             logger.debug(
                 "Смена профиля: GPU занят дольше %.1fс — очистка Metal-кэша пропущена",
                 MLX_CACHE_FLUSH_LOCK_TIMEOUT_SEC,

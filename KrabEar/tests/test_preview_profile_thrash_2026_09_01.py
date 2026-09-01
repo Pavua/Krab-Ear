@@ -104,3 +104,52 @@ class EnginePredicateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClearCacheOnlyOnRealModelChangeTests(unittest.TestCase):
+    """🔴 Вторая половина инцидента: у владельца ОБА профиля указывали на одну
+    и ту же модель (whisper-large-v3-mlx), поэтому «смена профиля» balanced↔max
+    меняла лишь строку, но всё равно делала mx.clear_cache() — выбрасывала
+    модель, которая тут же снова требовалась. Дважды на диктовку.
+    """
+
+    def _engine(self):
+        from core.engine import AudioEngine
+        eng = AudioEngine.__new__(AudioEngine)
+        eng.quality_profile = "balanced"
+        eng.current_model = "same/model"
+        return eng
+
+    def test_no_cache_flush_when_model_is_identical(self) -> None:
+        """Модель та же — кэш не трогаем (иначе платим перезагрузкой)."""
+        import core.engine as eng_mod
+        eng = self._engine()
+        calls = []
+        with unittest.mock.patch.object(eng_mod, "mlx_lock",
+                                        lambda: calls.append("lock") or MagicMock()):
+            with unittest.mock.patch.object(eng_mod, "settings") as st:
+                st.MODEL_BALANCED = "same/model"
+                st.model_max_list = ["same/model"]
+                changed = eng.set_quality_profile("max")
+        self.assertTrue(changed, "профиль обязан смениться")
+        self.assertEqual(eng.quality_profile, "max")
+        self.assertEqual(calls, [], "при неизменной модели mlx_lock для flush не берётся")
+
+    def test_cache_flush_happens_on_real_model_change(self) -> None:
+        """Модель ДЕЙСТВИТЕЛЬНО другая — flush нужен, чтобы освободить буферы."""
+        import core.engine as eng_mod
+        eng = self._engine()
+        calls = []
+
+        def _fake_lock():
+            calls.append("lock")
+            m = MagicMock()
+            m.acquire.return_value = False  # не уходим в реальный mlx
+            return m
+
+        with unittest.mock.patch.object(eng_mod, "mlx_lock", _fake_lock):
+            with unittest.mock.patch.object(eng_mod, "settings") as st:
+                st.MODEL_BALANCED = "same/model"
+                st.model_max_list = ["other/model"]
+                eng.set_quality_profile("max")
+        self.assertEqual(calls, ["lock"], "при смене модели flush обязан запрашивать лок")
