@@ -877,8 +877,18 @@ class AudioEngine:
         # Чистить кэш имеет смысл ТОЛЬКО когда действительно сменилась модель:
         # flush существует, чтобы освободить буферы СТАРОЙ модели. При той же
         # модели он лишь выбрасывает нужное и оплачивается перезагрузкой.
-        _cache_lock = mlx_lock() if _model_changed else None
-        if _cache_lock is not None and _cache_lock.acquire(timeout=MLX_CACHE_FLUSH_LOCK_TIMEOUT_SEC):
+        #
+        # 🔴 Ранний return, а не тернарник на mlx_lock(): source-контракт W1618
+        # (test_engine_mlx_lock_clear_cache_W1618) распознаёт AST-разбором ровно
+        # две формы захвата — `with mlx_lock():` и `lk = mlx_lock()` простым
+        # присваиванием. `mlx_lock() if cond else None` инвариант не нарушает,
+        # но гард его НЕ видит и краснеет. Сохраняем форму, понятную гарду,
+        # вместо того чтобы ослаблять сам гард.
+        if not _model_changed:
+            return True
+
+        _cache_lock = mlx_lock()
+        if _cache_lock.acquire(timeout=MLX_CACHE_FLUSH_LOCK_TIMEOUT_SEC):
             try:
                 import mlx.core as _mx
                 with mlx_inter_process_lock(degrade_on_timeout=True):  # W1635
@@ -887,7 +897,7 @@ class AudioEngine:
                 pass  # MLX не установлен или старая версия без clear_cache
             finally:
                 _cache_lock.release()
-        elif _model_changed:
+        else:
             logger.debug(
                 "Смена профиля: GPU занят дольше %.1fс — очистка Metal-кэша пропущена",
                 MLX_CACHE_FLUSH_LOCK_TIMEOUT_SEC,
