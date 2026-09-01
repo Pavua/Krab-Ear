@@ -25,6 +25,21 @@ logger = logging.getLogger("KrabEar.Backend.Transcriber")
 PREVIEW_MLX_LOCK_TIMEOUT_SEC = 1.0
 
 
+def _preview_needs_whisper_profile(engine) -> bool:
+    """Duck-typed мост к ``AudioEngine.preview_needs_whisper_profile``.
+
+    Fake-движки в тестах предиката не имеют — для них сохраняем прежнее
+    поведение (профиль выставляется), чтобы фикс не менял их сценарии.
+    """
+    probe = getattr(engine, "preview_needs_whisper_profile", None)
+    if probe is None:
+        return True
+    try:
+        return bool(probe())
+    except Exception:
+        return True
+
+
 class Transcriber:
     """Обёртка над AudioEngine для удобного вызова из API и IPC."""
 
@@ -151,7 +166,17 @@ class Transcriber:
             )
             return {"text": "", "skipped": "mlx_busy"}
         try:
-            self.engine.set_quality_profile("balanced")
+            # 🔴 Профиль трогаем ТОЛЬКО если превью реально пойдёт через whisper.
+            # set_quality_profile() делает mx.clear_cache() — выбрасывает
+            # загруженную модель. При quality_profile=max это заставляло
+            # ФИНАЛЬНУЮ транскрипцию перезагружать whisper-large-v3 (~3 ГБ) на
+            # КАЖДОЙ диктовке; 01.09.2026 она перестала укладываться в бюджет
+            # 3×длительность и падала «Все доступные STT-движки вышли из
+            # строя», а владелец получал текст накопителя превью — медленно и
+            # заметно хуже. Превью идёт single_pass (фоллбэка нет), поэтому при
+            # доступном GigaAM whisper-профиль ему безразличен.
+            if _preview_needs_whisper_profile(self.engine):
+                self.engine.set_quality_profile("balanced")
             # single_pass (2026-08-13, живой инцидент — диктовка владельца
             # потеряна): превью НЕ имеет права уходить в фоллбэк-цепочку.
             # Пустой ответ GigaAM на коротком хвосте уводил превью в Whisper,

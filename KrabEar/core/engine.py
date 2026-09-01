@@ -805,6 +805,38 @@ class AudioEngine:
         except Exception:
             pass  # helper must never raise
 
+    def preview_needs_whisper_profile(self) -> bool:
+        """Нужен ли превью whisper-профиль (и стоит ли ради него чистить MLX-кэш).
+
+        🔴 Живой инцидент 01.09.2026. Превью звало ``set_quality_profile("balanced")``
+        безусловно, а тот делает ``mx.clear_cache()`` — то есть ВЫБРАСЫВАЕТ
+        загруженную whisper-модель. При ``quality_profile=max`` финальная
+        транскрипция после каждой такой чистки перезагружала
+        whisper-large-v3 (~3 ГБ) и не укладывалась в бюджет
+        ``3 × длительность`` (93–97с на 31–34с речи), падала с «Все доступные
+        STT-движки вышли из строя», и владелец получал текст из накопителя
+        превью — медленно и заметно хуже качеством. Каскад
+        самоподдерживающийся: пока идёт 90-секундная финальная транскрипция,
+        превью СЛЕДУЮЩЕЙ диктовки голодает на том же локе.
+
+        Превью идёт ``single_pass=True`` — фоллбэк-цепочки у него НЕТ. Значит
+        whisper-профиль важен ему ровно тогда, когда whisper окажется ПЕРВЫМ
+        движком. Для русского первым идёт GigaAM (условие ниже зеркалит
+        ``_transcribe_with_fallback_impl``), и тогда чистить кэш незачем.
+
+        Консервативно: при недоступном GigaAM возвращаем True — прежнее
+        поведение сохраняется, превью снова получает лёгкую модель.
+        """
+        try:
+            gigaam_ready = (
+                bool(getattr(settings, "STT_GIGAAM_ENABLED", False))
+                and not self._is_model_unavailable(self._GIGAAM_MARKER)
+                and not getattr(self, "_skip_gigaam", False)
+            )
+        except Exception:
+            return True
+        return not gigaam_ready
+
     def set_quality_profile(self, profile: str) -> bool:
         """Переключает профиль качества (balanced или max)."""
         clean_profile = profile.strip().lower()
