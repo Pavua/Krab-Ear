@@ -316,11 +316,43 @@ class RecordingCoreService:
         return lifecycle_lock, closed_event
 
     def _get_runtime_setting(self, key: str, default: Any) -> Any:
-        """Read a setting from the live cached_settings dict."""
+        """Read a setting from the live cached_settings dict.
+
+        🔴 НЕ использовать для privacy-гейтов: сбой чтения возвращает
+        ``default``, а для ``privacy_mode_enabled`` дефолт ``False`` означает
+        fail-OPEN. Для приватности есть ``_privacy_mode_enabled()``.
+        """
         try:
             return self._settings_svc.cached_settings().get(key, default)
         except Exception:
             return default
+
+    def _privacy_mode_enabled(self) -> bool:
+        """FAIL-CLOSED чтение ``privacy_mode_enabled``.
+
+        Неизвестное состояние приватности ⇒ считаем privacy ON. Тот же контракт,
+        что у ``_privacy_getter`` (W1768) — здесь он распространён на остальные
+        гейты того же флага в этом классе, которые оставались на generic-обёртке
+        ``_get_runtime_setting`` и потому падали в fail-OPEN. Один из них стоял
+        в десяти строках от уже починенного сиблинга.
+
+        Путь достижим, а не теоретичен: ``SettingsService.cached_settings()``
+        ловит ТОЛЬКО ``StateStoreLockTimeout``, а ``StateStore._lock()``
+        документирует ``ENOSPC``/``EMFILE``/``EACCES`` в фазе захвата как
+        реалистичные — такой ``OSError`` пролетает мимо и доходит сюда.
+
+        🔴 Отсутствие ключа — НЕ сбой: настройки прочитаны, режим просто
+        выключен. Иначе fail-closed выродится в «privacy всегда ON» и фича
+        молча перестанет работать на чистом конфиге.
+        """
+        try:
+            return bool(self._settings_svc.cached_settings().get("privacy_mode_enabled", False))
+        except Exception:
+            logger.warning(
+                "Не удалось прочитать privacy_mode_enabled — считаем privacy ON (fail-closed)",
+                exc_info=True,
+            )
+            return True
 
     # ------------------------------------------------------------------ #
     # Public accessors (BackendService may read these for diagnostics)    #
@@ -702,12 +734,7 @@ class RecordingCoreService:
         """Вернуть независимый снимок terminal-ответа, если TTL/privacy разрешают."""
         # Privacy проверяется на чтении: кэш мог быть заполнен до включения
         # режима, но ни один replay-путь не должен выдать старый cleartext.
-        if bool(
-            self._get_runtime_setting(
-                "privacy_mode_enabled",
-                False,
-            )
-        ):
+        if self._privacy_mode_enabled():
             return None
 
         try:
@@ -735,12 +762,7 @@ class RecordingCoreService:
 
         # Повторная проверка сужает окно переключения privacy между первым
         # чтением настройки и готовым снимком ответа.
-        if bool(
-            self._get_runtime_setting(
-                "privacy_mode_enabled",
-                False,
-            )
-        ):
+        if self._privacy_mode_enabled():
             return None
         return replay
 
@@ -1390,7 +1412,7 @@ class RecordingCoreService:
                     exc_info=True,
                 )
         if bool(settings.get("realtime_partial_enabled", True)):
-            if self._get_runtime_setting("privacy_mode_enabled", False):
+            if self._privacy_mode_enabled():
                 logger.info("RealtimePartialTranscriber не запущен: privacy_mode_enabled=True")
             else:
                 import uuid as _uuid
@@ -1713,7 +1735,7 @@ class RecordingCoreService:
         # wave-31 HIGH: gate preview_text behind privacy_mode — the SSE partial-transcript
         # stream was already gated (W1673), but the IPC poll path was leaking accumulated
         # partial transcript text even when privacy_mode_enabled=True.
-        if self._get_runtime_setting("privacy_mode_enabled", False):
+        if self._privacy_mode_enabled():
             preview_text = ""
         audio_rms = (
             self.recorder.snapshot_rms()
