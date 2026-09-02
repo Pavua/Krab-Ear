@@ -253,28 +253,40 @@ public final class RealtimeOverlayController: NSObject {
         if clean.isEmpty {
             setPrimaryText("Слушаю…")
         } else {
-            // M4: Multi-line ring buffer — push new text as a new line, keep max 4 lines.
-            // Each IPC update provides the current partial sentence; we treat each non-empty
-            // update as a new line only when it differs from the last ring-buffer line.
+            // 🔴 ЗАМЕНА, а не накопление (02.09.2026, жалоба владельца:
+            // «каждое новое слово копирует всю диктовку»).
+            //
+            // Кольцевой буфер строился на предположении из старого комментария
+            // M4 — «each IPC update provides the current partial sentence», то
+            // есть backend якобы присылает только НОВЫЙ фрагмент. Это не так:
+            // recording_core_service кладёт в preview_text КУМУЛЯТИВНЫЙ текст
+            // (`self._preview_text = capped`, где capped = display_text[-900:]).
+            // Поэтому каждый тик добавлял новой строкой всю диктовку целиком, и
+            // владелец видел до четырёх её копий, растущих на слово.
+            //
+            // Раз текст уже кумулятивный и обрезан бэкендом до 900 знаков —
+            // просто показываем его. Рост по высоте берёт на себя adjustHeight().
             let cleanTrans = (translatedText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            let newLine = cleanTrans.isEmpty ? clean : "\(clean)  ↔  \(cleanTrans)"
-
-            if lineRingBuffer.last != newLine {
-                lineRingBuffer.append(newLine)
-                // Clip oldest lines so at most maxVisibleLines are shown.
-                if lineRingBuffer.count > maxVisibleLines {
-                    lineRingBuffer.removeFirst(lineRingBuffer.count - maxVisibleLines)
-                }
-            }
-            setPrimaryText(lineRingBuffer.joined(separator: "\n"))
+            let line = cleanTrans.isEmpty ? clean : "\(clean)  ↔  \(cleanTrans)"
+            lineRingBuffer = [line]
+            setPrimaryText(line)
         }
         if panel.isVisible {
             adjustHeight()
-            // 2026-05-09 fix: НЕ перепозиционируем overlay на каждый update tick.
-            // Раньше positionNearCursor() здесь следил за курсором — что приводило к
-            // тому, что overlay уезжал к углу экрана при движении мыши во время
-            // диктовки (user complaint). Initial position установлен в show() one-shot.
-            // Если хочется reposition — user может drag (saved position).
+            // 2026-05-09: слежение за курсором на каждом тике убрали — overlay
+            // уезжал к краю экрана при движении мыши во время диктовки
+            // (жалоба владельца). 02.09.2026 возвращено КАК ОПЦИЯ, выключенная
+            // по умолчанию: поведение без настройки не меняется.
+            //
+            // 🔴 Два условия, без которых опция воспроизвела бы старый баг:
+            //   1) ручное перетаскивание побеждает — если позиция сохранена,
+            //      за курсором не идём (иначе drag становится бессмысленным);
+            //   2) positionNearCursor() прижимает окно ко всем четырём краям
+            //      visibleFrame, поэтому «съехать за нижнюю сторону экрана»,
+            //      как в исходной жалобе, оно уже не может.
+            if followCursorEnabled && !hasUserPlacedPosition {
+                positionNearCursor()
+            }
         }
     }
 
@@ -546,6 +558,17 @@ public final class RealtimeOverlayController: NSObject {
     }
 
     // MARK: - Positioning
+
+    /// Владелец сам передвинул оверлей? Тогда за курсором не идём.
+    /// Позиция живёт в UserDefaults под ``savedOriginKey`` — её пишет
+    /// drag-монитор (см. M2: Position Memory + Drag Monitor).
+    private var hasUserPlacedPosition: Bool {
+        UserDefaults.standard.dictionary(forKey: savedOriginKey) != nil
+    }
+
+    /// Следовать ли за курсором на каждом тике обновления.
+    /// Выключено по умолчанию — включается настройкой `overlay_follow_cursor`.
+    var followCursorEnabled: Bool = false
 
     private func positionNearCursor() {
         let cursor = NSEvent.mouseLocation
