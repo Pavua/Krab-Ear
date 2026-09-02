@@ -185,6 +185,14 @@ extension HistoryPanelController {
         }
     }
 
+    /// Оверлей превью либо стоит там, куда его поставил владелец, либо едет за
+    /// курсором. Позиция, выставленная перетаскиванием, всегда сильнее — этот
+    /// флаг влияет только на оверлей, которого ещё не двигали руками.
+    @objc func onOverlayFollowCursorChanged() {
+        guard !isSyncingSettings else { return }
+        applySettingsPatch(["overlay_follow_cursor": overlayFollowCursorButton.state == .on])
+    }
+
     @objc func onTranslateAndPasteChanged() {
         guard !isSyncingSettings else { return }
         let enabled = translateAndPasteButton.state == .on
@@ -570,6 +578,7 @@ extension HistoryPanelController {
         (NSApp.delegate as? AgentAppDelegate)?.setPrivacyMode(settings.privacyModeEnabled)
         startSoundButton.state = settings.playStartSound ? .on : .off
         realtimePreviewButton.state = settings.realtimePreviewEnabled ? .on : .off
+        overlayFollowCursorButton.state = settings.overlayFollowCursor ? .on : .off
         translateAndPasteButton.state = settings.translateAndPaste ? .on : .off
         autoStartButton.state = settings.autoStartEnabled ? .on : .off
         dockIconButton.state = settings.showDockIcon ? .on : .off

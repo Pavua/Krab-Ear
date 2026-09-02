@@ -840,6 +840,7 @@ Returns: `{found: [...], count}`
 | Метод | Описание |
 |---|---|
 | `warmup_stt` | Ручной STT warmup |
+| `unload_stt_model` | Выгрузить STT-модель из памяти (парная к warmup_stt) |
 | `warmup_rewriter` | Ручной LLM warmup probe |
 | `select_model` | Умный выбор STT модели |
 | `get_stt_routing_decision` | Debug: результат scored adapter selection |
@@ -850,6 +851,16 @@ Returns: `{found: [...], count}`
 Ручной запуск STT warmup — полезен после смены профиля или модели.  
 Нет params.  
 Returns: `{ok, model, duration_ms}`
+
+### `unload_stt_model`
+*(stt_management_service.py)*  
+Выгружает STT-модель из памяти по явной команде — парная операция к `warmup_stt`.
+Кэш адаптера сбрасывается, следующая транскрибация поднимает модель заново,
+поэтому вызов не ломает диктовку, а лишь возвращает память до следующего
+использования. Ошибка выгрузки приходит в поле `error`, а не исключением: память
+освободить не удалось, но движок обязан продолжать работать.  
+Нет params.  
+Returns: `{unloaded: bool, error: str | null}`
 
 ### `warmup_rewriter`
 *(service.py)*  

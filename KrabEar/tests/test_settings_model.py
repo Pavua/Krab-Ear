@@ -171,6 +171,11 @@ class TestAllDefaultSettingsHaveDefaults(unittest.TestCase):
             "sip_password",
             "sip_from_number",
             "sip_proxy",
+            # Устройство записи: "" — это ЗНАЧЕНИЕ «системное по умолчанию», а не
+            # незаполненное поле. Именно им пикер микрофона кодирует первый пункт
+            # списка, и RecordingCoreService трактует пустую строку как «не
+            # переопределять вход» (02.09.2026, когда пикер подключили к настройке).
+            "selected_input_device",
         }
         empty_strings = [
             k

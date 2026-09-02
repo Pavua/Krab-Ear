@@ -1194,7 +1194,9 @@ class RecordingCoreService:
         # Uses cached_settings() — runtime-safe per Wave 58 lesson.
         _settings_pre = self._settings_svc.cached_settings()
         _selected_device = _settings_pre.get("selected_input_device", None)
-        if _selected_device is not None and hasattr(self.recorder, "set_device"):
+        # Пустая строка — «системное по умолчанию» (так пикер панели кодирует
+        # первый пункт списка); проверка на истинность покрывает и None, и "".
+        if _selected_device and hasattr(self.recorder, "set_device"):
             try:
                 self.recorder.set_device(_selected_device)
             except Exception as _dev_err:

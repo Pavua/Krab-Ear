@@ -824,6 +824,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "auto_start_enabled": False,
     "auto_paste": True,
     "play_start_sound": True,
+    # Имя входного устройства для записи; "" — системное по умолчанию.
+    # Применяется в RecordingCoreService перед стартом записи.
+    "selected_input_device": "",
     "quality_profile": "balanced",
     "network_mode": "offline_default",
     "hotkey": "right_option_toggle",

@@ -769,9 +769,17 @@ public class CollapsibleSectionView: NSView {
         setExpanded(newState, animated: true)
     }
 
+    /// Уведомление о смене состояния секции.
+    ///
+    /// Нужно секциям, которым дорого наполняться заранее: «Все настройки»
+    /// строит около 260 строк и делает это при первом раскрытии, а не при
+    /// каждой сборке панели.
+    public var onExpandedChange: ((Bool) -> Void)?
+
     public func setExpanded(_ expanded: Bool, animated: Bool) {
         self.isExpanded = expanded
         disclosureButton.state = expanded ? .on : .off
+        onExpandedChange?(expanded)
 
         // Capture the enclosing scroll view PATH before layout changes —
         // chain walks up to find parent NSScrollView (outer tab scroll).

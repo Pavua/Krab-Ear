@@ -150,6 +150,27 @@ jobs:
       - name: Check paired thresholds do not drift
         run: python3 scripts/audit_paired_thresholds.py --fail-on-found
 
+  agent-settings-symmetry-guard:
+    name: Agent settings symmetry guard (2026-09-02)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Ключ, который AgentSettings разбирает, но не отправляет обратно, панель
+      # показать может, а изменить — нет: сохранение идёт только через
+      # toPayload(). Так `overlay_follow_cursor` приехал без переключателя и
+      # включался лишь сырым IPC-вызовом из терминала. Обратная асимметрия хуже:
+      # значение уходит на backend, но эхо ответа его не читает, и контрол
+      # «щёлкнул — вернулось обратно». Гард читает Swift-исходник без сборки,
+      # поэтому падает за секунды и сразу называет ключ.
+      # No user-controlled input is used in this step — no injection risk.
+      - name: Guard selftest
+        run: python3 scripts/audit_agent_settings_symmetry.py --selftest
+
+      - name: Check AgentSettings reads and writes the same keys
+        run: python3 scripts/audit_agent_settings_symmetry.py --fail-on-found
+
   path-containment-guard:
     name: Path-containment startswith guard (#1674)
     runs-on: ubuntu-latest

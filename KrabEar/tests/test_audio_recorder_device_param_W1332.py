@@ -258,6 +258,20 @@ class TestRecordingCoreServiceDeviceInjection(unittest.TestCase):
         svc.handle_start_recording({})
         recorder.set_device.assert_not_called()
 
+    def test_no_set_device_when_setting_is_empty_string(self):
+        """Пустая строка — «системное по умолчанию», а не имя устройства.
+
+        Пикер микрофона в панели кодирует первый пункт списка («По умолчанию»)
+        пустой строкой, и таким же стал дефолт `selected_input_device` в
+        DEFAULT_SETTINGS (02.09.2026, когда пикер наконец подключили к
+        настройке). Проверка `is not None` пропустила бы "" дальше, и
+        `set_device("")` упал бы в предупреждение на каждой записи с выбором
+        «по умолчанию» — тихо, но на каждой.
+        """
+        svc, recorder = self._make_minimal_service(selected_device="")
+        svc.handle_start_recording({})
+        recorder.set_device.assert_not_called()
+
     def test_set_device_error_is_logged_not_raised(self):
         """A bad device in settings logs a warning but does not abort recording."""
         svc, recorder = self._make_minimal_service(selected_device=999)

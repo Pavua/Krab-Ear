@@ -206,6 +206,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     /// Privacy Mode (D.5): when ON, disables Sentry telemetry + forces translation offline.
     let startSoundButton = NSButton(checkboxWithTitle: "Звук старта", target: nil, action: nil)
     let realtimePreviewButton = NSButton(checkboxWithTitle: "Realtime превью", target: nil, action: nil)
+    let overlayFollowCursorButton = NSButton(checkboxWithTitle: "Оверлей за курсором", target: nil, action: nil)
     let translateAndPasteButton = NSButton(checkboxWithTitle: "Перевод + вставка", target: nil, action: nil)
     let callNotifyButton = NSButton(checkboxWithTitle: "Уведомлять собеседника", target: nil, action: nil)
     let callAutoSummaryButton = NSButton(checkboxWithTitle: "Авто-summary звонка", target: nil, action: nil)
@@ -572,9 +573,27 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
         // Сначала показываем «Историю» как безопасный fallback; syncSettingsControls()
         // ниже может восстановить сохранённую ui_last_tab без обхода всех вкладок.
+        //
+        // 🔴 Под isSyncingTabs. Делегат tabView(_:didSelect:) не только двигает
+        // сегмент — он ещё и СОХРАНЯЕТ ui_last_tab. Незаглушённый fallback
+        // поэтому затирал запомненную вкладку «Историей» при каждом открытии
+        // панели, и «помнить последнюю вкладку» не работало никогда (замер
+        // 02.09.2026: ui_last_tab = dictation до открытия, history сразу после).
+        isSyncingTabs = true
         mainTabView.selectTabViewItem(at: 2)
+        isSyncingTabs = false
 
         syncSettingsControls()
+        // 🔴 Восстановление ui_last_tab внутри syncSettingsControls() идёт под
+        // isSyncingTabs, поэтому делегат tabView(_:didSelect:) молчит и сегмент
+        // остаётся на fallback-«Истории», выбранной строкой выше. Панель тогда
+        // открывается с подсветкой одной вкладки и содержимым другой (живое
+        // воспроизведение 02.09.2026: ui_last_tab=dictation → «Диктовка» на
+        // экране, «История» в подсветке). Догоняем сегмент явно — источником
+        // правды остаётся mainTabView.
+        if let item = mainTabView.selectedTabViewItem {
+            tabSelector.selectedSegment = mainTabView.indexOfTabViewItem(item)
+        }
         layoutVisiblePanelTab()
         loadInitial()
         startPreviewPolling()
@@ -1205,6 +1224,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         realtimePreviewButton.target = self
         realtimePreviewButton.action = #selector(onRealtimePreviewChanged)
         settingsRow3.addArrangedSubview(realtimePreviewButton)
+
+        overlayFollowCursorButton.target = self
+        overlayFollowCursorButton.action = #selector(onOverlayFollowCursorChanged)
+        settingsRow3.addArrangedSubview(overlayFollowCursorButton)
 
         translateAndPasteButton.target = self
         translateAndPasteButton.action = #selector(onTranslateAndPasteChanged)
@@ -1955,6 +1978,15 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let sttEnginesSection = buildSTTEnginesSection()
         settingsBar.addArrangedSubview(sttEnginesSection)
 
+        // Управление жизнью модели STT в памяти (запрос владельца 02.09.2026).
+        let sttMemorySection = buildSTTModelMemorySection()
+        settingsBar.addArrangedSubview(sttMemorySection)
+
+        // «Все настройки» — таблица из ответа get_settings: покрывает ключи, у
+        // которых нет своего контрола, и подхватывает новые без правки Swift.
+        let allSettingsSection = buildAllSettingsSection()
+        settingsBar.addArrangedSubview(allSettingsSection)
+
         // Калибровка (аппаратно-зависимая рекомендация STT-модели).
         let calibrationSection = buildCalibrationSection()
         settingsBar.addArrangedSubview(calibrationSection)
@@ -2072,6 +2104,39 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         if UserDefaults.standard.useClaudeDesignVariant {
             // Build 5 Claude Design sections into settingsBarCD, then add to stack.
             buildClaudeDesignSettingsSections()
+
+            // 🔴 Одиннадцать секций писались только для Gemini-варианта, своей
+            // cdBuild-версии не получили — и в Claude Design оказывались
+            // недоступны ВОВСЕ, а не «спрятаны поглубже»: выбор микрофона,
+            // режим буфера обмена, быстрые заметки, авто-перевод выделения,
+            // вебхуки, планировщик записей, системные настройки. Найдено
+            // обходом панели 02.09.2026, когда починенный пикер микрофона всё
+            // равно не нашёлся на экране.
+            //
+            // Секции строятся выше безусловно, а `settingsBar` здесь скрывается
+            // — перенос их view в CD-стек безопасен: NSView живёт ровно в одной
+            // иерархии, и удерживать их скрытому бару незачем. Вид у них
+            // остаётся «геминиевский»; доступность важнее единообразия карточек,
+            // а порт на CDSettingsCardView — отдельная задача.
+            settingsBarCD.addArrangedSubview(makeCategoryHeader(text: "Ещё настройки"))
+            for section in [
+                audioPipelineSection,
+                profAudioSection,
+                builtSystemSection,
+                clipSection,
+                quickCaptureSection,
+                quickPresetSection,
+                selTransSection,
+                vaSection,
+                schedulerSection,
+                webhookManagerSection,
+                callObserverSettingsSection,
+                sttMemorySection,
+                allSettingsSection,
+            ] {
+                settingsBarCD.addArrangedSubview(section)
+            }
+
             settingsBarCD.translatesAutoresizingMaskIntoConstraints = false
             settingsBar.isHidden = true
             dictationStack.addArrangedSubview(settingsBarCD)
@@ -2159,6 +2224,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         for button in [audioDuckingButton, diarizationButton, llmRewriteButton,
                        autoPasteButton, pasteUndoButton, smartFieldFormatButton, streamingPasteButton,
                        quickEditButton, startSoundButton, realtimePreviewButton,
+                       overlayFollowCursorButton,
                        translateAndPasteButton, callNotifyButton, callAutoSummaryButton,
                        autoStartButton, dockIconButton] as [NSButton] {
             button.applyThemeCheckbox()

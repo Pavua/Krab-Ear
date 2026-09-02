@@ -152,15 +152,44 @@ extension HistoryPanelController {
                   let devices = result["devices"] as? [[String: Any]] else { return }
             DispatchQueue.main.async {
                 guard let self = self else { return }
+                self.audioDeviceSelector.target = self
+                self.audioDeviceSelector.action = #selector(self.onAudioDeviceChanged)
                 self.audioDeviceSelector.removeAllItems()
-                self.audioDeviceSelector.addItem(withTitle: "По умолчанию (системный)")
+                self.audioDeviceSelector.addItem(withTitle: Self.defaultAudioDeviceTitle)
                 for device in devices {
                     if let name = device["name"] as? String {
                         self.audioDeviceSelector.addItem(withTitle: name)
                     }
                 }
+                // Возвращаем пикер на сохранённое устройство: без этого он после
+                // каждой перезагрузки списка показывает «По умолчанию» при живой
+                // настройке, и владелец считает, что выбор потерян.
+                let saved = self.settingsProvider().selectedInputDevice
+                if !saved.isEmpty, self.audioDeviceSelector.itemTitles.contains(saved) {
+                    self.audioDeviceSelector.selectItem(withTitle: saved)
+                } else {
+                    self.audioDeviceSelector.selectItem(at: 0)
+                }
             }
         }
+    }
+
+    /// Заголовок первого пункта — «системное по умолчанию». Выбор этого пункта
+    /// кодируется пустой строкой: ровно её `RecordingCoreService` трактует как
+    /// «устройство не задано» и оставляет системный вход.
+    static let defaultAudioDeviceTitle = "По умолчанию (системный)"
+
+    /// 🔴 До 02.09.2026 пикер микрофона был украшением: заполнялся из
+    /// `get_audio_devices` и не имел ни target/action, ни читателя значения.
+    /// Обратная половина при этом работала — `RecordingCoreService` перед
+    /// стартом записи читает `selected_input_device` и зовёт
+    /// `AudioRecorder.set_device()`. То есть защита W1327 F2 ждала входа,
+    /// которого никто не подавал.
+    @objc func onAudioDeviceChanged() {
+        guard !isSyncingSettings else { return }
+        let title = audioDeviceSelector.titleOfSelectedItem ?? ""
+        let value = (audioDeviceSelector.indexOfSelectedItem <= 0) ? "" : title
+        applySettingsPatch(["selected_input_device": value])
     }
 
     @objc func onTestMicrophone() {

@@ -212,8 +212,14 @@ public final class RealtimeOverlayController: NSObject {
         lineRingBuffer = []  // M4: reset ring buffer on each new recording
         stageBadge.isHidden = true
         tintView.tintColor = KrabEarTheme.Colors.error.withAlphaComponent(0.04)
-        // M2: restore last user-dragged position; fall back to near-cursor if off-screen or not saved.
-        if !restoreSavedPosition() {
+        // M2: восстанавливаем позицию, куда владелец перетащил оверлей.
+        // 🔴 Но включённое следование за курсором сильнее: это более свежее и
+        // более явное распоряжение, чем перетаскивание когда-то в прошлом.
+        // Обратный порядок давал «галочка стоит, а оверлей не двигается» —
+        // ровно то, на что владелец пожаловался 02.09.2026.
+        if followCursorEnabled {
+            positionNearCursor()
+        } else if !restoreSavedPosition() {
             positionNearCursor()
         }
         panel.alphaValue = 0
@@ -269,7 +275,13 @@ public final class RealtimeOverlayController: NSObject {
             let cleanTrans = (translatedText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let line = cleanTrans.isEmpty ? clean : "\(clean)  ↔  \(cleanTrans)"
             lineRingBuffer = [line]
-            setPrimaryText(line)
+            // Панель фиксирована по высоте, а текст накапливается — показываем
+            // хвост, иначе видно только застывшее начало диктовки.
+            let font = primaryLabel.font ?? KrabEarTheme.Typography.display
+            let textWidth = 520 - KrabEarTheme.Metrics.comfortable * 2
+            setPrimaryText(Self.tailFitting(line, available: availableTextHeight()) { candidate in
+                self.heightForString(candidate, font: font, width: textWidth)
+            })
         }
         if panel.isVisible {
             adjustHeight()
@@ -278,13 +290,12 @@ public final class RealtimeOverlayController: NSObject {
             // (жалоба владельца). 02.09.2026 возвращено КАК ОПЦИЯ, выключенная
             // по умолчанию: поведение без настройки не меняется.
             //
-            // 🔴 Два условия, без которых опция воспроизвела бы старый баг:
-            //   1) ручное перетаскивание побеждает — если позиция сохранена,
-            //      за курсором не идём (иначе drag становится бессмысленным);
-            //   2) positionNearCursor() прижимает окно ко всем четырём краям
-            //      visibleFrame, поэтому «съехать за нижнюю сторону экрана»,
-            //      как в исходной жалобе, оно уже не может.
-            if followCursorEnabled && !hasUserPlacedPosition {
+            // 🔴 Старый баг («оверлей уезжает за край экрана») не возвращается:
+            // positionNearCursor() прижимает окно ко всем четырём краям
+            // visibleFrame. Сохранённую позицию опция намеренно перебивает —
+            // включённая галочка новее и явнее давнего перетаскивания, а иначе
+            // получается «включил и ничего не происходит».
+            if followCursorEnabled {
                 positionNearCursor()
             }
         }
@@ -559,13 +570,6 @@ public final class RealtimeOverlayController: NSObject {
 
     // MARK: - Positioning
 
-    /// Владелец сам передвинул оверлей? Тогда за курсором не идём.
-    /// Позиция живёт в UserDefaults под ``savedOriginKey`` — её пишет
-    /// drag-монитор (см. M2: Position Memory + Drag Monitor).
-    private var hasUserPlacedPosition: Bool {
-        UserDefaults.standard.dictionary(forKey: savedOriginKey) != nil
-    }
-
     /// Следовать ли за курсором на каждом тике обновления.
     /// Выключено по умолчанию — включается настройкой `overlay_follow_cursor`.
     var followCursorEnabled: Bool = false
@@ -773,6 +777,61 @@ public final class RealtimeOverlayController: NSObject {
     }
 
     // MARK: - Helpers
+
+    /// Хвост накопленного превью, помещающийся в отведённую высоту.
+    ///
+    /// `preview_text` приходит КУМУЛЯТИВНЫМ (backend режет его до 900 знаков),
+    /// а панель зафиксирована на `maxHeight`. Длинная диктовка целиком не влезает
+    /// — и владелец смотрит на ЗАСТЫВШЕЕ НАЧАЛО, пока говорит дальше («показывает
+    /// всё сообщение, которое от начала до конца», жалоба 02.09.2026). Меняются
+    /// только последние слова — их и показываем.
+    ///
+    /// Измеритель передаётся снаружи: у живого оверлея это `boundingRect` с его
+    /// реальным шрифтом и шириной, у теста — предсказуемая подделка, поэтому
+    /// поведение проверяется без создания NSPanel.
+    ///
+    /// Режем по границе слова: строка, начинающаяся с обрубка, читается хуже
+    /// обрезанной честно. Ведущее многоточие говорит, что начало за кадром.
+    nonisolated static func tailFitting(
+        _ text: String,
+        available: CGFloat,
+        measure: (String) -> CGFloat
+    ) -> String {
+        guard available > 0 else { return text }
+        if measure(text) <= available { return text }
+
+        let words = text.split(separator: " ", omittingEmptySubsequences: false)
+        guard !words.isEmpty else { return text }
+
+        // Двоичный поиск по числу последних слов: высота растёт монотонно, так
+        // что «помещается» — монотонный предикат, и хватает log(n) измерений.
+        var low = 1
+        var high = words.count
+        var best = ""
+        while low <= high {
+            let mid = (low + high) / 2
+            let candidate = "…" + words.suffix(mid).joined(separator: " ")
+            if measure(candidate) <= available {
+                best = candidate
+                low = mid + 1
+            } else {
+                high = mid - 1
+            }
+        }
+        // Не влезает даже одно слово — это перекос вёрстки, а не повод показать
+        // пустой оверлей: отдаём последнее слово и оставляем обрезку NSTextField.
+        return best.isEmpty ? "…" + String(words[words.count - 1]) : best
+    }
+
+    /// Высота, доступная тексту при фиксированной высоте панели.
+    private func availableTextHeight() -> CGFloat {
+        let insets: CGFloat = KrabEarTheme.Metrics.comfortable * 2
+        let topRowH: CGFloat = KrabEarTheme.Metrics.comfortable + 16
+        let stageLabelH: CGFloat = stageBadge.isHidden ? 0 : (18 + KrabEarTheme.Metrics.standard)
+        let padding: CGFloat = KrabEarTheme.Metrics.tight + KrabEarTheme.Metrics.comfortable
+        _ = insets
+        return maxHeight - (topRowH + stageLabelH + padding)
+    }
 
     private func heightForString(_ string: String, font: NSFont, width: CGFloat) -> CGFloat {
         guard !string.isEmpty, width > 0 else { return 22 }
