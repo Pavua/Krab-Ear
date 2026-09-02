@@ -32,6 +32,17 @@ logger = logging.getLogger("krab_ear.backend")
 
 _TAIL_CHARS = 600          # transcript_tail в get_meeting_live_state
 _ITEMS_MIN_GROWTH = 200    # симв.: минимальный прирост текста для нового LLM-вызова
+# 🔴 Окно для LLM-экстрактора. До 02.09.2026 в него уходил ВЕСЬ транскрипт с
+# начала встречи, без ограничения — а `extract()` не обрезает вход (в модуле
+# экстрактора нет ни одного truncate). На многочасовой встрече payload рано
+# или поздно перерастает контекст локальной модели, extract() начинает
+# возвращать ok=False, курсор last_extract_len при неудаче НЕ двигается — и
+# пункты перестают обновляться до конца встречи. То есть фича ломалась ровно
+# на том сценарии, ради которого делалась.
+# Ресурсный шторм при этом гасит CircuitBreaker внутри самого экстрактора
+# (allow_request/record_failure, экспоненциальный откат до 600с) — здесь
+# лечится не он, а потеря обновлений.
+_ITEMS_WINDOW_CHARS = 12000
 _LEASE_RENEW_SEC = 15.0    # период продления brain-lease
 _LEASE_TTL_SEC = 45.0      # TTL lease (перекрывает период продления с запасом)
 _WORKER_WAIT_SEC = 0.5     # шаг ожидания воркера
@@ -167,6 +178,48 @@ class _MeetingSession:
 
     def tail(self) -> str:
         return "".join(self.chunks)[-_TAIL_CHARS:]
+
+
+def _norm_key(text: str) -> str:
+    """Ключ дедупликации: регистр и краевые пробелы не считаются различием."""
+    return " ".join(str(text or "").split()).casefold()
+
+
+def _merge_texts(existing: list[str], fresh) -> list[str]:
+    """Добавляет новые строки к накопленным, сохраняя порядок появления.
+
+    Дедуп по нормализованному ключу: LLM на соседних окнах формулирует один и
+    тот же пункт с разным регистром и пробелами, и без нормализации список рос
+    бы дублями.
+    """
+    out = list(existing)
+    seen = {_norm_key(x) for x in out}
+    for item in fresh or []:
+        key = _norm_key(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
+def _merge_items(existing: list[dict], fresh: list[dict]) -> list[dict]:
+    """То же для задач. Ключ — поле ``text``: исполнитель и срок у одной задачи
+    могут уточниться на следующем окне, и такое уточнение ЗАМЕЩАЕТ прежнюю
+    запись, а не плодит вторую.
+    """
+    out = list(existing)
+    index = {_norm_key(d.get("text", "")): i for i, d in enumerate(out)}
+    for item in fresh or []:
+        key = _norm_key(item.get("text", ""))
+        if not key:
+            continue
+        if key in index:
+            out[index[key]] = item  # уточнённая версия той же задачи
+        else:
+            index[key] = len(out)
+            out.append(item)
+    return out
 
 
 class MeetingSessionService:
@@ -1228,9 +1281,13 @@ class MeetingSessionService:
             full_text = "".join(s.chunks)
         if len(full_text) - s.last_extract_len < _ITEMS_MIN_GROWTH:
             return  # текст почти не вырос — экономим LLM
+        # В модель уходит ХВОСТ, а не вся встреча: полный транскрипт растёт
+        # неограниченно и однажды перестаёт помещаться в контекст. Ранее
+        # названные пункты не теряются — они накапливаются ниже (_merge_*).
+        window_text = full_text[-_ITEMS_WINDOW_CHARS:]
         self._recording_core.pause_realtime_partials()
         try:
-            result = self._extractor.extract(full_text, language=s.language)
+            result = self._extractor.extract(window_text, language=s.language)
         finally:
             self._recording_core.resume_realtime_partials()
         with self._lock:
@@ -1238,10 +1295,15 @@ class MeetingSessionService:
                 return
             s.degraded_llm = not result.ok
             if result.ok:
-                s.items = [ai.to_dict() if hasattr(ai, "to_dict") else dict(ai)
-                           for ai in result.action_items]
-                s.decisions = list(result.decisions)
-                s.questions = list(result.questions)
+                # 🔴 НАКОПЛЕНИЕ, а не замена. Раньше списки перезаписывались
+                # целиком, и с переходом на окно пункты, названные в начале
+                # встречи, исчезали бы при каждом сдвиге — окно чинило бы одно
+                # и ломало другое.
+                fresh = [ai.to_dict() if hasattr(ai, "to_dict") else dict(ai)
+                         for ai in result.action_items]
+                s.items = _merge_items(s.items, fresh)
+                s.decisions = _merge_texts(s.decisions, result.decisions)
+                s.questions = _merge_texts(s.questions, result.questions)
                 s.last_extract_len = len(full_text)
                 s.last_updated_ts = time.time()
         if result.ok:
