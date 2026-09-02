@@ -805,6 +805,38 @@ class AudioEngine:
         except Exception:
             pass  # helper must never raise
 
+    def preview_needs_whisper_profile(self) -> bool:
+        """Нужен ли превью whisper-профиль (и стоит ли ради него чистить MLX-кэш).
+
+        🔴 Живой инцидент 01.09.2026. Превью звало ``set_quality_profile("balanced")``
+        безусловно, а тот делает ``mx.clear_cache()`` — то есть ВЫБРАСЫВАЕТ
+        загруженную whisper-модель. При ``quality_profile=max`` финальная
+        транскрипция после каждой такой чистки перезагружала
+        whisper-large-v3 (~3 ГБ) и не укладывалась в бюджет
+        ``3 × длительность`` (93–97с на 31–34с речи), падала с «Все доступные
+        STT-движки вышли из строя», и владелец получал текст из накопителя
+        превью — медленно и заметно хуже качеством. Каскад
+        самоподдерживающийся: пока идёт 90-секундная финальная транскрипция,
+        превью СЛЕДУЮЩЕЙ диктовки голодает на том же локе.
+
+        Превью идёт ``single_pass=True`` — фоллбэк-цепочки у него НЕТ. Значит
+        whisper-профиль важен ему ровно тогда, когда whisper окажется ПЕРВЫМ
+        движком. Для русского первым идёт GigaAM (условие ниже зеркалит
+        ``_transcribe_with_fallback_impl``), и тогда чистить кэш незачем.
+
+        Консервативно: при недоступном GigaAM возвращаем True — прежнее
+        поведение сохраняется, превью снова получает лёгкую модель.
+        """
+        try:
+            gigaam_ready = (
+                bool(getattr(settings, "STT_GIGAAM_ENABLED", False))
+                and not self._is_model_unavailable(self._GIGAAM_MARKER)
+                and not getattr(self, "_skip_gigaam", False)
+            )
+        except Exception:
+            return True
+        return not gigaam_ready
+
     def set_quality_profile(self, profile: str) -> bool:
         """Переключает профиль качества (balanced или max)."""
         clean_profile = profile.strip().lower()
@@ -816,7 +848,19 @@ class AudioEngine:
         if clean_profile == self.quality_profile and new_model == self.current_model:
             return False
 
-        logger.info("Смена профиля STT: %s -> %s (модель: %s)", self.quality_profile, clean_profile, new_model)
+        # 🔴 Модель могла НЕ измениться: у владельца (01.09.2026)
+        # MODEL_BALANCED и model_max_list[0] оба указывают на
+        # whisper-large-v3-mlx, поэтому «смена профиля» balanced↔max меняла
+        # только строку профиля. Гард выше требует совпадения ОБОИХ полей и
+        # потому не срабатывал, а очистка кэша ниже выбрасывала ровно ту
+        # модель, которая сейчас снова понадобится, — и следующая
+        # транскрипция грузила те же 3 ГБ заново. Дважды на каждую диктовку.
+        _model_changed = new_model != self.current_model
+        logger.info(
+            "Смена профиля STT: %s -> %s (модель: %s%s)",
+            self.quality_profile, clean_profile, new_model,
+            "" if _model_changed else ", модель не менялась — кэш сохранён",
+        )
         self.quality_profile = clean_profile
         self.current_model = new_model
         # H2: при смене профиля balanced↔max старая модель выгружается из MLX.
@@ -830,6 +874,19 @@ class AudioEngine:
         # финальная транскрибация стояла ЗДЕСЬ — на необязательной очистке кэша —
         # до backstop-таймаута 180с, после чего агент убивал бэкенд.
         # Поля профиля выставлены ВЫШЕ, поэтому пропуск очистки безопасен.
+        # Чистить кэш имеет смысл ТОЛЬКО когда действительно сменилась модель:
+        # flush существует, чтобы освободить буферы СТАРОЙ модели. При той же
+        # модели он лишь выбрасывает нужное и оплачивается перезагрузкой.
+        #
+        # 🔴 Ранний return, а не тернарник на mlx_lock(): source-контракт W1618
+        # (test_engine_mlx_lock_clear_cache_W1618) распознаёт AST-разбором ровно
+        # две формы захвата — `with mlx_lock():` и `lk = mlx_lock()` простым
+        # присваиванием. `mlx_lock() if cond else None` инвариант не нарушает,
+        # но гард его НЕ видит и краснеет. Сохраняем форму, понятную гарду,
+        # вместо того чтобы ослаблять сам гард.
+        if not _model_changed:
+            return True
+
         _cache_lock = mlx_lock()
         if _cache_lock.acquire(timeout=MLX_CACHE_FLUSH_LOCK_TIMEOUT_SEC):
             try:
