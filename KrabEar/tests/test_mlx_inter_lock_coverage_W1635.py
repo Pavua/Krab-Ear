@@ -11,7 +11,9 @@ Sites covered:
   4. engine.py  — _transcribe_model (main transcribe loop, raises on timeout)
   5. audio_lang_id.py — detect (transcribe path, raises on timeout)
   6. stt_whisper_mlx_adapter.py — transcribe (transcribe path)
-  7. bulk_reprocess.py — _reprocess_one (transcribe path)
+  7. bulk_reprocess.py — СНЯТ 02.09.2026: не вызывает MLX сам, а внешний захват
+     вокруг transcriber.transcribe() самоблокировал поток пула внутри
+     engine.transcribe (см. TestBulkReprocessNotAnMlxSiteW1635 ниже).
 
 AST-based: verify mlx_inter_process_lock import and usage presence in source.
 Mock-based: verify call ordering when env var enabled/disabled.
@@ -150,28 +152,29 @@ class TestSTTWhisperMLXAdapterASTW1635(unittest.TestCase):
         )
 
 
-class TestBulkReprocessASTW1635(unittest.TestCase):
-    """bulk_reprocess.py must import and use mlx_inter_process_lock."""
+class TestBulkReprocessNotAnMlxSiteW1635(unittest.TestCase):
+    """Сайт 7 снят 02.09.2026: bulk_reprocess не вызывает MLX сам.
 
-    def setUp(self):
-        self.src = _source("backend/bulk_reprocess.py")
+    Он зовёт transcriber.transcribe(), а engine.transcribe отдаёт работу в
+    ThreadPoolExecutor — внешний захват здесь самоблокировал поток пула, который
+    берёт тот же mlx_lock (RLock реентерабелен только для своего потока).
+    Инвариант «MLX-инференс под обоими локами» держат сайты 1–6.
+    Разбор: tests/test_bulk_reprocess_mlx_self_block_2026_09_02.py.
+    """
 
-    def test_import_present(self):
-        self.assertIn(
-            "mlx_inter_process_lock",
-            self.src,
-            "bulk_reprocess.py must import mlx_inter_process_lock",
-        )
-
-    def test_usage_present(self):
-        count = _count_inter_lock_usages(self.src)
-        self.assertGreaterEqual(count, 1, "bulk_reprocess.py must use mlx_inter_process_lock()")
-
-    def test_combined_with_statement(self):
-        self.assertIn(
-            "with mlx_inter_process_lock(), mlx_lock():",
-            self.src,
-            "bulk_reprocess.py must use combined with statement",
+    def test_no_lock_calls_remain(self):
+        tree = ast.parse(_source("backend/bulk_reprocess.py"))
+        found = sorted({
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in {"mlx_lock", "mlx_inter_process_lock"}
+        })
+        self.assertEqual(
+            found, [],
+            "bulk_reprocess снова захватывает GPU-локи вокруг transcribe "
+            f"({found}) — самоблокировка потока пула внутри engine.transcribe",
         )
 
 

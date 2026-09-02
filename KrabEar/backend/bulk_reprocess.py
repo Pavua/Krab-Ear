@@ -405,11 +405,22 @@ class BulkReprocessor:
             # Реальное перетранскрибирование.
             try:
                 audio_data = self._load_audio(audio_path)
-                # Defense-in-depth: serialise MLX GPU access even if the caller
-                # didn't inject is_recording_fn.  Per project rule (PR #71).
-                # W1635: also acquire mlx_inter_process_lock for cross-process safety.
-                from core.mlx_lock import mlx_lock
-                from core.mlx_inter_lock import mlx_inter_process_lock
+                # 🔴 Здесь НЕ берём mlx_lock/mlx_inter_process_lock вокруг
+                # transcribe (было до 02.09.2026 как «defense-in-depth», PR #71).
+                # Внешний захват самоблокировал ту самую работу, ради которой
+                # брался: engine.transcribe отдаёт и адаптеры, и whisper в
+                # ThreadPoolExecutor (engine.py: `_pool.submit(adapter_fn)`,
+                # `_executor.submit(self._transcribe_model, ...)`), а рабочий
+                # поток берёт ТОТ ЖЕ mlx_lock. RLock реентерабелен только для
+                # своего потока — поток пула ждал породивший его поток. Для
+                # GigaAM-MLX это не просто задержка: его ожидание ограничено
+                # 25 с, после чего он уступает очередь, то есть каждая запись
+                # пакета теряла 25 с и уезжала на резервный движок.
+                # Инвариант «любой MLX-инференс под локом» сохранён ниже по
+                # стеку: захват делает каждый MLX-путь сам — _transcribe_model
+                # (whisper + RU-finetune), GigaAM-MLX/parakeet/voxtral-адаптеры,
+                # AudioLanguageID._run_detect, set_quality_profile и пост-STT
+                # mx.clear_cache(). Тот же класс дефекта в превью — #1972.
                 import numpy as _np_budget
                 # Спека 2026-08-26 §5: bulk-reprocess → batch-бюджет.
                 # settings_get=None → дефолты модуля (у reprocessor'а нет
@@ -420,18 +431,15 @@ class BulkReprocessor:
                     and len(audio_data) > 0
                     else None
                 )
-                # Ожидание в очереди на GPU-локи — не работа STT; бюджет ограничивает
-                # удержание ресурса (инференс под локом), а не время до захвата.
-                with mlx_inter_process_lock(), mlx_lock():  # W1635: cross-process flock + intra-process RLock
-                    with stt_budget.stt_budget_scope(
-                        stt_budget.BATCH, audio_duration_sec=_dur_sec
-                    ):
-                        result = self.transcriber.transcribe(
-                            audio_data,
-                            quality_profile="balanced",
-                            cleanup_profile="soft",
-                            lang_hint=item.source_lang or None,
-                        )
+                with stt_budget.stt_budget_scope(
+                    stt_budget.BATCH, audio_duration_sec=_dur_sec
+                ):
+                    result = self.transcriber.transcribe(
+                        audio_data,
+                        quality_profile="balanced",
+                        cleanup_profile="soft",
+                        lang_hint=item.source_lang or None,
+                    )
                 new_text = str(result.get("text") or "").strip()
                 new_confidence = float(result.get("confidence") or 0.0)
 

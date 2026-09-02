@@ -4,7 +4,8 @@ Tests:
     - test_reprocess_refused_while_recording   (F1: RuntimeError when recording active)
     - test_reprocess_allowed_when_not_recording (F1: passes through when not recording)
     - test_reprocess_no_guard_fn_proceeds       (F1: backward compat — no fn injected)
-    - test_reprocess_uses_mlx_lock              (F2: mlx_lock acquired during transcribe)
+    - F2 пересмотрен 02.09.2026: внешний захват mlx_lock снят как самоблокировка
+      (см. tests/test_bulk_reprocess_mlx_self_block_2026_09_02.py)
 """
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, call
 
 PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -196,91 +197,21 @@ class TestReprocessRecordingGuardF1(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# F2: mlx_lock defense-in-depth tests
+# F2 (пересмотрен 02.09.2026): внешнего захвата mlx_lock больше НЕТ
+#
+# Исходные тесты закрепляли ИМЕННО место захвата — `with mlx_inter_process_lock(),
+# mlx_lock():` вокруг transcriber.transcribe(). Этот захват оказался
+# самоблокировкой: engine.transcribe отдаёт работу в ThreadPoolExecutor, а поток
+# пула берёт ТОТ ЖЕ mlx_lock (RLock реентерабелен только для своего потока).
+# Инвариант «MLX-инференс под локом» держат сами MLX-пути (_transcribe_model,
+# GigaAM-MLX/parakeet/voxtral-адаптеры). Разбор и регресс-тесты:
+# tests/test_bulk_reprocess_mlx_self_block_2026_09_02.py.
 # ---------------------------------------------------------------------------
 
-class TestReprocessMlxLockF2(unittest.TestCase):
-    """W1037 F2: mlx_lock must be acquired around transcriber.transcribe() call."""
+class TestDryRunDoesNotTranscribe(unittest.TestCase):
+    """dry_run планирует работу, но не запускает STT."""
 
-    def test_reprocess_uses_mlx_lock(self):
-        """mlx_lock context manager is entered during each actual transcription.
-
-        Since mlx_lock is imported lazily inside reprocess(), we patch the source
-        module (core.mlx_lock.mlx_lock) so the `from core.mlx_lock import mlx_lock`
-        inside reprocess() picks up the mock.
-        """
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            audio_path = f.name
-
-        try:
-            items = [_make_item_dict("id1", confidence=0.4, audio_path=audio_path)]
-            store = _make_store_mock(items)
-            transcriber = _make_transcriber_mock(text="Новый текст", confidence=0.9)
-            vm = _make_version_manager_mock()
-
-            lock_entered = {"count": 0}
-
-            class _FakeLock:
-                def __enter__(self):
-                    lock_entered["count"] += 1
-                    return self
-
-                def __exit__(self, *args):
-                    return False
-
-            with (
-                patch.object(BulkReprocessor, "_load_audio", return_value="audio_array"),
-                patch("core.mlx_lock.mlx_lock", return_value=_FakeLock()),
-            ):
-                br = BulkReprocessor(store=store, transcriber=transcriber, version_manager=vm)
-                result = br.reprocess(only_low_confidence=True, threshold=0.7)
-
-            # The lock must have been entered exactly once (one transcription candidate).
-            self.assertEqual(lock_entered["count"], 1)
-            self.assertEqual(result["reprocessed"], 1)
-        finally:
-            os.unlink(audio_path)
-
-    def test_reprocess_mlx_lock_imported_from_core(self):
-        """mlx_lock is imported from core.mlx_lock (not a stub) during reprocess."""
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            audio_path = f.name
-
-        try:
-            items = [_make_item_dict("id1", confidence=0.4, audio_path=audio_path)]
-            store = _make_store_mock(items)
-            transcriber = _make_transcriber_mock(text="Новый текст", confidence=0.9)
-            vm = _make_version_manager_mock()
-
-            lock_enter_calls = []
-
-            original_lock_cls = None
-            try:
-                from core.mlx_lock import mlx_lock as real_lock
-                original_lock_cls = real_lock
-            except ImportError:
-                pass
-
-            with (
-                patch.object(BulkReprocessor, "_load_audio", return_value="audio_array"),
-                patch("core.mlx_lock.mlx_lock") as mock_mlx,
-            ):
-                mock_ctx = MagicMock()
-                mock_ctx.__enter__ = MagicMock(return_value=None)
-                mock_ctx.__exit__ = MagicMock(return_value=False)
-                mock_mlx.return_value = mock_ctx
-
-                br = BulkReprocessor(store=store, transcriber=transcriber, version_manager=vm)
-                result = br.reprocess(only_low_confidence=True, threshold=0.7)
-
-            # transcribe must have been called (proves we got past the lock)
-            transcriber.transcribe.assert_called_once()
-            self.assertEqual(result["reprocessed"], 1)
-        finally:
-            os.unlink(audio_path)
-
-    def test_mlx_lock_not_acquired_for_dry_run(self):
-        """mlx_lock is NOT acquired during dry_run (no real transcription)."""
+    def test_dry_run_skips_transcription(self):
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             audio_path = f.name
 
@@ -290,24 +221,21 @@ class TestReprocessMlxLockF2(unittest.TestCase):
             transcriber = _make_transcriber_mock()
             vm = _make_version_manager_mock()
 
-            with patch("core.mlx_lock.mlx_lock") as mock_mlx:
-                br = BulkReprocessor(store=store, transcriber=transcriber, version_manager=vm)
-                result = br.reprocess(dry_run=True)
+            br = BulkReprocessor(store=store, transcriber=transcriber, version_manager=vm)
+            result = br.reprocess(dry_run=True)
 
-            # Dry run should not invoke transcriber or mlx_lock
             transcriber.transcribe.assert_not_called()
-            mock_mlx.assert_not_called()
             self.assertEqual(result["reprocessed"], 1)
         finally:
             os.unlink(audio_path)
 
 
 # ---------------------------------------------------------------------------
-# Combined guard + lock
+# Guard срабатывает раньше любой работы
 # ---------------------------------------------------------------------------
 
-class TestRecordingGuardTakesPrecedenceOverLock(unittest.TestCase):
-    """Guard check runs before any lock acquisition."""
+class TestRecordingGuardTakesPrecedenceOverWork(unittest.TestCase):
+    """Проверка записи выполняется до любого доступа к хранилищу и к STT."""
 
     def test_guard_fires_before_store_access(self):
         """When recording active, store is never accessed (no partial state)."""
@@ -315,20 +243,18 @@ class TestRecordingGuardTakesPrecedenceOverLock(unittest.TestCase):
         transcriber = _make_transcriber_mock()
         vm = _make_version_manager_mock()
 
-        with patch("core.mlx_lock.mlx_lock") as mock_mlx:
-            br = BulkReprocessor(
-                store=store,
-                transcriber=transcriber,
-                version_manager=vm,
-                is_recording_fn=lambda: True,
-            )
-            with self.assertRaises(RuntimeError):
-                br.reprocess()
+        br = BulkReprocessor(
+            store=store,
+            transcriber=transcriber,
+            version_manager=vm,
+            is_recording_fn=lambda: True,
+        )
+        with self.assertRaises(RuntimeError):
+            br.reprocess()
 
-            # mlx_lock must not have been acquired
-            mock_mlx.assert_not_called()
-            # Store must not have been accessed
-            store._lock.assert_not_called()
+        transcriber.transcribe.assert_not_called()
+        # Store must not have been accessed
+        store._lock.assert_not_called()
 
 
 if __name__ == "__main__":
