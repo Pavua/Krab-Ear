@@ -573,9 +573,27 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
         // Сначала показываем «Историю» как безопасный fallback; syncSettingsControls()
         // ниже может восстановить сохранённую ui_last_tab без обхода всех вкладок.
+        //
+        // 🔴 Под isSyncingTabs. Делегат tabView(_:didSelect:) не только двигает
+        // сегмент — он ещё и СОХРАНЯЕТ ui_last_tab. Незаглушённый fallback
+        // поэтому затирал запомненную вкладку «Историей» при каждом открытии
+        // панели, и «помнить последнюю вкладку» не работало никогда (замер
+        // 02.09.2026: ui_last_tab = dictation до открытия, history сразу после).
+        isSyncingTabs = true
         mainTabView.selectTabViewItem(at: 2)
+        isSyncingTabs = false
 
         syncSettingsControls()
+        // 🔴 Восстановление ui_last_tab внутри syncSettingsControls() идёт под
+        // isSyncingTabs, поэтому делегат tabView(_:didSelect:) молчит и сегмент
+        // остаётся на fallback-«Истории», выбранной строкой выше. Панель тогда
+        // открывается с подсветкой одной вкладки и содержимым другой (живое
+        // воспроизведение 02.09.2026: ui_last_tab=dictation → «Диктовка» на
+        // экране, «История» в подсветке). Догоняем сегмент явно — источником
+        // правды остаётся mainTabView.
+        if let item = mainTabView.selectedTabViewItem {
+            tabSelector.selectedSegment = mainTabView.indexOfTabViewItem(item)
+        }
         layoutVisiblePanelTab()
         loadInitial()
         startPreviewPolling()
