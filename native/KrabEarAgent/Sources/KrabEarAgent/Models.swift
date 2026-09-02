@@ -66,6 +66,7 @@ struct AgentSettings {
     var historyPageSize: Int
     var historyTextDensity: String
     var realtimePreviewEnabled: Bool
+    var overlayFollowCursor: Bool
     var cleanupProfile: String
     var translationMode: String
     var translateAndPaste: Bool
@@ -159,6 +160,7 @@ struct AgentSettings {
         historyPageSize: 50,
         historyTextDensity: "normal",
         realtimePreviewEnabled: true,
+        overlayFollowCursor: false,
         cleanupProfile: "soft",
         translationMode: "off",
         translateAndPaste: false,
@@ -237,6 +239,7 @@ struct AgentSettings {
         self.historyPageSize = (payload["history_page_size"] as? Int) ?? Self.default.historyPageSize
         self.historyTextDensity = (payload["history_text_density"] as? String) ?? Self.default.historyTextDensity
         self.realtimePreviewEnabled = (payload["realtime_preview_enabled"] as? Bool) ?? Self.default.realtimePreviewEnabled
+        self.overlayFollowCursor = (payload["overlay_follow_cursor"] as? Bool) ?? Self.default.overlayFollowCursor
         self.cleanupProfile = (payload["cleanup_profile"] as? String) ?? Self.default.cleanupProfile
         self.translationMode = (payload["translation_mode"] as? String) ?? Self.default.translationMode
         self.translateAndPaste = (payload["translate_and_paste"] as? Bool) ?? Self.default.translateAndPaste
@@ -336,6 +339,7 @@ struct AgentSettings {
         historyPageSize: Int,
         historyTextDensity: String,
         realtimePreviewEnabled: Bool,
+        overlayFollowCursor: Bool,
         cleanupProfile: String,
         translationMode: String,
         translateAndPaste: Bool,
@@ -409,6 +413,7 @@ struct AgentSettings {
         self.historyPageSize = historyPageSize
         self.historyTextDensity = historyTextDensity
         self.realtimePreviewEnabled = realtimePreviewEnabled
+        self.overlayFollowCursor = overlayFollowCursor
         self.cleanupProfile = cleanupProfile
         self.translationMode = translationMode
         self.translateAndPaste = translateAndPaste

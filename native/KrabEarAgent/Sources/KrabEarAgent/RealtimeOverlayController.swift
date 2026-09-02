@@ -270,11 +270,20 @@ public final class RealtimeOverlayController: NSObject {
         }
         if panel.isVisible {
             adjustHeight()
-            // 2026-05-09 fix: НЕ перепозиционируем overlay на каждый update tick.
-            // Раньше positionNearCursor() здесь следил за курсором — что приводило к
-            // тому, что overlay уезжал к углу экрана при движении мыши во время
-            // диктовки (user complaint). Initial position установлен в show() one-shot.
-            // Если хочется reposition — user может drag (saved position).
+            // 2026-05-09: слежение за курсором на каждом тике убрали — overlay
+            // уезжал к краю экрана при движении мыши во время диктовки
+            // (жалоба владельца). 02.09.2026 возвращено КАК ОПЦИЯ, выключенная
+            // по умолчанию: поведение без настройки не меняется.
+            //
+            // 🔴 Два условия, без которых опция воспроизвела бы старый баг:
+            //   1) ручное перетаскивание побеждает — если позиция сохранена,
+            //      за курсором не идём (иначе drag становится бессмысленным);
+            //   2) positionNearCursor() прижимает окно ко всем четырём краям
+            //      visibleFrame, поэтому «съехать за нижнюю сторону экрана»,
+            //      как в исходной жалобе, оно уже не может.
+            if followCursorEnabled && !hasSavedPosition() {
+                positionNearCursor()
+            }
         }
     }
 
@@ -546,6 +555,10 @@ public final class RealtimeOverlayController: NSObject {
     }
 
     // MARK: - Positioning
+
+    /// Следовать ли за курсором на каждом тике обновления.
+    /// Выключено по умолчанию — включается настройкой `overlay_follow_cursor`.
+    var followCursorEnabled: Bool = false
 
     private func positionNearCursor() {
         let cursor = NSEvent.mouseLocation

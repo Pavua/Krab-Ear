@@ -833,6 +833,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "history_page_size": 50,
     "history_text_density": "normal",
     "realtime_preview_enabled": True,
+    # Оверлей следует за курсором мыши во время диктовки. Выключено по
+    # умолчанию: слежение на каждом тике убрали 09.05.2026 после жалобы
+    # («оверлей съехал вниз и скрылся за краем экрана»). Возвращено как
+    # опция 02.09.2026 — с прижатием к краям экрана и приоритетом
+    # перетащенной вручную позиции.
+    "overlay_follow_cursor": False,
     "cleanup_profile": "soft",
     "translation_mode": "off",
     "translate_and_paste": False,

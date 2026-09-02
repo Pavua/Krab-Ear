@@ -73,6 +73,10 @@ extension AgentAppDelegate {
         guard isRecording, settings.realtimePreviewEnabled else {
             return
         }
+        // Настройка читается на каждом тике, а не один раз при показе: владелец
+        // может переключить её во время записи, и ждать следующей диктовки,
+        // чтобы увидеть эффект, — неочевидно.
+        realtimeOverlay.followCursorEnabled = settings.overlayFollowCursor
         // Sync IPC на main thread каждые 0.85s через NSTimer вызывал AppHang
         // когда backend под нагрузкой (диктовка + STT) — Sentry KRAB-EAR-AGENT-8 регрессия.
         // Перенесли на background queue с UI update обратно на main.
@@ -85,7 +89,17 @@ extension AgentAppDelegate {
                 return
             }
             let previewText = (result["preview_text"] as? String) ?? ""
-            let durationSec = (result["duration_sec"] as? Double) ?? 0.0
+            // 🔴 elapsed_sec, а НЕ duration_sec (02.09.2026, жалоба владельца
+            // «таймер висит на 1 с»). Оба ключа есть в ответе, но источники
+            // разные: duration_sec — это _preview_duration_sec, курсор
+            // превью-воркера, и обновляет его ТОЛЬКО он. Стоит воркеру
+            // застрять (живой случай: 25с на захвате mlx_lock), как таймер
+            // замирает на последнем значении. elapsed_sec приходит напрямую из
+            // recorder.get_duration_sec() и не зависит от превью вовсе.
+            // Фоллбэк на duration_sec оставлен на случай старого backend.
+            let durationSec = (result["elapsed_sec"] as? Double)
+                ?? (result["duration_sec"] as? Double)
+                ?? 0.0
             let audioRms = result["audio_rms"] as? Double
             DispatchQueue.main.async {
                 guard let self else { return }
