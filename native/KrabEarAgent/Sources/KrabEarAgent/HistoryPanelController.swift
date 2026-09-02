@@ -1978,6 +1978,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let sttEnginesSection = buildSTTEnginesSection()
         settingsBar.addArrangedSubview(sttEnginesSection)
 
+        // Управление жизнью модели STT в памяти (запрос владельца 02.09.2026).
+        let sttMemorySection = buildSTTModelMemorySection()
+        settingsBar.addArrangedSubview(sttMemorySection)
+
         // Калибровка (аппаратно-зависимая рекомендация STT-модели).
         let calibrationSection = buildCalibrationSection()
         settingsBar.addArrangedSubview(calibrationSection)
@@ -2122,6 +2126,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
                 schedulerSection,
                 webhookManagerSection,
                 callObserverSettingsSection,
+                sttMemorySection,
             ] {
                 settingsBarCD.addArrangedSubview(section)
             }

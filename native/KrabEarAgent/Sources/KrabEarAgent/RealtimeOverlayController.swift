@@ -212,8 +212,14 @@ public final class RealtimeOverlayController: NSObject {
         lineRingBuffer = []  // M4: reset ring buffer on each new recording
         stageBadge.isHidden = true
         tintView.tintColor = KrabEarTheme.Colors.error.withAlphaComponent(0.04)
-        // M2: restore last user-dragged position; fall back to near-cursor if off-screen or not saved.
-        if !restoreSavedPosition() {
+        // M2: восстанавливаем позицию, куда владелец перетащил оверлей.
+        // 🔴 Но включённое следование за курсором сильнее: это более свежее и
+        // более явное распоряжение, чем перетаскивание когда-то в прошлом.
+        // Обратный порядок давал «галочка стоит, а оверлей не двигается» —
+        // ровно то, на что владелец пожаловался 02.09.2026.
+        if followCursorEnabled {
+            positionNearCursor()
+        } else if !restoreSavedPosition() {
             positionNearCursor()
         }
         panel.alphaValue = 0
@@ -284,13 +290,12 @@ public final class RealtimeOverlayController: NSObject {
             // (жалоба владельца). 02.09.2026 возвращено КАК ОПЦИЯ, выключенная
             // по умолчанию: поведение без настройки не меняется.
             //
-            // 🔴 Два условия, без которых опция воспроизвела бы старый баг:
-            //   1) ручное перетаскивание побеждает — если позиция сохранена,
-            //      за курсором не идём (иначе drag становится бессмысленным);
-            //   2) positionNearCursor() прижимает окно ко всем четырём краям
-            //      visibleFrame, поэтому «съехать за нижнюю сторону экрана»,
-            //      как в исходной жалобе, оно уже не может.
-            if followCursorEnabled && !hasUserPlacedPosition {
+            // 🔴 Старый баг («оверлей уезжает за край экрана») не возвращается:
+            // positionNearCursor() прижимает окно ко всем четырём краям
+            // visibleFrame. Сохранённую позицию опция намеренно перебивает —
+            // включённая галочка новее и явнее давнего перетаскивания, а иначе
+            // получается «включил и ничего не происходит».
+            if followCursorEnabled {
                 positionNearCursor()
             }
         }
@@ -564,13 +569,6 @@ public final class RealtimeOverlayController: NSObject {
     }
 
     // MARK: - Positioning
-
-    /// Владелец сам передвинул оверлей? Тогда за курсором не идём.
-    /// Позиция живёт в UserDefaults под ``savedOriginKey`` — её пишет
-    /// drag-монитор (см. M2: Position Memory + Drag Monitor).
-    private var hasUserPlacedPosition: Bool {
-        UserDefaults.standard.dictionary(forKey: savedOriginKey) != nil
-    }
 
     /// Следовать ли за курсором на каждом тике обновления.
     /// Выключено по умолчанию — включается настройкой `overlay_follow_cursor`.

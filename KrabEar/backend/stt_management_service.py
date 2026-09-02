@@ -117,6 +117,29 @@ class STTManagementService:
     # STT warmup
     # ------------------------------------------------------------------
 
+    def handle_unload_stt_model(self, params: dict) -> dict:
+        """Выгружает STT-модели из памяти по явной команде из панели.
+
+        Парная операция к ``warmup_stt``. Кэш адаптера сбрасывается, следующая
+        транскрибация поднимает модель заново — поэтому «выгрузить» не ломает
+        диктовку, а лишь возвращает память до следующего использования.
+
+        Ошибку выгрузки не поднимаем наружу: память освободить не удалось, но
+        движок обязан продолжать работать, а владелец — увидеть причину.
+
+        Returns:
+            {"unloaded": bool, "error": str | None}
+        """
+        engine = getattr(self._transcriber, "engine", None) if self._transcriber else None
+        unload = getattr(engine, "unload_stt_models", None) if engine is not None else None
+        if not callable(unload):
+            return {"unloaded": False, "error": "engine not available"}
+        try:
+            unload()
+        except Exception as exc:  # noqa: BLE001 — сообщаем причину, не роняем IPC
+            return {"unloaded": False, "error": str(exc)}
+        return {"unloaded": True, "error": None}
+
     def handle_warmup_stt(self, params: dict) -> dict:
         """Ручной запуск STT warmup — полезен после смены профиля или модели.
 

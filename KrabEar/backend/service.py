@@ -2862,7 +2862,8 @@ class BackendService:
             "probe_llm_http": self._handle_probe_llm_http,  # однократный ping LM Studio HTTP endpoint
             "get_memory_ledger": self._handle_get_memory_ledger,
             "get_brain_lease_status": self._health_check_svc.handle_get_brain_lease_status,  # B3: кто держит LM Studio brain-лиз
-            "warmup_stt": self._stt_mgmt_svc.handle_warmup_stt,  # ручной запуск STT warmup (после смены профиля/модели)
+            "warmup_stt": self._stt_mgmt_svc.handle_warmup_stt,
+            "unload_stt_model": self._stt_mgmt_svc.handle_unload_stt_model,  # парная к warmup_stt: вернуть память до следующего использования  # ручной запуск STT warmup (после смены профиля/модели)
             "warmup_rewriter": self._text_scoring_svc.handle_warmup_rewriter,  # явный warmup-probe для "Load Model" кнопки
             "analyze_audio_quality": self._audio_analytics_svc.handle_analyze_audio_quality,  # pre-flight анализ качества аудиофайла
             "analyze_silence": self._audio_analytics_svc.handle_analyze_silence,  # обнаружение тишины и доли речи в аудиофайле

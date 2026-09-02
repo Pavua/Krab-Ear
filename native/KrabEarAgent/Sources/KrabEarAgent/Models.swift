@@ -59,6 +59,14 @@ struct AgentSettings {
     var playStartSound: Bool
     /// Имя входного устройства; "" — системное по умолчанию.
     var selectedInputDevice: String
+    /// Устройство инференса GigaAM: "mps" (GPU) или "cpu".
+    var sttGigaamDevice: String
+    /// Грузить ли модель STT при старте бэкенда, а не лениво в первой диктовке.
+    var sttWarmupOnStartup: Bool
+    /// Простой в секундах, после которого модель может быть выгружена.
+    var gigaamIdleUnloadSec: Double
+    /// Выгружать ли на самом деле: без этого дирижёр памяти только пишет в лог.
+    var memoryConductorEnforceGigaam: Bool
     var qualityProfile: String
     var networkMode: String
     var hotkey: String
@@ -154,6 +162,10 @@ struct AgentSettings {
         autoPaste: true,
         playStartSound: true,
         selectedInputDevice: "",
+        sttGigaamDevice: "mps",
+        sttWarmupOnStartup: false,
+        gigaamIdleUnloadSec: 600.0,
+        memoryConductorEnforceGigaam: false,
         qualityProfile: "balanced",
         networkMode: "offline_default",
         hotkey: "right_option_toggle",
@@ -234,6 +246,10 @@ struct AgentSettings {
         self.autoPaste = (payload["auto_paste"] as? Bool) ?? Self.default.autoPaste
         self.playStartSound = (payload["play_start_sound"] as? Bool) ?? Self.default.playStartSound
         self.selectedInputDevice = (payload["selected_input_device"] as? String) ?? Self.default.selectedInputDevice
+        self.sttGigaamDevice = (payload["stt_gigaam_device"] as? String) ?? Self.default.sttGigaamDevice
+        self.sttWarmupOnStartup = (payload["stt_warmup_on_startup"] as? Bool) ?? Self.default.sttWarmupOnStartup
+        self.gigaamIdleUnloadSec = (payload["gigaam_idle_unload_sec"] as? Double) ?? Self.default.gigaamIdleUnloadSec
+        self.memoryConductorEnforceGigaam = (payload["memory_conductor_enforce_gigaam"] as? Bool) ?? Self.default.memoryConductorEnforceGigaam
         self.qualityProfile = (payload["quality_profile"] as? String) ?? Self.default.qualityProfile
         self.networkMode = (payload["network_mode"] as? String) ?? Self.default.networkMode
         self.hotkey = (payload["hotkey"] as? String) ?? Self.default.hotkey
@@ -335,6 +351,10 @@ struct AgentSettings {
         autoPaste: Bool,
         playStartSound: Bool,
         selectedInputDevice: String,
+        sttGigaamDevice: String,
+        sttWarmupOnStartup: Bool,
+        gigaamIdleUnloadSec: Double,
+        memoryConductorEnforceGigaam: Bool,
         qualityProfile: String,
         networkMode: String,
         hotkey: String,
@@ -410,6 +430,10 @@ struct AgentSettings {
         self.autoPaste = autoPaste
         self.playStartSound = playStartSound
         self.selectedInputDevice = selectedInputDevice
+        self.sttGigaamDevice = sttGigaamDevice
+        self.sttWarmupOnStartup = sttWarmupOnStartup
+        self.gigaamIdleUnloadSec = gigaamIdleUnloadSec
+        self.memoryConductorEnforceGigaam = memoryConductorEnforceGigaam
         self.qualityProfile = qualityProfile
         self.networkMode = networkMode
         self.hotkey = hotkey
@@ -488,6 +512,10 @@ struct AgentSettings {
             "auto_paste": autoPaste,
             "play_start_sound": playStartSound,
             "selected_input_device": selectedInputDevice,
+            "stt_gigaam_device": sttGigaamDevice,
+            "stt_warmup_on_startup": sttWarmupOnStartup,
+            "gigaam_idle_unload_sec": gigaamIdleUnloadSec,
+            "memory_conductor_enforce_gigaam": memoryConductorEnforceGigaam,
             "quality_profile": qualityProfile,
             "network_mode": networkMode,
             "hotkey": hotkey,
