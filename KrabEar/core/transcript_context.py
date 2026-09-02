@@ -117,6 +117,49 @@ def _iso_to_epoch(ts: str) -> float:
     return 0.0
 
 
+def merge_language_hotwords(
+    common: "list[str] | None",
+    language: "str | None",
+    per_language: "dict[str, list[str]] | None",
+) -> "list[str]":
+    """Склеивает общий словарь подсказок с языковым.
+
+    Зачем: бюджет `initial_prompt` у Whisper — 224 токена, и на живых диктовках
+    он уже режется (лог: 948 знаков → 560). Испанский медицинский словарь в
+    русской диктовке бесполезен, но место выкупает у контекста истории. Поэтому
+    языковые термины подключаются только когда распознан их язык.
+
+    Порядок значим: общий список идёт ПЕРВЫМ. Обрезка промпта идёт с конца, а
+    общие термины относятся ко всем диктовкам — терять их из-за доменного
+    списка неправильно.
+
+    Язык приходит от движков в разном виде (`es`, `ES`, `es-ES`), поэтому
+    сравнивается только первый сегмент в нижнем регистре. Неизвестный или
+    неопределённый язык — обычная ситуация, а не ошибка: возвращается общий
+    список без потерь.
+    """
+    merged: list[str] = []
+    seen: set[str] = set()
+
+    def _add(items: "list[str] | None") -> None:
+        for item in items or []:
+            text = str(item).strip()
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(text)
+
+    _add(common)
+    if language and per_language:
+        code = str(language).strip().lower().replace("_", "-").split("-")[0]
+        if code:
+            _add(per_language.get(code))
+    return merged
+
+
 def build_initial_prompt(
     history_items: list[Any],
     hotwords: list[str] | None = None,

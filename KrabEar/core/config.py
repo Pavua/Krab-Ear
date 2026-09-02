@@ -575,6 +575,12 @@ class Settings(BaseSettings):
     # --- STT quality: user hotwords for initial_prompt boost ---
     # Управляется через IPC: add_stt_hotword / remove_stt_hotword / list_stt_hotwords.
     STT_HOTWORDS: List[str] = []
+    # Языковые словари подсказок: подключаются только когда распознан их язык.
+    # Общий STT_HOTWORDS действует всегда; языковой не занимает место в
+    # промпте чужой диктовки (бюджет Whisper 224 токена уже режется на 41%).
+    STT_HOTWORDS_RU: List[str] = []
+    STT_HOTWORDS_ES: List[str] = []
+    STT_HOTWORDS_EN: List[str] = []
 
     # --- Language-aware STT router (scaffold, Phase 5 future) ---
     # Маршрутизация на языково-специализированные STT модели.
@@ -1014,6 +1020,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # --- STT hotwords (initial_prompt boost) ---
     "stt_hotwords": [],
     "stt_hotwords_enabled": True,
+    # Языковые словари подсказок (см. STT_HOTWORDS_*): пустые по умолчанию.
+    "stt_hotwords_ru": [],
+    "stt_hotwords_es": [],
+    "stt_hotwords_en": [],
     # --- STT speaker-aware initial_prompt hint ---
     "stt_speaker_aware_prompt_enabled": True,
     "stt_dialogue_hint_threshold": 2,
