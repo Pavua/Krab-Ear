@@ -212,6 +212,27 @@ jobs:
         # No user-controlled input is used in this step -- no injection risk.
         run: python3 scripts/audit_fake_store_signatures.py --fail-on-found
 
+  orphan-panel-controls-guard:
+    name: Orphan panel controls guard (2026-09-03)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Контрол панели, объявленный как stored-свойство, но без проводки
+      # (target+action / чтение значения из ДОСТИЖИМОГО кода) или без места в
+      # иерархии видов — украшение: пикер микрофона заполнялся из
+      # get_audio_devices и никуда не отправлял выбор владельца. Первая версия
+      # гарда пропускала снятую проводку, потому что чтение значения жило в
+      # обработчике без action; теперь тела @objc-методов без единой ссылки
+      # #selector вырезаются перед проверкой. Читает Swift-исходник без сборки.
+      # No user-controlled input is used in this step — no injection risk.
+      - name: Guard selftest
+        run: python3 scripts/audit_orphan_panel_controls.py --selftest
+
+      - name: Check every panel control is wired and placed
+        run: python3 scripts/audit_orphan_panel_controls.py --fail-on-found
+
   dead-swift-methods-guard:
     name: Dead Swift methods guard (W6, report-only)
     runs-on: ubuntu-latest
