@@ -66,6 +66,8 @@ _LOCK_WAIT_TIMEOUT_SEC = 25.0
 
 # Жёсткий предел GigaAM — 25 c на массив; режем по 20 c с осознанным запасом
 # (см. engine._GIGAAM_MAX_CHUNK_SEC и инцидент «старый порог 30 s терял записи»).
+
+
 class GigaAMMLXChunkLoss(RuntimeError):
     """Звучащий кусок вернулся без текста — часть диктовки потеряна.
 
