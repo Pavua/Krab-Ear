@@ -386,6 +386,11 @@ extension HistoryPanelController {
         realtimePreviewButton.setButtonType(.switch)
         let realtimeRow = cdMakeRow(label: "Realtime preview", control: realtimePreviewButton)
 
+        // Оверлей за курсором
+        overlayFollowCursorButton.title = ""
+        overlayFollowCursorButton.setButtonType(.switch)
+        let overlayFollowRow = cdMakeRow(label: "Оверлей за курсором", control: overlayFollowCursorButton)
+
         // Start sound
         startSoundButton.title = ""
         startSoundButton.setButtonType(.switch)
@@ -427,6 +432,8 @@ extension HistoryPanelController {
         card.contentStackView.addArrangedSubview(quickEditTimeoutRow)
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(realtimeRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(overlayFollowRow)
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(soundRow)
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
@@ -644,6 +651,8 @@ extension HistoryPanelController {
         autoPasteButton.action = #selector(onAutoPasteChanged)
         realtimePreviewButton.target = self
         realtimePreviewButton.action = #selector(onRealtimePreviewChanged)
+        overlayFollowCursorButton.target = self
+        overlayFollowCursorButton.action = #selector(onOverlayFollowCursorChanged)
         startSoundButton.target = self
         startSoundButton.action = #selector(onStartSoundChanged)
         autoStartButton.target = self

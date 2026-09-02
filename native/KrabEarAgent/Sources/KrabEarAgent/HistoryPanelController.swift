@@ -206,6 +206,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     /// Privacy Mode (D.5): when ON, disables Sentry telemetry + forces translation offline.
     let startSoundButton = NSButton(checkboxWithTitle: "Звук старта", target: nil, action: nil)
     let realtimePreviewButton = NSButton(checkboxWithTitle: "Realtime превью", target: nil, action: nil)
+    let overlayFollowCursorButton = NSButton(checkboxWithTitle: "Оверлей за курсором", target: nil, action: nil)
     let translateAndPasteButton = NSButton(checkboxWithTitle: "Перевод + вставка", target: nil, action: nil)
     let callNotifyButton = NSButton(checkboxWithTitle: "Уведомлять собеседника", target: nil, action: nil)
     let callAutoSummaryButton = NSButton(checkboxWithTitle: "Авто-summary звонка", target: nil, action: nil)
@@ -1206,6 +1207,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         realtimePreviewButton.action = #selector(onRealtimePreviewChanged)
         settingsRow3.addArrangedSubview(realtimePreviewButton)
 
+        overlayFollowCursorButton.target = self
+        overlayFollowCursorButton.action = #selector(onOverlayFollowCursorChanged)
+        settingsRow3.addArrangedSubview(overlayFollowCursorButton)
+
         translateAndPasteButton.target = self
         translateAndPasteButton.action = #selector(onTranslateAndPasteChanged)
         settingsRow3.addArrangedSubview(translateAndPasteButton)
@@ -2159,6 +2164,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         for button in [audioDuckingButton, diarizationButton, llmRewriteButton,
                        autoPasteButton, pasteUndoButton, smartFieldFormatButton, streamingPasteButton,
                        quickEditButton, startSoundButton, realtimePreviewButton,
+                       overlayFollowCursorButton,
                        translateAndPasteButton, callNotifyButton, callAutoSummaryButton,
                        autoStartButton, dockIconButton] as [NSButton] {
             button.applyThemeCheckbox()

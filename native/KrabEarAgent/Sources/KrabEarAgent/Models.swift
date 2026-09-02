@@ -500,6 +500,7 @@ struct AgentSettings {
             "audio_ducking_enabled": audioDuckingEnabled,
             "audio_ducking_percent": audioDuckingPercent,
             "overlay_opacity_percent": overlayOpacityPercent,
+            "overlay_follow_cursor": overlayFollowCursor,
             "voice_gateway_url": voiceGatewayURL,
             "voice_gateway_api_key": voiceGatewayAPIKey,
             "update_channel": updateChannel,
