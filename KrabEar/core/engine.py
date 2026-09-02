@@ -40,7 +40,7 @@ from core.mlx_inter_lock import MLXInterLockTimeout, mlx_inter_process_lock  # n
 from core.mlx_lock import MLXLockTimeoutError  # noqa: E402
 from core.mlx_subprocess import MLXTimeoutError, get_watchdog  # noqa: E402
 from core.mlx_memory_gate import should_skip_second_mlx_checkpoint  # noqa: E402
-from core.transcript_context import build_initial_prompt
+from core.transcript_context import build_initial_prompt, merge_language_hotwords
 from core import stt_budget  # noqa: E402
 
 try:
@@ -1306,9 +1306,20 @@ class AudioEngine:
                 dynamic_prompt += f" Ключевые слова: {', '.join(extra_vocabulary)}"
             # Обогащаем prompt контекстом недавней истории и пользовательскими hotwords.
             # build_initial_prompt возвращает пустую строку если нет ни контекста, ни hotwords.
+            # Языковой словарь подключается только для своего языка: испанские
+            # медицинские термины бесполезны в русской диктовке, а место в
+            # промпте выкупают у контекста истории (бюджет 224 токена уже
+            # режется — см. лог «initial_prompt truncated»).
+            _lang_hotwords = {
+                "ru": list(getattr(settings, "STT_HOTWORDS_RU", []) or []),
+                "es": list(getattr(settings, "STT_HOTWORDS_ES", []) or []),
+                "en": list(getattr(settings, "STT_HOTWORDS_EN", []) or []),
+            }
             context_suffix = build_initial_prompt(
                 history_items=history_context or [],
-                hotwords=stt_hotwords or [],
+                hotwords=merge_language_hotwords(
+                    stt_hotwords or [], resolved_lang, _lang_hotwords
+                ),
             )
             if context_suffix:
                 dynamic_prompt = f"{context_suffix} {dynamic_prompt}"

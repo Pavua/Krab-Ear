@@ -40,6 +40,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 
 from core.audio_chunker import AudioChunker
+from core.silence_detector import SILENCE_THRESHOLD_DB
 from core.mlx_inter_lock import mlx_inter_process_lock
 from core.mlx_lock import MLXLockTimeoutError, mlx_lock
 from core.mlx_subprocess import MLX_HANG_HARD_KILL_SEC, MLXTimeoutError
@@ -65,6 +66,30 @@ _LOCK_WAIT_TIMEOUT_SEC = 25.0
 
 # Жёсткий предел GigaAM — 25 c на массив; режем по 20 c с осознанным запасом
 # (см. engine._GIGAAM_MAX_CHUNK_SEC и инцидент «старый порог 30 s терял записи»).
+
+
+class GigaAMMLXChunkLoss(RuntimeError):
+    """Звучащий кусок вернулся без текста — часть диктовки потеряна.
+
+    Исключение, а не укороченный результат: каскад движков в `engine.py`
+    трактует исключение как отказ и переходит к следующему движку, а
+    словарь-результат считается успехом. Живой случай 02.09.2026 — 27 секунд
+    речи стали 101 знаком, и владелец получил обрезанную диктовку без единого
+    признака беды в логе.
+
+    🔴 Следствие, о котором стоит знать: это НЕ таймаут, поэтому
+    `_blacklist_allowed_for` пометит движок недоступным на TTL (~300 с), и
+    ближайшие диктовки уйдут на Whisper. Это осознанный выбор направления
+    отказа: движок, только что молча съевший половину диктовки, не заслуживает
+    доверия следующие минуты, а блэклист сам истекает.
+    """
+
+
+# Кусок тише этого порога считается паузой: чанкер режет по тишине, и пустой
+# текст на таком куске — норма, а не потеря. Порог общий с `SilenceDetector`,
+# чтобы «тишина» значила одно и то же во всём конвейере.
+_CHUNK_SILENCE_DB = SILENCE_THRESHOLD_DB
+
 _MAX_CHUNK_SEC = 20.0
 
 # Маппинг режимов конфига (stt_gigaam_mode) на типы моделей gigaam-mlx.
@@ -149,14 +174,38 @@ class GigaAMMLXAdapter:
         self._warmup(gigaam_mlx, model, tokenizer)
 
         texts: list[str] = []
+        lost: list[str] = []
         for chunk in chunks:
             piece = self._infer_chunk(gigaam_mlx, model, tokenizer, chunk.audio)
             piece = (piece or "").strip()
             if piece:
                 texts.append(piece)
+                continue
+            # Пустой ответ имеет ДВА несовместимых источника: в куске правда нет
+            # речи (чанкер режет по паузам) либо текст потерян. Молча выбрасывать
+            # оба — это и есть баг 02.09.2026, когда 27 секунд стали 101 знаком.
+            if self._chunk_is_silent(chunk.audio):
+                logger.debug(
+                    "GigaAMMLXAdapter: кусок %.1f–%.1fс тихий, пустой текст ожидаем",
+                    chunk.start_sec, chunk.end_sec,
+                )
+                continue
+            lost.append(f"{chunk.start_sec:.1f}–{chunk.end_sec:.1f}с")
+            logger.warning(
+                "GigaAMMLXAdapter: кусок %.1f–%.1fс звучит, но вернулся пустым — "
+                "часть речи потеряна",
+                chunk.start_sec, chunk.end_sec,
+            )
+
+        if lost:
+            raise GigaAMMLXChunkLoss(
+                f"gigaam-mlx потерял {len(lost)} кусок(ов) со звучащей речью "
+                f"({', '.join(lost)}) из {len(chunks)} — отдаю каскаду, "
+                f"обрезанный текст возвращать нельзя"
+            )
 
         text = " ".join(texts)
-        logger.debug(
+        logger.info(
             "GigaAMMLXAdapter: %d чанков → %d символов (engine=gigaam-mlx-%s)",
             len(chunks), len(text), self._mlx_model_type,
         )
@@ -349,6 +398,21 @@ class GigaAMMLXAdapter:
                         self._mlx_model_type
                     )
         return self._model, self._tokenizer
+
+    @staticmethod
+    def _chunk_is_silent(audio: np.ndarray) -> bool:
+        """Тише порога тишины конвейера — значит в куске нет речи.
+
+        Считаем RMS, а не пик: одиночный щелчок не должен превращать паузу в
+        «звучащий» кусок и порождать ложную потерю.
+        """
+        if audio is None or getattr(audio, "size", 0) == 0:
+            return True
+        rms = float(np.sqrt(np.mean(np.square(audio.astype(np.float64)))))
+        if rms <= 0.0:
+            return True
+        db = 20.0 * np.log10(rms)
+        return bool(db < _CHUNK_SILENCE_DB)
 
     @staticmethod
     def _ensure_16k(audio: np.ndarray, sample_rate: int) -> np.ndarray:
