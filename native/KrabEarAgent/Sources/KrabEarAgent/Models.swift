@@ -57,6 +57,8 @@ struct AgentSettings {
     var autoStartEnabled: Bool
     var autoPaste: Bool
     var playStartSound: Bool
+    /// Имя входного устройства; "" — системное по умолчанию.
+    var selectedInputDevice: String
     var qualityProfile: String
     var networkMode: String
     var hotkey: String
@@ -151,6 +153,7 @@ struct AgentSettings {
         autoStartEnabled: false,
         autoPaste: true,
         playStartSound: true,
+        selectedInputDevice: "",
         qualityProfile: "balanced",
         networkMode: "offline_default",
         hotkey: "right_option_toggle",
@@ -230,6 +233,7 @@ struct AgentSettings {
         self.autoStartEnabled = (payload["auto_start_enabled"] as? Bool) ?? Self.default.autoStartEnabled
         self.autoPaste = (payload["auto_paste"] as? Bool) ?? Self.default.autoPaste
         self.playStartSound = (payload["play_start_sound"] as? Bool) ?? Self.default.playStartSound
+        self.selectedInputDevice = (payload["selected_input_device"] as? String) ?? Self.default.selectedInputDevice
         self.qualityProfile = (payload["quality_profile"] as? String) ?? Self.default.qualityProfile
         self.networkMode = (payload["network_mode"] as? String) ?? Self.default.networkMode
         self.hotkey = (payload["hotkey"] as? String) ?? Self.default.hotkey
@@ -330,6 +334,7 @@ struct AgentSettings {
         autoStartEnabled: Bool,
         autoPaste: Bool,
         playStartSound: Bool,
+        selectedInputDevice: String,
         qualityProfile: String,
         networkMode: String,
         hotkey: String,
@@ -404,6 +409,7 @@ struct AgentSettings {
         self.autoStartEnabled = autoStartEnabled
         self.autoPaste = autoPaste
         self.playStartSound = playStartSound
+        self.selectedInputDevice = selectedInputDevice
         self.qualityProfile = qualityProfile
         self.networkMode = networkMode
         self.hotkey = hotkey
@@ -481,6 +487,7 @@ struct AgentSettings {
             "auto_start_enabled": autoStartEnabled,
             "auto_paste": autoPaste,
             "play_start_sound": playStartSound,
+            "selected_input_device": selectedInputDevice,
             "quality_profile": qualityProfile,
             "network_mode": networkMode,
             "hotkey": hotkey,
