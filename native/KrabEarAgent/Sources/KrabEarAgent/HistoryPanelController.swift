@@ -1982,6 +1982,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let sttMemorySection = buildSTTModelMemorySection()
         settingsBar.addArrangedSubview(sttMemorySection)
 
+        // «Все настройки» — таблица из ответа get_settings: покрывает ключи, у
+        // которых нет своего контрола, и подхватывает новые без правки Swift.
+        let allSettingsSection = buildAllSettingsSection()
+        settingsBar.addArrangedSubview(allSettingsSection)
+
         // Калибровка (аппаратно-зависимая рекомендация STT-модели).
         let calibrationSection = buildCalibrationSection()
         settingsBar.addArrangedSubview(calibrationSection)
@@ -2127,6 +2132,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
                 webhookManagerSection,
                 callObserverSettingsSection,
                 sttMemorySection,
+                allSettingsSection,
             ] {
                 settingsBarCD.addArrangedSubview(section)
             }
