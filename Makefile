@@ -1,4 +1,4 @@
-.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release reset-tcc clean-worktree-builds audit-orphans audit-handlers audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-inmemory-purge-coverage audit-path-containment audit-dispatch-test-targets audit-ipc-drift audit-fake-store-signatures audit-agent-settings-symmetry audit-dead-swift audit-all pre-merge-check dispatch-tests service-loc
+.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release reset-tcc clean-worktree-builds audit-orphans audit-orphan-panel-controls audit-handlers audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-inmemory-purge-coverage audit-path-containment audit-dispatch-test-targets audit-ipc-drift audit-fake-store-signatures audit-agent-settings-symmetry audit-dead-swift audit-all pre-merge-check dispatch-tests service-loc
 
 VENV = .venv_krab_ear
 PYTHON = $(VENV)/bin/python
@@ -199,6 +199,13 @@ audit-agent-settings-symmetry:
 	python3 scripts/audit_agent_settings_symmetry.py --selftest
 	python3 scripts/audit_agent_settings_symmetry.py --fail-on-found $(ARGS)
 
+# Осиротевший контрол панели: объявлен, но без проводки (target+action или чтение
+# значения из ДОСТИЖИМОГО кода) либо без места в иерархии видов — украшение.
+# Так пикер микрофона заполнялся из get_audio_devices и никуда не отправлял выбор.
+audit-orphan-panel-controls:
+	python3 scripts/audit_orphan_panel_controls.py --selftest
+	python3 scripts/audit_orphan_panel_controls.py --fail-on-found $(ARGS)
+
 # Run all static audit checks (CI parity — runs same checks as CI guard jobs).
 # Audit dead Swift methods (W6 guard).
 # The Python side has five dead-code guards; the Swift agent had none, and the class
@@ -211,7 +218,7 @@ audit-dead-swift:
 	python3 scripts/audit_dead_swift_methods.py --selftest
 	python3 scripts/audit_dead_swift_methods.py $(ARGS)
 
-audit-all: audit-orphans audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-path-containment audit-dispatch-test-targets audit-inmemory-purge-coverage audit-ipc-drift audit-fake-store-signatures audit-paired-thresholds audit-agent-settings-symmetry
+audit-all: audit-orphans audit-duplicate-defs audit-cherry-pick audit-wiring audit-dead-modules audit-purge-coverage audit-path-containment audit-dispatch-test-targets audit-inmemory-purge-coverage audit-ipc-drift audit-fake-store-signatures audit-paired-thresholds audit-agent-settings-symmetry audit-orphan-panel-controls
 	@echo "All audit checks passed."
 
 # Reproduce the ubuntu krab-ear-ci env LOCALLY (Python 3.12, mlx ABSENT) and run

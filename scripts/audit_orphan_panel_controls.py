@@ -18,23 +18,22 @@
      или в конструктор строки (``cdMakeRow``, ``makeSwitchRow``,
      ``cdMakeSliderRow``, ``makeSettingRow``).
 
-🔴 ИЗВЕСТНАЯ СЛЕПАЯ ЗОНА — ПОЭТОМУ СКРИПТ НЕ ПОДКЛЮЧЁН НИ В Makefile, НИ В CI
+🔴 ЗАКРЫТАЯ СЛЕПАЯ ЗОНА (02→03.09.2026) — почему чтение считается не везде
 --------------------------------------------------------------------------
 Замер мутацией 02.09.2026: у ``audioDeviceSelector`` снята проводка
-(``target``/``action`` удалены) — гард по-прежнему отчитался CLEAN. Причина в
-сужении критерия: для value-контрола звено 2 засчитывается, если значение
-где-то читается, а чтение живёт внутри его же ``@objc``-обработчика. Стоит
-обработчику остаться без ``action``, и он становится недостижим, но выглядит
-как потребитель.
+(``target``/``action`` удалены) — первая версия гарда отчиталась CLEAN. Для
+value-контрола звено 2 засчитывалось, если значение где-то читается, а чтение
+жило внутри его же ``@objc``-обработчика. Обработчик без ``action`` недостижим,
+но выглядел как потребитель — гард не ловил ровно тот баг, ради которого написан.
 
-Сужение было правильным по своей задаче — оно срезало 11 ложных срабатываний
-из 12, — но в этой форме гард не ловит ровно тот баг, ради которого написан.
-До ужесточения (чтение внутри собственного обработчика контрола не считается
-потреблением) он годится как разовый искатель, а не как страж: всегда зелёный
-монитор хуже отсутствующего, потому что создаёт ложное чувство покрытия.
+Ужесточение: перед проверкой чтения из тела типа вырезаются тела
+``@objc``-обработчиков, на которые нет ни одной ссылки ``#selector(...)`` во
+всём дереве типов. Чтение внутри недостижимого обработчика — не потребление.
+Та же мутация теперь даёт находку; живое дерево (155 кандидатов) — CLEAN.
+Ссылки строкой (``Selector("...")``) не учитываются: в агенте их ноль.
 
-Свою работу как искатель он выполнил: нашёл живую дыру (пикер микрофона,
-починен в этой же волне) при нуле ложных срабатываний на 154 кандидатах.
+Как разовый искатель гард уже окупился: нашёл живую дыру (пикер микрофона,
+починен в той же волне) при нуле ложных срабатываний на 154 кандидатах.
 
 КРИТЕРИЙ (главное решение этого гарда)
 ---------------------------------------
@@ -306,7 +305,7 @@ def _balanced_slice(text: str, open_idx: int, open_ch: str, close_ch: str) -> st
         elif ch == close_ch:
             depth -= 1
             if depth == 0:
-                return text[open_idx : i + 1]
+                return text[open_idx: i + 1]
     return None
 
 
@@ -389,7 +388,6 @@ def _collect_from_sources(sources: dict[str, str]) -> tuple[list[ControlDecl], d
                 rel = line[type_m.end():]
                 if "{" in _wipe_strings(rel) or "{" in _wipe_strings(line):
                     # body_depth = depth after the opening brace of this type.
-                    wiped_full = _wipe_strings(line)
                     # Глубина тела = текущая глубина + 1 после первой '{' этой декларации.
                     body_depth = start_depth + 1
                     stack.append((pending_type, body_depth))
@@ -494,6 +492,44 @@ def _is_value_capable(decl: ControlDecl, body: str) -> bool:
     return False
 
 
+_OBJC_FUNC_RE = re.compile(
+    r"@objc(?:\([^)]*\))?\s+(?:[a-z]+\s+)*func\s+([A-Za-z_][A-Za-z0-9_]*)\s*\("
+)
+
+
+def _referenced_selectors(text: str) -> set[str]:
+    """Имена методов, на которые есть хотя бы одна ссылка ``#selector(...)``.
+
+    ``#selector(onFoo)``, ``#selector(self.onFoo)``, ``#selector(Type.onFoo(_:))``
+    — во всех формах последний сегмент до ``(``/``)`` и есть имя обработчика.
+    """
+    names: set[str] = set()
+    for m in re.finditer(r"#selector\s*\(\s*([A-Za-z_][A-Za-z0-9_.]*)", text):
+        names.add(m.group(1).rsplit(".", 1)[-1])
+    return names
+
+
+def _strip_unreachable_handlers(body: str, referenced: set[str]) -> str:
+    """Вырезает тела ``@objc``-обработчиков, не упомянутых ни одним ``#selector``.
+
+    Обработчик без ``action`` недостижим; чтение значения контрола внутри него
+    создаёт видимость потребителя — именно так гард пропустил снятую проводку
+    пикера микрофона. Замены идут с конца, чтобы смещения оставались верными.
+    """
+    out = body
+    for m in reversed(list(_OBJC_FUNC_RE.finditer(body))):
+        if m.group(1) in referenced:
+            continue
+        brace = body.find("{", m.end())
+        if brace < 0:
+            continue
+        fnbody = _balanced_slice(body, brace, "{", "}")
+        if not fnbody:
+            continue
+        out = out[:brace] + "{}" + out[brace + len(fnbody):]
+    return out
+
+
 def _value_is_read(decl: ControlDecl, body: str) -> bool:
     name = re.escape(decl.name)
     ident = rf"(?:self\.)?{name}"
@@ -508,7 +544,9 @@ def _value_is_read(decl: ControlDecl, body: str) -> bool:
     )
 
 
-def _has_wiring(decl: ControlDecl, body: str, helpers: set[str]) -> bool:
+def _has_wiring(
+    decl: ControlDecl, body: str, helpers: set[str], read_body: str | None = None
+) -> bool:
     if _ctor_wired(decl.init_text):
         return True
     name = re.escape(decl.name)
@@ -524,7 +562,10 @@ def _has_wiring(decl: ControlDecl, body: str, helpers: set[str]) -> bool:
         if re.search(rf"\b{re.escape(helper)}\(\s*{ident}\s*[,)]", body):
             return True
 
-    if _is_value_capable(decl, body) and _value_is_read(decl, body):
+    # Чтение ищется в теле БЕЗ недостижимых обработчиков (см. шапку).
+    if _is_value_capable(decl, body) and _value_is_read(
+        decl, body if read_body is None else read_body
+    ):
         return True
 
     # Локальный тёзк, затем self.name = local — паттерн tabSelector:
@@ -533,10 +574,10 @@ def _has_wiring(decl: ControlDecl, body: str, helpers: set[str]) -> bool:
         rf"(?<![A-Za-z0-9_])(?:(?:let|var)\s+)?(?:self\.)?{name}\s*=\s*"
     )
     for m in assign_re.finditer(body):
-        prefix = body[max(0, m.start() - 8) : m.start()]
+        prefix = body[max(0, m.start() - 8): m.start()]
         if prefix.endswith("."):
             continue
-        rhs = body[m.end() :]
+        rhs = body[m.end():]
         paren = rhs.find("(")
         if paren < 0 or paren > 80:
             continue
@@ -574,13 +615,19 @@ def classify_controls(
 ) -> list[Finding]:
     findings: list[Finding] = []
     helpers_by_type = {t: _wiring_helpers(b) for t, b in bodies.items()}
+    # Ссылки #selector собираются по ВСЕМ типам: обработчик панели может
+    # подключаться из соседнего типа, а не только из своего extension'а.
+    referenced = _referenced_selectors("\n".join(bodies.values()))
+    reachable = {t: _strip_unreachable_handlers(b, referenced) for t, b in bodies.items()}
     for decl in decls:
         body = bodies.get(decl.type_name, "")
         helpers = helpers_by_type.get(decl.type_name, set())
         missing: list[str] = []
         # Поле ввода (NSTextField) не обязано иметь action — см. шапку.
         needs_link2 = decl.control_kind != "NSTextField"
-        if needs_link2 and not _has_wiring(decl, body, helpers):
+        if needs_link2 and not _has_wiring(
+            decl, body, helpers, reachable.get(decl.type_name)
+        ):
             missing.append("проводка (target и action)")
         if not _has_hierarchy(decl, body):
             missing.append("включение в иерархию")
@@ -904,6 +951,46 @@ _GOOD_SAMPLES: dict[str, tuple[dict[str, str], str]] = {
         "endChainButton",
     ),
 }
+
+
+_BAD_SAMPLES["чтение только внутри обработчика без action"] = (
+    {
+        "A.swift": (
+            "class Panel {\n"
+            "    let devicePopup = NSPopUpButton(frame: .zero, pullsDown: false)\n"
+            "    func setup() {\n"
+            "        row.addArrangedSubview(devicePopup)\n"
+            "    }\n"
+            "    @objc func onDeviceChanged() {\n"
+            "        let title = devicePopup.titleOfSelectedItem ?? \"\"\n"
+            "        persist(title)\n"
+            "    }\n"
+            "}\n"
+        )
+    },
+    "devicePopup",
+    "wiring",
+)
+_GOOD_SAMPLES["чтение внутри обработчика, подключённого соседней кнопкой"] = (
+    {
+        "A.swift": (
+            "class Panel {\n"
+            "    let devicePopup = NSPopUpButton(frame: .zero, pullsDown: false)\n"
+            "    let applyButton = NSButton(title: \"Apply\", target: nil, action: nil)\n"
+            "    func setup() {\n"
+            "        row.addArrangedSubview(devicePopup)\n"
+            "        row.addArrangedSubview(applyButton)\n"
+            "        applyButton.target = self\n"
+            "        applyButton.action = #selector(onApply)\n"
+            "    }\n"
+            "    @objc func onApply() {\n"
+            "        persist(devicePopup.titleOfSelectedItem ?? \"\")\n"
+            "    }\n"
+            "}\n"
+        )
+    },
+    "devicePopup",
+)
 
 
 def selftest() -> int:
