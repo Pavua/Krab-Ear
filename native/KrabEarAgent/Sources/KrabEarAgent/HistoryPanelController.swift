@@ -2095,6 +2095,37 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         if UserDefaults.standard.useClaudeDesignVariant {
             // Build 5 Claude Design sections into settingsBarCD, then add to stack.
             buildClaudeDesignSettingsSections()
+
+            // 🔴 Одиннадцать секций писались только для Gemini-варианта, своей
+            // cdBuild-версии не получили — и в Claude Design оказывались
+            // недоступны ВОВСЕ, а не «спрятаны поглубже»: выбор микрофона,
+            // режим буфера обмена, быстрые заметки, авто-перевод выделения,
+            // вебхуки, планировщик записей, системные настройки. Найдено
+            // обходом панели 02.09.2026, когда починенный пикер микрофона всё
+            // равно не нашёлся на экране.
+            //
+            // Секции строятся выше безусловно, а `settingsBar` здесь скрывается
+            // — перенос их view в CD-стек безопасен: NSView живёт ровно в одной
+            // иерархии, и удерживать их скрытому бару незачем. Вид у них
+            // остаётся «геминиевский»; доступность важнее единообразия карточек,
+            // а порт на CDSettingsCardView — отдельная задача.
+            settingsBarCD.addArrangedSubview(makeCategoryHeader(text: "Ещё настройки"))
+            for section in [
+                audioPipelineSection,
+                profAudioSection,
+                builtSystemSection,
+                clipSection,
+                quickCaptureSection,
+                quickPresetSection,
+                selTransSection,
+                vaSection,
+                schedulerSection,
+                webhookManagerSection,
+                callObserverSettingsSection,
+            ] {
+                settingsBarCD.addArrangedSubview(section)
+            }
+
             settingsBarCD.translatesAutoresizingMaskIntoConstraints = false
             settingsBar.isHidden = true
             dictationStack.addArrangedSubview(settingsBarCD)
