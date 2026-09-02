@@ -36,8 +36,6 @@ def _make_settings(
     warning_gb: float = 5.0,
     critical_gb: float = 1.0,
     history_large_mb: int = 500,
-    auto_cleanup_enabled: bool = False,
-    auto_cleanup_days: int = 365,
 ) -> MagicMock:
     s = MagicMock()
     s.DISK_MONITOR_ENABLED = enabled
@@ -45,8 +43,6 @@ def _make_settings(
     s.DISK_WARNING_GB = warning_gb
     s.DISK_CRITICAL_GB = critical_gb
     s.HISTORY_LARGE_MB = history_large_mb
-    s.AUTO_CLEANUP_ENABLED = auto_cleanup_enabled
-    s.AUTO_CLEANUP_AFTER_DAYS = auto_cleanup_days
     return s
 
 

@@ -2513,7 +2513,7 @@ Returns: `{ok, recommended_model, recommended_engine, tier, mic, rationale}` —
 Нет params.  
 Returns: `{ok, privacy_mode, encryption_enabled, storage, retention, audit, purge_available}`  
 - `storage`: `{item_count, history_bytes, history_file_size_mb, transcripts_count, transcripts_size_mb, total_bytes, total_data_mb}`  
-- `retention`: `{auto_cleanup_enabled, auto_cleanup_after_days, auto_purge_enabled, auto_purge_retention_days}`  
+- `retention`: `{auto_purge_enabled, auto_purge_retention_days}` (ключи `auto_cleanup_*` удалены 03.09.2026 — цепь была мёртвой)  
 - `audit`: `{total_events, last_event_ts, by_type}`  
 - `purge_available`: всегда `True`
 

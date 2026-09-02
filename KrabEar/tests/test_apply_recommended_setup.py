@@ -170,7 +170,7 @@ class NoDeadOrNoKeysInAppliedTestCase(unittest.TestCase):
 
     _FORBIDDEN_KEYS = {
         # НЕТ (сеть/необратимость/тяжёлые зависимости/архитектурные/не-фичи)
-        "cloud_rewriter_enabled", "recap_email_enabled", "auto_cleanup_enabled",
+        "cloud_rewriter_enabled", "recap_email_enabled",
         "auto_purge_enabled", "pipeline_v2_enabled", "rest_api_auth_enabled",
         "privacy_mode_enabled", "stt_use_ru_finetune", "voxtral_enabled",
         "voxtral_reasoning_enabled", "wake_word_engine",

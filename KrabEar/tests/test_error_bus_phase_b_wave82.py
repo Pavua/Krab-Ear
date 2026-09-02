@@ -101,7 +101,6 @@ class DiskCriticalTests(unittest.TestCase):
         mock_settings.DISK_CRITICAL_GB = 1.0
         mock_settings.HISTORY_LARGE_MB = 500
         mock_settings.DISK_CHECK_INTERVAL_MIN = 5
-        mock_settings.AUTO_CLEANUP_ENABLED = False
         monitor = DiskSpaceMonitor(mock_settings, MagicMock(), Path("/tmp"))
         monitor._error_bus = None
         # Must not raise
@@ -116,7 +115,6 @@ class DiskCriticalTests(unittest.TestCase):
         mock_settings.DISK_CRITICAL_GB = 1.0
         mock_settings.HISTORY_LARGE_MB = 500
         mock_settings.DISK_CHECK_INTERVAL_MIN = 5
-        mock_settings.AUTO_CLEANUP_ENABLED = False
         monitor = DiskSpaceMonitor(mock_settings, MagicMock(), Path("/tmp"))
         bus, captured = _make_error_bus()
         monitor._error_bus = bus

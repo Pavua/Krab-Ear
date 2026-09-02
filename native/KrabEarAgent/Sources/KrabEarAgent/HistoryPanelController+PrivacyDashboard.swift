@@ -18,8 +18,7 @@
            storage {item_count Int, history_bytes Int, history_file_size_mb Double,
                     transcripts_count Int, transcripts_size_mb Double,
                     total_bytes Int, total_data_mb Double},
-           retention {auto_cleanup_enabled Bool, auto_cleanup_after_days Int,
-                      auto_purge_enabled Bool, auto_purge_retention_days Int},
+           retention {auto_purge_enabled Bool, auto_purge_retention_days Int},
            audit {total_events Int, last_event_ts String|Double|null,
                   by_type {action→count}},
            purge_available Bool
@@ -63,8 +62,6 @@ struct PrivacyDashboardData {
     let transcriptsCount: Int
     let totalDataMb: Double
     // retention
-    let autoCleanupEnabled: Bool
-    let autoCleanupAfterDays: Int
     let autoPurgeEnabled: Bool
     let autoPurgeRetentionDays: Int
     // audit
@@ -167,8 +164,6 @@ extension HistoryPanelController {
                         itemCount: (storage["item_count"] as? Int) ?? 0,
                         transcriptsCount: (storage["transcripts_count"] as? Int) ?? 0,
                         totalDataMb: HistoryPanelController.pdDouble(storage["total_data_mb"]),
-                        autoCleanupEnabled: (retention["auto_cleanup_enabled"] as? Bool) ?? false,
-                        autoCleanupAfterDays: (retention["auto_cleanup_after_days"] as? Int) ?? 0,
                         autoPurgeEnabled: (retention["auto_purge_enabled"] as? Bool) ?? false,
                         autoPurgeRetentionDays: (retention["auto_purge_retention_days"] as? Int) ?? 0,
                         auditTotalEvents: (audit["total_events"] as? Int) ?? 0,
@@ -257,16 +252,6 @@ extension HistoryPanelController {
         )
         card.contentStackView.addArrangedSubview(pdSeparator())
 
-        // Авто-очистка.
-        card.contentStackView.addArrangedSubview(
-            makeSettingRow(
-                label: "Авто-очистка",
-                control: pdValueLabel(pdRetentionValue(
-                    enabled: data.autoCleanupEnabled, days: data.autoCleanupAfterDays))
-            )
-        )
-        card.contentStackView.addArrangedSubview(pdSeparator())
-
         // Авто-purge.
         card.contentStackView.addArrangedSubview(
             makeSettingRow(
@@ -333,11 +318,6 @@ extension HistoryPanelController {
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(
             cdMakeRow(label: "Файлов транскриптов", control: pdValueLabel("\(data.transcriptsCount)"))
-        )
-        card.contentStackView.addArrangedSubview(cdMakeSeparator())
-        card.contentStackView.addArrangedSubview(
-            cdMakeRow(label: "Авто-очистка", control: pdValueLabel(pdRetentionValue(
-                enabled: data.autoCleanupEnabled, days: data.autoCleanupAfterDays)))
         )
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(

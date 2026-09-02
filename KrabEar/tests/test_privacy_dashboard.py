@@ -145,8 +145,7 @@ class TestPrivacyDashboardSchema(_PrivacyDashboardBase):
             resp = self._call()
         data = resp.get("result", resp)
         retention = data["retention"]
-        for key in ("auto_cleanup_enabled", "auto_cleanup_after_days",
-                    "auto_purge_enabled", "auto_purge_retention_days"):
+        for key in ("auto_purge_enabled", "auto_purge_retention_days"):
             self.assertIn(key, retention, f"retention.{key} отсутствует")
 
     def test_audit_subkeys(self):
@@ -297,7 +296,7 @@ class TestPrivacyDashboardStorage(_PrivacyDashboardBase):
 # ---------------------------------------------------------------------------
 
 class TestPrivacyDashboardRetention(unittest.TestCase):
-    """Retention-секция отражает настройки auto_cleanup и auto_purge."""
+    """Retention-секция отражает настройки auto_purge."""
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
@@ -327,20 +326,19 @@ class TestPrivacyDashboardRetention(unittest.TestCase):
     def test_retention_defaults(self):
         data = self._call().get("result", self._call())
         retention = data["retention"]
-        self.assertIs(retention["auto_cleanup_enabled"], False)
-        self.assertEqual(retention["auto_cleanup_after_days"], 365)
         self.assertIs(retention["auto_purge_enabled"], False)
         self.assertEqual(retention["auto_purge_retention_days"], 90)
 
     def test_retention_reflects_custom_settings(self):
         self.service.handle_request({
             "id": "s", "method": "set_settings",
-            "params": {"auto_cleanup_enabled": True, "auto_cleanup_after_days": 30}
+            "params": {"auto_purge_enabled": True, "auto_purge_retention_days": 30}
         })
         data = self._call().get("result", self._call())
         retention = data["retention"]
-        self.assertIs(retention["auto_cleanup_enabled"], True)
-        self.assertEqual(retention["auto_cleanup_after_days"], 30)
+        self.assertIs(retention["auto_purge_enabled"], True)
+        self.assertEqual(retention["auto_purge_retention_days"], 30)
+        self.assertNotIn("auto_cleanup_enabled", retention)
 
 
 # ---------------------------------------------------------------------------
