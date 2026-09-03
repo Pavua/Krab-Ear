@@ -167,11 +167,17 @@ final class HealthMonitorWiringTests: XCTestCase {
         }
 
         await monitor.start()
-        try? await Task.sleep(nanoseconds: 300_000_000) // ~6 пингов за 0.3s при interval=0.05
+        // Ждём до дедлайна, а не фиксированные 300 мс: на нагруженном self-hosted
+        // раннере за 300 мс успевало 2 пинга из ожидаемых 6 (красный CI 03.09.2026).
+        // Инвариант — «циклы идут с настроенным интервалом», а не «ровно N за окно».
+        let deadline = Date().addingTimeInterval(3.0)
+        while counter.value < 3 && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
         await monitor.stop()
 
         XCTAssertGreaterThanOrEqual(counter.value, 3,
-            "За 300ms при pingInterval=50ms должно произойти как минимум 3 пинга")
+            "При pingInterval=50ms за 3 с должно произойти как минимум 3 пинга")
     }
 
     // MARK: - T2: status update timer fires on main runloop
