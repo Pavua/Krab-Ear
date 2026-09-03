@@ -5,7 +5,7 @@
  активную сессию: статус, живой транскрипт, длительность, текущую стоимость,
  историю последних 10 звонков.
 
- Если backend возвращает "telnyx_not_configured" → показывает баннер настройки.
+ Если backend возвращает "gateway_not_configured" → показывает баннер настройки.
 
  Polish v2:
    1. Cost estimator preview (call_estimate_cost IPC) показывает ~$X.XXX/min (Country, Provider)
@@ -117,24 +117,20 @@ final class CallAutomationController: NSViewController {
     private var pollTimer: Timer?
 
     /// Текущий выбранный провайдер
+    /// Провайдер один: линия принадлежит Voice Gateway (волна консолидации
+    /// 03.09.2026, спека docs/superpowers/specs/2026-09-03-telephony-consolidation.md).
+    /// Собственные адаптеры Telnyx/Twilio/SIP удалены — они не совершили ни
+    /// одного звонка и не были подключены к дороге вызова вовсе.
     enum CallProvider: Int {
-        case telnyx = 0
-        case twilio = 1
-        case sipLocal = 2
-        var settingKey: String {
-            switch self {
-            case .telnyx: return "telnyx"
-            case .twilio: return "twilio"
-            case .sipLocal: return "sip_local"
-            }
-        }
+        case gateway = 0
+        var settingKey: String { "gateway" }
     }
-    private var selectedProvider: CallProvider = .telnyx
+    private var selectedProvider: CallProvider = .gateway
 
     // MARK: - UI: Provider switcher
 
     private let providerSegmented: NSSegmentedControl = {
-        let sc = NSSegmentedControl(labels: ["Telnyx", "Twilio", "SIP Local"], trackingMode: .selectOne, target: nil, action: nil)
+        let sc = NSSegmentedControl(labels: ["Voice Gateway"], trackingMode: .selectOne, target: nil, action: nil)
         sc.selectedSegment = 0
         sc.font = KrabEarTheme.Typography.caption
         sc.translatesAutoresizingMaskIntoConstraints = false
@@ -703,9 +699,13 @@ final class CallAutomationController: NSViewController {
         let providerKey = self.selectedProvider.settingKey
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
+            // 🔴 До 03.09.2026 кнопка звала call_session_create — журнальную
+            // запись, которая НЕ звонила: дороги от IPC до провайдера не
+            // существовало. call_start — настоящий набор через Voice Gateway.
             let result = try? self.ipcClient.call(
-                method: "call_session_create",
-                params: ["phone": phone, "goal_text": goal, "provider": providerKey]
+                method: "call_start",
+                params: ["phone": phone, "goal_text": goal, "prompt": goal,
+                         "provider": providerKey]
             )
             DispatchQueue.main.async {
                 self.handleDialResponse(result, phone: phone, goal: goal)
@@ -779,11 +779,8 @@ final class CallAutomationController: NSViewController {
     }
 
     @objc private func onProviderChanged() {
-        switch providerSegmented.selectedSegment {
-        case 0: selectedProvider = .telnyx
-        case 1: selectedProvider = .twilio
-        default: selectedProvider = .sipLocal
-        }
+        // Выбор из одного: провайдер остаётся шлюзом при любом сегменте.
+        selectedProvider = .gateway
         refreshProviderStatus()
         // Если уже введён корректный номер — обновить estimate
         let raw = phoneField.stringValue.trimmingCharacters(in: .whitespaces)
@@ -814,27 +811,15 @@ final class CallAutomationController: NSViewController {
 
     private func applyProviderStatus(_ response: [String: Any]?, provider: String) {
         guard let settings = response?["result"] as? [String: Any] else { return }
-        let isConfigured: Bool
-        if provider == "telnyx" {
-            let key  = (settings["telnyx_api_key"]    as? String) ?? ""
-            let from = (settings["telnyx_from_number"] as? String) ?? ""
-            isConfigured = !key.isEmpty && !from.isEmpty
-        } else if provider == "twilio" {
-            let sid  = (settings["twilio_account_sid"] as? String) ?? ""
-            let tok  = (settings["twilio_auth_token"]  as? String) ?? ""
-            let from = (settings["twilio_from_number"] as? String) ?? ""
-            isConfigured = !sid.isEmpty && !tok.isEmpty && !from.isEmpty
-        } else if provider == "sip_local" {
-            let server = (settings["sip_server"] as? String) ?? ""
-            let user   = (settings["sip_user"]   as? String) ?? ""
-            isConfigured = !server.isEmpty && !user.isEmpty
-        } else {
-            isConfigured = false
-        }
+        // Готовность = настройки Voice Gateway. Ключи удалённых адаптеров
+        // (telnyx_*, twilio_*, sip_*) больше ничего не значат.
+        let url = (settings["voice_gateway_url"] as? String) ?? ""
+        let key = (settings["voice_gateway_api_key"] as? String) ?? ""
+        let isConfigured = !url.isEmpty && !key.isEmpty
         providerStatusDot.contentTintColor = isConfigured ? NSColor.systemGreen : NSColor.systemGray
-        providerStatusDot.toolTip   = isConfigured
-            ? "\(provider.capitalized) настроен"
-            : "\(provider.capitalized): параметры провайдера не заданы в Настройках"
+        providerStatusDot.toolTip = isConfigured
+            ? "Voice Gateway настроен"
+            : "Voice Gateway: адрес или ключ не заданы в Настройках"
     }
 
     // MARK: - Transcript modal
@@ -881,10 +866,23 @@ final class CallAutomationController: NSViewController {
             return
         }
 
-        // Graceful: not_configured for any provider
+        // Не настроен провайдер — показать баннер, а не молчать.
+        // 🔴 Коды сверены с backend буква в букву: gateway_not_configured
+        // возвращает GatewayCallProvider, call_provider_unavailable —
+        // CallSessionService, когда фабрика не отдала провайдера вовсе.
+        // Коды удалённых адаптеров (telnyx_/twilio_/sip_local_not_configured)
+        // больше не приходят.
+        let notConfigured: Set<String> = ["gateway_not_configured", "call_provider_unavailable"]
         if let error = response["error"] as? [String: Any],
-           let code = error["code"] as? String,
-           code == "telnyx_not_configured" || code == "twilio_not_configured" || code == "sip_local_not_configured" {
+           let code = error["code"] as? String, notConfigured.contains(code) {
+            showConfigBanner(true)
+            return
+        }
+        if let result = response["result"] as? [String: Any],
+           (result["ok"] as? Bool) == false,
+           let code = result["error"] as? String, notConfigured.contains(code) {
+            // call_start отвечает отказом В PAYLOAD, а не конвертом ошибки:
+            // проверять только error-конверт значило бы пропустить этот случай.
             showConfigBanner(true)
             return
         }
