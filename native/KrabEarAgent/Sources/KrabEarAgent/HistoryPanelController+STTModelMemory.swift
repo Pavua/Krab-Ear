@@ -15,8 +15,8 @@
 
  🔴 Про срок простоя честная оговорка в самом интерфейсе: пока
  `memory_conductor_enforce_gigaam` выключен, дирижёр памяти только пишет в лог
- «would evict» и ничего не выгружает — срок остаётся рекомендацией. Поэтому
- рядом стоит переключатель принудительной выгрузки.
+ «would evict» и ничего не выгружает — поэтому строка «Простой до выгрузки»
+ визуально погашена, пока выключатель «Выгружать модель при простое» не включён.
  */
 
 import AppKit
@@ -41,11 +41,29 @@ extension HistoryPanelController {
     private var sttIdleLabel: NSTextField? {
         objc_getAssociatedObject(self, &STTMemoryAssocKeys.idleLabel) as? NSTextField
     }
+    private var sttEnforceToggle: NSButton? {
+        objc_getAssociatedObject(self, &STTMemoryAssocKeys.enforceToggle) as? NSButton
+    }
     private var sttMemoryStatusLabel: NSTextField? {
         objc_getAssociatedObject(self, &STTMemoryAssocKeys.statusLabel) as? NSTextField
     }
 
     // MARK: - Helpers
+
+    /// Применяет визуальную доступность строки «Простой до выгрузки»:
+    /// если выключатель «Выгружать модель при простое» выключен —
+    /// stepper блокируется (`isEnabled = false`), а лейбл гасится (`alphaValue = 0.5`).
+    @MainActor
+    private func applySTTIdleRowAvailability() {
+        let isEnabled: Bool
+        if let toggle = sttEnforceToggle {
+            isEnabled = (toggle.state == .on)
+        } else {
+            isEnabled = settingsProvider().memoryConductorEnforceGigaam
+        }
+        sttIdleStepper?.isEnabled = isEnabled
+        sttIdleLabel?.alphaValue = isEnabled ? 1.0 : 0.5
+    }
 
     @MainActor
     func makeSTTDevicePicker() -> NSPopUpButton {
@@ -143,7 +161,7 @@ extension HistoryPanelController {
         idleStack.alignment = .centerY
         idleStack.spacing = KrabEarTheme.Metrics.tight
         card.contentStackView.addArrangedSubview(makeSettingRow(
-            label: "Выгружать после простоя",
+            label: "Простой до выгрузки",
             description: "Сколько модель ждёт следующей диктовки, прежде чем освободить память.",
             control: idleStack
         ))
@@ -155,8 +173,8 @@ extension HistoryPanelController {
             self, &STTMemoryAssocKeys.enforceToggle, enforceToggle, .OBJC_ASSOCIATION_RETAIN_NONATOMIC
         )
         card.contentStackView.addArrangedSubview(makeSettingRow(
-            label: "Действительно выгружать по простою",
-            description: "Пока выключено, дирижёр памяти только пишет в лог «would evict» и ничего не освобождает — срок выше остаётся рекомендацией.",
+            label: "Выгружать модель при простое",
+            description: "Пока выключено, Krab Ear только записывает в журнал, что выгрузил бы модель.",
             control: enforceToggle
         ))
 
@@ -169,6 +187,7 @@ extension HistoryPanelController {
         card.contentStackView.addArrangedSubview(buttonsStack)
 
         section.contentStackView.addArrangedSubview(card)
+        applySTTIdleRowAvailability()
         return section
     }
 
@@ -199,6 +218,7 @@ extension HistoryPanelController {
               let toggle = objc_getAssociatedObject(self, &STTMemoryAssocKeys.enforceToggle) as? NSButton
         else { return }
         applySettingsPatch(["memory_conductor_enforce_gigaam": toggle.state == .on])
+        applySTTIdleRowAvailability()
     }
 
     /// Загрузка блокирует IPC-поток бэкенда на время инференса-прогрева, поэтому
@@ -268,14 +288,23 @@ extension HistoryPanelController {
         idleStack.orientation = .horizontal
         idleStack.alignment = .centerY
         idleStack.spacing = KrabEarTheme.Metrics.tight
-        let idleRow = cdMakeRow(label: "Выгружать после простоя", control: idleStack)
+        let idleRow = cdMakeRow(label: "Простой до выгрузки", control: idleStack)
 
         // 4. Принудительная выгрузка по простою
         let enforceToggle = makeSTTEnforceToggle()
         enforceToggle.setButtonType(.switch)
         enforceToggle.title = ""
         enforceToggle.state = settings.memoryConductorEnforceGigaam ? .on : .off
-        let enforceRow = cdMakeRow(label: "Действительно выгружать по простою", control: enforceToggle)
+        objc_setAssociatedObject(
+            self, &STTMemoryAssocKeys.enforceToggle, enforceToggle, .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        )
+        let enforceRow = cdMakeRow(label: "Выгружать модель при простое", control: enforceToggle)
+
+        let enforceHintLabel = NSTextField(labelWithString: "Пока выключено, Krab Ear только записывает в журнал, что выгрузил бы модель.")
+        enforceHintLabel.font = KrabEarTheme.Typography.caption
+        enforceHintLabel.textColor = KrabEarTheme.Colors.textSecondary
+        enforceHintLabel.lineBreakMode = .byWordWrapping
+        enforceHintLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         // 5. Кнопки ручного управления и статус
         let (loadButton, unloadButton, statusLabel) = makeSTTButtonsAndLabel()
@@ -292,10 +321,12 @@ extension HistoryPanelController {
         card.contentStackView.addArrangedSubview(idleRow)
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(enforceRow)
+        card.contentStackView.addArrangedSubview(enforceHintLabel)
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(buttonsStack)
 
         section.contentStackView.addArrangedSubview(card)
+        applySTTIdleRowAvailability()
         return section
     }
 }
