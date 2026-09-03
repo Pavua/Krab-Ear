@@ -2039,27 +2039,32 @@ def list_models():
         _s2 = deps.store.load_settings() or {}
         _llm_base = str(_s2.get("llm_base_url", "http://127.0.0.1:1234/v1")).rstrip("/")
         _llm_key = str(_s2.get("llm_api_key", "")).strip()
-        # Strip trailing /v<N> segment (Wave 68 pattern: /api/v1/models is the
-        # correct LM Studio endpoint, not /v1/models).
+        from backend.lm_studio_lifecycle import (
+            CATALOG_ENDPOINTS,
+            parse_lm_studio_catalog,
+        )
+        # Strip the trailing /v<N> segment: каталог живёт рядом с ним, а не под ним.
         _llm_host = _re.sub(r"/v\d+$", "", _llm_base)
-        _llm_url = f"{_llm_host}/api/v1/models"
-        # SSRF guard: allow only http/https schemes
-        _parsed = _urlparse.urlparse(_llm_url)
-        if _parsed.scheme not in ("http", "https"):
-            raise ValueError(f"Disallowed LM Studio URL scheme: {_parsed.scheme!r}")
-        _req = _urlreq.Request(_llm_url)
-        if _llm_key:
-            _req.add_header("Authorization", f"Bearer {_llm_key}")
-        with _urlreq.urlopen(_req, timeout=5) as _resp:  # noqa: S310
-            if _resp.status == 200:
+        for _endpoint in CATALOG_ENDPOINTS:
+            _llm_url = f"{_llm_host}{_endpoint}"
+            # SSRF guard: allow only http/https schemes
+            _parsed = _urlparse.urlparse(_llm_url)
+            if _parsed.scheme not in ("http", "https"):
+                raise ValueError(f"Disallowed LM Studio URL scheme: {_parsed.scheme!r}")
+            _req = _urlreq.Request(_llm_url)
+            if _llm_key:
+                _req.add_header("Authorization", f"Bearer {_llm_key}")
+            with _urlreq.urlopen(_req, timeout=5) as _resp:  # noqa: S310
+                if _resp.status != 200:
+                    continue
                 _data = json.loads(
                     _resp.read(512 * 1024).decode("utf-8", errors="replace")
                 )
-                llm_models = sorted(
-                    item.get("id")
-                    for item in _data.get("data", [])
-                    if item.get("id")
-                )
+            # Формы каталога разные, ключ идентификатора тоже — разбор общий.
+            _entries = parse_lm_studio_catalog(_data)
+            if _entries is not None:
+                llm_models = sorted(e["id"] for e in _entries)
+                break
     except Exception as exc:
         logger.warning(
             "GET /v1/models: llm_models probe failed (LM Studio may be off)"

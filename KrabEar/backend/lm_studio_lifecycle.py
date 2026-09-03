@@ -295,23 +295,91 @@ def load_model_sync(base_url: str, model_id: str, timeout_sec: float = 90.0) -> 
         return False
 
 
-def model_loaded(base_url: str, model_id: str, timeout: float = 5.0) -> bool | None:
-    """Проверяет "модель загружена в LM Studio?" через пассивный GET /api/v1/models.
+# ---------------------------------------------------------------------------
+# Каталог моделей LM Studio: три живые формы одного ответа
+# ---------------------------------------------------------------------------
+# 🔴 Замер 03.09.2026 (LM Studio 0.4.x, 105 моделей на диске, токен обязателен):
+#
+#   GET /api/v0/models → {"data":   [{"id":  ..., "state": "loaded"|"not-loaded"}]}
+#   GET /api/v1/models → {"models": [{"key": ..., "loaded_instances": [...]}]}
+#   GET /v1/models     → {"data":   [{"id":  ...}]}            (OpenAI-совместимый)
+#
+# Нативный v1 несёт идентификатор в "key", а список — в "models"; парсер
+# ``data[].id`` видел на нём пустоту и годами отвечал "модели нет" вместо
+# "не разобрал ответ". Отсюда вечное has_model=false в probe_llm_http и
+# всегда-None в model_loaded. Wave 68 (PR #415) померила этот же endpoint без
+# токена и записала "200 с пустым списком" — пусто было тело 401, а не каталог.
+CATALOG_ENDPOINTS: tuple[str, ...] = ("/api/v0/models", "/api/v1/models", "/v1/models")
 
-    Endpoint пинован (verified in prod): та же passive-listing точка, что
-    ``LLMRewriter.passive_health_check`` / ``LLMOpsService.handle_list_llm_models`` /
-    ``rest_server.py`` (Wave 68, PR #415) — ``{host}/api/v1/models``, НЕ голый
-    ``/v1/models`` (LM Studio отвечает на него 200, но логирует ERROR внутри себя).
-    Нормализация base_url — существующая конвенция этого модуля
-    (``.rstrip("/").removesuffix("/v1")``), та же что в ``_try_rest_load``/
-    ``_try_rest_unload``. Никогда не триггерит JIT-перезагрузку модели (только GET).
+# 🔴 Наличие в каталоге ≠ загружена: каталог перечисляет ВСЁ скачанное.
+# Признак загрузки есть только у двух нативных форм, поэтому проверка
+# "загружена?" не смеет опрашивать OpenAI-совместимый endpoint — он ответил бы
+# полным каталогом, и любая скачанная модель выглядела бы загруженной.
+LOADED_STATE_ENDPOINTS: tuple[str, ...] = ("/api/v0/models", "/api/v1/models")
+
+
+def parse_lm_studio_catalog(payload: object) -> list[dict] | None:
+    """Нормализует любую из трёх форм каталога в ``[{"id": str, "loaded": bool|None}]``.
+
+    🔴 Возврат тоже трёхзначный, и это ядро функции: ``None`` — форму не
+    распознал ("не смог оценить"), ``[]`` — распознал, каталог действительно
+    пуст. Схлопнуть их в один пустой список значит повторить ошибку
+    ``SNR=0.0``: sentinel "не смог" неотличим от измерения "ноль", и слепой
+    парсер выглядит как честный ответ "моделей нет".
+
+    ``loaded`` — трёхзначное по той же причине: True/False, когда форма несёт
+    состояние, и None, когда не несёт (OpenAI-совместимый список). None
+    означает "не смог оценить", а не "не загружена" — вызывающая сторона
+    обязана fail-safe.
+    """
+    if not isinstance(payload, dict):
+        return None
+    items = payload.get("models")
+    id_key, loaded_key = "key", "loaded_instances"
+    if not isinstance(items, list):
+        items = payload.get("data")
+        id_key, loaded_key = "id", "state"
+    if not isinstance(items, list):
+        return None
+
+    out: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        model_id = item.get(id_key)
+        if not isinstance(model_id, str) or not model_id:
+            continue
+        raw_state = item.get(loaded_key)
+        if loaded_key == "loaded_instances":
+            loaded = bool(raw_state) if isinstance(raw_state, list) else None
+        else:
+            loaded = (raw_state == "loaded") if isinstance(raw_state, str) else None
+        out.append({"id": model_id, "loaded": loaded})
+    return out
+
+
+def model_loaded(
+    base_url: str,
+    model_id: str,
+    timeout: float = 5.0,
+    api_key: str | None = None,
+) -> bool | None:
+    """Проверяет "модель загружена в LM Studio?" пассивным GET по каталогу.
+
+    Опрашивает ``LOADED_STATE_ENDPOINTS`` по порядку — только те формы, что
+    реально несут состояние загрузки (см. комментарий у константы). Разбор —
+    общий ``parse_lm_studio_catalog``. Нормализация base_url — существующая
+    конвенция этого модуля (``.rstrip("/").removesuffix("/v1")``), та же что в
+    ``_try_rest_load``/``_try_rest_unload``. Никогда не триггерит
+    JIT-перезагрузку модели (только GET).
 
     Три состояния (C-EFFECT-CHECK, docs/superpowers/specs/2026-08-19-memory-conductor-design.md §3):
-      - ``True``  — model_id присутствует среди ``data[].id`` ответа.
-      - ``False`` — LM Studio отвечает 200 с валидным списком, но модели в нём нет.
+      - ``True``  — модель есть в каталоге И помечена загруженной.
+      - ``False`` — LM Studio отвечает 200 с валидным каталогом, а модель в нём
+        либо отсутствует, либо помечена незагруженной.
       - ``None``  — состояние НЕИЗВЕСТНО: сеть недоступна/таймаут/не-2xx/битый JSON/
-        неожиданная форма ответа (нет ключа "data")/запрещённая схема base_url/
-        пустой model_id.
+        неразобранная форма ответа/форма без признака загрузки/запрещённая схема
+        base_url/пустой model_id.
 
     🔴 None ≠ False. Вызывающая сторона НЕ ДОЛЖНА трактовать None как "не
     загружена" — так же, как SNR=0.0 не значит "тишина", а значит "не смог
@@ -323,6 +391,8 @@ def model_loaded(base_url: str, model_id: str, timeout: float = 5.0) -> bool | N
         model_id: идентификатор модели в LM Studio.
         timeout: таймаут HTTP-запроса в секундах (default 5.0 — та же величина,
             что у ``passive_health_check``: /models — быстрый metadata call).
+        api_key: LLM_API_KEY из settings. LM Studio с включённой аутентификацией
+            отвечает 401 на запрос без Bearer — без ключа проба слепа.
 
     Returns:
         True/False/None — см. выше.
@@ -338,22 +408,31 @@ def model_loaded(base_url: str, model_id: str, timeout: float = 5.0) -> bool | N
         )
         return None
     api_root = base_url.rstrip("/").removesuffix("/v1")
-    url = f"{api_root}/api/v1/models"
-    try:
-        req = urllib.request.Request(url, method="GET")
-        with _SAFE_OPENER.open(req, timeout=timeout) as resp:
-            if resp.status != 200:
-                return None
-            data = json.loads(resp.read().decode("utf-8", errors="replace"))
-            if not isinstance(data, dict) or "data" not in data:
-                # Не форма /v1/models ответа (не dict или нет ключа "data") —
-                # неизвестно, а не "список пуст", поэтому None, а не False.
-                return None
-            ids = [m.get("id") for m in data["data"]]
-            return model_id in ids
-    except Exception as exc:
-        logger.debug("LM Studio model_loaded probe %s: %s", model_id, exc)
-        return None
+    for endpoint in LOADED_STATE_ENDPOINTS:
+        url = f"{api_root}{endpoint}"
+        try:
+            req = urllib.request.Request(url, method="GET")
+            if api_key:
+                req.add_header("Authorization", f"Bearer {api_key}")
+            with _SAFE_OPENER.open(req, timeout=timeout) as resp:
+                if resp.status != 200:
+                    continue
+                entries = parse_lm_studio_catalog(
+                    json.loads(resp.read().decode("utf-8", errors="replace"))
+                )
+        except Exception as exc:
+            logger.debug("LM Studio model_loaded probe %s (%s): %s", model_id, endpoint, exc)
+            continue
+        if entries is None:
+            # Форму не разобрали — это молчание, а не ответ "модели нет".
+            continue
+        for entry in entries:
+            if entry["id"] == model_id:
+                # loaded=None (форма без состояния) обязано остаться None.
+                return entry["loaded"]
+        # Модель отсутствует в полном каталоге — её точно не загрузили.
+        return False
+    return None
 
 
 def unload_model_async(base_url: str, model_id: str) -> None:

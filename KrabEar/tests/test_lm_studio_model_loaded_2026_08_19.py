@@ -36,8 +36,23 @@ def _fake_response(status: int, body: bytes = b"") -> MagicMock:
     return resp
 
 
-def _models_body(ids: list[str]) -> bytes:
-    return json.dumps({"data": [{"id": i} for i in ids]}).encode()
+def _models_body(ids: list[str], *, loaded: list[str] | None = None) -> bytes:
+    """Живая форма /api/v0/models: каталог + признак загрузки у каждой записи.
+
+    🔴 До 03.09.2026 хелпер отдавал записи БЕЗ ``state``, а тесты ждали от них
+    True — то есть закрепляли «есть в каталоге» = «загружена». Каталог
+    перечисляет всё скачанное, так что на реальном ответе это давало бы True
+    для любой незагруженной модели; форму без ``state`` живой endpoint не
+    отдаёт вовсе.
+    """
+    loaded_set = set(ids if loaded is None else loaded)
+    return json.dumps({
+        "object": "list",
+        "data": [
+            {"id": i, "state": "loaded" if i in loaded_set else "not-loaded"}
+            for i in ids
+        ],
+    }).encode()
 
 
 class TestModelLoadedTrue(unittest.TestCase):
@@ -49,11 +64,10 @@ class TestModelLoadedTrue(unittest.TestCase):
             result = model_loaded(BASE_URL, MODEL_ID)
         self.assertIs(result, True)
         req = mock_open.call_args[0][0]
-        # Pinned endpoint (verified live in llm_rewriter.passive_health_check /
-        # llm_ops_service.handle_list_llm_models / rest_server.py — Wave 68 fix,
-        # NOT bare /v1/models which LM Studio silently errors on).
-        self.assertTrue(req.full_url.endswith("/api/v1/models"))
-        self.assertNotIn("/v1/api/v1/models", req.full_url)
+        # Опрашиваются только формы, несущие состояние загрузки
+        # (lm_studio_lifecycle.LOADED_STATE_ENDPOINTS); первая из них — v0.
+        self.assertTrue(req.full_url.endswith("/api/v0/models"))
+        self.assertNotIn("/v1/api/", req.full_url)
 
     def test_model_loaded_true_base_url_without_v1_suffix(self):
         """base_url without a trailing /v1 must still resolve to .../api/v1/models."""
@@ -65,6 +79,13 @@ class TestModelLoadedTrue(unittest.TestCase):
 
 class TestModelLoadedFalse(unittest.TestCase):
     """LM Studio reachable, model_id absent from the list -> False (not None!)."""
+
+    def test_model_loaded_false_when_present_but_not_loaded(self):
+        """Модель скачана, но не загружена — False, а не True."""
+        resp = _fake_response(200, _models_body([MODEL_ID], loaded=[]))
+        with patch("backend.lm_studio_lifecycle._SAFE_OPENER.open", return_value=resp):
+            result = model_loaded(BASE_URL, MODEL_ID)
+        self.assertIs(result, False)
 
     def test_model_loaded_false_when_absent(self):
         resp = _fake_response(200, _models_body(["some-other-model"]))
