@@ -15,6 +15,12 @@
   <key>ProgramArguments</key>
   <array>
     <string>__PROJECT_ROOT__/.venv_krab_ear/bin/python3</string>
+    <!-- -u: launchd перенаправляет вывод в файл, поэтому Python включает
+         блочную буферизацию, и записи копятся до 8 КБ. При fail-fast через
+         os._exit (таймаут транскрибации) буфер гибнет вместе с процессом —
+         03.09.2026 так пропали причины 14 перезапусков подряд. В коде сброс
+         тоже есть, но флаг убирает задержку и для обычных строк. -->
+    <string>-u</string>
     <string>__PROJECT_ROOT__/KrabEar/backend/rest_server.py</string>
   </array>
 
