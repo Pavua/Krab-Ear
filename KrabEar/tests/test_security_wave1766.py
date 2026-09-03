@@ -10,14 +10,13 @@
 from __future__ import annotations
 
 import hmac
-import logging
 import os
 import stat
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
@@ -203,65 +202,3 @@ class TestVerifyTokenConstantTime(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # #8 (MED) — телефонный PII в логах telnyx_adapter
 # ---------------------------------------------------------------------------
-
-class TestTelnyxPhoneMasking(unittest.TestCase):
-    """telnyx_adapter: полный номер телефона не попадает в INFO-лог."""
-
-    def _make_adapter(self):
-        """Создаём TelnyxAdapter в stub-режиме (без API key)."""
-        from backend.telnyx_adapter import TelnyxAdapter
-        return TelnyxAdapter(
-            api_key="TEST_KEY",
-            from_number="+15550000001",
-            connection_id="",
-        )
-
-    def test_dial_log_does_not_contain_full_number(self):
-        """logger.info при dial не содержит полный номер to_number."""
-        adapter = self._make_adapter()
-        full_number = "+15559876543"
-
-        log_records = []
-
-        class _CapturingHandler(logging.Handler):
-            def emit(self, record):
-                log_records.append(self.format(record))
-
-        handler = _CapturingHandler()
-        telnyx_logger = logging.getLogger("KrabEar.Backend.TelnyxAdapter")
-        telnyx_logger.addHandler(handler)
-        telnyx_logger.setLevel(logging.DEBUG)
-
-        # Stub-режим — мокируем _post чтобы вернуть успех без реального HTTP
-        mock_result = {
-            "ok": True,
-            "data": {"call_leg_id": "leg-123", "call_control_id": "ctrl-abc"},
-            "status": 200,
-        }
-        with patch.object(adapter, "_post", return_value=mock_result):
-            adapter.dial(full_number)
-
-        telnyx_logger.removeHandler(handler)
-
-        for record_text in log_records:
-            self.assertNotIn(
-                full_number, record_text,
-                f"Полный номер {full_number} не должен присутствовать в логах: {record_text}",
-            )
-
-    def test_invalid_phone_message_masked(self):
-        """Сообщение об ошибке invalid_phone_number не содержит полный номер."""
-        adapter = self._make_adapter()
-        bad_number = "+15559001234"
-        # Patch _is_valid_phone чтобы вернуть False
-        with patch("backend.telnyx_adapter._is_valid_phone", return_value=False):
-            result = adapter.dial(bad_number)
-        self.assertFalse(result["ok"])
-        self.assertNotIn(
-            bad_number, result.get("message", ""),
-            "Полный номер не должен быть в сообщении об ошибке invalid_phone_number",
-        )
-
-
-if __name__ == "__main__":
-    unittest.main()

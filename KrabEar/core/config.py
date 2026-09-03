@@ -516,7 +516,7 @@ class Settings(BaseSettings):
     # --- Call provider abstraction (Phase 3) ---
     # Выбор активного провайдера телефонии.
     # Допустимые значения: "telnyx" | "twilio" | "sip_local" | "none"
-    CALL_PROVIDER: str = "telnyx"
+    CALL_PROVIDER: str = "gateway"
 
     # --- Local On-Device SIP adapter (Phase 3 On-Device Telephony) ---
     SIP_SERVER: str = ""
@@ -1332,7 +1332,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # замер ПОСЛЕ этого фикса показал суммарное ожидание на пути ping до
     # 2.04с (несколько бюджетированных попыток подряд) — сравнимо со
     # --- Local SIP On-Device Telephony (Phase 3) ---
-    "call_provider": "telnyx",
+    "call_provider": "gateway",
     "sip_server": "",
     "sip_port": 5060,
     "sip_user": "",
