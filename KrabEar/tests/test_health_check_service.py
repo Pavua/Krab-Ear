@@ -83,6 +83,9 @@ class FakeLLMRewriter:
     def warmup(self) -> bool:
         return True
 
+    def passive_health_check(self) -> tuple[bool, bool]:
+        return (True, True)
+
     def status(self) -> dict:
         return {"enabled": True, "reachable": True, "model": self._model}
 
@@ -272,18 +275,20 @@ class TestHandleProbeLlmHttp(unittest.TestCase):
         self.assertTrue(result["reachable"])
 
     def test_returns_latency_ms(self):
+        # Латентность — ЗАМЕР пассивного пинга, а не хвост последнего rewrite (_last_latency_ms).
         svc = make_service(llm_rewriter=FakeLLMRewriter())
         result = svc.handle_probe_llm_http({})
-        self.assertEqual(result["latency_ms"], 42)
+        self.assertIsInstance(result["latency_ms"], int)
+        self.assertGreaterEqual(result["latency_ms"], 0)
 
     def test_returns_model_name(self):
         svc = make_service(llm_rewriter=FakeLLMRewriter())
         result = svc.handle_probe_llm_http({})
         self.assertEqual(result["model"], "qwen3-4b")
 
-    def test_returns_not_reachable_when_warmup_fails(self):
+    def test_returns_not_reachable_when_passive_check_fails(self):
         rw = FakeLLMRewriter()
-        rw.warmup = lambda: False
+        rw.passive_health_check = lambda: (False, False)
         svc = make_service(llm_rewriter=rw)
         result = svc.handle_probe_llm_http({})
         self.assertFalse(result["reachable"])

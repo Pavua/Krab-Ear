@@ -458,14 +458,25 @@ class HealthCheckService:
     # ------------------------------------------------------------------
 
     def handle_probe_llm_http(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Однократный ping LM Studio HTTP endpoint. Возвращает reachable, latency_ms, model."""
+        """Однократный ping LM Studio HTTP endpoint. Возвращает reachable, latency_ms, model.
+
+        🔴 Пинг ПАССИВНЫЙ — ``passive_health_check()`` (GET /api/v1/models), а не
+        ``warmup()``: POST /v1/chat/completions заставляет LM Studio грузить модель
+        JIT. Живой инцидент 03.09.2026: секция «Рекомендованная настройка» зовёт
+        ``apply_recommended_setup {dry_run: true}`` при каждом старте агента, гейт
+        ``llm_rewrite_enabled`` дёргал этот пинг — и 11 ГБ GigaChat поднимались при
+        ВЫКЛЮЧЕННОМ рерайтере. Тот же класс, что ``llm_probe.py`` (PR #364).
+        ``has_model`` — целевая модель есть в каталоге LM Studio (не «загружена»).
+        """
         if self._llm_rewriter is None:
-            return {"reachable": False, "latency_ms": 0, "model": None}
-        ok = self._llm_rewriter.warmup()
+            return {"reachable": False, "latency_ms": 0, "model": None, "has_model": False}
+        start = time.monotonic()
+        reachable, has_model = self._llm_rewriter.passive_health_check()
         return {
-            "reachable": bool(ok),
-            "latency_ms": getattr(self._llm_rewriter, "_last_latency_ms", 0) or 0,
+            "reachable": bool(reachable),
+            "latency_ms": int((time.monotonic() - start) * 1000),
             "model": getattr(self._llm_rewriter, "_model", None),
+            "has_model": bool(has_model),
         }
 
     # ------------------------------------------------------------------
