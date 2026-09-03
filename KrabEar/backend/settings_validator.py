@@ -217,6 +217,7 @@ _BOOL_FIELDS: dict[str, bool] = {
     "quick_capture_send_to_notes": False,
     "quick_capture_obsidian_sync": False,
     "quick_capture_show_panel": False,
+    "llm_probe_enabled": True,
 }
 
 # Миграционные таблицы: (from_version, to_version) → список операций
