@@ -492,7 +492,7 @@ class MultipassBudgetBehaviorTests(unittest.TestCase):
         )
         calls: list[str] = []
 
-        def _fake_transcribe_model(audio, model, prompt, language=None):
+        def _fake_transcribe_model(audio, model, prompt, language=None, **kwargs):
             calls.append(model)
             return {"text": "retry-text", "confidence": 0.99}
 

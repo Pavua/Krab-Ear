@@ -107,7 +107,7 @@ class FallbackChainBalancedToMaxTests(unittest.TestCase):
         failing_model = settings.MODEL_BALANCED
         called_models = []
 
-        def fake_transcribe_model(audio_data, model_name, prompt, language=None):
+        def fake_transcribe_model(audio_data, model_name, prompt, language=None, **kwargs):
             called_models.append(model_name)
             if model_name == failing_model:
                 raise RuntimeError("balanced OOM")

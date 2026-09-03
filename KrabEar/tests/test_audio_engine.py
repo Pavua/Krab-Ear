@@ -190,7 +190,7 @@ class FallbackChainCandidateTests(unittest.TestCase):
         from core.config import settings
         captured = []
 
-        def fake_transcribe_model(audio_data, model_name, prompt, language):
+        def fake_transcribe_model(audio_data, model_name, prompt, language, **kwargs):
             captured.append(model_name)
             raise RuntimeError("stop")  # прерываем chain
 
