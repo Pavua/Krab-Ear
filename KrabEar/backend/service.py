@@ -1334,6 +1334,11 @@ class BackendService:
         self._call_session_service = CallSessionService(
             store=self._call_session_store,
             settings_get=self._get_runtime_setting,
+            # 🔴 До 03.09.2026 фабрика провайдеров сюда НЕ передавалась: сервис
+            # принимал get_provider_fn и никогда его не звал, а dial() не
+            # вызывался ни одной строкой прод-кода. Волна консолидации отдала
+            # линию Voice Gateway и подключила дорогу IPC → провайдер.
+            get_provider_fn=self._resolve_call_provider,
         )
         self._audio_analytics_svc = AudioAnalyticsService(
             audio_converter=self._audio_converter,
@@ -1827,6 +1832,28 @@ class BackendService:
         # Регистрация ПОСЛЕДНЕЙ: упавший на середине __init__ экземпляр не
         # попадает в реестр — teardown не позовёт close() у полусобранного.
         _LIVE_INSTANCES.add(self)
+
+    def _resolve_call_provider(self, _settings: Any = None) -> Any:
+        """Возвращает провайдера звонков по runtime-настройкам.
+
+        Читает НЕ статический core.config.settings, а живые значения: ключ и
+        адрес Voice Gateway хранятся в settings.json, и статический объект их
+        не видит (урок Wave 58). Ошибка конструирования не должна ронять
+        конструктор BackendService — звонки не критичный путь.
+        """
+        try:
+            from backend.call_provider_factory import get_provider
+
+            class _RuntimeView:
+                def __init__(self, get):
+                    self.CALL_PROVIDER = str(get("call_provider", "gateway") or "gateway")
+                    self.VOICE_GATEWAY_URL = str(get("voice_gateway_url", "") or "")
+                    self.VOICE_GATEWAY_API_KEY = str(get("voice_gateway_api_key", "") or "")
+
+            return get_provider(_RuntimeView(self._get_runtime_setting))
+        except Exception:
+            logger.exception("Не удалось создать провайдера звонков")
+            return None
 
     def _init_llm_rewriter(self):
         """Создаёт LLMRewriter если settings.LLM_ENABLED. Возвращает None иначе."""
@@ -3067,6 +3094,7 @@ class BackendService:
             "send_imessage": self._apple_integration_svc.handle_send_imessage,  # отправить сообщение через iMessage/SMS через osascript
             "list_telegram_chats": self._apple_integration_svc.handle_list_telegram_chats,  # получить список доступных чатов Telegram через main Krab userbot
             # --- Phase 3: Call Session CRUD (outbound call automation) ---
+            "call_start": self._call_session_service.handle_call_start,
             "call_session_create": self._call_session_service.handle_call_session_create,  # создать звонковую сессию
             "call_session_get": self._call_session_service.handle_call_session_get,  # получить сессию по id
             "call_session_list": self._call_session_service.handle_call_session_list,  # список сессий с опциональным фильтром по статусу
