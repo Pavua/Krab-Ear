@@ -495,6 +495,11 @@ extension HistoryPanelController {
     func syncSettingsControls(using value: AgentSettings? = nil) {
         let settings = value ?? settingsProvider()
 
+        // Секция «Автозвонки» строится один раз в applyVisualTheme, а панель
+        // открывается многократно — без вызова отсюда её контролы навсегда
+        // остались бы с литералами конструктора.
+        syncCallAutomationControls(using: settings)
+
         isSyncingSettings = true
         qualitySelector.selectItem(at: settings.qualityProfile == "max" ? 1 : 0)
         cleanupSelector.selectItem(at: settings.cleanupProfile == "strict" ? 1 : 0)

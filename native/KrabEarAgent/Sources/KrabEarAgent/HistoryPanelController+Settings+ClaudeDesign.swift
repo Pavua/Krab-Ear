@@ -84,6 +84,21 @@ final class CDSettingsCardView: NSVisualEffectView {
     }
 }
 
+// MARK: - Associated object keys for the call automation section
+
+/// Контролы секции «Автозвонки» создаются локально внутри строителя; чтобы
+/// синхронизация могла показать в них сохранённые значения, ссылки хранятся
+/// здесь (тот же приём, что у остальных CD-секций).
+private enum CallAutomationAssocKeys {
+    nonisolated(unsafe) static var apiKeyField: UInt8 = 0
+    nonisolated(unsafe) static var fromField: UInt8 = 0
+    nonisolated(unsafe) static var maxDurSlider: UInt8 = 0
+    nonisolated(unsafe) static var maxDurLabel: UInt8 = 0
+    nonisolated(unsafe) static var costSlider: UInt8 = 0
+    nonisolated(unsafe) static var costLabel: UInt8 = 0
+    nonisolated(unsafe) static var silenceToggle: UInt8 = 0
+}
+
 // MARK: - Associated object key for analytics dashboard
 
 private enum AssocDashboardKey {
@@ -473,6 +488,7 @@ extension HistoryPanelController {
         apiKeyField.placeholderString = "Вставьте ключ Telnyx API"
         apiKeyField.font = KrabEarTheme.Typography.body
         apiKeyField.tag = 31001 // CA: api key tag
+        objc_setAssociatedObject(self, &CallAutomationAssocKeys.apiKeyField, apiKeyField, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         apiKeyField.target = self
         apiKeyField.action = #selector(onTelnyxAPIKeyChanged)
         apiKeyField.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
@@ -483,6 +499,7 @@ extension HistoryPanelController {
         fromField.placeholderString = "+79991234567"
         fromField.font = KrabEarTheme.Typography.body
         fromField.tag = 31002
+        objc_setAssociatedObject(self, &CallAutomationAssocKeys.fromField, fromField, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         fromField.target = self
         fromField.action = #selector(onTelnyxFromNumberChanged)
         fromField.widthAnchor.constraint(greaterThanOrEqualToConstant: 140).isActive = true
@@ -491,20 +508,24 @@ extension HistoryPanelController {
         // Max call duration slider (5-60 min)
         let maxDurSlider = NSSlider(value: 30, minValue: 5, maxValue: 60, target: self, action: #selector(onCallMaxDurationChanged))
         maxDurSlider.tag = 31003
+        objc_setAssociatedObject(self, &CallAutomationAssocKeys.maxDurSlider, maxDurSlider, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         let maxDurLabel = NSTextField(labelWithString: "30 мин")
         maxDurLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         maxDurLabel.textColor = KrabEarTheme.Colors.textSecondary
         maxDurLabel.tag = 31013 // value label
+        objc_setAssociatedObject(self, &CallAutomationAssocKeys.maxDurLabel, maxDurLabel, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         maxDurLabel.setContentHuggingPriority(.required, for: .horizontal)
         let maxDurRow = cdMakeSliderRow(label: "Макс. длительность", slider: maxDurSlider, valueLabel: maxDurLabel)
 
         // Cost warn threshold slider ($1-$20)
         let costSlider = NSSlider(value: 5, minValue: 1, maxValue: 20, target: self, action: #selector(onCallCostWarnChanged))
         costSlider.tag = 31004
+        objc_setAssociatedObject(self, &CallAutomationAssocKeys.costSlider, costSlider, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         let costLabel = NSTextField(labelWithString: "$5")
         costLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         costLabel.textColor = KrabEarTheme.Colors.textSecondary
         costLabel.tag = 31014
+        objc_setAssociatedObject(self, &CallAutomationAssocKeys.costLabel, costLabel, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         costLabel.setContentHuggingPriority(.required, for: .horizontal)
         let costRow = cdMakeSliderRow(label: "Предупреждение стоимости", slider: costSlider, valueLabel: costLabel)
 
@@ -513,6 +534,7 @@ extension HistoryPanelController {
         silenceToggle.setButtonType(.switch)
         silenceToggle.state = .on
         silenceToggle.tag = 31005
+        objc_setAssociatedObject(self, &CallAutomationAssocKeys.silenceToggle, silenceToggle, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         let silenceRow = cdMakeRow(label: "Авто-завершение при тишине", control: silenceToggle)
 
         card.contentStackView.addArrangedSubview(apiKeyRow)
@@ -526,7 +548,49 @@ extension HistoryPanelController {
         card.contentStackView.addArrangedSubview(silenceRow)
 
         section.contentStackView.addArrangedSubview(card)
+        syncCallAutomationControls()
         return section
+    }
+
+    // MARK: - Call Automation settings sync
+
+    /// Показывает СОХРАНЁННЫЕ значения вместо литералов конструкторов.
+    ///
+    /// 🔴 Без этого секция врала о состоянии: слайдеры создаются с `value: 30`
+    /// и `value: 5`, тумблер с `.on`, поля пустыми — независимо от того, что
+    /// владелец выставил раньше. Опаснее самой лжи её следствие: слайдер,
+    /// показывающий 30 при сохранённых 15, при первом же касании запишет ~30,
+    /// то есть открытие панели и случайное движение мыши молча меняли настройку.
+    ///
+    /// Ключ Telnyx приходит из backend замаскированным (`REDACTED`) — в поле
+    /// его писать нельзя, иначе сохранение вернёт маску вместо ключа. Поэтому
+    /// секрет показывается только фактом «задан» в подсказке поля.
+    @MainActor
+    func syncCallAutomationControls(using value: AgentSettings? = nil) {
+        let settings = value ?? settingsProvider()
+        let wasSyncing = isSyncingSettings
+        isSyncingSettings = true
+        defer { isSyncingSettings = wasSyncing }
+
+        if let slider = objc_getAssociatedObject(self, &CallAutomationAssocKeys.maxDurSlider) as? NSSlider {
+            slider.integerValue = settings.callMaxDurationMin
+            (objc_getAssociatedObject(self, &CallAutomationAssocKeys.maxDurLabel) as? NSTextField)?
+                .stringValue = "\(settings.callMaxDurationMin) мин"
+        }
+        if let slider = objc_getAssociatedObject(self, &CallAutomationAssocKeys.costSlider) as? NSSlider {
+            slider.doubleValue = settings.callCostWarnUSD
+            (objc_getAssociatedObject(self, &CallAutomationAssocKeys.costLabel) as? NSTextField)?
+                .stringValue = String(format: "$%.0f", settings.callCostWarnUSD)
+        }
+        (objc_getAssociatedObject(self, &CallAutomationAssocKeys.silenceToggle) as? NSButton)?
+            .state = settings.callAutoEndOnSilence ? .on : .off
+        (objc_getAssociatedObject(self, &CallAutomationAssocKeys.fromField) as? NSTextField)?
+            .stringValue = settings.telnyxFromNumber
+        if let key = objc_getAssociatedObject(self, &CallAutomationAssocKeys.apiKeyField) as? NSSecureTextField {
+            key.placeholderString = settings.telnyxAPIKey.isEmpty
+                ? "Вставьте ключ Telnyx API"
+                : "Ключ задан — введите новый, чтобы заменить"
+        }
     }
 
     // MARK: - Call Automation settings handlers
