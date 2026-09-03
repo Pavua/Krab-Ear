@@ -23,6 +23,8 @@ jobs:
           filters: |
             swift:
               - 'native/**'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/krabear-ci.yml'
 
   backend-tests:
     runs-on: ubuntu-latest
@@ -224,6 +226,17 @@ jobs:
       - name: Swift release build
         run: |
           swift build -c release --package-path native/KrabEarAgent
+
+      # Контракт-тесты проводки (WiringTests / SourceContract): 139 тестов, ~1 с
+      # прогона. Ловят класс «написано, но не подключено» — setupErrorBus и
+      # setupHealthMonitor месяцами были мёртвыми при 100% зелёных тестах, потому
+      # что Swift-тесты в CI не гонялись вовсе. Полный набор (1658) намеренно
+      # не здесь: под нагрузкой раннера флейкает — его место в nightly.
+      - name: Swift wiring / source-contract tests
+        run: |
+          cd native/KrabEarAgent
+          swift build --build-tests
+          swift test --skip-build --filter "WiringTests|SourceContract"
 
 
   verify-claude-md:
