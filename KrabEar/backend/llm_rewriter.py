@@ -1438,35 +1438,51 @@ class LLMRewriter:
         )
 
     def passive_health_check(self) -> tuple[bool, bool]:
-        """Passive health check via GET /v1/models. Does NOT trigger JIT reload.
+        """Passive health check по каталогу моделей. Does NOT trigger JIT reload.
 
         Returns: (is_reachable, has_target_model)
-            is_reachable=True если HTTP 200
-            has_target_model=True если self._model in response.data[*].id
+            is_reachable=True если хоть один endpoint каталога ответил HTTP 200
+            has_target_model=True если self._model есть в разобранном каталоге
+
+        🔴 Формы ответа у LM Studio три, и идентификатор в них лежит в разных
+        ключах — разбор общий, ``lm_studio_lifecycle.parse_lm_studio_catalog``
+        (там же замер и история). Прежний парсер ``data[*].id`` не понимал
+        нативный ``/api/v1/models`` и отвечал has_model=False при живой модели.
 
         Designed for LLMHttpProbe to avoid JIT churn. Use warmup() for
         explicit cold-start triggers.
         """
         try:
-            # LM Studio exposes the models list at /api/v1/models (not /v1/models).
-            # Derive the base host from _base_url (strip /v1 suffix if present) so
-            # the probe URL is correct regardless of how LLM_BASE_URL is configured.
+            from backend.lm_studio_lifecycle import (  # noqa: PLC0415
+                CATALOG_ENDPOINTS,
+                parse_lm_studio_catalog,
+            )
+            # Derive the base host from _base_url (strip the /v<N> suffix if
+            # present) so the probe URL is correct regardless of how
+            # LLM_BASE_URL is configured.
             import re as _re
             _host = _re.sub(r"/v\d+$", "", self._base_url.rstrip("/"))
-            _url = f"{_host}/api/v1/models"
-            # Wave 1741: SSRF guard — reject file://, gopher://, etc.
-            _validate_llm_url(_url)
-            response = self._session.get(
-                _url,
-                headers=self._lm_studio_get_headers(),
-                timeout=5.0,  # short timeout — /models is fast metadata call
-                allow_redirects=False,  # Wave 1741: no redirect-based SSRF
-            )
-            if response.status_code != 200:
-                return (False, False)
-            data = response.json()
-            ids = [m.get("id") for m in data.get("data", [])]
-            return (True, self._model in ids)
+            reachable = False
+            for _endpoint in CATALOG_ENDPOINTS:
+                _url = f"{_host}{_endpoint}"
+                # Wave 1741: SSRF guard — reject file://, gopher://, etc.
+                _validate_llm_url(_url)
+                response = self._session.get(
+                    _url,
+                    headers=self._lm_studio_get_headers(),
+                    timeout=5.0,  # short timeout — /models is fast metadata call
+                    allow_redirects=False,  # Wave 1741: no redirect-based SSRF
+                )
+                if response.status_code != 200:
+                    continue
+                reachable = True
+                entries = parse_lm_studio_catalog(response.json())
+                if entries is None:
+                    # 200 с неразобранной формой — молчание, а не ответ
+                    # "моделей нет". Пробуем следующий источник каталога.
+                    continue
+                return (True, any(e["id"] == self._model for e in entries))
+            return (reachable, False)
         except (requests.ConnectionError, requests.Timeout, requests.RequestException):
             return (False, False)
         except ValueError as _ve:

@@ -111,6 +111,11 @@ class MemoryConductor:
 
     # -- настройки -----------------------------------------------------------
 
+    def _llm_api_key(self) -> str:
+        """Токен LM Studio. Без него verify-проба получает 401 и отвечает
+        "не знаю" на каждой итерации — механизм эвикции остаётся слепым."""
+        return str(self._get("llm_api_key", "") or "")
+
     def _settings(self) -> dict:
         try:
             return self._settings_service.cached_settings() or {}
@@ -296,7 +301,7 @@ class MemoryConductor:
         deadline = time.monotonic() + self._verify_timeout
         outcome: Optional[bool] = True
         while time.monotonic() < deadline:
-            outcome = self.model_loaded_fn(base, model_id)
+            outcome = self.model_loaded_fn(base, model_id, api_key=self._llm_api_key())
             if outcome is not True:
                 break
             time.sleep(self._verify_poll)
@@ -404,7 +409,7 @@ class MemoryConductor:
             deadline = time.monotonic() + self._verify_timeout
             outcome: Optional[bool] = True
             while time.monotonic() < deadline:
-                outcome = self.model_loaded_fn(base, brain)
+                outcome = self.model_loaded_fn(base, brain, api_key=self._llm_api_key())
                 if outcome is not True:
                     break
                 time.sleep(self._verify_poll)
