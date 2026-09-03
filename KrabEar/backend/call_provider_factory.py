@@ -20,11 +20,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger("KrabEar.Backend.CallProviderFactory")
 
 # Допустимые значения CALL_PROVIDER
+PROVIDER_GATEWAY = "gateway"
 PROVIDER_TELNYX = "telnyx"
 PROVIDER_TWILIO = "twilio"
 PROVIDER_SIP_LOCAL = "sip_local"
 PROVIDER_NONE = "none"
-_VALID_PROVIDERS = frozenset([PROVIDER_TELNYX, PROVIDER_TWILIO, PROVIDER_SIP_LOCAL, PROVIDER_NONE])
+_VALID_PROVIDERS = frozenset(
+    [PROVIDER_GATEWAY, PROVIDER_TELNYX, PROVIDER_TWILIO, PROVIDER_SIP_LOCAL, PROVIDER_NONE]
+)
 
 
 class NullCallProvider:
@@ -70,6 +73,19 @@ def get_provider(settings: Any) -> "CallProvider":
     if provider_name == PROVIDER_NONE:
         logger.info("CALL_PROVIDER=none, используется NullCallProvider")
         return NullCallProvider()  # type: ignore[return-value]
+
+    if provider_name == PROVIDER_GATEWAY:
+        # Волна консолидации 03.09.2026: линия принадлежит Voice Gateway, у него
+        # пять транспортов и ежедневные живые звонки; наши адаптеры не совершили
+        # ни одного. Спека — docs/superpowers/specs/2026-09-03-telephony-consolidation.md.
+        from backend.gateway_call_provider import GatewayCallProvider
+
+        adapter = GatewayCallProvider(
+            base_url=getattr(settings, "VOICE_GATEWAY_URL", "") or "",
+            api_key=getattr(settings, "VOICE_GATEWAY_API_KEY", "") or "",
+        )
+        logger.info("CallProvider=gateway configured=%s", adapter.is_configured())
+        return adapter  # type: ignore[return-value]
 
     if provider_name == PROVIDER_SIP_LOCAL:
         from backend.sip_local_adapter import LocalSIPAdapter

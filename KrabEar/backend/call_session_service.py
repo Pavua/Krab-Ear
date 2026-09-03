@@ -73,6 +73,75 @@ class CallSessionService:
     # CRUD handlers                                                        #
     # ------------------------------------------------------------------ #
 
+    def handle_call_start(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Инициирует исходящий звонок через провайдера и заводит запись журнала.
+
+        🔴 Путь инициации до 03.09.2026 отсутствовал вовсе: `dial()` не вызывала
+        ни одна строка прод-кода, `get_provider_fn` принимался и не звался, а
+        `call_session_create` лишь писал в журнал звонок, которого никто не
+        совершал. Волна консолидации отдала линию Voice Gateway (спека
+        docs/superpowers/specs/2026-09-03-telephony-consolidation.md), и этот
+        метод — единственная дорога от IPC до провайдера.
+
+        Параметры: `phone` (E.164, обязателен), `goal_text` (обязателен),
+        `prompt` (необязателен — с ним звонок ведёт агент шлюза).
+
+        🔴 Порядок «сначала звонок, потом запись» намеренный: несостоявшийся
+        звонок не должен оседать в журнале. Иначе история копит звонки, которых
+        не было — ровно та болезнь, из-за которой прежняя телефония выглядела
+        живой.
+        """
+        phone = str(params.get("phone") or "").strip()
+        if not phone:
+            raise ValueError("Параметр 'phone' обязателен")
+        goal = str(params.get("goal_text") or "").strip()
+        if not goal:
+            raise ValueError("Параметр 'goal_text' обязателен")
+
+        # Приватный режим запрещает исходящие целиком: номер — персональные
+        # данные, а звонок — выход наружу, который нельзя отозвать.
+        if self._settings_get("privacy_mode_enabled", False):
+            return {"ok": False, "error": "privacy_mode",
+                    "message": "Приватный режим запрещает исходящие звонки"}
+
+        if self._get_provider_fn is None:
+            return {"ok": False, "error": "call_provider_unavailable",
+                    "message": "Провайдер звонков не подключён"}
+        provider = self._get_provider_fn(None)
+        if provider is None:
+            return {"ok": False, "error": "call_provider_unavailable",
+                    "message": "Провайдер звонков не подключён"}
+
+        dial_kwargs: dict[str, Any] = {}
+        prompt = str(params.get("prompt") or "").strip()
+        if prompt:
+            dial_kwargs["prompt"] = prompt
+        for key in ("target_lang", "src_lang", "transport", "max_duration_sec"):
+            if params.get(key) is not None:
+                dial_kwargs[key] = params[key]
+
+        result = provider.dial(phone, **dial_kwargs) or {}
+        if not result.get("ok"):
+            return {"ok": False,
+                    "error": str(result.get("error") or "dial_failed"),
+                    "message": str(result.get("message") or "")}
+
+        session = self._store.create(phone_number=phone, goal_text=goal)
+        add_breadcrumb(
+            category="call_session",
+            message="call_start",
+            level="info",
+            data={"ok": True, "phone": mask_phone(phone),
+                  "provider": str(result.get("provider") or "")},
+        )
+        return {
+            "ok": True,
+            "session_id": session.id,
+            "gateway_session_id": str(result.get("call_control_id") or ""),
+            "call_id": str(result.get("call_id") or ""),
+            "status": str(result.get("status") or "dialing"),
+        }
+
     def handle_call_session_create(self, params: dict[str, Any]) -> dict[str, Any]:
         """Создаёт новую звонковую сессию.
 
