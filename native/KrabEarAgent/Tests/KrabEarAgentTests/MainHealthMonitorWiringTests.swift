@@ -146,9 +146,15 @@ final class HealthMonitorWiringTests: XCTestCase {
         }
 
         await monitor.start()
-        // 2 интервала = 2 fail → hung
-        try? await Task.sleep(nanoseconds: 200_000_000)
-        let state = await monitor.currentState()
+        // 2 интервала = 2 fail → hung. Ждём состояния до дедлайна, а не фиксированные
+        // 200 мс: на нагруженном раннере два цикла по 50 мс в 200 мс не укладывались
+        // (красный CI 03.09.2026, сиблинг теста интервала пинга).
+        let deadline = Date().addingTimeInterval(3.0)
+        var state = await monitor.currentState()
+        while state != .hung && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            state = await monitor.currentState()
+        }
         await monitor.stop()
 
         XCTAssertEqual(state, .hung,
