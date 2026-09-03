@@ -22,19 +22,46 @@ final class DesignVariantSectionParityTests: XCTestCase {
 
     /// Секции, которых у CD-варианта нет своих; каждая обязана попасть в
     /// `settingsBarCD` из общей части сборки.
-    private let geminiOnlySections = [
-        "audioPipelineSection",
-        "profAudioSection",
-        "builtSystemSection",
-        "clipSection",
-        "quickCaptureSection",
-        "quickPresetSection",
-        "selTransSection",
-        "vaSection",
-        "schedulerSection",
-        "webhookManagerSection",
-        "callObserverSettingsSection",
+    /// Секции, у которых до 02.09 не было своей CD-версии. Слева — переменная
+    /// общей части сборки, справа — CD-строитель, появившийся портом 03.09.
+    /// В CD-ветку должен попадать ЛИБО сам Gemini-view (перенос как есть), ЛИБО
+    /// его CD-версия — и то и другое даёт владельцу доступ к настройкам.
+    private let sectionPairs: [(gemini: String, cd: String)] = [
+        ("audioPipelineSection", "cdBuildAudioPipelineSection"),
+        ("profAudioSection", "cdBuildDictationProfileAudioSection"),
+        ("builtSystemSection", "cdBuildSystemSection"),
+        ("clipSection", "cdBuildDictationClipboardSection"),
+        ("quickCaptureSection", "cdBuildQuickCaptureSection"),
+        ("quickPresetSection", "cdBuildQuickPresetSection"),
+        ("selTransSection", "cdBuildSelectionTranslatorSection"),
+        ("vaSection", "cdBuildVoiceAssistantSection"),
+        ("schedulerSection", "cdBuildRecordingSchedulerSection"),
+        ("webhookManagerSection", "cdBuildWebhookManagerSection"),
+        ("callObserverSettingsSection", "cdBuildCallObserverSettingsSection"),
     ]
+
+    private var geminiOnlySections: [String] { sectionPairs.map(\.gemini) }
+
+    /// Все Swift-исходники агента одной строкой — CD-строители живут в
+    /// extension-файлах, а не в HistoryPanelController.swift.
+    private func readAllSources() throws -> String {
+        let relativeDir = "native/KrabEarAgent/Sources/KrabEarAgent"
+        var url = Bundle(for: DesignVariantSectionParityTests.self).bundleURL
+        var dir: URL?
+        for _ in 0..<10 {
+            let candidate = url.appendingPathComponent(relativeDir)
+            if FileManager.default.fileExists(atPath: candidate.path) { dir = candidate; break }
+            url = url.deletingLastPathComponent()
+        }
+        if dir == nil {
+            var root = URL(fileURLWithPath: #file)
+            for _ in 0..<5 { root = root.deletingLastPathComponent() }
+            dir = root.appendingPathComponent(relativeDir)
+        }
+        let files = try FileManager.default.contentsOfDirectory(at: dir!, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "swift" }
+        return try files.map { try String(contentsOf: $0, encoding: .utf8) }.joined(separator: "\n")
+    }
 
     private func readPanelSource() throws -> String {
         let relativePath = "native/KrabEarAgent/Sources/KrabEarAgent/HistoryPanelController.swift"
@@ -91,15 +118,35 @@ final class DesignVariantSectionParityTests: XCTestCase {
         }
         let addsToCD = branch.contains("settingsBarCD.addArrangedSubview")
         XCTAssertTrue(addsToCD, "ветка Claude Design ничего не добавляет в свой стек")
-        let missing = geminiOnlySections.filter { !branch.contains($0) }
+        let missing = sectionPairs
+            .filter { !branch.contains($0.gemini) && !branch.contains("\($0.cd)()") }
+            .map(\.gemini)
         XCTAssertTrue(
             missing.isEmpty,
             """
             вариант Claude Design не получает \(missing.count) секц(ию/ий): \
-            \(missing.joined(separator: ", ")). Своей версии у них нет, значит \
-            эти настройки владельцу недоступны вовсе — включая выбор микрофона.
+            \(missing.joined(separator: ", ")) — ни переносом Gemini-view, ни своей \
+            CD-версией. Эти настройки владельцу недоступны вовсе — включая выбор микрофона.
             """
         )
+    }
+
+    /// CD-строитель, на который ссылается ветка, обязан существовать в исходниках:
+    /// вызов несуществующей функции сборка отловит, а вот строитель, объявленный
+    /// и не вызванный ни из одной ветки — нет. Проверяем обе стороны.
+    func test_claudeDesignBuilders_referencedInBranchAreDefined() throws {
+        let src = try readPanelSource()
+        let all = try readAllSources()
+        guard let branch = claudeDesignBranchBody(of: src) else {
+            XCTFail("не удалось выделить тело ветки Claude Design")
+            return
+        }
+        for pair in sectionPairs where branch.contains("\(pair.cd)()") {
+            XCTAssertTrue(
+                all.contains("func \(pair.cd)()"),
+                "\(pair.cd) вызывается из CD-ветки, но не объявлен ни в одном файле"
+            )
+        }
     }
 
     /// Скрытый `settingsBar` не должен удерживать те же view: одна NSView живёт

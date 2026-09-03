@@ -45,6 +45,67 @@ extension HistoryPanelController {
         objc_getAssociatedObject(self, &STTMemoryAssocKeys.statusLabel) as? NSTextField
     }
 
+    // MARK: - Helpers
+
+    @MainActor
+    func makeSTTDevicePicker() -> NSPopUpButton {
+        if let existing = sttDevicePicker { return existing }
+        let picker = NSPopUpButton(frame: .zero, pullsDown: false)
+        picker.addItems(withTitles: ["GPU (mps)", "Процессор (cpu)"])
+        picker.target = self
+        picker.action = #selector(onSTTDeviceChanged)
+        objc_setAssociatedObject(self, &STTMemoryAssocKeys.devicePicker, picker, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        let settings = settingsProvider()
+        picker.selectItem(at: settings.sttGigaamDevice == "cpu" ? 1 : 0)
+        return picker
+    }
+
+    @MainActor
+    func makeSTTWarmupToggle() -> NSButton {
+        if let existing = objc_getAssociatedObject(self, &STTMemoryAssocKeys.warmupToggle) as? NSButton { return existing }
+        let toggle = NSButton(checkboxWithTitle: "", target: self, action: #selector(onSTTWarmupOnStartupChanged))
+        toggle.state = settingsProvider().sttWarmupOnStartup ? .on : .off
+        objc_setAssociatedObject(self, &STTMemoryAssocKeys.warmupToggle, toggle, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        return toggle
+    }
+
+    @MainActor
+    func makeSTTIdleStepperAndLabel() -> (NSTextField, NSStepper) {
+        if let label = sttIdleLabel, let stepper = sttIdleStepper { return (label, stepper) }
+        let settings = settingsProvider()
+        let stepper = NSStepper()
+        stepper.minValue = 1; stepper.maxValue = 1440; stepper.increment = 5
+        stepper.integerValue = max(1, Int((settings.gigaamIdleUnloadSec / 60.0).rounded()))
+        stepper.autorepeat = true; stepper.target = self; stepper.action = #selector(onSTTIdleUnloadChanged)
+        objc_setAssociatedObject(self, &STTMemoryAssocKeys.idleStepper, stepper, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        let label = NSTextField(labelWithString: "\(stepper.integerValue) мин")
+        label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        label.textColor = KrabEarTheme.Colors.textSecondary
+        objc_setAssociatedObject(self, &STTMemoryAssocKeys.idleLabel, label, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        return (label, stepper)
+    }
+
+    @MainActor
+    func makeSTTEnforceToggle() -> NSButton {
+        if let existing = objc_getAssociatedObject(self, &STTMemoryAssocKeys.enforceToggle) as? NSButton { return existing }
+        let toggle = NSButton(checkboxWithTitle: "", target: self, action: #selector(onSTTEnforceUnloadChanged))
+        toggle.state = settingsProvider().memoryConductorEnforceGigaam ? .on : .off
+        objc_setAssociatedObject(self, &STTMemoryAssocKeys.enforceToggle, toggle, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        return toggle
+    }
+
+    @MainActor
+    func makeSTTButtonsAndLabel() -> (ThemeSecondaryButton, ThemeSecondaryButton, NSTextField) {
+        let loadBtn = ThemeSecondaryButton(title: "Загрузить сейчас", target: self, action: #selector(onSTTLoadNow))
+        let unloadBtn = ThemeSecondaryButton(title: "Выгрузить сейчас", target: self, action: #selector(onSTTUnloadNow))
+        let lbl = NSTextField(labelWithString: "")
+        lbl.font = KrabEarTheme.Typography.caption
+        lbl.textColor = KrabEarTheme.Colors.textSecondary
+        lbl.lineBreakMode = .byTruncatingTail
+        objc_setAssociatedObject(self, &STTMemoryAssocKeys.statusLabel, lbl, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        return (loadBtn, unloadBtn, lbl)
+    }
+
     func buildSTTModelMemorySection() -> CollapsibleSectionView {
         let section = CollapsibleSectionView(
             sectionId: "stt_model_memory",
@@ -56,15 +117,7 @@ extension HistoryPanelController {
         let settings = settingsProvider()
 
         // --- устройство инференса ---
-        let devicePicker = NSPopUpButton(frame: .zero, pullsDown: false)
-        devicePicker.addItem(withTitle: "GPU (mps)")
-        devicePicker.addItem(withTitle: "Процессор (cpu)")
-        devicePicker.selectItem(at: settings.sttGigaamDevice == "cpu" ? 1 : 0)
-        devicePicker.target = self
-        devicePicker.action = #selector(onSTTDeviceChanged)
-        objc_setAssociatedObject(
-            self, &STTMemoryAssocKeys.devicePicker, devicePicker, .OBJC_ASSOCIATION_RETAIN_NONATOMIC
-        )
+        let devicePicker = makeSTTDevicePicker()
         card.contentStackView.addArrangedSubview(makeSettingRow(
             label: "Устройство распознавания",
             description: "Замер 02.09.2026 на 25-секундном аудио: GPU 1.31 с против 1.42 с на процессоре, текст одинаковый. Разница невелика — при нестабильности GPU переключение на процессор безопасно.",
@@ -72,11 +125,7 @@ extension HistoryPanelController {
         ))
 
         // --- прогрев при старте ---
-        let warmupToggle = NSButton(
-            checkboxWithTitle: "",
-            target: self,
-            action: #selector(onSTTWarmupOnStartupChanged)
-        )
+        let warmupToggle = makeSTTWarmupToggle()
         warmupToggle.state = settings.sttWarmupOnStartup ? .on : .off
         objc_setAssociatedObject(
             self, &STTMemoryAssocKeys.warmupToggle, warmupToggle, .OBJC_ASSOCIATION_RETAIN_NONATOMIC
@@ -88,23 +137,7 @@ extension HistoryPanelController {
         ))
 
         // --- срок простоя до выгрузки ---
-        let idleStepper = NSStepper()
-        idleStepper.minValue = 1
-        idleStepper.maxValue = 1440
-        idleStepper.increment = 5
-        idleStepper.integerValue = max(1, Int((settings.gigaamIdleUnloadSec / 60.0).rounded()))
-        idleStepper.autorepeat = true
-        idleStepper.target = self
-        idleStepper.action = #selector(onSTTIdleUnloadChanged)
-        objc_setAssociatedObject(
-            self, &STTMemoryAssocKeys.idleStepper, idleStepper, .OBJC_ASSOCIATION_RETAIN_NONATOMIC
-        )
-        let idleLabel = NSTextField(labelWithString: "\(idleStepper.integerValue) мин")
-        idleLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        idleLabel.textColor = KrabEarTheme.Colors.textSecondary
-        objc_setAssociatedObject(
-            self, &STTMemoryAssocKeys.idleLabel, idleLabel, .OBJC_ASSOCIATION_RETAIN_NONATOMIC
-        )
+        let (idleLabel, idleStepper) = makeSTTIdleStepperAndLabel()
         let idleStack = NSStackView(views: [idleLabel, idleStepper])
         idleStack.orientation = .horizontal
         idleStack.alignment = .centerY
@@ -116,11 +149,7 @@ extension HistoryPanelController {
         ))
 
         // --- принудительная выгрузка ---
-        let enforceToggle = NSButton(
-            checkboxWithTitle: "",
-            target: self,
-            action: #selector(onSTTEnforceUnloadChanged)
-        )
+        let enforceToggle = makeSTTEnforceToggle()
         enforceToggle.state = settings.memoryConductorEnforceGigaam ? .on : .off
         objc_setAssociatedObject(
             self, &STTMemoryAssocKeys.enforceToggle, enforceToggle, .OBJC_ASSOCIATION_RETAIN_NONATOMIC
@@ -132,19 +161,7 @@ extension HistoryPanelController {
         ))
 
         // --- ручные кнопки ---
-        let loadButton = ThemeSecondaryButton(
-            title: "Загрузить сейчас", target: self, action: #selector(onSTTLoadNow)
-        )
-        let unloadButton = ThemeSecondaryButton(
-            title: "Выгрузить сейчас", target: self, action: #selector(onSTTUnloadNow)
-        )
-        let statusLabel = NSTextField(labelWithString: "")
-        statusLabel.font = KrabEarTheme.Typography.caption
-        statusLabel.textColor = KrabEarTheme.Colors.textSecondary
-        statusLabel.lineBreakMode = .byTruncatingTail
-        objc_setAssociatedObject(
-            self, &STTMemoryAssocKeys.statusLabel, statusLabel, .OBJC_ASSOCIATION_RETAIN_NONATOMIC
-        )
+        let (loadButton, unloadButton, statusLabel) = makeSTTButtonsAndLabel()
         let buttonsStack = NSStackView(views: [loadButton, unloadButton, statusLabel])
         buttonsStack.orientation = .horizontal
         buttonsStack.alignment = .centerY
@@ -219,5 +236,66 @@ extension HistoryPanelController {
                     : "Не выгрузилась: \(error ?? "нет ответа бэкенда")"
             }
         }
+    }
+
+    // MARK: - CD Builders
+
+    /// Строит секцию «Модель STT в памяти» в компактном стиле Claude Design.
+    @MainActor
+    func cdBuildSTTModelMemorySection() -> CollapsibleSectionView {
+        let section = CollapsibleSectionView(
+            sectionId: "cd_stt_model_memory",
+            title: "Модель STT в памяти",
+            isExpanded: false
+        )
+        let card = CDSettingsCardView()
+        let settings = settingsProvider()
+
+        // 1. Устройство распознавания
+        let devicePicker = makeSTTDevicePicker()
+        let deviceRow = cdMakeRow(label: "Устройство распознавания", control: devicePicker)
+
+        // 2. Прогрев при старте бэкенда
+        let warmupToggle = makeSTTWarmupToggle()
+        warmupToggle.setButtonType(.switch)
+        warmupToggle.title = ""
+        warmupToggle.state = settings.sttWarmupOnStartup ? .on : .off
+        let warmupRow = cdMakeRow(label: "Загружать модель при старте", control: warmupToggle)
+
+        // 3. Срок простоя до выгрузки
+        let (idleLabel, idleStepper) = makeSTTIdleStepperAndLabel()
+        let idleStack = NSStackView(views: [idleLabel, idleStepper])
+        idleStack.orientation = .horizontal
+        idleStack.alignment = .centerY
+        idleStack.spacing = KrabEarTheme.Metrics.tight
+        let idleRow = cdMakeRow(label: "Выгружать после простоя", control: idleStack)
+
+        // 4. Принудительная выгрузка по простою
+        let enforceToggle = makeSTTEnforceToggle()
+        enforceToggle.setButtonType(.switch)
+        enforceToggle.title = ""
+        enforceToggle.state = settings.memoryConductorEnforceGigaam ? .on : .off
+        let enforceRow = cdMakeRow(label: "Действительно выгружать по простою", control: enforceToggle)
+
+        // 5. Кнопки ручного управления и статус
+        let (loadButton, unloadButton, statusLabel) = makeSTTButtonsAndLabel()
+        let buttonsStack = NSStackView(views: [loadButton, unloadButton, statusLabel])
+        buttonsStack.orientation = .horizontal
+        buttonsStack.alignment = .centerY
+        buttonsStack.spacing = KrabEarTheme.Metrics.standard
+        buttonsStack.edgeInsets = NSEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
+
+        card.contentStackView.addArrangedSubview(deviceRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(warmupRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(idleRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(enforceRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(buttonsStack)
+
+        section.contentStackView.addArrangedSubview(card)
+        return section
     }
 }

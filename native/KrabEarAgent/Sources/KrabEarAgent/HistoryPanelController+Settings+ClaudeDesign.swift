@@ -165,7 +165,7 @@ extension HistoryPanelController {
 
     /// Small badge pill — rounded background (CD design token #FF9500 warning, #0066FF accent).
     @MainActor
-    private func cdMakeBadge(text: String, color: NSColor) -> NSView {
+    func cdMakeBadge(text: String, color: NSColor) -> NSView {
         let label = NSTextField(labelWithString: text)
         label.font = .systemFont(ofSize: 9, weight: .semibold)
         label.textColor = color

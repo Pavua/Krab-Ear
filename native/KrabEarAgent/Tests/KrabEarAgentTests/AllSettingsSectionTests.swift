@@ -73,9 +73,11 @@ final class AllSettingsSectionTests: XCTestCase {
             src.contains("settingsBar.addArrangedSubview(allSettingsSection)"),
             "секция должна попасть в вариант Gemini"
         )
+        // 03.09.2026: в Claude Design секция идёт своей CD-версией (cdBuildAllSettingsSection),
+        // не переносом Gemini-view; годится любой из двух путей.
         XCTAssertTrue(
-            src.contains("allSettingsSection,"),
-            "секция должна попасть и в список, переносимый в Claude Design"
+            src.contains("allSettingsSection,") || src.contains("cdBuildAllSettingsSection(),"),
+            "секция должна попасть и в список Claude Design — переносом или своей CD-версией"
         )
     }
 

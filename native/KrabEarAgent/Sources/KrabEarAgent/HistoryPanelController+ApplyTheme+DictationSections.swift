@@ -138,4 +138,54 @@ extension HistoryPanelController {
         self.clipboardSection = clipSection
         return clipSection
     }
+
+    // MARK: - CD Builders
+
+    @MainActor
+    func cdBuildDictationProfileAudioSection() -> CollapsibleSectionView {
+        let section = CollapsibleSectionView(
+            sectionId: "cd_dictation_profile_audio",
+            title: "Профили и устройства",
+            isExpanded: false
+        )
+        let card = CDSettingsCardView()
+
+        let profileStack = NSStackView(views: [profilePresetSelector, applyProfileButton])
+        profileStack.orientation = .horizontal
+        profileStack.spacing = KrabEarTheme.Metrics.tight
+        let profRow = cdMakeRow(label: "Профиль", control: profileStack)
+
+        let audioStack = NSStackView(views: [audioDeviceSelector, testMicButton, micTestResultLabel])
+        audioStack.orientation = .horizontal
+        audioStack.spacing = KrabEarTheme.Metrics.tight
+        let audRow = cdMakeRow(label: "Микрофон", control: audioStack)
+
+        card.contentStackView.addArrangedSubview(profRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(audRow)
+
+        section.contentStackView.addArrangedSubview(card)
+        return section
+    }
+
+    @MainActor
+    func cdBuildDictationClipboardSection() -> CollapsibleSectionView {
+        let section = CollapsibleSectionView(
+            sectionId: "cd_dictation_clipboard",
+            title: "Буфер обмена",
+            isExpanded: false
+        )
+        let card = CDSettingsCardView()
+
+        let clipStack = NSStackView(views: [clipboardHistoryButton, repasteButton])
+        clipStack.orientation = .horizontal
+        clipStack.spacing = KrabEarTheme.Metrics.tight
+        let clipRow = cdMakeRow(label: "История и вставка", control: clipStack)
+
+        card.contentStackView.addArrangedSubview(clipRow)
+
+        section.contentStackView.addArrangedSubview(card)
+        return section
+    }
+
 }
