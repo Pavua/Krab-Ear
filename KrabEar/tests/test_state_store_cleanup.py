@@ -1,4 +1,4 @@
-"""Тесты auto_cleanup_old, get_storage_breakdown (StateStore) и throttle-категорий."""
+"""Тесты get_storage_breakdown (StateStore) и throttle-категорий."""
 
 from __future__ import annotations
 
@@ -44,87 +44,6 @@ def _add_item(store: StateStore, ts: str, text: str = "test") -> str:
         new_lines.append(json.dumps(rec, ensure_ascii=False))
     store.history_path.write_text("\n".join(new_lines) + "\n")
     return item_id
-
-
-class TestAutoCleanupOld(unittest.TestCase):
-    """Тесты StateStore.auto_cleanup_old()."""
-
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self._data_dir = Path(self._tmp.name)
-        self.store = _make_store(self._data_dir)
-
-    def tearDown(self) -> None:
-        self._tmp.cleanup()
-
-    def test_empty_store_returns_zero_deleted(self) -> None:
-        result = self.store.auto_cleanup_old(days=365)
-        self.assertEqual(result["deleted_count"], 0)
-        self.assertEqual(result["remaining"], 0)
-        self.assertFalse(result["dry_run"])
-
-    def test_raises_on_invalid_days(self) -> None:
-        with self.assertRaises(ValueError):
-            self.store.auto_cleanup_old(days=0)
-
-    def test_recent_items_not_deleted(self) -> None:
-        recent_ts = datetime.now().isoformat()
-        _add_item(self.store, ts=recent_ts)
-        result = self.store.auto_cleanup_old(days=365)
-        self.assertEqual(result["deleted_count"], 0)
-        self.assertEqual(result["remaining"], 1)
-
-    def test_old_items_deleted(self) -> None:
-        old_ts = (datetime.now() - timedelta(days=400)).isoformat()
-        _add_item(self.store, ts=old_ts)
-        result = self.store.auto_cleanup_old(days=365)
-        self.assertEqual(result["deleted_count"], 1)
-        self.assertEqual(result["remaining"], 0)
-
-    def test_mixed_items_only_old_deleted(self) -> None:
-        old_ts = (datetime.now() - timedelta(days=400)).isoformat()
-        recent_ts = datetime.now().isoformat()
-        _add_item(self.store, ts=old_ts, text="old")
-        _add_item(self.store, ts=recent_ts, text="recent")
-        result = self.store.auto_cleanup_old(days=365)
-        self.assertEqual(result["deleted_count"], 1)
-        self.assertEqual(result["remaining"], 1)
-
-    def test_dry_run_does_not_delete(self) -> None:
-        old_ts = (datetime.now() - timedelta(days=400)).isoformat()
-        _add_item(self.store, ts=old_ts)
-        result = self.store.auto_cleanup_old(days=365, dry_run=True)
-        self.assertEqual(result["deleted_count"], 1)
-        self.assertTrue(result["dry_run"])
-        # После dry_run запись должна оставаться
-        items_after, _ = self.store.get_history_page(cursor=None, limit=100)
-        self.assertEqual(len(items_after), 1)
-
-    def test_tombstones_written_for_deleted_items(self) -> None:
-        old_ts = (datetime.now() - timedelta(days=400)).isoformat()
-        item_id = _add_item(self.store, ts=old_ts)
-        self.store.auto_cleanup_old(days=365)
-        # Удалённый item должен отсутствовать в активных
-        items, _ = self.store.get_history_page(cursor=None, limit=100)
-        ids = [i["id"] for i in items]
-        self.assertNotIn(item_id, ids)
-
-    def test_threshold_days_in_result(self) -> None:
-        result = self.store.auto_cleanup_old(days=180)
-        self.assertEqual(result["threshold_days"], 180)
-
-    def test_oldest_item_age_days_present(self) -> None:
-        old_ts = (datetime.now() - timedelta(days=400)).isoformat()
-        _add_item(self.store, ts=old_ts)
-        result = self.store.auto_cleanup_old(days=500, dry_run=True)
-        self.assertIsNotNone(result["oldest_item_age_days"])
-        self.assertGreaterEqual(result["oldest_item_age_days"], 390)
-
-    def test_result_fields_present(self) -> None:
-        result = self.store.auto_cleanup_old(days=365)
-        for key in ("deleted_count", "remaining", "dry_run",
-                    "threshold_days", "oldest_item_age_days"):
-            self.assertIn(key, result, f"missing key: {key}")
 
 
 class TestGetStorageBreakdown(unittest.TestCase):

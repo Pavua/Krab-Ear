@@ -4400,7 +4400,7 @@ class BackendService:
           - history_encryption_enabled → settings cache
           - storage                    → HistoryService.handle_get_storage_info
                                          + StateStore.get_history_stats (item_count)
-          - retention                  → auto_cleanup_enabled / auto_cleanup_after_days settings
+          - retention                  → auto_purge_enabled / auto_purge_retention_days settings
           - audit                      → PrivacyAuditLogger (counts + last_event_ts + by_type)
           - purge_available            → всегда True (handle_purge_all_data доступен через IPC)
 
@@ -4415,8 +4415,7 @@ class BackendService:
             storage             (dict)  — item_count, history_bytes, history_file_size_mb,
                                           transcripts_count, transcripts_size_mb,
                                           total_bytes, total_data_mb.
-            retention           (dict)  — auto_cleanup_enabled, auto_cleanup_after_days,
-                                          auto_purge_enabled, auto_purge_retention_days.
+            retention           (dict)  — auto_purge_enabled, auto_purge_retention_days.
             audit               (dict)  — total_events, last_event_ts, by_type.
             purge_available     (bool)  — всегда True.
             ok                  (bool)  — всегда True; Swift гейтит разбор payload
@@ -4482,20 +4481,17 @@ class BackendService:
                 "total_data_mb": 0.0,
             }
 
-        # --- retention: auto_cleanup + auto_purge settings ---
+        # --- retention: auto_purge settings (auto_cleanup_* удалены 03.09.2026: цепь
+        # была мёртвой — метод и событие без единого потребителя) ---
         try:
             s = self._cached_settings()
             result["retention"] = {
-                "auto_cleanup_enabled": bool(s.get("auto_cleanup_enabled", False)),
-                "auto_cleanup_after_days": int(s.get("auto_cleanup_after_days", 365)),
                 "auto_purge_enabled": bool(s.get("auto_purge_enabled", False)),
                 "auto_purge_retention_days": int(s.get("auto_purge_retention_days", 90)),
             }
         except Exception:
             logger.exception("get_privacy_dashboard: ошибка чтения retention settings")
             result["retention"] = {
-                "auto_cleanup_enabled": False,
-                "auto_cleanup_after_days": 365,
                 "auto_purge_enabled": False,
                 "auto_purge_retention_days": 90,
             }

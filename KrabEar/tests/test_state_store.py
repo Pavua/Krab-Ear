@@ -12,7 +12,6 @@ Gaps NOT covered by the existing dedicated/integration/search files:
   - update_history_item_text / _load_text_overrides
   - update_history_item_action_items / get_history_item_action_items
   - import_history_ndjson (dedup + error + skip)
-  - auto_cleanup_old (dry_run + real delete)
   - get_storage_breakdown
   - get_history_overview
   - get_history_page_filtered (paste_status / translation_mode filters)
@@ -360,63 +359,6 @@ class TestImportHistoryNDJSON(unittest.TestCase):
     def test_import_nonexistent_file_raises(self):
         with self.assertRaises(RuntimeError):
             self.store.import_history_ndjson(Path(self._tmp) / "no_such.ndjson")
-
-
-# ---------------------------------------------------------------------------
-# Auto cleanup old items
-# ---------------------------------------------------------------------------
-
-class TestAutoCleanupOld(unittest.TestCase):
-
-    def setUp(self):
-        self._tmp = tempfile.mkdtemp()
-        self.store = _make_store(self._tmp)
-
-    def tearDown(self):
-        import shutil
-        shutil.rmtree(self._tmp, ignore_errors=True)
-
-    def test_dry_run_reports_count_without_deleting(self):
-        # Add item with an old timestamp via direct file manipulation
-        from datetime import datetime, timedelta
-        old_ts = (datetime.now() - timedelta(days=400)).isoformat()
-        item_id = _add(self.store, "ancient item")
-        # Manually overwrite ts in history.ndjson to make it old
-        lines = self.store.history_path.read_text(encoding="utf-8").splitlines()
-        rewritten = []
-        for line in lines:
-            d = json.loads(line)
-            if d.get("id") == item_id:
-                d["ts"] = old_ts
-            rewritten.append(json.dumps(d, ensure_ascii=False))
-        self.store.history_path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
-
-        result = self.store.auto_cleanup_old(days=365, dry_run=True)
-        self.assertGreaterEqual(result["deleted_count"], 1)
-        # dry_run=True → item still present
-        item = self.store.get_history_item_by_id(item_id)
-        self.assertIsNotNone(item)
-
-    def test_real_delete_removes_old_items(self):
-        from datetime import datetime, timedelta
-        old_ts = (datetime.now() - timedelta(days=400)).isoformat()
-        item_id = _add(self.store, "old gone")
-        lines = self.store.history_path.read_text(encoding="utf-8").splitlines()
-        rewritten = []
-        for line in lines:
-            d = json.loads(line)
-            if d.get("id") == item_id:
-                d["ts"] = old_ts
-            rewritten.append(json.dumps(d, ensure_ascii=False))
-        self.store.history_path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
-
-        self.store.auto_cleanup_old(days=365, dry_run=False)
-        item = self.store.get_history_item_by_id(item_id)
-        self.assertIsNone(item)
-
-    def test_invalid_days_raises(self):
-        with self.assertRaises(ValueError):
-            self.store.auto_cleanup_old(days=0)
 
 
 # ---------------------------------------------------------------------------

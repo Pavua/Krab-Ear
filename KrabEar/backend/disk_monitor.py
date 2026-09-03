@@ -288,12 +288,6 @@ class DiskSpaceMonitor:
                 if level == "critical":
                     self._push_disk_critical_error(free_gb)
 
-                # Auto-cleanup hook: если AUTO_CLEANUP_ENABLED и диск критический
-                if (
-                    level == "critical"
-                    and self._settings.AUTO_CLEANUP_ENABLED
-                ):
-                    self._trigger_auto_cleanup()
         else:
             # Сброс состояния при возврате к норме
             if self._last_disk_level is not None:
@@ -375,20 +369,6 @@ class DiskSpaceMonitor:
             error_bus.push(err)
         except Exception:
             logger.exception("DiskSpaceMonitor: disk.critical error_bus.push failed")
-
-    def _trigger_auto_cleanup(self) -> None:
-        """Запускает авто-очистку старых записей в фоновом потоке."""
-        try:
-            self._event_bus.emit("disk.auto_cleanup_requested", {
-                "days": self._settings.AUTO_CLEANUP_AFTER_DAYS,
-                "reason": "disk_critical",
-            })
-            logger.info(
-                "Запрос авто-очистки записей старше %d дней",
-                self._settings.AUTO_CLEANUP_AFTER_DAYS,
-            )
-        except Exception:
-            logger.exception("DiskSpaceMonitor: ошибка запроса авто-очистки")
 
     # ------------------------------------------------------------------
     # Утилиты

@@ -1,8 +1,7 @@
-"""Tests for W1471 F1+F2 fixes in StateStore.
+"""Tests for W1471 F2 fix in StateStore.
 
-F1: auto_cleanup_old holds _lock for the entire body (snapshot + delete loop).
-    TOCTOU window where concurrent import_history_ndjson / add_history_item
-    could interleave between snapshot and delete is eliminated.
+F1 (атомарность лока в auto_cleanup_old) удалён 03.09.2026 вместе с самим
+методом — цепь автоочистки была мёртвой.
 
 F2: import_history_ndjson uses tombstone IDs in addition to existing active IDs
     for dedup — prevents resurrection of deleted items after compaction.
@@ -13,10 +12,8 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
-import threading
-import time
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -59,110 +56,6 @@ def _make_import_file(tmp_dir: Path, items: list[dict]) -> Path:
         for item in items:
             fh.write(json.dumps(item, ensure_ascii=False) + "\n")
     return import_path
-
-
-class TestAutoCleanupOldAtomicConcurrentImport(unittest.TestCase):
-    """F1: auto_cleanup_old must hold lock for entire body.
-
-    Verify that a concurrent add_history_item during auto_cleanup_old
-    does not lead to inconsistent state (item inserted but then deleted
-    because it was in the pre-lock snapshot).
-    """
-
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self._data_dir = Path(self._tmp.name)
-        self.store = _make_store(self._data_dir)
-
-    def tearDown(self) -> None:
-        self._tmp.cleanup()
-
-    def test_auto_cleanup_old_atomic_concurrent_import(self) -> None:
-        """Items added after auto_cleanup_old starts must not be phantom-deleted.
-
-        We cannot reproduce the exact TOCTOU race deterministically without
-        patching the lock, but we verify the structural guarantee: auto_cleanup_old
-        operates entirely within a single _lock() critical section, so the
-        tombstone writes happen inside the lock, not outside.
-        """
-        old_ts = (datetime.now() - timedelta(days=400)).isoformat()
-        recent_ts = datetime.now().isoformat()
-
-        # Add old item
-        old_id = _add_item(self.store, ts=old_ts, text="old item")
-        # Add recent item (should not be deleted)
-        recent_id = _add_item(self.store, ts=recent_ts, text="recent item")
-
-        result = self.store.auto_cleanup_old(days=365)
-
-        self.assertEqual(result["deleted_count"], 1)
-        self.assertEqual(result["remaining"], 1)
-
-        # Verify only old item tombstoned, recent remains active
-        items, _ = self.store.get_history_page(cursor=None, limit=100)
-        ids = [i["id"] for i in items]
-        self.assertNotIn(old_id, ids, "old item should be deleted")
-        self.assertIn(recent_id, ids, "recent item must survive auto_cleanup_old")
-
-    def test_auto_cleanup_old_dry_run_is_lock_safe(self) -> None:
-        """Dry run must not write any tombstones, but still hold the lock correctly."""
-        old_ts = (datetime.now() - timedelta(days=400)).isoformat()
-        _add_item(self.store, ts=old_ts, text="old")
-
-        result = self.store.auto_cleanup_old(days=365, dry_run=True)
-
-        self.assertEqual(result["deleted_count"], 1)
-        self.assertTrue(result["dry_run"])
-
-        # Tombstone file must be empty — no writes happened
-        tombstone_content = self.store.tombstones_path.read_text().strip()
-        self.assertEqual(tombstone_content, "", "dry_run must not write tombstones")
-
-        # Item still active
-        items, _ = self.store.get_history_page(cursor=None, limit=100)
-        self.assertEqual(len(items), 1)
-
-    def test_auto_cleanup_old_concurrent_add_does_not_delete_new_items(self) -> None:
-        """Concurrent add_history_item during cleanup must not be deleted.
-
-        We simulate the race by having a thread add a recent item while
-        the main thread is running auto_cleanup_old. The new item must
-        survive because it falls outside the deletion threshold.
-        """
-        old_ts = (datetime.now() - timedelta(days=400)).isoformat()
-        _add_item(self.store, ts=old_ts, text="old item to delete")
-
-        concurrent_ids: list[str] = []
-        errors: list[Exception] = []
-
-        def concurrent_add() -> None:
-            try:
-                item = self.store.add_history_item(
-                    text="concurrently added item",
-                    paste_status="ok",
-                )
-                concurrent_ids.append(item.id)
-            except Exception as exc:  # noqa: BLE001
-                errors.append(exc)
-
-        # Run cleanup and concurrent add together
-        t = threading.Thread(target=concurrent_add, daemon=True)
-        t.start()
-        result = self.store.auto_cleanup_old(days=365)
-        t.join(timeout=5)
-
-        self.assertFalse(errors, f"Concurrent add raised: {errors}")
-
-        # Cleanup should have found and deleted 1 old item
-        self.assertEqual(result["deleted_count"], 1)
-
-        # Any concurrently added item must still be active
-        if concurrent_ids:
-            items, _ = self.store.get_history_page(cursor=None, limit=100)
-            active_ids = {i["id"] for i in items}
-            for cid in concurrent_ids:
-                self.assertIn(cid, active_ids,
-                              "Concurrent add must not be phantom-deleted by auto_cleanup_old")
 
 
 class TestImportHistoryNdjsonSkipsTombstonedIds(unittest.TestCase):

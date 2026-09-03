@@ -23,8 +23,6 @@ def _make_settings(
     warning_gb: float = 5.0,
     critical_gb: float = 1.0,
     history_large_mb: int = 500,
-    auto_cleanup_enabled: bool = False,
-    auto_cleanup_days: int = 365,
 ) -> MagicMock:
     s = MagicMock()
     s.DISK_MONITOR_ENABLED = enabled
@@ -32,8 +30,6 @@ def _make_settings(
     s.DISK_WARNING_GB = warning_gb
     s.DISK_CRITICAL_GB = critical_gb
     s.HISTORY_LARGE_MB = history_large_mb
-    s.AUTO_CLEANUP_ENABLED = auto_cleanup_enabled
-    s.AUTO_CLEANUP_AFTER_DAYS = auto_cleanup_days
     return s
 
 
@@ -252,47 +248,6 @@ class TestDiskMonitorStartStop(unittest.TestCase):
         m.start()  # второй старт — должен быть no-op
         self.assertIs(m._thread, first_thread)
         m.stop()
-
-
-class TestAutoCleanupHook(unittest.TestCase):
-    """Тест авто-очистки при disk.critical."""
-
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self._data_dir = Path(self._tmp.name)
-
-    def tearDown(self) -> None:
-        self._tmp.cleanup()
-
-    def test_auto_cleanup_requested_when_critical_and_enabled(self) -> None:
-        """disk.auto_cleanup_requested эмитится при critical + AUTO_CLEANUP_ENABLED."""
-        s = _make_settings(auto_cleanup_enabled=True)
-        bus, events = _make_event_bus()
-        m = DiskSpaceMonitor(settings=s, event_bus=bus, data_dir=self._data_dir)
-
-        fake_usage = MagicMock()
-        fake_usage.free = int(0.1 * 1024 ** 3)  # критически мало
-        fake_usage.total = int(100 * 1024 ** 3)
-        with patch("backend.disk_monitor.shutil.disk_usage", return_value=fake_usage):
-            m.check_now()
-
-        event_types = [e[0] for e in events]
-        self.assertIn("disk.auto_cleanup_requested", event_types)
-
-    def test_no_auto_cleanup_when_disabled(self) -> None:
-        """disk.auto_cleanup_requested НЕ эмитится когда AUTO_CLEANUP_ENABLED=False."""
-        s = _make_settings(auto_cleanup_enabled=False)
-        bus, events = _make_event_bus()
-        m = DiskSpaceMonitor(settings=s, event_bus=bus, data_dir=self._data_dir)
-
-        fake_usage = MagicMock()
-        fake_usage.free = int(0.1 * 1024 ** 3)
-        fake_usage.total = int(100 * 1024 ** 3)
-        with patch("backend.disk_monitor.shutil.disk_usage", return_value=fake_usage):
-            m.check_now()
-
-        event_types = [e[0] for e in events]
-        self.assertNotIn("disk.auto_cleanup_requested", event_types)
 
 
 class TestDiskMonitorExceptionHandling(unittest.TestCase):

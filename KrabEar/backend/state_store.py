@@ -1323,55 +1323,6 @@ class StateStore:
     # Disk / storage utilities
     # ------------------------------------------------------------------
 
-    def auto_cleanup_old(
-        self, days: int = 365, dry_run: bool = False
-    ) -> dict[str, Any]:
-        """Удаляет записи истории старше days дней (tombstone-удаление).
-
-        Args:
-            days: Записи старше этого числа дней будут удалены (>= 1).
-            dry_run: Если True - возвращает количество, но не удаляет.
-
-        Returns:
-            deleted_count, remaining, dry_run, threshold_days, oldest_item_age_days
-        """
-        if days < 1:
-            raise ValueError("days must be >= 1")
-
-        now_naive = datetime.now()
-        threshold_dt = now_naive - timedelta(days=days)
-
-        with self._lock():
-            active = self._load_active_items_unlocked()
-
-        to_delete = [
-            item
-            for item in active
-            if item.ts and self._parse_ts_to_naive_utc(item.ts) < threshold_dt
-        ]
-
-        oldest_age_days = None
-        if active:
-            oldest_ts_str = min(
-                (item.ts for item in active if item.ts), default=None
-            )
-            if oldest_ts_str:
-                oldest_dt = self._parse_ts_to_naive_utc(oldest_ts_str)
-                oldest_age_days = (now_naive - oldest_dt).days
-
-        if not dry_run:
-            for item in to_delete:
-                if item.id:
-                    self.delete_history_item(item.id)
-
-        return {
-            "deleted_count": len(to_delete),
-            "remaining": len(active) - len(to_delete),
-            "dry_run": dry_run,
-            "threshold_days": days,
-            "oldest_item_age_days": oldest_age_days,
-        }
-
     def get_storage_breakdown(self) -> dict[str, Any]:
         """Возвращает разбивку использования диска по компонентам (в MB).
 

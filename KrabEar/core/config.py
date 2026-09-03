@@ -80,10 +80,6 @@ class Settings(BaseSettings):
     DISK_CRITICAL_GB: float = 1.0
     # Порог для события disk.history_large (history.ndjson > N MB).
     HISTORY_LARGE_MB: int = 500
-    # Авто-очистка записей: opt-in, по умолчанию выключена.
-    AUTO_CLEANUP_ENABLED: bool = False
-    # Удалять записи старше N дней при авто-очистке.
-    AUTO_CLEANUP_AFTER_DAYS: int = 365
 
     # --- Watchdog длительности записи (backend/recording_duration_watchdog.py) --
     # Живой инцидент 2026-08-05: незамеченная 52-минутная диктовка обвалила
@@ -720,8 +716,6 @@ class Settings(BaseSettings):
     DISK_WARNING_GB: float = 5.0
     DISK_CRITICAL_GB: float = 1.0
     HISTORY_LARGE_MB: int = 500
-    AUTO_CLEANUP_ENABLED: bool = False
-    AUTO_CLEANUP_AFTER_DAYS: int = 365
 
     # --- Нормализация числительных (NumberNormalizer, core/number_normalizer.py) ---
     NUMBER_NORMALIZATION_ENABLED: bool = True
@@ -1090,8 +1084,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "disk_warning_gb": 5.0,
     "disk_critical_gb": 1.0,
     "history_large_mb": 500,
-    "auto_cleanup_enabled": False,
-    "auto_cleanup_after_days": 365,
     # --- In-process REST (см. REST_IN_PROCESS_ENABLED выше) ---
     # Видимость настройки в GUI/get_settings. Источник правды при СТАРТЕ —
     # Pydantic-поле; этот ключ ничего не включает сам по себе.
