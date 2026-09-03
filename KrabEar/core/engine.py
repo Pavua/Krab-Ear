@@ -302,6 +302,52 @@ _ICLOUD_ERRNO = 11
 # реплики, которые Whisper/GigaAM ещё способны разобрать.
 _MIN_TRANSCRIBE_SAMPLES = 160
 
+# 🔴 Запас между внутренним «убийцей» и внешним «сдающимся» (инцидент 03.09.2026).
+# На один вызов транскрибации наложены ДВА предела, и прекратить работу умеет
+# только внутренний: он убивает subprocess-воркер (threading.Timer в
+# MLXWhisperSession._send). Внешний предел (бюджет попытки) умеет лишь перестать
+# ждать — executor.shutdown(cancel_futures=True) на запущенную задачу не влияет
+# вовсе, поток остаётся жив и держит MLXWhisperSession._lock весь readline().
+# Пока внутренний предел был длиннее внешнего (120 с против 25 с), КАЖДОЕ
+# зависание оставляло брошенный поток с замком, и следующие запросы — включая
+# клип длиной 0.5 с — вставали за ним в очередь до самого fail-fast REST-процесса.
+_WORKER_TIMEOUT_GRACE_SEC = 2.0
+# Доля бюджета для случая, когда абсолютного запаса не хватает (остаток дедлайна
+# меньше самого запаса). Ноль или отрицательное значение здесь недопустимы:
+# мгновенный таймаут неотличим от настоящего зависания и убил бы здоровый воркер.
+_WORKER_TIMEOUT_MIN_FRACTION = 0.8
+
+
+def _fit_worker_timeout(setting_sec: float, attempt_timeout_sec: float | None) -> float:
+    """Внутренний предел, гарантированно срабатывающий раньше внешнего.
+
+    ``attempt_timeout_sec`` — бюджет попытки, который вызывающий ставит на
+    ``future.result``. ``None`` (прямые вызовы без внешнего предела) оставляет
+    прежнее поведение настройки.
+
+    Обе ветви одной формулой: для обычных бюджетов работает абсолютный запас,
+    для крошечного остатка — доля, которая никогда не даёт неположительное
+    число. Щедрый пакетный бюджет не поднимает таймаут выше настройки — ``min``
+    оставляет защиту не слабее прежней.
+
+    🔴 Асимметрия с веткой адаптеров ниже (``ADAPTER_MIN_BUDGET_SEC``, §4.8)
+    НАМЕРЕННАЯ, не забытое выравнивание. Там ту же коллизию двух пределов решают
+    противоположно — ПОДНИМАЮТ внешний, чтобы не бросать subprocess. Разными
+    решения делает цена сироты: осиротевший subprocess адаптера держит лишь GPU-
+    память и умирает от собственного таймаута, страдает только текущий запрос.
+    Осиротевший поток whisper-воркера держит ``MLXWhisperSession._lock``
+    синглтона — за ним встают ВСЕ последующие запросы процесса, включая клипы в
+    полсекунды. Поэтому здесь внутренний предел опускают, а не внешний поднимают.
+    """
+    if attempt_timeout_sec is None:
+        return setting_sec
+    inner = max(
+        attempt_timeout_sec - _WORKER_TIMEOUT_GRACE_SEC,
+        attempt_timeout_sec * _WORKER_TIMEOUT_MIN_FRACTION,
+    )
+    return min(setting_sec, inner)
+
+
 # NoiseProfiler разбивает аудио на фреймы по 2048 сэмплов и на более коротком
 # входе возвращает _silent_profile() — то есть snr_db=0.0 без всякого измерения.
 _DENOISE_MIN_SAMPLES = 2048
@@ -2174,16 +2220,19 @@ class AudioEngine:
             attempt_start = time.time()
             try:
                 if candidate["kind"] == "model":
+                    # Один источник истины для обоих пределов: то же число уходит
+                    # и воркеру (как срок жизни), и сюда (как срок ожидания).
+                    # Разъехавшись, они дают брошенный поток с замком сессии.
+                    _attempt_timeout = stt_budget.resolve_attempt_timeout_sec(
+                        _mp_duration_sec
+                    )
                     _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
                     try:
                         future = _executor.submit(
                             self._transcribe_model, audio_data, model_label, prompt, language,
+                            attempt_timeout_sec=_attempt_timeout,
                         )
-                        attempt_result = future.result(
-                            timeout=stt_budget.resolve_attempt_timeout_sec(
-                                _mp_duration_sec
-                            )
-                        )
+                        attempt_result = future.result(timeout=_attempt_timeout)
                     except (concurrent.futures.TimeoutError, concurrent.futures.CancelledError):
                         _executor.shutdown(wait=False, cancel_futures=True)
                         raise
@@ -2881,6 +2930,7 @@ class AudioEngine:
                             model_name,
                             prompt,
                             language,
+                            attempt_timeout_sec=timeout,
                         )
                         result = future.result(timeout=timeout)
                     except (concurrent.futures.TimeoutError, concurrent.futures.CancelledError):
@@ -2995,7 +3045,14 @@ class AudioEngine:
             return "mlx.oom"
         return None
 
-    def _transcribe_model(self, audio_data: Any, model_name: str, prompt: str, language: str | None = None) -> dict[str, Any]:
+    def _transcribe_model(
+        self,
+        audio_data: Any,
+        model_name: str,
+        prompt: str,
+        language: str | None = None,
+        attempt_timeout_sec: float | None = None,
+    ) -> dict[str, Any]:
         """Низкоуровневый вызов MLX Whisper с обработкой несовместимых аргументов.
 
         Все MLX вызовы сериализуются через глобальный RLock (mlx_lock) во избежание
@@ -3023,7 +3080,15 @@ class AudioEngine:
         ]
 
         recovery_enabled = getattr(settings, "MLX_CRASH_RECOVERY_ENABLED", True)
-        timeout_sec = getattr(settings, "MLX_TRANSCRIBE_TIMEOUT_SEC", 60.0)
+        # 🔴 Внутренний предел обязан срабатывать РАНЬШЕ внешнего бюджета попытки:
+        # только он умеет реально прекратить работу (убить subprocess-воркер), тогда
+        # как внешний лишь перестаёт ждать, оставляя поток с замком сессии.
+        # Бюджет приходит параметром, а не читается здесь: stt_budget живёт в
+        # ContextVar, который НЕ наследуется потоком пула (см. call_in_scope).
+        timeout_sec = _fit_worker_timeout(
+            getattr(settings, "MLX_TRANSCRIBE_TIMEOUT_SEC", 60.0),
+            attempt_timeout_sec,
+        )
 
         last_err: Exception | None = None
         from core.mlx_whisper_session import (
