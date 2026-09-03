@@ -215,6 +215,8 @@ class GigaAMMLXAdapter:
             # gigaam-mlx не отдаёт покадровые вероятности; константа как у
             # PyTorch-ветки (типичное качество модели на RU речи).
             "confidence": 0.9,
+            # См. stt_gigaam.py: константа обязана называться константой.
+            "confidence_source": "constant",
             "engine": f"gigaam-mlx-{self._mlx_model_type}",
             "native_punctuation": True,
         }
