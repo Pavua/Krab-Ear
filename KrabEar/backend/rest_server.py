@@ -635,6 +635,40 @@ def release_stt_singleflight() -> None:
 _TRANSCRIBE_TIMEOUT_EXIT_CODE = 70
 
 
+def _flush_logs_before_exit() -> None:
+    """Сбрасывает журнал на диск перед ``os._exit``.
+
+    🔴 Без этого fail-fast операционно неотличим от краша. Живой случай
+    03.09.2026: сервис перезапустился 14 раз с кодом 70, а в журнале за день —
+    ни одной строки о причине, хотя ``logger.error`` вызывался. ``os._exit``
+    намеренно не выполняет финализацию Python, поэтому буферы не сбрасываются;
+    служба вдобавок запущена без ``-u``, и stderr копится блоками, пока процесс
+    не умрёт вместе с ними.
+
+    Сбрасываем три места: обработчики самого логгера (там сидят записи),
+    ``stderr`` (туда launchd перенаправляет журнал) и ``stdout`` (строки Flask).
+    Каждый сброс защищён по отдельности: процесс уже отравлен зависшим
+    MLX-локом, и исключение в логировании не должно оставить его жить — выход
+    важнее полноты записи.
+    """
+    for handler in list(getattr(logger, "handlers", []) or []):
+        try:
+            handler.flush()
+        except Exception:  # noqa: BLE001 — сброс не смеет сорвать fail-fast
+            pass
+    # 🔴 sys импортируется локально: модульный alias _sys существует только
+    # внутри __main__-блока, и обращение к нему из хелпера упало бы ровно в
+    # момент смерти — там, где отладка невозможна.
+    import sys as _s
+
+    for stream in (getattr(_s, "stderr", None), getattr(_s, "stdout", None)):
+        try:
+            if stream is not None:
+                stream.flush()
+        except Exception:  # noqa: BLE001 — то же основание
+            pass
+
+
 def _exit_poisoned_rest_process(exit_code: int) -> None:
     """Немедленно завершает только REST-процесс, не запуская Python-finalize.
 
@@ -665,6 +699,17 @@ def _exit_poisoned_rest_process(exit_code: int) -> None:
         kill_mlx_whisper_session()
     except Exception:
         logger.debug("REST timeout: mlx_whisper worker kill failed", exc_info=True)
+    # Последняя запись перед смертью: без неё в журнале остаётся только новый
+    # старт, и причина перезапуска теряется — именно так 14 выходов за день
+    # выглядели молчаливым крашем.
+    logger.error(
+        "REST fail-fast: процесс завершает себя с кодом %s после зависшей "
+        "транскрибации (MLX-лок мог остаться у повисшего потока). launchd "
+        "поднимет новый процесс; частые повторы означают голодание машины, "
+        "а не ошибку запроса.",
+        exit_code,
+    )
+    _flush_logs_before_exit()
     os._exit(exit_code)
 
 
