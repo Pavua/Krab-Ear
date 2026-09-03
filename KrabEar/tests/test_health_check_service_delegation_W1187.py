@@ -91,6 +91,9 @@ class _FakeLLMRewriter:
     def warmup(self):
         return True
 
+    def passive_health_check(self):
+        return (True, True)
+
     def status(self):
         return {"enabled": True, "model": self._model}
 
