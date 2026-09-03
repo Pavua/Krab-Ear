@@ -1823,6 +1823,12 @@ class AudioEngine:
                 ),
                 "confidence": round(calibrated_score.calibrated, 3),
                 "raw_confidence": round(confidence, 3),
+                # 🔴 Откуда взялось число: "logprob" — посчитано по сегментам
+                # (путь Whisper), "constant" — подставлено адаптером, который
+                # оценку не выдаёт (GigaAM). Умолчание "logprob" намеренно: этот
+                # сборщик обслуживает whisper-путь, и пометить его "constant"
+                # значило бы оболгать честный замер в обратную сторону.
+                "confidence_source": result.get("confidence_source", "logprob"),
                 "confidence_adjustments": calibrated_score.adjustments,
                 "duration_ms": int(duration * 1000),
                 "engine": result.get("engine", "mlx-whisper"),
