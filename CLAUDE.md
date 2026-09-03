@@ -205,15 +205,19 @@ Privacy-mode gate pattern (waves 23-30): any IPC handler that returns transcript
 - **`backend/call_cost_estimator.py`** — `CallCostEstimator`: compute per-minute telephony cost estimate before dialing; shows ticker during active call.
 - **`backend/call_silence_probe.py`** — `CallSilenceProbe`: detect >10 s silence during a call to trigger soft end.
 - **`backend/call_auto_end.py`** — `CallAutoEnd`: enforce max-duration limit (default 30 min) and silence-based auto-hangup.
-- **`backend/telnyx_adapter.py`** — `TelnyxAdapter`: Telnyx Call Control REST API adapter for outbound calls; Bearer-auth + exponential-retry; stub-mode when `TELNYX_API_KEY` absent.
+- **`backend/gateway_call_provider.py`** — `GatewayCallProvider`: исходящие звонки через Voice Gateway (`POST /v1/telephony/calls/prompt-call` и `/outbound`), поверх существующего `VoiceGatewayClient`. 🔴 Наружу как `call_control_id` отдаётся **session_id шлюза** — им адресуется управление звонком; `call_sid` для этого не годится. Успех без `session_id` считается отказом (`gateway_no_session_id`): молчаливое ok означало бы линию, которую нечем положить. 🔴 Клиент возвращает КОНВЕРТ `{ok, payload}`, а формы ответов шлюза разные даже у соседних endpoint'ов (`GET /v1/sessions` обёрнут, `GET /v1/sessions/{id}` — голый SessionState без `ok`) — обе ловушки нашла живая проба, не тесты.
 - **`backend/observability.py`** — `init_sentry()` / `capture_exception()` helpers; Sentry/GlitchTip SDK init; fully no-op when DSN not provided.
 - **`backend/telegram_bridge.py`** — `TelegramBridge`: send messages from Krab Ear backend to main Krab userbot via `POST /api/notify` on localhost web-panel port.
 - **`backend/openwakeword_adapter.py`** — `OpenWakeWordAdapter`: Apache-2.0 wake-word detection (openWakeWord, no email/signup); custom "Краб" model requires ~15 min Jupyter training. НАСТОЯЩИЙ движок wake word с 2026-07-05 (Porcupine удалён): `last_detection {model, score, ts=monotonic}` в `wake_word_status` для IPC-поллинга агента; `settings_get` проброшен из `service.py` (до этого privacy-гейт был декоративным — конструировался без него); `_privacy_blocked()` проверяется каждый чанк `_listen_loop`. Зависимость опциональна: `KrabEar/requirements-wakeword.txt` (намеренно НЕ в requirements.txt — ubuntu-CI ставит его целиком) + однократно `openwakeword.utils.download_models()` (bootstrap_backend.command делает сам).
 
-#### Twilio / provider abstraction (Phase 3 step 5):
-- **`backend/twilio_adapter.py`** — `TwilioAdapter`: Twilio REST API adapter, same interface as `TelnyxAdapter`. Active provider selected via `CALL_PROVIDER` setting (`telnyx` | `twilio`); swap at runtime without code changes.
+#### Провайдер звонков (после консолидации 03.09.2026):
+🔴 Собственные адаптеры (`telnyx_adapter.py`, `twilio_adapter.py`, `sip_local_adapter.py`, 4723 строки
+с тестами) УДАЛЕНЫ: они не были подключены к дороге вызова вовсе — `dial()` не звала ни одна строка
+прод-кода, `get_provider` не импортировал ни один модуль, а `call_session_create` писал в журнал звонки,
+которых никто не совершал. Линия принадлежит Voice Gateway. Архив — тег `telephony-archive-2026-09-03`.
+Спека: `docs/superpowers/specs/2026-09-03-telephony-consolidation.md`.
 - **`backend/call_provider.py`** — `CallProvider`: Protocol (structural typing) defining the common interface all telephony adapters must implement.
-- **`backend/call_provider_factory.py`** — `get_provider()`: returns the active `CallProvider` adapter instance based on `CALL_PROVIDER` setting.
+- **`backend/call_provider_factory.py`** — `get_provider()`: отдаёт `GatewayCallProvider` при `call_provider=gateway` (дефолт) и `NullCallProvider` иначе, с громким предупреждением. 🔴 Старые значения настройки остаются ДОПУСТИМЫМИ в `settings_validator`: выкидывание значения из списка заставляло `set_settings` отвечать ok и молча возвращать прежнее.
 
 #### Additional backend modules:
 - **`backend/action_items_extractor.py`** — `ActionItemsExtractor`: extract tasks, decisions, and questions from meeting transcripts with priority tagging.
