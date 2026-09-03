@@ -211,7 +211,7 @@ Privacy-mode gate pattern (waves 23-30): any IPC handler that returns transcript
 - **`backend/openwakeword_adapter.py`** — `OpenWakeWordAdapter`: Apache-2.0 wake-word detection (openWakeWord, no email/signup); custom "Краб" model requires ~15 min Jupyter training. НАСТОЯЩИЙ движок wake word с 2026-07-05 (Porcupine удалён): `last_detection {model, score, ts=monotonic}` в `wake_word_status` для IPC-поллинга агента; `settings_get` проброшен из `service.py` (до этого privacy-гейт был декоративным — конструировался без него); `_privacy_blocked()` проверяется каждый чанк `_listen_loop`. Зависимость опциональна: `KrabEar/requirements-wakeword.txt` (намеренно НЕ в requirements.txt — ubuntu-CI ставит его целиком) + однократно `openwakeword.utils.download_models()` (bootstrap_backend.command делает сам).
 
 #### Провайдер звонков (после консолидации 03.09.2026):
-🔴 Собственные адаптеры (`telnyx_adapter.py`, `twilio_adapter.py`, `sip_local_adapter.py`, 4723 строки
+🔴 Собственные адаптеры (telnyx_adapter, twilio_adapter, sip_local_adapter — без backtick: файлов больше нет, 4723 строки
 с тестами) УДАЛЕНЫ: они не были подключены к дороге вызова вовсе — `dial()` не звала ни одна строка
 прод-кода, `get_provider` не импортировал ни один модуль, а `call_session_create` писал в журнал звонки,
 которых никто не совершал. Линия принадлежит Voice Gateway. Архив — тег `telephony-archive-2026-09-03`.
