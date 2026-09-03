@@ -167,4 +167,37 @@ extension HistoryPanelController {
         guard let appDelegate = NSApp.delegate as? AgentAppDelegate else { return }
         appDelegate.selectionTranslator?.config = config
     }
+
+    // MARK: - CD Builders
+
+    @MainActor
+    func cdBuildSelectionTranslatorSection() -> CollapsibleSectionView {
+        let section = CollapsibleSectionView(
+            sectionId: "cd_settings_selection_translate",
+            title: "Авто-перевод",
+            isExpanded: false
+        )
+        let card = CDSettingsCardView()
+
+        selectionTranslateToggle.title = ""
+        selectionTranslateToggle.setButtonType(.switch)
+        let toggleRow = cdMakeRow(label: "Включить", control: selectionTranslateToggle)
+
+        let hotkeyRow = cdMakeRow(label: "Горячая клавиша", control: selectionHotkeySelector)
+        let langRow = cdMakeRow(label: "Целевой язык", control: selectionTargetLangSelector)
+
+        card.contentStackView.addArrangedSubview(toggleRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(hotkeyRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(langRow)
+
+        section.contentStackView.addArrangedSubview(card)
+
+        // Sync initial state
+        syncSelectionTranslatorControls()
+
+        return section
+    }
+
 }

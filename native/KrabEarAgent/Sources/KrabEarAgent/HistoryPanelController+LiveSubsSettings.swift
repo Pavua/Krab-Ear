@@ -40,6 +40,24 @@ extension HistoryPanelController {
 
     /// Секция «Наблюдатель звонков агента» (Gemini-вариант, settingsBar —
     /// см. вызов в HistoryPanelController.swift).
+    // MARK: - Helpers
+
+    @MainActor
+    private func makeCallObserverHudToggle() -> NSButton {
+        let hudToggle = NSButton(checkboxWithTitle: "", target: self, action: #selector(onCallObserverHudEnabledChanged))
+        hudToggle.state = .on
+        objc_setAssociatedObject(self, &CallObserverSettingsAssocKeys.hudToggle, hudToggle, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        return hudToggle
+    }
+
+    @MainActor
+    private func makeCallObserverAutoplayToggle() -> NSButton {
+        let autoplayToggle = NSButton(checkboxWithTitle: "", target: self, action: #selector(onCallObserverAutoplayChanged))
+        autoplayToggle.state = .off
+        objc_setAssociatedObject(self, &CallObserverSettingsAssocKeys.autoplayToggle, autoplayToggle, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        return autoplayToggle
+    }
+
     @MainActor
     func buildCallObserverSettingsSection() -> CollapsibleSectionView {
         let section = CollapsibleSectionView(
@@ -49,22 +67,14 @@ extension HistoryPanelController {
         )
         let card = ThemeCardView()
 
-        let hudToggle = NSButton(checkboxWithTitle: "", target: self,
-                                 action: #selector(onCallObserverHudEnabledChanged(_:)))
-        hudToggle.state = .on  // прод-дефолт, см. IPCCallObserverSettings.refresh
-        objc_setAssociatedObject(self, &CallObserverSettingsAssocKeys.hudToggle, hudToggle,
-                                 .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        let hudToggle = makeCallObserverHudToggle()
         let hudRow = makeSettingRow(
             label: "Панель звонка агента при звонке",
             description: "Плавающая плашка с живым транскриптом поверх остальных окон.",
             control: hudToggle
         )
 
-        let autoplayToggle = NSButton(checkboxWithTitle: "", target: self,
-                                      action: #selector(onCallObserverAutoplayChanged(_:)))
-        autoplayToggle.state = .off
-        objc_setAssociatedObject(self, &CallObserverSettingsAssocKeys.autoplayToggle, autoplayToggle,
-                                 .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        let autoplayToggle = makeCallObserverAutoplayToggle()
         let autoplayRow = makeSettingRow(
             label: "Сразу включать звук звонка",
             description: "Автопрослушка звонка агента, как только он начался.",
@@ -111,4 +121,35 @@ extension HistoryPanelController {
         applySettingsPatch(["call_observer_autoplay_audio": sender.state == .on])
         (NSApp.delegate as? AgentAppDelegate)?.callObserverCoordinator?.settingsDidChange()
     }
+
+    // MARK: - CD Builders
+
+    @MainActor
+    func cdBuildCallObserverSettingsSection() -> CollapsibleSectionView {
+        let section = CollapsibleSectionView(
+            sectionId: "cd_call_observer_settings",
+            title: "Наблюдатель звонков агента",
+            isExpanded: false
+        )
+        let card = CDSettingsCardView()
+
+        let hudToggle = makeCallObserverHudToggle()
+        hudToggle.title = ""
+        hudToggle.setButtonType(.switch)
+        let hudRow = cdMakeRow(label: "Панель при звонке", control: hudToggle)
+
+        let autoplayToggle = makeCallObserverAutoplayToggle()
+        autoplayToggle.title = ""
+        autoplayToggle.setButtonType(.switch)
+        let autoplayRow = cdMakeRow(label: "Сразу включать звук", control: autoplayToggle)
+
+        card.contentStackView.addArrangedSubview(hudRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(autoplayRow)
+
+        section.contentStackView.addArrangedSubview(card)
+        refreshCallObserverSettingsToggles()
+        return section
+    }
+
 }

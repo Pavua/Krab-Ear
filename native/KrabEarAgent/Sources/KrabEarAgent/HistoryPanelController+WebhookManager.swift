@@ -27,7 +27,50 @@ enum WebhookManagerAssocKeys {
 extension HistoryPanelController {
 
     /// Строит секцию «Webhooks» для Gemini-дизайна (settingsBar).
+    // MARK: - Helpers
+
     @MainActor
+    func makeWebhookUrlField() -> NSTextField {
+        let urlField = NSTextField(frame: .zero)
+        urlField.placeholderString = "URL (напр. https://...)"
+        urlField.font = KrabEarTheme.Typography.body
+        urlField.bezelStyle = .roundedBezel
+        urlField.isBordered = true
+        urlField.widthAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
+        return urlField
+    }
+
+    @MainActor
+    func makeWebhookSubmitButton() -> ThemePrimaryButton {
+        let submitButton = ThemePrimaryButton(title: "Добавить webhook", target: self, action: #selector(onRegisterWebhook(_:)))
+        submitButton.setContentHuggingPriority(.required, for: .horizontal)
+        return submitButton
+    }
+
+    @MainActor
+    func makeWebhookEventsField() -> NSTextField {
+        let eventsField = NSTextField(frame: .zero)
+        eventsField.placeholderString = "События (через запятую, пусто = все)"
+        eventsField.font = KrabEarTheme.Typography.body
+        eventsField.bezelStyle = .roundedBezel
+        eventsField.isBordered = true
+        eventsField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        eventsField.widthAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
+        return eventsField
+    }
+
+    @MainActor
+    func makeWebhookSecretField() -> NSSecureTextField {
+        let secretField = NSSecureTextField(frame: .zero)
+        secretField.placeholderString = "Секрет (опционально, мин. 16 символов)"
+        secretField.font = KrabEarTheme.Typography.body
+        secretField.bezelStyle = .roundedBezel
+        secretField.isBordered = true
+        secretField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        secretField.widthAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
+        return secretField
+    }
+
     func buildWebhookManagerSection() -> CollapsibleSectionView {
         let section = CollapsibleSectionView(
             sectionId: "webhook_manager",
@@ -52,25 +95,11 @@ extension HistoryPanelController {
         objc_setAssociatedObject(self, &WebhookManagerAssocKeys.urlField, urlField, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
 
         // Events Field
-        let eventsField = NSTextField(frame: .zero)
-        eventsField.placeholderString = "События (через запятую, пусто = все)"
-        eventsField.font = KrabEarTheme.Typography.body
-        eventsField.bezelStyle = .roundedBezel
-        eventsField.isBordered = true
-        eventsField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        eventsField.widthAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
-        
+        let eventsField = makeWebhookEventsField()
         objc_setAssociatedObject(self, &WebhookManagerAssocKeys.eventsField, eventsField, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
 
         // Secret Field
-        let secretField = NSSecureTextField(frame: .zero)
-        secretField.placeholderString = "Секрет (опционально, мин. 16 символов)"
-        secretField.font = KrabEarTheme.Typography.body
-        secretField.bezelStyle = .roundedBezel
-        secretField.isBordered = true
-        secretField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        secretField.widthAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
-        
+        let secretField = makeWebhookSecretField()
         objc_setAssociatedObject(self, &WebhookManagerAssocKeys.secretField, secretField, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
 
         // Submit Button
@@ -142,23 +171,25 @@ extension HistoryPanelController {
 
     @MainActor
     private func rebuildWebhookCard(webhooks: [[String: Any]]) {
-        guard let card = objc_getAssociatedObject(self, &WebhookManagerAssocKeys.sectionCard) as? ThemeCardView else { return }
+        guard let card = objc_getAssociatedObject(self, &WebhookManagerAssocKeys.sectionCard) as? NSView else { return }
 
-        let arrangedViews = card.contentStackView.arrangedSubviews
+        let stack = (card as? ThemeCardView)?.contentStackView ?? (card as? CDSettingsCardView)?.contentStackView
+        guard let contentStack = stack else { return }
+        let arrangedViews = contentStack.arrangedSubviews
         // Сохраняем первые 2 вьюхи (форму добавления и разделитель)
         for v in arrangedViews.dropFirst(2) {
-            card.contentStackView.removeArrangedSubview(v)
+            contentStack.removeArrangedSubview(v)
             v.removeFromSuperview()
         }
 
         let subhead = makeSubhead("ЗАРЕГИСТРИРОВАННЫЕ WEBHOOKS")
-        card.contentStackView.addArrangedSubview(subhead)
+        contentStack.addArrangedSubview(subhead)
 
         if webhooks.isEmpty {
             let empty = NSTextField(labelWithString: "Нет зарегистрированных вебхуков")
             empty.font = KrabEarTheme.Typography.caption
             empty.textColor = KrabEarTheme.Colors.textSecondary
-            card.contentStackView.addArrangedSubview(empty)
+            contentStack.addArrangedSubview(empty)
         } else {
             for webhook in webhooks {
                 guard let id = webhook["webhook_id"] as? String,
@@ -179,7 +210,7 @@ extension HistoryPanelController {
                     failures: failures,
                     lastStatus: lastStatus
                 )
-                card.contentStackView.addArrangedSubview(row)
+                contentStack.addArrangedSubview(row)
             }
         }
     }
@@ -370,4 +401,58 @@ extension HistoryPanelController {
         separator.translatesAutoresizingMaskIntoConstraints = false
         return separator
     }
+
+    // MARK: - CD Builders
+
+    @MainActor
+    func cdBuildWebhookManagerSection() -> CollapsibleSectionView {
+        let section = CollapsibleSectionView(
+            sectionId: "cd_webhook_manager",
+            title: "Webhooks",
+            isExpanded: false
+        )
+        let card = CDSettingsCardView()
+        objc_setAssociatedObject(self, &WebhookManagerAssocKeys.sectionCard, card, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+
+        let urlField = makeWebhookUrlField()
+        let eventsField = makeWebhookEventsField()
+        let secretField = makeWebhookSecretField()
+        let submitButton = makeWebhookSubmitButton()
+        
+        objc_setAssociatedObject(self, &WebhookManagerAssocKeys.urlField, urlField, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        objc_setAssociatedObject(self, &WebhookManagerAssocKeys.eventsField, eventsField, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        objc_setAssociatedObject(self, &WebhookManagerAssocKeys.secretField, secretField, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        
+        let urlRow = cdMakeRow(label: "URL", control: urlField)
+        let eventsRow = cdMakeRow(label: "События", control: eventsField)
+        let secretRow = cdMakeRow(label: "Секрет", control: secretField)
+
+        let submitRow = NSStackView(views: [submitButton])
+        submitRow.orientation = .horizontal
+        submitRow.alignment = .trailing
+        submitRow.edgeInsets = NSEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
+
+        let formStack = NSStackView(views: [
+            urlRow,
+            cdMakeSeparator(),
+            eventsRow,
+            cdMakeSeparator(),
+            secretRow,
+            cdMakeSeparator(),
+            submitRow,
+        ])
+        formStack.orientation = .vertical
+        formStack.spacing = KrabEarTheme.Metrics.tight
+        formStack.alignment = .leading
+        
+        card.contentStackView.addArrangedSubview(formStack)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        
+        section.contentStackView.addArrangedSubview(card)
+        
+        fetchAndRebuildWebhookCard()
+        
+        return section
+    }
+
 }

@@ -246,4 +246,63 @@ extension HistoryPanelController {
         applySettingsPatch([key: patched])
         allSettingsStatusLabel?.stringValue = "Сохранено: \(key)"
     }
+
+    // MARK: - CD Builders
+
+    @MainActor
+    func cdBuildAllSettingsSection() -> CollapsibleSectionView {
+        let section = CollapsibleSectionView(
+            sectionId: "cd_all_settings_table",
+            title: "Все настройки",
+            isExpanded: false
+        )
+        let card = CDSettingsCardView()
+
+        let searchField = NSSearchField()
+        searchField.placeholderString = "Поиск по ключу"
+        searchField.target = self
+        searchField.action = #selector(onAllSettingsSearchChanged)
+        searchField.sendsSearchStringImmediately = true
+        objc_setAssociatedObject(
+            self, &AllSettingsAssocKeys.searchField, searchField, .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        )
+
+        let reloadButton = ThemeSecondaryButton(
+            title: "Обновить", target: self, action: #selector(onAllSettingsReload)
+        )
+        
+        let headerRow = cdMakeRow(label: "Поиск и обновление", control: NSStackView(views: [searchField, reloadButton]))
+        (headerRow.subviews.last as? NSStackView)?.spacing = KrabEarTheme.Metrics.tight
+        searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        
+        let statusLabel = NSTextField(labelWithString: "Раскройте секцию, чтобы загрузить список")
+        statusLabel.font = KrabEarTheme.Typography.caption
+        statusLabel.textColor = KrabEarTheme.Colors.textSecondary
+        objc_setAssociatedObject(
+            self, &AllSettingsAssocKeys.statusLabel, statusLabel, .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        )
+
+        let rowsStack = NSStackView()
+        rowsStack.orientation = .vertical
+        rowsStack.alignment = .leading
+        rowsStack.spacing = 2
+        objc_setAssociatedObject(
+            self, &AllSettingsAssocKeys.rowsStack, rowsStack, .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        )
+
+        card.contentStackView.addArrangedSubview(headerRow)
+        card.contentStackView.addArrangedSubview(statusLabel)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(rowsStack)
+
+        section.contentStackView.addArrangedSubview(card)
+
+        section.onExpandedChange = { [weak self] expanded in
+            guard expanded else { return }
+            self?.loadAllSettingsIfNeeded()
+        }
+        
+        return section
+    }
+
 }

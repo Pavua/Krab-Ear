@@ -2113,26 +2113,26 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             // обходом панели 02.09.2026, когда починенный пикер микрофона всё
             // равно не нашёлся на экране.
             //
-            // Секции строятся выше безусловно, а `settingsBar` здесь скрывается
-            // — перенос их view в CD-стек безопасен: NSView живёт ровно в одной
-            // иерархии, и удерживать их скрытому бару незачем. Вид у них
-            // остаётся «геминиевский»; доступность важнее единообразия карточек,
-            // а порт на CDSettingsCardView — отдельная задача.
+            // Секции строятся выше безусловно, а `settingsBar` здесь скрывается.
+            // 03.09.2026: у каждой из них появилась CD-версия (`cdBuild…`) — те же
+            // экземпляры контролов, переложенные в CDSettingsCardView; addArrangedSubview
+            // переносит их из скрытого Gemini-бара. Инвариант паритета вариантов
+            // держит DesignVariantSectionParityTests.
             settingsBarCD.addArrangedSubview(makeCategoryHeader(text: "Ещё настройки"))
             for section in [
-                audioPipelineSection,
-                profAudioSection,
-                builtSystemSection,
-                clipSection,
-                quickCaptureSection,
-                quickPresetSection,
-                selTransSection,
-                vaSection,
-                schedulerSection,
-                webhookManagerSection,
-                callObserverSettingsSection,
-                sttMemorySection,
-                allSettingsSection,
+                cdBuildAudioPipelineSection(),
+                cdBuildDictationProfileAudioSection(),
+                cdBuildSystemSection(),
+                cdBuildDictationClipboardSection(),
+                cdBuildQuickCaptureSection(),
+                cdBuildQuickPresetSection(),
+                cdBuildSelectionTranslatorSection(),
+                cdBuildVoiceAssistantSection(),
+                cdBuildRecordingSchedulerSection(),
+                cdBuildWebhookManagerSection(),
+                cdBuildCallObserverSettingsSection(),
+                cdBuildSTTModelMemorySection(),
+                cdBuildAllSettingsSection(),
             ] {
                 settingsBarCD.addArrangedSubview(section)
             }

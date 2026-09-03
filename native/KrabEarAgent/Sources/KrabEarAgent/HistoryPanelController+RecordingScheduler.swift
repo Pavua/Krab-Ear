@@ -25,6 +25,35 @@ extension HistoryPanelController {
 
     /// Строит секцию «Запланированные записи» для Gemini-дизайна (settingsBar).
     @MainActor
+    // MARK: - Helpers
+
+    func makeSchedulerTimeField() -> NSDatePicker {
+        let datePicker = NSDatePicker()
+        datePicker.datePickerStyle = .textFieldAndStepper
+        datePicker.datePickerElements = [.yearMonthDay, .hourMinute]
+        datePicker.dateValue = Date().addingTimeInterval(3600)
+        datePicker.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        return datePicker
+    }
+    
+    func makeSchedulerDurationField() -> NSTextField {
+        let durationField = NSTextField(frame: .zero)
+        durationField.placeholderString = "30"
+        durationField.widthAnchor.constraint(equalToConstant: 40).isActive = true
+        return durationField
+    }
+    
+    func makeSchedulerDescField() -> NSTextField {
+        let labelField = NSTextField(frame: .zero)
+        labelField.placeholderString = "Зум-колл..."
+        labelField.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
+        return labelField
+    }
+    
+    func makeSchedulerSubmitButton() -> ThemePrimaryButton {
+        return ThemePrimaryButton(title: "Запланировать", target: self, action: #selector(onScheduleRecording(_:)))
+    }
+
     func buildRecordingSchedulerSection() -> CollapsibleSectionView {
         let section = CollapsibleSectionView(
             sectionId: "recording_scheduler",
@@ -38,11 +67,7 @@ extension HistoryPanelController {
         // 1. Форма добавления
 
         // Date Picker
-        let datePicker = NSDatePicker()
-        datePicker.datePickerStyle = .textFieldAndStepper
-        datePicker.datePickerElements = [.yearMonthDay, .hourMinute]
-        datePicker.dateValue = Date().addingTimeInterval(3600) // +1 час по умолчанию
-        datePicker.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        let datePicker = makeSchedulerTimeField()
         
         objc_setAssociatedObject(self, &RecordingSchedulerAssocKeys.datePicker, datePicker, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
 
@@ -77,7 +102,7 @@ extension HistoryPanelController {
         objc_setAssociatedObject(self, &RecordingSchedulerAssocKeys.labelField, labelField, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
 
         // Submit Button
-        let submitButton = ThemePrimaryButton(title: "Запланировать", target: self, action: #selector(onScheduleRecording(_:)))
+        let submitButton = makeSchedulerSubmitButton()
         submitButton.setContentHuggingPriority(.required, for: .horizontal)
 
         // Compositing form
@@ -145,17 +170,19 @@ extension HistoryPanelController {
 
     @MainActor
     private func rebuildSchedulerCard(schedules: [[String: Any]]) {
-        guard let card = objc_getAssociatedObject(self, &RecordingSchedulerAssocKeys.sectionCard) as? ThemeCardView else { return }
+        guard let card = objc_getAssociatedObject(self, &RecordingSchedulerAssocKeys.sectionCard) as? NSView else { return }
 
-        let arrangedViews = card.contentStackView.arrangedSubviews
+        let stack = (card as? ThemeCardView)?.contentStackView ?? (card as? CDSettingsCardView)?.contentStackView
+        guard let contentStack = stack else { return }
+        let arrangedViews = contentStack.arrangedSubviews
         // Сохраняем первые 2 вьюхи (форму добавления и разделитель)
         for v in arrangedViews.dropFirst(2) {
-            card.contentStackView.removeArrangedSubview(v)
+            contentStack.removeArrangedSubview(v)
             v.removeFromSuperview()
         }
 
         let subhead = makeSubhead("ОЖИДАЮЩИЕ ЗАПИСИ")
-        card.contentStackView.addArrangedSubview(subhead)
+        contentStack.addArrangedSubview(subhead)
 
         let pendingSchedules = schedules.filter { ($0["status"] as? String) == "pending" }
 
@@ -163,7 +190,7 @@ extension HistoryPanelController {
             let empty = NSTextField(labelWithString: "Нет запланированных записей")
             empty.font = KrabEarTheme.Typography.caption
             empty.textColor = KrabEarTheme.Colors.textSecondary
-            card.contentStackView.addArrangedSubview(empty)
+            contentStack.addArrangedSubview(empty)
         } else {
             // Сортировка по времени (строки ISO8601 сортируются лексикографически корректно)
             let sortedSchedules = pendingSchedules.sorted { a, b in
@@ -193,7 +220,7 @@ extension HistoryPanelController {
                 
                 let durationMin = durationSec / 60
                 let row = makeScheduleRow(id: id, displayTime: displayTime, durationMin: durationMin, label: label)
-                card.contentStackView.addArrangedSubview(row)
+                contentStack.addArrangedSubview(row)
             }
         }
     }
@@ -323,5 +350,79 @@ extension HistoryPanelController {
         separator.boxType = .separator
         separator.translatesAutoresizingMaskIntoConstraints = false
         return separator
+    }
+
+    // MARK: - CD Builders
+
+    /// Строит секцию «Запланированные записи» в компактном стиле Claude Design.
+    @MainActor
+    func cdBuildRecordingSchedulerSection() -> CollapsibleSectionView {
+        let section = CollapsibleSectionView(
+            sectionId: "cd_recording_scheduler",
+            title: "Запланированные записи",
+            isExpanded: false
+        )
+        let card = CDSettingsCardView()
+        objc_setAssociatedObject(self, &RecordingSchedulerAssocKeys.sectionCard, card, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+
+        // Поля формы с регистрацией в associated-keys для CD-варианта
+        let datePicker = makeSchedulerTimeField()
+        objc_setAssociatedObject(self, &RecordingSchedulerAssocKeys.datePicker, datePicker, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+
+        let durationField = makeSchedulerDurationField()
+        durationField.font = KrabEarTheme.Typography.body
+        durationField.bezelStyle = .roundedBezel
+        durationField.isBordered = true
+        objc_setAssociatedObject(self, &RecordingSchedulerAssocKeys.durationField, durationField, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+
+        let durationLabel = NSTextField(labelWithString: "мин")
+        durationLabel.font = KrabEarTheme.Typography.body
+        durationLabel.textColor = KrabEarTheme.Colors.textSecondary
+
+        let durationStack = NSStackView(views: [durationField, durationLabel])
+        durationStack.orientation = .horizontal
+        durationStack.spacing = 4
+        durationStack.alignment = .centerY
+
+        let descField = makeSchedulerDescField()
+        descField.font = KrabEarTheme.Typography.body
+        descField.bezelStyle = .roundedBezel
+        descField.isBordered = true
+        objc_setAssociatedObject(self, &RecordingSchedulerAssocKeys.labelField, descField, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+
+        let submitButton = makeSchedulerSubmitButton()
+        submitButton.setContentHuggingPriority(.required, for: .horizontal)
+
+        let formRow1 = cdMakeRow(label: "Начало", control: datePicker)
+        let formRow2 = cdMakeRow(label: "Длительность", control: durationStack)
+        let formRow3 = cdMakeRow(label: "Метка", control: descField)
+
+        let submitRow = NSStackView(views: [submitButton])
+        submitRow.orientation = .horizontal
+        submitRow.alignment = .trailing
+        submitRow.edgeInsets = NSEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
+
+        let formStack = NSStackView(views: [
+            formRow1,
+            cdMakeSeparator(),
+            formRow2,
+            cdMakeSeparator(),
+            formRow3,
+            cdMakeSeparator(),
+            submitRow,
+        ])
+        formStack.orientation = .vertical
+        formStack.spacing = KrabEarTheme.Metrics.tight
+        formStack.alignment = .leading
+
+        card.contentStackView.addArrangedSubview(formStack)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+
+        section.contentStackView.addArrangedSubview(card)
+
+        // Загрузка списка запланированных записей
+        fetchAndRebuildSchedulerCard()
+
+        return section
     }
 }

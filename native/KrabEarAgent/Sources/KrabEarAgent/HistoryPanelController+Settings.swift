@@ -1139,6 +1139,15 @@ extension HistoryPanelController {
     /// Секция «Система» в Dictation tab.
     /// Строки: audioDucking toggle + slider, overlay opacity slider, autoStart toggle, dockIcon toggle.
     /// Переписана через makeSwitchRow / makeSettingRow / makeSeparator (Path A).
+    @MainActor
+    private func makeClaudeDesignToggle() -> NSButton {
+        let abToggle = NSButton(checkboxWithTitle: "", target: self, action: #selector(onUseClaudeDesignChanged))
+        abToggle.setButtonType(.switch)
+        abToggle.state = UserDefaults.standard.useClaudeDesignVariant ? .on : .off
+        abToggle.tag = 202501
+        return abToggle
+    }
+
     func buildSystemSection() -> CollapsibleSectionView {
         let section = CollapsibleSectionView(
             sectionId: "dictation_system_settings",
@@ -1227,10 +1236,7 @@ extension HistoryPanelController {
         )
 
         // 6. A/B variant toggle — Claude Design compact layout
-        let abToggle = NSButton(checkboxWithTitle: "", target: self, action: #selector(onUseClaudeDesignChanged))
-        abToggle.setButtonType(.switch)
-        abToggle.state = UserDefaults.standard.useClaudeDesignVariant ? .on : .off
-        abToggle.tag = 202501
+        let abToggle = makeClaudeDesignToggle()
         let abRow = makeSwitchRow(
             label: "Использовать компактную вёрстку (Claude Design A/B)",
             description: "Переключает панель настроек между Gemini-дизайном (по умолчанию) и компактным Claude Design. Изменение вступает в силу при следующем открытии панели.",
@@ -1504,14 +1510,8 @@ extension HistoryPanelController {
 
     // MARK: - Quick Preset Section
 
-    func buildQuickPresetSection() -> CollapsibleSectionView {
-        let section = CollapsibleSectionView(
-            sectionId: "settings_quick_presets",
-            title: "Пресеты записи",
-            isExpanded: true,
-            iconSymbol: "slider.horizontal.3"
-        )
-        let card = ThemeCardView()
+    @MainActor
+    func makeQuickPresetButtonStack() -> NSStackView {
         let buttonStack = NSStackView()
         buttonStack.orientation = .horizontal
         buttonStack.distribution = .fillEqually
@@ -1530,6 +1530,18 @@ extension HistoryPanelController {
             btn.state = presetIds[tag] == activePreset ? .on : .off
             buttonStack.addArrangedSubview(btn)
         }
+        return buttonStack
+    }
+
+    func buildQuickPresetSection() -> CollapsibleSectionView {
+        let section = CollapsibleSectionView(
+            sectionId: "settings_quick_presets",
+            title: "Пресеты записи",
+            isExpanded: true,
+            iconSymbol: "slider.horizontal.3"
+        )
+        let card = ThemeCardView()
+        let buttonStack = makeQuickPresetButtonStack()
         let descLabel = NSTextField(labelWithString: "Cmd+Shift+P — следующий пресет")
         descLabel.font = KrabEarTheme.Typography.caption
         descLabel.textColor = KrabEarTheme.Colors.textSecondary
@@ -1762,6 +1774,164 @@ extension HistoryPanelController {
                 self?.sttEngineLabel.stringValue = label
             }
         }
+    }
+
+
+    // MARK: - CD Builders
+
+    @MainActor
+    func cdBuildAudioPipelineSection() -> CollapsibleSectionView {
+        let section = CollapsibleSectionView(
+            sectionId: "cd_dictation_audio_pipeline",
+            title: "Аудио-пайплайн",
+            isExpanded: false
+        )
+        let card = CDSettingsCardView()
+
+        let diarRow = cdMakeRow(label: "Разделение говорящих", control: diarizationButton, badge: cdMakeBadge(text: "бета", color: KrabEarTheme.Colors.warning))
+        let qualRow = cdMakeRow(label: "Качество распознавания", control: qualitySelector)
+        let gigaamRow = cdMakeRow(label: "GigaAM-RNNT v2 для русского", control: gigaamEnabledButton, badge: cdMakeBadge(text: "RU only", color: KrabEarTheme.Colors.accent))
+        let engineRow = cdMakeRow(label: "Активный STT движок", control: sttEngineLabel)
+
+        card.contentStackView.addArrangedSubview(diarRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(qualRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(gigaamRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(engineRow)
+
+        section.contentStackView.addArrangedSubview(card)
+        return section
+    }
+
+    @MainActor
+    func cdBuildSystemSection() -> CollapsibleSectionView {
+        let section = CollapsibleSectionView(
+            sectionId: "cd_settings_system",
+            title: "Система",
+            isExpanded: false
+        )
+        let card = CDSettingsCardView()
+
+        let duckingToggleRow = cdMakeRow(label: "Приглушение звука при записи", control: audioDuckingButton)
+        let duckRow = cdMakeSliderRow(label: "Громкость при записи", slider: audioDuckingSlider, valueLabel: audioDuckingValueLabel)
+        let overlayRow = cdMakeSliderRow(label: "Прозрачность Live Preview", slider: overlayOpacitySlider, valueLabel: overlayOpacityValueLabel)
+        let autoStartRow = cdMakeRow(label: "Автозапуск при старте macOS", control: autoStartButton)
+        let dockRow = cdMakeRow(label: "Иконка в Dock", control: dockIconButton)
+        let abRow = cdMakeRow(label: "Использовать компактную вёрстку (Claude Design A/B)", control: makeClaudeDesignToggle())
+
+        card.contentStackView.addArrangedSubview(duckingToggleRow)
+        card.contentStackView.addArrangedSubview(duckRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(overlayRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(autoStartRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(dockRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(abRow)
+
+        section.contentStackView.addArrangedSubview(card)
+        return section
+    }
+
+    @MainActor
+    func cdBuildQuickCaptureSection() -> CollapsibleSectionView {
+        let section = CollapsibleSectionView(
+            sectionId: "cd_settings_quick_capture",
+            title: "Быстрые заметки",
+            isExpanded: false
+        )
+        let card = CDSettingsCardView()
+
+        let hotkeyRow = cdMakeRow(label: "Хоткей заметки", control: quickCaptureHotkeySelector)
+        let showPanelRow = cdMakeRow(label: "Скретчпад при записи", control: quickCaptureShowPanelButton)
+        let notesRow = cdMakeRow(label: "Дублировать в Apple Notes", control: quickCaptureNotesButton)
+        let obsidianRow = cdMakeRow(label: "Синхронизировать в Obsidian", control: quickCaptureObsidianButton)
+
+        pasteUndoButton.title = ""
+        pasteUndoButton.setButtonType(.switch)
+        pasteUndoButton.target = self
+        pasteUndoButton.action = #selector(onPasteUndoChanged)
+        let undoRow = cdMakeRow(label: "Откат вставки (Cmd+Ctrl+Z)", control: pasteUndoButton)
+
+        card.contentStackView.addArrangedSubview(hotkeyRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(showPanelRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(notesRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(obsidianRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(undoRow)
+
+        section.contentStackView.addArrangedSubview(card)
+        refreshQuickCaptureSectionState()
+        return section
+    }
+
+    @MainActor
+    func cdBuildQuickPresetSection() -> CollapsibleSectionView {
+        let section = CollapsibleSectionView(
+            sectionId: "cd_settings_quick_presets",
+            title: "Пресеты записи",
+            isExpanded: true
+        )
+        let card = CDSettingsCardView()
+        
+        let stack = makeQuickPresetButtonStack()
+        
+        let descLabel = NSTextField(labelWithString: "Cmd+Shift+P — следующий пресет")
+        descLabel.font = KrabEarTheme.Typography.caption
+        descLabel.textColor = KrabEarTheme.Colors.textSecondary
+        descLabel.translatesAutoresizingMaskIntoConstraints = false
+        
+        card.contentStackView.addArrangedSubview(stack)
+        card.contentStackView.addArrangedSubview(descLabel)
+        section.contentStackView.addArrangedSubview(card)
+        return section
+    }
+
+    @MainActor
+    func cdBuildVoiceAssistantSection() -> CollapsibleSectionView {
+        let section = CollapsibleSectionView(
+            sectionId: "cd_settings_voice_assistant",
+            title: "Разговор с AI",
+            isExpanded: false
+        )
+        let card = CDSettingsCardView()
+
+        vaHotkeyToggle.title = ""
+        vaHotkeyToggle.setButtonType(.switch)
+        let hkRow = cdMakeRow(label: "Горячая клавиша", control: vaHotkeyToggle)
+
+        vaWakeWordToggle.title = ""
+        vaWakeWordToggle.setButtonType(.switch)
+        let wakeRow = cdMakeRow(label: "Слово-пробуждение", control: vaWakeWordToggle, badge: cdMakeBadge(text: "приватность", color: KrabEarTheme.Colors.textSecondary))
+
+        let statusRow = cdMakeRow(label: "Статус", control: vaWakeWordStatusLabel)
+        let modelRow = cdMakeRow(label: "Модель", control: vaWakeWordModelSelector)
+        let threshRow = cdMakeSliderRow(label: "Порог", slider: vaWakeWordThresholdSlider, valueLabel: NSTextField(labelWithString: ""))
+        let engineRow = cdMakeRow(label: "Движок", control: vaEngineSelector)
+        let brainRow = cdMakeRow(label: "Провайдер", control: vaBrainModeSelector)
+
+        card.contentStackView.addArrangedSubview(hkRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(wakeRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(statusRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(modelRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(threshRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(engineRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(brainRow)
+
+        section.contentStackView.addArrangedSubview(card)
+        return section
     }
 
 }
