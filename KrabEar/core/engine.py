@@ -1561,6 +1561,16 @@ class AudioEngine:
                         "stt.repetition_loop",
                         f"reason={_loop_reason} text_len={len(raw_text)}",
                     )
+                    # Перепрогон другим движком: тост «перезапиши» — плохой ответ,
+                    # когда вторая попытка стоит секунды. single_pass (live subs)
+                    # исключён: там поток, а не диктовка.
+                    if not single_pass:
+                        result = self._maybe_repetition_loop_retry(
+                            audio_data, dynamic_prompt, resolved_lang, result, _loop_reason,
+                        )
+                        if result.get("loop_retry_applied"):
+                            raw_text = str(result.get("text", "")).strip()
+                            _is_loop, _loop_reason = is_likely_repetition_loop(raw_text)
 
             # Phase B.2: stt.empty_text — fires when STT returns empty AND audio is
             # non-trivial (>2s), to distinguish real silence from transcription failures.
@@ -1996,6 +2006,81 @@ class AudioEngine:
             except Exception:
                 return None
         return None
+
+    def _maybe_repetition_loop_retry(
+        self,
+        audio_data: Any,
+        prompt: str,
+        language: str | None,
+        first_result: dict[str, Any],
+        loop_reason: str,
+    ) -> dict[str, Any]:
+        """Перепрогон зацикленной транскрипции другим движком.
+
+        Детектор `is_likely_repetition_loop` до 03.09.2026 только предупреждал:
+        текст возвращался неизменным, владелец получал тост «перезапиши». Для
+        русского это была единственная защита вовсе — ретрай по уверенности там
+        не может сработать, потому что GigaAM отдаёт константу 0.9
+        (``confidence_source == "constant"``), а порог заведомо ниже.
+
+        🔴 Повтор берётся ТОЛЬКО если он сам не зациклен и не пуст. Иначе
+        возвращается исходный текст: правило «не врём про input» остаётся в
+        силе, и вырожденный ответ второго движка не выдаётся за спасение.
+        Попытка ровно одна — диктовка не должна удлиняться вдвое ради случая,
+        который в норме не наступает.
+        """
+        if not bool(getattr(settings, "STT_LOOP_RETRY_ENABLED", True)):
+            return first_result
+
+        # Кандидат — модель Whisper, отличная от движка, который зациклился.
+        # Для GigaAM (движок русского) это whisper-large; для самого whisper —
+        # тяжёлая max-модель, если она доступна.
+        first_engine = str(first_result.get("engine", ""))
+        candidates: list[str] = []
+        if "whisper" not in first_engine:
+            candidates.append(self.current_model)
+        for model in getattr(settings, "model_max_list", []) or []:
+            if model != self.current_model and not self._is_model_unavailable(model):
+                candidates.append(model)
+        if not candidates:
+            return first_result
+
+        model_label = candidates[0]
+        logger.warning(
+            "[STT] зацикливание (%s, engine=%s) → перепрогон через %s",
+            loop_reason, first_engine or "unknown", model_label,
+        )
+        attempt_start = time.time()
+        try:
+            retry_result = self._transcribe_model(
+                audio_data, model_label, prompt, language,
+            )
+        except Exception as exc:  # noqa: BLE001 — сбой повтора не смеет ломать диктовку
+            logger.warning("[STT] перепрогон после зацикливания не удался: %s", exc)
+            first_result["loop_retry_error"] = str(exc)
+            return first_result
+
+        retry_text = str(retry_result.get("text", "")).strip()
+        retry_looped = is_likely_repetition_loop(retry_text)[0] if retry_text else False
+        latency_ms = int((time.time() - attempt_start) * 1000)
+
+        if not retry_text or retry_looped:
+            logger.warning(
+                "[STT] перепрогон не помог (%s, %d мс) — остаёмся на исходном тексте",
+                "пусто" if not retry_text else "снова зациклен", latency_ms,
+            )
+            first_result["loop_retry_applied"] = False
+            return first_result
+
+        retry_result["loop_retry_applied"] = True
+        retry_result["loop_retry_from_engine"] = first_engine
+        retry_result["loop_retry_latency_ms"] = latency_ms
+        retry_result["model_used"] = model_label
+        logger.info(
+            "[STT] перепрогон спас диктовку: %s → %s, %d знаков за %d мс",
+            first_engine or "unknown", model_label, len(retry_text), latency_ms,
+        )
+        return retry_result
 
     def _maybe_multipass_retry(
         self,
