@@ -262,6 +262,10 @@ class Settings(BaseSettings):
     # Если первый pass (balanced) вернул уверенность ниже порога → пробуем тяжелее.
     # Threshold 0.65 покрывает типичные "плохие" результаты (0.3-0.6) без лишних ретраев.
     # Установить в 0.0 — никогда не ретраить. 1.0 — ретраить всегда.
+    # Перепрогон другим движком, если транскрипция вышла зацикленной.
+    # Для русского это единственная защита: ретрай по уверенности там мёртв,
+    # GigaAM отдаёт константу 0.9 вместо оценки (см. confidence_source).
+    STT_LOOP_RETRY_ENABLED: bool = True
     STT_MULTIPASS_ENABLED: bool = True
     STT_MIN_CONFIDENCE_THRESHOLD: float = 0.65
     # Максимальное число дополнительных попыток поверх первого pass (balanced).
@@ -936,6 +940,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "rt_silence_window_sec": 10.0,
     "rt_silence_max_sec": 8.0,
     # --- Confidence-driven multi-pass STT retry ---
+    "stt_loop_retry_enabled": True,
     "stt_multipass_enabled": True,
     "stt_min_confidence_threshold": 0.65,
     "stt_max_retries": 2,
