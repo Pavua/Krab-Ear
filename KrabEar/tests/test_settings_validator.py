@@ -263,6 +263,40 @@ class TestValidateBoolFields(unittest.TestCase):
         self.assertIs(result.fixed["silence_guard_enabled"], True)
 
 
+class TestLLMProbeSettingRegistered(unittest.TestCase):
+    """2026-09-03: llm_probe_enabled/llm_probe_interval_sec были read-only
+
+    inline defaults в service.py (`.get("llm_probe_enabled", True)`), не
+    зарегистрированы ни в DEFAULT_SETTINGS, ни в _BOOL_FIELDS/_RANGE_FIELDS.
+    Строковое "false" из settings.json/set_settings оставалось truthy
+    (тот же класс бага, что recording_owner_enforce), а get_settings не
+    отдавал ключ вовсе, пока кто-то не поставит его вручную через сырой IPC.
+    """
+
+    def setUp(self):
+        self.v = SettingsValidator()
+
+    def test_llm_probe_enabled_registered_in_default_settings(self):
+        from core.config import DEFAULT_SETTINGS
+        self.assertIn("llm_probe_enabled", DEFAULT_SETTINGS)
+        self.assertIs(DEFAULT_SETTINGS["llm_probe_enabled"], True)
+
+    def test_llm_probe_interval_sec_registered_in_default_settings(self):
+        from core.config import DEFAULT_SETTINGS
+        self.assertIn("llm_probe_interval_sec", DEFAULT_SETTINGS)
+        self.assertEqual(DEFAULT_SETTINGS["llm_probe_interval_sec"], 30.0)
+
+    def test_llm_probe_enabled_string_false_coerced_to_bool(self):
+        result = self.v.validate({"llm_probe_enabled": "false"})
+        self.assertTrue(result.valid)
+        self.assertIs(result.fixed["llm_probe_enabled"], False)
+
+    def test_llm_probe_interval_sec_clamped_to_range(self):
+        result = self.v.validate({"llm_probe_interval_sec": 9999.0})
+        self.assertTrue(result.valid)
+        self.assertEqual(result.fixed["llm_probe_interval_sec"], 300.0)
+
+
 class TestValidateSpecialFields(unittest.TestCase):
     def setUp(self):
         self.v = SettingsValidator()

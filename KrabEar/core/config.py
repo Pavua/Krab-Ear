@@ -1190,6 +1190,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # 90 с — запас для холодной загрузки gemma-4-e4b-it-mlx (~12 с с NVMe).
     # Диапазон: 10.0–600.0 с; защищён settings_validator._RANGE_FIELDS.
     "llm_autoload_timeout_sec": 90.0,
+    # 2026-09-03: пассивный health-probe LM Studio (LLMHttpProbe) читал этот
+    # флаг инлайново из cached_settings в service.py, но никогда не был
+    # зарегистрирован здесь — get_settings не отдавал ключ, а set_settings
+    # принимал строковое "false" как truthy (не было в _BOOL_FIELDS).
+    "llm_probe_enabled": True,
+    "llm_probe_interval_sec": 30.0,
     # --- STT startup warmup ---
     # Предварительная загрузка Whisper-модели при старте бэкенда в background thread.
     # Исключает задержку 1–3 с на первой диктовке (cold-start model load).
