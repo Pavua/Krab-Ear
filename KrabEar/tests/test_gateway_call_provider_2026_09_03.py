@@ -31,19 +31,29 @@ from backend.gateway_call_provider import GatewayCallProvider  # noqa: E402
 
 
 class _FakeHTTP:
-    """Двойник VoiceGatewayClient: пишет вызовы, отдаёт заготовленные ответы."""
+    """Двойник VoiceGatewayClient в его РЕАЛЬНОЙ форме — с конвертом.
+
+    🔴 Клиент возвращает `{"ok": True, "payload": {...}}`: внешний `ok` — успех
+    транспорта, ответ шлюза внутри. Первая версия этого двойника отвечала
+    плоско, тесты были зелёные, а против живого шлюза провайдер терял
+    `session_id` — проверялась фантазия, а не поведение зависимости.
+    """
 
     def __init__(self, responses: dict | None = None) -> None:
         self.calls: list[tuple[str, str, dict | None]] = []
         self._responses = responses or {}
 
+    def _envelope(self, key):
+        inner = self._responses.get(key, {"ok": True})
+        return {"ok": True, "payload": inner}
+
     def post(self, voice_gateway_url, api_key, path, payload=None, timeout=None):
         self.calls.append(("POST", path, payload))
-        return self._responses.get(("POST", path), {"ok": True})
+        return self._envelope(("POST", path))
 
     def get(self, voice_gateway_url, api_key, path, timeout=None):
         self.calls.append(("GET", path, None))
-        return self._responses.get(("GET", path), {"ok": True})
+        return self._envelope(("GET", path))
 
 
 def _provider(http: _FakeHTTP, url="http://127.0.0.1:8090", key="k") -> GatewayCallProvider:
@@ -131,3 +141,52 @@ class ConfigurationTest(unittest.TestCase):
         self.assertFalse(out["ok"])
         self.assertEqual(out["error"], "gateway_not_configured")
         self.assertEqual(http.calls, [])
+
+
+class EnvelopeAndIdentityTest(unittest.TestCase):
+    """Класс, найденный живой проверкой: успех без ручки управления."""
+
+    def test_success_without_session_id_is_refused(self) -> None:
+        http = _FakeHTTP({("POST", "/v1/telephony/calls/outbound"): {
+            "ok": True, "session_id": None, "call_sid": "CA1"}})
+        out = _provider(http).dial("+34911234567")
+        self.assertFalse(out["ok"], "звонок без session_id нечем завершить — это отказ")
+        self.assertEqual(out["error"], "gateway_no_session_id")
+
+    def test_transport_failure_is_surfaced(self) -> None:
+        class _Broken(_FakeHTTP):
+            def post(self, *a, **kw):
+                return {"ok": False, "error": "http_502:bad gateway"}
+        out = _provider(_Broken()).dial("+34911234567")
+        self.assertFalse(out["ok"])
+        self.assertIn("502", out["error"])
+
+
+class RealResponseShapesTest(unittest.TestCase):
+    """Формы, снятые с живого шлюза 03.09.2026 — не выдуманные.
+
+    Одна сессия приходит голым SessionState без поля `ok`; список — обёрнутым.
+    Первая версия провайдера требовала `ok` в обоих и читала живой ответ как
+    отказ. Тесты на выдуманной форме этого не видели.
+    """
+
+    def test_single_session_without_ok_field_is_success(self) -> None:
+        http = _FakeHTTP({("GET", "/v1/sessions/vs_1"): {
+            "id": "vs_1", "status": "stopped", "src_lang": "ru",
+            "meta": {"transport": "loopback"}}})
+        out = _provider(http).get_call_status("vs_1")
+        self.assertTrue(out["ok"], "SessionState без поля ok — валидный ответ, а не отказ")
+        self.assertEqual(out["status"], "stopped")
+
+    def test_status_absent_is_refused(self) -> None:
+        http = _FakeHTTP({("GET", "/v1/sessions/vs_1"): {"id": "vs_1"}})
+        out = _provider(http).get_call_status("vs_1")
+        self.assertFalse(out["ok"], "ответ без статуса нечем интерпретировать")
+
+    def test_list_wrapped_shape_from_live_gateway(self) -> None:
+        http = _FakeHTTP({("GET", "/v1/sessions"): {
+            "ok": True, "count": 2, "items": [
+                {"id": "vs_1", "status": "running"},
+                {"id": "vs_2", "status": "stopped"}]}})
+        out = _provider(http).list_active_calls()
+        self.assertEqual([c["id"] for c in out["calls"]], ["vs_1"])

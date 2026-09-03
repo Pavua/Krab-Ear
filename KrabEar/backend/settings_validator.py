@@ -70,7 +70,12 @@ _ENUM_FIELDS: dict[str, tuple[str, ...]] = {
     # настройке. См. docs/superpowers/specs/2026-08-12-live-subs-language-routing-design.md.
     "live_subs_language": ("ru", "es", "en", "auto"),
     # call_provider: выбор провайдера телефонии.
-    "call_provider": ("telnyx", "twilio", "sip_local", "none"),
+    # 03.09.2026: линия принадлежит Voice Gateway, собственные адаптеры удалены.
+    # 🔴 Старые значения оставлены допустимыми намеренно: settings.json владельца
+    # хранит "telnyx", и выкидывание значения из списка молча возвращало бы
+    # настройку к дефолту — set_settings отвечал бы ok, а значение не менялось.
+    # Фабрика на любое не-gateway значение отдаёт NullCallProvider с предупреждением.
+    "call_provider": ("gateway", "telnyx", "twilio", "sip_local", "none"),
 }
 
 # Диапазоны числовых полей: ключ → (min, max, default, type)
