@@ -21,16 +21,34 @@ would_skip_brain_reload (H2/H3 из адверсариального ревью 
 """
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger("KrabEar.Backend.MemoryConductor")
 
 _OWN_LEASE_OWNER = "krab_ear"
 _RESIDENTS = ("gigaam", "rewriter", "brain")
+_SHADOW_MARKER_FILENAME = "krab_ear_conductor_shadow.json"
+
+
+def _default_shadow_marker_path() -> Path:
+    """Путь маркера теневого режима — рядом с общим леджером памяти.
+
+    Формула чистая (без env-канала), зеркалит ``resolve_ledger_path()``.
+    """
+    try:
+        from backend.memory_ledger import resolve_ledger_path
+
+        return resolve_ledger_path().with_name(_SHADOW_MARKER_FILENAME)
+    except Exception:  # noqa: BLE001 — витрина не смеет ронять дирижёра
+        return (Path.home() / ".openclaw" / _SHADOW_MARKER_FILENAME).resolve()
+
+
 _SIZE_MB = {"gigaam": 2000, "rewriter": 5000, "brain": 20000}
 
 
@@ -58,6 +76,7 @@ class MemoryConductor:
         lease_holder_fn=None,
         verify_timeout_sec: float = 10.0,
         verify_poll_sec: float = 0.5,
+        shadow_marker_path: "Path | None" = None,
     ) -> None:
         if unload_model_fn is None or load_model_fn is None or model_loaded_fn is None:
             from backend.lm_studio_lifecycle import (
@@ -98,7 +117,17 @@ class MemoryConductor:
         self._would_skip_brain_reload = 0
         self._decisions: deque[str] = deque(maxlen=20)
         self._last_tick_ts: Optional[float] = None
-        self._shadow_since: Optional[float] = None
+        # 🔴 Дата входа в тень ПЕРЕЖИВАЕТ перезапуск. Раньше здесь стоял голый
+        # None и заполнялся time.time() при первом тике — то есть счётчик дней
+        # обнулялся с каждым стартом процесса. Панель показывала «SHADOW … (0 дн)»
+        # и на четырнадцатые сутки тоже, а именно эта строка по спеке должна
+        # была напомнить владельцу, что пора решать про enforce. Механизм,
+        # ждущий решения, обязан уметь о себе напомнить.
+        self._shadow_marker_path = (
+            Path(shadow_marker_path) if shadow_marker_path is not None
+            else _default_shadow_marker_path()
+        )
+        self._shadow_since: Optional[float] = self._read_shadow_marker()
         # LOW финального гейта: витрина брала "warm"+20000MB БЕЗУСЛОВНО, даже
         # сразу после подтверждённой выгрузки — Swift-строка показывала
         # несуществующие 19 ГБ. Кэш последней ДОСТОВЕРНОЙ проверки/выгрузки
@@ -140,8 +169,7 @@ class MemoryConductor:
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
-        if not self.enforce_for("brain") and self._shadow_since is None:
-            self._shadow_since = time.time()
+        self._sync_shadow_marker()
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._loop, name="memory-conductor", daemon=True,
@@ -193,8 +221,7 @@ class MemoryConductor:
             self._pressure_streak = 0
             return
         self._last_tick_ts = time.time()
-        if self._shadow_since is None and not self.enforce_for("brain"):
-            self._shadow_since = time.time()  # тень видима и без start()
+        self._sync_shadow_marker()  # тень видима и без start()
         # давление: одиночное наблюдение НИКОГДА не решает (гистерезис 3 тика)
         level = self._pressure_fn()
         level = 0 if level is None else int(level)
@@ -205,6 +232,50 @@ class MemoryConductor:
         self._rewriter_step(recording)
         self._brain_step(recording, trigger="pressure")
         self._publish(recording)
+
+    def _read_shadow_marker(self) -> Optional[float]:
+        """Дата входа в тень с прошлой жизни процесса. Ошибка чтения — не отказ.
+
+        Направление отказа осознанное: потерять счётчик дней лучше, чем
+        остановить механизм, следящий за памятью.
+        """
+        try:
+            raw = self._shadow_marker_path.read_text(encoding="utf-8")
+            value = float(json.loads(raw)["shadow_since"])
+            return value if value > 0 else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _write_shadow_marker(self, ts: float) -> None:
+        try:
+            self._shadow_marker_path.parent.mkdir(parents=True, exist_ok=True)
+            self._shadow_marker_path.write_text(
+                json.dumps({"shadow_since": ts}), encoding="utf-8"
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("маркер теневого режима не записан", exc_info=True)
+
+    def _clear_shadow_marker(self) -> None:
+        """Снимает маркер при переходе в enforce.
+
+        Без этого, вернувшись в тень, панель показала бы дни, накопленные до
+        включения — число, которое ничего не значит.
+        """
+        try:
+            self._shadow_marker_path.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            logger.debug("маркер теневого режима не снят", exc_info=True)
+
+    def _sync_shadow_marker(self) -> None:
+        """Приводит маркер в соответствие текущему режиму."""
+        if self.enforce_for("brain"):
+            if self._shadow_since is not None:
+                self._shadow_since = None
+            self._clear_shadow_marker()
+            return
+        if self._shadow_since is None:
+            self._shadow_since = time.time()
+            self._write_shadow_marker(self._shadow_since)
 
     def _safe_bool(self, fn) -> bool:
         try:
@@ -503,6 +574,9 @@ class MemoryConductor:
             logger.debug("ledger publish failed", exc_info=True)
 
     def get_diagnostics(self) -> dict[str, Any]:
+        # Витрина — главный потребитель счётчика дней; синхронизация здесь
+        # держит его честным даже без запущенного тика.
+        self._sync_shadow_marker()
         t = self._thread
         return {
             "enabled": self._get("memory_conductor_enabled", True),
