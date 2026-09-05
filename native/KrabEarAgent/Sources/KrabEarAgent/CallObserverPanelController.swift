@@ -163,10 +163,11 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
         
         let bubble = NSBox()
         bubble.boxType = .custom
-        bubble.borderType = .noBorder
-        bubble.fillColor = isAgent ? KrabEarTheme.Colors.accent.withAlphaComponent(0.15) : KrabEarTheme.Colors.cardBackground
+        bubble.borderType = .lineBorder
+        bubble.borderColor = KrabEarTheme.Colors.border
+        bubble.fillColor = isAgent ? KrabEarTheme.Colors.accent.withAlphaComponent(0.12) : KrabEarTheme.Colors.cardBackground
         bubble.wantsLayer = true
-        bubble.layer?.cornerRadius = 10
+        bubble.layer?.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
         
         let contentStack = NSStackView()
         contentStack.orientation = .vertical
@@ -253,29 +254,29 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
         stateBadgeBox.borderColor = KrabEarTheme.Colors.border
         stateBadgeBox.fillColor = KrabEarTheme.Colors.cardBackground
         stateBadgeBox.wantsLayer = true
-        stateBadgeBox.layer?.cornerRadius = 6
+        stateBadgeBox.layer?.cornerRadius = 10
         stateBadgeBox.contentView = stateBadge
         
         stateBadge.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             stateBadge.topAnchor.constraint(equalTo: stateBadgeBox.topAnchor, constant: 2),
             stateBadge.bottomAnchor.constraint(equalTo: stateBadgeBox.bottomAnchor, constant: -2),
-            stateBadge.leadingAnchor.constraint(equalTo: stateBadgeBox.leadingAnchor, constant: 6),
-            stateBadge.trailingAnchor.constraint(equalTo: stateBadgeBox.trailingAnchor, constant: -6)
+            stateBadge.leadingAnchor.constraint(equalTo: stateBadgeBox.leadingAnchor, constant: 8),
+            stateBadge.trailingAnchor.constraint(equalTo: stateBadgeBox.trailingAnchor, constant: -8)
         ])
 
         let header = NSStackView(views: [inContentTitleLabel, stateBadgeBox, sessionPicker, NSView(), costAlertLabel,
                                          costLabel, listenButton, hangupButton])
         header.orientation = .horizontal
         header.alignment = .centerY
-        header.edgeInsets = NSEdgeInsets(top: 12, left: 16, bottom: 8, right: 16)
-        header.spacing = 8
+        header.edgeInsets = NSEdgeInsets(top: KrabEarTheme.Metrics.comfortable, left: 16, bottom: KrabEarTheme.Metrics.standard, right: 16)
+        header.spacing = KrabEarTheme.Metrics.standard
         stateBadgeBox.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         transcriptStack.orientation = .vertical
         transcriptStack.alignment = .leading
-        transcriptStack.spacing = 6
-        transcriptStack.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
+        transcriptStack.spacing = KrabEarTheme.Metrics.standard
+        transcriptStack.edgeInsets = NSEdgeInsets(top: KrabEarTheme.Metrics.standard, left: KrabEarTheme.Metrics.comfortable, bottom: KrabEarTheme.Metrics.standard, right: KrabEarTheme.Metrics.comfortable)
         transcriptStack.translatesAutoresizingMaskIntoConstraints = false
 
         scrollView.documentView = transcriptStack

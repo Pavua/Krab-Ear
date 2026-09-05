@@ -148,7 +148,7 @@ extension HistoryPanelController {
 
         let card = CDSettingsCardView()
         let loadingLabel = NSTextField(labelWithString: "Загрузка…")
-        loadingLabel.font = .systemFont(ofSize: 12, weight: .regular)
+        loadingLabel.font = KrabEarTheme.Typography.caption
         loadingLabel.textColor = KrabEarTheme.Colors.textSecondary
         card.contentStackView.addArrangedSubview(loadingLabel)
 
@@ -191,7 +191,7 @@ extension HistoryPanelController {
         card.contentStackView.addArrangedSubview(row)
 
         let warnLabel = NSTextField(labelWithString: "")
-        warnLabel.font = .systemFont(ofSize: 11, weight: .regular)
+        warnLabel.font = KrabEarTheme.Typography.caption
         warnLabel.textColor = KrabEarTheme.Colors.warning
         warnLabel.isHidden = true
         objc_setAssociatedObject(
@@ -335,7 +335,7 @@ extension HistoryPanelController {
 
         if engines.isEmpty {
             let fallback = NSTextField(labelWithString: "Нет данных — бэкенд недоступен")
-            fallback.font = .systemFont(ofSize: 12, weight: .regular)
+            fallback.font = KrabEarTheme.Typography.caption
             fallback.textColor = KrabEarTheme.Colors.textSecondary
             card.contentStackView.addArrangedSubview(fallback)
             return
