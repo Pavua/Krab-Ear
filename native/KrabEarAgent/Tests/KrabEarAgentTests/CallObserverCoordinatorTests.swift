@@ -98,9 +98,9 @@ final class CallObserverCoordinatorTests: XCTestCase {
     }
 
     private func session(_ id: String) -> VGSessionInfo {
-        VGSessionInfo(id: id, status: "running", phone: "+341", callDirection: "outbound",
+        VGSessionInfo(id: id, status: "running", phone: "+341", forwardedFrom: "", callDirection: "outbound",
                       createdAt: "2026-08-21T10:00:00Z", updatedAt: "2026-08-21T10:00:00Z",
-                      srcLang: "es", tgtLang: "ru", callBrief: "")
+                      srcLang: "es", tgtLang: "ru", callBrief: "", isScreening: false, agentRole: "")
     }
 
     private func drain(_ t: TimeInterval = 0.05) { RunLoop.main.run(until: Date().addingTimeInterval(t)) }
