@@ -92,13 +92,16 @@ class ShadowTest(unittest.TestCase):
 
 
 class HysteresisTest(unittest.TestCase):
-    def test_two_ticks_not_enough_three_fire(self):
+    def test_two_ticks_not_enough_three_logs_would_not_unload_brain(self):
+        """C1: brain не выгружается. Гистерезис 3 тика → would, без unload."""
         c = _mk(pressure=4)
         c.tick_once()
         c.tick_once()
         c.unload_model_fn.assert_not_called()
+        self.assertEqual(c.get_diagnostics()["residents"]["brain"]["would"], 0)
         c.tick_once()
-        c.unload_model_fn.assert_called_once()
+        c.unload_model_fn.assert_not_called()
+        self.assertGreater(c.get_diagnostics()["residents"]["brain"]["would"], 0)
 
     def test_streak_resets_on_calm_tick(self):
         calm = {"v": 4}
@@ -192,27 +195,27 @@ class GatesTest(unittest.TestCase):
 
 
 class CooldownVerifyTest(unittest.TestCase):
+    """Cooldown живёт в _evict_model. C1: brain больше не ходит туда —
+    проверяем на rewriter (idle-unload), который кондуктор по-прежнему может
+    выгружать при enforce."""
+
     def test_verified_success_burns_cooldown(self):
-        c = _mk(pressure=4, model_loaded=False)  # после unload список пуст → успех
-        for _ in range(3):
-            c.tick_once()
+        c = _mk(pressure=0, model_loaded=False, stt_ts=0.0)
+        c.tick_once()
         c.wait_workers(2.0)
         self.assertEqual(c.unload_model_fn.call_count, 1)
-        for _ in range(3):
-            c.tick_once()
+        c.tick_once()
         c.wait_workers(2.0)
         self.assertEqual(c.unload_model_fn.call_count, 1, "cooldown не удержал")
 
     def test_verify_unknown_does_not_burn_cooldown(self):
-        c = _mk(pressure=4)
-        c.model_loaded_fn.return_value = None  # неизвестно
-        for _ in range(3):
-            c.tick_once()
+        c = _mk(pressure=0, stt_ts=0.0)
+        c.model_loaded_fn.return_value = None
+        c.tick_once()
         c.wait_workers(2.0)
         n1 = c.unload_model_fn.call_count
         self.assertEqual(n1, 1)
-        for _ in range(3):
-            c.tick_once()
+        c.tick_once()
         c.wait_workers(2.0)
         self.assertEqual(c.unload_model_fn.call_count, 2,
                          "unknown-исход не должен жечь cooldown")
@@ -247,11 +250,12 @@ class OomTriggerTest(unittest.TestCase):
         c.unload_model_fn.assert_not_called()
         self.assertGreater(c.get_diagnostics()["residents"]["brain"]["skipped_gate"], 0)
 
-    def test_oom_with_pressure_fires(self):
+    def test_oom_with_pressure_logs_would_not_unload_brain(self):
         c = _mk(pressure=4, model_loaded=False)
         c.handle_oom_event("krab_error", {"code": "mlx.oom"})
         c.wait_workers(2.0)
-        c.unload_model_fn.assert_called_once()
+        c.unload_model_fn.assert_not_called()
+        self.assertGreater(c.get_diagnostics()["residents"]["brain"]["would"], 0)
 
     def test_handler_returns_immediately_and_never_raises(self):
         c = _mk(pressure=4)
@@ -271,16 +275,16 @@ class OomTriggerTest(unittest.TestCase):
 
 
 class LegacyOomReliefTest(unittest.TestCase):
-    """🔴 H1 финального гейта: прежний OOM-релиф был боевым по умолчанию —
-    shadow-неделя не смеет молча снять взведённую страховочную сеть."""
+    """C1 holdoff: легаси mlx_oom_auto_unload_enabled больше не выгружает brain."""
 
-    def test_shadow_with_legacy_flag_still_evicts_on_confirmed_oom(self):
+    def test_shadow_with_legacy_flag_does_not_evict_brain(self):
         c = _mk(_settings(memory_conductor_enforce=False,
                           mlx_oom_auto_unload_enabled=True),
                 pressure=4, model_loaded=False)
         c.handle_oom_event("krab_error", {"code": "mlx.oom"})
         c.wait_workers(2.0)
-        c.unload_model_fn.assert_called_once()
+        c.unload_model_fn.assert_not_called()
+        self.assertGreater(c.get_diagnostics()["residents"]["brain"]["would"], 0)
 
     def test_shadow_with_legacy_flag_off_only_counts_would(self):
         c = _mk(_settings(memory_conductor_enforce=False,
@@ -330,25 +334,27 @@ class BrainStateHonestyTest(unittest.TestCase):
         self.assertEqual(brain["state"], "unknown")
         self.assertIsNone(brain["size_mb"])
 
-    def test_after_verified_eviction_state_is_unloaded_with_zero_size(self):
-        c = _mk(pressure=4, model_loaded=False)  # verify подтвердил выгрузку
+    def test_holdoff_never_marks_brain_unloaded_via_conductor(self):
+        """C1: кондуктор не выгружает brain — state остаётся unknown."""
+        c = _mk(pressure=4, model_loaded=False)
         for _ in range(3):
             c.tick_once()
         brain = self._last_brain_entry(c)
-        self.assertEqual(brain["state"], "unloaded")
-        self.assertEqual(brain["size_mb"], 0)
+        self.assertEqual(brain["state"], "unknown")
+        self.assertIsNone(brain["size_mb"])
+        c.unload_model_fn.assert_not_called()
 
-    def test_still_loaded_after_failed_eviction_state_is_warm(self):
-        c = _mk(pressure=4, model_loaded=True)  # verify: модель всё ещё загружена
+    def test_holdoff_does_not_claim_warm_after_pressure_ticks(self):
+        c = _mk(pressure=4, model_loaded=True)
         for _ in range(3):
             c.tick_once()
         brain = self._last_brain_entry(c)
-        self.assertEqual(brain["state"], "warm")
-        self.assertEqual(brain["size_mb"], 20000)
+        self.assertEqual(brain["state"], "unknown")
+        self.assertIsNone(brain["size_mb"])
 
     def test_unknown_verify_outcome_does_not_claim_warm(self):
         c = _mk(pressure=4)
-        c.model_loaded_fn.return_value = None  # сеть недоступна/таймаут
+        c.model_loaded_fn.return_value = None
         for _ in range(3):
             c.tick_once()
         brain = self._last_brain_entry(c)

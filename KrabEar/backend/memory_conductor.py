@@ -359,11 +359,13 @@ class MemoryConductor:
             return
         if time.monotonic() < self._cooldown_until.get("brain", 0.0):
             return
-        if not self.enforce_for("brain"):
-            c["would"] += 1
-            self._note("would evict brain (%s, streak=%d)" % (trigger, self._pressure_streak))
-            return
-        self._evict_model("brain", self._get("llm_brain_model", ""))
+        # C1 holdoff: brain — чат-модель Краба. Кондуктор её не jetsam'ит
+        # даже при enforce_brain=True; shadow «would evict» остаётся в логе.
+        c["would"] += 1
+        self._note(
+            "would evict brain (%s, streak=%d) — holdoff, never auto-evict"
+            % (trigger, self._pressure_streak)
+        )
 
     def _safe_lease(self):
         try:
@@ -459,18 +461,11 @@ class MemoryConductor:
             return
         if time.monotonic() < self._cooldown_until.get("brain", 0.0):
             return
-        if not self.enforce_for("brain"):
-            # 🔴 H1 финального гейта: прежний OOM-релиф был БОЕВЫМ по умолчанию
-            # (mlx_oom_auto_unload_enabled=True) — shadow не смеет молча снять
-            # взведённую страховочную сеть. Легаси-флаг сохраняет прод-поведение
-            # до включения enforce_brain.
-            if self._get("mlx_oom_auto_unload_enabled", True):
-                self._note("oom relief via legacy flag (conductor still shadow)")
-                self._evict_model("brain", self._get("llm_brain_model", ""))
-            else:
-                c["would"] += 1
-            return
-        self._evict_model("brain", self._get("llm_brain_model", ""))
+        # C1 holdoff: mlx_oom_auto_unload_enabled больше не выгружает brain.
+        # Это слот Краба (группы / уже загруженный local). Ручная кнопка тоста
+        # в error_actions остаётся. Shadow считает would.
+        c["would"] += 1
+        self._note("would evict brain (oom) — holdoff, never auto-evict")
 
     def on_recording_start(self) -> None:
         """Секвенс LM Studio на старте записи: unload brain → verify → load rewriter.

@@ -201,8 +201,8 @@ class Settings(BaseSettings):
     LLM_BRAIN_MODEL: str = ""
     # Автоматически unload brain при start_recording (освобождает память для STT).
     LLM_BRAIN_UNLOAD_ON_RECORDING: bool = True
-    # Автоматически pre-load brain при stop_recording (warm для VA conversation).
-    LLM_BRAIN_PRELOAD_ON_STOP: bool = True
+    # C1 holdoff: не поднимать 15+ ГБ обратно после стопа / ручной выгрузки.
+    LLM_BRAIN_PRELOAD_ON_STOP: bool = False
 
     # Авто-резервное копирование
     AUTO_BACKUP_ENABLED: bool = True
@@ -1248,6 +1248,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # TTL одного lease в секундах. Краш процесса не «вешает» lock: следующий acquire
     # заберёт лиз по истёкшему TTL. 30 с достаточно для recording цикла.
     "llm_brain_lease_ttl_sec": 30.0,
+    # C1 holdoff: ключи brain в схеме, чтобы get/set_settings их видели.
+    # Preload на стопе ВЫКЛЮЧЕН — не возвращаем 15+ ГБ после ручной выгрузки.
+    "llm_brain_model": "qwen/qwen3.6-27b",
+    "llm_brain_unload_on_recording": True,
+    "llm_brain_preload_on_stop": False,
     # --- STT model download stall timeout (backend/model_downloader.py) ---
     # Сколько секунд без прогресса (новых байт) считается «зависанием» загрузки.
     # По истечении загрузка прерывается с status="error"/reason="stalled".

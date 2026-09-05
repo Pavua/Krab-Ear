@@ -13,6 +13,22 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backend.llm_rewriter import LLMRewriter
 
+_LOADED_PROBE = None
+
+
+def setUpModule():
+    """C1: summarize probes Studio catalog. Unknown (None) → старый HTTP-путь."""
+    global _LOADED_PROBE
+    _LOADED_PROBE = patch(
+        "backend.lm_studio_lifecycle.probe_loaded_chat_models",
+        return_value=None,
+    )
+    _LOADED_PROBE.start()
+
+
+def tearDownModule():
+    _LOADED_PROBE.stop()
+
 
 def _mock_ok_response(content: str):
     resp = MagicMock()
