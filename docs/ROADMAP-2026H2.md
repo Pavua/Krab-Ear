@@ -2363,3 +2363,13 @@ Source-контракт тест ловит потерю проводки кат
 1.86 / 0.54-0.60 с против 6.47 / 1.83-2.02 с, текст **побайтово идентичен**.
 Владелец выбрал mlx ради скорости и отдельную волну ради корня — вместо смены
 транспорта как обходного пути.
+
+## 2026-09-05 — память, визуал, brain-holdoff (#1997–#1999)
+
+Оперативный фронт: [`NOW.md`](NOW.md). Горизонт: [`design-briefs/2026-09-05-horizon-plan.md`](design-briefs/2026-09-05-horizon-plan.md).
+
+- **#1997** — сенсор давления: Darwin `warning=1` + своп у потолка = distress; голый SIGKILL воркера → `stt.worker_killed`, не ложный `mlx.oom`. `memory_conductor_enforce*` OFF.
+- **#1998** — agy Gemini 3.1 Pro High: Call Observer / CD-ритм / оверлей. Агент relaunch, подпись Krab Ear Dev Local.
+- **#1999** — C1: стоп/rewriter/summarize не `lms load` на пустом Studio; облако только если Studio **недоступен** (`cloud_rewriter_enabled` всё ещё OFF). 15+ ГБ слот — у Краба (`gemma-4-26b`); `enforce_brain` никогда.
+- Q2 (RIS/SergeyRG, панель :8080) — не Ear: `ANTIGRAVITY_HANDOFF/2026-09-05-krab-8080-model-routing.md`.
+- Следующее в NOW: **C2** вырезать мёртвый Telnyx UI.

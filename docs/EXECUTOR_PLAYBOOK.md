@@ -30,6 +30,7 @@ cd .worktrees/<slug>
 - `BackendService(...)` в тесте → `service.close()` в `tearDown`.
 - Не наследовать `threading.Thread` в тест-стабах, если `start()` не зовёт `super().start()`.
 - Секреты (`lens_keys.env`, `hf_token`, `gh auth token`) использовать, **не печатать**.
+- **Brain / GPU (2026-09-05):** никогда `memory_conductor_enforce*` / `enforce_brain`. Ear не `lms load` / `load_model_*` на `llm_brain_model` без явной политики владельца; пустой каталог LM Studio ≠ недоступность Studio. Политика — [`NOW.md`](NOW.md) §brain.
 
 ## 2. Режим Cursor и модель
 

@@ -110,6 +110,9 @@ make sign
 - **Рестарт прод-бэкенда — только `scripts/safe_backend_restart.command`**:
   голый `launchctl kickstart -k` под активной записью теряет диктовку
   безвозвратно (аудио живёт в памяти процесса).
+- **LM Studio / brain (2026-09-05):** 15+ ГБ — общий слот Краба (gemma-26B), не autoload
+  Ear во время Cursor/диктовки; `enforce_brain` никогда; пустой каталог ≠ Studio down.
+  Канон — [`docs/NOW.md`](docs/NOW.md) §brain; Q2 Main Krab — `ANTIGRAVITY_HANDOFF/2026-09-05-krab-8080-model-routing.md`.
 - **GigaAM subprocess** — воркер живёт в отдельном venv
   (`~/.venv_krab_ear_gigaam`), общение через stdin/stdout JSON. Смерть в
   простое (не во время запроса) исторически была невидима для диагностики —

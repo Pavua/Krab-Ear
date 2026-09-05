@@ -6,7 +6,8 @@
 
 - Репозиторий: [Pavua/Krab-Ear](https://github.com/Pavua/Krab-Ear)
 - Прод-колея: **`origin/codex/krab-ear-v2`**
-- **HEAD:** `330bca9b` — #1999 C1 brain-holdoff + cloud при Studio down; backend перезапущен (pid 7659)
+- **Прод-код:** `330bca9b` — #1999 C1 brain-holdoff + cloud при Studio down
+- Backend pid **11891** (safe restart после #1999), агент pid **41353** (#1998, Krab Ear Dev Local)
 - Worktree: `git worktree add .worktrees/<slug> -b feat/<slug> origin/codex/krab-ear-v2`
 - Main Krab Q2 (:8080 purpose slots, RIS/SergeyRG) — **не Ear**: [`ANTIGRAVITY_HANDOFF/2026-09-05-krab-8080-model-routing.md`](../ANTIGRAVITY_HANDOFF/2026-09-05-krab-8080-model-routing.md)
 
