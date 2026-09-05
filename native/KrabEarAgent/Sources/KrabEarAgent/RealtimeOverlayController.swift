@@ -119,7 +119,7 @@ public final class RealtimeOverlayController: NSObject {
     private let modeLabel    = NSTextField(labelWithString: "—")
 
     /// 4a: Recording indicator dot (red, CABasicAnimation pulse)
-    private let recordingDot = NSView()
+    private let recordingDot = NSBox()
     private let recordingDotHalo = CALayer()
 
     /// 4c: Stage badge (pill) для reveal animation ("Распознано" / "Очищено" / "LLM")
@@ -411,9 +411,11 @@ public final class RealtimeOverlayController: NSObject {
         modeLabel.translatesAutoresizingMaskIntoConstraints = false
 
         // 4a: Recording dot
+        recordingDot.boxType = .custom
+        recordingDot.borderType = .noBorder
+        recordingDot.fillColor = KrabEarTheme.Colors.error
         recordingDot.wantsLayer = true
         recordingDot.layer?.cornerRadius = 4 // 8x8 dot
-        recordingDot.layer?.backgroundColor = KrabEarTheme.Colors.error.cgColor
         recordingDot.isHidden = true
         recordingDot.translatesAutoresizingMaskIntoConstraints = false
 
@@ -467,7 +469,6 @@ public final class RealtimeOverlayController: NSObject {
     // MARK: - Animations
 
     private func animateShow() {
-        // M1: fade-in 250 ms, easeInEaseOut. Reduce-motion: instant.
         if reduceMotion {
             panel.alphaValue = targetAlpha
             return
@@ -479,83 +480,71 @@ public final class RealtimeOverlayController: NSObject {
         }
         panel.alphaValue = 0
 
-        NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = 0.25
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            ctx.allowsImplicitAnimation = true
-            panel.animator().alphaValue = targetAlpha
-            panel.contentView?.layer?.transform = CATransform3DIdentity
-        })
+        KrabEarTheme.Motion.animate(
+            duration: 0.25,
+            easing: KrabEarTheme.Motion.Easing.easeInOut
+        ) {
+            self.panel.animator().alphaValue = self.targetAlpha
+            self.panel.contentView?.layer?.transform = CATransform3DIdentity
+        }
     }
 
     private func animateHide(completion: @escaping @Sendable () -> Void) {
-        // M1: fade-out 350 ms, easeInEaseOut. Reduce-motion: instant.
         if reduceMotion {
             panel.alphaValue = 0
             completion()
             return
         }
-        NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = 0.35
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            ctx.allowsImplicitAnimation = true
-            panel.animator().alphaValue = 0
-            if let layer = panel.contentView?.layer {
+        
+        KrabEarTheme.Motion.animate(
+            duration: 0.35,
+            easing: KrabEarTheme.Motion.Easing.easeInOut
+        ) {
+            self.panel.animator().alphaValue = 0
+            if let layer = self.panel.contentView?.layer {
                 var t = CATransform3DIdentity
                 t = CATransform3DScale(t, 0.96, 0.96, 1.0)
                 t = CATransform3DTranslate(t, 0, 8, 0)
                 layer.transform = t
             }
-        }, completionHandler: {
-            Task { @MainActor in completion() }
-        })
+        }
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            completion()
+        }
     }
 
     // MARK: - 4a / M3: Recording Dot Pulse (CABasicAnimation)
     // M3: pulse range 0.4↔1.0 per spec (was 1.0→0.2 which looked like blinking-off).
-    // 1.5 s period (0.75 s per half), autoreverses, reduce-motion skipped.
 
     private func startDotPulse() {
         guard !reduceMotion else {
-            recordingDot.layer?.opacity = 1.0
+            recordingDotHalo.opacity = 1.0
             return
         }
-        recordingDot.layer?.removeAnimation(forKey: dotPulseKey)
+        recordingDotHalo.removeAnimation(forKey: dotPulseKey)
 
         let pulse = CABasicAnimation(keyPath: "opacity")
-        pulse.fromValue = 0.4   // M3: min opacity (was 1.0)
-        pulse.toValue   = 1.0   // M3: max opacity (was 0.2)
-        pulse.duration  = 0.75  // half-period → 1.5 s full cycle
+        pulse.fromValue = 0.4
+        pulse.toValue   = 1.0
+        pulse.duration  = KrabEarTheme.Motion.Duration.long
         pulse.autoreverses   = true
         pulse.repeatCount    = .infinity
-        pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        pulse.timingFunction = KrabEarTheme.Motion.Easing.easeInOut
 
-        recordingDot.layer?.add(pulse, forKey: dotPulseKey)
+        recordingDotHalo.add(pulse, forKey: dotPulseKey)
     }
 
     private func stopDotPulse() {
-        recordingDot.layer?.removeAnimation(forKey: dotPulseKey)
-        recordingDot.layer?.opacity = 1.0
+        recordingDotHalo.removeAnimation(forKey: dotPulseKey)
+        recordingDotHalo.opacity = 1.0
     }
 
     // MARK: - 4d: Label Pulse (CABasicAnimation, replaces pulseTimer)
+    // Removed per visual polish pack
 
     private func startLabelPulse() {
-        guard !reduceMotion else {
-            primaryLabel.layer?.opacity = 1.0
-            return
-        }
-        primaryLabel.layer?.removeAnimation(forKey: labelPulseKey)
-
-        let pulse = CABasicAnimation(keyPath: "opacity")
-        pulse.fromValue = 1.0
-        pulse.toValue   = 0.65
-        pulse.duration  = KrabEarTheme.Motion.Duration.long
-        pulse.autoreverses  = true
-        pulse.repeatCount   = .infinity
-        pulse.timingFunction = KrabEarTheme.Motion.Easing.easeInOut
-
-        primaryLabel.layer?.add(pulse, forKey: labelPulseKey)
+        primaryLabel.layer?.opacity = 1.0
     }
 
     private func stopLabelPulse() {

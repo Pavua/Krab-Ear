@@ -173,6 +173,7 @@ extension HistoryPanelController {
     private func rebuildWebhookCard(webhooks: [[String: Any]]) {
         guard let card = objc_getAssociatedObject(self, &WebhookManagerAssocKeys.sectionCard) as? NSView else { return }
 
+        let isCD = card is CDSettingsCardView
         let stack = (card as? ThemeCardView)?.contentStackView ?? (card as? CDSettingsCardView)?.contentStackView
         guard let contentStack = stack else { return }
         let arrangedViews = contentStack.arrangedSubviews
@@ -182,7 +183,13 @@ extension HistoryPanelController {
             v.removeFromSuperview()
         }
 
-        let subhead = makeSubhead("ЗАРЕГИСТРИРОВАННЫЕ WEBHOOKS")
+        let subhead = isCD ? NSTextField(labelWithString: "ЗАРЕГИСТРИРОВАННЫЕ WEBHOOKS") : makeSubhead("ЗАРЕГИСТРИРОВАННЫЕ WEBHOOKS")
+        if isCD {
+            subhead.font = KrabEarTheme.Typography.captionMedium
+            subhead.textColor = KrabEarTheme.Colors.textSecondary
+            subhead.isBordered = false
+            subhead.drawsBackground = false
+        }
         contentStack.addArrangedSubview(subhead)
 
         if webhooks.isEmpty {
@@ -191,7 +198,7 @@ extension HistoryPanelController {
             empty.textColor = KrabEarTheme.Colors.textSecondary
             contentStack.addArrangedSubview(empty)
         } else {
-            for webhook in webhooks {
+            for (index, webhook) in webhooks.enumerated() {
                 guard let id = webhook["webhook_id"] as? String,
                       let url = webhook["url"] as? String else { continue }
                 
@@ -201,6 +208,10 @@ extension HistoryPanelController {
                 let failures = webhook["failures"] as? Int ?? 0
                 let lastStatus = webhook["last_status"] as? Int
                 
+                if isCD && index > 0 {
+                    contentStack.addArrangedSubview(cdMakeSeparator())
+                }
+                
                 let row = makeWebhookRow(
                     id: id,
                     url: url,
@@ -208,7 +219,8 @@ extension HistoryPanelController {
                     hasSecret: hasSecret,
                     deliveries: deliveries,
                     failures: failures,
-                    lastStatus: lastStatus
+                    lastStatus: lastStatus,
+                    isCD: isCD
                 )
                 contentStack.addArrangedSubview(row)
             }
@@ -216,9 +228,9 @@ extension HistoryPanelController {
     }
 
     @MainActor
-    private func makeWebhookRow(id: String, url: String, events: [String], hasSecret: Bool, deliveries: Int, failures: Int, lastStatus: Int?) -> NSView {
+    private func makeWebhookRow(id: String, url: String, events: [String], hasSecret: Bool, deliveries: Int, failures: Int, lastStatus: Int?, isCD: Bool = false) -> NSView {
         let urlLabel = NSTextField(labelWithString: url)
-        urlLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        urlLabel.font = isCD ? KrabEarTheme.Typography.body : NSFont.systemFont(ofSize: 13, weight: .medium)
         urlLabel.textColor = KrabEarTheme.Colors.textPrimary
         urlLabel.lineBreakMode = .byTruncatingMiddle
         urlLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -245,7 +257,7 @@ extension HistoryPanelController {
 
         var badges: [NSView] = []
         if hasSecret {
-            let badge = makeBadge(text: "Секрет", color: KrabEarTheme.Colors.accent, tooltip: "Используется HMAC подпись", symbol: "lock.fill")
+            let badge = isCD ? cdMakeBadge(text: "Секрет", color: KrabEarTheme.Colors.accent) : makeBadge(text: "Секрет", color: KrabEarTheme.Colors.accent, tooltip: "Используется HMAC подпись", symbol: "lock.fill")
             badges.append(badge)
         }
 
@@ -259,7 +271,7 @@ extension HistoryPanelController {
             statusColor = KrabEarTheme.Colors.textSecondary
         }
         
-        let statusBadge = makeBadge(text: statusText, color: statusColor, tooltip: "HTTP-статус последней доставки", symbol: nil)
+        let statusBadge = isCD ? cdMakeBadge(text: statusText, color: statusColor) : makeBadge(text: statusText, color: statusColor, tooltip: "HTTP-статус последней доставки", symbol: nil)
         badges.append(statusBadge)
 
         let deleteButton = NSButton(frame: .zero)

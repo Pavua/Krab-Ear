@@ -38,10 +38,12 @@ private final class AllSettingsRow {
     let key: String
     let view: NSView
     let haystack: String
-    init(key: String, view: NSView, haystack: String) {
+    var separator: NSView?
+    init(key: String, view: NSView, haystack: String, separator: NSView? = nil) {
         self.key = key
         self.view = view
         self.haystack = haystack
+        self.separator = separator
     }
 }
 
@@ -151,11 +153,20 @@ extension HistoryPanelController {
             stack.removeArrangedSubview(view)
             view.removeFromSuperview()
         }
+        
+        let isCD = UserDefaults.standard.useClaudeDesignVariant
+        stack.spacing = isCD ? KrabEarTheme.Metrics.tight : 2
+        
         var rows: [AllSettingsRow] = []
         // `settings` — вложенное эхо всего словаря, не настройка: показывать его
         // строкой значило бы предложить редактировать сам ответ.
         for key in values.keys.sorted() where key != "settings" && key != "ok" {
-            guard let row = makeAllSettingsRow(key: key, value: values[key]) else { continue }
+            guard let row = makeAllSettingsRow(key: key, value: values[key], isCD: isCD) else { continue }
+            if isCD {
+                let sep = cdMakeSeparator()
+                row.separator = sep
+                stack.addArrangedSubview(sep)
+            }
             rows.append(row)
             stack.addArrangedSubview(row.view)
         }
@@ -164,7 +175,7 @@ extension HistoryPanelController {
         applyAllSettingsFilter()
     }
 
-    private func makeAllSettingsRow(key: String, value: Any?) -> AllSettingsRow? {
+    private func makeAllSettingsRow(key: String, value: Any?, isCD: Bool) -> AllSettingsRow? {
         let control: NSView
         if Self.isSecretSettingKey(key) {
             let text = (value as? String) ?? ""
@@ -194,7 +205,14 @@ extension HistoryPanelController {
             label.widthAnchor.constraint(equalToConstant: 220).isActive = true
             control = label
         }
-        let view = makeSettingRow(label: key, description: nil, control: control)
+        
+        let view: NSView
+        if isCD {
+            view = cdMakeRow(label: key, control: control)
+        } else {
+            view = makeSettingRow(label: key, description: nil, control: control)
+        }
+        
         return AllSettingsRow(key: key, view: view, haystack: key.lowercased())
     }
 
@@ -209,14 +227,22 @@ extension HistoryPanelController {
         else { return }
         let field = objc_getAssociatedObject(self, &AllSettingsAssocKeys.searchField) as? NSSearchField
         let query = (field?.stringValue ?? "").trimmingCharacters(in: .whitespaces).lowercased()
-        var shown = 0
+        var shownRows: [AllSettingsRow] = []
         for row in rows {
             let visible = query.isEmpty || row.haystack.contains(query)
             row.view.isHidden = !visible
-            if visible { shown += 1 }
+            row.separator?.isHidden = true // hide all initially
+            if visible { shownRows.append(row) }
         }
+        
+        for (index, row) in shownRows.enumerated() {
+            if index > 0 {
+                row.separator?.isHidden = false
+            }
+        }
+        
         if !query.isEmpty {
-            allSettingsStatusLabel?.stringValue = "Найдено: \(shown) из \(rows.count)"
+            allSettingsStatusLabel?.stringValue = "Найдено: \(shownRows.count) из \(rows.count)"
         } else {
             allSettingsStatusLabel?.stringValue = "Настроек: \(rows.count)"
         }
@@ -271,8 +297,10 @@ extension HistoryPanelController {
             title: "Обновить", target: self, action: #selector(onAllSettingsReload)
         )
         
-        let headerRow = cdMakeRow(label: "Поиск и обновление", control: NSStackView(views: [searchField, reloadButton]))
-        (headerRow.subviews.last as? NSStackView)?.spacing = KrabEarTheme.Metrics.tight
+        let headerRow = NSStackView(views: [searchField, reloadButton])
+        headerRow.orientation = .horizontal
+        headerRow.alignment = .centerY
+        headerRow.spacing = KrabEarTheme.Metrics.standard
         searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         
         let statusLabel = NSTextField(labelWithString: "Раскройте секцию, чтобы загрузить список")

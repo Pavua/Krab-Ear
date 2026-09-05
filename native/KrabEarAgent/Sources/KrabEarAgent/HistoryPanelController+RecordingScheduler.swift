@@ -172,6 +172,7 @@ extension HistoryPanelController {
     private func rebuildSchedulerCard(schedules: [[String: Any]]) {
         guard let card = objc_getAssociatedObject(self, &RecordingSchedulerAssocKeys.sectionCard) as? NSView else { return }
 
+        let isCD = card is CDSettingsCardView
         let stack = (card as? ThemeCardView)?.contentStackView ?? (card as? CDSettingsCardView)?.contentStackView
         guard let contentStack = stack else { return }
         let arrangedViews = contentStack.arrangedSubviews
@@ -181,7 +182,13 @@ extension HistoryPanelController {
             v.removeFromSuperview()
         }
 
-        let subhead = makeSubhead("ОЖИДАЮЩИЕ ЗАПИСИ")
+        let subhead = isCD ? NSTextField(labelWithString: "ОЖИДАЮЩИЕ ЗАПИСИ") : makeSubhead("ОЖИДАЮЩИЕ ЗАПИСИ")
+        if isCD {
+            subhead.font = KrabEarTheme.Typography.captionMedium
+            subhead.textColor = KrabEarTheme.Colors.textSecondary
+            subhead.isBordered = false
+            subhead.drawsBackground = false
+        }
         contentStack.addArrangedSubview(subhead)
 
         let pendingSchedules = schedules.filter { ($0["status"] as? String) == "pending" }
@@ -206,7 +213,7 @@ extension HistoryPanelController {
             displayFormatter.dateStyle = .medium
             displayFormatter.timeStyle = .short
 
-            for schedule in sortedSchedules {
+            for (index, schedule) in sortedSchedules.enumerated() {
                 guard let id = schedule["id"] as? String,
                       let startTimeStr = schedule["start_time"] as? String,
                       let durationSec = schedule["duration_sec"] as? Int else { continue }
@@ -219,16 +226,21 @@ extension HistoryPanelController {
                 }
                 
                 let durationMin = durationSec / 60
-                let row = makeScheduleRow(id: id, displayTime: displayTime, durationMin: durationMin, label: label)
+                
+                if isCD && index > 0 {
+                    contentStack.addArrangedSubview(cdMakeSeparator())
+                }
+                
+                let row = makeScheduleRow(id: id, displayTime: displayTime, durationMin: durationMin, label: label, isCD: isCD)
                 contentStack.addArrangedSubview(row)
             }
         }
     }
 
     @MainActor
-    private func makeScheduleRow(id: String, displayTime: String, durationMin: Int, label: String) -> NSView {
+    private func makeScheduleRow(id: String, displayTime: String, durationMin: Int, label: String, isCD: Bool = false) -> NSView {
         let timeLabel = NSTextField(labelWithString: "\(displayTime) (\(durationMin) мин)")
-        timeLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        timeLabel.font = isCD ? KrabEarTheme.Typography.body : NSFont.systemFont(ofSize: 13, weight: .medium)
         timeLabel.textColor = KrabEarTheme.Colors.textPrimary
         timeLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
@@ -244,10 +256,17 @@ extension HistoryPanelController {
         textStack.spacing = 2
         textStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        let cancelButton = NSButton(title: "Отменить", target: self, action: #selector(onCancelScheduledRecording(_:)))
-        cancelButton.bezelStyle = .inline
-        cancelButton.identifier = NSUserInterfaceItemIdentifier(id)
-        cancelButton.setContentHuggingPriority(.required, for: .horizontal)
+        let cancelButton: NSButton
+        if isCD {
+            cancelButton = ThemeSecondaryButton(title: "Отменить", target: self, action: #selector(onCancelScheduledRecording(_:)))
+            cancelButton.identifier = NSUserInterfaceItemIdentifier(id)
+            cancelButton.setContentHuggingPriority(.required, for: .horizontal)
+        } else {
+            cancelButton = NSButton(title: "Отменить", target: self, action: #selector(onCancelScheduledRecording(_:)))
+            cancelButton.bezelStyle = .inline
+            cancelButton.identifier = NSUserInterfaceItemIdentifier(id)
+            cancelButton.setContentHuggingPriority(.required, for: .horizontal)
+        }
 
         let row = NSStackView(views: [textStack, cancelButton])
         row.orientation = .horizontal

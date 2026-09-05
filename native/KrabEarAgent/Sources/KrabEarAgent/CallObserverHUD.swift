@@ -9,7 +9,7 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
     private var panel: NSPanel?
     private let statusDot = NSBox()
     private let statusLabel = NSTextField(labelWithString: "")
-    private let badgesLabel = NSTextField(labelWithString: "")
+    private let badgesStack = NSStackView()
     private let linesLabel = NSTextField(wrappingLabelWithString: "")
     private let listenButton = ThemeButton()
     private let hangupButton = ThemeButton()
@@ -43,18 +43,50 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
                    listenState: CallAudioPlayer.ListenState, listeningSessionId: String?) {
         let statusLower = status.lowercased()
         if statusLower.contains("ring") {
-            statusDot.fillColor = .systemYellow
+            statusDot.fillColor = KrabEarTheme.Colors.warning
         } else if statusLower.contains("end") {
-            statusDot.fillColor = .systemGray
+            statusDot.fillColor = KrabEarTheme.Colors.textDisabled
         } else {
-            statusDot.fillColor = .systemGreen
+            statusDot.fillColor = KrabEarTheme.Colors.success
+        }
+        
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if reduceMotion {
+            statusDot.layer?.removeAnimation(forKey: "pulse")
+            statusDot.layer?.opacity = 1.0
+        } else if statusDot.layer?.animation(forKey: "pulse") == nil {
+            let anim = CABasicAnimation(keyPath: "opacity")
+            anim.fromValue = 1.0
+            anim.toValue = 0.4
+            anim.duration = KrabEarTheme.Motion.Duration.long
+            anim.autoreverses = true
+            anim.repeatCount = .infinity
+            anim.timingFunction = KrabEarTheme.Motion.Easing.easeInOut
+            statusDot.layer?.add(anim, forKey: "pulse")
         }
         
         var badges = [String]()
         if statusLower.contains("mute") { badges.append("mute") }
         if statusLower.contains("hold") { badges.append("hold") }
-        badgesLabel.stringValue = badges.isEmpty ? "" : "· " + badges.joined(separator: " ")
-        badgesLabel.isHidden = badges.isEmpty
+        
+        badgesStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        for badge in badges {
+            let label = NSTextField(labelWithString: badge.uppercased())
+            label.font = KrabEarTheme.Typography.captionMedium
+            label.textColor = KrabEarTheme.Colors.textSecondary
+            label.isBordered = false
+            label.drawsBackground = false
+            
+            let box = NSBox()
+            box.boxType = .custom
+            box.borderType = .noBorder
+            box.fillColor = KrabEarTheme.Colors.border
+            box.cornerRadius = 6
+            box.contentView = label
+            box.contentViewMargins = NSSize(width: 4, height: 1)
+            badgesStack.addArrangedSubview(box)
+        }
+        badgesStack.isHidden = badges.isEmpty
 
         if lastEntries.isEmpty {
             linesLabel.stringValue = "· ждём реплик…"
@@ -77,7 +109,7 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
         // T9 (2г): зелёный индикатор — только если реально слушаем ИМЕННО эту
         // карточку (listeningSessionId может отставать от hudTrackedId).
         let isListeningThisCall = listeningSessionId == session.id && listenState == .listening
-        listenButton.contentTintColor = isListeningThisCall ? .systemGreen : KrabEarTheme.Colors.textSecondary
+        listenButton.contentTintColor = isListeningThisCall ? KrabEarTheme.Colors.success : KrabEarTheme.Colors.textSecondary
         listenButton.toolTip = listenState == .subscriberLimit
             ? "Лимит слушателей VG — попробуйте ещё раз" : "Слушать звонок"
     }
@@ -124,7 +156,7 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
         statusDot.boxType = .custom
         statusDot.borderType = .noBorder
         statusDot.wantsLayer = true
-        statusDot.layer?.cornerRadius = 4
+        statusDot.layer?.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
         NSLayoutConstraint.activate([
             statusDot.widthAnchor.constraint(equalToConstant: 8),
             statusDot.heightAnchor.constraint(equalToConstant: 8)
@@ -132,8 +164,9 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
 
         statusLabel.textColor = KrabEarTheme.Colors.textPrimary
         statusLabel.font = KrabEarTheme.Typography.captionMedium
-        badgesLabel.textColor = KrabEarTheme.Colors.textSecondary
-        badgesLabel.font = KrabEarTheme.Typography.captionMedium
+        
+        badgesStack.orientation = .horizontal
+        badgesStack.spacing = KrabEarTheme.Metrics.tight
         
         linesLabel.textColor = KrabEarTheme.Colors.textSecondary
         linesLabel.font = KrabEarTheme.Typography.body
@@ -151,11 +184,11 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
 
         let buttons = NSStackView(views: [listenButton, hangupButton, closeButton])
         buttons.orientation = .horizontal
-        buttons.spacing = 2
+        buttons.spacing = KrabEarTheme.Metrics.tight
         
-        let statusStack = NSStackView(views: [statusDot, statusLabel, badgesLabel])
+        let statusStack = NSStackView(views: [statusDot, statusLabel, badgesStack])
         statusStack.orientation = .horizontal
-        statusStack.spacing = 6
+        statusStack.spacing = KrabEarTheme.Metrics.standard
         statusStack.alignment = .centerY
         
         let topRow = NSStackView(views: [statusStack, NSView(), buttons])
@@ -166,8 +199,8 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
         let stack = NSStackView(views: [topRow, linesLabel])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 4
-        stack.edgeInsets = NSEdgeInsets(top: 12, left: 16, bottom: 12, right: 16)
+        stack.spacing = KrabEarTheme.Metrics.itemSpacing
+        stack.edgeInsets = NSEdgeInsets(top: KrabEarTheme.Metrics.cardPadding, left: 16, bottom: KrabEarTheme.Metrics.cardPadding, right: 16)
         stack.translatesAutoresizingMaskIntoConstraints = false
         
         content.addSubview(stack)
@@ -253,6 +286,8 @@ private class HUDBackdropView: NSVisualEffectView {
         layer?.cornerCurve = .continuous
         layer?.masksToBounds = true
         layer?.borderWidth = 1.0
+        
+        if let l = layer { KrabEarTheme.Elevation.applyCard(to: l) }
         
         bgLayer.backgroundColor = KrabEarTheme.Colors.cardBackground.cgColor
         layer?.insertSublayer(bgLayer, at: 0)
