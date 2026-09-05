@@ -200,7 +200,16 @@ class CooldownVerifyTest(unittest.TestCase):
     выгружать при enforce."""
 
     def test_verified_success_burns_cooldown(self):
-        c = _mk(pressure=0, model_loaded=False, stt_ts=0.0)
+        # stt_ts=0.0 зелёный только если monotonic > rewriter_idle_unload_sec
+        # (домашний Mac с аптаймом суток). Свежая ubuntu-VM CI — минуты,
+        # idle < 1800с, unload не зовётся. Якорь от monotonic + короткий порог.
+        now = time.monotonic()
+        c = _mk(
+            _settings(rewriter_idle_unload_sec=1.0),
+            pressure=0,
+            model_loaded=False,
+            stt_ts=now - 10.0,
+        )
         c.tick_once()
         c.wait_workers(2.0)
         self.assertEqual(c.unload_model_fn.call_count, 1)
@@ -209,7 +218,12 @@ class CooldownVerifyTest(unittest.TestCase):
         self.assertEqual(c.unload_model_fn.call_count, 1, "cooldown не удержал")
 
     def test_verify_unknown_does_not_burn_cooldown(self):
-        c = _mk(pressure=0, stt_ts=0.0)
+        now = time.monotonic()
+        c = _mk(
+            _settings(rewriter_idle_unload_sec=1.0),
+            pressure=0,
+            stt_ts=now - 10.0,
+        )
         c.model_loaded_fn.return_value = None
         c.tick_once()
         c.wait_workers(2.0)
