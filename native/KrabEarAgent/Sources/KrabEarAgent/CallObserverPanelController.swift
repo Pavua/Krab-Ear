@@ -6,6 +6,7 @@ import AppKit
 final class CallObserverPanelController: NSWindowController, CallObserverPanelPresenting {
     weak var coordinator: CallObserverCoordinator?
 
+    private let inContentTitleLabel = NSTextField(labelWithString: "Звонок агента")
     private let stateBadgeBox = NSBox()
     private let stateBadge = NSTextField(labelWithString: "")
     private let costLabel = NSTextField(labelWithString: "—")
@@ -31,7 +32,9 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
     }
 
     func showPanel(session: VGSessionInfo) {
-        window?.title = "Звонок агента · \(session.phone.isEmpty ? session.id : session.phone)"
+        let titleText = "Звонок агента · \(session.phone.isEmpty ? session.id : session.phone)"
+        window?.title = titleText
+        inContentTitleLabel.stringValue = titleText
         // State-бейдж (live/terminal) задаёт ТОЛЬКО координатор — showPanel его не трогает,
         // иначе открытие панели по терминальной сессии перетёрло бы setTerminal.
         showWindow(nil)
@@ -205,6 +208,18 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
     private func buildUI() {
         guard let content = window?.contentView else { return }
         if let win = window { KrabEarTheme.applyTheme(to: win) }
+
+        // Как MeetingLivePanel / QuickCapture: `.titled` даёт крестик,
+        // titleVisibility=.hidden убирает native title из прозрачного titlebar
+        // (иначе «Звонок агента · +номер» рисуется поверх бейджа).
+        window?.titleVisibility = .hidden
+        
+        inContentTitleLabel.font = KrabEarTheme.Typography.sectionTitle
+        inContentTitleLabel.textColor = KrabEarTheme.Colors.textPrimary
+        inContentTitleLabel.lineBreakMode = .byTruncatingTail
+        inContentTitleLabel.maximumNumberOfLines = 1
+        inContentTitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        inContentTitleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         
         listenButton.image = NSImage(systemSymbolName: "speaker.wave.2", accessibilityDescription: "Слушать")
         listenButton.title = ""
@@ -249,11 +264,13 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
             stateBadge.trailingAnchor.constraint(equalTo: stateBadgeBox.trailingAnchor, constant: -6)
         ])
 
-        let header = NSStackView(views: [stateBadgeBox, sessionPicker, NSView(), costAlertLabel,
+        let header = NSStackView(views: [inContentTitleLabel, stateBadgeBox, sessionPicker, NSView(), costAlertLabel,
                                          costLabel, listenButton, hangupButton])
         header.orientation = .horizontal
+        header.alignment = .centerY
         header.edgeInsets = NSEdgeInsets(top: 12, left: 16, bottom: 8, right: 16)
         header.spacing = 8
+        stateBadgeBox.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         transcriptStack.orientation = .vertical
         transcriptStack.alignment = .leading
@@ -269,8 +286,10 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
         root.orientation = .vertical
         root.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(root)
+        
+        let topAnchor = (window?.contentLayoutGuide as? NSLayoutGuide)?.topAnchor ?? content.topAnchor
         NSLayoutConstraint.activate([
-            root.topAnchor.constraint(equalTo: content.topAnchor),
+            root.topAnchor.constraint(equalTo: topAnchor),
             root.bottomAnchor.constraint(equalTo: content.bottomAnchor),
             root.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             root.trailingAnchor.constraint(equalTo: content.trailingAnchor),
@@ -301,6 +320,8 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
 
     // MARK: Test hooks
     var testHook_stateBadgeText: String { stateBadge.stringValue }
+    var testHook_inContentTitleLabel: NSTextField { inContentTitleLabel }
+    var testHook_stateBadgeBox: NSBox { stateBadgeBox }
     var testHook_transcriptPlainText: String {
         transcriptStack.arrangedSubviews
             .compactMap { view -> String? in
