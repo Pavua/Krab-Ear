@@ -1267,9 +1267,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "stt_timeout_batch_max_sec": 3600.0,
     "stt_timeout_request_attempts": 4.0,
     # --- Cloud rewriter fallback (backend/cloud_rewriter.py) ---
-    # PRIVACY-SENSITIVE: когда включён, транскрипт отправляется в облако.
-    # Opt-in: False по умолчанию — пользователь должен явно включить.
-    # privacy_mode_enabled=True ВСЕГДА блокирует (engine._cloud_rewrite_allowed).
+    # PRIVACY-SENSITIVE: когда включён, транскрипт может уйти в облако.
+    # Opt-in: False по умолчанию. privacy_mode_enabled=True ВСЕГДА блокирует.
+    # Семантика 2026-09-05: Studio сначала всегда. Cloud ТОЛЬКО если Studio
+    # недостижим (connection/timeout), НЕ если каталог пуст (C1 extractive,
+    # без lms load). Тот же ключ — не плодить второй флаг.
     "cloud_rewriter_enabled": False,
     # Провайдер: "openai" | "anthropic" | "custom"
     "cloud_rewriter_provider": "openai",

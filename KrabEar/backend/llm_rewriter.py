@@ -265,6 +265,30 @@ _CHATBOT_MARKERS = (
 )
 
 
+# Cloud-fallback только когда Studio недостижим (сеть/таймаут).
+# Пустой каталог / HTTP 400 «no models» — НЕ недоступность (C1: extractive, без lms load).
+_STUDIO_UNAVAILABLE_REASONS = frozenset({"timeout", "connection_error"})
+
+
+def is_studio_unavailable(
+    fallback_reason: str | None,
+    last_error: str | None = None,
+) -> bool:
+    """True только если LM Studio не отвечает, не если слот пуст.
+
+    ``circuit_open`` считается недоступностью только когда последняя ошибка
+    была timeout/connection — иначе пустой каталог, открывший circuit,
+    утащил бы транскрипт в облако.
+    """
+    reason = (fallback_reason or "").strip()
+    if reason in _STUDIO_UNAVAILABLE_REASONS:
+        return True
+    if reason == "circuit_open":
+        err = (last_error or "").strip().lower()
+        return err.startswith("timeout") or err.startswith("connection_error")
+    return False
+
+
 @dataclass
 class LLMRewriteResult:
     """Результат попытки rewrite'а. Всегда возвращается, никогда не raises."""
@@ -348,6 +372,73 @@ class LLMRewriter:
             self._idle_keepalive_thread.start()
         else:
             self._idle_keepalive_thread = None
+
+    def _cloud_llm_fallback_allowed(self) -> bool:
+        """Opt-in cloud только при живом токене настроек. Privacy всегда wins.
+
+        Нет getter → закрыто (не слать транскрипт «на всякий случай»).
+        Getter упал → закрыто.
+        """
+        try:
+            getter = self._settings_getter
+            if getter is None:
+                return False
+            if getter("privacy_mode_enabled", False):
+                return False
+            return bool(getter("cloud_rewriter_enabled", False))
+        except Exception:
+            logger.warning("cloud fallback getter raised — failing closed")
+            return False
+
+    def _maybe_apply_cloud_summarize(
+        self,
+        result: LLMRewriteResult,
+        text: str,
+        max_sentences: int,
+    ) -> LLMRewriteResult:
+        """После провала Studio: cloud только если процесс/сеть недоступны."""
+        if result.ok:
+            return result
+        if not self._cloud_llm_fallback_allowed():
+            return result
+        if not is_studio_unavailable(result.fallback_reason, last_error=self._last_error):
+            return result
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return result
+        try:
+            from backend.cloud_rewriter import cloud_summarize  # noqa: PLC0415
+            cloud_text = cloud_summarize(cleaned, max_sentences=max_sentences)
+        except Exception:
+            logger.warning("cloud summarize fallback failed", exc_info=True)
+            return result
+        if not cloud_text:
+            return result
+        try:
+            from backend.privacy_audit import get_privacy_audit_logger  # noqa: PLC0415
+            getter = self._settings_getter
+            provider = "openai"
+            if getter is not None:
+                provider = str(getter("cloud_rewriter_provider", "openai") or "openai")
+            get_privacy_audit_logger().log_event(
+                category="cloud_rewrite",
+                action="cloud_summarize_used",
+                details={
+                    "provider": provider,
+                    "input_chars": len(cleaned),
+                    "output_chars": len(cloud_text),
+                },
+            )
+        except Exception:
+            pass
+        logger.info(
+            "cloud summarize fallback applied: %d→%d chars",
+            len(cleaned),
+            len(cloud_text),
+        )
+        return LLMRewriteResult(
+            ok=True, text=cloud_text, fallback_reason=None, latency_ms=None
+        )
 
     @property
     def _timeout(self) -> float:
@@ -795,10 +886,8 @@ class LLMRewriter:
                 ok=False, text=None, fallback_reason="unauthorized", latency_ms=latency_ms
             )
         # 5c. C1 holdoff: HTTP 400 "No models loaded" больше НЕ делает
-        # `lms load` / load_model_sync. Владелец выгрузил слот намеренно —
-        # Ear не поднимает ни rewriter, ни 15+ ГБ brain. Fall through на
-        # сырой текст / extractive (cloud_rewriter только если уже включён
-        # снаружи, этот путь его не включает).
+        # `lms load` / load_model_sync. Пустой слот ≠ Studio недоступен —
+        # cloud_rewriter на этом пути не вызывается (только timeout/connection).
         _NO_MODELS_PATTERNS = ("no models loaded", "no model", "model not found")
         if response.status_code == 400 and any(
             p in (response.text or "").lower() for p in _NO_MODELS_PATTERNS
@@ -1116,7 +1205,12 @@ class LLMRewriter:
         return result_text
 
     def summarize(self, text: str, max_sentences: int = 3) -> LLMRewriteResult:
-        """Генерирует краткое summary текста через LLM.
+        """Генерирует краткое summary: сначала Studio, cloud только если он недоступен."""
+        result = self._summarize_studio(text, max_sentences=max_sentences)
+        return self._maybe_apply_cloud_summarize(result, text, max_sentences)
+
+    def _summarize_studio(self, text: str, max_sentences: int = 3) -> LLMRewriteResult:
+        """Studio-only summary. Пустой каталог → studio_empty_no_autoload, без lms load.
 
         Контракт: НИКОГДА не raises. Все ошибки — через LLMRewriteResult.ok=False.
         """

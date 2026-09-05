@@ -1,11 +1,14 @@
-"""Cloud rewriter fallback — облачная полировка транскрипта когда LM Studio недоступен.
+"""Cloud rewriter fallback — облако ТОЛЬКО когда LM Studio недоступен.
+
+Пустой каталог Studio ≠ недоступен (C1: extractive / сырой текст, без lms load).
+Cloud — connection/timeout, если cloud_rewriter_enabled и не privacy.
 
 PRIVACY-SENSITIVE: текст пользователя покидает устройство.
 Защиты:
   1. Opt-in: cloud_rewriter_enabled по умолчанию False.
-  2. Privacy gate: privacy_mode_enabled=True ВСЕГДА блокирует (engine.py).
-  3. Audit trail: каждый реальный вызов логируется в PrivacyAuditLogger (engine.py).
-  4. Не сохраняет транскрипт локально — только полирует и возвращает строку.
+  2. Privacy gate: privacy_mode_enabled=True ВСЕГДА блокирует (engine.py / rewriter).
+  3. Audit trail: каждый реальный вызов логируется в PrivacyAuditLogger.
+  4. Не сохраняет транскрипт локально — только полирует/резюмирует и возвращает строку.
 
 Архитектура зеркалирует backend/cloud_stt.py (Protocol + per-provider + stub + caps).
 """
@@ -183,8 +186,8 @@ def _load_settings() -> dict:
 class CloudRewriterProvider(Protocol):
     """Интерфейс облачного провайдера для полировки транскрипта."""
 
-    def rewrite(self, text: str, language: str) -> Dict[str, Any]:
-        """Полирует транскрипт.
+    def rewrite(self, text: str, language: str, system_prompt: Optional[str] = None) -> Dict[str, Any]:
+        """Полирует транскрипт (или выполняет task из system_prompt).
 
         Возвращает:
             {"text": <polished>}  — успех.
@@ -212,7 +215,7 @@ class OpenAIRewriterProvider:
         raw = str((_load_settings() or {}).get(self._MODEL_SETTING, "") or "").strip()
         return raw or self._MODEL
 
-    def rewrite(self, text: str, language: str) -> Dict[str, Any]:
+    def rewrite(self, text: str, language: str, system_prompt: Optional[str] = None) -> Dict[str, Any]:
         api_key = _load_settings().get("openai_api_key", "").strip()
         if not api_key:
             return {
@@ -222,7 +225,7 @@ class OpenAIRewriterProvider:
             }
 
         lang_key = (language or "ru").lower()[:2]
-        system_prompt = _CLEANUP_SYSTEM_PROMPTS.get(lang_key, _DEFAULT_SYSTEM_PROMPT)
+        system_prompt = system_prompt or _CLEANUP_SYSTEM_PROMPTS.get(lang_key, _DEFAULT_SYSTEM_PROMPT)
 
         payload = json.dumps({
             "model": self._model_name(),
@@ -274,7 +277,7 @@ class AnthropicRewriterProvider:
         return raw or self._MODEL
     _API_VERSION = "2023-06-01"
 
-    def rewrite(self, text: str, language: str) -> Dict[str, Any]:
+    def rewrite(self, text: str, language: str, system_prompt: Optional[str] = None) -> Dict[str, Any]:
         api_key = _load_settings().get("anthropic_api_key", "").strip()
         if not api_key:
             return {
@@ -284,7 +287,7 @@ class AnthropicRewriterProvider:
             }
 
         lang_key = (language or "ru").lower()[:2]
-        system_prompt = _CLEANUP_SYSTEM_PROMPTS.get(lang_key, _DEFAULT_SYSTEM_PROMPT)
+        system_prompt = system_prompt or _CLEANUP_SYSTEM_PROMPTS.get(lang_key, _DEFAULT_SYSTEM_PROMPT)
 
         payload = json.dumps({
             "model": self._model_name(),
@@ -337,7 +340,7 @@ class CustomRewriterProvider:
     заголовок Authorization не отправляется. base_url защищён SSRF-гардом.
     """
 
-    def rewrite(self, text: str, language: str) -> Dict[str, Any]:
+    def rewrite(self, text: str, language: str, system_prompt: Optional[str] = None) -> Dict[str, Any]:
         s = _load_settings()
         base_url = s.get("cloud_rewriter_base_url", "").strip()
         if not base_url:
@@ -365,7 +368,7 @@ class CustomRewriterProvider:
         endpoint = _normalize_endpoint(base_url)
 
         lang_key = (language or "ru").lower()[:2]
-        system_prompt = _CLEANUP_SYSTEM_PROMPTS.get(lang_key, _DEFAULT_SYSTEM_PROMPT)
+        system_prompt = system_prompt or _CLEANUP_SYSTEM_PROMPTS.get(lang_key, _DEFAULT_SYSTEM_PROMPT)
 
         payload = json.dumps({
             "model": model,
@@ -487,4 +490,50 @@ def cloud_rewrite(text: str, language: str) -> Optional[str]:
 
     except Exception as e:
         logger.error("cloud_rewrite unexpected error: %s", e, extra={"error": str(e)})
+        return None
+
+
+def cloud_summarize(text: str, max_sentences: int = 3) -> Optional[str]:
+    """Краткое резюме через того же провайдера, что cloud_rewrite.
+
+    PRIVACY CONTRACT: caller обязан проверить privacy_mode_enabled=False
+    AND cloud_rewriter_enabled=True. Сама функция gate не держит.
+
+    Min-ratio рерайта (0.35) здесь НЕ применяется: summary короче входа.
+    Выход длиннее входа отвергается (это уже не резюме).
+    """
+    if not text or not text.strip():
+        return None
+    try:
+        n = max(1, min(int(max_sentences or 3), 8))
+    except (TypeError, ValueError):
+        n = 3
+    prompt = (
+        f"Сделай краткое summary ({n} предложения) этого разговора/диктовки. "
+        "Верни ТОЛЬКО summary. Без пояснений. Без кавычек. Без префиксов."
+    )
+    try:
+        provider_name = _load_settings().get("cloud_rewriter_provider", "openai")
+        provider = get_cloud_rewriter(provider_name)
+        result = provider.rewrite(text, "ru", system_prompt=prompt)
+        if "error" in result:
+            if result["error"] not in ("no_api_key", "no_endpoint", "no_model"):
+                logger.warning(
+                    "Cloud summarize failed: provider=%s error=%s message=%s",
+                    result.get("provider"), result.get("error"), result.get("message", ""),
+                    extra={"provider": result.get("provider"), "error": result.get("error")},
+                )
+            return None
+        out = (result.get("text") or "").strip()
+        if not out:
+            return None
+        if len(text) > 0 and len(out) > len(text):
+            logger.warning(
+                "Cloud summarize rejected (longer than input): in=%d out=%d",
+                len(text), len(out),
+            )
+            return None
+        return out
+    except Exception as e:
+        logger.error("cloud_summarize unexpected error: %s", e, extra={"error": str(e)})
         return None
