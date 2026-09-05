@@ -218,6 +218,19 @@ _BOOL_FIELDS: dict[str, bool] = {
     "quick_capture_obsidian_sync": False,
     "quick_capture_show_panel": False,
     "llm_probe_enabled": True,
+    # C1 holdoff: строка "false" не должна становиться truthy.
+    "llm_brain_preload_on_stop": False,
+    "llm_brain_unload_on_recording": True,
+    "llm_brain_lease_enabled": True,
+    "cloud_rewriter_enabled": False,
+    "mlx_oom_auto_unload_enabled": True,
+    "memory_conductor_enabled": True,
+    "memory_conductor_enforce": False,
+    "memory_conductor_enforce_gigaam": False,
+    "memory_conductor_enforce_whisper": False,
+    "memory_conductor_enforce_rewriter": False,
+    "memory_conductor_enforce_brain": False,
+    "memory_conductor_enforce_recording_sequence": False,
 }
 
 # Миграционные таблицы: (from_version, to_version) → список операций

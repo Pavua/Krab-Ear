@@ -1782,11 +1782,14 @@ class AudioEngine:
                         llm_result.fallback_reason,
                         llm_result.latency_ms,
                     )
-                    # 4.5a Cloud rewriter fallback: когда локальный LM Studio недоступен,
-                    # опционально полируем транскрипт через облачный LLM.
-                    # PRIVACY CONTRACT: разрешено ТОЛЬКО если cloud_rewriter_enabled=True
-                    # И privacy_mode_enabled=False (проверяется в _cloud_rewrite_allowed).
-                    if self._cloud_rewrite_allowed():
+                    # 4.5a Cloud rewriter fallback: ТОЛЬКО если Studio недостижим
+                    # (timeout/connection), не если каталог пуст (C1 extractive).
+                    # PRIVACY CONTRACT: cloud_rewriter_enabled=True И не privacy.
+                    from backend.llm_rewriter import is_studio_unavailable as _studio_down  # noqa: PLC0415
+                    if self._cloud_rewrite_allowed() and _studio_down(
+                        llm_result.fallback_reason,
+                        last_error=getattr(self._llm_rewriter, "_last_error", None),
+                    ):
                         try:
                             from backend.cloud_rewriter import cloud_rewrite as _cloud_rewrite  # noqa: PLC0415
                             _cr_lang = resolved_lang or settings.TRANSCRIBE_LANGUAGE

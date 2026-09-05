@@ -17,6 +17,23 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backend.llm_rewriter import LLMRewriter
 
+_LOADED_PROBE = None
+
+
+def setUpModule():
+    """C1: summarize probes catalog; None = неизвестно, HTTP-путь тестов без изменений."""
+    global _LOADED_PROBE
+    _LOADED_PROBE = patch(
+        "backend.lm_studio_lifecycle.probe_loaded_chat_models",
+        return_value=None,
+    )
+    _LOADED_PROBE.start()
+
+
+def tearDownModule():
+    if _LOADED_PROBE is not None:
+        _LOADED_PROBE.stop()
+
 
 def _make_rewriter() -> LLMRewriter:
     return LLMRewriter(

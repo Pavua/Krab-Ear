@@ -1,27 +1,21 @@
-"""Wave 5 — regression tests for Fix B (false-success REST body check) and
-Fix C (LLM rewriter self-heal on HTTP 400 'No models loaded').
+"""Wave 5 — REST body error checks + C1 holdoff on rewriter 400.
 
 All HTTP and subprocess calls are mocked; no real LM Studio required.
 
 Fix B: _try_rest_load / _try_rest_unload must return False when the HTTP
        response is 2xx but the body contains {"error": "..."}.
 
-Fix C: LLMRewriter._rewrite_impl must trigger load_model_sync on HTTP 400
-       "No models loaded", retry once, and:
-         (a) return polished text + NOT trip the circuit if retry succeeds;
-         (b) fall through to graceful raw fallback if load fails;
-         (c) only call load_model_sync once even if N threads hit the 400.
+C1: LLMRewriter._rewrite_impl must NOT call load_model_sync on HTTP 400
+    "No models loaded" — empty Studio stays empty (extractive / raw text).
 """
 from __future__ import annotations
 
 import json
 import sys
 import threading
-import time
 import unittest
-from io import BytesIO
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -292,10 +286,9 @@ def _make_rewriter():
 
 
 class TestSelfHealOnNoModelsLoaded(unittest.TestCase):
-    """Fix C: HTTP 400 'No models loaded' triggers load_model_sync + one retry."""
+    """C1 holdoff: HTTP 400 'No models loaded' must NOT call load_model_sync."""
 
     def setUp(self):
-        # LLMRewriter imports requests; mock session on the instance
         self.rewriter = _make_rewriter()
         self._orig_session_post = self.rewriter._session.post
 
@@ -305,134 +298,62 @@ class TestSelfHealOnNoModelsLoaded(unittest.TestCase):
     def _make_400_response(self, body="No models loaded"):
         return _fake_requests_response(400, text=body)
 
-    def _make_200_response(self, polished="Polished text."):
-        return _fake_requests_response(
-            200,
-            json_data={"choices": [{"message": {"content": polished}}]},
+    def test_empty_studio_does_not_lms_load(self):
+        self.rewriter._session.post = MagicMock(
+            return_value=self._make_400_response("No models loaded")
         )
-
-    # ------------------------------------------------------------------
-    # (a) 400 "No models loaded" → loader invoked + retry → success
-    # ------------------------------------------------------------------
-
-    def test_self_heal_success_returns_polished_text(self):
-        """FAILS before fix (record_failure + circuit trip); PASSES after fix."""
-        first_resp = self._make_400_response("No models loaded")
-        retry_resp = self._make_200_response("Polished via self-heal.")
-
-        call_seq = [first_resp, retry_resp]
-        self.rewriter._session.post = MagicMock(side_effect=call_seq)
-
-        # load_model_sync is lazy-imported inside _rewrite_impl from lm_studio_lifecycle
-        with patch("backend.lm_studio_lifecycle.load_model_sync", return_value=True):
+        with patch("backend.lm_studio_lifecycle.load_model_sync") as load_sync:
             result = self.rewriter.rewrite("raw transcript text")
-
-        self.assertTrue(result.ok, f"Expected ok=True, got fallback_reason={result.fallback_reason}")
-        self.assertEqual(result.text, "Polished via self-heal.")
-
-    def test_self_heal_success_does_not_trip_circuit(self):
-        """Circuit breaker must NOT register the eviction as a failure."""
-        first_resp = self._make_400_response("no model found")
-        retry_resp = self._make_200_response("Good output.")
-
-        self.rewriter._session.post = MagicMock(side_effect=[first_resp, retry_resp])
-
-        with patch("backend.lm_studio_lifecycle.load_model_sync", return_value=True):
-            result = self.rewriter.rewrite("some text")
-
-        self.assertTrue(result.ok)
-        # Failure count must not have increased (record_success resets it)
-        self.assertEqual(
-            self.rewriter._circuit._consecutive_failures,
-            0,
-            "circuit _consecutive_failures must be 0 after successful self-heal",
-        )
-
-    # ------------------------------------------------------------------
-    # (b) loader fails → graceful raw fallback, no exception
-    # ------------------------------------------------------------------
-
-    def test_self_heal_load_failure_degrades_gracefully(self):
-        """When load_model_sync returns False, must fall through to raw fallback."""
-        first_resp = self._make_400_response("No models loaded")
-        self.rewriter._session.post = MagicMock(return_value=first_resp)
-
-        with patch("backend.lm_studio_lifecycle.load_model_sync", return_value=False):
-            result = self.rewriter.rewrite("raw text")
-
-        # rewrite() contract: NEVER raises — always returns LLMRewriteResult
+        load_sync.assert_not_called()
         self.assertFalse(result.ok)
         self.assertIsNone(result.text)
-        # fallback_reason should reflect the HTTP failure
+        self.assertIn("400", result.fallback_reason)
+        self.assertEqual(self.rewriter._session.post.call_count, 1)
+
+    def test_empty_studio_records_circuit_failure(self):
+        self.rewriter._session.post = MagicMock(
+            return_value=self._make_400_response("no model found")
+        )
+        with patch("backend.lm_studio_lifecycle.load_model_sync"):
+            result = self.rewriter.rewrite("some text")
+        self.assertFalse(result.ok)
+        self.assertGreaterEqual(self.rewriter._circuit._consecutive_failures, 1)
+
+    def test_empty_studio_degrades_gracefully(self):
+        self.rewriter._session.post = MagicMock(
+            return_value=self._make_400_response("No models loaded")
+        )
+        with patch("backend.lm_studio_lifecycle.load_model_sync", return_value=True):
+            result = self.rewriter.rewrite("raw text")
+        self.assertFalse(result.ok)
+        self.assertIsNone(result.text)
         self.assertIn("400", result.fallback_reason)
 
-    def test_self_heal_retry_failure_degrades_gracefully(self):
-        """Load succeeds but retry also returns non-200 → graceful, no exception."""
-        first_resp = self._make_400_response("No models loaded")
-        retry_resp = _fake_requests_response(503, text="Service Unavailable")
-
-        self.rewriter._session.post = MagicMock(side_effect=[first_resp, retry_resp])
-
-        with patch("backend.lm_studio_lifecycle.load_model_sync", return_value=True):
-            result = self.rewriter.rewrite("some text")
-
-        self.assertFalse(result.ok)
-        self.assertIsNone(result.text)
-
-    # ------------------------------------------------------------------
-    # (c) concurrent calls → load_model_sync called at most once
-    # ------------------------------------------------------------------
-
-    def test_concurrent_calls_trigger_single_load(self):
-        """N concurrent calls hitting 400 must invoke load_model_sync only once."""
+    def test_concurrent_calls_never_load(self):
         N = 5
-        load_call_count = [0]
-        load_lock = threading.Lock()
-
-        def _slow_load(*args, **kwargs):
-            time.sleep(0.02)  # simulate real load time
-            with load_lock:
-                load_call_count[0] += 1
-            return True
-
-        # Each thread gets: 400 first, 200 on retry
-        def _post_side_effect(*args, **kwargs):
-            # Return 400 until load completes, then 200
-            with load_lock:
-                if load_call_count[0] == 0:
-                    return self._make_400_response("No models loaded")
-            return self._make_200_response("ok")
-
-        self.rewriter._session.post = MagicMock(side_effect=_post_side_effect)
-
+        self.rewriter._session.post = MagicMock(
+            return_value=self._make_400_response("No models loaded")
+        )
         results = []
         errors = []
 
         def _run():
             try:
-                r = self.rewriter.rewrite("hello")
-                results.append(r)
+                results.append(self.rewriter.rewrite("hello"))
             except Exception as exc:
                 errors.append(exc)
 
-        with patch("backend.lm_studio_lifecycle.load_model_sync", side_effect=_slow_load):
+        with patch("backend.lm_studio_lifecycle.load_model_sync") as load_sync:
             threads = [threading.Thread(target=_run) for _ in range(N)]
             for t in threads:
                 t.start()
             for t in threads:
                 t.join(timeout=5.0)
 
-        self.assertEqual(errors, [], f"No exceptions expected; got: {errors}")
-        # The self._autoload_lock serialises load calls, so only ONE thread
-        # actually runs load_model_sync while the others wait for the lock
-        # and then find the model already loaded.
-        self.assertLessEqual(
-            load_call_count[0],
-            N,
-            "load_model_sync should not be called N times, only by the first thread",
-        )
-        # All threads must return a result (no exception)
+        self.assertEqual(errors, [])
+        load_sync.assert_not_called()
         self.assertEqual(len(results), N)
+        self.assertTrue(all(not r.ok for r in results))
 
 
 # ---------------------------------------------------------------------------

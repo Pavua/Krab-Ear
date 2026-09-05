@@ -265,6 +265,30 @@ _CHATBOT_MARKERS = (
 )
 
 
+# Cloud-fallback только когда Studio недостижим (сеть/таймаут).
+# Пустой каталог / HTTP 400 «no models» — НЕ недоступность (C1: extractive, без lms load).
+_STUDIO_UNAVAILABLE_REASONS = frozenset({"timeout", "connection_error"})
+
+
+def is_studio_unavailable(
+    fallback_reason: str | None,
+    last_error: str | None = None,
+) -> bool:
+    """True только если LM Studio не отвечает, не если слот пуст.
+
+    ``circuit_open`` считается недоступностью только когда последняя ошибка
+    была timeout/connection — иначе пустой каталог, открывший circuit,
+    утащил бы транскрипт в облако.
+    """
+    reason = (fallback_reason or "").strip()
+    if reason in _STUDIO_UNAVAILABLE_REASONS:
+        return True
+    if reason == "circuit_open":
+        err = (last_error or "").strip().lower()
+        return err.startswith("timeout") or err.startswith("connection_error")
+    return False
+
+
 @dataclass
 class LLMRewriteResult:
     """Результат попытки rewrite'а. Всегда возвращается, никогда не raises."""
@@ -348,6 +372,73 @@ class LLMRewriter:
             self._idle_keepalive_thread.start()
         else:
             self._idle_keepalive_thread = None
+
+    def _cloud_llm_fallback_allowed(self) -> bool:
+        """Opt-in cloud только при живом токене настроек. Privacy всегда wins.
+
+        Нет getter → закрыто (не слать транскрипт «на всякий случай»).
+        Getter упал → закрыто.
+        """
+        try:
+            getter = self._settings_getter
+            if getter is None:
+                return False
+            if getter("privacy_mode_enabled", False):
+                return False
+            return bool(getter("cloud_rewriter_enabled", False))
+        except Exception:
+            logger.warning("cloud fallback getter raised — failing closed")
+            return False
+
+    def _maybe_apply_cloud_summarize(
+        self,
+        result: LLMRewriteResult,
+        text: str,
+        max_sentences: int,
+    ) -> LLMRewriteResult:
+        """После провала Studio: cloud только если процесс/сеть недоступны."""
+        if result.ok:
+            return result
+        if not self._cloud_llm_fallback_allowed():
+            return result
+        if not is_studio_unavailable(result.fallback_reason, last_error=self._last_error):
+            return result
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return result
+        try:
+            from backend.cloud_rewriter import cloud_summarize  # noqa: PLC0415
+            cloud_text = cloud_summarize(cleaned, max_sentences=max_sentences)
+        except Exception:
+            logger.warning("cloud summarize fallback failed", exc_info=True)
+            return result
+        if not cloud_text:
+            return result
+        try:
+            from backend.privacy_audit import get_privacy_audit_logger  # noqa: PLC0415
+            getter = self._settings_getter
+            provider = "openai"
+            if getter is not None:
+                provider = str(getter("cloud_rewriter_provider", "openai") or "openai")
+            get_privacy_audit_logger().log_event(
+                category="cloud_rewrite",
+                action="cloud_summarize_used",
+                details={
+                    "provider": provider,
+                    "input_chars": len(cleaned),
+                    "output_chars": len(cloud_text),
+                },
+            )
+        except Exception:
+            pass
+        logger.info(
+            "cloud summarize fallback applied: %d→%d chars",
+            len(cleaned),
+            len(cloud_text),
+        )
+        return LLMRewriteResult(
+            ok=True, text=cloud_text, fallback_reason=None, latency_ms=None
+        )
 
     @property
     def _timeout(self) -> float:
@@ -794,97 +885,19 @@ class LLMRewriter:
             return LLMRewriteResult(
                 ok=False, text=None, fallback_reason="unauthorized", latency_ms=latency_ms
             )
-        # 5c. Self-heal: HTTP 400 "No models loaded" → reload + one retry.
-        #
-        # LM Studio evicts the model after ~30 min idle TTL. When evicted, any
-        # /v1/chat/completions request returns HTTP 400 with body containing phrases
-        # like "No models loaded", "no model", or "model not found". We detect this
-        # and perform ONE synchronous reload attempt before falling through to the
-        # normal failure path — keeping the circuit breaker clean for a genuine
-        # eviction event.
-        #
-        # Thread-safety: self._autoload_lock ensures that if N concurrent rewrite calls
-        # hit the same eviction, only ONE triggers the reload; the others wait for the
-        # lock and will find the model already loaded when they proceed to retry.
-        #
-        # Only one self-heal attempt per rewrite call (no loop), matching the task spec.
+        # 5c. C1 holdoff: HTTP 400 "No models loaded" больше НЕ делает
+        # `lms load` / load_model_sync. Пустой слот ≠ Studio недоступен —
+        # cloud_rewriter на этом пути не вызывается (только timeout/connection).
         _NO_MODELS_PATTERNS = ("no models loaded", "no model", "model not found")
         if response.status_code == 400 and any(
             p in (response.text or "").lower() for p in _NO_MODELS_PATTERNS
         ):
             logger.info(
-                "LLM rewriter: HTTP 400 'no models loaded' detected — triggering self-heal "
+                "LLM rewriter: HTTP 400 'no models loaded' — holdoff, no lms load "
                 "model_id=%s base_url=%s",
                 self._model, self._base_url,
                 extra={"model": self._model, "base_url": self._base_url},
             )
-            # Lazy import — avoids circular dependency at module load time.
-            from backend.lm_studio_lifecycle import load_model_sync  # noqa: PLC0415
-
-            autoload_timeout = 90.0
-            if self._settings_getter is not None:
-                try:
-                    autoload_timeout = float(
-                        self._settings_getter("llm_autoload_timeout_sec", 90.0)
-                    )
-                except Exception:  # noqa: BLE001
-                    pass  # keep default; settings read never breaks rewriter
-
-            with self._autoload_lock:
-                load_ok = load_model_sync(
-                    base_url=self._base_url,
-                    model_id=self._model,
-                    timeout_sec=autoload_timeout,
-                )
-
-            if load_ok:
-                # One retry after successful load — if it succeeds, call record_success()
-                # so the circuit breaker does NOT register this eviction as a failure.
-                logger.info(
-                    "LLM rewriter: model reloaded, retrying completion model_id=%s",
-                    self._model,
-                    extra={"model": self._model},
-                )
-                try:
-                    with self._post_lock:
-                        retry_response = self._session.post(
-                            f"{self._base_url}/chat/completions",
-                            json=payload,
-                            headers=headers,
-                            timeout=self._timeout,
-                        )
-                    latency_ms = int((time.monotonic() - start) * 1000)
-                    self._last_latency_ms = latency_ms
-                    if retry_response.status_code == 200:
-                        self._circuit.record_success()
-                        response = retry_response  # fall through to step 6 parsing
-                        logger.info(
-                            "LLM rewriter: self-heal retry succeeded model_id=%s elapsed_ms=%s",
-                            self._model, latency_ms,
-                            extra={"model": self._model, "elapsed_ms": latency_ms},
-                        )
-                    else:
-                        logger.warning(
-                            "LLM rewriter: self-heal retry failed status=%s model_id=%s",
-                            retry_response.status_code, self._model,
-                            extra={"status": retry_response.status_code, "model": self._model},
-                        )
-                        # Fall through to the standard failure handling below.
-                        response = retry_response
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "LLM rewriter: self-heal retry raised %s model_id=%s",
-                        exc, self._model,
-                        extra={"error": str(exc), "model": self._model},
-                    )
-                    # Fall through to failure handling with the ORIGINAL response.
-            else:
-                logger.warning(
-                    "LLM rewriter: self-heal load failed for model_id=%s — falling through",
-                    self._model,
-                    extra={"model": self._model},
-                )
-                # Fall through to the normal failure path; record_failure() below.
 
         if response.status_code != 200:
             self._circuit.record_failure()
@@ -1192,7 +1205,12 @@ class LLMRewriter:
         return result_text
 
     def summarize(self, text: str, max_sentences: int = 3) -> LLMRewriteResult:
-        """Генерирует краткое summary текста через LLM.
+        """Генерирует краткое summary: сначала Studio, cloud только если он недоступен."""
+        result = self._summarize_studio(text, max_sentences=max_sentences)
+        return self._maybe_apply_cloud_summarize(result, text, max_sentences)
+
+    def _summarize_studio(self, text: str, max_sentences: int = 3) -> LLMRewriteResult:
+        """Studio-only summary. Пустой каталог → studio_empty_no_autoload, без lms load.
 
         Контракт: НИКОГДА не raises. Все ошибки — через LLMRewriteResult.ok=False.
         """
@@ -1228,8 +1246,30 @@ class LLMRewriter:
             f"Сделай краткое summary ({max_sentences} предложения) этого разговора/диктовки. "
             "Верни ТОЛЬКО summary. Без пояснений. Без кавычек. Без префиксов."
         )
+        # C1: summary идёт в УЖЕ загруженный слот (Krab 26B/27B). Пустая Studio
+        # (проба вернула []) → extractive, без POST и без lms load. None
+        # (проба слепа) ≠ пусто: POST на self._model без автозагрузки.
+        try:
+            from backend.lm_studio_lifecycle import probe_loaded_chat_models  # noqa: PLC0415
+            loaded_ids = probe_loaded_chat_models(
+                self._base_url,
+                timeout=1.5,
+                api_key=self._api_key or None,
+            )
+        except Exception:
+            logger.debug("summarize: loaded-chat probe failed", exc_info=True)
+            loaded_ids = None
+        if loaded_ids == []:
+            logger.info("summarize: skip LLM — studio empty (no autoload)")
+            return LLMRewriteResult(
+                ok=False,
+                text=None,
+                fallback_reason="studio_empty_no_autoload",
+                latency_ms=None,
+            )
+        summary_model = loaded_ids[0] if loaded_ids else self._model
         payload = {
-            "model": self._model,
+            "model": summary_model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": cleaned_input},

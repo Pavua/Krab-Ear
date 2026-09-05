@@ -2834,21 +2834,6 @@ class RecordingCoreService:
                 data={"duration_sec": round(float(duration_sec), 2)},
             )
 
-            # Brain lease coordination: acquire lease before preloading brain
-            # so Krab userbot knows Ear is about to use LM Studio on Metal GPU.
-            if bool(settings.get("llm_brain_lease_enabled", True)):
-                try:
-                    from backend.brain_lease import acquire_brain_lease
-                    ttl = float(
-                        settings.get("llm_brain_lease_ttl_sec", 30.0)
-                    )
-                    acquire_brain_lease("krab_ear", ttl_sec=ttl)
-                except Exception as exc:
-                    logger.debug(
-                        "BrainLease: acquire hook error (ignored): %s",
-                        exc,
-                    )
-
             try:
                 # MED-3: бамп безусловный (не гейтован brain_model/preload) —
                 # ниже по коду STT точно отработает независимо от настроек
@@ -2859,10 +2844,25 @@ class RecordingCoreService:
                 brain_model = str(
                     settings.get("llm_brain_model", "")
                 ).strip()
+                # C1 holdoff: дефолт False. Acquire+load только если реально
+                # грузим brain — иначе 30 с держим чужой lock впустую и
+                # поднимаем 15+ ГБ после ручной выгрузки владельца.
                 preload_enabled = bool(
-                    settings.get("llm_brain_preload_on_stop", True)
+                    settings.get("llm_brain_preload_on_stop", False)
                 )
                 if brain_model and preload_enabled:
+                    if bool(settings.get("llm_brain_lease_enabled", True)):
+                        try:
+                            from backend.brain_lease import acquire_brain_lease
+                            ttl = float(
+                                settings.get("llm_brain_lease_ttl_sec", 30.0)
+                            )
+                            acquire_brain_lease("krab_ear", ttl_sec=ttl)
+                        except Exception as exc:
+                            logger.debug(
+                                "BrainLease: acquire hook error (ignored): %s",
+                                exc,
+                            )
                     conductor = getattr(self, "_memory_conductor", None)
                     # C-NO-PINGPONG: под enforced pressure-streak reload 19 ГБ
                     # пропускается (иначе лестница и reload дерутся за память).

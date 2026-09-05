@@ -435,6 +435,82 @@ def model_loaded(
     return None
 
 
+_EMBEDDING_TYPE_MARKERS = frozenset({"embeddings", "embedding"})
+
+
+def _is_embedding_model(model_id: str, type_hint: str = "") -> bool:
+    hint = (type_hint or "").strip().lower()
+    if hint in _EMBEDDING_TYPE_MARKERS:
+        return True
+    lowered = (model_id or "").lower()
+    return "embed" in lowered
+
+
+def probe_loaded_chat_models(
+    base_url: str,
+    timeout: float = 5.0,
+    api_key: str | None = None,
+) -> list[str] | None:
+    """Какие chat-модели сейчас загружены в LM Studio (без JIT/load).
+
+    Только GET по ``LOADED_STATE_ENDPOINTS``. Embeddings пропускаются.
+    Три состояния, как у ``model_loaded``:
+      - ``[]``     — каталог разобран, загруженных chat-моделей нет;
+      - ``[id…]``  — есть хотя бы одна загруженная chat-модель;
+      - ``None``   — неизвестно (сеть/таймаут/неразобранная форма).
+
+    ``None`` нельзя читать как «пусто» — POST в этом случае не должен
+    самовольно грузить модель, но и не должен притворяться, что слот пуст.
+    """
+    if not _scheme_allowed(base_url):
+        logger.warning(
+            "LM Studio: refusing loaded-chat probe — base_url scheme not in %s: %r",
+            sorted(_ALLOWED_SCHEMES), base_url,
+        )
+        return None
+    api_root = base_url.rstrip("/").removesuffix("/v1")
+    for endpoint in LOADED_STATE_ENDPOINTS:
+        url = f"{api_root}{endpoint}"
+        try:
+            req = urllib.request.Request(url, method="GET")
+            if api_key:
+                req.add_header("Authorization", f"Bearer {api_key}")
+            with _SAFE_OPENER.open(req, timeout=timeout) as resp:
+                if resp.status != 200:
+                    continue
+                payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+                entries = parse_lm_studio_catalog(payload)
+        except Exception as exc:
+            logger.debug("LM Studio loaded-chat probe (%s): %s", endpoint, exc)
+            continue
+        if entries is None:
+            continue
+        type_by_id: dict[str, str] = {}
+        if isinstance(payload, dict):
+            raw_items = payload.get("data")
+            if not isinstance(raw_items, list):
+                raw_items = payload.get("models")
+            if isinstance(raw_items, list):
+                for item in raw_items:
+                    if not isinstance(item, dict):
+                        continue
+                    mid = item.get("id") or item.get("key")
+                    if isinstance(mid, str) and mid:
+                        type_by_id[mid] = str(
+                            item.get("type") or item.get("model_type") or ""
+                        )
+        loaded: list[str] = []
+        for entry in entries:
+            if entry.get("loaded") is not True:
+                continue
+            mid = str(entry.get("id") or "")
+            if not mid or _is_embedding_model(mid, type_by_id.get(mid, "")):
+                continue
+            loaded.append(mid)
+        return loaded
+    return None
+
+
 def unload_model_async(base_url: str, model_id: str) -> None:
     """Fire-and-forget unload. Не блокирует caller, errors silently logged.
 

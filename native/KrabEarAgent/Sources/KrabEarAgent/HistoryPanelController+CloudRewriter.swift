@@ -47,7 +47,7 @@ extension HistoryPanelController {
         let toggle = NSButton(checkboxWithTitle: "", target: self, action: #selector(onCloudRewriterEnabledChanged(_:)))
         toggle.setButtonType(.switch)
         objc_setAssociatedObject(self, &CloudRewriterAssocKeys.toggle, toggle, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-        let toggleRow = makeSettingRow(label: "Включить облачную полировку (fallback)", control: toggle)
+        let toggleRow = makeSettingRow(label: "Облако, если LM Studio недоступен", control: toggle)
         
         let providerPicker = NSPopUpButton(frame: .zero, pullsDown: false)
         providerPicker.addItems(withTitles: ["OpenAI", "Anthropic", "Custom (свой сервер)"])
@@ -96,7 +96,7 @@ extension HistoryPanelController {
         objc_setAssociatedObject(self, &CloudRewriterAssocKeys.apiKeyField, apiKeyField, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         let apiKeyRow = makeSettingRow(label: "API-ключ", control: apiKeyField)
         
-        let privacyWarnLabel = NSTextField(labelWithString: "⚠️ При включении ваши транскрипты отправляются выбранному облачному провайдеру для полировки. Это нарушает локально-приватный режим. Не включайте для конфиденциального контента. В режиме приватности фича автоматически отключена.")
+        let privacyWarnLabel = NSTextField(labelWithString: "⚠️ Только если LM Studio не запущен или не отвечает. Пустой каталог Studio облако не вызывает (локальное extractive). В режиме приватности выключено — транскрипт с устройства не уходит.")
         privacyWarnLabel.font = KrabEarTheme.Typography.caption
         privacyWarnLabel.textColor = KrabEarTheme.Colors.textSecondary
         privacyWarnLabel.isEditable = false
@@ -135,7 +135,7 @@ extension HistoryPanelController {
         let toggle = NSButton(checkboxWithTitle: "", target: self, action: #selector(onCloudRewriterEnabledChanged(_:)))
         toggle.setButtonType(.switch)
         objc_setAssociatedObject(self, &CloudRewriterAssocKeys.cdToggle, toggle, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-        let toggleRow = cdMakeRow(label: "Включить облачную полировку (fallback)", control: toggle)
+        let toggleRow = cdMakeRow(label: "Облако, если LM Studio недоступен", control: toggle)
         
         let providerPicker = NSPopUpButton(frame: .zero, pullsDown: false)
         providerPicker.addItems(withTitles: ["OpenAI", "Anthropic", "Custom (свой сервер)"])
@@ -188,7 +188,7 @@ extension HistoryPanelController {
         objc_setAssociatedObject(self, &CloudRewriterAssocKeys.cdApiKeyField, apiKeyField, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         let apiKeyRow = cdMakeRow(label: "API-ключ", control: apiKeyField)
         
-        let privacyWarnLabel = NSTextField(labelWithString: "⚠️ При включении ваши транскрипты отправляются выбранному облачному провайдеру для полировки. Это нарушает локально-приватный режим. Не включайте для конфиденциального контента. В режиме приватности фича автоматически отключена.")
+        let privacyWarnLabel = NSTextField(labelWithString: "⚠️ Только если LM Studio не запущен или не отвечает. Пустой каталог Studio облако не вызывает (локальное extractive). В режиме приватности выключено — транскрипт с устройства не уходит.")
         privacyWarnLabel.font = .systemFont(ofSize: 11, weight: .regular)
         privacyWarnLabel.textColor = KrabEarTheme.Colors.textSecondary
         privacyWarnLabel.isEditable = false
