@@ -1,259 +1,68 @@
 # NOW — что делать сейчас (Krab Ear)
 
-Обновлено: 2026-09-03. Читай **этот файл + одну карточку волны**. Не читай `ROADMAP-2026H2.md` как очередь задач — это журнал. Как работать: [`EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md).
-
-## P0 interrupt — SIGSEGV `whisper-large-v3-turbo` (2026-08-16 16:21)
-
-Не чинить в Главном Крабе. Коалиция краша: **`ai.krab.ear.rest`**. Каскад: `balanced` (turbo) → retry `whisper-large-v3-mlx` при confidence < 0.65 → retry turbo, параллельно LM Studio на 36 ГБ.
-
-**P0a закрыта в коде (2026-08-16):** второй MLX-чекпоинт не грузится при `kern.memorystatus_vm_pressure_level >= 1` (и turbo→turbo skip); REST `/v1/stt/transcribe` — process-wide singleflight, 503 `stt_busy`. Карточка: [`docs/superpowers/plans/2026-08-16-p0-mlx-second-checkpoint.md`](superpowers/plans/2026-08-16-p0-mlx-second-checkpoint.md). `mlx_subprocess` — in-process watchdog, не изоляция PID.
-
-**P0c закрыта и живая (2026-08-17):** `mlx_whisper` для REST в OS-worker. IPC-диктовка in-process. Карточка: [`docs/superpowers/plans/2026-08-16-p0c-mlx-whisper-worker.md`](superpowers/plans/2026-08-16-p0c-mlx-whisper-worker.md).
-
-**P0d/P0e/P0f живые после `safe_backend_restart --with-rest` (2026-08-17 ~05:41):** backend pid 36646; REST pid **36880**, child `mlx_whisper_worker.py` pid 40064. `POST /v1/stt/transcribe` 200 за 0.53с (`persist_history=false`); P0a скипнула второй MLX-чекпоинт под vm_pressure. Карточки: P0d token reload, P0e `/v1/stream` singleflight, P0f dead-child respawn.
-
-## Панель и STT — вторая волна 03.09 (в проде)
-
-- **#1986** «Автозвонки» показывали литералы вместо сохранённых значений: слайдеры
-  создавались с `value: 30` / `value: 5`, тумблер с `.on`. Слайдер, показывающий 30
-  при сохранённых 15, при первом касании записывал 30 — открытие панели молча меняло
-  настройку. Зеркало бага пикера микрофона (тот писал, но не читал).
-- **#1987** «Модель STT в памяти»: «Действительно выгружать по простою» →
-  «Выгружать модель при простое», «Выгружать после простоя» → «Простой до выгрузки»;
-  строка срока гасится, пока выключатель выключен (иначе выглядит действующей, а
-  дирижёр памяти только пишет в журнал «выгрузил бы»). Визуал — Gemini 3.8 Flash.
-- **#1985** уверенность GigaAM — константа 0.9, помечена `confidence_source`.
-  🔴 Следствия живые: ретрай по уверенности для русского не срабатывает никогда,
-  тренды качества показывают русские записи лучше прочих независимо от качества.
-  Решение о потребителях (ретрай при вырожденном выходе / реальный logprob) — за владельцем.
-- **#1984** каталог LM Studio: три формы ответа, один разбор. «200 с пустым телом»
-  из отмены Wave 68 был ответом 401 без токена — CLAUDE.md поправлен.
-
-- **#1988** зацикленная транскрипция перепрогоняется другим движком (для русского —
-  Whisper вместо GigaAM): ровно одна попытка, результат берётся только если сам не
-  зациклен и не пуст, сбой повтора диктовку не ломает. Выключатель
-  `stt_loop_retry_enabled`, по умолчанию включён. До этого детектор только слал тост
-  «перезапиши», а ретрай по уверенности для русского мёртв (константа 0.9).
-
-🔴 **Ключ Voice Gateway не сходился**: `/v1/sessions` отвечал 403 (токен есть и отвергнут),
-у нас было 43 символа против 32 у шлюза — call assist не работал ни разу. Ключ порождает
-ШЛЮЗ, канон значения в его plist launchd (`.env` грузится с `override=False`), поэтому
-односторонняя ротация у нас = гарантированный обрыв. Синхронизировано 03.09, живая проба
-`GET /v1/sessions` → 200.
-
-🔴 **Телефония дублирована**: 3049 строк в Krab Ear (адаптеры Telnyx/Twilio, своя
-машина состояний, хранилище сессий) против полноценной телефонии Voice Gateway.
-Копия Krab Ear никогда не работала: ключ пустой, файл сессий 0 байт. 03.09 отправлен
-запрос сессии Voice Gateway о границе владения; до ответа ничего не удаляем.
-
-## Волна телефонии — консолидация в Voice Gateway (03.09)
-
-Разведка вскрыла, что «своя телефония» Krab Ear была НЕ ПОДКЛЮЧЕНА: `dial()` не
-вызывала ни одна строка прод-кода, `get_provider` не импортировал ни один модуль,
-`CallSessionService` принимал фабрику и не звал, `call_session_create` писал в
-журнал звонки, которых никто не совершал. 3049 строк адаптеров — остров без дорог.
-Археология: наша телефония старше шлюзовой на три месяца, код НЕ копировался
-(нулевое пересечение реализаций) — велась настоящая двойная работа, 35 коммитов.
-
-- **Этап 1 (#1989, в проде)**: `GatewayCallProvider` поверх существующего
-  `VoiceGatewayClient`, IPC `call_start` — единственная дорога IPC → провайдер →
-  журнал. Порядок «сначала звонок, потом запись»: несостоявшийся звонок не оседает
-  в истории. Приватный режим запрещает исходящие.
-- **Этап 2 (#1990)**: удалено 4723 строки (адаптеры Telnyx/Twilio/SIP + 8 файлов
-  тестов). Панель: кнопка звонит `call_start`, а не журнальной записью; провайдер
-  один. Архив — тег `telephony-archive-2026-09-03`.
-
-🔴 **Живая проверка нашла три бага мимо зелёных тестов** (память:
-reference_live_call_found_three_bugs_tests_missed): клиент возвращает КОНВЕРТ
-`{ok, payload}`, тестовый двойник отвечал плоско (проверял фантазию), формы ответов
-шлюза разные у соседних endpoint'ов. Инвариант: успех без `session_id` = отказ.
-
-🔴 **`set_settings` молча врал**: `call_provider=gateway` возвращал ok, значение не
-менялось — валидатор не знал слова. Старые значения оставлены допустимыми: их
-изъятие вернуло бы настройку к дефолту так же молча.
-
-Два живых звонка на номер владельца: набор → разговор → запись → завершение.
-Замечания шлюзу переданы и приняты: клон голоса не укладывается в таймаут 15с
-(живой замер 16.7с) и суммаризация сочиняет протокол на пустом транскрипте.
-
-## Включены функции, лежавшие выключенными (03.09, по просьбе владельца)
-
-Инвентаризация «построено, но никогда не включалось»: из 67 булевых настроек
-выключены были 28. Включены пять, у которых есть и прод-код, и тесты, и которые
-не тянут моделей в память:
-
-| функция | ключ | живая проверка |
-|---|---|---|
-| Отмена вставки | `paste_undo_enabled` | — |
-| Шаблоны текста | `text_snippets_enabled` | добавил/прочитал/удалил через IPC |
-| Быстрая правка | `quick_edit_enabled` | — |
-| Обучение на исправлениях | `auto_learn_corrections_enabled` | — |
-| Голосовые команды | `voice_commands_enabled` | «запятая» → `,` на живом тексте |
-
-🔴 Проверялся ФАКТ РАБОТЫ, а не факт включения. По дороге вскрылось расхождение
-имён: `list_templates` и `get_learned_corrections` не существуют, живые методы —
-`get_templates`, `list_text_snippets` (+ параметр `expansion`, не `text`).
-
-**Отложено владельцем до разгруженной машины:** `history_encryption_enabled`
-(разовая перекодировка всей истории — в архиве врачебные записи).
-**Не включаем на перегруженной машине:** `semantic_search_enabled`,
-`stt_sensevoice_enabled`, `voxtral_enabled` — каждая тянет свою модель в память,
-а сервис REST уже умирает от голодания.
-
-🔴 **Три флага оказались пустыми**: `smart_field_format_enabled` и
-`streaming_paste_enabled` читаются только в Swift и в backend не существуют вовсе;
-`llm_probe_enabled` — наоборот. Достроить или удалить, как поступили с `auto_cleanup_*`.
-
-## REST умирал молча — починено (#1991)
-
-14 перезапусков за день с кодом 70 и НИ ОДНОЙ строки о причине; шлюз видел 142
-отказа. Смерть намеренная (fail-fast после зависшей транскрибации: MLX-лок мог
-остаться у повисшего потока), но немая: `os._exit` не сбрасывает буферы, а служба
-запущена без `-u` — записи копились блоками и гибли вместе с процессом.
-Теперь строка о причине + `_flush_logs_before_exit()` до выхода; шаблон службы
-получил `-u`. 🔴 Корень (что именно зависает) НЕ устранён — ждём срабатываний с
-новым журналом на разгруженной машине.
+Обновлено: **2026-09-05**. Одна страница: база, политика brain/GPU, очередь. Журнал волн — [`ROADMAP-2026H2.md`](ROADMAP-2026H2.md), не очередь. Горизонт 2–4 нед: [`design-briefs/2026-09-05-horizon-plan.md`](design-briefs/2026-09-05-horizon-plan.md). Как работать: [`EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md).
 
 ## База
 
 - Репозиторий: [Pavua/Krab-Ear](https://github.com/Pavua/Krab-Ear)
-- Default / прод-колея: **`codex/krab-ear-v2`** (ветки `main`/`master` нет)
-- HEAD на момент записи: `1dad53d5` — `fix(stt): подпись GigaAM v3 в list_stt_engines, карточка W7 (#1927)`. Sparkle-appcast: `b2aaf527`. Код релиза v2.11.0: `064467f6`. P0f в истории: `a5b6f517`.
-- Новые волны: `git worktree add .worktrees/<slug> -b feat/<slug> origin/codex/krab-ear-v2`
-- Последний Sparkle-тег: **v2.11.0 (2026-08-16)** — [GitHub Release](https://github.com/Pavua/Krab-Ear/releases/tag/v2.11.0). Dev-guard: Sparkle не трогает `.app` внутри git-дерева; ежедневка владельца — только `scripts/build_and_deploy.command` по явной просьбе.
+- Прод-колея: **`origin/codex/krab-ear-v2`**
+- **HEAD:** `330bca9b` — #1999 C1 brain-holdoff + cloud при Studio down; backend перезапущен (pid 7659)
+- Worktree: `git worktree add .worktrees/<slug> -b feat/<slug> origin/codex/krab-ear-v2`
+- Main Krab Q2 (:8080 purpose slots, RIS/SergeyRG) — **не Ear**: [`ANTIGRAVITY_HANDOFF/2026-09-05-krab-8080-model-routing.md`](../ANTIGRAVITY_HANDOFF/2026-09-05-krab-8080-model-routing.md)
 
-## Волна панели, оверлея и STT — закрыта 2026-09-02/03 (#1977 и #1978 в проде)
+## Задеплоено 2026-09-05
 
-Началось с вопроса владельца «где включить следование за курсором», закончилось
-шестнадцатью правками. Доклад с замерами:
-[`docs/audit/2026-09-02-panel-settings-coverage.md`](audit/2026-09-02-panel-settings-coverage.md).
+- **#1997** — сенсор памяти: `vm_pressure` + swap у потолка; SIGKILL воркера → `stt.worker_killed`, не `mlx.oom`. **`memory_conductor_enforce*` всё ещё OFF** (shadow только логирует).
+- **#1998** — визуал Call Observer, Claude Design-секций, оверлея диктовки; parity-бинарь + relaunch агента.
+- **#1999** — C1 brain-holdoff: на стопе записи / rewriter / summarize **не** `lms load` при пустом Studio; lease только если реально грузим; OOM-path не целится в brain; cloud-fallback при **Studio недоступен** (не пустой каталог). **`cloud_rewriter_enabled` всё ещё OFF** — путь есть, флаг не включён.
 
-**Панель.** Из 258 живых настроек редактировались 86. Закрыто таблицей «Все
-настройки» (строится из `get_settings`, 259 ключей, секреты маскированы) — а не
-контролами вручную: настройки прибавляются быстрее секций. 🔴 Вариант дизайна
-Claude Design (включён у владельца) **не содержал 11 секций** Gemini-варианта —
-выбор микрофона, буфер обмена, быстрые заметки и другие были недоступны физически.
-Возвращены; инвариант — `DesignVariantSectionParityTests`. Пикер микрофона был
-декоративным (без target/action), при этом бэкенд применял `selected_input_device`
-давно (W1327 F2). Подсветка вкладки расходилась с содержимым, память вкладки
-затиралась fallback'ом при каждом открытии. Гард `audit_agent_settings_symmetry.py`
-(init/toPayload) в CI. Секция «Модель STT в памяти» + IPC `unload_stt_model`.
+## Политика LM Studio / brain (владелец 2026-09-05)
 
-**STT.** 🔴 Транспорт `mlx` (gigaam-mlx) **терял чанки молча**: 27 с речи → 101
-знак без ошибки в логе — пустой ответ на звучащий кусок отбрасывался как пауза.
-Владелец переведён на `subprocess` (56 с → 566 знаков); в #1978 пустой кусок
-разбирается на тишину/потерю, потеря бросает `GigaAMMLXChunkLoss`. Холодный старт
-воркера 27 с убран прогревом при старте (`stt_warmup_on_startup`, 2.4 с в фоне на
-mps). Замер cpu vs mps на инференсе: 1.53 с vs 1.31 с — устройство почти ни при
-чём, важно только для загрузки.
+**15+ ГБ local** — один слот экосистемы: у Краба обычно **`lm-studio-local/gemma-4-26b-a4b-it@4bit`** (`LOCAL_PREFERRED_MODEL`), не «второй» Ear-only 27B. Ear `llm_brain_model` = `qwen/qwen3.6-27b` — lease/unload/OOM-UI, **preload-on-stop уже False**.
 
-**Словарь.** 🔴 `stt_hotwords` доходят только до Whisper — GigaAM подсказок не
-принимает; `initial_prompt` режется на 41%. Языковые профили `stt_hotwords_ru/es/en`
-(#1978): 69 испанских медтерминов от cowork-сессии живут только в испанском промпте
-(русский 362 знака, испанский 544). Движко-независимый рычаг — фонетический
-словарь (точная замена, наполнять наблюдёнными парами).
+| Режим | Поведение |
+|---|---|
+| Idle / away | Краб отвечает в группах из того же RAM-слота; саммари звонков — если модель уже загружена |
+| Работа (Cursor, диктовка) | **Не autoload.** Ear не должен `lms load` после ручной выгрузки владельца |
+| Любой LLM-путь Ear | **Сначала LM Studio** (каталог / chat), без преждевременного `lms load` |
+| **Пустой каталог** Studio | ≠ «Studio недоступен». Пусто → extractive / сырой STT, **без autoload** (#1999) |
+| **Studio недоступен** (сеть/процесс) | Cloud, **если** `cloud_rewriter_enabled=true` и не privacy; иначе extractive/сырой текст (#1999) |
+| Кондуктор | **`enforce_brain` — никогда.** Не включать `memory_conductor_enforce*` «чтобы выгнать» 27B |
 
-**Решения владельца 03.09:** мёртвая цепь `auto_cleanup_*` — удалена целиком
-(настройки, хук DiskSpaceMonitor, событие, `StateStore.auto_cleanup_old`, строка дашборда);
-односторонний пакет «рекомендованная настройка» — оставлен, обратный путь закрывает
-«Все настройки». Swift контракт-тесты (`WiringTests|SourceContract`, 139 шт., 1.1 с) — в per-PR гейте с #1981 (03.09); полный набор — nightly.
-**03.09 ночь, дальше:** 13 секций «Ещё настройки» получили карточки Claude Design (#1983,
-визуал agy: Gemini 3.1 Pro + follow-up на 3.8 Flash, гейт Claude; тесты паритета принимают
-CD-строители). `probe_llm_http` стал пассивным (#1982): раньше «пинг» делал POST chat/completions
-и LM Studio грузил 11 ГБ GigaChat JIT при каждом старте агента при ВЫКЛЮЧЕННОМ рерайтере —
-триггером был `apply_recommended_setup {dry_run}` из секции «Рекомендованная настройка».
-Два таймингозависимых теста HealthMonitor переведены на дедлайн (первая добыча Swift-гейта).
-Открыто: `passive_health_check` отдаёт `has_model=false` при живой модели — форма ответа
-`/api/v1/models` не совпадает с парсером (на гейт не влияет, он читает `reachable`).
+🔴 Автовозврат 15+ ГБ после ручной выгрузки сейчас чаще **Краб** `ensure_model_loaded`, не Ear. Ear holdoff в проде (#1999); Краб — бриф в handoff §5.
 
-## 🔴 Потеря диктовок — ДВА корня, оба закрыты 2026-08-27
+Живые флаги (не трогать без владельца): `llm_rewrite_enabled=False`, `cloud_rewriter_enabled=False`, `llm_brain_preload_on_stop=False`, `memory_conductor_enforce*=False`, `mlx_oom_auto_unload_enabled=True` (brain исключён из target, #1999).
 
-**A. `mlx_lock` отпускался под живым потоком (#1958, в проде).** Watchdog
-GigaAM-MLX бросал рабочий поток и сразу выходил из критической секции — замок
-освобождался, пока поток ещё в Metal-вызове, и следующая диктовка стартовала
-ВТОРОЙ параллельный инференс. Дефект повторяем: после первого зависания ломалось
-всё до перезапуска backend. Улика — `sample`: четыре потока на `rlock_acquire`
-при спящем `libmlx`. Sibling-asymmetry: `mlx_subprocess.MLXWatchdog` этот баг
-чинил ещё в W1358. Спека:
-[`2026-08-27-mlx-lock-handoff-design.md`](superpowers/specs/2026-08-27-mlx-lock-handoff-design.md).
-Живая проверка после деплоя: та же запись — 1.1 с.
+## Контекст (коротко, ещё актуально)
 
-**B. Self-hosted CI душил распознавание.** Все три раннера стояли с
-`ProcessType = Interactive` (дефолт установщика GitHub) → macOS не притормаживал
-CI, распознавание 20-секундного файла заняло 170 с вместо ~7, и каскад не уложился
-в бюджеты #1956. Сменено на `Background`. 🔴 Правило: self-hosted CI на рабочей
-машине владельца — часть прод-окружения, его приоритет обязан быть ниже приложений.
-
-**Модель рерайтера.** Замер 12 живых диктовок: `huihui-qwen3-14b-abl-v2` —
-8.4 с медиана, сохраняет текст дословно (9/9 матерных слов, как 26B).
-🔴 `gigachat3.1-10b` НЕ использовать: на длинных русских текстах переводит их на
-английский и пересказывает мат.
+- Телефония только через Voice Gateway (#1989/#1990); ключ VG синхронизирован 03.09.
+- REST fail-fast с логом (#1991); корень зависания MLX — отдельно (`mlx_lock` без timeout на инференсе).
+- GigaAM `confidence=0.9` (#1985) — ретрай по уверенности для RU мёртв; решение за владельцем.
+- P0 turbo/REST worker, Memory Conductor shadow, Call Observer w1 — в проде; детали в `ROADMAP` / `CLAUDE.md`.
+- Не включать: `REST_IN_PROCESS_ENABLED`, `semantic_search` / SenseVoice / Voxtral на этой машине, `history_encryption_enabled`.
 
 ## Следующая волна
 
-**W2a — CLAUDE.md HealthMonitor: закрыта 2026-08-16** (sticky-hang уже в коде, починили drift доков).
+### Cursor (корни) — порядок из horizon §3
 
-**W2b — замер аномалии длительности: закрыта 2026-08-16.** Opt-in `debug_keep_dictation_wav` (дефолт выкл), каталог `debug_duration_wav/` + сидкар, CLI `scripts/measure_duration_anomaly.py`. Чанкер/GigaAM не патчили.
+1. **C2** — вырезать мёртвый Telnyx UI в CD (`call_provider=gateway` жив).
+2. **C3** — интерактивный timeout на `mlx_lock` в `_transcribe_model` (не rebase `feat/stt-timeout-budgets`).
+3. **C5** — схема: `llm_brain_*`, `cloud_rewriter_*`, мёртвые Swift-флаги в `DEFAULT_SETTINGS`.
+4. Позже: HealthMonitor 2 с, GigaAM confidence consumers.
 
-**Изоляция `privacy_audit.log`: закрыта 2026-08-23 (PR #1949 + #1950, оба смержены).** Боевой compliance-журнал на 90% состоял из тестового мусора (44 907 `purge_all_data` из 50 041) — путь был захардкожен мимо env и мимо `data_dir`, а логгер синглтон. `KRAB_EAR_PRIVACY_AUDIT_DIR` + принудительный throwaway в `conftest.py` до импорта приложения + семь e2e-смоков (🔴 вручную запущенный `python KrabEar/main.py --data-dir …` по-прежнему пишет в боевой журнал — env-переменную надо выставлять самому); дашборд переведён на одно-проходный `summarize()`. Боевой журнал заархивирован отдельной сессией (`privacy_audit.archive-2026-08-23.log`), фикс HMAC-цепочки смержен той же сессией. Спека: [`2026-08-23-privacy-audit-path-isolation-design.md`](superpowers/specs/2026-08-23-privacy-audit-path-isolation-design.md). 🔴 Прогон через `python -m unittest` НЕ изолируется — `KrabEar/tests/` не пакет, `conftest.py` это механизм pytest.
+**Сиблинг (не этот чат):** включение `cloud_rewriter_enabled` — отдельное «да» владельца (путь #1999 уже в коде).
 
-**Пикер транспорта GigaAM: PR открыт 2026-08-24.** GigaAM v3 умеет транспорт `mlx` (48× realtime против 25× у `subprocess` на живом замере) с 2.9% расхождением текста (орфографические варианты, без смысловых потерь) — но параллельно с whisper-диктовкой GigaAM-чанк ждёт держащий `mlx_lock` whisper целиком (замер: 0.07с без конкуренции → 6.71с параллельно 60с-диктовке). Переключатель `subprocess`/`mlx` теперь в Settings → STT-движки (оба UI-варианта), с честной индикацией через `find_spec("gigaam_mlx")` (не импорт — тот успешен без библиотеки) и предупреждающим бейджем, если MLX выбран, а библиотека не найдена. Прод переключён на `mlx` живым тестом (RSS backend 201→530 МБ подтвердил in-process загрузку). Спека: [`2026-08-23-gigaam-transport-picker-design.md`](superpowers/specs/2026-08-23-gigaam-transport-picker-design.md). 🔴 Известное следствие: `stt_gigaam_transport` теперь round-trip'ит через `toPayload()` — первое сохранение любой настройки закрепит `subprocess` поверх Python pydantic-дефолта `auto` (функционально эквивалентно на типичном сетапе). 🔴 При `transport=mlx` GigaAM пропадает из `GET /v1/models` REST-процесса (фабрика не знает `mlx`) — известное ограничение с самой mlx-волны, фикс фабрики вне объёма.
+### agy / Gemini 3.1 Pro High (после Cursor-срезов)
 
-**W2c — REST `deadline_sec`: закрыта 2026-08-16 Ear + 2026-08-17 VG.** Optional form-поле на `POST /v1/stt/transcribe`, clamp [5, 120]. VG `KrabEarSTTEngine` шлёт `deadline_sec=25` при HTTP timeout 30.0 — [PR #229](https://github.com/Pavua/Krab-Voice-Gateway/pull/229), прод pid 72437.
-
-**W3 — Sparkle v2.11.0: закрыта 2026-08-16.** `krab-ear-ci` зелёный на `064467f6` (три stale-теста подтянуты к прод: hang-kill 10с, пустые SIP-креды, spy на startup-recovery). Dispatch `release.yml -f version=2.11.0` → success. `debug_keep_dictation_wav` в проде не включать.
-
-**P0a/P0c/P0d/P0e/P0f — SEGV turbo в REST: закрыты 2026-08-16/17.** Pressure-gate + POST singleflight (P0a); OS-worker (P0c); token reload (P0d); `/v1/stream` native STT под тот же singleflight (P0e); dead-child respawn (P0f, сиблинг GigaAM W1216 F1). Не `REST_IN_PROCESS_ENABLED`. IPC-диктовка in-process.
-
-**W8 — раздельные бюджеты STT: в работе (ветка `feat/stt-timeout-budgets`).** `TRANSCRIBE_TIMEOUT_SEC=3600` применялся одинаково к 4-секундной диктовке и часовому импорту. Инцидент 2026-08-26 04:21–06:21 (`backend.log:30288-30554`): владелец ждал **180 с** (IPC-backstop), а два часа прожил **абандоненный поток** на 4.71 с аудио — держал MLX-локи и выдал тост «Критическая ошибка» через два часа после записи. Теперь бюджет = `overhead + длительность × factor(профиль)` с потолком профиля и общим дедлайном запроса; ContextVar (`core/stt_budget.py`), профиль по владельцу поколения записи (встречи → `batch`). Спека: [`2026-08-26-stt-timeout-budgets-design.md`](superpowers/specs/2026-08-26-stt-timeout-budgets-design.md), план: [`2026-08-26-stt-timeout-budgets.md`](superpowers/plans/2026-08-26-stt-timeout-budgets.md).
-
-🔴 **Корень зависания НЕ закрыт этой волной.** `_transcribe_model` висел час МИМО 45-секундного watchdog'а (`MLX_TRANSCRIBE_TIMEOUT_SEC`, `MLX_CRASH_RECOVERY_ENABLED=True`) — значит зависание произошло ДО него. Главный подозреваемый: `mlx_lock()` без таймаута (`engine.py`, `with mlx_inter_process_lock(), mlx_lock():` в `_transcribe_model`) — тот же класс, что инцидент 2026-08-13 с превью-воркером, где вспомогательный путь блокировал основной. Волна бюджетов ограничивает ПОСЛЕДСТВИЕ (жизнь зомби ~416 с вместо 7184 с), не причину. Отдельная волна.
-
-**GigaAM = v3 (не апгрейдить).** Прод `stt_gigaam_mode=v3_e2e_rnnt`. Лейбл IPC `list_stt_engines.display_name` = `"GigaAM v3 (RU)"` после [#1927](https://github.com/Pavua/Krab-Ear/pull/1927) и `safe_backend_restart` (живой IPC проверен). Голое `"rnnt"` в git-пакете алиасится в `v3_rnnt`.
-
-**W7 — wake-word PortAudio после диктовки: закрыта 2026-08-17.** Карточка: [`docs/superpowers/plans/2026-08-17-wakeword-portaudio-after-dictation.md`](superpowers/plans/2026-08-17-wakeword-portaudio-after-dictation.md). Give-up кап больше не сбрасывается 1–2 тиками `last_chunk_ts` после kickstart (`notePoll`, 8 тиков ≈ 6 с). `wake_word_start` отвергается, пока worker рекордера ещё жив после `stop()` (`is_start_blocked=_reinit_is_recording_gate`). Не чинили сам PortAudio / `_listen_loop`. **Parity-бинари положены и задеплоены 2026-08-18 11:00** (`LC_UUID C015A3D8-3DD4-3FF9-8D67-C3D42043C993`, подпись «Krab Ear Dev Local», агент pid 80544, dSYM в Sentry). До этого прод бегал на бинаре от 08-12, то есть Swift-половина фикса не работала, а вместе с ней в прод впервые уехали `b8198311` (шорткаты ⌘1–⌘7) и `33a6c9ca` (Local SIP) — они лежали в git с 08-16.
-
-**W8 — наблюдаемость заблокированного `wake_word_start` + честный heartbeat: закрыта и задеплоена 2026-08-18.** Карточка: [`docs/superpowers/plans/2026-08-18-w8-blocked-start-observability.md`](superpowers/plans/2026-08-18-w8-blocked-start-observability.md). Fable-ревью диапазона `e425c5ee..39f92f8b` нашло два дефекта W7, оба подтверждены построчным гейтом. (A, HIGH) Гейт W7 отвергал старт тем же reason, что и настоящая запись → Swift ретраил вечно, сессия не создавалась, watchdog принимал это за легитимную паузу и сбрасывал эпизод → `wedged` недостижим, путь `DEFERRED_WORKER_HUNG` (введён 2026-08-09 против «тихого бессрочного простоя») обойдён; пока worker рекордера жив после `stop()`-таймаута, wake word и диктовка были мертвы без уведомления. Теперь отдельный `RECORDER_WORKER_HUNG_REASON`, watchdog ведёт по `is_worker_hung` аномалию до `wedged` + ErrorBus, Swift держит обе строки транзиентными и логирует клин WARN. (B, MEDIUM) `notePoll` проверял `last_chunk_ts` на наличие — замороженный штамп при живом треде снимал give-up кап за ~6 с; теперь здоровье = РОСТ штампа. Кросс-языковой контракт-тест фиксирует обе строки: Swift сравнивает reason ТОЧНОЙ строкой, рассинхрон сжёг бы бюджет self-heal за 3 попытки. Прод после деплоя: агент `LC_UUID 3615DACD`, backend pid 70114, `wake_word running/not wedged`, watchdog `session_active`.
-
-**W9 — слепота Sentry: закрыта и задеплоена 2026-08-18.** Карточка: [`docs/superpowers/plans/2026-08-18-w9-sentry-quota-blindness.md`](superpowers/plans/2026-08-18-w9-sentry-quota-blindness.md). Sentry не принимал события с 13-08 не из-за кода: организация выбрала бесплатную квоту (accepted = ровно 5000/30д, rate_limited 4018, произведено 13 193). Слепота 22 дня из 30, 91% доли backend съел один issue `KRAB-EAR-BACKEND-1V` (2488, зависание stop_recording, починен `bc5ee07b` уже после выжигания). 🔴 Серверный Key Rate Limit на free-плане поставить НЕЛЬЗЯ: PUT ключа отвечает HTTP 200 и молча оставляет `rateLimit: null` — перечитывать через GET. Сделано: `backend/sentry_quota.py` (ok/blind/idle/unknown, `unknown` НИКОГДА не равен ok) + клиентский потолок в `ErrorBus` (12/час на код, 40/час суммарно, скользящее окно; локальные ring buffer и шина получают всё). Смок-рутина (`~/.claude/scheduled-tasks/krab-ear-e2e-smoke/`) переписана: сначала факт приёма, потом issues; слово «quiet» запрещено. Живая проверка после мержа: рутина выдаёт `blind ... rate_limited=117`. Курс владельца — ужиматься в бесплатный план, платный не берём; зрение вернётся ~4 сентября (сброс цикла).
-
-**W10 — объём логов REST: PR [#1931](https://github.com/Pavua/Krab-Ear/pull/1931).** На каждый HTTP-запрос писались ДВЕ строки (своя + werkzeug) без таймстемпа: `logging.basicConfig` в `rest_server.py` ставил root-обработчик формата `"%(message)s"`, а werkzeug логировал тот же запрос своим access-логом. `backend/rest_log_config.py` — формат с временем + `werkzeug` на WARNING. Ротацию для `Krab Ear/logs` починил Главный Краб (их PR #140); объём записи — наша сторона.
-
-**W6 — гард мёртвых Swift-методов: PR [#1932](https://github.com/Pavua/Krab-Ear/pull/1932).** Python закрыт пятью гардами мёртвого кода, Swift — ничем, при том что класс живой (`setupErrorBus`/`setupHealthMonitor` месяцами были мертвы за 100% зелёными тестами). 🔴 Критерий важнее сканера: наивное «нет `name(`» даёт 95 находок, ~78 ложных; восемь правил-исключений (override, trailing-closure, протокол ТОЛЬКО с именем требования, lifecycle, bare-reference, частые имена → needs_review, вызовы из Tests → test_only). На живом дереве **19 мёртвых + 45 test-only**, все 19 прогейчены машинно — 0 ложных. Стартует **report-only**, вне `audit-all`: удаление — отдельное решение владельца, а красный с первого дня гейт начинают игнорировать. Карточка: [`docs/superpowers/plans/2026-08-18-w6-audit-dead-swift-methods.md`](superpowers/plans/2026-08-18-w6-audit-dead-swift-methods.md).
-
-🔴 **Счётчик Voice Gateway больше НЕ метрика здоровья нашего `:5005`** (их сообщение 2026-08-18 20:36). Они семплируют предсказуемые внешние отказы 1/20 ради общей квоты Sentry: «KrabEar STT exception: ReadTimeout» долетает ~13 вместо 263. Таймауты при этом никуда не делись — они в полном объёме в локальных логах гейтвея, сырые цифры за любое окно они отдадут по запросу. Наша сторона на момент проверки: `stt_busy` 0, singleflight-отбоев 0, ошибок транскрипции 0, но 616 срабатываний memory-pressure (это штатный скип второго MLX-чекпоинта из P0a). Источник 263 таймаутов не установлен — отдельная волна, если решим брать.
-
-**Кандидат волны (не начата): REST не различает пустой результат.** Вскрыто разбором логов Voice Gateway 2026-08-18. `/v1/stt/transcribe` отдаёт HTTP 200 с пустой строкой И когда в аудио тишина, И когда распознать не смогли — причина внутри у нас есть (`_empty_transcription_result` с `empty_audio`/`vad_skip`, заведена 13.08), но наружу не выведена. У VG это выглядит как «KrabEar STT: '' (4846ms)» — 4.8 секунды на «тишину» подозрительны. Класс [[reference_empty_result_has_two_sources]]: по такому ответу нельзя двигать состояние клиента. Отдельно: их всплеск таймаутов 16.08 (59 из 82, окно 17:06–18:07) — ЦЕЛИКОМ до нашего первого P0-фикса (16.08 20:16), после деплоя 17.08 — 1, 18.08 — 0, то есть внешнее подтверждение, что P0a/P0c сработали. `deadline_sec` (W2c, в проде с 17.08 05:53) на живом потоке ещё НЕ проверен — 504 у VG не было ни разу, но и значимых прогонов после деплоя не было; проверяется искусственно (длинный файл с `deadline_sec=5` → ожидать 504 через ~5с).
-
-🟡 **ИСПРАВЛЕНО 2026-08-19: вчерашний вывод «мост отбивался 401» был ОШИБКОЙ АТРИБУЦИИ.** Адверсариальное ревью (Fable) + личный гейт кода: `event_bridge.py::_tick` в ветке неуспеха делает `_failed_count += len(batch)` на КАЖДОМ провале, включая 401. Диагностика показывала `sent=0, failed=0` ⇒ прод-мост не сделал ни одной попытки и невиновен. Арифметика подтверждает: бэкофф экспоненциальный, потолок 30с ⇒ максимум ~70 попыток за 30 минут, а не ~1600 наблюдавшихся. Отправитель 401 — кто-то другой на общем порту 127.0.0.1:5005 (вероятно второй backend с иным `--data-dir`); точный источник НЕ УСТАНОВЛЕН. «Самовосстановление» в 21:15 — это первая и сразу успешная отправка прод-моста (`sent=1`), а не починка.
-
-🔴 **Настоящий непочиненный корень (Fable, HIGH):** путь к токен-файлу разрешается ДВУМЯ независимыми каналами — мост берёт `data_dir` из CLI-аргумента (`service.py`, `store.data_dir`), REST — из `settings.DATA_DIR` (env `KRAB_EAR_DATA_DIR`, дефолт `~/.krab_ear_data`). При их расхождении обе половины P0d перечитывают КАЖДАЯ СВОЙ файл, mtime обоих не двигается, и 401 вечен. Это регресс-риск уже случавшегося инцидента 12.07 (rest.plist data-dir mismatch). Лечение: единый источник пути + лог полного пути токена с обеих сторон при первом чтении.
-
-🟢 **Волна тоста mlx.oom ЗАКРЫТА и задеплоена 2026-08-19.** Смержено и живо в проде: #1933 (ложные тосты `iogpumetal`⊃`metal` в ДВУХ асимметричных местах, кнопка-заглушка → реальная выгрузка с гейтом на чужую brain-лизу, `action_label` доезжает до UI + кросс-языковой гард), #1934 (реактивная автовыгрузка при OOM; 🔴 листенер шины синхронен в потоке STT — вся работа уведена в свой поток, тест меряет ≤0.3с), #1935 (единая формула пути к токену + путь в логе REST и в `get_diagnostics`), #1937 (REST различает тишину и отказ). Ждёт мержа #1936 (подпись в диагностической панели, Swift — потребует пересборки бинаря). Настройка `llm_brain_unload_on_recording` включена (была выключена — единственный предохранитель), подтверждена живым чтением процесса.
-
-Живая проверка после деплоя: `get_diagnostics.event_bridge` отдаёт `token_path` + `token_present`, REST независимо логирует `токен читается из /Users/pablito/Library/Application Support/KrabEar/event_bridge_token` — оба пути видны и совпадают. Вчерашняя диагностика, стоившая часов и закончившаяся ошибкой атрибуции, теперь делается взглядом на две строки.
-
-🔴 **Не закрыто, зафиксировано:** параметр `_empty_transcription_result(engine=...)` фактически несёт ПРИЧИНУ (`empty_audio`/`vad_skip`), а не имя движка — поле `engine` в REST-ответе врёт. Переименование рискованно для читателей поля, поэтому #1937 завёл рядом честное поле, а смысловой баг остался. Реактивный OOM-путь теперь живёт в `MemoryConductor._brain_oom_worker` (легаси-флаг сохраняет боевое поведение в shadow); боевой путь НЕ пройден — [[reference_emergency_mechanism_zero_runs_means_untested]].
-
-🟢 **Волна Memory Conductor ЗАДЕПЛОЕНА В SHADOW 2026-08-20** (PR #1939, 28 файлов, 9 задач, 2 раунда ревью спеки + ревью плана + финальный гейт диффа BLOCK→фиксы). Живая проверка: `get_memory_ledger` → conductor thread_alive, shadow_since активен, леджер публикует gigaam/rewriter/brain; Swift-строка «Память» в статус-меню (LC_UUID 6B7D8AA3). Все enforce-флаги ВЫКЛЮЧЕНЫ — неделю лестница только логирует решения (`would`-счётчики + decisions ring в диагностике). 🔴 **Правило enforce**: включает ВЛАДЕЛЕЦ per-resident (`memory_conductor_enforce_gigaam/_whisper/_rewriter/_brain/_recording_sequence`) после разбора shadow-логов ≥7 дней; строка меню покажет «shadow N дн» после 7 дней. Реактивная OOM-выгрузка НЕ потеряна в shadow — легаси-флаг `mlx_oom_auto_unload_enabled` сохраняет боевое поведение (H1 финального гейта). Условия к enforce-волне (MED финального гейта): in-process gigaam close не чистит `_model`; идл rewriter не бампается batch-импортом/встречами; `_publish` пишет brain как warm даже после выгрузки; sticky `_pressure_streak` при disabled. Спека: `docs/superpowers/specs/2026-08-19-memory-conductor-design.md` (v2.1), план: `docs/superpowers/plans/2026-08-19-memory-conductor-plan.md` (v1.1). Бриф Крабу отправлен (их половина: префикс `krab/`, та же схема).
-
-🟢 **Call Observer w1 — наблюдатель звонков VG (HUD+панель+аудио+трубка); спека 2026-08-21.** View-only клиент: poll-дискавери сессий (`VGSessionWatcher`), events-WS (`VGCallStreamClient`), прослушка `/monitor/audio` (μ-law → `CallAudioPlayer`), координатор-автомат (`CallObserverCoordinator`) + функциональный UI (HUD, панель, пункт статус-меню). Гейт волны: `scripts/e2e_call_observer_smoke.command` (fake VG на flask/flask-sock, `scripts/fake_vg_server.py`) — интеграционные XCTest `CallObserverE2ETests` (env-гейт `KRAB_E2E_VG_PORT`, юнит-CI герметичен). Наблюдение + одна команда завершения звонка (hangup с confirm-sheet); shadow-режим не нужен: никакой записи данных, единственное write-действие — явное, за подтверждением владельца. Волна 2 (вмешательство в звонок — подсказки/DTMF) ждёт (a)/(e) от VG.
-
-🟢 **Socket ownership — Swift-хвост: закрыт и задеплоен 2026-08-23 (PR [#1945](https://github.com/Pavua/Krab-Ear/pull/1945)).** Закрывает MED-3 волны 2026-08-22 (см. ROADMAP): `BackendSupervisor.cleanupStaleSocket()` (active-режим, standalone dev-запуск/DMG без launchd-юнита) делал безусловный `removeItem` socket-пути перед спавном ребёнка — если ping не укладывался в таймаут на ЖИВОМ backend'е, супервизор срывал его имя, а contender упирался в sidecar-flock и выходил `EX_TEMPFAIL` (ноль достижимых backend'ов). Метод удалён целиком — единственный владелец pathname'а теперь `SocketOwnershipClaim.prepare_for_bind` (Python, flock + re-check dev/ino/mtime_ns), одинаково в active и passive. Прод (`.passive`) этот код никогда не звал, поэтому волна 08-22 его не заметила. TDD-гейт `BackendSupervisorSocketOwnershipTests` (живой AF_UNIX listener + source-контракт по коду без комментариев) + живой e2e на выброс (7/7, throwaway data-dir) + CI 22/22. Деплой скоординирован с параллельной сессией (её privacy-dashboard фикс #1946 уже в бинаре). Гейты: `swift build -c release`, `swift test` 1630/0 fail.
-
-**Следующая:** нет назначенной волны. Известный хвост: `krab-ear-rest.err.log` 179 МБ — на каждый HTTP-запрос пишутся ДВЕ строки (своя + werkzeug) при 34к запросов; ротацию для `Krab Ear/logs` починил Главный Краб (их PR #140), объём записи — наша сторона. Swift-агент в проде = LC_UUID `D0AC8079` (деплой socket-ownership 2026-08-23, pid 97653, `AX trusted: true`, хоткеи активированы, wake word `running/not wedged`). Живой REST на P0d/P0e/P0f. Не включать `REST_IN_PROCESS_ENABLED`. Не kickstart под запись.
+1. Глоссарий «Все настройки» (259 ключей) — можно сразу.
+2. «Автозвонки» VG-native — **после C2**.
+3. Разговор + селекторы из `list_llm_models` — **после** политики brain (дорожка B).
 
 ## Не делать
 
-- Не чекаутить `audit/*` и не мержить PR [#1875](https://github.com/Pavua/Krab-Ear/pull/1875) (`krab_ru` hard-negatives — отрицательный результат).
-- Не строить заново C2 Live Meeting / C3 Quick Capture — закрыты в июле 2026. Handoff 2026-08-15 по ним врёт.
-- Не «чинить» HealthMonitor sticky-hang — вторая ступень (`setWedgeProbe` → `forceRestartBackend`) уже в проде. `CLAUDE.md` в этом месте устарел; правка — в спеке W2, не новый сторож.
-- Не включать `REST_IN_PROCESS_ENABLED` в проде.
-- Не запускать собранный `KrabEarAgent` из воркера (убьёт прод). Не `launchctl kickstart -k` под запись — только `scripts/safe_backend_restart.command`.
-- Не `git add -A`. Не коммитить `wake_word_models/hard_negatives_raw/tts_phrases.json`.
-- Не удалять remote-ветки `audit/*` пачкой. Не трогать Main Krab runtime и VG `.env`.
-- Не второй EventBridge. Не возвращать wake word на SSE. Не дообучать `krab_ru` синтетикой.
-
-## Уже закрыто (не очередь)
-
-STT (mlx-whisper + GigaAM v3), диаризация, перевод, LLM-полировка, wake word `hey_jarvis`, Sparkle, EventBridge, C2, C3, M1/M2 (рубильник выкл), wake-word watchdog, R1/R2, 1V hang-kill 10с, LocalSIP, S56 shortcuts, ES TTS.
+- Не чекаутить `audit/*`, не мержить PR #1875 (`krab_ru` hard-negatives).
+- Не строить заново C2/C3; не «чинить» HealthMonitor sticky-hang заново.
+- Не `REST_IN_PROCESS_ENABLED`; не голый `launchctl kickstart -k` под запись — `scripts/safe_backend_restart.command`.
+- Не запускать собранный `KrabEarAgent` из воркера. Не `git add -A`. Не коммитить `wake_word_models/hard_negatives_raw/tts_phrases.json`.
+- Не трогать Main Krab runtime / VG `.env`. Не второй EventBridge. Не wake word на SSE.
+- **Никогда** `memory_conductor_enforce*` / `enforce_brain`. Не дообучать `krab_ru` синтетикой.
