@@ -64,4 +64,33 @@ final class CallObserverUITests: XCTestCase {
             XCTAssertFalse(text.contains("runModal"), "\(file): runModal запрещён (Sequoia AppHang)")
         }
     }
+
+    func test_panel_header_layout_no_overlap() {
+        let panel = CallObserverPanelController()
+        let s = session("s1")
+        panel.showPanel(session: s)
+        
+        // .titled + hidden visibility сохраняет крестик, но убирает нативный тайтл
+        XCTAssertEqual(panel.window?.titleVisibility, .hidden)
+        XCTAssertTrue(panel.window?.styleMask.contains(.titled) == true)
+        
+        let expectedPhone = s.phone
+        XCTAssertTrue(panel.window?.title.contains(expectedPhone) == true)
+        XCTAssertTrue(panel.testHook_inContentTitleLabel.stringValue.contains(expectedPhone))
+        
+        panel.setTerminal(message: "Звонок завершён")
+        XCTAssertEqual(panel.testHook_stateBadgeText, "Звонок завершён")
+        
+        guard let contentView = panel.window?.contentView else {
+            XCTFail("No content view")
+            return
+        }
+        contentView.layoutSubtreeIfNeeded()
+        
+        let titleFrame = panel.testHook_inContentTitleLabel.convert(panel.testHook_inContentTitleLabel.bounds, to: nil)
+        let badgeFrame = panel.testHook_stateBadgeBox.convert(panel.testHook_stateBadgeBox.bounds, to: nil)
+        
+        XCTAssertFalse(titleFrame.intersects(badgeFrame), "Title and badge should not intersect / overlap")
+        panel.close()
+    }
 }
