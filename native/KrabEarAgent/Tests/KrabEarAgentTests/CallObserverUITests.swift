@@ -2,11 +2,13 @@ import AppKit
 import XCTest
 @testable import KrabEarAgent
 
+@MainActor
 final class CallObserverUITests: XCTestCase {
-    private func session(_ id: String = "s1") -> VGSessionInfo {
-        VGSessionInfo(id: id, status: "running", phone: "+34 600 000 000",
+    private func session(_ id: String = "s1", isScreening: Bool = false, forwardedFrom: String = "") -> VGSessionInfo {
+        VGSessionInfo(id: id, status: "running", phone: "+34 600 000 000", forwardedFrom: forwardedFrom,
                       callDirection: "outbound", createdAt: "2026-08-21T10:00:00Z",
-                      updatedAt: "2026-08-21T10:00:00Z", srcLang: "es", tgtLang: "ru", callBrief: "")
+                      updatedAt: "2026-08-21T10:00:00Z", srcLang: "es", tgtLang: "ru", callBrief: "",
+                      isScreening: isScreening, agentRole: isScreening ? "inbound_screener" : "")
     }
 
     func test_hud_show_hide_visibility() {
@@ -91,6 +93,44 @@ final class CallObserverUITests: XCTestCase {
         let badgeFrame = panel.testHook_stateBadgeBox.convert(panel.testHook_stateBadgeBox.bounds, to: nil)
         
         XCTAssertFalse(titleFrame.intersects(badgeFrame), "Title and badge should not intersect / overlap")
+        panel.close()
+    }
+    
+    func test_panel_header_layout_screening_no_overlap() {
+        let panel = CallObserverPanelController()
+        let s = session("s2", isScreening: true, forwardedFrom: "+16895551234")
+        panel.showPanel(session: s)
+        
+        let titleString = panel.testHook_inContentTitleLabel.stringValue
+        XCTAssertTrue(titleString.contains("Скрининг входящего"), "должна быть метка скрининга")
+        XCTAssertTrue(titleString.contains(s.phone), "должен быть caller")
+        XCTAssertTrue(titleString.contains(s.forwardedFrom), "должен быть DID")
+        XCTAssertNotEqual(s.phone, s.forwardedFrom, "caller ≠ DID")
+        
+        panel.setTerminal(message: "Звонок завершён")
+        
+        guard let contentView = panel.window?.contentView else {
+            XCTFail("No content view")
+            return
+        }
+        contentView.layoutSubtreeIfNeeded()
+        
+        let titleFrame = panel.testHook_inContentTitleLabel.convert(panel.testHook_inContentTitleLabel.bounds, to: nil)
+        let badgeFrame = panel.testHook_stateBadgeBox.convert(panel.testHook_stateBadgeBox.bounds, to: nil)
+        
+        XCTAssertFalse(titleFrame.intersects(badgeFrame), "Long screening title and badge should not intersect")
+        panel.close()
+    }
+    
+    func test_panel_outbound_no_screening_badge() {
+        let panel = CallObserverPanelController()
+        let s = session("s3", isScreening: false)
+        panel.showPanel(session: s)
+        
+        let titleString = panel.testHook_inContentTitleLabel.stringValue
+        XCTAssertFalse(titleString.contains("Скрининг"), "outbound без screening-метки")
+        XCTAssertTrue(titleString.contains("Звонок агента"))
+        
         panel.close()
     }
 }

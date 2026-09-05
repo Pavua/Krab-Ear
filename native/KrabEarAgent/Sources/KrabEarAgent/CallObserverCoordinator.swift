@@ -332,12 +332,15 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
         case .callState(let status, let muted, let held):
             call.session = VGSessionInfo(id: call.session.id, status: status,
                                          phone: call.session.phone,
+                                         forwardedFrom: call.session.forwardedFrom,
                                          callDirection: call.session.callDirection,
                                          createdAt: call.session.createdAt,
                                          updatedAt: call.session.updatedAt,
                                          srcLang: call.session.srcLang,
                                          tgtLang: call.session.tgtLang,
-                                         callBrief: call.session.callBrief)
+                                         callBrief: call.session.callBrief,
+                                         isScreening: call.session.isScreening,
+                                         agentRole: call.session.agentRole)
             observed[id] = call
             panel.updateStatus(status: status, muted: muted, held: held, badge: nil)
             refreshHUD()

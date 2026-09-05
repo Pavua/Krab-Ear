@@ -32,7 +32,14 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
     }
 
     func showPanel(session: VGSessionInfo) {
-        let titleText = "Звонок агента · \(session.phone.isEmpty ? session.id : session.phone)"
+        let titleText: String
+        let caller = session.phone.isEmpty ? session.id : session.phone
+        if session.isScreening {
+            let didText = session.forwardedFrom.isEmpty ? "" : " (на \(session.forwardedFrom))"
+            titleText = "Скрининг входящего · \(caller)\(didText)"
+        } else {
+            titleText = "Звонок агента · \(caller)"
+        }
         window?.title = titleText
         inContentTitleLabel.stringValue = titleText
         // State-бейдж (live/terminal) задаёт ТОЛЬКО координатор — showPanel его не трогает,
