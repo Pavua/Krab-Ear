@@ -647,27 +647,26 @@ class GigaAMAdapter:
 def detect_subprocess_oom(returncode: int, stderr: str) -> tuple[bool, str | None]:
     """Return (is_oom, signal_name) for subprocess exit.
 
-    is_oom: True if returncode or stderr indicates OOM/fatal MLX crash.
+    is_oom: True if returncode or stderr indicates proven OOM/fatal MLX crash.
     signal_name: Human-readable signal name (e.g. 'SIGABRT', 'SIGKILL',
                  'SIGSEGV', 'SIGBUS') OR 'stderr_oom_pattern' OR None.
 
     Heuristics:
-    - returncode == -6 (SIGABRT) — MLX often abort()'s on Metal OOM
-    - returncode == -9 (SIGKILL) — kernel OOM killer
-    - returncode == -10 (SIGBUS) — memory alignment fault
-    - returncode == -11 (SIGSEGV) — MLX/Metal corruption segfault
     - stderr contains "out of memory" / "MallocStackLogging" / "OutOfMemoryError"
+      — текстовая улика важнее кода сигнала (в т.ч. поверх SIGKILL)
+    - returncode == -6 (SIGABRT) — MLX often abort()'s on Metal OOM
+    - returncode == -10 (SIGBUS) — memory alignment / GPU fault
+    - returncode == -11 (SIGSEGV) — MLX/Metal corruption segfault
+    - returncode == -9 (SIGKILL) — процесс убит (jetsam/внешний kill),
+      НЕ доказанный Metal OOM: is_oom=False, signal_name='SIGKILL'
 
     Public so it can be imported by tests without instantiating any class.
     """
-    _SIGNAL_NAMES: dict[int, str] = {
+    _OOM_SIGNALS: dict[int, str] = {
         -6: "SIGABRT",
-        -9: "SIGKILL",
         -10: "SIGBUS",
         -11: "SIGSEGV",
     }
-    if returncode in _SIGNAL_NAMES:
-        return (True, _SIGNAL_NAMES[returncode])
     if stderr:
         low = stderr.lower()
         if any(s in low for s in (
@@ -677,6 +676,10 @@ def detect_subprocess_oom(returncode: int, stderr: str) -> tuple[bool, str | Non
             "mallocstacklogging",
         )):
             return (True, "stderr_oom_pattern")
+    if returncode in _OOM_SIGNALS:
+        return (True, _OOM_SIGNALS[returncode])
+    if returncode == -9:
+        return (False, "SIGKILL")
     return (False, None)
 
 
@@ -891,7 +894,7 @@ class _GigaAMSubprocessSession:
         Call this instead of close() wherever a session is found dead via
         is_loaded()==False before we ourselves terminate/kill it — running
         diagnosis on a session we are about to force-kill would misattribute
-        our own SIGKILL as an OOM.
+        our own SIGKILL as a worker crash.
         """
         self._check_proc_oom_on_exit()
         self.close()
@@ -1088,8 +1091,8 @@ class _GigaAMSubprocessSession:
                         stderr_text = self._proc.stderr.read() or ""
                 except Exception:
                     pass
-            is_oom, _signal_name = detect_subprocess_oom(rc, stderr_text)
-            if is_oom:
+            is_oom, signal_name = detect_subprocess_oom(rc, stderr_text)
+            if is_oom or signal_name == "SIGKILL":
                 cb = self.oom_callback
                 if callable(cb):
                     try:

@@ -57,6 +57,11 @@ def _default_pressure() -> Optional[int]:
     return vm_pressure_level()
 
 
+def _default_host_stats():
+    from core.mlx_memory_gate import host_memory_stats
+    return host_memory_stats()
+
+
 class MemoryConductor:
     def __init__(
         self,
@@ -66,6 +71,7 @@ class MemoryConductor:
         is_recording: Callable[[], bool],
         is_meeting_active: Callable[[], bool],
         pressure_fn: Callable[[], Optional[int]] = _default_pressure,
+        host_stats_fn: Callable[[], Any] = _default_host_stats,
         gigaam_close_if_idle: Callable[[float], bool] = None,
         gigaam_idle_sec_fn: Callable[[], float] = None,
         last_stt_activity_ts_fn: Callable[[], float] = None,
@@ -94,6 +100,7 @@ class MemoryConductor:
         self._is_recording = is_recording
         self._is_meeting_active = is_meeting_active
         self._pressure_fn = pressure_fn
+        self._host_stats_fn = host_stats_fn
         self.gigaam_close_if_idle = gigaam_close_if_idle
         self._gigaam_idle_sec_fn = gigaam_idle_sec_fn
         self._last_stt_activity_ts_fn = last_stt_activity_ts_fn
@@ -217,15 +224,15 @@ class MemoryConductor:
             # навсегда возвращает False, даже когда кондуктор снова включат
             # и реального давления давно нет. Выключенный кондуктор не смеет
             # хранить состояние, влияющее на будущие решения — сброс streak,
-            # как при спокойном тике (level < 2).
+            # как при спокойном тике (нет distress).
             self._pressure_streak = 0
             return
         self._last_tick_ts = time.time()
         self._sync_shadow_marker()  # тень видима и без start()
-        # давление: одиночное наблюдение НИКОГДА не решает (гистерезис 3 тика)
-        level = self._pressure_fn()
-        level = 0 if level is None else int(level)
-        self._pressure_streak = self._pressure_streak + 1 if level >= 2 else 0
+        # давление: одиночное наблюдение НИКОГДА не решает (гистерезис 3 тика).
+        # 2026-09-05: Darwin warning=1 при свопе у потолка — смотрим corroboration.
+        distress = self._observe_pressure()[1]
+        self._pressure_streak = self._pressure_streak + 1 if distress else 0
 
         recording = self._safe_bool(self._is_recording)
         self._gigaam_step(recording)
@@ -282,6 +289,19 @@ class MemoryConductor:
             return bool(fn())
         except Exception:
             return False
+
+    def _safe_host_stats(self):
+        try:
+            return self._host_stats_fn()
+        except Exception:
+            return None
+
+    def _observe_pressure(self) -> tuple[int, bool]:
+        """sysctl-уровень + своп/RAM. level=1 без улик — не distress."""
+        from core.mlx_memory_gate import is_memory_distress
+        level = self._pressure_fn()
+        level = 0 if level is None else int(level)
+        return level, is_memory_distress(level, self._safe_host_stats())
 
     def _gigaam_step(self, recording: bool) -> None:
         threshold = self._get("gigaam_idle_unload_sec", 600.0)
@@ -422,10 +442,10 @@ class MemoryConductor:
 
     def _brain_oom_worker(self) -> None:
         c = self._counters["brain"]
-        level = self._pressure_fn()
-        level = 0 if level is None else int(level)
-        if level < 2:
-            # mlx.oom имеет историю ложных срабатываний — подтверждаем sysctl
+        level, distress = self._observe_pressure()
+        if not distress:
+            # mlx.oom имеет историю ложных срабатываний — подтверждаем
+            # sysctl И своп/доступную RAM (Darwin warning=1 может врать).
             c["skipped_gate"] += 1
             self._note("oom trigger unconfirmed by pressure (level=%d)" % level)
             return

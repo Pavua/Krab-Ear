@@ -52,6 +52,7 @@ def _mk(settings=None, *, pressure=0, recording=False, meeting=False,
         is_recording=lambda: recording,
         is_meeting_active=lambda: meeting,
         pressure_fn=lambda: pressure,
+        host_stats_fn=lambda: None,
         gigaam_close_if_idle=MagicMock(return_value=True),
         gigaam_idle_sec_fn=lambda: gigaam_idle,
         last_stt_activity_ts_fn=lambda: (stt_ts if stt_ts is not None

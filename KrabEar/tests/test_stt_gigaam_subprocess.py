@@ -897,7 +897,7 @@ class TestIdleDeathOomDiagnosis(unittest.TestCase):
         from core.pipeline.stt_gigaam import GigaAMAdapter, _GigaAMSubprocessSession
 
         # Воркер уже мёртв ДО первого вызова _get_subprocess_session в этом тесте —
-        # смоделированная idle-смерть: poll() возвращает -9 (SIGKILL, OOM-сигнатура),
+        # смоделированная idle-смерть: poll() возвращает -9 (SIGKILL),
         # но НИКАКОЙ _send() не выполнялся (никто не заметил в момент смерти).
         dead_session = _GigaAMSubprocessSession.__new__(_GigaAMSubprocessSession)
         dead_session._loaded = True

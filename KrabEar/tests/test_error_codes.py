@@ -74,6 +74,7 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             "audio.buffer_overflow",
             "stt.oom_model_evicted",
             "stt.gigaam_worker_timeout",
+            "stt.worker_killed",
             # Added Wave 61 — 3 final missing codes:
             # VGW reconnect / diarization skipped / LM Studio HTTP 500 HTML
             "vgw.reconnect",
@@ -275,7 +276,8 @@ class ErrorRegistryShapeTests(unittest.TestCase):
         after anti-storm exhaustion) = 67;
         2026-08-05 recording-duration watchdog added
         recording.long_duration_warning = 68;
+        2026-09-05 SIGKILL ≠ mlx.oom added stt.worker_killed = 72;
         test_expected_codes_present guards the exact set so this count test is a
         redundant but cheap invariant.
         """
-        self.assertEqual(len(ERROR_REGISTRY), 71)
+        self.assertEqual(len(ERROR_REGISTRY), 72)

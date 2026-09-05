@@ -442,6 +442,21 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "dedupe_seconds": 30,
     },
 
+    # stt.worker_killed — subprocess получил SIGKILL без текстовой улики OOM.
+    # Jetsam / внешний kill ≠ доказанный Metal OOM; mlx.oom тост и OOM-рельеф
+    # кондуктора здесь врали (инцидент 2026-09-05).
+    "stt.worker_killed": {
+        "user_msg_ru": (
+            "STT-воркер убит системой (SIGKILL) — это не доказанный GPU OOM. "
+            "Часто нехватка RAM или свопа."
+        ),
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "error",
+        "dedupe_seconds": 30,
+    },
+
     # ── Wave 64: 5 new codes from backend log analysis 2026-05-14/16 ─────
 
     # stt.gigaam.ffmpeg_missing — REST server startup or audio_converter.py
