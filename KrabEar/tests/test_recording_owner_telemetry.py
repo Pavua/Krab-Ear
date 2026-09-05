@@ -480,7 +480,8 @@ class RecordingOwnerConfigurationContractTest(unittest.TestCase):
         # перестал отдавать кадры) — 70 записей.
         # 2026-08-26: stt.budget_exhausted (раздельные бюджеты STT — каскад
         # прерван по исчерпанию бюджета запроса) — 71 запись.
-        self.assertEqual(len(ERROR_REGISTRY), 71)
+        # 2026-09-05: stt.worker_killed (SIGKILL ≠ доказанный mlx.oom) — 72.
+        self.assertEqual(len(ERROR_REGISTRY), 72)
 
     def test_backend_service_wires_error_bus_into_recording_core(self) -> None:
         source = (

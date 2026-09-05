@@ -46,11 +46,17 @@ class DetectSubprocessOomTests(unittest.TestCase):
         self.assertTrue(is_oom)
         self.assertEqual(signal_name, "SIGABRT")
 
-    def test_returncode_minus_9_detected_as_oom(self) -> None:
-        """SIGKILL (-9) must be detected as OOM with signal name SIGKILL."""
+    def test_returncode_minus_9_is_not_proven_mlx_oom(self) -> None:
+        """SIGKILL (-9) is process-killed (jetsam/внешний kill), не доказанный Metal OOM."""
         is_oom, signal_name = detect_subprocess_oom(-9, "")
-        self.assertTrue(is_oom)
+        self.assertFalse(is_oom)
         self.assertEqual(signal_name, "SIGKILL")
+
+    def test_sigkill_with_oom_stderr_is_still_oom(self) -> None:
+        """Текстовая улика OOM важнее голого SIGKILL — тогда это mlx OOM."""
+        is_oom, signal_name = detect_subprocess_oom(-9, "Metal out of memory: allocation failed")
+        self.assertTrue(is_oom)
+        self.assertEqual(signal_name, "stderr_oom_pattern")
 
     def test_returncode_minus_11_detected_as_oom_with_sigsegv(self) -> None:
         """SIGSEGV (-11) must be detected as OOM with signal name SIGSEGV."""
@@ -156,9 +162,9 @@ class AudioEngineDetectOomStaticTests(unittest.TestCase):
         self.assertTrue(is_oom)
         self.assertEqual(signal_name, "SIGABRT")
 
-    def test_static_method_minus_9(self) -> None:
+    def test_static_method_minus_9_is_not_proven_oom(self) -> None:
         is_oom, signal_name = AudioEngine._detect_subprocess_oom(-9, "")
-        self.assertTrue(is_oom)
+        self.assertFalse(is_oom)
         self.assertEqual(signal_name, "SIGKILL")
 
     def test_static_method_stderr_pattern(self) -> None:
@@ -202,9 +208,20 @@ class PushMlxOomForWorkerTests(unittest.TestCase):
     def test_fires_with_critical_severity(self) -> None:
         """mlx.oom must be pushed with critical severity."""
         engine = _make_engine_stub()
-        engine._push_mlx_oom_for_worker("gigaam_worker", -9, "")
+        engine._push_mlx_oom_for_worker("gigaam_worker", -6, "")
         pushed = engine._error_bus.push.call_args[0][0]
         self.assertEqual(pushed.severity, "critical")
+        self.assertEqual(pushed.code, "mlx.oom")
+
+    def test_sigkill_does_not_push_mlx_oom(self) -> None:
+        """Голый SIGKILL не должен эмитить mlx.oom — это врёт тосту и OOM-релифу."""
+        engine = _make_engine_stub()
+        engine._push_mlx_oom_for_worker("gigaam_worker", -9, "")
+        self.assertEqual(engine._error_bus.push.call_count, 1)
+        pushed = engine._error_bus.push.call_args[0][0]
+        self.assertNotEqual(pushed.code, "mlx.oom")
+        self.assertEqual(pushed.code, "stt.worker_killed")
+        self.assertIn("SIGKILL", pushed.message_debug)
 
     def test_debug_message_contains_name_and_rc(self) -> None:
         """message_debug must contain worker name, returncode, and signal name."""

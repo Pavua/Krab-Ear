@@ -838,9 +838,10 @@ class AudioEngine:
     def _detect_subprocess_oom(returncode: int, stderr: str) -> tuple[bool, str | None]:
         """Return (is_oom, signal_name) for subprocess exit.
 
-        is_oom: True if returncode or stderr indicates OOM/fatal MLX crash.
+        is_oom: True if returncode or stderr indicates proven OOM/fatal MLX crash.
         signal_name: Human-readable signal (e.g. 'SIGABRT', 'SIGKILL',
                      'SIGSEGV', 'SIGBUS') OR 'stderr_oom_pattern' OR None.
+        SIGKILL без текстовой улики OOM → is_oom=False (процесс убит, не Metal OOM).
 
         Delegates to core.pipeline.stt_gigaam.detect_subprocess_oom.
         """
@@ -848,20 +849,23 @@ class AudioEngine:
         return detect_subprocess_oom(returncode, stderr)
 
     def _push_mlx_oom_for_worker(self, name: str, rc: int, stderr: str) -> None:
-        """Push mlx.oom KrabError for a crashed worker subprocess.
+        """Сообщить о крэше STT-воркера. mlx.oom — только при доказанном OOM.
 
-        Called after _detect_subprocess_oom returns True. Never raises.
-        Includes signal_name in message_debug for Sentry grouping.
+        SIGKILL без текстовой улики — stt.worker_killed (jetsam/внешний kill),
+        не Metal OOM. Never raises.
         """
         try:
             from core.pipeline.stt_gigaam import detect_subprocess_oom
-            _is_oom, signal_name = detect_subprocess_oom(rc, stderr)
+            is_oom, signal_name = detect_subprocess_oom(rc, stderr)
             stderr_tail = (stderr or "")[-200:]
-            self._push_error(
-                "mlx.oom",
-                f"worker={name} returncode={rc} signal={signal_name} stderr_tail={stderr_tail!r}",
-                severity="critical",
+            debug = (
+                f"worker={name} returncode={rc} signal={signal_name} "
+                f"stderr_tail={stderr_tail!r}"
             )
+            if is_oom:
+                self._push_error("mlx.oom", debug, severity="critical")
+            elif signal_name == "SIGKILL":
+                self._push_error("stt.worker_killed", debug, severity="error")
         except Exception:
             pass  # helper must never raise
 
