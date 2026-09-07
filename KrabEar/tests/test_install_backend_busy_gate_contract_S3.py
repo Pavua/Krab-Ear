@@ -10,9 +10,9 @@ busy-гейт по образцу ``scripts/safe_backend_restart.command::busy_r
 S3, задача 1, п. «Как это тестировать»). Вместо этого он извлекает РЕАЛЬНЫЕ
 функции ``ipc_call``/``busy_reason`` из текста скрипта (тот же приём, что
 ``test_ensure_agent_running_contract.py`` использует для pgrep-паттерна) и
-исполняет ТОЛЬКО их в изолированном ``sh``-подпроцессе с фейковым ``python3``
-в PATH — ни реальный сокет, ни реальный launchctl, ни реальный backend не
-задействуются.
+исполняет их через общий изолированный harness: настоящий Python читает
+частный AF_UNIX-сокет, launchctl заменён marker-заглушкой. Живой сокет,
+launchctl и backend не задействуются; HOME не меняется.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ import json
 import os
 import re
 import subprocess
-import uuid
 from pathlib import Path
 
 
@@ -38,61 +37,9 @@ def _extract_function(source: str, name: str) -> str:
 def _run_busy_reason(
     tmp_path: Path, recording_response: str, meeting_response: str
 ) -> subprocess.CompletedProcess:
-    source = INSTALLER.read_text(encoding="utf-8")
-    ipc_call_src = _extract_function(source, "ipc_call")
-    busy_reason_src = _extract_function(source, "busy_reason")
-
-    driver = tmp_path / "driver.sh"
-    driver.write_text(
-        "#!/bin/sh\n"
-        + ipc_call_src
-        + "\n"
-        + busy_reason_src
-        + '\nif REASON=$(busy_reason); then echo "BUSY:$REASON"; else echo FREE; fi\n',
-        encoding="utf-8",
-    )
-    driver.chmod(0o755)
-
-    fake_home = tmp_path / "home"
-    (fake_home / "Library/Application Support/KrabEar").mkdir(parents=True)
-    # AF_UNIX-совместимая короткая ссылка не нужна — сокет тут вообще не
-    # создаётся: fake python3 отвечает по имени метода, не открывая сокет.
-    short_home = Path("/tmp") / f"krab-install-busy-{uuid.uuid4().hex}"
-    short_home.symlink_to(fake_home, target_is_directory=True)
-
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    python3_stub = fake_bin / "python3"
-    python3_stub.write_text(
-        "#!/bin/sh\n"
-        'case "$2" in\n'
-        '  get_recording_state) printf "%s\\n" "$FAKE_RECORDING_RESPONSE" ;;\n'
-        '  get_meeting_live_state) printf "%s\\n" "$FAKE_MEETING_RESPONSE" ;;\n'
-        "esac\n",
-        encoding="utf-8",
-    )
-    python3_stub.chmod(0o755)
-
-    env = os.environ.copy()
-    env.update(
-        {
-            "HOME": str(short_home),
-            "PATH": f"{fake_bin}:{env['PATH']}",
-            "FAKE_RECORDING_RESPONSE": recording_response,
-            "FAKE_MEETING_RESPONSE": meeting_response,
-        }
-    )
-    try:
-        return subprocess.run(
-            ["/bin/sh", str(driver)],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    finally:
-        short_home.unlink(missing_ok=True)
+    from test_restart_unknown_activity_2026_09_07 import run_gate
+    return run_gate(tmp_path, "install_backend_launchagent.command", recording_response,
+                    meeting_response, function_only=True)[0]
 
 
 def test_busy_reason_detects_active_recording(tmp_path: Path) -> None:
@@ -104,7 +51,7 @@ def test_busy_reason_detects_active_recording(tmp_path: Path) -> None:
         ),
         meeting_response=json.dumps({"id": "1", "ok": True, "result": {"active": False}}),
     )
-    assert result.stdout.strip() == "BUSY:recording", result.stdout + result.stderr
+    assert result.stdout.strip() == "BLOCK:recording", result.stdout + result.stderr
 
 
 def test_busy_reason_detects_active_meeting(tmp_path: Path) -> None:
@@ -115,7 +62,7 @@ def test_busy_reason_detects_active_meeting(tmp_path: Path) -> None:
         ),
         meeting_response=json.dumps({"id": "1", "ok": True, "result": {"active": True}}),
     )
-    assert result.stdout.strip() == "BUSY:meeting", result.stdout + result.stderr
+    assert result.stdout.strip() == "BLOCK:meeting", result.stdout + result.stderr
 
 
 def test_busy_reason_free_when_idle(tmp_path: Path) -> None:
@@ -127,7 +74,7 @@ def test_busy_reason_free_when_idle(tmp_path: Path) -> None:
         ),
         meeting_response=json.dumps({"id": "1", "ok": True, "result": {"active": False}}),
     )
-    assert result.stdout.strip() == "FREE", result.stdout + result.stderr
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_busy_gate_precedes_bootout_in_script_order() -> None:

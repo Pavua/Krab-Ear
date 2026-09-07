@@ -71,3 +71,12 @@ def test_program_arguments_use_main_entrypoint() -> None:
         "ProgramArguments всё ещё содержит KrabEar/backend/service.py — "
         "двойное исполнение модуля backend.service при включённом REST (Р9)"
     )
+
+
+def test_rest_template_is_valid_and_uses_same_data_dir() -> None:
+    """Raw REST XML должен разбираться и ссылаться на общий каталог backend."""
+    rest_path = TEMPLATE.with_name("ai.krab.ear.rest.plist.template")
+    rest = plistlib.loads(rest_path.read_bytes())
+    backend = _load_template()
+    assert rest["Label"] == "ai.krab.ear.rest"
+    assert rest["EnvironmentVariables"]["KRAB_EAR_DATA_DIR"] == backend["EnvironmentVariables"]["KRAB_EAR_DATA_DIR"]
