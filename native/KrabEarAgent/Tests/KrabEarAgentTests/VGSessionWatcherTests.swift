@@ -26,6 +26,8 @@ private final class ScriptedFetcher: VGSessionFetching {
 }
 
 private final class SpyDelegate: VGSessionWatcherDelegate {
+    var appearedSessions: [VGSessionInfo] = []
+    var updatedSessions: [VGSessionInfo] = []
     var appeared: [(String, UInt64, Bool)] = []
     var updated: [(String, UInt64)] = []
     var gone: [(String, UInt64)] = []
@@ -35,10 +37,14 @@ private final class SpyDelegate: VGSessionWatcherDelegate {
     // ассертит значение, а не полагается на то, что XCTest сам крутится на main.
     var appearedOnMainThread: [Bool] = []
     func watcherCallAppeared(_ s: VGSessionInfo, generation: UInt64, resurrected: Bool) {
+        appearedSessions.append(s)
         appearedOnMainThread.append(Thread.isMainThread)
         appeared.append((s.id, generation, resurrected))
     }
-    func watcherCallUpdated(_ s: VGSessionInfo, generation: UInt64) { updated.append((s.id, generation)) }
+    func watcherCallUpdated(_ s: VGSessionInfo, generation: UInt64) {
+        updatedSessions.append(s)
+        updated.append((s.id, generation))
+    }
     func watcherCallGone(sessionId: String, generation: UInt64) { gone.append((sessionId, generation)) }
     func watcherVGLost(sessionId: String, generation: UInt64) { lost.append((sessionId, generation)) }
     func watcherAuthRejected() { authRejects += 1 }
@@ -76,6 +82,76 @@ final class VGSessionWatcherTests: XCTestCase {
         w.pollOnce { exp.fulfill() }
         wait(for: [exp], timeout: 2)
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))  // дренаж main-доставки
+    }
+
+    func test_screening_json_uses_top_level_identity_and_meta_markers() throws {
+        let w = makeWatcher()
+        let markers: [[String: Any]] = [
+            ["screening": true],
+            ["agent_role": "inbound_screener"],
+            ["screening": false, "agent_role": "inbound_screener"],
+        ]
+        for (index, marker) in markers.enumerated() {
+            var raw = session("screening-\(index)", phone: "+12025550101", direction: "inbound")
+            raw["source"] = "twilio_pstn_inbound"
+            raw["forwarded_from"] = "+12025550102"
+            var meta = marker
+            meta["phone"] = "not-the-top-level-caller"
+            raw["meta"] = meta
+            fetcher.script = [.success((200, body([raw])))]
+            poll(w)
+            let info = try XCTUnwrap(spy.appearedSessions.last)
+            XCTAssertEqual(info.id, raw["id"] as? String)
+            XCTAssertTrue(info.isScreening)
+            XCTAssertEqual(info.phone, "+12025550101")
+            XCTAssertEqual(info.forwardedFrom, "+12025550102")
+            XCTAssertEqual(info.callDirection, "inbound")
+            XCTAssertEqual(info.agentRole, marker["agent_role"] as? String ?? "")
+        }
+    }
+
+    func test_outbound_json_without_meta_is_not_screening() throws {
+        let w = makeWatcher()
+        fetcher.script = [.success((200, body([session("outbound")])))]
+        poll(w)
+        let info = try XCTUnwrap(spy.appearedSessions.first)
+        XCTAssertFalse(info.isScreening)
+        XCTAssertEqual(info.agentRole, "")
+        XCTAssertEqual(info.forwardedFrom, "")
+        XCTAssertEqual(info.callDirection, "outbound")
+    }
+
+    func test_inbound_creation_snapshots_wait_for_complete_identity() throws {
+        // VG twilio_voice_webhook: initial meta → running → phone/direction/DID.
+        // До последнего patch isLiveLocked не должен показывать промежуточную сессию.
+        var created = session("inbound", status: "created", phone: "", direction: "")
+        created["source"] = "twilio_pstn_inbound"
+        created["forwarded_from"] = ""
+        created["meta"] = ["screening": true, "agent_role": "inbound_screener"]
+        var running = created
+        running["status"] = "running"
+        var ready = running
+        ready["phone"] = "+12025550101"
+        ready["forwarded_from"] = "+12025550102"
+        ready["call_direction"] = "inbound"
+        let w = makeWatcher()
+        fetcher.script = [created, running, ready, ready].map { .success((200, body([$0]))) }
+        poll(w)
+        XCTAssertTrue(spy.appearedSessions.isEmpty)
+        poll(w)
+        XCTAssertTrue(spy.appearedSessions.isEmpty)
+        poll(w)
+        XCTAssertEqual(spy.appearedSessions.count, 1)
+        let first = try XCTUnwrap(spy.appearedSessions.first)
+        XCTAssertTrue(first.isScreening)
+        XCTAssertEqual(first.agentRole, "inbound_screener")
+        XCTAssertEqual(first.phone, "+12025550101")
+        XCTAssertEqual(first.forwardedFrom, "+12025550102")
+        XCTAssertEqual(first.callDirection, "inbound")
+        poll(w)
+        XCTAssertEqual(spy.appearedSessions.count, 1)
+        XCTAssertEqual(spy.updatedSessions, [first])
+        XCTAssertEqual(spy.appeared.first?.1, spy.updated.first?.1)
     }
 
     func test_appear_immediate_and_updated_on_next_poll() {
