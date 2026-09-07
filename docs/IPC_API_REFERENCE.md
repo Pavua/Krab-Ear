@@ -863,7 +863,8 @@ REST использует метод только для `request_profile=voice_
 и `language=ru`. Сокет: `KRAB_EAR_SOCKET`, иначе стандартный endpoint native
 BackendService в `~/Library/Application Support/KrabEar/krabear.sock`.
 IPC-подпись берётся из `IPC_SIGNING_ENABLED/IPC_SIGNING_SECRET`; параметры формы
-её не меняют. Отказ privacy/подписи → HTTP 403 без fallback, busy/not-ready →503,
+её не меняют. Отказ privacy/подписи/IPC throttle → HTTP 403 без fallback;
+throttle выполняется до проверки privacy владельцем. Model busy/not-ready →503,
 timeout →504. Auto/ES/EN идут общим STT, но всегда без history, диаризации,
 prompt-контекста владельца и multipass. Предварительный бюджет профиля — 8 с;
 включение Gateway требует отдельной runtime qualification.

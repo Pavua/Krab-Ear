@@ -1689,7 +1689,7 @@ def _transcribe_call_ru(deadline: float):
             signing_secret=settings.IPC_SIGNING_SECRET,
         )
     except CallSTTRejectedError:
-        return jsonify({"error": "owner authorization refused", "text": ""}), 403
+        return jsonify({"error": "owner policy refused", "text": ""}), 403
     except CallSTTTimeoutError:
         if _call_profile_privacy_enabled():
             return jsonify({"skipped": "privacy_mode", "text": ""}), 403

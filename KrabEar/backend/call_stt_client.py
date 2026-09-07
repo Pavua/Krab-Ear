@@ -72,8 +72,15 @@ def _decode_response(frame: bytes, request_id: str) -> dict[str, Any]:
     if not isinstance(envelope, dict) or envelope.get("id") != request_id:
         raise CallSTTProtocolError("IPC ответ не соответствует запросу")
     error = envelope.get("error")
-    if envelope.get("ok") is False and isinstance(error, dict) and error.get("code") == "unauthorized":
-        raise CallSTTRejectedError("Владелец отклонил авторизацию IPC")
+    # Эти control-policy gates выполняются ДО privacy в телефонном handler.
+    # Их отказ не подтверждает разрешение на запасной STT, даже при HTTP
+    # privacy=False в отдельном REST-процессе. Model busy остаётся retryable.
+    if (
+        envelope.get("ok") is False
+        and isinstance(error, dict)
+        and error.get("code") in {"unauthorized", "rate_limit_exceeded"}
+    ):
+        raise CallSTTRejectedError("Владелец отклонил IPC по политике доступа")
     if envelope.get("ok") is not True or "error" in envelope:
         raise CallSTTProtocolError("Владелец отклонил IPC-запрос")
     result = envelope.get("result")

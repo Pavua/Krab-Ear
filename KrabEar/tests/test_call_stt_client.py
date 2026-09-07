@@ -140,11 +140,12 @@ def test_missing_signing_secret_fails_before_connect(monkeypatch, signing_enable
         _call("/tmp/not-used.sock", signing_enabled=signing_enabled, signing_secret=signing_secret)
 
 
-def test_signing_rejection_has_no_unsigned_retry():
+@pytest.mark.parametrize("code", ["unauthorized", "rate_limit_exceeded"])
+def test_policy_rejection_has_no_unsigned_retry(code):
     def reply(connection, request, stop):
         connection.sendall((json.dumps({
             "id": request["id"], "ok": False,
-            "error": {"code": "unauthorized", "message": "sensitive text not surfaced"},
+            "error": {"code": code, "message": "sensitive text not surfaced"},
         }) + "\n").encode())
 
     with _server(reply) as (path, received):
@@ -298,7 +299,7 @@ def test_connection_failure_is_typed_and_has_no_secret_or_path():
         assert "sensitive-name" not in str(error.value)
 
 
-@pytest.mark.parametrize("outcome", ["privacy_mode", "unauthorized", "ok"])
+@pytest.mark.parametrize("outcome", ["privacy_mode", "unauthorized", "rate_limit_exceeded", "ok"])
 @pytest.mark.parametrize("received_at", [102.0, 103.0])
 def test_completed_refusal_frame_survives_deadline_but_success_does_not(monkeypatch, outcome, received_at):
     client = _client()
@@ -317,10 +318,10 @@ def test_completed_refusal_frame_survives_deadline_but_success_does_not(monkeypa
     monkeypatch.setattr(socket.socket, "recv", recv)
 
     def reply(connection, request, stop):
-        if outcome == "unauthorized":
+        if outcome in {"unauthorized", "rate_limit_exceeded"}:
             frame = (json.dumps({
                 "id": request["id"], "ok": False,
-                "error": {"code": "unauthorized", "message": "refused"},
+                "error": {"code": outcome, "message": "refused"},
             }) + "\n").encode()
         else:
             frame = _reply(request, {"status": outcome, "text": "" if outcome == "privacy_mode" else "Привет"})
@@ -330,7 +331,7 @@ def test_completed_refusal_frame_survives_deadline_but_success_does_not(monkeypa
         if outcome == "privacy_mode":
             assert _call(path, timeout=2) == {"status": "privacy_mode", "text": ""}
         else:
-            expected = client.CallSTTRejectedError if outcome == "unauthorized" else client.CallSTTTimeoutError
+            expected = client.CallSTTTimeoutError if outcome == "ok" else client.CallSTTRejectedError
             with pytest.raises(expected):
                 _call(path, timeout=2)
         assert len(received) == 1
