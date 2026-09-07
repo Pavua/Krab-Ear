@@ -10,6 +10,24 @@ Krab Ear is a local voice assistant/transcriber for macOS. It runs as a two-proc
 
 The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels, and docs are in Russian.
 
+## Телефонный STT-профиль Voice Gateway (source, 2026-09-07)
+
+`POST /v1/stt/transcribe` с `request_profile=voice_gateway_call`: RU идёт через
+подписываемый IPC `transcribe_ephemeral_call` к единственному уже загруженному
+subprocess GigaAM в BackendService. Auto/ES/EN используют общий STT с явным auto,
+без history/диаризации/контекста владельца/multipass. Standalone REST по-прежнему
+не создаёт GigaAM. Полный контракт и исходы —
+[`docs/IPC_API_REFERENCE.md`](docs/IPC_API_REFERENCE.md#transcribe_ephemeral_call).
+
+`CallSTTService` удерживает отслеживаемую обработку после таймаута клиента;
+router/adapter pin запрещает выгрузку/подмену сессии. Privacy читается строго
+через `StateStore.call_privacy_mode`; ошибка и повреждение настроек не дают
+default OFF. `close()` возвращает False до drain и не закрывает используемые
+pipes. Новые source gates не доказывают живую скорость/качество: Gateway-флаги
+`KRAB_STT_EAR_CALL_PROFILE_ENABLED` и `KRAB_SCREENING_AUTO_LANGUAGE_ENABLED`
+остаются выключенными до отдельной qualification. План:
+[`2026-09-07-vg-gigaam-call-profile.md`](docs/superpowers/plans/2026-09-07-vg-gigaam-call-profile.md).
+
 **Оперативный фронт: `docs/NOW.md`** (одна страница). Журнал волн: `docs/ROADMAP-2026H2.md` (обновлять после каждой волны; не очередь задач для исполнителей). Рельсы: `docs/EXECUTOR_PLAYBOOK.md`. Старый `docs/ROADMAP.md` — архив.
 
 ## Architecture

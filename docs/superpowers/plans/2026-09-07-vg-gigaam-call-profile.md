@@ -10,6 +10,28 @@ GigaAM-владельцу Krab Ear, сохранив честный auto-languag
 **Runtime boundary:** source/tests only. No `REST_IN_PROCESS_ENABLED`, launchd
 restart, live call, process termination, credentials, or production state.
 
+## Implementation checkpoint 2026-09-07
+
+- [x] Explicit auto сохраняется до Whisper и WhisperX; проверка идёт через
+  настоящий REST→Transcriber→AudioEngine путь с подставным ML worker.
+- [x] `STTRouter.reserve_gigaam_call` → `GigaAMAdapter.reserve_call`: общий
+  pin/inflight, только уже загруженный subprocess, отказ без очереди;
+  reconfigure/dead-session lookup/close не теряют закреплённую сессию.
+- [x] `CallSTTService`: одна отслеживаемая работа, поздний drain, bounded
+  shutdown, строгая owner privacy через `StateStore.call_privacy_mode`.
+- [x] Ограниченный WAV и подписанный IPC, REST профиль, общий deadline и
+  no-history для всех языков, privacy имеет приоритет над auth/лимитом/ошибкой.
+- [x] Gateway source wiring: отдельный флаг `KRAB_STT_EAR_CALL_PROFILE_ENABLED=0`,
+  RU/remote audio, explicit auto, фактическая backend metadata.
+- Итоговые committed-SHA gates фиксируются в `.remember/CODEX_CALL_STT_20260907.md`.
+- [ ] Runtime latency/quality qualification и включение флагов владельцем.
+
+Предварительный бюджет 8 с на Ear / 10 с HTTP в Gateway не является замером.
+Другие GigaAM-транспорты не включаются и возвращают `not_ready`. Существующий
+120-секундный watchdog аварии subprocess отделён от deadline телефонного хода.
+Таймаут транспорта не доказывает актуальный privacy-state недоступного owner;
+для доступного owner и всех полученных исходов privacy сохраняет приоритет.
+
 ## Confirmed defect
 
 Standalone REST owns `AudioEngine(skip_gigaam_warmup=True)` and calls its own

@@ -541,7 +541,8 @@ class AudioEngine:
         self._skip_gigaam: bool = skip_gigaam_warmup
 
         # skip_gigaam_warmup=True используется REST-сервером чтобы не создавать дубликат
-        # subprocess'а — он проксирует через BackendService IPC (Wave 69).
+        # subprocess'а; RU call-profile идёт через BackendService IPC,
+        # остальные REST-запросы обслуживает собственный Whisper.
         if getattr(settings, "STT_GIGAAM_ENABLED", False) and not skip_gigaam_warmup:
             def _warmup_bg() -> None:
                 try:
@@ -567,18 +568,22 @@ class AudioEngine:
         """
         self._router.close()
 
-    def close(self) -> None:
+    def close(self) -> bool:
         """Останавливает фоновые ресурсы движка (живой инцидент 2026-08-04).
 
         Единственный владелец GigaAM subprocess-воркера, спавненного background-
         warmup-тредом в __init__, — self._router. Без этого вызова процесс
         остаётся сиротой при остановке владельца (Transcriber/BackendService).
+        False означает незавершённый drain/ошибку; вызывающий сохраняет
+        владельца и может повторить close после завершения инференса.
         Never raises — вызывается из чужих finally/close-цепочек.
         """
         try:
-            self._router.close()
+            if self._router.close() is False:
+                return False
         except Exception:
             logger.warning("AudioEngine.close: ошибка закрытия STTRouter", exc_info=True)
+            return False
         try:
             from core.mlx_whisper_session import close_mlx_whisper_session
 
@@ -588,6 +593,8 @@ class AudioEngine:
                 "AudioEngine.close: ошибка закрытия mlx_whisper worker",
                 exc_info=True,
             )
+            return False
+        return True
 
     def warmup(self) -> dict[str, Any]:
         """Prewarm Whisper model to eliminate first-dictation cold-start latency.
@@ -3545,10 +3552,16 @@ class AudioEngine:
             audio_array = audio_data
 
         # Транскрибация (batch_size=16 — безопасный дефолт для 36 GB RAM).
-        lang_param = language if language else None
+        # Sentinel живёт до границы конкретного API: WhisperX, как и
+        # mlx-whisper, включает детектор через None, не строку "auto".
+        lang_param = (
+            None
+            if isinstance(language, str) and language.strip().lower() == "auto"
+            else language or None
+        )
         result = model.transcribe(audio_array, batch_size=16, language=lang_param)
 
-        detected_lang = result.get("language") or language
+        detected_lang = result.get("language") or lang_param
 
         # --- Word-level timestamps (phoneme alignment) ---
         word_timestamps = None

@@ -837,6 +837,37 @@ Returns: `{found: [...], count}`
 
 ## STT Management
 
+### `transcribe_ephemeral_call`
+
+Телефонный запрос Voice Gateway к единственному владельцу GigaAM. Параметры:
+`request_id` (идентификатор внутри подписанных params), `audio_wav_b64`
+(PCM16 mono WAV, 8/16 кГц, ≤25 с), `language="ru"`, `deadline_monotonic`
+(абсолютный monotonic-дедлайн этого хоста, остаток ≤25 с). Полный JSON-конверт
+с подписью/newline ограничен 1 MiB; этот предел дополнительно ограничивает
+длительность 16 кГц WAV после base64.
+
+Ответ `result`: `status=ok|busy|not_ready|timeout|privacy_mode|closing|error`,
+`text` (пустой при отказе), `reason` при известной причине. Успех несёт фактические
+`engine`, `adapter`, `mode`, `model`, `transport`, `language`, `confidence` и
+`confidence_source`. GigaAM confidence имеет источник `constant`.
+
+Поддержан только уже загруженный subprocess-адаптер: холодная модель и другие
+транспорты дают `not_ready`, занятая диктовка — `busy`. Lazy-load, история,
+перевод и диаризация не запускаются. Privacy проверяется строго в owner до
+admission и перед ответом; повреждённые настройки закрывают доступ. Истёкший
+клиентский deadline не убивает worker: owner дочитывает поздний ответ и удаляет
+WAV, сохраняя pin/занятость. Shutdown закрывает admission; незаконченный drain
+возвращает `False` и сохраняет используемый transcriber.
+
+REST использует метод только для `request_profile=voice_gateway_call`
+и `language=ru`. Сокет: `KRAB_EAR_SOCKET`, иначе стандартный endpoint native
+BackendService в `~/Library/Application Support/KrabEar/krabear.sock`.
+IPC-подпись берётся из `IPC_SIGNING_ENABLED/IPC_SIGNING_SECRET`; параметры формы
+её не меняют. Отказ privacy/подписи → HTTP 403 без fallback, busy/not-ready →503,
+timeout →504. Auto/ES/EN идут общим STT, но всегда без history, диаризации,
+prompt-контекста владельца и multipass. Предварительный бюджет профиля — 8 с;
+включение Gateway требует отдельной runtime qualification.
+
 | Метод | Описание |
 |---|---|
 | `warmup_stt` | Ручной STT warmup |

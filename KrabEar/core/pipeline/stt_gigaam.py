@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -156,7 +157,7 @@ class GigaAMAdapter:
         # W1216 F2 fix: adapter-level spawn lock prevents concurrent transcribe() calls
         # from both passing the `_subprocess is None` guard and double-spawning workers.
         # Distinct from _GigaAMSubprocessSession._lock (which serialises IPC sends).
-        self._spawn_lock = threading.Lock()
+        self._spawn_lock = threading.RLock()
         # In-process sibling of _spawn_lock: serialises the heavy (~2 GB) lazy
         # model load in _get_model() so two concurrent in-process transcribe()
         # calls cannot both pass the `_model is None` guard and load twice
@@ -171,10 +172,36 @@ class GigaAMAdapter:
         # against the exact same lock transcribe() uses.
         self.last_used_ts: float = time.monotonic()
         self.inflight: int = 0
+        self._call_pins: int = 0
 
     # ------------------------------------------------------------------
     # Публичный API
     # ------------------------------------------------------------------
+
+    def reserve_call(self) -> tuple[Optional["_GigaAMCallLease"], str]:
+        """Закрепляет свободную загруженную subprocess-сессию без ожидания.
+
+        Тот же lock и inflight, что у диктовки/idle-reaper. Не вызывает lazy
+        transport/model lookup; другие транспорты требуют своей qualification.
+        """
+        if not self._spawn_lock.acquire(blocking=False):
+            return None, "busy"
+        try:
+            if self.inflight:
+                return None, "busy"
+            session = self._subprocess
+            if (
+                self._active_transport != "subprocess"
+                or session is None
+                or not session.is_loaded()
+            ):
+                return None, "not_ready"
+            self.inflight += 1
+            self._call_pins += 1
+            self.last_used_ts = time.monotonic()
+            return _GigaAMCallLease(self, session), "ok"
+        finally:
+            self._spawn_lock.release()
 
     def transcribe(
         self,
@@ -286,15 +313,9 @@ class GigaAMAdapter:
         inflight (см. _mark_inflight_start/_mark_inflight_end), поэтому evict
         не может проскочить в окне только что стартовавшего запроса.
 
-        Unlocked-split (как для whisper's close()/_send()) здесь НЕ нужен:
-        close() ниже НЕ берёт _spawn_lock сам — subprocess-путь трогает только
-        self._subprocess через собственный _GigaAMSubprocessSession._lock, а
-        in-process путь просто обнуляет self._model (никакой отдельный лок ему
-        не нужен: _model_lock защищает только САМУ загрузку, а inflight==0 под
-        _spawn_lock здесь уже гарантирует, что ни один поток не выполняет
-        _get_model()/transcribe() прямо сейчас) — поэтому вызывать close()
-        прямо из-под _spawn_lock безопасно (никакого self-deadlock, W-#1872
-        класс сюда не применим).
+        _spawn_lock — RLock: close() повторно берёт его в том же потоке,
+        проверяет inflight и делегирует _close_unlocked. Телефонный pin и
+        обычная диктовка удерживают inflight до фактического конца работы.
 
         Возвращает True если реально что-то выгрузили; False — если нечего
         было выгружать (не загружено), шла работа (inflight != 0), или
@@ -307,8 +328,7 @@ class GigaAMAdapter:
                 return False
             if (time.monotonic() - self.last_used_ts) < idle_sec:
                 return False
-            self.close()
-            return True
+            return self.close()
 
     def is_loaded(self) -> bool:
         """Возвращает True если модель уже загружена (in-process ИЛИ subprocess)."""
@@ -318,7 +338,18 @@ class GigaAMAdapter:
             return True
         return False
 
-    def close(self) -> None:
+    def close(self) -> bool:
+        """Не закрывает pipes, пока диктовка или телефонный lease ещё живы."""
+        if not self._spawn_lock.acquire(blocking=False):
+            return False
+        try:
+            if self.inflight:
+                return False
+            return self._close_unlocked()
+        finally:
+            self._spawn_lock.release()
+
+    def _close_unlocked(self) -> bool:
         """Освобождает ресурсы: subprocess worker (если запущен) И in-process
         модель (если загружена этим транспортом).
 
@@ -331,16 +362,20 @@ class GigaAMAdapter:
         """
         if self._subprocess is not None:
             try:
-                self._subprocess.close()
+                if self._subprocess.close() is False:
+                    return False
             except Exception as exc:
                 logger.debug("GigaAMAdapter.close: %s", exc)
+                return False
             self._subprocess = None
         if self._model is not None:
             try:
                 self._release_in_process_model(self._model)
             except Exception as exc:
                 logger.debug("GigaAMAdapter.close: in-process model release failed: %s", exc)
+                return False
             self._model = None
+        return True
 
     @staticmethod
     def _release_in_process_model(model: object) -> None:
@@ -470,28 +505,11 @@ class GigaAMAdapter:
         kills the second — but the parent threads race to assign self._subprocess,
         potentially leaving it pointing to the dead second session.
         """
-        # F1: clear dead session before the guard check so spawn is retried.
-        if self._subprocess is not None and not self._subprocess.is_loaded():
-            logger.debug(
-                "GigaAMAdapter: dead subprocess session detected — clearing for re-spawn "
-                "(W1216 F1)"
-            )
-            try:
-                self._subprocess.diagnose_and_close()
-            except Exception:
-                pass
-            self._subprocess = None
-
-        # Fast path: already live, no lock needed.
-        if self._subprocess is not None:
-            return self._subprocess
-
-        # F2: serialize spawn through adapter-level lock; re-check inside to handle the
-        # case where a concurrent caller already completed spawn while we waited.
+        # Проверка/сброс/создание атомарны относительно телефонного pin и reaper.
         with self._spawn_lock:
-            # F1 re-check inside lock: another thread may have cleared + re-spawned
-            # a session that already died again between the outer check and lock acquire.
             if self._subprocess is not None and not self._subprocess.is_loaded():
+                if self._call_pins:
+                    raise RuntimeError("GigaAM session still owned by call drain")
                 try:
                     self._subprocess.diagnose_and_close()
                 except Exception:
@@ -683,6 +701,86 @@ def detect_subprocess_oom(returncode: int, stderr: str) -> tuple[bool, str | Non
     return (False, None)
 
 
+class _GigaAMCallBusy(RuntimeError):
+    """Слот занял другой потребитель до отправки телефонного запроса."""
+
+
+class _GigaAMCallLease:
+    """Pin существующей сессии до завершения inference и удаления temp WAV."""
+
+    def __init__(self, adapter: GigaAMAdapter, session: "_GigaAMSubprocessSession"):
+        self._adapter = adapter
+        self._session = session
+        self._lock = threading.Lock()
+        self._released = False
+        self._started = False
+        self._running = False
+
+    def release(self) -> None:
+        with self._lock:
+            if not self._released and not self._running:
+                self._released = True
+                with self._adapter._spawn_lock:
+                    self._adapter._call_pins -= 1
+                    self._adapter._mark_inflight_end()
+
+    def run(self, audio: np.ndarray, sample_rate: int, deadline_monotonic: float) -> dict:
+        # Один lease — одна попытка. Service освобождает его только после run.
+        with self._lock:
+            if self._released or self._started:
+                raise RuntimeError("call lease already consumed")
+            self._started = True
+            self._running = True
+        try:
+            return self._run(audio, sample_rate, deadline_monotonic)
+        finally:
+            with self._lock:
+                self._running = False
+            self.release()
+
+    def _run(self, audio: np.ndarray, sample_rate: int, deadline_monotonic: float) -> dict:
+        if (
+            sample_rate not in (8000, 16000)
+            or not isinstance(audio, np.ndarray)
+            or audio.ndim != 1
+            or not 0 < audio.size <= 25 * sample_rate
+            or not np.isfinite(audio).all()
+            or not math.isfinite(deadline_monotonic)
+        ):
+            raise ValueError("invalid call audio or deadline")
+        if time.monotonic() >= deadline_monotonic:
+            return {"status": "timeout", "text": ""}
+        audio_16k = self._adapter._ensure_16k(audio, sample_rate)
+        if audio_16k.size > 25 * _REQUIRED_SAMPLE_RATE:
+            raise ValueError("call audio exceeds shortform limit")
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            path = tmp.name
+        try:
+            self._adapter._write_wav(path, audio_16k)
+            if time.monotonic() >= deadline_monotonic:
+                return {"status": "timeout", "text": ""}
+            try:
+                result = self._session.transcribe(
+                    path, wait_for_slot=False, deadline_monotonic=deadline_monotonic,
+                )
+            except _GigaAMCallBusy:
+                return {"status": "busy", "text": ""}
+            text = str(result.get("text", "")).strip()
+            return {
+                "status": "ok", "text": text, "language": "ru",
+                "engine": self._adapter._engine_name(),
+                "adapter": "gigaam", "mode": self._adapter._mode,
+                "model": f"gigaam-{self._adapter._mode}", "transport": "subprocess",
+                "confidence": 0.9, "confidence_source": "constant",
+                **({"reason": "empty_transcription"} if not text else {}),
+            }
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
 class _GigaAMSubprocessSession:
     """Управляет долгоживущим subprocess-воркером (gigaam_worker.py).
 
@@ -835,6 +933,9 @@ class _GigaAMSubprocessSession:
         audio_path: str,
         longform: bool = False,
         hf_token: str = "",
+        *,
+        wait_for_slot: bool = True,
+        deadline_monotonic: float | None = None,
     ) -> dict:
         """Отправляет transcribe-команду, возвращает {"text": ..., "engine": ...}.
 
@@ -876,7 +977,13 @@ class _GigaAMSubprocessSession:
             request["longform"] = True
         if hf_token:
             request["hf_token"] = hf_token
-        response = self._send(request, timeout_sec=timeout)
+        if wait_for_slot:
+            response = self._send(request, timeout_sec=timeout)
+        else:
+            response = self._send(
+                request, timeout_sec=timeout, wait_for_slot=False,
+                deadline_monotonic=deadline_monotonic,
+            )
         if not response.get("ok"):
             err = response.get("error", "unknown")
             raise RuntimeError(f"_GigaAMSubprocessSession: transcribe failed: {err}")
@@ -978,7 +1085,10 @@ class _GigaAMSubprocessSession:
     # Internal protocol helpers
     # ------------------------------------------------------------------
 
-    def _send(self, request: dict, timeout_sec: float) -> dict:
+    def _send(
+        self, request: dict, timeout_sec: float, *, wait_for_slot: bool = True,
+        deadline_monotonic: float | None = None,
+    ) -> dict:
         """Отправляет JSON-запрос, читает одну JSON-строку ответа.
 
         Сериализует доступ через `_lock` — несколько потоков не могут одновременно
@@ -989,7 +1099,11 @@ class _GigaAMSubprocessSession:
         if self._proc.stdin is None or self._proc.stdout is None:
             raise RuntimeError("_GigaAMSubprocessSession: process pipes missing")
 
-        with self._lock:
+        if not self._lock.acquire(blocking=wait_for_slot):
+            raise _GigaAMCallBusy("GigaAM session busy")
+        try:
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                raise TimeoutError("call expired before worker send")
             try:
                 self._proc.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
                 self._proc.stdin.flush()
@@ -1005,6 +1119,8 @@ class _GigaAMSubprocessSession:
                 line = self._proc.stdout.readline()
             finally:
                 timer.cancel()
+        finally:
+            self._lock.release()
 
         if not line:
             # Worker exited without responding — check for OOM before raising.

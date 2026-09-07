@@ -212,19 +212,22 @@ class Transcriber:
             audio_data, cleanup_profile="soft", is_preview=True, single_pass=True,
         )
 
-    def close(self) -> None:
+    def close(self) -> bool:
         """Останавливает фоновые ресурсы обёрнутого engine (2026-08-04).
 
         Duck-typed: engine может быть fake-объектом без close() (тесты) — тогда
-        это тихий no-op, не AttributeError. Never raises.
+        это тихий no-op, не AttributeError. False сохраняет отказ владельца
+        закрыться во время незавершённого инференса. Never raises.
         """
         engine_close = getattr(self.engine, "close", None)
         if engine_close is None:
-            return
+            return True
         try:
-            engine_close()
+            # Legacy engine возвращал None; только явный False = drain pending.
+            return engine_close() is not False
         except Exception:
             logger.warning("Transcriber.close: ошибка закрытия engine", exc_info=True)
+            return False
 
     # ------------------------------------------------------------------
     # Phase B.1 — error_bus integration (late-injection, same as LLMRewriter)

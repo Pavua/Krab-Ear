@@ -25,11 +25,11 @@ if str(PROJECT_ROOT) not in sys.path:
 def _make_engine(**kwargs):
     """Создаёт AudioEngine с опциональными инжектированными зависимостями.
 
-    Все тяжёлые зависимости (mlx_whisper, pyannote, torch) уже обёрнуты в
-    try/except в самом engine.py, поэтому AudioEngine() можно конструировать
-    без каких-либо установленных ML-библиотек.
+    Запрещаем фоновый GigaAM warmup: установленный у владельца отдельный
+    venv может запустить реальный worker даже без ML-пакетов в test-venv.
     """
     from core.engine import AudioEngine
+    kwargs.setdefault("skip_gigaam_warmup", True)
     return AudioEngine(**kwargs)
 
 

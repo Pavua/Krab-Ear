@@ -23,14 +23,14 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.engine import AudioEngine
-from backend.transcriber import Transcriber
+from core.engine import AudioEngine  # noqa: E402
+from backend.transcriber import Transcriber  # noqa: E402
 
 
 class AudioEngineCloseTests(unittest.TestCase):
@@ -41,6 +41,9 @@ class AudioEngineCloseTests(unittest.TestCase):
         # в этом тесте; закрытие проверяем на ВРУЧНУЮ подставленном mock-роутере.
         self.engine = AudioEngine(skip_gigaam_warmup=True)
         self.engine._router = MagicMock()
+        whisper_close = patch("core.mlx_whisper_session.close_mlx_whisper_session")
+        self.whisper_close = whisper_close.start()
+        self.addCleanup(whisper_close.stop)
 
     def test_close_delegates_to_router(self):
         self.engine.close()
@@ -50,7 +53,21 @@ class AudioEngineCloseTests(unittest.TestCase):
     def test_close_never_raises_when_router_close_fails(self):
         self.engine._router.close.side_effect = RuntimeError("subprocess wait failed")
 
-        self.engine.close()  # daemon-совместимый контракт — не должен бросить
+        self.assertIs(self.engine.close(), False)
+        self.whisper_close.assert_not_called()
+
+    def test_inflight_router_refuses_close_until_drain(self):
+        self.engine._router.close.side_effect = [False, True]
+
+        self.assertIs(self.engine.close(), False)
+        self.whisper_close.assert_not_called()
+
+        self.assertIs(self.engine.close(), True)
+        self.whisper_close.assert_called_once()
+
+    def test_whisper_close_failure_is_not_reported_as_complete(self):
+        self.whisper_close.side_effect = RuntimeError("worker close failed")
+        self.assertIs(self.engine.close(), False)
 
 
 class TranscriberCloseTests(unittest.TestCase):
@@ -72,6 +89,24 @@ class TranscriberCloseTests(unittest.TestCase):
         transcriber = Transcriber(engine=_EngineWithoutClose())
 
         transcriber.close()  # не должен бросить AttributeError
+
+    def test_inflight_engine_refusal_propagates_and_can_be_retried(self):
+        fake_engine = MagicMock()
+        fake_engine.close.side_effect = [False, True]
+        transcriber = Transcriber(engine=fake_engine)
+
+        self.assertIs(transcriber.close(), False)
+        self.assertIs(transcriber.close(), True)
+
+    def test_close_exception_reports_incomplete(self):
+        fake_engine = MagicMock()
+        fake_engine.close.side_effect = RuntimeError("close failed")
+        self.assertIs(Transcriber(engine=fake_engine).close(), False)
+
+    def test_legacy_none_close_result_means_complete(self):
+        fake_engine = MagicMock()
+        fake_engine.close.return_value = None
+        self.assertIs(Transcriber(engine=fake_engine).close(), True)
 
 
 if __name__ == "__main__":
