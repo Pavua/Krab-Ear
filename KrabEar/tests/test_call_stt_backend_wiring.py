@@ -101,7 +101,7 @@ def real_call_stack(monkeypatch, tmp_path):
     from backend import service as backend_module
     from backend.request_signing import RequestSigner
     from backend.state_store import StateStore
-    from core.pipeline import stt_gigaam
+    import core.pipeline.stt_gigaam as stt_gigaam
     from core.stt_router import STTRouter
     # Импортный helper подавляет standalone AudioEngine/StateStore construction.
     from test_rest_vg_contract_M1 import _deps_with, rs
