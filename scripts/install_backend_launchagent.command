@@ -66,37 +66,76 @@ wait_for_bootout() {
 # test_install_backend_busy_gate_contract_S3.py извлекает их из ТЕКСТА этого
 # файла и гоняет изолированно, без запуска установщика целиком.
 ipc_call() {
-  # $1 = method; выводит сырой JSON-ответ или пустую строку при мёртвом сокете.
+  # Состояние выдаётся только после полного валидного ответа IPC. Тексты
+  # диктовки/встречи не попадают ни в shell output, ни в аргументы процессов.
   python3 - "$1" <<'PY' 2>/dev/null
-import json, os, socket, sys
+import json, os, socket, sys, time
 method = sys.argv[1]
 p = os.path.expanduser("~/Library/Application Support/KrabEar/krabear.sock")
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
 try:
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(4)
-    s.connect(p)
-    s.sendall((json.dumps({"id": "1", "method": method, "params": {}}) + "\n").encode())
-    print(s.recv(8192).decode())
+    deadline = time.monotonic() + 4.0
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(4.0)
+        connection.connect(p)
+        connection.sendall((json.dumps({"id": "1", "method": method, "params": {}}) + "\n").encode())
+        data = bytearray()
+        while b"\n" not in data:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or len(data) >= 1048576:
+                raise TimeoutError("IPC reply limit")
+            connection.settimeout(remaining)
+            chunk = connection.recv(min(8192, 1048576 - len(data)))
+            if not chunk:
+                raise ValueError("incomplete IPC reply")
+            data.extend(chunk)
+    response = json.loads(data.split(b"\n", 1)[0], object_pairs_hook=unique_object)
+    if not isinstance(response, dict) or response.get("id") != "1" or response.get("ok") is not True:
+        raise ValueError("invalid RPC envelope")
+    if response.get("error") is not None:
+        raise ValueError("RPC error")
+    result = response.get("result")
+    if not isinstance(result, dict) or ("ok" in result and result["ok"] is not True):
+        raise ValueError("invalid RPC result")
+    if method == "ping":
+        if result.get("status") != "ok":
+            raise ValueError("backend not ready")
+        print('{"ok": true}')
+    else:
+        field = {"get_recording_state": "is_recording", "get_meeting_live_state": "active"}[method]
+        value = result.get(field)
+        if type(value) is not bool or result.get("privacy_mode_active") is True:
+            raise ValueError("activity unknown")
+        print("busy" if value else "idle")
 except Exception:
-    pass
+    if method != "ping":
+        print("unknown")
 PY
 }
 
 busy_reason() {
-  # Печатает причину занятости ("recording" / "meeting") или ничего.
+  # 0 + причина = занято/неизвестно (блокировать); 1 = оба IPC подтвердили idle.
   local rec meet
   rec=$(ipc_call get_recording_state)
-  if [ -n "$rec" ] && printf '%s' "$rec" | grep -qE '"is_recording"[[:space:]]*:[[:space:]]*true'; then
-    echo "recording"
-    return 0
-  fi
+  case "$rec" in
+    busy) echo "recording"; return 0 ;;
+    idle) ;;
+    *) echo "unknown-recording"; return 0 ;;
+  esac
   meet=$(ipc_call get_meeting_live_state)
-  if [ -n "$meet" ] && printf '%s' "$meet" | grep -qE \
-    '"active"[[:space:]]*:[[:space:]]*true|"(state|status)"[[:space:]]*:[[:space:]]*"(recording|active|running)"'; then
-    echo "meeting"
-    return 0
-  fi
-  return 1
+  case "$meet" in
+    busy) echo "meeting"; return 0 ;;
+    idle) return 1 ;;
+    *) echo "unknown-meeting"; return 0 ;;
+  esac
 }
 
 [ -f "$TEMPLATE" ] || fail "template not found: $TEMPLATE"
@@ -104,33 +143,6 @@ busy_reason() {
 mkdir -p "$ROOT_DIR/logs"
 mkdir -p "$HOME/Library/LaunchAgents"
 mkdir -p "$HOME/Library/Application Support/KrabEar"
-
-# Busy-гейт перед переустановкой юнита (инцидент 2026-07-22: bootout под
-# диктовкой безвозвратно теряет аудио — оно живёт только в памяти процесса).
-# Отсутствие сокета = первичная установка (backend ещё не запускался) — это
-# НЕ занятость, установка идёт как раньше.
-if [ "$FORCE" -eq 1 ]; then
-  log "--force: busy-гейт пропущен"
-elif [ -S "$SOCKET" ]; then
-  DEADLINE=$(( $(date +%s) + WAIT_SEC ))
-  # 🔴 Вызывать busy_reason ТОЛЬКО внутри if/while: скрипт под `set -e`
-  # (строка 16 выше), а busy_reason по контракту возвращает 1, когда backend
-  # свободен. Голый `REASON=$(busy_reason)` отдельным statement'ом под set -e
-  # молча завершил бы установку на КАЖДОМ свободном прогоне — гейт
-  # инвертировался бы в вечный отказ (см. test_busy_reason_never_called_as_bare_assignment_under_set_e).
-  while REASON=$(busy_reason); do
-    if [ "$WAIT_SEC" -eq 0 ]; then
-      fail "активная сессия ($REASON) — переустановка потеряла бы аудио. Дождись окончания, запусти с --wait N или осознанно --force."
-    fi
-    if [ "$(date +%s)" -ge "$DEADLINE" ]; then
-      fail "сессия ($REASON) не закончилась за ${WAIT_SEC}с"
-    fi
-    log "идёт $REASON — жду… ($(( DEADLINE - $(date +%s) ))с осталось)"
-    sleep 3
-  done
-else
-  log "сокет отсутствует/мёртв — первичная установка, busy-гейт пропущен"
-fi
 
 # HF_TOKEN resolution order:
 #   1. env var HF_TOKEN (если пользователь выставил вручную)
@@ -155,6 +167,31 @@ fi
 if [ -z "${HF_TOKEN:-}" ]; then
   log "HF-токен пропущен — диаризация говорящих отключена"
   HF_TOKEN=""
+fi
+
+# Busy-гейт перед переустановкой юнита (инцидент 2026-07-22: bootout под
+# диктовкой безвозвратно теряет аудио — оно живёт только в памяти процесса).
+# Отсутствие сокета не доказывает отсутствие владельца аудио. Первичная
+# установка/recovery без IPC требуют существующего явного --force.
+if [ "$FORCE" -eq 1 ]; then
+  log "--force: busy-гейт пропущен"
+else
+  DEADLINE=$(( $(date +%s) + WAIT_SEC ))
+  # 🔴 Вызывать busy_reason ТОЛЬКО внутри if/while: скрипт под `set -e`
+  # (строка 16 выше), а busy_reason по контракту возвращает 1, когда backend
+  # свободен. Голый `REASON=$(busy_reason)` отдельным statement'ом под set -e
+  # молча завершил бы установку на КАЖДОМ свободном прогоне — гейт
+  # инвертировался бы в вечный отказ (см. test_busy_reason_never_called_as_bare_assignment_under_set_e).
+  while REASON=$(busy_reason); do
+    if [ "$WAIT_SEC" -eq 0 ]; then
+      fail "активная сессия ($REASON) или состояние не подтверждено — переустановка запрещена. Дождись окончания, запусти с --wait N или осознанно --force."
+    fi
+    if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+      fail "сессия ($REASON) не закончилась за ${WAIT_SEC}с"
+    fi
+    log "идёт $REASON — жду… ($(( DEADLINE - $(date +%s) ))с осталось)"
+    sleep 3
+  done
 fi
 
 # 1. Bootout старой версии (если загружена) — ДО записи нового plist, чтобы

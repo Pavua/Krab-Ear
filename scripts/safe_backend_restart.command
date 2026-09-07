@@ -9,7 +9,9 @@
 #
 # Скрипт спрашивает get_recording_state / get_meeting_live_state через IPC и
 # отказывается рестартовать, пока идёт запись или живая встреча (можно ждать
-# с --wait). Мёртвый/неотвечающий сокет — рестарт разрешён (чинить и надо).
+# с --wait). Отсутствующий/неотвечающий сокет — UNKNOWN, не разрешение
+# убивать процесс. Восстановление неизвестного endpoint требует отдельного
+# осознанного действия владельца; автоматический recovery здесь запрещён.
 #
 # ИСПОЛЬЗОВАНИЕ:
 #   scripts/safe_backend_restart.command            # backend, отказ при записи
@@ -37,59 +39,92 @@ while [ $# -gt 0 ]; do
 done
 
 ipc_call() {
-  # $1 = method; выводит сырой JSON-ответ или пустую строку при мёртвом сокете.
+  # Состояние выдаётся только после полного валидного ответа IPC. Тексты
+  # диктовки/встречи не попадают ни в shell output, ни в аргументы процессов.
   python3 - "$1" <<'PY' 2>/dev/null
-import json, os, socket, sys
+import json, os, socket, sys, time
 method = sys.argv[1]
 p = os.path.expanduser("~/Library/Application Support/KrabEar/krabear.sock")
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
 try:
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(4)
-    s.connect(p)
-    s.sendall((json.dumps({"id": "1", "method": method, "params": {}}) + "\n").encode())
-    print(s.recv(8192).decode())
+    deadline = time.monotonic() + 4.0
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(4.0)
+        connection.connect(p)
+        connection.sendall((json.dumps({"id": "1", "method": method, "params": {}}) + "\n").encode())
+        data = bytearray()
+        while b"\n" not in data:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or len(data) >= 1048576:
+                raise TimeoutError("IPC reply limit")
+            connection.settimeout(remaining)
+            chunk = connection.recv(min(8192, 1048576 - len(data)))
+            if not chunk:
+                raise ValueError("incomplete IPC reply")
+            data.extend(chunk)
+    response = json.loads(data.split(b"\n", 1)[0], object_pairs_hook=unique_object)
+    if not isinstance(response, dict) or response.get("id") != "1" or response.get("ok") is not True:
+        raise ValueError("invalid RPC envelope")
+    if response.get("error") is not None:
+        raise ValueError("RPC error")
+    result = response.get("result")
+    if not isinstance(result, dict) or ("ok" in result and result["ok"] is not True):
+        raise ValueError("invalid RPC result")
+    if method == "ping":
+        if result.get("status") != "ok":
+            raise ValueError("backend not ready")
+        print('{"ok": true}')
+    else:
+        field = {"get_recording_state": "is_recording", "get_meeting_live_state": "active"}[method]
+        value = result.get(field)
+        if type(value) is not bool or result.get("privacy_mode_active") is True:
+            raise ValueError("activity unknown")
+        print("busy" if value else "idle")
 except Exception:
-    pass
+    if method != "ping":
+        print("unknown")
 PY
 }
 
 busy_reason() {
-  # Печатает причину занятости ("recording" / "meeting") или ничего.
+  # 0 + причина = занято/неизвестно (блокировать); 1 = оба IPC подтвердили idle.
   local rec meet
   rec=$(ipc_call get_recording_state)
-  if [ -n "$rec" ] && printf '%s' "$rec" | grep -qE '"is_recording"[[:space:]]*:[[:space:]]*true'; then
-    echo "recording"
-    return 0
-  fi
+  case "$rec" in
+    busy) echo "recording"; return 0 ;;
+    idle) ;;
+    *) echo "unknown-recording"; return 0 ;;
+  esac
   meet=$(ipc_call get_meeting_live_state)
-  # Живой IPC-контракт MeetingSessionService возвращает boolean ``active``;
-  # старые state/status оставляем fallback'ом для совместимости с ранними ветками.
-  if [ -n "$meet" ] && printf '%s' "$meet" | grep -qE \
-    '"active"[[:space:]]*:[[:space:]]*true|"(state|status)"[[:space:]]*:[[:space:]]*"(recording|active|running)"'; then
-    echo "meeting"
-    return 0
-  fi
-  return 1
+  case "$meet" in
+    busy) echo "meeting"; return 0 ;;
+    idle) return 1 ;;
+    *) echo "unknown-meeting"; return 0 ;;
+  esac
 }
 
-if [ -S "$SOCK" ]; then
-  DEADLINE=$(( $(date +%s) + WAIT_SEC ))
-  while REASON=$(busy_reason); do
-    if [ "$WAIT_SEC" -eq 0 ]; then
-      echo "REFUSED: активная сессия ($REASON) — рестарт потерял бы аудио." >&2
-      echo "Дождись окончания или запусти с --wait N." >&2
-      exit 1
-    fi
-    if [ "$(date +%s)" -ge "$DEADLINE" ]; then
-      echo "REFUSED: сессия ($REASON) не закончилась за ${WAIT_SEC}с." >&2
-      exit 1
-    fi
-    echo "[safe-restart] идёт $REASON — жду… ($(( DEADLINE - $(date +%s) ))с осталось)"
-    sleep 3
-  done
-else
-  echo "[safe-restart] сокет отсутствует/мёртв — рестарт разрешён без проверки."
-fi
+DEADLINE=$(( $(date +%s) + WAIT_SEC ))
+while REASON=$(busy_reason); do
+  if [ "$WAIT_SEC" -eq 0 ]; then
+    echo "REFUSED: активная сессия ($REASON) или состояние не подтверждено — рестарт запрещён." >&2
+    echo "Дождись окончания или запусти с --wait N." >&2
+    exit 1
+  fi
+  if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+    echo "REFUSED: сессия ($REASON) не закончилась за ${WAIT_SEC}с." >&2
+    exit 1
+  fi
+  echo "[safe-restart] идёт $REASON — жду… ($(( DEADLINE - $(date +%s) ))с осталось)"
+  sleep 3
+done
 
 echo "[safe-restart] kickstart $BACKEND_UNIT"
 launchctl kickstart -k "$BACKEND_UNIT"
