@@ -37,7 +37,7 @@ except Exception:
 
 from core.mlx_lock import mlx_lock  # noqa: E402 — после try/except блока MLX импорта
 from core.mlx_inter_lock import MLXInterLockTimeout, mlx_inter_process_lock  # noqa: E402
-from core.mlx_lock import MLXLockTimeoutError  # noqa: E402
+from core.mlx_lock import MLXLockTimeoutError, acquire_mlx_lock  # noqa: E402
 from core.mlx_subprocess import MLXTimeoutError, get_watchdog  # noqa: E402
 from core.mlx_memory_gate import should_skip_second_mlx_checkpoint  # noqa: E402
 from core.transcript_context import build_initial_prompt, merge_language_hotwords
@@ -346,6 +346,18 @@ def _fit_worker_timeout(setting_sec: float, attempt_timeout_sec: float | None) -
         attempt_timeout_sec * _WORKER_TIMEOUT_MIN_FRACTION,
     )
     return min(setting_sec, inner)
+
+
+def _mlx_attempt_deadline(timeout_sec: float) -> float:
+    """Зафиксировать срок попытки в вызывающем треде до передачи в executor."""
+    now = time.monotonic()
+    deadline = now + timeout_sec
+    remaining = stt_budget.remaining_sec()
+    if remaining is not None:
+        # now снят ДО remaining: микрозадержка может лишь сократить срок,
+        # но не продлить дедлайн запроса при передаче между тредами.
+        deadline = min(deadline, now + remaining)
+    return deadline
 
 
 # NoiseProfiler разбивает аудио на фреймы по 2048 сэмплов и на более коротком
@@ -757,43 +769,21 @@ class AudioEngine:
         return True
 
     def _blacklist_allowed_for(self, exc: BaseException, *, is_adapter: bool = False) -> bool:
-        """§4.7 (спека 2026-08-26), уточнено финальным гейтом волны (находка 1):
-        можно ли писать модель в _unavailable_models по этому исключению.
+        """Решить, доказывает ли исключение неисправность модели.
 
-        Любое НЕ-таймаутное исключение (MLX watchdog, крах воркера, OOM)
-        блэклист заслуживает независимо от ветки — проверяется первым.
-
-        Дальше ветки РАСХОДЯТСЯ по источнику многоминутного ожидания:
-
-        - whisper-каскад и multipass-ретраи (is_adapter=False, дефолт):
-          единственный НЕОГРАНИЧЕННЫЙ источник ожидания здесь — очередь за
-          внутрипроцессным mlx_lock() (общий GPU-лок с любой конкурентной
-          операцией, например часовым импортом), а НЕ зависший инференс.
-          Настоящее зависание ловит собственный watchdog MLX и приходит
-          отдельным типом (MLXTimeoutError, RuntimeError-наследник — не
-          матчится этой проверкой, у него своя ветка except, блэклистит
-          всегда). Проверка через budget_exhausted() бюджета ЗАПРОСА здесь
-          не годится: попытка истекает по СВОЕМУ бюджету (104-180с — в разы
-          меньше бюджета запроса), так что запрос почти всегда ещё "жив" —
-          инцидент 2026-08-26 показал именно это: 4.71с аудио держали общий
-          GPU-лок в очереди позади часового импорта и уходили в блэклист,
-          хотя обе модели были полностью здоровы. Поэтому здесь TimeoutError
-          НИКОГДА не блэклистит — сигнал попросту неотличим от очереди.
-        - adapter-ветка (is_adapter=True: GigaAM/Parakeet/SenseVoice/
-          WhisperX/Voxtral) — другой контракт: внешний таймаут там floor'ится
-          ADAPTER_MIN_BUDGET_SEC (200с), заведомо выше внутренних таймаутов
-          subprocess (120с shortform / 180с load) — сработавший внешний
-          таймаут означает, что subprocess не уложился даже в собственный
-          лимит, законный сигнал нездоровья; решает по остатку дедлайна
-          ЗАПРОСА, как и раньше (stt_budget.timeout_blacklist_allowed()).
+        Intra/inter-process queue timeout означает занятую очередь, не отказ
+        движка. Generic TimeoutError у Whisper тоже не отличает очередь от
+        истечения внешнего бюджета. Для других адаптеров сохраняется прежнее
+        решение по остатку бюджета запроса (их внутренние лимиты отличаются).
+        Настоящие watchdog/OOM/worker-crash ошибки по-прежнему blacklists.
         """
         # 🔴 Ожидание ОЧЕРЕДИ за GPU — не отказ движка (волна 2026-08-29).
-        # MLXLockTimeoutError означает «лок держит сосед» (превью, импорт,
+        # MLXLockTimeoutError/MLXInterLockTimeout означают «лок держит сосед» (превью, импорт,
         # смена профиля), а сам движок здоров и GPU даже не трогал. Блэклист за
         # это выбивает рабочий GigaAM на 300 с и отправляет следующую диктовку
         # в облако, которого нет, — тот же дефект, что разбирала спека #1956,
         # только в adapter-ветке, куда он попадает как наследник TimeoutError.
-        if isinstance(exc, MLXLockTimeoutError):
+        if isinstance(exc, (MLXLockTimeoutError, MLXInterLockTimeout)):
             return False
         if not isinstance(exc, (TimeoutError, concurrent.futures.TimeoutError)):
             return True
@@ -2259,6 +2249,7 @@ class AudioEngine:
                         future = _executor.submit(
                             self._transcribe_model, audio_data, model_label, prompt, language,
                             attempt_timeout_sec=_attempt_timeout,
+                            attempt_deadline_monotonic=_mlx_attempt_deadline(_attempt_timeout),
                         )
                         attempt_result = future.result(timeout=_attempt_timeout)
                     except (concurrent.futures.TimeoutError, concurrent.futures.CancelledError):
@@ -2807,8 +2798,9 @@ class AudioEngine:
                 self._RU_FINETUNE_MARKER,
                 "stt_ru_finetune",
                 _ru_finetune_model,
-                lambda: self._transcribe_model(
+                lambda **attempt_budget: self._transcribe_model(
                     chain_audio_data, _ru_finetune_model, prompt, language,
+                    **attempt_budget,
                 ),
             ),
             (
@@ -2881,9 +2873,19 @@ class AudioEngine:
                     with _profiler.start_span(span_name):
                         _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
                         try:
-                            _fut = _pool.submit(adapter_fn)
+                            _adapter_kwargs = {}
+                            if model_name == self._RU_FINETUNE_MARKER:
+                                _adapter_kwargs = {
+                                    "attempt_timeout_sec": _adapter_timeout,
+                                    "attempt_deadline_monotonic": _mlx_attempt_deadline(_adapter_timeout),
+                                }
+                            _fut = _pool.submit(adapter_fn, **_adapter_kwargs)
                             try:
                                 adapter_result = _fut.result(timeout=_adapter_timeout)
+                            except (MLXLockTimeoutError, MLXInterLockTimeout):
+                                # Future возвращает исходную ошибку очереди. Не
+                                # подменять её общим timeout: это включит blacklist.
+                                raise
                             except concurrent.futures.TimeoutError:
                                 _fut.cancel()
                                 raise TimeoutError(
@@ -2955,6 +2957,7 @@ class AudioEngine:
                             prompt,
                             language,
                             attempt_timeout_sec=timeout,
+                            attempt_deadline_monotonic=_mlx_attempt_deadline(timeout),
                         )
                         result = future.result(timeout=timeout)
                     except (concurrent.futures.TimeoutError, concurrent.futures.CancelledError):
@@ -2967,6 +2970,11 @@ class AudioEngine:
                         _executor.shutdown(wait=False)
                 result["model_used"] = model_name
                 return result
+            except (MLXLockTimeoutError, MLXInterLockTimeout) as exc:
+                logger.warning(
+                    "Очередь MLX для %s: %s — модель не помечается неисправной",
+                    model_name, exc,
+                )
             except concurrent.futures.TimeoutError as exc:
                 # Лог обязан называть СРАБОТАВШЕЕ число, не глобальную
                 # константу — иначе следующий разбор идёт по ложному следу.
@@ -3076,6 +3084,7 @@ class AudioEngine:
         prompt: str,
         language: str | None = None,
         attempt_timeout_sec: float | None = None,
+        attempt_deadline_monotonic: float | None = None,
     ) -> dict[str, Any]:
         """Низкоуровневый вызов MLX Whisper с обработкой несовместимых аргументов.
 
@@ -3084,8 +3093,10 @@ class AudioEngine:
         RLock позволяет повторный захват из того же потока (fallback chain).
 
         Если MLX_CRASH_RECOVERY_ENABLED=True, каждый вызов mlx_whisper.transcribe()
-        оборачивается в MLXWatchdog.run_with_timeout() — при зависании GPU поток
-        обрывается через MLXTimeoutError, который всплывает в fallback chain.
+        оборачивается в MLXWatchdog.run_with_timeout(). Таймаут не обрывает
+        Python-поток: watchdog ждёт bounded join перед MLXTimeoutError.
+        Абсолютный срок ограничивает ожидание и допуск in-process инференса;
+        уже начавшийся Metal этот срок принудительно не останавливает.
         """
         effective_language = (
             None
@@ -3113,10 +3124,8 @@ class AudioEngine:
         # как внешний лишь перестаёт ждать, оставляя поток с замком сессии.
         # Бюджет приходит параметром, а не читается здесь: stt_budget живёт в
         # ContextVar, который НЕ наследуется потоком пула (см. call_in_scope).
-        timeout_sec = _fit_worker_timeout(
-            getattr(settings, "MLX_TRANSCRIBE_TIMEOUT_SEC", 60.0),
-            attempt_timeout_sec,
-        )
+        configured_timeout_sec = getattr(settings, "MLX_TRANSCRIBE_TIMEOUT_SEC", 60.0)
+        timeout_sec = _fit_worker_timeout(configured_timeout_sec, attempt_timeout_sec)
 
         last_err: Exception | None = None
         from core.mlx_whisper_session import (
@@ -3168,55 +3177,87 @@ class AudioEngine:
                         last_err = e
             raise last_err or RuntimeError("Ошибка вызова mlx_whisper.transcribe")
 
-        # Сериализуем доступ к GPU через глобальный MLX lock.
-        # W1635: also wrap with mlx_inter_process_lock for cross-process GPU safety.
-        # Raises MLXInterLockTimeout — let it propagate to transcribe() callers.
-        # Минимальный critical section: только сам mlx_whisper.transcribe вызов.
-        with mlx_inter_process_lock(), mlx_lock():  # W1635: cross-process flock (outer) + intra-process RLock (inner)
-            for params in variants:
-                try:
-                    if recovery_enabled:
-                        # Watchdog: запускает в daemon-thread, бросает MLXTimeoutError при зависании.
-                        # W1604 F1 fix: MLXTimeoutError перехватывается ЗДЕСЬ (внутри loop),
-                        # чтобы variants fallthrough работал так же, как при recovery_enabled=False.
-                        captured_params = params  # closure capture
-                        return get_watchdog().run_with_timeout(
-                            fn=lambda: mlx_whisper.transcribe(audio_data, **captured_params),
-                            timeout_sec=timeout_sec,
-                            model_name=model_name,
+        if attempt_deadline_monotonic is None:
+            relative_timeout = attempt_timeout_sec
+            if relative_timeout is None:
+                relative_timeout = stt_budget.resolve_attempt_timeout_sec(
+                    self._estimate_audio_duration_sec(audio_data)
+                )
+            attempt_deadline_monotonic = _mlx_attempt_deadline(relative_timeout)
+
+        last_inference_error: MemoryError | RuntimeError | None = None
+
+        def remaining_attempt_sec() -> float:
+            remaining = attempt_deadline_monotonic - time.monotonic()
+            if remaining <= 0:
+                # Исчерпание срока не отменяет уже подтверждённый отказ
+                # движка. TypeError совместимости сюда намеренно не попадает.
+                if last_inference_error is not None:
+                    raise last_inference_error
+                raise MLXLockTimeoutError(
+                    "Срок попытки Whisper истёк до запуска инференса"
+                )
+            return remaining
+
+        def infer_variant(params: dict[str, Any]) -> dict[str, Any]:
+            # Проверка выполняется также внутри daemon watchdog — между
+            # созданием треда и его запуском срок мог уже истечь.
+            remaining_attempt_sec()
+            return mlx_whisper.transcribe(audio_data, **params)
+
+        # Сохраняем порядок: межпроцессный flock снаружи, RLock внутри.
+        # 5с — прежний предел flock; 25с — queue cap, как у GigaAM MLX.
+        # Оба ожидания и каждая variant ограничены остатком одной попытки.
+        with mlx_inter_process_lock(timeout_sec=min(5.0, remaining_attempt_sec())):
+            with acquire_mlx_lock(timeout_sec=min(25.0, remaining_attempt_sec())):
+                for params in variants:
+                    timeout_sec = _fit_worker_timeout(
+                        configured_timeout_sec, remaining_attempt_sec()
+                    )
+                    try:
+                        if recovery_enabled:
+                            # Watchdog: запускает в daemon-thread, бросает MLXTimeoutError при зависании.
+                            # W1604 F1 fix: MLXTimeoutError перехватывается ЗДЕСЬ (внутри loop),
+                            # чтобы variants fallthrough работал так же, как при recovery_enabled=False.
+                            captured_params = params  # closure capture
+                            return get_watchdog().run_with_timeout(
+                                fn=lambda: infer_variant(captured_params),
+                                timeout_sec=timeout_sec,
+                                model_name=model_name,
+                            )
+                        else:
+                            return infer_variant(params)
+                    except MLXTimeoutError as e:
+                        # KRAB-EAR-BACKEND-1V: при таймауте watchdog (Metal GPU завис)
+                        # перебор вариантов kwargs бессмысленен (тот же GPU, та же модель).
+                        # Повторные попытки лишь умножали задержку (3x таймаут), приводя к
+                        # 180с IPC backstop. Прерываемся немедленно для перехода к fallback chain.
+                        logger.error(
+                            "MLX watchdog timeout %.1fs (model=%s) — прерываю variants loop для fallback",
+                            e.timeout_sec, model_name,
                         )
-                    else:
-                        return mlx_whisper.transcribe(audio_data, **params)
-                except MLXTimeoutError as e:
-                    # KRAB-EAR-BACKEND-1V: при таймауте watchdog (Metal GPU завис)
-                    # перебор вариантов kwargs бессмысленен (тот же GPU, та же модель).
-                    # Повторные попытки лишь умножали задержку (3x таймаут), приводя к
-                    # 180с IPC backstop. Прерываемся немедленно для перехода к fallback chain.
-                    logger.error(
-                        "MLX watchdog timeout %.1fs (model=%s) — прерываю variants loop для fallback",
-                        e.timeout_sec, model_name,
-                    )
-                    self._push_error(
-                        "stt.mlx_timeout",
-                        f"MLXTimeoutError {e.timeout_sec}s (model={model_name})",
-                        severity="error",
-                    )
-                    raise
-                except TypeError as e:
-                    last_err = e
-                except (MemoryError, RuntimeError) as e:
-                    # Phase B.2: mlx.oom / Wave 64: mlx.metal_assertion_failure —
-                    # classification centralized in _classify_mlx_error_code (2026-08-19
-                    # sibling-asymmetry fix: assertion is more specific, checked first).
-                    _emsg = str(e).lower()
-                    _code = self._classify_mlx_error_code(_emsg, isinstance(e, MemoryError))
-                    if _code is not None:
                         self._push_error(
-                            _code,
-                            f"{type(e).__name__}: {e} (model={model_name})",
-                            severity="critical" if _code == "mlx.oom" else "error",
+                            "stt.mlx_timeout",
+                            f"MLXTimeoutError {e.timeout_sec}s (model={model_name})",
+                            severity="error",
                         )
-                    last_err = e
+                        raise
+                    except TypeError as e:
+                        last_err = e
+                    except (MemoryError, RuntimeError) as e:
+                        last_inference_error = e
+                        # Phase B.2: mlx.oom / Wave 64: mlx.metal_assertion_failure —
+                        # classification centralized in _classify_mlx_error_code (2026-08-19
+                        # sibling-asymmetry fix: assertion is more specific, checked first).
+                        _emsg = str(e).lower()
+                        _code = self._classify_mlx_error_code(_emsg, isinstance(e, MemoryError))
+                        if _code is not None:
+                            self._push_error(
+                                _code,
+                                f"{type(e).__name__}: {e} (model={model_name})",
+                                severity="critical" if _code == "mlx.oom" else "error",
+                            )
+                        last_err = e
         raise last_err or RuntimeError("Ошибка вызова mlx_whisper.transcribe")
 
     # --- SenseVoice adapter (Alibaba FunASR, Phase 4 quick win) ---

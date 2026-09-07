@@ -4,12 +4,15 @@ struct VGSessionInfo: Equatable {
     let id: String
     let status: String
     let phone: String
+    let forwardedFrom: String
     let callDirection: String
     let createdAt: String
     let updatedAt: String
     let srcLang: String
     let tgtLang: String
     let callBrief: String
+    let isScreening: Bool
+    let agentRole: String
 }
 
 /// Страница дискавери: T8-fetcher ОБЯЗАН слать limit=sessionsPageLimit (не хардкод).
@@ -262,10 +265,16 @@ final class VGSessionWatcher {
     private static func parse(_ raw: [String: Any]) -> VGSessionInfo? {
         guard let id = raw["id"] as? String, let status = raw["status"] as? String else { return nil }
         func s(_ k: String) -> String { raw[k] as? String ?? "" }
+        let meta = raw["meta"] as? [String: Any] ?? [:]
+        let agentRole = meta["agent_role"] as? String ?? ""
+        let isScreening = (meta["screening"] as? Bool ?? false)
+            || agentRole == "inbound_screener"
         return VGSessionInfo(id: id, status: status, phone: s("phone"),
+                             forwardedFrom: s("forwarded_from"),
                              callDirection: s("call_direction"), createdAt: s("created_at"),
                              updatedAt: s("updated_at"), srcLang: s("src_lang"),
-                             tgtLang: s("tgt_lang"), callBrief: s("call_brief"))
+                             tgtLang: s("tgt_lang"), callBrief: s("call_brief"),
+                             isScreening: isScreening, agentRole: agentRole)
     }
 
     private func notify(_ block: @escaping (VGSessionWatcherDelegate) -> Void) {

@@ -1,13 +1,11 @@
+import AppKit
 import XCTest
 @testable import KrabEarAgent
 
 /// Секция «Автозвонки» обязана ПОКАЗЫВАТЬ сохранённые значения, а не дефолты.
 ///
-/// Найдено обходом панели 03.09.2026. Все пять контролов секции (ключ Telnyx,
-/// исходящий номер, макс. длительность, порог стоимости, авто-завершение при
-/// тишине) записывают настройки через `applySettingsPatch`, но ни один не
-/// получает текущее значение: слайдеры создаются с литералами `value: 30` и
-/// `value: 5`, тумблер — с `.on`, поля — пустыми.
+/// Проверяет три оставшихся контрола: длительность, стоимость и завершение
+/// при тишине. Устаревшие Telnyx-поля удалены; legacy-схема сохраняется отдельно.
 ///
 /// 🔴 Опаснее, чем «не видно значения»: слайдер, показывающий 30 при
 /// сохранённых 15, при первом же касании запишет ~30 — открытие панели и
@@ -36,6 +34,51 @@ final class CallAutomationSyncTests: XCTestCase {
         try source("native/KrabEarAgent/Sources/KrabEarAgent/HistoryPanelController+Settings+ClaudeDesign.swift")
     }
 
+    func test_callAutomationSection_hasNoRemovedProviderControls() throws {
+        let src = try claudeDesignSource()
+        for token in [
+            "#selector(onTelnyxAPIKeyChanged)",
+            "#selector(onTelnyxFromNumberChanged)",
+            "func onTelnyxAPIKeyChanged(",
+            "func onTelnyxFromNumberChanged(",
+            "CallAutomationAssocKeys.apiKeyField",
+            "CallAutomationAssocKeys.fromField",
+            "settings.telnyxAPIKey",
+            "settings.telnyxFromNumber",
+        ] {
+            XCTAssertFalse(src.contains(token), "Мёртвый Telnyx-контрол остался: \(token)")
+        }
+    }
+
+    func test_sharedCallPanel_doesNotRecommendRemovedProvider() throws {
+        let src = try source("native/KrabEarAgent/Sources/KrabEarAgent/CallAutomationController.swift")
+        for copy in [
+            "Настройте Telnyx API key",
+            "Проверьте настройки Telnyx.",
+        ] {
+            XCTAssertFalse(src.contains(copy), "Панель направляет в удалённый провайдер: \(copy)")
+        }
+    }
+
+    @MainActor
+    func test_configBanner_keeps_gateway_guidance_when_shown() throws {
+        // Не загружаем view: init создаёт только контроллер и не вызывает IPC.
+        let controller = CallAutomationController(
+            ipcClient: IPCClient(socketPath: "/tmp/krabear-unused-\(UUID().uuidString).sock")
+        )
+        let label = try XCTUnwrap(
+            Mirror(reflecting: controller).children
+                .first(where: { $0.label == "configBannerLabel" })?.value as? NSTextField
+        )
+        let guidance = label.stringValue
+        XCTAssertTrue(guidance.contains("Voice Gateway"))
+        controller.showConfigBanner(true)
+        XCTAssertEqual(label.stringValue, guidance, "Показ не должен перезаписывать актуальную подсказку")
+        controller.showConfigBanner(false)
+        controller.showConfigBanner(true)
+        XCTAssertEqual(label.stringValue, guidance)
+    }
+
     /// Синхронизация обязана существовать отдельной функцией — её зовут из двух
     /// мест (построение секции и `syncSettingsControls`).
     func test_syncFunctionExists() throws {
@@ -46,10 +89,10 @@ final class CallAutomationSyncTests: XCTestCase {
         )
     }
 
-    /// Каждое из пяти полей настроек должно применяться к своему контролу.
+    /// Каждое из трёх полей настроек должно применяться к своему контролу.
     func test_everySettingIsApplied() throws {
         let src = try claudeDesignSource()
-        for field in ["callMaxDurationMin", "callCostWarnUSD", "callAutoEndOnSilence", "telnyxFromNumber", "telnyxAPIKey"] {
+        for field in ["callMaxDurationMin", "callCostWarnUSD", "callAutoEndOnSilence"] {
             XCTAssertTrue(
                 src.contains("settings.\(field)"),
                 "\(field) не применяется к контролу — значение владельца не видно в панели"
