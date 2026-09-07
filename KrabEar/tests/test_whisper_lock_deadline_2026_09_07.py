@@ -105,24 +105,27 @@ def test_attempt_timeout_retires_waiter_without_late_inference(isolated_whisper)
     }
 
 
-def test_expired_direct_request_does_not_enter_inference(isolated_whisper):
+@pytest.mark.parametrize("language", ["ru", "auto"])
+def test_expired_direct_request_does_not_enter_inference(isolated_whisper, language):
     engine, infer, _lock = isolated_whisper
     with stt_budget.stt_budget_scope(stt_budget.INTERACTIVE, deadline_sec=0.0):
         with pytest.raises(MLXLockTimeoutError):
             engine._transcribe_model(
-                np.zeros(1600, dtype=np.float32), "test-whisper", "", "ru",
+                np.zeros(1600, dtype=np.float32), "test-whisper", "", language,
             )
     infer.assert_not_called()
 
 
-def test_free_lock_still_allows_inference(isolated_whisper):
+@pytest.mark.parametrize("language, expected", [(None, "ru"), ("ru", "ru"), ("auto", None)])
+def test_free_lock_still_allows_inference(isolated_whisper, language, expected):
     engine, infer, lock = isolated_whisper
     result = engine._transcribe_model(
-        np.zeros(1600, dtype=np.float32), "test-whisper", "", "ru",
+        np.zeros(1600, dtype=np.float32), "test-whisper", "", language,
         attempt_timeout_sec=1.0,
     )
     assert result == {"text": "тестовый результат"}
     infer.assert_called_once()
+    assert infer.call_args.kwargs["language"] == expected
     assert lock.entered.is_set()
 
 
