@@ -100,12 +100,34 @@ class TestEngineASTW1635(unittest.TestCase):
         self.assertIsNotNone(warmup_idx, "engine.py must catch MLXInterLockTimeout in warmup_stt path")
 
     def test_transcribe_model_uses_inter_lock(self):
-        """_transcribe_model must use mlx_inter_process_lock in the variants loop."""
-        self.assertIn(
-            "with mlx_inter_process_lock(), mlx_lock():",
-            self.src,
-            "engine.py _transcribe_model must use combined with statement",
-        )
+        tree = ast.parse(self.src)
+        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "AudioEngine")
+        method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "_transcribe_model")
+
+        def named_call(expr, name):
+            return (
+                isinstance(expr, ast.Call)
+                and isinstance(expr.func, ast.Name)
+                and expr.func.id == name
+            )
+
+        pairs = []
+        for outer in ast.walk(method):
+            if not isinstance(outer, ast.With):
+                continue
+            outer_expr = outer.items[0].context_expr
+            if not named_call(outer_expr, "mlx_inter_process_lock"):
+                continue
+            for inner in outer.body:
+                if not isinstance(inner, ast.With):
+                    continue
+                inner_expr = inner.items[0].context_expr
+                if named_call(inner_expr, "acquire_mlx_lock"):
+                    pairs.append((outer_expr, inner_expr))
+        self.assertTrue(pairs, "В _transcribe_model нужны outer flock и inner bounded RLock")
+        for outer, inner in pairs:
+            self.assertIn("timeout_sec", {kw.arg for kw in outer.keywords})
+            self.assertIn("timeout_sec", {kw.arg for kw in inner.keywords})
 
 
 class TestAudioLangIDASTW1635(unittest.TestCase):

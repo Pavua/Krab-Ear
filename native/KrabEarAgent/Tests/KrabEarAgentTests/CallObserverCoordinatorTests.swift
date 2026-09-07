@@ -2,12 +2,14 @@ import XCTest
 @testable import KrabEarAgent
 
 private final class SpyHUD: CallObserverHUDPresenting {
+    var updatedSessions: [VGSessionInfo] = []
     var shown: [String] = []; var lingers: [String] = []; var hides = 0
     var updates: [(String, String, Int, CallAudioPlayer.ListenState, String?)] = []
     var isHUDVisible = false
     func showHUD(session: VGSessionInfo) { shown.append(session.id); isHUDVisible = true }
     func updateHUD(session: VGSessionInfo, status: String, lastEntries: [TranscriptEntry],
                    listenState: CallAudioPlayer.ListenState, listeningSessionId: String?) {
+        updatedSessions.append(session)
         updates.append((session.id, status, lastEntries.count, listenState, listeningSessionId))
     }
     func showLinger(message: String) { lingers.append(message) }
@@ -72,7 +74,7 @@ final class CallObserverCoordinatorTests: XCTestCase {
         streamHandler = nil
     }
 
-    private func makeCoordinator() -> CallObserverCoordinator {
+    private func makeCoordinator(hudPresenter: CallObserverHUDPresenting? = nil) -> CallObserverCoordinator {
         stream.connectionFactoryForTests = { _, _, onMessage in
             self.streamHandler = onMessage
             final class NoopConn: VGWebSocketConnecting { func connect() {}; func permanentStop() {} }
@@ -82,7 +84,7 @@ final class CallObserverCoordinatorTests: XCTestCase {
             final class NoopConn: VGWebSocketConnecting { func connect() {}; func permanentStop() {} }
             return NoopConn()
         }
-        let c = CallObserverCoordinator(hud: hud, panel: panel, poster: poster,
+        let c = CallObserverCoordinator(hud: hudPresenter ?? hud, panel: panel, poster: poster,
                                         settings: settings, stream: stream, player: player,
                                         tokenProvider: { "" },
                                         lingerSeconds: 0.1,
@@ -97,16 +99,97 @@ final class CallObserverCoordinatorTests: XCTestCase {
         return c
     }
 
-    private func session(_ id: String) -> VGSessionInfo {
-        VGSessionInfo(id: id, status: "running", phone: "+341", callDirection: "outbound",
-                      createdAt: "2026-08-21T10:00:00Z", updatedAt: "2026-08-21T10:00:00Z",
-                      srcLang: "es", tgtLang: "ru", callBrief: "")
+    private func session(_ id: String, phone: String = "+341", forwardedFrom: String = "",
+                         isScreening: Bool = false,
+                         createdAt: String = "2026-08-21T10:00:00Z") -> VGSessionInfo {
+        VGSessionInfo(id: id, status: "running", phone: phone, forwardedFrom: forwardedFrom,
+                      callDirection: isScreening ? "inbound" : "outbound",
+                      createdAt: createdAt, updatedAt: "2026-08-21T10:00:00Z",
+                      srcLang: "es", tgtLang: "ru", callBrief: "",
+                      isScreening: isScreening, agentRole: isScreening ? "inbound_screener" : "")
     }
 
     private func drain(_ t: TimeInterval = 0.05) { RunLoop.main.run(until: Date().addingTimeInterval(t)) }
 
     private func emit(_ json: String, gen: UInt64) {
         streamHandler?(.text(json), gen); drain()
+    }
+
+    @MainActor
+    func test_hud_return_to_surviving_call_refreshes_identity_and_clock() throws {
+        let realHUD = CallObserverHUD()
+        let c = makeCoordinator(hudPresenter: realHUD)
+        defer {
+            c.tearDown()
+            realHUD.hideHUD()
+        }
+        let a = session("surviving-A", phone: "+12025550101")
+        let b = session("screening-B", phone: "+12025550102",
+                        forwardedFrom: "+12025550103", isScreening: true,
+                        createdAt: "2026-08-21T10:05:00Z")
+        c.watcherCallAppeared(a, generation: 1, resurrected: false)
+        drain()
+        c.watcherCallAppeared(b, generation: 2, resurrected: false)
+        drain()
+        XCTAssertTrue(realHUD.testHook_statusText.contains(b.phone))
+        XCTAssertTrue(realHUD.testHook_statusText.contains(b.forwardedFrom))
+
+        c.watcherCallGone(sessionId: b.id, generation: 2)
+        drain()
+        let expectedTitle = "\(a.callDirection) \(a.phone)"
+        XCTAssertTrue(realHUD.testHook_statusText.hasPrefix(expectedTitle),
+                      "HUD должен вернуться к оставшемуся живому звонку A")
+        realHUD.testHook_fireElapsedTimer()
+        let text = realHUD.testHook_statusText
+        XCTAssertTrue(text.hasPrefix(expectedTitle + " · "))
+        XCTAssertFalse(text.contains(b.phone), "Завершённый B больше не подписывает HUD")
+        XCTAssertFalse(text.contains(b.forwardedFrom))
+        let suffix = try XCTUnwrap(text.components(separatedBy: " · ").last)
+        let minutes = try XCTUnwrap(Int(suffix.components(separatedBy: ":")[0]))
+        let created = try XCTUnwrap(VGSessionWatcher.parseISO(a.createdAt))
+        let expectedMinutes = Int(Date().timeIntervalSince(created)) / 60
+        XCTAssertLessThanOrEqual(abs(minutes - expectedMinutes), 1,
+                                "Часы HUD должны отсчитываться от A, а не от B")
+    }
+
+    @MainActor
+    func test_hud_terminal_linger_survives_followup_poll() {
+        let realHUD = CallObserverHUD()
+        let c = makeCoordinator(hudPresenter: realHUD)
+        defer {
+            c.tearDown()
+            realHUD.hideHUD()
+        }
+        let s = session("terminal", phone: "+12025550101",
+                        forwardedFrom: "+12025550102", isScreening: true)
+        c.watcherCallAppeared(s, generation: 1, resurrected: false)
+        drain()
+        c.watcherCallGone(sessionId: s.id, generation: 1)
+        XCTAssertEqual(realHUD.testHook_statusText, "Звонок завершён")
+        c.watcherCallUpdated(s, generation: 1)
+        drain()
+        realHUD.testHook_fireElapsedTimer()
+        XCTAssertEqual(realHUD.testHook_statusText, "Звонок завершён",
+                       "Поздний poll не должен перезаписать terminal linger")
+    }
+
+    func test_call_state_preserves_screening_identity_in_hud_update() throws {
+        let c = makeCoordinator()
+        defer { c.tearDown() }
+        let s = session("screening", phone: "+12025550101",
+                        forwardedFrom: "+12025550102", isScreening: true)
+        c.watcherCallAppeared(s, generation: 1, resurrected: false)
+        drain()
+        hud.updatedSessions.removeAll()
+        emit(#"{"type":"call.state","ts":"t","data":{"status":"paused","muted":true,"held":false}}"#,
+             gen: 1)
+        let updated = try XCTUnwrap(hud.updatedSessions.last)
+        XCTAssertEqual(updated.status, "paused")
+        XCTAssertEqual(updated.phone, s.phone)
+        XCTAssertEqual(updated.forwardedFrom, s.forwardedFrom)
+        XCTAssertEqual(updated.isScreening, s.isScreening)
+        XCTAssertEqual(updated.agentRole, s.agentRole)
+        XCTAssertEqual(updated.createdAt, s.createdAt)
     }
 
     func test_happy_path_appear_transcript_end_once() {

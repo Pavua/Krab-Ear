@@ -9,6 +9,7 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
     private var panel: NSPanel?
     private let statusDot = NSBox()
     private let statusLabel = NSTextField(labelWithString: "")
+    private var statusTitleText = ""
     private let badgesStack = NSStackView()
     private let linesLabel = NSTextField(wrappingLabelWithString: "")
     private let listenButton = ThemeButton()
@@ -29,8 +30,9 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
         // L3 (w1 final, sibling-асимметрия): VG отдаёт ISO и с долями секунды, и
         // без — общий VGSessionWatcher.parseISO уже принимает оба формата, свой
         // одноразовый ISO8601DateFormatter() здесь ловил только один из них.
-        callCreatedAt = VGSessionWatcher.parseISO(session.createdAt)
-        statusLabel.stringValue = "\(session.callDirection) \(session.phone)"
+        updateSessionIdentity(session)
+        statusLabel.stringValue = statusTitleText
+
         // I-4 (координатор): ЛЮБОЙ showHUD — включая повторный для уже видимого
         // HUD — обязан очистить ранее показанный linger-текст.
         linesLabel.stringValue = "· ждём реплик…"
@@ -41,6 +43,8 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
 
     func updateHUD(session: VGSessionInfo, status: String, lastEntries: [TranscriptEntry],
                    listenState: CallAudioPlayer.ListenState, listeningSessionId: String?) {
+        updateSessionIdentity(session)
+        refreshElapsedText()
         let statusLower = status.lowercased()
         if statusLower.contains("ring") {
             statusDot.fillColor = KrabEarTheme.Colors.warning
@@ -124,15 +128,31 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
         panel?.orderOut(nil)
     }
 
+    private func updateSessionIdentity(_ session: VGSessionInfo) {
+        callCreatedAt = VGSessionWatcher.parseISO(session.createdAt)
+        let caller = session.phone.isEmpty ? session.id : session.phone
+        if session.isScreening {
+            let didText = session.forwardedFrom.isEmpty ? "" : " на \(session.forwardedFrom)"
+            statusTitleText = "Скрининг входящего · \(caller)\(didText)"
+        } else {
+            statusTitleText = "\(session.callDirection) \(caller)"
+        }
+    }
+
+    private func refreshElapsedText() {
+        guard let created = callCreatedAt else {
+            statusLabel.stringValue = statusTitleText
+            return
+        }
+        let seconds = Int(Date().timeIntervalSince(created))
+        let mmss = String(format: "%02d:%02d", seconds / 60, seconds % 60)
+        statusLabel.stringValue = statusTitleText + " · " + mmss
+    }
+
     private func startElapsedTimer() {
         elapsedTimer?.invalidate()
         elapsedTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            guard let self, let created = self.callCreatedAt else { return }
-            let s = Int(Date().timeIntervalSince(created))
-            let mmss = String(format: "%02d:%02d", s / 60, s % 60)
-            var text = self.statusLabel.stringValue
-            if let dotRange = text.range(of: " · ") { text = String(text[..<dotRange.lowerBound]) }
-            self.statusLabel.stringValue = text + " · " + mmss
+            self?.refreshElapsedText()
         }
     }
 
@@ -249,6 +269,11 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
     // MARK: Test hooks
     var testHook_listenButton: NSButton { listenButton }
     var testHook_hangupButton: NSButton { hangupButton }
+    var testHook_statusText: String { statusLabel.stringValue }
+
+    func testHook_fireElapsedTimer() {
+        elapsedTimer?.fire()
+    }
 }
 
 /// Клик-vs-драг: mouseUp < 4pt от mouseDown = клик (isMovableByWindowBackground

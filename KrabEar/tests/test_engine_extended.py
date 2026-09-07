@@ -31,9 +31,9 @@ if str(PROJECT_ROOT) not in sys.path:
 # ---------------------------------------------------------------------------
 
 def _make_engine():
-    """Создаёт AudioEngine без реальных моделей (они not imported в CI)."""
+    """Создаёт AudioEngine без фонового прогрева GigaAM или его worker."""
     from core.engine import AudioEngine
-    return AudioEngine()
+    return AudioEngine(skip_gigaam_warmup=True)
 
 
 def _whisper_ok(text: str = "hello") -> dict:
@@ -243,33 +243,59 @@ class MlxLockWrappingTests(unittest.TestCase):
         self.engine = _make_engine()
 
     def test_mlx_lock_acquired_during_transcribe_model(self):
-        """mlx_lock() должен быть захвачен внутри _transcribe_model."""
+        """Общий RLock удерживается во время inference и освобождается после него."""
         from core import mlx_lock as mlx_lock_module
 
-        lock_entered = threading.Event()
         original_lock = mlx_lock_module._mlx_lock
+        lock_entries = []
 
         class SpyRLock:
-            """Прокси-RLock, фиксирующий вход в context manager."""
+            def acquire(self, *args, **kwargs):
+                acquired = original_lock.acquire(*args, **kwargs)
+                if acquired:
+                    lock_entries.append(1)
+                return acquired
+
+            def release(self):
+                return original_lock.release()
+
             def __enter__(self):
-                lock_entered.set()
-                return original_lock.__enter__()
+                self.acquire()
+                return self
 
             def __exit__(self, *args):
-                return original_lock.__exit__(*args)
+                self.release()
+                return False
 
-        spy = SpyRLock()
+        def available_to_another_thread():
+            results = []
 
-        with patch("core.engine.mlx_lock", return_value=spy):
+            def probe():
+                acquired = original_lock.acquire(blocking=False)
+                results.append(acquired)
+                if acquired:
+                    original_lock.release()
+
+            thread = threading.Thread(target=probe, daemon=True)
+            thread.start()
+            thread.join(timeout=2.0)
+            self.assertFalse(thread.is_alive(), "lock probe не завершился")
+            self.assertEqual(len(results), 1)
+            return results[0]
+
+        def guarded_inference(*args, **kwargs):
+            self.assertGreater(len(lock_entries), 0)
+            self.assertFalse(available_to_another_thread(), "GPU-вызов выполняется без RLock")
+            return _whisper_ok()
+
+        with patch.object(mlx_lock_module, "_mlx_lock", SpyRLock()):
             with patch("core.engine.mlx_whisper") as mock_mlx:
-                mock_mlx.transcribe.return_value = _whisper_ok()
+                mock_mlx.transcribe.side_effect = guarded_inference
                 self.engine._transcribe_model(
-                    np.zeros(16000, dtype=np.float32),
-                    "fake/balanced",
-                    "test prompt",
+                    np.zeros(16000, dtype=np.float32), "fake/balanced", "prompt",
                 )
-
-        self.assertTrue(lock_entered.is_set(), "mlx_lock не был захвачен в _transcribe_model")
+                mock_mlx.transcribe.assert_called_once()
+        self.assertTrue(available_to_another_thread(), "RLock не освобождён после inference")
 
 
 # ---------------------------------------------------------------------------

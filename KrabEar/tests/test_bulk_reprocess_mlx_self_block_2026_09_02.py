@@ -160,9 +160,9 @@ class BulkReprocessMlxInvariantSourceContractTests(unittest.TestCase):
             return None
         fn = node.func
         if isinstance(fn, ast.Name):
-            return fn.id
+            return "mlx_lock" if fn.id == "acquire_mlx_lock" else fn.id
         if isinstance(fn, ast.Attribute):
-            return fn.attr
+            return "mlx_lock" if fn.attr == "acquire_mlx_lock" else fn.attr
         return None
 
     @classmethod
@@ -191,6 +191,11 @@ class BulkReprocessMlxInvariantSourceContractTests(unittest.TestCase):
             "engine.transcribe; межпроцессный flock самоблокируется так же "
             "(поток пула открывает НОВЫЙ fd на тот же файл)",
         )
+
+    def test_bounded_lock_is_recognized_by_the_invariant(self) -> None:
+        import ast
+        tree = ast.parse("with acquire_mlx_lock(timeout_sec=1):\n    pass")
+        self.assertEqual(self._lock_calls(tree), ["mlx_lock"])
 
     def test_whisper_inference_still_holds_both_locks(self) -> None:
         """Инвариант живёт ниже по стеку — в самом MLX-вызове, а не у вызывающего."""

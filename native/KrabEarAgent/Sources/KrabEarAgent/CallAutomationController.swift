@@ -13,7 +13,7 @@
    3. Call history table: Date | To | Duration | Cost | Status icon | Goal (truncated)
       Click row → modal с полным транскриптом
    4. Emergency stop — большая красная кнопка ЭКСТРЕННО ПРЕРВАТЬ, всегда видна при активном звонке
-   5. Provider switcher — segmented control Telnyx / Twilio, зелёная точка если оба ключа настроены
+   5. Клиент Voice Gateway — состояние подключения и настройки интеграции
 */
 
 import AppKit
@@ -291,7 +291,7 @@ final class CallAutomationController: NSViewController {
     }()
     private let configBannerLabel: NSTextField = {
         let l = NSTextField(wrappingLabelWithString:
-            "Настройте Telnyx API key в разделе «Автозвонки» в Настройках, затем вернитесь сюда.")
+            "Звонки выполняются через Voice Gateway. Проверьте его адрес и ключ в настройках интеграции.")
         l.font = KrabEarTheme.Typography.body
         l.textColor = .secondaryLabelColor
         l.translatesAutoresizingMaskIntoConstraints = false
@@ -905,7 +905,7 @@ final class CallAutomationController: NSViewController {
             updateSessionUI(session: session)
             startSessionPolling(sessionID: sessionID)
         } else {
-            showError("Не удалось начать звонок. Проверьте настройки Telnyx.")
+            showError("Не удалось начать звонок. Проверьте настройки Voice Gateway.")
         }
     }
 
@@ -1069,10 +1069,6 @@ final class CallAutomationController: NSViewController {
     }
 
     func showConfigBanner(_ show: Bool) {
-        if show {
-            let providerName = selectedProvider.settingKey.capitalized
-            configBannerLabel.stringValue = "Настройте параметры \(providerName) в разделе «Автозвонки» в Настройках, затем вернитесь сюда."
-        }
         configBannerCard.isHidden = !show
     }
 }
