@@ -90,8 +90,6 @@ final class CDSettingsCardView: NSVisualEffectView {
 /// синхронизация могла показать в них сохранённые значения, ссылки хранятся
 /// здесь (тот же приём, что у остальных CD-секций).
 private enum CallAutomationAssocKeys {
-    nonisolated(unsafe) static var apiKeyField: UInt8 = 0
-    nonisolated(unsafe) static var fromField: UInt8 = 0
     nonisolated(unsafe) static var maxDurSlider: UInt8 = 0
     nonisolated(unsafe) static var maxDurLabel: UInt8 = 0
     nonisolated(unsafe) static var costSlider: UInt8 = 0
@@ -472,7 +470,7 @@ extension HistoryPanelController {
     }
 
     // MARK: - Section 6: Автозвонки (Claude Design)
-    // Phase 3.4 Call Automation settings: Telnyx credentials + call limits.
+    // Настройки автозвонков: длительность, стоимость и завершение при тишине.
 
     @MainActor
     func cdBuildCallAutomationSection() -> CollapsibleSectionView {
@@ -482,28 +480,6 @@ extension HistoryPanelController {
             isExpanded: false
         )
         let card = CDSettingsCardView()
-
-        // Telnyx API key (secure field shown as password)
-        let apiKeyField = NSSecureTextField(frame: .zero)
-        apiKeyField.placeholderString = "Вставьте ключ Telnyx API"
-        apiKeyField.font = KrabEarTheme.Typography.body
-        apiKeyField.tag = 31001 // CA: api key tag
-        objc_setAssociatedObject(self, &CallAutomationAssocKeys.apiKeyField, apiKeyField, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-        apiKeyField.target = self
-        apiKeyField.action = #selector(onTelnyxAPIKeyChanged)
-        apiKeyField.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
-        let apiKeyRow = cdMakeRow(label: "Telnyx API Key", control: apiKeyField)
-
-        // From number
-        let fromField = NSTextField(string: "")
-        fromField.placeholderString = "+79991234567"
-        fromField.font = KrabEarTheme.Typography.body
-        fromField.tag = 31002
-        objc_setAssociatedObject(self, &CallAutomationAssocKeys.fromField, fromField, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-        fromField.target = self
-        fromField.action = #selector(onTelnyxFromNumberChanged)
-        fromField.widthAnchor.constraint(greaterThanOrEqualToConstant: 140).isActive = true
-        let fromRow = cdMakeRow(label: "Исходящий номер", control: fromField)
 
         // Max call duration slider (5-60 min)
         let maxDurSlider = NSSlider(value: 30, minValue: 5, maxValue: 60, target: self, action: #selector(onCallMaxDurationChanged))
@@ -537,10 +513,6 @@ extension HistoryPanelController {
         objc_setAssociatedObject(self, &CallAutomationAssocKeys.silenceToggle, silenceToggle, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         let silenceRow = cdMakeRow(label: "Авто-завершение при тишине", control: silenceToggle)
 
-        card.contentStackView.addArrangedSubview(apiKeyRow)
-        card.contentStackView.addArrangedSubview(cdMakeSeparator())
-        card.contentStackView.addArrangedSubview(fromRow)
-        card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(maxDurRow)
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(costRow)
@@ -557,14 +529,11 @@ extension HistoryPanelController {
     /// Показывает СОХРАНЁННЫЕ значения вместо литералов конструкторов.
     ///
     /// 🔴 Без этого секция врала о состоянии: слайдеры создаются с `value: 30`
-    /// и `value: 5`, тумблер с `.on`, поля пустыми — независимо от того, что
+    /// и `value: 5`, тумблер с `.on` — независимо от того, что
     /// владелец выставил раньше. Опаснее самой лжи её следствие: слайдер,
     /// показывающий 30 при сохранённых 15, при первом же касании запишет ~30,
     /// то есть открытие панели и случайное движение мыши молча меняли настройку.
     ///
-    /// Ключ Telnyx приходит из backend замаскированным (`REDACTED`) — в поле
-    /// его писать нельзя, иначе сохранение вернёт маску вместо ключа. Поэтому
-    /// секрет показывается только фактом «задан» в подсказке поля.
     @MainActor
     func syncCallAutomationControls(using value: AgentSettings? = nil) {
         let settings = value ?? settingsProvider()
@@ -584,26 +553,10 @@ extension HistoryPanelController {
         }
         (objc_getAssociatedObject(self, &CallAutomationAssocKeys.silenceToggle) as? NSButton)?
             .state = settings.callAutoEndOnSilence ? .on : .off
-        (objc_getAssociatedObject(self, &CallAutomationAssocKeys.fromField) as? NSTextField)?
-            .stringValue = settings.telnyxFromNumber
-        if let key = objc_getAssociatedObject(self, &CallAutomationAssocKeys.apiKeyField) as? NSSecureTextField {
-            key.placeholderString = settings.telnyxAPIKey.isEmpty
-                ? "Вставьте ключ Telnyx API"
-                : "Ключ задан — введите новый, чтобы заменить"
-        }
+
     }
 
     // MARK: - Call Automation settings handlers
-
-    @objc func onTelnyxAPIKeyChanged(_ sender: NSSecureTextField) {
-        guard !isSyncingSettings else { return }
-        applySettingsPatch(["telnyx_api_key": sender.stringValue])
-    }
-
-    @objc func onTelnyxFromNumberChanged(_ sender: NSTextField) {
-        guard !isSyncingSettings else { return }
-        applySettingsPatch(["telnyx_from_number": sender.stringValue])
-    }
 
     @objc func onCallMaxDurationChanged(_ sender: NSSlider) {
         guard !isSyncingSettings else { return }
