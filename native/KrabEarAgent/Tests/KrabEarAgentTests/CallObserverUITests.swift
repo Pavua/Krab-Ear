@@ -11,6 +11,62 @@ final class CallObserverUITests: XCTestCase {
                       isScreening: isScreening, agentRole: isScreening ? "inbound_screener" : "")
     }
 
+    func test_hud_screening_caller_and_did_survive_elapsed_ticks() {
+        let hud = CallObserverHUD()
+        defer { hud.hideHUD() }
+
+        let s = session(
+            "screening-timer",
+            isScreening: true,
+            forwardedFrom: "+16895551234"
+        )
+        hud.showHUD(session: s)
+        let title = hud.testHook_statusText
+        XCTAssertTrue(title.contains(s.phone))
+        XCTAssertTrue(title.contains(s.forwardedFrom))
+
+        for tick in 1...2 {
+            hud.testHook_fireElapsedTimer()
+            let text = hud.testHook_statusText
+            XCTAssertTrue(
+                text.hasPrefix(title + " · "),
+                "Полный заголовок должен сохраниться после тика \(tick)"
+            )
+            XCTAssertTrue(text.contains(s.phone))
+            XCTAssertTrue(text.contains(s.forwardedFrom))
+            let parts = text.components(separatedBy: " · ")
+            XCTAssertEqual(parts.count, 3, "Один разделитель заголовка и один времени")
+            XCTAssertNotNil(
+                parts.last?.range(
+                    of: "^[0-9]{2,}:[0-9]{2}$",
+                    options: .regularExpression
+                ),
+                "Таймер должен действительно добавить время"
+            )
+        }
+    }
+
+    func test_hud_new_call_replaces_previous_screening_title() {
+        let hud = CallObserverHUD()
+        defer { hud.hideHUD() }
+        let screening = session(
+            "old-screening",
+            isScreening: true,
+            forwardedFrom: "+16895551234"
+        )
+        hud.showHUD(session: screening)
+        hud.testHook_fireElapsedTimer()
+
+        let outbound = session("new-outbound")
+        hud.showHUD(session: outbound)
+        let expectedTitle = "\(outbound.callDirection) \(outbound.phone)"
+        XCTAssertEqual(hud.testHook_statusText, expectedTitle)
+        hud.testHook_fireElapsedTimer()
+        XCTAssertTrue(hud.testHook_statusText.hasPrefix(expectedTitle + " · "))
+        XCTAssertFalse(hud.testHook_statusText.contains(screening.forwardedFrom))
+        XCTAssertFalse(hud.testHook_statusText.contains("Скрининг"))
+    }
+
     func test_hud_show_hide_visibility() {
         let hud = CallObserverHUD()
         XCTAssertFalse(hud.isHUDVisible)
@@ -95,42 +151,42 @@ final class CallObserverUITests: XCTestCase {
         XCTAssertFalse(titleFrame.intersects(badgeFrame), "Title and badge should not intersect / overlap")
         panel.close()
     }
-    
+
     func test_panel_header_layout_screening_no_overlap() {
         let panel = CallObserverPanelController()
         let s = session("s2", isScreening: true, forwardedFrom: "+16895551234")
         panel.showPanel(session: s)
-        
+
         let titleString = panel.testHook_inContentTitleLabel.stringValue
         XCTAssertTrue(titleString.contains("Скрининг входящего"), "должна быть метка скрининга")
         XCTAssertTrue(titleString.contains(s.phone), "должен быть caller")
         XCTAssertTrue(titleString.contains(s.forwardedFrom), "должен быть DID")
         XCTAssertNotEqual(s.phone, s.forwardedFrom, "caller ≠ DID")
-        
+
         panel.setTerminal(message: "Звонок завершён")
-        
+
         guard let contentView = panel.window?.contentView else {
             XCTFail("No content view")
             return
         }
         contentView.layoutSubtreeIfNeeded()
-        
+
         let titleFrame = panel.testHook_inContentTitleLabel.convert(panel.testHook_inContentTitleLabel.bounds, to: nil)
         let badgeFrame = panel.testHook_stateBadgeBox.convert(panel.testHook_stateBadgeBox.bounds, to: nil)
-        
+
         XCTAssertFalse(titleFrame.intersects(badgeFrame), "Long screening title and badge should not intersect")
         panel.close()
     }
-    
+
     func test_panel_outbound_no_screening_badge() {
         let panel = CallObserverPanelController()
         let s = session("s3", isScreening: false)
         panel.showPanel(session: s)
-        
+
         let titleString = panel.testHook_inContentTitleLabel.stringValue
         XCTAssertFalse(titleString.contains("Скрининг"), "outbound без screening-метки")
         XCTAssertTrue(titleString.contains("Звонок агента"))
-        
+
         panel.close()
     }
 }

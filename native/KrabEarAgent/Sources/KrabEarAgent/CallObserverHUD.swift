@@ -9,6 +9,7 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
     private var panel: NSPanel?
     private let statusDot = NSBox()
     private let statusLabel = NSTextField(labelWithString: "")
+    private var statusTitleText = ""
     private let badgesStack = NSStackView()
     private let linesLabel = NSTextField(wrappingLabelWithString: "")
     private let listenButton = ThemeButton()
@@ -30,15 +31,16 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
         // без — общий VGSessionWatcher.parseISO уже принимает оба формата, свой
         // одноразовый ISO8601DateFormatter() здесь ловил только один из них.
         callCreatedAt = VGSessionWatcher.parseISO(session.createdAt)
-        
+
         let caller = session.phone.isEmpty ? session.id : session.phone
         if session.isScreening {
             let didText = session.forwardedFrom.isEmpty ? "" : " на \(session.forwardedFrom)"
-            statusLabel.stringValue = "Скрининг входящего · \(caller)\(didText)"
+            statusTitleText = "Скрининг входящего · \(caller)\(didText)"
         } else {
-            statusLabel.stringValue = "\(session.callDirection) \(caller)"
+            statusTitleText = "\(session.callDirection) \(caller)"
         }
-        
+        statusLabel.stringValue = statusTitleText
+
         // I-4 (координатор): ЛЮБОЙ showHUD — включая повторный для уже видимого
         // HUD — обязан очистить ранее показанный linger-текст.
         linesLabel.stringValue = "· ждём реплик…"
@@ -138,9 +140,7 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
             guard let self, let created = self.callCreatedAt else { return }
             let s = Int(Date().timeIntervalSince(created))
             let mmss = String(format: "%02d:%02d", s / 60, s % 60)
-            var text = self.statusLabel.stringValue
-            if let dotRange = text.range(of: " · ") { text = String(text[..<dotRange.lowerBound]) }
-            self.statusLabel.stringValue = text + " · " + mmss
+            self.statusLabel.stringValue = self.statusTitleText + " · " + mmss
         }
     }
 
@@ -257,6 +257,11 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
     // MARK: Test hooks
     var testHook_listenButton: NSButton { listenButton }
     var testHook_hangupButton: NSButton { hangupButton }
+    var testHook_statusText: String { statusLabel.stringValue }
+
+    func testHook_fireElapsedTimer() {
+        elapsedTimer?.fire()
+    }
 }
 
 /// Клик-vs-драг: mouseUp < 4pt от mouseDown = клик (isMovableByWindowBackground
