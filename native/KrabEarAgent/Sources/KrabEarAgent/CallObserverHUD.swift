@@ -30,15 +30,7 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
         // L3 (w1 final, sibling-асимметрия): VG отдаёт ISO и с долями секунды, и
         // без — общий VGSessionWatcher.parseISO уже принимает оба формата, свой
         // одноразовый ISO8601DateFormatter() здесь ловил только один из них.
-        callCreatedAt = VGSessionWatcher.parseISO(session.createdAt)
-
-        let caller = session.phone.isEmpty ? session.id : session.phone
-        if session.isScreening {
-            let didText = session.forwardedFrom.isEmpty ? "" : " на \(session.forwardedFrom)"
-            statusTitleText = "Скрининг входящего · \(caller)\(didText)"
-        } else {
-            statusTitleText = "\(session.callDirection) \(caller)"
-        }
+        updateSessionIdentity(session)
         statusLabel.stringValue = statusTitleText
 
         // I-4 (координатор): ЛЮБОЙ showHUD — включая повторный для уже видимого
@@ -51,6 +43,8 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
 
     func updateHUD(session: VGSessionInfo, status: String, lastEntries: [TranscriptEntry],
                    listenState: CallAudioPlayer.ListenState, listeningSessionId: String?) {
+        updateSessionIdentity(session)
+        refreshElapsedText()
         let statusLower = status.lowercased()
         if statusLower.contains("ring") {
             statusDot.fillColor = KrabEarTheme.Colors.warning
@@ -134,13 +128,31 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
         panel?.orderOut(nil)
     }
 
+    private func updateSessionIdentity(_ session: VGSessionInfo) {
+        callCreatedAt = VGSessionWatcher.parseISO(session.createdAt)
+        let caller = session.phone.isEmpty ? session.id : session.phone
+        if session.isScreening {
+            let didText = session.forwardedFrom.isEmpty ? "" : " на \(session.forwardedFrom)"
+            statusTitleText = "Скрининг входящего · \(caller)\(didText)"
+        } else {
+            statusTitleText = "\(session.callDirection) \(caller)"
+        }
+    }
+
+    private func refreshElapsedText() {
+        guard let created = callCreatedAt else {
+            statusLabel.stringValue = statusTitleText
+            return
+        }
+        let seconds = Int(Date().timeIntervalSince(created))
+        let mmss = String(format: "%02d:%02d", seconds / 60, seconds % 60)
+        statusLabel.stringValue = statusTitleText + " · " + mmss
+    }
+
     private func startElapsedTimer() {
         elapsedTimer?.invalidate()
         elapsedTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            guard let self, let created = self.callCreatedAt else { return }
-            let s = Int(Date().timeIntervalSince(created))
-            let mmss = String(format: "%02d:%02d", s / 60, s % 60)
-            self.statusLabel.stringValue = self.statusTitleText + " · " + mmss
+            self?.refreshElapsedText()
         }
     }
 

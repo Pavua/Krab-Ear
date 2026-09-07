@@ -650,7 +650,9 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
     }
 
     private func refreshHUD() {
-        guard hud.isHUDVisible, let id = hudTrackedId, let call = observed[id] else { return }
+        guard !hudShowingLinger, hud.isHUDVisible,
+              let id = hudTrackedId, let call = observed[id],
+              !call.terminalDelivered else { return }
         hud.updateHUD(session: call.session, status: call.session.status,
                       lastEntries: Array(call.transcript.suffix(2)),
                       listenState: listenState, listeningSessionId: listeningSessionId)
