@@ -30,7 +30,15 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
         // без — общий VGSessionWatcher.parseISO уже принимает оба формата, свой
         // одноразовый ISO8601DateFormatter() здесь ловил только один из них.
         callCreatedAt = VGSessionWatcher.parseISO(session.createdAt)
-        statusLabel.stringValue = "\(session.callDirection) \(session.phone)"
+        
+        let caller = session.phone.isEmpty ? session.id : session.phone
+        if session.isScreening {
+            let didText = session.forwardedFrom.isEmpty ? "" : " на \(session.forwardedFrom)"
+            statusLabel.stringValue = "Скрининг входящего · \(caller)\(didText)"
+        } else {
+            statusLabel.stringValue = "\(session.callDirection) \(caller)"
+        }
+        
         // I-4 (координатор): ЛЮБОЙ showHUD — включая повторный для уже видимого
         // HUD — обязан очистить ранее показанный linger-текст.
         linesLabel.stringValue = "· ждём реплик…"
