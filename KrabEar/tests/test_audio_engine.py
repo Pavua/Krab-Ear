@@ -111,6 +111,15 @@ class LanguageResolutionTests(unittest.TestCase):
     def test_hint_with_spaces_is_stripped(self):
         self.assertEqual(self._resolve("  ru  "), "ru")
 
+    def test_request_language_keeps_explicit_auto_distinct_from_omitted(self):
+        from core.engine import AudioEngine
+        from core.config import settings
+
+        with patch.object(settings, "TRANSCRIBE_LANGUAGE", "ru"):
+            self.assertEqual(AudioEngine._resolve_request_language("auto"), "auto")
+            self.assertEqual(AudioEngine._resolve_request_language(" AUTO "), "auto")
+            self.assertEqual(AudioEngine._resolve_request_language(None), "ru")
+
 
 # ---------------------------------------------------------------------------
 # 3. Unavailable model tracking

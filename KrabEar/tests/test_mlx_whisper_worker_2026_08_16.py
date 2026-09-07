@@ -278,6 +278,35 @@ class EngineRoutesToWorkerTest(unittest.TestCase):
         mock_worker.assert_called()
         watchdog.run_with_timeout.assert_not_called()
 
+    def test_explicit_auto_does_not_fall_back_to_global_russian(self):
+        import numpy as np
+
+        engine = self._make_engine()
+        audio = np.zeros(16000, dtype=np.float32)
+
+        with (
+            patch("core.mlx_whisper_session.mlx_whisper_worker_enabled", return_value=True),
+            patch(
+                "core.mlx_whisper_session.transcribe_via_mlx_worker",
+                return_value={"text": "hola", "language": "es"},
+            ) as mock_worker,
+            patch("core.engine.mlx_lock"),
+            patch("core.engine.mlx_inter_process_lock"),
+            patch("core.engine.settings") as mock_settings,
+        ):
+            mock_settings.TRANSCRIBE_LANGUAGE = "ru"
+            mock_settings.MLX_CRASH_RECOVERY_ENABLED = True
+            mock_settings.MLX_TRANSCRIBE_TIMEOUT_SEC = 45.0
+            engine._transcribe_model(
+                audio,
+                "mlx-community/whisper-large-v3-turbo",
+                "",
+                language="auto",
+            )
+
+        params = mock_worker.call_args.args[1]
+        self.assertIsNone(params["language"])
+
     def test_worker_crash_does_not_call_watchdog(self):
         import numpy as np
         from core.mlx_whisper_session import MLXWorkerCrashed

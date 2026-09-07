@@ -1044,6 +1044,20 @@ class AudioEngine:
         return None
 
     @staticmethod
+    def _resolve_request_language(lang_hint: str | None) -> str | None:
+        """Сохраняет explicit ``auto`` отдельно от omitted/default языка.
+
+        ``None`` исторически означает «использовать TRANSCRIBE_LANGUAGE».
+        Литерал ``auto`` нужен межпроцессным клиентам как явное намерение и
+        преобразуется в настоящий ``None`` только у границы Whisper API.
+        """
+        if isinstance(lang_hint, str) and lang_hint.strip().lower() == "auto":
+            return "auto"
+        if lang_hint is None:
+            return settings.TRANSCRIBE_LANGUAGE
+        return AudioEngine._resolve_language(lang_hint)
+
+    @staticmethod
     def _empty_transcription_result(engine: str, language: str | None) -> dict[str, Any]:
         """Пустой результат транскрибации в контракте обычного ответа.
 
@@ -1312,7 +1326,7 @@ class AudioEngine:
             except Exception as _v2_exc:
                 logger.warning("pipeline_v2 failed (%s), falling back", _v2_exc)
 
-        resolved_lang = self._resolve_language(lang_hint) if lang_hint is not None else settings.TRANSCRIBE_LANGUAGE
+        resolved_lang = self._resolve_request_language(lang_hint)
 
         try:
             from backend.observability import add_breadcrumb as _add_bc  # lazy — avoid circular
@@ -2408,11 +2422,7 @@ class AudioEngine:
                     pass
 
         start_time = time.time()
-        resolved_lang = (
-            self._resolve_language(lang_hint)
-            if lang_hint is not None
-            else settings.TRANSCRIBE_LANGUAGE
-        )
+        resolved_lang = self._resolve_request_language(lang_hint)
         domain_desc = self.DOMAIN_PROMPTS.get(domain, self.DOMAIN_PROMPTS["casual"])
         dynamic_prompt = f"{settings.TRANSCRIBE_PROMPT} Тематика: {domain_desc}"
         if extra_vocabulary:
@@ -3070,7 +3080,11 @@ class AudioEngine:
         оборачивается в MLXWatchdog.run_with_timeout() — при зависании GPU поток
         обрывается через MLXTimeoutError, который всплывает в fallback chain.
         """
-        effective_language = language if language is not None else settings.TRANSCRIBE_LANGUAGE
+        effective_language = (
+            None
+            if isinstance(language, str) and language.strip().lower() == "auto"
+            else language if language is not None else settings.TRANSCRIBE_LANGUAGE
+        )
         base_params = {
             "path_or_hf_repo": model_name,
             "initial_prompt": prompt,
