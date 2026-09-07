@@ -827,6 +827,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "show_dock_icon": True,
     "auto_start_enabled": False,
     "auto_paste": True,
+    # Opt-in режимы вставки: совпадает со Swift AgentSettings.default.
+    "smart_field_format_enabled": False,
+    "streaming_paste_enabled": False,
     "play_start_sound": True,
     # Имя входного устройства для записи; "" — системное по умолчанию.
     # Применяется в RecordingCoreService перед стартом записи.

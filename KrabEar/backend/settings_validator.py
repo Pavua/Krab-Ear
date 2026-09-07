@@ -187,6 +187,8 @@ _BOOL_FIELDS: dict[str, bool] = {
     "auto_start_enabled": False,
     "show_dock_icon": True,
     "auto_paste": True,
+    "smart_field_format_enabled": False,
+    "streaming_paste_enabled": False,
     "play_start_sound": True,
     "realtime_preview_enabled": True,
     "translate_and_paste": False,
