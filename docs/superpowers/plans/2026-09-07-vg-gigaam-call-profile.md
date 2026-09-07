@@ -4,7 +4,7 @@
 GigaAM-владельцу Krab Ear, сохранив честный auto-language на первом ходе и не
 создавая второй ML worker.
 
-**Base:** `origin/codex/krab-ear-v2` at
+**Initial base:** `origin/codex/krab-ear-v2` at
 `7cdb38561ae62d2fca0febf57858db89c28bf199`.
 
 **Runtime boundary:** source/tests only. No `REST_IN_PROCESS_ENABLED`, launchd
@@ -31,6 +31,33 @@ restart, live call, process termination, credentials, or production state.
 120-секундный watchdog аварии subprocess отделён от deadline телефонного хода.
 Таймаут транспорта не доказывает актуальный privacy-state недоступного owner;
 для доступного owner и всех полученных исходов privacy сохраняет приоритет.
+
+## CI и интеграция обновлённой базы, 07.09 вечером
+
+Push CI `34156531880` на `2b07917d` завершился ошибкой, а PR CI
+`34156535841` того же SHA прошёл. В chunk-прогоне тест loop retry получил
+`MagicMock` вместо текста; затем изолированный прогон сообщил о падении
+`test_language_hotwords_2026_09_03.py`, скрыв traceback в `/dev/null`.
+Это два разных наблюдения: исправление первого не доказывает причину второго.
+Оба файла прошли исходную локальную Python 3.12 parity без MLX.
+
+Проверяемый follow-up:
+
+- Подменить тяжёлый infer также на повторной попытке в loop-тестах, сохранив
+  настоящие detector/retry и проверку попытки. Воспроизвести прежний MagicMock
+  детерминированно, затем подтвердить сохранение текста диктовки.
+- Сохранять stdout/stderr изолированных CI-прогонов: последние 80 строк в
+  failed log, полный файл в artifact на 7 дней. Коды ошибок, таймауты и
+  прежний aggregate verdict остаются без ослабления.
+- Объединить `origin/codex/krab-ear-v2` `3c8e1663` (#2000): bounded Whisper
+  lock пересекается с explicit-auto в `engine.py`. Дополнить проверку
+  свободного lock случаем `auto → None`, истёкшего срока — отсутствием infer.
+- Пройти официальный no-MLX Python 3.12 набор call-profile и lock-тестов,
+  `make audit-all`, независимое ревью и CI окончательного SHA.
+
+`hotwords` не исключается из CI и не объявляется исправленным без новой
+диагностики. In-process Whisper deadline не является доказательством сроков
+subprocess/GigaAM или живого телефонного диалога. Runtime остаётся отдельным этапом.
 
 ## Confirmed defect
 

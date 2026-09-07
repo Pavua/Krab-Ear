@@ -95,6 +95,8 @@ jobs:
           nchunks=16; chunk=$(( (n + nchunks - 1) / nchunks )); rc=0
           echo "Total test files: $n, chunks: $nchunks, chunk size: $chunk"
           : > /tmp/pf_failed.txt
+          export ISOLATED_LOG_DIR="${RUNNER_TEMP}/pytest-isolated"
+          mkdir -p "$ISOLATED_LOG_DIR" || exit 1
           reap() { pkill -9 -f "import sys;ex" 2>/dev/null || true; pkill -9 -f "mlx_subprocess" 2>/dev/null || true; pkill -9 -f "gigaam_worker" 2>/dev/null || true; }
           for i in $(seq 0 $((nchunks - 1))); do
             sub=("${files[@]:$((i*chunk)):$chunk}")
@@ -113,8 +115,15 @@ jobs:
               # (timeout 90) so a hung test cannot stall the job toward the 120-min limit.
               echo "::warning::chunk $((i+1)) exited $crc -- per-file isolate (parallel -P4)"
               printf '%s\n' "${sub[@]}" | xargs -P 4 -I {} bash -c '
-                timeout 90 python -m pytest "$1" --tb=line -q -p no:xdist -p no:cacheprovider >/dev/null 2>&1 \
-                  || { echo "::error::isolated FAIL($?): $1"; echo "$1" >> /tmp/pf_failed.txt; }
+                log_file="$ISOLATED_LOG_DIR/${1##*/}.log"
+                if timeout 90 python -m pytest "$1" --tb=short -q -p no:xdist -p no:cacheprovider >"$log_file" 2>&1; then
+                  :
+                else
+                  fcode=$?
+                  echo "::error::isolated FAIL($fcode): $1"
+                  tail -n 80 "$log_file"
+                  echo "$1" >> /tmp/pf_failed.txt
+                fi
               ' _ {}
               reap
             fi
@@ -125,6 +134,15 @@ jobs:
           fi
           echo "Aggregate rc=$rc"
           exit $rc
+
+      - name: Preserve isolated pytest diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: isolated-pytest-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pytest-isolated/
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Audit orphan imports in service.py
         run: python3 scripts/audit_orphan_imports.py

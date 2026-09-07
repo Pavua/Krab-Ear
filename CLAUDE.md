@@ -14,8 +14,10 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 
 `POST /v1/stt/transcribe` с `request_profile=voice_gateway_call`: RU идёт через
 подписываемый IPC `transcribe_ephemeral_call` к единственному уже загруженному
-subprocess GigaAM в BackendService. Auto/ES/EN используют общий STT с явным auto,
-без history/диаризации/контекста владельца/multipass. Standalone REST по-прежнему
+subprocess GigaAM в BackendService. Неизвестный язык сохраняется как явный auto;
+фиксированные ES/EN используют общий STT с соответствующим кодом языка.
+Все языки профиля идут без history/диаризации/контекста владельца/multipass.
+Standalone REST по-прежнему
 не создаёт GigaAM. Полный контракт и исходы —
 [`docs/IPC_API_REFERENCE.md`](docs/IPC_API_REFERENCE.md#transcribe_ephemeral_call).
 

@@ -2,7 +2,17 @@
 
 Обновлено: **2026-09-05**. Одна страница: база, политика brain/GPU, очередь. Журнал волн — [`ROADMAP-2026H2.md`](ROADMAP-2026H2.md), не очередь. Горизонт 2–4 нед: [`design-briefs/2026-09-05-horizon-plan.md`](design-briefs/2026-09-05-horizon-plan.md). Как работать: [`EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md).
 
-## База
+**Source-дополнение 2026-09-07:** PR [#2001](https://github.com/Pavua/Krab-Ear/pull/2001)
+добавляет телефонный STT-профиль для Voice Gateway: explicit auto и RU через
+уже загруженный owner GigaAM, без второго worker и history. Контракт и незакрытая
+runtime qualification — в [плане](superpowers/plans/2026-09-07-vg-gigaam-call-profile.md).
+В этой работе runtime не перезапускался; флаги Gateway
+`KRAB_STT_EAR_CALL_PROFILE_ENABLED` и `KRAB_SCREENING_AUTO_LANGUAGE_ENABLED` OFF.
+Source-проверки не доказывают CI другого SHA или готовность живого звонка.
+Текущие HEAD/CI — в primary `.remember/CODEX_CALL_STT_20260907.md` с повторной
+проверкой Git/GitHub. SHA/PID ниже сохранены как snapshot 05.09, не текущая проверка.
+
+## База и runtime snapshot 2026-09-05
 
 - Репозиторий: [Pavua/Krab-Ear](https://github.com/Pavua/Krab-Ear)
 - Прод-колея: **`origin/codex/krab-ear-v2`**
