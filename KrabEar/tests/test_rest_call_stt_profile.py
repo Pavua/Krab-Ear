@@ -74,7 +74,10 @@ def test_all_call_profiles_are_context_free_and_never_persist(rest, language):
     deps.store.add_history_item.assert_not_called()
 
 
-@pytest.mark.parametrize("status,http", [("privacy_mode",403), ("timeout",504), ("busy",503), ("not_ready",503)])
+@pytest.mark.parametrize(
+    "status,http",
+    [("privacy_mode", 403), ("timeout", 504), ("busy", 503), ("not_ready", 503)],
+)
 def test_owner_outcome_mapping(rest, monkeypatch, status, http):
     client, deps = rest
     monkeypatch.setattr(call_client, "transcribe_ephemeral_call", Mock(return_value={
