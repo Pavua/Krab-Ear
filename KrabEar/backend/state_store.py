@@ -569,6 +569,28 @@ class StateStore:
             self._recent_search_index = []
             self._recent_search_index_signature = None
 
+    def call_privacy_mode(self) -> bool:
+        """Strict телефонный guard: испорченные настройки не равны privacy OFF.
+
+        Общий load_settings сохраняет прежнюю семантику soft-defaults.
+        Отсутствующий файл — известный новый профиль, ошибка чтения — отказ.
+        """
+        with self._lock(nowait=True, shared=True):
+            try:
+                raw = self.settings_path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                return False
+            try:
+                payload = json.loads(raw)
+            except (ValueError, TypeError) as exc:
+                raise ValueError("call privacy settings unreadable") from exc
+            if not isinstance(payload, dict):
+                raise ValueError("call privacy settings must be an object")
+            value = payload.get("privacy_mode_enabled", False)
+            if type(value) is not bool:
+                raise ValueError("call privacy flag must be boolean")
+            return value
+
     def load_settings(self, lock_timeout_sec: float | None = None, nowait: bool = False) -> dict[str, Any]:
         """Читает настройки и дополняет их дефолтами.
 

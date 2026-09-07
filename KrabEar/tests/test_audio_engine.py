@@ -25,11 +25,11 @@ if str(PROJECT_ROOT) not in sys.path:
 def _make_engine(**kwargs):
     """Создаёт AudioEngine с опциональными инжектированными зависимостями.
 
-    Все тяжёлые зависимости (mlx_whisper, pyannote, torch) уже обёрнуты в
-    try/except в самом engine.py, поэтому AudioEngine() можно конструировать
-    без каких-либо установленных ML-библиотек.
+    Запрещаем фоновый GigaAM warmup: установленный у владельца отдельный
+    venv может запустить реальный worker даже без ML-пакетов в test-venv.
     """
     from core.engine import AudioEngine
+    kwargs.setdefault("skip_gigaam_warmup", True)
     return AudioEngine(**kwargs)
 
 
@@ -110,6 +110,15 @@ class LanguageResolutionTests(unittest.TestCase):
 
     def test_hint_with_spaces_is_stripped(self):
         self.assertEqual(self._resolve("  ru  "), "ru")
+
+    def test_request_language_keeps_explicit_auto_distinct_from_omitted(self):
+        from core.engine import AudioEngine
+        from core.config import settings
+
+        with patch.object(settings, "TRANSCRIBE_LANGUAGE", "ru"):
+            self.assertEqual(AudioEngine._resolve_request_language("auto"), "auto")
+            self.assertEqual(AudioEngine._resolve_request_language(" AUTO "), "auto")
+            self.assertEqual(AudioEngine._resolve_request_language(None), "ru")
 
 
 # ---------------------------------------------------------------------------

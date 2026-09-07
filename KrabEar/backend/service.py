@@ -275,6 +275,9 @@ def _shutdown_backend(
             logger.exception(
                 "InProcessRestServer.begin_shutdown() выбросил при shutdown"
             )
+    call_stt = getattr(service, "_call_stt", None)
+    if call_stt is not None:
+        call_stt.begin_shutdown()
     try:
         # F1 (приёмочное ревью 2026-07-23): STT-пайплайн выполняется В
         # handler-потоке (handle_stop_recording/meeting_stop/transcribe_paths),
@@ -517,6 +520,12 @@ class BackendService:
                     if getattr(transcriber.engine, "_llm_rewriter", None) is None:
                         transcriber.engine._llm_rewriter = self._llm_rewriter
                     transcriber.engine._settings_get = self._get_runtime_setting
+        from backend.call_stt_service import CallSTTService
+
+        self._call_stt = CallSTTService(
+            router=getattr(getattr(self.transcriber, "engine", None), "_router", None),
+            privacy_mode_fn=lambda: self.store.call_privacy_mode(),
+        )
         # Wire snippet provider into engine so TextSnippetExpander in engine.py
         # can access the current snippet list at transcription time (late-injection
         # pattern, mirrors _llm_rewriter wiring above).
@@ -2401,6 +2410,15 @@ class BackendService:
         signal handler run_server() и в finally serve_forever(). Возвращает
         False, когда любой нативный/audio worker не подтвердил завершение.
         """
+        call_stt = getattr(self, "_call_stt", None)
+        call_stt_stopped = True
+        if call_stt is not None:
+            try:
+                call_stt.begin_shutdown()
+                call_stt_stopped = call_stt.close() is not False
+            except Exception:
+                call_stt_stopped = False
+                logger.exception("CallSTTService.close() raised during close()")
         try:
             self._memory_conductor.stop()
         except Exception:
@@ -2583,13 +2601,15 @@ class BackendService:
         # no-op, не AttributeError-шум в логе.
         transcriber = getattr(self, "transcriber", None)
         close_transcriber = getattr(transcriber, "close", None) if transcriber is not None else None
-        if close_transcriber is not None:
+        if close_transcriber is not None and call_stt_stopped:
             try:
-                close_transcriber()
+                if close_transcriber() is False:
+                    all_workers_stopped = False
             except Exception:
+                all_workers_stopped = False
                 logger.exception("Transcriber.close() raised during close()")
 
-        return all_workers_stopped and wake_word_stopped
+        return all_workers_stopped and wake_word_stopped and call_stt_stopped
 
     # ------------------------------------------------------------------ #
     # Backwards-compatible proxy properties for Wave 172 migration         #
@@ -2785,6 +2805,7 @@ class BackendService:
             "compact_history": self._history.handle_compact_history,  # VERIFIED: called from Swift (main, HistoryPanel)
             "add_history_item": self._history.handle_add_history_item,  # VERIFIED: called from Swift (main, HistoryPanel)
             "transcribe_paths": self._handle_transcribe_paths,  # VERIFIED: called from Swift (HistoryPanel)
+            "transcribe_ephemeral_call": self._call_stt.handle,
             "transcribe_paths_async": self._handle_transcribe_paths_async,  # PR #14: фоновый job + прогресс
             "get_transcribe_progress": self._handle_get_transcribe_progress,  # PR #14: опрос прогресса job'а
             "cancel_transcribe_job": self._handle_cancel_transcribe_job,  # PR #14: запрос отмены job'а

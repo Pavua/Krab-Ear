@@ -289,6 +289,20 @@ class TranscribeLangHintTest(unittest.TestCase):
         call_kwargs = self.mock_transcriber.transcribe.call_args[1]
         self.assertIsNone(call_kwargs.get("lang_hint"))
 
+    def test_explicit_auto_is_preserved_as_distinct_request_intent(self):
+        data = {
+            "file": (io.BytesIO(b"RIFF....WAVEfmt "), "audio.wav"),
+            "language": "auto",
+        }
+        resp = self.client.post(
+            "/v1/stt/transcribe",
+            data=data,
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(resp.status_code, 200)
+        call_kwargs = self.mock_transcriber.transcribe.call_args[1]
+        self.assertEqual(call_kwargs.get("lang_hint"), "auto")
+
 
 # ---------------------------------------------------------------------------
 # 5. Additional allowed audio extensions

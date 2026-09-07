@@ -553,7 +553,8 @@ class AudioEngine:
         self._skip_gigaam: bool = skip_gigaam_warmup
 
         # skip_gigaam_warmup=True используется REST-сервером чтобы не создавать дубликат
-        # subprocess'а — он проксирует через BackendService IPC (Wave 69).
+        # subprocess'а; RU call-profile идёт через BackendService IPC,
+        # остальные REST-запросы обслуживает собственный Whisper.
         if getattr(settings, "STT_GIGAAM_ENABLED", False) and not skip_gigaam_warmup:
             def _warmup_bg() -> None:
                 try:
@@ -579,18 +580,22 @@ class AudioEngine:
         """
         self._router.close()
 
-    def close(self) -> None:
+    def close(self) -> bool:
         """Останавливает фоновые ресурсы движка (живой инцидент 2026-08-04).
 
         Единственный владелец GigaAM subprocess-воркера, спавненного background-
         warmup-тредом в __init__, — self._router. Без этого вызова процесс
         остаётся сиротой при остановке владельца (Transcriber/BackendService).
+        False означает незавершённый drain/ошибку; вызывающий сохраняет
+        владельца и может повторить close после завершения инференса.
         Never raises — вызывается из чужих finally/close-цепочек.
         """
         try:
-            self._router.close()
+            if self._router.close() is False:
+                return False
         except Exception:
             logger.warning("AudioEngine.close: ошибка закрытия STTRouter", exc_info=True)
+            return False
         try:
             from core.mlx_whisper_session import close_mlx_whisper_session
 
@@ -600,6 +605,8 @@ class AudioEngine:
                 "AudioEngine.close: ошибка закрытия mlx_whisper worker",
                 exc_info=True,
             )
+            return False
+        return True
 
     def warmup(self) -> dict[str, Any]:
         """Prewarm Whisper model to eliminate first-dictation cold-start latency.
@@ -1034,6 +1041,20 @@ class AudioEngine:
         return None
 
     @staticmethod
+    def _resolve_request_language(lang_hint: str | None) -> str | None:
+        """Сохраняет explicit ``auto`` отдельно от omitted/default языка.
+
+        ``None`` исторически означает «использовать TRANSCRIBE_LANGUAGE».
+        Литерал ``auto`` нужен межпроцессным клиентам как явное намерение и
+        преобразуется в настоящий ``None`` только у границы Whisper API.
+        """
+        if isinstance(lang_hint, str) and lang_hint.strip().lower() == "auto":
+            return "auto"
+        if lang_hint is None:
+            return settings.TRANSCRIBE_LANGUAGE
+        return AudioEngine._resolve_language(lang_hint)
+
+    @staticmethod
     def _empty_transcription_result(engine: str, language: str | None) -> dict[str, Any]:
         """Пустой результат транскрибации в контракте обычного ответа.
 
@@ -1302,7 +1323,7 @@ class AudioEngine:
             except Exception as _v2_exc:
                 logger.warning("pipeline_v2 failed (%s), falling back", _v2_exc)
 
-        resolved_lang = self._resolve_language(lang_hint) if lang_hint is not None else settings.TRANSCRIBE_LANGUAGE
+        resolved_lang = self._resolve_request_language(lang_hint)
 
         try:
             from backend.observability import add_breadcrumb as _add_bc  # lazy — avoid circular
@@ -2399,11 +2420,7 @@ class AudioEngine:
                     pass
 
         start_time = time.time()
-        resolved_lang = (
-            self._resolve_language(lang_hint)
-            if lang_hint is not None
-            else settings.TRANSCRIBE_LANGUAGE
-        )
+        resolved_lang = self._resolve_request_language(lang_hint)
         domain_desc = self.DOMAIN_PROMPTS.get(domain, self.DOMAIN_PROMPTS["casual"])
         dynamic_prompt = f"{settings.TRANSCRIBE_PROMPT} Тематика: {domain_desc}"
         if extra_vocabulary:
@@ -3081,7 +3098,11 @@ class AudioEngine:
         Абсолютный срок ограничивает ожидание и допуск in-process инференса;
         уже начавшийся Metal этот срок принудительно не останавливает.
         """
-        effective_language = language if language is not None else settings.TRANSCRIBE_LANGUAGE
+        effective_language = (
+            None
+            if isinstance(language, str) and language.strip().lower() == "auto"
+            else language if language is not None else settings.TRANSCRIBE_LANGUAGE
+        )
         base_params = {
             "path_or_hf_repo": model_name,
             "initial_prompt": prompt,
@@ -3572,10 +3593,16 @@ class AudioEngine:
             audio_array = audio_data
 
         # Транскрибация (batch_size=16 — безопасный дефолт для 36 GB RAM).
-        lang_param = language if language else None
+        # Sentinel живёт до границы конкретного API: WhisperX, как и
+        # mlx-whisper, включает детектор через None, не строку "auto".
+        lang_param = (
+            None
+            if isinstance(language, str) and language.strip().lower() == "auto"
+            else language or None
+        )
         result = model.transcribe(audio_array, batch_size=16, language=lang_param)
 
-        detected_lang = result.get("language") or language
+        detected_lang = result.get("language") or lang_param
 
         # --- Word-level timestamps (phoneme alignment) ---
         word_timestamps = None

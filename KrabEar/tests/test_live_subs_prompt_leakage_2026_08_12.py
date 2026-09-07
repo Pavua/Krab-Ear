@@ -13,8 +13,8 @@ G1 — `Transcriber.transcribe(context_free=True)` → `AudioEngine.transcribe`
 G2 — зацикленное окно (is_likely_repetition_loop==True) не эмитится в
      LiveSubsService: дропается, инкрементит dropped_windows (F3), логируется
      БЕЗ утечки самого текста. Путь диктовки (AudioEngine напрямую) не тронут —
-     raw_text по-прежнему возвращается неизменённым (engine.py: «не врём про
-     input»).
+     raw_text возвращается неизменённым, если повторное распознавание не
+     помогло (engine.py: «не врём про input»).
 
 Спека: docs/superpowers/specs/2026-08-12-live-subs-prompt-leakage-design.md
 
@@ -129,19 +129,24 @@ class EngineContextFreePromptTests(unittest.TestCase):
         _, diar_kwargs = mock_diar.call_args
         self.assertFalse(diar_kwargs.get("is_preview"))
 
+    @patch("core.engine.settings.STT_LOOP_RETRY_ENABLED", True)
+    @patch("core.engine.settings.MODEL_MAX_CANDIDATES", "test-loop-retry")
+    @patch("core.engine.AudioEngine._transcribe_model", side_effect=RuntimeError("test: retry unavailable"))
     @patch("core.engine.AudioEngine._maybe_run_diarization")
     @patch("core.engine.AudioEngine._transcribe_with_fallback")
-    def test_context_free_does_not_disable_loop_detector(self, mock_fallback, mock_diar):
+    def test_context_free_does_not_disable_loop_detector(self, mock_fallback, mock_diar, mock_retry):
         """context_free=True не гейтит repetition-loop детектор в engine.py —
         тот срабатывает как обычно (тот же путь, что и без context_free)."""
         from core.engine import AudioEngine
         mock_fallback.return_value = _make_whisper_result(LOOP_TEXT)
         mock_diar.return_value = None
         engine = AudioEngine(skip_gigaam_warmup=True)
+        engine.current_model = "test-first-pass"
         with self.assertLogs("KrabEar.Engine", level="WARNING") as cm:
             engine.transcribe("fake.wav", is_preview=False, context_free=True)
         loop_logs = [line for line in cm.output if "repetition loop detected" in line]
         self.assertEqual(len(loop_logs), 1)
+        mock_retry.assert_called_once()
 
 
 # ── G1: LiveSubsService реально передаёт context_free (декоративная проводка) ─
@@ -223,21 +228,27 @@ class LiveSubsRepetitionLoopDropTests(unittest.TestCase):
 
 class DictationPathUnaffectedByLoopDropTests(unittest.TestCase):
     """G2-гейт живёт ТОЛЬКО в LiveSubsService. AudioEngine (дорога диктовки) по-
-    прежнему возвращает зацикленный текст НЕИЗМЕНЁННЫМ — engine.py:~1138,
-    «не врём про input»: пользователь видит реальный вывод Whisper и решает,
-    перезаписать ли фразу."""
+    прежнему возвращает зацикленный текст НЕИЗМЕНЁННЫМ, если повторное STT
+    не удалось: пользователь видит реальный вывод Whisper и решает,
+    перезаписать ли фразу. Мокаем оба STT-входа: после 03.09 loop retry идёт
+    напрямую в _transcribe_model, минуя _transcribe_with_fallback."""
 
+    @patch("core.engine.settings.STT_LOOP_RETRY_ENABLED", True)
+    @patch("core.engine.settings.MODEL_MAX_CANDIDATES", "test-loop-retry")
+    @patch("core.engine.AudioEngine._transcribe_model", side_effect=RuntimeError("test: retry unavailable"))
     @patch("core.engine.AudioEngine._maybe_run_diarization")
     @patch("core.engine.AudioEngine._transcribe_with_fallback")
-    def test_dictation_returns_loop_text_unmodified(self, mock_fallback, mock_diar):
+    def test_dictation_returns_loop_text_unmodified(self, mock_fallback, mock_diar, mock_retry):
         from core.engine import AudioEngine
         mock_fallback.return_value = _make_whisper_result(LOOP_TEXT)
         mock_diar.return_value = None
         engine = AudioEngine(skip_gigaam_warmup=True)
+        engine.current_model = "test-first-pass"
 
         result = engine.transcribe("fake.wav", is_preview=False)
 
         self.assertEqual(result["raw_text"], LOOP_TEXT)
+        mock_retry.assert_called_once()
 
 
 if __name__ == "__main__":
