@@ -120,8 +120,8 @@ class MLXLockSerializationTests(unittest.TestCase):
 class MLXLockSmokeCheckEngineTests(unittest.TestCase):
     """Smoke-test: engine.py must not have bare mlx_whisper.transcribe() calls.
 
-    Parses engine.py as text to verify every mlx_whisper.transcribe invocation
-    appears within a with-block that acquired mlx_lock.  Does NOT import MLX.
+    Разбирает AST и проверяет lock у вызова или у всех uses локального helper.
+    Does NOT import MLX.
     """
 
     @classmethod
@@ -132,38 +132,224 @@ class MLXLockSmokeCheckEngineTests(unittest.TestCase):
         with open(path, encoding="utf-8") as f:
             return f.read(), path
 
-    def test_engine_transcribe_sites_inside_mlx_lock_block(self):
-        """Every mlx_whisper.transcribe() call in engine.py must be inside with mlx_lock()."""
-        text, path = self._read_engine()
-        if text is None:
-            self.skipTest(f"engine.py not found at {path}")
+    @staticmethod
+    def _unprotected_sites(text):
+        """Лексический lock либо локальный helper без незащищённых uses/escape.
 
-        lines = text.split("\n")
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            # Skip comments
-            if stripped.startswith("#"):
+        Lambda разрешена только как непосредственный fn для известного
+        watchdog, чей вызывающий удерживает lock до завершения callback.
+        Это структурный guard; сам watchdog lifecycle проверяется отдельно.
+        """
+        import ast
+        tree = ast.parse(text)
+        parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+
+        def name(expr):
+            if isinstance(expr, ast.Name):
+                return expr.id
+            if isinstance(expr, ast.Attribute):
+                return expr.attr
+            return None
+
+        def nearest_function(node):
+            while node in parents:
+                node = parents[node]
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    return node
+            return None
+
+        def guarded(call):
+            child = call
+            while child in parents:
+                parent = parents[child]
+                if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    return False
+                if isinstance(parent, ast.GeneratorExp):
+                    return False
+                if isinstance(parent, ast.Lambda):
+                    keyword = parents.get(parent)
+                    consumer = parents.get(keyword)
+                    if not (
+                        isinstance(keyword, ast.keyword) and keyword.arg == "fn"
+                        and isinstance(consumer, ast.Call)
+                        and isinstance(consumer.func, ast.Attribute)
+                        and consumer.func.attr == "run_with_timeout"
+                        and isinstance(consumer.func.value, ast.Call)
+                        and name(consumer.func.value.func) == "get_watchdog"
+                    ):
+                        return False
+                if isinstance(parent, ast.With) and child in parent.body:
+                    # Вызов в context_expr выполняется ДО __enter__, не под lock.
+                    for item in parent.items:
+                        expr = item.context_expr
+                        if isinstance(expr, ast.Call) and name(expr.func) in {"mlx_lock", "acquire_mlx_lock"}:
+                            return True
+                child = parent
+            return False
+
+        calls = [node for node in ast.walk(tree) if (
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "mlx_whisper" and node.func.attr == "transcribe"
+        )]
+        bad = []
+        for call in calls:
+            if guarded(call):
                 continue
-            if "mlx_whisper.transcribe" not in line:
-                continue
-            # Skip lines where mlx_whisper.transcribe appears only inside a string literal
-            # (e.g. error messages, docstrings, raise RuntimeError("...mlx_whisper.transcribe"))
-            # A real call site has mlx_whisper.transcribe followed by '(' not inside quotes.
-            # Heuristic: if the occurrence is only inside a string (surrounded by quotes), skip it.
-            # Check: strip the line and see if the call token appears outside of quotes
-            # by looking for 'mlx_whisper.transcribe(' as an actual invocation pattern.
-            if "mlx_whisper.transcribe(" not in line:
-                # It's a reference in a string/comment, not an actual call — skip
-                continue
-            # Look back up to 20 lines for 'with mlx_lock'
-            context_start = max(0, i - 20)
-            context = "\n".join(lines[context_start:i + 1])
-            self.assertIn(
-                "mlx_lock",
-                context,
-                f"Unwrapped mlx_whisper.transcribe at {path}:{i + 1}:\n  {line.strip()}\n"
-                f"  Context (lines {context_start + 1}-{i + 1}):\n{context}",
+            helper = nearest_function(call)
+            owner = nearest_function(helper) if helper is not None else None
+            # Helper fallback не должен повторно разрешать отложенное тело,
+            # отвергнутое guarded(): вызов helper ещё не выполняет generator/lambda.
+            deferred_body = False
+            ancestor = call
+            while ancestor in parents and ancestor is not helper:
+                ancestor = parents[ancestor]
+                if isinstance(ancestor, (ast.GeneratorExp, ast.Lambda)):
+                    deferred_body = True
+            eager_helper = (
+                not deferred_body
+                and isinstance(helper, ast.FunctionDef)
+                and isinstance(owner, ast.FunctionDef)
+                and not any(isinstance(node, (ast.Yield, ast.YieldFrom)) for node in ast.walk(helper))
             )
+            uses = [] if not eager_helper else [
+                node for node in ast.walk(owner)
+                if isinstance(node, ast.Name) and node.id == helper.name
+            ]
+            if not uses or any(
+                not isinstance(parents.get(use), ast.Call)
+                or parents[use].func is not use
+                or not guarded(parents[use])
+                for use in uses
+            ):
+                bad.append(call.lineno)
+        return len(calls), bad
+
+    def test_engine_transcribe_sites_inside_mlx_lock_block(self):
+        text, path = self._read_engine()
+        self.assertIsNotNone(text, f"engine.py отсутствует: {path}")
+        count, bad = self._unprotected_sites(text)
+        self.assertGreater(count, 0, "guard не нашёл ни одного фактического MLX-вызова")
+        self.assertEqual(bad, [], f"Незащищённые MLX call-sites в {path}: {bad}")
+
+    def test_guard_accepts_direct_and_watchdog_protected_calls(self):
+        import textwrap
+        samples = [
+            "with mlx_lock():\n    mlx_whisper.transcribe(audio)",
+            "with acquire_mlx_lock(timeout_sec=1):\n    mlx_whisper.transcribe(audio)",
+            """
+            def run():
+                def infer():
+                    return mlx_whisper.transcribe(audio)
+                with acquire_mlx_lock(timeout_sec=1):
+                    return infer()
+            """,
+            """
+            def run():
+                def infer():
+                    return mlx_whisper.transcribe(audio)
+                with acquire_mlx_lock(timeout_sec=1):
+                    return get_watchdog().run_with_timeout(fn=lambda: infer())
+            """,
+        ]
+        for sample in samples:
+            with self.subTest(source=sample):
+                self.assertEqual(self._unprotected_sites(textwrap.dedent(sample)), (1, []))
+
+    def test_guard_rejects_unprotected_calls_and_helper_escape(self):
+        import textwrap
+        samples = [
+            "# with mlx_lock():\nmlx_whisper.transcribe(audio)",
+            "with mlx_lock():\n    pass\nmlx_whisper.transcribe(audio)",
+            "with acquire_mlx_lock(mlx_whisper.transcribe(audio)):\n    pass",
+            """
+            def run():
+                def infer():
+                    return mlx_whisper.transcribe(audio)
+                return infer()
+            """,
+            """
+            def run():
+                with mlx_lock():
+                    def infer():
+                        return mlx_whisper.transcribe(audio)
+                return infer()
+            """,
+            """
+            def run():
+                def infer():
+                    return mlx_whisper.transcribe(audio)
+                with mlx_lock():
+                    infer()
+                return infer()
+            """,
+            """
+            def run():
+                def infer():
+                    return mlx_whisper.transcribe(audio)
+                with mlx_lock():
+                    return infer
+            """,
+            """
+            def run():
+                def infer():
+                    return mlx_whisper.transcribe(audio)
+                with mlx_lock():
+                    later = lambda: infer()
+                return later()
+            """,
+            """
+            def run():
+                def infer():
+                    return mlx_whisper.transcribe(audio)
+                with mlx_lock():
+                    pending = (infer() for _ in [0])
+                return next(pending)
+            """,
+            """
+            def run():
+                with mlx_lock():
+                    pending = (mlx_whisper.transcribe(audio) for _ in [0])
+                return next(pending)
+            """,
+            """
+            def run():
+                def infer():
+                    return (mlx_whisper.transcribe(audio) for _ in [0])
+                with mlx_lock():
+                    pending = infer()
+                return next(pending)
+            """,
+            """
+            def run():
+                def infer():
+                    return lambda: mlx_whisper.transcribe(audio)
+                with mlx_lock():
+                    pending = infer()
+                return pending()
+            """,
+            """
+            def run():
+                async def infer():
+                    return mlx_whisper.transcribe(audio)
+                with mlx_lock():
+                    pending = infer()
+                return asyncio.run(pending)
+            """,
+            """
+            def run():
+                def infer():
+                    yield mlx_whisper.transcribe(audio)
+                with mlx_lock():
+                    pending = infer()
+                return next(pending)
+            """,
+        ]
+        for sample in samples:
+            with self.subTest(source=sample):
+                count, bad = self._unprotected_sites(textwrap.dedent(sample))
+                self.assertEqual(count, 1)
+                self.assertEqual(len(bad), 1)
 
     def test_engine_imports_mlx_lock(self):
         """engine.py must import mlx_lock from core.mlx_lock."""
