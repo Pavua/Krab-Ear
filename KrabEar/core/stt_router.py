@@ -398,12 +398,42 @@ class STTRouter:
         with self._gigaam_adapter_lock:
             return self._get_gigaam_adapter_locked()
 
+    def reserve_gigaam_call(self) -> tuple[Optional[Any], str]:
+        """Без lazy-create закрепляет adapter/session под owner-lock."""
+        if not self._gigaam_adapter_lock.acquire(blocking=False):
+            return None, "busy"
+        try:
+            if not getattr(self._settings, "STT_GIGAAM_ENABLED", False):
+                return None, "not_ready"
+            adapter = self._gigaam_adapter
+            reserve = getattr(adapter, "reserve_call", None)
+            if reserve is None:
+                return None, "not_ready"
+            fingerprint = self._gigaam_adapter_fingerprint
+            if fingerprint is None or fingerprint[:3] != (
+                getattr(self._settings, "STT_GIGAAM_MODE", "rnnt"),
+                getattr(self._settings, "STT_GIGAAM_DEVICE", "mps"),
+                getattr(self._settings, "STT_GIGAAM_TRANSPORT", "auto"),
+            ):
+                return None, "not_ready"
+            configured_python = getattr(self._settings, "STT_GIGAAM_VENV_PYTHON", "")
+            if (configured_python or "").strip():
+                validated_python = self._validate_gigaam_venv_python(configured_python.strip())
+                if validated_python is None or validated_python != fingerprint[3]:
+                    return None, "not_ready"
+            elif fingerprint[3] is not None:
+                return None, "not_ready"
+            return reserve()
+        finally:
+            self._gigaam_adapter_lock.release()
+
     def _get_gigaam_adapter_locked(self) -> Optional[Any]:
         """Реализует получение GigaAM-адаптера под удерживаемым lock."""
         if not getattr(self._settings, "STT_GIGAAM_ENABLED", False):
             # Toggle off очищает и объект, и fingerprint, иначе последующее
             # включение может ошибочно принять новый конфиг за старый.
-            self._close_cached_gigaam_adapter()
+            if not self._close_cached_gigaam_adapter():
+                return None
             logger.debug("STTRouter.get_gigaam_adapter: STT_GIGAAM_ENABLED=False → None")
             return None
 
@@ -436,7 +466,8 @@ class STTRouter:
                 "STTRouter.get_gigaam_adapter: конфигурация изменилась — "
                 "пересоздаём адаптер"
             )
-            self._close_cached_gigaam_adapter()
+            if not self._close_cached_gigaam_adapter():
+                return None
 
         if transport == "mlx":
             # MLX-транспорт — другой КЛАСС адаптера (инференс в главном процессе
@@ -501,7 +532,7 @@ class STTRouter:
             logger.warning("STTRouter.get_gigaam_adapter: ошибка создания адаптера: %s", exc)
             return None
 
-    def close(self) -> None:
+    def close(self) -> bool:
         """Публичная точка входа для владельца (AudioEngine) при остановке.
 
         Живой инцидент 2026-08-04: кэшированный GigaAM-адаптер держит реальный
@@ -509,24 +540,31 @@ class STTRouter:
         владельца процесс остаётся сиротой. Ранее закрытие происходило только
         реактивно — при смене конфига (см. _close_cached_gigaam_adapter).
         """
-        self._close_cached_gigaam_adapter()
-
-    def _close_cached_gigaam_adapter(self) -> None:
-        """Закрывает кэшированный адаптер и безусловно сбрасывает fingerprint."""
-        adapter = self._gigaam_adapter
-        # Сначала очищаем ссылки: даже ошибка close не должна оставлять в кэше
-        # уже недействительный адаптер или его конфигурацию.
-        self._gigaam_adapter = None
-        self._gigaam_adapter_fingerprint = None
-        if adapter is None:
-            return
+        if not self._gigaam_adapter_lock.acquire(blocking=False):
+            return False
         try:
-            adapter.close()
+            return self._close_cached_gigaam_adapter()
+        finally:
+            self._gigaam_adapter_lock.release()
+
+    def _close_cached_gigaam_adapter(self) -> bool:
+        """Сбрасывает cache только после подтверждённого освобождения owner."""
+        adapter = self._gigaam_adapter
+        if adapter is None:
+            self._gigaam_adapter_fingerprint = None
+            return True
+        try:
+            if adapter.close() is False:
+                return False
         except Exception as exc:
             logger.warning(
                 "STTRouter.get_gigaam_adapter: ошибка закрытия старого адаптера: %s",
                 exc,
             )
+            return False
+        self._gigaam_adapter = None
+        self._gigaam_adapter_fingerprint = None
+        return True
 
     def warmup_gigaam(self) -> bool:
         """Force-load GigaAM model в background чтобы избежать cold-start latency.

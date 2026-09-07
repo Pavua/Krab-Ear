@@ -360,6 +360,12 @@ def _block_cross_origin_reads(f):
 
 def _rate_limit_exceeded_handler(e):
     """Возвращает 429 JSON с retry_after вместо стандартного HTML."""
+    if (
+        request.path.endswith("/stt/transcribe")
+        and request.form.get("request_profile") == "voice_gateway_call"
+        and _call_profile_privacy_enabled()
+    ):
+        return jsonify({"skipped": "privacy_mode", "text": ""}), 403
     retry_after = 60
     try:
         retry_after = math.ceil(e.description.retry_after.total_seconds())
@@ -844,6 +850,11 @@ class TranscribeResponseSchema(Schema):
     duration_ms = ma_fields.Integer(load_default=0)
     engine = ma_fields.String(load_default="mlx-whisper")
     model = ma_fields.String(load_default="")
+    adapter = ma_fields.String()
+    mode = ma_fields.String()
+    transport = ma_fields.String()
+    confidence_source = ma_fields.String()
+    request_profile = ma_fields.String()
     language = ma_fields.String(load_default=None, allow_none=True)
     segments = ma_fields.List(ma_fields.Dict(), load_default=list)
     diarization = ma_fields.Dict(load_default=dict)
@@ -856,7 +867,8 @@ class TranscribeResponseSchema(Schema):
 # Используем один AudioEngine для всех подсистем во избежание перегрузки VRAM.
 #
 # Wave 69: skip_gigaam_warmup=True предотвращает дублирование GigaAM subprocess.
-# REST-сервер проксирует STT через BackendService IPC и не использует GigaAM напрямую.
+# RU call-profile проксируется через BackendService IPC; обычный REST STT
+# использует свой Whisper. GigaAM напрямую здесь не используется.
 # Только BackendService (service.py) должен быть owner'ом GigaAM worker'а.
 # ---------------------------------------------------------------------------
 
@@ -1613,10 +1625,85 @@ def _privacy_gate(f):
     """
     @functools.wraps(f)
     def decorated(*args, **kwargs):
-        if _load_settings_field("privacy_mode_enabled", False):
+        g.call_stt_entered_at = time.monotonic()
+        call_profile = (
+            request.path.endswith("/stt/transcribe")
+            and request.form.get("request_profile") == "voice_gateway_call"
+        )
+        privacy = _call_profile_privacy_enabled() if call_profile else _load_settings_field("privacy_mode_enabled", False)
+        if privacy:
             return jsonify({"ok": False, "skipped": "privacy_mode"}), 403
-        return f(*args, **kwargs)
+        result = f(*args, **kwargs)
+        if not call_profile:
+            return result
+        # Проверяем ВСЕ исходы, включая busy/ошибку auth/inference. Сохраняем
+        # исходный Response и его close-callback poisoned REST cleanup.
+        response = current_app.make_response(result)
+        deadline = getattr(g, "call_stt_deadline", None)
+        if _call_profile_privacy_enabled():
+            response.set_data(json.dumps({"skipped": "privacy_mode", "text": ""}))
+            response.status_code = 403
+        elif deadline is not None and time.monotonic() >= deadline and response.status_code < 400:
+            response.set_data(json.dumps({"error": "call STT timeout", "text": ""}))
+            response.status_code = 504
+        return response
     return decorated
+
+
+def _call_profile_privacy_enabled() -> bool:
+    """Нечитаемые настройки телефона закрывают доступ, как у IPC owner."""
+    try:
+        return _deps().store.call_privacy_mode() is not False
+    except Exception:
+        return True
+
+
+def _transcribe_call_ru(deadline: float):
+    """Standalone REST передаёт WAV владельцу, без собственного MLX вызова."""
+    from pathlib import Path
+    from backend.call_stt_client import (
+        CallSTTProtocolError, CallSTTRejectedError, CallSTTTimeoutError,
+        transcribe_ephemeral_call,
+    )
+    from backend.call_stt_wire import CALL_MAX_WAV_BYTES, CallSTTValidationError, decode_call_wav
+    from backend.service import default_data_dir, default_socket_path
+
+    if time.monotonic() >= deadline:
+        return jsonify({"error": "call STT timeout", "text": ""}), 504
+    file = request.files.get("file")
+    if file is None:
+        return jsonify({"error": "No file part"}), 400
+    wav_bytes = file.stream.read(CALL_MAX_WAV_BYTES + 1)
+    try:
+        decode_call_wav(wav_bytes)
+    except CallSTTValidationError:
+        return jsonify({"error": "invalid call WAV"}), 400
+    # Совпадает с native BackendService default и явным CLI override.
+    # REST DATA_DIR исторически может быть другим каталогом — не ищем сокеты.
+    socket_override = os.getenv("KRAB_EAR_SOCKET", "").strip()
+    socket_path = Path(socket_override).expanduser() if socket_override else default_socket_path(default_data_dir())
+    try:
+        result = transcribe_ephemeral_call(
+            wav_bytes, socket_path=socket_path, deadline_monotonic=deadline,
+            signing_enabled=settings.IPC_SIGNING_ENABLED,
+            signing_secret=settings.IPC_SIGNING_SECRET,
+        )
+    except CallSTTRejectedError:
+        return jsonify({"error": "owner policy refused", "text": ""}), 403
+    except CallSTTTimeoutError:
+        if _call_profile_privacy_enabled():
+            return jsonify({"skipped": "privacy_mode", "text": ""}), 403
+        return jsonify({"error": "call STT timeout", "text": ""}), 504
+    except CallSTTProtocolError:
+        if _call_profile_privacy_enabled():
+            return jsonify({"skipped": "privacy_mode", "text": ""}), 403
+        return jsonify({"error": "call STT unavailable", "text": ""}), 503
+    if _call_profile_privacy_enabled() or result.get("status") == "privacy_mode":
+        return jsonify({"skipped": "privacy_mode", "text": ""}), 403
+    status = result.get("status")
+    if status != "ok":
+        return jsonify(result), 504 if status == "timeout" else 503
+    return jsonify({**result, "history_id": "", "request_profile": "voice_gateway_call"}), 200
 
 
 @v1_blp.route("/tts/synthesize", methods=["POST"])
@@ -1676,6 +1763,10 @@ def transcribe_audio():
 
     Request: multipart/form-data
         - file: audio file (required). Allowed: .wav .mp3 .ogg .m4a .flac .opus .webm .mp4 .aac
+        - request_profile: optional "voice_gateway_call". RU → loaded owner
+          GigaAM via IPC; other languages → context-free single-pass STT.
+          Always ephemeral, no diarization. PCM16 mono WAV 8/16k only, <=25s,
+          bounded envelope; one deadline_sec in (0,25], default 8 seconds.
         - quality_profile: fast|balanced|accurate (default: balanced). NOTE
           (W1897): AudioEngine.set_quality_profile() only recognizes
           {"balanced", "max"} — "fast" and "accurate" both silently coerce to
@@ -1708,13 +1799,33 @@ def transcribe_audio():
     mode is active (privacy_mode_enabled=true in settings.json) — enforced by
     @_privacy_gate before this body runs (and before auth is even checked).
     """
+    entered_at = getattr(g, "call_stt_entered_at", time.monotonic())
+    profile = request.form.get("request_profile", "")
+    if profile not in ("", "voice_gateway_call"):
+        return jsonify({"error": "invalid request_profile"}), 400
+    call_profile = profile == "voice_gateway_call"
+    call_deadline = None
+    if call_profile:
+        if _call_profile_privacy_enabled():
+            return jsonify({"skipped": "privacy_mode", "text": ""}), 403
+        try:
+            budget = float(request.form.get("deadline_sec", "8"))
+            if not math.isfinite(budget) or not 0 < budget <= 25:
+                raise ValueError
+        except (TypeError, ValueError):
+            return jsonify({"error": "invalid call deadline_sec"}), 400
+        call_deadline = entered_at + budget
+        g.call_stt_deadline = call_deadline
+        call_language = (request.form.get("lang_hint") or request.form.get("language") or "auto").strip().lower()
+        if call_language == "ru":
+            return _transcribe_call_ru(call_deadline)
     deps = _deps()
     chat_id = request.form.get("chat_id")
     message_id = request.form.get("message_id")
-    persist_history = request.form.get("persist_history", "true").strip().lower() in ("true", "1", "yes")
+    persist_history = not call_profile and request.form.get("persist_history", "true").strip().lower() in ("true", "1", "yes")
 
     # Идемпотентность
-    if chat_id and message_id and deps.store.is_idempotent(chat_id, message_id):
+    if not call_profile and chat_id and message_id and deps.store.is_idempotent(chat_id, message_id):
         return jsonify({"status": "skipped", "reason": "duplicate"}), 200
 
     if "file" not in request.files:
@@ -1745,7 +1856,16 @@ def transcribe_audio():
         # Каталог мог исчезнуть после импорта из-за системной очистки или изоляции теста.
         # mkdir остаётся внутри try: ошибки прав/ENOSPC проходят общий обработчик ниже.
         TEMP_DIR.mkdir(parents=True, exist_ok=True)
-        file.save(str(temp_path))
+        if call_profile:
+            from backend.call_stt_wire import CALL_MAX_WAV_BYTES, CallSTTValidationError, decode_call_wav
+            try:
+                call_wav = file.stream.read(CALL_MAX_WAV_BYTES + 1)
+                decode_call_wav(call_wav)
+            except CallSTTValidationError:
+                return jsonify({"error": "invalid call WAV"}), 400
+            temp_path.write_bytes(call_wav)
+        else:
+            file.save(str(temp_path))
 
         # F1: Validate magic bytes before handing the file to any decoder.
         with open(str(temp_path), "rb") as _fh:
@@ -1780,11 +1900,11 @@ def transcribe_audio():
             return jsonify({"error": f"Invalid domain: {domain}"}), 400
         # Accept both "lang_hint" (Krab Ear native) and "language" (Voice Gateway
         # KrabEarSTTEngine sends this key) — cross-project contract drift fix.
-        lang_hint = request.form.get("lang_hint") or request.form.get("language") or None
+        lang_hint = call_language if call_profile else request.form.get("lang_hint") or request.form.get("language") or None
 
         req_vocab_raw = request.form.get("vocabulary", "")
         req_vocab = [w.strip() for w in req_vocab_raw.split(",") if w.strip()] if req_vocab_raw else []
-        full_vocabulary = list(set(deps.store.load_vocabulary() + req_vocab))
+        full_vocabulary = [] if call_profile else list(set(deps.store.load_vocabulary() + req_vocab))
 
         # W1897: diarize form field — explicit per-call override. Omitted (None)
         # preserves prior behavior (Transcriber.transcribe falls back to
@@ -1797,6 +1917,8 @@ def transcribe_audio():
             if _diarize_raw is None
             else _diarize_raw.strip().lower() in ("true", "1", "yes")
         )
+        if call_profile:
+            diarize_override = False
 
         _deadline_sec, _deadline_err = _resolve_transcribe_deadline_sec(
             request.form.get("deadline_sec"),
@@ -1806,8 +1928,12 @@ def transcribe_audio():
         _transcribe_timeout_sec = (
             _TRANSCRIBE_TIMEOUT_SEC if _deadline_sec is None else _deadline_sec
         )
+        if call_deadline is not None:
+            _transcribe_timeout_sec = call_deadline - time.monotonic()
+            if _transcribe_timeout_sec <= 0:
+                return jsonify({"error": "call STT timeout"}), 504
 
-        if not try_acquire_stt_singleflight(_transcribe_timeout_sec):
+        if not try_acquire_stt_singleflight(0.0 if call_profile else _transcribe_timeout_sec):
             logger.warning(
                 "REST STT singleflight busy after %.1fs for %s",
                 _transcribe_timeout_sec,
@@ -1830,6 +1956,8 @@ def transcribe_audio():
             lang_hint=lang_hint,
             diarize=diarize_override,
         )
+        if call_profile:
+            _transcribe_kwargs.update(context_free=True, single_pass=True)
         _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         _pool_shutdown_nonblocking = False
         # Спека 2026-08-26 §4.1/§6: scope открывается ВНУТРИ worker-треда
@@ -1841,6 +1969,10 @@ def transcribe_audio():
         except Exception:
             _budget_settings_snapshot = None
         try:
+            if call_deadline is not None:
+                _transcribe_timeout_sec = call_deadline - time.monotonic()
+                if _transcribe_timeout_sec <= 0:
+                    return jsonify({"error": "call STT timeout"}), 504
             _future = _pool.submit(
                 stt_budget.call_in_scope,
                 deps.transcriber.transcribe,
@@ -1851,7 +1983,10 @@ def transcribe_audio():
                 **_transcribe_kwargs,
             )
             try:
-                result = _future.result(timeout=_transcribe_timeout_sec)
+                result = _future.result(timeout=(
+                    max(0.0, call_deadline - time.monotonic())
+                    if call_deadline is not None else _transcribe_timeout_sec
+                ))
             except concurrent.futures.TimeoutError:
                 if _future.done():
                     # Сам транскрайбер тоже может завершиться исключением
@@ -1916,13 +2051,17 @@ def transcribe_audio():
                 _pool.shutdown(wait=True)
         elapsed_sec = time.monotonic() - start_ts
 
+        if call_profile and _call_profile_privacy_enabled():
+            return jsonify({"skipped": "privacy_mode", "text": ""}), 403
+        if call_deadline is not None and time.monotonic() >= call_deadline:
+            return jsonify({"error": "call STT timeout", "text": ""}), 504
         text = result.get("text", "")
 
         # F3: Respect privacy_mode_enabled — skip history persistence when active.
         # privacy_mode_enabled ALWAYS wins over persist_history (see CLAUDE.md
         # "privacy_mode_enabled ВСЕГДА побеждает"): a caller cannot use
         # persist_history=true to force a save while global privacy mode is on.
-        _privacy_mode = _load_settings_field("privacy_mode_enabled", False)
+        _privacy_mode = False if call_profile else _load_settings_field("privacy_mode_enabled", False)
         if _privacy_mode or not persist_history:
             history_item_id = ""
         else:
