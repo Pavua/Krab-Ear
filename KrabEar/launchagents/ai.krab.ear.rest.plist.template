@@ -67,7 +67,7 @@
 
     <!-- fix/tts-ru-accent-routing (2026-07-12): REST-процесс тоже вызывает
          tts_service.handle_synthesize_speech (POST /v1/tts/synthesize, Voice
-         Gateway bridge) -- тот же Silero-primary флаг, что и в
+         Gateway bridge): тот же Silero-primary флаг, что и в
          ai.krab.ear.backend.plist.template, для консистентности между двумя
          процессами. См. тот template за полным обоснованием. -->
     <key>KRAB_EAR_TTS_ENABLED</key>
