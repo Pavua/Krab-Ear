@@ -22,6 +22,18 @@ from core.stt_budget import KNOB_BOUNDS as _STT_BUDGET_KNOB_BOUNDS
 
 CURRENT_SCHEMA_VERSION = "2.0"
 
+
+# Строковые параметры C5: неверный тип отклоняется, а не превращается в
+# model id/endpoint или пустой credential. Пустая строка — явное значение UI.
+_STRING_FIELDS: tuple[str, ...] = (
+    "llm_brain_model",
+    "cloud_rewriter_base_url",
+    "cloud_rewriter_custom_model",
+    "cloud_rewriter_openai_model",
+    "cloud_rewriter_anthropic_model",
+    "cloud_rewriter_api_key",
+)
+
 # Определения enum-полей: ключ → допустимые значения
 _ENUM_FIELDS: dict[str, tuple[str, ...]] = {
     "mode": ("headless", "menubar"),
@@ -387,7 +399,15 @@ class SettingsValidator:
             else:
                 fixed[key] = coerced
 
-        # 4. Специальные поля
+        # 4. Строковые brain/cloud параметры. Не логировать значение:
+        # контейнер/число в credential поле тоже может содержать секрет.
+        for key in _STRING_FIELDS:
+            if key in fixed and not isinstance(fixed[key], str):
+                errors.append(
+                    f"'{key}': ожидается str, получен {type(fixed[key]).__name__}"
+                )
+
+        # 5. Специальные поля
         # translation_glossary должен быть dict
         if "translation_glossary" in fixed and not isinstance(fixed["translation_glossary"], dict):
             warnings.append(
