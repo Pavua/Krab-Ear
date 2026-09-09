@@ -7,9 +7,8 @@ EACCES в ``StateStore._lock()``) открывает гейт.
 Эталон: ``RecordingCoreService._privacy_mode_enabled`` +
 ``test_privacy_gate_fail_closed_2026_09_01.py``.
 
-TextProcessing: тесты инжектят optional ``settings_svc`` (как TextScoring).
-Runtime wiring в ``service.py`` — follow-up: #2005 уже в базе, но этот PR
-его не трогает, чтобы не смешивать волны.
+TextProcessing: optional ``settings_svc`` (как TextScoring); BackendService
+передаёт его в конструктор.
 """
 from __future__ import annotations
 
@@ -17,6 +16,7 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -119,6 +119,32 @@ class SpeakerPrivacyGateFailsClosedTests(unittest.TestCase):
         result = mgr.handle_get_speaker_aliases({})
         self.assertEqual(result.get("aliases"), {})
         self.assertEqual(result.get("reason"), "privacy_mode_active")
+
+
+class TextProcessingPrivacyProductionWiringTests(unittest.TestCase):
+    """BackendService.__init__ обязан передать settings_svc для fail-closed privacy."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._svc = None
+
+    def tearDown(self) -> None:
+        if self._svc is not None:
+            self._svc.close()
+
+    def test_backend_wires_settings_svc_into_text_processing_svc(self) -> None:
+        from backend.service import BackendService
+        from backend.state_store import StateStore
+
+        store = StateStore(data_dir=Path(self._tmpdir))
+        self._svc = BackendService(store=store)
+
+        self.assertIs(
+            self._svc._text_processing_svc._settings_svc,
+            self._svc._settings_svc,
+            "BackendService должен wire _settings_svc в _text_processing_svc",
+        )
+        self.assertIsNotNone(self._svc._text_processing_svc._settings_svc)
 
 
 if __name__ == "__main__":

@@ -50,8 +50,8 @@ class TextProcessingService:
             store:                StateStore — хранилище истории (для summarize_item).
             llm_rewriter:         LLMRewriter | None — LLM для summary; None = fallback.
             settings_svc:         SettingsService | None — fail-closed privacy
-                                  (сиблинг TextScoring; тесты инжектят, wiring в
-                                  service.py — follow-up, этот PR его не трогает).
+                                  (сиблинг TextScoring; BackendService передаёт
+                                  self._settings_svc).
         """
         self._readability_scorer = readability_scorer
         self._transcription_scorer = transcription_scorer
