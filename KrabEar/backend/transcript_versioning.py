@@ -64,14 +64,36 @@ class TranscriptVersionManager:
     # ------------------------------------------------------------------
 
     def _is_privacy_mode(self) -> bool:
-        """True если privacy_mode_enabled активен (через settings_fn, если подключён)."""
-        if self._settings_fn is None:
+        """FAIL-CLOSED чтение ``privacy_mode_enabled``.
+
+        Неизвестное состояние приватности ⇒ считаем privacy ON. Тот же контракт,
+        что у ``RecordingCoreService._privacy_mode_enabled``.
+
+        ``settings_fn=None`` (data-dir-only конструктор) — гейт no-op, не сбой.
+        Частично сконструированный инстанс (``__new__`` без ``__init__``) —
+        AttributeError на ``_settings_fn`` → False, чтобы не ломать unit-тесты
+        и не путать отсутствие атрибута со сбоем чтения настроек.
+        ``settings_fn()`` вернул None / не-dict, либо бросил (OSError flock
+        ENOSPC/EMFILE/EACCES) → True. Отсутствие ключа после успешного чтения
+        → False (не crash и не «всегда ON»).
+        """
+        try:
+            settings_fn = self._settings_fn
+        except AttributeError:
+            return False
+        if settings_fn is None:
             return False
         try:
-            settings = self._settings_fn()
-            return bool(settings.get("privacy_mode_enabled", False))
+            settings = settings_fn()
         except Exception:  # noqa: BLE001
-            return False
+            logger.warning(
+                "Не удалось прочитать privacy_mode_enabled — считаем privacy ON (fail-closed)",
+                exc_info=True,
+            )
+            return True
+        if not isinstance(settings, dict):
+            return True
+        return bool(settings.get("privacy_mode_enabled", False))
 
     def _read_all(self) -> list[dict[str, Any]]:
         """Читает все версии из NDJSON."""
