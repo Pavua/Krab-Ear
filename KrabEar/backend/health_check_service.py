@@ -108,20 +108,25 @@ class HealthCheckService:
     # ------------------------------------------------------------------
 
     def _is_privacy_mode(self) -> bool:
-        """Returns True if privacy_mode_enabled is active via SettingsService.
+        """FAIL-CLOSED ``privacy_mode_enabled`` для latency-некритичных путей.
 
-        Бюджетный (не nowait) путь — используется ``get_diagnostics`` и
-        другими НЕ-latency-критичными вызывающими. ``handle_ping`` использует
-        отдельный ``_is_privacy_mode_nowait()`` ниже — см. его докстринг за
-        объяснением, почему privacy-чтение внутри ping не может позволить
-        себе даже короткий бюджет ожидания.
+        Бюджетный (не nowait) путь — ``get_diagnostics`` и прочие диагностики.
+        ``handle_ping`` использует отдельный ``_is_privacy_mode_nowait()`` —
+        zero-wait, см. его докстринг.
+
+        Любой IO/lock ``Exception`` → True. Отсутствие ключа после успешного
+        чтения → False (не crash и не «всегда ON»).
         """
         if self._settings_svc is None:
             return False
         try:
             return bool(self._settings_svc.cached_settings().get("privacy_mode_enabled", False))
         except Exception:
-            return False
+            logger.warning(
+                "Не удалось прочитать privacy_mode_enabled — считаем privacy ON (fail-closed)",
+                exc_info=True,
+            )
+            return True
 
     def _is_privacy_mode_nowait(self) -> bool:
         """Zero-wait ``privacy_mode_enabled`` read, ИСКЛЮЧИТЕЛЬНО для ``handle_ping``
@@ -145,7 +150,11 @@ class HealthCheckService:
         try:
             return bool(self._settings_svc.cached_settings(nowait=True).get("privacy_mode_enabled", False))
         except Exception:
-            return False
+            logger.warning(
+                "Не удалось прочитать privacy_mode_enabled (nowait) — считаем privacy ON (fail-closed)",
+                exc_info=True,
+            )
+            return True
 
     def _read_history_count_for_ping(self) -> int:
         """Читает ``count_active_items()`` РОВНО ОДНОЙ неблокирующей попыткой,
