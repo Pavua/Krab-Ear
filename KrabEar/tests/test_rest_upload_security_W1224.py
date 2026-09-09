@@ -694,13 +694,18 @@ class TestPrivacyModeSkipsHistoryPersistViaRest(_Base):
 
         W1212: privacy_mode=True blocks the entire transcription endpoint with 403,
         not just history persistence (more conservative security posture).
+
+        Ordinary REST читает флаг через ``_privacy_mode_enabled()`` →
+        ``store.load_settings()`` (fail-closed на IO). Патч
+        ``_load_settings_field`` сюда больше не попадает: missing key = OFF,
+        поэтому пустой мок-словарь давал 200 вместо 403.
         """
         wav_data = _make_wav_bytes()
         mock_info = MagicMock()
         mock_info.duration = 5.0
 
-        with patch("soundfile.info", return_value=mock_info), \
-                patch.object(_rest_mod, "_load_settings_field", return_value=True):
+        self.store.load_settings.return_value = {"privacy_mode_enabled": True}
+        with patch("soundfile.info", return_value=mock_info):
             resp = self.client.post(
                 "/v1/stt/transcribe",
                 data={"file": (io.BytesIO(wav_data), "private.wav")},
@@ -714,6 +719,7 @@ class TestPrivacyModeSkipsHistoryPersistViaRest(_Base):
         self.assertEqual(body.get("skipped"), "privacy_mode")
         # History must NOT have been persisted
         self.store.add_history_item.assert_not_called()
+        self.transcriber.transcribe.assert_not_called()
 
     def test_privacy_mode_disabled_persists_history(self):
         """privacy_mode_enabled=False → store.add_history_item() IS called."""
@@ -721,8 +727,8 @@ class TestPrivacyModeSkipsHistoryPersistViaRest(_Base):
         mock_info = MagicMock()
         mock_info.duration = 5.0
 
-        with patch("soundfile.info", return_value=mock_info), \
-                patch.object(_rest_mod, "_load_settings_field", return_value=False):
+        self.store.load_settings.return_value = {"privacy_mode_enabled": False}
+        with patch("soundfile.info", return_value=mock_info):
             resp = self.client.post(
                 "/v1/stt/transcribe",
                 data={"file": (io.BytesIO(wav_data), "public.wav")},
