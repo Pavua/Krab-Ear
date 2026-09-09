@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -80,6 +82,32 @@ class TextScoringPrivacyGateFailsClosedTests(unittest.TestCase):
         self.assertEqual(result.get("titles"), [])
         self.assertEqual(result.get("reason"), "privacy_mode_active")
         svc._auto_title_generator.generate_title.assert_not_called()
+
+
+class TextScoringPrivacyProductionWiringTests(unittest.TestCase):
+    """BackendService.__init__ обязан передать settings_svc для fail-closed privacy."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._svc = None
+
+    def tearDown(self) -> None:
+        if self._svc is not None:
+            self._svc.close()
+
+    def test_backend_wires_settings_svc_into_text_scoring_svc(self) -> None:
+        from backend.service import BackendService
+        from backend.state_store import StateStore
+
+        store = StateStore(data_dir=Path(self._tmpdir))
+        self._svc = BackendService(store=store)
+
+        self.assertIs(
+            self._svc._text_scoring_svc._settings_svc,
+            self._svc._settings_svc,
+            "BackendService должен wire _settings_svc в _text_scoring_svc",
+        )
+        self.assertIsNotNone(self._svc._text_scoring_svc._settings_svc)
 
 
 if __name__ == "__main__":
