@@ -231,7 +231,8 @@ class AutoGlossaryBuilder:
         self._data_dir = data_dir
         self._refresh_hours = refresh_hours
         # Callable returning current settings dict; used to check privacy_mode.
-        # None means privacy_mode is assumed off (backward-compatible).
+        # None after __init__ means privacy_mode is assumed off (FakeStore tests).
+        # Missing attribute / broken provider → privacy ON (fail-closed).
         self._settings_provider = settings_provider
 
         # Lock protecting _cache + _cache_built_at across build/invalidate/get_cached.
@@ -303,7 +304,14 @@ class AutoGlossaryBuilder:
         return list(terms)
 
     def get_cached(self) -> List[str]:
-        """Возвращает текущий кэш без пересчёта (может быть пустым)."""
+        """Возвращает текущий кэш без пересчёта (может быть пустым).
+
+        Privacy-гейт: transcript-derived terms не отдаём, пока режим
+        неизвестен или включён. Не трогаем ``_cache`` до проверки —
+        ``__new__`` без ``__init__`` иначе упадёт на отсутствующем атрибуте.
+        """
+        if self._is_privacy_mode_active():
+            return []
         return list(self._cache)
 
     def invalidate(self) -> None:
@@ -333,21 +341,28 @@ class AutoGlossaryBuilder:
         return age_hours < self._refresh_hours
 
     def _is_privacy_mode_active(self) -> bool:
-        """Возвращает True если privacy_mode включён в текущих настройках.
+        """FAIL-CLOSED чтение privacy_mode / privacy_mode_enabled.
 
-        Проверяет оба варианта ключа: "privacy_mode" и "privacy_mode_enabled"
-        (W1294: разные вызывающие используют разные ключи).
+        Неизвестное состояние приватности ⇒ считаем privacy ON. Тот же
+        контракт, что у ``RecordingCoreService._privacy_mode_enabled``.
+
+        ``settings_provider is None`` после ``__init__`` — явный тестовый
+        путь (FakeStore без настроек) ⇒ False, экстракция работает.
+        Отсутствующий атрибут (``__new__`` без ``__init__``) и любой
+        IO/lock ``Exception`` ⇒ True. Отсутствие ключа после успешного
+        чтения ⇒ False (не «всегда ON»).
         """
-        if self._settings_provider is None:
-            return False
         try:
+            if self._settings_provider is None:
+                return False
             s = self._settings_provider()
             return bool(s.get("privacy_mode", False) or s.get("privacy_mode_enabled", False))
         except Exception as exc:
             logger.warning(
-                "auto_glossary: не удалось получить настройки для privacy_mode: %s", exc
+                "auto_glossary: не удалось получить настройки для privacy_mode: %s",
+                exc,
             )
-            return False
+            return True
 
     def _build_from_history(self, window_days: int, top_n: int) -> List[str]:
         """Основная логика построения глоссария из истории."""

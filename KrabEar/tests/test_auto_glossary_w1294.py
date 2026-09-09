@@ -209,9 +209,9 @@ class TestPrivacyModeSkipsDiskPersist(unittest.TestCase):
             raise RuntimeError("settings unavailable")
 
         builder = AutoGlossaryBuilder(store=store, settings_provider=_bad_provider)
-        # Should not raise; falls back to building normally
+        # Should not raise; fail-closed → empty glossary, no crash
         result = builder.build()
-        self.assertIsInstance(result, list)
+        self.assertEqual(result, [])
 
 
 # ── TestFillerBigramsExcluded ─────────────────────────────────────────────────

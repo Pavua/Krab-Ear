@@ -741,8 +741,8 @@ class TestPrivacyModeGuard(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def test_settings_provider_exception_defaults_to_no_privacy(self):
-        """If settings_provider raises, privacy_mode defaults to False (persist proceeds)."""
+    def test_settings_provider_exception_defaults_to_privacy_on(self):
+        """If settings_provider raises, privacy_mode fails closed (no persist)."""
         import shutil
         import tempfile
 
@@ -759,12 +759,13 @@ class TestPrivacyModeGuard(unittest.TestCase):
                 data_dir=Path(tmpdir),
                 settings_provider=_broken_provider,
             )
-            # Should not raise; _is_privacy_mode_active catches the error
-            builder.build(force=True)
-            # File should NOT be persisted when provider raises (fails-safe to no persist)
-            # Actually: _is_privacy_mode_active returns False on exception → persists
+            result = builder.build(force=True)
+            self.assertEqual(result, [])
             cache_file = Path(tmpdir) / "auto_glossary.json"
-            self.assertTrue(cache_file.exists(), "При ошибке провайдера должен записывать (fail-open)")
+            self.assertFalse(
+                cache_file.exists(),
+                "При ошибке провайдера не должен записывать (fail-closed)",
+            )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
