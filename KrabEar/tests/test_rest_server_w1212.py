@@ -17,6 +17,7 @@ Covers:
   F6 LOW — privacy mode guard on /v1/stt/transcribe:
     - test_stt_transcribe_blocked_in_privacy_mode
     - test_stt_transcribe_allowed_when_privacy_mode_off
+    - test_load_settings_field_fallback_blocks_transcribe_on_error (fail-closed)
 
 Run:
     PYTHONPATH=$(pwd)/KrabEar python -m unittest KrabEar/tests/test_rest_server_w1212.py -v
@@ -449,8 +450,8 @@ class TestSttTranscribeBlockedInPrivacyMode(_RestBase):
         self.assertEqual(resp.status_code, 403,
                          f"Privacy mode must block regardless of auth state")
 
-    def test_load_settings_field_fallback_allows_transcribe_on_error(self):
-        """When load_settings() raises an exception, privacy guard defaults to False."""
+    def test_load_settings_field_fallback_blocks_transcribe_on_error(self):
+        """When load_settings() raises, ordinary REST privacy guard fails closed."""
         self.mock_store.load_settings.side_effect = RuntimeError("disk error")
         data = {"file": (io.BytesIO(self._audio_data()), "test.wav")}
         resp = self.client.post(
@@ -458,9 +459,17 @@ class TestSttTranscribeBlockedInPrivacyMode(_RestBase):
             data=data,
             content_type="multipart/form-data",
         )
-        # Should not be 403 — fallback to False means transcription proceeds
-        self.assertNotEqual(resp.status_code, 403,
-                            "load_settings error should not produce 403 privacy block")
+        self.assertEqual(
+            resp.status_code, 403,
+            "load_settings error must produce 403 privacy block (fail-closed)",
+        )
+        body = resp.get_json()
+        self.assertIsNotNone(body)
+        self.assertEqual(body.get("skipped"), "privacy_mode")
+        self.assertFalse(body.get("ok", True))
+        self.assertFalse(body.get("text"))
+        self.mock_transcriber.transcribe.assert_not_called()
+        self.mock_store.add_history_item.assert_not_called()
 
 
 # ===========================================================================
