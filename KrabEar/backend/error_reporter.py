@@ -8,6 +8,11 @@ W977 hardening (Wave 987):
   Privacy mode (settings.privacy_mode_enabled) полностью обнуляет message/context.
 - F3 LOW: handle_get_error_report снимает (errors, total_in_buffer) за один lock-захват.
 - F5 LOW: длинные stack-trace в message поле обрезаются тем же _MAX_MESSAGE_LEN cap.
+
+Privacy-гейт fail-CLOSED (2026-09): сбой чтения настроек = privacy ON.
+Текст диктовки/истории не попадает в ring-buffer и в IPC get_error_report.
+Технические поля (component, error_type, stats) и traceback при privacy OFF
+сохраняются.
 """
 
 from __future__ import annotations
@@ -75,14 +80,28 @@ class ErrorReporter:
     # ------------------------------------------------------------------
 
     def _is_privacy_mode(self) -> bool:
-        """Возвращает True если runtime-настройка privacy_mode_enabled = True."""
-        if self._settings_provider is None:
-            return False
+        """FAIL-CLOSED чтение ``privacy_mode_enabled``.
+
+        Неизвестное состояние приватности ⇒ считаем privacy ON. Тот же контракт,
+        что у ``HistoryService._is_privacy_mode``.
+
+        ``settings_provider is None`` — privacy OFF (юнит-тесты без провайдера;
+        прод всегда передаёт ``cached_settings`` из BackendService).
+
+        Любой IO/lock ``Exception`` → True. Отсутствие ключа после успешного
+        чтения → False. ``AttributeError`` от частично сконструированного
+        инстанса (``__new__`` без ``__init__`` в unit-тестах) → False.
+        """
         try:
-            cfg = self._settings_provider()
+            provider = getattr(self, "_settings_provider", None)
+            if provider is None:
+                return False
+            cfg = provider()
             return bool(cfg.get("privacy_mode_enabled", False))
-        except Exception:
+        except AttributeError:
             return False
+        except Exception:
+            return True
 
     @staticmethod
     def _sanitize_message(message: str) -> str:
@@ -107,6 +126,14 @@ class ErrorReporter:
             return dict(context)
         except (TypeError, ValueError):
             return {"non_serializable": True}
+
+    @staticmethod
+    def _redact_error_dict(row: dict[str, Any]) -> dict[str, Any]:
+        """Убирает текст диктовки из сериализованной записи, не трогая тип/компонент."""
+        redacted = dict(row)
+        redacted["message"] = "<redacted: privacy_mode>"
+        redacted["context"] = {}
+        return redacted
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -224,6 +251,10 @@ class ErrorReporter:
 
         W977 F3: errors и total_in_buffer снимаются за один lock-захват,
         исключая TOCTOU-расхождение между двумя отдельными чтениями буфера.
+
+        Fail-closed privacy: при privacy ON / сбое чтения настроек IPC не
+        отдаёт ранее сохранённый текст диктовки. component / error_type
+        остаются — это не пользовательский текст.
         """
         limit = int(params.get("limit", 50))
         limit = max(1, min(limit, self._max_size))
@@ -236,9 +267,12 @@ class ErrorReporter:
         # Новейшие — первыми, затем применяем limit
         items.reverse()
         errors = items[:limit]
+        payload = [e.to_dict() for e in errors]
+        if self._is_privacy_mode():
+            payload = [self._redact_error_dict(row) for row in payload]
 
         return {
-            "errors": [e.to_dict() for e in errors],
+            "errors": payload,
             "total_in_buffer": total_in_buffer,
         }
 
