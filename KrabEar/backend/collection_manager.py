@@ -60,13 +60,26 @@ class CollectionManager:
         self._load()
 
     def _is_privacy_mode(self) -> bool:
-        """Returns True when privacy_mode_enabled is set in cached settings."""
+        """FAIL-CLOSED чтение ``privacy_mode_enabled``.
+
+        Неизвестное состояние приватности ⇒ считаем privacy ON. Тот же контракт,
+        что у ``RecordingCoreService._privacy_mode_enabled``. ``settings_fn`` в
+        проде — ``cached_settings()``; OSError из ``StateStore._lock()``
+        (ENOSPC/EMFILE/EACCES) не должен открывать гейт.
+
+        🔴 Отсутствие ключа — НЕ сбой: настройки прочитаны, режим просто выключен.
+        ``settings_fn is None`` — не сбой чтения, а отсутствие источника (тесты).
+        """
         if self._settings_fn is None:
             return False
         try:
             return bool(self._settings_fn().get("privacy_mode_enabled", False))
         except Exception:
-            return False
+            logger.warning(
+                "Не удалось прочитать privacy_mode_enabled — считаем privacy ON (fail-closed)",
+                exc_info=True,
+            )
+            return True
 
     # ------------------------------------------------------------------
     # Персистентность

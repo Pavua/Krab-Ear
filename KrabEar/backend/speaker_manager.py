@@ -134,13 +134,26 @@ class SpeakerManager:
             self._fingerprints_path = None
 
     def _is_privacy_mode(self) -> bool:
-        """Returns True when privacy_mode_enabled is active via settings_fn."""
+        """FAIL-CLOSED чтение ``privacy_mode_enabled``.
+
+        Неизвестное состояние приватности ⇒ считаем privacy ON. Тот же контракт,
+        что у ``RecordingCoreService._privacy_mode_enabled``. ``settings_fn`` в
+        проде — ``cached_settings()``; OSError из ``StateStore._lock()``
+        (ENOSPC/EMFILE/EACCES) не должен открывать гейт.
+
+        🔴 Отсутствие ключа — НЕ сбой: настройки прочитаны, режим просто выключен.
+        ``settings_fn is None`` — не сбой чтения, а отсутствие источника (тесты).
+        """
         if self._settings_fn is None:
             return False
         try:
             return bool(self._settings_fn().get("privacy_mode_enabled", False))
         except Exception:
-            return False
+            _log.warning(
+                "Не удалось прочитать privacy_mode_enabled — считаем privacy ON (fail-closed)",
+                exc_info=True,
+            )
+            return True
 
     def _load(self) -> None:
         if self._path is None or not self._path.exists():

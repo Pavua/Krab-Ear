@@ -1238,6 +1238,7 @@ class BackendService:
             text_postprocessor=self._text_postprocessor,
             store=self.store,
             llm_rewriter=self._llm_rewriter,
+            settings_svc=self._settings_svc,
         )
         # wave-1770 MED: inject settings_get for privacy gates on text analysis handlers.
         self._text_processing_svc._settings_get = self._get_runtime_setting

@@ -37,6 +37,7 @@ class TextProcessingService:
         text_postprocessor: Any,
         store: Any,
         llm_rewriter: Optional[Any] = None,
+        settings_svc: Optional[Any] = None,
     ) -> None:
         """
         Args:
@@ -48,6 +49,9 @@ class TextProcessingService:
             text_postprocessor:   TextPostProcessor — конвейер пост-обработки.
             store:                StateStore — хранилище истории (для summarize_item).
             llm_rewriter:         LLMRewriter | None — LLM для summary; None = fallback.
+            settings_svc:         SettingsService | None — fail-closed privacy
+                                  (сиблинг TextScoring; BackendService передаёт
+                                  self._settings_svc).
         """
         self._readability_scorer = readability_scorer
         self._transcription_scorer = transcription_scorer
@@ -60,15 +64,33 @@ class TextProcessingService:
         # wave-1770 MED: late-injected settings getter for privacy gates.
         # Set by BackendService after construction (same pattern as other services).
         self._settings_get = None
+        self._settings_svc = settings_svc
 
     def _is_privacy_mode(self) -> bool:
-        """Returns True if privacy_mode_enabled is active via late-injected settings_get."""
-        if self._settings_get is None:
-            return False
+        """FAIL-CLOSED чтение ``privacy_mode_enabled``.
+
+        Неизвестное состояние приватности ⇒ считаем privacy ON. Тот же контракт,
+        что у ``RecordingCoreService._privacy_mode_enabled``. Generic
+        ``_settings_get`` в проде — это ``_get_runtime_setting``, который при
+        сбое отдаёт default (fail-OPEN); поэтому privacy читаем через
+        ``settings_svc.cached_settings()`` когда доступен.
+
+        🔴 Отсутствие ключа — НЕ сбой: настройки прочитаны, режим просто выключен.
+        """
         try:
+            if self._settings_svc is not None:
+                return bool(
+                    self._settings_svc.cached_settings().get("privacy_mode_enabled", False)
+                )
+            if self._settings_get is None:
+                return False
             return bool(self._settings_get("privacy_mode_enabled", False))
         except Exception:
-            return False
+            logger.warning(
+                "Не удалось прочитать privacy_mode_enabled — считаем privacy ON (fail-closed)",
+                exc_info=True,
+            )
+            return True
 
     # ------------------------------------------------------------------ #
     # summarize_text / summarize_item                                      #
