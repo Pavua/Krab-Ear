@@ -1604,12 +1604,33 @@ def _load_settings_field(key: str, default):
 
     Falls back gracefully to *default* on any read/parse error so that
     callers are never blocked by a corrupt settings file.
+
+    🔴 Не использовать для ``privacy_mode_enabled``: ``default=False`` при
+    сбое — fail-OPEN. Для приватности есть ``_privacy_mode_enabled()``.
     """
     try:
         s = _deps().store.load_settings()
         return s.get(key, default)
     except Exception:
         return default
+
+
+def _privacy_mode_enabled() -> bool:
+    """FAIL-CLOSED чтение ``privacy_mode_enabled`` для обычного REST/WS.
+
+    IO/lock ошибка → privacy ON. Отсутствие ключа после успешного чтения →
+    OFF (не вечный 403 на чистом конфиге). Call-profile путь сюда не ходит —
+    там ``_call_profile_privacy_enabled`` / ``StateStore.call_privacy_mode``.
+    Эталон: ``RecordingCoreService._privacy_mode_enabled``.
+    """
+    try:
+        return bool(_deps().store.load_settings().get("privacy_mode_enabled", False))
+    except Exception:
+        logger.warning(
+            "Не удалось прочитать privacy_mode_enabled — считаем privacy ON (fail-closed)",
+            exc_info=True,
+        )
+        return True
 
 
 def _privacy_gate(f):
@@ -1630,7 +1651,7 @@ def _privacy_gate(f):
             request.path.endswith("/stt/transcribe")
             and request.form.get("request_profile") == "voice_gateway_call"
         )
-        privacy = _call_profile_privacy_enabled() if call_profile else _load_settings_field("privacy_mode_enabled", False)
+        privacy = _call_profile_privacy_enabled() if call_profile else _privacy_mode_enabled()
         if privacy:
             return jsonify({"ok": False, "skipped": "privacy_mode"}), 403
         result = f(*args, **kwargs)
@@ -2061,7 +2082,7 @@ def transcribe_audio():
         # privacy_mode_enabled ALWAYS wins over persist_history (see CLAUDE.md
         # "privacy_mode_enabled ВСЕГДА побеждает"): a caller cannot use
         # persist_history=true to force a save while global privacy mode is on.
-        _privacy_mode = False if call_profile else _load_settings_field("privacy_mode_enabled", False)
+        _privacy_mode = False if call_profile else _privacy_mode_enabled()
         if _privacy_mode or not persist_history:
             history_item_id = ""
         else:
@@ -2566,8 +2587,8 @@ def ws_events(ws):
 def _ws_stream_handler(ws):
     """WebSocket endpoint для потоковой транскрипции/перевода (Stage 1)."""
     deps = _deps()
-    # 🔴 Privacy-gate
-    if deps.store.load_settings().get("privacy_mode_enabled", False):
+    # 🔴 Privacy-gate (fail-closed: IO/lock ошибка чтения settings → ON)
+    if _privacy_mode_enabled():
         try:
             ws.send(json.dumps({"type": "error", "code": "privacy_mode_active", "message": "Privacy mode active"}))
             ws.close(message=b"privacy_mode_active")
@@ -2639,8 +2660,8 @@ def _ws_stream_handler(ws):
             if not raw_msg:
                 break
 
-            # Privacy gate on each chunk
-            if deps.store.load_settings().get("privacy_mode_enabled", False):
+            # Privacy gate on each chunk (тот же fail-closed helper)
+            if _privacy_mode_enabled():
                 ws.send(json.dumps({"type": "error", "code": "privacy_mode_active", "message": "Privacy mode active"}))
                 break
 
