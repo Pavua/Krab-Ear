@@ -159,15 +159,40 @@ class HistoryService:
     # ------------------------------------------------------------------
 
     def _is_privacy_mode(self) -> bool:
-        """Возвращает True если privacy_mode_enabled активен в текущих настройках."""
+        """FAIL-CLOSED чтение ``privacy_mode_enabled``.
+
+        Неизвестное состояние приватности ⇒ считаем privacy ON. Тот же контракт,
+        что у ``RecordingCoreService._privacy_mode_enabled`` и
+        ``SettingsService.cached_settings()`` (на lock timeout — последнее
+        известное значение или принудительный privacy ON).
+
+        Порядок источников (прод: конструктор не передаёт ``cached_settings=``,
+        ``_settings_svc`` late-inject из ``BackendService`` ~1311):
+        1. ``settings_svc.cached_settings()`` если ``_settings_svc`` есть;
+        2. иначе ``_cached_settings()`` если задан;
+        3. иначе ``store.load_settings()``.
+
+        Любой IO/lock ``Exception`` → True. Отсутствие ключа после успешного
+        чтения → False (не crash и не «всегда ON»).
+        """
         try:
-            if self._cached_settings is not None:
+            settings_svc = getattr(self, "_settings_svc", None)
+            if settings_svc is not None:
+                settings = settings_svc.cached_settings()
+            elif getattr(self, "_cached_settings", None) is not None:
                 settings = self._cached_settings()
             else:
                 settings = self.store.load_settings()
             return bool(settings.get("privacy_mode_enabled", False))
-        except Exception:  # noqa: BLE001
+        except AttributeError:
+            # Частично сконструированный инстанс (__new__ без __init__ в unit-тестах).
             return False
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Не удалось прочитать privacy_mode_enabled — считаем privacy ON (fail-closed)",
+                exc_info=True,
+            )
+            return True
 
     # ------------------------------------------------------------------
     # Phase B loud-error helper (late-injected _error_bus)
