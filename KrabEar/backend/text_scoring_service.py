@@ -33,6 +33,7 @@ class TextScoringService:
         term_extractor: Any,
         auto_title_generator: Any,
         get_runtime_setting: Callable[[str, Any], Any],
+        settings_svc: Optional[Any] = None,
     ) -> None:
         """
         Args:
@@ -41,11 +42,37 @@ class TextScoringService:
             auto_title_generator:  AutoTitleGenerator — генерация заголовков.
             get_runtime_setting:   callable(key, default) — runtime settings lookup
                                    (передаётся как self._get_runtime_setting из BackendService).
+            settings_svc:          SettingsService | None — fail-closed чтение privacy_mode_enabled
+                                   (сиблинг RecordingCoreService; опционально до проводки в service.py).
         """
         self._llm_rewriter = llm_rewriter
         self._term_extractor = term_extractor
         self._auto_title_generator = auto_title_generator
         self._get_runtime_setting = get_runtime_setting
+        self._settings_svc = settings_svc
+
+    def _privacy_mode_enabled(self) -> bool:
+        """FAIL-CLOSED чтение ``privacy_mode_enabled``.
+
+        Неизвестное состояние приватности ⇒ считаем privacy ON. Тот же контракт,
+        что у ``RecordingCoreService._privacy_mode_enabled`` — generic
+        ``_get_runtime_setting`` при сбое отдаёт default (fail-OPEN), поэтому
+        privacy читаем через ``settings_svc.cached_settings()`` когда доступен.
+
+        🔴 Отсутствие ключа — НЕ сбой: настройки прочитаны, режим просто выключен.
+        """
+        try:
+            if self._settings_svc is not None:
+                return bool(
+                    self._settings_svc.cached_settings().get("privacy_mode_enabled", False)
+                )
+            return bool(self._get_runtime_setting("privacy_mode_enabled", False))
+        except Exception:
+            logger.warning(
+                "Не удалось прочитать privacy_mode_enabled — считаем privacy ON (fail-closed)",
+                exc_info=True,
+            )
+            return True
 
     # ------------------------------------------------------------------ #
     # warmup_rewriter                                                       #
@@ -90,7 +117,7 @@ class TextScoringService:
         Returns:
             {"terms": [{"term", "score", "frequency", "language", "category"}, ...]}
         """
-        if self._get_runtime_setting("privacy_mode_enabled", False):
+        if self._privacy_mode_enabled():
             return {"ok": True, "terms": [], "reason": "privacy_mode_active"}
         text = params.get("text", "")
         language = params.get("language", "ru")
@@ -131,7 +158,7 @@ class TextScoringService:
             {titles: [{id, title, generated_at}]}
         """
         # wave-1770 MED: gate consistent with handle_extract_terms — both analyze transcript text.
-        if self._get_runtime_setting("privacy_mode_enabled", False):
+        if self._privacy_mode_enabled():
             return {"title": "", "titles": [], "reason": "privacy_mode_active"}
         # Пакетный режим
         items = params.get("items")

@@ -1466,6 +1466,7 @@ class BackendService:
             term_extractor=self._term_extractor,
             auto_title_generator=self._auto_title_generator,
             get_runtime_setting=self._get_runtime_setting,
+            settings_svc=self._settings_svc,
         )
         # openWakeWord adapter (default disabled via WAKE_WORD_ENGINE setting).
         # settings_get ОБЯЗАТЕЛЕН: без него privacy-гейт в handle_wake_word_start
