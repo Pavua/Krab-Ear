@@ -84,13 +84,22 @@ class RecordingChainManager:
         self._load()
 
     def _is_privacy_mode(self) -> bool:
-        """Returns True when privacy_mode_enabled is set in cached settings."""
+        """FAIL-CLOSED чтение ``privacy_mode_enabled``.
+
+        Эталон: ``RecordingCoreService._privacy_mode_enabled``.
+        Без settings_fn — False (тесты без инжекта). IO/lock ошибка → True.
+        Отсутствие ключа после успешного чтения → False.
+        """
         if self._settings_fn is None:
             return False
         try:
             return bool(self._settings_fn().get("privacy_mode_enabled", False))
         except Exception:
-            return False
+            logger.warning(
+                "Не удалось прочитать privacy_mode_enabled — считаем privacy ON (fail-closed)",
+                exc_info=True,
+            )
+            return True
 
     # ------------------------------------------------------------------
     # Персистентность

@@ -103,13 +103,22 @@ class EventReplayManager:
     # ------------------------------------------------------------------
 
     def _is_privacy_mode(self) -> bool:
-        """Возвращает True если privacy_mode_enabled активен в настройках."""
+        """FAIL-CLOSED чтение ``privacy_mode_enabled``.
+
+        Эталон: ``RecordingCoreService._privacy_mode_enabled``.
+        Без провайдера — False (тесты без инжекта). IO/lock ошибка → True.
+        Отсутствие ключа после успешного чтения → False.
+        """
         if self._settings_provider is None:
             return False
         try:
             return bool(self._settings_provider().get("privacy_mode_enabled", False))
         except Exception:
-            return False
+            logger.warning(
+                "Не удалось прочитать privacy_mode_enabled — считаем privacy ON (fail-closed)",
+                exc_info=True,
+            )
+            return True
 
     @staticmethod
     def _redact_entry(entry: dict[str, Any]) -> dict[str, Any]:

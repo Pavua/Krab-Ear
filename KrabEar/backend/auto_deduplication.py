@@ -705,18 +705,26 @@ class AutoDeduplicator:
     # ------------------------------------------------------------------
 
     def _privacy_mode_enabled(self) -> bool:
-        """Возвращает True если включён режим приватности (запрещено сравнивать тексты).
+        """FAIL-CLOSED чтение ``privacy_mode_enabled``.
 
-        Использует settings_provider (инжектированный из BackendService) для чтения
-        runtime-настройки 'privacy_mode_enabled'. Без провайдера — всегда False (не блокирует).
+        Неизвестное состояние приватности ⇒ считаем privacy ON (сравнение
+        транскриптов запрещено). Тот же контракт, что у
+        ``RecordingCoreService._privacy_mode_enabled``.
+
+        Без провайдера — False (тестовый путь; прод инжектит provider).
+        🔴 Отсутствие ключа — НЕ сбой: провайдер возвращает default=False.
+        IO/lock ``Exception`` → True.
         """
         if self._settings_provider is None:
             return False
         try:
             return bool(self._settings_provider("privacy_mode_enabled", False))
         except Exception:
-            logger.warning("_privacy_mode_enabled: ошибка чтения настройки, считаем False")
-            return False
+            logger.warning(
+                "Не удалось прочитать privacy_mode_enabled — считаем privacy ON (fail-closed)",
+                exc_info=True,
+            )
+            return True
 
     # ------------------------------------------------------------------
     # IPC handlers

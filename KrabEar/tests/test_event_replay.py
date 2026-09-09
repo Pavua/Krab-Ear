@@ -654,8 +654,8 @@ class TestPrivacyModeGuard(unittest.TestCase):
             self.assertTrue(entry["data"].get("redacted"))
             self.assertNotIn("text", entry["data"])
 
-    def test_settings_provider_exception_falls_back_to_no_redaction(self):
-        """Если settings_provider бросает исключение, redaction не применяется."""
+    def test_settings_provider_exception_redacts_fail_closed(self):
+        """Если settings_provider бросает — redaction применяется (fail-closed)."""
         def broken_provider():
             raise RuntimeError("Settings unavailable")
 
@@ -665,8 +665,10 @@ class TestPrivacyModeGuard(unittest.TestCase):
         mgr.close()
 
         self.assertEqual(len(events), 1)
-        # No redaction on provider failure — safe fallback
-        self.assertEqual(events[0]["data"].get("key"), "value")
+        data = events[0]["data"]
+        self.assertTrue(data.get("redacted"))
+        self.assertEqual(data.get("reason"), "privacy_mode")
+        self.assertNotIn("key", data)
 
 
 class TestW1444LimitValidationAndClearTruncate(unittest.TestCase):
