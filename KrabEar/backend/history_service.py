@@ -176,13 +176,17 @@ class HistoryService:
         чтения → False (не crash и не «всегда ON»).
         """
         try:
-            if self._settings_svc is not None:
-                settings = self._settings_svc.cached_settings()
-            elif self._cached_settings is not None:
+            settings_svc = getattr(self, "_settings_svc", None)
+            if settings_svc is not None:
+                settings = settings_svc.cached_settings()
+            elif getattr(self, "_cached_settings", None) is not None:
                 settings = self._cached_settings()
             else:
                 settings = self.store.load_settings()
             return bool(settings.get("privacy_mode_enabled", False))
+        except AttributeError:
+            # Частично сконструированный инстанс (__new__ без __init__ в unit-тестах).
+            return False
         except Exception:  # noqa: BLE001
             logger.warning(
                 "Не удалось прочитать privacy_mode_enabled — считаем privacy ON (fail-closed)",
