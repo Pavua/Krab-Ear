@@ -187,19 +187,19 @@ class TestSettingsProviderDefaultNoOp(unittest.TestCase):
         self.assertNotEqual(result.action_taken, "privacy_skipped")
 
     def test_settings_provider_exception_safe(self) -> None:
-        """If settings_provider raises, privacy gate defaults to off (no crash)."""
+        """If settings_provider raises, privacy gate is ON (fail-closed, no crash)."""
         def bad_provider(key, default):
             raise RuntimeError("settings provider crash")
 
         dedup = AutoDeduplicator(settings_provider=bad_provider)
         store = _make_store_with_items([])
-        # Must not raise — should fall back to non-privacy mode
         result = dedup.check_duplicate(
             text="Тест стабильности при сбое провайдера",
             timestamp=_now_iso(),
             store=store,
         )
-        self.assertNotEqual(result.action_taken, "privacy_skipped")
+        self.assertEqual(result.action_taken, "privacy_skipped")
+        store.get_history_page.assert_not_called()
 
 
 class TestPrivacySentinelIsSharedInstance(unittest.TestCase):

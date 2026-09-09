@@ -474,14 +474,13 @@ class PrivacyModeGuardTestCase(unittest.TestCase):
         self.assertTrue(result.is_duplicate)
 
     def test_privacy_mode_settings_provider_exception_safe(self) -> None:
-        """Если settings_provider бросает исключение — privacy_mode считается False (fail-safe)."""
+        """Если settings_provider бросает — privacy ON (fail-closed), без сравнения текстов."""
         # W1505 N1 HIGH fix: провайдер принимает два аргумента (key, default)
         def broken_settings(key: str, default: object = False) -> object:
             raise RuntimeError("Ошибка получения настроек")
 
         deduplicator = AutoDeduplicator(settings_provider=broken_settings)
 
-        # При ошибке провайдера настроек — дедупликация продолжается (не ломается)
         existing_item = {
             "id": "orig-004",
             "text": "Транскрипция при сломанном провайдере",
@@ -490,19 +489,19 @@ class PrivacyModeGuardTestCase(unittest.TestCase):
         mock_store = MagicMock()
         mock_store.get_history_page.return_value = ([existing_item], None)
 
-        # Не должно бросать исключение
         result = deduplicator.check_duplicate(
             text="Транскрипция при сломанном провайдере",
             timestamp=_now_iso(),
             store=mock_store,
         )
-        self.assertIn(result.action_taken, ("kept", "skipped", "merged"))
+        self.assertEqual(result.action_taken, "privacy_skipped")
+        mock_store.get_history_page.assert_not_called()
 
     def test_privacy_provider_signature_two_args(self) -> None:
         """Регрессия W1505 N1 HIGH: settings_provider вызывается с двумя аргументами (key, default).
 
-        Нулевой lambda (zero-arg) вызывает TypeError который поглощается except Exception
-        и возвращает False — privacy_mode никогда не активируется. Этот тест ловит регрессию.
+        Нулевой lambda (zero-arg) вызывает TypeError; except глотает его fail-closed
+        (privacy ON), но канонический прод-провайдер обязан получать (key, default).
         W1248: canonical key is "privacy_mode_enabled".
         """
         calls: list[tuple] = []
@@ -858,13 +857,12 @@ class W1412SettingsProviderTestCase(unittest.TestCase):
         self.assertTrue(dedup._privacy_mode_enabled())
 
     def test_privacy_mode_enabled_handles_provider_exception(self) -> None:
-        """_privacy_mode_enabled() → False при исключении в settings_provider (не падает)."""
+        """_privacy_mode_enabled() → True при исключении в settings_provider (fail-closed)."""
         def broken_provider(key: str, default: object = None) -> object:
             raise RuntimeError("settings broken")
 
         dedup = AutoDeduplicator(settings_provider=broken_provider)
-        # Должен обработать исключение и вернуть False
-        self.assertFalse(dedup._privacy_mode_enabled())
+        self.assertTrue(dedup._privacy_mode_enabled())
 
     # ------------------------------------------------------------------
     # test_handle_run_deduplication_injects_semantic_searcher
