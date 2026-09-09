@@ -216,6 +216,26 @@ class RecapScheduler:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
+    def _is_privacy_mode(self) -> bool:
+        """FAIL-CLOSED чтение ``privacy_mode_enabled``.
+
+        Не использовать ``_current_settings()``: тот глотает IO в ``{}`` и
+        открывает email-гейт (fail-OPEN). Флаг ``enabled`` по-прежнему
+        читается через getattr/``_current_settings`` (AttributeError → False).
+        Privacy на ``__new__`` без ``__init__`` — True, не False.
+        """
+        try:
+            provider = self._settings_provider
+            if provider is None:
+                return False
+            return bool(provider().get("privacy_mode_enabled", False))
+        except Exception:
+            logger.warning(
+                "Не удалось прочитать privacy_mode_enabled — считаем privacy ON (fail-closed)",
+                exc_info=True,
+            )
+            return True
+
     # ------------------------------------------------------------------
     # Runtime settings refresh
     # ------------------------------------------------------------------
@@ -352,9 +372,9 @@ class RecapScheduler:
         # --- Privacy gate: режим конфиденциальности запрещает egress ---
         # Дайджест формируется из текста транскрипций, поэтому при активном
         # privacy_mode_enabled письмо НЕ отправляется (mirror export_scheduler F4).
-        # _current_settings() безопасен: при отсутствии провайдера или ошибке
-        # возвращает {}, и privacy_mode_enabled трактуется как False.
-        if self._current_settings().get("privacy_mode_enabled", False):
+        # 2026-09: IO/lock сбой — тоже skip (fail-closed). Не через
+        # ``_current_settings()``: тот глотает исключение в ``{}`` → fail-OPEN.
+        if self._is_privacy_mode():
             logger.info(
                 "recap_scheduler: пропуск отправки дайджеста (privacy mode активен)",
                 extra={"date": date_str, "reason": "privacy_mode_active"},

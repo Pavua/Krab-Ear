@@ -124,17 +124,16 @@ class PrivacyModeTopicSkipTestCase(unittest.TestCase):
 
     # ── settings_provider raises: should default to no privacy ───────────────
 
-    def test_faulty_settings_provider_defaults_to_no_privacy(self) -> None:
-        """If settings_provider raises, privacy_mode defaults to False (safe fallback)."""
+    def test_faulty_settings_provider_defaults_to_privacy_on(self) -> None:
+        """If settings_provider raises, privacy_mode defaults to ON (fail-closed)."""
         def bad_provider():
             raise RuntimeError("provider broken")
 
         enricher = MetadataEnricher(settings_provider=bad_provider)
-        # Should not raise; topics may be non-empty
         result = enricher.enrich(_make_item("Данные алгоритм программирование"))
         meta = result["metadata"]
         self.assertIn("topics", meta)
-        self.assertIsInstance(meta["topics"], list)
+        self.assertEqual(meta["topics"], [])
 
 
 class PrivacyModeRuntimeToggleTestCase(unittest.TestCase):

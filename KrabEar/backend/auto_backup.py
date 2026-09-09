@@ -67,6 +67,31 @@ class AutoBackupManager:
         # (будущие бэкапы снова разрешены). threading.Event сам по себе thread-safe.
         self._purged = threading.Event()
 
+    def _is_privacy_mode(self) -> bool:
+        """FAIL-CLOSED чтение ``privacy_mode_enabled``.
+
+        Неизвестное состояние приватности ⇒ считаем privacy ON. Тот же контракт,
+        что у ``RecordingCoreService._privacy_mode_enabled``. ``settings_fn`` в
+        проде — ``cached_settings()``; OSError из ``StateStore._lock()``
+        (ENOSPC/EMFILE/EACCES) не должен открывать гейт и копировать history.
+
+        🔴 Отсутствие ключа — НЕ сбой: настройки прочитаны, режим просто выключен.
+        ``settings_fn is None`` после ``__init__`` — отсутствие источника (тесты).
+        ``__new__`` без ``__init__`` даёт AttributeError → True, в отличие от
+        ``enabled`` (getattr → False).
+        """
+        try:
+            settings_fn = self._settings_fn
+            if settings_fn is None:
+                return False
+            return bool(settings_fn().get("privacy_mode_enabled", False))
+        except Exception:
+            logger.warning(
+                "Не удалось прочитать privacy_mode_enabled — считаем privacy ON (fail-closed)",
+                exc_info=True,
+            )
+            return True
+
     # ------------------------------------------------------------------
     # Вспомогательные свойства
     # ------------------------------------------------------------------
@@ -301,16 +326,13 @@ class AutoBackupManager:
         # wave-1770 HIGH: skip backup when privacy_mode_enabled — history.ndjson contains
         # full transcript text (PII). The manual backup (handle_backup_history) already
         # gates on privacy_mode; auto-backup must do the same.
-        if self._settings_fn is not None:
-            try:
-                if self._settings_fn().get("privacy_mode_enabled", False):
-                    return {
-                        "backed_up": False,
-                        "skipped_reason": "privacy_mode",
-                        "backup_path": None,
-                    }
-            except Exception:
-                pass  # fail-open: settings unavailable → don't block backup
+        # 2026-09: IO/lock сбой чтения settings — тоже skip (fail-closed), не pass.
+        if self._is_privacy_mode():
+            return {
+                "backed_up": False,
+                "skipped_reason": "privacy_mode",
+                "backup_path": None,
+            }
 
         # wave-25 (B2): после privacy-purge бэкапы заморожены до clear_purged().
         # Без этого фоновый/оппортунистический цикл пересоздал бы backups/ с PII
