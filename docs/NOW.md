@@ -12,11 +12,9 @@ Source-проверки не доказывают CI другого SHA или �
 Текущие HEAD/CI — в primary `.remember/CODEX_CALL_STT_20260907.md` с повторной
 проверкой Git/GitHub. SHA/PID ниже сохранены как snapshot 05.09, не текущая проверка.
 
-**Source 2026-09-09 вечер (Cloud, `gh pr view` + `git fetch`; runtime не деплоили):**
-`origin/codex/krab-ear-v2` = `033090ed` (#2007). MERGED: [#2005](https://github.com/Pavua/Krab-Ear/pull/2005) `5e24ee6`,
-[#2006](https://github.com/Pavua/Krab-Ear/pull/2006) `5c88af5`, [#2007](https://github.com/Pavua/Krab-Ear/pull/2007) `033090ed`.
-OPEN draft: [#2008](https://github.com/Pavua/Krab-Ear/pull/2008) siblings (collection/speaker live; text_processing wiring follow-up).
-PID и прод-код 05.09 ниже — snapshot, не свежая проверка. Handoff: `.remember/CLOUD_2026-09-09_privacy_gates.md`.
+**Cloud 2026-09-09:** Cursor Cloud Ubuntu cannot deploy to the owner Mac (no `launchctl`).
+Privacy fail-closed **#2005–#2014** merged on `origin/codex/krab-ear-v2` = `1c8d6502` (#2014).
+PID 05.09 below is a historical snapshot, not a live check. Handoff: `.remember/CLOUD_2026-09-09_privacy_gates.md`.
 
 ## База и runtime snapshot 2026-09-05
 
