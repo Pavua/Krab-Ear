@@ -2029,10 +2029,21 @@ class BackendService:
         """Callback для AudioEngine: читает runtime toggle из StateStore.
 
         Используется для проверки llm_rewrite_enabled на каждой транскрипции.
+
+        🔴 ``privacy_mode_enabled`` при сбое чтения — True (fail-closed): через
+        этот колбэк приватность читают ~20 коллабораторов и inline-гейты, и
+        ``default=False`` открывал их все ровно тогда, когда состояние
+        приватности неизвестно. Отсутствие ключа сбоем не считается.
         """
         try:
             return self._cached_settings().get(key, default)
         except Exception:
+            if key == "privacy_mode_enabled":
+                logger.warning(
+                    "Не удалось прочитать privacy_mode_enabled — считаем privacy ON (fail-closed)",
+                    exc_info=True,
+                )
+                return True
             return default
 
     def _is_rest_inprocess_running(self) -> bool:
