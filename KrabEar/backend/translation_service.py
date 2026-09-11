@@ -8,12 +8,15 @@ get_glossary_suggestions, get_vocabulary_suggestions.
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 from typing import Any, Callable, TYPE_CHECKING
 
 from backend.observability import add_breadcrumb
 from core.language_detector import LanguageDetector
+
+logger = logging.getLogger("KrabEar.Backend.Translation")
 
 if TYPE_CHECKING:
     from backend.settings_service import SettingsService
@@ -175,6 +178,31 @@ class TranslationService:
         # через _save_lock, предотвращающая TOCTOU lost-update.
         self._settings_svc: "SettingsService | None" = settings_svc
         self._lang_detector = LanguageDetector()
+
+    def _is_privacy_mode(self) -> bool:
+        """FAIL-CLOSED чтение ``privacy_mode_enabled``.
+
+        Неизвестное состояние приватности ⇒ считаем privacy ON. Тот же контракт,
+        что у ``RecordingCoreService._privacy_mode_enabled``. В проде
+        ``_cached_settings`` — ``SettingsService.cached_settings()``; OSError
+        из ``StateStore._lock()`` не должен отдавать glossary/vocabulary
+        suggestions из истории.
+
+        🔴 Отсутствие ключа — НЕ сбой: настройки прочитаны, режим просто выключен.
+        """
+        try:
+            settings_svc = self._settings_svc
+            if settings_svc is not None:
+                settings = settings_svc.cached_settings()
+            else:
+                settings = self._cached_settings()
+            return bool(settings.get("privacy_mode_enabled", False))
+        except Exception:
+            logger.warning(
+                "Не удалось прочитать privacy_mode_enabled — считаем privacy ON (fail-closed)",
+                exc_info=True,
+            )
+            return True
 
     def handle_translate_text(self, params: dict[str, Any]) -> dict[str, Any]:
         """Отдельная IPC-команда перевода текста для UI и будущих workflow."""
@@ -492,8 +520,9 @@ class TranslationService:
         Privacy gate (wave-29): когда privacy_mode_enabled=True возвращает пустые предложения
         без обращения к истории — утечка capitalized words / brand names / source→target pairs
         из translation history нарушает режим конфиденциальности.
+        2026-09: IO/lock сбой чтения settings — тоже пустой ответ (fail-closed).
         """
-        if (self._cached_settings() or {}).get("privacy_mode_enabled"):
+        if self._is_privacy_mode():
             return {"ok": True, "suggestions": [], "reason": "privacy_mode_active"}
 
         from core.utils import _BRAND_REPLACEMENTS_RAW
@@ -616,8 +645,9 @@ class TranslationService:
         Privacy gate (wave-29): когда privacy_mode_enabled=True возвращает пустой список
         без обращения к истории транскрибаций — leaking proper nouns / domain terms
         нарушает режим конфиденциальности.
+        2026-09: IO/lock сбой чтения settings — тоже пустой ответ (fail-closed).
         """
-        if (self._cached_settings() or {}).get("privacy_mode_enabled"):
+        if self._is_privacy_mode():
             return {"ok": True, "suggestions": [], "total": 0, "reason": "privacy_mode_active"}
 
         scan_limit = max(10, min(int(params.get("scan_limit", 100) or 100), 500))

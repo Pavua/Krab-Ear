@@ -394,8 +394,8 @@ class TestAutoBackupPrivacyGateW1770(unittest.TestCase):
             result = mgr.check_and_backup()
             self.assertNotEqual(result.get("skipped_reason"), "privacy_mode")
 
-    def test_backup_runs_when_settings_fn_raises(self) -> None:
-        """If settings_fn raises, fail-open: backup still runs."""
+    def test_backup_skipped_when_settings_fn_raises(self) -> None:
+        """If settings_fn raises, fail-closed: backup is skipped as privacy ON."""
         with tempfile.TemporaryDirectory() as tmpdir:
             store = _make_store(Path(tmpdir))
 
@@ -408,8 +408,8 @@ class TestAutoBackupPrivacyGateW1770(unittest.TestCase):
                 settings_fn=bad_settings_fn,
             )
             result = mgr.check_and_backup()
-            # fail-open: should not be skipped due to privacy_mode
-            self.assertNotEqual(result.get("skipped_reason"), "privacy_mode")
+            self.assertFalse(result.get("backed_up"))
+            self.assertEqual(result.get("skipped_reason"), "privacy_mode")
 
 
 if __name__ == "__main__":

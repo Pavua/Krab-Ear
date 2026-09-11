@@ -210,6 +210,28 @@ class MetadataEnricher:
         self._enriched_count: int = 0
         self._total_enrichment_time_sec: float = 0.0
 
+    def _privacy_mode_enabled(self, fallback: bool = False) -> bool:
+        """FAIL-CLOSED чтение ``privacy_mode_enabled``.
+
+        Неизвестное состояние приватности ⇒ считаем privacy ON. Generic
+        ``_get_runtime_setting`` при сбое отдаёт ``default`` (fail-OPEN) —
+        для приватности его нельзя использовать. ``settings_provider is None``
+        после ``__init__`` — fallback из аргумента ``enrich(privacy_mode=)``.
+        Отсутствие ключа после успешного dict → False.
+        """
+        try:
+            provider = self._settings_provider
+            if provider is None:
+                return bool(fallback)
+            return bool(provider().get("privacy_mode_enabled", False))
+        except Exception:
+            logger.warning(
+                "Не удалось прочитать privacy_mode_enabled — считаем privacy ON (fail-closed)",
+                extra={"fallback": bool(fallback)},
+                exc_info=True,
+            )
+            return True
+
     # ── Основной API ──────────────────────────────────────────────────────────
 
     def enrich(
@@ -291,7 +313,8 @@ class MetadataEnricher:
         # W1277 F5: skip topic extraction in privacy_mode — transcript content
         # must not be processed beyond the minimum required for STT output.
         # Use settings_provider (runtime) if available, else fall back to parameter.
-        effective_privacy = bool(self._get_runtime_setting("privacy_mode_enabled", privacy_mode))
+        # 2026-09: IO/lock сбой — topics=[], не generic-обёртка fail-OPEN.
+        effective_privacy = self._privacy_mode_enabled(fallback=privacy_mode)
         if effective_privacy:
             topics: list[str] = []
             logger.debug("MetadataEnricher: topic enrichment skipped (privacy_mode_enabled=True)")
