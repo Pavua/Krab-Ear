@@ -217,13 +217,13 @@ class MetadataEnricher:
         ``_get_runtime_setting`` при сбое отдаёт ``default`` (fail-OPEN) —
         для приватности его нельзя использовать. ``settings_provider is None``
         после ``__init__`` — fallback из аргумента ``enrich(privacy_mode=)``.
-        Отсутствие ключа после успешного dict → False.
+        Отсутствие ключа после успешного dict → fallback (как до fail-closed).
         """
         try:
             provider = self._settings_provider
             if provider is None:
                 return bool(fallback)
-            return bool(provider().get("privacy_mode_enabled", False))
+            return bool(provider().get("privacy_mode_enabled", fallback))
         except Exception:
             logger.warning(
                 "Не удалось прочитать privacy_mode_enabled — считаем privacy ON (fail-closed)",
