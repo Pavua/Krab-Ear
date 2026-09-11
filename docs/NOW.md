@@ -1,6 +1,22 @@
 # NOW — что делать сейчас (Krab Ear)
 
-Обновлено: **2026-09-05**. Одна страница: база, политика brain/GPU, очередь. Журнал волн — [`ROADMAP-2026H2.md`](ROADMAP-2026H2.md), не очередь. Горизонт 2–4 нед: [`design-briefs/2026-09-05-horizon-plan.md`](design-briefs/2026-09-05-horizon-plan.md). Как работать: [`EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md).
+Обновлено: **2026-09-11**. Одна страница: база, политика brain/GPU, очередь. Журнал волн — [`ROADMAP-2026H2.md`](ROADMAP-2026H2.md), не очередь. Горизонт 2–4 нед: [`design-briefs/2026-09-05-horizon-plan.md`](design-briefs/2026-09-05-horizon-plan.md). Как работать: [`EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md).
+
+## Деплой 2026-09-11 (актуальный runtime)
+
+- **Прод-код:** `6561a030` (#2016). Backend и REST запускаются из неизменяемого
+  release-worktree `~/.local/share/krab-ear/releases/<sha>` (locked, detached);
+  путь прописан в `PYTHONPATH` и `ProgramArguments` обоих plist
+  (`ai.krab.ear.backend`, `ai.krab.ear.rest`). 🔴 Деплой = `git worktree add --detach`
+  нового SHA + замена SHA в plist + `bootout`/`bootstrap` (kickstart plist не перечитывает;
+  bootstrap сразу после bootout даёт EIO, пока старый процесс гасится — повторить).
+  Прежний релиз `375d4bed` оставлен для отката. Проверка «нет записи/встречи» — перед bootout.
+- Вошло: privacy fail-closed #2005–#2016 (корень — `service._get_runtime_setting`
+  для `privacy_mode_enabled`, #2016), brain-lease конечный TTL #2004. Swift не менялся —
+  агент не пересобирался. Живой e2e (`scripts/run_e2e_smokes.command`): 65 PASS / 0 FAIL.
+- Открыто: `state_store._read_encryption_flag_unlocked` при сбое чтения settings отдаёт
+  False (plaintext-запись истории) — не чинилось; `test_integration_1000_cycles` локально
+  упирается в 30с-таймаут при load ~30 (CI зелёный).
 
 **Source-дополнение 2026-09-07:** PR [#2001](https://github.com/Pavua/Krab-Ear/pull/2001)
 добавляет телефонный STT-профиль для Voice Gateway: explicit auto до общего STT,
