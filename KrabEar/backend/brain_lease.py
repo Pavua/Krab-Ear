@@ -9,11 +9,12 @@
 ВАЖНО — graceful degradation:
     Каждая публичная функция обёрнута в try/except и НИКОГДА не пробрасывает исключения
     в вызывающий код. Любая ошибка (нет fcntl, нет прав, диск полон, сломан JSON)
-    → WARNING в лог и безопасное значение:
+    → WARNING в лог и graceful fallback:
         - acquire_brain_lease → True (Ear не блокируется)
         - release_brain_lease → no-op
         - current_lease_holder → None
     Lease — это оптимизация, а не hard dependency recording pipeline.
+    True/None не доказывают физическое владение GPU или отсутствие другого процесса.
 
 Lock path (кросс-проектный contract):
     Default: ~/.openclaw/lm_studio_brain.lock
@@ -38,11 +39,12 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
+import math
 import os
 import tempfile
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger("KrabEar.BrainLease")
 
@@ -51,6 +53,17 @@ _DEFAULT_LOCK_PATH = Path.home() / ".openclaw" / "lm_studio_brain.lock"
 
 # Default TTL when not specified by caller.
 _DEFAULT_TTL_SEC = 30.0
+
+
+def _finite_float(value: Any) -> float:
+    """Проверить представимое конечное время, не раскрывая исходное значение."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("invalid lease time") from None
+    if not math.isfinite(parsed):
+        raise ValueError("non-finite lease time")
+    return parsed
 
 
 def _resolve_lock_path(lock_path: Optional[Path] = None) -> Path:
@@ -68,8 +81,12 @@ def _ensure_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
-def _read_payload(fd: int) -> Optional[dict]:
-    """Read and parse JSON payload from the beginning of fd. Returns None on any error."""
+def _read_payload(fd: int, *, validate_times: bool = True) -> Optional[dict]:
+    """Прочитать payload; release проверяет owner без требования валидного срока.
+
+    Это позволяет владельцу убрать свой legacy NaN/Inf lease. Acquire/status
+    всегда используют строгий режим; повреждённый срок не доказывает holder.
+    """
     try:
         os.lseek(fd, 0, os.SEEK_SET)
         raw = b""
@@ -80,7 +97,14 @@ def _read_payload(fd: int) -> Optional[dict]:
             raw += chunk
         if not raw.strip():
             return None
-        return json.loads(raw.decode("utf-8"))
+        payload = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload, dict):
+            return None
+        if validate_times:
+            for field in ("exp_ts", "acquired_ts"):
+                if field in payload:
+                    _finite_float(payload[field])
+        return payload
     except Exception:
         return None
 
@@ -88,13 +112,13 @@ def _read_payload(fd: int) -> Optional[dict]:
 def _write_payload(fd: int, payload: dict, path: Path) -> None:
     """Overwrite the lock file with JSON payload atomically via temp-file + rename.
 
-    The flock (LOCK_EX) is already held by the caller for the whole read-modify-write
-    cycle, so the rename is logically atomic with respect to other flocking processes.
+    Replace атомарен для содержимого path, но flock привязан к старому inode:
+    это не межпроцессная mutex-гарантия (существующий advisory-контракт).
     Building the bytes BEFORE any truncation ensures the old payload survives an ENOSPC:
     if the temp-file write fails, the original ``path`` content is untouched and ``fd``
     still holds the flock so the caller can unlock cleanly.
     """
-    raw = json.dumps(payload).encode("utf-8")
+    raw = json.dumps(payload, allow_nan=False).encode("utf-8")
     tmp_fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".brain_lease_tmp_")
     try:
         os.write(tmp_fd, raw)
@@ -122,6 +146,8 @@ def acquire_brain_lease(
         owner:     Logical owner name, e.g. "krab_ear" or "krab".
         ttl_sec:   Lease duration in seconds. A process crash leaves the lease
                    expired after this duration — the next caller reclaims it.
+                   Только конечное число; 0/negative сохраняют immediate expiry.
+                   Невалидный TTL/clock/sum → graceful True без записи lease.
         lock_path: Override the lock file path (for testing). Falls back to
                    KRAB_EAR_BRAIN_LEASE_PATH env var → ~/.openclaw/lm_studio_brain.lock.
 
@@ -134,6 +160,10 @@ def acquire_brain_lease(
         Ear is never blocked by lease machinery.
     """
     try:
+        # Проверяем до filesystem side effects, включая overflow конечной суммы.
+        ttl_sec = _finite_float(ttl_sec)
+        now = _finite_float(time.time())
+        expires = _finite_float(now + ttl_sec)
         path = _resolve_lock_path(lock_path)
         _ensure_parent(path)
 
@@ -149,12 +179,11 @@ def acquire_brain_lease(
                 logger.debug("BrainLease: flock LOCK_NB contention for owner=%r — graceful True", owner)
                 return True
 
-            now = time.time()
             payload = _read_payload(fd)
 
             if payload is not None:
                 existing_owner = payload.get("owner", "")
-                exp_ts = float(payload.get("exp_ts", 0.0))
+                exp_ts = _finite_float(payload.get("exp_ts", 0.0))
                 if existing_owner != owner and now < exp_ts:
                     # Held by someone else AND not expired — we cannot acquire.
                     fcntl.flock(fd, fcntl.LOCK_UN)
@@ -169,7 +198,7 @@ def acquire_brain_lease(
                 "owner": owner,
                 "pid": os.getpid(),
                 "acquired_ts": now,
-                "exp_ts": now + ttl_sec,
+                "exp_ts": expires,
             }
             _write_payload(fd, new_payload, path)
             fcntl.flock(fd, fcntl.LOCK_UN)
@@ -210,7 +239,7 @@ def release_brain_lease(
         fd = os.open(str(path), os.O_RDWR, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            payload = _read_payload(fd)
+            payload = _read_payload(fd, validate_times=False)
 
             if payload is not None and payload.get("owner") == owner:
                 os.ftruncate(fd, 0)
@@ -265,8 +294,9 @@ def current_lease_holder(
         if payload is None:
             return None
 
-        exp_ts = float(payload.get("exp_ts", 0.0))
-        if time.time() >= exp_ts:
+        exp_ts = _finite_float(payload.get("exp_ts", 0.0))
+        now = _finite_float(time.time())
+        if now >= exp_ts:
             return None  # Expired.
 
         return payload

@@ -34,6 +34,10 @@ _STRING_FIELDS: tuple[str, ...] = (
     "cloud_rewriter_api_key",
 )
 
+# Конечные float-поля без новой политики диапазона: сохраняем 0/negative TTL.
+_FINITE_FLOAT_FIELDS: dict[str, float] = {"llm_brain_lease_ttl_sec": 30.0}
+
+
 # Определения enum-полей: ключ → допустимые значения
 _ENUM_FIELDS: dict[str, tuple[str, ...]] = {
     "mode": ("headless", "menubar"),
@@ -383,6 +387,21 @@ class SettingsValidator:
                 fixed[key] = clamped
             else:
                 fixed[key] = parsed  # нормализуем тип
+
+        # 2b. Finite-only numeric knobs: общий numeric auto-fix без artificial caps.
+        for key, default in _FINITE_FLOAT_FIELDS.items():
+            if key not in fixed:
+                continue
+            try:
+                parsed = float(fixed[key])
+                if not math.isfinite(parsed):
+                    raise ValueError("non-finite")
+            except (TypeError, ValueError, OverflowError):
+                # Неверный тип может содержать секрет, поэтому без repr(value).
+                warnings.append(f"'{key}': ожидается конечное число, исправлено на {default}")
+                fixed[key] = default
+            else:
+                fixed[key] = parsed
 
         # 3. Bool-поля
         for key, default_val in _BOOL_FIELDS.items():
