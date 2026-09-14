@@ -211,6 +211,19 @@ class StateStore:
                 if enabled:
                     from backend.history_crypto import build_history_crypto
                     self._history_crypto_instance = build_history_crypto()
+                    if self._history_crypto_instance is None:
+                        # Флаг включён, но ключ недоступен (Keychain) — молчать
+                        # нельзя: иначе тихий plaintext при включённом флаге.
+                        logger.error(
+                            "StateStore: history_encryption_enabled, но "
+                            "build_history_crypto вернул None"
+                        )
+                        self._push_error(
+                            "history.encrypt_fail",
+                            "encryption flag on but build_history_crypto "
+                            "returned None (keychain unavailable?)",
+                            severity="error",
+                        )
                 # else: None — default off, no-op
             except Exception:
                 logger.exception("StateStore: ошибка инициализации history crypto")
@@ -222,6 +235,11 @@ class StateStore:
         Используется только из _get_history_crypto() (вызывается под lock).
         Безопасно: settings.json пишется атомарно через tmp + replace,
         поэтому неполные записи не встречаются.
+
+        Fail-closed (R1, 2026-09-14): сбой чтения НЕ означает «шифрование
+        выключено» — иначе битый settings тихо уводит историю в plaintext.
+        Отсутствующий файл — свежий профиль (False); ошибка чтения —
+        assume-enabled (True) + громкий history.encrypt_fail.
         """
         try:
             if not self.settings_path.exists():
@@ -233,9 +251,29 @@ class StateStore:
             )
             if isinstance(payload, dict):
                 return bool(payload.get("history_encryption_enabled", False))
-        except Exception:
+        except Exception as exc:
             logger.exception("StateStore._read_encryption_flag_unlocked: ошибка чтения")
-        return False
+            self._push_error(
+                "history.encrypt_fail",
+                "encryption flag unreadable, assuming enabled: "
+                f"{type(exc).__name__}: {exc}",
+                severity="error",
+            )
+            return True
+        # Сюда попадаем, только если файл прочитан, но это не dict:
+        # safe_json_loads вернул default=None на битом JSON (исключения нет).
+        # Тихий False здесь — тот же fail-open, поэтому тоже отказ + громко.
+        logger.error(
+            "StateStore._read_encryption_flag_unlocked: settings не объект, "
+            "считаем шифрование включённым"
+        )
+        self._push_error(
+            "history.encrypt_fail",
+            "encryption flag unreadable (settings not an object), "
+            "assuming enabled",
+            severity="error",
+        )
+        return True
 
     def _maybe_encrypt(self, json_str: str) -> str:
         """Шифрует строку JSON если шифрование включено и доступно.
