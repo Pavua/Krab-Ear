@@ -1445,6 +1445,7 @@ class BackendServiceTestCase(unittest.TestCase):
         # 2+ workers accumulated MLX / LM-Studio background threads simultaneously.
         # 50 cycles still exercises the full start/stop/history/compact pipeline.
         # In solo runs (no xdist) the full 1000 cycles run as before.
+        # R2 (2026-09-14): conftest neuters per-cycle LM Studio unload — ~7 s loaded.
         import os
         n_cycles = 50 if os.environ.get("PYTEST_XDIST_WORKER") else 1000
         for idx in range(n_cycles):
