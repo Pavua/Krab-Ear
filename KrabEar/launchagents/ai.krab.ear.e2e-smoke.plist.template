@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Template for ai.krab.ear.e2e-smoke launchd job (Ear E2E smoke, R4).
+
+  Порт Claude scheduled-task krab-ear-e2e-smoke (глох без живой сессии)
+  на launchd. Read-only проверки: backend ping, diagnostics, Swift agent,
+  Sentry ingest+issues, audio devices, settings integrity.
+  НИКОГДА не триггерит record/dictation.
+
+  Install via: scripts/install_ear_e2e_smoke.command
+  Stop via:    launchctl bootout gui/$UID/ai.krab.ear.e2e-smoke
+  Status via:  launchctl print gui/$UID/ai.krab.ear.e2e-smoke
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.krab.ear.e2e-smoke</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PROJECT_ROOT__/.venv_krab_ear/bin/python3</string>
+    <!-- -u: launchd перенаправляет вывод в файл → блочная буферизация;
+         см. комментарий в ai.krab.ear.rest.plist.template (потеря логов
+         03.09.2026). Для 6-часового smoke потеря вывода = слепой прогон. -->
+    <string>-u</string>
+    <string>__PROJECT_ROOT__/scripts/ear_e2e_smoke.py</string>
+  </array>
+
+  <!-- Каденс Claude-таска (каждые 6 ч). RunAtLoad=false: первый прогон через
+       6 ч после bootstrap, нулевой импакт на прод в момент установки. -->
+  <key>StartInterval</key>
+  <integer>21600</integer>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>KeepAlive</key>
+  <false/>
+
+  <key>LowPriorityIO</key>
+  <true/>
+
+  <!-- Self-hosted урок: CI/фон на рабочей машине — только Background,
+       иначе конкурирует за CPU с диктовкой (см. ROADMAP: CI душил STT). -->
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>WorkingDirectory</key>
+  <string>__PROJECT_ROOT__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+
+    <key>PYTHONPATH</key>
+    <string>__PROJECT_ROOT__/KrabEar</string>
+
+    <key>HOME</key>
+    <string>__HOME__</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>__PROJECT_ROOT__/logs/krab-ear-e2e-smoke.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__PROJECT_ROOT__/logs/krab-ear-e2e-smoke.err.log</string>
+</dict>
+</plist>
