@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+Before heavy runtime/CI work, open [`docs/AGENT_SKILLS.md`](docs/AGENT_SKILLS.md) for shared agent skill workflows.
+
 ## Project Overview
 
 Krab Ear is a local voice assistant/transcriber for macOS. It runs as a two-process system:
