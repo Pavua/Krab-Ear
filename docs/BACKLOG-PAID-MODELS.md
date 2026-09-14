@@ -9,8 +9,10 @@
 ## Ф0-остаток (проводка opencode)
 
 1. `opencode.json`: `small_model` → `opencode-go/glm-5.3-flash`.
-2. Агент `executor` (subagent, `opencode-go/glm-5.3-flash`, playbook-дисциплина
-   в промпте) + агент `gate-security` (subagent, `opencode/claude-fable-5-1`,
+2. Агент `executor` (subagent, `opencode/deepseek-v4-flash`, playbook-дисциплина
+   в промпте; акция до 20.09; точный ID подтвердить — в каталоге Zen 14.09
+   `v4.1-flash` отсутствует, fallback `deepseek-v4-flash-free`) + агент
+   `gate-security` (subagent, `opencode/claude-fable-5-1`,
    `edit: deny`, adversarial two-stage review).
 3. MCP Sentry: remote `https://mcp.sentry.dev/mcp`, токен через
    `{env:SENTRY_AUTH_TOKEN}` (значение — только из Main Krab `.env`,
@@ -19,7 +21,7 @@
 5. **Рестарт opencode** (конфиг не hot-reload) + проверка: `/models`,
    живой запрос Sentry MCP.
 
-## Очередь исполнителя (flash, ~$0.15/$0.50 за 1M)
+## Очередь исполнителя (DeepSeek V4 Flash, ~$0.14/$0.28 за 1M, акция до 20.09)
 
 - R2 `test_integration_1000_cycles` (30с при load ~30).
 - R4 миграция Ear-smoke на launchd (карточка; исполнение — flash).
