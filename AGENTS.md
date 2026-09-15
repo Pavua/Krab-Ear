@@ -1,5 +1,9 @@
 # AGENTS.md — Krab Ear (для Codex, Antigravity/Gemini и любого другого агента)
 
+## Skill index for AI assistants
+
+Смотрите также [AGENT_SKILLS.md](docs/AGENT_SKILLS.md) перед runtime/CI/Sentry work.
+
 Это стартовый документ для ЛЮБОГО AI-агента, впервые открывающего этот репозиторий —
 Codex, Antigravity (Gemini), Cursor или человек-новичок.
 
