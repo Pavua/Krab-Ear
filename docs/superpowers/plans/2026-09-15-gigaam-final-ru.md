@@ -62,6 +62,14 @@ Run: `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_gigaam_final
 Expected: FAIL — GigaAM-ветка либо теряет cold-кусок, либо вообще не
 вызывается финальным путём (по дизайну), либо хуже baseline.
 
+Outcome 15.09 (честно): на тёплой машине — 3/3 PASS за ~6 с, cold-loss
+НЕ воспроизвёлся (Metal/кэши горячие после ночных диктовок; W957-гард
+поймал первую попытку — сеть запрещена, добавлен офлайн-режим HF как
+у прод-процесса). Harness валиден как regression-lock, но НЕ как RED:
+детерминированный RED волны — шов роутинга (финал RU идёт в Whisper
+по дизайну, см. T3). По пути поправлена W957-дыра harness (offline).
+T2/T3 идут от шва роутинга, не от cold-repro.
+
 ### Task 2: прогрев (warmup-путь)
 
 **Files:**
