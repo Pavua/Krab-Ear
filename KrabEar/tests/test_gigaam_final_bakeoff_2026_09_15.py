@@ -51,6 +51,24 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _weights_cached() -> bool:
+    """Веса GigaAM-MLX в локальном HF-кэше (иначе офлайн-загрузка упадёт).
+
+    CI-раннеры без кэша скипаются, а не краснеют: сеть в тестах запрещена
+    W957-гардом, а качать ~2 ГБ ради одного файла — не его работа.
+    """
+    import glob as _glob
+    roots = [os.environ.get("HF_HUB_CACHE"),
+             os.path.expanduser("~/.cache/huggingface/hub")]
+    for root in roots:
+        if not root:
+            continue
+        for pat in ("*gigaam*", "*GigaAM*"):
+            if _glob.glob(os.path.join(root, pat)):
+                return True
+    return False
+
+
 def _needs_env() -> None:
     if sys.platform != "darwin" or SAY is None:
         raise unittest.SkipTest("нужен macOS say для синтетического корпуса")
@@ -58,6 +76,8 @@ def _needs_env() -> None:
         raise unittest.SkipTest("нужен ffmpeg для ресемпла в 16k")
     if not HAVE_MLX:
         raise unittest.SkipTest("нужен mlx для GigaAM-MLX")
+    if not _weights_cached():
+        raise unittest.SkipTest("нет весов GigaAM-MLX в HF-кэше (офлайн)")
 
 
 @pytest.mark.slow
