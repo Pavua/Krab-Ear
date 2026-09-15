@@ -2373,3 +2373,29 @@ Source-контракт тест ловит потерю проводки кат
 - **#1999** — C1: стоп/rewriter/summarize не `lms load` на пустом Studio; облако только если Studio **недоступен** (`cloud_rewriter_enabled` всё ещё OFF). 15+ ГБ слот — у Краба (`gemma-4-26b`); `enforce_brain` никогда.
 - Q2 (RIS/SergeyRG, панель :8080) — не Ear: `ANTIGRAVITY_HANDOFF/2026-09-05-krab-8080-model-routing.md`.
 - Следующее в NOW: **C2** вырезать мёртвый Telnyx UI.
+
+## 2026-09-07–11 — интеграция, privacy fail-closed, деплой (#2000–#2018)
+
+Поколение собрано из разрозненных веток 07–08.09 в интеграцию #2000 и доведено
+серией privacy-волн до деплоя 09-11 (релиз `6561a030`, живой e2e 65 PASS / 0 FAIL).
+NOW.md того периода («Следующее: C2») протух в день написания: C2/C3/C5 уже лежали
+в интеграции #2000. Очередь переписана 14.09 (сверка C2/C3/C5 с кодом колеи).
+
+- **#2000** — интеграция: MLX-guards под bounded lock, explicit auto до Whisper,
+  типы paste-флагов, **C2** Telnyx-strip (`c248fab7`), **C3** attempt-deadline
+  Whisper (`971efd24`), screening-HUD caller/DID, CallObserver-флоу входящего.
+- **#2001** — VG GigaAM call-профиль (план `2026-09-07-vg-gigaam-call-profile.md`;
+  флаги `KRAB_STT_EAR_CALL_PROFILE_ENABLED` / `KRAB_SCREENING_AUTO_LANGUAGE_ENABLED`
+  OFF; runtime qualification открыта).
+- **#2002** — restart-failclosed (XML-шаблон REST launchd, запрет рестарта при
+  неизвестном состоянии IPC).
+- **#2003** — **C5**: валидатор отклоняет неверные типы brain/cloud-строк.
+- **#2004** — brain-lease: конечный TTL, проверка времени.
+- **#2005–#2016** — privacy fail-closed серией (корень #2016: общий
+  `_get_runtime_setting` для `privacy_mode_enabled`).
+- **#2017** — NOW.md: деплой 09-11. **#2018** — tgrep основной поиск по коду.
+- Деплой-механика (не launchctl kickstart): `git worktree add --detach` нового SHA +
+  замена SHA в plist + `bootout`/`bootstrap`; прежний релиз `375d4bed` оставлен
+  для отката. Swift в поколении не менялся — агент не пересобирался.
+- Открыто (очередь NOW 14.09): encryption fail-open, `integration_1000_cycles`
+  30с при load ~30, smoke-раннер Ear молчит с 09-08.
