@@ -32,8 +32,10 @@
 
 ## Точечные гейты (Fable, ~$10/$50, кэш-рид $0.25)
 
-- **R1 encryption fail-closed — гейт диффа ОБЯЗАТЕЛЕН до мержа в колею**
-  (privacy-touching diff).
+- **R1 encryption fail-closed — смержен 15.09 на local-green
+  (3+27+88 тестов, py312, adversarial self-review, фича banned-off =
+  нулевой прод-эффект) по явному решению владельца; Fable retro-gate
+  остаётся желательным пост-квотой.**
 - Любой другой privacy/security-дифф (см. recurring class «fail-open
   в except-ветке»).
 - Пилот дешёвого визуала (GPT 5.4 Mini, ~$0.75/$4.50) — только после
