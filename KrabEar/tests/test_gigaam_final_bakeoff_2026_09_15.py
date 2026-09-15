@@ -30,6 +30,14 @@ try:
     HAVE_MLX = True
 except ImportError:
     HAVE_MLX = False
+try:
+    # Именно этот пакет импортируется лениво внутри transcribe(); проверять
+    # надо его, а не mlx (CI-раннер с голым mlx без gigaam_mlx падал
+    # ModuleNotFoundError вместо скипа — nightly 15.09).
+    import gigaam_mlx  # noqa: F401
+    HAVE_GIGAAM_MLX = True
+except ImportError:
+    HAVE_GIGAAM_MLX = False
 
 PHRASES = (
     (
