@@ -431,6 +431,39 @@ def _suppress_startup_diagnostics(request):
 
 
 # ---------------------------------------------------------------------------
+# R2 (2026-09-14): neuter per-cycle LM Studio brain-unload in tests.
+#
+# RecordingCore fires unload_model_async() on EVERY start_recording
+# (llm_brain_unload_on_recording, default True): thread + REST-unload,
+# on refusal `lms unload` CLI subprocess. With live Studio (dev box) the
+# 1000-cycle soak burns ~37 s wall / 192 s CPU (631%) vs the W957 30 s
+# guard (measured 15.5→28.4 ms/cycle growing vs 5-7 ms flat neutered),
+# and unloads the owner's live brain 1000x as a side effect. CI stays
+# green only because Studio is offline there (fast-refuse).
+#
+# No nodeid exclusions (unlike the warmup guards above): every test that
+# asserts real unload behaviour binds its own reference
+# (test_lm_studio_lifecycle imports the names directly;
+# test_oom_action_real_unload* / test_error_actions patch
+# backend.error_actions.unload_model_async), so patching the lifecycle
+# module attribute is invisible to them. RecordingCore imports the name
+# inside the function per call, so the patch intercepts the soak path.
+# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _disable_studio_unload_in_tests():
+    try:
+        from unittest.mock import patch
+
+        with patch(
+            "backend.lm_studio_lifecycle.unload_model_async",
+            lambda *a, **k: None,
+        ):
+            yield
+    except Exception:
+        yield
+
+
+# ---------------------------------------------------------------------------
 # 2026-08-05: LLMRewriter.ping()/warmup_probe()/summarize() hit real LM Studio
 # (loopback 127.0.0.1) via requests.Session — _block_real_network above
 # deliberately allows loopback (it would otherwise break legitimate local
