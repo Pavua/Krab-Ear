@@ -2399,3 +2399,17 @@ NOW.md того периода («Следующее: C2») протух в де
   для отката. Swift в поколении не менялся — агент не пересобирался.
 - Открыто (очередь NOW 14.09): encryption fail-open, `integration_1000_cycles`
   30с при load ~30, smoke-раннер Ear молчит с 09-08.
+
+## 2026-09-16 — деплой `5cab7988` (R1 в проде)
+
+Процедура §09-11 без отклонений: worktree --detach, swap SHA в обоих
+plist (бэкап в /tmp), bootout → bootstrap; EIO на первом bootstrap REST
+сработал как задокументировано (ретрай +5с). Busy-check: 60 с idle +
+финальный чек (записи/встречи нет). Backend pid 21156, REST 22059, агент
+1020 не тронут. Постдеплой: ping ok, diagnostics 13/13, агент 1, Sentry —
+один `GigaAM worker shutdown` warn-batch (штатный артефакт рестарта).
+Прежний релиз `6561a030` оставлен для отката. Что вошло: R1 (нулевой
+прод-эффект — фича banned-off), R2/R4 тесты и скрипты, доки (#2017–#2018
+и далее). CI на SHA: CI + krab-ear-ci + mlx-nightly зелёные
+(nightly-шаткость warmup-теста относится к ubuntu-env, не к релизу;
+bake-off гвард починен в том же SHA).

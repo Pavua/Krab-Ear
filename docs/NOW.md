@@ -1,8 +1,22 @@
 # NOW — что делать сейчас (Krab Ear)
 
-Обновлено: **2026-09-14**. Одна страница: база, политика brain/GPU, очередь. Журнал волн — [`ROADMAP-2026H2.md`](ROADMAP-2026H2.md), не очередь. Горизонт 2–4 нед: [`design-briefs/2026-09-05-horizon-plan.md`](design-briefs/2026-09-05-horizon-plan.md). Как работать: [`EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md).
+Обновлено: **2026-09-16**. Одна страница: база, политика brain/GPU, очередь. Журнал волн — [`ROADMAP-2026H2.md`](ROADMAP-2026H2.md), не очередь. Горизонт 2–4 нед: [`design-briefs/2026-09-05-horizon-plan.md`](design-briefs/2026-09-05-horizon-plan.md). Как работать: [`EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md).
 
-## Деплой 2026-09-11 (актуальный runtime)
+## Деплой 2026-09-16 (актуальный runtime)
+
+- **Прод-код:** `5cab7988` (R1 encryption fail-closed + R2/R4 тесты, CИ зелёный:
+  CI + krab-ear-ci + mlx-nightly). Процедура §09-11 без изменений; EIO на
+  первом bootstrap REST сработал как задокументировано (ретрай +5с — ок).
+- Backend pid **21156**, REST **22059** (оба свежие); агент **1020** не тронут
+  (Swift не менялся). Прежний релиз `6561a030` оставлен для отката.
+- Проверка «нет записи/встречи»: 60 с idle + финальный чек перед bootout.
+  Постдеплой: ping ok, diagnostics 13/13, агент 1, Sentry — один
+  `GigaAM worker shutdown` warn-batch (штатный артефакт рестарта, класс
+  self-heal). Fable retro-gate R1 — пост-квотой (см. BACKLOG).
+- R1 в проде нулевого эффекта (фича banned-off) — деплой гигиенический
+  (колея == прод), не релиз фич.
+
+## Деплой 2026-09-11
 
 - **Прод-код:** `6561a030` (#2016). Backend и REST запускаются из неизменяемого
   release-worktree `~/.local/share/krab-ear/releases/<sha>` (locked, detached);
@@ -14,9 +28,9 @@
 - Вошло: privacy fail-closed #2005–#2016 (корень — `service._get_runtime_setting`
   для `privacy_mode_enabled`, #2016), brain-lease конечный TTL #2004. Swift не менялся —
   агент не пересобирался. Живой e2e (`scripts/run_e2e_smokes.command`): 65 PASS / 0 FAIL.
-- Открыто: `state_store._read_encryption_flag_unlocked` при сбое чтения settings отдаёт
-  False (plaintext-запись истории) — не чинилось; `test_integration_1000_cycles` локально
-  упирается в 30с-таймаут при load ~30 (CI зелёный).
+- Открыто 11.09 → закрыто: encryption fail-open — волна R1 (fail-closed +
+  громко), задеплоено 16.09; soak-таймаут — волна R2 (per-cycle unload
+  шторм убран фикстурой, soak ~22 с, гард 30 с цел).
 
 **Source-дополнение 2026-09-07:** PR [#2001](https://github.com/Pavua/Krab-Ear/pull/2001)
 добавляет телефонный STT-профиль для Voice Gateway: explicit auto до общего STT,
@@ -28,12 +42,12 @@ Source-проверки не доказывают CI другого SHA или �
 Текущие HEAD/CI — в primary `.remember/CODEX_CALL_STT_20260907.md` с повторной
 проверкой Git/GitHub. SHA/PID ниже сохранены как snapshot 05.09, не текущая проверка.
 
-## База и runtime snapshot 2026-09-14
+## База и runtime snapshot 2026-09-16
 
 - Репозиторий: [Pavua/Krab-Ear](https://github.com/Pavua/Krab-Ear)
-- Прод-колея: **`origin/codex/krab-ear-v2`** @ `f55c5899` (#2018)
-- **Прод-код:** `6561a030` (релиз 09-11, §деплой выше; колея впереди только доками #2017/#2018 — runtime идентичен)
-- Backend pid **78386** (рестарт 13.09 21:52), REST **76458**, агент pid **1020** (релонч 12.09)
+- Прод-колея: **`origin/codex/krab-ear-v2`** @ `5cab7988`
+- **Прод-код:** `5cab7988` (релиз 16.09, §деплой выше; колея == прод)
+- Backend pid **21156**, REST **22059** (деплой 16.09), агент pid **1020** (релонч 12.09)
 - Worktree: `git worktree add .worktrees/<slug> -b feat/<slug> origin/codex/krab-ear-v2`
 - Main Krab Q2 (:8080 purpose slots, RIS/SergeyRG) — **не Ear**: [`ANTIGRAVITY_HANDOFF/2026-09-05-krab-8080-model-routing.md`](../ANTIGRAVITY_HANDOFF/2026-09-05-krab-8080-model-routing.md)
 
@@ -77,10 +91,11 @@ paste-флаги типизированы. Не строить заново.
 
 ### Корни (порядок)
 
-1. **R1** — fail-open `_read_encryption_flag_unlocked`: сбой чтения settings → False → plaintext-запись истории. Карточка RED→GREEN + sibling-sweep тем же паттерном.
-2. **R2** — `test_integration_1000_cycles`: 30с-таймаут локально при load ~30 (CI зелёный).
-3. **PR #2001** — runtime qualification VG call-профиля (флаги OFF; живой звонок — отдельное «да» владельца).
-4. **Smoke-раннер Ear** — тишина с 09-08: диагноз scheduled-tasks → кандидат на перенос в launchd.
+1. **R1** — DONE + задеплоено 16.09 (fail-closed, Fable retro-gate пост-квотой).
+2. **R2** — DONE (unload-нейтер, soak ~22 с; CI nightly подтверждает скипы).
+3. **PR #2001** — синтетика 10/10 (p50 0.4 с), VG-бриф у владельца;
+   живой звонок исполняет VG-сессия; busy-probe оппортунистически.
+4. **Smoke-раннер Ear** — DONE (launchd, штатные прогоны OK 15–16.09).
 
 Позже: HealthMonitor 2 с (C6, не чинить sticky-hang заново), GigaAM confidence consumers (#1985 — решение за владельцем).
 
