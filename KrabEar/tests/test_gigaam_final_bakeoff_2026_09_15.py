@@ -95,8 +95,8 @@ def _needs_env() -> None:
         raise unittest.SkipTest("нужен macOS say для синтетического корпуса")
     if FFMPEG is None:
         raise unittest.SkipTest("нужен ffmpeg для ресемпла в 16k")
-    if not HAVE_MLX:
-        raise unittest.SkipTest("нужен mlx для GigaAM-MLX")
+    if not HAVE_MLX or not HAVE_GIGAAM_MLX:
+        raise unittest.SkipTest("нужен mlx+gigaam_mlx для GigaAM-MLX")
     if not _weights_cached():
         raise unittest.SkipTest("нет весов GigaAM-MLX в HF-кэше (офлайн)")
 
