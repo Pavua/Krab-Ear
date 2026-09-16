@@ -178,6 +178,7 @@ class CallAssistService:
         start_preview_fn: Callable[[str], None] | None = None,
         coerce_bool_fn: Callable[[Any, bool], bool] | None = None,
         settings_get: Callable[[str, Any], Any] | None = None,
+        recording_core: Any = None,
     ) -> None:
         self.store: Any = store
         self.recorder: Any = recorder
@@ -188,6 +189,10 @@ class CallAssistService:
         self._start_preview: Callable[[str], None] = start_preview_fn or (lambda qp: None)
         self._coerce_bool: Callable[[Any, bool], bool] = coerce_bool_fn or self._default_coerce_bool
         self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
+        # W2 (2026-09-16): сырой recorder shared с RecordingCoreService.
+        # Без ссылки на core stop() не может проверить чужое владение.
+        # None = прямые юнит-конструкции (legacy-поведение, см. гейт ниже).
+        self._recording_core: Any = recording_core
         self._lock: threading.Lock = threading.Lock()
         self._state: dict[str, Any] = {
             "active": False,
@@ -372,6 +377,33 @@ class CallAssistService:
 
         return dict(state)
 
+    def _may_stop_shared_recorder(self) -> bool:
+        """Может ли call assist останавливать общий рекордер.
+
+        Рекордер shared с RecordingCoreService (модель владения generation).
+        Останавливаем, только если захватом никто другой не владеет:
+        owner None (idle либо захват открыт самим звонком без публикации) —
+        можно; чужой owner (dictation/meeting/...) — нельзя, иначе stop
+        звонка обрежет чужую запись (W2, 2026-09-16). Без привязанного core
+        (прямые юнит-конструкции) — legacy-поведение. Ошибка чтения owner —
+        fail-closed False (потеря записи хуже зависшего микрофона).
+        """
+        core = self._recording_core
+        if core is None:
+            return True
+        try:
+            owner = core.current_recording_owner()
+        except Exception:
+            logger.exception("call_assist stop: owner не прочитан — не останавливаем")
+            return False
+        if owner is not None:
+            logger.warning(
+                "call_assist stop: рекордер занят владельцем %r — пропуск stop()",
+                owner,
+            )
+            return False
+        return True
+
     def handle_stop(self, params: dict[str, Any]) -> dict[str, Any]:
         """Останавливает текущую сессию ассистента звонка."""
         stopped_at = datetime.now().isoformat(timespec="seconds")
@@ -398,7 +430,7 @@ class CallAssistService:
         # The recorder is shared with the main recording workflow; stopping it
         # unconditionally would silently abort an unrelated recording that happened
         # to be running when handle_stop is called on an already-idle session.
-        if active and self.recorder.is_recording:
+        if active and self.recorder.is_recording and self._may_stop_shared_recorder():
             try:
                 self.recorder.stop()
             except Exception:

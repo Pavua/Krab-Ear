@@ -1582,6 +1582,10 @@ class BackendService:
         # прямой late-inject повторяет тот же безопасный порядок, что JobTracker.
         # Privacy-purge очищает terminal-response cache и повышает его epoch.
         self._history._recording_core = self._recording_core_svc
+        # W2 (2026-09-16): CallAssistService создан раньше RecordingCoreService,
+        # прямой late-inject повторяет безопасный порядок R2 Task 5. Нужен для
+        # ownership-гейта recorder.stop() (чужую диктовку/встречу не останавливать).
+        self._call_assist._recording_core = self._recording_core_svc
         # wave-1770 HIGH: inject SearchHistoryManager so handle_purge_all_data can call
         # clear_search_history() (clears in-memory _entries) instead of just unlinking
         # the file (which left RAM entries returning stale queries until restart).
