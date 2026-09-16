@@ -31,6 +31,8 @@ import threading
 from enum import Enum
 from typing import Any, Callable
 
+from backend.openwakeword_adapter import WakeWordDisabledError
+
 logger = logging.getLogger("KrabEar.Backend.AudioReinit")
 
 _WAKE_WORD_THRESHOLD_DEFAULT = 0.5
@@ -303,6 +305,12 @@ class AudioReinitCoordinator:
                     else _WAKE_WORD_THRESHOLD_DEFAULT
                 ),
             )
+        except WakeWordDisabledError:
+            logger.info(
+                "AudioReinitCoordinator: restore пропущен — "
+                "wake_word_enabled=False (восстанавливать нечего)"
+            )
+            return True
         except Exception:
             logger.exception(
                 "AudioReinitCoordinator: не удалось перезапустить wake word "

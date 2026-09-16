@@ -109,6 +109,17 @@ class WakeWordWatchdog:
         except Exception:
             return True
 
+    def _wake_feature_enabled(self) -> bool:
+        """Включена ли сама фича wake word (не путать с _enabled(),
+        который гейтит watchdog по wake_word_watchdog_enabled)."""
+        try:
+            return self._settings_get("wake_word_enabled", True) is not False
+        except Exception:
+            # Fail-open как _enabled(): глитч настроек не должен убивать
+            # работающий слушатель; выключение обрабатывается явным False.
+            logger.exception("WakeWordWatchdog: чтение wake_word_enabled упало")
+            return True
+
     def _worker_hung_active(self) -> bool:
         """Заблокирован ли старт живым зависшим worker'ом рекордера."""
         if self._is_worker_hung is None:
@@ -195,6 +206,26 @@ class WakeWordWatchdog:
             with self._lock:
                 self._anomaly_since = None
             self._reset_episode()
+            return None
+
+        if not self._wake_feature_enabled():
+            # Фича выключена владельцем: живой слушатель = mic-hold баг,
+            # гасим тихо без эскалации; мёртвый не воскрешаем (иначе
+            # watchdog вернул бы микрофон вопреки тумблеру). Сюда не
+            # доходим во время активной записи (return выше) — resume-логика
+            # диктовки не затрагивается.
+            try:
+                if bool(self._adapter.is_running()):
+                    self._adapter.stop()
+                    logger.info(
+                        "WakeWordWatchdog: слушатель остановлен — "
+                        "wake_word_enabled=False"
+                    )
+                    return "stopped_disabled"
+            except Exception:
+                logger.exception(
+                    "WakeWordWatchdog: остановка при выключенной фиче упала"
+                )
             return None
 
         try:

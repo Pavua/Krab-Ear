@@ -66,6 +66,14 @@ _MAX_CONSECUTIVE_STREAM_FAILURES: int = 3
 _STREAM_FAILURE_COOLDOWN_SEC: float = 60.0
 
 
+class WakeWordDisabledError(RuntimeError):
+    """Фича wake word выключена владельцем (wake_word_enabled=False).
+
+    Отдельный тип, чтобы AudioReinitCoordinator._restore_listener отличал
+    «восстанавливать нечего» (True) от настоящего сбоя старта (False).
+    """
+
+
 class OpenWakeWordAdapter:
     """Адаптер openWakeWord для Krab Ear.
 
@@ -208,6 +216,17 @@ class OpenWakeWordAdapter:
             ValueError: Если модель не найдена.
         """
         with self._lock:
+            # F5b (2026-09-16, sibling asymmetry F5): IPC-гейт
+            # handle_wake_word_start — не единственный вход. Прямые вызовы
+            # start() (AudioReinitCoordinator._restore_listener) обходили
+            # проверку и открывали микрофон при wake_word_enabled=False.
+            # Тот же fail-open default True, что в F5: отсутствие ключа =
+            # «агент ещё не синхронизировал», не «выключено».
+            if self._settings_get("wake_word_enabled", True) is False:
+                logger.info(
+                    "OpenWakeWordAdapter.start: отклонён — wake_word_enabled=False"
+                )
+                raise WakeWordDisabledError("wake word disabled in settings")
             if self._maintenance:
                 raise RuntimeError(
                     "wake word занят обслуживанием аудио-стека (reinit) — "
