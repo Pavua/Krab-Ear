@@ -2413,3 +2413,20 @@ plist (бэкап в /tmp), bootout → bootstrap; EIO на первом bootstr
 и далее). CI на SHA: CI + krab-ear-ci + mlx-nightly зелёные
 (nightly-шаткость warmup-теста относится к ubuntu-env, не к релизу;
 bake-off гвард починен в том же SHA).
+
+## 2026-09-16 — W1/W2 + W3-вердикт без кода
+
+- **W1** wake mic-hold (`249f80b5`): F5b source-gate `start()` +
+  restore-skip + watchdog stop/no-resurrect. Sibling asymmetry F5 закрыта.
+- **W2** callassist ownership (`94efeb22`): stop-gate по generation owner
+  (`current_recording_owner`, late-inject по прецеденту R2 Task 5);
+  start осознанно не тронут.
+- **W3** meeting-stop: ВЕРДИКТ БЕЗ КОДА. RecordingStopCoordinator (retry
+  тем же токеном, poll в бюджете, SSE-fence, slow-finalization UI) +
+  `RecordingStopCoordinatorTests` покрывают; таймаут давно 120 + poll,
+  не 60. Журнальные заметки R2-spec про «не чинится» устарели.
+- Галлюцинации DimaTorzok-класса: уже фильтруются (W1894,
+  `TextUtils._strip_hallucinations` в пайплайне) — журнал устарел.
+- Открыто (микро-волна, осторожно — cassette cache clears 01.09):
+  `quality_profile` захардкожен в `engine.__init__` ("balanced"), saved
+  применяется per-request; diagnostics врёт до первой записи.
