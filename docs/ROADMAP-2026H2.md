@@ -2521,3 +2521,18 @@ bake-off гвард починен в том же SHA).
   ли user-vocab при purge — отдельным «да», не сейчас.
 - Deploy-gap: seed оверлей/openclaw не доедет на непустой stt_hotwords
   (у владельца 41) — добить IPC при деплое.
+
+## 2026-09-18 — деплой `35b32bab` (F1 в проде)
+
+- Процедура §09-11: busy 60 с idle + финальный чек; release worktree --detach;
+  swap SHA в обоих plist (бэкап `/tmp/ear-plist-backup-20260918/`);
+  bootout (poll до «gone», ~6 с) → bootstrap (без EIO, ретраи не потребовались).
+  Backend 41951, REST 42836, агент 7602 не тронут. Прежний релиз 5cab7988 — откат.
+- Постдеплой: ping ok (v2.0.5, ~8 с), diagnostics 13/13, REST health 200 (~4 с),
+  e2e 44/44 + 21/21 green, privacy-gates hold, Sentry — 0 инцидентов Ear.
+- 🔴 Live-добор W4: авто-seed только на пустой файл (у владельца непустые) —
+  hotwords оверлей/openclaw через IPC (42→43), phonetic +10 записей/28 вариантов
+  через add_phonetic_entry (1/3 → 11/31). Класс: seed only-if-empty не досыпает
+  на существующие файлы — при запеканиях использовать IPC-добор.
+- Открыто: R2-запись эталонов (владелец, инструмент Record Golden Set.command);
+  WER-замер F1 после записи.
