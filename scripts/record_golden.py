@@ -17,6 +17,7 @@ docs/golden/r2-scenario.md. Аудио остаётся ЛОКАЛЬНО, в git
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import signal
@@ -74,27 +75,48 @@ def _is_recorded(path: Path) -> bool:
 
 
 def _record_one(device: str, out_path: Path) -> bool:
-    """Пишет одну фразу: Enter — старт, Enter — стоп (SIGINT, корректный WAV)."""
+    """Пишет одну фразу: Enter — старт, Enter — стоп (SIGINT, корректный WAV).
+
+    Пишем в `<id>.wav.part` и переименовываем ТОЛЬКО после чистого стопа:
+    обрыв (Ctrl+C/EOF) не оставит половинку фразы, которую resume примет за
+    готовую (обрывок → завышенный WER на эталоне).
+    """
+    part_path = out_path.with_name(out_path.name + ".part")
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
         "-f", "avfoundation", "-i", device,
-        "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "-y", str(out_path),
+        "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "-y", str(part_path),
     ]
     proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
-    time.sleep(0.4)
-    if proc.poll() is not None:
-        print("    ffmpeg завершился сразу — похоже, нет доступа к микрофону.")
-        return False
-    input("    ▶ Говори (Enter — остановить): ")
-    proc.send_signal(signal.SIGINT)
+    stopped_cleanly = False
     try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-    if not _is_recorded(out_path):
+        time.sleep(0.4)
+        if proc.poll() is not None:
+            print("    ffmpeg завершился сразу — похоже, нет доступа к микрофону.")
+            return False
+        input("    ▶ Говори (Enter — остановить): ")
+        proc.send_signal(signal.SIGINT)
+        try:
+            proc.wait(timeout=10)
+            stopped_cleanly = True
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    except (KeyboardInterrupt, EOFError):
+        # Не оставляем осиротевший ffmpeg и половинку файла.
+        proc.send_signal(signal.SIGINT)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        part_path.unlink(missing_ok=True)
+        raise
+    if not stopped_cleanly or not _is_recorded(part_path):
         print("    Файл пустой или слишком короткий — попробуем ещё раз.")
+        part_path.unlink(missing_ok=True)
         return False
+    os.replace(part_path, out_path)
     size_kb = out_path.stat().st_size // 1024
     print(f"    ✓ {out_path.name} ({size_kb} КБ)")
     return True

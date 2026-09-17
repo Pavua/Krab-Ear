@@ -62,6 +62,12 @@ class ParseScenarioTests(unittest.TestCase):
             self.assertNotIn("mkdir", phrase.text)
             self.assertNotIn("ffmpeg", phrase.text)
 
+    def test_empty_text_yields_no_phrases(self) -> None:
+        self.assertEqual(self.mod.parse_scenario(""), [])
+
+    def test_text_without_phrase_sections_yields_nothing(self) -> None:
+        self.assertEqual(self.mod.parse_scenario("# Заголовок\n\n1. не фраза\n"), [])
+
 
 if __name__ == "__main__":
     unittest.main()

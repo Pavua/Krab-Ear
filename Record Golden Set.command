@@ -3,7 +3,10 @@
 # Двойной клик → интерактивная запись. Фразы: docs/golden/r2-scenario.md.
 # Аудио остаётся локально (~/Library/Application Support/KrabEar/golden/).
 
-set -euo pipefail
-
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
-exec python3 "$ROOT_DIR/scripts/record_golden.py" "$@"
+python3 "$ROOT_DIR/scripts/record_golden.py" "$@"
+rc=$?
+echo
+echo "Нажми Enter, чтобы закрыть окно."
+read -r
+exit $rc
