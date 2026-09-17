@@ -485,7 +485,6 @@ class AudioEngine:
                           дублирование subprocess'а — Wave 69 fix).
         """
         self.current_model = settings.MODEL_BALANCED
-        self.quality_profile = "balanced"
         self._unavailable_models: dict[str, float] = {}
         self._diarization_pipeline: Pipeline | None = None
         self._diarization_load_error: str | None = None
@@ -528,6 +527,10 @@ class AudioEngine:
         self._llm_rewriter = llm_rewriter
         self._last_llm_diff = None
         self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
+        # 0.3: сохранённый профиль вместо хардкода — иначе diagnostics
+        # (читает сохранённое, service.py:4431) врёт до первой записи.
+        _saved_profile = self._settings_get("quality_profile", "balanced")
+        self.quality_profile = _saved_profile if _saved_profile in {"balanced", "max"} else "balanced"
         self._confidence_calibrator = ConfidenceCalibrator()
 
         # Language-aware STT router — используется для GigaAM и будущих RU-адаптеров.
