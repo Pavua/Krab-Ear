@@ -2514,6 +2514,10 @@ bake-off гвард починен в том же SHA).
 - НЕ запекалось: maby, кетопрофен-ловушка, падежи. WER до/после — ждёт R2-эталоны.
 - Гейт: двойной (зеркалка hallucination_manager ACCEPT по конвенции паритета;
   is False→True — единственный честный вариант; скелет t.id→t.attr).
-- Открыто после F1: purge-покрытие user-vocab (phonetic/hotwords/snippets — отдельная
-  микро-волна, приватность); deploy-gap: seed оверлей/openclaw не доедет на
-  непустой stt_hotwords (у владельца 41) — добить IPC при деплое.
+- Проверено 18.09: purge-покрытие user-vocab — НЕ gap: `phonetic_vocab.json`
+  намеренно в allowlist (`scripts/purge_coverage_allowlist.txt`, решение W1770,
+  app-config policy); `audit_purge_coverage.py`: 92 стора / 75 covered /
+  18 allowlisted / 0 gaps; in-memory guard зелёный. Опция владельцу: сносить
+  ли user-vocab при purge — отдельным «да», не сейчас.
+- Deploy-gap: seed оверлей/openclaw не доедет на непустой stt_hotwords
+  (у владельца 41) — добить IPC при деплое.
