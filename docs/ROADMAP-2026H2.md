@@ -2502,3 +2502,18 @@ bake-off гвард починен в том же SHA).
 - Каждый PR: свой разбор + независимый ревьюер со своими прогонами + CI
   green (длинный backend-tests — хвостом, failures 0).
 - Остаток волны 0: 0.6 (ответы Krab Main / VG — ждём).
+
+## 2026-09-18 — F1 в колее (лексика W4 запечена)
+
+- #2029 (`a335d864`): 10 phonetic-записей / 28 вариантов (openclow, RU/ES-препараты,
+  висперед→whisper, лрд/lrd→p0lrd, mixed-алфавит); seed-hotwords оверлей/openclaw;
+  tail-фильтр голого dimatorzok (6138/6138 в истории — все tail); флаг
+  phonetic_vocab_enabled → True; REST-движок wired (провайдер + settings).
+- Task 0 (агрегаты): VG-пары в STT-корпусах нулевые (из брифа, ок); новые
+  кандидаты: maby:172 (ждёт R2), оксикодон:23 (словоформа — skip), backslash:48.
+- НЕ запекалось: maby, кетопрофен-ловушка, падежи. WER до/после — ждёт R2-эталоны.
+- Гейт: двойной (зеркалка hallucination_manager ACCEPT по конвенции паритета;
+  is False→True — единственный честный вариант; скелет t.id→t.attr).
+- Открыто после F1: purge-покрытие user-vocab (phonetic/hotwords/snippets — отдельная
+  микро-волна, приватность); deploy-gap: seed оверлей/openclaw не доедет на
+  непустой stt_hotwords (у владельца 41) — добить IPC при деплое.
