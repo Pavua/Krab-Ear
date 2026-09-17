@@ -1695,7 +1695,7 @@ Params: `{limit?}`
 Returns: `{entries: [{event, ts, mode}, ...]}`
 
 ### `clear_privacy_audit_log`
-> 🔴 намеренно удалён из IPC dispatch (W957 SECURITY, `service.py:3167`): существует только как внутренний хендлер, по сокету недоступен. Не добавлять обратно.
+> 🔴 Намеренно удалён из IPC dispatch (W957 SECURITY, `service.py:3167`): существует только как внутренний хендлер, по сокету недоступен. Не добавлять обратно.
 
 *(service.py)*  
 Удаляет файл privacy audit log. Идемпотентен.  

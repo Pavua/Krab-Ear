@@ -54,7 +54,7 @@ class IpcDocsParityTests(unittest.TestCase):
         text = DOC.read_text(encoding="utf-8")
         for name in sorted(set(extra) & KNOWN_REMOVED):
             section = text.split(f"### `{name}`", 1)[1].split("\n## ", 1)[0]
-            self.assertIn(REMOVED_MARKER, section,
+            self.assertIn(REMOVED_MARKER, section.lower(),
                           f"{name}: секция обязана нести маркер удаления")
 
     def test_counts_are_not_pinned_but_sane(self) -> None:
