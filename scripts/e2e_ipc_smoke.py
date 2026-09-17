@@ -5,7 +5,7 @@ Exercises the user-facing IPC surface against a LIVE backend over a Unix socket.
 Goal: catch "feature runs but output is wrong/empty" bugs before manual testing.
 
 Run against a LIVE backend (production launchd instance, or a dev instance you
-started with `python KrabEar/main.py --data-dir <dir>`):
+started with `KRAB_EAR_EVENT_BRIDGE_ENABLED=0 KRAB_EAR_PRIVACY_AUDIT_DIR=<dir> python KrabEar/main.py --data-dir <dir>`):
 
     python scripts/e2e_ipc_smoke.py [/path/to/krabear.sock]
 
