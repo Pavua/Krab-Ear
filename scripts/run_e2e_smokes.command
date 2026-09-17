@@ -31,6 +31,11 @@ LOG="$DATADIR/backend.log"
 # Privacy-журнал тоже уводим в throwaway: логгер home-rooted по умолчанию и
 # иначе пишет в боевой compliance-файл вопреки обещанию шапки скрипта.
 export KRAB_EAR_PRIVACY_AUDIT_DIR="$DATADIR"
+# EventBridge одноразового backend'а целит в REST :5005 — это БОЕВОЙ REST,
+# а токен лежит во временном каталоге: прод-лог ловит пачки 401
+# «неверный bridge-токен» (инцидент 16.09). Мост тестирует отдельный
+# run_e2e_bridge_smoke.command на своём порту — здесь он не нужен.
+export KRAB_EAR_EVENT_BRIDGE_ENABLED=0
 
 cleanup() {
   if [ -n "${BPID:-}" ] && kill -0 "$BPID" 2>/dev/null; then

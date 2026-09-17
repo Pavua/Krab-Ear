@@ -2,7 +2,7 @@
 """Живой e2e-смок C2a: meeting-сессия против THROWAWAY backend.
 
 Запуск (руками, НЕ CI):
-  python KrabEar/main.py --data-dir /tmp/krab_ear_meeting_e2e &   # throwaway
+  KRAB_EAR_EVENT_BRIDGE_ENABLED=0 KRAB_EAR_PRIVACY_AUDIT_DIR=/tmp/krab_ear_meeting_e2e python KrabEar/main.py --data-dir /tmp/krab_ear_meeting_e2e &   # throwaway
   python3 scripts/e2e_meeting_smoke.py /tmp/krab_ear_meeting_e2e/krabear.sock
 
 Проверяет: start -> активная сессия -> транскрипт растёт (реальный CHUNK_STT

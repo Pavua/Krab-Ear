@@ -91,6 +91,9 @@ def main() -> int:
     # Privacy-журнал тоже уводим в throwaway: логгер home-rooted по умолчанию и
     # иначе пишет в боевой compliance-файл вопреки обещанию шапки скрипта.
     env["KRAB_EAR_PRIVACY_AUDIT_DIR"] = str(data_dir)
+    # EventBridge одноразового backend'а иначе стучится в БОЕВОЙ REST :5005
+    # с токеном из временного каталога (пачки 401 в прод-логе, инцидент 16.09).
+    env["KRAB_EAR_EVENT_BRIDGE_ENABLED"] = "0"
 
     proc: subprocess.Popen | None = None
     rc = 0
