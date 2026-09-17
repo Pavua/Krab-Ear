@@ -1119,7 +1119,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # --- Phonetic correction vocabulary (post-STT, before paste) ---
     # When True: misheard variants in transcripts are replaced with canonical spellings.
     # Entries managed via add_phonetic_entry / list_phonetic_entries / remove_phonetic_entry IPC.
-    "phonetic_vocab_enabled": False,
+    # W4 (17.09): включено владельцем — кураторский seed в backend/phonetic_vocab_service.py.
+    "phonetic_vocab_enabled": True,
     # --- Number / datetime normalization (text post-processing) ---
     "number_normalization_enabled": True,
     "datetime_normalization_enabled": True,

@@ -39,6 +39,7 @@ from backend.rest_auth import RestAuth
 from backend.service import BackendService
 from backend.state_store import StateStore
 from backend.transcriber import Transcriber
+from backend.phonetic_vocab_service import PhoneticVocabService
 from backend.metrics_collector import metrics  # noqa: F401
 from backend.api_versioning import api_version_header, get_api_info
 from backend.translator import Translator
@@ -875,6 +876,11 @@ class TranscribeResponseSchema(Schema):
 engine = AudioEngine(skip_gigaam_warmup=True)
 store = StateStore(settings.DATA_DIR)
 transcriber = Transcriber(engine=engine)
+# W4: REST-движок корректирует лексику так же, как диктовка. engine.py читает
+# _settings_get (runtime-флаг phonetic_vocab_enabled) и _phonetic_provider
+# (entries). Паттерн settings_get — как в LiveSubsService ниже (store.load_settings).
+engine._settings_get = lambda k, d=None: store.load_settings().get(k, d)
+engine._phonetic_provider = PhoneticVocabService(data_dir=store.data_dir).get_entries
 translator = Translator()
 tts_service = TTSService()
 

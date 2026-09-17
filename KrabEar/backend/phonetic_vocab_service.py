@@ -29,6 +29,33 @@ _MAX_ENTRIES = 200
 _MAX_VARIANT_LEN = 200
 _MAX_CANONICAL_LEN = 200
 
+# Кураторский seed (W4, утверждён владельцем 17.09): пары «вариант → канон»,
+# кладутся при первом запуске, если phonetic_vocab.json ещё не существует.
+# Сознательно НЕ включены `maby` (легитимное EN "maybe", ждёт примеров R2)
+# и пары кетопрофеновой ловушки (те варианты относятся к другому препарату).
+# 10 записей / 28 вариантов — укладывается в лимиты 200 записей / 200 символов.
+_DEFAULT_ENTRIES: list[dict] = [
+    {"canonical": "openclaw", "variants": ["openclow"]},
+    {"canonical": "трамадол", "variants": ["травмадол", "траммадол", "тромадол", "рамадол"]},
+    {"canonical": "прегабалин", "variants": ["пегабалин", "пегбалин", "прегалин", "пригаболин"]},
+    {"canonical": "парацетамол", "variants": ["парацетамон", "парацемолом"]},
+    {"canonical": "oxicodona", "variants": ["oxicodon", "oxycodona", "oxipodona", "oxigodona", "оxicodona"]},
+    {"canonical": "pregabalina", "variants": ["pregabalin", "pregabalino", "pregabalín", "pegabarina", "пregabalina"]},
+    {"canonical": "paracetamol", "variants": ["fartestamol"]},
+    {"canonical": "tramadol", "variants": ["ramadol", "tromadol", "dramadol"]},
+    {"canonical": "whisper", "variants": ["висперед"]},
+    {"canonical": "p0lrd", "variants": ["лрд", "lrd"]},
+]
+
+
+def _default_entries() -> List[dict]:
+    """Копия seed-записей (variants — новые списки, чтобы не делить мутабельное
+    состояние между вызовами/инстансами)."""
+    return [
+        {"canonical": e["canonical"], "variants": list(e["variants"])}
+        for e in _DEFAULT_ENTRIES
+    ]
+
 
 class PhoneticVocabService:
     """IPC-сервис для хранения и управления фонетическим словарём пользователя.
@@ -41,6 +68,9 @@ class PhoneticVocabService:
         self._path = data_dir / _PHONETIC_VOCAB_FILENAME
         data_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+        # После clear_all (privacy-purge) авто-seed в этом процессе подавлен,
+        # чтобы удалённый пользователем словарь не «воскресал» при чтении.
+        self._seed_suppressed = False
 
     # ── Storage ──────────────────────────────────────────────────────────────
 
@@ -88,8 +118,25 @@ class PhoneticVocabService:
 
     # ── Public read API (called by engine.py via provider callback) ──────────
 
+    def ensure_seeded(self) -> None:
+        """Кладёт кураторский seed, если файла ещё нет (первый запуск).
+
+        Существующий файл НЕ перезаписывается: пользовательские записи и
+        удаления (в т.ч. clear_all) уважаются. Идемпотентен.
+        """
+        with self._lock:
+            if self._seed_suppressed or self._path.exists():
+                return
+            self._save(_default_entries())
+            logger.info("PhoneticVocab: засеяно %d дефолтных записей", len(_DEFAULT_ENTRIES))
+
     def get_entries(self) -> List[dict]:
-        """Возвращает текущий список записей (thread-safe)."""
+        """Возвращает текущий список записей (thread-safe).
+
+        На первом запуске (файл отсутствует) предварительно засевает
+        кураторские записи — см. ensure_seeded().
+        """
+        self.ensure_seeded()
         with self._lock:
             return self._load()
 
@@ -97,8 +144,10 @@ class PhoneticVocabService:
         """Удаляет phonetic_vocab.json с диска (для privacy-purge).
 
         Идемпотентен — не бросает исключений если файл уже отсутствует.
+        Подавляет авто-seed в текущем процессе (не воскрешаем словарь).
         """
         with self._lock:
+            self._seed_suppressed = True
             try:
                 self._path.unlink(missing_ok=True)
             except OSError as exc:

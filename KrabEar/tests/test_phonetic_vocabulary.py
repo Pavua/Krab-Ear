@@ -341,10 +341,10 @@ class TestPhoneticVocabDispatchEntries(unittest.TestCase):
         self.assertTrue(hasattr(svc_mod, "PhoneticVocabService"))
 
     def test_default_settings_has_phonetic_vocab_enabled(self):
-        """DEFAULT_SETTINGS in config.py includes phonetic_vocab_enabled=False."""
+        """DEFAULT_SETTINGS in config.py includes phonetic_vocab_enabled (W4: True)."""
         from core.config import DEFAULT_SETTINGS
         self.assertIn("phonetic_vocab_enabled", DEFAULT_SETTINGS)
-        self.assertIs(DEFAULT_SETTINGS["phonetic_vocab_enabled"], False)
+        self.assertIs(DEFAULT_SETTINGS["phonetic_vocab_enabled"], True)
 
 
 if __name__ == "__main__":
