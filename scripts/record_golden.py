@@ -85,7 +85,7 @@ def _record_one(device: str, out_path: Path) -> bool:
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
         "-f", "avfoundation", "-i", device,
-        "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "-y", str(part_path),
+        "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "-f", "wav", "-y", str(part_path),
     ]
     proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
     stopped_cleanly = False
@@ -93,6 +93,7 @@ def _record_one(device: str, out_path: Path) -> bool:
         time.sleep(0.4)
         if proc.poll() is not None:
             print("    ffmpeg завершился сразу — похоже, нет доступа к микрофону.")
+            part_path.unlink(missing_ok=True)
             return False
         input("    ▶ Говори (Enter — остановить): ")
         proc.send_signal(signal.SIGINT)
