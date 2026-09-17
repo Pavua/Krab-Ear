@@ -552,19 +552,6 @@ extension AgentAppDelegate {
         // Быстрое переключение пресетов записи
         addPresetMenuEntry(to: menu)
 
-        let updateChannelItem = NSMenuItem(title: "Update Channel", action: nil, keyEquivalent: "")
-        menu.addItem(updateChannelItem)
-        let updateChannelSubmenu = NSMenu()
-        let stableChannelItem = NSMenuItem(title: "Stable", action: #selector(onUpdateChannelStable), keyEquivalent: "")
-        stableChannelItem.target = self
-        stableChannelItem.state = settings.updateChannel == "stable" ? .on : .off
-        updateChannelSubmenu.addItem(stableChannelItem)
-        let betaChannelItem = NSMenuItem(title: "Beta", action: #selector(onUpdateChannelBeta), keyEquivalent: "")
-        betaChannelItem.target = self
-        betaChannelItem.state = settings.updateChannel == "beta" ? .on : .off
-        updateChannelSubmenu.addItem(betaChannelItem)
-        menu.setSubmenu(updateChannelSubmenu, for: updateChannelItem)
-
         let checkUpdatesItem = NSMenuItem(
             title: "Проверить обновления…",
             action: #selector(onCheckForUpdates),

@@ -1069,20 +1069,6 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         applyHotkeyProfile("translation")
     }
 
-    @objc func onUpdateChannelStable() {
-        settings.updateChannel = "stable"
-        persistSettingsPayload(settings.toPayload())
-        rebuildStatusMenu()
-        notify(title: "Krab Ear", body: "Канал обновлений: stable")
-    }
-
-    @objc func onUpdateChannelBeta() {
-        settings.updateChannel = "beta"
-        persistSettingsPayload(settings.toPayload())
-        rebuildStatusMenu()
-        notify(title: "Krab Ear", body: "Канал обновлений: beta")
-    }
-
     private func applyHotkeyProfile(_ profile: String) {
         switch profile {
         case "meeting":
