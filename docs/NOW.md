@@ -1,8 +1,25 @@
 # NOW — что делать сейчас (Krab Ear)
 
-Обновлено: **2026-09-17**. Одна страница: база, политика brain/GPU, очередь. Журнал волн — [`ROADMAP-2026H2.md`](ROADMAP-2026H2.md), не очередь. Горизонт 2–4 нед: [`design-briefs/2026-09-05-horizon-plan.md`](design-briefs/2026-09-05-horizon-plan.md). Как работать: [`EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md).
+Обновлено: **2026-09-18**. Одна страница: база, политика brain/GPU, очередь. Журнал волн — [`ROADMAP-2026H2.md`](ROADMAP-2026H2.md), не очередь. Горизонт 2–4 нед: [`design-briefs/2026-09-05-horizon-plan.md`](design-briefs/2026-09-05-horizon-plan.md). Как работать: [`EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md).
 
-## Деплой 2026-09-16 (актуальный runtime)
+## Деплой 2026-09-18 (актуальный runtime)
+
+- **Прод-код:** `35b32bab` — **F1 (лексика W4) в проде**. Процедура §деплой
+  09-11 без отклонений: busy-check 60 с idle + финальный, worktree --detach,
+  swap SHA в обоих plist (бэкап `/tmp/ear-plist-backup-20260918/`), bootout
+  (poll до «gone», ~6 с) → bootstrap (ретраи не потребовались; EIO не возник).
+- Backend pid **41951**, REST **42836**; агент **7602** не тронут. Прежний
+  релиз `5cab7988` оставлен для отката.
+- Постдеплой: ping ok (v2.0.5, ~8 с), diagnostics 13/13, REST `/health` 200
+  (~4 с), e2e-смоки 44/44 + 21/21 green, privacy-gates hold, Sentry — ноль
+  инцидентов Ear за окно.
+- 🔴 **Live-добор W4** (авто-seed в коде — только на пустой файл; у владельца
+  файлы непустые): hotwords `оверлей`,`openclaw` через IPC (42→43);
+  phonetic +10 кураторских записей / 28 вариантов через `add_phonetic_entry`
+  (было 1/3 → стало 11/31). Следующие запекания лексики — тоже IPC-добором.
+- WER до/после — ждёт R2-записи владельца (инструмент: `Record Golden Set.command`).
+
+## Деплой 2026-09-16
 
 - **Прод-код:** `5cab7988` (R1 encryption fail-closed + R2/R4 тесты, CИ зелёный:
   CI + krab-ear-ci + mlx-nightly). Процедура §09-11 без изменений; EIO на
@@ -42,12 +59,12 @@ Source-проверки не доказывают CI другого SHA или �
 Текущие HEAD/CI — в primary `.remember/CODEX_CALL_STT_20260907.md` с повторной
 проверкой Git/GitHub. SHA/PID ниже сохранены как snapshot 05.09, не текущая проверка.
 
-## База и runtime snapshot 2026-09-16
+## База и runtime snapshot 2026-09-18
 
 - Репозиторий: [Pavua/Krab-Ear](https://github.com/Pavua/Krab-Ear)
-- Прод-колея: **`origin/codex/krab-ear-v2`** @ `5cab7988`
-- **Прод-код:** `5cab7988` (релиз 16.09, §деплой выше; колея == прод)
-- Backend pid **21156**, REST **22059** (деплой 16.09), агент pid **1020** (релонч 12.09)
+- Прод-колея: **`origin/codex/krab-ear-v2`** @ `35b32bab`
+- **Прод-код:** `35b32bab` (релиз 18.09, §деплой выше; колея == прод)
+- Backend pid **41951**, REST **42836** (деплой 18.09), агент pid **7602** (не тронут)
 - Worktree: `git worktree add .worktrees/<slug> -b feat/<slug> origin/codex/krab-ear-v2`
 - Main Krab Q2 (:8080 purpose slots, RIS/SergeyRG) — **не Ear**: [`ANTIGRAVITY_HANDOFF/2026-09-05-krab-8080-model-routing.md`](../ANTIGRAVITY_HANDOFF/2026-09-05-krab-8080-model-routing.md)
 
