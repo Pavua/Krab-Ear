@@ -2430,3 +2430,41 @@ bake-off гвард починен в том же SHA).
 - Открыто (микро-волна, осторожно — cassette cache clears 01.09):
   `quality_profile` захардкожен в `engine.__init__` ("balanced"), saved
   применяется per-request; diagnostics врёт до первой записи.
+
+## 2026-09-16 — живой VG-звонок, GigaAM-вердикт, майнинг лексики, MCP
+
+- **VG live call** (исполнитель — VG-сессия, Gateway SHA `50fc496`):
+  SH Valencia Palace `+34963375037` (проверен: свежий, не в do-not-redial,
+  стационар 963, reception 24h; RIU/Barceló отпали — do-not-redial).
+  Звонок `vs_86d8a84d4902` (~05:11–05:13, 92 с, кап 90 с штатно): PSTN чист,
+  disclosure первой фразой, ответил IVR (не человек); агент по дизайну
+  (silence-on-IVR, пропуск ходов, отсев ×2 STT-галлюцинаций на hold-музыке,
+  number-guard, 2 озвученных хода, clone, вежливый hangup); goal=False.
+  TG-доставка: `/api/notify` + `/api/notify_voice` 200 (саммари+аудио).
+  STT-ходы — Groq cloud 478–712 мс + Gemini second-opinion 2395 мс.
+  🔴 **Ear call-профиль НЕ задействован** (0 обращений к `:5005`, правило
+  es→groq): живого RU-замера нет, в силе синтетика 10/10. Дальше:
+  форсированный Ear-STT (карточка VG) или RU-сценарий. Стоимость ~$0.03–0.04.
+  Флаги возвращены 1-в-1, гейтвей idle.
+- **GigaAM-финал RU**: вердикт без кода (роутинг GigaAM-first уже есть +
+  покрыт; warmup есть + покрыт; cold-loss средовой). Harness
+  `test_gigaam_final_bakeoff` = regression-lock (CI-скипы починены в том
+  же SHA после двух красных nightly: E127 + `gigaam_mlx`-гвард).
+- **Живые диктовки 14–16.09** (верифицированы, все в истории): финалы 1–3 —
+  Whisper (cold-start MLX уронил кусок → каскад), №4 целиком прогретый
+  GigaAM-MLX без ошибок. Ошибки: `верла`, `проверяю/проверяй`,
+  `НЕплохо→плохо` (дроп безударного НЕ — классика Whisper),
+  `кодки/терминации`. Пост-обработка OFF (решение владельца).
+  Тост «Аудиобуфер переполнен» = штатный сигнал (финал цел).
+- **Майнинг лексики** (с разрешения владельца, только агрегаты):
+  `history.ndjson` (23k) + архив `transcripts.sqlite` (192k сегментов).
+  Находки: `dimatorzok` 5049× в 5 файлах (дыра youtube-фильтра —
+  голый токен!); `speaker_XX` в текстах истории; `lrd` 1792×,
+  `висперед` 525× (неопознаны); `openclow→openclaw` (40×).
+  Отравлений глоссариев нет. VG drug-пары (02.09) найдены, но НЕ запечены
+  (`phonetic_vocab.json` почти пуст). W4 ждёт аппрува слов.
+- **opencode wiring**: скиллы 16+10, агенты executor/gate-security, MCP
+  sentry/context7/chrome-devtools/hammerspoon, small_model, `/goal`,
+  tgrep-дисциплина; Sentry-токен в shell (деривация из Main Krab `.env`).
+  Computer-use ставить не во что (бинарника нет); openclaw-browser релей
+  лежит. Всё вступает после рестарта opencode.

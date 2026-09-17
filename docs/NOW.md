@@ -1,6 +1,6 @@
 # NOW — что делать сейчас (Krab Ear)
 
-Обновлено: **2026-09-16**. Одна страница: база, политика brain/GPU, очередь. Журнал волн — [`ROADMAP-2026H2.md`](ROADMAP-2026H2.md), не очередь. Горизонт 2–4 нед: [`design-briefs/2026-09-05-horizon-plan.md`](design-briefs/2026-09-05-horizon-plan.md). Как работать: [`EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md).
+Обновлено: **2026-09-17**. Одна страница: база, политика brain/GPU, очередь. Журнал волн — [`ROADMAP-2026H2.md`](ROADMAP-2026H2.md), не очередь. Горизонт 2–4 нед: [`design-briefs/2026-09-05-horizon-plan.md`](design-briefs/2026-09-05-horizon-plan.md). Как работать: [`EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md).
 
 ## Деплой 2026-09-16 (актуальный runtime)
 
@@ -93,9 +93,18 @@ paste-флаги типизированы. Не строить заново.
 
 1. **R1** — DONE + задеплоено 16.09 (fail-closed, Fable retro-gate пост-квотой).
 2. **R2** — DONE (unload-нейтер, soak ~22 с; CI nightly подтверждает скипы).
-3. **PR #2001** — синтетика 10/10 (p50 0.4 с), VG-бриф у владельца;
-   живой звонок исполняет VG-сессия; busy-probe оппортунистически.
+3. **PR #2001** — синтетика 10/10 (p50 0.4 с); ЖИВОЙ ЗВОНОК СОСТОЯЛСЯ
+   16.09 (VG-сессия, отель SH Valencia Palace, 92 с, IVR, ~$0.03–0.04,
+   запись+саммари в TG): тракт чист, НО Ear-профиль не задействован
+   (0 обращений к :5005, es→groq). Живой RU-замер открыт: форсированный
+   Ear-STT (карточка VG) или RU-сценарий. Busy-probe оппортунистически.
 4. **Smoke-раннер Ear** — DONE (launchd, штатные прогоны OK 15–16.09).
+5. **W1/W2** — DONE+задеплоено (mic-hold гейты; callassist ownership-gate).
+   GigaAM-финал: вердикт без кода (роутинг уже GigaAM-first + покрыт).
+6. **W4 STT-лексика** — майнинг готов (23k диктовок + 192k сегментов архива,
+   только агрегаты): `dimatorzok` 5049× (дыра фильтра!), `openclow→openclaw`,
+   hotword `оверлей`, VG drug-пары не запечены (phonetic_vocab пуст).
+   ЖДЁТ аппрува слов владельцем → запекание + тесты.
 
 Позже: HealthMonitor 2 с (C6, не чинить sticky-hang заново), GigaAM confidence consumers (#1985 — решение за владельцем).
 
