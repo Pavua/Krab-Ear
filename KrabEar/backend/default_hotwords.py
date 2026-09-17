@@ -38,6 +38,7 @@ _CATEGORIES: dict[str, list[str]] = {
         "Ollama",
         "LM Studio",
         "HuggingFace",
+        "openclaw",
     ],
     "dev_tools": [
         "GitHub",
@@ -113,6 +114,7 @@ _CATEGORIES: dict[str, list[str]] = {
         "hotkey",
         "diarization",
         "transcription",
+        "оверлей",
     ],
 }
 
