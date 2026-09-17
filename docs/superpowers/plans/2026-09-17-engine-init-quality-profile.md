@@ -4,7 +4,7 @@
 
 **Goal:** `AudioEngine.__init__` берёт `quality_profile` из сохранённых настроек вместо хардкода `"balanced"`.
 
-**Architecture:** цепочка `BackendService._get_runtime_setting` → `Transcriber(settings_get=...)` → `AudioEngine(settings_get=...)` уже существует и несёт сохранённые значения (`service.py:512-514`, `transcriber.py:61`). Фикс — прочитать ключ в `__init__` через уже инжектированный колбэк. Ловушка порядка: `self._settings_get` присваивается только на строке 530, а хардкод стоит на 488 — читать профиль можно только ПОСЛЕ 530.
+**Architecture:** цепочка `BackendService._get_runtime_setting` → `Transcriber(settings_get=...)` (`KrabEar/backend/transcriber.py:61`) → `AudioEngine(settings_get=...)` уже существует и несёт сохранённые значения (`service.py:512-514`, `transcriber.py:50-67`). Фикс — прочитать ключ в `__init__` через уже инжектированный колбэк. Ловушка порядка: `self._settings_get` присваивается только на строке 530, а хардкод стоит на 488 — читать профиль можно только ПОСЛЕ 530.
 
 **Tech Stack:** Python, `unittest`. Новых зависимостей нет.
 
@@ -18,7 +18,7 @@
 
 - `KrabEar/core/engine.py:488` — `self.quality_profile = "balanced"` (хардкод).
 - `KrabEar/core/engine.py:530` — `self._settings_get = settings_get or (lambda k, d: d)`.
-- `KrabEar/core/config.py:837` — `"quality_profile": "balanced"` в `DEFAULT_SETTINGS` (ключ существует, env `KRAB_EAR_QUALITY_PROFILE` тоже подхватится).
+- `KrabEar/core/config.py:837` — `"quality_profile": "balanced"` в `DEFAULT_SETTINGS` (ключ существует).
 - `KrabEar/backend/service.py:4431` — diagnostics читает `settings.get("quality_profile", "balanced")` (сохранённое) — вот почему diagnostics врёт до первой записи.
 - `KrabEar/backend/service.py:512-514` — `BackendService` передаёт `settings_get=self._get_runtime_setting` (сохранённые настройки, не дефолты).
 - Конструкция движка в тестах: `AudioEngine(skip_gigaam_warmup=True)` (прецедент `test_engine_edge_cases.py:30-33`, MLX мокируется, `service.close()` не нужен — это не `BackendService`).

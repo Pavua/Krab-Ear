@@ -72,10 +72,10 @@
 - [ ] **Step 1: Ноль ссылок**
 
 ```bash
-rg -n 'onUpdateChannel|Update Channel' native/ --glob '!*build*'
+rg -n 'onUpdateChannel|Update Channel' native/KrabEarAgent/Sources/
 ```
 
-Ожидаемо: пусто. Затем:
+Ожидаемо: пусто (скоп — только сорсы: закоммиченный parity-бинарь `native/runtime/KrabEarAgent` содержит старые символы и в скоп НЕ входит). Затем:
 
 ```bash
 rg -n 'updateChannel' native/KrabEarAgent/Sources/
