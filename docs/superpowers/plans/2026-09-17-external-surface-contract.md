@@ -27,7 +27,7 @@
 | VG `app/tts_engines.py:186` | REST `POST /v1/tts/synthesize` | `wav_bytes_b64` |
 
 Сторона Ear:
-- `KrabEar/backend/service.py` — `_build_dispatch_table`: ключи `"ping"` (строка 2793), `"synthesize_speech"` (3117), `"get_history_page"`; AST находит 361 строковый ключ.
+- `KrabEar/backend/service.py` — `_build_dispatch_table`: ключи `"ping"` (строка 2793), `"synthesize_speech"` (3117), `"get_history_page"`; AST находит 360 ключей верхнего уровня.
 - `rest_server.py:1056-1059` — `monitoring_blp`, `url_prefix=""`; `:1541-1544` — `v1_blp`, `url_prefix="/v1"`.
 - `rest_server.py:1070` — `@monitoring_blp.route("/health", methods=["GET"])`; `:1730` — `@v1_blp.route("/tts/synthesize", methods=["POST"])`; `:1777` — `@v1_blp.route("/stt/transcribe", methods=["POST"])`.
 - Ключи ответа: `health_check_service.py` `handle_ping` → `"status"` (225); `tts_service.py` `handle_synthesize_speech` → `"wav_bytes_b64"` (569); `history_service.py` `handle_get_history_page` → `"items"` (342); `rest_server.py` `synthesize_speech` → `"wav_bytes_b64"` (1770); `rest_server.py` `transcribe_audio` → `"text"`, `"segments"` (2114).
