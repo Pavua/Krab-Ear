@@ -118,17 +118,25 @@ paste-флаги типизированы. Не строить заново.
 4. **Smoke-раннер Ear** — DONE (launchd, штатные прогоны OK 15–16.09).
 5. **W1/W2** — DONE+задеплоено (mic-hold гейты; callassist ownership-gate).
    GigaAM-финал: вердикт без кода (роутинг уже GigaAM-first + покрыт).
-6. **W4/F1 STT-лексика** — ЗАПЕЧЕНО 18.09 (#2029, `a335d864`): 10 phonetic-записей
-   (openclow, RU/ES-препараты, висперед→whisper, лрд/lrd→p0lrd), seed-hotwords
-   оверлей/openclaw, tail-фильтр голого `dimatorzok` (6138/6138 в истории — все
-   tail), `phonetic_vocab_enabled=True`, REST-движок wired. 🔴 НЕ в проде:
-   деплой ждёт окна; при деплое добить 2 hotwords через IPC (seed не доедет на
-   непустой stt_hotwords). WER до/после — ждёт R2-эталоны (владелец записывает).
+6. **W4/F1 STT-лексика** — ЗАПЕЧЕНО 18.09 (#2029) и **В ПРОДЕ** (деплой
+   `35b32bab` 18.09): 10 phonetic-записей (openclow, RU/ES-препараты,
+   висперед→whisper, лрд/lrd→p0lrd), seed-hotwords оверлей/openclaw, tail-фильтр
+   голого `dimatorzok`, `phonetic_vocab_enabled=True`, REST-движок wired.
+   Live-добор выполнен (seed не доехал на непустые файлы): hotwords 42→43,
+   phonetic 1/3→11/31 через IPC. WER до/после — ждёт R2-эталоны.
    `maby` НЕ запечён (ждёт примеров; EN "maybe" — контроль в R2-сценарии).
 7. **Волна 0 (гигиена, до 30.09)** — 0.1 (изоляция e2e-моста), 0.2 (контракт),
    0.3 (quality_profile из настроек), 0.4 (паритет IPC-документации: 50 записей),
    0.5 (меню Update Channel удалено) — DONE+смержены 17.09. Остаток волны: ответы
    соседей (0.6, ждём Krab Main / VG).
+8. **Ночная волна 18/19.09 (в колее, ждёт деплой-окна; флаги OFF)** — R1 табло
+   (#2033/#2034: сканер+панель+launchd 06:00; первый снимок — fail из-за
+   исторических bridge_401=24, вымылись к 10:00), F5 ленивая выгрузка семантики
+   (#2037/#2038: `_semantic_step`, always-on, 1800с/0=off, бeз enforce и IPC),
+   F2/F2b spend-cap (#2035/#2036 + #2039/#2040: атомарный резерв через
+   `core/atomic_io`, inf-кламп, fail-closed; adversarial-ревью нашло 5 дыр →
+   закрыты, SECURITY-PASS). Поведение прода не меняется (флаги OFF).
+   D10 исполнен (−126 локально/−1260 origin, auto-delete on).
 
 Позже: HealthMonitor 2 с (C6, не чинить sticky-hang заново), GigaAM confidence consumers (#1985 — решение за владельцем).
 
