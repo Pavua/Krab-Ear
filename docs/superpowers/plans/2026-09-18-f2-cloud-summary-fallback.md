@@ -181,7 +181,7 @@ PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_cloud_spend_cap.py
 
 ## Definition of Done
 
-- 2 RED→GREEN + 3 guard + 1 helper (ERROR→GREEN); регрессия зелёная; audit-all зелёный.
+- 3 RED→GREEN + 2 guard + 1 helper (ERROR→GREEN); регрессия зелёная; audit-all зелёный.
 - В диффе: НЕТ второй облачной ветки; НЕТ правок `engine.py`/STT-путей/`_generate_summary`; НЕТ текстов/ключей в spend-файле (проверить `rg -n 'sk-|text'` по диффу spend-кода); флаг `cloud_rewriter_enabled` остаётся False.
 - Деплой/включение — НЕ в этой карточке.
 
