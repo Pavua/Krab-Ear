@@ -1293,6 +1293,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "cloud_rewriter_openai_model": "gpt-4o-mini",
     "cloud_rewriter_anthropic_model": "claude-haiku-4-5-20251001",
     "cloud_rewriter_api_key": "",        # опционально (self-hosted часто без ключа)
+    # F2: месячный лимит трат облачного фоллбэка summary, USD. 0 = запрещено
+    # всё (fail-closed). Оценка стоимости — по тарифной таблице в cloud_rewriter.py.
+    "cloud_spend_cap_usd_monthly": 1.0,
     # --- Cloud STT fallback provider (core/engine.py::_transcribe_remote) ---
     # Используется ТОЛЬКО когда NETWORK_MODE != "offline_strict" И локальные
     # STT-модели все недоступны (последнее звено fallback-цепочки). Провайдер:

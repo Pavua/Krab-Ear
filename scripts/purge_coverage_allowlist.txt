@@ -45,5 +45,8 @@ event_bridge_token/      # HMAC bridge-auth секрет между IPC/REST п�
 # --- ID-only resurrection registry (no PII) -------------------------------
 history_purged_ids.ndjson  # W1756: append-only list of deleted item IDs (no text) to block re-import resurrection; intentionally retained across purge
 
+# --- Billing / spend counters (no PII) ------------------------------------
+cloud_spend.json         # F2: месячный spend-cap облачного summary — только {"YYYY-MM": usd}; ни текста транскриптов, ни API-ключей. Переживает purge намеренно: сброс обнулил бы учёт лимита трат.
+
 # --- Model caches (downloaded artefacts, not user data) -------------------
 wake_word_models/        # openWakeWord ML model files downloaded from the hub; not user content

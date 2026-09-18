@@ -17,9 +17,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import urllib.error
 import urllib.request
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Protocol
 from urllib.parse import urlparse
 
@@ -177,6 +180,125 @@ def _load_settings() -> dict:
     if _settings_fn is not None:
         return _settings_fn()
     return _fallback_store().load_settings()
+
+
+# -------------------------------------------------------------------------
+# F2: месячный spend-cap облачного фоллбэка summary (D3-узко)
+# -------------------------------------------------------------------------
+# Счётчик трат: <data_dir>/cloud_spend.json, формат {"YYYY-MM": usd}.
+# Только цифры — ни текстов транскриптов, ни API-ключей здесь нет.
+_CLOUD_SPEND_FILENAME = "cloud_spend.json"
+
+# Тарифы USD за 1M токенов: {(provider, model): (in_usd, out_usd)}.
+# Токены провайдер в ответе не возвращает — считаем оценку len/4.
+# gpt-4o-mini — известный тариф; приближённо, сверить по первому счёту владельца.
+_KNOWN_SUMMARIZE_RATES: Dict[tuple, tuple] = {
+    ("openai", "gpt-4o-mini"): (0.15, 0.60),
+}
+# Неизвестная модель/провайдер — консервативный blended $1.00/1M: cap
+# срабатывает раньше (fail-closed), а не позже.
+_UNKNOWN_SUMMARIZE_RATE = (1.0, 1.0)
+# self-hosted / custom endpoint: трат у провайдера нет.
+_CUSTOM_SUMMARIZE_RATE = (0.0, 0.0)
+
+
+def current_month_key() -> str:
+    """Месяц счётчика в локальном времени: "YYYY-MM"."""
+    return datetime.now().strftime("%Y-%m")
+
+
+def _spend_path(data_dir: Path | str) -> Path:
+    return Path(data_dir) / _CLOUD_SPEND_FILENAME
+
+
+def _read_spend_map(data_dir: Path | str) -> dict:
+    """Прочитать весь файл трат; нет файла / битый — пустой dict (не исключение)."""
+    path = _spend_path(data_dir)
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            loaded = json.load(fh)
+        if isinstance(loaded, dict):
+            return loaded
+    except Exception:
+        pass
+    return {}
+
+
+def read_spend_usd(data_dir: Path | str, month: str) -> float:
+    """Сумма трат за месяц; нет файла / битый JSON / мусор — 0.0."""
+    try:
+        return float(_read_spend_map(data_dir).get(month, 0.0))
+    except Exception:
+        return 0.0
+
+
+def add_spend_usd(data_dir: Path | str, month: str, usd: float) -> None:
+    """Добавить трату за месяц атомарной записью tmp + os.replace.
+
+    В файле — только числа (месяц-ключ и USD-значение), округление до 6 знаков.
+    """
+    amount = round(float(usd), 6)
+    data = _read_spend_map(data_dir)
+    try:
+        prev = float(data.get(month, 0.0))
+    except Exception:
+        prev = 0.0
+    data[month] = round(prev + amount, 6)
+    path = _spend_path(data_dir)
+    tmp_path = path.with_name(path.name + ".tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(str(tmp_path), str(path))
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
+def estimate_summarize_usd(
+    in_text: str,
+    out_text: str,
+    provider: str,
+    model: str,
+) -> float:
+    """Оценка стоимости вызова summary по тарифной таблице.
+
+    Точный usage провайдер не возвращает → токены ≈ len/4. custom/self-hosted
+    тариф 0.0; неизвестная пара (provider, model) — консервативный blended.
+    """
+    provider_key = str(provider or "").strip().lower()
+    model_key = str(model or "").strip()
+    if provider_key == "custom":
+        in_rate, out_rate = _CUSTOM_SUMMARIZE_RATE
+    else:
+        in_rate, out_rate = _KNOWN_SUMMARIZE_RATES.get(
+            (provider_key, model_key), _UNKNOWN_SUMMARIZE_RATE
+        )
+    in_tokens = max(0, len(in_text or "")) / 4.0
+    out_tokens = max(0, len(out_text or "")) / 4.0
+    return round((in_tokens * in_rate + out_tokens * out_rate) / 1_000_000, 6)
+
+
+def spend_allowed(cap: float, spent: float, est: float) -> bool:
+    """Месячный cap: `cap <= 0` — запрещено всё; иначе spent + est <= cap.
+
+    Fail-closed на любой нечисловой вход.
+    """
+    try:
+        cap_value = float(cap)
+    except (TypeError, ValueError):
+        return False
+    if cap_value <= 0:
+        return False
+    try:
+        return float(spent) + float(est) <= cap_value
+    except (TypeError, ValueError):
+        return False
 
 
 # -------------------------------------------------------------------------

@@ -340,6 +340,9 @@ class LLMRewriter:
         # W1504 N3+N4: privacy mode guard — late-injected callable(key, default) -> value.
         # None = privacy check skipped (backward compat). Set by BackendService after init.
         self._settings_getter: Optional[Callable] = None
+        # F2: месячный spend-cap облачного фоллбэка summary. None = облако
+        # заблокировано (fail-closed); BackendService проставляет data_dir.
+        self._spend_dir = None
         self._circuit = CircuitBreaker(
             fail_threshold=circuit_fail_threshold,
             initial_reset_sec=circuit_initial_reset_sec,
@@ -406,6 +409,52 @@ class LLMRewriter:
         cleaned = (text or "").strip()
         if not cleaned:
             return result
+        # F2: месячный spend-cap (D3-узко). Вторая облачная ветка ЗАПРЕЩЕНА —
+        # только этот cap-гейт перед существующим вызовом cloud_summarize.
+        spend_dir = self._spend_dir
+        if spend_dir is None:
+            return result
+        try:
+            from backend.cloud_rewriter import (  # noqa: PLC0415
+                add_spend_usd,
+                current_month_key,
+                estimate_summarize_usd,
+                read_spend_usd,
+                spend_allowed,
+            )
+        except Exception:
+            logger.warning("cloud spend helpers unavailable — failing closed", exc_info=True)
+            return result
+        getter = self._settings_getter
+        provider = "openai"
+        model = ""
+        try:
+            if getter is not None:
+                provider = str(getter("cloud_rewriter_provider", "openai") or "openai")
+                model_setting = {
+                    "openai": "cloud_rewriter_openai_model",
+                    "anthropic": "cloud_rewriter_anthropic_model",
+                    "custom": "cloud_rewriter_custom_model",
+                }.get(provider.lower(), "")
+                if model_setting:
+                    model = str(getter(model_setting, "") or "")
+        except Exception:
+            provider = "openai"
+            model = ""
+        try:
+            cap = float(getter("cloud_spend_cap_usd_monthly", 1.0)) if getter is not None else 0.0
+        except Exception:
+            cap = 0.0
+        try:
+            spent = read_spend_usd(spend_dir, current_month_key())
+            # Верхняя оценка (in == out): summary не длиннее входа, поэтому не
+            # даём cap-гейту пропустить вызов, который затем выйдет за лимит.
+            est_bound = estimate_summarize_usd(cleaned, cleaned, provider, model)
+            if not spend_allowed(cap, spent, est_bound):
+                return result
+        except Exception:
+            logger.warning("cloud spend cap check failed — failing closed", exc_info=True)
+            return result
         try:
             from backend.cloud_rewriter import cloud_summarize  # noqa: PLC0415
             cloud_text = cloud_summarize(cleaned, max_sentences=max_sentences)
@@ -414,6 +463,15 @@ class LLMRewriter:
             return result
         if not cloud_text:
             return result
+        # Учёт траты — только цифры; сбой учёта не роняет готовый результат.
+        try:
+            add_spend_usd(
+                spend_dir,
+                current_month_key(),
+                estimate_summarize_usd(cleaned, cloud_text, provider, model),
+            )
+        except Exception:
+            pass
         try:
             from backend.privacy_audit import get_privacy_audit_logger  # noqa: PLC0415
             getter = self._settings_getter
