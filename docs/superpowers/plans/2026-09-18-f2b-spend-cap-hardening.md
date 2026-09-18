@@ -84,7 +84,7 @@ class ReserveSpendTests(unittest.TestCase):
         self.assertEqual(len(results), 400)
         self.assertTrue(all(results), "при cap=100 все резервы должны пройти")
         spent = cr.read_spend_usd(self.dir, self.month)
-        self.assertAlmostEqual(spent, 400 * est, places=6)
+        self.assertAlmostEqual(spent, 400 * est, places=9)
 
     def test_concurrent_reserve_never_exceeds_cap(self) -> None:
         """MED-1: суммарный резерв не превышает cap + один шаг."""
@@ -206,8 +206,8 @@ PYTHONPATH=$(pwd)/KrabEar python3 -m pytest KrabEar/tests/test_cloud_spend_cap_h
   - `import math`, `import threading`, `from core.atomic_io import atomic_write_text` (сверить путь/импорт-конвенцию модуля).
   - `_SPEND_LOCK = threading.Lock()` рядом с `_CLOUD_SPEND_FILENAME`.
   - `_read_spend_map_strict(data_dir) -> dict | None`: читает файл; нет файла → `{}`; не-dict / битый JSON / невалидный ключ (не `^\d{4}-\d{2}$`) / значение не finite или < 0 → `None` + `logger.warning` (без содержимого).
-  - `reserve_spend_usd(data_dir, month, est, cap) -> bool`: guard `math.isfinite(cap) and cap > 0` (иначе False); под `_SPEND_LOCK`: `raw = _read_spend_map_strict(...)`; `None` → False; `spent = raw.get(month, 0.0)`; `if not spend_allowed(cap, spent, est): return False`; `raw[month] = round(spent + max(0.0, float(est)), 6)`; `atomic_write_text(path, json.dumps(raw))`; True. Исключение записи → лог + False.
-  - `add_spend_usd` — переписать на `_SPEND_LOCK` + `atomic_write_text` (дельта может быть отрицательной; кламп итога `max(0.0, ...)`; битый файл → лог + no-op, НЕ перезапись).
+  - `reserve_spend_usd(data_dir, month, est, cap) -> bool`: guard `math.isfinite(cap) and cap > 0` (иначе False); под `_SPEND_LOCK`: `raw = _read_spend_map_strict(...)`; `None` → False; `spent = raw.get(month, 0.0)`; `if not spend_allowed(cap, spent, est): return False`; `raw[month] = round(spent + max(0.0, float(est)), 9)`; `atomic_write_text(path, json.dumps(raw))`; True. Исключение записи → лог + False. 🔴 Округление — 9 знаков: суммы summary микродолларовые, 6 знаков теряют reconcile (пример: bound 4.875e-6).
+  - `add_spend_usd` — переписать на `_SPEND_LOCK` + `atomic_write_text` (дельта может быть отрицательной; кламп итога `max(0.0, round(..., 9))`; битый файл → лог + no-op, НЕ перезапись).
   - `read_spend_usd` — оставить (используется тестами/статусом); на strict-`None` вернуть 0.0 (чтение не гейт).
 - [ ] **Step 2: Шов** (`llm_rewriter.py:409-475`): импорт заменить на `reserve_spend_usd` (+ `add_spend_usd`, `current_month_key`, `estimate_summarize_usd`); pre-check → `if not reserve_spend_usd(spend_dir, current_month_key(), est_bound, cap): return result`; на провале облака/пустом ответе/исключении — release `add_spend_usd(spend_dir, month, -est_bound)` (в try/except-pass); на успехе — reconcile `add_spend_usd(spend_dir, month, actual - est_bound)`. 🔴 `getter(..., 0.0)` вместо 1.0 (LOW-3). Privacy-порядок и вызов `cloud_summarize` НЕ менять.
 - [ ] **Step 3: Валидатор** — `settings_validator.py` рядом с `call_budget_usd:127`: `"cloud_spend_cap_usd_monthly": (0.0, 1000.0, 1.0, float),`.
