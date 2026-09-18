@@ -1128,6 +1128,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "semantic_search_enabled": False,
     "semantic_search_model": "intfloat/multilingual-e5-base",
     "semantic_search_auto_index": True,
+    "semantic_search_idle_unload_sec": 1800.0,  # F5/D5: idle-выгрузка модели семантики; 0 = выключено
     # --- Quick Edit before paste ---
     "quick_edit_enabled": False,
     "quick_edit_timeout_sec": 5.0,

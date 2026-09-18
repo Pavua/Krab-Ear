@@ -107,6 +107,8 @@ _RANGE_FIELDS: dict[str, tuple[Any, Any, Any, type]] = {
     "gigaam_idle_unload_sec": (60.0, 86400.0, 600.0, float),
     "whisper_idle_unload_sec": (60.0, 86400.0, 900.0, float),
     "rewriter_idle_unload_sec": (300.0, 86400.0, 1800.0, float),
+    # F5/D5: idle-выгрузка CPU-модели семантики; 0 = выключено.
+    "semantic_search_idle_unload_sec": (0.0, 86400.0, 1800.0, float),
     "memory_pressure_streak_ticks": (2, 20, 3, int),
     "memory_evict_cooldown_sec": (60.0, 86400.0, 600.0, float),
     # Окно между попытками автовыгрузки при mlx.oom. 0 → каждый OOM (нагрузочно),

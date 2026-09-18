@@ -12,6 +12,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -46,6 +47,10 @@ class SemanticSearcher:
         self._model_lock = threading.Lock()
         self._model_loaded = False
         self._model_error: Optional[str] = None
+        # F5/D5: monotonic-отметка последнего использования модели (ставится в
+        # _get_model — единственной точке входа search/index). Нужна для
+        # idle-выгрузки кондуктором.
+        self._last_used_ts: float = 0.0
 
         # numpy arrays / index — loaded lazily
         self._embeddings: Any = None  # np.ndarray shape (N, D)
@@ -284,6 +289,31 @@ class SemanticSearcher:
         )
         return {"reset": True, "previous_error": previous}
 
+    def unload_model(self) -> bool:
+        """Гасит ТОЛЬКО модель (память); индекс в RAM/на диске не трогает.
+
+        Идемпотентен. `_model_error` НЕ выставляется — следующий запрос
+        лениво поднимет модель заново (прецедент reset_model_error:261).
+        """
+        with self._model_lock:
+            if self._model is None and not self._model_loaded:
+                return False
+            self._model = None
+            self._model_loaded = False
+        logger.info("semantic_search: модель выгружена (idle unload)")
+        return True
+
+    def unload_if_idle(self, idle_sec: float) -> bool:
+        """Выгружает модель, если она простаивает >= idle_sec секунд."""
+        try:
+            idle = time.monotonic() - float(self._last_used_ts)
+            threshold = float(idle_sec)
+        except (TypeError, ValueError):
+            return False
+        if threshold <= 0 or idle < threshold:
+            return False
+        return self.unload_model()
+
     def purge_all(self) -> None:
         """Полностью очищает in-memory индекс и удаляет файлы embeddings с диска.
 
@@ -355,6 +385,10 @@ class SemanticSearcher:
     def _get_model(self) -> Any:
         """Lazy load sentence-transformers model. Thread-safe."""
         with self._model_lock:
+            # F5/D5: отметка использования ДО раннего return — иначе загруженная
+            # модель, к которой обратились через _get_model, осталась бы «свежей»
+            # с точки зрения unload_if_idle.
+            self._last_used_ts = time.monotonic()
             if self._model_loaded:
                 return self._model
             if self._model_error:

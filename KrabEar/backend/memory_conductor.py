@@ -74,6 +74,8 @@ class MemoryConductor:
         host_stats_fn: Callable[[], Any] = _default_host_stats,
         gigaam_close_if_idle: Callable[[float], bool] = None,
         gigaam_idle_sec_fn: Callable[[], float] = None,
+        semantic_unload_if_idle: Callable[[float], bool] = None,
+        semantic_idle_sec_fn: Callable[[], float] = None,
         last_stt_activity_ts_fn: Callable[[], float] = None,
         tick_sec: float = 30.0,
         unload_model_fn=None,
@@ -103,6 +105,9 @@ class MemoryConductor:
         self._host_stats_fn = host_stats_fn
         self.gigaam_close_if_idle = gigaam_close_if_idle
         self._gigaam_idle_sec_fn = gigaam_idle_sec_fn
+        # F5/D5: опциональные провайдеры idle-выгрузки CPU-модели семантики.
+        self.semantic_unload_if_idle = semantic_unload_if_idle
+        self._semantic_idle_sec_fn = semantic_idle_sec_fn
         self._last_stt_activity_ts_fn = last_stt_activity_ts_fn
         self._tick_sec = float(tick_sec)
         self.unload_model_fn = unload_model_fn
@@ -237,6 +242,7 @@ class MemoryConductor:
         recording = self._safe_bool(self._is_recording)
         self._gigaam_step(recording)
         self._rewriter_step(recording)
+        self._semantic_step()
         self._brain_step(recording, trigger="pressure")
         self._publish(recording)
 
@@ -341,6 +347,28 @@ class MemoryConductor:
             self._note("would evict rewriter (idle %.0fs)" % idle)
             return
         self._evict_model("rewriter", self._get("llm_model", ""))
+
+    def _semantic_step(self) -> None:
+        """F5/D5: idle-выгрузка CPU-модели семантического поиска.
+
+        🔴 Всегда включено (без enforce_for): не GPU-резидент, не участвует
+        в pressure/shadow-политике; порог 0 = выключено. memory_conductor_enabled
+        остаётся общим гейтом (tick_once).
+        """
+        threshold = self._get("semantic_search_idle_unload_sec", 1800.0)
+        if threshold <= 0 or self.semantic_unload_if_idle is None:
+            return
+        try:
+            idle = float(self._semantic_idle_sec_fn())
+        except Exception:
+            return
+        if idle < threshold:
+            return
+        try:
+            if self.semantic_unload_if_idle(threshold):
+                self._note("unloaded semantic model (idle %.0fs)" % idle)
+        except Exception:
+            logger.exception("semantic unload failed")
 
     def _brain_step(self, recording: bool, trigger: str) -> None:
         need = int(self._get("memory_pressure_streak_ticks", 3))
