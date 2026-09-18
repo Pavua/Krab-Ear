@@ -107,7 +107,7 @@ class CloudSpendCapTests(unittest.TestCase):
         self.assertGreater(spent, 0.0)
 
     def test_no_spend_dir_blocks_cloud(self) -> None:
-        """_spend_dir None → fail-closed (guard, зелёный и до, и после — фиксирует инвариант)."""
+        """_spend_dir None → fail-closed (RED-критерий №3: до имплементации облако вызывается)."""
         rw = _rewriter(self._base_settings(), None)
         with patch("backend.cloud_rewriter.cloud_summarize") as cloud, _no_audit():
             out = rw._maybe_apply_cloud_summarize(_failed_result(), "тестовый текст 3", 3)
@@ -153,7 +153,7 @@ if __name__ == "__main__":
 ```bash
 PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_cloud_spend_cap.py -v -p no:cacheprovider
 ```
-Ожидаемо: 2 FAIL (cap-тесты) + 1 ERROR (helpers) + 3 guard-pass. Иная картина (импорты, конструктор) — **стоп** координатору.
+Ожидаемо: 3 FAIL (cap_exceeded, allows_records, no_spend_dir) + 1 ERROR (helpers) + 2 guard-pass (privacy, empty_catalog). Иная картина (импорты, конструктор) — **стоп** координатору.
 
 ### Task 2: Реализация (GREEN)
 
