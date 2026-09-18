@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import json
 import logging
-import os
+import math
+import re
 import threading
 import urllib.error
 import urllib.request
@@ -27,6 +28,7 @@ from typing import Any, Callable, Dict, Optional, Protocol
 from urllib.parse import urlparse
 
 from backend.state_store import StateStore
+from core.atomic_io import atomic_write_text
 from core.config import settings
 
 logger = logging.getLogger("KrabEar.Backend.CloudRewriter")
@@ -188,6 +190,9 @@ def _load_settings() -> dict:
 # Счётчик трат: <data_dir>/cloud_spend.json, формат {"YYYY-MM": usd}.
 # Только цифры — ни текстов транскриптов, ни API-ключей здесь нет.
 _CLOUD_SPEND_FILENAME = "cloud_spend.json"
+# F2b: сериализация read-modify-write резерва (одного процесса достаточно).
+_SPEND_LOCK = threading.Lock()
+_MONTH_KEY_RE = re.compile(r"^\d{4}-\d{2}$")
 
 # Тарифы USD за 1M токенов: {(provider, model): (in_usd, out_usd)}.
 # Токены провайдер в ответе не возвращает — считаем оценку len/4.
@@ -224,6 +229,39 @@ def _read_spend_map(data_dir: Path | str) -> dict:
     return {}
 
 
+def _read_spend_map_strict(data_dir: Path | str) -> dict | None:
+    """Строгое чтение файла трат: нет файла → {}; битый/невалидный → None.
+
+    None = «spent unknown» → резерв запрещён (fail-closed), а файл НЕ
+    перезаписывается. Логи без содержимого (только факт и причина).
+    """
+    path = _spend_path(data_dir)
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            loaded = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        logger.warning("cloud spend file unreadable — treating as unknown")
+        return None
+    if not isinstance(loaded, dict):
+        logger.warning("cloud spend file is not a JSON object — treating as unknown")
+        return None
+    for key, value in loaded.items():
+        if not isinstance(key, str) or not _MONTH_KEY_RE.fullmatch(key):
+            logger.warning("cloud spend file has invalid month key — treating as unknown")
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            logger.warning("cloud spend file has non-numeric value — treating as unknown")
+            return None
+        if not math.isfinite(number) or number < 0:
+            logger.warning("cloud spend file has invalid value — treating as unknown")
+            return None
+    return loaded
+
+
 def read_spend_usd(data_dir: Path | str, month: str) -> float:
     """Сумма трат за месяц; нет файла / битый JSON / мусор — 0.0."""
     try:
@@ -232,32 +270,82 @@ def read_spend_usd(data_dir: Path | str, month: str) -> float:
         return 0.0
 
 
-def add_spend_usd(data_dir: Path | str, month: str, usd: float) -> None:
-    """Добавить трату за месяц атомарной записью tmp + os.replace.
+def reserve_spend_usd(data_dir: Path | str, month: str, est: float, cap: float) -> bool:
+    """Зарезервировать est под месячный cap атомарной записью (F2b).
 
-    В файле — только числа (месяц-ключ и USD-значение), округление до 6 знаков.
+    Под модульным локом: strict-чтение файла → `spent + est <= cap` → запись
+    `spent + est` (округление 9 знаков). True только если резерв записан.
+    Битый/невалидный файл → deny (fail-closed), файл не перезаписывается.
+    non-finite/<=0 cap, non-finite/отрицательный est, невалидный month
+    или сбой записи → False.
     """
-    amount = round(float(usd), 6)
-    data = _read_spend_map(data_dir)
     try:
-        prev = float(data.get(month, 0.0))
-    except Exception:
-        prev = 0.0
-    data[month] = round(prev + amount, 6)
-    path = _spend_path(data_dir)
-    tmp_path = path.with_name(path.name + ".tmp")
+        cap_value = float(cap)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(cap_value) or cap_value <= 0:
+        return False
     try:
-        with tmp_path.open("w", encoding="utf-8") as fh:
-            json.dump(data, fh)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(str(tmp_path), str(path))
-    except Exception:
+        est_value = float(est)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(est_value) or est_value < 0:
+        # F2b-полировка: отрицательный est — не free-pass, а отказ (LOW ревью).
+        return False
+    if not _MONTH_KEY_RE.fullmatch(str(month)):
+        return False
+    with _SPEND_LOCK:
+        raw = _read_spend_map_strict(data_dir)
+        if raw is None:
+            return False
         try:
-            tmp_path.unlink(missing_ok=True)
+            spent = float(raw.get(month, 0.0))
+        except (TypeError, ValueError):
+            return False
+        if not spend_allowed(cap_value, spent, est_value):
+            return False
+        raw[month] = round(spent + est_value, 9)
+        try:
+            atomic_write_text(_spend_path(data_dir), json.dumps(raw))
         except Exception:
-            pass
-        raise
+            logger.warning("cloud spend reserve write failed — failing closed", exc_info=True)
+            return False
+    return True
+
+
+def add_spend_usd(data_dir: Path | str, month: str, usd: float) -> None:
+    """Добавить трату за месяц (дельта может быть отрицательной) атомарно.
+
+    В файле — только числа (месяц-ключ и USD-значение), округление 9 знаков.
+    Итог клампится в 0.0 (release/reconcile не уводят счётчик в минус).
+    Битый/невалидный файл → лог + no-op, история НЕ перезаписывается.
+    """
+    try:
+        amount = float(usd)
+    except (TypeError, ValueError):
+        logger.warning("cloud spend add: non-numeric delta ignored")
+        return
+    if not math.isfinite(amount):
+        logger.warning("cloud spend add: non-finite delta ignored")
+        return
+    if not _MONTH_KEY_RE.fullmatch(str(month)):
+        logger.warning("cloud spend add: invalid month key ignored")
+        return
+    with _SPEND_LOCK:
+        raw = _read_spend_map_strict(data_dir)
+        if raw is None:
+            logger.warning("cloud spend file invalid — add skipped (not overwritten)")
+            return
+        try:
+            prev = float(raw.get(month, 0.0))
+        except (TypeError, ValueError):
+            logger.warning("cloud spend entry invalid — add skipped")
+            return
+        raw[month] = max(0.0, round(prev + amount, 9))
+        try:
+            atomic_write_text(_spend_path(data_dir), json.dumps(raw))
+        except Exception:
+            logger.warning("cloud spend add write failed", exc_info=True)
 
 
 def estimate_summarize_usd(

@@ -127,6 +127,8 @@ _RANGE_FIELDS: dict[str, tuple[Any, Any, Any, type]] = {
     "background_guard_max_uniform_active_ratio": (0.40, 0.99, 0.92, float),
     "notify_confidence_threshold": (0.0, 1.0, 0.5, float),
     "call_budget_usd": (0.0, 1000.0, 2.0, float),
+    # F2b MED-2: месячный cap облачного summary; non-finite режется валидатором.
+    "cloud_spend_cap_usd_monthly": (0.0, 1000.0, 1.0, float),
     # Realtime silence filter (wave-34 B1/B2/B3 + wave-1770 MED)
     "rt_silence_check_sec": (0.5, 60.0, 5.0, float),
     "rt_silence_window_sec": (1.0, 30.0, 10.0, float),
