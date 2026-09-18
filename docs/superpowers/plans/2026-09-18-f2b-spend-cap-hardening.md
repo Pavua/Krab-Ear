@@ -206,7 +206,7 @@ if __name__ == "__main__":
 ```bash
 PYTHONPATH=$(pwd)/KrabEar python3 -m pytest KrabEar/tests/test_cloud_spend_cap_hardening.py -v -p no:cacheprovider
 ```
-🔴 RED-классификация (сверена симуляцией): pre-fix `reserve`-тесты (6) FAIL по отсутствию `reserve_spend_usd`; `test_failed_cloud_releases_reservation` FAIL по `assertTrue(exists)` (файла нет — вакуумного pass нет); `test_exception_releases_reservation` FAIL там же; `test_success_reconciles_to_actual_not_bound` FAIL (шов считает без резерва/реконсайла); `test_validator_range_registered` FAIL по `assertIn`. Всё FAIL, не ERROR коллекции (импорт модуля работает). Иная картина (импорты/фикстура) — стоп координатору.
+🔴 RED-классификация (сверена симуляцией): pre-fix **7 FAILED** (6 reserve-тестов + `test_failed_cloud_releases_reservation` по `assertTrue(exists)` + `test_exception_releases_reservation` там же) + **2 PASSED**: `test_success_reconciles_to_actual_not_bound` — РЕГРЕССИОННЫЙ (старый шов тоже пишет actual; PASS и pre, и post) и `test_non_finite_cap_is_rejected` (pytest-квирк: parent PASSED + 3 SUBFAILED на inf/nan — суть красная). Exit pre-fix = 1. Критерий: exit≠0 и ≥7 падений по правильным причинам; иная картина (импорты/фикстура) — стоп координатору.
 
 ### Task 2: Реализация (GREEN)
 
