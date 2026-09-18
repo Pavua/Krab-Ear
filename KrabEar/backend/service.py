@@ -720,6 +720,19 @@ class BackendService:
             a = _gigaam_adapter()
             return bool(a is not None and a.close_if_idle(threshold))
 
+        # F5/D5: idle-выгрузка CPU-модели семантики. `_semantic_searcher`
+        # создаётся ПОЗЖЕ старта кондуктора (:1396) — getattr + except в шаге
+        # означают, что первые тики молча пропустят шаг до создания сеарчера.
+        def _semantic_idle_sec() -> float:
+            searcher = getattr(self, "_semantic_searcher", None)
+            if searcher is None or not searcher.model_loaded:
+                raise RuntimeError("semantic searcher model not loaded")
+            return max(0.0, time.monotonic() - float(searcher._last_used_ts))
+
+        def _semantic_unload_if_idle(threshold: float) -> bool:
+            searcher = getattr(self, "_semantic_searcher", None)
+            return bool(searcher is not None and searcher.unload_if_idle(threshold))
+
         self._memory_ledger = LedgerClient("krab_ear")
         self._memory_conductor = MemoryConductor(
             settings_service=self._settings_svc,
@@ -730,6 +743,8 @@ class BackendService:
             ),
             gigaam_close_if_idle=_gigaam_close_if_idle,
             gigaam_idle_sec_fn=_gigaam_idle_sec,
+            semantic_unload_if_idle=_semantic_unload_if_idle,
+            semantic_idle_sec_fn=_semantic_idle_sec,
             last_stt_activity_ts_fn=_rcs_mod.last_stt_activity_ts,
         )
         event_bus.add_listener(self._memory_conductor.handle_oom_event)
