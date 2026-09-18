@@ -248,7 +248,7 @@ def _read_spend_map_strict(data_dir: Path | str) -> dict | None:
         logger.warning("cloud spend file is not a JSON object — treating as unknown")
         return None
     for key, value in loaded.items():
-        if not isinstance(key, str) or not _MONTH_KEY_RE.match(key):
+        if not isinstance(key, str) or not _MONTH_KEY_RE.fullmatch(key):
             logger.warning("cloud spend file has invalid month key — treating as unknown")
             return None
         try:
@@ -276,7 +276,8 @@ def reserve_spend_usd(data_dir: Path | str, month: str, est: float, cap: float) 
     Под модульным локом: strict-чтение файла → `spent + est <= cap` → запись
     `spent + est` (округление 9 знаков). True только если резерв записан.
     Битый/невалидный файл → deny (fail-closed), файл не перезаписывается.
-    non-finite/<=0 cap, non-finite est или сбой записи → False.
+    non-finite/<=0 cap, non-finite/отрицательный est, невалидный month
+    или сбой записи → False.
     """
     try:
         cap_value = float(cap)
@@ -288,9 +289,11 @@ def reserve_spend_usd(data_dir: Path | str, month: str, est: float, cap: float) 
         est_value = float(est)
     except (TypeError, ValueError):
         return False
-    if not math.isfinite(est_value):
+    if not math.isfinite(est_value) or est_value < 0:
+        # F2b-полировка: отрицательный est — не free-pass, а отказ (LOW ревью).
         return False
-    est_value = max(0.0, est_value)
+    if not _MONTH_KEY_RE.fullmatch(str(month)):
+        return False
     with _SPEND_LOCK:
         raw = _read_spend_map_strict(data_dir)
         if raw is None:
@@ -324,6 +327,9 @@ def add_spend_usd(data_dir: Path | str, month: str, usd: float) -> None:
         return
     if not math.isfinite(amount):
         logger.warning("cloud spend add: non-finite delta ignored")
+        return
+    if not _MONTH_KEY_RE.fullmatch(str(month)):
+        logger.warning("cloud spend add: invalid month key ignored")
         return
     with _SPEND_LOCK:
         raw = _read_spend_map_strict(data_dir)

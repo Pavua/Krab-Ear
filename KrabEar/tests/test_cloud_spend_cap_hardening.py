@@ -102,6 +102,34 @@ class ReserveSpendTests(unittest.TestCase):
         self.assertTrue(cr.reserve_spend_usd(self.dir, self.month, 0.002, 100.0))
         self.assertFalse((self.dir / "cloud_spend.json.tmp").exists())
 
+    def test_negative_est_is_rejected(self) -> None:
+        """Полировка: отрицательный est — отказ, а не free-pass."""
+        self.assertFalse(cr.reserve_spend_usd(self.dir, self.month, -1.0, 1.0))
+        self.assertFalse((self.dir / "cloud_spend.json").exists())
+        # ноль допустим (custom-тариф 0.0)
+        self.assertTrue(cr.reserve_spend_usd(self.dir, self.month, 0.0, 1.0))
+
+    def test_garbage_month_rejected(self) -> None:
+        """Полировка: невалидный месяц — отказ/no-op, файл не портится self-DoS-ключом.
+
+        Валидируется ФОРМАТ (как strict-ридер), не календарь: «2026-13» — вне скоупа.
+        """
+        for bad_month in ("garbage", "2026-09\n", "26-09", ""):
+            with self.subTest(month=bad_month):
+                self.assertFalse(cr.reserve_spend_usd(self.dir, bad_month, 0.001, 100.0))
+        cr.add_spend_usd(self.dir, "garbage", 1.0)  # no-op
+        self.assertTrue(cr.reserve_spend_usd(self.dir, self.month, 0.001, 100.0))
+        raw = (self.dir / "cloud_spend.json").read_text(encoding="utf-8")
+        self.assertNotIn("garbage", raw)
+
+    def test_tmp_symlink_not_followed(self) -> None:
+        """LOW-2: подложенный .tmp-symlink не перезаписывает жертву (mkstemp игнорирует имя)."""
+        victim = self.dir / "victim.txt"
+        victim.write_text("SECRET2", encoding="utf-8")
+        (self.dir / "cloud_spend.json.tmp").symlink_to(victim)
+        self.assertTrue(cr.reserve_spend_usd(self.dir, self.month, 0.001, 100.0))
+        self.assertEqual(victim.read_text(encoding="utf-8"), "SECRET2")
+
 
 class SeamReservationTests(unittest.TestCase):
     """Шов: reserve → вызов → reconcile/release (реальный LLMRewriter, мок cloud_summarize)."""
@@ -159,6 +187,44 @@ class SeamReservationTests(unittest.TestCase):
             actual = cr.estimate_summarize_usd("тестовый текст 2 подлиннее", "ок", "openai", "gpt-4o-mini")
             self.assertAlmostEqual(spent, actual, places=6)
             self.assertLess(spent, bound)
+
+    def test_missing_cap_key_blocks_cloud(self) -> None:
+        """LOW-3 пин: ключа cap нет → дефолт шва 0.0 → облако не вызвано."""
+        with tempfile.TemporaryDirectory() as d:
+            rw = self._rewriter(Path(d))
+            rw._settings_getter = lambda k, dv=None: {
+                "privacy_mode_enabled": False,
+                "cloud_rewriter_enabled": True,
+                "cloud_rewriter_provider": "openai",
+                "cloud_rewriter_openai_model": "gpt-4o-mini",
+            }.get(k, dv)
+            with patch("backend.cloud_rewriter.cloud_summarize") as cloud, \
+                 patch("backend.privacy_audit.get_privacy_audit_logger"):
+                out = rw._maybe_apply_cloud_summarize(self._failed(), "тестовый текст 4", 3)
+            cloud.assert_not_called()
+            self.assertFalse(out.ok)
+
+    def test_raising_getter_blocks_cloud(self) -> None:
+        """LOW-3 пин: getter падает на cap-ключе → cap=0.0 → облако не вызвано."""
+        with tempfile.TemporaryDirectory() as d:
+            rw = self._rewriter(Path(d))
+
+            def _raising(key, dv=None):
+                if key == "cloud_spend_cap_usd_monthly":
+                    raise RuntimeError("settings store down")
+                return {
+                    "privacy_mode_enabled": False,
+                    "cloud_rewriter_enabled": True,
+                    "cloud_rewriter_provider": "openai",
+                    "cloud_rewriter_openai_model": "gpt-4o-mini",
+                }.get(key, dv)
+
+            rw._settings_getter = _raising
+            with patch("backend.cloud_rewriter.cloud_summarize") as cloud, \
+                 patch("backend.privacy_audit.get_privacy_audit_logger"):
+                out = rw._maybe_apply_cloud_summarize(self._failed(), "тестовый текст 5", 3)
+            cloud.assert_not_called()
+            self.assertFalse(out.ok)
 
 
 if __name__ == "__main__":
