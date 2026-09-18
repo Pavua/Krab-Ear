@@ -550,6 +550,8 @@ class BackendService:
         # still POSTed transcript text to LM Studio.  Mirror the translator pattern exactly.
         if self._llm_rewriter is not None:
             self._llm_rewriter._settings_getter = self._get_runtime_setting
+            # F2: spend-cap облачного фоллбэка summary пишет месяц/траты в data_dir.
+            self._llm_rewriter._spend_dir = store.data_dir
         self._start_time: float = time.monotonic()
         self._settings_svc = SettingsService(store=self.store)
         # S3/Задача 2: cloud_stt/cloud_rewriter раньше строили СОБСТВЕННЫЙ

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -34,6 +35,9 @@ def _settings(**over):
         "privacy_mode_enabled": False,
         "cloud_rewriter_enabled": False,
         "cloud_rewriter_provider": "openai",
+        # F2 spend-cap: высокий лимит + валидный каталог, чтобы существующий
+        # cloud-путь оставался разрешённым (setup-совместимость).
+        "cloud_spend_cap_usd_monthly": 100.0,
         "stt_punctuation_llm_pass_enabled": False,
     }
     base.update(over)
@@ -194,6 +198,9 @@ class EngineCloudOnlyWhenStudioDownTest(unittest.TestCase):
 @pytest.mark.llm_network_live
 class SummarizeCloudOnlyWhenStudioDownTest(unittest.TestCase):
     def setUp(self) -> None:
+        # F2 spend-cap: реальный rewriter должен иметь spend_dir, иначе
+        # облако fail-closed и существующие cloud-кейсы перестают звать мок.
+        self.tmp = tempfile.TemporaryDirectory()
         self.rewriter = LLMRewriter(
             base_url=BASE_URL,
             api_key="",
@@ -202,6 +209,10 @@ class SummarizeCloudOnlyWhenStudioDownTest(unittest.TestCase):
             circuit_fail_threshold=3,
             idle_keepalive_enabled=False,
         )
+        self.rewriter._spend_dir = Path(self.tmp.name)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
 
     def test_empty_catalog_does_not_call_cloud(self) -> None:
         self.rewriter._settings_getter = _settings(cloud_rewriter_enabled=True)
