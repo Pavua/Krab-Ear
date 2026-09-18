@@ -2,9 +2,23 @@
 
 Обновлено: **2026-09-18**. Одна страница: база, политика brain/GPU, очередь. Журнал волн — [`ROADMAP-2026H2.md`](ROADMAP-2026H2.md), не очередь. Горизонт 2–4 нед: [`design-briefs/2026-09-05-horizon-plan.md`](design-briefs/2026-09-05-horizon-plan.md). Как работать: [`EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md).
 
-## Деплой 2026-09-18 (актуальный runtime)
+## Деплой 2026-09-18 №2 (актуальный runtime) — ночная волна
 
-- **Прод-код:** `35b32bab` — **F1 (лексика W4) в проде**. Процедура §деплой
+- **Прод-код:** `e004ba3d` — R1 табло, F5 (ленивая выгрузка семантики),
+  F2/F2b (спенд-кап харденинг), журналы. Поведение прода не меняется:
+  `cloud_rewriter_enabled=False`, `semantic_search_enabled=False` (весь код
+  спит до флагов). Процедура §деплой 09-11: busy 60 с idle + финальный,
+  worktree --detach, swap SHA (бэкап `/tmp/ear-plist-backup-20260919/`),
+  bootout (poll до «gone», ~5 с) → bootstrap без EIO/ретраев.
+- Backend pid **89956**, REST **90743** (GigaAM worker 90534); агент **7602**
+  не тронут. Прежний релиз `35b32bab` оставлен для отката.
+- Постдеплой: ping ok (v2.0.5, ~10 с), diagnostics 13/13, REST `/health` 200
+  (~6 с), e2e 44/44 + 21/21 green, privacy-gates hold, Sentry — 0 инцидентов Ear.
+  F1-лексика цела (phonetic 11/31, hotwords 43); semantic off/model не грузился.
+
+## Деплой 2026-09-18 №1 — F1 (35b32bab)
+
+- **Прод-код:** `35b32bab` — F1 (лексика W4) в проде. Процедура §деплой
   09-11 без отклонений: busy-check 60 с idle + финальный, worktree --detach,
   swap SHA в обоих plist (бэкап `/tmp/ear-plist-backup-20260918/`), bootout
   (poll до «gone», ~6 с) → bootstrap (ретраи не потребовались; EIO не возник).
@@ -62,9 +76,9 @@ Source-проверки не доказывают CI другого SHA или �
 ## База и runtime snapshot 2026-09-18
 
 - Репозиторий: [Pavua/Krab-Ear](https://github.com/Pavua/Krab-Ear)
-- Прод-колея: **`origin/codex/krab-ear-v2`** @ `35b32bab`
-- **Прод-код:** `35b32bab` (релиз 18.09, §деплой выше; колея == прод)
-- Backend pid **41951**, REST **42836** (деплой 18.09), агент pid **7602** (не тронут)
+- Прод-колея: **`origin/codex/krab-ear-v2`** @ `e004ba3d`
+- **Прод-код:** `e004ba3d` (релиз 18.09 №2, §деплой выше; колея == прод)
+- Backend pid **89956**, REST **90743** (деплой 18.09 №2), агент pid **7602** (не тронут)
 - Worktree: `git worktree add .worktrees/<slug> -b feat/<slug> origin/codex/krab-ear-v2`
 - Main Krab Q2 (:8080 purpose slots, RIS/SergeyRG) — **не Ear**: [`ANTIGRAVITY_HANDOFF/2026-09-05-krab-8080-model-routing.md`](../ANTIGRAVITY_HANDOFF/2026-09-05-krab-8080-model-routing.md)
 

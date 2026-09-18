@@ -2563,3 +2563,15 @@ bake-off гвард починен в том же SHA).
   general-adversarial); (б) пульт :8777 однопоточный — пачка параллельных curl
   создаёт очередь дольше таймаутов; (в) seed-и «только на пустой файл» — при
   запеканиях лексики добирать IPC-методами.
+
+## 2026-09-18 №2 — деплой `e004ba3d` (ночная волна в проде)
+
+- Процедура §деплой: busy 60 с idle + финальный; release worktree --detach;
+  plist swap (бэкап `/tmp/ear-plist-backup-20260919/`); bootout (poll до gone,
+  ~5 с) → bootstrap без EIO. Backend 89956, REST 90743, агент 7602 не тронут.
+  Откат — `35b32bab` (release-worktree на месте).
+- Вошло: R1 табло (сканер/панель/launchd), F5 ленивая выгрузка семантики,
+  F2/F2b spend-cap (SECURITY-PASS), журналы. Поведение прода не меняется —
+  `cloud_rewriter_enabled=False`, `semantic_search_enabled=False`.
+- Постдеплой: ping ok, diagnostics 13/13, health 200, e2e 44/44+21/21,
+  privacy-gates hold, Sentry — 0 инцидентов Ear; F1-лексика цела (11/31, 43).
