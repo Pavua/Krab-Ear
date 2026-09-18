@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Template for ai.krab.ear.reliability launchd job (R1: ежедневный сканер).
+
+  Раз в сутки снимает сигналы надёжности Ear (scripts/reliability_scan.py,
+  режим one-shot) и пишет снимок в ~/.local/share/krab-ear/reliability/.
+  Скрипт stdlib-only и ТОЛЬКО читает источники (логи/audit/rescue/forensics):
+  никаких команд управления, никакого record/dictation, прод-юниты не
+  трогаются.
+
+  Install via: scripts/install_reliability_scanner.command
+  Stop via:    launchctl bootout gui/$UID/ai.krab.ear.reliability
+  Status via:  launchctl print gui/$UID/ai.krab.ear.reliability
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.krab.ear.reliability</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PROJECT_ROOT__/.venv_krab_ear/bin/python3</string>
+    <!-- -u: launchd перенаправляет вывод в файл → блочная буферизация;
+         см. комментарий в ai.krab.ear.rest.plist.template. -->
+    <string>-u</string>
+    <string>__PROJECT_ROOT__/scripts/reliability_scan.py</string>
+    <string>--once</string>
+  </array>
+
+  <!-- Раз в сутки, 06:00 (как внешний system-health-snapshot). -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>6</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>KeepAlive</key>
+  <false/>
+
+  <key>LowPriorityIO</key>
+  <true/>
+
+  <!-- Фон на рабочей машине — только Background, иначе конкурирует за CPU
+       с диктовкой (см. ROADMAP: CI душил STT). -->
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>WorkingDirectory</key>
+  <string>__PROJECT_ROOT__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+
+    <key>PYTHONPATH</key>
+    <string>__PROJECT_ROOT__/KrabEar</string>
+
+    <key>HOME</key>
+    <string>__HOME__</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>__PROJECT_ROOT__/logs/reliability.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__PROJECT_ROOT__/logs/reliability.err.log</string>
+</dict>
+</plist>

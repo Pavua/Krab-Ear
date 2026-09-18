@@ -22,8 +22,14 @@ import pathlib
 import re
 import subprocess
 import time
+from datetime import datetime, timezone
 
 REPO = pathlib.Path("/Users/pablito/Antigravity_AGENTS/Krab Ear")
+# Ops-хранилище сканера надёжности (scripts/reliability_scan.py), не data_dir.
+RELIABILITY_SNAPSHOT = (
+    pathlib.Path.home() / ".local" / "share" / "krab-ear" / "reliability" / "latest.json"
+)
+RELIABILITY_STALE_HOURS = 26
 WORKER_DIRS = {
     "Krab Ear": REPO / ".remember" / "tmp" / "workers",
     "Главный Краб": pathlib.Path("/Users/pablito/Antigravity_AGENTS/Краб/.remember/tmp/workers"),
@@ -179,6 +185,40 @@ def collect_prod() -> dict:
                 info["rss_mb"] = round(int(parts[1]) / 1024) if len(parts) > 1 else None
         out[label] = info
     return out
+
+
+def collect_reliability(snapshot_path=None) -> dict:
+    """Снимок ежедневного сканера надёжности (R1).
+
+    🔴 Читается `latest.json`, а не живой скан: пульт не должен сам ходить
+    по логам. Нет файла / битый JSON → `unknown`/`no-snapshot`; снимок старше
+    26 ч → `unknown`/`stale`. Просроченный снимок НИКОГДА не «ok».
+    """
+    path = pathlib.Path(snapshot_path) if snapshot_path else RELIABILITY_SNAPSHOT
+    try:
+        snapshot = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"status": "unknown", "reason": "no-snapshot"}
+    generated = snapshot.get("generated_ts")
+    try:
+        ts = datetime.fromisoformat(generated)
+    except (TypeError, ValueError):
+        return {"status": "unknown", "reason": "no-snapshot"}
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    age_hours = (datetime.now(timezone.utc) - ts.astimezone(timezone.utc)).total_seconds() / 3600
+    if age_hours > RELIABILITY_STALE_HOURS:
+        return {"status": "unknown", "reason": "stale", "age_hours": round(age_hours, 1)}
+    result = dict(snapshot)
+    result.setdefault("status", "unknown")
+    # 7-дневные суммы — соседний файл того же снимка (если сканер его записал).
+    try:
+        result["summary_7d"] = json.loads(
+            (path.parent / "summary_7d.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        result["summary_7d"] = None
+    return result
 
 
 def collect_projects() -> dict:
@@ -370,6 +410,46 @@ def render_html(d: dict, refresh_sec: int = 20) -> str:
             f'<span class="meta">{i["merged"][11:]}</span>{_pill("ok", "в проде")}</div>'
             for i in items)
 
+    def rows_reliability():
+        rel = d.get("reliability") or {"status": "unknown"}
+        if not rel.get("signals"):
+            reasons = {"no-snapshot": "снимка нет — сканер ещё не запускался",
+                       "stale": "снимок просрочен (>26 ч)"}
+            return f'<div class="sub">{reasons.get(rel.get("reason"), "нет данных")}</div>'
+        labels = {
+            "stt_critical": "Провалы диктовки (STT)",
+            "gigaam_chunk_loss": "Потери чанков GigaAM",
+            "handle_request_hangs": "Зависшие IPC",
+            "bridge_401": "401 моста",
+            "rescue_files": "Восстановленные записи",
+            "unclean_deaths": "Нечистые смерти",
+            "ping_latency": "ping p50/p99",
+        }
+        out = []
+        signals = rel.get("signals") or {}
+        for key, label in labels.items():
+            sig = signals.get(key)
+            if not sig:
+                continue
+            status = sig.get("status", "unknown")
+            if status == "unknown":
+                value = "источник недоступен"
+            elif key == "ping_latency":
+                value = (f'p50 {sig.get("p50", "?")} / p99 {sig.get("p99", "?")} мс'
+                         f' · {sig.get("samples", 0)} проб')
+            else:
+                value = f'за 24ч: {sig.get("records", 0)}'
+            out.append(f'<div class="row"><span class="nm">{label}</span>'
+                       f'<span class="meta">{value}</span>{_pill(status)}</div>')
+        summary = rel.get("summary_7d") or {}
+        if summary:
+            out.append(
+                f'<div class="sub">7 дней: снимков {summary.get("days_count", 0)}'
+                f' · ping p50 {summary.get("ping_p50_median")}'
+                f' / p99 {summary.get("ping_p99_median")} мс</div>')
+        out.append('<div class="sub">Только счётчики и латентности — без текстов.</div>')
+        return "".join(out)
+
     load_cls = "ok" if (load or 0) < 20 else ("warn" if (load or 0) < 60 else "fail")
     return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -381,6 +461,7 @@ def render_html(d: dict, refresh_sec: int = 20) -> str:
 <div class="verdict {vcls}"><p class="vt">{vt}</p><p class="vn">{vn}</p></div>
 <div class="grid">
 <section class="card"><h2>Прод Krab Ear</h2>{rows_prod()}</section>
+<section class="card"><h2>Надёжность (24ч / 7д)</h2>{rows_reliability()}</section>
 <section class="card"><h2>Машина</h2>
 <div style="display:flex;align-items:baseline;gap:10px">
 <span class="big {load_cls}">{load}</span><span class="unit">средняя загрузка</span></div>
@@ -409,7 +490,7 @@ def serve(port: int) -> int:
                 "machine": collect_machine(), "prod": collect_prod(),
                 "workers": collect_workers(), "prs": collect_prs(),
                 "sessions": collect_sessions(), "projects": collect_projects(),
-                "done_today": collect_done(),
+                "done_today": collect_done(), "reliability": collect_reliability(),
             }
             body = render_html(data).encode("utf-8")
             self.send_response(200)
@@ -447,6 +528,7 @@ def main() -> int:
         "sessions": collect_sessions(),
         "projects": collect_projects(),
         "done_today": collect_done(),
+        "reliability": collect_reliability(),
     }
     if args.json:
         print(json.dumps(data, ensure_ascii=False, indent=2))
