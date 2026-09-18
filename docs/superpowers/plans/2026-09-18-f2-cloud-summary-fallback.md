@@ -1,44 +1,48 @@
-# F2: облачный фоллбэк summary (узко, по D3) — Implementation Plan
+# F2: месячный spend-cap для облачного фоллбэка summary (D3-узко) — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** когда локальный LLM недоступен (LM Studio DOWN), `summarize_item` и итоги встреч пробуют облако — иначе как сейчас extractive/пусто. Только summary, только Studio-DOWN, privacy всегда сильнее, месячный лимит трат.
+**Goal:** у существующего облачного фоллбэка summary появляется месячный лимит трат: исчерпан → тихо extractive, как будто облака нет. Больше ничего не меняется.
 
-**Architecture:** встраиваемся в существующую точку отказа: `_generate_summary` возвращает None → сейчас сразу extractive. Новая ветка между ними: `privacy? → extractive` → `enabled + studio-down + cap-ok? → cloud rewrite(summary-промпт) → ok? cloud : extractive`. Переиспользуем готовое: провайдеры `backend/cloud_rewriter.py` (`OpenAIRewriterProvider`, custom/anthropic — SSRF-guarded opener), предикат `is_studio_unavailable` (`llm_rewriter.py`, НЕ путать с пустым каталогом — C1: пустой каталог = extractive без облака), гейт `_cloud_rewrite_allowed()` (`engine.py:712`, privacy+enabled — сверить сигнатуру и переиспользовать логику, не дублировать). Новое только одно: месячный счётчик трат (файл `data_dir/cloud_spend.json` `{YYYY-MM: usd}`, fail-closed к extractive при превышении; цену берём из ответа провайдера если есть, иначе консервативная оценка по тарифу модели из конфига).
+**Architecture:** 🔴 облачная ветка summary УЖЕ в проде (`LLMRewriter._maybe_apply_cloud_summarize`, покрыта `SummarizeCloudOnlyWhenStudioDownTest`) — **вторую облачную ветку НЕ строить** (это был бы двойной вызов = двойное списание + двойная эксфильтрация). Единственный шов: внутрь `_maybe_apply_cloud_summarize`, между существующими проверками (`_cloud_llm_fallback_allowed` + `is_studio_unavailable`) и вызовом `cloud_summarize` — вставить cap-check; после успеха — `add_spend`. Счётчик: `data_dir/cloud_spend.json` (`{"YYYY-MM": usd}`), атомарная запись tmp+replace (прецедент `state_store.py:2280-2288`); цена — ВСЕГДА оценка по тарифной таблице (провайдер usd не возвращает — проверено), custom/self-hosted тариф 0.0. Fail-closed везде: `_spend_dir is None` → облако заблокировано; лимит `0` = запрещено всё; любое исключение → результат без облака.
 
-**Tech Stack:** Python `unittest` + `unittest.mock` (сеть в тестах ЗАПРЕЩЕНА — провайдер только мок). Новых зависимостей нет.
+**Tech Stack:** Python `unittest` + `unittest.mock` (сеть в тестах ЗАПРЕЩЕНА — `cloud_summarize` только мок). Новых зависимостей нет.
 
 **База:** `origin/codex/krab-ear-v2`. Worktree: `.worktrees/f2-cloud-summary`, ветка `feat/f2-cloud-summary`.
 
-**Баны:** список из [`EXECUTOR_PLAYBOOK.md`](../../EXECUTOR_PLAYBOOK.md) §1 целиком. Дополнительно — 🔴 PRIVACY-КРИТИЧНО: **диктовку в облако НЕ отправлять** (rewrite диктовки остаётся сырым STT); любой путь, отправляющий текст наружу, обязан начинаться с privacy-проверки (fail-closed); тексты транскриптов в тесты/логи/отчёты НЕ тащить (синтетика вида «тестовый текст N»); секреты (`cloud_rewriter_api_key`) только из settings/ENV, никогда в код/логи/отчёты; после мержа — независимое security-ревью (координатор).
+**Баны:** список из [`EXECUTOR_PLAYBOOK.md`](../../EXECUTOR_PLAYBOOK.md) §1 целиком. Дополнительно — 🔴 PRIVACY-КРИТИЧНО: **диктовку в облако НЕ отправлять** (не трогать `engine.py` и STT-пути вообще); тексты транскриптов в тесты/логи/отчёты НЕ тащить (синтетика вида «тестовый текст N»); секреты только из settings/ENV, никогда в код/логи/отчёты/файл трат (в нём — только цифры); после мержа — независимое security-ревью (координатор).
 
 ---
 
 ## Проверенные факты (координатор, 18.09, file:line)
 
-- `text_processing_service.py:147` `_generate_summary(text) -> Optional[str]` (None если LLM недоступен); `:162` `handle_summarize_item` — privacy-гейт на уровне хендлера уже есть (wave-1770 HIGH); дальше читает текст из history, зовёт `_generate_summary`, при None — extractive (дочитать точную ветку в файле, строки ~185+).
-- `recording_core_service.py:3954` `_generate_summary` — путь итогов встреч (вторая точка встройки; сверить, куда уходит None).
-- `llm_rewriter.py:1207` `summarize(text, max_sentences=3) -> LLMRewriteResult(ok, text, fallback_reason, latency_ms)`; `:1250` — пустой каталог → extractive без POST (C1).
-- `engine.py:1800-1803` — прецедент различия DOWN vs пусто + вызов `_cloud_rewrite_allowed()` и `is_studio_unavailable` (прочитать и повторить семантику).
-- `engine.py:712` `_cloud_rewrite_allowed()` — privacy + enabled (прочитать точные условия).
-- `cloud_rewriter.py:186-218` — `CloudRewriterProvider.rewrite(text, language, system_prompt) -> Dict`; `adopt_settings_reader`/`_load_settings` (`:156-184`) — как провайдер читает конфиг.
-- Конфиг (`core/config.py:1277+`): `cloud_rewriter_enabled=False`, `provider=openai`, `openai_model=gpt-4o-mini`, `base_url/custom_model/api_key`. Месячного лимита НЕТ — проектируем в Task 2.
-- D3-рамка (решение владельца): summary/встречи only; Studio DOWN only; privacy wins; месячный лимит.
+- Шов: `llm_rewriter.py:393-441` `_maybe_apply_cloud_summarize(result, text, max_sentences)`: `result.ok → return` → `_cloud_llm_fallback_allowed()` (`:376-388`: privacy wins, нет getter → закрыто) → `is_studio_unavailable(reason, last_error)` (`:273-289`: только `timeout`/`connection_error` (+circuit_open с такой ошибкой); пустой каталог — НЕ down) → `cloud_summarize(cleaned, max_sentences)` (импорт внутри метода, `:410`) → audit-лог БЕЗ текста (`:417-433`: только provider/input_chars/output_chars — прецедент «в spend-файл тоже только цифры») → `LLMRewriteResult(ok=True, text=...)` (`:436-441`).
+- `cloud_summarize(text, max_sentences=3) -> Optional[str]` (`cloud_rewriter.py:496-514`): текст или None; usd НЕ возвращает (проверено `rg usd` — пусто). `get_cloud_rewriter(name)` (`:416`). Тарифной таблицы в репо НЕТ — создать.
+- `summarize()` (`llm_rewriter.py:1207`): Studio → `_maybe_apply_cloud_summarize`. Оба `_generate_summary` (`text_processing_service.py:147`, `recording_core_service.py:3954`, семантика None идентична) идут через него — cap в шве покрывает оба пути сразу. (`recording_core:3954` — это батч-импорт аудио (`:3861`), не «итоги встреч»; итоги встреч — через `handle_summarize_item` (`service.py:4943`). Поведение не различать — шов общий.)
+- Конструктор: `LLMRewriter(base_url, api_key, model, ...)` — прямого `__new__` не надо; `_settings_getter` — plain-атрибут (прецедент `test_studio_unavailable_cloud_fallback_2026_09_05.py:207`); `_spend_dir` — новый plain-атрибут (None = облако заблокировано).
+- Прод-владелец один: `LLMRewriter(` в прод-коде только `service.py:1881`; `_settings_getter` ставится в `:552` — `_spend_dir = store.data_dir` ставить рядом (проверить, что `store` в скоупе — строки :474+ его используют).
+- Конфиг точные имена (`core/config.py:1277+`): `cloud_rewriter_enabled` (False), `cloud_rewriter_provider` (openai), `cloud_rewriter_openai_model` (gpt-4o-mini), `cloud_rewriter_anthropic_model`, `cloud_rewriter_base_url`, `cloud_rewriter_custom_model`, `cloud_rewriter_api_key` (+ `anthropic_api_key`, см. комментарий :1300). Новое: `cloud_spend_cap_usd_monthly` (дефолт **1.0**; **0 = запрещено всё**, fail-closed).
+- D3-рамка (решение владельца): summary only; Studio-DOWN only; privacy wins; лимит. Флаг остаётся False (включает владелец; НЕ в этой карточке).
 
 ---
 
-### Task 1: Тесты ветки (RED)
+### Task 1: Тесты cap (RED)
 
 **Files:**
-- Create: `KrabEar/tests/test_cloud_summary_fallback.py`
+- Create: `KrabEar/tests/test_cloud_spend_cap.py`
 
-- [ ] **Step 1: Написать тесты** (провайдер — строго мок, сети нет):
+- [ ] **Step 1: Написать тесты** (фикстура — настоящий `LLMRewriter`, как в существующем cloud-fallback тесте; патчится ТОЛЬКО реально существующий `backend.cloud_rewriter.cloud_summarize`, БЕЗ `create=True`; audit-логгер мокается):
 
 ```python
-"""F2: облачный фоллбэк summary — узко по D3 (только summary, только Studio-DOWN)."""
+"""F2: месячный spend-cap облачного фоллбэка summary (D3-узко).
+
+Шов уже в проде (_maybe_apply_cloud_summarize); здесь только cap.
+Сеть запрещена: cloud_summarize всегда мок.
+"""
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -47,106 +51,140 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-
-def _svc(monkey_settings: dict):
-    from backend import text_processing_service as tps
-    svc = tps.TextProcessingService.__new__(tps.TextProcessingService)
-    svc._settings_get = lambda k, d=None: monkey_settings.get(k, d)
-    return svc
+from backend.llm_rewriter import LLMRewriteResult, LLMRewriter
 
 
-class CloudSummaryFallbackTests(unittest.TestCase):
-    def test_privacy_mode_never_calls_cloud(self) -> None:
-        """privacy ON → extractive/пусто, провайдер не создан и не вызван."""
-        svc = _svc({"privacy_mode_enabled": True, "cloud_rewriter_enabled": True})
-        with patch("backend.text_processing_service.CloudRewriterProvider", create=True) as provider:
-            result = svc._generate_summary("тестовый текст 1")
-        provider.assert_not_called()
-        self.assertIsNone(result)  # вызывающий код идёт в extractive
+def _rewriter(settings: dict, spend_dir: Path | str | None) -> LLMRewriter:
+    rw = LLMRewriter(base_url="http://127.0.0.1:1", api_key="", model="test-model")
+    rw._settings_getter = lambda k, d=None: settings.get(k, d)
+    rw._spend_dir = spend_dir
+    return rw
 
-    def test_empty_catalog_never_calls_cloud(self) -> None:
-        """Пустой каталог Studio ≠ DOWN (C1): облака нет даже при enabled."""
-        svc = _svc({"privacy_mode_enabled": False, "cloud_rewriter_enabled": True})
-        with patch("backend.text_processing_service.is_studio_unavailable", return_value=False, create=True), \
-             patch("backend.text_processing_service.CloudRewriterProvider", create=True) as provider:
-            result = svc._generate_summary("тестовый текст 2")
-        provider.assert_not_called()
-        self.assertIsNone(result)
 
-    def test_studio_down_calls_cloud_and_returns_text(self) -> None:
-        svc = _svc({"privacy_mode_enabled": False, "cloud_rewriter_enabled": True})
-        fake = MagicMock()
-        fake.rewrite.return_value = {"ok": True, "text": "облачное саммари", "usd": 0.0001}
-        with patch("backend.text_processing_service.is_studio_unavailable", return_value=True, create=True), \
-             patch("backend.text_processing_service.build_cloud_provider", return_value=fake, create=True):
-            result = svc._generate_summary("тестовый текст 3")
-        self.assertEqual(result, "облачное саммари")
-        fake.rewrite.assert_called_once()
+def _failed_result() -> LLMRewriteResult:
+    # timeout ∈ _STUDIO_UNAVAILABLE_REASONS → is_studio_unavailable True.
+    return LLMRewriteResult(ok=False, text=None, fallback_reason="timeout", latency_ms=None)
 
-    def test_cloud_failure_falls_back_to_none(self) -> None:
-        """Облако упало/лимит исчерпан → None (вызывающий идёт в extractive), без исключений наружу."""
-        svc = _svc({"privacy_mode_enabled": False, "cloud_rewriter_enabled": True})
-        fake = MagicMock()
-        fake.rewrite.return_value = {"ok": False, "error": "timeout"}
-        with patch("backend.text_processing_service.is_studio_unavailable", return_value=True, create=True), \
-             patch("backend.text_processing_service.build_cloud_provider", return_value=fake, create=True):
-            result = svc._generate_summary("тестовый текст 4")
-        self.assertIsNone(result)
 
-    def test_spend_cap_blocks_cloud(self) -> None:
-        """Исчерпанный месячный лимит → облака нет (fail-closed к extractive)."""
-        svc = _svc({"privacy_mode_enabled": False, "cloud_rewriter_enabled": True,
-                    "cloud_spend_cap_usd_monthly": 0.0})
-        with patch("backend.text_processing_service.is_studio_unavailable", return_value=True, create=True), \
-             patch("backend.text_processing_service.CloudRewriterProvider", create=True) as provider:
-            result = svc._generate_summary("тестовый текст 5")
-        provider.assert_not_called()
-        self.assertIsNone(result)
+def _no_audit():
+    return patch("backend.llm_rewriter.get_privacy_audit_logger", create=False)
+
+
+class CloudSpendCapTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.spend_dir = Path(self.tmp.name)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _base_settings(self, **over):
+        cfg = {"privacy_mode_enabled": False, "cloud_rewriter_enabled": True,
+               "cloud_rewriter_provider": "openai", "cloud_spend_cap_usd_monthly": 100.0}
+        cfg.update(over)
+        return cfg
+
+    def test_cap_exceeded_blocks_cloud(self) -> None:
+        """RED-критерий №1: лимит 0 → cloud_summarize НЕ вызывается."""
+        rw = _rewriter(self._base_settings(cloud_spend_cap_usd_monthly=0.0), self.spend_dir)
+        with patch("backend.cloud_rewriter.cloud_summarize") as cloud, _no_audit():
+            out = rw._maybe_apply_cloud_summarize(_failed_result(), "тестовый текст 1", 3)
+        cloud.assert_not_called()
+        self.assertFalse(out.ok)
+
+    def test_cap_allows_and_records_spend(self) -> None:
+        """RED-критерий №2: лимит есть → вызов + запись трат в файл."""
+        rw = _rewriter(self._base_settings(), self.spend_dir)
+        with patch("backend.cloud_rewriter.cloud_summarize", return_value="облачное саммари") as cloud, _no_audit():
+            out = rw._maybe_apply_cloud_summarize(_failed_result(), "тестовый текст 2", 3)
+        cloud.assert_called_once()
+        self.assertTrue(out.ok)
+        self.assertEqual(out.text, "облачное саммари")
+        from backend import cloud_rewriter as cr
+        spent = cr.read_spend_usd(self.spend_dir, cr.current_month_key())
+        self.assertGreater(spent, 0.0)
+
+    def test_no_spend_dir_blocks_cloud(self) -> None:
+        """_spend_dir None → fail-closed (guard, зелёный и до, и после — фиксирует инвариант)."""
+        rw = _rewriter(self._base_settings(), None)
+        with patch("backend.cloud_rewriter.cloud_summarize") as cloud, _no_audit():
+            out = rw._maybe_apply_cloud_summarize(_failed_result(), "тестовый текст 3", 3)
+        cloud.assert_not_called()
+        self.assertFalse(out.ok)
+
+    def test_privacy_mode_blocks_before_cap(self) -> None:
+        """privacy ON → облака нет (guard, был и будет)."""
+        rw = _rewriter(self._base_settings(privacy_mode_enabled=True), self.spend_dir)
+        with patch("backend.cloud_rewriter.cloud_summarize") as cloud, _no_audit():
+            out = rw._maybe_apply_cloud_summarize(_failed_result(), "тестовый текст 4", 3)
+        cloud.assert_not_called()
+        self.assertFalse(out.ok)
+
+    def test_empty_catalog_never_reaches_cap(self) -> None:
+        """Пустой каталог ≠ DOWN (guard, был и будет)."""
+        rw = _rewriter(self._base_settings(), self.spend_dir)
+        studio_empty = LLMRewriteResult(ok=False, text=None, fallback_reason="studio_empty_no_autoload",
+                                        latency_ms=None)
+        with patch("backend.cloud_rewriter.cloud_summarize") as cloud, _no_audit():
+            out = rw._maybe_apply_cloud_summarize(studio_empty, "тестовый текст 5", 3)
+        cloud.assert_not_called()
+        self.assertFalse(out.ok)
+
+    def test_spend_helpers_roundtrip(self) -> None:
+        """read/add атомарно считают месяц (хелперы новые: pre-impl это ERROR — ожидаемо, см. ниже)."""
+        from backend import cloud_rewriter as cr
+        month = cr.current_month_key()
+        self.assertEqual(cr.read_spend_usd(self.spend_dir, month), 0.0)
+        cr.add_spend_usd(self.spend_dir, month, 0.001)
+        cr.add_spend_usd(self.spend_dir, month, 0.002)
+        self.assertAlmostEqual(cr.read_spend_usd(self.spend_dir, month), 0.003)
 
 
 if __name__ == "__main__":
     unittest.main()
 ```
 
-🔴 Две проверки перед прогоном (имена/конструкторы могут отличаться — сверить `rg`, править ТЕСТ под код, не код): конструктор `TextProcessingService(...)` (здесь — через `__new__` + `_settings_get`; если класс требует store/rewriter в `__init__` — инжектить моки, а не `__new__`); имена `is_studio_unavailable` / фабрики провайдера (в тесте — `build_cloud_provider`; если фабрики нет — создать тонкую `build_cloud_provider(settings_get)` в `cloud_rewriter.py` рядом с провайдерами и использовать её и в прод-коде, и в тесте).
+🔴 Честная классификация RED (зафиксировать в отчёте, не маскировать): тесты `test_cap_exceeded_blocks_cloud` и `test_cap_allows_and_records_spend` — настоящий RED (FAIL: до имплементации облако вызывается / файла нет); `test_no_spend_dir/privacy/empty_catalog` — guard (зелёные до и после); `test_spend_helpers_roundtrip` — ERROR до имплементации (имён нет), GREEN после. Перед прогоном сверить: `_maybe_apply_cloud_summarize` — метод инстанса (не static), `LLMRewriteResult` импортируется из `backend.llm_rewriter`, `get_privacy_audit_logger` патчится по пути `backend.llm_rewriter.get_privacy_audit_logger` (импорт внутри метода — сверить, что имя резолвится оттуда; если нет — править ТЕСТ под код).
 
 - [ ] **Step 2: RED**:
 
 ```bash
-PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_cloud_summary_fallback.py -v -p no:cacheprovider
+PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_cloud_spend_cap.py -v -p no:cacheprovider
 ```
-Ожидаемо: FAIL (ветки нет — `_generate_summary` возвращает None всегда). Если FAIL по именам — это проверки выше, не RED.
+Ожидаемо: 2 FAIL (cap-тесты) + 1 ERROR (helpers) + 3 guard-pass. Иная картина (импорты, конструктор) — **стоп** координатору.
 
 ### Task 2: Реализация (GREEN)
 
 **Files:**
-- Modify: `KrabEar/backend/text_processing_service.py` (`_generate_summary` + опционально фабрика)
-- Modify: `KrabEar/backend/recording_core_service.py` (`_generate_summary`, та же ветка)
-- Modify: `KrabEar/backend/cloud_rewriter.py` (только если нужна фабрика `build_cloud_provider`)
-- Modify: `KrabEar/core/config.py` (ключи `cloud_spend_cap_usd_monthly` (дефолт 0 = лимит не задан → ветка выключена до явного лимита? РЕШЕНИЕ: дефолт `1.0` USD/мес — безопасный потолок из коробки; 0 = запрещено) + `cloud_spend_*` учёт)
-- Test: `KrabEar/tests/test_cloud_summary_fallback.py`
+- Modify: `KrabEar/backend/cloud_rewriter.py` (хелперы + тарифы)
+- Modify: `KrabEar/backend/llm_rewriter.py` (cap-check + add_spend в шве)
+- Modify: `KrabEar/core/config.py` (ключ `cloud_spend_cap_usd_monthly`, дефолт 1.0)
+- Modify: `KrabEar/backend/service.py` (1 строка: `_spend_dir` рядом с `:552`)
+- Test: `KrabEar/tests/test_cloud_spend_cap.py`
 
-- [ ] **Step 1: Счётчик трат** — `data_dir/cloud_spend.json` вида `{"2026-09": 0.0123}`; хелперы `read_spend(month)`, `add_spend(usd)` (атомарная запись через tmp+replace, как принято в репо); цена — из ответа провайдера (`usd`), иначе оценка `len(text)/4/1000 * TARIFF[model]` (тарифы маленькой таблицей в `cloud_rewriter.py`, gpt-4o-mini первым). Проверка лимита ДО вызова; превышен/равен → сразу None. 🔴 Ключ от провайдера/тексты в файл трат НЕ писать (только цифры).
-- [ ] **Step 2: Ветка в обоих `_generate_summary`**: `privacy? → None` → `local = llm.summarize(...)` → `if ok: return` → `if not (enabled and studio_down and cap_ok): return None` → `cloud = provider.rewrite(text, lang, SUMMARY_SYSTEM_PROMPT)` (промпт: «сожми в 3 предложения, язык входа») → `ok? (add_spend; return text) : None`. ВСЯ ветка в try/except → None (облако никогда не роняет summary).
-- [ ] **Step 3: GREEN** — команда Task 1 Step 2. Ожидаемо: 5 passed.
-- [ ] **Step 4: Регрессия** — файлы, покрывающие summarize: найти `rg -ln 'summarize_item|_generate_summary' KrabEar/tests/` и прогнать их все. Ожидаемо: зелёные без правок (правка существующих тестов запрещена — расхождение = стоп координатору).
-- [ ] **Step 5: Гейт** — flake8 (max-120) изменённых + `scripts/pre_merge_py312_check.sh` на новый тест. `make audit-all` — да (тронуты сервисы).
+- [ ] **Step 1: Хелперы в `cloud_rewriter.py`** — `current_month_key() -> "%Y-%m" (локальное время, комментарий)`; `read_spend_usd(data_dir, month) -> float` (нет файла/битый → 0.0, не исключение); `add_spend_usd(data_dir, month, usd)` (tmp+`os.replace`, округление до 6 знаков; в файл — ТОЛЬКО цифры); `estimate_summarize_usd(in_text, out_text, provider, model) -> float` (токены ≈ `len/4`, тарифная таблица `{(provider, model): (in_usd_per_1m, out_usd_per_1m)}`: gpt-4o-mini известный тариф + комментарий «приближённо, сверить по первому счёту владельца»; unknown → консервативный blended $1.00/1M (cap срабатывает раньше — fail-closed); custom/self-hosted → 0.0 + комментарий); `spend_allowed(cap, spent, est) -> bool` (`cap <= 0 → False`; иначе `spent + est <= cap`).
+- [ ] **Step 2: Шов в `_maybe_apply_cloud_summarize`** — ПОСЛЕ существующих `allowed` + `is_studio_unavailable` проверок, ДО вызова `cloud_summarize`: прочитать cap (`getter("cloud_spend_cap_usd_monthly", 1.0)`, float(); исключение getter → считать 0 = блок); `spend_dir = self._spend_dir` (None → `return result` — fail-closed); `est = estimate...`; `if not spend_allowed: return result`; ПОСЛЕ успеха (`cloud_text` непустой, перед audit-блоком): `add_spend_usd(spend_dir, current_month_key(), estimate(..., cloud_text))` в try/except-pass (учёт не должен ронять результат). 🔴 Вторая облачная ветка запрещена — только эти вставки, сигнатуры и остальная логика метода не меняются.
+- [ ] **Step 3: Проводка** — `service.py` рядом с `:552`: `self._llm_rewriter._spend_dir = store.data_dir` (проверить `store` в скоупе — строки :474+; если имя другое — взять то же выражение, что у соседних сервисов). Больше нигде `LLMRewriter(` в проде нет (проверено `rg`) — других мест проводки не требуется.
+- [ ] **Step 4: Существующие тесты** — ЕДИНСТВЕННОЕ разрешённое изменение старых файлов: в `test_studio_unavailable_cloud_fallback_2026_09_05.py` (и siblings, если тоже упадут — перечислить в отчёте) добавить в setUp `_spend_dir = tmp_path` + cap высокий (`cloud_spend_cap_usd_monthly: 100.0` в их settings-фикстуру). Любая другая правка старых тестов — **стоп** координатору.
+- [ ] **Step 5: GREEN** — команда Task 1 Step 2. Ожидаемо: 6 passed.
+- [ ] **Step 6: Регрессия** — `test_studio_unavailable_cloud_fallback_2026_09_05.py`, `test_llm_rewriter_summarize*.py`, `test_cloud_rewriter*.py` (найти точные имена `rg -ln`). Ожидаемо: зелёные.
+- [ ] **Step 7: Гейт** — flake8 (max-120) изменённых + `scripts/pre_merge_py312_check.sh` на новый тест + `make audit-all` (сервисы тронуты).
 
 ### Task 3: Коммит и PR
 
 - [ ] `git branch --show-current` → `feat/f2-cloud-summary`
-- [ ] `git add` **явными путями** (только файлы Task 2)
-- [ ] Коммит: `feat(summary): облачный фоллбэк summary при Studio-DOWN (D3-узко)`
+- [ ] `git add` **явными путями** (только файлы Task 2 + setup-правки Step 4)
+- [ ] Коммит: `feat(summary): месячный spend-cap облачного фоллбэка (D3)`
 - [ ] PR в `codex/krab-ear-v2` с пометкой «privacy-путь: нужен gate-security»; НЕ мержить.
 
 ## Definition of Done
 
-- 5 тестов RED→GREEN; регрессия summarize-файлов зелёная; audit-all зелёный.
-- В прод-коде: диктовка облака не касается (проверить `rg -n 'cloud' KrabEar/core/engine.py` — только существующие строки); privacy-проверка ПЕРВОЙ в ветке; секреты не в коде/логах.
-- Деплой/включение флага — НЕ в этой карточке (флаг остаётся False; включает владелец отдельной командой после мержа).
+- 2 RED→GREEN + 3 guard + 1 helper (ERROR→GREEN); регрессия зелёная; audit-all зелёный.
+- В диффе: НЕТ второй облачной ветки; НЕТ правок `engine.py`/STT-путей/`_generate_summary`; НЕТ текстов/ключей в spend-файле (проверить `rg -n 'sk-|text'` по диффу spend-кода); флаг `cloud_rewriter_enabled` остаётся False.
+- Деплой/включение — НЕ в этой карточке.
 
 ## Вне scope (записать в отчёт, не чинить)
 
-- Включение `cloud_rewriter_enabled` / ввод API-ключа — владелец.
-- Точный тариф провайдера — таблицей-приближением, сверка по первому счёту.
-- Cloud для диктовки — запрещено D3 (не делать).
+- Включение флага / ввод API-ключа / сверка тарифа по счёту — владелец.
+- Точный учёт токенов провайдера (нет в ответах API) — оценка len/4.
+- Cloud для диктовки — запрещено D3.
