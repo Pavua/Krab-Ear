@@ -18,8 +18,8 @@
 
 - Находки (подтверждены воспроизведением): MED-1 гонка — 8 потоков × 50 add по $0.0001 → учтено 0.0005 вместо 0.04, большинство записей молча теряется (`llm_rewriter.py:473-474 except: pass`); MED-2 `float("1e999")` → `inf` → `spend_allowed(inf,...)` == True; LOW-1 битый файл → `{}` → 0.0 → перезапись без истории; LOW-2 фиксированный `cloud_spend.json.tmp` → symlink write-through (проверено: victim-файл перезаписан); LOW-3 `getter("cloud_spend_cap_usd_monthly", 1.0)` — при сбое чтения стора разрешает до $1.
 - Приватность/scope — SAFE (ревью): единственный `cloud_summarize` — шов; privacy первым, fail-closed; диктовка/STT не тронуты.
-- Готовое: `core/atomic_io.py:15` `atomic_write_text(path, text, *, encoding="utf-8")` — unique mkstemp + fsync + os.replace (докстрока явно описывает устранение shared-`.tmp` гонки). Валидатор: `settings_validator.py:98` `_RANGE_FIELDS`, sibling `call_budget_usd:127` = `(0.0, 1000.0, 2.0, float)`; non-finite режется `:358+`.
-- Текущий код: `cloud_rewriter.py:190-300` (`_read_spend_map/read_spend_usd/add_spend_usd/estimate_summarize_usd/spend_allowed`); шов `llm_rewriter.py:409-475` (импорт хелперов внутри метода, pre-check `read_spend_usd`+`spend_allowed`, post-success `add_spend_usd(actual)`).
+- Готовое: `core/atomic_io.py:15` `atomic_write_text(path, text, *, encoding="utf-8")` — unique mkstemp + fsync + os.replace (докстрока явно описывает устранение shared-`.tmp` гонки). Валидатор: `settings_validator.py:98` `_RANGE_FIELDS`, sibling `call_budget_usd:129` = `(0.0, 1000.0, 2.0, float)`; non-finite режется `:376`.
+- Текущий код: `cloud_rewriter.py:186-301` (`_read_spend_map/read_spend_usd/add_spend_usd/estimate_summarize_usd/spend_allowed`, `import os` используется только в `add_spend_usd`); шов `llm_rewriter.py:396-499`, спенд-часть 412-474 (импорт хелперов внутри метода, pre-check `read_spend_usd`+`spend_allowed`, post-success `add_spend_usd(actual)`).
 - Тесты F2: `test_cloud_spend_cap.py` (6 шт., cap-логика исполняется по-настоящему, мок только `cloud_summarize`).
 
 ---
@@ -147,6 +147,7 @@ class SeamReservationTests(unittest.TestCase):
             "privacy_mode_enabled": False,
             "cloud_rewriter_enabled": True,
             "cloud_rewriter_provider": "openai",
+            "cloud_rewriter_openai_model": "gpt-4o-mini",
             "cloud_spend_cap_usd_monthly": 100.0,
         }.get(k, d)
         rw._spend_dir = spend_dir
@@ -163,7 +164,20 @@ class SeamReservationTests(unittest.TestCase):
                  patch("backend.privacy_audit.get_privacy_audit_logger"):
                 out = rw._maybe_apply_cloud_summarize(self._failed(), "тестовый текст 1", 3)
             self.assertFalse(out.ok)
-            self.assertAlmostEqual(cr.read_spend_usd(Path(d), cr.current_month_key()), 0.0, places=6)
+            # Файл появился (резерв был) и обнулён release'ом (pre-fix: файла нет вовсе).
+            self.assertTrue((Path(d) / "cloud_spend.json").exists())
+            self.assertAlmostEqual(cr.read_spend_usd(Path(d), cr.current_month_key()), 0.0, places=9)
+
+    def test_exception_releases_reservation(self) -> None:
+        """Ветка release-on-exception: cloud_summarize бросил — резерв снят, текст не утёк."""
+        with tempfile.TemporaryDirectory() as d:
+            rw = self._rewriter(Path(d))
+            with patch("backend.cloud_rewriter.cloud_summarize", side_effect=RuntimeError("boom")), \
+                 patch("backend.privacy_audit.get_privacy_audit_logger"):
+                out = rw._maybe_apply_cloud_summarize(self._failed(), "тестовый текст 3", 3)
+            self.assertFalse(out.ok)
+            self.assertTrue((Path(d) / "cloud_spend.json").exists())
+            self.assertAlmostEqual(cr.read_spend_usd(Path(d), cr.current_month_key()), 0.0, places=9)
 
     def test_success_reconciles_to_actual_not_bound(self) -> None:
         with tempfile.TemporaryDirectory() as d:
@@ -192,7 +206,7 @@ if __name__ == "__main__":
 ```bash
 PYTHONPATH=$(pwd)/KrabEar python3 -m pytest KrabEar/tests/test_cloud_spend_cap_hardening.py -v -p no:cacheprovider
 ```
-Ожидаемо: FAIL/ERROR по отсутствию `reserve_spend_usd` / ключа в `_RANGE_FIELDS`; `test_failed_cloud_releases_reservation` и `test_success_reconciles_to_actual_not_bound` могут ПАДАТЬ по сути (сегодняшний шов: reserve нет, release нет) либо ERROR — классификацию каждого теста в отчёт. Если падает фикстура/импорт — стоп координатору.
+🔴 RED-классификация (сверена симуляцией): pre-fix `reserve`-тесты (6) FAIL по отсутствию `reserve_spend_usd`; `test_failed_cloud_releases_reservation` FAIL по `assertTrue(exists)` (файла нет — вакуумного pass нет); `test_exception_releases_reservation` FAIL там же; `test_success_reconciles_to_actual_not_bound` FAIL (шов считает без резерва/реконсайла); `test_validator_range_registered` FAIL по `assertIn`. Всё FAIL, не ERROR коллекции (импорт модуля работает). Иная картина (импорты/фикстура) — стоп координатору.
 
 ### Task 2: Реализация (GREEN)
 
@@ -203,14 +217,14 @@ PYTHONPATH=$(pwd)/KrabEar python3 -m pytest KrabEar/tests/test_cloud_spend_cap_h
 - Test: `KrabEar/tests/test_cloud_spend_cap_hardening.py`
 
 - [ ] **Step 1: Хелперы** — в `cloud_rewriter.py`:
-  - `import math`, `import threading`, `from core.atomic_io import atomic_write_text` (сверить путь/импорт-конвенцию модуля).
+  - `import math`, `import re` (+ проверить: после переписывания `os.` в файле не остаётся → убрать `import os`, иначе F401; `threading` уже импортирован — не дублировать), `from core.atomic_io import atomic_write_text` (прецедент ленивых импортов `from core.atomic_io import ...` — `state_store.py:694` и др.; модульного уровня импорт безопасен, `cloud_rewriter.py:27` уже импортирует `from core.config import settings`).
   - `_SPEND_LOCK = threading.Lock()` рядом с `_CLOUD_SPEND_FILENAME`.
   - `_read_spend_map_strict(data_dir) -> dict | None`: читает файл; нет файла → `{}`; не-dict / битый JSON / невалидный ключ (не `^\d{4}-\d{2}$`) / значение не finite или < 0 → `None` + `logger.warning` (без содержимого).
   - `reserve_spend_usd(data_dir, month, est, cap) -> bool`: guard `math.isfinite(cap) and cap > 0` (иначе False); под `_SPEND_LOCK`: `raw = _read_spend_map_strict(...)`; `None` → False; `spent = raw.get(month, 0.0)`; `if not spend_allowed(cap, spent, est): return False`; `raw[month] = round(spent + max(0.0, float(est)), 9)`; `atomic_write_text(path, json.dumps(raw))`; True. Исключение записи → лог + False. 🔴 Округление — 9 знаков: суммы summary микродолларовые, 6 знаков теряют reconcile (пример: bound 4.875e-6).
   - `add_spend_usd` — переписать на `_SPEND_LOCK` + `atomic_write_text` (дельта может быть отрицательной; кламп итога `max(0.0, round(..., 9))`; битый файл → лог + no-op, НЕ перезапись).
   - `read_spend_usd` — оставить (используется тестами/статусом); на strict-`None` вернуть 0.0 (чтение не гейт).
-- [ ] **Step 2: Шов** (`llm_rewriter.py:409-475`): импорт заменить на `reserve_spend_usd` (+ `add_spend_usd`, `current_month_key`, `estimate_summarize_usd`); pre-check → `if not reserve_spend_usd(spend_dir, current_month_key(), est_bound, cap): return result`; на провале облака/пустом ответе/исключении — release `add_spend_usd(spend_dir, month, -est_bound)` (в try/except-pass); на успехе — reconcile `add_spend_usd(spend_dir, month, actual - est_bound)`. 🔴 `getter(..., 0.0)` вместо 1.0 (LOW-3). Privacy-порядок и вызов `cloud_summarize` НЕ менять.
-- [ ] **Step 3: Валидатор** — `settings_validator.py` рядом с `call_budget_usd:127`: `"cloud_spend_cap_usd_monthly": (0.0, 1000.0, 1.0, float),`.
+- [ ] **Step 2: Шов** (`llm_rewriter.py:396-499`, спенд-часть 412-474): импорт заменить на `reserve_spend_usd` (+ `add_spend_usd`, `current_month_key`, `estimate_summarize_usd`); 🔴 зафиксировать `month = current_month_key()` ОДИН раз до reserve и использовать тот же `month` в release/reconcile (граница месяца). Pre-check → `if not reserve_spend_usd(spend_dir, month, est_bound, cap): return result`; на провале облака/пустом ответе/исключении — release `add_spend_usd(spend_dir, month, -est_bound)` (в try/except-pass); на успехе — reconcile `add_spend_usd(spend_dir, month, actual - est_bound)`. 🔴 `getter(..., 0.0)` вместо 1.0 (LOW-3). Privacy-порядок и вызов `cloud_summarize` НЕ менять.
+- [ ] **Step 3: Валидатор** — `settings_validator.py` рядом с `call_budget_usd:129`: `"cloud_spend_cap_usd_monthly": (0.0, 1000.0, 1.0, float),`.
 - [ ] **Step 4: GREEN** — команда Task 1 Step 2. Ожидаемо: все зелёные.
 - [ ] **Step 5: Регрессия** — `test_cloud_spend_cap.py`, `test_studio_unavailable_cloud_fallback_2026_09_05.py`, `test_cloud_rewriter.py`, `test_llm_rewriter_summarize.py`, `tests/test_atomic_io*.py` (найти `rg -ln 'atomic_io' KrabEar/tests/`). Любая правка старых тестов — стоп координатору.
 - [ ] **Step 6: Гейт** — flake8 (max-120) изменённых; `scripts/pre_merge_py312_check.sh` на новый тест; `make audit-all`.
@@ -232,5 +246,6 @@ PYTHONPATH=$(pwd)/KrabEar python3 -m pytest KrabEar/tests/test_cloud_spend_cap_h
 ## Вне scope (записать в отчёт, не чинить)
 
 - Межпроцессная сериализация spend-файла (одного процесса достаточно; flock — если появится второй writer).
+- «Залипание» резерва при падении release/reconcile (резерв ≤ est_bound остаётся до конца месяца) — осознанно fail-closed, не чинить.
 - Реальная сверка тарифа по счёту — владелец.
 - Включение `cloud_rewriter_enabled` — владелец.
