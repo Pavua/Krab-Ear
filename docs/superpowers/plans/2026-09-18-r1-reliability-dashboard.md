@@ -18,7 +18,7 @@
 
 **Пульта (`scripts/status_dashboard.py`, :8777 через `ai.krab.ear.dashboard.plist`):**
 - Доктрина: «никогда не выдавать отсутствие данных за успех»; у разделов `status: ok/warn/fail/unknown`.
-- Точки расширения: `collect_*()` возвращают dict (:47–:193); рендер `render_html` и секции-карточки :382–394; CLI `--json`/`--serve` :431–436 (флага `--once` нет — так работает и так ок).
+- Точки расширения: `collect_*()` возвращают dict (:47–:199); рендер `render_html` и секции-карточки :382–394; CLI `--json`/`--serve` :431–436 (флага `--once` нет — так работает и так ок).
 - 🔴 Ловушка: словарь собирается в ДВУХ местах — `Handler.do_GET` :407–413 и `main()` :441–450; новый ключ вставлять в оба (иначе `--json` и `--serve` разойдутся).
 - Плагинов нет; тестов у пульта нет — контракт нового коллектора закрываем тестом.
 
@@ -31,7 +31,7 @@
 | 401 моста | `logs/krab-ear-rest.err.log` | `неверный bridge-токен` (`backend/rest_server.py:576`) | локальное время в `asctime`; считать по дате |
 | Восстановленные записи | `<data_dir>/rescue/*.meta.json` | mtime в окне | collection «Восстановленные записи» в `collections.json` — только успешные; meta-файлы — честнее |
 | Нечистые смерти | `<data_dir>/forensics/*/` | число каталогов по mtime | 🔴 ретеншен `_MAX_RETAINED_DIRS=5` (`shutdown_forensics.py:43`) + rate-limit `_COLLECT_MIN_GAP_SEC=900` (:52) — 7-дневный счёт обрезается, писать caveat в снимок; JSON-файлы PII не содержат, `own_logs_tail.txt` — НЕ читать |
-| ping p50/p99 | `audit_<UTC-дата>.ndjson` (7 дней, `audit_logger.py:95`) | `method=="ping"` → `duration_ms` | это время handle_request (не RTT) и только успешные вызовы — писать limitation в снимок |
+| ping p50/p99 | `audit_<UTC-дата>.ndjson` (7 дней, `audit_logger.py:95`) | `method=="ping"` → `duration_ms` | `ts` — **ISO-строка** (`audit_logger.py:126`), не epoch: парсить `datetime.fromisoformat`. Это время handle_request (не RTT) и только успешные вызовы — писать limitation в снимок |
 
 **Что НЕ делать (уже есть):** `scripts/backend_log_digest.py` (расширять его паттерны — отдельная волна, сюда не тащить), `metrics_collector.py` (in-memory STT-метрики), `health_checker.py`, `collect_ux_telemetry.py`, `history_health_report.py`, внешний `system-health-snapshot` (.openclaw — машинный уровень). **«Длительность диктовки к длине речи» из истории не построить** (в `history.ndjson` нет `speech_duration`; `audio_path` в последних 200 записях пуст) — в R1 это честно `unknown`, будущая инструментация.
 
@@ -50,15 +50,23 @@
 - [ ] **Step 1: Написать тесты (RED)** — синтетические фикстуры в `tempfile` для каждого сигнала; ядро тестов:
 
 ```python
-"""R1: сканер надёжности — синтетические фикстуры на каждый сигнал."""
+"""R1: сканер надёжности — синтетические фикстуры на каждый сигнал.
+
+Форматы источников (сверено):
+- backend.log: `%(asctime)s [%(name)s] %(levelname)s: %(message)s`,
+  asctime с МИЛЛИСЕКУНДАМИ через запятую: `2026-09-18 02:05:43,820`.
+- rest.err.log: `%(asctime)s %(levelname)s %(name)s: %(message)s` (тоже `,мс`).
+- audit_*.ndjson: `{"ts": "<ISO 8601 с offset>", "method", "success", "duration_ms"}`.
+
+В фикстурах штампы ГЕНЕРИРУЮТСЯ от текущего времени (никаких зашитых дат:
+тест обязан быть зелёным в любой день). `until` берётся ПОСЛЕ создания файлов.
+"""
 from __future__ import annotations
 
 import importlib.util
 import json
-import os
 import sys
 import tempfile
-import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -75,6 +83,11 @@ def _load_module():
     return module
 
 
+def _log_stamp(until: datetime, minutes_ago: int = 2) -> str:
+    """Локальный штамп как в backend.log/rest err: 'YYYY-MM-DD HH:MM:SS,mmm'."""
+    return (until - timedelta(minutes=minutes_ago)).astimezone().strftime("%Y-%m-%d %H:%M:%S,123")
+
+
 class ScanSourcesTests(unittest.TestCase):
     def setUp(self) -> None:
         self.mod = _load_module()
@@ -83,51 +96,69 @@ class ScanSourcesTests(unittest.TestCase):
         self.data_dir = self.root / "data"
         self.data_dir.mkdir()
         (self.root / "logs").mkdir()
-        self.now = datetime.now(timezone.utc)
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
     # --- STT critical -------------------------------------------------
     def test_stt_critical_counts_records_not_lines(self) -> None:
+        until = datetime.now(timezone.utc)
+        stamp = _log_stamp(until)
         log = self.data_dir / "backend.log"
         log.write_text(
-            "2026-09-18 01:00:00 [KrabEar.Engine] ERROR: Критическая ошибка распознавания\n"
+            f"{stamp} [KrabEar.Engine] ERROR: Критическая ошибка распознавания\n"
             "Traceback (most recent call last):\n"
-            "ValueError: Все доступные STT-движки вышли из строя\n"
-            "2026-09-18 01:00:00 [KrabEar.Engine] ERROR: Критическая ошибка распознавания\n",
+            "RuntimeError: Все доступные STT-движки вышли из строя\n"
+            f"{stamp} [KrabEar.Engine] ERROR: Критическая ошибка распознавания\n",
             encoding="utf-8",
         )
-        result = self.mod.scan_stt_critical([log], self.now - timedelta(hours=24), self.now)
+        result = self.mod.scan_stt_critical([log], until - timedelta(hours=24), until)
         self.assertEqual(result["records"], 2)
         self.assertEqual(result["status"], "warn")  # ≥1 критический провал = warn
 
     def test_stt_critical_missing_log_is_unknown(self) -> None:
-        result = self.mod.scan_stt_critical([self.data_dir / "absent.log"], self.now - timedelta(hours=24), self.now)
+        until = datetime.now(timezone.utc)
+        result = self.mod.scan_stt_critical([self.data_dir / "absent.log"], until - timedelta(hours=24), until)
         self.assertEqual(result["status"], "unknown")
 
     # --- GigaAM chunk loss -------------------------------------------
     def test_gigaam_chunk_loss_record_level(self) -> None:
+        until = datetime.now(timezone.utc)
+        stamp = _log_stamp(until)
         log = self.data_dir / "backend.log"
         log.write_text(
-            "2026-09-18 01:00:00 [KrabEar.GigaAMMLX] WARNING: кусок 1.0–2.0с звучит, но вернулся пустым — часть речи потеряна\n"
-            "2026-09-18 01:00:01 [KrabEar.Engine] WARNING: Модель gigaam не сработала: gigaam-mlx потерял 2 кусок(ов) из 5\n",
+            f"{stamp} [KrabEar.GigaAMMLX] WARNING: кусок 1.0–2.0с звучит, но вернулся пустым — часть речи потеряна\n"
+            f"{stamp} [KrabEar.Engine] WARNING: Модель gigaam не сработала: gigaam-mlx потерял 2 кусок(ов) из 5\n",
             encoding="utf-8",
         )
-        result = self.mod.scan_gigaam_chunk_loss([log], self.now - timedelta(hours=24), self.now)
+        result = self.mod.scan_gigaam_chunk_loss([log], until - timedelta(hours=24), until)
         self.assertEqual(result["records"], 1)  # один record-level, «вернулся пустым» не считается
+
+    # --- handle_request hangs ----------------------------------------
+    def test_handle_request_hangs_counts(self) -> None:
+        until = datetime.now(timezone.utc)
+        stamp = _log_stamp(until)
+        log = self.data_dir / "backend.log"
+        log.write_text(
+            f"{stamp} [KrabEar.Backend.Service] ERROR: handle_request завис дольше 180с "
+            "(method=stop_recording) — backstop-таймаут, слот освобождён, рабочий поток абандонен\n",
+            encoding="utf-8",
+        )
+        result = self.mod.scan_handle_request_hangs([log], until - timedelta(hours=24), until)
+        self.assertEqual(result["records"], 1)
 
     # --- bridge 401 ---------------------------------------------------
     def test_bridge_401_counts_only_lines_in_window(self) -> None:
-        stamp = (datetime.now() - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
-        old = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+        until = datetime.now(timezone.utc)
+        stamp = _log_stamp(until, minutes_ago=5)
+        old = _log_stamp(until, minutes_ago=3 * 24 * 60)
         log = self.root / "logs" / "krab-ear-rest.err.log"
         log.write_text(
-            f"{stamp},217 WARNING KrabEar.REST: event_bridge: неверный bridge-токен\n"
-            f"{old},100 WARNING KrabEar.REST: event_bridge: неверный bridge-токен\n",
+            f"{stamp} WARNING KrabEar.REST: event_bridge: неверный bridge-токен\n"
+            f"{old} WARNING KrabEar.REST: event_bridge: неверный bridge-токен\n",
             encoding="utf-8",
         )
-        result = self.mod.scan_bridge_401([log], self.now - timedelta(hours=24), self.now)
+        result = self.mod.scan_bridge_401([log], until - timedelta(hours=24), until)
         self.assertEqual(result["records"], 1)
 
     # --- rescue / forensics ------------------------------------------
@@ -137,21 +168,24 @@ class ScanSourcesTests(unittest.TestCase):
         (rescue / "a.meta.json").write_text("{}", encoding="utf-8")
         forensics = self.data_dir / "forensics"
         (forensics / "20260918_010101_000001").mkdir(parents=True)
-        result_r = self.mod.scan_rescue_files(rescue, self.now - timedelta(hours=24), self.now)
-        result_f = self.mod.scan_unclean_deaths(forensics, self.now - timedelta(hours=24), self.now)
+        until = datetime.now(timezone.utc)  # ПОСЛЕ создания файлов — окно их включает
+        result_r = self.mod.scan_rescue_files(rescue, until - timedelta(hours=24), until)
+        result_f = self.mod.scan_unclean_deaths(forensics, until - timedelta(hours=24), until)
         self.assertEqual(result_r["records"], 1)
         self.assertEqual(result_f["records"], 1)
         self.assertIn("retention", result_f["caveat"].lower())
 
     # --- ping latency --------------------------------------------------
     def test_ping_latency_p50_p99_from_audit(self) -> None:
-        audit = self.data_dir / f"audit_{self.now:%Y-%m-%d}.ndjson"
+        until = datetime.now(timezone.utc)
+        audit = self.data_dir / f"audit_{until:%Y-%m-%d}.ndjson"
+        stamp = (until - timedelta(minutes=1)).isoformat()
         lines = [
-            json.dumps({"ts": self.now.timestamp(), "method": "ping", "success": True, "duration_ms": v})
+            json.dumps({"ts": stamp, "method": "ping", "success": True, "duration_ms": v})
             for v in (10, 20, 30, 40, 100)
         ]
         audit.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        result = self.mod.scan_ping_latency([audit], self.now - timedelta(hours=24), self.now)
+        result = self.mod.scan_ping_latency([audit], until - timedelta(hours=24), until)
         self.assertEqual(result["samples"], 5)
         self.assertEqual(result["p50"], 30)
         self.assertEqual(result["p99"], 100)
@@ -161,7 +195,7 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-Сигнатуры функций — контракт карточки: `scan_stt_critical(logs, since, until)`, `scan_gigaam_chunk_loss(logs, ...)`, `scan_handle_request_hangs(logs, ...)`, `scan_bridge_401(logs, ...)`, `scan_rescue_files(rescue_dir, ...)`, `scan_unclean_deaths(forensics_dir, ...)`, `scan_ping_latency(audit_files, ...)`. Каждая возвращает `{"records"|"samples": int, "status": "ok|warn|fail|unknown", ...}`.
+Сигнатуры функций — контракт карточки: `scan_stt_critical(logs, since, until)`, `scan_gigaam_chunk_loss(logs, ...)`, `scan_handle_request_hangs(logs, ...)`, `scan_bridge_401(logs, ...)`, `scan_rescue_files(rescue_dir, ...)`, `scan_unclean_deaths(forensics_dir, ...)`, `scan_ping_latency(audit_files, ...)`. Каждая возвращает `{"records"|"samples": int, "status": "ok|warn|fail|unknown", ...}`; `scan_unclean_deaths` дополнительно **обязан** вернуть `"caveat"` (ретеншен/rate-limit).
 
 - [ ] **Step 2: RED**:
 
@@ -171,7 +205,8 @@ PYTHONPATH=$(pwd)/KrabEar python3 -m pytest KrabEar/tests/test_reliability_scan.
 Ожидаемо: FAIL по отсутствию модуля/функций (не по синтаксису теста).
 
 - [ ] **Step 3: Реализация** — `scripts/reliability_scan.py` (stdlib only):
-  - `since/until` — `datetime` aware; логи парсить по локальному времени (`datetime.strptime(prefix, "%Y-%m-%d %H:%M:%S")` → `astimezone()`), audit — UTC (`ts` — epoch секунды), mtime сравнивать в UTC. Каждую границу — комментарием (TZ-ловушка).
+  - `since/until` — `datetime` aware; логи парсить по локальному времени С МИЛЛИСЕКУНДАМИ: `datetime.strptime(line[:23], "%Y-%m-%d %H:%M:%S,%f")` → `.astimezone()` (asctime в обоих логах — `…,%f`); audit — `datetime.fromisoformat(entry["ts"])` (ISO с offset, НЕ epoch); mtime сравнивать в UTC. Каждую границу — комментарием (TZ-ловушка).
+  - `generated_ts` — ISO с offset без суффикса `Z`: `datetime.now(timezone.utc).astimezone().isoformat()` (🔴 пульт `:8777` работает на системном python 3.9 — `fromisoformat` не понимает `Z`; в 3.9 `+02:00` ок).
   - Ротация: принимать список файлов `backend.log`, `backend.log.1..3`; строку ротации учесть («в логе старше» — ок, окно всё равно 24 ч и ротация быстрая).
   - Статусы: `stt_critical`/`gigaam_chunk_loss`/`unclean_deaths` — `warn` при ≥1, `fail` при ≥3 (константы `THRESHOLD_*` наверху); `handle_request_hangs`/`bridge_401` — `warn` ≥1, `fail` ≥5; `ping_latency` — `warn` если p99 > 800 мс, `fail` > 2000 мс. Отсутствующий источник → `unknown` (НИКОГДА не ok).
   - `build_snapshot(...)` собирает словарь: `{"generated_ts", "window_hours": 24, "signals": {...}, "unknown_sources": [...], "status"}` — общий статус = худший из сигналов, но при ≥1 unknown и остальных ok → `warn` (не ok).
@@ -210,7 +245,7 @@ PYTHONPATH=$(pwd)/KrabEar python3 -m pytest KrabEar/tests/test_reliability_scan.
 - Test: `KrabEar/tests/test_reliability_launchd.py` (по образцу `test_ear_smoke_launchd_2026_09_14.py`)
 
 - [ ] **Step 1:** Шаблон: `__HOME__`/`__PROJECT_ROOT__` (как e2e-smoke), `ProgramArguments` = `.venv_krab_ear/bin/python3 -u scripts/reliability_scan.py --once`, `StartCalendarInterval` 06:00, `RunAtLoad=false`, `ProcessType=Background`, `LowPriorityIO`, `PYTHONPATH=KrabEar`, stdout/err в `<repo>/logs/reliability.out/err.log`.
-- [ ] **Step 2:** Инсталлер — дословная логика `install_ear_e2e_smoke.command`: render → `plutil -lint` → `bootout` (если загружен) → `bootstrap` → верификация `launchctl print` + один ручной `--once` прогон (пишет снимок). Никаких правок чужих юнитов.
+- [ ] **Step 2:** Инсталлер — логика `install_ear_e2e_smoke.command`, НО verify другой: render → `plutil -lint` → `bootout` (если загружен) → `bootstrap` → верификация `launchctl print gui/$(id -u)/ai.krab.ear.reliability` содержит `Hour 6`/`Minute 0` (StartCalendarInterval; 🔴 grep «run interval» из e2e-smoke НЕ подходит — там StartInterval) → один ручной `--once` прогон (пишет снимок). Никаких правок чужих юнитов.
 - [ ] **Step 3:** Контракт-тест: `plistlib.load` шаблона — `StartCalendarInterval`=06:00, `RunAtLoad` false, путь скрипта существует в репо; инсталлер упоминает `plutil -lint` и `ai.krab.ear.reliability`.
 - [ ] **Step 4: Установка (живой шаг)** — выполнить `scripts/install_reliability_scanner.command`; проверить `launchctl print gui/$(id -u)/ai.krab.ear.reliability` и появившийся `latest.json`; записать в отчёт вывод.
 
