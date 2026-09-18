@@ -409,8 +409,9 @@ class LLMRewriter:
         cleaned = (text or "").strip()
         if not cleaned:
             return result
-        # F2: месячный spend-cap (D3-узко). Вторая облачная ветка ЗАПРЕЩЕНА —
-        # только этот cap-гейт перед существующим вызовом cloud_summarize.
+        # F2b: резерв до вызова, reconcile на успех / release на провал.
+        # Вторая облачная ветка ЗАПРЕЩЕНА — только этот cap-гейт перед
+        # существующим вызовом cloud_summarize.
         spend_dir = self._spend_dir
         if spend_dir is None:
             return result
@@ -419,8 +420,7 @@ class LLMRewriter:
                 add_spend_usd,
                 current_month_key,
                 estimate_summarize_usd,
-                read_spend_usd,
-                spend_allowed,
+                reserve_spend_usd,
             )
         except Exception:
             logger.warning("cloud spend helpers unavailable — failing closed", exc_info=True)
@@ -442,15 +442,18 @@ class LLMRewriter:
             provider = "openai"
             model = ""
         try:
-            cap = float(getter("cloud_spend_cap_usd_monthly", 1.0)) if getter is not None else 0.0
+            # LOW-3: сбой чтения настройки → cap=0.0 (deny), а не дефолт $1.
+            cap = float(getter("cloud_spend_cap_usd_monthly", 0.0)) if getter is not None else 0.0
         except Exception:
             cap = 0.0
+        # Верхняя оценка (in == out): summary не длиннее входа, поэтому не
+        # даём cap-гейту пропустить вызов, который затем выйдет за лимит.
+        # month фиксируется ОДИН раз — reserve/release/reconcile в одном месяце
+        # даже на границе месяца.
+        month = current_month_key()
         try:
-            spent = read_spend_usd(spend_dir, current_month_key())
-            # Верхняя оценка (in == out): summary не длиннее входа, поэтому не
-            # даём cap-гейту пропустить вызов, который затем выйдет за лимит.
             est_bound = estimate_summarize_usd(cleaned, cleaned, provider, model)
-            if not spend_allowed(cap, spent, est_bound):
+            if not reserve_spend_usd(spend_dir, month, est_bound, cap):
                 return result
         except Exception:
             logger.warning("cloud spend cap check failed — failing closed", exc_info=True)
@@ -460,15 +463,24 @@ class LLMRewriter:
             cloud_text = cloud_summarize(cleaned, max_sentences=max_sentences)
         except Exception:
             logger.warning("cloud summarize fallback failed", exc_info=True)
+            try:
+                add_spend_usd(spend_dir, month, -est_bound)
+            except Exception:
+                pass
             return result
         if not cloud_text:
+            try:
+                add_spend_usd(spend_dir, month, -est_bound)
+            except Exception:
+                pass
             return result
         # Учёт траты — только цифры; сбой учёта не роняет готовый результат.
+        # Reconcile: снимаем резерв-bounded, ставим actual (дельта ≤ 0).
         try:
             add_spend_usd(
                 spend_dir,
-                current_month_key(),
-                estimate_summarize_usd(cleaned, cloud_text, provider, model),
+                month,
+                estimate_summarize_usd(cleaned, cloud_text, provider, model) - est_bound,
             )
         except Exception:
             pass
