@@ -72,13 +72,17 @@ def _existing(paths) -> list:
     return [Path(p) for p in paths if Path(p).is_file()]
 
 
-def _iter_lines(paths):
+def _iter_lines(paths, unreadable: list | None = None):
     for path in _existing(paths):
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as fh:
                 for line in fh:
                     yield line
         except OSError:
+            # 🔴 fail-closed для монитора: нечитаемый источник — это unknown,
+            # НЕ «ноль событий». Иначе «всегда зелёный» при сломанном доступе.
+            if unreadable is not None:
+                unreadable.append(str(path))
             continue
 
 
@@ -106,9 +110,10 @@ def _in_window(moment: datetime | None, since: datetime, until: datetime) -> boo
     return moment is not None and since <= moment <= until
 
 
-def _count_pattern(logs, pattern: str, since: datetime, until: datetime) -> int:
+def _count_pattern(logs, pattern: str, since: datetime, until: datetime,
+                   unreadable: list | None = None) -> int:
     total = 0
-    for line in _iter_lines(logs):
+    for line in _iter_lines(logs, unreadable):
         if pattern not in line:
             continue
         if _in_window(_parse_log_ts(line), since, until):
@@ -136,7 +141,10 @@ def _scan_log_signal(logs, pattern: str, since: datetime, until: datetime,
                      warn_at: int, fail_at: int) -> dict:
     if not _existing(logs):
         return {"records": 0, "status": "unknown", "reason": "no-source"}
-    records = _count_pattern(logs, pattern, since, until)
+    unreadable: list = []
+    records = _count_pattern(logs, pattern, since, until, unreadable)
+    if unreadable:
+        return {"records": records, "status": "unknown", "reason": "unreadable"}
     return {"records": records, "status": _count_status(records, warn_at, fail_at)}
 
 
@@ -202,6 +210,7 @@ def scan_ping_latency(audit_files, since: datetime, until: datetime) -> dict:
     if not _existing(audit_files):
         return {"samples": 0, "status": "unknown", "reason": "no-source"}
     durations = []
+    unreadable = []
     for path in _existing(audit_files):
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as fh:
@@ -227,7 +236,12 @@ def scan_ping_latency(audit_files, since: datetime, until: datetime) -> dict:
                     if isinstance(value, (int, float)):
                         durations.append(float(value))
         except OSError:
+            unreadable.append(str(path))
             continue
+    if unreadable:
+        # 🔴 fail-closed: нечитаемый audit-файл — unknown, не «нет данных = ок».
+        return {"samples": len(durations), "status": "unknown", "reason": "unreadable",
+                "note": "время handle_request, не RTT; только успешные вызовы"}
     if not durations:
         return {"samples": 0, "status": "unknown", "reason": "no-samples",
                 "note": "время handle_request, не RTT; только успешные вызовы"}

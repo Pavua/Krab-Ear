@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -146,6 +147,41 @@ class ScanSourcesTests(unittest.TestCase):
         self.assertEqual(result["samples"], 5)
         self.assertEqual(result["p50"], 30)
         self.assertEqual(result["p99"], 100)
+
+    # --- fail-closed: нечитаемый источник (рекуррентный класс fail-open) ---
+    def test_unreadable_log_is_unknown_not_ok(self) -> None:
+        if os.geteuid() == 0:
+            self.skipTest("root читает всё — chmod не блокирует")
+        until = datetime.now(timezone.utc)
+        log = self.data_dir / "backend.log"
+        log.write_text(
+            f"{_log_stamp(until)} [KrabEar.Engine] ERROR: Критическая ошибка распознавания\n",
+            encoding="utf-8",
+        )
+        os.chmod(log, 0)
+        try:
+            result = self.mod.scan_stt_critical([log], until - timedelta(hours=24), until)
+        finally:
+            os.chmod(log, 0o600)
+        self.assertEqual(result["status"], "unknown")
+        self.assertEqual(result["reason"], "unreadable")
+
+    def test_unreadable_audit_is_unknown_not_ok(self) -> None:
+        if os.geteuid() == 0:
+            self.skipTest("root читает всё — chmod не блокирует")
+        until = datetime.now(timezone.utc)
+        audit = self.data_dir / f"audit_{until:%Y-%m-%d}.ndjson"
+        audit.write_text(
+            json.dumps({"ts": until.isoformat(), "method": "ping", "success": True, "duration_ms": 10}) + "\n",
+            encoding="utf-8",
+        )
+        os.chmod(audit, 0)
+        try:
+            result = self.mod.scan_ping_latency([audit], until - timedelta(hours=24), until)
+        finally:
+            os.chmod(audit, 0o600)
+        self.assertEqual(result["status"], "unknown")
+        self.assertEqual(result["reason"], "unreadable")
 
 
 class DashboardCollectorTests(unittest.TestCase):
