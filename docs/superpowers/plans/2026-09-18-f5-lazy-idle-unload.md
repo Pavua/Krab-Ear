@@ -16,11 +16,11 @@
 
 ## Проверенные факты (координатор, 18.09, file:line)
 
-- `SemanticSearcher` (`backend/semantic_search.py`): `__init__:29` (поля `_model/_model_loaded/_model_error:45-48`, `_embeddings/_index:51-53`, `_model_lock:46`, `_index_lock:53`); свойства `is_enabled:74-76`, `model_loaded:78-80`; `status():86-95` (уже отдаёт `model_loaded`); `reset_model_error:261-283` — прецедент «сбросить `_model`/`_model_loaded` БЕЗ `_model_error`, индекс сохранить»; `_get_model:355-377` (ранний `return` если `_model_loaded`; свежая загрузка → `_load_from_disk:368`); `search:228-258` (гейт `enabled` → `_get_model` → копия матрицы под `_index_lock`; пустой индекс → `[]`); `index_item:108`, `index_all:149` — тоже зовут `_get_model`; `_save_locked` после каждой мутации → диск == RAM (важно для переживания unload).
-- Кондуктор (`backend/memory_conductor.py`): `_RESIDENTS:35` (`gigaam/rewriter/brain`); `__init__:71+` принимает `gigaam_close_if_idle`/`gigaam_idle_sec_fn:75-76`, `tick_sec=30:83`; `tick_once:218-243` зовёт `_gigaam_step(recording)`, `_rewriter_step(recording)`, `_brain_step(...)`; `_gigaam_step:306-327` — образец (порог из `_get(...)`, `idle = idle_sec_fn()`, исключение → return, `enforce_for` → shadow-счётчик); `_get:161-166` через `self._settings()`.
-- Проводка (`backend/service.py:712-730`): `_gigaam_idle_sec()`/`_gigaam_close_if_idle()` — локальные функции-замыкания; `MemoryConductor(...)` конструируется там же (`:723+`). `self._semantic_searcher` создаётся `:1394-1399` (`enabled` — снапшот настроек на старте; смена — рестарт, вне scope).
+- `SemanticSearcher` (`backend/semantic_search.py`): `__init__:29` (поля `_model/_model_loaded/_model_error:45-48`, `_embeddings/_index:51-53`, `_model_lock:46`, `_index_lock:53`); свойства `is_enabled:74-76`, `model_loaded:78-80`; `status():86-95` (уже отдаёт `model_loaded`); `reset_model_error:261-283` — прецедент «сбросить `_model`/`_model_loaded` БЕЗ `_model_error`, индекс сохранить»; `_get_model:355-380` (ранний `return` если `_model_loaded`; свежая загрузка → `_load_from_disk:368`); `search:228-259` (гейт `enabled` → `_get_model` → копия матрицы под `_index_lock`; пустой индекс → `[]`); `index_item:108`, `index_all:149` — тоже зовут `_get_model`; `_save_locked` при УСПЕШНОЙ мутации → в steady state диск == RAM (сбой записи глушится warn — остаточный риск, см. Вне scope). 🔴 `time` в шапке файла НЕ импортирован — добавить.
+- Кондуктор (`backend/memory_conductor.py`): `_RESIDENTS:35` (`gigaam/rewriter/brain`); `__init__:71+` принимает `gigaam_close_if_idle`/`gigaam_idle_sec_fn:75-76`, `tick_sec` (дефолт 30); `tick_once:218-243` зовёт `_gigaam_step(recording)`, `_rewriter_step(recording)`, `_brain_step(...)`; `_gigaam_step:306-327` — образец (порог из `_get(...)`, `idle = idle_sec_fn()`, исключение → return, `enforce_for` → shadow-счётчик); `_get:161-166`; `_note:538`; `enforce_for:168-172`.
+- Проводка (`backend/service.py`): `_gigaam_idle_sec()`/`_gigaam_close_if_idle()` — замыкания; `MemoryConductor(` `:724`, `.start()` `:736`, `self._semantic_searcher` создаётся ПОЗЖЕ `:1396` (замыкания читают атрибут при вызове → первый тик молча пропустит, `getattr` в Step 3). `enabled` — снапшот настроек на старте (смена — рестарт, вне scope).
 - Конфиг: семантика — `core/config.py:1128-1130` (`semantic_search_enabled/model/auto_index`), `MAX_ITEMS=5000`; валидатор — `backend/settings_validator.py:105-114` (диапазоны conductor-порогов; формат `(low, high, default, type)`).
-- Тесты-прецеденты: `test_semantic_search.py` (`_make_fake_model:33`, прямая подмена `_model`+`_encode/_encode_batch`, lazy-load через `sys.modules`-патч `sentence_transformers`); кондуктор — `test_memory_conductor_2026_08_19.py` + `test_memory_conductor_wiring_2026_08_19.py` (переиспользовать их фикстуры; `_semantic_step` тестировать прямым вызовом, как принято для шагов).
+- Тесты-прецеденты: `test_semantic_search.py` (`_make_fake_model:33`, прямая подмена `_model`+`_encode/_encode_batch`; в :414-423 патч `sys.modules` используется для ImportError-пути — наш fake-модуль `SentenceTransformer` задаётся тем же приёмом, прямого прецедента нет, приём проверен симуляцией); кондуктор — `test_memory_conductor_2026_08_19.py` + `test_memory_conductor_wiring_2026_08_19.py` (переиспользовать их фикстуры; `_semantic_step` тестировать прямым вызовом — существующие тесты гоняют шаги через `tick_once()`, прямой вызов валиден и проверен симуляцией).
 
 ---
 
@@ -123,7 +123,7 @@ if __name__ == "__main__":
 
 🔴 Две проверки перед прогоном (сверить `rg`, при несовпадении — править ТЕСТ под код): `index_item(id, text)` — точная сигнатура (`semantic_search.py:108`); `SemanticSearcher.enabled=True` в конструкторе достаточен для `search` (гейт `_enabled`).
 
-- [ ] **Step 2: Секция кондуктора** — `SemanticStepTests` в том же файле: `_semantic_step` вызывается напрямую; фикстура кондуктора — из `test_memory_conductor_2026_08_19.py` (найти, как он строит `MemoryConductor` + мок settings-сервиса с `cached_settings()`; переиспользовать). Ассерты:
+- [ ] **Step 2: Секция кондуктора** — `SemanticStepTests` в том же файле: `_semantic_step` вызывается напрямую; фикстура кондуктора — из `test_memory_conductor_2026_08_19.py` (найти, как он строит `MemoryConductor` + мок settings-сервиса с `cached_settings()`; переиспользовать; все kwargs keyword-only). Ассерты:
   - idle_fn → `99999.0`, провайдер `semantic_unload_if_idle` вызван с порогом `1800.0` (порог задать через `cached_settings().get("semantic_search_idle_unload_sec")`);
   - idle_fn кидает → шаг молчит (провайдер не вызван);
   - idle_fn → `10.0` (< порога) → провайдер не вызван;
@@ -146,7 +146,7 @@ PYTHONPATH=$(pwd)/KrabEar python3 -m pytest KrabEar/tests/test_semantic_idle_unl
 - Modify: `KrabEar/core/config.py`
 - Modify: `KrabEar/backend/settings_validator.py`
 
-- [ ] **Step 1: Searcher** — в `__init__` рядом с `_model_loaded`: `self._last_used_ts: float = 0.0`; в `_get_model` ПЕРВОЙ строкой под `_model_lock`: `self._last_used_ts = time.monotonic()` (импорт `time` уже есть — сверить). Новые методы рядом с `reset_model_error`:
+- [ ] **Step 1: Searcher** — в `__init__` рядом с `_model_loaded`: `self._last_used_ts: float = 0.0`; в `_get_model` ПЕРВОЙ строкой под `_model_lock`: `self._last_used_ts = time.monotonic()`; 🔴 добавить `import time` в шапку файла (сейчас его там нет). Новые методы рядом с `reset_model_error`:
 
 ```python
     def unload_model(self) -> bool:
@@ -207,7 +207,7 @@ PYTHONPATH=$(pwd)/KrabEar python3 -m pytest KrabEar/tests/test_semantic_idle_unl
 
 ```python
         def _semantic_idle_sec() -> float:
-            searcher = self._semantic_searcher
+            searcher = getattr(self, "_semantic_searcher", None)
             if searcher is None or not searcher.model_loaded:
                 raise RuntimeError("semantic searcher model not loaded")
             return max(0.0, time.monotonic() - float(searcher._last_used_ts))
@@ -217,12 +217,12 @@ PYTHONPATH=$(pwd)/KrabEar python3 -m pytest KrabEar/tests/test_semantic_idle_unl
             return bool(searcher is not None and searcher.unload_if_idle(threshold))
 ```
 
-и в конструктор `MemoryConductor(...)` добавить `semantic_unload_if_idle=_semantic_unload_if_idle, semantic_idle_sec_fn=_semantic_idle_sec,`. ⚠️ `self._semantic_searcher` создаётся ПОЗЖЕ (`:1394`) — проверить порядок в `__init__`: если замыкание читает атрибут при вызове (а не при создании) — порядок не важен; проверь и запиши в отчёт.
+и в конструктор `MemoryConductor(...)` `:724` добавить `semantic_unload_if_idle=_semantic_unload_if_idle, semantic_idle_sec_fn=_semantic_idle_sec,`. ⚠️ Порядок в `__init__`: `MemoryConductor(...)` `:724` → `.start()` `:736` → `self._semantic_searcher` создаётся ПОЗЖЕ (`:1396`), поэтому первый(е) тик(и) молча пропустят шаг (`getattr` + `except`); зафиксировать в отчёте.
 
 - [ ] **Step 4: Конфиг** — `core/config.py` рядом с semantic-ключами (~:1128):
   `"semantic_search_idle_unload_sec": 1800.0,  # F5/D5: idle-выгрузка модели семантики; 0 = выключено` + `settings_validator.py` рядом с conductor-порогами (`:105-114`): `"semantic_search_idle_unload_sec": (0.0, 86400.0, 1800.0, float),`.
 - [ ] **Step 5: GREEN** — команда Task 1 Step 3. Ожидаемо: все зелёные.
-- [ ] **Step 6: Регрессия** — `test_semantic_search.py`, `test_semantic_search_wave31.py`, `test_memory_conductor_2026_08_19.py`, `test_memory_conductor_wiring_2026_08_19.py`, `test_conductor_shadow_since_persists_2026_09_04.py` (+ `rg -ln 'MemoryConductor\(' KrabEar/tests/` — все файлы). Ожидаемо: зелёные без правок; любая правка старых тестов — стоп координатору.
+- [ ] **Step 6: Регрессия** — `test_semantic_search.py`, `test_semantic_search_wave31.py`, `test_memory_conductor_2026_08_19.py`, `test_memory_conductor_wiring_2026_08_19.py`, `test_conductor_shadow_since_persists_2026_09_04.py`, `test_brain_holdoff_c1_2026_09_05.py`, `test_memory_distress_sensor_2026_09_05.py` (+ `rg -ln 'MemoryConductor\(' KrabEar/tests/` — все файлы). Ожидаемо: зелёные без правок; любая правка старых тестов — стоп координатору.
 - [ ] **Step 7: Гейт** — flake8 (max-120) изменённых; `scripts/pre_merge_py312_check.sh` на новый тест; `make audit-all`.
 
 ### Task 3: Коммит и PR
@@ -236,11 +236,11 @@ PYTHONPATH=$(pwd)/KrabEar python3 -m pytest KrabEar/tests/test_semantic_idle_unl
 
 - Тесты searcher + кондуктор RED→GREEN; регрессия зелёная; audit-all зелёный.
 - `_RESIDENTS`/`enforce_for`/существующие шаги/brain-политика не тронуты (проверить диффом); новых IPC нет; `semantic_search_enabled` остаётся False.
-- `unload_model` не трогает индекс и не выставляет `_model_error`; `unload_if_idle` при `threshold<=0` — не выгружает.
-- В отчёт: порядок `_semantic_searcher` vs кондуктор-конструктор; классификация RED по каждому тесту.
+- `unload_model` не трогает индекс и не выставляет `_model_error`; `unload_if_idle` при `threshold<=0` — не выгружает; в отчёт — порядок init (start раньше searcher, первые тики молча пропускают) и классификация RED по каждому тесту.
 
 ## Вне scope (записать в отчёт, не чинить)
 
 - Включение `semantic_search_enabled` / построение индекса (~2-3 мин) — владелец отдельно.
 - Смена модели/флага на лету (снапшот на старте) — существующий дизайн, не трогать.
 - Watchdog-выгрузка при давлении (mlx.oom и т.п.) — не делать: семантика не GPU-резидент.
+- Остаточные риски (зафиксировать в отчёте, не чинить): (а) сбой `_save_locked` глушится warn → RAM может быть богаче диска, и ре-подъём после unload перечитает диск; (б) `index_all(force=True)` очищает RAM до encode, а `_load_from_disk` не читает `_purge_epoch` — конкурентный ре-подъём во время долгой перестройки может перезаписать RAM диском. Оба окна — до ~3 мин (полная перестройка) против порога 30 мин; риск фринж, вне этой карточки.
