@@ -67,7 +67,9 @@ def _failed_result() -> LLMRewriteResult:
 
 
 def _no_audit():
-    return patch("backend.llm_rewriter.get_privacy_audit_logger", create=False)
+    # get_privacy_audit_logger импортируется ВНУТРИ _maybe_apply_cloud_summarize
+    # (from ... import в момент вызова) — патчить нужно место ОПРЕДЕЛЕНИЯ:
+    return patch("backend.privacy_audit.get_privacy_audit_logger")
 
 
 class CloudSpendCapTests(unittest.TestCase):
@@ -144,7 +146,7 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-🔴 Честная классификация RED (зафиксировать в отчёте, не маскировать): тесты `test_cap_exceeded_blocks_cloud` и `test_cap_allows_and_records_spend` — настоящий RED (FAIL: до имплементации облако вызывается / файла нет); `test_no_spend_dir/privacy/empty_catalog` — guard (зелёные до и после); `test_spend_helpers_roundtrip` — ERROR до имплементации (имён нет), GREEN после. Перед прогоном сверить: `_maybe_apply_cloud_summarize` — метод инстанса (не static), `LLMRewriteResult` импортируется из `backend.llm_rewriter`, `get_privacy_audit_logger` патчится по пути `backend.llm_rewriter.get_privacy_audit_logger` (импорт внутри метода — сверить, что имя резолвится оттуда; если нет — править ТЕСТ под код).
+🔴 Честная классификация RED (зафиксировать в отчёте, не маскировать): `test_cap_exceeded_blocks_cloud` — FAIL (облако вызывается); `test_cap_allows_and_records_spend` — FAIL на строке spend-файла (облако вызывается, файла нет); `test_no_spend_dir_blocks_cloud` — FAIL (RED-критерий №3: pre-impl `_spend_dir` не читается → облако вызывается); `test_spend_helpers_roundtrip` — ERROR (имён нет); `test_privacy_mode_blocks_before_cap` и `test_empty_catalog_never_reaches_cap` — guard (зелёные до и после). Итого ожидаемо: **3 FAIL + 1 ERROR + 2 guard-pass**. Перед прогоном сверить: `_maybe_apply_cloud_summarize` — метод инстанса (не static), `LLMRewriteResult` импортируется из `backend.llm_rewriter`.
 
 - [ ] **Step 2: RED**:
 
@@ -164,7 +166,7 @@ PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_cloud_spend_cap.py
 
 - [ ] **Step 1: Хелперы в `cloud_rewriter.py`** — `current_month_key() -> "%Y-%m" (локальное время, комментарий)`; `read_spend_usd(data_dir, month) -> float` (нет файла/битый → 0.0, не исключение); `add_spend_usd(data_dir, month, usd)` (tmp+`os.replace`, округление до 6 знаков; в файл — ТОЛЬКО цифры); `estimate_summarize_usd(in_text, out_text, provider, model) -> float` (токены ≈ `len/4`, тарифная таблица `{(provider, model): (in_usd_per_1m, out_usd_per_1m)}`: gpt-4o-mini известный тариф + комментарий «приближённо, сверить по первому счёту владельца»; unknown → консервативный blended $1.00/1M (cap срабатывает раньше — fail-closed); custom/self-hosted → 0.0 + комментарий); `spend_allowed(cap, spent, est) -> bool` (`cap <= 0 → False`; иначе `spent + est <= cap`).
 - [ ] **Step 2: Шов в `_maybe_apply_cloud_summarize`** — ПОСЛЕ существующих `allowed` + `is_studio_unavailable` проверок, ДО вызова `cloud_summarize`: прочитать cap (`getter("cloud_spend_cap_usd_monthly", 1.0)`, float(); исключение getter → считать 0 = блок); `spend_dir = self._spend_dir` (None → `return result` — fail-closed); `est = estimate...`; `if not spend_allowed: return result`; ПОСЛЕ успеха (`cloud_text` непустой, перед audit-блоком): `add_spend_usd(spend_dir, current_month_key(), estimate(..., cloud_text))` в try/except-pass (учёт не должен ронять результат). 🔴 Вторая облачная ветка запрещена — только эти вставки, сигнатуры и остальная логика метода не меняются.
-- [ ] **Step 3: Проводка** — `service.py` рядом с `:552`: `self._llm_rewriter._spend_dir = store.data_dir` (проверить `store` в скоупе — строки :474+; если имя другое — взять то же выражение, что у соседних сервисов). Больше нигде `LLMRewriter(` в проде нет (проверено `rg`) — других мест проводки не требуется.
+- [ ] **Step 3: Проводка** — `service.py` ВНУТРИ существующего `if self._llm_rewriter is not None:` рядом с `:552` (`_init_llm_rewriter` может вернуть None — голое присваивание без гарда упадёт): `self._llm_rewriter._spend_dir = store.data_dir` (проверить `store` в скоупе — строки :474+; если имя другое — взять то же выражение, что у соседних сервисов). Больше нигде `LLMRewriter(` в проде нет (проверено `rg`) — других мест проводки не требуется.
 - [ ] **Step 4: Существующие тесты** — ЕДИНСТВЕННОЕ разрешённое изменение старых файлов: в `test_studio_unavailable_cloud_fallback_2026_09_05.py` (и siblings, если тоже упадут — перечислить в отчёте) добавить в setUp `_spend_dir = tmp_path` + cap высокий (`cloud_spend_cap_usd_monthly: 100.0` в их settings-фикстуру). Любая другая правка старых тестов — **стоп** координатору.
 - [ ] **Step 5: GREEN** — команда Task 1 Step 2. Ожидаемо: 6 passed.
 - [ ] **Step 6: Регрессия** — `test_studio_unavailable_cloud_fallback_2026_09_05.py`, `test_llm_rewriter_summarize*.py`, `test_cloud_rewriter*.py` (найти точные имена `rg -ln`). Ожидаемо: зелёные.
