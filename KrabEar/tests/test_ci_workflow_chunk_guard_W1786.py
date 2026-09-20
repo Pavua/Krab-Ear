@@ -21,6 +21,14 @@ WORKFLOWS = (
 )
 
 
+def _uses_owned_process_group_cleanup(source: str) -> bool:
+    """True, если cleanup ограничен process group конкретного pytest-запуска."""
+    return (
+        "scripts/run_isolated_pytest.py" in source
+        and "pkill -9 -f" not in source
+    )
+
+
 def test_guarded_workflows_all_exist() -> None:
     """🔴 Файлы гарда обязаны существовать.
 
@@ -30,6 +38,20 @@ def test_guarded_workflows_all_exist() -> None:
     """
     missing = [p.name for p in WORKFLOWS if not p.exists()]
     assert not missing, f"гард указывает на несуществующие workflow: {missing}"
+
+
+@pytest.mark.parametrize("workflow_path", WORKFLOWS, ids=lambda path: path.name)
+def test_chunk_cleanup_is_limited_to_its_own_process_group(
+    workflow_path: Path,
+) -> None:
+    """A1: CI не должен выбирать чужой GigaAM/MLX worker по общему имени."""
+    assert _uses_owned_process_group_cleanup(workflow_path.read_text(encoding="utf-8"))
+
+
+def test_process_group_cleanup_detector_rejects_global_name_match() -> None:
+    """Сам guard обязан краснеть для прежнего глобального cleanup-паттерна."""
+    legacy = 'reap() { pkill -9 -f "gigaam_worker"; }\npython -m pytest'
+    assert not _uses_owned_process_group_cleanup(legacy)
 
 
 @pytest.mark.parametrize("workflow_path", WORKFLOWS, ids=lambda path: path.name)
