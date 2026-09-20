@@ -51,8 +51,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SHARED_ENV_PATH = Path.home() / "Antigravity_AGENTS" / "Краб" / ".env"
 
 DEFAULT_STATE_PATH = Path.home() / ".openclaw" / "krab_runtime_state" / "krab_ear_runner_health_streak.json"
-DEFAULT_REPO = "Pavua/Krab-Ear"
-DEFAULT_RUNNER_NAME = "krab-ear-m4max"
+DEFAULT_REPO = "Pavua/Krab-CI-Control"
+DEFAULT_RUNNER_NAME = "krab-ear-m4max-private"
 OFFLINE_STREAK_THRESHOLD = 3  # consecutive checks offline -> actionable
 HTTP_TIMEOUT = float(os.environ.get("RUNNER_HEALTH_TIMEOUT_SEC", "15"))
 
@@ -171,6 +171,18 @@ def evaluate(status: str | None, state: dict) -> tuple[dict, bool, bool]:
     return new_state, actionable, False
 
 
+def runner_offline_message(runner_name: str, status: str, streak: int) -> str:
+    """Даёт оператору только private-controller recovery path."""
+    return (
+        f"🔴 Private Krab Ear device-gate runner '{runner_name}' offline "
+        f"{streak} проверок подряд (status={status}). "
+        "Private Pavua/Krab-CI-Control exact-SHA MLX/Metal gate не выполнится, "
+        "пока controller не восстановлен — "
+        "проверь: cd ~/actions-runner-krab-ci-control && ./svc.sh status. "
+        "Не регистрируй runner обратно в public repo."
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     _load_dotenv()
     global TG_TOKEN, TG_CHAT
@@ -212,13 +224,7 @@ def main(argv: list[str] | None = None) -> int:
     if recovered and send_fn:
         send_fn(f"✅ Krab Ear self-hosted CI runner '{args.runner_name}' снова online.")
     if actionable and send_fn:
-        send_fn(
-            f"🔴 Krab Ear self-hosted CI runner '{args.runner_name}' offline "
-            f"{new_state['streak']} проверок подряд (status={status or 'not_found'}). "
-            f"macOS CI (ci.yml python+swift, krabear-ci.yml swift-build) не выполнится, "
-            f"пока раннер не поднимется — проверь: "
-            f"cd ~/actions-runner-krab-ear && ./svc.sh status"
-        )
+        send_fn(runner_offline_message(args.runner_name, status or "not_found", new_state["streak"]))
 
     if not args.dry_run:
         atomic_write_json(state_path, new_state)

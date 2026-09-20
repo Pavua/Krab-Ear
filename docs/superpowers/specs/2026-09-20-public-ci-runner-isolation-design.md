@@ -148,21 +148,24 @@ Private device workflow использует одну concurrency group
 
 ## Runner cutover
 
-Cutover выполняется отдельным тихим окном после зелёного public PR:
+Cutover выполняется отдельным тихим окном после зелёного public PR, но до его
+merge: self-mutable PR guard не является execution boundary, пока runner
+физически доступен public repo.
 
 1. Создать private controller и проверить workflow/static contracts без
-   запуска heavy MLX.
-2. Смержить public PR; подтвердить hosted CI exact merge SHA.
-3. Убедиться, что Ear runner idle и нет активной пользовательской записи.
-4. Остановить только service `actions.runner.Pavua-Krab-Ear...`, не Ear
+   запуска heavy MLX; hosted public PR checks должны быть terminal green.
+2. Убедиться, что Ear runner idle и нет активной пользовательской записи.
+3. Остановить только service `actions.runner.Pavua-Krab-Ear...`, не Ear
    backend/agent и не соседние runners.
-5. Удалить регистрацию runner из public `Pavua/Krab-Ear`.
-6. Зарегистрировать отдельный runner instance/directory только в private
+4. Удалить регистрацию runner из public `Pavua/Krab-Ear` и через API
+   подтвердить `total_count == 0` до любого public merge.
+5. Зарегистрировать отдельный runner instance/directory только в private
    `Pavua/Krab-CI-Control`; токен не печатать и не хранить в Git.
-7. Через API подтвердить `total_count == 0` для public Ear и online private
-   runner с ожидаемыми labels.
-8. Запустить private gate на exact default-branch SHA и получить terminal
+6. Через API подтвердить online private runner с ожидаемыми labels.
+7. Запустить private gate на exact default-branch SHA и получить terminal
    evidence.
+8. Только после private acceptance и отдельного owner-approved решения
+   смержить public hosted-only PR; подтвердить post-merge CI exact SHA.
 
 Нельзя держать public и private listener одновременно активными как способ
 «мягкого перехода»: это оставляет старую поверхность атаки и допускает два

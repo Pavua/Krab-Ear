@@ -676,52 +676,28 @@ R2 «владение записью» (конец июля): `RecordingStopCoor
 записи» + тост `audio.recording_rescued`). Оставшаяся дельта (проверено разведкой 2026-08-11):
 сохранённый стоп НЕ дострелится сам после реконнекта — только по ручному нажатию.
 
-### Self-hosted CI runner (macOS ARM64, с 2026-07-24)
+### CI runner boundary (public Ear / private device gate)
 
-GitHub billing на аккаунте Pavua: account-wide $0 budget + Stop usage=Yes на Actions;
-macOS-минуты биллятся ×10 против Linux — главный драйвер исчерпания бюджета при частых
-push/PR. Self-hosted минуты не тарифицируются вовсе. Поднят раннер **`krab-ear-m4max`**
-(user-level launchd, БЕЗ sudo, каталог `~/actions-runner-krab-ear`) — отдельный от
-сиблинг-раннера `krab-m4max` (Krab-openclaw, другой репо, не путать/не трогать).
+**Исторический контекст 2026-07-24:** repository-level runner `krab-ear-m4max`
+в public Ear был введён при account-wide billing block. Это больше не является
+приемлемой execution boundary: returning contributor может изменить workflow и
+исполнить код на личном Mac, а fork approval не создаёт sandbox.
 
-**Охват**: только 3 джоба, физически способных выполниться на macOS self-hosted —
-`ci.yml` `python` + `swift`, `krabear-ci.yml` `swift-build` (`runs-on: [self-hosted,
-macOS, ARM64]`). Все `ubuntu-latest` джобы НЕ тронуты (self-hosted раннер — macOS, Linux
-на нём физически не выполнится). `release.yml` **осознанно оставлен** на `macos-latest`
-(GitHub-hosted) — публичный релизный пайплайн (codesign/Sparkle-sign/GitHub Release) это
-отдельная категория риска от частой CI, минуты жжёт редко (только на теги), решение
-предполагает отдельное явное «да» для конверсии.
+**Текущая policy после cutover:** public PR/push jobs используют только standard
+GitHub-hosted labels из allowlist (`ubuntu-*`, `macos-*`, `windows-*`), без
+списков меток, expressions или job-level reusable workflows. `public-runner-
+isolation-guard` — regression lint; он не заменяет physical boundary.
 
-**🔴 Публичный репо + self-hosted = требует проверки перед КАЖДЫМ изменением scope.**
-Krab-Ear публичный (isPrivate=false), self-hosted раннер выполняет код push/PR с правами
-локального юзера владельца. Settings → Actions → General → «Fork pull request workflows»
-= **«Require approval for first-time contributors»** (проверено вживую владельцем через
-скриншот 2026-07-24, НЕ через API — GitHub REST API не отдаёт эту настройку чистым полем).
-Это значит: PR от нового форка НЕ запустится автоматически, требует ручного «Approve and
-run» от мейнтейнера (шанс посмотреть diff, особенно `.github/workflows/`, ПЕРЕД approve).
-После первого смерженного PR контрибьютора его будущие PR идут без approval — это
-осознанный trade-off самого механизма GitHub, не наша дыра. **Правило: расширение scope
-self-hosted на новые джобы/триггеры — заново сверять этот гейт, не полагаться на память.**
+Device-specific MLX/Metal gate живёт только в private `Pavua/Krab-CI-Control`
+и принимает trusted exact SHA из `codex/krab-ear-v2`. До merge public hosted
+workflow public runner обязан быть остановлен, удалён из `Pavua/Krab-Ear`, а
+API должен вернуть `total_count=0`. Нельзя снова регистрировать runner в public
+repo как recovery shortcut.
 
-**🔴 `actions/setup-python@v5` ломается на self-hosted macOS**: безусловно перезаписывает
-`AGENT_TOOLSDIRECTORY` на `/Users/runner/hostedtoolcache` (не уважает `RUNNER_TOOL_CACHE`
-раннера) → `mkdir` падает `EACCES` (`/Users/runner` не существует на этой машине, создать
-без sudo нельзя). Обход (уже применён в `ci.yml`): изолированный venv поверх системного
-`python3.12` (Homebrew) + `PATH` через `$GITHUB_PATH`, БЕЗ `actions/setup-python` вообще.
-`krabear-ci.yml`'s `backend-tests` job (ubuntu-hosted, НЕ self-hosted) продолжает
-использовать `setup-python@v5` штатно — баг только на macOS self-hosted, Linux не задет.
-
-**Health-check**: `scripts/krab_ear_runner_health_check.py` + LaunchAgent
-`ai.krab.ear.runner-health` (15 мин, streak-гейт offline≥3 — не единичное наблюдение,
-тот же hysteresis-паттерн, что krab_metrics_drift_check.py/сиблинг для Krab-openclaw —
-оба вне этого репо, упомянуты без backtick намеренно).
-GITHUB_TOKEN + Telegram-креды — общие владельца, читаются из `.env` главного Krab (не
-дублируются per-repo). Живой смок 2026-07-24: первый push после установки — `status=online`,
-джобы реально ушли на раннер (`busy=true` во время прогона, не queued).
-
-**Операционное**: `cd ~/actions-runner-krab-ear && ./svc.sh status|stop|start`. Регистрация
-токена одноразовая (`gh api -X POST repos/Pavua/Krab-Ear/actions/runners/registration-token`,
-живёт 1 час) — уже использована, для повторной регистрации/deregister нужен новый токен.
+Private runner recovery: `scripts/krab_ear_runner_health_check.py` +
+`ai.krab.ear.runner-health` проверяют `krab-ear-m4max-private`; source path
+будущего service — `~/actions-runner-krab-ci-control`. GITHUB_TOKEN и Telegram
+credentials остаются общими владельца и не копируются в controller repository.
 
 ### Пульт наблюдения (02.09.2026)
 

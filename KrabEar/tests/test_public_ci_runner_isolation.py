@@ -51,6 +51,21 @@ class WorkflowPolicyFixturesTest(unittest.TestCase):
 
         self.assertEqual(sum("self_hosted_runner" in value for value in self.reasons()), 2)
 
+    def test_rejects_runner_labels_that_match_self_hosted_without_literal(self) -> None:
+        self.write("ci.yml", "on: pull_request\njobs:\n  test:\n    runs-on: [macOS, ARM64]\n")
+
+        self.assertIn("runner_label_not_allowlisted", self.reasons())
+
+    def test_rejects_custom_runner_label(self) -> None:
+        self.write("ci.yml", "on: pull_request\njobs:\n  test:\n    runs-on: krab-ear-device\n")
+
+        self.assertIn("runner_label_not_allowlisted", self.reasons())
+
+    def test_rejects_job_level_reusable_workflow(self) -> None:
+        self.write("ci.yml", "on: pull_request\njobs:\n  reuse:\n    uses: ./.github/workflows/reusable.yml\n")
+
+        self.assertIn("reusable_workflow_forbidden", self.reasons())
+
     def test_rejects_dynamic_runs_on(self) -> None:
         self.write("ci.yml", "on: pull_request\njobs:\n  test:\n    runs-on: ${{ matrix.runner }}\n")
 

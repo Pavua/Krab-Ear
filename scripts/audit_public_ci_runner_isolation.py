@@ -21,6 +21,22 @@ data = YAML.safe_load(
 )
 STDOUT.write(JSON.generate(data))
 '''
+_ALLOWED_HOSTED_RUNNERS = frozenset(
+    {
+        "ubuntu-latest",
+        "ubuntu-22.04",
+        "ubuntu-24.04",
+        "macos-latest",
+        "macos-14",
+        "macos-15",
+        "macos-15-intel",
+        "macos-26",
+        "macos-26-intel",
+        "windows-latest",
+        "windows-2022",
+        "windows-2025",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -78,13 +94,19 @@ def _trigger_names(value: Any) -> set[str]:
     return set()
 
 
-def _runs_on_tokens(value: Any) -> tuple[set[str], bool]:
-    if isinstance(value, str):
-        return {value}, "${{" in value
-    if isinstance(value, list) and all(isinstance(item, str) for item in value):
-        tokens = set(value)
-        return tokens, any("${{" in token for token in tokens)
-    return set(), True
+def _runner_selector_reason(value: Any) -> str | None:
+    """Разрешает только явный GitHub-hosted scalar, не label-combination."""
+    if isinstance(value, list):
+        if any(isinstance(item, str) and item.casefold() == "self-hosted" for item in value):
+            return "self_hosted_runner"
+        return "runner_label_not_allowlisted"
+    if not isinstance(value, str) or "${{" in value:
+        return "dynamic_runs_on"
+    if value.casefold() == "self-hosted":
+        return "self_hosted_runner"
+    if value not in _ALLOWED_HOSTED_RUNNERS:
+        return "runner_label_not_allowlisted"
+    return None
 
 
 def audit_workflow(path: Path, root: Path) -> list[Finding]:
@@ -107,13 +129,12 @@ def audit_workflow(path: Path, root: Path) -> list[Finding]:
         if not isinstance(job, dict):
             findings.append(Finding(relative, str(job_name), "job_not_mapping"))
             continue
-        if "uses" in job and "runs-on" not in job:
+        if "uses" in job:
+            findings.append(Finding(relative, str(job_name), "reusable_workflow_forbidden"))
             continue
-        tokens, dynamic = _runs_on_tokens(job.get("runs-on"))
-        if dynamic:
-            findings.append(Finding(relative, str(job_name), "dynamic_runs_on"))
-        if any(token.casefold() == "self-hosted" for token in tokens):
-            findings.append(Finding(relative, str(job_name), "self_hosted_runner"))
+        reason = _runner_selector_reason(job.get("runs-on"))
+        if reason:
+            findings.append(Finding(relative, str(job_name), reason))
     return findings
 
 

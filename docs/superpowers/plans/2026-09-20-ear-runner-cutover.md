@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Начинать только после зелёных public isolation PR и private-controller security review.
+- Начинать только после зелёных public isolation PR и private-controller security review, но до public merge.
 - Merge каждого repo требует отдельного owner-approved решения.
 - Не останавливать `ai.krab.ear.backend`, `ai.krab.ear.rest`, `ai.krab.ear.agent`, Krab или Voice Gateway.
 - Не печатать tokens, `.credentials`, `.runner`, environment или полный argv.
@@ -55,7 +55,8 @@ gh api repos/Pavua/Krab-Ear/actions/runners \
 ```
 
 Stop unless exactly one matching PR exists, public checks are terminal green,
-the controller is private, and its exact SHA passed security review.
+the controller is private, and its exact SHA passed security review. Public PR
+must remain unmerged until private acceptance completes.
 
 - [ ] **Step 2: Check idle/resource state twice**
 
@@ -250,6 +251,12 @@ gh api repos/Pavua/Krab-CI-Control/actions/runners \
 ```
 
 Expected: public `0`; private online and idle.
+
+- [ ] **Step 6: Merge public hosted-only PR after private acceptance**
+
+Only after an explicit owner-approved merge decision, merge the rebased public
+PR and verify post-merge hosted CI on its exact merge SHA. Runner registration
+must already be absent from public Ear; do not use merge as a reason to restore it.
 
 ---
 
