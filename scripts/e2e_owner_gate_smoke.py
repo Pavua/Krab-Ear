@@ -104,6 +104,8 @@ def _spawn_backend(data_dir: Path, log_path: Path) -> subprocess.Popen:
     # Privacy-журнал тоже уводим в throwaway: логгер home-rooted по умолчанию и
     # иначе пишет в боевой compliance-файл вопреки обещанию шапки скрипта.
     env["KRAB_EAR_PRIVACY_AUDIT_DIR"] = str(data_dir)
+    # Одноразовый backend не должен постить временный bridge-токен в прод-REST.
+    env["KRAB_EAR_EVENT_BRIDGE_ENABLED"] = "0"
     log_fh = log_path.open("wb")
     return subprocess.Popen(
         [str(VENV_PY), str(KRAB_EAR / "main.py"), "--data-dir", str(data_dir)],
