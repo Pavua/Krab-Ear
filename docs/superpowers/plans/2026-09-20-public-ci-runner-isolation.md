@@ -69,7 +69,7 @@ def test_invalid_yaml_fails_closed(self) -> None:
 
 ```bash
 "/Users/pablito/Antigravity_AGENTS/Krab Ear/.venv_krab_ear/bin/python" \
-  -m pytest KrabEar/tests/test_public_ci_runner_isolation.py -q
+  -m pytest --noconftest KrabEar/tests/test_public_ci_runner_isolation.py -q
 ```
 
 Expected: failure because `scripts/audit_public_ci_runner_isolation.py` is absent.
@@ -106,7 +106,7 @@ Handle Psych's YAML-1.1 boolean conversion by treating top-level key `true` as `
 
 ```bash
 "/Users/pablito/Antigravity_AGENTS/Krab Ear/.venv_krab_ear/bin/python" \
-  -m pytest KrabEar/tests/test_public_ci_runner_isolation.py -q
+  -m pytest --noconftest KrabEar/tests/test_public_ci_runner_isolation.py -q
 "/Users/pablito/Antigravity_AGENTS/Krab Ear/.venv_krab_ear/bin/python" -m py_compile \
   scripts/audit_public_ci_runner_isolation.py KrabEar/tests/test_public_ci_runner_isolation.py
 ruby -e 'require "yaml"; puts Psych::VERSION'
@@ -148,7 +148,7 @@ class RepositoryPolicyTest(unittest.TestCase):
 
 ```bash
 "/Users/pablito/Antigravity_AGENTS/Krab Ear/.venv_krab_ear/bin/python" \
-  -m pytest \
+  -m pytest --noconftest \
   KrabEar/tests/test_public_ci_runner_isolation.py::RepositoryPolicyTest::test_public_repository_has_no_self_hosted_jobs \
   -q
 ```
@@ -173,7 +173,7 @@ Keep checkout, SPM cache, release build, build-tests and filtered tests unchange
 
 - [ ] **Step 4: Remove public MLX workflow**
 
-Delete `.github/workflows/mlx-nightly.yml` after the private-controller branch contains its reviewed replacement. This deletion must not merge first.
+Stage deletion of `.github/workflows/mlx-nightly.yml` in this isolated branch so the public policy test proves the final state. Do not push or merge this deletion until the private-controller branch contains its reviewed replacement.
 
 - [ ] **Step 5: Add a fast guard job to both PR workflows**
 
@@ -196,12 +196,11 @@ visible check is intentional because either workflow can later change independen
 
 ```bash
 "/Users/pablito/Antigravity_AGENTS/Krab Ear/.venv_krab_ear/bin/python" \
-  -m pytest KrabEar/tests/test_public_ci_runner_isolation.py -q
+  -m pytest --noconftest KrabEar/tests/test_public_ci_runner_isolation.py -q
 python3 scripts/audit_public_ci_runner_isolation.py --fail-on-found
-for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
-  [ -f "$workflow" ] || continue
+while IFS= read -r -d '' workflow; do
   ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: false)' "$workflow"
-done
+done < <(find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -print0)
 ```
 
 - [ ] **Step 7: Commit**
@@ -287,7 +286,7 @@ If ancestry fails, transplant the commits into a fresh worktree instead of mergi
 
 ```bash
 "/Users/pablito/Antigravity_AGENTS/Krab Ear/.venv_krab_ear/bin/python" \
-  -m pytest KrabEar/tests/test_public_ci_runner_isolation.py -q
+  -m pytest --noconftest KrabEar/tests/test_public_ci_runner_isolation.py -q
 python3 scripts/audit_public_ci_runner_isolation.py --fail-on-found
 plutil -lint scripts/launchagents/ai.krab.ear.runner-health.plist
 python3 scripts/verify_claude_md.py
