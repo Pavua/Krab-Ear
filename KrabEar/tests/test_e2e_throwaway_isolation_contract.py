@@ -16,7 +16,11 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 SHELL_LAUNCHER = REPO / "scripts" / "run_e2e_smokes.command"
-PY_LAUNCHER = REPO / "scripts" / "e2e_recommended_setup_smoke.py"
+PY_LAUNCHERS = (
+    REPO / "scripts" / "e2e_recommended_setup_smoke.py",
+    REPO / "scripts" / "e2e_owner_gate_smoke.py",
+    REPO / "scripts" / "e2e_rescue_smoke.py",
+)
 
 # переменная -> допустимые значения (None = любое непустое)
 ISOLATION_ENV: dict[str, set[str] | None] = {
@@ -37,34 +41,65 @@ def shell_exports_before_spawn(text: str) -> dict[str, str]:
     return found
 
 
-def python_env_before_popen(source: str) -> dict[str, str]:
-    """`env["VAR"] = <значение>` в функции, строками РАНЬШЕ subprocess.Popen."""
+def python_envs_before_backend_popen(source: str) -> list[tuple[str, dict[str, str]]]:
+    """Env каждой функции у каждого собственного backend Popen до его старта."""
     tree = ast.parse(source)
-    popen_lines = [
-        node.lineno
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "Popen"
-    ]
-    if not popen_lines:
-        raise AssertionError("в Python-запускателе не найден subprocess.Popen")
-    first_popen = min(popen_lines)
-    found: dict[str, str] = {}
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign) or node.lineno >= first_popen:
+    launches: list[tuple[str, dict[str, str]]] = []
+    for function in ast.walk(tree):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        for target in node.targets:
-            if (
-                isinstance(target, ast.Subscript)
-                and isinstance(target.value, ast.Name)
-                and target.value.id == "env"
-                and isinstance(target.slice, ast.Constant)
-                and isinstance(target.slice.value, str)
+        scope_nodes = list(_nodes_in_current_scope(function))
+        assignments = sorted(
+            (node for node in scope_nodes if isinstance(node, ast.Assign)),
+            key=lambda node: node.lineno,
+        )
+        calls = sorted(
+            (node for node in scope_nodes if isinstance(node, ast.Call)),
+            key=lambda node: node.lineno,
+        )
+        for call in calls:
+            if not (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "Popen"
+                and call.args
+                and "main.py" in ast.unparse(call.args[0])
             ):
-                value = node.value.value if isinstance(node.value, ast.Constant) else "<expr>"
-                found[target.slice.value] = str(value)
-    return found
+                continue
+            env_name = None
+            for keyword in call.keywords:
+                if keyword.arg == "env" and isinstance(keyword.value, ast.Name):
+                    env_name = keyword.value.id
+                    break
+            found: dict[str, str] = {}
+            if env_name is not None:
+                for node in assignments:
+                    if node.lineno >= call.lineno:
+                        continue
+                    for target in node.targets:
+                        if not (
+                            isinstance(target, ast.Subscript)
+                            and isinstance(target.value, ast.Name)
+                            and target.value.id == env_name
+                            and isinstance(target.slice, ast.Constant)
+                            and isinstance(target.slice.value, str)
+                        ):
+                            continue
+                        value = node.value.value if isinstance(node.value, ast.Constant) else "<expr>"
+                        found[target.slice.value] = str(value)
+            launches.append((function.name, found))
+    if not launches:
+        raise AssertionError("в Python-запускателе не найден backend subprocess.Popen")
+    return launches
+
+
+def _nodes_in_current_scope(node: ast.AST):
+    """Обходит scope, не приписывая родителю код вложенной функции/класса."""
+    yield node
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        yield from _nodes_in_current_scope(child)
 
 
 def missing_isolation(found: dict[str, str]) -> list[str]:
@@ -82,9 +117,13 @@ class ThrowawayLauncherIsolationTests(unittest.TestCase):
         found = shell_exports_before_spawn(SHELL_LAUNCHER.read_text(encoding="utf-8"))
         self.assertEqual(missing_isolation(found), [])
 
-    def test_python_launcher_isolates_backend(self) -> None:
-        found = python_env_before_popen(PY_LAUNCHER.read_text(encoding="utf-8"))
-        self.assertEqual(missing_isolation(found), [])
+    def test_python_launchers_isolate_backend(self) -> None:
+        for launcher in PY_LAUNCHERS:
+            with self.subTest(launcher=launcher.name):
+                spawns = python_envs_before_backend_popen(
+                    launcher.read_text(encoding="utf-8"))
+                self.assertEqual(len(spawns), 1)
+                self.assertEqual(missing_isolation(spawns[0][1]), [])
 
 
 class DetectorSelfTest(unittest.TestCase):
@@ -108,11 +147,66 @@ class DetectorSelfTest(unittest.TestCase):
             "    env = {}\n"
             '    env["KRAB_EAR_PRIVACY_AUDIT_DIR"] = "/tmp/x"\n'
             '    env["KRAB_EAR_EVENT_BRIDGE_ENABLED"] = "1"\n'
-            '    subprocess.Popen(["python"], env=env)\n'
+            '    subprocess.Popen(["KrabEar/main.py"], env=env)\n'
         )
         self.assertEqual(
-            missing_isolation(python_env_before_popen(source)),
+            missing_isolation(python_envs_before_backend_popen(source)[0][1]),
             ["KRAB_EAR_EVENT_BRIDGE_ENABLED='1': ожидалось одно из ['0', 'False', 'false']"],
+        )
+
+    def test_python_detector_scopes_each_backend_spawn_and_its_env(self) -> None:
+        source = (
+            "import subprocess\n"
+            "def unrelated():\n"
+            "    env = {}\n"
+            '    env["KRAB_EAR_EVENT_BRIDGE_ENABLED"] = "0"\n'
+            "def first():\n"
+            "    env = {}\n"
+            '    env["KRAB_EAR_PRIVACY_AUDIT_DIR"] = "/tmp/x"\n'
+            '    env["KRAB_EAR_EVENT_BRIDGE_ENABLED"] = "0"\n'
+            '    subprocess.Popen(["KrabEar/main.py"], env=env)\n'
+            "def second():\n"
+            "    env2 = {}\n"
+            '    env2["KRAB_EAR_PRIVACY_AUDIT_DIR"] = "/tmp/y"\n'
+            '    subprocess.Popen(["KrabEar/main.py"], env=env2)\n'
+            "def no_env():\n"
+            '    subprocess.Popen(["KrabEar/main.py"])\n'
+            "def nested_false_green():\n"
+            "    env = {}\n"
+            '    env["KRAB_EAR_PRIVACY_AUDIT_DIR"] = "/tmp/z"\n'
+            "    def unused():\n"
+            '        env["KRAB_EAR_EVENT_BRIDGE_ENABLED"] = "0"\n'
+            '    subprocess.Popen(["KrabEar/main.py"], env=env)\n'
+            "def outer_with_nested_spawn():\n"
+            "    def inner():\n"
+            "        env3 = {}\n"
+            '        env3["KRAB_EAR_PRIVACY_AUDIT_DIR"] = "/tmp/q"\n'
+            '        subprocess.Popen(["KrabEar/main.py"], env=env3)\n'
+        )
+        spawns = python_envs_before_backend_popen(source)
+        self.assertEqual(
+            [name for name, _ in spawns],
+            ["first", "second", "no_env", "nested_false_green", "inner"],
+        )
+        self.assertEqual(missing_isolation(spawns[0][1]), [])
+        self.assertEqual(
+            missing_isolation(spawns[1][1]),
+            ["KRAB_EAR_EVENT_BRIDGE_ENABLED: не выставлена до старта backend"],
+        )
+        self.assertEqual(
+            missing_isolation(spawns[2][1]),
+            [
+                "KRAB_EAR_PRIVACY_AUDIT_DIR: не выставлена до старта backend",
+                "KRAB_EAR_EVENT_BRIDGE_ENABLED: не выставлена до старта backend",
+            ],
+        )
+        self.assertEqual(
+            missing_isolation(spawns[3][1]),
+            ["KRAB_EAR_EVENT_BRIDGE_ENABLED: не выставлена до старта backend"],
+        )
+        self.assertEqual(
+            missing_isolation(spawns[4][1]),
+            ["KRAB_EAR_EVENT_BRIDGE_ENABLED: не выставлена до старта backend"],
         )
 
 
