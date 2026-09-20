@@ -82,6 +82,13 @@ Source-проверки не доказывают CI другого SHA или �
 - Worktree: `git worktree add .worktrees/<slug> -b feat/<slug> origin/codex/krab-ear-v2`
 - Main Krab Q2 (:8080 purpose slots, RIS/SergeyRG) — **не Ear**: [`ANTIGRAVITY_HANDOFF/2026-09-05-krab-8080-model-routing.md`](../ANTIGRAVITY_HANDOFF/2026-09-05-krab-8080-model-routing.md)
 
+## Подготовленная CI-изоляция (ещё не operational cutover)
+
+- Public PR/push Swift CI переводится на standard `macos-latest` и остаётся disposable.
+- MLX/Metal gate переезжает в private `Pavua/Krab-CI-Control` и принимает только exact SHA доверенной колеи.
+- До отдельного quiet-window cutover runner `krab-ear-m4max` ещё зарегистрирован в public repo; не объявлять `total_count=0` раньше API read-back.
+- Hosted macOS не заменяет MLX проверку: VM не даёт эквивалентного Metal-пути. Красный private MLX gate — отдельный сигнал расследования, не подмена PR CI.
+
 ## Задеплоено 2026-09-05
 
 - **#1997** — сенсор памяти: `vm_pressure` + swap у потолка; SIGKILL воркера → `stt.worker_killed`, не `mlx.oom`. **`memory_conductor_enforce*` всё ещё OFF** (shadow только логирует).
