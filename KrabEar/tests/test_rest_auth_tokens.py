@@ -196,6 +196,7 @@ def _ensure_rest_server_stubs():
             ),
         })},
         "backend.state_store": {"StateStore": type("FSS", (), {
+            "data_dir": Path(tempfile.gettempdir()),
             "__init__": lambda s, *a, **k: None,
             "is_idempotent": lambda s, *a, **k: False,
             "load_vocabulary": lambda s: [],
