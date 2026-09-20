@@ -65,3 +65,14 @@ class WorkflowPolicyFixturesTest(unittest.TestCase):
         self.write("ci.yml", "on: [pull_request\njobs: {}\n")
 
         self.assertTrue(any(value.startswith("yaml_parse_error:") for value in self.reasons()))
+
+
+class RepositoryPolicyTest(unittest.TestCase):
+    """Public workflow tree не должен получить доступ к личному runner-у."""
+
+    def test_public_repository_has_no_self_hosted_jobs(self) -> None:
+        mod = load_module()
+
+        findings = mod.audit_tree(REPO_ROOT)
+
+        self.assertEqual([finding.describe() for finding in findings], [])
