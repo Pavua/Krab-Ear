@@ -31,7 +31,7 @@ jobs:
     name: Swift agent build
     needs: changes
     if: ${{ needs.changes.outputs.swift == 'true' }}
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-latest
 
     steps:
       - name: Checkout
@@ -60,6 +60,16 @@ jobs:
           cd native/KrabEarAgent
           swift build --build-tests
           swift test --skip-build --filter "WiringTests|SourceContract"
+
+  public-runner-isolation-guard:
+    name: Public runner isolation guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify standard Ruby YAML parser exists
+        run: ruby -e 'require "yaml"; puts Psych::VERSION'
+      - name: Reject self-hosted jobs and pull_request_target
+        run: python3 scripts/audit_public_ci_runner_isolation.py --fail-on-found
 
   verify-claude-md:
     name: CLAUDE.md drift check

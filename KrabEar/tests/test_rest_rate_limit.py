@@ -11,6 +11,7 @@ import sys
 import os
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------
@@ -82,6 +83,8 @@ _orig_StateStore = getattr(_state_store_mod, "StateStore", None)
 
 
 class _FakeStateStore:
+    data_dir = Path("/tmp")
+
     def __init__(self, *a, **kw):
         pass
 

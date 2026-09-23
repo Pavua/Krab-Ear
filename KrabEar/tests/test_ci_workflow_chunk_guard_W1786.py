@@ -1,7 +1,7 @@
 """Проверяет, что chunked-CI не пропускает Python-тесты на системном Bash macOS.
 
-Этот тест защищает оба GitHub Actions workflow: macOS использует Bash 3.2 без
-``mapfile``, а пустой список тестов обязан завершать gate ошибкой, а не ложным успехом.
+Этот тест защищает public Ubuntu chunked workflow: пустой список тестов обязан
+завершать gate ошибкой, а не ложным успехом.
 """
 
 import re
@@ -11,14 +11,10 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-# 🔴 mlx-nightly.yml, а не ci.yml: 01.09.2026 chunked-джоб уехал из ci.yml в
-# отдельный ночной workflow (self-hosted раннер терял TLS-соединение с GitHub
-# под нагрузкой и ронял PR без логов). Гард следует за КОДОМ, а не за именем
-# файла — иначе он молча перестал бы что-либо проверять, оставаясь зелёным.
-WORKFLOWS = (
-    REPO_ROOT / ".github" / "workflows" / "mlx-nightly.yml",
-    REPO_ROOT / ".github" / "workflows" / "krabear-ci.yml",
-)
+# MLX/Metal gate теперь private и тестируется в Pavua/Krab-CI-Control. В public
+# Ear остаётся один chunked Python workflow; перечисление удалённого файла
+# превращало осмысленный security migration в ложный CI failure.
+WORKFLOWS = (REPO_ROOT / ".github" / "workflows" / "krabear-ci.yml",)
 
 
 def _uses_owned_process_group_cleanup(source: str) -> bool:
@@ -86,24 +82,3 @@ def test_chunked_python_gate_fails_when_no_tests_are_found(workflow_path: Path) 
     assert "::error::" in guard, "гард обязан явно сообщать об ошибке"
     assert "exit 1" in guard
     assert guard_start < source.index("Total test files: $n")
-
-
-def test_macos_gate_has_a_portable_timeout_command() -> None:
-    """macOS-job явно устанавливает и fail-closed выбирает GNU timeout."""
-
-    source = WORKFLOWS[0].read_text(encoding="utf-8")
-
-    assert "brew install ffmpeg coreutils" in source
-    assert "command -v timeout" in source
-    assert "command -v gtimeout" in source
-    # 🔴 Проверяем НАЛИЧИЕ таймаута у обоих прогонов (чанк и per-file), а не
-    # конкретные секунды: бюджет — настраиваемая величина, и его правка не
-    # должна ронять гейт. 30.08.2026 per-file подняли 150→600с (три прогона
-    # подряд гибли по таймауту на файлах, честно идущих 16-37с), и тест упал не
-    # на пропаже защиты, а на изменении числа. Исчезновение самого timeout —
-    # то, ради чего гейт существует, — по-прежнему ловится.
-    timed_runs = re.findall(r'"\$timeout_cmd" (\d+) python -m pytest', source)
-    assert len(timed_runs) >= 2, (
-        f"ожидались таймаут-обёртки для чанка и per-file прогона, найдено: {timed_runs}"
-    )
-    assert all(int(sec) > 0 for sec in timed_runs), f"нулевой бюджет: {timed_runs}"
