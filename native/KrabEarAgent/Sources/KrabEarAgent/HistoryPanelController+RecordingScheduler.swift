@@ -182,14 +182,28 @@ extension HistoryPanelController {
             v.removeFromSuperview()
         }
 
-        let subhead = isCD ? NSTextField(labelWithString: "ОЖИДАЮЩИЕ ЗАПИСИ") : makeSubhead("ОЖИДАЮЩИЕ ЗАПИСИ")
+        let subhead: NSTextField
         if isCD {
-            subhead.font = KrabEarTheme.Typography.captionMedium
+            subhead = NSTextField(labelWithString: "ОЖИДАЮЩИЕ ЗАПИСИ")
+            subhead.font = KrabEarTheme.Typography.caption
             subhead.textColor = KrabEarTheme.Colors.textSecondary
+            subhead.isEditable = false
             subhead.isBordered = false
             subhead.drawsBackground = false
+            // Трекинг прописных букв согласно токенам типографики Claude Design
+            let attrs: [NSAttributedString.Key: Any] = [
+                .kern: 0.5 as NSNumber,
+                .font: KrabEarTheme.Typography.caption,
+                .foregroundColor: KrabEarTheme.Colors.textSecondary,
+            ]
+            subhead.attributedStringValue = NSAttributedString(string: "ОЖИДАЮЩИЕ ЗАПИСИ", attributes: attrs)
+        } else {
+            subhead = makeSubhead("ОЖИДАЮЩИЕ ЗАПИСИ")
         }
         contentStack.addArrangedSubview(subhead)
+        if isCD {
+            contentStack.setCustomSpacing(KrabEarTheme.Metrics.tight, after: subhead)
+        }
 
         let pendingSchedules = schedules.filter { ($0["status"] as? String) == "pending" }
 
@@ -197,6 +211,9 @@ extension HistoryPanelController {
             let empty = NSTextField(labelWithString: "Нет запланированных записей")
             empty.font = KrabEarTheme.Typography.caption
             empty.textColor = KrabEarTheme.Colors.textSecondary
+            empty.isEditable = false
+            empty.isBordered = false
+            empty.drawsBackground = false
             contentStack.addArrangedSubview(empty)
         } else {
             // Сортировка по времени (строки ISO8601 сортируются лексикографически корректно)
@@ -240,14 +257,23 @@ extension HistoryPanelController {
     @MainActor
     private func makeScheduleRow(id: String, displayTime: String, durationMin: Int, label: String, isCD: Bool = false) -> NSView {
         let timeLabel = NSTextField(labelWithString: "\(displayTime) (\(durationMin) мин)")
-        timeLabel.font = isCD ? KrabEarTheme.Typography.body : NSFont.systemFont(ofSize: 13, weight: .medium)
+        // В режиме Claude Design используем размер Typography.body с начертанием medium
+        timeLabel.font = isCD
+            ? .systemFont(ofSize: KrabEarTheme.Typography.body.pointSize, weight: .medium)
+            : NSFont.systemFont(ofSize: 13, weight: .medium)
         timeLabel.textColor = KrabEarTheme.Colors.textPrimary
+        timeLabel.isEditable = false
+        timeLabel.isBordered = false
+        timeLabel.drawsBackground = false
         timeLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
         let descLabel = NSTextField(labelWithString: label.isEmpty ? "Без названия" : label)
         descLabel.font = KrabEarTheme.Typography.caption
         descLabel.textColor = KrabEarTheme.Colors.textSecondary
         descLabel.lineBreakMode = .byTruncatingTail
+        descLabel.isEditable = false
+        descLabel.isBordered = false
+        descLabel.drawsBackground = false
         descLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         
         let textStack = NSStackView(views: [timeLabel, descLabel])
@@ -258,9 +284,12 @@ extension HistoryPanelController {
 
         let cancelButton: NSButton
         if isCD {
-            cancelButton = ThemeSecondaryButton(title: "Отменить", target: self, action: #selector(onCancelScheduledRecording(_:)))
-            cancelButton.identifier = NSUserInterfaceItemIdentifier(id)
-            cancelButton.setContentHuggingPriority(.required, for: .horizontal)
+            let btn = ThemeSecondaryButton(title: "Отменить", target: self, action: #selector(onCancelScheduledRecording(_:)))
+            btn.controlSize = .small
+            btn.font = KrabEarTheme.Typography.captionMedium
+            btn.identifier = NSUserInterfaceItemIdentifier(id)
+            btn.setContentHuggingPriority(.required, for: .horizontal)
+            cancelButton = btn
         } else {
             cancelButton = NSButton(title: "Отменить", target: self, action: #selector(onCancelScheduledRecording(_:)))
             cancelButton.bezelStyle = .inline
@@ -273,7 +302,9 @@ extension HistoryPanelController {
         row.distribution = .fill
         row.alignment = .centerY
         row.spacing = KrabEarTheme.Metrics.standard
-        row.edgeInsets = NSEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
+        row.edgeInsets = isCD
+            ? NSEdgeInsets(top: 5, left: 0, bottom: 5, right: 0)
+            : NSEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
         return row
     }
 
