@@ -118,6 +118,13 @@ class OpenWakeWordAdapter:
         # зависшее чтение 13-07 оба оставляют его stale). Всё под self._lock.
         self._last_chunk_ts: float | None = None
         self._listen_started_ts: float | None = None
+        # Диагностика A3: отдельно различаем открытие stream, read() без
+        # ответа и успешно прочитанные (в том числе полностью нулевые) кадры.
+        # Ни аудиоданные, ни имя устройства здесь не сохраняются.
+        self._stream_opened: bool = False
+        self._last_read_started_ts: float | None = None
+        self._last_read_completed_ts: float | None = None
+        self._last_any_chunk_ts: float | None = None
         # Поколение сессии: отвисший «зомби»-тред старой сессии видит чужое
         # поколение и выходит, не публикуя heartbeat/детекции чужой сессии
         # (один bounded read до проверки — принятый остаточный риск, спека §6).
@@ -319,6 +326,10 @@ class OpenWakeWordAdapter:
             # watchdog по свежему чанку или start() новой сессии.
             self._last_chunk_ts = None
             self._listen_started_ts = None
+            self._stream_opened = False
+            self._last_read_started_ts = None
+            self._last_read_completed_ts = None
+            self._last_any_chunk_ts = None
             # 🔴 Симметрично _last_detection: остановка ПО ПРОСЬБЕ владельца
             # (privacy, выключение фичи, пауза поллера) закрывает и лестницу
             # голодания — иначе застывший флаг эскалирует выключённую фичу.
@@ -410,12 +421,16 @@ class OpenWakeWordAdapter:
         with self._lock:
             return self._active_threshold
 
-    def heartbeat(self) -> dict[str, float | None]:
+    def heartbeat(self) -> dict[str, Any]:
         """Снапшот heartbeat'а для watchdog/status (спека 2026-07-15)."""
         with self._lock:
             return {
                 "last_chunk_ts": self._last_chunk_ts,
                 "listen_started_ts": self._listen_started_ts,
+                "stream_opened": self._stream_opened,
+                "last_read_started_ts": self._last_read_started_ts,
+                "last_read_completed_ts": self._last_read_completed_ts,
+                "last_any_chunk_ts": self._last_any_chunk_ts,
                 # Голодание — НЕ «чистая пауза»: watchdog обязан различать
                 # (иначе эпизод сбрасывается и wedged недостижим).
                 "starvation_active": self._starved_since is not None,
@@ -451,6 +466,10 @@ class OpenWakeWordAdapter:
         (start()) или в тестах без конкуренции."""
         self._last_chunk_ts = None
         self._listen_started_ts = None
+        self._stream_opened = False
+        self._last_read_started_ts = None
+        self._last_read_completed_ts = None
+        self._last_any_chunk_ts = None
         self._wedged = False
 
     def _record_detection(self, model_name: str, score: float) -> None:
@@ -790,6 +809,10 @@ class OpenWakeWordAdapter:
             self._last_detection = None
             self._last_chunk_ts = None
             self._listen_started_ts = None
+            self._stream_opened = False
+            self._last_read_started_ts = None
+            self._last_read_completed_ts = None
+            self._last_any_chunk_ts = None
 
     def _listen_loop(
         self,
@@ -864,6 +887,8 @@ class OpenWakeWordAdapter:
                 with self._lock:
                     self._consecutive_stream_failures = 0
                     self._stream_failure_cooldown_until = 0.0
+                    if self._generation == generation:
+                        self._stream_opened = True
                 while not self._stop_event.is_set():
                     if self._privacy_blocked():
                         logger.info(
@@ -905,7 +930,17 @@ class OpenWakeWordAdapter:
                                 exc, streak,
                             )
                             break
-                    audio_chunk, _ = stream.read(chunk_size)
+                    with self._lock:
+                        if self._generation == generation:
+                            self._last_read_started_ts = time.monotonic()
+                    try:
+                        audio_chunk, _ = stream.read(chunk_size)
+                    finally:
+                        # read() может бросить, а __exit__ ниже — зависнуть:
+                        # это НЕ pending read. Штампуем оба исхода до close.
+                        with self._lock:
+                            if self._generation == generation:
+                                self._last_read_completed_ts = time.monotonic()
                     # openwakeword.Model.predict() требует numpy.ndarray —
                     # НЕ list (см. KRAB-EAR-BACKEND-1C/1D). sounddevice уже
                     # возвращает ndarray, поэтому просто flatten() без .tolist().
@@ -920,8 +955,9 @@ class OpenWakeWordAdapter:
                             )
                             break
                         oww = self._oww
+                        self._last_any_chunk_ts = time.monotonic()
                         if flat.any():
-                            self._last_chunk_ts = time.monotonic()
+                            self._last_chunk_ts = self._last_any_chunk_ts
 
                     if oww is None:
                         break
