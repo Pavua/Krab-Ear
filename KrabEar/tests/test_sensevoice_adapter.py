@@ -367,6 +367,7 @@ class TestSenseVoiceLoadModelThreadSafe(unittest.TestCase):
         import threading
         import numpy as np
         from unittest.mock import MagicMock, patch
+        import core.pipeline.stt_sensevoice as sensevoice_module
 
         call_count = {"n": 0}
         load_event = threading.Event()   # lets threads pile up before model appears
@@ -377,6 +378,7 @@ class TestSenseVoiceLoadModelThreadSafe(unittest.TestCase):
         mock_model_instance.generate.return_value = [{"text": "hello", "key": "0"}]
 
         original_load = SenseVoiceSTTAdapter._load_model
+        original_import = sensevoice_module._try_import_funasr
 
         def slow_load(self_adapter: Any, AutoModel: Any) -> None:
             call_count["n"] += 1
@@ -392,22 +394,23 @@ class TestSenseVoiceLoadModelThreadSafe(unittest.TestCase):
         def worker() -> None:
             try:
                 audio = np.zeros(1600, dtype=np.float32)
-                with patch("core.pipeline.stt_sensevoice._try_import_funasr",
-                           return_value=mock_auto_model_cls):
-                    with patch.object(SenseVoiceSTTAdapter, "_load_model", slow_load):
-                        adapter.transcribe(audio)
+                adapter.transcribe(audio)
             except Exception as e:
                 errors.append(e)
 
-        threads = [threading.Thread(target=worker) for _ in range(4)]
-        for t in threads:
-            t.start()
-        # Let all threads enter transcribe() before the model finishes loading
-        import time
-        time.sleep(0.05)
-        load_event.set()   # unblock the slow load
-        for t in threads:
-            t.join(timeout=5.0)
+        with patch(
+            "core.pipeline.stt_sensevoice._try_import_funasr",
+            return_value=mock_auto_model_cls,
+        ), patch.object(SenseVoiceSTTAdapter, "_load_model", slow_load):
+            threads = [threading.Thread(target=worker) for _ in range(4)]
+            for t in threads:
+                t.start()
+            # Let all threads enter transcribe() before the model finishes loading
+            import time
+            time.sleep(0.05)
+            load_event.set()   # unblock the slow load
+            for t in threads:
+                t.join(timeout=5.0)
 
         # No exceptions
         self.assertEqual(errors, [], f"Threads raised: {errors}")
@@ -417,6 +420,8 @@ class TestSenseVoiceLoadModelThreadSafe(unittest.TestCase):
             1,
             f"_load_model was called {call_count['n']} times; expected 1 (thread-safety failure)",
         )
+        self.assertIs(sensevoice_module._try_import_funasr, original_import)
+        self.assertIs(SenseVoiceSTTAdapter._load_model, original_load)
 
 
 if __name__ == "__main__":
