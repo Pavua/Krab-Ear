@@ -44,6 +44,7 @@ from contracts.stt_events import SttFailed, SttFinal, SttPartial
 from contracts.translation_events import TranslationCompleted, TranslationFailed
 from backend.event_bus import bus as event_bus
 from backend.models import DEFAULT_SETTINGS
+from backend.state_store import HistoryEncryptionUnavailable
 from core.silence_constants import SILENCE_THRESHOLD_DB_PRESERVE_WHISPER
 from core.utils import TextUtils
 
@@ -3470,20 +3471,28 @@ class RecordingCoreService:
                     speaker_turns=tp.get("speaker_turns") if isinstance(tp.get("speaker_turns"), list) else None,
                     privacy_mode=_privacy_mode,
                 )
-            except OSError as _disk_exc:
+            except (OSError, HistoryEncryptionUnavailable) as _disk_exc:
                 import errno as _errno
+                _is_crypto = isinstance(_disk_exc, HistoryEncryptionUnavailable)
                 _is_enospc = getattr(_disk_exc, "errno", None) == _errno.ENOSPC
-                _reason = "disk_full" if _is_enospc else "io_error"
-                logger.error("Phase E: disk error %s: %s", _reason, _disk_exc)
+                _reason = (
+                    "encryption_unavailable" if _is_crypto
+                    else "disk_full" if _is_enospc else "io_error"
+                )
+                logger.error("Phase E: history persist error %s: %s", _reason, _disk_exc)
                 try:
                     from backend.error_codes import ERROR_REGISTRY
                     from datetime import datetime, timezone
-                    _e = ERROR_REGISTRY.get("history.write_fail", {})
+                    _error_code = "history.encrypt_fail" if _is_crypto else "history.write_fail"
+                    _e = ERROR_REGISTRY.get(_error_code, {})
                     event_bus.emit("krab_error", {
                         "severity": _e.get("severity", "critical"), "component": "history",
-                        "code": "history.write_fail",
+                        "code": _error_code,
                         "message_user": _e.get("user_msg_ru", "Не удалось сохранить"),
-                        "message_debug": f"OSError errno={getattr(_disk_exc, 'errno', None)}: {_disk_exc}",
+                        "message_debug": (
+                            "history encryption unavailable" if _is_crypto
+                            else f"OSError errno={getattr(_disk_exc, 'errno', None)}: {_disk_exc}"
+                        ),
                         "ts": datetime.now(timezone.utc).isoformat(),
                         "context": {"reason": _reason},
                     })

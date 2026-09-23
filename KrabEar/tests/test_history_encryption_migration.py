@@ -44,11 +44,15 @@ def _make_fake_crypto():
 
 
 def _inject_crypto(store, crypto=None):
-    """Подменяет крипто-инстанс в StateStore (обход Keychain)."""
+    """Включает шифрование в temp-профиле и подменяет Keychain crypto."""
     if crypto is None:
         crypto = _make_fake_crypto()
+    store.save_settings({"history_encryption_enabled": True})
     store._history_crypto_initialized = True
     store._history_crypto_instance = crypto
+    # migrate_history_encryption() deliberately reinitializes crypto; bypass
+    # Keychain in this temp-profile fixture without weakening production code.
+    store._get_history_crypto = lambda: crypto
     return crypto
 
 
@@ -142,7 +146,8 @@ class TestMigrateEncryptsPlaintext(unittest.TestCase):
         # Уже зашифрованная строка
         _write_enc1_line(self.data_dir / "history.ndjson", _make_item_payload("id1", "Секрет"), crypto)
 
-        result = store.migrate_history_encryption()
+        with patch("backend.history_crypto.build_history_crypto", return_value=crypto):
+            result = store.migrate_history_encryption()
 
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["encrypted"], 0, "Уже зашифрованные строки не должны перешифровываться")
@@ -156,7 +161,8 @@ class TestMigrateEncryptsPlaintext(unittest.TestCase):
         _write_enc1_line(self.data_dir / "history.ndjson", _make_item_payload("id1", "Зашифрован"), crypto)
         _write_plaintext_line(self.data_dir / "history.ndjson", _make_item_payload("id2", "Открытый"))
 
-        result = store.migrate_history_encryption()
+        with patch("backend.history_crypto.build_history_crypto", return_value=crypto):
+            result = store.migrate_history_encryption()
 
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["encrypted"], 1)
@@ -251,7 +257,8 @@ class TestMigrateIdempotent(unittest.TestCase):
         # Второй запуск — тот же store (crypto уже инициализирован)
         store2 = _make_store(self.data_dir)
         _inject_crypto(store2, crypto)
-        r2 = store2.migrate_history_encryption()
+        with patch("backend.history_crypto.build_history_crypto", return_value=crypto):
+            r2 = store2.migrate_history_encryption()
         self.assertTrue(r2["ok"])
         self.assertEqual(r2["encrypted"], 0, "Повторная миграция не должна шифровать уже зашифрованные строки")
         self.assertEqual(r2["already_encrypted"], 1)
@@ -290,6 +297,30 @@ class TestMigrateBakCreated(unittest.TestCase):
             bak_path.exists(),
             ".bak с plaintext-данными НЕ должен оставаться на диске после успешного шифрования",
         )
+
+    def test_backup_wipe_failure_does_not_report_migration_success(self):
+        """Шифрованный live не оправдывает ok=True с открытым backup рядом."""
+        store = _make_store(self.data_dir)
+        _inject_crypto(store)
+        marker = "SYNTHETIC_A5_BACKUP"
+        _write_plaintext_line(
+            self.data_dir / "history.ndjson", _make_item_payload("a5", marker)
+        )
+        bak_path = self.data_dir / "history.ndjson.bak"
+        original_open = Path.open
+
+        def deny_backup_wipe(path, mode="r", *args, **kwargs):
+            if path == bak_path and mode == "r+b":
+                raise PermissionError("synthetic backup wipe denial")
+            return original_open(path, mode, *args, **kwargs)
+
+        with patch.object(Path, "open", deny_backup_wipe):
+            result = store.migrate_history_encryption()
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "backup_cleanup_failed")
+        self.assertTrue((self.data_dir / "history.ndjson").read_text().startswith("ENC1:"))
+        self.assertIn(marker, bak_path.read_text())
 
     def test_bak_plaintext_not_readable_after_migration(self):
         """Ни один файл .bak не должен содержать plaintext транскрипт после миграции."""
@@ -407,7 +438,8 @@ class TestMigrateBakPlaintextNotSurviving(unittest.TestCase):
         # Second run
         store2 = _make_store(self.data_dir)
         _inject_crypto(store2, crypto)
-        r2 = store2.migrate_history_encryption()
+        with patch("backend.history_crypto.build_history_crypto", return_value=crypto):
+            r2 = store2.migrate_history_encryption()
         self.assertTrue(r2["ok"])
         self.assertEqual(r2["encrypted"], 0, "Второй запуск не должен шифровать уже зашифрованные строки")
         self.assertEqual(r2["already_encrypted"], 1)
@@ -479,6 +511,64 @@ class TestMigrateAtomicOnError(unittest.TestCase):
         # tmp-файл удалён (cleanup)
         tmp_path = self.data_dir / "history.ndjson.migration_tmp"
         self.assertFalse(tmp_path.exists(), "tmp-файл должен быть удалён при ошибке")
+        self.assertFalse(
+            (self.data_dir / "history.ndjson.bak").exists(),
+            "Если live не заменён, дублирующий plaintext backup не должен оставаться",
+        )
+
+    def test_partial_backup_copy_failure_removes_plaintext_duplicate(self):
+        """Ошибка copy2 после копирования не оставляет лишний plaintext .bak."""
+        import shutil
+
+        store = _make_store(self.data_dir)
+        _inject_crypto(store)
+        history_path = self.data_dir / "history.ndjson"
+        _write_plaintext_line(history_path, _make_item_payload("a5", "SYNTHETIC_COPY_FAIL"))
+        original = history_path.read_bytes()
+        copy2_original = shutil.copy2
+
+        def copy_then_fail(src, dst):
+            copy2_original(src, dst)
+            raise OSError("synthetic copystat failure")
+
+        with patch("shutil.copy2", side_effect=copy_then_fail):
+            with self.assertRaises(OSError):
+                store.migrate_history_encryption()
+
+        self.assertEqual(history_path.read_bytes(), original)
+        self.assertFalse((self.data_dir / "history.ndjson.bak").exists())
+
+
+class TestMigrateSettingsRace(unittest.TestCase):
+    """OFF во время получения ключа не может оставить ENC1 при выключенном флаге."""
+
+    def test_disable_during_key_lookup_aborts_before_file_replace(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            settings_path = data_dir / "settings.json"
+            settings_path.write_text(
+                json.dumps({"history_encryption_enabled": True}), encoding="utf-8"
+            )
+            history_path = data_dir / "history.ndjson"
+            _write_plaintext_line(history_path, _make_item_payload("a5", "SYNTHETIC_RACE"))
+            original = history_path.read_bytes()
+            store = _make_store(data_dir)
+            crypto = _make_fake_crypto()
+
+            def disable_then_return_crypto():
+                _make_store(data_dir).save_settings({"history_encryption_enabled": False})
+                return crypto
+
+            with patch(
+                "backend.history_crypto.build_history_crypto",
+                side_effect=disable_then_return_crypto,
+            ):
+                result = store.migrate_history_encryption()
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["reason"], "encryption_disabled")
+            self.assertEqual(history_path.read_bytes(), original)
+            self.assertFalse((data_dir / "history.ndjson.bak").exists())
 
 
 class TestMigrateCryptoUnavailable(unittest.TestCase):
@@ -494,6 +584,7 @@ class TestMigrateCryptoUnavailable(unittest.TestCase):
 
     def test_returns_encryption_unavailable_when_crypto_none(self):
         store = _make_store(self.data_dir)
+        store.save_settings({"history_encryption_enabled": True})
         store._history_crypto_initialized = True
         store._history_crypto_instance = None
 
