@@ -264,7 +264,7 @@ class TestAppendNdjsonFsyncCalledOnEveryWrite(unittest.TestCase):
             n_writes = 5
             with patch("backend.state_store.os.fsync") as mock_fsync:
                 for i in range(n_writes):
-                    StateStore._append_ndjson(target, {"seq": i, "data": f"value-{i}"})
+                    store._append_ndjson(target, {"seq": i, "data": f"value-{i}"})
 
             self.assertEqual(
                 mock_fsync.call_count, n_writes,

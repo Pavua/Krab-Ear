@@ -237,11 +237,20 @@ class StateStore:
                 logger.exception("StateStore: ошибка инициализации history crypto")
         return self._history_crypto_instance
 
+    def _history_journal_paths(self) -> tuple[Path, ...]:
+        """Явный набор журналов, подчинённых политике шифрования истории."""
+        return (
+            self.history_path, self.tombstones_path, self.purged_ids_path,
+            self.status_path, self.tags_path, self.favorites_path,
+            self.annotations_path, self.text_updates_path, self.action_items_path,
+            self.calendar_links_path,
+        )
+
     def _has_encrypted_history_unlocked(self) -> bool:
-        """Есть ли ENC1-строки в основном журнале или tombstones."""
+        """Есть ли ENC1-строки в любом из управляемых журналов истории."""
         from backend.history_crypto import SENTINEL
 
-        for path in (self.history_path, self.tombstones_path):
+        for path in self._history_journal_paths():
             if not path.exists():
                 continue
             with path.open("r", encoding="utf-8") as fh:
@@ -1863,7 +1872,7 @@ class StateStore:
         result: dict[str, dict] = {}
         if not self.text_updates_path.exists():
             return result
-        for payload in self._read_ndjson_unlocked(self.text_updates_path):
+        for payload in self._read_history_ndjson_unlocked(self.text_updates_path):
             item_id = str(payload.get("id", "")).strip()
             if item_id and "text" in payload:
                 result[item_id] = {
@@ -1877,7 +1886,7 @@ class StateStore:
         result: dict[str, dict] = {}
         if not self.action_items_path.exists():
             return result
-        for payload in self._read_ndjson_unlocked(self.action_items_path):
+        for payload in self._read_history_ndjson_unlocked(self.action_items_path):
             item_id = str(payload.get("id", "")).strip()
             if item_id:
                 result[item_id] = {
@@ -1940,7 +1949,7 @@ class StateStore:
     def _load_tags_overrides_unlocked(self) -> dict[str, list[str]]:
         """Собирает последние значения tags по id из журнала тегов."""
         result: dict[str, list[str]] = {}
-        for payload in self._read_ndjson_unlocked(self.tags_path):
+        for payload in self._read_history_ndjson_unlocked(self.tags_path):
             item_id = str(payload.get("id", "")).strip()
             tags = payload.get("tags")
             if item_id and isinstance(tags, list):
@@ -1950,7 +1959,7 @@ class StateStore:
     def _load_favorites_overrides_unlocked(self) -> dict[str, bool]:
         """Собирает последние значения favorite по id из журнала избранного."""
         result: dict[str, bool] = {}
-        for payload in self._read_ndjson_unlocked(self.favorites_path):
+        for payload in self._read_history_ndjson_unlocked(self.favorites_path):
             item_id = str(payload.get("id", "")).strip()
             if item_id and "favorite" in payload:
                 result[item_id] = bool(payload["favorite"])
@@ -2008,7 +2017,7 @@ class StateStore:
     def _load_annotation_overrides_unlocked(self) -> dict[str, str]:
         """Собирает последние заметки по id из журнала аннотаций (last-write-wins)."""
         result: dict[str, str] = {}
-        for payload in self._read_ndjson_unlocked(self.annotations_path):
+        for payload in self._read_history_ndjson_unlocked(self.annotations_path):
             item_id = str(payload.get("id", "")).strip()
             note = payload.get("note")
             if item_id and note is not None:
@@ -2025,14 +2034,13 @@ class StateStore:
         не воскрешает записи даже после компактирования.
         """
         deleted: set[str] = set()
-        # tombstones_path использует шифрование (если включено) — читаем через
-        # _read_history_ndjson_unlocked, который применяет _maybe_decrypt.
-        # purged_ids_path никогда не шифруется (только ids, не PII).
+        # Оба deletion-журнала используют тот же codec, что и история:
+        # постоянный реестр ID также подчиняется encryption policy.
         for payload in self._read_history_ndjson_unlocked(self.tombstones_path):
             item_id = str(payload.get("id", "")).strip()
             if item_id:
                 deleted.add(item_id)
-        for payload in self._read_ndjson_unlocked(self.purged_ids_path):
+        for payload in self._read_history_ndjson_unlocked(self.purged_ids_path):
             item_id = str(payload.get("id", "")).strip()
             if item_id:
                 deleted.add(item_id)
@@ -2041,7 +2049,7 @@ class StateStore:
     def _load_status_overrides_unlocked(self) -> dict[str, str]:
         """Собирает последние значения paste_status по id."""
         result: dict[str, str] = {}
-        for payload in self._read_ndjson_unlocked(self.status_path):
+        for payload in self._read_history_ndjson_unlocked(self.status_path):
             item_id = str(payload.get("id", "")).strip()
             status = str(payload.get("paste_status", "")).strip()
             if item_id and status:
@@ -2051,8 +2059,8 @@ class StateStore:
     def _read_history_ndjson_unlocked(self, path: Path) -> Iterator[dict[str, Any]]:
         """Читает NDJSON-файл истории с опциональной расшифровкой строк.
 
-        Используется для history.ndjson и tombstones.ndjson, которые могут
-        содержать смесь открытых и зашифрованных строк.  Plaintext строки
+        Используется для всех управляемых журналов, которые могут содержать
+        смесь legacy открытых и зашифрованных строк. Plaintext строки
         проходят без изменений через ``_maybe_decrypt``.
         """
         if not path.exists():
@@ -2097,13 +2105,11 @@ class StateStore:
         (sink записи), что позволяет тестам патчить _append_ndjson_raw и
         перехватывать ошибки записи на диск.
         """
-        json_str = self._maybe_encrypt(json.dumps(payload, ensure_ascii=False))
-        self._append_ndjson_raw(self.history_path, json_str)
+        self._append_ndjson(self.history_path, payload)
 
     def _append_tombstone_ndjson(self, payload: dict[str, Any]) -> None:
         """Append к tombstones с опциональным шифрованием строки."""
-        json_str = self._maybe_encrypt(json.dumps(payload, ensure_ascii=False))
-        self._append_ndjson_raw(self.tombstones_path, json_str)
+        self._append_ndjson(self.tombstones_path, payload)
 
     @staticmethod
     def _append_ndjson_raw(path: Path, line: str) -> None:
@@ -2113,21 +2119,14 @@ class StateStore:
             fh.flush()
             os.fsync(fh.fileno())
 
-    @staticmethod
-    def _append_ndjson(path: Path, payload: dict[str, Any]) -> None:
-        """Атомарный append JSON-строки с flush/fsync."""
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
-            fh.flush()
-            os.fsync(fh.fileno())
+    def _append_ndjson(self, path: Path, payload: dict[str, Any]) -> None:
+        """Append журнала через общий codec; вызывающий код держит history lock."""
+        line = self._maybe_encrypt(json.dumps(payload, ensure_ascii=False))
+        self._append_ndjson_raw(path, line)
 
-    @staticmethod
-    def _count_ndjson_entries_unlocked(path: Path) -> int:
-        """Подсчитывает количество валидных JSON-строк в журнале."""
-        count = 0
-        for _ in StateStore._read_ndjson_unlocked(path):
-            count += 1
-        return count
+    def _count_ndjson_entries_unlocked(self, path: Path) -> int:
+        """Считает валидные записи managed-журнала, включая ENC1."""
+        return sum(1 for _ in self._read_history_ndjson_unlocked(path))
 
     @staticmethod
     def _safe_file_size(path: Path) -> int:
@@ -2279,7 +2278,7 @@ class StateStore:
     def _load_calendar_overrides_unlocked(self) -> "dict[str, dict[str, Any]]":
         """Собирает последние ссылки на события Calendar (last-write-wins по id)."""
         result: "dict[str, dict[str, Any]]" = {}
-        for payload in self._read_ndjson_unlocked(self.calendar_links_path):
+        for payload in self._read_history_ndjson_unlocked(self.calendar_links_path):
             item_id = str(payload.get("id", "")).strip()
             cal_event = payload.get("calendar_event")
             if item_id and isinstance(cal_event, dict) and cal_event.get("title"):
