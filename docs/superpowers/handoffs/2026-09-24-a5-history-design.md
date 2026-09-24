@@ -20,7 +20,8 @@
   десяти журналов), `c3f947d40b5282311c9520639584e9cdc65c7b96` (compaction и
   durable purged ledger). Docs baseline: `2252beefcc81c3079dd28923723e5b45f87f60c8`.
 - Только synthetic tests во временных профилях; build, IPC, Keychain и runtime
-  probes не запускались. Push/PR/CI/deploy для A5.1 ещё не выполнены.
+  probes не запускались. Локальный gate завершён, следующий шаг — PR/CI;
+  deploy/activation для A5.1 не выполнены.
 
 ## Независимый review и self-review
 
@@ -51,13 +52,19 @@ A5.1, Critical/Important/Minor отсутствуют. Review статическ
   previous A5 13, StateStore 68, fsync 5 passed.
 - Task 2: RED 6 failed / 22 passed → GREEN 28 passed; зависимые файлы отдельно:
   integrity 12, fsync 5, TOCTOU 8, recording_merger 9, previous A5 13 passed.
-- `make audit-all`, `git diff --check` — PASS. Flake8 production и нового теста
-  PASS; в затронутом legacy fsync-test есть два исходных F401 (`json`, `call`),
-  наличие на базе проверено; они не объявляются новым clean lint.
+- `make audit-all`, `git diff --check` — PASS. Flake8 всех трёх изменённых
+  Python-файлов с точными параметрами `.github/workflows/krabear-ci.yml` PASS.
+  Исходные F401 (`json`, `call`) legacy fsync-test разрешены test-only CI ignores;
+  при более строгом запуске без этих ignores предупреждения сохраняются.
 - Python 3.14 dev interpreter, process-group wrapper, timeout 30s/test;
   pytest-timeout работает. Есть исходное optional torchcodec/FFmpeg warning.
-- Python 3.12 без MLX parity ещё НЕ подтверждён. Общие `/private/tmp/py312`
-  и A1/A2 venv содержат MLX; не удалять/не менять их ради проверки.
+- Python 3.12.11 без MLX: 143 PASS, семь файлов отдельными процессами
+  (28+13+68+5+12+8+9), timeout 30s/test. Собственный минимальный venv
+  `/private/tmp/krab-ear-a5-parity.ND2yDn/venv`; `mlx`/`mlx_whisper` отсутствуют
+  по find_spec, conftest и hardware/network guards не обходились. Первичная
+  collection потребовала pydantic-settings: установлен только в этом venv.
+  Это targeted missing-MLX gate, НЕ полный Ubuntu/backend-import gate;
+  полный набор проверяет hosted CI. Общие py312/A1/A2 venv не менялись.
 - Логи: `.superpowers/sdd/2026-09-24-a5-journal-codec/` (ignored worktree data).
 
 ## Ресурсное окно
@@ -74,10 +81,10 @@ swap used 31254.50 MiB. Последующий `memory_pressure -Q` показа
 ## Следующий шаг
 
 1. Повторно сверить exact remote/base, собственный worktree status и ресурсы.
-2. Закрыть missing-MLX Python 3.12 gate в собственном изолированном окружении
-   либо exact hosted CI; не выдавать contaminated local venv за ubuntu parity.
+2. Создать source-only PR и дождаться exact-head hosted CI; локальный
+   targeted missing-MLX Python 3.12 gate уже пройден.
 3. Не читать/копировать живую историю или Keychain для «проверки».
-4. После parity подготовить source-only PR, exact CI перед merge. Whole-diff
+4. Exact CI перед merge. Whole-diff
    review и audit-all уже пройдены. Не пересоздавать `/tmp/py312`
    автоматически: штатный parity script умеет удалять/rebuild shared venv.
 5. После A5.1 остаются A5.2 transaction/backup/derived copies и A5.3 Swift/session
