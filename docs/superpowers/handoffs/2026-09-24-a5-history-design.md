@@ -20,7 +20,7 @@
   десяти журналов), `c3f947d40b5282311c9520639584e9cdc65c7b96` (compaction и
   durable purged ledger). Docs baseline: `2252beefcc81c3079dd28923723e5b45f87f60c8`.
 - Только synthetic tests во временных профилях; build, IPC, Keychain и runtime
-  probes не запускались. Локальный gate завершён, следующий шаг — PR/CI;
+  probes не запускались. A5.1 source-only принят через PR #2050;
   deploy/activation для A5.1 не выполнены.
 
 ## Независимый review и self-review
@@ -93,6 +93,19 @@ A5.1, Critical/Important/Minor отсутствуют. Review статическ
   1 PASS за 25.70s (dev Python3.14, fake recorder; optional torchcodec warning).
   Это не доказывает Ubuntu timing; требуется новый exact-head hosted CI.
 
+### Финальная source-приёмка PR #2050
+
+- PR head `ab8b0c46b8e712982dea77ee029e2bc529dc92b0`: PR `CI`
+  36035325372, PR `krab-ear-ci` 36035325522 и push `krab-ear-ci`
+  36035318589 завершились success; PR был CLEAN перед squash merge.
+- Squash merge 24.09.2026: `56adafb9ac8e9f8a7495450776e13f271a9fc996`.
+  Exact `origin/codex/krab-ear-v2` после merge совпал с этим SHA.
+- Оба post-merge push gate на `56adafb9`: `CI` 36039305276 и
+  `krab-ear-ci` 36039305269 завершились success. Это source/CI acceptance,
+  не свидетельство live deployment или полной защиты данных at rest.
+- Предыдущие failed runs не rerun-ились. Живые история, Keychain, backend,
+  Swift-агент и критичный флаг не затрагивались.
+
 ## Ресурсное окно
 
 Snapshot 24.09.2026 ~15:51 UTC: активен CI главного Краба,
@@ -106,15 +119,14 @@ swap used 31254.50 MiB. Последующий `memory_pressure -Q` показа
 
 ## Следующий шаг
 
-1. Повторно сверить exact remote/base, собственный worktree status и ресурсы.
-2. Создать source-only PR и дождаться exact-head hosted CI; локальный
-   targeted missing-MLX Python 3.12 gate уже пройден.
+1. A5.1 source/CI завершён; не повторять его gate без нового изменения.
+2. Следующий блок — A5.2 transaction/backup/derived copies, затем A5.3
+   Swift/session exports и отдельная live activation. Перед новой работой
+   сверить свежую удалённую базу, worktree и ресурсы.
 3. Не читать/копировать живую историю или Keychain для «проверки».
-4. Exact CI перед merge. Whole-diff
-   review и audit-all уже пройдены. Не пересоздавать `/tmp/py312`
-   автоматически: штатный parity script умеет удалять/rebuild shared venv.
-5. После A5.1 остаются A5.2 transaction/backup/derived copies и A5.3 Swift/session
-   exports. Полный A5, deployment и activation этим source-блоком не закрыты.
+   `history_encryption_enabled` оставить OFF до полного A5 и отдельного решения.
+4. Не пересоздавать `/tmp/py312` автоматически: штатный parity script умеет
+   удалять/rebuild shared venv.
 
 Исполнение экономное: основной агент последовательно; один ограниченный
 независимый reviewer на финальный diff. Sol Medium подходит для A5.1 по готовой
