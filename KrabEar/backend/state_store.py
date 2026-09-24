@@ -1703,23 +1703,50 @@ class StateStore:
         """
         active = self._load_active_items_unlocked()
         _active_ids = {item.id for item in active}
-        _all_ids: set[str] = set()
-        try:
-            for payload in self._read_history_ndjson_unlocked(self.tombstones_path):
-                item_id = str(payload.get("id", "")).strip()
-                if item_id:
-                    _all_ids.add(item_id)
-        except Exception:
-            pass
-        _tombstoned_ids = _all_ids - _active_ids
+        _tombstoned_ids = {
+            str(payload.get("id", "")).strip()
+            for payload in self._read_history_ndjson_unlocked(self.tombstones_path)
+            if str(payload.get("id", "")).strip()
+        } - _active_ids
+        already_purged = {
+            str(payload.get("id", "")).strip()
+            for payload in self._read_history_ndjson_unlocked(self.purged_ids_path)
+        }
+
+        # A5: чтение и crypto preparation завершаются до первой live-записи.
+        # Повреждение sidecar или отказ encrypt не должны менять активные файлы.
+        history_lines = [
+            self._maybe_encrypt(json.dumps(item.to_dict(), ensure_ascii=False))
+            for item in active
+        ]
+        surviving_lines: dict[Path, list[str]] = {}
+        for journal_path in (self.annotations_path, self.calendar_links_path):
+            surviving_lines[journal_path] = [
+                self._maybe_encrypt(json.dumps(payload, ensure_ascii=False)) + "\n"
+                for payload in self._read_history_ndjson_unlocked(journal_path)
+                if str(payload.get("id", "")).strip() in _active_ids
+            ]
+        purged_lines = [
+            self._maybe_encrypt(json.dumps({"id": item_id}, ensure_ascii=False))
+            for item_id in sorted(_tombstoned_ids - already_purged)
+        ]
+
+        # Permanent ledger должен быть durable ДО очистки tombstones.
+        # Не подавляем IO/crypto failure: это разрешило бы resurrection.
+        for line in purged_lines:
+            self._append_ndjson_raw(self.purged_ids_path, line)
+        if _tombstoned_ids:
+            # Предыдущий append мог записать ID, но упасть на fsync. Повтор
+            # синхронизирует ledger даже при отсутствии новых строк.
+            with self.purged_ids_path.open("r+b") as ledger_file:
+                os.fsync(ledger_file.fileno())
 
         tmp_history = self.history_path.with_suffix(".ndjson.tmp")
         _history_replaced = False
 
         try:
             with tmp_history.open("w", encoding="utf-8") as fh:
-                for item in active:
-                    line = self._maybe_encrypt(json.dumps(item.to_dict(), ensure_ascii=False))
+                for line in history_lines:
                     fh.write(line + "\n")
                 fh.flush()
                 # W853 fix 1: fsync before the atomic rename so the data is
@@ -1738,16 +1765,6 @@ class StateStore:
                     tmp_history.unlink()
                 except OSError:
                     pass
-
-        # W1756: перед очисткой tombstones дописываем удалённые id в постоянный
-        # реестр purged_ids_path, чтобы import_history_ndjson мог блокировать
-        # resurrection даже после compact (tombstones_path очищается ниже).
-        if _tombstoned_ids:
-            try:
-                for _pid in _tombstoned_ids:
-                    self._append_ndjson(self.purged_ids_path, {"id": _pid})
-            except Exception:  # noqa: BLE001 — purge-persist failure must not break compact
-                logger.exception("_compact_unlocked: ошибка записи purged_ids_path")
 
         # W853 fix 2: truncate each delta journal atomically via tmp-file +
         # fsync + rename.  A plain write_text("") is not atomic — a crash
@@ -1774,19 +1791,9 @@ class StateStore:
         # calendar_links are last-write-wins by id) rather than a plain
         # truncation: the journals may contain entries for items that are *not*
         # being deleted in this compaction cycle, so we must keep those.
-        for journal_path, key_field in [
-            (self.annotations_path, "id"),
-            (self.calendar_links_path, "id"),
-        ]:
-            surviving_lines: list[str] = []
-            for payload in self._read_ndjson_unlocked(journal_path):
-                entry_id = str(payload.get(key_field, "")).strip()
-                if entry_id and entry_id in _active_ids:
-                    surviving_lines.append(
-                        json.dumps(payload, ensure_ascii=False) + "\n"
-                    )
+        for journal_path, prepared_lines in surviving_lines.items():
             _tmp = journal_path.with_suffix(".tmp")
-            _tmp.write_text("".join(surviving_lines), encoding="utf-8")
+            _tmp.write_text("".join(prepared_lines), encoding="utf-8")
             with _tmp.open("r+", encoding="utf-8") as _fh:
                 _fh.flush()
                 os.fsync(_fh.fileno())

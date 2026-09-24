@@ -1,6 +1,8 @@
 """A5: синтетическая проверка шифрования всех журналов StateStore."""
 
 import json
+import os
+from pathlib import Path
 
 import pytest
 
@@ -82,3 +84,113 @@ def test_recording_merger_cannot_bypass_encryption(protected_store):
     for path in (store.history_path, store.tombstones_path):
         lines = path.read_text(encoding="utf-8").splitlines()
         assert lines and all(line.startswith("ENC1:") for line in lines)
+
+
+def journal_snapshot(store):
+    return {name: getattr(store, name).read_bytes() for name in JOURNALS}
+
+
+def test_compact_preserves_encrypted_notes_calendar_and_deletions(protected_store):
+    store, _ = protected_store
+    live = store.add_history_item(text="SYNTHETIC_LIVE")
+    deleted = store.add_history_item(text="SYNTHETIC_DELETED")
+    store.set_annotation(live.id, "SYNTHETIC_NOTE")
+    store.update_history_item_calendar(live.id, {"title": "SYNTHETIC_EVENT"})
+    store.delete_history_item(deleted.id)
+    store.compact()
+    assert store.get_annotation(live.id) == "SYNTHETIC_NOTE"
+    assert store.get_history_item_calendar(live.id) == {"title": "SYNTHETIC_EVENT"}
+    for name in JOURNALS:
+        assert all(line.startswith("ENC1:") for line in getattr(store, name).read_text().splitlines())
+    with store._lock():
+        assert deleted.id in store._load_deleted_ids_unlocked()
+    ledger = store.purged_ids_path.read_bytes()
+    store.compact()
+    assert store.purged_ids_path.read_bytes() == ledger
+
+
+@pytest.mark.parametrize("name", ["annotations_path", "calendar_links_path", "purged_ids_path"])
+def test_corrupt_sidecar_aborts_compact_without_live_changes(protected_store, name):
+    store, _ = protected_store
+    store.add_history_item(text="SYNTHETIC_LIVE")
+    getattr(store, name).write_text("ENC1:broken\n", encoding="utf-8")
+    before = journal_snapshot(store)
+    with pytest.raises(HistoryEncryptionUnavailable):
+        store.compact()
+    assert journal_snapshot(store) == before
+
+
+def test_crypto_failure_preparing_annotation_does_not_change_journals(protected_store, monkeypatch):
+    store, crypto = protected_store
+    item = store.add_history_item(text="SYNTHETIC_LIVE")
+    store.set_annotation(item.id, "SYNTHETIC_NOTE")
+    before = journal_snapshot(store)
+    original = crypto.encrypt_line
+
+    def fail_note(raw):
+        if '"note"' in raw:
+            raise RuntimeError("synthetic rewrite encryption failure")
+        return original(raw)
+
+    monkeypatch.setattr(crypto, "encrypt_line", fail_note)
+    with pytest.raises(HistoryEncryptionUnavailable):
+        store.compact()
+    assert journal_snapshot(store) == before
+
+
+def test_purged_id_write_failure_keeps_tombstones(protected_store, monkeypatch):
+    store, _ = protected_store
+    item = store.add_history_item(text="SYNTHETIC_DELETE")
+    store.delete_history_item(item.id)
+    before = journal_snapshot(store)
+    original = store._append_ndjson_raw
+
+    def fail_purged(path, line):
+        if path == store.purged_ids_path:
+            raise OSError("synthetic disk failure")
+        return original(path, line)
+
+    monkeypatch.setattr(store, "_append_ndjson_raw", fail_purged)
+    with pytest.raises(OSError):
+        store.compact()
+    assert store.tombstones_path.read_bytes() == before["tombstones_path"]
+    assert store.history_path.read_bytes() == before["history_path"]
+
+
+def test_retry_fsyncs_existing_purged_id_before_clearing_tombstones(protected_store, monkeypatch):
+    store, _ = protected_store
+    item = store.add_history_item(text="SYNTHETIC_DELETE")
+    store.delete_history_item(item.id)
+    tombstones_before = store.tombstones_path.read_bytes()
+    ledger_stat = store.purged_ids_path.stat()
+    real_fsync = os.fsync
+    real_replace = Path.replace
+    fail_once = True
+    events = []
+
+    def ledger_fsync(fd):
+        nonlocal fail_once
+        current = os.fstat(fd)
+        is_ledger = (current.st_dev, current.st_ino) == (ledger_stat.st_dev, ledger_stat.st_ino)
+        if is_ledger and fail_once:
+            fail_once = False
+            raise OSError("synthetic failure after ledger write")
+        result = real_fsync(fd)
+        if is_ledger:
+            events.append("ledger-durable")
+        return result
+
+    def traced_replace(source, target):
+        if Path(target) == store.tombstones_path:
+            events.append("tombstones-replaced")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(os, "fsync", ledger_fsync)
+    monkeypatch.setattr(Path, "replace", traced_replace)
+    with pytest.raises(OSError):
+        store.compact()
+    assert store.purged_ids_path.read_bytes()
+    assert store.tombstones_path.read_bytes() == tombstones_before
+    events.clear()
+    store.compact()
+    assert events.index("ledger-durable") < events.index("tombstones-replaced")
