@@ -57,10 +57,12 @@ def _make_store(data_dir: Path) -> StateStore:
 
 
 def _inject_crypto(store: StateStore) -> HistoryCrypto:
-    """Подменяет крипто-инстанс в StateStore (обход Keychain, CI-safe)."""
+    """Включает шифрование в temp-профиле и обходит Keychain (CI-safe)."""
     crypto = HistoryCrypto(os.urandom(32))
+    store.save_settings({"history_encryption_enabled": True})
     store._history_crypto_initialized = True
     store._history_crypto_instance = crypto
+    store._get_history_crypto = lambda: crypto
     return crypto
 
 
