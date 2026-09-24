@@ -1265,6 +1265,24 @@ class TestDiskFullPhaseE(unittest.TestCase):
             "transcript_text must be non-empty so Swift can offer save-as",
         )
 
+    def test_encryption_failure_preserves_transcript_text_without_plaintext_persist(self):
+        """Готовый STT текст остаётся в ответе при fail-closed отказе истории."""
+        from backend.state_store import HistoryEncryptionUnavailable
+
+        store = self._make_disk_full_store()
+        store.add_history_item.side_effect = HistoryEncryptionUnavailable(
+            "synthetic key unavailable"
+        )
+        recorder = _FakeRecorder()
+        recorder.is_recording = True
+        svc = _make_service(self._tmp, recorder=recorder, extra_kwargs={"store": store})
+
+        result = svc.handle_stop_recording({})
+
+        self.assertEqual(result.get("status"), "persist_failed")
+        self.assertEqual(result.get("reason"), "encryption_unavailable")
+        self.assertTrue(result.get("transcript_text"))
+
     def test_disk_full_does_not_raise(self):
         """Phase E must swallow OSError and return a dict — never propagate."""
         import errno as _errno_mod

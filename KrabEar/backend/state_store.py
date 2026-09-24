@@ -88,6 +88,14 @@ class StateStoreLockUpgradeError(IpcOperationalError):
     """
 
 
+class HistoryEncryptionUnavailable(IpcOperationalError):
+    """Нельзя сохранить новую запись, когда обязательное шифрование недоступно."""
+
+
+class StateStoreSettingsCorruptError(IpcOperationalError):
+    """Нельзя перезаписать повреждённые settings дефолтами без восстановления."""
+
+
 class StateStore:
     """Фасад для настроек и истории backend-сервиса."""
 
@@ -229,6 +237,18 @@ class StateStore:
                 logger.exception("StateStore: ошибка инициализации history crypto")
         return self._history_crypto_instance
 
+    def _has_encrypted_history_unlocked(self) -> bool:
+        """Есть ли ENC1-строки в основном журнале или tombstones."""
+        from backend.history_crypto import SENTINEL
+
+        for path in (self.history_path, self.tombstones_path):
+            if not path.exists():
+                continue
+            with path.open("r", encoding="utf-8") as fh:
+                if any(line.startswith(SENTINEL) for line in fh):
+                    return True
+        return False
+
     def _read_encryption_flag_unlocked(self) -> bool:
         """Читает флаг history_encryption_enabled из settings.json без захвата lock.
 
@@ -243,6 +263,15 @@ class StateStore:
         """
         try:
             if not self.settings_path.exists():
+                # Отсутствие settings означает fresh profile только пока ни
+                # один локальный журнал не содержит уже зашифрованных строк.
+                if self._has_encrypted_history_unlocked():
+                    self._push_error(
+                        "history.encrypt_fail",
+                        "settings missing while encrypted history exists; assuming enabled",
+                        severity="error",
+                    )
+                    return True
                 return False
             payload = safe_json_loads(
                 self.settings_path.read_text(encoding="utf-8"),
@@ -250,7 +279,24 @@ class StateStore:
                 context="settings.json (encryption flag check)",
             )
             if isinstance(payload, dict):
-                return bool(payload.get("history_encryption_enabled", False))
+                if "history_encryption_enabled" not in payload:
+                    if self._has_encrypted_history_unlocked():
+                        self._push_error(
+                            "history.encrypt_fail",
+                            "encryption flag missing beside ENC1 history; assuming enabled",
+                            severity="error",
+                        )
+                        return True
+                    return False
+                flag = payload["history_encryption_enabled"]
+                if isinstance(flag, bool):
+                    return flag
+                self._push_error(
+                    "history.encrypt_fail",
+                    "encryption flag has invalid type; assuming enabled",
+                    severity="error",
+                )
+                return True
         except Exception as exc:
             logger.exception("StateStore._read_encryption_flag_unlocked: ошибка чтения")
             self._push_error(
@@ -278,25 +324,34 @@ class StateStore:
     def _maybe_encrypt(self, json_str: str) -> str:
         """Шифрует строку JSON если шифрование включено и доступно.
 
-        Если шифрование выключено или HistoryCrypto недоступен — возвращает
-        json_str без изменений (поведение по умолчанию, байт-идентично текущему).
+        Если шифрование выключено — возвращает json_str без изменений.
+        При включённом шифровании любая недоступность crypto запрещает запись.
         """
+        enabled = self._read_encryption_flag_unlocked()
+        if not enabled and self.settings_path.exists():
+            # Явно выключенный флаг имеет приоритет над старым crypto-кэшем.
+            self._history_crypto_initialized = False
+            self._history_crypto_instance = None
+            return json_str
+        if enabled and self._history_crypto_initialized and self._history_crypto_instance is None:
+            # Флаг мог включиться после прежней plaintext-записи; повторно
+            # получить ключ до записи вместо использования старого None-кэша.
+            self._history_crypto_initialized = False
         crypto = self._get_history_crypto()
         if crypto is None:
+            if enabled:
+                raise HistoryEncryptionUnavailable("history encryption unavailable")
             return json_str
         try:
             return crypto.encrypt_line(json_str)
         except Exception as exc:
-            # Шифрование включено, но упало → НЕ молчим: пишем plaintext (данные
-            # не теряем), но громко уведомляем через error_bus — иначе это была бы
-            # незаметная security-регрессия (пользователь думает, что зашифровано).
-            logger.exception("StateStore._maybe_encrypt: ошибка шифрования, пишем plaintext")
+            logger.exception("StateStore._maybe_encrypt: ошибка шифрования, запись отклонена")
             self._push_error(
                 "history.encrypt_fail",
                 f"encrypt_line failed: {type(exc).__name__}: {exc}",
                 severity="error",
             )
-            return json_str
+            raise HistoryEncryptionUnavailable("history encryption failed") from exc
 
     def _maybe_decrypt(self, raw_line: str) -> str:
         """Дешифрует строку если она зашифрована (определяется по SENTINEL).
@@ -307,19 +362,22 @@ class StateStore:
         from backend.history_crypto import HistoryCrypto
         if not HistoryCrypto.is_encrypted(raw_line):
             return raw_line
+        if self._history_crypto_initialized and self._history_crypto_instance is None:
+            # Временный отказ Keychain не должен требовать записи или рестарта,
+            # чтобы повторно попробовать прочитать уже зашифрованную историю.
+            self._history_crypto_initialized = False
         crypto = self._get_history_crypto()
         if crypto is None:
-            # Ключ недоступен — не можем расшифровать
             logger.error(
                 "StateStore._maybe_decrypt: зашифрованная строка найдена, "
-                "но crypto недоступен — строка пропущена"
+                "но crypto недоступен — чтение отклонено"
             )
-            return ""  # пустая строка → safe_json_loads вернёт None → строка пропущена
+            raise HistoryEncryptionUnavailable("history decryption unavailable")
         try:
             return crypto.decrypt_line(raw_line)
-        except Exception:
-            logger.exception("StateStore._maybe_decrypt: ошибка расшифровки — строка пропущена")
-            return ""  # аналогично
+        except Exception as exc:
+            logger.exception("StateStore._maybe_decrypt: ошибка расшифровки — чтение отклонено")
+            raise HistoryEncryptionUnavailable("history decryption failed") from exc
 
     def _push_error(self, code: str, message_debug: str, severity: str | None = None) -> None:
         """Push KrabError to attached ErrorBus if available. Late-injected attribute."""
@@ -671,6 +729,38 @@ class StateStore:
     def save_settings(self, new_settings: dict[str, Any]) -> dict[str, Any]:
         """Сохраняет настройки атомарно и возвращает нормализованный результат."""
         with self._lock():
+            if (
+                not self.settings_path.exists()
+                and new_settings.get("history_encryption_enabled") is not True
+                and self._read_encryption_flag_unlocked()
+            ):
+                raise StateStoreSettingsCorruptError(
+                    "settings missing beside encrypted history; restore encryption flag"
+                )
+            if self.settings_path.exists():
+                current = safe_json_loads(
+                    self.settings_path.read_text(encoding="utf-8"),
+                    default=None,
+                    context="settings.json (write guard)",
+                )
+                if not isinstance(current, dict):
+                    raise StateStoreSettingsCorruptError(
+                        "settings.json unreadable; restore before saving"
+                    )
+                if (
+                    "history_encryption_enabled" in current
+                    and not isinstance(current["history_encryption_enabled"], bool)
+                ):
+                    raise StateStoreSettingsCorruptError(
+                        "history encryption flag invalid; restore before saving"
+                    )
+                if (
+                    new_settings.get("history_encryption_enabled") is not True
+                    and self._has_encrypted_history_unlocked()
+                ):
+                    raise StateStoreSettingsCorruptError(
+                        "cannot disable encryption while ENC1 history remains"
+                    )
             settings = dict(DEFAULT_SETTINGS)
             settings.update(new_settings)
             tmp_path = self.settings_path.with_suffix(".json.tmp")
@@ -1973,10 +2063,6 @@ class StateStore:
                 if not raw:
                     continue
                 decrypted = self._maybe_decrypt(raw)
-                if not decrypted:
-                    # _maybe_decrypt вернул пустую строку → ошибка расшифровки,
-                    # строка уже залогирована → пропускаем.
-                    continue
                 payload = safe_json_loads(decrypted)
                 if payload is None:
                     continue
@@ -2215,8 +2301,8 @@ class StateStore:
           non-empty value; if any line fails, rolls back by restoring .bak as
           history.ndjson and returns {"ok": False, "reason": "verification_failed"}.
         - On successful verification, securely removes the .bak (best-effort overwrite
-          with zeros then unlink); a removal failure only logs a warning and does NOT
-          fail the migration — the encrypted file is already live and correct.
+          with zeros then unlink); cleanup failure reports backup_cleanup_failed,
+          because a plaintext backup may remain beside the encrypted live file.
         - The .bak is intentionally transient: the recovery mechanism for
           encryption-at-rest is the Keychain key (HistoryCrypto), not a permanent
           plaintext sidecar sitting on disk.
@@ -2234,6 +2320,12 @@ class StateStore:
         import shutil as _shutil
         from backend.history_crypto import HistoryCrypto
 
+        # Do not create/load a key for a disabled profile, and do not turn an
+        # explicit OFF setting into ENC1 even when migration is called directly.
+        with self._lock():
+            if not self._read_encryption_flag_unlocked():
+                return {"ok": False, "reason": "encryption_disabled"}
+
         # Force re-init so we pick up a freshly enabled flag.
         self._history_crypto_initialized = False
         crypto = self._get_history_crypto()
@@ -2241,6 +2333,11 @@ class StateStore:
             return {"ok": False, "reason": "encryption_unavailable"}
 
         with self._lock():
+            # Keychain access above can take time. Another StateStore may have
+            # disabled encryption while the key was loading; the final check
+            # must share the lock with save_settings before any file writes.
+            if not self._read_encryption_flag_unlocked():
+                return {"ok": False, "reason": "encryption_disabled"}
             if not self.history_path.exists() or self.history_path.stat().st_size == 0:
                 return {"ok": False, "reason": "empty_file"}
 
@@ -2275,11 +2372,10 @@ class StateStore:
 
             # Step 3: write .bak BEFORE touching the live file
             bak_path = self.history_path.with_suffix(".ndjson.bak")
-            _shutil.copy2(str(self.history_path), str(bak_path))
-
             # Step 4: write tmp, then atomic replace
             tmp_path = self.history_path.with_suffix(".ndjson.migration_tmp")
             try:
+                _shutil.copy2(str(self.history_path), str(bak_path))
                 with tmp_path.open("w", encoding="utf-8") as fh:
                     for out_line in out_lines:
                         fh.write(out_line + "\n")
@@ -2291,6 +2387,12 @@ class StateStore:
                     tmp_path.unlink(missing_ok=True)
                 except Exception:
                     pass
+                try:
+                    # До успешного os.replace исходный live-файл не тронут;
+                    # дополнительная plaintext-копия не нужна для rollback.
+                    bak_path.unlink(missing_ok=True)
+                except Exception:
+                    logger.exception("migrate_history_encryption: backup cleanup failed")
                 raise
 
             # Step 5: self-verify — decrypt every ENC1 line back; roll back on failure
@@ -2322,6 +2424,7 @@ class StateStore:
                 return {"ok": False, "reason": "verification_failed"}
 
             # Step 6: verification passed — securely remove the plaintext .bak
+            backup_cleanup_failed = False
             try:
                 bak_size = bak_path.stat().st_size
                 with bak_path.open("r+b") as fh:
@@ -2330,17 +2433,22 @@ class StateStore:
                     os.fsync(fh.fileno())
                 bak_path.unlink()
             except Exception as wipe_exc:
-                # Non-fatal: encrypted live file is already in place; log + continue
+                # Live уже зашифрован, но оставшийся plaintext backup означает,
+                # что миграцию нельзя объявлять завершённой.
                 logger.warning(
                     "migrate_history_encryption: не удалось безопасно удалить .bak",
                     extra={"bak_path": str(bak_path), "error": str(wipe_exc)},
                 )
+                backup_cleanup_failed = True
 
         # Step 7: reset crypto cache (file changed on disk)
         self._history_crypto_initialized = False
         self._search_index.clear()
         self._recent_search_index = []
         self._recent_search_index_signature = None
+
+        if backup_cleanup_failed:
+            return {"ok": False, "reason": "backup_cleanup_failed"}
 
         if progress_cb is not None:
             try:
