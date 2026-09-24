@@ -67,6 +67,20 @@ A5.1, Critical/Important/Minor отсутствуют. Review статическ
   полный набор проверяет hosted CI. Общие py312/A1/A2 venv не менялись.
 - Логи: `.superpowers/sdd/2026-09-24-a5-journal-codec/` (ignored worktree data).
 
+### Первый hosted CI и точечная коррекция
+
+- Push-run `krab-ear-ci` 36027294864 на `b3022cd9` упал на
+  `test_krab_ear_runner_health_check.py`: при импорте скрипта отсутствовал
+  `httpx`; в этом же job были `Unknown config option: timeout` и
+  `timeout_method` из-за отсутствия `pytest-timeout`. Оба пакета отсутствовали
+  в `KrabEar/requirements.txt` базы. Другие A5.1 tests в логе не падали.
+- В PR добавлены обе прямые зависимости. Runner test в собственном Python 3.12
+  без `httpx` воспроизвёл точный RED (1 failed), после установки declarative
+  dependency — GREEN (1 passed). Pytest-timeout уже стоял в собственном venv;
+  штатный CI должен подтвердить его наличие в полной установке requirements.
+- Новая CI-проверка после push нужна для исправленного SHA. Ни один runner
+  вручную не перезапускался, failed run не rerun-ился.
+
 ## Ресурсное окно
 
 Snapshot 24.09.2026 ~15:51 UTC: активен CI главного Краба,
