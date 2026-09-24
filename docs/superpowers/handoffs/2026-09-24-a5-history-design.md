@@ -80,6 +80,18 @@ A5.1, Critical/Important/Minor отсутствуют. Review статическ
   штатный CI должен подтвердить его наличие в полной установке requirements.
 - Новая CI-проверка после push нужна для исправленного SHA. Ни один runner
   вручную не перезапускался, failed run не rerun-ился.
+- Следующий PR run `krab-ear-ci` 36030838569 на `da46b2d1` подтвердил отсутствие
+  старого `httpx`-сбоя, но `pytest-timeout` включил прежний default 30s для
+  всех тестов. Под hosted-нагрузкой 30s превысили real-repo cherry-pick audit,
+  dead-extracted audit (в `setUpClass`) и `test_backend_service.py::
+  BackendServiceTestCase::test_integration_1000_cycles`. Ни один A5.1 тест
+  не обозначен failing. Merge HOLD.
+- В `.github/workflows/krabear-ci.yml` выставлен явный CI cap 75s на test
+  для chunk и per-file isolate при неизменном внешнем per-file 90s. Локально
+  под `--timeout=75`: scanner real-repo 1 PASS за 16.98s, dead-extracted
+  RealRepoSmokeTests 6 PASS за 15.69s (Python3.12 без MLX); 1000 циклов
+  1 PASS за 25.70s (dev Python3.14, fake recorder; optional torchcodec warning).
+  Это не доказывает Ubuntu timing; требуется новый exact-head hosted CI.
 
 ## Ресурсное окно
 
