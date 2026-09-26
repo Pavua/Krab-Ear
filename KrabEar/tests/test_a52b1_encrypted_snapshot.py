@@ -111,6 +111,21 @@ def _manifest(snapshot_dir: Path) -> dict:
     return json.loads((snapshot_dir / SNAPSHOT_MANIFEST_FILENAME).read_text("utf-8"))
 
 
+def _read_ndjson_lines(path: Path) -> list[str]:
+    """Читает файл НА ТОЧНУЮ границу строки ``\\n`` — как text-mode reader.
+
+    ``str.splitlines()`` здесь неприменим: он делит по \\v \\f \\x1c
+    \\x1d \\x1e \\x85 \\u2028 \\u2029, которых не видит ни writer, ни reader.
+    """
+    text = path.read_text("utf-8")
+    if text == "":
+        return []
+    lines = text.split("\n")
+    if lines and lines[-1] == "":  # хвостовой перевод строки
+        lines.pop()
+    return lines
+
+
 class TestSnapshotRegistryCompleteness:
     def test_snapshot_contains_exactly_ten_registry_files(self, tmp_path):
         data_dir = _data_dir(tmp_path)
@@ -135,12 +150,87 @@ class TestSnapshotRegistryCompleteness:
         staging = Path(result["staging_dir"])
 
         for name in HISTORY_JOURNAL_FILENAMES:
-            out_lines = (staging / name).read_text("utf-8").splitlines()
+            out_lines = _read_ndjson_lines(staging / name)
             assert out_lines, f"{name}: snapshot не должен быть пустым"
             for line in out_lines:
                 assert line.startswith(SENTINEL), f"{name}: строка не ENC1"
-                # Побайтовое соответствие исходной строке после расшифровки.
-                assert crypto.decrypt_line(line) in expected[name]
+            # ПОЗИЦИОННОЕ равенство: одна исходная строка → одна выходная, в том
+            # же порядке. Проверка «membership» пропускала бы перестановку и
+            # разбиение записи (CRITICAL-1).
+            assert [crypto.decrypt_line(ln) for ln in out_lines] == expected[name]
+
+    # Разрывы, которые str.splitlines() считает границей строки, а writer/reader
+    # истории — нет (см. state_store: json.dumps(..., ensure_ascii=False) + "\n").
+    _SPLIT_LIKE = ("\u2028", "\x85", "\v", "\f", "\x1c", "\x1e", "\u2029")
+
+    def test_embedded_line_separators_do_not_split_one_record(self, tmp_path):
+        """Одна NDJSON-запись со встроенными разрывами → ровно одна ENC1-строка."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        record = {"id": "r1", "text": "a\u2028" + "b\x85c\vd" + "\u2029"}
+        source_line = json.dumps(record, ensure_ascii=False)
+        (data_dir / "history.ndjson").write_text(
+            source_line + "\n", encoding="utf-8"
+        )
+        backup_dir = tmp_path / "snap"
+        result = _prepared(tmp_path, data_dir, crypto, backup_dir)
+        staging = Path(result["staging_dir"])
+
+        out_lines = _read_ndjson_lines(staging / "history.ndjson")
+        assert len(out_lines) == 1, "запись не должна дробиться границами строк"
+        assert out_lines[0].startswith(SENTINEL)
+        assert crypto.decrypt_line(out_lines[0]) == source_line
+
+    def test_records_with_unicode_separators_survive_committed_snapshot(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        expected = []
+        for i, sep in enumerate(self._SPLIT_LIKE):
+            rec = {"id": f"sep-{i}", "text": f"x{sep}y"}
+            expected.append(json.dumps(rec, ensure_ascii=False))
+        (data_dir / "history.ndjson").write_text(
+            "\n".join(expected) + "\n", encoding="utf-8"
+        )
+        backup_dir = tmp_path / "backups" / "snap"
+        create_encrypted_snapshot(
+            data_dir=data_dir,
+            backup_dir=backup_dir,
+            crypto=crypto,
+            transaction_id="tx-sep",
+            policy_on=True,
+        )
+
+        out_lines = _read_ndjson_lines(backup_dir / "history.ndjson")
+        assert len(out_lines) == len(expected)
+        assert [crypto.decrypt_line(ln) for ln in out_lines] == expected
+        assert _manifest(backup_dir)["state"] == STATE_COMMITTED
+
+    def test_roundtrip_guard_refuses_when_line_does_not_decrypt_back(self, tmp_path):
+        """Сторож round-trip: выходная строка обязана расшифровываться в исходную.
+
+        Даже если неисправность в самом шифровании (здесь — обрезающая обёртка),
+        снимок не должен получить состояние PREPARED/COMMITTED.
+        """
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        (data_dir / "history.ndjson").write_text(_line(1) + "\n", encoding="utf-8")
+
+        class _CorruptingCrypto:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def is_encrypted(self, line):
+                return self._inner.is_encrypted(line)
+
+            def encrypt_line(self, plaintext):
+                return self._inner.encrypt_line(plaintext)[:-4]
+
+            def decrypt_line(self, token):
+                return self._inner.decrypt_line(token)
+
+        with pytest.raises(SnapshotOperationRefused) as exc:
+            _prepared(tmp_path, data_dir, _CorruptingCrypto(crypto), tmp_path / "snap")
+        assert exc.value.reason == "snapshot_roundtrip_mismatch"
 
     def test_manifest_records_only_fixed_names_size_and_ciphertext_hash(self, tmp_path):
         data_dir = _data_dir(tmp_path)

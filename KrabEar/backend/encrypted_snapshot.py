@@ -66,6 +66,7 @@ REASON_POLICY_UNAVAILABLE = "snapshot_policy_unavailable"
 REASON_SOURCE_SYMLINK = "snapshot_source_symlink"
 REASON_SOURCE_UNREADABLE = "snapshot_source_unreadable"
 REASON_LINE_TAMPERED = "snapshot_line_tampered"
+REASON_ROUNDTRIP_MISMATCH = "snapshot_roundtrip_mismatch"
 REASON_PREPARED_MISSING = "snapshot_prepared_missing"
 REASON_FINGERPRINT_MISMATCH = "snapshot_fingerprint_mismatch"
 REASON_PENDING_OPERATION = "snapshot_pending_operation"
@@ -199,11 +200,35 @@ def _source_fingerprint(data_dir: Path) -> dict[str, dict[str, Any] | None]:
     return result
 
 
+def _split_ndjson_lines(text: str) -> list[str]:
+    """Делит ТОЛЬКО по ``\\n`` — как writer и как text-mode reader журналов.
+
+    🔴 ``str.splitlines()`` здесь неприменим: он дополнительно делит по
+    ``\\v \\f \\x1c \\x1d \\x1e \\x85 \\u2028 \\u2029``, которых writer
+    (``json.dumps(..., ensure_ascii=False) + "\\n"``) никогда не ставит, а
+    reader (``for line in fh``) никогда не видит. Наивный splitlines рвал одну
+    NDJSON-запись на 2–3 ENC1-строки и при этом оставлял снимок в состоянии
+    COMMITTED — тихая порча данных, которую read-back не ловил (сверял он сам с
+    собой же). Хвостовой перевод строки сохраняется точно.
+    """
+    if text == "":
+        return []
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()  # перевод строки в конце файла, а не пустая запись
+    return lines
+
+
 def _encrypt_journal(source: Path, crypto: Any) -> bytes:
     """Построчно: ENC1 → проверка расшифровкой, plaintext → шифрование.
 
     Отказ при любой нечитаемой/подделанной строке: молчаливый skip означал бы
     потерю данных при «успешном» снимке.
+
+    Каждая выходная строка ОБЯЗАНА расшифровываться ровно в исходную, и число
+    выходных строк обязано совпасть с числом исходных (round-trip-сторож).
+    Проверка обязательна: снимок, который нельзя воспроизвести побайтово, не
+    должен получать состояние PREPARED/COMMITTED.
 
     Отсутствующий журнал — валидная ПУСТАЯ запись реестра (спека §5: набор
     всегда полный); «есть, но не читается» — уже отказ.
@@ -223,8 +248,9 @@ def _encrypt_journal(source: Path, crypto: Any) -> bytes:
             REASON_SOURCE_UNREADABLE, f"{source.name}: не UTF-8: {exc}"
         ) from exc
 
+    src_lines = _split_ndjson_lines(text)
     out_lines: list[str] = []
-    for lineno, line in enumerate(text.splitlines(), start=1):
+    for lineno, line in enumerate(src_lines, start=1):
         if crypto.is_encrypted(line):
             try:
                 crypto.decrypt_line(line)
@@ -237,6 +263,33 @@ def _encrypt_journal(source: Path, crypto: Any) -> bytes:
             out_lines.append(line)  # проверена расшифровкой — сохраняем байт-в-байт
         else:
             out_lines.append(crypto.encrypt_line(line))
+
+    # --- round-trip-сторож: снимок обязан воспроизводиться побайтово ---
+    if len(out_lines) != len(src_lines):
+        raise SnapshotOperationRefused(
+            REASON_ROUNDTRIP_MISMATCH,
+            f"{source.name}: число строк изменилось: {len(src_lines)} → {len(out_lines)}",
+        )
+    for lineno, (src_line, out_line) in enumerate(zip(src_lines, out_lines), start=1):
+        if not crypto.is_encrypted(out_line):
+            raise SnapshotOperationRefused(
+                REASON_ROUNDTRIP_MISMATCH,
+                f"{source.name}:{lineno}: выходная строка не ENC1",
+            )
+        try:
+            decoded = crypto.decrypt_line(out_line)
+        except Exception as exc:  # noqa: BLE001
+            raise SnapshotOperationRefused(
+                REASON_ROUNDTRIP_MISMATCH,
+                f"{source.name}:{lineno}: выходная строка не расшифровывается: "
+                f"{type(exc).__name__}",
+            ) from exc
+        if not crypto.is_encrypted(src_line) and decoded != src_line:
+            raise SnapshotOperationRefused(
+                REASON_ROUNDTRIP_MISMATCH,
+                f"{source.name}:{lineno}: расшифровка выходной строки не совпала "
+                "с исходной",
+            )
 
     if not out_lines:
         return b""
