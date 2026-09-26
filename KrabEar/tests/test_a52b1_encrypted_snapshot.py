@@ -1343,3 +1343,74 @@ class TestStaleStagingIsNotPending:
         assert rec["ok"] is False
         assert rec["reason"] == "snapshot_recovery_pending"
         assert rec["state"] == STATE_COMMITTING
+
+
+class TestAutoBackupPolicyRace:
+    """MAJOR-7: гонка политики под store-lock на АВТО-пути (у ручного — тест выше).
+
+    Решение «снимок или legacy-копия» принимается ОДИН раз — под store-lock в
+    `_do_backup` (см. коммит refactor(a5.2b1)). Поэтому авто-путь следует
+    политике, наблюдаемой в момент записи, а ручной — отказывается: там
+    пользователь уже инициировал операцию под ON, и молча переключать её в
+    plaintext нельзя. Асимметрия зафиксирована тестами намеренно.
+    """
+
+    def test_on_to_off_under_store_lock_follows_policy_at_write_time(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        mgr = AutoBackupManager(store=store, interval_hours=0)
+        real_lock = store._lock
+        state = {"flipped": False}
+
+        @contextmanager
+        def flipping_lock(*args, **kwargs):
+            if not state["flipped"]:
+                state["flipped"] = True
+                # ON → OFF ровно перед захватом реального lock.
+                (data_dir / "settings.json").write_text(
+                    json.dumps({"history_encryption_enabled": False}), encoding="utf-8"
+                )
+            with real_lock(*args, **kwargs):
+                yield
+
+        with patch.object(store, "_lock", flipping_lock):
+            out = mgr.check_and_backup()
+
+        assert state["flipped"] is True
+        backups = data_dir / "backups"
+        names = sorted(p.name for p in backups.iterdir() if p.is_dir())
+        # Политика в момент записи — OFF ⇒ OFF-профиль, снимка быть не должно.
+        assert out["backed_up"] is True
+        assert not [n for n in names if n.startswith("auto_snapshot_")]
+        assert [n for n in names if n.startswith("auto_backup_")]
+        assert mgr.get_auto_backup_status()["last_backup_kind"] == "legacy_plaintext"
+
+    def test_on_to_off_never_leaves_half_written_state(self, tmp_path):
+        """Гонка не должна оставить ни staging, ни незавершённой транзакции."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        mgr = AutoBackupManager(store=store, interval_hours=0)
+        real_lock = store._lock
+        state = {"flipped": False}
+
+        @contextmanager
+        def flipping_lock(*args, **kwargs):
+            if not state["flipped"]:
+                state["flipped"] = True
+                (data_dir / "settings.json").write_text(
+                    json.dumps({"history_encryption_enabled": False}), encoding="utf-8"
+                )
+            with real_lock(*args, **kwargs):
+                yield
+
+        with patch.object(store, "_lock", flipping_lock):
+            mgr.check_and_backup()
+
+        backups = data_dir / "backups"
+        rec = recover_pending_state(data_dir=data_dir, backups_root=backups)
+        assert rec["pending"] is False

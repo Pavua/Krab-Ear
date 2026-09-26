@@ -11,6 +11,7 @@ OFF-профиль сохраняет прежнее поведение.
 from __future__ import annotations
 
 import json
+import os
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
@@ -60,6 +61,40 @@ def _enc1_line() -> str:
 
 def _no_keychain(*_a, **_k):
     raise AssertionError("policy guard must not touch the Keychain")
+
+
+def _synthetic_crypto():
+    """Случайный тестовый ключ — ни Keychain, ни реальная история."""
+    from backend.history_crypto import HistoryCrypto
+
+    return HistoryCrypto(os.urandom(32))
+
+
+def _store_with_crypto(data_dir: Path, crypto):
+    """StateStore с подставленным ключом (тот же приём, что в тестах A5.1)."""
+    store = StateStore(data_dir)
+    store._get_history_crypto = lambda: crypto
+    return store
+
+
+def _write_history(data_dir: Path, crypto) -> None:
+    """Пара записей, зашифрованных ЭТИМ ключом."""
+    (data_dir / "history.ndjson").write_text(
+        crypto.encrypt_line('{"id":"a","text":"one"}') + "\n"
+        + crypto.encrypt_line('{"id":"b","text":"two"}') + "\n",
+        encoding="utf-8",
+    )
+
+
+def _all_backup_dirs(backups: Path) -> list[str]:
+    """ВСЕ каталоги в backups/, включая auto_snapshot_* и dot-prefixed staging.
+
+    Прежние утверждения матчили только ``auto_backup_*`` — ошибочно созданный
+    каталог нового протокола проскакивал молча (MAJOR-7).
+    """
+    if not backups.is_dir():
+        return []
+    return sorted(p.name for p in backups.iterdir() if p.is_dir())
 
 
 def _flipping_flock_patch(module_name: str, second_store: StateStore):
@@ -220,6 +255,7 @@ class TestAutoBackupGate:
         return AutoBackupManager(store=store, interval_hours=0, **kwargs)
 
     def test_check_and_backup_refuses_and_preserves_existing(self, tmp_path):
+        """ON + недоступный ключ ⇒ честный отказ, ничего не записано."""
         data_dir = _data_dir(tmp_path)
         store = StateStore(data_dir)
         backups = data_dir / "backups"
@@ -244,8 +280,36 @@ class TestAutoBackupGate:
         assert meta.read_text(encoding="utf-8") == '{"last_backup_ts": null, "backup_count": 5}'
         assert (old / "backup_meta.json").read_text(encoding="utf-8") == '{"old": true}'
         assert _bytes(store.history_path) == history_before
-        dirs = [p.name for p in backups.iterdir() if p.is_dir()]
-        assert dirs == ["auto_backup_20200101_000000"]
+        # Утверждение widened: никаких auto_snapshot_*/.staging тоже быть не
+        # должно — раньше матчились только auto_backup_* и ошибочно созданный
+        # каталог нового протокола проскочил бы молча.
+        assert _all_backup_dirs(backups) == ["auto_backup_20200101_000000"]
+
+    def test_on_with_working_key_never_writes_plaintext(self, tmp_path):
+        """MAJOR-7: при ON и ДОСТУПНОМ ключе проверяется ПОЛИТИКА, а не ключ.
+
+        Прежний тест проходил из-за отсутствия ключа, поэтому стереть
+        under-lock re-check политики он не мог. Здесь ключ рабочий: единственная
+        причина не создать legacy plaintext-копию — политика.
+        """
+        data_dir = _data_dir(tmp_path)
+        crypto = _synthetic_crypto()
+        _write_history(data_dir, crypto)
+        _write_settings(data_dir, {"history_encryption_enabled": True})
+        store = _store_with_crypto(data_dir, crypto)
+        mgr = self._manager(store)
+        history_before = _bytes(store.history_path)
+
+        out = mgr.check_and_backup()
+
+        assert out["backed_up"] is True
+        assert Path(out["backup_path"]).name.startswith("auto_snapshot_")
+        backups = data_dir / "backups"
+        # Ни одного legacy plaintext-каталога — это и есть проверка политики.
+        assert not [p for p in _all_backup_dirs(backups) if p.startswith("auto_backup_")]
+        assert [p for p in _all_backup_dirs(backups) if p.startswith("auto_snapshot_")]
+        # Источник не тронут.
+        assert _bytes(store.history_path) == history_before
 
     def test_status_does_not_claim_unavailable_at_on(self, tmp_path):
         """A5.2b1: при ON backup ЖИВ (идёт в encrypted snapshot) — статус не врёт.
@@ -315,8 +379,16 @@ class TestAutoBackupGate:
         assert out["backed_up"] is True
 
     def test_recheck_under_store_lock_blocks_off_to_on(self, tmp_path):
+        """OFF→ON под store-lock: plaintext-копия невозможна (MAJOR-7).
+
+        Ключ здесь РАБОЧИЙ, поэтому отказ проистекает из политики, а не из
+        отсутствия ключа: гонка обязана привести к отказу либо к encrypted
+        snapshot — но никогда к legacy plaintext-каталогу.
+        """
         data_dir = _data_dir(tmp_path)
-        store = StateStore(data_dir)
+        crypto = _synthetic_crypto()
+        _write_history(data_dir, crypto)
+        store = _store_with_crypto(data_dir, crypto)
         second = StateStore(data_dir)
         mgr = self._manager(store)
         real_lock = store._lock
@@ -330,16 +402,18 @@ class TestAutoBackupGate:
             with real_lock(*args, **kwargs):
                 yield
 
-        with patch.object(store, "_lock", flipping_lock), patch(
-            "backend.history_crypto.build_history_crypto", side_effect=_no_keychain
-        ):
+        with patch.object(store, "_lock", flipping_lock):
             out = mgr.check_and_backup()
-        assert out["backed_up"] is False
-        assert out["skipped_reason"] == REASON
+
         backups = data_dir / "backups"
-        assert not backups.exists() or not any(
-            p.is_dir() and p.name.startswith("auto_backup_") for p in backups.iterdir()
-        )
+        names = _all_backup_dirs(backups) if backups.exists() else []
+        # 🔴 Главное утверждение гейта: ни одного legacy plaintext-каталога.
+        assert not [n for n in names if n.startswith("auto_backup_")], names
+        if out["backed_up"]:
+            # Политика ON обнаружена под lock ⇒ допустим только снимок.
+            assert Path(out["backup_path"]).name.startswith("auto_snapshot_")
+        else:
+            assert out["skipped_reason"] == REASON
 
 
 class TestArchiveManagerGate:
