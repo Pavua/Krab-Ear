@@ -46,9 +46,18 @@ from backend.state_store import HISTORY_JOURNAL_FILENAMES, StateStore
 # Строка-«canary»: её plaintext-хэш/текст не должны появляться в sidecar'ах.
 CANARY_PLAINTEXT = '{"id":"canary-a52b2","text":"kolya skazal sekret"}'
 
-# Счётчик обращений к Keychain (см. фикстуру ниже). Модульный, чтобы итоговое
+# Счётчики обращений к Keychain (см. фикстуру ниже). Модульные, чтобы итоговое
 # утверждение видело ВСЕ обращения за сессию, а не только за один тест.
-KEYCHAIN_ATTEMPTS = {"count": 0}
+#
+# ДВА счётчика, потому что пути принципиально разные:
+#   * ``attempts``  — чтение/создание ключа (build_history_crypto,
+#     get_or_create_history_key). Для b2 это НУЛЬ: restore/recovery работают с
+#     уже полученным ключом и не имеют права дёргать Keychain.
+#   * ``deletions`` — низкоуровневый ``crypto_keystore._run_security``. Единственный
+#     путь к нему в этом наборе — ``handle_purge_all_data``, который по явному
+#     действию владельца УДАЛЯЕТ ключ шифрования (поведение из волны 0afc3ff9,
+#     не b2: без этого выживший ключ расшифровывает pre-purge бэкап).
+KEYCHAIN_ATTEMPTS = {"attempts": 0, "deletions": 0}
 
 
 def _key() -> bytes:
@@ -204,15 +213,22 @@ def _write_ledger(data_dir: Path, name: str, ids: list[str], crypto: HistoryCryp
 
 @pytest.fixture(autouse=True)
 def _forbid_keychain(monkeypatch):
-    """Считает и запрещает любые обращения к Keychain (b1-приём + счётчик)."""
+    """Считает и запрещает любые обращения к Keychain (b1-приём + счётчики)."""
     import backend.crypto_keystore as ks
     import backend.history_crypto as hc
 
     def _counted(*_a, **_k):
-        KEYCHAIN_ATTEMPTS["count"] += 1
+        KEYCHAIN_ATTEMPTS["attempts"] += 1
         raise AssertionError("A5.2b2 не должен обращаться к системному Keychain")
 
-    monkeypatch.setattr(ks, "_run_security", _counted)
+    def _counted_deletion(*_a, **_k):
+        # Единственный легальный путь сюда — удаление ключа в purge (владелец
+        # попросил стереть всё). Считаем отдельно, чтобы не смазать главный
+        # инвариант «b2 не читает и не создаёт ключ».
+        KEYCHAIN_ATTEMPTS["deletions"] += 1
+        raise AssertionError("Keychain недоступен в тестах (счётчик удалений)")
+
+    monkeypatch.setattr(ks, "_run_security", _counted_deletion)
     monkeypatch.setattr(ks, "get_or_create_history_key", _counted)
     monkeypatch.setattr(hc, "build_history_crypto", _counted)
     yield
@@ -229,7 +245,7 @@ def test_keychain_attempts_stay_zero(tmp_path):
         backups_root=data_dir / "backups", snapshot_dir=data_dir / "backups" / "snapshot_1", crypto=crypto
     )
     collect_ledger_union(data_dir=data_dir, crypto=crypto)
-    assert KEYCHAIN_ATTEMPTS["count"] == 0
+    assert KEYCHAIN_ATTEMPTS["attempts"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1334,7 +1350,7 @@ class TestRecoveryRollsForward:
         assert result["reason"] == "snapshot_requires_encryption_on"
         assert _data_bytes(data_dir) == live_before
         assert len(_restore_markers(data_dir)) == 1
-        assert KEYCHAIN_ATTEMPTS["count"] == 0
+        assert KEYCHAIN_ATTEMPTS["attempts"] == 0
 
     def test_recovery_without_key_refuses_and_creates_none(self, tmp_path):
         data_dir = _data_dir(tmp_path)
@@ -1351,7 +1367,7 @@ class TestRecoveryRollsForward:
         assert result["pending"] is True
         assert result["reason"] == "snapshot_crypto_unavailable"
         assert _data_bytes(data_dir) == live_before
-        assert KEYCHAIN_ATTEMPTS["count"] == 0
+        assert KEYCHAIN_ATTEMPTS["attempts"] == 0
 
     def test_recovery_reports_pre_restore_path_for_manual_decision(self, tmp_path):
         data_dir = _data_dir(tmp_path)
@@ -1572,7 +1588,7 @@ class TestRecoveryTriggerPoints:
         assert _restore_markers(data_dir) == []
         assert has_pending_restore(data_dir) is False
         assert last_restore_recovery()["rolled_forward"] is True
-        assert KEYCHAIN_ATTEMPTS["count"] == 0
+        assert KEYCHAIN_ATTEMPTS["attempts"] == 0
 
     def test_restore_call_rolls_forward_pending_restore(self, tmp_path):
         data_dir = _data_dir(tmp_path)
@@ -1650,7 +1666,7 @@ class TestRecoveryTriggerPoints:
         assert backup.get("ok") is not False, "OFF-профиль не должен ломаться от мусора"
         assert _data_bytes(data_dir) == live_before
         assert leftover.is_dir()  # посторонний каталог НЕ удаляется fail-closed
-        assert KEYCHAIN_ATTEMPTS["count"] == 0
+        assert KEYCHAIN_ATTEMPTS["attempts"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -2613,3 +2629,26 @@ class TestRecoveryRefusesSubstitutedTarget:
             "snapshot_manifest_invalid",
         }
         assert _data_bytes(data_dir) == live_before
+
+
+# ---------------------------------------------------------------------------
+# Итоговая проверка Keychain. Стоит ПОСЛЕДНИМ в модуле намеренно: pytest
+# выполняет тесты в порядке файла, поэтому к этому моменту пройдена вся сессия.
+# ---------------------------------------------------------------------------
+
+
+def test_zz_keychain_untouched_across_whole_session():
+    """Ни одного чтения/создания ключа за ВСЮ сессию b2 (а не только к моменту).
+
+    Отдельно фиксируется, что низкоуровневый ``_run_security`` мог быть достигнут
+    только из ``handle_purge_all_data`` — там удаление ключа является ПРЕДНАМЕРЕННЫМ
+    поведением (волна 0afc3ff9): выживший AES-ключ расшифровывает pre-purge
+    бэкап. К b2 (restore/recovery/backup) это отношения не имеет, но замалчивать
+    его нельзя — поэтому счётчика два, а не один.
+    """
+    assert KEYCHAIN_ATTEMPTS["attempts"] == 0, (
+        "A5.2b2 не имеет права читать или создавать ключ истории: "
+        f"{KEYCHAIN_ATTEMPTS['attempts']} обращений"
+    )
+    # Удалений ключа столько, сколько тестов дёрнули purge (каждый — максимум одна).
+    assert KEYCHAIN_ATTEMPTS["deletions"] <= 3, KEYCHAIN_ATTEMPTS
