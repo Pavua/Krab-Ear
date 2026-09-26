@@ -390,6 +390,36 @@ def _unpublished_staging_dirs(backups_root: Path) -> list[Path]:
     return sorted(p for p in staging_root.iterdir() if p.is_dir())
 
 
+def _candidate_signature(paths: list[Path]) -> tuple:
+    """Дёшевая сигнатура набора каталогов-кандидатов (stat, без чтения файлов).
+
+    Учитывает mtime/размер манифеста, поэтому перезапись манифеста НА МЕСТЕ
+    (не через rename) тоже меняет сигнатуру и не прячется за кэшем.
+    """
+    parts: list[tuple] = []
+    for path in paths:
+        try:
+            dir_stat = path.stat()
+        except OSError:
+            continue
+        manifest = path / SNAPSHOT_MANIFEST_FILENAME
+        try:
+            m_stat = manifest.stat()
+            parts.append((path.name, dir_stat.st_mtime_ns, m_stat.st_mtime_ns, m_stat.st_size))
+        except OSError:
+            parts.append((path.name, dir_stat.st_mtime_ns, 0, -1))
+    return tuple(parts)
+
+
+# Кэш последнего результата pending-скана: backups_root → (сигнатура, результат).
+# N3: статус зовётся из UI/IPC часто, а prune при ON выключен — без кэша каждый
+# вызов читал и парсил манифест КАЖДОГО снимка. Ключ кэша — сигнатура из stat'ов,
+# поэтому любое изменение на диске (новый снимок, перезапись манифеста) даёт
+# промах и полный перескан.
+_PENDING_SCAN_CACHE: dict[str, tuple[tuple, dict | None]] = {}
+_PENDING_CACHE_MAX_ROOTS = 32
+
+
 def find_pending_transaction(*, backups_root: Path) -> dict | None:
     """Первая незавершённая (не COMMITTED) транзакция в backups-корне.
 
@@ -399,30 +429,44 @@ def find_pending_transaction(*, backups_root: Path) -> dict | None:
     опираться при решении, доказывать ли что-то.
     """
     root = Path(backups_root)
+    cache_key = str(root)
     if not root.is_dir():
         return None
     published = [(p, True) for p in _snapshot_dirs(root)]
     unpublished = [(p, False) for p in _unpublished_staging_dirs(root)]
+    candidates = [p for p, _flag in published + unpublished]
+
+    signature = _candidate_signature(candidates)
+    cached = _PENDING_SCAN_CACHE.get(cache_key)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+
+    def _result(state: Any, transaction_id: Any, path: Path, is_published: bool) -> dict:
+        if len(_PENDING_SCAN_CACHE) >= _PENDING_CACHE_MAX_ROOTS:
+            _PENDING_SCAN_CACHE.clear()
+        _PENDING_SCAN_CACHE[cache_key] = (signature, {
+            "state": state,
+            "transaction_id": transaction_id,
+            "path": str(path),
+            "published": is_published,
+        })
+        return _PENDING_SCAN_CACHE[cache_key][1]
+
     for path, is_published in published + unpublished:
         try:
             manifest = _read_manifest(path)
         except SnapshotOperationRefused:
             # Нечитаемый манифест — тоже незавершённая транзакция: молчать нельзя.
-            return {
-                "state": "UNKNOWN",
-                "transaction_id": None,
-                "path": str(path),
-                "published": is_published,
-            }
+            return _result("UNKNOWN", None, path, is_published)
         if manifest is None:
             continue
         if manifest.get("state") != STATE_COMMITTED:
-            return {
-                "state": manifest.get("state"),
-                "transaction_id": manifest.get("transaction_id"),
-                "path": str(path),
-                "published": is_published,
-            }
+            return _result(
+                manifest.get("state"), manifest.get("transaction_id"), path, is_published
+            )
+    if len(_PENDING_SCAN_CACHE) >= _PENDING_CACHE_MAX_ROOTS:
+        _PENDING_SCAN_CACHE.clear()
+    _PENDING_SCAN_CACHE[cache_key] = (signature, None)
     return None
 
 

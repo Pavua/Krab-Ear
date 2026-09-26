@@ -1641,3 +1641,72 @@ class TestAutoBackupRefusalObservability:
         assert status["last_refusal_reason"] is None
         assert status["encrypted_snapshots"] == 0
         assert status["encryption_operation_unavailable"] is False
+
+
+class TestPendingScanIsNotOofN:
+    """N3: статус не должен читать манифест каждого снимка при каждом вызове.
+
+    Prune при ON выключен, снимки растут, а статус зовётся из UI/IPC: линейное
+    чтение+парсинг манифестов на каждый вызов — лишний ввод-вывод, который
+    растёт вместе с backups/. Кэш по сигнатуре (mtime/size) убирает повторные
+    ЧТЕНИЯ, не теряя обнаружения незавершённой транзакции.
+    """
+
+    def _profile_with_snapshots(self, tmp_path: Path, count: int = 4):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        _settings_on(data_dir)
+        backups = data_dir / "backups"
+        for i in range(count):
+            create_encrypted_snapshot(
+                data_dir=data_dir, backup_dir=backups / f"auto_snapshot_2026010{i}_000000",
+                crypto=crypto, transaction_id=f"tx-n3-{i}", policy_on=True,
+            )
+        return data_dir, backups, _store_with_crypto(data_dir, crypto)
+
+    def _count_manifest_reads(self, fn):
+        reads: list[str] = []
+        real_open = Path.open
+
+        def counting_open(self, *a, **k):
+            if self.name == SNAPSHOT_MANIFEST_FILENAME:
+                reads.append(str(self))
+            return real_open(self, *a, **k)
+
+        with patch.object(Path, "open", counting_open):
+            fn()
+        return len(reads)
+
+    def test_repeated_status_calls_do_not_reread_manifests(self, tmp_path):
+        data_dir, backups, store = self._profile_with_snapshots(tmp_path, 4)
+        mgr = AutoBackupManager(store=store, interval_hours=0)
+
+        first = self._count_manifest_reads(mgr.get_auto_backup_status)
+        second = self._count_manifest_reads(mgr.get_auto_backup_status)
+        third = self._count_manifest_reads(mgr.get_auto_backup_status)
+
+        assert first >= 1, "первый вызов обязан просканировать"
+        assert second == 0, f"повторный вызов не должен читать манифесты (было {second})"
+        assert third == 0
+        # Счётчик остаётся честным и дешёвым.
+        status = mgr.get_auto_backup_status()
+        assert status["encrypted_snapshots"] == 4
+
+    def test_cache_does_not_hide_in_place_manifest_change(self, tmp_path):
+        """Перезапись манифеста на месте (не через rename) обязана быть замечена."""
+        data_dir, backups, store = self._profile_with_snapshots(tmp_path, 3)
+        mgr = AutoBackupManager(store=store, interval_hours=0)
+        mgr.get_auto_backup_status()  # прогрев
+
+        victim = sorted(backups.glob("auto_snapshot_*"))[0]
+        manifest = _manifest(victim)
+        manifest["state"] = STATE_COMMITTING
+        victim.joinpath(SNAPSHOT_MANIFEST_FILENAME).write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+
+        status = mgr.get_auto_backup_status()
+        assert status["encryption_operation_unavailable"] is True
+        assert status["skipped_reason"] == "snapshot_recovery_pending"
