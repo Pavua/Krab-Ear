@@ -1463,21 +1463,24 @@ def _apply_verified_snapshot_locked(
     transaction_id: str,
     pre_restore_snapshot: str,
     recovered: bool,
+    staging: Path | None = None,
 ) -> dict:
     """Шаги 2–4 под store-lock: union → фильтрация → COMMITTING → замены → read-back.
 
-    Вызывается и обычным restore, и recovery (roll-forward). Разница только в
-    ``pre_restore_snapshot``/``recovered``: при докачке страховка уже создана
-    первым restore, второй раз она не нужна.
+    Вызывается и обычным restore, и recovery (roll-forward). Разница: ``staging``
+    (у recovery — каталог незавершённой транзакции, он переиспользуется) и
+    ``pre_restore_snapshot``/``recovered`` (страховка уже создана первым
+    restore, второй раз она не нужна).
     """
     union = set(collect_ledger_union(data_dir=data_dir, crypto=crypto))
     blocked = union | _snapshot_ledger_ids(snapshot_dir=snapshot_dir, crypto=crypto)
 
-    staging = _restore_staging_dir(data_dir, transaction_id)
-    if staging.exists():
-        raise SnapshotOperationRefused(
-            REASON_DESTINATION_EXISTS, f"staging {staging.name} уже существует"
-        )
+    if staging is None:
+        staging = _restore_staging_dir(data_dir, transaction_id)
+        if staging.exists():
+            raise SnapshotOperationRefused(
+                REASON_DESTINATION_EXISTS, f"staging {staging.name} уже существует"
+            )
     _ensure_private_dir(staging)
 
     try:
@@ -1572,6 +1575,251 @@ def _apply_verified_snapshot_locked(
         "readback": readback,
         "recovered": recovered,
     }
+
+
+def _recovery_result(
+    *,
+    ok: bool,
+    pending: bool,
+    reason: str | None,
+    state: str | None = None,
+    transaction_id: str | None = None,
+    snapshot_dir: str | None = None,
+    pre_restore_snapshot: str | None = None,
+    restored_entries: int = 0,
+    rolled_forward: bool = False,
+    stale_staging: list[str] | None = None,
+    extra_markers: list[str] | None = None,
+    snapshot_pending: bool = False,
+) -> dict:
+    """Единая форма ответа recovery (одно место → один словарь полей)."""
+    return {
+        "ok": ok,
+        "pending": pending,
+        "reason": reason,
+        "state": state,
+        "transaction_id": transaction_id,
+        "snapshot_dir": snapshot_dir,
+        "pre_restore_snapshot": pre_restore_snapshot,
+        "restored_entries": restored_entries,
+        "rolled_forward": rolled_forward,
+        "stale_staging": list(stale_staging or []),
+        "extra_markers": list(extra_markers or []),
+        "snapshot_pending": snapshot_pending,
+    }
+
+
+def recover_pending_restore(
+    *,
+    data_dir: Any,
+    backups_root: Any,
+    crypto: Any,
+    policy_read: Callable[[], bool] | None = None,
+) -> dict:
+    """A5.2b2 Task 3 — fail-closed recovery: докатка проверенного снимка.
+
+    Спека §5: «После crash COMMITTING либо докатывается из этого snapshot, либо
+    остаётся fail-closed до восстановления; непроверенный успех запрещён» и
+    «Recovery при недоступном ключе не создаёт новый ключ и не запускает обычное
+    обслуживание». Карточка b2, решение 6: докатывается ЦЕЛЕВОЙ снимок
+    (roll-forward), pre-restore снимок остаётся страховкой для ручного решения.
+
+    Разбор решений:
+
+      * restore-маркера нет → дешёвый no-op. Состояние b1 (мусор из
+        неопубликованного staging / pending опубликованного COMMITTING) доносится
+        честно: «snapshot_stale_staging» либо «snapshot_recovery_pending»;
+      * маркер ``COMMITTED`` → транзакция уже завершена, осталось убрать
+        приватный staging (crash между записью COMMITTED и уборкой). Ничего не
+        переделывается, живая история не перезаписывается;
+      * маркер ``COMMITTING`` → повторная верификация целевого снимка и
+        ДОКАЧКА тем же кодом, что и обычный restore (тот же commit-протокол,
+        тот же ledger union, read-back → COMMITTED). Roll-forward, а не откат в
+        pre-restore: тот остаётся на диске, его путь возвращается владельцу;
+      * невозможно докачать (снимок повреждён, ключ недоступен, policy OFF) →
+        fail-closed: причина машинно-читаема, путь pre-restore снимка в ответе,
+        НИЧЕГО не удаляется, новый ключ не создаётся, обычное обслуживание
+        (backup) не стартует — новые снимки блокирует тот же маркер.
+
+    Возвращает словарь (никогда не бросает): вызывается из конструктора
+    StateStore, где исключение означало бы «backend не стартует».
+    """
+    data_dir = Path(data_dir)
+    backups_root = Path(backups_root)
+    if policy_read is None:
+        from backend.history_encryption_policy import data_dir_policy_reader
+
+        policy_read = data_dir_policy_reader(data_dir)
+
+    def _blocked(reason: str, **kwargs: Any) -> dict:
+        logger.error(
+            "encrypted_snapshot: restore recovery fail-closed (%s) — %s",
+            reason,
+            kwargs.get("snapshot_dir") or data_dir,
+        )
+        return _recovery_result(ok=False, pending=True, reason=reason, **kwargs)
+
+    try:
+        markers = restore_marker_dirs(data_dir)
+    except SnapshotOperationRefused as exc:
+        return _blocked(exc.reason)
+
+    # Состояние b1 смотрим ВСЕГДА: владелец должен видеть честную картину
+    # backups независимо от наличия restore-маркера.
+    try:
+        b1 = recover_pending_state(data_dir=data_dir, backups_root=backups_root)
+    except SnapshotOperationRefused as exc:
+        b1 = {"ok": False, "pending": True, "reason": exc.reason, "state": None}
+    b1_pending = bool(b1.get("pending"))
+    b1_reason = b1.get("reason")
+
+    if not markers:
+        if b1_pending:
+            # Опубликованный COMMITTING снимка (backup) — докатывать его как
+            # restore нельзя: это тихо заменило бы живую историю старым бэкапом.
+            return _recovery_result(
+                ok=False,
+                pending=True,
+                reason=b1_reason or REASON_RECOVERY_PENDING,
+                state=b1.get("state"),
+                snapshot_pending=True,
+            )
+        if b1_reason:
+            return _recovery_result(
+                ok=True,
+                pending=False,
+                reason=b1_reason,
+                state=b1.get("state"),
+                stale_staging=list(b1.get("stale_staging") or []),
+            )
+        return _recovery_result(ok=True, pending=False, reason=None)
+
+    staging = markers[0]
+    extra = [str(p) for p in markers[1:]]
+    if extra:
+        logger.warning(
+            "encrypted_snapshot: найдено %d restore-маркеров, обрабатывается самый "
+            "ранний по имени; остальные: %s",
+            len(markers), extra,
+        )
+    try:
+        marker = _read_restore_marker(staging)
+    except SnapshotOperationRefused as exc:
+        return _blocked(
+            exc.reason, extra_markers=extra, snapshot_pending=b1_pending
+        )
+
+    transaction_id = str(marker.get("transaction_id") or "")
+    pre_restore = marker.get("pre_restore_snapshot")
+    target = marker.get("target_snapshot")
+    common = {
+        "state": marker.get("state"),
+        "transaction_id": transaction_id or None,
+        "snapshot_dir": str(target) if target else None,
+        "pre_restore_snapshot": str(pre_restore) if pre_restore else None,
+        "extra_markers": extra,
+        "snapshot_pending": b1_pending,
+    }
+
+    # --- Маркер COMMITTED: транзакция завершена, осталась только уборка. ---
+    if marker.get("state") == RESTORE_STATE_COMMITTED:
+        _cancel_staging(staging)
+        if transaction_id:
+            _cleanup_restore_tmp(data_dir, transaction_id)
+        _fsync_dir(data_dir)
+        logger.info(
+            "encrypted_snapshot: restore %s уже был COMMITTED — приватный staging убран",
+            transaction_id,
+        )
+        return _recovery_result(
+            ok=True,
+            pending=False,
+            reason=None,
+            restored_entries=int(marker.get("restored_entries") or 0),
+            **common,
+        )
+
+    # --- Маркер COMMITTING: докатка целевого снимка. ---
+    try:
+        # Fail-closed: без доказанной ON-политики расшифровка была бы понижением
+        # policy. Ключ не создаём — ни нового, ни через Keychain.
+        _require_policy_on(policy_read, reason_when_off=REASON_REQUIRES_ENCRYPTION_ON)
+        if crypto is None:
+            raise SnapshotOperationRefused(
+                REASON_CRYPTO_UNAVAILABLE,
+                "ключ недоступен — докачка невозможна, отката в plaintext нет",
+            )
+        if not target:
+            raise SnapshotOperationRefused(
+                REASON_MANIFEST_INVALID, "в restore-маркере нет целевого снимка"
+            )
+        with history_flock(data_dir):
+            _require_policy_on(policy_read, reason_when_off=REASON_POLICY_UNAVAILABLE)
+            # Повторная верификация: снимок могли подменить/испортить после crash.
+            verify_snapshot(backups_root=backups_root, snapshot_dir=target, crypto=crypto)
+            result = _apply_verified_snapshot_locked(
+                data_dir=data_dir,
+                backups_root=backups_root,
+                snapshot_dir=Path(str(target)),
+                crypto=crypto,
+                policy_read=policy_read,
+                transaction_id=transaction_id or _new_transaction_id("restore"),
+                pre_restore_snapshot=str(pre_restore) if pre_restore else "",
+                recovered=True,
+                # ТОТ ЖЕ каталог staging: докачка — продолжение той же
+                # транзакции, а не новая. Второй маркер не создаётся, поэтому
+                # следующий запуск не увидит «две незавершённые операции».
+                staging=staging,
+            )
+    except SnapshotOperationRefused as exc:
+        return _blocked(exc.reason, **common)
+    except Exception:  # noqa: BLE001 — recovery не имеет права бросить
+        logger.exception("encrypted_snapshot: recovery неожиданно упал")
+        return _blocked(
+            REASON_RECOVERY_PENDING, **common
+        )
+
+    return _recovery_result(
+        ok=True,
+        pending=False,
+        reason=None,
+        state=result["state"],
+        transaction_id=result["transaction_id"],
+        snapshot_dir=result["snapshot_dir"],
+        pre_restore_snapshot=result["pre_restore_snapshot"] or None,
+        restored_entries=result["restored_entries"],
+        rolled_forward=True,
+        extra_markers=extra,
+        snapshot_pending=b1_pending,
+    )
+
+
+def recover_pending_restore_from_store(store: Any) -> dict | None:
+    """Ленивая точка входа recovery для ``StateStore.__init__`` (одна строка).
+
+    ``None`` — маркера на диске не было: обычный старт, работа не выполнялась.
+    Проверка наличия маркера НЕ читает его содержимое и НЕ обращается к ключу,
+    поэтому обычный старт (в т.ч. OFF-профиль прода) не делает ни одного
+    обращения к Keychain. Тяжёлая логика и все fail-closed решения — в
+    ``recover_pending_restore``; здесь только сбор аргументов из store.
+    """
+    data_dir = Path(store.data_dir)
+    if not has_pending_restore(data_dir):
+        return None
+    from backend.history_encryption_policy import store_policy_reader
+
+    crypto_getter = getattr(store, "_get_history_crypto", None)
+    crypto = crypto_getter() if callable(crypto_getter) else None
+    try:
+        return recover_pending_restore(
+            data_dir=data_dir,
+            backups_root=data_dir / "backups",
+            crypto=crypto,
+            policy_read=store_policy_reader(store),
+        )
+    except Exception:  # noqa: BLE001 — старт backend не имеет права падать
+        logger.exception("StateStore: A5.2b2 restore recovery не выполнен")
+        return None
 
 
 def restore_encrypted_snapshot(

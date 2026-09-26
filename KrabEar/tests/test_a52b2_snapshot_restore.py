@@ -30,6 +30,8 @@ from backend.encrypted_snapshot import (
     SnapshotOperationRefused,
     collect_ledger_union,
     create_encrypted_snapshot,
+    has_pending_restore,
+    recover_pending_restore,
     restore_encrypted_snapshot,
     verify_snapshot,
 )
@@ -1222,3 +1224,348 @@ class TestRestoreCommitProtocol:
         assert exc.value.reason == "snapshot_recovery_pending"
         assert exc.value.pending is True
         assert len(_restore_markers(data_dir)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — fail-closed recovery с докачкой + ленивый wiring
+# ---------------------------------------------------------------------------
+
+
+def _crash_restore(data_dir: Path, crypto: HistoryCrypto, snapshot_dir: Path, *, at: str):
+    """Роняет restore в нужном crash-окне и возвращает живой маркер."""
+    if at == "marker":
+        target = "backend.encrypted_snapshot._write_restore_marker"
+        side_effect = OSError("synthetic crash at marker")
+    elif at == "replace":
+        target = "backend.encrypted_snapshot._replace_journal"
+        side_effect = OSError("synthetic crash at replacement")
+    else:
+        raise ValueError(at)
+    with patch(target, side_effect=side_effect):
+        with pytest.raises(SnapshotOperationRefused):
+            restore_encrypted_snapshot(
+                data_dir=data_dir,
+                backups_root=data_dir / "backups",
+                snapshot_dir=snapshot_dir,
+                crypto=crypto,
+                policy_read=_policy_on(data_dir),
+            )
+
+
+def _recover(data_dir: Path, crypto: HistoryCrypto) -> dict:
+    return recover_pending_restore(
+        data_dir=data_dir,
+        backups_root=data_dir / "backups",
+        crypto=crypto,
+        policy_read=_policy_on(data_dir),
+    )
+
+
+class TestRecoveryRollsForward:
+    def test_committing_restore_is_rolled_forward_to_committed(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        expected = _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        _crash_restore(data_dir, crypto, snapshot_dir, at="replace")
+        assert len(_restore_markers(data_dir)) == 1
+
+        result = _recover(data_dir, crypto)
+
+        assert result["ok"] is True
+        assert result["rolled_forward"] is True
+        assert result["state"] == "COMMITTED"
+        assert result["restored_entries"] == 3
+        # Доказан результат, а не «оставлено как было».
+        for name in HISTORY_JOURNAL_FILENAMES:
+            lines = _read_ndjson_lines(data_dir / name)
+            assert lines, name
+        assert [crypto.decrypt_line(ln) for ln in _read_ndjson_lines(data_dir / "history.ndjson")] == [
+            expected["history.ndjson"][0],
+            expected["history.ndjson"][1],
+            expected["history.ndjson"][2],
+        ]
+        assert _restore_markers(data_dir) == []
+
+    def test_recovery_reverifies_target_before_applying(self, tmp_path):
+        """Снимок, испорченный ПОСЛЕ crash, не докатывается молча."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        _crash_restore(data_dir, crypto, snapshot_dir, at="replace")
+        target = snapshot_dir / "history.ndjson"
+        target.write_bytes(target.read_bytes() + b"ENC1:AAAA\n")
+
+        result = _recover(data_dir, crypto)
+
+        assert result["ok"] is False
+        assert result["pending"] is True
+        assert result["reason"] in {
+            "snapshot_readback_failed",
+            "snapshot_line_tampered",
+        }
+        assert result["pre_restore_snapshot"] is not None
+        # Ничего не удалено и не заменено «как есть».
+        assert len(_restore_markers(data_dir)) == 1
+
+    def test_recovery_refuses_rollforward_at_off_policy(self, tmp_path):
+        """Fail-closed: никакого отката в plaintext, никакого нового ключа."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        _crash_restore(data_dir, crypto, snapshot_dir, at="replace")
+        live_before = _data_bytes(data_dir)
+        _settings_off(data_dir)
+
+        result = _recover(data_dir, crypto)
+
+        assert result["ok"] is False
+        assert result["pending"] is True
+        assert result["reason"] == "snapshot_requires_encryption_on"
+        assert _data_bytes(data_dir) == live_before
+        assert len(_restore_markers(data_dir)) == 1
+        assert KEYCHAIN_ATTEMPTS["count"] == 0
+
+    def test_recovery_without_key_refuses_and_creates_none(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        _crash_restore(data_dir, crypto, snapshot_dir, at="replace")
+        live_before = _data_bytes(data_dir)
+
+        result = _recover(data_dir, None)
+
+        assert result["ok"] is False
+        assert result["pending"] is True
+        assert result["reason"] == "snapshot_crypto_unavailable"
+        assert _data_bytes(data_dir) == live_before
+        assert KEYCHAIN_ATTEMPTS["count"] == 0
+
+    def test_recovery_reports_pre_restore_path_for_manual_decision(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        _crash_restore(data_dir, crypto, snapshot_dir, at="replace")
+        marker = _marker(_restore_markers(data_dir)[0])
+
+        result = _recover(data_dir, crypto)
+
+        assert result["pre_restore_snapshot"] == marker["pre_restore_snapshot"]
+        assert Path(result["pre_restore_snapshot"]).is_dir()
+
+    def test_committed_marker_left_by_crash_is_only_cleaned(self, tmp_path):
+        """COMMITTED на диске = транзакция уже завершена: убрать, не переделывать."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        # Доводим до успеха, затем возвращаем каталог staging на место — как если бы
+        # процесс умер между записью COMMITTED и уборкой staging.
+        restore_encrypted_snapshot(
+            data_dir=data_dir,
+            backups_root=data_dir / "backups",
+            snapshot_dir=snapshot_dir,
+            crypto=crypto,
+            policy_read=_policy_on(data_dir),
+        )
+        live_after_restore = _data_bytes(data_dir)
+        leftover = data_dir / f"{RESTORE_STAGING_PREFIX}tx-проигранный"
+        leftover.mkdir()
+        (leftover / RESTORE_MARKER_FILENAME).write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "transaction_id": "tx-проигранный",
+                    "state": "COMMITTED",
+                    "target_snapshot": str(snapshot_dir),
+                    "pre_restore_snapshot": str(snapshot_dir),
+                    "files": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = _recover(data_dir, crypto)
+
+        assert result["ok"] is True
+        assert result["rolled_forward"] is False
+        assert result["state"] == "COMMITTED"
+        assert result["pending"] is False
+        assert _restore_markers(data_dir) == []
+        assert _data_bytes(data_dir) == live_after_restore
+
+    def test_recovery_of_midway_crash_completes_mixed_set(self, tmp_path):
+        """Половина замен + докачка = связный полный набор, а не смесь."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        expected = _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        calls = {"n": 0}
+
+        def _fifth_fails(tmp_arg, target):
+            calls["n"] += 1
+            if calls["n"] == 5:
+                raise OSError("synthetic crash on fifth replacement")
+            return _real_replace(tmp_arg, target)
+
+        with patch("backend.encrypted_snapshot._replace_journal", _fifth_fails):
+            with pytest.raises(SnapshotOperationRefused):
+                restore_encrypted_snapshot(
+                    data_dir=data_dir,
+                    backups_root=data_dir / "backups",
+                    snapshot_dir=snapshot_dir,
+                    crypto=crypto,
+                    policy_read=_policy_on(data_dir),
+                )
+
+        result = _recover(data_dir, crypto)
+
+        assert result["ok"] is True
+        assert result["rolled_forward"] is True
+        for name in HISTORY_JOURNAL_FILENAMES:
+            if name in ("history_tombstones.ndjson", "history_purged_ids.ndjson"):
+                continue
+            got = [crypto.decrypt_line(ln) for ln in _read_ndjson_lines(data_dir / name)]
+            assert got == expected[name], name
+
+
+class TestRecoveryNoOpAndStaleStaging:
+    def test_no_marker_is_cheap_noop(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        before = _tree_state(data_dir)
+
+        result = _recover(data_dir, crypto)
+
+        assert result["ok"] is True
+        assert result["pending"] is False
+        assert result["reason"] is None
+        assert result["rolled_forward"] is False
+        assert result["state"] is None
+        assert _tree_state(data_dir) == before
+
+    def test_unpublished_snapshot_staging_is_musor_not_pending(self, tmp_path):
+        """Ориентир — `published`: staging без публикации не трогаем и не чистим."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        _make_snapshot(data_dir, crypto)
+        staging = data_dir / "backups" / ".staging" / ".tx-мусор"
+        staging.mkdir(parents=True)
+        (staging / "history.ndjson").write_text("", encoding="utf-8")
+        (staging / "snapshot_manifest.json").write_text(
+            json.dumps({"version": 1, "state": "COMMITTING"}), encoding="utf-8"
+        )
+
+        result = _recover(data_dir, crypto)
+
+        assert result["ok"] is True
+        assert result["pending"] is False
+        assert result["reason"] == "snapshot_stale_staging"
+        # Доказательство остаётся владельцу.
+        assert staging.is_dir()
+
+    def test_published_snapshot_committing_stays_visible_as_pending(self, tmp_path):
+        """b1-транзакция (backup) не докатывается под видом restore и не прячется."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        manifest = _manifest(snapshot_dir)
+        manifest["state"] = "COMMITTING"
+        _write_manifest(snapshot_dir, manifest)
+
+        result = _recover(data_dir, crypto)
+
+        assert result["ok"] is False
+        assert result["pending"] is True
+        assert result["reason"] == "snapshot_recovery_pending"
+        assert result["rolled_forward"] is False
+        # Живая история не тронута: backup-COMMITTING не превращается в restore.
+        assert len(_read_ndjson_lines(data_dir / "history.ndjson")) == 3
+
+    def test_has_pending_restore_is_cheap_and_false_without_marker(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        _fill_profile(data_dir, _crypto())
+        assert has_pending_restore(data_dir) is False
+        leftover = data_dir / f"{RESTORE_STAGING_PREFIX}tx-1"
+        leftover.mkdir()
+        (leftover / RESTORE_MARKER_FILENAME).write_text("{}", encoding="utf-8")
+        assert has_pending_restore(data_dir) is True
+
+
+class TestRecoveryWiring:
+    def test_state_store_init_recovers_only_when_marker_exists(self, tmp_path, monkeypatch):
+        from backend.state_store import StateStore
+
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        _crash_restore(data_dir, crypto, snapshot_dir, at="replace")
+        assert _restore_markers(data_dir)
+        # Ключ подставляется ДО конструктора: recovery работает внутри __init__.
+        monkeypatch.setattr(StateStore, "_get_history_crypto", lambda self: crypto)
+
+        store = StateStore(data_dir)  # конструктор обязан докатить маркер
+
+        assert store.restore_recovery["rolled_forward"] is True
+        assert store.restore_recovery["state"] == "COMMITTED"
+        assert KEYCHAIN_ATTEMPTS["count"] == 0
+        assert _restore_markers(data_dir) == []
+        assert has_pending_restore(data_dir) is False
+        lines = _read_ndjson_lines(data_dir / "history.ndjson")
+        assert lines and all(ln.startswith(SENTINEL) for ln in lines)
+
+    def test_state_store_init_without_marker_does_nothing(self, tmp_path):
+        from backend.state_store import StateStore
+
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        _make_snapshot(data_dir, crypto)
+        before = _data_bytes(data_dir)
+        settings_before = (data_dir / "settings.json").read_bytes()
+
+        StateStore(data_dir)
+
+        assert _data_bytes(data_dir) == before
+        assert (data_dir / "settings.json").read_bytes() == settings_before
+        assert _restore_markers(data_dir) == []
+
+    def test_off_profile_start_with_stray_marker_does_not_decrypt(self, tmp_path):
+        """OFF-профиль (прод) + случайный каталог: никаких обращений к ключу."""
+        from backend.state_store import StateStore
+
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_off(data_dir)
+        _make_snapshot(data_dir, crypto)
+        live_before = _data_bytes(data_dir)
+        leftover = data_dir / f"{RESTORE_STAGING_PREFIX}tx-мусор"
+        leftover.mkdir()
+        (leftover / RESTORE_MARKER_FILENAME).write_text("{}", encoding="utf-8")
+
+        StateStore(data_dir)
+
+        assert _data_bytes(data_dir) == live_before
+        assert leftover.is_dir()  # доказательство не удалено
+        assert KEYCHAIN_ATTEMPTS["count"] == 0

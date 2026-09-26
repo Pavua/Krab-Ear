@@ -406,6 +406,17 @@ class StateStore:
         self._lock_holder_label: str | None = None
         self._lock_holder_since: float | None = None
 
+        # A5.2b2: докачка незавершённого restore из encrypted-снимка. Wiring
+        # ленивый и ровно один вызов: дешёвая проверка наличия маркера (без
+        # чтения содержимого и без обращения к ключу), вся логика и все
+        # fail-closed решения — в backend/encrypted_snapshot.py. ``None``
+        # означает «маркера не было». Ставится последним: recovery держит
+        # history_flock и читает настройки, поэтому все пути должны быть
+        # проинициализированы.
+        from backend.encrypted_snapshot import recover_pending_restore_from_store
+
+        self.restore_recovery = recover_pending_restore_from_store(self)
+
         # Phase B.2 — error_bus late-injection
 
     def _get_history_crypto(self):
