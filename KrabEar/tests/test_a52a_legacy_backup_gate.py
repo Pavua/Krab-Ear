@@ -474,6 +474,94 @@ class _ProxyStore:
         self.data_dir = str(data_dir)
 
 
+class _LockCountingStore:
+    """Fake-store со spy ``_lock``: считает входы, без реального flock."""
+
+    def __init__(self, data_dir: Path) -> None:
+        self.data_dir = str(data_dir)
+        self.lock_enters = 0
+
+    @contextmanager
+    def _lock(self, *args, **kwargs):
+        self.lock_enters += 1
+        yield
+
+    def get_history_item_by_id(self, item_id):
+        return None
+
+    def delete_history_item(self, item_id):
+        return False
+
+    def add_history_item(self, text="", **kwargs):
+        return None
+
+
+class _SemanticSpy:
+    """Spy semantic_searcher, фиксирующий глубину store-flock в момент вызова."""
+
+    def __init__(self, lock_depth: dict) -> None:
+        self._lock_depth = lock_depth
+        self.calls: list[dict] = []
+
+    def index_item(self, item_id, text):
+        self.calls.append({"item_id": item_id, "depth": self._lock_depth["n"]})
+
+    def remove_item(self, item_id):
+        pass
+
+
+class TestUnarchiveAvailability:
+    """MAJOR (review): unarchive не держит глобальный history.lock на ML-путь."""
+
+    def test_unarchive_over_batch_rejected_before_store_lock(self, tmp_path):
+        from backend import archive_manager as _am
+
+        data_dir = _data_dir(tmp_path)
+        store = _LockCountingStore(data_dir)
+        mgr = ArchiveManager(store=store)
+        over = getattr(_am, "_MAX_UNARCHIVE_BATCH", 100) + 1
+        result = mgr.unarchive_items([f"id-{i}" for i in range(over)])
+        assert result.get("ok") is False
+        assert result.get("reason") == "too_many_ids"
+        assert store.lock_enters == 0
+
+    def test_unarchive_at_batch_cap_still_enters_lock(self, tmp_path):
+        from backend import archive_manager as _am
+
+        data_dir = _data_dir(tmp_path)
+        store = _LockCountingStore(data_dir)
+        mgr = ArchiveManager(store=store)
+        at_cap = getattr(_am, "_MAX_UNARCHIVE_BATCH", 100)
+        result = mgr.unarchive_items([f"id-{i}" for i in range(at_cap)])
+        assert result.get("reason") != "too_many_ids"
+        assert store.lock_enters >= 1
+
+    def test_unarchive_indexes_after_store_lock_released(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        store = StateStore(data_dir)
+        lock_depth = {"n": 0}
+        real_lock = store._lock
+
+        @contextmanager
+        def tracking_lock(*args, **kwargs):
+            with real_lock(*args, **kwargs):
+                lock_depth["n"] += 1
+                try:
+                    yield
+                finally:
+                    lock_depth["n"] -= 1
+
+        spy = _SemanticSpy(lock_depth)
+        mgr = ArchiveManager(store=store, semantic_searcher=spy)
+        mgr._archive_path.write_text(
+            '{"id":"seed","text":"semantic text"}\n', encoding="utf-8"
+        )
+        with patch.object(store, "_lock", tracking_lock):
+            result = mgr.unarchive_items(["seed"])
+        assert result["unarchived_count"] == 1
+        assert spy.calls == [{"item_id": "seed", "depth": 0}]
+
+
 class TestPolicyReaderFallback:
     def test_proxy_store_uses_data_dir_on(self, tmp_path):
         data_dir = _data_dir(tmp_path)

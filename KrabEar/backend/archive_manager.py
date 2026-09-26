@@ -34,6 +34,10 @@ _ARCHIVE_LOCK_FILE = "archive.ndjson.lock"  # sibling lock file for cross-proces
 # ДО захвата lock; превышение MAX_ARCHIVE_BATCH отклоняется.
 _MAX_ARCHIVE_BATCH = 100        # макс. item_ids за один archive_items()
 _MAX_ITEM_ID_LEN = 200          # макс. длина одного id (отсекает мусорные строки)
+# MAJOR (adversarial review, 2026-09-26): unarchive держит store-flock на весь
+# цикл восстановления (включая semantic index_item → ML _encode), поэтому его
+# батч тоже обязан быть капнут ДО захвата lock — зеркально archive_items.
+_MAX_UNARCHIVE_BATCH = 100      # макс. item_ids за один unarchive_items()
 # wave-25 (B1-c): защита от unbounded-load archive.ndjson на каждый list/stats/unarchive.
 _MAX_ARCHIVE_LOAD = 50_000      # выше — warn + truncate (защита памяти)
 
@@ -241,17 +245,26 @@ class ArchiveManager:
         if self._recording_chain_mgr is not None:
             self._recording_chain_mgr.remove_item_from_all_chains(clean_id)
 
-    def _validate_archive_ids(self, item_ids: list[str]) -> list[str] | dict[str, Any]:
+    def _validate_archive_ids(
+        self,
+        item_ids: list[str],
+        *,
+        max_batch: int = _MAX_ARCHIVE_BATCH,
+    ) -> list[str] | dict[str, Any]:
         """Валидирует item_ids ДО захвата store-flock (wave-25 B1-b).
 
         Lock starvation fix: раньше итерация по item_ids (включая мусорные/гигантские
         списки) шла ВНУТРИ store._lock() — межпроцессной fcntl.flock, сериализующей
         ВСЕ записи/компактирование истории. Огромный список держал бы lock сколь угодно
         долго. Теперь все id чистятся и проверяются заранее; flock держится только на
-        ограниченный (≤ _MAX_ARCHIVE_BATCH) валидный набор.
+        ограниченный (≤ ``max_batch``) валидный набор.
+
+        ``max_batch``: archive_items → ``_MAX_ARCHIVE_BATCH`` (default);
+        unarchive_items → ``_MAX_UNARCHIVE_BATCH`` — тот же паттерн, т.к. unarchive
+        дополнительно держит lock на semantic ML-индексацию.
 
         Отклоняем не-строки, пустые после strip, длиннее _MAX_ITEM_ID_LEN. Если число
-        валидных id превышает _MAX_ARCHIVE_BATCH — возвращаем ошибку (батч слишком велик).
+        валидных id превышает ``max_batch`` — возвращаем ошибку (батч слишком велик).
 
         Returns:
             Список очищенных id (с сохранением порядка, без дубликатов) ИЛИ
@@ -270,11 +283,11 @@ class ArchiveManager:
                 continue
             seen.add(clean)
             clean_ids.append(clean)
-        if len(clean_ids) > _MAX_ARCHIVE_BATCH:
+        if len(clean_ids) > max_batch:
             return {
                 "ok": False,
                 "reason": "too_many_ids",
-                "max": _MAX_ARCHIVE_BATCH,
+                "max": max_batch,
                 "got": len(clean_ids),
             }
         return clean_ids
@@ -438,6 +451,13 @@ class ArchiveManager:
         Returns:
             Словарь с ключами unarchived_count, not_found.
             При обнаружении конкурентного purge возвращает ok=False, reason=purge_in_progress.
+            При превышении ``_MAX_UNARCHIVE_BATCH`` — ok=False, reason=too_many_ids
+            (проверка ДО захвата store-flock).
+
+        MAJOR (adversarial review): item_ids валидируются/капятся ДО store-flock;
+        semantic ``index_item`` (синхронный ML ``_encode``) выполняется ПОСЛЕ
+        отпускания lock с re-check purge-epoch, чтобы не держать глобальный
+        history.lock на ML-путь.
         """
         _store = store if store is not None else self._store
         # A5.2a: unarchive возвращает plaintext-записи в активную историю и
@@ -448,15 +468,27 @@ class ArchiveManager:
                 _ENC_OP_UNAVAILABLE,
             )
             return {"ok": False, "reason": _ENC_OP_UNAVAILABLE}
-        ids_set = {str(i).strip() for i in item_ids if str(i).strip()}
-        if not ids_set:
+        # MAJOR (adversarial review, 2026-09-26): валидация + кап ДО store-flock
+        # (зеркально archive_items). Без капа цикл восстановления держал бы
+        # межпроцессный history.lock на весь список до _MAX_ARCHIVE_LOAD.
+        validated = self._validate_archive_ids(
+            item_ids, max_batch=_MAX_UNARCHIVE_BATCH
+        )
+        if isinstance(validated, dict):
+            return validated
+        if not validated:
             return {"unarchived_count": 0, "not_found": []}
+        ids_set = set(validated)
 
         # wave-33 (B2): снимок purge-epoch ДО захвата self._lock.
         epoch_before = self._current_epoch()
 
         unarchived_count = 0
         not_found: list[str] = []
+        # MAJOR: semantic index_item (синхронный ML _encode) выносится ИЗ-ПОД
+        # store-flock. Копим успешно восстановленные записи, индексируем после
+        # отпускания lock с re-check purge-epoch.
+        to_index: list[tuple[str, str]] = []
 
         store_lock_factory = getattr(_store, "_lock", None)
         store_lock_ctx = (
@@ -521,13 +553,10 @@ class ArchiveManager:
                         if self._semantic_searcher is not None:
                             restore_text = restore_dict.get("text", "")
                             if restore_text and restore_text.strip():
-                                try:
-                                    self._semantic_searcher.index_item(item_id, restore_text)
-                                except Exception as exc:
-                                    logger.warning(
-                                        "unarchive_items: не удалось переиндексировать %s: %s",
-                                        item_id, exc,
-                                    )
+                                # Индексация выполняется ПОСЛЕ store-flock (ниже):
+                                # index_item → синхронный ML _encode не должен
+                                # держать глобальный history.lock.
+                                to_index.append((item_id, restore_text))
                     except Exception as exc:
                         logger.error("Не удалось восстановить запись id=%s: %s", item_id, exc)
                         remaining.append(item)
@@ -537,7 +566,27 @@ class ArchiveManager:
             not_found = sorted(ids_set - found_ids)
             self._rewrite_archive(remaining)
 
-            return {"unarchived_count": unarchived_count, "not_found": not_found}
+        # Индексация ВНЕ store-flock. Re-check purge-epoch: если между отпусканием
+        # lock и индексацией прошёл clear_all (epoch++), записи уже удалены —
+        # индексировать нечего, иначе semantic-индекс воскресил бы PII-метаданные.
+        if to_index:
+            if self._current_epoch() != epoch_before:
+                logger.warning(
+                    "unarchive_items: purge во время индексации (epoch %d→%d) — "
+                    "semantic index пропущен",
+                    epoch_before, self._current_epoch(),
+                )
+            else:
+                for item_id, restore_text in to_index:
+                    try:
+                        self._semantic_searcher.index_item(item_id, restore_text)
+                    except Exception as exc:
+                        logger.warning(
+                            "unarchive_items: не удалось переиндексировать %s: %s",
+                            item_id, exc,
+                        )
+
+        return {"unarchived_count": unarchived_count, "not_found": not_found}
 
     def list_archived(self, limit: int = 50) -> list[dict[str, Any]]:
         """Возвращает список архивированных записей (от новых к старым).

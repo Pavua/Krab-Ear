@@ -1046,6 +1046,27 @@ caller-side — A5.2b).
 fallback `store_policy_reader` (см. выше). Тест «нет ложного success-log»
 невозможен без правки service.py — остаётся долгом.
 
+**MAJOR-Availability (второй review-раунд, PASS-WITH-NITS).** Фикс MAJOR-1
+внёс Availability-регресс: `unarchive_items` держал глобальный `history.lock`
+на весь цикл, включая semantic `index_item` → синхронный ML `_encode`
+(`archive_manager.py:525`), тогда как `archive_items` для этого капнут
+`_MAX_ARCHIVE_BATCH=100`, а `unarchive_items` не капился и читал до
+`_MAX_ARCHIVE_LOAD=50k`. Большой unarchive блокировал записи/compaction истории
+и мог валить concurrent IPC в `StateStoreLockTimeout` (30с).
+
+Фикс (новый коммит, бонусы MAJOR-1 сохранены):
+- `_MAX_UNARCHIVE_BATCH = 100`; `_validate_archive_ids(item_ids, *,
+  max_batch=...)` обобщён, `unarchive_items` валидирует/капит ДО store-flock
+  (вернуть `ok=False, reason=too_many_ids` на >100).
+- `index_item` вынесен ИЗ-ПОД store-flock: под локом копим `to_index` успешно
+  восстановленных записей, после отпускания лок отпускаем и индексируем, с
+  re-check `_current_epoch()` — при конкурентном `clear_all` semantic index
+  пропускается (иначе PII-метаданные воскресли бы в индексе).
+- RED: `TestUnarchiveAvailability::test_unarchive_over_batch_rejected_before_store_lock`
+  (на HEAD `_lock` входил, cap отсутствовал) и
+  `::test_unarchive_indexes_after_store_lock_released` (spy фиксировал depth=1;
+  после фикса depth=0). Контроль `::test_unarchive_at_batch_cap_still_enters_lock`.
+
 **MINOR-2 — долг A5.2b (НЕ чинится здесь).** `service.py:1234` логирует
 `data_migrator: migration complete ...` безусловно, даже когда `migrate`
 вернул `reason=history_encryption_operation_unavailable` (смешанный v1.0 + ON).
