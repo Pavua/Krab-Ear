@@ -34,8 +34,7 @@ def _make_history_item(item_id: str, text: str):
 
 
 class TestStateStoreEncryptFailureLoud(unittest.TestCase):
-    """Crypto-audit (2026-06-20): encrypt_line упал → plaintext fallback (данные
-    не теряем), НО громкий error_bus push (не молчаливая security-регрессия)."""
+    """A5: encrypt_line упал → отказ записи и громкий error_bus push."""
 
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
@@ -45,9 +44,9 @@ class TestStateStoreEncryptFailureLoud(unittest.TestCase):
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def test_encrypt_failure_pushes_error_and_falls_back_to_plaintext(self) -> None:
+    def test_encrypt_failure_pushes_error_and_rejects_plaintext(self) -> None:
         from unittest.mock import MagicMock
-        from backend.state_store import StateStore
+        from backend.state_store import HistoryEncryptionUnavailable, StateStore
 
         store = StateStore(self.data_dir)
         # Крипто, чей encrypt_line всегда падает (имитация native-сбоя AESGCM).
@@ -59,11 +58,10 @@ class TestStateStoreEncryptFailureLoud(unittest.TestCase):
         bus = MagicMock()
         store._error_bus = bus
 
-        out = store._maybe_encrypt('{"id":"x","text":"secret"}')
+        with self.assertRaises(HistoryEncryptionUnavailable):
+            store._maybe_encrypt('{"id":"x","text":"secret"}')
 
-        # 1. Данные не потеряны — вернулся plaintext.
-        self.assertEqual(out, '{"id":"x","text":"secret"}')
-        # 2. Громко: error_bus.push вызван (history.encrypt_fail).
+        # Ошибка сохраняется локально для retry, но на диск plaintext не уходит.
         self.assertTrue(bus.push.called, "ожидался громкий error_bus push при сбое шифрования")
 
 

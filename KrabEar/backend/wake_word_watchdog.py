@@ -20,6 +20,7 @@ stop/reinit/start (~1-2с тишины микрофона) один раз на 
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from collections import deque
@@ -43,6 +44,40 @@ _HEAL_STORM_MAX = 3
 # staleness. 🔴 Критерий ИМЕННО счётчик, а не собственный таймер: два критерия
 # и два писателя wedged разъехались бы при первой же правке констант.
 _MAX_STARVE_EXITS = 3
+
+
+def _capture_progress_hint(heartbeat: dict[str, Any], now: float) -> str:
+    """Только скалярный, PII-free снимок захвата для редких stale-логов."""
+    opened = heartbeat.get("stream_opened")
+    opened_text = str(opened).lower() if isinstance(opened, bool) else "unknown"
+
+    def _age(value: Any) -> str:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return "none"
+        if not math.isfinite(value):
+            return "none"
+        return f"{max(0.0, now - value):.1f}s"
+
+    last_any = heartbeat.get("last_any_chunk_ts")
+    read_started = heartbeat.get("last_read_started_ts")
+    read_completed = heartbeat.get("last_read_completed_ts")
+    pending = (
+        isinstance(read_started, (int, float))
+        and not isinstance(read_started, bool)
+        and math.isfinite(read_started)
+        and (
+            not isinstance(read_completed, (int, float))
+            or isinstance(read_completed, bool)
+            or not math.isfinite(read_completed)
+            or read_started > read_completed
+        )
+    )
+    return (
+        f"capture: stream_opened={opened_text}, "
+        f"any_chunk_age={_age(last_any)}, "
+        f"nonzero_chunk_age={_age(heartbeat.get('last_chunk_ts'))}, "
+        f"read_pending_age={_age(read_started) if pending else 'none'}"
+    )
 
 
 class WakeWordWatchdog:
@@ -318,8 +353,8 @@ class WakeWordWatchdog:
 
             logger.warning(
                 "WakeWordWatchdog: heartbeat stale %.1fs (порог %.1fs) — "
-                "мягкое лечение через координатор",
-                staleness, stale_sec,
+                "мягкое лечение через координатор; %s",
+                staleness, stale_sec, _capture_progress_hint(hb, now),
             )
             outcome = self._coordinator.reinit_with_wake_word_restore()
             if outcome in (ReinitOutcome.DEFERRED_RECORDING, ReinitOutcome.BUSY):
@@ -348,7 +383,7 @@ class WakeWordWatchdog:
                 self._heal_history.append(now)
             return "healed"
 
-        self._escalate(staleness, "stale_after_reinit")
+        self._escalate(staleness, "stale_after_reinit", heartbeat=hb)
         return "escalated"
 
     # ------------------------------------------------------------------
@@ -436,14 +471,20 @@ class WakeWordWatchdog:
         except Exception:
             logger.exception("WakeWordWatchdog: сброс wedged упал")
 
-    def _escalate(self, staleness: float, reason: str) -> None:
+    def _escalate(
+        self, staleness: float, reason: str, *, heartbeat: dict[str, Any] | None = None,
+    ) -> None:
         with self._lock:
             self._heal_attempted_this_episode = True
             self._escalated_this_episode = True
+        capture = (
+            f"; {_capture_progress_hint(heartbeat, self._clock())}"
+            if heartbeat is not None else ""
+        )
         logger.error(
             "WakeWordWatchdog: мягкое лечение невозможно/не помогло (%s, "
-            "staleness=%.1fs) — wedged:true, лечение на стороне агента",
-            reason, staleness,
+            "staleness=%.1fs) — wedged:true, лечение на стороне агента%s",
+            reason, staleness, capture,
         )
         try:
             self._adapter.set_wedged(True)

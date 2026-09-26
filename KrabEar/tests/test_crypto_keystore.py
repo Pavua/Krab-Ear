@@ -63,6 +63,7 @@ class TestGetOrCreateHistoryKey(unittest.TestCase):
         # Второй вызов должен быть add-generic-password
         second_call_args = mock_sec.call_args_list[1][0][0]
         self.assertIn("add-generic-password", second_call_args)
+        self.assertNotIn("-U", second_call_args, "конкурентное создание не должно заменить чужой ключ")
 
     def test_stored_key_is_base64_of_returned_key(self) -> None:
         """Ключ, переданный в Keychain, совпадает с возвращённым значением."""
@@ -85,8 +86,8 @@ class TestGetOrCreateHistoryKey(unittest.TestCase):
         stored_key = base64.b64decode(stored_b64_holder[0])
         self.assertEqual(stored_key, result)
 
-    def test_regenerates_if_stored_key_wrong_length(self) -> None:
-        """Если в Keychain хранится ключ неверной длины — генерирует новый."""
+    def test_rejects_stored_key_wrong_length_without_replacement(self) -> None:
+        """Повреждённый ключ не заменяется: старые записи могут зависеть от него."""
         # Возвращаем 16-байтный ключ вместо 32
         short_key = os.urandom(16)
         b64_short = base64.b64encode(short_key).decode()
@@ -95,11 +96,11 @@ class TestGetOrCreateHistoryKey(unittest.TestCase):
         store_ok = _ok_result()
 
         with patch("backend.crypto_keystore._run_security", side_effect=[find_ok, store_ok]) as mock_sec:
-            from backend.crypto_keystore import get_or_create_history_key
-            result = get_or_create_history_key()
+            from backend.crypto_keystore import KeystoreUnavailable, get_or_create_history_key
+            with self.assertRaises(KeystoreUnavailable):
+                get_or_create_history_key()
 
-        self.assertEqual(len(result), 32)
-        self.assertEqual(mock_sec.call_count, 2)
+        self.assertEqual(mock_sec.call_count, 1)
 
     def test_keystore_unavailable_when_security_missing(self) -> None:
         """FileNotFoundError от 'security' → KeystoreUnavailable."""
@@ -124,6 +125,31 @@ class TestGetOrCreateHistoryKey(unittest.TestCase):
         with patch("backend.crypto_keystore._run_security", side_effect=[find_fail, store_fail]):
             with self.assertRaises(KeystoreUnavailable):
                 get_or_create_history_key()
+
+    def test_operational_lookup_failure_never_replaces_existing_key(self) -> None:
+        """Заблокированный Keychain не равен отсутствующему ключу."""
+        from backend.crypto_keystore import KeystoreUnavailable, get_or_create_history_key
+
+        with patch(
+            "backend.crypto_keystore._run_security",
+            side_effect=[_fail_result(45, "synthetic read denied"), _ok_result()],
+        ) as mock_sec:
+            with self.assertRaises(KeystoreUnavailable):
+                get_or_create_history_key()
+        self.assertEqual(mock_sec.call_count, 1)
+
+    def test_corrupt_existing_key_never_overwritten(self) -> None:
+        """Неверный ключ блокирует доступ, а не заменяется через -U."""
+        from backend.crypto_keystore import KeystoreUnavailable, get_or_create_history_key
+
+        bad_key = base64.b64encode(b"short-key").decode()
+        with patch(
+            "backend.crypto_keystore._run_security",
+            side_effect=[_ok_result(bad_key), _ok_result()],
+        ) as mock_sec:
+            with self.assertRaises(KeystoreUnavailable):
+                get_or_create_history_key()
+        self.assertEqual(mock_sec.call_count, 1)
 
 
 class TestDeleteHistoryKey(unittest.TestCase):

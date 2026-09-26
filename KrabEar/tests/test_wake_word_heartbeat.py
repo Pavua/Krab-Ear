@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -120,6 +121,9 @@ class HeartbeatTests(unittest.TestCase):
         during = oww.snapshots[0]
         self.assertIsNotNone(during["listen_started_ts"])
         self.assertIsNotNone(during["last_chunk_ts"])
+        self.assertTrue(during["stream_opened"])
+        self.assertIsNotNone(during["last_read_started_ts"])
+        self.assertIsNotNone(during["last_any_chunk_ts"])
         # После выхода цикла сессия зачищена (post-exit cleanup, Finding 3).
         hb = self.adapter.heartbeat()
         self.assertIsNone(hb["last_chunk_ts"])
@@ -131,6 +135,83 @@ class HeartbeatTests(unittest.TestCase):
         for during in oww.snapshots:
             self.assertIsNotNone(during["listen_started_ts"])
             self.assertIsNone(during["last_chunk_ts"])
+            self.assertTrue(during["stream_opened"])
+            self.assertIsNotNone(during["last_any_chunk_ts"])
+
+    def test_blocked_read_is_distinguishable_from_zero_chunks(self):
+        """Начатое, но не завершённое чтение не выглядит как поток нулей."""
+        entered = threading.Event()
+        release = threading.Event()
+
+        class _BlockedStream(_FakeStream):
+            def read(self, n):
+                entered.set()
+                release.wait(timeout=2.0)
+                return _zero_chunk(n), False
+
+        stream = _BlockedStream([], self.adapter._stop_event)
+        self.fake_sd.InputStream = lambda **kw: stream
+        self.adapter._oww = _FakeOWW()
+        thread = threading.Thread(
+            target=self.adapter._listen_loop,
+            kwargs={"threshold": 0.5, "chunk_size": 4,
+                    "sample_rate": 16000, "generation": self.adapter._generation},
+            daemon=True,
+        )
+        thread.start()
+        try:
+            self.assertTrue(entered.wait(timeout=1.0))
+            during = self.adapter.heartbeat()
+            self.assertTrue(during["stream_opened"])
+            self.assertIsNotNone(during["last_read_started_ts"])
+            self.assertIsNone(during["last_any_chunk_ts"])
+        finally:
+            self.adapter._stop_event.set()
+            release.set()
+            thread.join(timeout=2.0)
+        self.assertFalse(thread.is_alive())
+
+    def test_failed_read_is_not_pending_while_stream_close_hangs(self):
+        """После исключения read клин __exit__ — другой этап PortAudio."""
+        closing = threading.Event()
+        release = threading.Event()
+
+        class _ErrorThenBlockedClose:
+            read_available = 4096
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                closing.set()
+                release.wait(timeout=2.0)
+                return False
+
+            def read(self, n):
+                raise OSError("synthetic read failure")
+
+        self.fake_sd.InputStream = lambda **kw: _ErrorThenBlockedClose()
+        self.adapter._oww = _FakeOWW()
+        thread = threading.Thread(
+            target=self.adapter._listen_loop,
+            kwargs={"threshold": 0.5, "chunk_size": 4,
+                    "sample_rate": 16000, "generation": self.adapter._generation},
+            daemon=True,
+        )
+        thread.start()
+        try:
+            self.assertTrue(closing.wait(timeout=1.0))
+            during = self.adapter.heartbeat()
+            self.assertIsNotNone(during["last_read_started_ts"])
+            self.assertIsNotNone(during["last_read_completed_ts"])
+            self.assertGreaterEqual(
+                during["last_read_completed_ts"], during["last_read_started_ts"],
+            )
+            self.assertIsNone(during["last_any_chunk_ts"])
+        finally:
+            release.set()
+            thread.join(timeout=2.0)
+        self.assertFalse(thread.is_alive())
 
     def test_stale_generation_exits_loop_early(self):
         # Поколение адаптера ушло вперёд — «зомби»-тред обязан выйти,
@@ -145,6 +226,10 @@ class HeartbeatTests(unittest.TestCase):
     def test_start_resets_heartbeat_and_wedged(self):
         self.adapter._last_chunk_ts = 123.0
         self.adapter._listen_started_ts = 120.0
+        self.adapter._stream_opened = True
+        self.adapter._last_read_started_ts = 121.0
+        self.adapter._last_read_completed_ts = 121.5
+        self.adapter._last_any_chunk_ts = 122.0
         self.adapter.set_wedged(True)
         # Прямой вызов внутренностей start() невозможен без библиотеки —
         # проверяем контракт через _reset_session_state(), который start()
@@ -153,7 +238,24 @@ class HeartbeatTests(unittest.TestCase):
         hb = self.adapter.heartbeat()
         self.assertIsNone(hb["last_chunk_ts"])
         self.assertIsNone(hb["listen_started_ts"])
+        self.assertFalse(hb["stream_opened"])
+        self.assertIsNone(hb["last_read_started_ts"])
+        self.assertIsNone(hb["last_read_completed_ts"])
+        self.assertIsNone(hb["last_any_chunk_ts"])
         self.assertFalse(self.adapter.is_wedged())
+
+    def test_old_generation_cleanup_preserves_new_diagnostics(self):
+        self.adapter._generation = 2
+        self.adapter._stream_opened = True
+        self.adapter._last_read_started_ts = 121.0
+        self.adapter._last_read_completed_ts = 121.5
+        self.adapter._last_any_chunk_ts = 122.0
+        self.adapter._cleanup_session_after_loop_exit(1)
+        hb = self.adapter.heartbeat()
+        self.assertTrue(hb["stream_opened"])
+        self.assertEqual(hb["last_read_started_ts"], 121.0)
+        self.assertEqual(hb["last_read_completed_ts"], 121.5)
+        self.assertEqual(hb["last_any_chunk_ts"], 122.0)
 
     def test_real_start_wires_reset_session_state(self):
         # Интеграционная проводка: НАСТОЯЩИЙ start() обязан звать

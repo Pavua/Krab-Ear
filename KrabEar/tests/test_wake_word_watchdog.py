@@ -169,6 +169,65 @@ class HealAndEscalateTests(unittest.TestCase):
         self.assertEqual(wd.check_once(), "healed")
         self.assertEqual(coord.calls, 1)
 
+    def test_first_stale_log_identifies_zero_frame_stream(self):
+        """Свежие прочитанные кадры без ненулевого heartbeat видны до reinit."""
+        wd, adapter, coord, clock = _make()
+        adapter.hb = {
+            "last_chunk_ts": 900.0,
+            "listen_started_ts": 900.0,
+            "stream_opened": True,
+            "last_read_started_ts": 998.0,
+            "last_read_completed_ts": 998.5,
+            "last_any_chunk_ts": 999.0,
+        }
+        with self.assertLogs("KrabEar.Backend.WakeWordWatchdog", level="WARNING") as logs:
+            self.assertEqual(wd.check_once(), "healed")
+        warning = "\n".join(logs.output)
+        self.assertIn("stream_opened=true", warning)
+        self.assertIn("any_chunk_age=1.0s", warning)
+        self.assertIn("nonzero_chunk_age=100.0s", warning)
+        self.assertIn("read_pending_age=none", warning)
+        self.assertEqual(coord.calls, 1)
+
+    def test_second_stale_log_identifies_blocked_read(self):
+        """После reinit видна незавершённая операция read(), без аудиоданных."""
+        wd, adapter, coord, clock = _make()
+        adapter.hb = {"last_chunk_ts": None, "listen_started_ts": 900.0}
+        self.assertEqual(wd.check_once(), "healed")
+        adapter.hb = {
+            "last_chunk_ts": None,
+            "listen_started_ts": 960.0,
+            "stream_opened": True,
+            "last_read_started_ts": 969.0,
+            "last_any_chunk_ts": None,
+        }
+        with self.assertLogs("KrabEar.Backend.WakeWordWatchdog", level="ERROR") as logs:
+            self.assertEqual(wd.check_once(), "escalated")
+        error = "\n".join(logs.output)
+        self.assertIn("stream_opened=true", error)
+        self.assertIn("any_chunk_age=none", error)
+        self.assertIn("read_pending_age=31.0s", error)
+        self.assertTrue(adapter.wedged)
+        self.assertEqual(coord.calls, 1)
+
+    def test_second_stale_log_does_not_call_failed_read_pending(self):
+        """Зависший close после read exception нельзя спутать с read-hang."""
+        wd, adapter, coord, clock = _make()
+        adapter.hb = {"last_chunk_ts": None, "listen_started_ts": 900.0}
+        self.assertEqual(wd.check_once(), "healed")
+        adapter.hb = {
+            "last_chunk_ts": None,
+            "listen_started_ts": 960.0,
+            "stream_opened": True,
+            "last_read_started_ts": 969.0,
+            "last_read_completed_ts": 970.0,
+            "last_any_chunk_ts": None,
+        }
+        with self.assertLogs("KrabEar.Backend.WakeWordWatchdog", level="ERROR") as logs:
+            self.assertEqual(wd.check_once(), "escalated")
+        self.assertIn("read_pending_age=none", "\n".join(logs.output))
+        self.assertEqual(coord.calls, 1)
+
     def test_heal_does_not_close_episode_until_real_chunk(self):
         # Ловушка: после heal новая сессия даёт свежий listen_started_ts —
         # grace-окно НЕ должно сбрасывать эпизод, иначе watchdog зациклится

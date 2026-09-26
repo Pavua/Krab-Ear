@@ -517,8 +517,11 @@ class TestMigrateHistoryEncryptionWithSharedLoadSettings(unittest.TestCase):
         from backend.history_crypto import HistoryCrypto
 
         store = _make_store(self.data_dir)
+        store.save_settings({"history_encryption_enabled": True})
+        crypto = HistoryCrypto(os.urandom(32))
         store._history_crypto_initialized = True
-        store._history_crypto_instance = HistoryCrypto(os.urandom(32))
+        store._history_crypto_instance = crypto
+        store._get_history_crypto = lambda: crypto
 
         for i in range(5):
             _write_plaintext_line(store.history_path, f"item-{i}", f"text {i}")
