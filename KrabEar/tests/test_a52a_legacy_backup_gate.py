@@ -232,7 +232,13 @@ class TestAutoBackupGate:
         _write_settings(data_dir, {"history_encryption_enabled": True})
         mgr = self._manager(store)
         history_before = _bytes(store.history_path)
-        out = mgr.check_and_backup()
+        # A5.2b1: при ON auto-backup идёт в encrypted snapshot, которому нужен
+        # ключ. Закрываем Keychain, чтобы тест оставался детерминированным и не
+        # создавал реальный ключ: недоступный ключ ⇒ тот же честный отказ.
+        with patch(
+            "backend.history_crypto.build_history_crypto", side_effect=_no_keychain
+        ):
+            out = mgr.check_and_backup()
         assert out["backed_up"] is False
         assert out["skipped_reason"] == REASON
         assert meta.read_text(encoding="utf-8") == '{"last_backup_ts": null, "backup_count": 5}'
@@ -263,7 +269,11 @@ class TestAutoBackupGate:
             created.append(d.name)
         _write_settings(data_dir, {"history_encryption_enabled": True})
         mgr = self._manager(store, max_copies=1)
-        out = mgr.check_and_backup()
+        # A5.2b1: ключ недоступен ⇒ снимок невозможен ⇒ отказ до prune.
+        with patch(
+            "backend.history_crypto.build_history_crypto", side_effect=_no_keychain
+        ):
+            out = mgr.check_and_backup()
         assert out["skipped_reason"] == REASON
         dirs = sorted(p.name for p in backups.iterdir() if p.is_dir())
         assert dirs == sorted(created)
@@ -291,7 +301,9 @@ class TestAutoBackupGate:
             with real_lock(*args, **kwargs):
                 yield
 
-        with patch.object(store, "_lock", flipping_lock):
+        with patch.object(store, "_lock", flipping_lock), patch(
+            "backend.history_crypto.build_history_crypto", side_effect=_no_keychain
+        ):
             out = mgr.check_and_backup()
         assert out["backed_up"] is False
         assert out["skipped_reason"] == REASON

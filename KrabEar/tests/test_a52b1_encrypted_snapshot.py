@@ -14,11 +14,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from backend.auto_backup import AutoBackupManager
 from backend.encrypted_snapshot import (
     SNAPSHOT_MANIFEST_FILENAME,
     SNAPSHOT_MANIFEST_VERSION,
@@ -33,7 +35,11 @@ from backend.encrypted_snapshot import (
     verify_snapshot_readback,
 )
 from backend.history_crypto import SENTINEL, HistoryCrypto
-from backend.state_store import HISTORY_JOURNAL_FILENAMES
+from backend.history_encryption_policy import (
+    OPERATION_UNAVAILABLE_REASON as REASON,
+)
+from backend.history_service import HistoryService
+from backend.state_store import HISTORY_JOURNAL_FILENAMES, StateStore
 
 # Строка-«canary»: её plaintext-хэш НЕ должен встречаться в манифесте.
 CANARY_PLAINTEXT = '{"id":"canary-a52b1","text":"kolya skazal sekret"}'
@@ -262,9 +268,11 @@ class TestSnapshotRegistryCompleteness:
         (data_dir / "history.ndjson").write_text(
             SENTINEL + "not-base64!!\n", encoding="utf-8"
         )
+        backup_dir = tmp_path / "snap"
         with pytest.raises(SnapshotOperationRefused) as exc:
-            _prepared(tmp_path, data_dir, crypto, backup_dir := tmp_path / "snap")
+            _prepared(tmp_path, data_dir, crypto, backup_dir)
         assert exc.value.reason == "snapshot_line_tampered"
+        assert not (backup_dir / "history.ndjson").exists()
 
     def test_symlinked_registry_entry_is_refused(self, tmp_path):
         data_dir = _data_dir(tmp_path)
@@ -365,7 +373,7 @@ class TestCommitProtocol:
     def test_crash_after_committing_before_publication_is_fail_closed(self, tmp_path):
         data_dir = _data_dir(tmp_path)
         crypto = _crypto()
-        expected = _fill_mixed(data_dir, crypto)
+        _fill_mixed(data_dir, crypto)
         backup_dir = tmp_path / "backups" / "snapshot_1"
         sources_before = _data_bytes(data_dir)
 
@@ -566,3 +574,244 @@ class TestCommitProtocol:
         # Существующий бэкап не тронут.
         assert (backup_dir / "history.ndjson").read_text("utf-8") == _line(1) + "\n"
 
+
+# ----------------------------------------------------------------------
+# Task 3: manual + auto backup при Encryption ON
+# ----------------------------------------------------------------------
+
+CANARY_CANARY = '{"id":"canary-legacy","text":"kolya skazal sekret"}'
+
+
+def _settings_on(data_dir: Path) -> None:
+    _settings(data_dir, {"history_encryption_enabled": True})
+
+
+def _settings_off(data_dir: Path) -> None:
+    _settings(data_dir, {"history_encryption_enabled": False})
+
+
+def _store_with_crypto(data_dir: Path, crypto: HistoryCrypto | None) -> StateStore:
+    store = StateStore(data_dir)
+    # Инъекция ключа БЕЗ Keychain (тот же приём, что в существующих тестах A5.1).
+    store._get_history_crypto = lambda: crypto
+    return store
+
+
+def _snapshot_payload(snapshot_dir: Path) -> list[str]:
+    return _payload_files(snapshot_dir)
+
+
+class TestManualBackupEncryptedSnapshot:
+    def test_manual_backup_on_creates_encrypted_snapshot(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        svc = HistoryService(store=store, cached_settings=lambda: {})
+        sources_before = _data_bytes(data_dir)
+
+        result = svc.handle_backup_history({})
+
+        assert result["ok"] is True
+        assert result["reason"] is None
+        snapshot_dir = Path(result["backup_path"])
+        assert snapshot_dir.is_dir()
+        # Ровно 10 журналов реестра + манифест, все строки ENC1.
+        assert _snapshot_payload(snapshot_dir) == sorted(HISTORY_JOURNAL_FILENAMES)
+        for name in HISTORY_JOURNAL_FILENAMES:
+            body = (snapshot_dir / name).read_text("utf-8")
+            if body:
+                assert all(ln.startswith(SENTINEL) for ln in body.splitlines())
+        manifest = _manifest(snapshot_dir)
+        assert manifest["state"] == STATE_COMMITTED
+        assert manifest["version"] == SNAPSHOT_MANIFEST_VERSION
+        assert manifest["policy_at_capture"] is True
+        # settings.json не входит в payload.
+        assert "settings.json" not in _snapshot_payload(snapshot_dir)
+        # Источники не тронуты.
+        assert _data_bytes(data_dir) == sources_before
+
+    def test_manual_backup_on_writes_no_plaintext_anywhere(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        (data_dir / "history.ndjson").write_text(CANARY_CANARY + "\n", encoding="utf-8")
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        svc = HistoryService(store=store, cached_settings=lambda: {})
+
+        result = svc.handle_backup_history({})
+        assert result["ok"] is True
+        _no_plaintext_anywhere(Path(result["backup_path"]))
+        # Ровно один снимок создан — никаких legacy plaintext-копий рядом.
+        backups = data_dir / "backups"
+        created = [p for p in backups.iterdir() if p.is_dir()]
+        assert len(created) == 1
+        # Исходный plaintext-журнал на месте (мы не перезаписываем историю).
+        assert (data_dir / "history.ndjson").read_text("utf-8") == CANARY_CANARY + "\n"
+
+    def test_manual_backup_on_without_key_refuses(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, None)  # ключ недоступен
+        svc = HistoryService(store=store, cached_settings=lambda: {})
+
+        result = svc.handle_backup_history({})
+        assert result["ok"] is False
+        assert result["reason"] == REASON
+        assert result["backup_path"] is None
+        assert not (data_dir / "backups").exists()
+
+    def test_manual_backup_on_refuses_when_policy_flips_off_under_lock(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        svc = HistoryService(store=store, cached_settings=lambda: {})
+        real_lock = store._lock
+        state = {"flipped": False}
+
+        @contextmanager
+        def flipping_lock(*args, **kwargs):
+            if not state["flipped"]:
+                state["flipped"] = True
+                _settings_off(data_dir)  # ON → OFF прямо под lock
+            with real_lock(*args, **kwargs):
+                yield
+
+        with patch.object(store, "_lock", flipping_lock):
+            result = svc.handle_backup_history({})
+
+        assert result["ok"] is False
+        assert result["reason"]  # машинно-читаемая причина
+        assert not (data_dir / "backups").exists()
+
+    def test_manual_backup_off_path_is_untouched(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        (data_dir / "history.ndjson").write_text(_line(1) + "\n", encoding="utf-8")
+        _settings_off(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        svc = HistoryService(store=store, cached_settings=lambda: {})
+
+        with patch(
+            "backend.history_service.create_encrypted_snapshot",
+            side_effect=AssertionError("OFF-профиль не должен вызывать snapshot"),
+            create=True,
+        ):
+            result = svc.handle_backup_history({})
+
+        # Прежнее поведение: legacy-копия history + settings, имя backup_<ts>.
+        assert result["backup_path"]
+        assert Path(result["backup_path"]).name.startswith("backup_")
+        names = sorted(p.name for p in Path(result["backup_path"]).iterdir())
+        assert "history.ndjson" in names
+        assert "settings.json" in names
+        assert "backup_meta.json" in names
+
+    def test_manual_backup_off_never_touches_snapshot_module(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        store = _store_with_crypto(data_dir, None)
+        svc = HistoryService(store=store, cached_settings=lambda: {})
+        with patch(
+            "backend.encrypted_snapshot.create_encrypted_snapshot",
+            side_effect=AssertionError("OFF-профиль не должен вызывать snapshot"),
+        ):
+            result = svc.handle_backup_history({})
+        assert result["backup_path"]
+
+
+class TestAutoBackupEncryptedSnapshot:
+    def _manager(self, store, **kwargs):
+        return AutoBackupManager(store=store, interval_hours=0, **kwargs)
+
+    def test_auto_backup_on_creates_encrypted_snapshot(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        mgr = self._manager(store)
+
+        out = mgr.check_and_backup()
+
+        assert out["backed_up"] is True
+        assert out["skipped_reason"] is None
+        snapshot_dir = Path(out["backup_path"])
+        assert snapshot_dir.is_dir()
+        assert _snapshot_payload(snapshot_dir) == sorted(HISTORY_JOURNAL_FILENAMES)
+        assert _manifest(snapshot_dir)["state"] == STATE_COMMITTED
+        assert "settings.json" not in _snapshot_payload(snapshot_dir)
+        _no_plaintext_anywhere(snapshot_dir)
+        # Снимок не перепутан с legacy-копией и попал в meta.
+        assert snapshot_dir.name.startswith("auto_snapshot_")
+        meta = json.loads((data_dir / "backups" / "auto_backup_meta.json").read_text("utf-8"))
+        assert meta["backup_count"] == 1
+
+    def test_auto_backup_on_without_key_reports_skipped_reason(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, None)
+        mgr = self._manager(store)
+
+        out = mgr.check_and_backup()
+        assert out["backed_up"] is False
+        assert out["skipped_reason"] == REASON
+        assert not (data_dir / "backups").exists()
+
+    def test_auto_backup_on_does_not_prune_legacy_or_new_snapshots(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        backups = data_dir / "backups"
+        backups.mkdir(parents=True, exist_ok=True)
+        legacy = []
+        for i in range(4):
+            d = backups / f"auto_backup_2020010{i}_000000"
+            d.mkdir()
+            (d / "backup_meta.json").write_text(f'{{"i": {i}}}', encoding="utf-8")
+            legacy.append(d.name)
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        mgr = self._manager(store, max_copies=1)
+
+        out = mgr.check_and_backup()
+        assert out["backed_up"] is True
+        # Retention при ON не удаляет ни legacy-копии, ни снимки нового протокола.
+        for name in legacy:
+            assert (backups / name / "backup_meta.json").exists()
+        snapshot_dir = Path(out["backup_path"])
+        assert snapshot_dir.is_dir()
+        assert _manifest(snapshot_dir)["state"] == STATE_COMMITTED
+
+    def test_auto_backup_off_path_and_prune_unchanged(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        (data_dir / "history.ndjson").write_text(_line(1) + "\n", encoding="utf-8")
+        _settings_off(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        backups = data_dir / "backups"
+        backups.mkdir(parents=True, exist_ok=True)
+        old = backups / "auto_backup_20200101_000000"
+        old.mkdir()
+        (old / "backup_meta.json").write_text("{}", encoding="utf-8")
+        mgr = self._manager(store, max_copies=1)
+
+        with patch(
+            "backend.encrypted_snapshot.create_encrypted_snapshot",
+            side_effect=AssertionError("OFF-профиль не должен вызывать snapshot"),
+        ):
+            out = mgr.check_and_backup()
+
+        assert out["backed_up"] is True
+        # Прежнее поведение: legacy-копия, prune по max_copies, meta обновлена.
+        legacy_dir = Path(out["backup_path"])
+        assert legacy_dir.name.startswith("auto_backup_")
+        assert (legacy_dir / "history.ndjson").exists()
+        assert (legacy_dir / "settings.json").exists()
+        assert not old.exists()  # prune отработал как раньше

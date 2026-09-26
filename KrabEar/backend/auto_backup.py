@@ -18,6 +18,10 @@ from pathlib import Path
 from typing import Any, Callable, ContextManager, Optional
 
 from backend.settings_backup import SENSITIVE_FIELDS as _SENSITIVE_FIELDS
+from backend.encrypted_snapshot import (
+    SnapshotOperationRefused,
+    create_encrypted_snapshot,
+)
 from backend.history_encryption_policy import (
     OPERATION_UNAVAILABLE_REASON as _ENC_OP_UNAVAILABLE,
     HistoryEncryptionOperationUnavailable,
@@ -215,7 +219,11 @@ class AutoBackupManager:
         # plaintext-копию. При ON sink не трогается вовсе.
         with self._store_lock():
             if self._encryption_blocked():
-                raise HistoryEncryptionOperationUnavailable("auto_backup")
+                # A5.2b1: при Encryption ON legacy plaintext-копия не создаётся,
+                # но и backup не отказывает — это тот же encrypted snapshot из
+                # ручного пути ( спека §5). Всё под тем же store-lock; при
+                # недоступном ключе/сбое протокола — машинно-читаемый отказ.
+                return self._encrypted_snapshot(ts)
             # Create with restricted permissions so PII is not world-readable.
             backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             try:
@@ -289,6 +297,65 @@ class AutoBackupManager:
         }
 
     # ------------------------------------------------------------------
+    # A5.2b1 — encrypted snapshot (только при Encryption ON)
+    # ------------------------------------------------------------------
+
+    def _history_crypto_for_snapshot(self):
+        """Ключ истории для snapshot'а или ``None``.
+
+        Тот же ``HistoryCrypto``, которым StateStore шифрует журналы: снимок
+        обязан читаться тем же ключом. Любая ошибка → ``None`` → отказ.
+        """
+        getter = getattr(self.store, "_get_history_crypto", None)
+        if not callable(getter):
+            return None
+        try:
+            return getter()
+        except Exception:  # noqa: BLE001
+            logger.exception("auto_backup: не удалось получить ключ истории")
+            return None
+
+    def _encrypted_snapshot(self, ts: str) -> dict:
+        """Auto-backup при Encryption ON: encrypted snapshot (вызывается под lock).
+
+        Имена каталогов ``auto_snapshot_*`` намеренно НЕ совпадают с legacy
+        ``auto_backup_*``: retention/prune старых копий не должна находить
+        снимки нового протокола (инвентаризация и удаление legacy — A5.2c).
+        """
+        crypto = self._history_crypto_for_snapshot()
+        if crypto is None:
+            logger.error(
+                "auto_backup: encryption on, но ключ недоступен — snapshot "
+                "невозможен (%s)",
+                _ENC_OP_UNAVAILABLE,
+            )
+            raise HistoryEncryptionOperationUnavailable("auto_backup")
+
+        snapshot_dir = self.backups_dir / f"auto_snapshot_{ts}"
+        try:
+            result = create_encrypted_snapshot(
+                data_dir=self.store.data_dir,
+                backup_dir=snapshot_dir,
+                crypto=crypto,
+                transaction_id=f"auto_backup_{ts}",
+                policy_on=True,
+                policy_read=self._encryption_policy_read,
+            )
+        except SnapshotOperationRefused as exc:
+            logger.warning("auto_backup: encrypted snapshot отклонён: %s (%s)", exc.reason, exc)
+            raise HistoryEncryptionOperationUnavailable("auto_backup") from exc
+
+        return {
+            "backup_path": str(snapshot_dir),
+            "backup_ts": ts,
+            "size_mb": round(result.get("size_bytes", 0) / (1024 * 1024), 3),
+            "entries": 0,  # заполняется вызывающим вне lock (count_active_items)
+            "encrypted": True,
+            "state": result["state"],
+            "transaction_id": result["transaction_id"],
+        }
+
+    # ------------------------------------------------------------------
     # Privacy-purge guard (wave-25 B2)
     # ------------------------------------------------------------------
 
@@ -355,14 +422,14 @@ class AutoBackupManager:
         if self._purged.is_set():
             return {"backed_up": False, "skipped_reason": "purged", "backup_path": None}
 
-        # A5.2a: legacy auto-backup создаёт plaintext-копию истории. При
-        # Encryption ON отказ ДО mkdir; старые backup'ы/meta не трогаются.
-        if self._encryption_blocked():
-            return {
-                "backed_up": False,
-                "skipped_reason": _ENC_OP_UNAVAILABLE,
-                "backup_path": None,
-            }
+        # A5.2b1: при Encryption ON auto-backup больше не отказывается — идёт
+        # encrypted snapshot (тот же путь, что и ручной backup). Отказ при
+        # недоступном ключе/сбое протокола остаётсяfail-closed и наблюдаем
+        # через skipped_reason; mkdir/copy при ON не происходит вовсе.
+        #
+        # A5.2a-контракт сохранён: решение принимается ПОД store-lock (в
+        # _do_backup), повторно после захвата; старые backup'ы/meta при отказе
+        # не трогаются.
 
         with self._lock:
             meta = self._load_meta()
@@ -395,7 +462,9 @@ class AutoBackupManager:
                 return {"backed_up": False, "skipped_reason": "purged", "backup_path": None}
 
             # A5.2a: OFF→ON через второй StateStore, пока мы ждали self._lock.
-            if self._encryption_blocked():
+            # Повторная проверка: снимаем блокировку только чтобы отдать явный
+            # отказ — запись в этом вызове не происходит.
+            if self._encryption_blocked() and not self._can_snapshot():
                 return {
                     "backed_up": False,
                     "skipped_reason": _ENC_OP_UNAVAILABLE,
@@ -411,7 +480,11 @@ class AutoBackupManager:
                     "skipped_reason": _ENC_OP_UNAVAILABLE,
                     "backup_path": None,
                 }
-            self._prune_old_backups()
+            # Retention (A5.2a §6: gate ДО prune) — только для OFF-профиля.
+            # При ON снимки нового протокола и legacy-копии НЕ удаляются:
+            # инвентаризация и решение по старым plaintext — A5.2c.
+            if not result.get("encrypted"):
+                self._prune_old_backups()
 
             meta["last_backup_ts"] = datetime.now(timezone.utc).isoformat()
             meta["backup_count"] = meta.get("backup_count", 0) + 1
@@ -425,6 +498,15 @@ class AutoBackupManager:
                 "size_mb": result["size_mb"],
                 "entries": result["entries"],
             }
+
+    def _can_snapshot(self) -> bool:
+        """Доступен ли ключ для encrypted snapshot (без записи).
+
+        Нужен, чтобы early-return в ``check_and_backup`` не превращал ON с
+        доступным ключом в ложный отказ: решение «снимок или отказ» принимает
+        ``_do_backup`` под store-lock, где ключ и читается.
+        """
+        return self._history_crypto_for_snapshot() is not None
 
     def get_auto_backup_status(self) -> dict:
         """Возвращает статус авто-резервного копирования.

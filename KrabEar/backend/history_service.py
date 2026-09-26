@@ -24,6 +24,10 @@ from backend.history_encryption_policy import (
     policy_blocks,
     store_policy_reader,
 )
+from backend.encrypted_snapshot import (
+    SnapshotOperationRefused,
+    create_encrypted_snapshot,
+)
 
 # Typed imports — only loaded during static analysis, avoid runtime circular imports
 if TYPE_CHECKING:
@@ -4165,12 +4169,11 @@ class HistoryService:
             "reason": _ENC_OP_UNAVAILABLE,
         }
         if policy_blocks(policy_read):
-            logger.warning(
-                "handle_backup_history: history encryption on — legacy plaintext "
-                "backup refused (%s)",
-                _ENC_OP_UNAVAILABLE,
-            )
-            return refusal
+            # A5.2b1: при Encryption ON legacy plaintext-копия не создаётся, но
+            # backup больше не отказывает — это согласованный encrypted snapshot
+            # всех десяти журналов под тем же store-lock (спека §5, «Новый
+            # backup — … encrypted snapshot того же реестра под lock, с manifest»).
+            return self._encrypted_snapshot_backup(policy_read)
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         backups_dir = Path(self.store.data_dir) / "backups"
@@ -4223,6 +4226,107 @@ class HistoryService:
             "size_mb": size_mb,
             "entries": entries,
         }
+
+    # ------------------------------------------------------------------
+    # A5.2b1 — encrypted snapshot (только при Encryption ON)
+    # ------------------------------------------------------------------
+
+    def _encrypted_snapshot_backup(self, policy_read) -> dict[str, Any]:
+        """Backup при Encryption ON: согласованный encrypted snapshot (A5.2b1).
+
+        Инварианты (спека §5 + границы волны):
+          * снимок — ровно десять журналов реестра, ``settings.json`` внутрь не
+            входит (settings отделены и не могут понизить policy);
+          * никаких plaintext-файлов: строки ENC1, manifest хранит только имена,
+            size и sha256 CIPHERTEXT;
+          * снимок атомарно публикуется и фиксируется (COMMITTED) только после
+            read-back всех файлов;
+          * при недоступном ключе, незавершённой транзакции или сбое протокола —
+            машинно-читаемый отказ и НОЛЬ записанных plaintext-копий;
+          * retention старых бэкапов при ON не трогается (инвентаризация — A5.2c).
+
+        Контракт A5.2a не ослаблен: policy читается ДО lock (вызывающий) и
+        повторно ПОД тем же store-lock (здесь).
+        """
+        refusal = {
+            "backup_path": None,
+            "size_mb": 0.0,
+            "entries": 0,
+            "ok": False,
+            "reason": _ENC_OP_UNAVAILABLE,
+        }
+
+        with self.store._lock():
+            # Повторная проверка ПОД lock: ON→OFF на ходу операции нельзя
+            # превращать в молчаливую смену режима.
+            if not policy_blocks(policy_read):
+                logger.warning(
+                    "handle_backup_history: encryption выключен до захвата lock — "
+                    "snapshot отменён"
+                )
+                return {**refusal, "reason": "snapshot_policy_unavailable"}
+
+            crypto = self._history_crypto_for_snapshot()
+            if crypto is None:
+                logger.error(
+                    "handle_backup_history: encryption on, но ключ недоступен — "
+                    "snapshot невозможен (%s)",
+                    _ENC_OP_UNAVAILABLE,
+                )
+                return refusal
+
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            snapshot_dir = Path(self.store.data_dir) / "backups" / f"snapshot_{ts}"
+            try:
+                result = create_encrypted_snapshot(
+                    data_dir=self.store.data_dir,
+                    backup_dir=snapshot_dir,
+                    crypto=crypto,
+                    transaction_id=f"manual_backup_{ts}",
+                    policy_on=True,
+                    policy_read=policy_read,
+                )
+            except SnapshotOperationRefused as exc:
+                logger.warning(
+                    "handle_backup_history: encrypted snapshot отклонён: %s (%s)",
+                    exc.reason, exc,
+                )
+                return {**refusal, "reason": exc.reason}
+
+        # Вне lock: count_active_items() сам берёт store-lock.
+        entries = self.store.count_active_items()
+        size_mb = round(result.get("size_bytes", 0) / (1024 * 1024), 3)
+        logger.info(
+            "Encrypted snapshot создан: %s (transaction %s, %s МБ, %d записей)",
+            snapshot_dir, result["transaction_id"], size_mb, entries,
+        )
+        return {
+            "backup_path": str(snapshot_dir),
+            "size_mb": size_mb,
+            "entries": entries,
+            "ok": True,
+            "reason": None,
+            "encrypted": True,
+            "state": result["state"],
+            "transaction_id": result["transaction_id"],
+        }
+
+    def _history_crypto_for_snapshot(self):
+        """Ключ истории для snapshot'а или ``None`` (без Keychain-логики здесь).
+
+        Берётся ТОТ ЖЕ экземпляр ``HistoryCrypto``, которым StateStore шифрует
+        строки журналов: снимок обязан читаться тем же ключом. Ошибка любого
+        рода → ``None`` → вызывающий отказывает (fail-closed), а не пишет
+        plaintext.
+        """
+        getter = getattr(self.store, "_get_history_crypto", None)
+        if not callable(getter):
+            return None
+        try:
+            return getter()
+        except Exception:  # noqa: BLE001
+            logger.exception("handle_backup_history: не удалось получить ключ истории")
+            return None
 
     def handle_restore_history(self, params: dict[str, Any]) -> dict[str, Any]:
         """Восстанавливает историю из резервной копии.
