@@ -1028,7 +1028,9 @@ def _require_restorable_snapshot_dir(backups_root: Any, snapshot_dir: Any) -> Pa
     return resolved
 
 
-def _decrypt_verified_lines(*, path: Path, crypto: Any, reason_mismatch: str) -> list[str]:
+def _decrypt_verified_lines(
+    *, journal_file: Path, crypto: Any, reason_mismatch: str
+) -> list[str]:
     """Каждая строка файла обязана быть ENC1 и расшифровываться. Иначе — отказ.
 
     Отказ, а не skip: молчаливая потеря строки означала бы потерю данных при
@@ -1036,16 +1038,16 @@ def _decrypt_verified_lines(*, path: Path, crypto: Any, reason_mismatch: str) ->
     ``policy_mismatch`` (plaintext-снимок), а не «повреждение».
     """
     try:
-        raw = path.read_bytes()
+        raw = journal_file.read_bytes()
     except OSError as exc:
         raise SnapshotOperationRefused(
-            REASON_SOURCE_UNREADABLE, f"{path.name} не читается: {exc}"
+            REASON_SOURCE_UNREADABLE, f"{journal_file.name} не читается: {exc}"
         ) from exc
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise SnapshotOperationRefused(
-            REASON_SOURCE_UNREADABLE, f"{path.name}: не UTF-8: {exc}"
+            REASON_SOURCE_UNREADABLE, f"{journal_file.name}: не UTF-8: {exc}"
         ) from exc
     out: list[str] = []
     for lineno, line in enumerate(_split_ndjson_lines(text), start=1):
@@ -1056,7 +1058,7 @@ def _decrypt_verified_lines(*, path: Path, crypto: Any, reason_mismatch: str) ->
         if not crypto.is_encrypted(line):
             raise SnapshotOperationRefused(
                 reason_mismatch,
-                f"{path.name}:{lineno}: строка не ENC1 — plaintext-снимок при "
+                f"{journal_file.name}:{lineno}: строка не ENC1 — plaintext-снимок при "
                 "включённой политике шифрования",
             )
         try:
@@ -1064,7 +1066,7 @@ def _decrypt_verified_lines(*, path: Path, crypto: Any, reason_mismatch: str) ->
         except Exception as exc:  # noqa: BLE001 — чужой ключ или tamper
             raise SnapshotOperationRefused(
                 REASON_LINE_TAMPERED,
-                f"{path.name}:{lineno}: ENC1-строка не расшифровывается "
+                f"{journal_file.name}:{lineno}: ENC1-строка не расшифровывается "
                 f"(чужой ключ или tamper): {type(exc).__name__}",
             ) from exc
         out.append(line)
@@ -1128,7 +1130,7 @@ def verify_snapshot(*, backups_root: Any, snapshot_dir: Any, crypto: Any) -> dic
     lines: dict[str, int] = {}
     for name in HISTORY_JOURNAL_FILENAMES:
         verified = _decrypt_verified_lines(
-            path=resolved / name,
+            journal_file=resolved / name,
             crypto=crypto,
             reason_mismatch=REASON_POLICY_MISMATCH,
         )
@@ -1185,15 +1187,19 @@ def collect_ledger_union(*, data_dir: Any, crypto: Any) -> tuple[str, ...]:
         )
     union: set[str] = set()
     for name in LEDGER_JOURNAL_NAMES:
-        path = Path(data_dir) / name
-        if path.is_symlink():
+        # Имя локали НЕ `path`: audit_purge_coverage выводит «корень в data_dir»
+        # из имён, и generic-имя здесь заставило бы сканер считать ВСЕ
+        # `path / <const>` в модуле (включая b1-манифест снимка) хранилищем
+        # прямо в data_dir. Конкретное имя — и код понятнее, и аудит честнее.
+        ledger_file = Path(data_dir) / name
+        if ledger_file.is_symlink():
             raise SnapshotOperationRefused(
                 REASON_SOURCE_SYMLINK, f"{name} — symlink не разыменовывается"
             )
-        if not path.exists():
+        if not ledger_file.exists():
             continue
         try:
-            raw = path.read_bytes()
+            raw = ledger_file.read_bytes()
         except OSError as exc:
             raise SnapshotOperationRefused(
                 REASON_LEDGER_UNREADABLE, f"{name} не читается: {exc}"
@@ -1325,7 +1331,9 @@ def _snapshot_ledger_ids(*, snapshot_dir: Path, crypto: Any) -> set[str]:
     for name in LEDGER_JOURNAL_NAMES:
         for lineno, line in enumerate(
             _decrypt_verified_lines(
-                path=snapshot_dir / name, crypto=crypto, reason_mismatch=REASON_POLICY_MISMATCH
+                journal_file=snapshot_dir / name,
+                crypto=crypto,
+                reason_mismatch=REASON_POLICY_MISMATCH,
             ),
             start=1,
         ):
@@ -1374,7 +1382,9 @@ def _build_restore_output(
         else:
             out_lines: list[str] = []
             verified = _decrypt_verified_lines(
-                path=snapshot_dir / name, crypto=crypto, reason_mismatch=REASON_POLICY_MISMATCH
+                journal_file=snapshot_dir / name,
+                crypto=crypto,
+                reason_mismatch=REASON_POLICY_MISMATCH,
             )
             for lineno, line in enumerate(verified, start=1):
                 item_id = _record_id(
@@ -1421,12 +1431,12 @@ def _readback_live_journals(*, data_dir: Path, files_meta: list[dict]) -> dict:
     mismatches: list[str] = []
     for entry in files_meta:
         name = str(entry.get("name"))
-        path = Path(data_dir) / name
-        if not path.is_file():
+        journal_file = Path(data_dir) / name
+        if not journal_file.is_file():
             mismatches.append(f"{name}: отсутствует")
             continue
         try:
-            blob = path.read_bytes()
+            blob = journal_file.read_bytes()
         except OSError as exc:
             mismatches.append(f"{name}: не читается ({exc})")
             continue
