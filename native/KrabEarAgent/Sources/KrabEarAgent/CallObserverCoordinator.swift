@@ -62,6 +62,14 @@ protocol CallObserverPanelPresenting: AnyObject {
     var isPanelVisible: Bool { get }
 }
 
+/// Ответ VG на whisper-подсказку. `pending` — глубина очереди подсказок у агента
+/// (`whisper_pending` в теле 200): при значении > 1 владелец должен видеть, что
+/// агент ещё не произнёс всё, иначе «принято» читается как «сказано».
+struct VGWhisperAck: Equatable {
+    var code: Int
+    var pending: Int?
+}
+
 protocol VGCommandPosting {
     func hangup(baseURL: URL, sessionId: String, completion: @escaping (Result<Int, Error>) -> Void)
     func fetchCostUsd(baseURL: URL, sessionId: String, completion: @escaping (Double?) -> Void)
@@ -69,7 +77,7 @@ protocol VGCommandPosting {
     /// следующий ход LLM-агента; агент озвучивает её на своём tgt_lang.
     /// Секретов не печатает: в лог уходит только код ответа.
     func whisper(baseURL: URL, sessionId: String, text: String,
-                 completion: @escaping (Result<Int, Error>) -> Void)
+                 completion: @escaping (Result<VGWhisperAck, Error>) -> Void)
 }
 
 protocol CallObserverSettingsProviding {
@@ -543,10 +551,20 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
     /// двигает выбор (как onListenTapped) — иначе подсказка улетела бы в чужой
     /// звонок. One-in-flight (brief §5): вторая отправка заблокирована до
     /// ответа. Терминальный звонок подсказку не принимает.
+    ///
+    /// Кап длины (`whisperMaxChars`): ни клиент, ни VG не ограничивают размер
+    /// подсказки, а она уходит в промпт LLM дословно — длинный текст съедает
+    /// контекст и разгоняет стоимость одного хода. Обрезать молча нельзя (агент
+    /// получил бы искажённую инструкцию) → честный отказ с указанием лимита.
     func userWhisperedFromPanel(text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !whisperInFlight,
               let id = selectedId, let call = observed[id], !call.terminalDelivered else { return }
+        guard trimmed.count <= Self.whisperMaxChars else {
+            panel.presentWhisperResult(accepted: false,
+                                       message: "Слишком длинная подсказка — максимум \(Self.whisperMaxChars) символов")
+            return
+        }
         whisperInFlight = true
         panel.setWhisperSendEnabled(false)
         poster.whisper(baseURL: baseURL, sessionId: id, text: trimmed) { [weak self] result in
@@ -555,9 +573,15 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
                 self.whisperInFlight = false
                 self.panel.setWhisperSendEnabled(true)
                 switch result {
-                case .success(let code) where (200..<300).contains(code):
-                    self.panel.presentWhisperResult(accepted: true, message: nil)
-                case .success(404), .success(503):
+                case .success(let ack) where (200..<300).contains(ack.code):
+                    // Глубина очереди у агента: 1 — подсказка уже в работе,
+                    // >1 — агент ещё не произнёс предыдущие. Молчаливое «принято»
+                    // вводило бы владельца в заблуждение.
+                    let message: String? = (ack.pending ?? 1) > 1
+                        ? "Подсказка принята (в очереди \(ack.pending ?? 1))"
+                        : nil
+                    self.panel.presentWhisperResult(accepted: true, message: message)
+                case .success(let ack) where ack.code == 404 || ack.code == 503:
                     // Скринер недоступен: сессия ушла терминалом между вводом и
                     // отправкой либо VG отвечает «агент не готов». Текст владельца
                     // НЕ теряем — остаётся в поле для повтора.
@@ -570,6 +594,10 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
             }
         }
     }
+
+    /// Лимит длины whisper-подсказки (символов). Обоснование: ограничения нет ни
+    /// в VG, ни в клиенте, а текст идёт в промпт агента как есть.
+    private static let whisperMaxChars = 500
 
     /// Трубка из HUD: панель откроется и поднимет confirm-sheet (HUD без окна
     /// для sheet). P-2: сначала ре-байнд на hudTrackedId (см. userToggledListen) —

@@ -148,7 +148,7 @@ final class URLSessionVGCommandPoster: VGCommandPosting {
     /// своём tgt_lang. Авторизация — тот же Bearer, что у hangup/diagnostics;
     /// новых секретов не заводим (brief §3).
     func whisper(baseURL: URL, sessionId: String, text: String,
-                 completion: @escaping (Result<Int, Error>) -> Void) {
+                 completion: @escaping (Result<VGWhisperAck, Error>) -> Void) {
         var url = baseURL
         url.append(path: "/v1/sessions/\(sessionId)/agent/whisper")
         var req = VGWebSocketConnection.makeRequest(url: url, token: tokenProvider())
@@ -156,9 +156,18 @@ final class URLSessionVGCommandPoster: VGCommandPosting {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         // Текст подсказки в лог НЕ пишем (privacy): в лог уходит только код.
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["text": text])
-        session.dataTask(with: req) { _, resp, error in
+        session.dataTask(with: req) { data, resp, error in
             if let error { completion(.failure(error)); return }
-            completion(.success((resp as? HTTPURLResponse)?.statusCode ?? 0))
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            // 200 отдаёт `whisper_pending` — глубину очереди подсказок у агента.
+            // Показываем её владельцу: без этого «принято» неотличимо от
+            // «агент ещё ничего не сказал».
+            var pending: Int?
+            if let data,
+               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                pending = obj["whisper_pending"] as? Int
+            }
+            completion(.success(VGWhisperAck(code: code, pending: pending)))
         }.resume()
     }
 }
