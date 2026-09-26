@@ -31,6 +31,8 @@ from backend.encrypted_snapshot import (
     SnapshotOperationRefused,
     classify_backup_dir,
     create_encrypted_snapshot,
+    read_pending_restore_verdict,
+    recover_pending_restore_from_store,
     restore_encrypted_snapshot,
 )
 
@@ -4182,6 +4184,13 @@ class HistoryService:
         import shutil
 
         policy_read = store_policy_reader(self.store)
+        # A5.2b2 (M2): докачка незавершённого restore живёт в точках обслуживания,
+        # а не в конструкторе StateStore (у фасада 5 точек создания, recovery шёл
+        # ДО init_sentry/ErrorBus, и вердикт всё равно никем не читался). Здесь —
+        # самое раннее безопасное место: маркер докатывается ДО любой работы с
+        # журналами. Маркера нет — вызов мгновенно возвращает None (один
+        # iterdir, без чтения содержимого и без обращения к ключу).
+        self._recover_pending_restore()
         refusal = {
             "backup_path": None,
             "size_mb": 0.0,
@@ -4331,6 +4340,25 @@ class HistoryService:
             "state": result["state"],
             "transaction_id": result["transaction_id"],
         }
+
+    # ------------------------------------------------------------------
+    # A5.2b2 — точки обслуживания незавершённого restore
+    # ------------------------------------------------------------------
+
+    def _recover_pending_restore(self) -> dict | None:
+        """Докатывает незавершённый restore, если он есть (A5.2b2, M2).
+
+        Вызывается из backup/restore/листинга бэкапов. Без маркера вызов
+        мгновенно возвращает ``None``: проверка наличия — один ``iterdir``
+        data_dir, без чтения содержимого и без обращения к ключу (OFF-профиль
+        прода не платит ни одного тика Keychain).
+
+        Никогда не бросает: незавершённая транзакция — это fail-closed вердикт,
+        а не ошибка обслуживания. Вердикт кэшируется в модуле и читается через
+        ``get_auto_backup_status().restore_recovery`` (отдельного диагностического
+        IPC-метода нет — это долг, ``service.py`` в бане волны).
+        """
+        return recover_pending_restore_from_store(self.store)
 
     def _history_crypto_for_snapshot(self):
         """Ключ истории для snapshot'а или ``None`` (без Keychain-логики здесь).
@@ -4501,6 +4529,10 @@ class HistoryService:
         """
         import shutil
 
+        # A5.2b2 (M2): точка обслуживания №2. Докачка ДО любой работы с журналами:
+        # восстановление не имеет права применяться поверх рваного набора.
+        self._recover_pending_restore()
+
         # A5.2a: legacy restore через copy2 запрещён при Encryption ON — он
         # вернул бы plaintext и мог бы понизить текущую policy через
         # restore_settings=True (OFF-settings в backup). Отказ ДО валидации
@@ -4610,10 +4642,18 @@ class HistoryService:
 
         Возвращает:
             backups (list): список объектов с полями path, backup_date, entries, size_mb
+            encrypted_snapshots (list): снимки нового протокола
+            restore_recovery (dict | None): A5.2b2 — read-only вердикт о
+                незавершённом restore (машинно-читаемый: pending/reason/
+                pre_restore_snapshot). Здесь ТОЛЬКО чтение маркера: сам листинг
+                не докатывает транзакцию и ничего не пишет.
         """
+        # A5.2b2 (M2): вердикт виден в том же ответе, что и список бэкапов, —
+        # иначе «есть незавершённый restore» нельзя объяснить владельцу.
+        restore_verdict = read_pending_restore_verdict(self.store.data_dir)
         backups_dir = Path(self.store.data_dir) / "backups"
         if not backups_dir.exists():
-            return {"backups": []}
+            return {"backups": [], "restore_recovery": restore_verdict}
 
         result = []
         snapshots: list[dict[str, Any]] = []
@@ -4655,7 +4695,11 @@ class HistoryService:
                     entry["size_mb"] = round(size_bytes / (1024 * 1024), 3)
             result.append(entry)
 
-        return {"backups": result, "encrypted_snapshots": snapshots}
+        return {
+            "backups": result,
+            "encrypted_snapshots": snapshots,
+            "restore_recovery": restore_verdict,
+        }
 
     def handle_find_duplicates(self, params: dict[str, Any]) -> dict[str, Any]:
         """Находит дублирующиеся транскрипции в истории.

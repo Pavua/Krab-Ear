@@ -23,6 +23,7 @@ from backend.encrypted_snapshot import (
     create_encrypted_snapshot,
     has_pending_restore,
     read_pending_restore_verdict,
+    recover_pending_restore_from_store,
     recover_pending_state,
 )
 from backend.history_encryption_policy import (
@@ -523,6 +524,11 @@ class AutoBackupManager:
         # сразу после rmtree() в purge-теле (TOCTOU).
         if self._purged.is_set():
             return {"backed_up": False, "skipped_reason": "purged", "backup_path": None}
+
+        # A5.2b2 (M2): точка обслуживания №3. Незавершённый restore докатывается
+        # ДО решения о бэкапе: снимок рваного набора сделал бы «последний
+        # хороший бэкап» мусором. Без маркера вызов бесплатен (один iterdir).
+        recover_pending_restore_from_store(self.store)
 
         # A5.2b1: при Encryption ON auto-backup больше не отказывается — идёт
         # encrypted snapshot (тот же путь, что и ручной backup). Отказ при

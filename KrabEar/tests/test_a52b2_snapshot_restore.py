@@ -33,6 +33,7 @@ from backend.encrypted_snapshot import (
     collect_ledger_union,
     create_encrypted_snapshot,
     has_pending_restore,
+    last_restore_recovery,
     purge_pending_restore_staging,
     recover_pending_restore,
     restore_encrypted_snapshot,
@@ -1513,8 +1514,17 @@ class TestRecoveryNoOpAndStaleStaging:
         assert has_pending_restore(data_dir) is True
 
 
-class TestRecoveryWiring:
-    def test_state_store_init_recovers_only_when_marker_exists(self, tmp_path, monkeypatch):
+class TestRecoveryTriggerPoints:
+    """M2: recovery вызывается в точках обслуживания, а НЕ в StateStore.__init__.
+
+    Причина (adversarial-ревью): у фасада пять точек создания, recovery шёл ДО
+    ``init_sentry``/late-injection ErrorBus, а вердикт всё равно никем не
+    читался. Докатка обязана жить там, где она блокирует работу, а вердикт —
+    быть читаемым существующим способом.
+    """
+
+    def test_state_store_init_never_touches_recovery(self, tmp_path):
+        """Конструктор фасада не докатывает: иначе 5 точек создания и pre-Sentry порядок."""
         data_dir = _data_dir(tmp_path)
         crypto = _crypto()
         _fill_profile(data_dir, crypto)
@@ -1522,18 +1532,15 @@ class TestRecoveryWiring:
         snapshot_dir = _make_snapshot(data_dir, crypto)
         _crash_restore(data_dir, crypto, snapshot_dir, at="replace")
         assert _restore_markers(data_dir)
-        # Ключ подставляется ДО конструктора: recovery работает внутри __init__.
-        monkeypatch.setattr(StateStore, "_get_history_crypto", lambda self: crypto)
+        live_before = _data_bytes(data_dir)
 
-        store = StateStore(data_dir)  # конструктор обязан докатить маркер
+        store = StateStore(data_dir)
 
-        assert store.restore_recovery["rolled_forward"] is True
-        assert store.restore_recovery["state"] == "COMMITTED"
-        assert KEYCHAIN_ATTEMPTS["count"] == 0
-        assert _restore_markers(data_dir) == []
-        assert has_pending_restore(data_dir) is False
-        lines = _read_ndjson_lines(data_dir / "history.ndjson")
-        assert lines and all(ln.startswith(SENTINEL) for ln in lines)
+        assert _restore_markers(data_dir) != [], "конструктор докатал транзакцию"
+        assert _data_bytes(data_dir) == live_before
+        assert not hasattr(store, "restore_recovery"), (
+            "вердикт recovery не должен жить на фасаде — долг M2"
+        )
 
     def test_state_store_init_without_marker_does_nothing(self, tmp_path):
         data_dir = _data_dir(tmp_path)
@@ -1550,22 +1557,99 @@ class TestRecoveryWiring:
         assert (data_dir / "settings.json").read_bytes() == settings_before
         assert _restore_markers(data_dir) == []
 
-    def test_off_profile_start_with_stray_marker_does_not_decrypt(self, tmp_path):
-        """OFF-профиль (прод) + случайный каталог: никаких обращений к ключу."""
+    def test_backup_call_rolls_forward_pending_restore(self, tmp_path):
         data_dir = _data_dir(tmp_path)
         crypto = _crypto()
         _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        _crash_restore(data_dir, crypto, snapshot_dir, at="replace")
+        assert _restore_markers(data_dir)
+        svc = _svc(data_dir, crypto)
+
+        svc.handle_backup_history({})  # обслуживание само докатывает
+
+        assert _restore_markers(data_dir) == []
+        assert has_pending_restore(data_dir) is False
+        assert last_restore_recovery()["rolled_forward"] is True
+        assert KEYCHAIN_ATTEMPTS["count"] == 0
+
+    def test_restore_call_rolls_forward_pending_restore(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        _crash_restore(data_dir, crypto, snapshot_dir, at="replace")
+        svc = _svc(data_dir, crypto)
+
+        result = svc.handle_restore_history({"backup_path": str(snapshot_dir)})
+
+        assert result["ok"] is True
+        assert _restore_markers(data_dir) == []
+        assert last_restore_recovery()["rolled_forward"] is True
+
+    def test_auto_backup_call_rolls_forward_pending_restore(self, tmp_path):
+        from backend.auto_backup import AutoBackupManager
+
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        _crash_restore(data_dir, crypto, snapshot_dir, at="replace")
+        store = _store_with_crypto(data_dir, crypto)
+
+        AutoBackupManager(store=store, interval_hours=0).check_and_backup()
+
+        assert _restore_markers(data_dir) == []
+        assert last_restore_recovery()["rolled_forward"] is True
+
+    def test_list_backups_surfaces_pending_verdict_without_writing(self, tmp_path):
+        """Точка наблюдения: вердикт виден, но ничего не докатывается и не пишется."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        _crash_restore(data_dir, crypto, snapshot_dir, at="replace")
+        svc = _svc(data_dir, crypto)
+        before = _tree_state(data_dir)
+
+        listed = svc.handle_list_backups({})
+
+        assert listed["restore_recovery"]["pending"] is True
+        assert listed["restore_recovery"]["pre_restore_snapshot"]
+        assert _restore_markers(data_dir) != []  # ничего не докатано
+        assert _tree_state(data_dir) == before
+
+    def test_off_profile_service_call_with_stray_marker_does_not_decrypt(self, tmp_path):
+        """OFF-профиль (прод) + посторонний каталог: ноль обращений к ключу.
+
+        Профиль СОГЛАСОВАН (журналы plaintext, флаг OFF) — иначе проверялось бы
+        не свойство recovery, а давление A5.1 «ENC1 при выключенном флаге».
+        """
+        data_dir = _data_dir(tmp_path)
+        for i, name in enumerate(HISTORY_JOURNAL_FILENAMES):
+            (data_dir / name).write_text(
+                json.dumps({"id": f"off{i}", "text": "открытая запись"}, ensure_ascii=False)
+                + "\n",
+                encoding="utf-8",
+            )
         _settings_off(data_dir)
-        _make_snapshot(data_dir, crypto)
         live_before = _data_bytes(data_dir)
         leftover = data_dir / f"{RESTORE_STAGING_PREFIX}tx-мусор"
         leftover.mkdir()
         (leftover / RESTORE_MARKER_FILENAME).write_text("{}", encoding="utf-8")
+        svc = _svc(data_dir, None)
 
-        StateStore(data_dir)
+        listed = svc.handle_list_backups({})
+        backup = svc.handle_backup_history({})
 
+        assert listed["restore_recovery"]["pending"] is True
+        assert backup.get("ok") is not False, "OFF-профиль не должен ломаться от мусора"
         assert _data_bytes(data_dir) == live_before
-        assert leftover.is_dir()  # доказательство не удалено
+        assert leftover.is_dir()  # посторонний каталог НЕ удаляется fail-closed
         assert KEYCHAIN_ATTEMPTS["count"] == 0
 
 
@@ -1989,7 +2073,28 @@ class TestRecoveryKeepsPendingEvidence:
 
 
 class TestPendingRestoreBlocksWriters:
-    def _ragged(self, tmp_path, tag="w"):
+    """B2: снимок не берётся, пока на диске живёт маркер незавершённого restore.
+
+    До M2 докатка жила в конструкторе StateStore, поэтому тесты были бы другими.
+    Инвариант тот же: «последний хороший бэкап» не может быть снимком
+    промежуточного (рваного) состояния. Здоровый маркер точки обслуживания
+    ДОКАЧЫВАЮТ — и тогда бэкап проходит; блокировка обязана срабатывать, когда
+    докачка невозможна (это и есть состояние, опасное для владельца).
+    """
+
+    def _unhealable(self, tmp_path):
+        """Crash + испорченный ЦЕЛЕВОЙ снимок: докачка невозможна, маркер живёт."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        _crash_on_nth_replace(data_dir, crypto, snapshot_dir, nth=4)
+        target = snapshot_dir / "history.ndjson"
+        target.write_bytes(target.read_bytes() + b"ENC1:zzz\n")
+        return data_dir, crypto, snapshot_dir
+
+    def _healable(self, tmp_path):
         data_dir = _data_dir(tmp_path)
         crypto = _crypto()
         _fill_profile(data_dir, crypto)
@@ -1998,31 +2103,29 @@ class TestPendingRestoreBlocksWriters:
         _crash_on_nth_replace(data_dir, crypto, snapshot_dir, nth=4)
         return data_dir, crypto, snapshot_dir
 
-    def test_manual_backup_refused_while_restore_pending(self, tmp_path):
-        data_dir, crypto, _snap = self._ragged(tmp_path)
+    def test_manual_backup_refused_when_restore_cannot_be_healed(self, tmp_path):
+        data_dir, crypto, _snap = self._unhealable(tmp_path)
         svc = _svc(data_dir, crypto)
-        backups_before = sorted(p.name for p in (data_dir / "backups").iterdir())
 
         result = svc.handle_backup_history({})
 
         assert result["ok"] is False
         assert result["reason"] == "snapshot_recovery_pending"
-        assert sorted(p.name for p in (data_dir / "backups").iterdir()) == backups_before
+        assert _restore_markers(data_dir) != [], "маркер должен уцелеть"
+        # Новых снимков сверх исходного нет (pre-restore страховка создаётся
+        # ДО проверки снимка и потому не считается «новым»).
+        fresh = [
+            q.name for q in (data_dir / "backups").glob("snapshot_*")
+            if "prerestore" not in q.name
+        ]
+        assert fresh == ["snapshot_1"], fresh
 
-    def test_auto_backup_refused_while_restore_pending(self, tmp_path):
+    def test_auto_backup_refused_when_restore_cannot_be_healed(self, tmp_path):
         from backend.auto_backup import AutoBackupManager
 
-        data_dir, crypto, _snap = self._ragged(tmp_path)
+        data_dir, crypto, _snap = self._unhealable(tmp_path)
         store = _store_with_crypto(data_dir, crypto)
         mgr = AutoBackupManager(store=store, interval_hours=0)
-
-        def _snapshot_dirs() -> list[str]:
-            return sorted(
-                p.name for p in (data_dir / "backups").iterdir()
-                if p.is_dir() and (p / SNAPSHOT_MANIFEST_FILENAME).exists()
-            )
-
-        backups_before = _snapshot_dirs()
 
         out = mgr.check_and_backup()
 
@@ -2030,15 +2133,26 @@ class TestPendingRestoreBlocksWriters:
         # Конкретная причина протокола, а не «операция недоступна»: владельцу
         # нужно знать, что чинить (незавершённый restore), а не искать ключ.
         assert out["skipped_reason"] == "snapshot_recovery_pending"
-        # Ни одного НОВОГО каталога-снимка (rваный набор нельзя зафиксировать
-        # как «последний хороший бэкап»). Sidecar исхода (.last_result*) — штатная
-        # наблюдаемость auto-цикла, в нём только метаданные, не история.
-        assert _snapshot_dirs() == backups_before
+        assert _restore_markers(data_dir) != []
+        assert [q.name for q in (data_dir / "backups").glob("auto_snapshot_*")] == []
+
+    def test_service_point_heals_pending_restore_then_backup_succeeds(self, tmp_path):
+        data_dir, crypto, _snap = self._healable(tmp_path)
+        svc = _svc(data_dir, crypto)
+
+        result = svc.handle_backup_history({})
+
+        assert result["ok"] is True
+        assert _restore_markers(data_dir) == []
+        assert last_restore_recovery()["rolled_forward"] is True
+        # Снимок снят с ЦЕЛОГО состояния, а не с промежуточного.
+        assert result["encrypted"] is True
+        assert Path(result["backup_path"]).is_dir()
 
     def test_auto_backup_status_reports_blocked_by_pending_restore(self, tmp_path):
         from backend.auto_backup import AutoBackupManager
 
-        data_dir, crypto, _snap = self._ragged(tmp_path)
+        data_dir, crypto, _snap = self._unhealable(tmp_path)
         store = _store_with_crypto(data_dir, crypto)
         status = AutoBackupManager(store=store, interval_hours=0).get_auto_backup_status()
 
@@ -2054,7 +2168,7 @@ class TestPendingRestoreBlocksWriters:
     def test_status_is_clean_after_successful_recovery(self, tmp_path):
         from backend.auto_backup import AutoBackupManager
 
-        data_dir, crypto, _snap = self._ragged(tmp_path)
+        data_dir, crypto, _snap = self._healable(tmp_path)
         _recover(data_dir, crypto)
         store = _store_with_crypto(data_dir, crypto)
         mgr = AutoBackupManager(store=store, interval_hours=0)
