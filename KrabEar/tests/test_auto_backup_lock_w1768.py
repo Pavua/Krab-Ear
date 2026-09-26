@@ -50,7 +50,7 @@ class _LockSpyStore:
         self.settings_path = data_dir / "settings.json"
         for p in (self.history_path, self.tombstones_path,
                   self.status_path, self.settings_path):
-            p.write_text("dummy", encoding="utf-8")
+            p.write_text("{}", encoding="utf-8")
         self.lock_enter_count = 0
         self._lock_depth = 0
         self.reentrant_violation = False

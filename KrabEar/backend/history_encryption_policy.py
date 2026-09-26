@@ -38,31 +38,44 @@ class HistoryEncryptionOperationUnavailable(Exception):
         super().__init__(f"{operation}: {OPERATION_UNAVAILABLE_REASON}")
 
 
-def data_dir_policy_reader(data_dir: Path | str) -> Callable[[], bool]:
-    """Fail-closed reader флага для менеджера без StateStore-ссылки."""
+def data_dir_policy_reader(
+    data_dir: Path | str,
+    *,
+    push_error: Callable[..., None] | None = None,
+) -> Callable[[], bool]:
+    """Fail-closed reader флага для менеджера без StateStore-ссылки.
+
+    ``push_error`` опционально пробрасывается в ``read_history_encryption_flag``
+    (ErrorBus), чтобы отказ политики был виден так же громко, как из StateStore.
+    """
     base = Path(data_dir)
     settings_path = base / "settings.json"
     journals = history_journal_paths(base)
-    return lambda: read_history_encryption_flag(settings_path, journals)
+    return lambda: read_history_encryption_flag(
+        settings_path, journals, push_error=push_error
+    )
 
 
 def store_policy_reader(store: Any) -> Callable[[], bool]:
     """Fail-closed reader флага для менеджера с StateStore.
 
     Использует существующий ``StateStore._read_encryption_flag_unlocked``.
-    Лёгкие тестовые двойники без этого метода считаются OFF (как и другие
-    защитные пути, которые деградируют на fake-store).
+    Метод обязан быть определён на КЛАССЕ store: проверка через
+    ``getattr(type(store), ...)`` не даёт ``MagicMock`` авто-создать атрибут
+    (иначе любой mock-store выглядел бы как ON и ломал OFF-контроль).
 
-    Метод должен быть определён на КЛАССЕ store. Проверка через
-    ``getattr(type(store), ...)`` сознательно не даёт ``MagicMock``
-    авто-создать атрибут (иначе любой mock-store выглядел бы как ON и
-    ломал бы OFF-контроль).
+    Fallback: store без класс-метода, но с ``data_dir`` (будущий proxy/store
+    wrapper) НЕ отключает гейты молча — читает ту же policy из
+    ``data_dir/settings.json`` тем же fail-closed механизмом.
     """
     class_reader = getattr(type(store), "_read_encryption_flag_unlocked", None)
     if callable(class_reader):
         bound = getattr(store, "_read_encryption_flag_unlocked", None)
         if callable(bound):
             return lambda: bool(bound())
+    data_dir = getattr(store, "data_dir", None)
+    if isinstance(data_dir, (str, Path)):
+        return data_dir_policy_reader(data_dir)
     return lambda: False
 
 

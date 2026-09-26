@@ -23,6 +23,7 @@ from backend.data_migrator import DataMigrator, MigrationResult
 from backend.history_encryption_policy import (
     OPERATION_UNAVAILABLE_REASON as REASON,
     HistoryEncryptionOperationUnavailable,
+    store_policy_reader,
 )
 from backend.history_service import HistoryService
 from backend.state_store import StateStore
@@ -59,6 +60,31 @@ def _enc1_line() -> str:
 
 def _no_keychain(*_a, **_k):
     raise AssertionError("policy guard must not touch the Keychain")
+
+
+def _flipping_flock_patch(module_name: str, second_store: StateStore):
+    """Патч ``backend.<module_name>.history_flock`` (create=True).
+
+    На входе в lock флипает ``history_encryption_enabled=true`` через второй
+    StateStore, затем берёт реальный ``history_flock`` (если он уже существует
+    после фикса). На текущем HEAD код патч не вызывает → флип не происходит,
+    и plaintext-sink выполняется: RED по правильной причине.
+    """
+    try:
+        from backend.state_store import history_flock as real_flock
+    except ImportError:  # HEAD до фикса
+        real_flock = None
+
+    @contextmanager
+    def _flip(data_dir, *args, **kwargs):
+        second_store.save_settings({"history_encryption_enabled": True})
+        if real_flock is None:
+            yield
+        else:
+            with real_flock(data_dir, *args, **kwargs):
+                yield
+
+    return patch(f"backend.{module_name}.history_flock", _flip, create=True)
 
 
 class TestManualBackupPolicyFailureModes:
@@ -323,6 +349,31 @@ class TestArchiveManagerGate:
         assert removed >= 1
         assert mgr._archive_path.read_text(encoding="utf-8") == ""
 
+    def test_unarchive_recheck_under_store_lock_blocks_off_to_on(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        store = StateStore(data_dir)
+        item = store.add_history_item(text="synthetic unarchive race")
+        off_mgr = ArchiveManager(store=store)
+        off_mgr.archive_items([item.id])
+        before = _bytes(store.history_path)
+        mgr = ArchiveManager(store=store)  # OFF на конструировании
+        second = StateStore(data_dir)
+        real_lock = store._lock
+        state = {"flipped": False}
+
+        @contextmanager
+        def flipping_lock(*args, **kwargs):
+            if not state["flipped"]:
+                state["flipped"] = True
+                second.save_settings({"history_encryption_enabled": True})
+            with real_lock(*args, **kwargs):
+                yield
+
+        with patch.object(store, "_lock", flipping_lock):
+            result = mgr.unarchive_items([item.id])
+        assert result["ok"] is False and result["reason"] == REASON
+        assert _bytes(store.history_path) == before
+
 
 class TestTranscriptVersionGate:
     def test_constructs_without_storage_when_on(self, tmp_path):
@@ -393,6 +444,52 @@ class TestTranscriptVersionGate:
         assert removed >= 1
         assert (data_dir / "transcript_versions.ndjson").read_text(encoding="utf-8") == ""
 
+    def test_save_version_recheck_under_lock_blocks_off_to_on(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        mgr = TranscriptVersionManager(data_dir=data_dir)
+        second = StateStore(data_dir)
+        before = _bytes(data_dir / "transcript_versions.ndjson")
+        with _flipping_flock_patch("transcript_versioning", second):
+            with pytest.raises(HistoryEncryptionOperationUnavailable):
+                mgr.save_version("item-1", "synthetic race")
+        assert _bytes(data_dir / "transcript_versions.ndjson") == before
+
+    def test_revert_recheck_under_lock_blocks_off_to_on(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        seed = TranscriptVersionManager(data_dir=data_dir)
+        seed.save_version("item-1", "first", "stt_raw")
+        mgr = TranscriptVersionManager(data_dir=data_dir)
+        second = StateStore(data_dir)
+        before = _bytes(data_dir / "transcript_versions.ndjson")
+        with _flipping_flock_patch("transcript_versioning", second):
+            with pytest.raises(HistoryEncryptionOperationUnavailable):
+                mgr.revert_to_version("item-1", 1)
+        assert _bytes(data_dir / "transcript_versions.ndjson") == before
+
+
+class _ProxyStore:
+    """Store без класс-метода `_read_encryption_flag_unlocked`, но с data_dir."""
+
+    def __init__(self, data_dir: Path) -> None:
+        self.data_dir = str(data_dir)
+
+
+class TestPolicyReaderFallback:
+    def test_proxy_store_uses_data_dir_on(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        _write_settings(data_dir, {"history_encryption_enabled": True})
+        assert store_policy_reader(_ProxyStore(data_dir))() is True
+
+    def test_proxy_store_uses_data_dir_off(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        assert store_policy_reader(_ProxyStore(data_dir))() is False
+
+    def test_store_without_data_dir_is_off(self):
+        class _NoDir:
+            pass
+
+        assert store_policy_reader(_NoDir())() is False
+
 
 class TestDataMigratorGate:
     def test_migrate_refuses_and_writes_nothing_when_on(self, tmp_path):
@@ -446,3 +543,32 @@ class TestDataMigratorGate:
         result = migrator.migrate(data_dir)
         assert result.backup_path == ""
         assert not (data_dir / "backups").exists()
+
+    def test_migrate_recheck_under_flock_blocks_off_to_on(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        (data_dir / "history.ndjson").write_text(
+            json.dumps({"id": "1", "text": "v1"}) + "\n", encoding="utf-8"
+        )
+        migrator = DataMigrator(data_dir=data_dir)
+        second = StateStore(data_dir)
+        before = _bytes(data_dir / "history.ndjson")
+        with _flipping_flock_patch("data_migrator", second):
+            result = migrator.migrate(data_dir)
+        assert result.reason == REASON
+        assert result.backup_path == ""
+        assert _bytes(data_dir / "history.ndjson") == before
+        assert not (data_dir / "backups").exists()
+
+    def test_rollback_recheck_under_flock_blocks_off_to_on(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        backup = data_dir / "backups" / "migration_backup_x"
+        backup.mkdir(parents=True)
+        (backup / "history.ndjson").write_text('{"id":"restored"}\n', encoding="utf-8")
+        (data_dir / "history.ndjson").write_text('{"id":"current"}\n', encoding="utf-8")
+        migrator = DataMigrator(data_dir=data_dir)
+        second = StateStore(data_dir)
+        before = _bytes(data_dir / "history.ndjson")
+        with _flipping_flock_patch("data_migrator", second):
+            result = migrator.rollback_migration(data_dir, str(backup))
+        assert result["ok"] is False and result["reason"] == REASON
+        assert _bytes(data_dir / "history.ndjson") == before

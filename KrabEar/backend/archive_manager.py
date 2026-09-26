@@ -10,6 +10,7 @@ import fcntl
 import json
 import logging
 import threading
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -457,9 +458,20 @@ class ArchiveManager:
         unarchived_count = 0
         not_found: list[str] = []
 
-        with self._lock:
-            # A5.2a: OFF→ON пока ждали self._lock.
+        store_lock_factory = getattr(_store, "_lock", None)
+        store_lock_ctx = (
+            store_lock_factory() if callable(store_lock_factory) else nullcontext()
+        )
+        # A5.2a (MAJOR-1): policy перепроверяется ПОД store-flock (общий
+        # lock-контракт с save_settings/archive_items atomic-веткой).
+        # nullcontext — для fake-store без _lock.
+        with self._lock, store_lock_ctx:
             if policy_blocks(self._encryption_policy_read):
+                logger.warning(
+                    "unarchive_items: encryption включён до store-lock — "
+                    "plaintext unarchive refused (%s)",
+                    _ENC_OP_UNAVAILABLE,
+                )
                 return {"ok": False, "reason": _ENC_OP_UNAVAILABLE}
             # wave-33 (B2): перепроверяем epoch под self._lock. Если конкурентный
             # purge инкрементировал его между снимком и захватом — отменяем:
@@ -525,7 +537,7 @@ class ArchiveManager:
             not_found = sorted(ids_set - found_ids)
             self._rewrite_archive(remaining)
 
-        return {"unarchived_count": unarchived_count, "not_found": not_found}
+            return {"unarchived_count": unarchived_count, "not_found": not_found}
 
     def list_archived(self, limit: int = 50) -> list[dict[str, Any]]:
         """Возвращает список архивированных записей (от новых к старым).

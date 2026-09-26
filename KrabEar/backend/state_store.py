@@ -210,6 +210,100 @@ def read_history_encryption_flag(
     )
 
 
+# A5.2a: тот же файл, что StateStore._lock (data_dir/history.lock). Отдельный
+# module-level helper нужен sink'ам без StateStore-ссылки (DataMigrator,
+# TranscriptVersionManager), чтобы политику можно было перепроверить ПОД тем же
+# межпроцессным flock, что и save_settings.
+_HISTORY_FLOCK_TIMEOUT_SEC = 30.0
+_HISTORY_FLOCK_POLL_SEC = 0.05
+_HISTORY_FLOCK_STATE_LOCK = threading.Lock()
+_HISTORY_FLOCK_DEPTH: dict[tuple[int, str], int] = {}
+
+
+def _history_flock_key(data_dir: Path) -> tuple[int, str]:
+    lock_path = Path(data_dir) / "history.lock"
+    try:
+        resolved = str(lock_path.resolve())
+    except OSError:
+        resolved = str(lock_path)
+    return threading.get_ident(), resolved
+
+
+@contextmanager
+def history_flock(
+    data_dir: Path,
+    *,
+    timeout_sec: float = _HISTORY_FLOCK_TIMEOUT_SEC,
+) -> Iterator[None]:
+    """Эксклюзивный flock на ``<data_dir>/history.lock``.
+
+    Это ТОТ ЖЕ файл, который берёт ``StateStore._lock``. Нужен sink'ам без
+    StateStore-ссылки, чтобы перепроверка политики и запись выполнялись под
+    одним межпроцессным lock'ом с ``save_settings``.
+
+    Реентерабельность: ВНУТРИ этого helper'а — per-thread depth по resolved
+    пути (nested вход того же треда — no-op). 🔴 НЕ реентерабелен относительно
+    ``StateStore._lock``: если тот же тред уже держит ``store._lock()`` на этом
+    файле, flock на новом fd заблокируется. Поэтому helper вызывается ТОЛЬКО из
+    sink'ов, которые по инварианту не выполняются под store._lock
+    (``save_version``/``revert_to_version``/``migrate``/``rollback_migration``);
+    hooks компактирования сюда не входят.
+
+    Захват ограничен ``timeout_sec`` (``StateStoreLockTimeout`` вместо вечного
+    ожидания) — потенциальный дедлок превращается в громкий отказ.
+    """
+    key = _history_flock_key(data_dir)
+    with _HISTORY_FLOCK_STATE_LOCK:
+        depth = _HISTORY_FLOCK_DEPTH.get(key, 0)
+        reentrant = depth > 0
+        if reentrant:
+            _HISTORY_FLOCK_DEPTH[key] = depth + 1
+    if reentrant:
+        try:
+            yield
+        finally:
+            with _HISTORY_FLOCK_STATE_LOCK:
+                current = _HISTORY_FLOCK_DEPTH.get(key, 1) - 1
+                if current <= 0:
+                    _HISTORY_FLOCK_DEPTH.pop(key, None)
+                else:
+                    _HISTORY_FLOCK_DEPTH[key] = current
+        return
+
+    lock_path = Path(data_dir) / "history.lock"
+    lock_path.touch(exist_ok=True)
+    lock_file = lock_path.open("a+", encoding="utf-8")
+    deadline = time.monotonic() + max(0.0, timeout_sec)
+    try:
+        while True:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise StateStoreLockTimeout(
+                        f"history_flock: не получил exclusive flock на "
+                        f"{lock_path} за {timeout_sec:.2f}с"
+                    )
+                time.sleep(_HISTORY_FLOCK_POLL_SEC)
+    except BaseException:
+        lock_file.close()
+        with _HISTORY_FLOCK_STATE_LOCK:
+            _HISTORY_FLOCK_DEPTH.pop(key, None)
+        raise
+    with _HISTORY_FLOCK_STATE_LOCK:
+        _HISTORY_FLOCK_DEPTH[key] = 1
+    try:
+        yield
+    finally:
+        with _HISTORY_FLOCK_STATE_LOCK:
+            _HISTORY_FLOCK_DEPTH.pop(key, None)
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        finally:
+            lock_file.close()
+
+
 class StateStore:
     """Фасад для настроек и истории backend-сервиса."""
 

@@ -44,7 +44,7 @@ def _make_store(data_dir: Path) -> MagicMock:
     store.settings_path = data_dir / "settings.json"
     store.count_active_items.return_value = 0
     for attr in ("history_path", "tombstones_path", "settings_path"):
-        getattr(store, attr).write_text("dummy", encoding="utf-8")
+        getattr(store, attr).write_text("{}", encoding="utf-8")
     return store
 
 

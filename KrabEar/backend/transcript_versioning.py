@@ -22,6 +22,7 @@ from backend.history_encryption_policy import (
     data_dir_policy_reader,
     policy_blocks,
 )
+from backend.state_store import history_flock
 
 logger = logging.getLogger("KrabEar.Backend.TranscriptVersioning")
 
@@ -229,21 +230,31 @@ class TranscriptVersionManager:
                 f"version text {_text_bytes} bytes exceeds _MAX_TEXT_BYTES={_MAX_TEXT_BYTES}"
             )
 
-        with self._lock:
-            all_records = self._read_all()
-            version_num = self._next_version_num(item_id, all_records)
-            record: dict[str, Any] = {
-                "item_id": item_id,
-                "version_num": version_num,
-                "text": text,
-                "source": source,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }
-            self._append(record)
-            # F1: применяем лимит после добавления (cap = MAX_VERSIONS_PER_ITEM)
-            all_records.append(record)
-            self._enforce_version_cap(item_id, all_records)
-            return dict(record)
+        # CRITICAL-2 (A5.2a adversarial review): append версии — plaintext-sink.
+        # Повторная проверка политики и append выполняются под тем же
+        # history.lock flock, что и save_settings (data_dir==store.data_dir),
+        # поэтому OFF→ON вторым StateStore после первичного guard не оставит
+        # plaintext-строку at-rest. history_flock НЕ берётся ни одним hook'ом
+        # компактирования (см. purge_orphaned_versions), поэтому дедлока с
+        # удерживаемым store._lock нет.
+        with history_flock(self._data_dir):
+            if policy_blocks(self._encryption_policy_read):
+                raise HistoryEncryptionOperationUnavailable("save_version")
+            with self._lock:
+                all_records = self._read_all()
+                version_num = self._next_version_num(item_id, all_records)
+                record: dict[str, Any] = {
+                    "item_id": item_id,
+                    "version_num": version_num,
+                    "text": text,
+                    "source": source,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+                self._append(record)
+                # F1: применяем лимит после добавления (cap = MAX_VERSIONS_PER_ITEM)
+                all_records.append(record)
+                self._enforce_version_cap(item_id, all_records)
+                return dict(record)
 
     def get_versions(self, item_id: str) -> list[dict[str, Any]]:
         """Возвращает все версии для item_id, от новейшей к старейшей.
@@ -309,21 +320,25 @@ class TranscriptVersionManager:
             raise ValueError("Текст целевой версии пустой — откат невозможен")
         if len(revert_text.encode("utf-8")) > _MAX_TEXT_BYTES:
             revert_text = revert_text.encode("utf-8")[:_MAX_TEXT_BYTES - 11].decode("utf-8", errors="ignore") + "[TRUNCATED]"
-        with self._lock:
-            all_records = self._read_all()
-            next_num = self._next_version_num(clean_id, all_records)
-            record: dict[str, Any] = {
-                "item_id": clean_id,
-                "version_num": next_num,
-                "text": revert_text,
-                "source": "manual",
-                "reverted_from": version_num,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }
-            self._append(record)
-            all_records.append(record)
-            self._enforce_version_cap(clean_id, all_records)
-            return dict(record)
+        # CRITICAL-2: re-check + append под тем же history.lock flock, что save_settings.
+        with history_flock(self._data_dir):
+            if policy_blocks(self._encryption_policy_read):
+                raise HistoryEncryptionOperationUnavailable("revert_to_version")
+            with self._lock:
+                all_records = self._read_all()
+                next_num = self._next_version_num(clean_id, all_records)
+                record: dict[str, Any] = {
+                    "item_id": clean_id,
+                    "version_num": next_num,
+                    "text": revert_text,
+                    "source": "manual",
+                    "reverted_from": version_num,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+                self._append(record)
+                all_records.append(record)
+                self._enforce_version_cap(clean_id, all_records)
+                return dict(record)
 
     def diff_versions(self, item_id: str, v1: int, v2: int) -> dict[str, Any]:
         """Возвращает текстовый diff между двумя версиями.
@@ -559,6 +574,12 @@ class TranscriptVersionManager:
         """
         # A5.2a: orphan-cleanup — auto plaintext rewrite. При ON не трогаем
         # существующие версии (они входят в inventory, автоматически не удаляются).
+        #
+        # 🔴 LOCK CONTRACT: этот метод вызывается из StateStore._compact_unlocked
+        # (через `_on_compact_hook`) ПОД store._lock() на том же треде, поэтому
+        # здесь НЕЛЬЗЯ брать history_flock — это был бы nested flock на новом fd
+        # и вечный дедлок. Гонка с save_settings закрыта самим store._lock
+        # вызывающего компактирования; отдельный re-check тут не нужен.
         if policy_blocks(self._encryption_policy_read):
             return 0
         with self._lock:

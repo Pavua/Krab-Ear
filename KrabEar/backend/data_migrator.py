@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 import shutil
@@ -22,6 +21,7 @@ from backend.history_encryption_policy import (
     data_dir_policy_reader,
     policy_blocks,
 )
+from backend.state_store import history_flock
 
 logger = logging.getLogger("KrabEar.Backend.DataMigrator")
 
@@ -220,18 +220,17 @@ class DataMigrator:
             raise ValueError(f"Неподдерживаемая целевая версия: {target_version!r}. Поддерживается только '2.0'.")
 
         # A5.2a: schema migration создаёт plaintext backup, raw rewrite и prune.
-        # При Encryption ON — отказ до _create_backup; возвращаем MigrationResult
-        # (startup ожидает его, а не произвольный failure dict), без ложного
-        # success-log. Guard не трогает Keychain.
-        if policy_blocks(data_dir_policy_reader(data_dir)):
-            current = self.get_schema_version(data_dir)
+        # При Encryption ON — отказ. Guard не трогает Keychain. Возвращаем
+        # MigrationResult (startup ожидает его, а не произвольный failure dict).
+        reader = data_dir_policy_reader(data_dir)
+        if policy_blocks(reader):
             logger.warning(
                 "DataMigrator.migrate: history encryption on — legacy schema "
-                "migration refused (from=%s to=%s, %s)",
-                current, target_version, _ENC_OP_UNAVAILABLE,
+                "migration refused (to=%s, %s)",
+                target_version, _ENC_OP_UNAVAILABLE,
             )
             return MigrationResult(
-                from_version=current,
+                from_version="unknown",
                 to_version=target_version,
                 items_migrated=0,
                 items_skipped=0,
@@ -254,21 +253,42 @@ class DataMigrator:
                 backup_path="",
             )
 
-        backup_path = self._create_backup(data_dir)
+        # CRITICAL-1 (A5.2a adversarial review): backup + rewrite обязаны
+        # выполняться под тем же history.lock flock, что и save_settings, а
+        # политика — перепроверяться ПОСЛЕ захвата lock. Иначе второй
+        # StateStore/IPC-клиент может включить шифрование между guard и copy.
+        with history_flock(data_dir):
+            if policy_blocks(reader):
+                logger.warning(
+                    "DataMigrator.migrate: encryption включён до захвата lock — "
+                    "legacy schema migration refused (%s)",
+                    _ENC_OP_UNAVAILABLE,
+                )
+                return MigrationResult(
+                    from_version=current,
+                    to_version=target_version,
+                    items_migrated=0,
+                    items_skipped=0,
+                    backup_path="",
+                    reason=_ENC_OP_UNAVAILABLE,
+                )
+            backup_path = self._create_backup(data_dir)
 
-        # Миграция v1.0 → v2.0
-        if current == "1.0" and target_version == "2.0":
-            return self._migrate_v1_to_v2(data_dir, backup_path)
+            # Миграция v1.0 → v2.0 (lock уже удерживается этим контекстом).
+            if current == "1.0" and target_version == "2.0":
+                return self._migrate_v1_to_v2(
+                    data_dir, backup_path, _lock_held=True
+                )
 
-        # Неизвестный путь миграции — ничего не делаем, возвращаем статус
-        logger.warning("Неизвестный путь миграции: %s → %s", current, target_version)
-        return MigrationResult(
-            from_version=current,
-            to_version=target_version,
-            items_migrated=0,
-            items_skipped=0,
-            backup_path=backup_path,
-        )
+            # Неизвестный путь миграции — ничего не делаем, возвращаем статус
+            logger.warning("Неизвестный путь миграции: %s → %s", current, target_version)
+            return MigrationResult(
+                from_version=current,
+                to_version=target_version,
+                items_migrated=0,
+                items_skipped=0,
+                backup_path=backup_path,
+            )
 
     # ------------------------------------------------------------------
     # IPC handlers
@@ -402,7 +422,8 @@ class DataMigrator:
 
         # A5.2a: rollback восстанавливает plaintext-файлы из миграционного
         # backup. При Encryption ON — отказ до copy/prune.
-        if policy_blocks(data_dir_policy_reader(data_dir)):
+        reader = data_dir_policy_reader(data_dir)
+        if policy_blocks(reader):
             logger.warning(
                 "rollback_migration: history encryption on — legacy plaintext "
                 "rollback refused (%s)",
@@ -418,21 +439,30 @@ class DataMigrator:
         if not backup_dir.is_dir():
             raise ValueError(f"Директория резервной копии не найдена: {backup_path!r}")
 
-        lock_path = data_dir / "history.lock"
         restored: list[str] = []
 
-        with open(lock_path, "a+") as lock_fh:
-            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
-            try:
-                for src in backup_dir.iterdir():
-                    if src.name == "migration_meta.json":
-                        continue
-                    dest = data_dir / src.name
-                    shutil.copy2(src, dest)
-                    restored.append(src.name)
-                    logger.info("Откат: восстановлен файл %s", src.name)
-            finally:
-                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        # CRITICAL-1: copy под тем же history.lock flock, что и save_settings, с
+        # повторной проверкой политики ПОСЛЕ захвата (OFF→ON вторым StateStore).
+        with history_flock(data_dir):
+            if policy_blocks(reader):
+                logger.warning(
+                    "rollback_migration: encryption включён до захвата lock — "
+                    "legacy plaintext rollback refused (%s)",
+                    _ENC_OP_UNAVAILABLE,
+                )
+                return {
+                    "ok": False,
+                    "reason": _ENC_OP_UNAVAILABLE,
+                    "restored_files": [],
+                    "backup_path": str(backup_path),
+                }
+            for src in backup_dir.iterdir():
+                if src.name == "migration_meta.json":
+                    continue
+                dest = data_dir / src.name
+                shutil.copy2(src, dest)
+                restored.append(src.name)
+                logger.info("Откат: восстановлен файл %s", src.name)
 
         logger.info("Откат миграции завершён: восстановлено %d файлов из %s", len(restored), backup_dir)
         return {"restored_files": restored, "backup_path": str(backup_dir)}
@@ -504,23 +534,25 @@ class DataMigrator:
 
         return str(backup_dir)
 
-    def _migrate_v1_to_v2(self, data_dir: Path, backup_path: str) -> MigrationResult:
+    def _migrate_v1_to_v2(
+        self,
+        data_dir: Path,
+        backup_path: str,
+        *,
+        _lock_held: bool = False,
+    ) -> MigrationResult:
         """Применяет миграцию v1.0 → v2.0.
 
         Добавляет поля tags=[], favorite=false, annotation="" ко всем записям,
         которым они не хватает. Перезаписывает history.ndjson атомарно.
 
-        Удерживает POSIX flock(LOCK_EX) на history.lock на всё время записи,
-        чтобы исключить гонку с параллельными append-операциями StateStore.
+        ``_lock_held=True`` — вызывающий уже держит ``history_flock(data_dir)``
+        (migrate вызывает под одним lock'ом для guard+backup+rewrite).
         """
-        lock_path = data_dir / "history.lock"
-        with open(lock_path, "a+") as lock_fh:
-            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
-            try:
-                result = self._do_migrate_v1_to_v2(data_dir, backup_path)
-            finally:
-                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
-        return result
+        if _lock_held:
+            return self._do_migrate_v1_to_v2(data_dir, backup_path)
+        with history_flock(data_dir):
+            return self._do_migrate_v1_to_v2(data_dir, backup_path)
 
     def _do_migrate_v1_to_v2(self, data_dir: Path, backup_path: str) -> MigrationResult:
         """Внутренний метод миграции — вызывается под удержанием history.lock."""
