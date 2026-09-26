@@ -53,7 +53,6 @@ logger = logging.getLogger("KrabEar.Backend.EncryptedSnapshot")
 
 SNAPSHOT_MANIFEST_VERSION = 1
 SNAPSHOT_MANIFEST_FILENAME = "snapshot_manifest.json"
-STAGING_PREFIX = ".snapshot_staging_"
 
 STATE_PREPARED = "PREPARED"
 STATE_COMMITTING = "COMMITTING"
@@ -74,6 +73,7 @@ REASON_DESTINATION_EXISTS = "snapshot_destination_exists"
 REASON_READBACK_FAILED = "snapshot_readback_failed"
 REASON_PUBLISH_FAILED = "snapshot_publish_failed"
 REASON_MANIFEST_INVALID = "snapshot_manifest_invalid"
+REASON_OUTSIDE_BACKUPS_ROOT = "snapshot_outside_backups_root"
 REASON_FSYNC_FAILED = "snapshot_fsync_failed"
 REASON_RECOVERY_PENDING = "snapshot_recovery_pending"
 
@@ -301,35 +301,108 @@ def _encrypt_journal(source: Path, crypto: Any) -> bytes:
 
 
 # ----------------------------------------------------------------------
+# Где лежат снимки и что можно восстанавливать
+# ----------------------------------------------------------------------
+
+# Приватный корень staging внутри backups. Имя dot-prefixed — чтобы staging
+# НИКОГДА не всплывал в списке бэкапов (в т.ч. legacy restore) и не выглядел
+# как готовый бэкап. Публикация остаётся одной атомарной os.replace внутри
+# одного filesystem: backups/.staging/<txid> → backups/<snapshot>.
+STAGING_ROOT_NAME = ".staging"
+
+# Каталоги, которые legacy restore ПРАВЕДОМ не может распознать: в них лежат
+# ENC1-строки, а legacy restore копирует их через copy2 как есть.
+SNAPSHOT_DIR_PREFIXES = ("snapshot_", "auto_snapshot_")
+
+# Единственные каталоги, которые legacy restore понимает.
+LEGACY_BACKUP_DIR_PREFIXES = ("backup_", "auto_backup_")
+
+UNSUPPORTED_BACKUP_REASON = "unsupported_backup_format"
+
+
+def classify_backup_dir(path: Any) -> str:
+    """Классифицирует каталог в backups: ``legacy`` / ``snapshot`` / ``unsupported``.
+
+    ``legacy``     — каталог, который restore вправе трогать (backup_*/auto_backup_*).
+    ``snapshot``   — encrypted snapshot нового протокола (восстановление — b2).
+    ``unsupported``— всё остальное: dot-prefixed (staging/мусор) и посторонние имена.
+
+    Fail-closed по умолчанию: неизвестное имя НЕ считается legacy-бэкапом.
+    Раньше подходил любой каталог с ``history.ndjson``, из-за чего снимок можно
+    было скормить restore и затереть живую историю шифротекстом.
+    """
+    p = Path(path)
+    if p.name.startswith("."):
+        return "unsupported"
+    if (p / SNAPSHOT_MANIFEST_FILENAME).exists():
+        return "snapshot"
+    if p.name.startswith(LEGACY_BACKUP_DIR_PREFIXES):
+        return "legacy"
+    return "unsupported"
+
+
+def _backups_root(data_dir: Any) -> Path:
+    return (Path(data_dir) / "backups").resolve()
+
+
+def _require_inside_backups(data_dir: Any, dest: Any) -> Path:
+    """Снимок обязан лежать внутри ``<data_dir>/backups`` — даже через symlink.
+
+    ``resolve()`` разыменовывает и сам ``backups``, и промежуточные компоненты,
+    поэтому подмена ``backups`` симлинком уводит снимок наружу и здесь
+    отсекается.
+    """
+    root = _backups_root(data_dir)
+    resolved = Path(dest).resolve()
+    if resolved != root and not resolved.is_relative_to(root):
+        raise SnapshotOperationRefused(
+            REASON_OUTSIDE_BACKUPS_ROOT,
+            f"{resolved} находится вне {root} — снимок обязан лежать в backups/",
+        )
+    return resolved
+
+
+def _staging_dir_for(backups_root: Path, transaction_id: str) -> Path:
+    return Path(backups_root) / STAGING_ROOT_NAME / f".tx-{transaction_id}"
+
+
+# ----------------------------------------------------------------------
 # Pending-транзакции
 # ----------------------------------------------------------------------
 
 
-def _snapshot_dirs(backup_dir: Path) -> list[Path]:
-    """Каталоги-снимки (опубликованные) внутри backups-корня."""
-    root = Path(backup_dir)
+def _snapshot_dirs(backups_root: Path) -> list[Path]:
+    """Опубликованные каталоги-снимки внутри backups-корня (без dot-prefixed)."""
+    root = Path(backups_root)
     if not root.is_dir():
         return []
     return sorted(
-        p for p in root.iterdir()
-        if p.is_dir() and not p.name.startswith(STAGING_PREFIX)
+        p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")
     )
 
 
-def find_pending_transaction(*, backup_dir: Path) -> dict | None:
+def _unpublished_staging_dirs(backups_root: Path) -> list[Path]:
+    """Неопубликованные staging-каталоги (подготовка началась, замены не было)."""
+    staging_root = Path(backups_root) / STAGING_ROOT_NAME
+    if not staging_root.is_dir():
+        return []
+    return sorted(p for p in staging_root.iterdir() if p.is_dir())
+
+
+def find_pending_transaction(*, backups_root: Path) -> dict | None:
     """Первая незавершённая (не COMMITTED) транзакция в backups-корне.
 
-    Учитываются и опубликованные каталоги (COMMITTING), и оставшиеся
-    приватные staging-каталоги (PREPARED — публикация не началась).
+    Различает ОПУБЛИКОВАННУЮ транзакцию (каталог-снимок с COMMITTING — замена
+    началась, нужен b2) и неопубликованный staging (подготовка, замены не
+    было — это мусор, а не незавершённая операция). На ``published`` b2 обязан
+    опираться при решении, доказывать ли что-то.
     """
-    root = Path(backup_dir)
+    root = Path(backups_root)
     if not root.is_dir():
         return None
-    candidates = _snapshot_dirs(root) + [
-        p for p in sorted(root.iterdir())
-        if p.is_dir() and p.name.startswith(STAGING_PREFIX)
-    ]
-    for path in candidates:
+    published = [(p, True) for p in _snapshot_dirs(root)]
+    unpublished = [(p, False) for p in _unpublished_staging_dirs(root)]
+    for path, is_published in published + unpublished:
         try:
             manifest = _read_manifest(path)
         except SnapshotOperationRefused:
@@ -338,7 +411,7 @@ def find_pending_transaction(*, backup_dir: Path) -> dict | None:
                 "state": "UNKNOWN",
                 "transaction_id": None,
                 "path": str(path),
-                "published": not path.name.startswith(STAGING_PREFIX),
+                "published": is_published,
             }
         if manifest is None:
             continue
@@ -347,7 +420,7 @@ def find_pending_transaction(*, backup_dir: Path) -> dict | None:
                 "state": manifest.get("state"),
                 "transaction_id": manifest.get("transaction_id"),
                 "path": str(path),
-                "published": not path.name.startswith(STAGING_PREFIX),
+                "published": is_published,
             }
     return None
 
@@ -384,10 +457,14 @@ def build_encrypted_snapshot(
     if not str(transaction_id):
         raise SnapshotOperationRefused(REASON_PREPARED_MISSING, "пустой transaction_id")
 
+    # Снимок обязан лежать внутри <data_dir>/backups (symlink не уводит наружу).
+    dest = _require_inside_backups(data_dir, backup_dir)
+    backups_root = dest.parent
+
     # Шаг 1: незавершённая операция запрещает новую транзакцию (опубликованная).
     # Сканируется КОРЕНЬ backups, а не каталог-снимок: незавершённая транзакция
     # лежит рядом с новым назначением.
-    pending = find_pending_transaction(backup_dir=backup_dir.parent)
+    pending = find_pending_transaction(backups_root=backups_root)
     if pending and pending.get("published"):
         raise SnapshotOperationRefused(
             REASON_PENDING_OPERATION,
@@ -405,8 +482,9 @@ def build_encrypted_snapshot(
     registry = _registry(data_dir)
     fingerprint = _source_fingerprint(data_dir)
 
-    backup_dir.parent.mkdir(parents=True, exist_ok=True)
-    staging = backup_dir.parent / f"{STAGING_PREFIX}{transaction_id}"
+    _ensure_private_dir(backups_root)
+    _ensure_private_dir(backups_root / STAGING_ROOT_NAME)
+    staging = _staging_dir_for(backups_root, transaction_id)
     if staging.exists():
         raise SnapshotOperationRefused(
             REASON_DESTINATION_EXISTS, f"staging {staging.name} уже существует"
@@ -509,6 +587,22 @@ def verify_snapshot_readback(*, backup_dir: Any) -> dict:
     }
 
 
+def _ensure_private_dir(path: Path) -> None:
+    """mkdir + явный chmod 0700 (в т.ч. для уже существующего каталога).
+
+    ``mkdir(mode=...)`` не применяет режим к существующему каталогу, поэтому
+    права подтягиваются явно — в каталоге лежат только ENC1-строки, но лишняя
+    видимость каталога не нужна никому.
+    """
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(path, 0o700)
+    except OSError as exc:
+        raise SnapshotOperationRefused(
+            REASON_FSYNC_FAILED, f"не удалось выставить 0700 на {path}: {exc}"
+        ) from exc
+
+
 def _cancel_staging(staging: Path) -> None:
     """Отмена транзакции ДО durable COMMITTING: приватный staging убирается.
 
@@ -532,7 +626,6 @@ def _publish_staging(staging: Path, backup_dir: Path) -> None:
         raise SnapshotOperationRefused(
             REASON_DESTINATION_EXISTS, f"{backup_dir} уже существует — не перезаписываем"
         )
-    backup_dir.parent.mkdir(parents=True, exist_ok=True)
     os.replace(staging, backup_dir)
     _fsync_dir(backup_dir.parent)
 
@@ -548,8 +641,12 @@ def commit_encrypted_snapshot(
     """Шаги 4–6 спеки: COMMITTING → повторный fingerprint → замена → read-back.
 
     ``COMMITTED`` записывается ТОЛЬКО после успешного read-back всех файлов.
+
+    ``snapshot_dir`` — КАТАЛОГ СНИМКА (публикуемое назначение), обязан лежать
+    внутри ``<data_dir>/backups``.
     """
     backup_dir = Path(backup_dir)
+    _require_inside_backups(data_dir, backup_dir)
     if not prepared:
         raise SnapshotOperationRefused(
             REASON_PREPARED_MISSING, "commit без подготовленного снимка запрещён"
@@ -662,11 +759,14 @@ def commit_encrypted_snapshot(
     }
 
 
-def recover_pending_state(*, data_dir: Any, backup_dir: Any) -> dict:
+def recover_pending_state(*, data_dir: Any, backups_root: Any) -> dict:
     """Fail-closed признак незавершённой транзакции (доказка — b2).
 
-    ``backup_dir`` здесь — КОРЕНЬ backups (каталог, где лежат снимки и их
-    приватные staging-каталоги), а не каталог конкретного снимка.
+    ``backups_root`` — КОРЕНЬ backups (где лежат снимки и приватные
+    staging-каталоги), а не каталог конкретного снимка. Имя параметра
+    намеренно отличается от ``snapshot_dir`` в build/commit: раньше оба
+    назывались ``backup_dir``, но означали разные вещи — b2 обязан понимать
+    разницу по имени, а не по догадке.
 
     b1 НЕ откатывает снимок в plaintext, НЕ создаёт новый ключ и НЕ запускает
     обычное обслуживание: единственный честный ответ — «есть незавершённая
@@ -676,7 +776,7 @@ def recover_pending_state(*, data_dir: Any, backup_dir: Any) -> dict:
     b1 намеренно не используется.
     """
     del data_dir  # контракт b2; в b1 источники не трогаем
-    pending = find_pending_transaction(backup_dir=Path(backup_dir))
+    pending = find_pending_transaction(backups_root=Path(backups_root))
     if pending is None:
         return {
             "ok": True,

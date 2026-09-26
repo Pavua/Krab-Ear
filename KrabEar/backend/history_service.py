@@ -25,7 +25,9 @@ from backend.history_encryption_policy import (
     store_policy_reader,
 )
 from backend.encrypted_snapshot import (
+    UNSUPPORTED_BACKUP_REASON,
     SnapshotOperationRefused,
+    classify_backup_dir,
     create_encrypted_snapshot,
 )
 
@@ -4377,6 +4379,21 @@ class HistoryService:
         if not backup_dir.exists() or not backup_dir.is_dir():
             raise RuntimeError(f"Папка резервной копии не найдена: {backup_dir}")
 
+        # A5.2b1 (MAJOR-3): формат каталога проверяется ДО первой копии.
+        # Каталоги снимков нового протокола содержат `history.ndjson` в ENC1 —
+        # legacy restore скопировал бы шифротекст поверх живой истории и вернул
+        # «успех» (уничтожение данных при виде нормального ответа). Staging и
+        # любые не-legacy имена — тоже не legacy-бэкапы. Восстановление из
+        # снимков — A5.2b2; до него — явный отказ с машинно-читаемой причиной.
+        kind = classify_backup_dir(backup_dir)
+        if kind != "legacy":
+            logger.warning(
+                "handle_restore_history: каталог %s — %s, legacy restore не "
+                "применим (%s)",
+                backup_dir, kind, UNSUPPORTED_BACKUP_REASON,
+            )
+            return {**refusal, "reason": UNSUPPORTED_BACKUP_REASON}
+
         # Проверяем, что это наш backup (должен содержать history.ndjson или backup_meta.json)
         history_backup = backup_dir / "history.ndjson"
         meta_file = backup_dir / "backup_meta.json"
@@ -4441,8 +4458,24 @@ class HistoryService:
             return {"backups": []}
 
         result = []
+        snapshots: list[dict[str, Any]] = []
         for backup_dir in sorted(backups_dir.iterdir(), reverse=True):
             if not backup_dir.is_dir():
+                continue
+            # A5.2b1 (MAJOR-3): снимки и мусор (staging, dot-prefixed) нельзя
+            # показывать как восстанавливаемые бэкапы — restore из них затирает
+            # историю шифротекстом. Снимки видны отдельным списком с честным
+            # «не восстанавливается», чтобы не выглядеть «пропавшим бэкапом».
+            kind = classify_backup_dir(backup_dir)
+            if kind != "legacy":
+                if kind == "snapshot":
+                    snapshots.append(
+                        {
+                            "path": str(backup_dir),
+                            "restorable": False,
+                            "reason": UNSUPPORTED_BACKUP_REASON,
+                        }
+                    )
                 continue
             meta_file = backup_dir / "backup_meta.json"
             entry: dict[str, Any] = {
@@ -4464,7 +4497,7 @@ class HistoryService:
                     entry["size_mb"] = round(size_bytes / (1024 * 1024), 3)
             result.append(entry)
 
-        return {"backups": result}
+        return {"backups": result, "encrypted_snapshots": snapshots}
 
     def handle_find_duplicates(self, params: dict[str, Any]) -> dict[str, Any]:
         """Находит дублирующиеся транскрипции в истории.

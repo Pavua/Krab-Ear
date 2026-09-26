@@ -131,7 +131,7 @@ class TestSnapshotRegistryCompleteness:
         data_dir = _data_dir(tmp_path)
         crypto = _crypto()
         _fill_mixed(data_dir, crypto)
-        backup_dir = tmp_path / "snap"
+        backup_dir = data_dir / "backups" / "snap"
         result = _prepared(tmp_path, data_dir, crypto, backup_dir)
         assert result["state"] == STATE_PREPARED
 
@@ -145,7 +145,7 @@ class TestSnapshotRegistryCompleteness:
         data_dir = _data_dir(tmp_path)
         crypto = _crypto()
         expected = _fill_mixed(data_dir, crypto)
-        backup_dir = tmp_path / "snap"
+        backup_dir = data_dir / "backups" / "snap"
         result = _prepared(tmp_path, data_dir, crypto, backup_dir)
         staging = Path(result["staging_dir"])
 
@@ -172,7 +172,7 @@ class TestSnapshotRegistryCompleteness:
         (data_dir / "history.ndjson").write_text(
             source_line + "\n", encoding="utf-8"
         )
-        backup_dir = tmp_path / "snap"
+        backup_dir = data_dir / "backups" / "snap"
         result = _prepared(tmp_path, data_dir, crypto, backup_dir)
         staging = Path(result["staging_dir"])
 
@@ -191,7 +191,7 @@ class TestSnapshotRegistryCompleteness:
         (data_dir / "history.ndjson").write_text(
             "\n".join(expected) + "\n", encoding="utf-8"
         )
-        backup_dir = tmp_path / "backups" / "snap"
+        backup_dir = data_dir / "backups" / "snap"
         create_encrypted_snapshot(
             data_dir=data_dir,
             backup_dir=backup_dir,
@@ -229,14 +229,14 @@ class TestSnapshotRegistryCompleteness:
                 return self._inner.decrypt_line(token)
 
         with pytest.raises(SnapshotOperationRefused) as exc:
-            _prepared(tmp_path, data_dir, _CorruptingCrypto(crypto), tmp_path / "snap")
+            _prepared(tmp_path, data_dir, _CorruptingCrypto(crypto), data_dir / "backups" / "snap")
         assert exc.value.reason == "snapshot_roundtrip_mismatch"
 
     def test_manifest_records_only_fixed_names_size_and_ciphertext_hash(self, tmp_path):
         data_dir = _data_dir(tmp_path)
         crypto = _crypto()
         _fill_mixed(data_dir, crypto)
-        backup_dir = tmp_path / "snap"
+        backup_dir = data_dir / "backups" / "snap"
         result = _prepared(tmp_path, data_dir, crypto, backup_dir)
         staging = Path(result["staging_dir"])
         manifest = _manifest(staging)
@@ -259,7 +259,7 @@ class TestSnapshotRegistryCompleteness:
         (data_dir / "history.ndjson").write_text(CANARY_PLAINTEXT + "\n", encoding="utf-8")
         expected["history.ndjson"] = [CANARY_PLAINTEXT]
 
-        backup_dir = tmp_path / "snap"
+        backup_dir = data_dir / "backups" / "snap"
         result = _prepared(tmp_path, data_dir, crypto, backup_dir)
         staging = Path(result["staging_dir"])
         raw_manifest = (staging / SNAPSHOT_MANIFEST_FILENAME).read_text("utf-8")
@@ -287,7 +287,7 @@ class TestSnapshotRegistryCompleteness:
         crypto = _crypto()
         _fill_mixed(data_dir, crypto)
         (data_dir / "history_tags.ndjson").write_text(CANARY_PLAINTEXT + "\n", encoding="utf-8")
-        backup_dir = tmp_path / "snap"
+        backup_dir = data_dir / "backups" / "snap"
         result = _prepared(tmp_path, data_dir, crypto, backup_dir)
         staging = Path(result["staging_dir"])
 
@@ -304,7 +304,7 @@ class TestSnapshotRegistryCompleteness:
         (data_dir / "history.ndjson").write_text(_line(1) + "\n", encoding="utf-8")
         (data_dir / "history_tags.ndjson").write_text("", encoding="utf-8")  # пустой
         # остальные 8 отсутствуют
-        backup_dir = tmp_path / "snap"
+        backup_dir = data_dir / "backups" / "snap"
         result = _prepared(tmp_path, data_dir, crypto, backup_dir)
         staging = Path(result["staging_dir"])
 
@@ -322,7 +322,7 @@ class TestSnapshotRegistryCompleteness:
         plain = _line(7)
         encrypted = crypto.encrypt_line(_line(8))
         (data_dir / "history.ndjson").write_text(plain + "\n" + encrypted + "\n", encoding="utf-8")
-        backup_dir = tmp_path / "snap"
+        backup_dir = data_dir / "backups" / "snap"
         result = _prepared(tmp_path, data_dir, crypto, backup_dir)
         staging = Path(result["staging_dir"])
 
@@ -344,7 +344,7 @@ class TestSnapshotRegistryCompleteness:
         (data_dir / "history.ndjson").write_text(
             good + "\n" + tampered + "\n" + _line(4) + "\n", encoding="utf-8"
         )
-        backup_dir = tmp_path / "snap"
+        backup_dir = data_dir / "backups" / "snap"
 
         with pytest.raises(SnapshotOperationRefused) as exc:
             _prepared(tmp_path, data_dir, crypto, backup_dir)
@@ -358,7 +358,7 @@ class TestSnapshotRegistryCompleteness:
         (data_dir / "history.ndjson").write_text(
             SENTINEL + "not-base64!!\n", encoding="utf-8"
         )
-        backup_dir = tmp_path / "snap"
+        backup_dir = data_dir / "backups" / "snap"
         with pytest.raises(SnapshotOperationRefused) as exc:
             _prepared(tmp_path, data_dir, crypto, backup_dir)
         assert exc.value.reason == "snapshot_line_tampered"
@@ -375,7 +375,7 @@ class TestSnapshotRegistryCompleteness:
         target.symlink_to(outside)
 
         with pytest.raises(SnapshotOperationRefused) as exc:
-            _prepared(tmp_path, data_dir, crypto, tmp_path / "snap")
+            _prepared(tmp_path, data_dir, crypto, data_dir / "backups" / "snap")
         assert exc.value.reason == "snapshot_source_symlink"
 
     def test_missing_crypto_is_refused(self, tmp_path):
@@ -384,7 +384,7 @@ class TestSnapshotRegistryCompleteness:
         with pytest.raises(SnapshotOperationRefused) as exc:
             build_encrypted_snapshot(
                 data_dir=data_dir,
-                backup_dir=tmp_path / "snap",
+                backup_dir=data_dir / "backups" / "snap",
                 crypto=None,
                 transaction_id="tx-a52b1-0002",
                 policy_on=True,
@@ -395,7 +395,7 @@ class TestSnapshotRegistryCompleteness:
         data_dir = _data_dir(tmp_path)
         crypto = _crypto()
         _fill_mixed(data_dir, crypto)
-        result = _prepared(tmp_path, data_dir, crypto, tmp_path / "snap")
+        result = _prepared(tmp_path, data_dir, crypto, data_dir / "backups" / "snap")
         staging = Path(result["staging_dir"])
         assert staging.is_dir()
         assert oct(staging.stat().st_mode & 0o777) == "0o700"
@@ -414,9 +414,11 @@ def _data_bytes(data_dir: Path) -> dict[str, bytes]:
 
 
 def _staging_dirs(backups_root: Path) -> list[Path]:
-    if not backups_root.is_dir():
+    """Неопубликованные staging-каталоги: backups/.staging/<транзакция>."""
+    staging_root = Path(backups_root) / ".staging"
+    if not staging_root.is_dir():
         return []
-    return [p for p in backups_root.iterdir() if p.is_dir() and p.name.startswith(".snapshot_staging_")]
+    return [p for p in staging_root.iterdir() if p.is_dir()]
 
 
 def _no_plaintext_anywhere(*roots: Path) -> None:
@@ -439,7 +441,7 @@ class TestCommitProtocol:
         data_dir = _data_dir(tmp_path)
         crypto = _crypto()
         _fill_mixed(data_dir, crypto)
-        backup_dir = tmp_path / "backups" / "snapshot_1"
+        backup_dir = data_dir / "backups" / "snapshot_1"
         prepared = _prepared(tmp_path, data_dir, crypto, backup_dir)
 
         # Источник изменился после подготовки (append в журнал).
@@ -464,7 +466,7 @@ class TestCommitProtocol:
         data_dir = _data_dir(tmp_path)
         crypto = _crypto()
         _fill_mixed(data_dir, crypto)
-        backup_dir = tmp_path / "backups" / "snapshot_1"
+        backup_dir = data_dir / "backups" / "snapshot_1"
         sources_before = _data_bytes(data_dir)
 
         # Crash ровно на первой замене: COMMITTING уже durable.
@@ -494,7 +496,7 @@ class TestCommitProtocol:
         assert _data_bytes(data_dir) == sources_before
         _no_plaintext_anywhere(backup_dir.parent)
         # Fail-closed признак, а не «успех».
-        recovery = recover_pending_state(data_dir=data_dir, backup_dir=backup_dir.parent)
+        recovery = recover_pending_state(data_dir=data_dir, backups_root=backup_dir.parent)
         assert recovery["ok"] is False
         assert recovery["pending"] is True
         assert recovery["reason"] == "snapshot_recovery_pending"
@@ -505,7 +507,7 @@ class TestCommitProtocol:
         data_dir = _data_dir(tmp_path)
         crypto = _crypto()
         _fill_mixed(data_dir, crypto)
-        backup_dir = tmp_path / "backups" / "snapshot_1"
+        backup_dir = data_dir / "backups" / "snapshot_1"
         sources_before = _data_bytes(data_dir)
 
         # Crash сразу после публикации, до read-back/COMMITTED.
@@ -534,7 +536,7 @@ class TestCommitProtocol:
         # Исходные журналы целы.
         assert _data_bytes(data_dir) == sources_before
         _no_plaintext_anywhere(backup_dir.parent)
-        recovery = recover_pending_state(data_dir=data_dir, backup_dir=backup_dir.parent)
+        recovery = recover_pending_state(data_dir=data_dir, backups_root=backup_dir.parent)
         assert recovery["ok"] is False
         assert recovery["reason"] == "snapshot_recovery_pending"
         assert recovery["path"] == str(backup_dir)
@@ -542,7 +544,7 @@ class TestCommitProtocol:
         with pytest.raises(SnapshotOperationRefused) as blocked:
             create_encrypted_snapshot(
                 data_dir=data_dir,
-                backup_dir=tmp_path / "backups" / "snapshot_2",
+                backup_dir=data_dir / "backups" / "snapshot_2",
                 crypto=crypto,
                 transaction_id="tx-a52b1-crash2b",
                 policy_on=True,
@@ -553,7 +555,7 @@ class TestCommitProtocol:
         data_dir = _data_dir(tmp_path)
         crypto = _crypto()
         _fill_mixed(data_dir, crypto)
-        backup_dir = tmp_path / "backups" / "snapshot_1"
+        backup_dir = data_dir / "backups" / "snapshot_1"
 
         with patch(
             "backend.encrypted_snapshot.verify_snapshot_readback",
@@ -576,14 +578,14 @@ class TestCommitProtocol:
         assert exc.value.reason == "snapshot_readback_failed"
         # Состояние НЕ COMMITTED — несмотря на «успешную» публикацию.
         assert _manifest(backup_dir)["state"] == STATE_COMMITTING
-        recovery = recover_pending_state(data_dir=data_dir, backup_dir=backup_dir.parent)
+        recovery = recover_pending_state(data_dir=data_dir, backups_root=backup_dir.parent)
         assert recovery["ok"] is False
 
     def test_successful_commit_reports_committed_after_full_readback(self, tmp_path):
         data_dir = _data_dir(tmp_path)
         crypto = _crypto()
         _fill_mixed(data_dir, crypto)
-        backup_dir = tmp_path / "backups" / "snapshot_1"
+        backup_dir = data_dir / "backups" / "snapshot_1"
 
         result = create_encrypted_snapshot(
             data_dir=data_dir,
@@ -599,7 +601,7 @@ class TestCommitProtocol:
         assert _manifest(backup_dir)["state"] == STATE_COMMITTED
         # Staging убран публикацией — незавершённых транзакций нет.
         assert _staging_dirs(backup_dir.parent) == []
-        recovery = recover_pending_state(data_dir=data_dir, backup_dir=backup_dir.parent)
+        recovery = recover_pending_state(data_dir=data_dir, backups_root=backup_dir.parent)
         assert recovery["ok"] is True
         assert recovery["pending"] is False
         assert recovery["reason"] is None
@@ -609,7 +611,7 @@ class TestCommitProtocol:
         data_dir = _data_dir(tmp_path)
         crypto = _crypto()
         _fill_mixed(data_dir, crypto)
-        backup_dir = tmp_path / "backups" / "snapshot_1"
+        backup_dir = data_dir / "backups" / "snapshot_1"
         create_encrypted_snapshot(
             data_dir=data_dir,
             backup_dir=backup_dir,
@@ -629,7 +631,7 @@ class TestCommitProtocol:
         data_dir = _data_dir(tmp_path)
         crypto = _crypto()
         _fill_mixed(data_dir, crypto)
-        backup_dir = tmp_path / "backups" / "snapshot_1"
+        backup_dir = data_dir / "backups" / "snapshot_1"
         prepared = _prepared(tmp_path, data_dir, crypto, backup_dir)
 
         with pytest.raises(SnapshotOperationRefused) as exc:
@@ -648,7 +650,7 @@ class TestCommitProtocol:
         data_dir = _data_dir(tmp_path)
         crypto = _crypto()
         _fill_mixed(data_dir, crypto)
-        backup_dir = tmp_path / "backups" / "snapshot_1"
+        backup_dir = data_dir / "backups" / "snapshot_1"
         backup_dir.mkdir(parents=True)
         (backup_dir / "history.ndjson").write_text(_line(1) + "\n", encoding="utf-8")
 
@@ -673,7 +675,7 @@ class TestCommitProtocol:
         data_dir = _data_dir(tmp_path)
         crypto = _crypto()
         _fill_mixed(data_dir, crypto)
-        backups_root = tmp_path / "backups"
+        backups_root = data_dir / "backups"
         backup_dir = backups_root / "snapshot_1"
         backup_dir.mkdir(parents=True)
         (backup_dir / "history.ndjson").write_text(_line(1) + "\n", encoding="utf-8")
@@ -689,7 +691,7 @@ class TestCommitProtocol:
         assert exc.value.reason == "snapshot_destination_exists"
         # Ни staging, ни признака незавершённой транзакции.
         assert _staging_dirs(backups_root) == []
-        recovery = recover_pending_state(data_dir=data_dir, backup_dir=backups_root)
+        recovery = recover_pending_state(data_dir=data_dir, backups_root=backups_root)
         assert recovery["pending"] is False
         assert recovery["reason"] is None
         assert recovery["ok"] is True
@@ -699,7 +701,7 @@ class TestCommitProtocol:
         data_dir = _data_dir(tmp_path)
         crypto = _crypto()
         _fill_mixed(data_dir, crypto)
-        backups_root = tmp_path / "backups"
+        backups_root = data_dir / "backups"
         first = backups_root / "snapshot_1"
         create_encrypted_snapshot(
             data_dir=data_dir, backup_dir=first, crypto=crypto,
@@ -712,7 +714,7 @@ class TestCommitProtocol:
             )
         assert exc.value.reason == "snapshot_destination_exists"
         assert _staging_dirs(backups_root) == []
-        recovery = recover_pending_state(data_dir=data_dir, backup_dir=backups_root)
+        recovery = recover_pending_state(data_dir=data_dir, backups_root=backups_root)
         assert recovery["pending"] is False
         # Первый снимок остался валидным и зафиксированным.
         assert _manifest(first)["state"] == STATE_COMMITTED
@@ -722,7 +724,7 @@ class TestCommitProtocol:
         data_dir = _data_dir(tmp_path)
         crypto = _crypto()
         _fill_mixed(data_dir, crypto)
-        backup_dir = tmp_path / "backups" / "snapshot_1"
+        backup_dir = data_dir / "backups" / "snapshot_1"
         create_encrypted_snapshot(
             data_dir=data_dir,
             backup_dir=backup_dir,
@@ -746,7 +748,7 @@ class TestCommitProtocol:
         data_dir = _data_dir(tmp_path)
         crypto = _crypto()
         _fill_mixed(data_dir, crypto)
-        backup_dir = tmp_path / "backups" / "snapshot_1"
+        backup_dir = data_dir / "backups" / "snapshot_1"
         create_encrypted_snapshot(
             data_dir=data_dir,
             backup_dir=backup_dir,
@@ -832,7 +834,8 @@ class TestManualBackupEncryptedSnapshot:
         _no_plaintext_anywhere(Path(result["backup_path"]))
         # Ровно один снимок создан — никаких legacy plaintext-копий рядом.
         backups = data_dir / "backups"
-        created = [p for p in backups.iterdir() if p.is_dir()]
+        # .staging — служебный корень, а не бэкап.
+        created = [p for p in backups.iterdir() if p.is_dir() and not p.name.startswith(".")]
         assert len(created) == 1
         # Исходный plaintext-журнал на месте (мы не перезаписываем историю).
         assert (data_dir / "history.ndjson").read_text("utf-8") == CANARY_CANARY + "\n"
@@ -1002,3 +1005,151 @@ class TestAutoBackupEncryptedSnapshot:
         assert (legacy_dir / "history.ndjson").exists()
         assert (legacy_dir / "settings.json").exists()
         assert not old.exists()  # prune отработал как раньше
+
+
+class TestSnapshotIsNotRestorable:
+    """MAJOR-3: снимок нельзя скормить legacy restore (шифротекст ≠ plaintext).
+
+    Legacy restore копирует `history.ndjson` через copy2. Каталог снимка тоже
+    содержит `history.ndjson` — но строки ENC1. До b2 такой restore затирал бы
+    живую историю шифротекстом и возвращал «успех».
+    """
+
+    def _on_store(self, data_dir: Path) -> tuple[StateStore, HistoryService, HistoryCrypto]:
+        crypto = _crypto()
+        _settings_on(data_dir)
+        _fill_mixed(data_dir, crypto)
+        store = _store_with_crypto(data_dir, crypto)
+        return store, HistoryService(store=store, cached_settings=lambda: {}), crypto
+
+    def _auto_snapshot(self, data_dir: Path) -> Path:
+        store, _svc, _crypto_ = self._on_store(data_dir)
+        out = AutoBackupManager(store=store, interval_hours=0).check_and_backup()
+        assert out["backed_up"] is True
+        return Path(out["backup_path"])
+
+    def test_list_backups_does_not_offer_snapshot_as_restorable(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        store, svc, _crypto_ = self._on_store(data_dir)
+        snapshot_dir = self._auto_snapshot(data_dir)
+
+        listed = svc.handle_list_backups({})
+        paths = [b["path"] for b in listed["backups"]]
+        assert str(snapshot_dir) not in paths
+        # Владелец всё равно видит, что снимок существует, но НЕ как restorable.
+        snaps = listed.get("encrypted_snapshots") or []
+        assert [s["path"] for s in snaps] == [str(snapshot_dir)]
+        assert snaps[0]["restorable"] is False
+        assert snaps[0]["reason"] == "unsupported_backup_format"
+
+    def test_restore_from_snapshot_refuses_and_keeps_live_history(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        store, svc, _crypto_ = self._on_store(data_dir)
+        snapshot_dir = self._auto_snapshot(data_dir)
+
+        # Владелец выключил шифрование (OFF-профиль) и указал на «бэкап».
+        _settings_off(data_dir)
+        off_store = _store_with_crypto(data_dir, None)
+        off_svc = HistoryService(store=off_store, cached_settings=lambda: {})
+        live = '{"id":"live","text":"живая запись"}\n'
+        (data_dir / "history.ndjson").write_text(live, encoding="utf-8")
+
+        result = off_svc.handle_restore_history({"backup_path": str(snapshot_dir)})
+
+        assert result["ok"] is False
+        assert result["reason"] == "unsupported_backup_format"
+        assert result["restored_entries"] == 0
+        # 🔴 Живая история не тронута — ни байтом.
+        assert (data_dir / "history.ndjson").read_text("utf-8") == live
+
+    def test_restore_from_manual_snapshot_refuses(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        # ТОТ ЖЕ ключ, которым зашифрованы журналы: снимок обязан читаться им.
+        _store, _svc, crypto = self._on_store(data_dir)
+        svc_on = HistoryService(
+            store=_store_with_crypto(data_dir, crypto), cached_settings=lambda: {}
+        )
+        made = svc_on.handle_backup_history({})
+        assert made["ok"] is True
+        snapshot_dir = Path(made["backup_path"])
+
+        _settings_off(data_dir)
+        off_svc = HistoryService(
+            store=_store_with_crypto(data_dir, None), cached_settings=lambda: {}
+        )
+        result = off_svc.handle_restore_history({"backup_path": str(snapshot_dir)})
+        assert result["ok"] is False
+        assert result["reason"] == "unsupported_backup_format"
+
+    def test_restore_from_staging_dir_refuses(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        backup_dir = data_dir / "backups" / "snapshot_1"
+        prepared = build_encrypted_snapshot(
+            data_dir=data_dir,
+            backup_dir=backup_dir,
+            crypto=crypto,
+            transaction_id="tx-staging-restore",
+            policy_on=True,
+        )
+        staging = Path(prepared["staging_dir"])
+        # OFF явно: иначе первым сработает A5.2a-гейт (settings отсутствуют, а
+        # ENC1 в журналах есть ⇒ policy fail-closed = ON).
+        _settings_off(data_dir)
+        off_svc = HistoryService(
+            store=_store_with_crypto(data_dir, None), cached_settings=lambda: {}
+        )
+        result = off_svc.handle_restore_history({"backup_path": str(staging)})
+        assert result["ok"] is False
+        assert result["reason"] == "unsupported_backup_format"
+        # Неопубликованный staging вообще не должен попадать в backups-список.
+        listed = off_svc.handle_list_backups({})
+        assert staging.name not in [Path(b["path"]).name for b in listed["backups"]]
+
+    def test_restore_from_unknown_dir_name_refuses(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        store = _store_with_crypto(data_dir, None)
+        svc = HistoryService(store=store, cached_settings=lambda: {})
+        stray = data_dir / "backups" / "my_random_folder"
+        stray.mkdir(parents=True)
+        (stray / "history.ndjson").write_text('{"id":"x"}\n', encoding="utf-8")
+
+        result = svc.handle_restore_history({"backup_path": str(stray)})
+        assert result["ok"] is False
+        assert result["reason"] == "unsupported_backup_format"
+
+    def test_legacy_backup_is_still_restorable(self, tmp_path):
+        """OFF-регресс: настоящий legacy-бэкап восстанавливается как раньше."""
+        data_dir = _data_dir(tmp_path)
+        store = _store_with_crypto(data_dir, None)
+        svc = HistoryService(store=store, cached_settings=lambda: {})
+        # Записи пишет сам store — иначе count_active_items не увидит «живых».
+        store.add_history_item(text="one")
+        store.add_history_item(text="two")
+        made = svc.handle_backup_history({})
+        assert Path(made["backup_path"]).name.startswith("backup_")
+        (data_dir / "history.ndjson").write_text("", encoding="utf-8")
+
+        result = svc.handle_restore_history({"backup_path": made["backup_path"]})
+        assert result.get("ok") is not False
+        assert result["restored_entries"] == 2
+        assert "one" in (data_dir / "history.ndjson").read_text("utf-8")
+
+    def test_staging_is_placed_under_dot_staging_dir(self, tmp_path):
+        """Staging живёт в backups/.staging/ — dot-prefixed, чтобы не всплывал."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        backup_dir = data_dir / "backups" / "snapshot_1"
+        prepared = build_encrypted_snapshot(
+            data_dir=data_dir,
+            backup_dir=backup_dir,
+            crypto=crypto,
+            transaction_id="tx-stage-loc",
+            policy_on=True,
+        )
+        staging = Path(prepared["staging_dir"])
+        backups_root = backup_dir.parent
+        assert staging.parent == backups_root / ".staging"
+        assert staging.name.startswith(".")
