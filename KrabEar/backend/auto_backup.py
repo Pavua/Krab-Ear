@@ -21,6 +21,7 @@ from backend.settings_backup import SENSITIVE_FIELDS as _SENSITIVE_FIELDS
 from backend.encrypted_snapshot import (
     SnapshotOperationRefused,
     create_encrypted_snapshot,
+    recover_pending_state,
 )
 from backend.history_encryption_policy import (
     OPERATION_UNAVAILABLE_REASON as _ENC_OP_UNAVAILABLE,
@@ -80,6 +81,13 @@ class AutoBackupManager:
         # Encryption ON check_and_backup/_do_backup отказывают до mkdir и не
         # трогают старые backup'ы/meta. Guard не трогает Keychain.
         self._encryption_policy_read = store_policy_reader(store)
+        # A5.2b1: последний наблюдённый исход backup-цикла этого экземпляра.
+        # Нужен, чтобы статус отличал «снимок только что зафиксирован» от
+        # «реально отказали, вот причина» (MAJOR-4). В памяти, а не в
+        # auto_backup_meta.json: meta-файл при отказе обязан остаться
+        # нетронутым (контракт A5.2a).
+        self._last_backup_kind: Optional[str] = None
+        self._last_refusal_reason: Optional[str] = None
 
     def _encryption_blocked(self) -> bool:
         """True, если legacy plaintext auto-backup запрещён политикой."""
@@ -158,6 +166,19 @@ class AutoBackupManager:
             if d.is_dir() and d.name.startswith("auto_backup_")
         )
         return dirs
+
+    def _list_snapshot_dirs(self) -> list[Path]:
+        """Каталоги encrypted snapshot'ов (``auto_snapshot_*``).
+
+        Отдельно от ``_list_auto_backups``: это другой формат и другой
+        retention, смешивать их в одном счётчике нельзя.
+        """
+        if not self.backups_dir.exists():
+            return []
+        return sorted(
+            d for d in self.backups_dir.iterdir()
+            if d.is_dir() and d.name.startswith("auto_snapshot_")
+        )
 
     def _prune_old_backups(self) -> int:
         """Удаляет старые авто-бэкапы, оставляя не более max_copies.
@@ -470,6 +491,8 @@ class AutoBackupManager:
                 result = self._do_backup()
             except HistoryEncryptionOperationUnavailable:
                 # ON пойман под store-lock — sink не тронут, причина видима.
+                self._last_refusal_reason = _ENC_OP_UNAVAILABLE
+                self._last_backup_kind = None
                 return {
                     "backed_up": False,
                     "skipped_reason": _ENC_OP_UNAVAILABLE,
@@ -484,6 +507,10 @@ class AutoBackupManager:
             meta["last_backup_ts"] = datetime.now(timezone.utc).isoformat()
             meta["backup_count"] = meta.get("backup_count", 0) + 1
             self._save_meta(meta)
+            self._last_backup_kind = (
+                "encrypted_snapshot" if result.get("encrypted") else "legacy_plaintext"
+            )
+            self._last_refusal_reason = None
 
             return {
                 "backed_up": True,
@@ -524,19 +551,55 @@ class AutoBackupManager:
                     pass
 
             total_backups = len(self._list_auto_backups())
-            encryption_blocked = self._encryption_blocked()
+            snapshots = self._list_snapshot_dirs()
+            encryption_on = self._encryption_blocked()
 
+            # A5.2b1 (MAJOR-4): «backup недоступен» ≠ «legacy plaintext-копия
+            # недоступна». При ON backup ЖИВ: он пишет encrypted snapshot. Старый
+            # код возвращал здесь True всегда при ON — владелец видел «backup
+            # недоступен» даже когда снимок только что зафиксирован, а реальный
+            # отказ (нет ключа) от неё был неотличим.
+            #
+            # Единственный случай, когда backup при ON действительно невозможен
+            # прямо сейчас, — незавершённая опубликованная транзакция снимка
+            # (нужен b2). Проверяется чтением каталогов, БЕЗ обращения к Keychain
+            # (политика чтения флага Keychain не трогает — A5.2a).
+            recovery = None
+            if encryption_on:
+                recovery = recover_pending_state(
+                    data_dir=self.store.data_dir, backups_root=self.backups_dir
+                )
+            blocked_by_pending = bool(recovery and recovery.get("pending"))
+
+            # Что РЕАЛЬНО было последним: снимок, legacy-копия или отказ.
+            last_kind = self._last_backup_kind
+            if last_kind is None:
+                if snapshots:
+                    last_kind = "encrypted_snapshot"
+                elif total_backups:
+                    last_kind = "legacy_plaintext"
+            last_refusal = self._last_refusal_reason
+            if last_refusal is None and blocked_by_pending:
+                last_refusal = recovery.get("reason")
+
+            unavailable = blocked_by_pending
             return {
                 "enabled": self.enabled,
                 "last_backup_ts": last_ts_str,
                 "next_backup_ts": next_ts_str,
+                # Прежнее значение: только legacy auto_backup_* — потребители
+                # (UI) не должны внезапно увидеть в нём снимки.
                 "total_backups": total_backups,
+                "encrypted_snapshots": len(snapshots),
                 "interval_hours": self.interval_hours,
                 "max_copies": self.max_copies,
                 "backups_dir": str(self.backups_dir),
-                # A5.2a: наблюдаемый отказ legacy plaintext backup. Backend
-                # startup и RecordingCore игнорируют результат check_and_backup,
-                # поэтому причина обязана быть видна и здесь.
-                "encryption_operation_unavailable": encryption_blocked,
-                "skipped_reason": _ENC_OP_UNAVAILABLE if encryption_blocked else None,
+                "encryption_operation_unavailable": unavailable,
+                "skipped_reason": (
+                    recovery.get("reason") if blocked_by_pending else None
+                ),
+                # A5.2b1: честная развязка «что произошло» / «почему отказ».
+                "encryption_on": encryption_on,
+                "last_backup_kind": last_kind,
+                "last_refusal_reason": last_refusal,
             }

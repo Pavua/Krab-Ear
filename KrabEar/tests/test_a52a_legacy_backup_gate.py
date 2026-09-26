@@ -247,14 +247,43 @@ class TestAutoBackupGate:
         dirs = [p.name for p in backups.iterdir() if p.is_dir()]
         assert dirs == ["auto_backup_20200101_000000"]
 
-    def test_status_reports_operation_unavailable(self, tmp_path):
+    def test_status_does_not_claim_unavailable_at_on(self, tmp_path):
+        """A5.2b1: при ON backup ЖИВ (идёт в encrypted snapshot) — статус не врёт.
+
+        Раньше здесь стояло ``encryption_operation_unavailable is True`` при
+        любом ON: владелец видел «backup недоступен» даже когда снимок только
+        что зафиксирован, а реальный отказ (нет ключа) от этого не отличался.
+        Теперь «недоступно» означает ровно одно — незавершённую транзакцию
+        снимка, которую обязан разбирать b2.
+        """
         data_dir = _data_dir(tmp_path)
         store = StateStore(data_dir)
         _write_settings(data_dir, {"history_encryption_enabled": True})
         mgr = self._manager(store)
-        status = mgr.get_auto_backup_status()
-        assert status["encryption_operation_unavailable"] is True
-        assert status["skipped_reason"] == REASON
+        with patch(
+            "backend.history_crypto.build_history_crypto", side_effect=_no_keychain
+        ):
+            status = mgr.get_auto_backup_status()
+        assert status["encryption_on"] is True
+        assert status["encryption_operation_unavailable"] is False
+        assert status["skipped_reason"] is None
+        assert status["last_backup_kind"] is None
+        assert status["last_refusal_reason"] is None
+
+    def test_status_reports_refusal_after_failed_on_backup(self, tmp_path):
+        """Реальный отказ (недоступный ключ) виден в статусе машинно-читаемо."""
+        data_dir = _data_dir(tmp_path)
+        store = StateStore(data_dir)
+        _write_settings(data_dir, {"history_encryption_enabled": True})
+        mgr = self._manager(store)
+        with patch(
+            "backend.history_crypto.build_history_crypto", side_effect=_no_keychain
+        ):
+            out = mgr.check_and_backup()
+            status = mgr.get_auto_backup_status()
+        assert out["backed_up"] is False
+        assert status["last_refusal_reason"] == REASON
+        assert status["last_backup_kind"] is None
 
     def test_retention_overflow_preserved_when_on(self, tmp_path):
         data_dir = _data_dir(tmp_path)

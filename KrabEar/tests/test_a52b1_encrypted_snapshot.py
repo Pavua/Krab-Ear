@@ -1153,3 +1153,90 @@ class TestSnapshotIsNotRestorable:
         backups_root = backup_dir.parent
         assert staging.parent == backups_root / ".staging"
         assert staging.name.startswith(".")
+
+
+class TestAutoBackupStatusHonesty:
+    """MAJOR-4: статус при ON не должен вечно врать «backup недоступен»."""
+
+    def _manager(self, store, **kwargs):
+        return AutoBackupManager(store=store, interval_hours=0, **kwargs)
+
+    def test_status_after_successful_snapshot_is_honest(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        mgr = self._manager(store)
+
+        out = mgr.check_and_backup()
+        assert out["backed_up"] is True
+        status = mgr.get_auto_backup_status()
+
+        # Backup при ON доступен — снимок создан и зафиксирован.
+        assert status["encryption_operation_unavailable"] is False
+        assert status["skipped_reason"] is None
+        assert status["last_backup_kind"] == "encrypted_snapshot"
+        assert status["last_refusal_reason"] is None
+        assert status["encrypted_snapshots"] == 1
+        # total_backups по-прежнему про legacy auto_backup_* (не ломаем потребителя)
+        assert status["total_backups"] == 0
+
+    def test_status_reports_real_refusal_reason(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, None)  # ключ недоступен
+        mgr = self._manager(store)
+
+        out = mgr.check_and_backup()
+        assert out["backed_up"] is False
+        status = mgr.get_auto_backup_status()
+
+        # Настоящий отказ виден и отличим от «просто ничего не было».
+        assert status["last_refusal_reason"] == REASON
+        assert status["last_backup_kind"] is None
+        assert status["encrypted_snapshots"] == 0
+
+    def test_status_flags_unfinished_transaction_as_unavailable(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        mgr = self._manager(store)
+        # Опубликованная незавершённая транзакция: backup сейчас невозможен.
+        backup_dir = data_dir / "backups" / "snapshot_stuck"
+        create_encrypted_snapshot(
+            data_dir=data_dir, backup_dir=backup_dir, crypto=crypto,
+            transaction_id="tx-stuck", policy_on=True,
+        )
+        manifest = _manifest(backup_dir)
+        manifest["state"] = STATE_COMMITTING
+        (backup_dir / SNAPSHOT_MANIFEST_FILENAME).write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+
+        status = mgr.get_auto_backup_status()
+        assert status["encryption_operation_unavailable"] is True
+        assert status["skipped_reason"] == "snapshot_recovery_pending"
+        assert status["last_backup_kind"] is None
+
+    def test_status_off_profile_keeps_legacy_fields(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        (data_dir / "history.ndjson").write_text(_line(1) + "\n", encoding="utf-8")
+        _settings_off(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        mgr = self._manager(store)
+
+        out = mgr.check_and_backup()
+        assert out["backed_up"] is True
+        status = mgr.get_auto_backup_status()
+
+        assert status["last_backup_kind"] == "legacy_plaintext"
+        assert status["last_refusal_reason"] is None
+        assert status["encrypted_snapshots"] == 0
+        assert status["encryption_operation_unavailable"] is False
