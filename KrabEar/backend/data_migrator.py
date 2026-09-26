@@ -39,6 +39,17 @@ _V2_DEFAULTS: dict[str, Any] = {
     "annotation": "",
 }
 
+# A5.2b DEBT (adversarial review MINOR-2, 2026-09-26): service.py startup
+# логирует "data_migrator: migration complete ..." безусловно, даже когда
+# migrate() вернул reason=history_encryption_operation_unavailable на смешанном
+# v1.0 + encryption-ON профиле — потому что не смотрит MigrationResult.reason.
+# Caller-side правка намеренно вне A5.2a (service.py заморожен баном карточки).
+# Machine-readable сигнал уже есть: MigrationResult.reason /
+# handle_run_migration["reason"]. A5.2b обязан сделать startup-лог честным.
+A5_2B_CALLER_SUCCESS_LOG_DEBT = (
+    "service.py startup must not log migration success when reason is set"
+)
+
 
 @dataclass
 class MigrationResult:

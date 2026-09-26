@@ -12,13 +12,17 @@ rewrite/prune с машинно-читаемой причиной, а OFF-про
 **Architecture:** Один fail-closed policy-читатель — тот же механизм, что
 `StateStore._read_encryption_flag_unlocked` (A5 #2049), вынесенный в
 module-level функцию `read_history_encryption_flag()` без изменения семантики.
-Guard вызывается дважды: до lock (не создавать storage) и повторно ПОД общим
-store-lock (закрыть OFF→ON гонку через второй StateStore). Явный owner purge
+Guard вызывается до lock (не создавать storage) и повторно ПОД тем же
+межпроцессным history-flock: store-backed sink'и — под `StateStore._lock()`,
+sink'и без store-ссылки (DataMigrator, TranscriptVersionManager) — под
+module-level `history_flock(data_dir)` на тот же `data_dir/history.lock`
+(закрывает OFF→ON гонку через второй StateStore). Явный owner purge
 (`clear_all`) не блокируется. Encrypted snapshot/restore — A5.2b; эта карточка
 возвращает честный отказ.
 
 **Tech Stack:** Python 3.12/3.14, pytest, существующий POSIX flock
-(`StateStore._lock`, per-thread reentrancy SH/EX), `core.parsing_utils.safe_json_loads`.
+(`StateStore._lock` + module-level `history_flock` для sink'ов без store,
+per-thread reentrancy SH/EX), `core.parsing_utils.safe_json_loads`.
 Новых зависимостей нет.
 
 **Spec:** `docs/superpowers/specs/2026-09-24-a5-history-at-rest-design.md`, §§1, 4–6, 9.
@@ -973,7 +977,9 @@ Run: `make audit-all`
 - `store_policy_reader` проверяет метод через `getattr(type(store), ...)`, а не
   через экземпляр: `MagicMock`-store иначе авто-создаёт
   `_read_encryption_flag_unlocked` и ложный ON ломал OFF-контроль
-  `test_auto_backup*.py`. Fake-store без метода = OFF (как `_store_lock`).
+  `test_auto_backup*.py`. Store без класс-метода, но с `data_dir`, больше НЕ
+  отключает гейты молча: fallback — `data_dir_policy_reader(data_dir)` (см.
+  review-follow-up MINOR-1; фейковые store'ы приведены к валидному OFF `{}`).
 - Byte-snapshot в `test_manual_backup_refuses_on_and_writes_nothing` исключает
   `*.lock`: `_is_privacy_mode()` через `store.load_settings()` (pre-existing
   поведение OFF-профиля) создаёт `history.lock`; это не plaintext-copy sink.
@@ -989,4 +995,71 @@ Run: `make audit-all`
   session capability). При ON backup/restore возвращают честный
   `history_encryption_operation_unavailable`, не частичный результат.
 - `history_encryption_enabled` в прод-коде не включается.
+
+## A5.2a review follow-up (BLOCK от 2026-09-26 закрыт)
+
+Независимый adversarial-ревью вернул BLOCK. Закрыто новым коммитом (не amend).
+
+**CRITICAL-1 — data_migrator TOCTOU.** `migrate`/`rollback_migration` решали
+policy до flock, затем `_create_backup`/`copy2`/rewrite шли без re-check.
+Фикс: `migrate` держит один `history_flock(data_dir)` на guard→re-check→
+backup→rewrite (`_migrate_v1_to_v2(_lock_held=True)` не берёт nested flock);
+`rollback_migration` — один `history_flock` с re-check после захвата.
+RED: `TestDataMigratorGate::test_migrate_recheck_under_flock_blocks_off_to_on`,
+`::test_rollback_recheck_under_flock_blocks_off_to_on` (патч
+`backend.data_migrator.history_flock` флипает ON на входе; на HEAD код патч не
+зовёт и plaintext-backup/rewrite выполняется → RED).
+
+**CRITICAL-2 — transcript_versioning TOCTOU.** `save_version`/`revert_to_version`
+append'или без общего lock. Фикс: re-check политики и append — под
+`history_flock(self._data_dir)` (тот же файл, что `save_settings`).
+`purge_orphaned_versions` flock НЕ берёт: он вызывается из
+`StateStore._compact_unlocked` через `_on_compact_hook` ПОД store._lock на том
+же треде — nested flock дал бы вечный дедлок (инвариант зафиксирован
+комментарием в коде). RED:
+`TestTranscriptVersionGate::test_save_version_recheck_under_lock_blocks_off_to_on`,
+`::test_revert_recheck_under_lock_blocks_off_to_on`.
+
+**MAJOR-1 — unarchive_items re-check не под store flock.** Фикс:
+`with self._lock, store_lock_ctx:` (store `_lock()` для StateStore,
+`nullcontext` для fake-store без `_lock`) + re-check policy после захвата.
+RED: `TestArchiveManagerGate::test_unarchive_recheck_under_store_lock_blocks_off_to_on`.
+
+**MINOR-1 — silent OFF fallback.** `store_policy_reader` без класс-метода теперь
+падает на `data_dir_policy_reader(getattr(store, "data_dir", ...))`, а не
+`lambda: False`. Фейковые store'ы `test_auto_backup*.py` /
+`test_wave91_rmtree_races.py` приведены к валидному OFF `{}` (раньше держали
+битый "dummy", что при новом контракте = fail-closed ON). RED:
+`TestPolicyReaderFallback::test_proxy_store_uses_data_dir_on` (и контрольные
+`_off` / `without_data_dir`).
+
+**MINOR-3 (optional).** Отказ `migrate` больше не перечитывает
+`get_schema_version` ради `from_version`: initial-refusal возвращает
+`from_version="unknown"`; под-lock re-check использует уже вычисленный `current`.
+`MigrationResult.reason` — machine-readable.
+
+**MINOR-4 (optional).** `data_dir_policy_reader(data_dir, *, push_error=None)`
+пробрасывает ErrorBus-колбэк в `read_history_encryption_flag` (проводка
+caller-side — A5.2b).
+
+**MINOR-5.** Добавлены re-check тесты для Archive/TranscriptVersion и тест
+fallback `store_policy_reader` (см. выше). Тест «нет ложного success-log»
+невозможен без правки service.py — остаётся долгом.
+
+**MINOR-2 — долг A5.2b (НЕ чинится здесь).** `service.py:1234` логирует
+`data_migrator: migration complete ...` безусловно, даже когда `migrate`
+вернул `reason=history_encryption_operation_unavailable` (смешанный v1.0 + ON).
+`service.py` заморожен баном карточки. Код-видимый маркер:
+`data_migrator.A5_2B_CALLER_SUCCESS_LOG_DEBT`. A5.2b обязан сделать startup-лог
+честным (проверять `MigrationResult.reason`).
+
+**Lock-контракт (честная формулировка).** Store-backed sink'и (manual backup/
+restore, auto backup, archive) берут `StateStore._lock()`. Sink'и без
+store-ссылки (migrate/rollback, save_version/revert_to_version) берут
+module-level `history_flock(data_dir)` — тот же файл `data_dir/history.lock`,
+reentrancy-safe внутри helper'а, bounded wait → `StateStoreLockTimeout`.
+`history_flock` НЕ реентерабелен относительно внешнего `StateStore._lock` на
+том же треде (nested flock на новом fd), поэтому вызывается только из sink'ов,
+про которые доказано, что они не выполняются под store._lock; orphan-cleanup
+хук сюда не входит.
 
