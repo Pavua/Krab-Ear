@@ -980,13 +980,25 @@ class TestAutoBackupEncryptedSnapshot:
         crypto = _crypto()
         _fill_mixed(data_dir, crypto)
         _settings_on(data_dir)
+        sources_before = _data_bytes(data_dir)
         store = _store_with_crypto(data_dir, None)
         mgr = self._manager(store)
 
         out = mgr.check_and_backup()
         assert out["backed_up"] is False
         assert out["skipped_reason"] == REASON
-        assert not (data_dir / "backups").exists()
+        # Отказ не создаёт СОДЕРЖИМОГО бэкапа: ни одного каталога-копии, ни
+        # settings.json, ни файлов истории. Единственное, что может появиться, —
+        # dot-prefixed sidecar протокола (метаданные последнего исхода), который
+        # переживает рестарт (N1) и не является копией истории.
+        backups = data_dir / "backups"
+        assert [p.name for p in backups.iterdir() if p.is_dir()] == []
+        assert [p.name for p in backups.iterdir() if p.is_file()] == [".last_result.json"]
+        raw = (backups / ".last_result.json").read_text("utf-8")
+        assert "ENC1:" not in raw
+        # Источники не тронуты.
+        assert _data_bytes(data_dir) == sources_before
+        assert (data_dir / "history.ndjson").stat().st_size > 0
 
     def test_auto_backup_on_does_not_prune_legacy_or_new_snapshots(self, tmp_path):
         data_dir = _data_dir(tmp_path)
@@ -1518,3 +1530,115 @@ class TestSnapshotContainment:
         assert published.parent == real_backups
         assert _manifest(published)["state"] == STATE_COMMITTED
         assert _payload_files(published) == sorted(HISTORY_JOURNAL_FILENAMES)
+
+
+class TestAutoBackupRefusalObservability:
+    """N1: отказ при ON обязан быть виден в полях СТАТУСА, а не только цикла.
+
+    A5.2a ввела `encryption_operation_unavailable`/`skipped_reason` именно
+    потому, что backend startup и RecordingCore игнорируют результат
+    `check_and_backup` (единственная IPC-поверхность — get_auto_backup_status).
+    Полный отказ backup-цикла, не отражённый в статусе, — это тихий отказ.
+    """
+
+    def _on_profile(self, tmp_path: Path, crypto):
+        data_dir = _data_dir(tmp_path)
+        crypto = crypto
+        _settings_on(data_dir)
+        return data_dir, _store_with_crypto(data_dir, crypto)
+
+    def test_refusal_is_visible_in_status_fields(self, tmp_path):
+        """N1.3 (наблюдаемость): реальный отказ ⇒ unavailable/skipped_reason."""
+        data_dir, store = self._on_profile(tmp_path, None)  # ключ недоступен
+        mgr = AutoBackupManager(store=store, interval_hours=0)
+
+        out = mgr.check_and_backup()
+        assert out["backed_up"] is False
+        status = mgr.get_auto_backup_status()
+
+        assert status["encryption_operation_unavailable"] is True
+        assert status["skipped_reason"] == REASON
+        assert status["last_refusal_reason"] == REASON
+
+    def test_refusal_survives_restart(self, tmp_path):
+        """N1.1: после рестарта причина отказа не теряется (sidecar-протокол)."""
+        data_dir, store = self._on_profile(tmp_path, None)
+        first = AutoBackupManager(store=store, interval_hours=0)
+        assert first.check_and_backup()["backed_up"] is False
+
+        # Свежий менеджер — эмуляция рестарта backend на том же профиле.
+        fresh_store = _store_with_crypto(data_dir, None)
+        fresh = AutoBackupManager(store=fresh_store, interval_hours=0)
+        status = fresh.get_auto_backup_status()
+
+        assert status["encryption_operation_unavailable"] is True
+        assert status["skipped_reason"] == REASON
+        assert status["last_refusal_reason"] == REASON
+        assert status["last_backup_kind"] is None
+        # Sidecar dot-prefixed и без секретов.
+        sidecar = data_dir / "backups" / ".last_result.json"
+        assert sidecar.is_file()
+        raw = sidecar.read_text("utf-8")
+        payload = json.loads(raw)
+        assert payload["refusal_reason"] == REASON
+        # Sidecar хранит только метаданные протокола: ни ключа, ни ENC1, ни текста.
+        assert set(payload) <= {"version", "kind", "refusal_reason", "recorded_at"}
+        assert not any(token in raw for token in ("ENC1:", "history_key", "BEGIN"))
+
+    def test_status_dict_is_not_self_contradictory(self, tmp_path):
+        """N1.2: отказ не может сосуществовать с kind=encrypted_snapshot."""
+        crypto = _crypto()
+        data_dir, store = self._on_profile(tmp_path, crypto)
+        mgr = AutoBackupManager(store=store, interval_hours=0)
+        assert mgr.check_and_backup()["backed_up"] is True
+
+        # Ключ стал недоступен — следующий цикл честно отказывает.
+        store._get_history_crypto = lambda: None
+        assert mgr.check_and_backup()["backed_up"] is False
+
+        status = mgr.get_auto_backup_status()
+        assert status["last_refusal_reason"] == REASON
+        # Каталог снимка на диске есть, но последний цикл отказал ⇒ kind=None.
+        assert status["last_backup_kind"] is None
+        assert status["encryption_operation_unavailable"] is True
+
+    def test_successful_on_backup_is_not_unavailable(self, tmp_path):
+        """N1.3 (отдельный сценарий): успешный ON-бэкап ⇒ unavailable == False."""
+        crypto = _crypto()
+        data_dir, store = self._on_profile(tmp_path, crypto)
+        mgr = AutoBackupManager(store=store, interval_hours=0)
+        assert mgr.check_and_backup()["backed_up"] is True
+
+        status = mgr.get_auto_backup_status()
+        assert status["encryption_operation_unavailable"] is False
+        assert status["skipped_reason"] is None
+        assert status["last_backup_kind"] == "encrypted_snapshot"
+        assert status["last_refusal_reason"] is None
+
+    def test_sidecar_does_not_appear_in_legacy_backup_listing(self, tmp_path):
+        crypto = _crypto()
+        data_dir, store = self._on_profile(tmp_path, None)
+        mgr = AutoBackupManager(store=store, interval_hours=0)
+        mgr.check_and_backup()
+        svc = HistoryService(store=store, cached_settings=lambda: {})
+        listed = svc.handle_list_backups({})
+        assert not any(
+            "last_result" in b["path"] for b in listed["backups"]
+        ), "sidecar не должен попадать в список бэкапов"
+        assert not any(
+            "last_result" in s["path"] for s in listed.get("encrypted_snapshots") or []
+        )
+
+    def test_purge_clears_recorded_outcome(self, tmp_path):
+        """Purge не должен оставлять в статусе следы удалённых бэкапов."""
+        crypto = _crypto()
+        data_dir, store = self._on_profile(tmp_path, crypto)
+        mgr = AutoBackupManager(store=store, interval_hours=0)
+        assert mgr.check_and_backup()["backed_up"] is True
+
+        mgr.set_purged()
+        status = mgr.get_auto_backup_status()
+        assert status["last_backup_kind"] is None
+        assert status["last_refusal_reason"] is None
+        assert status["encrypted_snapshots"] == 0
+        assert status["encryption_operation_unavailable"] is False

@@ -311,31 +311,16 @@ class TestAutoBackupGate:
         # Источник не тронут.
         assert _bytes(store.history_path) == history_before
 
-    def test_status_does_not_claim_unavailable_at_on(self, tmp_path):
-        """A5.2b1: при ON backup ЖИВ (идёт в encrypted snapshot) — статус не врёт.
+    def test_status_reports_unavailable_after_refused_on_backup(self, tmp_path):
+        """A5.2a-гейт наблюдаемости (восстановлен, N1.3).
 
-        Раньше здесь стояло ``encryption_operation_unavailable is True`` при
-        любом ON: владелец видел «backup недоступен» даже когда снимок только
-        что зафиксирован, а реальный отказ (нет ключа) от этого не отличался.
-        Теперь «недоступно» означает ровно одно — незавершённую транзакцию
-        снимка, которую обязан разбирать b2.
+        Backend startup и RecordingCore игнорируют результат
+        ``check_and_backup``: единственная IPC-поверхность — статус. Поэтому
+        реальный отказ backup-цикла при ON обязан быть виден в
+        ``encryption_operation_unavailable``/``skipped_reason`` — иначе отказ
+        полностью немой. Этот тест — обратная сторона теста про успешный
+        ON-бэкап (unavailable == False); смешивать их нельзя.
         """
-        data_dir = _data_dir(tmp_path)
-        store = StateStore(data_dir)
-        _write_settings(data_dir, {"history_encryption_enabled": True})
-        mgr = self._manager(store)
-        with patch(
-            "backend.history_crypto.build_history_crypto", side_effect=_no_keychain
-        ):
-            status = mgr.get_auto_backup_status()
-        assert status["encryption_on"] is True
-        assert status["encryption_operation_unavailable"] is False
-        assert status["skipped_reason"] is None
-        assert status["last_backup_kind"] is None
-        assert status["last_refusal_reason"] is None
-
-    def test_status_reports_refusal_after_failed_on_backup(self, tmp_path):
-        """Реальный отказ (недоступный ключ) виден в статусе машинно-читаемо."""
         data_dir = _data_dir(tmp_path)
         store = StateStore(data_dir)
         _write_settings(data_dir, {"history_encryption_enabled": True})
@@ -346,8 +331,43 @@ class TestAutoBackupGate:
             out = mgr.check_and_backup()
             status = mgr.get_auto_backup_status()
         assert out["backed_up"] is False
+        assert status["encryption_on"] is True
+        assert status["encryption_operation_unavailable"] is True
+        assert status["skipped_reason"] == REASON
         assert status["last_refusal_reason"] == REASON
         assert status["last_backup_kind"] is None
+
+    def test_status_claims_nothing_before_first_attempt(self, tmp_path):
+        """Без попытки бэкапа статус не придумывает ни успеха, ни отказа."""
+        data_dir = _data_dir(tmp_path)
+        store = StateStore(data_dir)
+        _write_settings(data_dir, {"history_encryption_enabled": True})
+        mgr = self._manager(store)
+        with patch(
+            "backend.history_crypto.build_history_crypto", side_effect=_no_keychain
+        ):
+            status = mgr.get_auto_backup_status()
+        assert status["encryption_on"] is True
+        assert status["last_backup_kind"] is None
+        assert status["last_refusal_reason"] is None
+        assert status["skipped_reason"] is None
+
+    def test_status_refusal_survives_manager_restart(self, tmp_path):
+        """Причина отказа переживает рестарт: sidecar, а не память процесса."""
+        data_dir = _data_dir(tmp_path)
+        store = StateStore(data_dir)
+        _write_settings(data_dir, {"history_encryption_enabled": True})
+        with patch(
+            "backend.history_crypto.build_history_crypto", side_effect=_no_keychain
+        ):
+            self._manager(store).check_and_backup()
+        # Новый менеджер на том же data_dir — эмуляция рестарта backend.
+        with patch(
+            "backend.history_crypto.build_history_crypto", side_effect=_no_keychain
+        ):
+            status = self._manager(StateStore(data_dir)).get_auto_backup_status()
+        assert status["encryption_operation_unavailable"] is True
+        assert status["skipped_reason"] == REASON
 
     def test_retention_overflow_preserved_when_on(self, tmp_path):
         data_dir = _data_dir(tmp_path)
