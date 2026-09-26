@@ -76,6 +76,7 @@ REASON_MANIFEST_INVALID = "snapshot_manifest_invalid"
 REASON_OUTSIDE_BACKUPS_ROOT = "snapshot_outside_backups_root"
 REASON_FSYNC_FAILED = "snapshot_fsync_failed"
 REASON_RECOVERY_PENDING = "snapshot_recovery_pending"
+REASON_STALE_STAGING = "snapshot_stale_staging"
 
 
 class SnapshotOperationRefused(Exception):
@@ -775,7 +776,7 @@ def recover_pending_state(*, data_dir: Any, backups_root: Any) -> dict:
     ``data_dir`` принимается для контракта b2 (recovery сверяет источники) и в
     b1 намеренно не используется.
     """
-    del data_dir  # контракт b2; в b1 источники не трогаем
+    del data_dir  # контракт б2; в b1 источники не трогаем
     pending = find_pending_transaction(backups_root=Path(backups_root))
     if pending is None:
         return {
@@ -785,7 +786,34 @@ def recover_pending_state(*, data_dir: Any, backups_root: Any) -> dict:
             "state": None,
             "transaction_id": None,
             "path": None,
+            "published": False,
+            "stale_staging": [],
         }
+
+    # 🔴 Неопубликованный staging (MAJOR-6) — это МУСОР от crash в prepare, а не
+    # незавершённая операция: публикация не начиналась, ни один файл снимка не
+    # появился в backups/, откатывать нечего, ключ не нужен. Раньше он давал
+    # pending=True навсегда (и ERROR в лог на каждую проверку), хотя новые
+    # транзакции при этом спокойно шли — b2 не смог бы отличить «нужен разбор»
+    # от «удали мусор и работай дальше».
+    if not pending.get("published"):
+        stale = [str(p) for p in _unpublished_staging_dirs(Path(backups_root))]
+        logger.warning(
+            "encrypted_snapshot: неопубликованный staging без признака замены — "
+            "мусор, удалить безопасно: %s",
+            stale,
+        )
+        return {
+            "ok": True,
+            "pending": False,
+            "reason": REASON_STALE_STAGING,
+            "state": pending.get("state"),
+            "transaction_id": pending.get("transaction_id"),
+            "path": pending.get("path"),
+            "published": False,
+            "stale_staging": stale,
+        }
+
     logger.error(
         "encrypted_snapshot: обнаружена незавершённая транзакция %s (%s) в %s — "
         "fail-closed, авто-отката нет",
@@ -798,6 +826,8 @@ def recover_pending_state(*, data_dir: Any, backups_root: Any) -> dict:
         "state": pending.get("state"),
         "transaction_id": pending.get("transaction_id"),
         "path": pending.get("path"),
+        "published": True,
+        "stale_staging": [],
     }
 
 

@@ -495,12 +495,21 @@ class TestCommitProtocol:
         # Исходные журналы целы, никакого отката в plaintext.
         assert _data_bytes(data_dir) == sources_before
         _no_plaintext_anywhere(backup_dir.parent)
-        # Fail-closed признак, а не «успех».
+        # MAJOR-6: rename не состоялся ⇒ ни одного файла снимка в backups/ нет,
+        # живая история цела и согласованна, откатывать нечего ⇒ это НЕ
+        # незавершённая операция, а мусор (b2 удалит staging и повторит backup).
+        # Fail-closed «pending» остаётся только для ОПУБЛИКОВАННОГО COMMITTING —
+        # см. test_crash_after_publication_keeps_valid_snapshot_and_reports_pending.
         recovery = recover_pending_state(data_dir=data_dir, backups_root=backup_dir.parent)
-        assert recovery["ok"] is False
-        assert recovery["pending"] is True
-        assert recovery["reason"] == "snapshot_recovery_pending"
+        assert recovery["ok"] is True
+        assert recovery["pending"] is False
+        assert recovery["reason"] == "snapshot_stale_staging"
+        assert recovery["published"] is False
+        assert recovery["state"] == STATE_COMMITTING
         assert recovery["transaction_id"] == "tx-a52b1-crash1"
+        # Доказательство для b2 при этом сохранено — staging не удалён.
+        assert staging[0].is_dir()
+        assert _payload_files(staging[0]) == sorted(HISTORY_JOURNAL_FILENAMES)
         # Никакого нового ключа: build_history_crypto не вызывался (патч-ловушка).
 
     def test_crash_after_publication_keeps_valid_snapshot_and_reports_pending(self, tmp_path):
@@ -1240,3 +1249,97 @@ class TestAutoBackupStatusHonesty:
         assert status["last_refusal_reason"] is None
         assert status["encrypted_snapshots"] == 0
         assert status["encryption_operation_unavailable"] is False
+
+    def test_auto_backup_snapshot_reports_real_entry_count(self, tmp_path):
+        """MAJOR-5: успешный снимок обязан сообщать entries, а не 0.
+
+        Legacy-путь считает записи (count_active_items) и падает в исключение
+        при ошибке; снимок возвращал hardcoded 0 с обещанием «вызывающий
+        заполнит», а вызывающий просто пробрасывал.
+        """
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        store.add_history_item(text="one")
+        store.add_history_item(text="two")
+
+        out = AutoBackupManager(store=store, interval_hours=0).check_and_backup()
+
+        assert out["backed_up"] is True
+        assert out["entries"] == 2
+        mgr = AutoBackupManager(store=store, interval_hours=0)
+        assert mgr.get_auto_backup_status()["last_backup_kind"] == "encrypted_snapshot"
+
+
+class TestStaleStagingIsNotPending:
+    """MAJOR-6: неопубликованный staging — мусор, а не незавершённая операция.
+
+    b2 будет строить recovery на recover_pending_state. Если она вечно видит
+    pending=True из-за брошенного staging (crash в prepare), recovery не сможет
+    отличить «нужен разбор» от «удали мусор и работай дальше».
+    """
+
+    def _data_dir_with_staging(self, tmp_path: Path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        backup_dir = data_dir / "backups" / "snapshot_1"
+        prepared = build_encrypted_snapshot(
+            data_dir=data_dir, backup_dir=backup_dir, crypto=crypto,
+            transaction_id="tx-crash-prepare", policy_on=True,
+        )
+        return data_dir, crypto, backup_dir.parent, Path(prepared["staging_dir"])
+
+    def test_unpublished_staging_is_not_pending(self, tmp_path):
+        data_dir, _crypto_, backups_root, staging = self._data_dir_with_staging(tmp_path)
+        assert staging.is_dir()
+
+        rec = recover_pending_state(data_dir=data_dir, backups_root=backups_root)
+
+        assert rec["pending"] is False
+        assert rec["ok"] is True
+        assert rec["reason"] == "snapshot_stale_staging"
+        assert rec["stale_staging"], "мусорный staging должен быть назван прямо"
+        assert staging.name in rec["stale_staging"][0]
+
+    def test_stale_staging_does_not_block_new_snapshot(self, tmp_path):
+        data_dir, crypto, backups_root, _staging = self._data_dir_with_staging(tmp_path)
+        res = create_encrypted_snapshot(
+            data_dir=data_dir, backup_dir=data_dir / "backups" / "snapshot_2",
+            crypto=crypto, transaction_id="tx-after-stale", policy_on=True,
+        )
+        assert res["state"] == STATE_COMMITTED
+        rec = recover_pending_state(data_dir=data_dir, backups_root=backups_root)
+        assert rec["pending"] is False
+
+    def test_auto_status_not_blocked_by_stale_staging(self, tmp_path):
+        data_dir, crypto, _root, _staging = self._data_dir_with_staging(tmp_path)
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        mgr = AutoBackupManager(store=store, interval_hours=0)
+        status = mgr.get_auto_backup_status()
+        assert status["encryption_operation_unavailable"] is False
+        assert status["skipped_reason"] is None
+
+    def test_published_committing_remains_pending(self, tmp_path):
+        """Опубликованный COMMITTING по-прежнему fail-closed (b2 обязан его видеть)."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        backup_dir = data_dir / "backups" / "snapshot_1"
+        create_encrypted_snapshot(
+            data_dir=data_dir, backup_dir=backup_dir, crypto=crypto,
+            transaction_id="tx-published", policy_on=True,
+        )
+        manifest = _manifest(backup_dir)
+        manifest["state"] = STATE_COMMITTING
+        (backup_dir / SNAPSHOT_MANIFEST_FILENAME).write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        rec = recover_pending_state(data_dir=data_dir, backups_root=backup_dir.parent)
+        assert rec["pending"] is True
+        assert rec["ok"] is False
+        assert rec["reason"] == "snapshot_recovery_pending"
+        assert rec["state"] == STATE_COMMITTING

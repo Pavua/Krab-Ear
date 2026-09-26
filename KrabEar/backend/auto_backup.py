@@ -370,7 +370,11 @@ class AutoBackupManager:
             "backup_path": str(snapshot_dir),
             "backup_ts": ts,
             "size_mb": round(result.get("size_bytes", 0) / (1024 * 1024), 3),
-            "entries": 0,  # заполняется вызывающим вне lock (count_active_items)
+            # entries НЕ считаем здесь: count_active_items() сам берёт
+            # store-lock, а мы внутри него. Считает вызывающий — как в
+            # legacy-ветке _do_backup (MAJOR-5: раньше здесь был hardcoded 0
+            # с обещанием «вызывающий заполнит», а вызывающий пробрасывал).
+            "entries": 0,
             "encrypted": True,
             "state": result["state"],
             "transaction_id": result["transaction_id"],
@@ -511,6 +515,18 @@ class AutoBackupManager:
                 "encrypted_snapshot" if result.get("encrypted") else "legacy_plaintext"
             )
             self._last_refusal_reason = None
+
+            # MAJOR-5: entries считаются ЗДЕСЬ, вне store-lock (снимок создавался
+            # под ним). Для снимка счётчик не применим — у него нет
+            # backup_meta.json, — поэтому он не выдумывается.
+            if result.get("encrypted"):
+                try:
+                    result["entries"] = self.store.count_active_items()
+                except Exception:  # noqa: BLE001 — как в legacy-ветке
+                    logger.warning(
+                        "auto_backup: не удалось посчитать записи для снимка",
+                        exc_info=True,
+                    )
 
             return {
                 "backed_up": True,
