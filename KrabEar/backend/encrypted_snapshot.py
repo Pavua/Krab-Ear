@@ -926,3 +926,297 @@ def create_encrypted_snapshot(
         prepared=prepared,
         policy_read=policy_read,
     )
+
+
+# ----------------------------------------------------------------------
+# A5.2b2 — restore из проверенного снимка
+# ----------------------------------------------------------------------
+
+# Приватный staging RESTORE живёт РЯДОМ с живыми журналами, а не в backups:
+# замена живого файла обязана быть os.replace в пределах ОДНОГО filesystem
+# (backs может быть symlink на другой том — легальная конфигурация b1), и
+# только этот каталог лежит на одном носителе с data_dir. Имя dot-prefixed и
+# режим 0700: каталог не должен всплывать в списках и не должен быть виден.
+RESTORE_STAGING_PREFIX = ".a52b2-restore-"
+RESTORE_MARKER_FILENAME = "restore_marker.json"
+RESTORE_MARKER_VERSION = 1
+
+# Состояния restore-маркера. Те же строки, что у b1-манифеста: маркер и манифест
+# описывают одну транзакцию, и ``COMMITTED`` здесь, как и там, означает
+# «read-back прошёл».
+RESTORE_STATE_COMMITTING = STATE_COMMITTING
+RESTORE_STATE_COMMITTED = STATE_COMMITTED
+
+# Машинно-читаемые причины b2. Переиспользуемые b1-коды (``snapshot_*``)
+# не дублируются: один словарь причин на всю волну.
+REASON_REQUIRES_ENCRYPTION_ON = "snapshot_requires_encryption_on"
+REASON_POLICY_MISMATCH = "snapshot_policy_mismatch"
+REASON_RESTORE_SETTINGS_UNSUPPORTED = "restore_settings_unsupported_at_on"
+REASON_LEDGER_UNREADABLE = "snapshot_ledger_unreadable"
+REASON_LEDGER_MALFORMED = "snapshot_ledger_malformed"
+REASON_RECORD_MALFORMED = "snapshot_record_malformed"
+REASON_OUTPUT_MISMATCH = "snapshot_output_mismatch"
+REASON_RECOVERY_IMPOSSIBLE = "snapshot_recovery_impossible"
+
+# Два журнала deletion ledger: tombstones ∪ purged (спека §5). Выходной ledger
+# restore пишется по объединению, поэтому порядок здесь важен только для
+# читателя-человека.
+LEDGER_JOURNAL_NAMES: tuple[str, str] = (
+    "history_tombstones.ndjson",
+    "history_purged_ids.ndjson",
+)
+
+
+def _require_restorable_snapshot_dir(backups_root: Any, snapshot_dir: Any) -> Path:
+    """Containment каталога-снимка: только опубликованный снимок внутри backups.
+
+    Три независимых слоя (спека §5 шаг 1: «Проверить типы/контейнмент файлов…
+    Не следовать symlink из реестра»):
+
+      * лексический слой — ``..``-выход и подмена корня backups отсекаются
+        сравнением НЕ-разыменованных путей;
+      * слой symlink-компонентов — ни одного symlink на пути к снимку, иначе
+        проверялся бы не тот каталог, который указал владелец/IPC;
+      * разыменованный слой — главная гарантия: итоговый путь обязан лежать
+        внутри РАЗЫМЕНОВАННОГО корня backups.
+
+    Слои независимы: бэкенд приходит с уже разыменованным ``backup_path``, а
+    модульные вызовы — с путём как есть. Сравнение только по одному из слоёв
+    ломало бы один из двух честных случаев (либо symlink-inside, либо
+    симлинкнутый data_dir, который b1 сам считает легальной конфигурацией).
+    """
+    root_raw = Path(backups_root)
+    raw = Path(snapshot_dir)
+    root_lex = Path(os.path.abspath(str(root_raw)))
+    raw_lex = Path(os.path.abspath(str(raw)))
+
+    try:
+        rel = raw_lex.relative_to(root_lex)
+    except ValueError:
+        rel = None
+    if rel is not None:
+        if not rel.parts:
+            raise SnapshotOperationRefused(
+                REASON_OUTSIDE_BACKUPS_ROOT, "восстановление из самого backups/ запрещено"
+            )
+        cursor = root_lex
+        for part in rel.parts:
+            cursor = cursor / part
+            if cursor.is_symlink():
+                raise SnapshotOperationRefused(
+                    REASON_SOURCE_SYMLINK,
+                    f"{cursor.name} — symlink не разыменовывается",
+                )
+
+    root = root_raw.resolve()
+    resolved = raw.resolve()
+    if resolved != root and not resolved.is_relative_to(root):
+        raise SnapshotOperationRefused(
+            REASON_OUTSIDE_BACKUPS_ROOT,
+            f"{resolved} находится вне {root} — снимок обязан лежать в backups/",
+        )
+    staging_root = root / STAGING_ROOT_NAME
+    if resolved.is_relative_to(staging_root):
+        raise SnapshotOperationRefused(
+            REASON_STALE_STAGING,
+            f"{resolved} — неопубликованный staging, а не снимок",
+        )
+    return resolved
+
+
+def _decrypt_verified_lines(*, path: Path, crypto: Any, reason_mismatch: str) -> list[str]:
+    """Каждая строка файла обязана быть ENC1 и расшифровываться. Иначе — отказ.
+
+    Отказ, а не skip: молчаливая потеря строки означала бы потерю данных при
+    «успешном» восстановлении. Не-ENC1 строка при текущей ON-policy — это
+    ``policy_mismatch`` (plaintext-снимок), а не «повреждение».
+    """
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise SnapshotOperationRefused(
+            REASON_SOURCE_UNREADABLE, f"{path.name} не читается: {exc}"
+        ) from exc
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SnapshotOperationRefused(
+            REASON_SOURCE_UNREADABLE, f"{path.name}: не UTF-8: {exc}"
+        ) from exc
+    out: list[str] = []
+    for lineno, line in enumerate(_split_ndjson_lines(text), start=1):
+        if not line.strip():
+            # Пустые строки допустимы (writer их не пишет, но файл мог быть
+            # дописан сторонним инструментом) — не строка данных.
+            continue
+        if not crypto.is_encrypted(line):
+            raise SnapshotOperationRefused(
+                reason_mismatch,
+                f"{path.name}:{lineno}: строка не ENC1 — plaintext-снимок при "
+                "включённой политике шифрования",
+            )
+        try:
+            crypto.decrypt_line(line)
+        except Exception as exc:  # noqa: BLE001 — чужой ключ или tamper
+            raise SnapshotOperationRefused(
+                REASON_LINE_TAMPERED,
+                f"{path.name}:{lineno}: ENC1-строка не расшифровывается "
+                f"(чужой ключ или tamper): {type(exc).__name__}",
+            ) from exc
+        out.append(line)
+    return out
+
+
+def verify_snapshot(*, backups_root: Any, snapshot_dir: Any, crypto: Any) -> dict:
+    """A5.2b2 Task 1 — ПОЛНАЯ read-only верификация снимка перед первой записью.
+
+    Проверяется всё, что обязано быть верно до того, как живые журналы будут
+    затронуты (спека §5: «Restore предварительно полностью проверяет snapshot и
+    key… Незнакомый формат, неполный набор… отклоняются до первой записи»):
+
+      * контейнмент: только опубликованный каталог-снимок внутри backups-корня,
+        ни одного symlink-компонента (шаг 1);
+      * манифест известной версии, набор — ровно десять имён реестра, без
+        посторонних файлов (шаг 3 b1 → read-back);
+      * size + sha256 CIPHERTEXT каждого файла совпадают с манифестом;
+      * ``policy_at_capture`` — ON: plaintext-снимок при ON означал бы тихое
+        понижение policy (карточка b2, решение 3);
+      * расшифровка КАЖДОЙ строки КАЖДОГО файла (чужой ключ и tamper ловятся
+        именно здесь — хэш ciphertext'а подмену бы замаскировал);
+      * наличие ключа.
+
+    Ни одной записи: функция не создаёт каталогов и не трогает живые журналы
+    (тест ``test_verify_is_read_only`` фиксирует mtime+содержимое дерева).
+    """
+    if crypto is None:
+        raise SnapshotOperationRefused(
+            REASON_CRYPTO_UNAVAILABLE, "ключ недоступен — restore невозможен"
+        )
+    resolved = _require_restorable_snapshot_dir(backups_root, snapshot_dir)
+
+    manifest = _read_manifest(resolved)
+    if manifest is None:
+        raise SnapshotOperationRefused(
+            REASON_MANIFEST_INVALID, f"{resolved.name}: манифест отсутствует"
+        )
+    if manifest.get("policy_at_capture") is not True:
+        # Неизвестная/выключенная policy на момент снятия — восстановление под
+        # текущей ON-политикой означало бы понижение/нарушение policy.
+        raise SnapshotOperationRefused(
+            REASON_POLICY_MISMATCH,
+            f"{resolved.name}: policy_at_capture="
+            f"{manifest.get('policy_at_capture')!r} — снимок не снят при ON",
+        )
+
+    # Целостность и полнота набора — тем же read-back, что и в b1 (один
+    # источник правды для «что значит проверенный снимок»).
+    readback = verify_snapshot_readback(backup_dir=resolved)
+    if not readback["ok"]:
+        raise SnapshotOperationRefused(
+            REASON_READBACK_FAILED,
+            f"{resolved.name}: снимок не прошёл проверку целостности: "
+            f"{readback['mismatches']}",
+        )
+
+    # Построчная проверка расшифровки — ПОСЛЕ хэшей, чтобы «честный» пересчёт
+    # манифеста под подделанный ENC1 не прошёл незамеченным. Набор — тот же
+    # реестр state_store, что уже проверен read-back'ом выше.
+    lines: dict[str, int] = {}
+    for name in HISTORY_JOURNAL_FILENAMES:
+        verified = _decrypt_verified_lines(
+            path=resolved / name,
+            crypto=crypto,
+            reason_mismatch=REASON_POLICY_MISMATCH,
+        )
+        lines[name] = len(verified)
+
+    logger.info(
+        "encrypted_snapshot: снимок %s проверен (%d файлов, %d строк, tx=%s)",
+        resolved.name, len(lines), sum(lines.values()), manifest.get("transaction_id"),
+    )
+    return {
+        "ok": True,
+        "snapshot_dir": str(resolved),
+        "transaction_id": manifest.get("transaction_id"),
+        "state": manifest.get("state"),
+        "policy_at_capture": manifest.get("policy_at_capture"),
+        "files": list(HISTORY_JOURNAL_FILENAMES),
+        "checked": len(lines),
+        "lines": lines,
+        "readback": readback,
+    }
+
+
+def _record_id(decrypted: str, *, where: str, reason: str) -> str | None:
+    """ID записи журнала. Неразбираемый JSON — отказ (данные не теряются молча)."""
+    try:
+        payload = json.loads(decrypted)
+    except ValueError as exc:
+        raise SnapshotOperationRefused(
+            reason, f"{where}: строка не разбирается как JSON: {type(exc).__name__}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise SnapshotOperationRefused(reason, f"{where}: строка не JSON-объект")
+    item_id = payload.get("id")
+    if item_id is None:
+        return None
+    text = str(item_id).strip()
+    return text or None
+
+
+def collect_ledger_union(*, data_dir: Any, crypto: Any) -> tuple[str, ...]:
+    """A5.2b2 Task 1 — tombstones ∪ purged ТЕКУЩЕГО профиля (read-only, fail-closed).
+
+    Спека §5: «При недоступности ключа или повреждении текущего ledger restore
+    прекращается без изменения файлов». Поэтому здесь нет ни одного молчаливого
+    ``skip``: строка, которую нельзя прочитать/разобрать/определить, — отказ, а
+    не «наверное, не ID».
+
+    Пустой ledger (файлов нет) — валидное пустое объединение; это НЕ ошибка.
+    """
+    if crypto is None:
+        raise SnapshotOperationRefused(
+            REASON_CRYPTO_UNAVAILABLE,
+            "ключ недоступен — текущий deletion ledger не проверить",
+        )
+    union: set[str] = set()
+    for name in LEDGER_JOURNAL_NAMES:
+        path = Path(data_dir) / name
+        if path.is_symlink():
+            raise SnapshotOperationRefused(
+                REASON_SOURCE_SYMLINK, f"{name} — symlink не разыменовывается"
+            )
+        if not path.exists():
+            continue
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            raise SnapshotOperationRefused(
+                REASON_LEDGER_UNREADABLE, f"{name} не читается: {exc}"
+            ) from exc
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise SnapshotOperationRefused(
+                REASON_LEDGER_UNREADABLE, f"{name}: не UTF-8: {exc}"
+            ) from exc
+        for lineno, line in enumerate(_split_ndjson_lines(text), start=1):
+            if not line.strip():
+                continue
+            if crypto.is_encrypted(line):
+                try:
+                    line = crypto.decrypt_line(line)
+                except Exception as exc:  # noqa: BLE001 — чужой ключ или tamper
+                    raise SnapshotOperationRefused(
+                        REASON_LEDGER_UNREADABLE,
+                        f"{name}:{lineno}: ENC1-строка ledger не расшифровывается: "
+                        f"{type(exc).__name__}",
+                    ) from exc
+            item_id = _record_id(line, where=f"{name}:{lineno}", reason=REASON_LEDGER_MALFORMED)
+            if not item_id:
+                raise SnapshotOperationRefused(
+                    REASON_LEDGER_MALFORMED,
+                    f"{name}:{lineno}: в deletion ledger нет непустого id",
+                )
+            union.add(item_id)
+    return tuple(sorted(union))
