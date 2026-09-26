@@ -148,7 +148,7 @@ extension HistoryPanelController {
 
         let card = CDSettingsCardView()
         let loadingLabel = NSTextField(labelWithString: "Загрузка…")
-        loadingLabel.font = KrabEarTheme.Typography.caption
+        loadingLabel.font = KrabEarTheme.Typography.captionMedium
         loadingLabel.textColor = KrabEarTheme.Colors.textSecondary
         card.contentStackView.addArrangedSubview(loadingLabel)
 
@@ -190,9 +190,13 @@ extension HistoryPanelController {
         let row = cdMakeRow(label: "Транспорт распознавания GigaAM", control: picker)
         card.contentStackView.addArrangedSubview(row)
 
-        let warnLabel = NSTextField(labelWithString: "")
+        let warnLabel = NSTextField(wrappingLabelWithString: "")
         warnLabel.font = KrabEarTheme.Typography.caption
         warnLabel.textColor = KrabEarTheme.Colors.warning
+        warnLabel.isBordered = false
+        warnLabel.drawsBackground = false
+        warnLabel.isEditable = false
+        warnLabel.isSelectable = false
         warnLabel.isHidden = true
         objc_setAssociatedObject(
             self, &STTEnginesAssocKeys.cdGigaamTransportWarnLabel, warnLabel,
@@ -335,7 +339,7 @@ extension HistoryPanelController {
 
         if engines.isEmpty {
             let fallback = NSTextField(labelWithString: "Нет данных — бэкенд недоступен")
-            fallback.font = KrabEarTheme.Typography.caption
+            fallback.font = KrabEarTheme.Typography.captionMedium
             fallback.textColor = KrabEarTheme.Colors.textSecondary
             card.contentStackView.addArrangedSubview(fallback)
             return
@@ -447,6 +451,7 @@ extension HistoryPanelController {
             }
             toggle.identifier = NSUserInterfaceItemIdentifier(toggleKey)
             toggle.setAccessibilityLabel("\(engine.displayName): включить/выключить")
+            KrabEarTheme.styleCheckbox(toggle)
             control = toggle
         } else {
             let imageView = NSImageView()

@@ -183,19 +183,36 @@ extension HistoryPanelController {
             v.removeFromSuperview()
         }
 
-        let subhead = isCD ? NSTextField(labelWithString: "ЗАРЕГИСТРИРОВАННЫЕ WEBHOOKS") : makeSubhead("ЗАРЕГИСТРИРОВАННЫЕ WEBHOOKS")
+        let subhead: NSTextField
         if isCD {
-            subhead.font = KrabEarTheme.Typography.captionMedium
+            subhead = NSTextField(labelWithString: "ЗАРЕГИСТРИРОВАННЫЕ WEBHOOKS")
+            subhead.font = KrabEarTheme.Typography.caption
             subhead.textColor = KrabEarTheme.Colors.textSecondary
+            subhead.isEditable = false
             subhead.isBordered = false
             subhead.drawsBackground = false
+            // Трекинг прописных букв согласно токенам типографики Claude Design
+            let attrs: [NSAttributedString.Key: Any] = [
+                .kern: 0.5 as NSNumber,
+                .font: KrabEarTheme.Typography.caption,
+                .foregroundColor: KrabEarTheme.Colors.textSecondary,
+            ]
+            subhead.attributedStringValue = NSAttributedString(string: "ЗАРЕГИСТРИРОВАННЫЕ WEBHOOKS", attributes: attrs)
+        } else {
+            subhead = makeSubhead("ЗАРЕГИСТРИРОВАННЫЕ WEBHOOKS")
         }
         contentStack.addArrangedSubview(subhead)
+        if isCD {
+            contentStack.setCustomSpacing(KrabEarTheme.Metrics.tight, after: subhead)
+        }
 
         if webhooks.isEmpty {
             let empty = NSTextField(labelWithString: "Нет зарегистрированных вебхуков")
             empty.font = KrabEarTheme.Typography.caption
             empty.textColor = KrabEarTheme.Colors.textSecondary
+            empty.isEditable = false
+            empty.isBordered = false
+            empty.drawsBackground = false
             contentStack.addArrangedSubview(empty)
         } else {
             for (index, webhook) in webhooks.enumerated() {
@@ -230,9 +247,15 @@ extension HistoryPanelController {
     @MainActor
     private func makeWebhookRow(id: String, url: String, events: [String], hasSecret: Bool, deliveries: Int, failures: Int, lastStatus: Int?, isCD: Bool = false) -> NSView {
         let urlLabel = NSTextField(labelWithString: url)
-        urlLabel.font = isCD ? KrabEarTheme.Typography.body : NSFont.systemFont(ofSize: 13, weight: .medium)
+        // В режиме Claude Design используем размер Typography.body с начертанием medium
+        urlLabel.font = isCD
+            ? .systemFont(ofSize: KrabEarTheme.Typography.body.pointSize, weight: .medium)
+            : NSFont.systemFont(ofSize: 13, weight: .medium)
         urlLabel.textColor = KrabEarTheme.Colors.textPrimary
         urlLabel.lineBreakMode = .byTruncatingMiddle
+        urlLabel.isEditable = false
+        urlLabel.isBordered = false
+        urlLabel.drawsBackground = false
         urlLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         var subtitleParts: [String] = []
@@ -247,6 +270,9 @@ extension HistoryPanelController {
         descLabel.font = KrabEarTheme.Typography.caption
         descLabel.textColor = KrabEarTheme.Colors.textSecondary
         descLabel.lineBreakMode = .byTruncatingTail
+        descLabel.isEditable = false
+        descLabel.isBordered = false
+        descLabel.drawsBackground = false
         descLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         
         let textStack = NSStackView(views: [urlLabel, descLabel])
@@ -257,7 +283,9 @@ extension HistoryPanelController {
 
         var badges: [NSView] = []
         if hasSecret {
-            let badge = isCD ? cdMakeBadge(text: "Секрет", color: KrabEarTheme.Colors.accent) : makeBadge(text: "Секрет", color: KrabEarTheme.Colors.accent, tooltip: "Используется HMAC подпись", symbol: "lock.fill")
+            let badge = isCD
+                ? cdMakeBadge(text: "Секрет", color: KrabEarTheme.Colors.accent)
+                : makeBadge(text: "Секрет", color: KrabEarTheme.Colors.accent, tooltip: "Используется HMAC подпись", symbol: "lock.fill")
             badges.append(badge)
         }
 
@@ -271,7 +299,9 @@ extension HistoryPanelController {
             statusColor = KrabEarTheme.Colors.textSecondary
         }
         
-        let statusBadge = isCD ? cdMakeBadge(text: statusText, color: statusColor) : makeBadge(text: statusText, color: statusColor, tooltip: "HTTP-статус последней доставки", symbol: nil)
+        let statusBadge = isCD
+            ? cdMakeBadge(text: statusText, color: statusColor)
+            : makeBadge(text: statusText, color: statusColor, tooltip: "HTTP-статус последней доставки", symbol: nil)
         badges.append(statusBadge)
 
         let deleteButton = NSButton(frame: .zero)
@@ -306,7 +336,9 @@ extension HistoryPanelController {
         row.distribution = .fill
         row.alignment = .centerY
         row.spacing = KrabEarTheme.Metrics.standard
-        row.edgeInsets = NSEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
+        row.edgeInsets = isCD
+            ? NSEdgeInsets(top: 5, left: 0, bottom: 5, right: 0)
+            : NSEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
         return row
     }
 

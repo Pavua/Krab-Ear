@@ -69,7 +69,9 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
     func updateTranscript(_ entries: [TranscriptEntry]) {
         transcriptStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         for entry in entries.suffix(200) {  // рендер-кап; полный буфер держит координатор
-            transcriptStack.addArrangedSubview(row(for: entry))
+            let item = row(for: entry)
+            transcriptStack.addArrangedSubview(item)
+            item.widthAnchor.constraint(equalTo: transcriptStack.widthAnchor, constant: -(KrabEarTheme.Metrics.cardPadding * 2)).isActive = true
         }
         if let doc = scrollView.documentView {
             doc.scroll(NSPoint(x: 0, y: doc.bounds.maxY))
@@ -212,7 +214,7 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
         let originalText: String
         var translationText: String? = nil
         var extraSystemText: String? = nil
-        
+
         switch entry.kind {
         case .remote(let text, let translation):
             isAgent = false
@@ -232,15 +234,19 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
             let lbl = NSTextField(labelWithString: "· \(msg)")
             lbl.font = KrabEarTheme.Typography.captionMedium
             lbl.textColor = KrabEarTheme.Colors.textSecondary
+            lbl.isBordered = false
+            lbl.drawsBackground = false
             let wrap = NSStackView(views: [lbl])
+            wrap.orientation = .vertical
             wrap.alignment = .centerX
             wrap.identifier = NSUserInterfaceItemIdentifier("transcript:· \(msg)")
+            wrap.translatesAutoresizingMaskIntoConstraints = false
             return wrap
         }
-        
+
         let container = NSStackView()
-        
-        // Reconstruct the exact legacy string for the test hook
+
+        // Восстанавливаем точную legacy-строку для тестового хука
         let legacyText: String
         switch entry.kind {
         case .remote(let text, let translation):
@@ -256,52 +262,65 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
             legacyText = "· \(msg)"
         }
         container.identifier = NSUserInterfaceItemIdentifier("transcript:" + legacyText)
-        
+
         container.orientation = .vertical
         container.alignment = isAgent ? .trailing : .leading
-        
+        container.translatesAutoresizingMaskIntoConstraints = false
+
         let bubble = NSBox()
         bubble.boxType = .custom
-        bubble.borderType = .lineBorder
+        bubble.borderWidth = 1.0
         bubble.borderColor = KrabEarTheme.Colors.border
-        bubble.fillColor = isAgent ? KrabEarTheme.Colors.accent.withAlphaComponent(0.12) : KrabEarTheme.Colors.cardBackground
+        bubble.fillColor = isAgent
+            ? KrabEarTheme.Colors.accent.withAlphaComponent(0.12)
+            : KrabEarTheme.Colors.cardBackground
         bubble.wantsLayer = true
         bubble.layer?.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
-        
+        bubble.layer?.cornerCurve = .continuous
+        bubble.translatesAutoresizingMaskIntoConstraints = false
+
         let contentStack = NSStackView()
         contentStack.orientation = .vertical
         contentStack.alignment = isAgent ? .trailing : .leading
         contentStack.spacing = 2
-        
+        contentStack.translatesAutoresizingMaskIntoConstraints = false
+
         let origLbl = NSTextField(wrappingLabelWithString: originalText)
         origLbl.font = KrabEarTheme.Typography.body
         origLbl.textColor = KrabEarTheme.Colors.textPrimary
+        origLbl.isBordered = false
+        origLbl.drawsBackground = false
         contentStack.addArrangedSubview(origLbl)
-        
+
         if let tr = translationText {
             let trLbl = NSTextField(wrappingLabelWithString: tr)
             trLbl.font = KrabEarTheme.Typography.caption
             trLbl.textColor = KrabEarTheme.Colors.textSecondary
+            trLbl.isBordered = false
+            trLbl.drawsBackground = false
             contentStack.addArrangedSubview(trLbl)
         }
-        
+
         if let sys = extraSystemText {
             let sysLbl = NSTextField(wrappingLabelWithString: sys)
             sysLbl.font = KrabEarTheme.Typography.caption
             sysLbl.textColor = KrabEarTheme.Colors.textDisabled
+            sysLbl.isBordered = false
+            sysLbl.drawsBackground = false
             contentStack.addArrangedSubview(sysLbl)
         }
-        
+
         bubble.contentView = contentStack
-        contentStack.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            contentStack.topAnchor.constraint(equalTo: bubble.topAnchor, constant: 8),
-            contentStack.bottomAnchor.constraint(equalTo: bubble.bottomAnchor, constant: -8),
-            contentStack.leadingAnchor.constraint(equalTo: bubble.leadingAnchor, constant: 12),
-            contentStack.trailingAnchor.constraint(equalTo: bubble.trailingAnchor, constant: -12)
-        ])
-        
         container.addArrangedSubview(bubble)
+
+        NSLayoutConstraint.activate([
+            contentStack.topAnchor.constraint(equalTo: bubble.topAnchor, constant: KrabEarTheme.Metrics.standard),
+            contentStack.bottomAnchor.constraint(equalTo: bubble.bottomAnchor, constant: -KrabEarTheme.Metrics.standard),
+            contentStack.leadingAnchor.constraint(equalTo: bubble.leadingAnchor, constant: KrabEarTheme.Metrics.comfortable),
+            contentStack.trailingAnchor.constraint(equalTo: bubble.trailingAnchor, constant: -KrabEarTheme.Metrics.comfortable),
+            bubble.widthAnchor.constraint(lessThanOrEqualTo: container.widthAnchor, multiplier: 0.85)
+        ])
+
         return container
     }
 
@@ -313,49 +332,69 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
         // titleVisibility=.hidden убирает native title из прозрачного titlebar
         // (иначе «Звонок агента · +номер» рисуется поверх бейджа).
         window?.titleVisibility = .hidden
-        
+
         inContentTitleLabel.font = KrabEarTheme.Typography.sectionTitle
         inContentTitleLabel.textColor = KrabEarTheme.Colors.textPrimary
         inContentTitleLabel.lineBreakMode = .byTruncatingTail
         inContentTitleLabel.maximumNumberOfLines = 1
         inContentTitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         inContentTitleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        
+
         listenButton.image = NSImage(systemSymbolName: "speaker.wave.2", accessibilityDescription: "Слушать")
         listenButton.title = ""
         listenButton.isBordered = false
         listenButton.isTransparentStyle = true
+        listenButton.contentTintColor = KrabEarTheme.Colors.textSecondary
+        listenButton.wantsLayer = true
+        listenButton.layer?.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
+        listenButton.layer?.cornerCurve = .continuous
         listenButton.target = self
         listenButton.action = #selector(onListenTapped)
-        
+
         hangupButton.image = NSImage(systemSymbolName: "phone.down.fill", accessibilityDescription: "Положить трубку")
         hangupButton.title = ""
         hangupButton.isBordered = false
         hangupButton.isTransparentStyle = true
+        hangupButton.contentTintColor = KrabEarTheme.Colors.textSecondary
+        hangupButton.wantsLayer = true
+        hangupButton.layer?.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
+        hangupButton.layer?.cornerCurve = .continuous
         hangupButton.target = self
         hangupButton.action = #selector(onHangupTapped)
+
+        NSLayoutConstraint.activate([
+            listenButton.widthAnchor.constraint(equalToConstant: KrabEarTheme.Metrics.controlHeight),
+            listenButton.heightAnchor.constraint(equalToConstant: KrabEarTheme.Metrics.controlHeight),
+            hangupButton.widthAnchor.constraint(equalToConstant: KrabEarTheme.Metrics.controlHeight),
+            hangupButton.heightAnchor.constraint(equalToConstant: KrabEarTheme.Metrics.controlHeight),
+        ])
 
         sessionPicker.target = self
         sessionPicker.action = #selector(onSessionPicked)
         sessionPicker.isHidden = true
-        
+
         costAlertLabel.textColor = KrabEarTheme.Colors.warning
         costAlertLabel.font = KrabEarTheme.Typography.captionMedium
         costAlertLabel.isHidden = true
         costLabel.textColor = KrabEarTheme.Colors.textSecondary
-        costLabel.font = KrabEarTheme.Typography.captionMedium
+        costLabel.font = KrabEarTheme.Typography.captionMedium.tabular()
 
         stateBadge.font = KrabEarTheme.Typography.captionMedium
         stateBadge.textColor = KrabEarTheme.Colors.textPrimary
-        
+        stateBadge.isBordered = false
+        stateBadge.drawsBackground = false
+        stateBadge.isEditable = false
+        stateBadge.isSelectable = false
+
         stateBadgeBox.boxType = .custom
-        stateBadgeBox.borderType = .lineBorder
+        stateBadgeBox.borderWidth = 1.0
         stateBadgeBox.borderColor = KrabEarTheme.Colors.border
         stateBadgeBox.fillColor = KrabEarTheme.Colors.cardBackground
         stateBadgeBox.wantsLayer = true
         stateBadgeBox.layer?.cornerRadius = 10
+        stateBadgeBox.layer?.cornerCurve = .continuous
         stateBadgeBox.contentView = stateBadge
-        
+
         stateBadge.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             stateBadge.topAnchor.constraint(equalTo: stateBadgeBox.topAnchor, constant: 2),
@@ -368,16 +407,27 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
                                          costLabel, listenButton, hangupButton])
         header.orientation = .horizontal
         header.alignment = .centerY
-        header.edgeInsets = NSEdgeInsets(top: KrabEarTheme.Metrics.comfortable, left: 16, bottom: KrabEarTheme.Metrics.standard, right: 16)
+        header.edgeInsets = NSEdgeInsets(
+            top: KrabEarTheme.Metrics.cardPadding,
+            left: KrabEarTheme.Metrics.cardPadding,
+            bottom: KrabEarTheme.Metrics.standard,
+            right: KrabEarTheme.Metrics.cardPadding
+        )
         header.spacing = KrabEarTheme.Metrics.standard
         stateBadgeBox.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         transcriptStack.orientation = .vertical
         transcriptStack.alignment = .leading
         transcriptStack.spacing = KrabEarTheme.Metrics.standard
-        transcriptStack.edgeInsets = NSEdgeInsets(top: KrabEarTheme.Metrics.standard, left: KrabEarTheme.Metrics.comfortable, bottom: KrabEarTheme.Metrics.standard, right: KrabEarTheme.Metrics.comfortable)
+        transcriptStack.edgeInsets = NSEdgeInsets(
+            top: KrabEarTheme.Metrics.standard,
+            left: KrabEarTheme.Metrics.cardPadding,
+            bottom: KrabEarTheme.Metrics.standard,
+            right: KrabEarTheme.Metrics.cardPadding
+        )
         transcriptStack.translatesAutoresizingMaskIntoConstraints = false
 
+        scrollView.applyThemeInnerScroll()
         scrollView.documentView = transcriptStack
         scrollView.hasVerticalScroller = true
         scrollView.translatesAutoresizingMaskIntoConstraints = false
@@ -435,7 +485,7 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
         root.orientation = .vertical
         root.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(root)
-        
+
         let topAnchor = (window?.contentLayoutGuide as? NSLayoutGuide)?.topAnchor ?? content.topAnchor
         NSLayoutConstraint.activate([
             root.topAnchor.constraint(equalTo: topAnchor),
@@ -467,7 +517,7 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
         coordinator?.userSelectedSession(id)
     }
 
-    // MARK: Test hooks
+    // MARK: - Тестовые хуки
     var testHook_stateBadgeText: String { stateBadge.stringValue }
     var testHook_inContentTitleLabel: NSTextField { inContentTitleLabel }
     var testHook_stateBadgeBox: NSBox { stateBadgeBox }
@@ -481,9 +531,8 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
     var testHook_transcriptPlainText: String {
         transcriptStack.arrangedSubviews
             .compactMap { view -> String? in
-                if let tf = view as? NSTextField { return tf.stringValue } // fallback for .system(let msg) which returns a StackView now? No, wait.
-                // Let's recursively find the hidden 'accessibilityLabel' or reconstruct it.
-                // Better: we can store the plain text in `view.toolTip` or `view.identifier`.
+                if let tf = view as? NSTextField { return tf.stringValue }
+                // Извлечение plain text для тестов через identifier вида transcript:<текст>
                 if let sv = view as? NSStackView, let identifier = sv.identifier?.rawValue, identifier.starts(with: "transcript:") {
                     return String(identifier.dropFirst(11))
                 }

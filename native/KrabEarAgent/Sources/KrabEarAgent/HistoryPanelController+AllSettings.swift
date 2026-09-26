@@ -218,7 +218,9 @@ extension HistoryPanelController {
     @MainActor
     private func makeAllSettingsLabelView(desc: SettingDescriptor, key: String, isCD: Bool) -> NSView {
         let titleLabel = NSTextField(labelWithString: desc.titleRU)
-        titleLabel.font = isCD ? .systemFont(ofSize: 12, weight: .medium) : KrabEarTheme.Typography.body
+        // P3: CD-хардкод 12pt → токен темы (тот же маппинг, что в P2-правках
+        // STTEnginesPicker/WebhookManager: 12pt medium ≡ captionMedium).
+        titleLabel.font = isCD ? KrabEarTheme.Typography.captionMedium : KrabEarTheme.Typography.body
         titleLabel.textColor = KrabEarTheme.Colors.textPrimary
         titleLabel.lineBreakMode = .byTruncatingTail
         if let tip = desc.descriptionRU, !tip.isEmpty {
@@ -330,7 +332,10 @@ extension HistoryPanelController {
         let card = CDSettingsCardView()
 
         let searchField = NSSearchField()
-        searchField.placeholderString = "Поиск по ключу"
+        // P3: CD-вариант ищет по тому же haystack, что и Gemini (название + ключ
+        // + группа), поэтому «Поиск по ключу» — ложь. Смысл поиска не меняем,
+        // выравниваем только формулировку с основной веткой.
+        searchField.placeholderString = "Поиск по названию, ключу или группе"
         searchField.target = self
         searchField.action = #selector(onAllSettingsSearchChanged)
         searchField.sendsSearchStringImmediately = true
@@ -358,7 +363,10 @@ extension HistoryPanelController {
         let rowsStack = NSStackView()
         rowsStack.orientation = .vertical
         rowsStack.alignment = .leading
-        rowsStack.spacing = 2
+        // P3: CD-ветка держит ритм Metrics.tight (rebuildAllSettingsRows уже
+        // ставит tight при загрузке — стартовое значение обязано совпадать,
+        // иначе до первой загрузки виден другой интервал).
+        rowsStack.spacing = KrabEarTheme.Metrics.tight
         objc_setAssociatedObject(
             self, &AllSettingsAssocKeys.rowsStack, rowsStack, .OBJC_ASSOCIATION_RETAIN_NONATOMIC
         )
