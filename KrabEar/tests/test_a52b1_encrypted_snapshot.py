@@ -22,6 +22,7 @@ import pytest
 
 from backend.auto_backup import AutoBackupManager
 from backend.encrypted_snapshot import (
+    REASON_POLICY_UNAVAILABLE,
     SNAPSHOT_MANIFEST_FILENAME,
     SNAPSHOT_MANIFEST_VERSION,
     STATE_COMMITTED,
@@ -772,6 +773,29 @@ class TestCommitProtocol:
         assert check["ok"] is False
         assert any("extra_plaintext.ndjson" in m for m in check["mismatches"])
 
+    def test_readback_rejects_extra_subdirectory(self, tmp_path):
+        """MINOR: read-back проверял только is_file() — подкаталог проходил молча.
+
+        Внутрь опубликованного снимка нельзя подложить ничего: ни файл, ни
+        каталог. Иначе «валидный» снимок может тащить посторонние данные.
+        """
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        backup_dir = data_dir / "backups" / "snapshot_1"
+        create_encrypted_snapshot(
+            data_dir=data_dir, backup_dir=backup_dir, crypto=crypto,
+            transaction_id="tx-subdir", policy_on=True,
+        )
+        (backup_dir / "nested").mkdir()
+        (backup_dir / "nested" / "payload.ndjson").write_text(
+            '{"id":"sneaky"}\n', encoding="utf-8"
+        )
+
+        check = verify_snapshot_readback(backup_dir=backup_dir)
+        assert check["ok"] is False
+        assert any("nested" in m for m in check["mismatches"])
+
 
 # ----------------------------------------------------------------------
 # Task 3: manual + auto backup при Encryption ON
@@ -885,7 +909,8 @@ class TestManualBackupEncryptedSnapshot:
             result = svc.handle_backup_history({})
 
         assert result["ok"] is False
-        assert result["reason"]  # машинно-читаемая причина
+        # Причина — константа модуля, а не строковый литерал в сервисе.
+        assert result["reason"] == REASON_POLICY_UNAVAILABLE
         assert not (data_dir / "backups").exists()
 
     def test_manual_backup_off_path_is_untouched(self, tmp_path):

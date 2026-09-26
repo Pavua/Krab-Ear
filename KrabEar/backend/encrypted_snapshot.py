@@ -556,11 +556,16 @@ def verify_snapshot_readback(*, backup_dir: Any) -> dict:
             f"набор файлов не совпадает с реестром: {sorted(map(str, listed))}"
         )
     # Лишние файлы в снимке (например, подброшенный рядом plaintext) —
-    # снимок с ними не считается прочитанным.
+    # снимок с ними не считается прочитанным. Проверяем ЛЮБУЮ запись в каталоге,
+    # включая ПОДКАТАЛОГИ: раньше смотрели только is_file(), и подложенный
+    # подкаталог с содержимым проходил молча.
     for path in sorted(snapshot_dir.iterdir()):
-        if path.is_file() and path.name != SNAPSHOT_MANIFEST_FILENAME:
-            if path.name not in listed:
-                mismatches.append(f"лишний файл в снимке: {path.name}")
+        if path.name == SNAPSHOT_MANIFEST_FILENAME:
+            continue
+        if path.name in listed and path.is_file():
+            continue
+        kind = "каталог" if path.is_dir() else "файл"
+        mismatches.append(f"лишний {kind} в снимке: {path.name}")
 
     for entry in entries:
         name = entry.get("name")

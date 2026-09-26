@@ -25,6 +25,7 @@ from backend.history_encryption_policy import (
     store_policy_reader,
 )
 from backend.encrypted_snapshot import (
+    REASON_POLICY_UNAVAILABLE,
     UNSUPPORTED_BACKUP_REASON,
     SnapshotOperationRefused,
     classify_backup_dir,
@@ -4266,7 +4267,7 @@ class HistoryService:
                     "handle_backup_history: encryption выключен до захвата lock — "
                     "snapshot отменён"
                 )
-                return {**refusal, "reason": "snapshot_policy_unavailable"}
+                return {**refusal, "reason": REASON_POLICY_UNAVAILABLE}
 
             crypto = self._history_crypto_for_snapshot()
             if crypto is None:
