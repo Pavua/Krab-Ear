@@ -286,12 +286,16 @@ def store_policy_reader(store: Any) -> Callable[[], bool]:
     """Fail-closed reader для менеджера с StateStore.
 
     Использует существующий ``StateStore._read_encryption_flag_unlocked``.
-    Лёгкие тестовые двойники без этого метода считаются OFF (как и другие
-    защитные пути, деградирующие на fake-store).
+    Метод обязан быть определён на КЛАССЕ store: проверка через
+    ``getattr(type(store), ...)`` не даёт ``MagicMock`` авто-создать атрибут
+    (иначе любой mock-store выглядел бы как ON и ломал OFF-контроль).
+    Лёгкие тестовые двойники без этого метода считаются OFF.
     """
-    reader = getattr(store, "_read_encryption_flag_unlocked", None)
-    if callable(reader):
-        return lambda: bool(reader())
+    class_reader = getattr(type(store), "_read_encryption_flag_unlocked", None)
+    if callable(class_reader):
+        bound = getattr(store, "_read_encryption_flag_unlocked", None)
+        if callable(bound):
+            return lambda: bool(bound())
     return lambda: False
 
 
@@ -333,6 +337,15 @@ PASS после Task 2 (guard установлен в `handle_backup_history`).
 - [ ] **Step 1: Write the failing tests**
 
 ```python
+def _data_snapshot(data_dir: Path) -> dict:
+    """Байты файлов данных, кроме служебных flock-файлов (*.lock)."""
+    return {
+        p.name: _bytes(p)
+        for p in sorted(data_dir.iterdir())
+        if p.is_file() and p.suffix != ".lock"
+    }
+
+
 class TestManualBackupPolicyFailureModes:
     def test_manual_backup_refuses_on_and_writes_nothing(self, tmp_path):
         data_dir = _data_dir(tmp_path)
@@ -340,7 +353,7 @@ class TestManualBackupPolicyFailureModes:
         store = StateStore(data_dir)
         svc = HistoryService(store=store)
         (data_dir / "history.ndjson").write_text('{"id":"a"}\n', encoding="utf-8")
-        before = {p.name: _bytes(p) for p in sorted(data_dir.iterdir())}
+        before = _data_snapshot(data_dir)
         with patch(
             "backend.history_crypto.build_history_crypto", side_effect=_no_keychain
         ):
@@ -348,7 +361,7 @@ class TestManualBackupPolicyFailureModes:
         assert result["ok"] is False
         assert result["reason"] == REASON
         assert not (data_dir / "backups").exists()
-        after = {p.name: _bytes(p) for p in sorted(data_dir.iterdir())}
+        after = _data_snapshot(data_dir)
         assert after == before
 
     def test_manual_backup_refuses_on_corrupt_settings_without_keychain(self, tmp_path):
@@ -952,3 +965,28 @@ Run:
 
 Run: `scripts/pre_merge_py312_check.sh KrabEar/tests/test_a52a_legacy_backup_gate.py`
 Run: `make audit-all`
+
+---
+
+## Implementation notes (уточнено в GREEN)
+
+- `store_policy_reader` проверяет метод через `getattr(type(store), ...)`, а не
+  через экземпляр: `MagicMock`-store иначе авто-создаёт
+  `_read_encryption_flag_unlocked` и ложный ON ломал OFF-контроль
+  `test_auto_backup*.py`. Fake-store без метода = OFF (как `_store_lock`).
+- Byte-snapshot в `test_manual_backup_refuses_on_and_writes_nothing` исключает
+  `*.lock`: `_is_privacy_mode()` через `store.load_settings()` (pre-existing
+  поведение OFF-профиля) создаёт `history.lock`; это не plaintext-copy sink.
+- Патч `store._read_encryption_flag_unlocked` через `patch.object` на реальном
+  StateStore остаётся виден reader'у: класс-метод есть, instance-атрибут
+  подменён → guard fail-closed.
+- `AutoBackupManager._do_backup`: `mkdir` перенесён ПОД `_store_lock()`, чтобы
+  «проверка до mkdir» и «snapshot под lock» выполнялись одним контрактом.
+
+## Явно вне scope
+
+- A5.2b (encrypted snapshot/manifest/recovery), A5.2c (inventory), A5.3 (export
+  session capability). При ON backup/restore возвращают честный
+  `history_encryption_operation_unavailable`, не частичный результат.
+- `history_encryption_enabled` в прод-коде не включается.
+
