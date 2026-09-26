@@ -574,7 +574,6 @@ class TestCommitProtocol:
         # Существующий бэкап не тронут.
         assert (backup_dir / "history.ndjson").read_text("utf-8") == _line(1) + "\n"
 
-
     def test_readback_rejects_manifest_with_foreign_names(self, tmp_path):
         """Манифест из 10 записей, но с ЧУЖИМИ именами — это не наш реестр."""
         data_dir = _data_dir(tmp_path)
