@@ -95,4 +95,63 @@ final class AllSettingsSectionTests: XCTestCase {
             "синхронный IPC на главном потоке даёт AppHang (AGENT-3) — вызов обязан быть off-main"
         )
     }
+
+    // MARK: - Тесты русского глоссария настроек
+
+    func test_settingsGlossary_knownKeys_haveRussianTitleAndGroup() {
+        let sampleKeys = [
+            "overlay_follow_cursor",
+            "privacy_mode_enabled",
+            "auto_paste",
+            "quality_profile",
+            "stt_gigaam_enabled",
+            "llm_rewrite_enabled",
+            "voice_gateway_url",
+            "audio_ducking_enabled",
+            "silence_guard_enabled",
+        ]
+        for key in sampleKeys {
+            let desc = SettingsGlossary.lookup(key)
+            XCTAssertNotEqual(desc.titleRU, key, "Ключ \(key) обязан иметь человекочитаемый русский заголовок")
+            XCTAssertFalse(desc.groupRU.isEmpty, "Ключ \(key) обязан иметь категорию")
+            XCTAssertNotEqual(desc.groupRU, "Разное", "Известный ключ \(key) не должен попадать в категорию Разное")
+        }
+    }
+
+    func test_settingsGlossary_unknownKey_gracefulFallback() {
+        let unknownKey = "future_unreleased_experiment_key_2027"
+        let desc = SettingsGlossary.lookup(unknownKey)
+        XCTAssertEqual(desc.titleRU, unknownKey, "Неизвестный ключ должен возвращать сам ключ как fallback")
+        XCTAssertEqual(desc.groupRU, "Разное", "Неизвестный ключ должен относиться к группе Разное")
+        XCTAssertNil(desc.descriptionRU)
+    }
+
+    func test_settingsGlossary_itemsCount_coversSettings() {
+        XCTAssertGreaterThanOrEqual(
+            SettingsGlossary.items.count, 245,
+            "В словаре глоссария должно быть не менее 245 параметров конфигурации"
+        )
+    }
+
+    func test_allSettings_searchHaystackAndGlossaryWiring() throws {
+        let src = try readSourceFile(
+            "native/KrabEarAgent/Sources/KrabEarAgent/HistoryPanelController+AllSettings.swift"
+        )
+        XCTAssertTrue(
+            src.contains("SettingsGlossary.lookup(key)"),
+            "makeAllSettingsRow обязан резолвить русский дескриптор через SettingsGlossary"
+        )
+        XCTAssertTrue(
+            src.contains("desc.titleRU"),
+            "makeAllSettingsRow обязан использовать русское название"
+        )
+        XCTAssertTrue(
+            src.contains("desc.groupRU"),
+            "makeAllSettingsRow обязан использовать категорию"
+        )
+        XCTAssertTrue(
+            src.contains("desc.descriptionRU"),
+            "search haystack обязан включать описание настройки"
+        )
+    }
 }
