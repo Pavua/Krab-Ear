@@ -610,30 +610,69 @@ Returns (успех, ON):
 | `snapshot_outside_backups_root` | путь вне `data_dir/backups` (вызывающий получает `RuntimeError`, как и раньше) |
 | `snapshot_source_symlink` | symlink на пути к снимку или к ledger-журналу |
 | `snapshot_stale_staging` | указан неопубликованный staging, а не снимок |
-| `snapshot_restore_pending` / `snapshot_apply_failed` | сбой протокола (см. ниже) |
+| `snapshot_policy_unavailable` | флаг политики не читается (fail-closed: доказать ON не смогли) либо политика изменилась под lock |
+| `snapshot_destination_exists` | каталог назначения/staging уже существует (в т.ч. transaction_id занят) |
+| `snapshot_prepared_missing` | recovery: каталог незавершённой транзакции исчез с диска |
+| `snapshot_source_unreadable` | файл журнала/снимка не читается или не UTF-8 |
+| `snapshot_fsync_failed` | сбой записи/fsync: маркер, staging-файлы или каталог |
+| `snapshot_permissions_failed` | не удалось выставить приватные права (0700/0600) |
+| `snapshot_apply_failed` | сбой замены живых журналов (файл уже мог быть заменён частью) |
 
 При отказе по протоколу **после** durable `COMMITTING` (замена/фиксация/чтение)
-в ответе дополнительно есть признак незавершённости: на диске остаётся
-restore-маркер, авто-отката нет, а следующий запуск докатывает проверенный снимок
-(`StateStore.restore_recovery`).
+на диске остаётся restore-маркер, авто-отката нет, и обслуживание блокируется до
+разбора: следующий вызов точки обслуживания докатывает проверенный снимок либо,
+если докачка невозможна, оставляет маркер и fail-closed причину.
 
-**Recovery (A5.2b2, без отдельного IPC-метода).** Точка входа — конструктор
-`StateStore`: при наличии restore-маркера вызывается докачка (повторная
-верификация снимка → применение → read-back → `COMMITTED`). Без маркера работа не
-выполняется вовсе и ключ не запрашивается. При невозможности докачки — fail-closed:
-никакого отката в plaintext, никакого нового ключа, обычное обслуживание (backup)
-не стартует, причина машинно-читаема, путь pre-restore снимка остаётся в ответе.
-Результат последнего recovery — `StateStore.restore_recovery`
-(`{ok, pending, reason, state, transaction_id, snapshot_dir, pre_restore_snapshot,
-restored_entries, rolled_forward, stale_staging, extra_markers, snapshot_pending}`).
+Поля успешного ответа (проверено по коду, M3/N3/N4):
+
+| Поле | Значение |
+|---|---|
+| `restored_entries` | строки **восстановленной `history.ndjson`**; `null` — значение неизвестно (см. `warnings`) |
+| `restored_entries_verified` | `true` — пересчитано живым стором после COMMITTED; `false` — счётчик был недоступен |
+| `restored_entries_source` | `store_count` / `snapshot_lines` / `unknown` |
+| `filtered_out_lines` | **строки** (по всем 10 журналам: история + дельты), вычеркнутые по deletion ledger |
+| `ledger_blocked` | размер объединения tombstones ∪ purged |
+| `warnings` | машинно-читаемый список (например, `restored_entries_unverified`) |
+
+`restored_entries` **никогда** не берётся из значения, не прошедшего проверку:
+значение, прочитанное с диска (COMMITTED-маркер в recovery), проверяется на тип,
+диапазон и правдоподобие, иначе возвращается 0 с громким предупреждением.
+
+**Recovery (A5.2b2, без отдельного IPC-метода).** Точки входа — **обслуживание**,
+а не конструктор `StateStore` (у фасада пять точек создания, а докачка шла до
+инициализации Sentry/ErrorBus): `backup_history`, `restore_history`,
+`list_backups` (read-only вердикт) и авто-бэкап-цикл. При наличии
+restore-маркера вызывается докачка (повторная верификация снимка → применение →
+read-back → `COMMITTED`); маркера нет — вызов мгновенно возвращает `None` и ключ
+не запрашивается. Целевой снимок берётся из маркера «как записан», поэтому
+подмена каталога на symlink после crash отклоняется до докачки.
+
+При невозможности докачки — fail-closed: никакого отката в plaintext, никакого
+нового ключа, обычное обслуживание (backup) не стартует, причина
+машинно-читаема, путь pre-restore снимка остаётся в ответе.
+
+Вердикт читаем двумя существующими способами (отдельного диагностического
+IPC-метода нет — `service.py` в бане волны, это долг):
+
+- `list_backups.restore_recovery` — read-only, всегда актуален (считывается с
+  маркера, ничего не пишет и не докатывает);
+- `get_auto_backup_status.restore_recovery` + `restore_pending` +
+  `blocked_by_pending` — то же плюс влияет на «backup недоступен».
+
+Форма вердикта: `{ok, pending, reason, state, transaction_id, snapshot_dir,
+pre_restore_snapshot, restored_entries, rolled_forward, stale_staging,
+extra_markers, snapshot_pending}`. `restored_entries` здесь — из маркера, с
+проверкой (см. выше), и 0 означает «непригодно», а не «пусто».
 
 ### `list_backups`
 *(history_service.py)*  
 Возвращает список доступных резервных копий с метаданными.  
 Нет params.  
-Returns: `{backups: [{path, backup_date, entries, size_mb}, ...], encrypted_snapshots: [{path, restorable, reason}, ...]}`
+Returns: `{backups: [{path, backup_date, entries, size_mb}, ...], encrypted_snapshots: [{path, restorable, reason}, ...], restore_recovery: {...} | null}`
 
 `backups` содержит **только legacy-копии** (`backup_*`, `auto_backup_*`).
+`restore_recovery` — A5.2b2, read-only вердикт о незавершённом restore (см. выше);
+`null`, если маркера нет.
 
 `encrypted_snapshots` (A5.2b1) — снимки нового протокола (`snapshot_*`,
 `snapshot_prerestore_*`). Поле `restorable: false` и
@@ -661,7 +700,15 @@ Returns: `{exports: [...]}`
 *(service.py → auto_backup.py)*  
 Статус авто-резервного копирования: включено, последний/следующий бэкап, счётчики.  
 Нет params.  
-Returns: `{enabled, last_backup_ts, next_backup_ts, total_backups, encrypted_snapshots, interval_hours, max_copies, backups_dir, encryption_on, encryption_operation_unavailable, skipped_reason, last_backup_kind, last_refusal_reason}`
+Returns: `{enabled, last_backup_ts, next_backup_ts, total_backups, encrypted_snapshots, interval_hours, max_copies, backups_dir, encryption_on, encryption_operation_unavailable, skipped_reason, last_backup_kind, last_refusal_reason, restore_pending, restore_recovery, blocked_by_pending}`
+
+Поля A5.2b2 (B2): `restore_pending` — на диске есть незавершённый restore;
+`blocked_by_pending` — обычное обслуживание заблокировано (незавершённый restore
+**или** незавершённая транзакция снимка b1), и это же делает
+`encryption_operation_unavailable: true`; `restore_recovery` — read-only вердикт
+(см. `restore_history`). Причина отказа цикла больше не теряется за общим
+`history_encryption_operation_unavailable`: конкретные коды протокола
+(например, `snapshot_recovery_pending`) доходят до `skipped_reason` как есть.
 
 Поля наблюдаемости (важно: backend startup и RecordingCore **игнорируют**
 результат `check_and_backup`, поэтому причина любого отказа обязана быть видна

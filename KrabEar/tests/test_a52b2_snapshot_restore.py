@@ -2557,3 +2557,59 @@ class TestRestoreCountDegradation:
 
         assert observed, "reset_search_caches не вызван"
         assert observed[0]["locked"] is True, "сброс индекса сделан вне store-lock"
+
+
+class TestRecoveryRefusesSubstitutedTarget:
+    """N1: symlink-слой containment живёт в recovery, а не только в тестах.
+
+    Целевой снимок recovery берёт ИЗ МАРКЕРА («как записан»). Если после crash
+    каталог подменили symlink'ом, докачка не должна идти по нему — это ровно тот
+    случай, ради которого слой symlink-компонентов и нужен.
+    """
+
+    def test_recovery_refuses_symlinked_target_after_crash(self, tmp_path):
+        import shutil
+
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        _crash_on_nth_replace(data_dir, crypto, snapshot_dir, nth=4)
+        assert _restore_markers(data_dir) != []
+        # Подмена: настоящий снимок уводим в сторону, на его место — symlink.
+        elsewhere = tmp_path / "подменённый_снимок"
+        shutil.move(str(snapshot_dir), str(elsewhere))
+        os.symlink(str(elsewhere), str(snapshot_dir))
+        live_before = _data_bytes(data_dir)
+
+        result = _recover(data_dir, crypto)
+
+        assert result["ok"] is False
+        assert result["pending"] is True
+        assert result["reason"] == "snapshot_source_symlink"
+        assert _data_bytes(data_dir) == live_before
+        assert _restore_markers(data_dir) != [], "доказательство не должно исчезнуть"
+
+    def test_recovery_refuses_target_escaping_backups_root(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        _crash_on_nth_replace(data_dir, crypto, snapshot_dir, nth=2)
+        # Снимок «уехал» из backups — маркер указывает на уже недопустимую цель.
+        import shutil
+
+        shutil.move(str(snapshot_dir), str(tmp_path / "вне_backups"))
+        live_before = _data_bytes(data_dir)
+
+        result = _recover(data_dir, crypto)
+
+        assert result["ok"] is False
+        assert result["pending"] is True
+        assert result["reason"] in {
+            "snapshot_outside_backups_root",
+            "snapshot_manifest_invalid",
+        }
+        assert _data_bytes(data_dir) == live_before
