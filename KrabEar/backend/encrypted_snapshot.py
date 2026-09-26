@@ -1468,10 +1468,8 @@ def _cleanup_restore_tmp(data_dir: Path, transaction_id: str) -> None:
 def _apply_verified_snapshot_locked(
     *,
     data_dir: Path,
-    backups_root: Path,
     snapshot_dir: Path,
     crypto: Any,
-    policy_read: Callable[[], bool],
     transaction_id: str,
     pre_restore_snapshot: str,
     recovered: bool,
@@ -1479,10 +1477,14 @@ def _apply_verified_snapshot_locked(
 ) -> dict:
     """Шаги 2–4 под store-lock: union → фильтрация → COMMITTING → замены → read-back.
 
-    Вызывается и обычным restore, и recovery (roll-forward). Разница: ``staging``
-    (у recovery — каталог незавершённой транзакции, он переиспользуется) и
-    ``pre_restore_snapshot``/``recovered`` (страховка уже создана первым
-    restore, второй раз она не нужна).
+    Вызывается и обычным restore, и recovery (roll-forward); оба вызова — уже
+    под ``history_flock``, с повторной проверкой policy и повторной верификацией
+    снимка (поэтому ни ``policy_read``, ни ``backups_root`` здесь и нет: делать
+    вид, что проверка политики происходит внутри, было бы ложью).
+
+    Разница: ``staging`` (у recovery — каталог незавершённой транзакции, он
+    переиспользуется) и ``pre_restore_snapshot``/``recovered`` (страховка уже
+    создана первым restore, второй раз она не нужна).
     """
     union = set(collect_ledger_union(data_dir=data_dir, crypto=crypto))
     blocked = union | _snapshot_ledger_ids(snapshot_dir=snapshot_dir, crypto=crypto)
@@ -1771,10 +1773,8 @@ def recover_pending_restore(
             verify_snapshot(backups_root=backups_root, snapshot_dir=target, crypto=crypto)
             result = _apply_verified_snapshot_locked(
                 data_dir=data_dir,
-                backups_root=backups_root,
                 snapshot_dir=Path(str(target)),
                 crypto=crypto,
-                policy_read=policy_read,
                 transaction_id=transaction_id or _new_transaction_id("restore"),
                 pre_restore_snapshot=str(pre_restore) if pre_restore else "",
                 recovered=True,
@@ -1960,10 +1960,8 @@ def restore_encrypted_snapshot(
         )
         return _apply_verified_snapshot_locked(
             data_dir=data_dir,
-            backups_root=backups_root,
             snapshot_dir=resolved,
             crypto=crypto,
-            policy_read=policy_read,
             transaction_id=transaction_id,
             pre_restore_snapshot=str(pre_dir),
             recovered=False,
