@@ -892,9 +892,13 @@ class TestWave1767Hardening(unittest.TestCase):
         with patch.object(_fcntl, "flock", side_effect=_spy_flock):
             migrator.rollback_migration(self._tmpdir, result.backup_path)
 
-        # Должны быть LOCK_EX и LOCK_UN
-        self.assertIn(_fcntl.LOCK_EX, flock_calls,
-                      "#13: rollback_migration не захватывает LOCK_EX на history.lock")
+        # Должны быть exclusive-флаг и LOCK_UN. A5.2a: history_flock берёт
+        # LOCK_EX | LOCK_NB (опрос с таймаутом, чтобы потенциальный дедлок был
+        # громким), поэтому проверяем бит LOCK_EX, а не точное равенство.
+        self.assertTrue(
+            any(op & _fcntl.LOCK_EX for op in flock_calls),
+            "#13: rollback_migration не захватывает exclusive flock на history.lock",
+        )
         self.assertIn(_fcntl.LOCK_UN, flock_calls,
                       "#13: rollback_migration не снимает LOCK_UN после восстановления")
 

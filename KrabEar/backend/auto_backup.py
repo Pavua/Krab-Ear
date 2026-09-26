@@ -18,6 +18,12 @@ from pathlib import Path
 from typing import Any, Callable, ContextManager, Optional
 
 from backend.settings_backup import SENSITIVE_FIELDS as _SENSITIVE_FIELDS
+from backend.history_encryption_policy import (
+    OPERATION_UNAVAILABLE_REASON as _ENC_OP_UNAVAILABLE,
+    HistoryEncryptionOperationUnavailable,
+    policy_blocks,
+    store_policy_reader,
+)
 
 logger = logging.getLogger("KrabEar.Backend.AutoBackup")
 
@@ -66,6 +72,14 @@ class AutoBackupManager:
         # пропускает запись молча. clear_purged() снимает флаг после завершения purge
         # (будущие бэкапы снова разрешены). threading.Event сам по себе thread-safe.
         self._purged = threading.Event()
+        # A5.2a: fail-closed policy-reader legacy plaintext backup. При
+        # Encryption ON check_and_backup/_do_backup отказывают до mkdir и не
+        # трогают старые backup'ы/meta. Guard не трогает Keychain.
+        self._encryption_policy_read = store_policy_reader(store)
+
+    def _encryption_blocked(self) -> bool:
+        """True, если legacy plaintext auto-backup запрещён политикой."""
+        return policy_blocks(getattr(self, "_encryption_policy_read", None))
 
     def _is_privacy_mode(self) -> bool:
         """FAIL-CLOSED чтение ``privacy_mode_enabled``.
@@ -180,12 +194,6 @@ class AutoBackupManager:
         """Выполняет резервное копирование и возвращает метаданные."""
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         backup_dir = self.backups_dir / f"auto_backup_{ts}"
-        # Create with restricted permissions so PII is not world-readable.
-        backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        try:
-            os.chmod(backup_dir, 0o700)
-        except OSError:
-            pass
 
         # Файлы истории/статуса копируются verbatim; settings.json — только после редакции.
         plain_files = [
@@ -202,11 +210,18 @@ class AutoBackupManager:
         # попавшее МЕЖДУ copy2() отдельных файлов, спарит pre-compact history.ndjson
         # с post-compact tombstones (или наоборот) → при восстановлении воскресшие
         # либо потерянные записи (integrity/privacy-регрессия).
-        # ВАЖНО: flock НЕ реентрантен (каждый _lock() открывает свой fd →
-        # повторный LOCK_EX из того же процесса заблокируется навсегда). Поэтому
-        # внутри блока — только plain shutil.copy2 / чтение settings.json: никаких
-        # методов store, которые сами берут lock (count_active_items и т.п.).
+        # A5.2a: mkdir перенесён ПОД lock, а policy повторно проверяется ПОСЛЕ
+        # захвата — OFF→ON через второй StateStore не должен успеть создать
+        # plaintext-копию. При ON sink не трогается вовсе.
         with self._store_lock():
+            if self._encryption_blocked():
+                raise HistoryEncryptionOperationUnavailable("auto_backup")
+            # Create with restricted permissions so PII is not world-readable.
+            backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            try:
+                os.chmod(backup_dir, 0o700)
+            except OSError:
+                pass
             for src in plain_files:
                 if Path(src).exists():
                     dst = backup_dir / Path(src).name
@@ -340,6 +355,15 @@ class AutoBackupManager:
         if self._purged.is_set():
             return {"backed_up": False, "skipped_reason": "purged", "backup_path": None}
 
+        # A5.2a: legacy auto-backup создаёт plaintext-копию истории. При
+        # Encryption ON отказ ДО mkdir; старые backup'ы/meta не трогаются.
+        if self._encryption_blocked():
+            return {
+                "backed_up": False,
+                "skipped_reason": _ENC_OP_UNAVAILABLE,
+                "backup_path": None,
+            }
+
         with self._lock:
             meta = self._load_meta()
             last_ts_str: str | None = meta.get("last_backup_ts")
@@ -370,7 +394,23 @@ class AutoBackupManager:
             if self._purged.is_set():
                 return {"backed_up": False, "skipped_reason": "purged", "backup_path": None}
 
-            result = self._do_backup()
+            # A5.2a: OFF→ON через второй StateStore, пока мы ждали self._lock.
+            if self._encryption_blocked():
+                return {
+                    "backed_up": False,
+                    "skipped_reason": _ENC_OP_UNAVAILABLE,
+                    "backup_path": None,
+                }
+
+            try:
+                result = self._do_backup()
+            except HistoryEncryptionOperationUnavailable:
+                # ON пойман повторно под store-lock — sink не тронут.
+                return {
+                    "backed_up": False,
+                    "skipped_reason": _ENC_OP_UNAVAILABLE,
+                    "backup_path": None,
+                }
             self._prune_old_backups()
 
             meta["last_backup_ts"] = datetime.now(timezone.utc).isoformat()
@@ -416,6 +456,7 @@ class AutoBackupManager:
                     pass
 
             total_backups = len(self._list_auto_backups())
+            encryption_blocked = self._encryption_blocked()
 
             return {
                 "enabled": self.enabled,
@@ -425,4 +466,9 @@ class AutoBackupManager:
                 "interval_hours": self.interval_hours,
                 "max_copies": self.max_copies,
                 "backups_dir": str(self.backups_dir),
+                # A5.2a: наблюдаемый отказ legacy plaintext backup. Backend
+                # startup и RecordingCore игнорируют результат check_and_backup,
+                # поэтому причина обязана быть видна и здесь.
+                "encryption_operation_unavailable": encryption_blocked,
+                "skipped_reason": _ENC_OP_UNAVAILABLE if encryption_blocked else None,
             }

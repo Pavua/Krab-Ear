@@ -19,6 +19,11 @@ from core.search_highlighter import SearchHighlighter
 
 from core.duplicate_detector import DuplicateDetector
 from backend.summary_profiles import SummaryProfileManager
+from backend.history_encryption_policy import (
+    OPERATION_UNAVAILABLE_REASON as _ENC_OP_UNAVAILABLE,
+    policy_blocks,
+    store_policy_reader,
+)
 
 # Typed imports — only loaded during static analysis, avoid runtime circular imports
 if TYPE_CHECKING:
@@ -4145,12 +4150,31 @@ class HistoryService:
         if self._is_privacy_mode():
             return {"backup_path": None, "size_mb": 0.0, "entries": 0, "reason": "privacy_mode_active"}
 
+        # A5.2a: manual backup создаёт plaintext-копию управляемой истории.
+        # При Encryption ON — отказ с машинно-читаемой причиной ДО mkdir.
+        # Повторная проверка ПОД общим store-lock закрывает OFF→ON гонку через
+        # второй StateStore. Guard не трогает Keychain.
         import shutil
+
+        policy_read = store_policy_reader(self.store)
+        refusal = {
+            "backup_path": None,
+            "size_mb": 0.0,
+            "entries": 0,
+            "ok": False,
+            "reason": _ENC_OP_UNAVAILABLE,
+        }
+        if policy_blocks(policy_read):
+            logger.warning(
+                "handle_backup_history: history encryption on — legacy plaintext "
+                "backup refused (%s)",
+                _ENC_OP_UNAVAILABLE,
+            )
+            return refusal
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         backups_dir = Path(self.store.data_dir) / "backups"
         backup_dir = backups_dir / f"backup_{ts}"
-        backup_dir.mkdir(parents=True, exist_ok=True)
 
         files_to_backup = [
             self.store.history_path,
@@ -4160,13 +4184,26 @@ class HistoryService:
         ]
 
         total_bytes = 0
-        for src in files_to_backup:
-            if src.exists():
-                dst = backup_dir / src.name
-                shutil.copy2(src, dst)
-                total_bytes += dst.stat().st_size
+        # W1768-класс: снимок истории обязан быть атомарным относительно
+        # append/compaction — держим тот же store-lock. Guard и sink в одном
+        # lock-контракте; повторная политика-проверка ПОСЛЕ захвата lock.
+        with self.store._lock():
+            if policy_blocks(policy_read):
+                logger.warning(
+                    "handle_backup_history: encryption включён до захвата lock — "
+                    "legacy plaintext backup refused (%s)",
+                    _ENC_OP_UNAVAILABLE,
+                )
+                return refusal
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            for src in files_to_backup:
+                if src.exists():
+                    dst = backup_dir / src.name
+                    shutil.copy2(src, dst)
+                    total_bytes += dst.stat().st_size
 
-        # Сохраняем метаданные резервной копии
+        # Сохраняем метаданные резервной копии (вне lock: count_active_items
+        # сам берёт store-lock).
         import json as _json
         entries = self.store.count_active_items()
         meta = {
@@ -4199,6 +4236,25 @@ class HistoryService:
             backup_date (str): timestamp резервной копии
         """
         import shutil
+
+        # A5.2a: legacy restore через copy2 запрещён при Encryption ON — он
+        # вернул бы plaintext и мог бы понизить текущую policy через
+        # restore_settings=True (OFF-settings в backup). Отказ ДО валидации
+        # пути и до любого чтения/записи, с машинно-читаемой причиной.
+        policy_read = store_policy_reader(self.store)
+        refusal = {
+            "restored_entries": 0,
+            "backup_date": "unknown",
+            "ok": False,
+            "reason": _ENC_OP_UNAVAILABLE,
+        }
+        if policy_blocks(policy_read):
+            logger.warning(
+                "handle_restore_history: history encryption on — legacy plaintext "
+                "restore refused (%s)",
+                _ENC_OP_UNAVAILABLE,
+            )
+            return refusal
 
         raw_path = str(params.get("backup_path", "")).strip()
         if not raw_path:
@@ -4240,6 +4296,15 @@ class HistoryService:
 
         # Восстанавливаем файлы (под lock)
         with self.store._lock():
+            # A5.2a: OFF→ON через второй StateStore до захвата lock —
+            # повторная проверка блокирует sink до первого copy2.
+            if policy_blocks(policy_read):
+                logger.warning(
+                    "handle_restore_history: encryption включён до захвата lock — "
+                    "legacy plaintext restore refused (%s)",
+                    _ENC_OP_UNAVAILABLE,
+                )
+                return refusal
             if history_backup.exists():
                 shutil.copy2(history_backup, self.store.history_path)
 
