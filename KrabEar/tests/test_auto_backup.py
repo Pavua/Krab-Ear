@@ -32,7 +32,7 @@ def _make_store(data_dir: Path) -> MagicMock:
     # Создаём dummy файлы
     for attr in ("history_path", "tombstones_path", "settings_path"):
         p = getattr(store, attr)
-        p.write_text("dummy", encoding="utf-8")
+        p.write_text("{}", encoding="utf-8")
     return store
 
 
