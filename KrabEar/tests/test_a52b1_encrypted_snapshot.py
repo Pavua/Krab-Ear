@@ -1542,8 +1542,8 @@ class TestAutoBackupRefusalObservability:
     """
 
     def _on_profile(self, tmp_path: Path, crypto):
+        """Профиль с ON и заданным ключом (None ⇒ ключ недоступен)."""
         data_dir = _data_dir(tmp_path)
-        crypto = crypto
         _settings_on(data_dir)
         return data_dir, _store_with_crypto(data_dir, crypto)
 
@@ -1616,7 +1616,6 @@ class TestAutoBackupRefusalObservability:
         assert status["last_refusal_reason"] is None
 
     def test_sidecar_does_not_appear_in_legacy_backup_listing(self, tmp_path):
-        crypto = _crypto()
         data_dir, store = self._on_profile(tmp_path, None)
         mgr = AutoBackupManager(store=store, interval_hours=0)
         mgr.check_and_backup()
