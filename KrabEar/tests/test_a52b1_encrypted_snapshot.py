@@ -1439,3 +1439,82 @@ class TestAutoBackupPolicyRace:
         backups = data_dir / "backups"
         rec = recover_pending_state(data_dir=data_dir, backups_root=backups)
         assert rec["pending"] is False
+
+
+class TestSnapshotContainment:
+    """MINOR (containment): снимок не может уйти за пределы backups-области.
+
+    Проверяется РАЗРЕШЁННЫЙ путь назначения: и лексический (никаких `..` и
+    чужих каталогов), и разыменованный (симлинк внутри backups не уводит снимок
+    наружу). Отдельно закреплено решение по симлинку на САМОМ каталоге backups.
+    """
+
+    def _data_dir_with_history(self, tmp_path: Path) -> tuple[Path, HistoryCrypto]:
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        (data_dir / "history.ndjson").write_text(_line(1) + "\n", encoding="utf-8")
+        return data_dir, crypto
+
+    def test_destination_outside_backups_root_is_refused(self, tmp_path):
+        data_dir, crypto = self._data_dir_with_history(tmp_path)
+        outside = tmp_path / "elsewhere" / "snap"
+        with pytest.raises(SnapshotOperationRefused) as exc:
+            build_encrypted_snapshot(
+                data_dir=data_dir, backup_dir=outside, crypto=crypto,
+                transaction_id="tx-outside", policy_on=True,
+            )
+        assert exc.value.reason == "snapshot_outside_backups_root"
+        assert not outside.exists()
+
+    def test_lexical_escape_via_parent_segments_is_refused(self, tmp_path):
+        data_dir, crypto = self._data_dir_with_history(tmp_path)
+        (data_dir / "backups").mkdir()
+        escape = data_dir / "backups" / ".." / "evil"
+        with pytest.raises(SnapshotOperationRefused) as exc:
+            build_encrypted_snapshot(
+                data_dir=data_dir, backup_dir=escape, crypto=crypto,
+                transaction_id="tx-dotdot", policy_on=True,
+            )
+        assert exc.value.reason == "snapshot_outside_backups_root"
+        assert not (data_dir / "evil").exists()
+
+    def test_symlinked_destination_inside_backups_is_refused(self, tmp_path):
+        data_dir, crypto = self._data_dir_with_history(tmp_path)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (data_dir / "backups").mkdir()
+        (data_dir / "backups" / "snap").symlink_to(outside)
+        with pytest.raises(SnapshotOperationRefused) as exc:
+            build_encrypted_snapshot(
+                data_dir=data_dir, backup_dir=data_dir / "backups" / "snap",
+                crypto=crypto, transaction_id="tx-symlink-dest", policy_on=True,
+            )
+        assert exc.value.reason == "snapshot_outside_backups_root"
+        assert list(outside.iterdir()) == []
+
+    def test_symlinked_backups_root_is_followed_to_real_location(self, tmp_path):
+        """РЕШЕНИЕ: симлинк на САМ каталог backups допускается и разыменовывается.
+
+        Владелец вправе держать backups на другом томе — это легальная
+        конфигурация, и запрещать её нельзя. Снимок обязан лежать рядом с
+        остальными бэкапами, то есть по РЕАЛЬНОМУ пути backups; проверка
+        containment сравнивает разыменованные пути с обеих сторон, поэтому
+        «настоящий» backups и снимок совпадают. Запрещено лишь уйти из этой
+        области (три теста выше).
+        """
+        data_dir, crypto = self._data_dir_with_history(tmp_path)
+        real_backups = tmp_path / "real_backups"
+        real_backups.mkdir()
+        (data_dir / "backups").symlink_to(real_backups)
+
+        result = create_encrypted_snapshot(
+            data_dir=data_dir, backup_dir=data_dir / "backups" / "snapshot_1",
+            crypto=crypto, transaction_id="tx-root-symlink", policy_on=True,
+        )
+
+        assert result["state"] == STATE_COMMITTED
+        published = Path(result["backup_dir"])
+        # Снимок физически лежит в РЕАЛЬНОМ backups, а не рядом с симлинком.
+        assert published.parent == real_backups
+        assert _manifest(published)["state"] == STATE_COMMITTED
+        assert _payload_files(published) == sorted(HISTORY_JOURNAL_FILENAMES)

@@ -443,6 +443,12 @@ def build_encrypted_snapshot(
 
     Snapshot ещё НЕ опубликован — это делает ``commit_encrypted_snapshot``.
     Возвращает ``prepared``-словарь (fingerprint источников — только в памяти).
+
+    ИМЕНА ПАРАМЕТРОВ (b2 обязан читать буквально): ``backup_dir`` здесь — КАТАЛОГ
+    СНИМКА, то есть публикуемое назначение внутри ``<data_dir>/backups``; он НЕ
+    является корнем backups. Корнем backups оперируют ``recover_pending_state``
+    и ``find_pending_transaction`` — у них параметр называется ``backups_root``.
+    Одинаковое имя ``backup_dir`` у обоих раньше означало разные вещи.
     """
     data_dir = Path(data_dir)
     backup_dir = Path(backup_dir)
@@ -526,7 +532,7 @@ def build_encrypted_snapshot(
         "state": STATE_PREPARED,
         "transaction_id": transaction_id,
         "staging_dir": str(staging),
-        "backup_dir": str(backup_dir),
+        "backup_dir": str(dest),  # разрешённый путь: symlink разыменован
         "manifest": manifest,
         "files": files_meta,
         "size_bytes": total_bytes,
@@ -652,7 +658,7 @@ def commit_encrypted_snapshot(
     внутри ``<data_dir>/backups``.
     """
     backup_dir = Path(backup_dir)
-    _require_inside_backups(data_dir, backup_dir)
+    dest = _require_inside_backups(data_dir, backup_dir)
     if not prepared:
         raise SnapshotOperationRefused(
             REASON_PREPARED_MISSING, "commit без подготовленного снимка запрещён"
@@ -713,7 +719,7 @@ def commit_encrypted_snapshot(
     # (спека §5), а признак COMMITTING обязан пережить crash для b2-доказки.
     try:
         # Шаг 5: публикация проверенного снимка.
-        _publish_staging(staging, backup_dir)
+        _publish_staging(staging, dest)
     except OSError as exc:
         # Crash/сбой на первой замене: источники целы, признак COMMITTING
         # остаётся на диске — система fail-closed, отката нет.
@@ -749,7 +755,7 @@ def commit_encrypted_snapshot(
 
     manifest["state"] = STATE_COMMITTED
     _write_manifest_atomic(backup_dir, manifest)
-    _fsync_dir(backup_dir)
+    _fsync_dir(dest)
     logger.info(
         "encrypted_snapshot: транзакция %s зафиксирована (COMMITTED), %d файлов",
         transaction_id, len(manifest["files"]),
@@ -758,7 +764,7 @@ def commit_encrypted_snapshot(
         "ok": True,
         "state": STATE_COMMITTED,
         "transaction_id": transaction_id,
-        "backup_dir": str(backup_dir),
+        "backup_dir": str(dest),  # разрешённый путь: symlink разыменован
         "files": manifest["files"],
         "size_bytes": prepared.get("size_bytes", 0),
         "readback": readback,
