@@ -1226,21 +1226,6 @@ def collect_ledger_union(*, data_dir: Any, crypto: Any) -> tuple[str, ...]:
     return tuple(sorted(union))
 
 
-def _write_restore_marker(*args: Any, **kwargs: Any) -> None:
-    """Durable restore-маркер (COMMITTING) — отдельная точка ради crash-доказки."""
-    raise NotImplementedError("A5.2b2 Task 2: _write_restore_marker ещё не реализован")
-
-
-def _replace_journal(*args: Any, **kwargs: Any) -> None:
-    """Одна замена живого журнала (os.replace) — отдельная точка ради crash-доказки."""
-    raise NotImplementedError("A5.2b2 Task 2: _replace_journal ещё не реализован")
-
-
-def _readback_live_journals(*args: Any, **kwargs: Any) -> dict:
-    """Read-back всех десяти живых журналов — отдельная точка ради crash-доказки."""
-    raise NotImplementedError("A5.2b2 Task 2: _readback_live_journals ещё не реализован")
-
-
 def _new_transaction_id(prefix: str) -> str:
     """Уникальный transaction_id: метка времени + случайные 4 байта.
 
