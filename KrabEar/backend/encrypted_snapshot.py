@@ -72,6 +72,7 @@ REASON_FINGERPRINT_MISMATCH = "snapshot_fingerprint_mismatch"
 REASON_PENDING_OPERATION = "snapshot_pending_operation"
 REASON_DESTINATION_EXISTS = "snapshot_destination_exists"
 REASON_READBACK_FAILED = "snapshot_readback_failed"
+REASON_PUBLISH_FAILED = "snapshot_publish_failed"
 REASON_MANIFEST_INVALID = "snapshot_manifest_invalid"
 REASON_FSYNC_FAILED = "snapshot_fsync_failed"
 REASON_RECOVERY_PENDING = "snapshot_recovery_pending"
@@ -588,6 +589,18 @@ def commit_encrypted_snapshot(
             f"источники изменились после подготовки: {changed}",
         )
 
+    # Проверка адреса назначения — ДО durable COMMITTING (MAJOR-2).
+    # «Каталог уже существует» — отказ ДО первой замены, то есть отмена по
+    # спецификации §5 («до COMMITTING отмена оставляет исходные файлы без
+    # изменений»). Если проверять это внутри публикации, отказ случился бы уже
+    # ПОСЛЕ записи COMMITTING: на диске осталась бы транзакция, которая никогда
+    # не начала замену, а `recover_pending_state` залип бы в pending навсегда.
+    if backup_dir.exists():
+        _cancel_staging(staging)
+        raise SnapshotOperationRefused(
+            REASON_DESTINATION_EXISTS, f"{backup_dir} уже существует — не перезаписываем"
+        )
+
     # Шаг 4: durable COMMITTING — ДО первой замены.
     manifest = dict(prepared["manifest"])
     manifest["state"] = STATE_COMMITTING
@@ -602,10 +615,14 @@ def commit_encrypted_snapshot(
         # Crash/сбой на первой замене: источники целы, признак COMMITTING
         # остаётся на диске — система fail-closed, отката нет.
         raise SnapshotOperationRefused(
-            REASON_READBACK_FAILED,
+            REASON_PUBLISH_FAILED,
             f"публикация снимка не удалась: {type(exc).__name__}: {exc}",
             pending=True,
         ) from exc
+    except SnapshotOperationRefused as exc:
+        # Отказ самой публикации после COMMITTING: транзакция уже durable,
+        # чистить staging нельзя — это уничтожило бы доказательство для b2.
+        raise SnapshotOperationRefused(exc.reason, str(exc), pending=True) from exc
 
     # Шаг 6: read-back ВСЕХ файлов; при расхождении состояние остаётся COMMITTING.
     # Сбой самого read-back — тоже fail-closed: COMMITTED не достигается,

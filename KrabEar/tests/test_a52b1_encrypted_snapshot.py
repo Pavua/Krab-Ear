@@ -482,7 +482,7 @@ class TestCommitProtocol:
                     transaction_id="tx-a52b1-crash1",
                     policy_on=True,
                 )
-        assert exc.value.reason == "snapshot_readback_failed"
+        assert exc.value.reason == "snapshot_publish_failed"
         assert exc.value.pending is True
         # Признак COMMITTING пережил crash — источник для b2-доказки.
         assert not backup_dir.exists()
@@ -663,6 +663,59 @@ class TestCommitProtocol:
         assert exc.value.reason == "snapshot_destination_exists"
         # Существующий бэкап не тронут.
         assert (backup_dir / "history.ndjson").read_text("utf-8") == _line(1) + "\n"
+
+    def test_refusal_before_publication_leaves_no_committing_evidence(self, tmp_path):
+        """Отказ ДО первой замены не должен оставлять durable COMMITTING (MAJOR-2).
+
+        Иначе `COMMITTING` перестаёт означать «замена началась» — доказательная
+        база b2 разрушается, а `recover_pending_state` залипает навсегда.
+        """
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        backups_root = tmp_path / "backups"
+        backup_dir = backups_root / "snapshot_1"
+        backup_dir.mkdir(parents=True)
+        (backup_dir / "history.ndjson").write_text(_line(1) + "\n", encoding="utf-8")
+
+        with pytest.raises(SnapshotOperationRefused) as exc:
+            create_encrypted_snapshot(
+                data_dir=data_dir,
+                backup_dir=backup_dir,
+                crypto=crypto,
+                transaction_id="tx-a52b1-dest2",
+                policy_on=True,
+            )
+        assert exc.value.reason == "snapshot_destination_exists"
+        # Ни staging, ни признака незавершённой транзакции.
+        assert _staging_dirs(backups_root) == []
+        recovery = recover_pending_state(data_dir=data_dir, backup_dir=backups_root)
+        assert recovery["pending"] is False
+        assert recovery["reason"] is None
+        assert recovery["ok"] is True
+
+    def test_second_backup_in_same_second_does_not_poison_recovery(self, tmp_path):
+        """Два backup'а в одну секунду: второй честно отказывает, b2-база цела."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        backups_root = tmp_path / "backups"
+        first = backups_root / "snapshot_1"
+        create_encrypted_snapshot(
+            data_dir=data_dir, backup_dir=first, crypto=crypto,
+            transaction_id="tx-a52b1-1", policy_on=True,
+        )
+        with pytest.raises(SnapshotOperationRefused) as exc:
+            create_encrypted_snapshot(
+                data_dir=data_dir, backup_dir=first, crypto=crypto,
+                transaction_id="tx-a52b1-2", policy_on=True,
+            )
+        assert exc.value.reason == "snapshot_destination_exists"
+        assert _staging_dirs(backups_root) == []
+        recovery = recover_pending_state(data_dir=data_dir, backup_dir=backups_root)
+        assert recovery["pending"] is False
+        # Первый снимок остался валидным и зафиксированным.
+        assert _manifest(first)["state"] == STATE_COMMITTED
 
     def test_readback_rejects_manifest_with_foreign_names(self, tmp_path):
         """Манифест из 10 записей, но с ЧУЖИМИ именами — это не наш реестр."""
