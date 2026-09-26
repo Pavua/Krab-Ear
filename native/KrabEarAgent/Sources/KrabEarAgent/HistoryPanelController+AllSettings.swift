@@ -225,7 +225,7 @@ extension HistoryPanelController {
             titleLabel.toolTip = tip
         }
 
-        let captionLabel = NSTextField(labelWithString: "\(key)  •  \(desc.groupRU)")
+        let captionLabel = NSTextField(labelWithString: "\(key) — \(desc.groupRU)")
         captionLabel.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
         captionLabel.textColor = KrabEarTheme.Colors.textSecondary
         captionLabel.lineBreakMode = .byTruncatingTail
