@@ -73,21 +73,29 @@ Source-проверки не доказывают CI другого SHA или �
 Текущие HEAD/CI — в primary `.remember/CODEX_CALL_STT_20260907.md` с повторной
 проверкой Git/GitHub. SHA/PID ниже сохранены как snapshot 05.09, не текущая проверка.
 
-## База и runtime snapshot 2026-09-18
+## База и runtime snapshot
 
 - Репозиторий: [Pavua/Krab-Ear](https://github.com/Pavua/Krab-Ear)
-- Прод-колея: **`origin/codex/krab-ear-v2`** @ `e004ba3d`
-- **Прод-код:** `e004ba3d` (релиз 18.09 №2, §деплой выше; колея == прод)
-- Backend pid **89956**, REST **90743** (деплой 18.09 №2), агент pid **7602** (не тронут)
+- Прод-колея: **`origin/codex/krab-ear-v2`** @ `4bf1c4e9` (26.09: whisper #2054,
+  polish+P3 #2047, глоссарий #2046, A5.2a #2052, CI-фикс #2053)
+- **Прод-код (Python-бэкенд):** `bc09490f` — A5.2a и всё UI-мержи **source-only**,
+  в прод не задеплоены; `history_encryption_enabled` остаётся **OFF**
+- Агент (Swift) пересобран 26.09 (`make sign`) под голосовой ввод во время
+  входящего скрининга; pid меняется, смотреть `pgrep -fl KrabEarAgent`
 - Worktree: `git worktree add .worktrees/<slug> -b feat/<slug> origin/codex/krab-ear-v2`
 - Main Krab Q2 (:8080 purpose slots, RIS/SergeyRG) — **не Ear**: [`ANTIGRAVITY_HANDOFF/2026-09-05-krab-8080-model-routing.md`](../ANTIGRAVITY_HANDOFF/2026-09-05-krab-8080-model-routing.md)
 
-## Подготовленная CI-изоляция (ещё не operational cutover)
+## CI-изоляция — cutover СДЕЛАН (read-back 2026-09-26)
 
-- Public PR/push Swift CI переводится на standard `macos-latest` и остаётся disposable.
-- MLX/Metal gate переезжает в private `Pavua/Krab-CI-Control` и принимает только exact SHA доверенной колеи.
-- До отдельного quiet-window cutover runner `krab-ear-m4max` ещё зарегистрирован в public repo; не объявлять `total_count=0` раньше API read-back.
-- Hosted macOS не заменяет MLX проверку: VM не даёт эквивалентного Metal-пути. Красный private MLX gate — отдельный сигнал расследования, не подмена PR CI.
+- **API read-back:** в публичном `Pavua/Krab-Ear` — **0 self-hosted раннеров**;
+  PR/push CI идёт на GitHub-hosted `macos-latest` (disposable) и не трогает личный Mac.
+- Единственный self-hosted раннер — `krab-ear-m4max-private` в приватном
+  `Pavua/Krab-CI-Control`: **только** MLX/Metal-гейт по exact SHA доверенной колеи
+  и только когда владелец не под бенчмарками. Hosted macOS не заменяет MLX-проверку:
+  VM не даёт эквивалентного Metal-пути; красный private MLX gate — отдельный
+  сигнал расследования, не подмена PR CI.
+- Прежний текст «раннер `krab-ear-m4max` ещё зарегистрирован в public repo» устарел.
+
 
 ## Задеплоено 2026-09-05
 
@@ -122,9 +130,39 @@ Source-проверки не доказывают CI другого SHA или �
 
 ## Следующая волна
 
+### A5.2b — следующий кусок (первый приоритет после приёмки A5.2a)
+
+- **A5.2a DONE (26.09, #2052, source-only).** Fail-closed гейты на всех plaintext
+  legacy-sinks (manual/auto backup+restore, archive, version, schema migration) при
+  `history_encryption_enabled=ON`, с re-check под общим `history.lock`. Прошёл
+  независимый adversarial-ревью: 2 CRITICAL (TOCTOU) и 1 MAJOR (ML под глобальным
+  lock) закрыты. Долг код-видим: `A5_2B_CALLER_SUCCESS_LOG_DEBT` (ложный startup
+  success-log, `service.py` был заморожен баном волны), ErrorBus-проводка
+  `data_dir_policy_reader(push_error=)`.
+- **A5.2b** — manifest/state machine для encrypted multi-file snapshot: recovery,
+  restore с union нынешних tombstones/purged IDs, rollback к plaintext запрещён.
+  Спека: `docs/superpowers/specs/2026-09-24-a5-history-at-rest-design.md`; порядок
+  работ и RED-кейсы — `docs/superpowers/handoffs/2026-09-25-a5-lifecycle-start.md`
+  (в колее с #2052). A5.2c — scoped inventory.
+
+### Инцидент Glovo 2026-09-26 — закрыт (whisper)
+
+- Ребёнок позвонил на DID, скрининг слушал, а подсказать агенту «на лету» было
+  нечем. Закрыто двумя тонкими клиентами к одному бэкенд-эндпоинту VG
+  `POST /v1/sessions/{id}/agent/whisper`:
+  - **Вариант C (сделан, #2054):** поле «Шепнуть скринеру…» в нативном Call Observer,
+    видно только на `meta.screening`-сессиях, one-in-flight, 404/503 → «Скринер
+    недоступен» (текст сохраняется), успех → тихий чек + haptic. Агент собран и запущен.
+  - **Вариант B (DRAFT, ждёт owner-review):** TG-бот «Krab Call Control» —
+    спека `Krab Voice Gateway/docs/superpowers/specs/2026-09-26-call-control-tg-bot-design.md`.
+    Правки — в VG-репо отдельной сессией (граница экосистемы).
+- Известные нюансы для владельца: лимита длины подсказки нет ни в клиенте, ни в VG
+  (длинный текст уходит в промпт дословно — может разогнать стоимость хода);
+  `whisper_pending` в ответе 200 клиент не показывает.
+
 C2/C3/C5 закрыты в колее 07–08.09 (интеграция #2000, схема #2003, сверено 14.09):
 Telnyx вырезан из CD-секции (осталась payload-совместимость `Models.swift` + тесты),
-Whisper ждёт по attempt-deadline, валидатор отклоняет неверные типы brain/cloud-строк,
+Whisper ждёт по attempt-deadline, валидатор отвергает неверные типы brain/cloud-строк,
 paste-флаги типизированы. Не строить заново.
 
 ### Корни (порядок)
