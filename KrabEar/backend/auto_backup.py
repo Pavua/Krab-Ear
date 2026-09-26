@@ -462,19 +462,14 @@ class AutoBackupManager:
                 return {"backed_up": False, "skipped_reason": "purged", "backup_path": None}
 
             # A5.2a: OFF→ON через второй StateStore, пока мы ждали self._lock.
-            # Повторная проверка: снимаем блокировку только чтобы отдать явный
-            # отказ — запись в этом вызове не происходит.
-            if self._encryption_blocked() and not self._can_snapshot():
-                return {
-                    "backed_up": False,
-                    "skipped_reason": _ENC_OP_UNAVAILABLE,
-                    "backup_path": None,
-                }
-
+            # A5.2b1: решение «снимок или отказ» принимает _do_backup ПОД
+            # store-lock (единственная точка проверки политики и ключа) — здесь
+            # дублировать её нельзя: чтение ключа вне store-lock лишний раз
+            # трогает Keychain и создаёт второе место, где живёт решение.
             try:
                 result = self._do_backup()
             except HistoryEncryptionOperationUnavailable:
-                # ON пойман повторно под store-lock — sink не тронут.
+                # ON пойман под store-lock — sink не тронут, причина видима.
                 return {
                     "backed_up": False,
                     "skipped_reason": _ENC_OP_UNAVAILABLE,
@@ -498,15 +493,6 @@ class AutoBackupManager:
                 "size_mb": result["size_mb"],
                 "entries": result["entries"],
             }
-
-    def _can_snapshot(self) -> bool:
-        """Доступен ли ключ для encrypted snapshot (без записи).
-
-        Нужен, чтобы early-return в ``check_and_backup`` не превращал ON с
-        доступным ключом в ложный отказ: решение «снимок или отказ» принимает
-        ``_do_backup`` под store-lock, где ключ и читается.
-        """
-        return self._history_crypto_for_snapshot() is not None
 
     def get_auto_backup_status(self) -> dict:
         """Возвращает статус авто-резервного копирования.
