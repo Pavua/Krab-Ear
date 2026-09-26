@@ -76,7 +76,7 @@ extension HistoryPanelController {
         let card = ThemeCardView()
 
         let searchField = NSSearchField()
-        searchField.placeholderString = "Поиск по названию настройки"
+        searchField.placeholderString = "Поиск по названию, ключу или группе"
         searchField.target = self
         searchField.action = #selector(onAllSettingsSearchChanged)
         searchField.sendsSearchStringImmediately = true
@@ -206,14 +206,59 @@ extension HistoryPanelController {
             control = label
         }
         
-        let view: NSView
-        if isCD {
-            view = cdMakeRow(label: key, control: control)
-        } else {
-            view = makeSettingRow(label: key, description: nil, control: control)
+        let desc = SettingsGlossary.lookup(key)
+        let labelView = makeAllSettingsLabelView(desc: desc, key: key, isCD: isCD)
+        let view = makeAllSettingsRowView(labelView: labelView, control: control, isCD: isCD)
+
+        let haystack = "\(key) \(desc.titleRU) \(desc.groupRU) \(desc.descriptionRU ?? "")".lowercased()
+        return AllSettingsRow(key: key, view: view, haystack: haystack)
+    }
+
+    /// Формирует двухстрочный заголовок настройки: русское название (primary) + IPC-ключ и категория (caption).
+    @MainActor
+    private func makeAllSettingsLabelView(desc: SettingDescriptor, key: String, isCD: Bool) -> NSView {
+        let titleLabel = NSTextField(labelWithString: desc.titleRU)
+        titleLabel.font = isCD ? .systemFont(ofSize: 12, weight: .medium) : KrabEarTheme.Typography.body
+        titleLabel.textColor = KrabEarTheme.Colors.textPrimary
+        titleLabel.lineBreakMode = .byTruncatingTail
+        if let tip = desc.descriptionRU, !tip.isEmpty {
+            titleLabel.toolTip = tip
         }
-        
-        return AllSettingsRow(key: key, view: view, haystack: key.lowercased())
+
+        let captionLabel = NSTextField(labelWithString: "\(key) — \(desc.groupRU)")
+        captionLabel.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+        captionLabel.textColor = KrabEarTheme.Colors.textSecondary
+        captionLabel.lineBreakMode = .byTruncatingTail
+        if let tip = desc.descriptionRU, !tip.isEmpty {
+            captionLabel.toolTip = tip
+        }
+
+        let stack = NSStackView(views: [titleLabel, captionLabel])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 1
+        stack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return stack
+    }
+
+    /// Собирает строку настройки с выравниванием: метка слева, спейсер, контрол справа.
+    @MainActor
+    private func makeAllSettingsRowView(labelView: NSView, control: NSView, isCD: Bool) -> NSView {
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        spacer.setAccessibilityElement(false)
+
+        let row = NSStackView(views: [labelView, spacer, control])
+        row.orientation = .horizontal
+        row.distribution = .fill
+        row.alignment = .centerY
+        row.spacing = KrabEarTheme.Metrics.standard
+        if isCD {
+            row.edgeInsets = NSEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
+        } else {
+            row.edgeInsets = NSEdgeInsets(top: 2, left: 0, bottom: 2, right: 0)
+        }
+        return row
     }
 
     // MARK: - Поиск

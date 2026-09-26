@@ -10,10 +10,17 @@ import fcntl
 import json
 import logging
 import threading
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from backend.history_encryption_policy import (
+    OPERATION_UNAVAILABLE_REASON as _ENC_OP_UNAVAILABLE,
+    policy_blocks,
+    store_policy_reader,
+)
 
 logger = logging.getLogger("KrabEar.Backend.ArchiveManager")
 
@@ -27,6 +34,10 @@ _ARCHIVE_LOCK_FILE = "archive.ndjson.lock"  # sibling lock file for cross-proces
 # ДО захвата lock; превышение MAX_ARCHIVE_BATCH отклоняется.
 _MAX_ARCHIVE_BATCH = 100        # макс. item_ids за один archive_items()
 _MAX_ITEM_ID_LEN = 200          # макс. длина одного id (отсекает мусорные строки)
+# MAJOR (adversarial review, 2026-09-26): unarchive держит store-flock на весь
+# цикл восстановления (включая semantic index_item → ML _encode), поэтому его
+# батч тоже обязан быть капнут ДО захвата lock — зеркально archive_items.
+_MAX_UNARCHIVE_BATCH = 100      # макс. item_ids за один unarchive_items()
 # wave-25 (B1-c): защита от unbounded-load archive.ndjson на каждый list/stats/unarchive.
 _MAX_ARCHIVE_LOAD = 50_000      # выше — warn + truncate (защита памяти)
 
@@ -64,9 +75,14 @@ class ArchiveManager:
         self._archive_path = self._archive_dir / _ARCHIVE_FILE
         self._lock_path = self._archive_dir / _ARCHIVE_LOCK_FILE
         self._lock = threading.Lock()
-        self._archive_dir.mkdir(parents=True, exist_ok=True)
-        self._archive_path.touch(exist_ok=True)
-        self._lock_path.touch(exist_ok=True)
+        # A5.2a: guard plaintext archive при Encryption ON. Конструирование НЕ
+        # создаёт storage, но backend assembly завершается (archive_items /
+        # unarchive_items откажут; explicit purge остаётся разрешён).
+        self._encryption_policy_read = store_policy_reader(store)
+        if not policy_blocks(self._encryption_policy_read):
+            self._archive_dir.mkdir(parents=True, exist_ok=True)
+            self._archive_path.touch(exist_ok=True)
+            self._lock_path.touch(exist_ok=True)
         # wave-25 (B1-a): purge-epoch счётчик для закрытия TOCTOU-окна между
         # снимком активной истории и записью в архив. Инкрементируется в clear_all()
         # (privacy-purge). archive_items() снимает значение ДО захвата store-flock и
@@ -171,6 +187,9 @@ class ArchiveManager:
         with self._epoch_lock:
             self._purge_epoch += 1
         with self._lock:
+            # A5.2a: explicit owner purge не блокируется Encryption ON и должен
+            # работать даже если конструктор при ON не создавал storage.
+            self._archive_dir.mkdir(parents=True, exist_ok=True)
             archived_before = len(self._read_archive())
             tmp = self._archive_path.with_suffix(".ndjson.tmp")
             with self._lock_path.open("a", encoding="utf-8") as lock_f:
@@ -226,17 +245,26 @@ class ArchiveManager:
         if self._recording_chain_mgr is not None:
             self._recording_chain_mgr.remove_item_from_all_chains(clean_id)
 
-    def _validate_archive_ids(self, item_ids: list[str]) -> list[str] | dict[str, Any]:
+    def _validate_archive_ids(
+        self,
+        item_ids: list[str],
+        *,
+        max_batch: int = _MAX_ARCHIVE_BATCH,
+    ) -> list[str] | dict[str, Any]:
         """Валидирует item_ids ДО захвата store-flock (wave-25 B1-b).
 
         Lock starvation fix: раньше итерация по item_ids (включая мусорные/гигантские
         списки) шла ВНУТРИ store._lock() — межпроцессной fcntl.flock, сериализующей
         ВСЕ записи/компактирование истории. Огромный список держал бы lock сколь угодно
         долго. Теперь все id чистятся и проверяются заранее; flock держится только на
-        ограниченный (≤ _MAX_ARCHIVE_BATCH) валидный набор.
+        ограниченный (≤ ``max_batch``) валидный набор.
+
+        ``max_batch``: archive_items → ``_MAX_ARCHIVE_BATCH`` (default);
+        unarchive_items → ``_MAX_UNARCHIVE_BATCH`` — тот же паттерн, т.к. unarchive
+        дополнительно держит lock на semantic ML-индексацию.
 
         Отклоняем не-строки, пустые после strip, длиннее _MAX_ITEM_ID_LEN. Если число
-        валидных id превышает _MAX_ARCHIVE_BATCH — возвращаем ошибку (батч слишком велик).
+        валидных id превышает ``max_batch`` — возвращаем ошибку (батч слишком велик).
 
         Returns:
             Список очищенных id (с сохранением порядка, без дубликатов) ИЛИ
@@ -255,11 +283,11 @@ class ArchiveManager:
                 continue
             seen.add(clean)
             clean_ids.append(clean)
-        if len(clean_ids) > _MAX_ARCHIVE_BATCH:
+        if len(clean_ids) > max_batch:
             return {
                 "ok": False,
                 "reason": "too_many_ids",
-                "max": _MAX_ARCHIVE_BATCH,
+                "max": max_batch,
                 "got": len(clean_ids),
             }
         return clean_ids
@@ -299,6 +327,14 @@ class ArchiveManager:
             переполнении батча (too_many_ids) или гонке с purge (purge_in_progress).
         """
         _store = store if store is not None else self._store
+        # A5.2a: archive создаёт plaintext-копию истории. При Encryption ON
+        # отказ до любых append/rewrite; tombstones не трогаются.
+        if policy_blocks(self._encryption_policy_read):
+            logger.warning(
+                "archive_items: history encryption on — plaintext archive refused (%s)",
+                _ENC_OP_UNAVAILABLE,
+            )
+            return {"ok": False, "reason": _ENC_OP_UNAVAILABLE}
         if not item_ids:
             return ArchiveResult(
                 archived_count=0,
@@ -328,6 +364,15 @@ class ArchiveManager:
                 # (межпроцессная fcntl.flock). Снимок активных записей берётся один
                 # раз, чтобы конкурентный compact() не вклинился между чтениями.
                 with _store._lock():
+                    # A5.2a: OFF→ON через второй StateStore до захвата store-lock —
+                    # повторная проверка блокирует plaintext sink.
+                    if policy_blocks(self._encryption_policy_read):
+                        logger.warning(
+                            "archive_items: encryption включён до lock — "
+                            "plaintext archive refused (%s)",
+                            _ENC_OP_UNAVAILABLE,
+                        )
+                        return {"ok": False, "reason": _ENC_OP_UNAVAILABLE}
                     # wave-25 (B1-a): перепроверяем epoch ПОД store-flock. Если purge
                     # инкрементировал его в окне между снимком и захватом — отменяем,
                     # иначе только что очищенный архив получил бы PII обратно.
@@ -362,6 +407,9 @@ class ArchiveManager:
                 # Fallback для тестовых двойников без unlocked-API StateStore.
                 # wave-25 (B1-a): epoch-перепроверка и здесь (purge мог пройти между
                 # снимком и началом работы); store-flock в этой ветке нет.
+                # A5.2a: повторная policy-проверка симметрично atomic-ветке.
+                if policy_blocks(self._encryption_policy_read):
+                    return {"ok": False, "reason": _ENC_OP_UNAVAILABLE}
                 if self._current_epoch() != epoch_before:
                     logger.warning(
                         "archive_items: обнаружен конкурентный purge (epoch %d→%d) — отмена",
@@ -403,19 +451,60 @@ class ArchiveManager:
         Returns:
             Словарь с ключами unarchived_count, not_found.
             При обнаружении конкурентного purge возвращает ok=False, reason=purge_in_progress.
+            При превышении ``_MAX_UNARCHIVE_BATCH`` — ok=False, reason=too_many_ids
+            (проверка ДО захвата store-flock).
+
+        MAJOR (adversarial review): item_ids валидируются/капятся ДО store-flock;
+        semantic ``index_item`` (синхронный ML ``_encode``) выполняется ПОСЛЕ
+        отпускания lock с re-check purge-epoch, чтобы не держать глобальный
+        history.lock на ML-путь.
         """
         _store = store if store is not None else self._store
-        ids_set = {str(i).strip() for i in item_ids if str(i).strip()}
-        if not ids_set:
+        # A5.2a: unarchive возвращает plaintext-записи в активную историю и
+        # rewrite'ит archive.ndjson. При Encryption ON — отказ.
+        if policy_blocks(self._encryption_policy_read):
+            logger.warning(
+                "unarchive_items: history encryption on — plaintext unarchive refused (%s)",
+                _ENC_OP_UNAVAILABLE,
+            )
+            return {"ok": False, "reason": _ENC_OP_UNAVAILABLE}
+        # MAJOR (adversarial review, 2026-09-26): валидация + кап ДО store-flock
+        # (зеркально archive_items). Без капа цикл восстановления держал бы
+        # межпроцессный history.lock на весь список до _MAX_ARCHIVE_LOAD.
+        validated = self._validate_archive_ids(
+            item_ids, max_batch=_MAX_UNARCHIVE_BATCH
+        )
+        if isinstance(validated, dict):
+            return validated
+        if not validated:
             return {"unarchived_count": 0, "not_found": []}
+        ids_set = set(validated)
 
         # wave-33 (B2): снимок purge-epoch ДО захвата self._lock.
         epoch_before = self._current_epoch()
 
         unarchived_count = 0
         not_found: list[str] = []
+        # MAJOR: semantic index_item (синхронный ML _encode) выносится ИЗ-ПОД
+        # store-flock. Копим успешно восстановленные записи, индексируем после
+        # отпускания lock с re-check purge-epoch.
+        to_index: list[tuple[str, str]] = []
 
-        with self._lock:
+        store_lock_factory = getattr(_store, "_lock", None)
+        store_lock_ctx = (
+            store_lock_factory() if callable(store_lock_factory) else nullcontext()
+        )
+        # A5.2a (MAJOR-1): policy перепроверяется ПОД store-flock (общий
+        # lock-контракт с save_settings/archive_items atomic-веткой).
+        # nullcontext — для fake-store без _lock.
+        with self._lock, store_lock_ctx:
+            if policy_blocks(self._encryption_policy_read):
+                logger.warning(
+                    "unarchive_items: encryption включён до store-lock — "
+                    "plaintext unarchive refused (%s)",
+                    _ENC_OP_UNAVAILABLE,
+                )
+                return {"ok": False, "reason": _ENC_OP_UNAVAILABLE}
             # wave-33 (B2): перепроверяем epoch под self._lock. Если конкурентный
             # purge инкрементировал его между снимком и захватом — отменяем:
             # иначе только что очищенный архив получил бы PII обратно в active.
@@ -464,13 +553,10 @@ class ArchiveManager:
                         if self._semantic_searcher is not None:
                             restore_text = restore_dict.get("text", "")
                             if restore_text and restore_text.strip():
-                                try:
-                                    self._semantic_searcher.index_item(item_id, restore_text)
-                                except Exception as exc:
-                                    logger.warning(
-                                        "unarchive_items: не удалось переиндексировать %s: %s",
-                                        item_id, exc,
-                                    )
+                                # Индексация выполняется ПОСЛЕ store-flock (ниже):
+                                # index_item → синхронный ML _encode не должен
+                                # держать глобальный history.lock.
+                                to_index.append((item_id, restore_text))
                     except Exception as exc:
                         logger.error("Не удалось восстановить запись id=%s: %s", item_id, exc)
                         remaining.append(item)
@@ -479,6 +565,26 @@ class ArchiveManager:
 
             not_found = sorted(ids_set - found_ids)
             self._rewrite_archive(remaining)
+
+        # Индексация ВНЕ store-flock. Re-check purge-epoch: если между отпусканием
+        # lock и индексацией прошёл clear_all (epoch++), записи уже удалены —
+        # индексировать нечего, иначе semantic-индекс воскресил бы PII-метаданные.
+        if to_index:
+            if self._current_epoch() != epoch_before:
+                logger.warning(
+                    "unarchive_items: purge во время индексации (epoch %d→%d) — "
+                    "semantic index пропущен",
+                    epoch_before, self._current_epoch(),
+                )
+            else:
+                for item_id, restore_text in to_index:
+                    try:
+                        self._semantic_searcher.index_item(item_id, restore_text)
+                    except Exception as exc:
+                        logger.warning(
+                            "unarchive_items: не удалось переиндексировать %s: %s",
+                            item_id, exc,
+                        )
 
         return {"unarchived_count": unarchived_count, "not_found": not_found}
 
