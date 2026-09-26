@@ -20,6 +20,20 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
     private let sessionPicker = NSPopUpButton()
     private var hangupSheetOpen = false
 
+    // MARK: - Whisper (подсказка скринеру, инцидент 2026-09-26)
+    // Поле ввода и кнопка отправки живут ОТДЕЛЬНЫМ рядом под транскриптом, а
+    // не в хедере: хедер держит инвариант `test_panel_header_layout_no_overlap`
+    // (title + state-бейдж + cost + пикер + две кнопки) и не должен расти.
+    private let whisperBar = NSStackView()
+    private let whisperField = NSTextField()
+    private let whisperSendButton = ThemeButton()
+    private let whisperStatusLabel = NSTextField(labelWithString: "")
+    /// Отправленная подсказка ждёт ТОЛЬКО ответа VG (ack по WS в v1 не слушаем,
+    /// brief §4) — держим кнопку выключенной до completion, иначе владелец
+    /// влепит вторую подсказку поверх первой.
+    private var whisperInFlight = false
+    private var whisperStatusClearWork: DispatchWorkItem?
+
     var isPanelVisible: Bool { window?.isVisible ?? false }
 
     convenience init() {
@@ -42,6 +56,9 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
         }
         window?.title = titleText
         inContentTitleLabel.stringValue = titleText
+        // Whisper-бар ТОЛЬКО для скрининга (brief §2): у перевода/prompt-call
+        // подсказка агенту уже есть на iOS, дублировать поле нельзя.
+        setWhisperFieldVisible(session.isScreening)
         // State-бейдж (live/terminal) задаёт ТОЛЬКО координатор — showPanel его не трогает,
         // иначе открытие панели по терминальной сессии перетёрло бы setTerminal.
         showWindow(nil)
@@ -80,6 +97,12 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
         stateBadge.stringValue = message
         listenButton.isEnabled = false
         hangupButton.isEnabled = false
+        // Звонок мёртв — подсказывать больше некому: замок на время полёта
+        // сбрасываем, чтобы кнопка не осталась мёртвой disabled при следующем
+        // звонке (бар всё равно скрыт setWhisperFieldVisible(false) ниже).
+        whisperInFlight = false
+        whisperSendButton.isEnabled = false
+        whisperField.isEnabled = false
         closeHangupSheetIfOpen()
     }
 
@@ -87,6 +110,75 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
         stateBadge.stringValue = "в эфире"
         listenButton.isEnabled = true
         hangupButton.isEnabled = true
+        whisperField.isEnabled = true
+        whisperSendButton.isEnabled = !whisperInFlight
+    }
+
+    // MARK: - Whisper UI (протокол CallObserverPanelPresenting)
+
+    func setWhisperFieldVisible(_ visible: Bool) {
+        whisperBar.isHidden = !visible
+        if !visible {
+            // Скрытие = сессия не скрининговая: чистим и ввод, и статус, чтобы
+            // при возврате панели к скринингу не мигал чужой текст/ошибка.
+            whisperField.stringValue = ""
+            clearWhisperStatus()
+            whisperSendButton.isEnabled = false
+            whisperField.isEnabled = false
+        } else {
+            whisperField.isEnabled = true
+            whisperSendButton.isEnabled = !whisperInFlight
+        }
+    }
+
+    func setWhisperSendEnabled(_ enabled: Bool) {
+        whisperInFlight = !enabled
+        whisperSendButton.isEnabled = enabled && !whisperBar.isHidden
+    }
+
+    func presentWhisperResult(accepted: Bool, message: String?) {
+        if accepted {
+            // Успех: тихий чек + поле освобождаем (brief §4).
+            whisperField.stringValue = ""
+            setWhisperStatus("Подсказка принята", isError: false)
+            let performer: NSHapticFeedbackPerformer = NSHapticFeedbackManager.defaultPerformer
+            performer.perform(.generic, performanceTime: .now)
+        } else {
+            // Ошибка: плашка 3с, ТЕКСТ В ПОЛЕ СОХРАНЁН (brief §4 + DoD.2).
+            setWhisperStatus(message ?? "Подсказка не отправлена", isError: true)
+        }
+    }
+
+    private func setWhisperStatus(_ text: String, isError: Bool) {
+        whisperStatusClearWork?.cancel()
+        whisperStatusClearWork = nil
+        whisperStatusLabel.stringValue = text
+        whisperStatusLabel.textColor = isError
+            ? KrabEarTheme.Colors.warning
+            : KrabEarTheme.Colors.textSecondary
+        guard !text.isEmpty else { return }
+        let work = DispatchWorkItem { [weak self] in
+            self?.whisperStatusLabel.stringValue = ""
+            self?.whisperStatusClearWork = nil
+        }
+        whisperStatusClearWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.whisperStatusSeconds, execute: work)
+    }
+
+    private func clearWhisperStatus() {
+        whisperStatusClearWork?.cancel()
+        whisperStatusClearWork = nil
+        whisperStatusLabel.stringValue = ""
+    }
+
+    private static let whisperStatusSeconds: TimeInterval = 3.0
+
+    @objc private func onWhisperSendTapped() {
+        let text = whisperField.stringValue
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !whisperInFlight else { return }
+        // Клавиатурный путь тот же, что и кнопка (Return в поле = отправить).
+        coordinator?.userWhisperedFromPanel(text: text)
     }
 
     func closeHangupSheetIfOpen() {
@@ -340,7 +432,56 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
         scrollView.hasVerticalScroller = true
         scrollView.translatesAutoresizingMaskIntoConstraints = false
 
-        let root = NSStackView(views: [header, scrollView])
+        // Whisper-бар (brief §1): однострочный ввод + отправка ПОД транскриптом,
+        // отдельным рядом root-стека — хедер держит инвариант
+        // test_panel_header_layout_no_overlap и не должен расти.
+        whisperField.placeholderString = "Шепнуть скринеру…"
+        whisperField.target = self
+        whisperField.action = #selector(onWhisperSendTapped)
+        whisperField.font = KrabEarTheme.Typography.body
+        whisperField.isBezeled = true
+        whisperField.isEnabled = false
+        whisperSendButton.image = NSImage(systemSymbolName: "paperplane",
+                                         accessibilityDescription: "Отправить подсказку")
+        whisperSendButton.title = ""
+        whisperSendButton.isBordered = false
+        whisperSendButton.isTransparentStyle = true
+        whisperSendButton.contentTintColor = KrabEarTheme.Colors.textSecondary
+        whisperSendButton.wantsLayer = true
+        whisperSendButton.layer?.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
+        whisperSendButton.layer?.cornerCurve = .continuous
+        whisperSendButton.target = self
+        whisperSendButton.action = #selector(onWhisperSendTapped)
+        whisperSendButton.isEnabled = false
+        NSLayoutConstraint.activate([
+            whisperSendButton.widthAnchor.constraint(equalToConstant: KrabEarTheme.Metrics.controlHeight),
+            whisperSendButton.heightAnchor.constraint(equalToConstant: KrabEarTheme.Metrics.controlHeight),
+        ])
+
+        whisperStatusLabel.font = KrabEarTheme.Typography.caption
+        whisperStatusLabel.textColor = KrabEarTheme.Colors.textSecondary
+        whisperStatusLabel.lineBreakMode = .byTruncatingTail
+
+        let whisperRow = NSStackView(views: [whisperField, whisperSendButton])
+        whisperRow.orientation = .horizontal
+        whisperRow.alignment = .centerY
+        whisperRow.spacing = KrabEarTheme.Metrics.tight
+
+        whisperBar.orientation = .vertical
+        whisperBar.alignment = .leading
+        whisperBar.spacing = KrabEarTheme.Metrics.tight
+        whisperBar.edgeInsets = NSEdgeInsets(
+            top: KrabEarTheme.Metrics.tight,
+            left: KrabEarTheme.Metrics.comfortable,
+            bottom: KrabEarTheme.Metrics.standard,
+            right: KrabEarTheme.Metrics.comfortable
+        )
+        whisperBar.addArrangedSubview(whisperRow)
+        whisperBar.addArrangedSubview(whisperStatusLabel)
+        whisperBar.isHidden = true
+        whisperBar.translatesAutoresizingMaskIntoConstraints = false
+
+        let root = NSStackView(views: [header, scrollView, whisperBar])
         root.orientation = .vertical
         root.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(root)
@@ -380,6 +521,13 @@ final class CallObserverPanelController: NSWindowController, CallObserverPanelPr
     var testHook_stateBadgeText: String { stateBadge.stringValue }
     var testHook_inContentTitleLabel: NSTextField { inContentTitleLabel }
     var testHook_stateBadgeBox: NSBox { stateBadgeBox }
+    /// Whisper-хуки (инцидент 2026-09-26): видимость по meta.screening,
+    /// single-flight блокировка кнопки, обратная связь и сохранение текста
+    /// при ошибке проверяются тестами CallObserverUITests.
+    var testHook_whisperBarVisible: Bool { !whisperBar.isHidden }
+    var testHook_whisperField: NSTextField { whisperField }
+    var testHook_whisperSendEnabled: Bool { whisperSendButton.isEnabled && whisperField.isEnabled }
+    var testHook_whisperStatusText: String { whisperStatusLabel.stringValue }
     var testHook_transcriptPlainText: String {
         transcriptStack.arrangedSubviews
             .compactMap { view -> String? in

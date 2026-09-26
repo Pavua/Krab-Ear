@@ -22,6 +22,15 @@ private final class SpyPanel: CallObserverPanelPresenting {
     var costs: [String] = []; var costAlerts: [String?] = []
     var badges: [String?] = []; var hangupPrompts = 0
     var isPanelVisible = false
+    // Whisper (инцидент 2026-09-26): видимость по meta.screening, single-flight
+    // и исход отправки — контракт, который гейтит координатор.
+    var whisperVisible: [Bool] = []; var whisperSendEnabled: [Bool] = []
+    var whisperResults: [(accepted: Bool, message: String?)] = []
+    func setWhisperFieldVisible(_ visible: Bool) { whisperVisible.append(visible) }
+    func setWhisperSendEnabled(_ enabled: Bool) { whisperSendEnabled.append(enabled) }
+    func presentWhisperResult(accepted: Bool, message: String?) {
+        whisperResults.append((accepted, message))
+    }
     func showPanel(session: VGSessionInfo) { shown.append(session.id); isPanelVisible = true }
     func updateTranscript(_ entries: [TranscriptEntry]) { transcripts.append(entries) }
     func updateStatus(status: String, muted: Bool?, held: Bool?, badge: String?) { badges.append(badge) }
@@ -42,6 +51,18 @@ private final class SpyPoster: VGCommandPosting {
     }
     func fetchCostUsd(baseURL: URL, sessionId: String, completion: @escaping (Double?) -> Void) {
         completion(costValue)
+    }
+    // Whisper: полный контроль над асинхронностью — в проде HTTP отвечает на
+    // ПОЗЖЕ вызова; синхронный мок замаскировал бы гонку single-flight (второй
+    // вызов успевал бы уйти до «ответа» первого).
+    var whispers: [(sessionId: String, text: String)] = []
+    /// nil → completion не вызывается (запрос в полёте), как реальный HTTP.
+    var whisperResult: Result<Int, Error>? = .success(200)
+    var whisperCompletions: [(Result<Int, Error>) -> Void] = []
+    func whisper(baseURL: URL, sessionId: String, text: String,
+                 completion: @escaping (Result<Int, Error>) -> Void) {
+        whispers.append((sessionId, text))
+        if let result = whisperResult { completion(result) } else { whisperCompletions.append(completion) }
     }
 }
 
@@ -639,5 +660,61 @@ final class CallObserverCoordinatorTests: XCTestCase {
         XCTAssertEqual(panel.costAlerts.last ?? nil, "⚠ $1.50" as String?,
                        "поллер не смывает липкий cost-alert бейдж")
         XCTAssertFalse(panel.costs.contains("⚠ $1.50"), "cost-alert не идёт через costLabel")
+    }
+
+    // MARK: - Whisper (подсказка скринеру, инцидент 2026-09-26)
+
+    /// Подсказка уходит в выбранную сессию с ТОЧНЫМ текстом (обрезанным) —
+    /// HIGH-1-инвариант: кнопка панели не смеет двигать выбор.
+    func test_whisper_targetsSelectedSessionWithTrimmedText() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1", isScreening: true), generation: 1, resurrected: false); drain()
+        c.userWhisperedFromPanel(text: "  di que sí, recojo el pedido  \n"); drain()
+        XCTAssertEqual(poster.whispers.count, 1)
+        XCTAssertEqual(poster.whispers.first?.sessionId, "s1")
+        XCTAssertEqual(poster.whispers.first?.text, "di que sí, recojo el pedido")
+    }
+
+    /// One-in-flight (brief §5): вторая отправка до ответа первого запроса
+    /// игнорируется, кнопка заблокирована ровно на время полёта.
+    func test_whisper_isSingleFlight_untilResponse() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1", isScreening: true), generation: 1, resurrected: false); drain()
+        poster.whisperResult = nil  // первый запрос ушёл, ответ не пришёл
+        c.userWhisperedFromPanel(text: "primera"); drain()
+        XCTAssertEqual(panel.whisperSendEnabled, [false], "кнопка блокируется на время полёта")
+
+        c.userWhisperedFromPanel(text: "segunda"); drain()
+        XCTAssertEqual(poster.whispers.count, 1, "вторая подсказка в полёте обязана игнорироваться")
+
+        poster.whisperCompletions.first?(.success(200)); drain()
+        XCTAssertEqual(panel.whisperSendEnabled.last, true, "после ответа кнопка разблокирована")
+        XCTAssertEqual(panel.whisperResults.last?.accepted, true)
+
+        c.userWhisperedFromPanel(text: "tercera"); drain()
+        XCTAssertEqual(poster.whispers.count, 2, "после ответа отправка снова доступна")
+    }
+
+    /// 404/503 → «Скринер недоступен» + НЕ accepted (текст владельца панель
+    /// сохраняет сама — проверяется в CallObserverUITests).
+    func test_whisper_404_reportsScreeningUnavailable() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1", isScreening: true), generation: 1, resurrected: false); drain()
+        poster.whisperResult = .success(404)
+        c.userWhisperedFromPanel(text: "hola"); drain()
+        XCTAssertEqual(panel.whisperResults.last?.accepted, false)
+        XCTAssertEqual(panel.whisperResults.last?.message, "Скринер недоступен")
+    }
+
+    /// Пустой/пробельный текст и терминальный звонок — отправки не было.
+    func test_whisper_ignoresBlankTextAndTerminalCall() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1", isScreening: true), generation: 1, resurrected: false); drain()
+        c.userWhisperedFromPanel(text: "   "); drain()
+        XCTAssertEqual(poster.whispers.count, 0, "пустая подсказка не отправляется")
+
+        c.watcherCallGone(sessionId: "s1", generation: 1); drain()
+        c.userWhisperedFromPanel(text: "hola"); drain()
+        XCTAssertEqual(poster.whispers.count, 0, "терминальный звонок подсказку не принимает")
     }
 }

@@ -49,12 +49,27 @@ protocol CallObserverPanelPresenting: AnyObject {
     func setLive()
     func closeHangupSheetIfOpen()
     func presentHangupConfirm()
+    /// Видимость whisper-бара: TRUE только для сессий скрининга
+    /// (`meta.screening` / inbound_screener). У перевода и prompt-call подсказка
+    /// скринеру неуместна — там у агента своя подсказка с iOS, дублировать нельзя.
+    func setWhisperFieldVisible(_ visible: Bool)
+    /// Single-flight замок: повторная отправка заблокирована, пока предыдущая
+    /// в полёте (brief §5).
+    func setWhisperSendEnabled(_ enabled: Bool)
+    /// Итог отправки: accepted=true — тихий чек (поле очищается), false — плашка
+    /// с причиной на 3с, ТЕКСТ В ПОЛЕ СОХРАНЯЕТСЯ (brief §4 + DoD.2).
+    func presentWhisperResult(accepted: Bool, message: String?)
     var isPanelVisible: Bool { get }
 }
 
 protocol VGCommandPosting {
     func hangup(baseURL: URL, sessionId: String, completion: @escaping (Result<Int, Error>) -> Void)
     func fetchCostUsd(baseURL: URL, sessionId: String, completion: @escaping (Double?) -> Void)
+    /// POST /v1/sessions/{id}/agent/whisper — подсказка владельца попадает в
+    /// следующий ход LLM-агента; агент озвучивает её на своём tgt_lang.
+    /// Секретов не печатает: в лог уходит только код ответа.
+    func whisper(baseURL: URL, sessionId: String, text: String,
+                 completion: @escaping (Result<Int, Error>) -> Void)
 }
 
 protocol CallObserverSettingsProviding {
@@ -120,6 +135,9 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
     /// generation резюмируется без нового явного userToggledListen).
     private var listeningSessionId: String?
     private var hangupInFlight = false
+    /// One-in-flight для whisper: пока подсказка в полёте, вторая отправка
+    /// игнорируется (brief §5) — иначе две гонки к агенту смешивают реплики.
+    private var whisperInFlight = false
     private var lingerWork: DispatchWorkItem?
     private var pushWork: DispatchWorkItem?
     private var costTimer: DispatchSourceTimer?
@@ -513,6 +531,41 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
                     self.panel.updateStatus(status: self.observed[id]?.session.status ?? "",
                                             muted: nil, held: nil,
                                             badge: "Не удалось положить трубку")
+                }
+            }
+        }
+    }
+
+    /// Подсказка скринеру из панели (инцидент Glovo 2026-09-26: робот звонил,
+    /// скрининг слушал, а поправить агента на лету было нечем).
+    ///
+    /// HIGH-1-инвариант: кнопка панели целится СТРОГО в selectedId и никогда не
+    /// двигает выбор (как onListenTapped) — иначе подсказка улетела бы в чужой
+    /// звонок. One-in-flight (brief §5): вторая отправка заблокирована до
+    /// ответа. Терминальный звонок подсказку не принимает.
+    func userWhisperedFromPanel(text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !whisperInFlight,
+              let id = selectedId, let call = observed[id], !call.terminalDelivered else { return }
+        whisperInFlight = true
+        panel.setWhisperSendEnabled(false)
+        poster.whisper(baseURL: baseURL, sessionId: id, text: trimmed) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.whisperInFlight = false
+                self.panel.setWhisperSendEnabled(true)
+                switch result {
+                case .success(let code) where (200..<300).contains(code):
+                    self.panel.presentWhisperResult(accepted: true, message: nil)
+                case .success(404), .success(503):
+                    // Скринер недоступен: сессия ушла терминалом между вводом и
+                    // отправкой либо VG отвечает «агент не готов». Текст владельца
+                    // НЕ теряем — остаётся в поле для повтора.
+                    self.panel.presentWhisperResult(accepted: false,
+                                                    message: "Скринер недоступен")
+                case .success, .failure:
+                    self.panel.presentWhisperResult(accepted: false,
+                                                    message: "Подсказка не отправлена")
                 }
             }
         }
