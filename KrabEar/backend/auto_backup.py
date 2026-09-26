@@ -21,6 +21,8 @@ from backend.settings_backup import SENSITIVE_FIELDS as _SENSITIVE_FIELDS
 from backend.encrypted_snapshot import (
     SnapshotOperationRefused,
     create_encrypted_snapshot,
+    has_pending_restore,
+    read_pending_restore_verdict,
     recover_pending_state,
 )
 from backend.history_encryption_policy import (
@@ -429,6 +431,12 @@ class AutoBackupManager:
             )
         except SnapshotOperationRefused as exc:
             logger.warning("auto_backup: encrypted snapshot отклонён: %s (%s)", exc.reason, exc)
+            # A5.2b2: конкретная причина протокола (например, незавершённый
+            # restore) не должна теряться за общим «операция недоступна» —
+            # владельцу нужен верный ответ, что именно чинить. Обёртка нужна
+            # только для не-протокольных отказов (например, «уже есть каталог»).
+            if exc.reason.startswith("snapshot_"):
+                raise
             raise HistoryEncryptionOperationUnavailable("auto_backup") from exc
 
         return {
@@ -562,6 +570,15 @@ class AutoBackupManager:
             # трогает Keychain и создаёт второе место, где живёт решение.
             try:
                 result = self._do_backup()
+            except SnapshotOperationRefused as exc:
+                # A5.2b2: причина протокола видна как есть — «есть незавершённый
+                # restore» это не то же самое, что «ключ недоступен».
+                self._record_result(None, exc.reason)
+                return {
+                    "backed_up": False,
+                    "skipped_reason": exc.reason,
+                    "backup_path": None,
+                }
             except HistoryEncryptionOperationUnavailable:
                 # ON пойман под store-lock — sink не тронут, причина видима.
                 self._record_result(None, _ENC_OP_UNAVAILABLE)
@@ -654,7 +671,16 @@ class AutoBackupManager:
                 recovery = recover_pending_state(
                     data_dir=self.store.data_dir, backups_root=self.backups_dir
                 )
-            blocked_by_pending = bool(recovery and recovery.get("pending"))
+            # A5.2b2 (B2): незавершённый RESTORE — тоже незавершённая операция.
+            # b1-скан смотрит только backups/, а restore-маркер лежит в data_dir,
+            # поэтому раньше статус показывал «всё спокойно», и фоновый цикл
+            # создавал снимок рваного набора. Сигнал дешёвый (iterdir) и не
+            # трогает ключ.
+            restore_verdict = None
+            restore_pending = has_pending_restore(self.store.data_dir)
+            if restore_pending:
+                restore_verdict = read_pending_restore_verdict(self.store.data_dir)
+            blocked_by_pending = bool(recovery and recovery.get("pending")) or restore_pending
 
             # Что РЕАЛЬНО было последним: снимок, legacy-копия или отказ.
             # N1.2: если последний цикл ОТКАЗАЛ, вид выводится из отказа, и
@@ -670,7 +696,9 @@ class AutoBackupManager:
                 elif total_backups:
                     last_kind = "legacy_plaintext"
             if last_refusal is None and blocked_by_pending:
-                last_refusal = recovery.get("reason")
+                last_refusal = (restore_verdict or {}).get("reason") or (
+                    recovery.get("reason") if recovery else None
+                )
 
             # N1.1/N1.3: «недоступно» = есть ДОКАЗАННЫЙ отказ (записанный циклом,
             # переживает рестарт) ИЛИ незавершённая опубликованная транзакция.
@@ -695,4 +723,10 @@ class AutoBackupManager:
                 "encryption_on": encryption_on,
                 "last_backup_kind": last_kind,
                 "last_refusal_reason": last_refusal,
+                # A5.2b2: незавершённый restore виден читаемым способом
+                # (без service.py), потому что отдельного диагностического
+                # IPC-метода для вердикта recovery пока нет — см. карточку.
+                "restore_pending": restore_pending,
+                "restore_recovery": restore_verdict,
+                "blocked_by_pending": blocked_by_pending,
             }

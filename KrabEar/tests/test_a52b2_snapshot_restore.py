@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -1804,3 +1805,276 @@ class TestPurgeCoversRestoreStaging:
         before = _data_bytes(data_dir)
         assert purge_pending_restore_staging(data_dir) == []
         assert _data_bytes(data_dir) == before
+
+
+# ---------------------------------------------------------------------------
+# A5.2b2 review — B1: recovery НЕ имеет права удалять маркер-pending
+# ---------------------------------------------------------------------------
+
+
+def _crash_on_nth_replace(data_dir, crypto, snapshot_dir, *, nth: int):
+    """Роняет restore на nth-й замене → смешанный набор + маркер COMMITTING."""
+    calls = {"n": 0}
+    real = os.replace
+
+    def _maybe_fail(tmp_arg, target):
+        calls["n"] += 1
+        if calls["n"] == nth:
+            raise OSError("synthetic crash on replacement")
+        return real(str(tmp_arg), str(target))
+
+    with patch("backend.encrypted_snapshot._replace_journal", _maybe_fail):
+        with pytest.raises(SnapshotOperationRefused) as exc:
+            restore_encrypted_snapshot(
+                data_dir=data_dir,
+                backups_root=data_dir / "backups",
+                snapshot_dir=snapshot_dir,
+                crypto=crypto,
+                policy_read=_policy_on(data_dir),
+            )
+    assert exc.value.pending is True
+    assert calls["n"] == nth
+    return calls
+
+
+def _oneshot_enospc_in_restore_staging():
+    """Одноразовый ENOSPC на записи в staging restore (не в pre-restore снимок)."""
+    state = {"armed": False}
+    real = None
+
+    def _maybe_fail(path, blob):
+        if state["armed"] and RESTORE_STAGING_PREFIX in str(path):
+            state["armed"] = False
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real(path, blob)
+
+    from backend import encrypted_snapshot as es
+
+    real = es._write_file_durable
+    return state, patch("backend.encrypted_snapshot._write_file_durable", _maybe_fail)
+
+
+class TestRecoveryKeepsPendingEvidence:
+    def test_prepare_failure_during_recovery_keeps_marker(self, tmp_path):
+        """B1-проба: crash на 5-й замене + сбой prepare в recovery.
+
+        Живой набор рваный, маркер COMMITTING — единственное доказательство
+        незавершённого restore. Отказ в prepare НЕ имеет права его удалить:
+        иначе рваный набор становится невидимым, а следующий restore рапортует
+        об успехе поверх него.
+        """
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        _crash_on_nth_replace(data_dir, crypto, snapshot_dir, nth=5)
+        markers = _restore_markers(data_dir)
+        assert len(markers) == 1
+        assert _marker(markers[0])["state"] == "COMMITTING"
+        live_during_crash = _data_bytes(data_dir)
+        state, ctx = _oneshot_enospc_in_restore_staging()
+        state["armed"] = True
+
+        with ctx:
+            result = _recover(data_dir, crypto)
+
+        assert result["ok"] is False
+        assert result["pending"] is True
+        assert result["reason"] == "snapshot_fsync_failed"
+        # 🔴 Доказательство обязано остаться на диске.
+        assert _restore_markers(data_dir) != [], "маркер-pending удалён отказом в prepare"
+        assert has_pending_restore(data_dir) is True
+        assert _marker(_restore_markers(data_dir)[0])["state"] == "COMMITTING"
+        # Рваный набор не тронут «починкой» — он ждёт разбора.
+        assert _data_bytes(data_dir) == live_during_crash
+
+    def test_malformed_record_during_recovery_keeps_marker(self, tmp_path):
+        """Тот же инвариант для другого отказа prepare (запись не JSON-объект)."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        _crash_on_nth_replace(data_dir, crypto, snapshot_dir, nth=3)
+        assert len(_restore_markers(data_dir)) == 1
+        # Снимок портится ПОСЛЕ crash: строка валидно расшифровывается, но это
+        # не JSON-объект → отказ в prepare докачки.
+        target = snapshot_dir / "history.ndjson"
+        lines = _read_ndjson_lines(target)
+        lines[0] = crypto.encrypt_line(json.dumps([1, 2], ensure_ascii=False))
+        target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        _rehash(snapshot_dir)
+        live_during_crash = _data_bytes(data_dir)
+
+        result = _recover(data_dir, crypto)
+
+        assert result["ok"] is False
+        assert result["pending"] is True
+        assert result["reason"] == "snapshot_record_malformed"
+        assert _restore_markers(data_dir) != [], "маркер-pending удалён отказом в prepare"
+        assert has_pending_restore(data_dir) is True
+        assert _data_bytes(data_dir) == live_during_crash
+
+    def test_ragged_profile_blocks_ordinary_maintenance(self, tmp_path):
+        """Пока маркер жив — обычное обслуживание заблокировано (спека §5.4)."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        _crash_on_nth_replace(data_dir, crypto, snapshot_dir, nth=4)
+        state, ctx = _oneshot_enospc_in_restore_staging()
+        state["armed"] = True
+        with ctx:
+            _recover(data_dir, crypto)
+        assert has_pending_restore(data_dir) is True
+
+        # Новый restore не идёт.
+        with pytest.raises(SnapshotOperationRefused) as restore_blocked:
+            restore_encrypted_snapshot(
+                data_dir=data_dir,
+                backups_root=data_dir / "backups",
+                snapshot_dir=snapshot_dir,
+                crypto=crypto,
+                policy_read=_policy_on(data_dir),
+            )
+        assert restore_blocked.value.pending is True
+        # Новый снимок (страховка) не создаётся.
+        backups_before = sorted(p.name for p in (data_dir / "backups").iterdir())
+        with pytest.raises(SnapshotOperationRefused) as backup_blocked:
+            create_encrypted_snapshot(
+                data_dir=data_dir,
+                backup_dir=data_dir / "backups" / "snapshot_2",
+                crypto=crypto,
+                transaction_id="tx-while-ragged",
+                policy_on=True,
+            )
+        assert backup_blocked.value.pending is True
+        assert backup_blocked.value.reason == "snapshot_recovery_pending"
+        assert sorted(p.name for p in (data_dir / "backups").iterdir()) == backups_before
+
+    def test_cancellation_still_cleans_its_own_fresh_staging(self, tmp_path):
+        """Отмена ДО COMMITTING по-прежнему не оставляет мусора (регресс фикса B1)."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        live_before = _data_bytes(data_dir)
+
+        with patch(
+            "backend.encrypted_snapshot._write_restore_marker",
+            side_effect=OSError("synthetic crash before marker"),
+        ):
+            with pytest.raises(SnapshotOperationRefused):
+                restore_encrypted_snapshot(
+                    data_dir=data_dir,
+                    backups_root=data_dir / "backups",
+                    snapshot_dir=snapshot_dir,
+                    crypto=crypto,
+                    policy_read=_policy_on(data_dir),
+                )
+
+        # Свежий каталог, созданный этим вызовом, — мусор: убираем.
+        assert _restore_markers(data_dir) == []
+        assert [p.name for p in data_dir.glob(f"{RESTORE_STAGING_PREFIX}*")] == []
+        assert _data_bytes(data_dir) == live_before
+
+
+# ---------------------------------------------------------------------------
+# A5.2b2 review — B2: writers не идут по рваному набору, статус это показывает
+# ---------------------------------------------------------------------------
+
+
+class TestPendingRestoreBlocksWriters:
+    def _ragged(self, tmp_path, tag="w"):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        _crash_on_nth_replace(data_dir, crypto, snapshot_dir, nth=4)
+        return data_dir, crypto, snapshot_dir
+
+    def test_manual_backup_refused_while_restore_pending(self, tmp_path):
+        data_dir, crypto, _snap = self._ragged(tmp_path)
+        svc = _svc(data_dir, crypto)
+        backups_before = sorted(p.name for p in (data_dir / "backups").iterdir())
+
+        result = svc.handle_backup_history({})
+
+        assert result["ok"] is False
+        assert result["reason"] == "snapshot_recovery_pending"
+        assert sorted(p.name for p in (data_dir / "backups").iterdir()) == backups_before
+
+    def test_auto_backup_refused_while_restore_pending(self, tmp_path):
+        from backend.auto_backup import AutoBackupManager
+
+        data_dir, crypto, _snap = self._ragged(tmp_path)
+        store = _store_with_crypto(data_dir, crypto)
+        mgr = AutoBackupManager(store=store, interval_hours=0)
+
+        def _snapshot_dirs() -> list[str]:
+            return sorted(
+                p.name for p in (data_dir / "backups").iterdir()
+                if p.is_dir() and (p / SNAPSHOT_MANIFEST_FILENAME).exists()
+            )
+
+        backups_before = _snapshot_dirs()
+
+        out = mgr.check_and_backup()
+
+        assert out["backed_up"] is False
+        # Конкретная причина протокола, а не «операция недоступна»: владельцу
+        # нужно знать, что чинить (незавершённый restore), а не искать ключ.
+        assert out["skipped_reason"] == "snapshot_recovery_pending"
+        # Ни одного НОВОГО каталога-снимка (rваный набор нельзя зафиксировать
+        # как «последний хороший бэкап»). Sidecar исхода (.last_result*) — штатная
+        # наблюдаемость auto-цикла, в нём только метаданные, не история.
+        assert _snapshot_dirs() == backups_before
+
+    def test_auto_backup_status_reports_blocked_by_pending_restore(self, tmp_path):
+        from backend.auto_backup import AutoBackupManager
+
+        data_dir, crypto, _snap = self._ragged(tmp_path)
+        store = _store_with_crypto(data_dir, crypto)
+        status = AutoBackupManager(store=store, interval_hours=0).get_auto_backup_status()
+
+        assert status["restore_pending"] is True
+        assert status["blocked_by_pending"] is True
+        assert status["encryption_operation_unavailable"] is True
+        assert status["skipped_reason"] == "snapshot_recovery_pending"
+        # Вердикт recovery читаем существующим способом (без service.py).
+        assert status["restore_recovery"]["pending"] is True
+        assert status["restore_recovery"]["reason"] == "snapshot_recovery_pending"
+        assert status["restore_recovery"]["pre_restore_snapshot"]
+
+    def test_status_is_clean_after_successful_recovery(self, tmp_path):
+        from backend.auto_backup import AutoBackupManager
+
+        data_dir, crypto, _snap = self._ragged(tmp_path)
+        _recover(data_dir, crypto)
+        store = _store_with_crypto(data_dir, crypto)
+        mgr = AutoBackupManager(store=store, interval_hours=0)
+
+        status = mgr.get_auto_backup_status()
+        assert status["restore_pending"] is False
+        assert status["restore_recovery"] is None
+        # И backup снова работает.
+        out = mgr.check_and_backup()
+        assert out["backed_up"] is True
+
+    def test_status_fields_exist_in_off_profile(self, tmp_path):
+        """Новые поля обязаны быть и при OFF, иначе UI получит KeyError."""
+        from backend.auto_backup import AutoBackupManager
+
+        data_dir = _data_dir(tmp_path)
+        _fill_profile(data_dir, _crypto())
+        _settings_off(data_dir)
+        store = _store_with_crypto(data_dir, None)
+        status = AutoBackupManager(store=store, interval_hours=0).get_auto_backup_status()
+
+        assert status["restore_pending"] is False
+        assert status["restore_recovery"] is None
+        assert "blocked_by_pending" in status

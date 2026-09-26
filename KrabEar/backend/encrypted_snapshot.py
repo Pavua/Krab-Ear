@@ -524,8 +524,23 @@ def build_encrypted_snapshot(
     dest = _require_inside_backups(data_dir, backup_dir)
     backups_root = dest.parent
 
+    # 🔴 B2 (спека §5.4: «Readers/writers/restore проверяют pending state под тем
+    # же lock»): незавершённый RESTORE — тоже незавершённая операция, и новый
+    # снимок при ней брать нельзя. Пока замены не завершены, журналы могут быть
+    # рваными, а снимок рваного набора станет «последним хорошим бэкапом»
+    # владельца — мусором, неотличимым в list_backups. Маркер лежит в data_dir,
+    # поэтому b1-скан backups его не видит: проверяем явно и ДО подготовки.
+    restore_markers = restore_marker_dirs(data_dir)
+    if restore_markers:
+        raise SnapshotOperationRefused(
+            REASON_RECOVERY_PENDING,
+            f"незавершённый restore ({restore_markers[0].name}) — снимок поверх "
+            "него зафиксировал бы промежуточное состояние",
+            pending=True,
+        )
+
     # Шаг 1: незавершённая операция запрещает новую транзакцию (опубликованная).
-    # Сканируется КОРЕНЬ backups, а не каталог-снимок: незавершённая транзакция
+    # Сканируется КОРЕНЬ backups, а не каталог-снимка: незавершённая транзакция
     # лежит рядом с новым назначением.
     pending = find_pending_transaction(backups_root=backups_root)
     if pending and pending.get("published"):
@@ -1489,12 +1504,22 @@ def _apply_verified_snapshot_locked(
     union = set(collect_ledger_union(data_dir=data_dir, crypto=crypto))
     blocked = union | _snapshot_ledger_ids(snapshot_dir=snapshot_dir, crypto=crypto)
 
-    if staging is None:
+    # 🔴 B1: каталог, который этот вызов НЕ создавал, — не мусор, а доказательство
+    # незавершённой транзакции (recovery переиспользует каталог маркера). Убрать
+    # его при отказе в prepare означало бы: рваный набор становится невидимым,
+    # ``has_pending_restore`` молчит, а следующий restore рапортует об успехе
+    # поверх него. Отменяется (рекурсивно) только то, что создал этот вызов.
+    created_staging = staging is None
+    if created_staging:
         staging = _restore_staging_dir(data_dir, transaction_id)
         if staging.exists():
             raise SnapshotOperationRefused(
                 REASON_DESTINATION_EXISTS, f"staging {staging.name} уже существует"
             )
+    elif not staging.is_dir():
+        raise SnapshotOperationRefused(
+            REASON_PREPARED_MISSING, f"staging {staging.name} не найден"
+        )
     _ensure_private_dir(staging)
 
     try:
@@ -1518,15 +1543,19 @@ def _apply_verified_snapshot_locked(
         _write_restore_marker(staging, marker)
         _fsync_dir(staging)
     except SnapshotOperationRefused:
-        # Отмена ДО durable COMMITTING: живые файлы не тронуты, незавершённой
-        # транзакции на диске не остаётся (спека §5 «до COMMITTING отмена …»).
-        _cancel_staging(staging)
+        # Отмена ДО durable COMMITTING: живые файлы не тронуты. Каталог убирается
+        # ТОЛЬКО если его создал этот вызов (B1): в recovery-ветке переиспользуемый
+        # каталог маркера — единственное доказательство незавершённого restore.
+        if created_staging:
+            _cancel_staging(staging)
         raise
     except OSError as exc:
-        _cancel_staging(staging)
+        if created_staging:
+            _cancel_staging(staging)
         raise SnapshotOperationRefused(
             REASON_FSYNC_FAILED,
             f"подготовка restore не удалась: {type(exc).__name__}: {exc}",
+            pending=not created_staging,
         ) from exc
 
     # --- Шаг 3: замены. С этого момента транзакция необратима (отката нет). ---
@@ -1827,14 +1856,65 @@ def purge_pending_restore_staging(data_dir: Any) -> list[str]:
     return removed
 
 
-def recover_pending_restore_from_store(store: Any) -> dict | None:
-    """Ленивая точка входа recovery для ``StateStore.__init__`` (одна строка).
+def read_pending_restore_verdict(data_dir: Any) -> dict | None:
+    """Read-only вердикт о незавершённом restore. ``None`` — маркера нет.
 
-    ``None`` — маркера на диске не было: обычный старт, работа не выполнялась.
-    Проверка наличия маркера НЕ читает его содержимое и НЕ обращается к ключу,
-    поэтому обычный старт (в т.ч. OFF-профиль прода) не делает ни одного
-    обращения к Keychain. Тяжёлая логика и все fail-closed решения — в
-    ``recover_pending_restore``; здесь только сбор аргументов из store.
+    Ничего не пишет и НЕ докатывает: это честный «статус» для точек наблюдения
+    (auto-backup status, UI). Само восстановление вызывают точки обслуживания
+    (``recover_pending_restore_from_store``), а его вердикт кэшируется в
+    ``last_restore_recovery()`` для диагностики.
+    """
+    markers = restore_marker_dirs(data_dir)
+    if not markers:
+        return None
+    staging = markers[0]
+    try:
+        marker = _read_restore_marker(staging)
+    except SnapshotOperationRefused as exc:
+        return _recovery_result(
+            ok=False,
+            pending=True,
+            reason=exc.reason,
+            extra_markers=[str(p) for p in markers[1:]],
+        )
+    pre_restore = marker.get("pre_restore_snapshot")
+    target = marker.get("target_snapshot")
+    return _recovery_result(
+        ok=False,
+        pending=True,
+        reason=REASON_RECOVERY_PENDING,
+        state=marker.get("state"),
+        transaction_id=str(marker.get("transaction_id") or "") or None,
+        snapshot_dir=str(target) if target else None,
+        pre_restore_snapshot=str(pre_restore) if pre_restore else None,
+        extra_markers=[str(p) for p in markers[1:]],
+    )
+
+
+# Вердикт ПОСЛЕДНЕЙ реальной попытки восстановления (диагностика/статус).
+# Хранится в памяти процесса: после рестарта вердикт всегда пересчитывается
+# маркером на диске (см. ``read_pending_restore_verdict``), поэтому «протухшего»
+# ответа быть не может — источник истины остаётся диск.
+_LAST_RECOVERY_VERDICT: dict | None = None
+
+
+def last_restore_recovery() -> dict | None:
+    """Вердикт последней реальной попытки recovery (или ``None``)."""
+    return _LAST_RECOVERY_VERDICT
+
+
+def recover_pending_restore_from_store(store: Any) -> dict | None:
+    """Точка входа recovery для точек обслуживания (backup/restore/auto).
+
+    ``None`` — маркера на диске не было: работа не выполнялась вовсе. Проверка
+    наличия маркера НЕ читает его содержимое и НЕ обращается к ключу, поэтому
+    обычный вызов без незавершённого restore (в т.ч. OFF-профиль прода) не
+    делает ни одного обращения к Keychain.
+
+    Почему НЕ в ``StateStore.__init__`` (решение ревьюера M2): у фасада пять
+    точек создания, recovery шёл ДО ``init_sentry``/late-injection ErrorBus, а
+    вердикт всё равно никем не читался. Вместо этого докачка живёт там, где
+    она обязана блокировать работу, и её вердикт кэшируется для статуса.
     """
     data_dir = Path(store.data_dir)
     if not has_pending_restore(data_dir):
@@ -1843,15 +1923,17 @@ def recover_pending_restore_from_store(store: Any) -> dict | None:
 
     crypto_getter = getattr(store, "_get_history_crypto", None)
     crypto = crypto_getter() if callable(crypto_getter) else None
+    global _LAST_RECOVERY_VERDICT
     try:
-        return recover_pending_restore(
+        _LAST_RECOVERY_VERDICT = recover_pending_restore(
             data_dir=data_dir,
             backups_root=data_dir / "backups",
             crypto=crypto,
             policy_read=store_policy_reader(store),
         )
-    except Exception:  # noqa: BLE001 — старт backend не имеет права падать
-        logger.exception("StateStore: A5.2b2 restore recovery не выполнен")
+        return _LAST_RECOVERY_VERDICT
+    except Exception:  # noqa: BLE001 — вызывающий не имеет права упасть
+        logger.exception("encrypted_snapshot: restore recovery не выполнен")
         return None
 
 
