@@ -416,6 +416,19 @@ def verify_snapshot_readback(*, backup_dir: Any) -> dict:
         )
 
     mismatches: list[str] = []
+    listed = [entry.get("name") for entry in entries]
+    # Набор — ровно реестр, никаких посторонних имён (спека §1/§5).
+    if set(listed) != set(HISTORY_JOURNAL_FILENAMES) or len(listed) != 10:
+        mismatches.append(
+            f"набор файлов не совпадает с реестром: {sorted(map(str, listed))}"
+        )
+    # Лишние файлы в снимке (например, подброшенный рядом plaintext) —
+    # снимок с ними не считается прочитанным.
+    for path in sorted(snapshot_dir.iterdir()):
+        if path.is_file() and path.name != SNAPSHOT_MANIFEST_FILENAME:
+            if path.name not in listed:
+                mismatches.append(f"лишний файл в снимке: {path.name}")
+
     for entry in entries:
         name = entry.get("name")
         path = snapshot_dir / str(name)

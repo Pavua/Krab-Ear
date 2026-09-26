@@ -575,6 +575,51 @@ class TestCommitProtocol:
         assert (backup_dir / "history.ndjson").read_text("utf-8") == _line(1) + "\n"
 
 
+    def test_readback_rejects_manifest_with_foreign_names(self, tmp_path):
+        """Манифест из 10 записей, но с ЧУЖИМИ именами — это не наш реестр."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        backup_dir = tmp_path / "backups" / "snapshot_1"
+        create_encrypted_snapshot(
+            data_dir=data_dir,
+            backup_dir=backup_dir,
+            crypto=crypto,
+            transaction_id="tx-a52b1-foreign",
+            policy_on=True,
+        )
+        manifest = _manifest(backup_dir)
+        for i, entry in enumerate(manifest["files"]):
+            entry["name"] = f"foreign_{i}.ndjson"
+        (backup_dir / SNAPSHOT_MANIFEST_FILENAME).write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        check = verify_snapshot_readback(backup_dir=backup_dir)
+        assert check["ok"] is False
+        assert any("реестр" in m for m in check["mismatches"])
+
+    def test_readback_rejects_extra_payload_file(self, tmp_path):
+        """Лишний файл в снимке (например, подброшенный plaintext) — не «успех»."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        backup_dir = tmp_path / "backups" / "snapshot_1"
+        create_encrypted_snapshot(
+            data_dir=data_dir,
+            backup_dir=backup_dir,
+            crypto=crypto,
+            transaction_id="tx-a52b1-extra",
+            policy_on=True,
+        )
+        (backup_dir / "extra_plaintext.ndjson").write_text(
+            '{"id":"canary-extra","text":"kolya skazal sekret"}\n', encoding="utf-8"
+        )
+        check = verify_snapshot_readback(backup_dir=backup_dir)
+        assert check["ok"] is False
+        assert any("extra_plaintext.ndjson" in m for m in check["mismatches"])
+
+
 # ----------------------------------------------------------------------
 # Task 3: manual + auto backup при Encryption ON
 # ----------------------------------------------------------------------
