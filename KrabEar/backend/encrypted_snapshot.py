@@ -46,6 +46,7 @@ from typing import Any, Callable
 
 from backend.state_store import (
     HISTORY_JOURNAL_FILENAMES,
+    history_flock,
     history_journal_paths,
 )
 
@@ -940,6 +941,10 @@ def create_encrypted_snapshot(
 RESTORE_STAGING_PREFIX = ".a52b2-restore-"
 RESTORE_MARKER_FILENAME = "restore_marker.json"
 RESTORE_MARKER_VERSION = 1
+# Суффикс подготовленной копии журнала рядом с живым файлом. Тот же filesystem,
+# что у data_dir (backs может быть symlink на другой том), поэтому замена —
+# атомарный os.replace, а не копирование.
+RESTORE_TMP_SUFFIX = ".a52b2-restore-"
 
 # Состояния restore-маркера. Те же строки, что у b1-манифеста: маркер и манифест
 # описывают одну транзакцию, и ``COMMITTED`` здесь, как и там, означает
@@ -955,8 +960,7 @@ REASON_RESTORE_SETTINGS_UNSUPPORTED = "restore_settings_unsupported_at_on"
 REASON_LEDGER_UNREADABLE = "snapshot_ledger_unreadable"
 REASON_LEDGER_MALFORMED = "snapshot_ledger_malformed"
 REASON_RECORD_MALFORMED = "snapshot_record_malformed"
-REASON_OUTPUT_MISMATCH = "snapshot_output_mismatch"
-REASON_RECOVERY_IMPOSSIBLE = "snapshot_recovery_impossible"
+REASON_APPLY_FAILED = "snapshot_apply_failed"
 
 # Два журнала deletion ledger: tombstones ∪ purged (спека §5). Выходной ledger
 # restore пишется по объединению, поэтому порядок здесь важен только для
@@ -1220,3 +1224,481 @@ def collect_ledger_union(*, data_dir: Any, crypto: Any) -> tuple[str, ...]:
                 )
             union.add(item_id)
     return tuple(sorted(union))
+
+
+def _write_restore_marker(*args: Any, **kwargs: Any) -> None:
+    """Durable restore-маркер (COMMITTING) — отдельная точка ради crash-доказки."""
+    raise NotImplementedError("A5.2b2 Task 2: _write_restore_marker ещё не реализован")
+
+
+def _replace_journal(*args: Any, **kwargs: Any) -> None:
+    """Одна замена живого журнала (os.replace) — отдельная точка ради crash-доказки."""
+    raise NotImplementedError("A5.2b2 Task 2: _replace_journal ещё не реализован")
+
+
+def _readback_live_journals(*args: Any, **kwargs: Any) -> dict:
+    """Read-back всех десяти живых журналов — отдельная точка ради crash-доказки."""
+    raise NotImplementedError("A5.2b2 Task 2: _readback_live_journals ещё не реализован")
+
+
+def _new_transaction_id(prefix: str) -> str:
+    """Уникальный transaction_id: метка времени + случайные 4 байта.
+
+    Случайная часть обязательна: две транзакции в одну секунду (снимок + restore,
+    два restore подряд) не должны делить каталог staging.
+    """
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"{prefix}-{stamp}-{os.urandom(4).hex()}"
+
+
+def _restore_staging_dir(data_dir: Path, transaction_id: str) -> Path:
+    return Path(data_dir) / f"{RESTORE_STAGING_PREFIX}{transaction_id}"
+
+
+def restore_marker_dirs(data_dir: Any) -> list[Path]:
+    """Каталоги незавершённого restore в data_dir. Дёшево: один ``iterdir``.
+
+    Единственная точка «есть ли незавершённая операция» — её же зовёт ленивый
+    wiring в ``StateStore.__init__``. Содержимое маркера НЕ читается: на старте
+    достаточно факта наличия.
+    """
+    base = Path(data_dir)
+    try:
+        entries = list(base.iterdir())
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise SnapshotOperationRefused(
+            REASON_FSYNC_FAILED, f"{base} не читается: {exc}"
+        ) from exc
+    found = [
+        path
+        for path in entries
+        if path.name.startswith(RESTORE_STAGING_PREFIX)
+        and not path.is_symlink()
+        and path.is_dir()
+        and (path / RESTORE_MARKER_FILENAME).is_file()
+    ]
+    return sorted(found)
+
+
+def has_pending_restore(data_dir: Any) -> bool:
+    """Дёшевая проверка наличия restore-маркера (для wiring'а)."""
+    try:
+        return bool(restore_marker_dirs(data_dir))
+    except SnapshotOperationRefused:
+        return True  # не смогли проверить — считаем «есть», recovery разберётся
+
+
+def _require_policy_on(
+    policy_read: Callable[[], bool], *, reason_when_off: str
+) -> None:
+    """Restore требует текущей policy ON (решение 1 карточки b2).
+
+    Ошибка чтения политики ≠ «выключено» и ≠ «включено»: доказать ON не смогли —
+    операция запрещена (fail-closed), потому что альтернатива — тихая расшифровка
+    ENC1 в открытый вид, то есть понижение policy для данных, которые владелец
+    шифровал.
+    """
+    try:
+        on = bool(policy_read())
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("encrypted_snapshot: политика шифрования не читается")
+        raise SnapshotOperationRefused(
+            REASON_POLICY_UNAVAILABLE,
+            f"политика шифрования не читается ({type(exc).__name__}) — "
+            "восстановление запрещено",
+        ) from exc
+    if not on:
+        raise SnapshotOperationRefused(
+            reason_when_off,
+            "восстановление encrypted-снимка требует включённого шифрования: "
+            "иначе данные были бы расшифрованы в открытый вид",
+        )
+
+
+def _read_restore_marker(staging: Path) -> dict:
+    path = staging / RESTORE_MARKER_FILENAME
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SnapshotOperationRefused(
+            REASON_MANIFEST_INVALID,
+            f"restore-маркер {staging.name} не читается: {exc}",
+        ) from exc
+    if not isinstance(payload, dict) or payload.get("version") != RESTORE_MARKER_VERSION:
+        raise SnapshotOperationRefused(
+            REASON_MANIFEST_INVALID,
+            f"restore-маркер {staging.name}: неизвестный формат/версия",
+        )
+    return payload
+
+
+def _snapshot_ledger_ids(*, snapshot_dir: Path, crypto: Any) -> set[str]:
+    """ID deletion ledger САМОГО снимка (его era). Уже проверен verify_snapshot."""
+    ids: set[str] = set()
+    for name in LEDGER_JOURNAL_NAMES:
+        for lineno, line in enumerate(
+            _decrypt_verified_lines(
+                path=snapshot_dir / name, crypto=crypto, reason_mismatch=REASON_POLICY_MISMATCH
+            ),
+            start=1,
+        ):
+            item_id = _record_id(
+                crypto.decrypt_line(line),
+                where=f"{name}:{lineno}",
+                reason=REASON_LEDGER_MALFORMED,
+            )
+            if not item_id:
+                raise SnapshotOperationRefused(
+                    REASON_LEDGER_MALFORMED,
+                    f"{name}:{lineno}: в ledger снимка нет непустого id",
+                )
+            ids.add(item_id)
+    return ids
+
+
+def _build_restore_output(
+    *,
+    data_dir: Path,
+    staging: Path,
+    snapshot_dir: Path,
+    crypto: Any,
+    blocked: set[str],
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Готовит десять выходных ENC1-журналов в приватном staging.
+
+    Фильтрация по ``blocked`` (ledger union) применяется к истории и ко всем
+    дельтам: запись, удалённая владельцем, не может вернуться ни через один
+    журнал (спека §5: «исключаются из восстановленной истории и связанных дельт»).
+    Строки переносятся БАЙТ-В-БАЙТ из уже проверенного снимка — лишнего
+    шифрования нет, а побайтовое совпадение с бэкапом остаётся доказуемым.
+
+    Возвращает ``(files_meta, restored_entries, filtered_out)``.
+    """
+    files_meta: list[dict[str, Any]] = []
+    restored_entries = 0
+    filtered_out = 0
+    for name in HISTORY_JOURNAL_FILENAMES:
+        if name in LEDGER_JOURNAL_NAMES:
+            # Выходной ledger = ОБЪЕДИНЕНИЕ. Старый снимок не может его уменьшить.
+            body = "".join(
+                crypto.encrypt_line(json.dumps({"id": item_id}, ensure_ascii=False)) + "\n"
+                for item_id in sorted(blocked)
+            ).encode("utf-8")
+        else:
+            out_lines: list[str] = []
+            verified = _decrypt_verified_lines(
+                path=snapshot_dir / name, crypto=crypto, reason_mismatch=REASON_POLICY_MISMATCH
+            )
+            for lineno, line in enumerate(verified, start=1):
+                item_id = _record_id(
+                    crypto.decrypt_line(line),
+                    where=f"{name}:{lineno}",
+                    reason=REASON_RECORD_MALFORMED,
+                )
+                if item_id and item_id in blocked:
+                    filtered_out += 1
+                    continue
+                out_lines.append(line)
+            if name == "history.ndjson":
+                restored_entries = len(out_lines)
+            body = ("\n".join(out_lines) + "\n" if out_lines else b"").encode("utf-8")
+        _write_file_durable(staging / name, body)
+        files_meta.append(
+            {"name": name, "size": len(body), "sha256": _sha256(body)}
+        )
+    return files_meta, restored_entries, filtered_out
+
+
+def _replace_journal(tmp_file: Path, target: Path) -> None:
+    """Одна атомарная замена живого журнала (``os.replace``, один filesystem)."""
+    os.replace(str(tmp_file), str(target))
+
+
+def _write_restore_marker(staging: Path, marker: dict) -> None:
+    """Durable restore-маркер: tmp → fsync → replace → fsync каталога."""
+    blob = json.dumps(marker, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")
+    tmp = staging / f"{RESTORE_MARKER_FILENAME}.tmp"
+    _write_file_durable(tmp, blob)
+    os.replace(tmp, staging / RESTORE_MARKER_FILENAME)
+    _fsync_dir(staging)
+
+
+def _readback_live_journals(*, data_dir: Path, files_meta: list[dict]) -> dict:
+    """Read-back ВСЕХ десяти живых журналов против ожидаемых size/sha256.
+
+    Только после этого (и никогда раньше) restore-маркер может получить
+    состояние COMMITTED — ровно как в b1 для снимка.
+    """
+    mismatches: list[str] = []
+    for entry in files_meta:
+        name = str(entry.get("name"))
+        path = Path(data_dir) / name
+        if not path.is_file():
+            mismatches.append(f"{name}: отсутствует")
+            continue
+        try:
+            blob = path.read_bytes()
+        except OSError as exc:
+            mismatches.append(f"{name}: не читается ({exc})")
+            continue
+        if len(blob) != entry.get("size"):
+            mismatches.append(f"{name}: size {len(blob)} != {entry.get('size')}")
+            continue
+        if _sha256(blob) != entry.get("sha256"):
+            mismatches.append(f"{name}: sha256 не совпадает")
+    return {"ok": not mismatches, "checked": len(files_meta), "mismatches": mismatches}
+
+
+def _cleanup_restore_tmp(data_dir: Path, transaction_id: str) -> None:
+    """Убирает незамещённые ``*.a52b2-restore-<txid>.tmp`` рядом с журналами.
+
+    Частично применённый restore восстанавливается ДОКАЗКОЙ (повторное
+    применение), поэтому tmp-куски доказывать нечего — только мусор в data_dir.
+    """
+    for name in HISTORY_JOURNAL_FILENAMES:
+        try:
+            (Path(data_dir) / f"{name}{RESTORE_TMP_SUFFIX}{transaction_id}").unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:  # noqa: BLE001 — чистка не должна ронять транзакцию
+            logger.warning(
+                "encrypted_snapshot: не удалось убрать %s (%s)", name, exc
+            )
+
+
+def _apply_verified_snapshot_locked(
+    *,
+    data_dir: Path,
+    backups_root: Path,
+    snapshot_dir: Path,
+    crypto: Any,
+    policy_read: Callable[[], bool],
+    transaction_id: str,
+    pre_restore_snapshot: str,
+    recovered: bool,
+) -> dict:
+    """Шаги 2–4 под store-lock: union → фильтрация → COMMITTING → замены → read-back.
+
+    Вызывается и обычным restore, и recovery (roll-forward). Разница только в
+    ``pre_restore_snapshot``/``recovered``: при докачке страховка уже создана
+    первым restore, второй раз она не нужна.
+    """
+    union = set(collect_ledger_union(data_dir=data_dir, crypto=crypto))
+    blocked = union | _snapshot_ledger_ids(snapshot_dir=snapshot_dir, crypto=crypto)
+
+    staging = _restore_staging_dir(data_dir, transaction_id)
+    if staging.exists():
+        raise SnapshotOperationRefused(
+            REASON_DESTINATION_EXISTS, f"staging {staging.name} уже существует"
+        )
+    _ensure_private_dir(staging)
+
+    try:
+        files_meta, restored_entries, filtered_out = _build_restore_output(
+            data_dir=data_dir,
+            staging=staging,
+            snapshot_dir=snapshot_dir,
+            crypto=crypto,
+            blocked=blocked,
+        )
+        # Шаг 3 (середина): durable COMMITTING — ДО первой замены живого файла.
+        marker = {
+            "version": RESTORE_MARKER_VERSION,
+            "transaction_id": transaction_id,
+            "state": RESTORE_STATE_COMMITTING,
+            "target_snapshot": str(snapshot_dir),
+            "pre_restore_snapshot": pre_restore_snapshot,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "files": files_meta,
+        }
+        _write_restore_marker(staging, marker)
+        _fsync_dir(staging)
+    except SnapshotOperationRefused:
+        # Отмена ДО durable COMMITTING: живые файлы не тронуты, незавершённой
+        # транзакции на диске не остаётся (спека §5 «до COMMITTING отмена …»).
+        _cancel_staging(staging)
+        raise
+    except OSError as exc:
+        _cancel_staging(staging)
+        raise SnapshotOperationRefused(
+            REASON_FSYNC_FAILED,
+            f"подготовка restore не удалась: {type(exc).__name__}: {exc}",
+        ) from exc
+
+    # --- Шаг 3: замены. С этого момента транзакция необратима (отката нет). ---
+    try:
+        for entry in files_meta:
+            name = str(entry["name"])
+            tmp = data_dir / f"{name}{RESTORE_TMP_SUFFIX}{transaction_id}"
+            _write_file_durable(tmp, (staging / name).read_bytes())
+            _replace_journal(tmp, data_dir / name)
+    except Exception as exc:  # noqa: BLE001 — crash/сбой замены
+        _cleanup_restore_tmp(data_dir, transaction_id)
+        raise SnapshotOperationRefused(
+            REASON_APPLY_FAILED,
+            f"замена живых журналов не удалась: {type(exc).__name__}: {exc}",
+            pending=True,
+        ) from exc
+    _fsync_dir(data_dir)
+
+    # --- Шаг 4: read-back ВСЕХ файлов. COMMITTED недостижим без него. ---
+    try:
+        readback = _readback_live_journals(data_dir=data_dir, files_meta=files_meta)
+    except Exception as exc:  # noqa: BLE001
+        raise SnapshotOperationRefused(
+            REASON_READBACK_FAILED,
+            f"read-back не выполнен: {type(exc).__name__}: {exc}",
+            pending=True,
+        ) from exc
+    if not readback["ok"]:
+        raise SnapshotOperationRefused(
+            REASON_READBACK_FAILED,
+            f"read-back не сошёлся: {readback['mismatches']}",
+            pending=True,
+        )
+
+    marker["state"] = RESTORE_STATE_COMMITTED
+    marker["committed_at"] = datetime.now(timezone.utc).isoformat()
+    marker["restored_entries"] = restored_entries
+    _write_restore_marker(staging, marker)
+    _fsync_dir(data_dir)
+
+    # Транзакция завершена: приватный staging больше не нужен. Маркер COMMITTED,
+    # оставшийся после crash здесь, recovery уберёт как «уже завершённую».
+    _cancel_staging(staging)
+    _fsync_dir(data_dir)
+    logger.info(
+        "encrypted_snapshot: restore %s зафиксирован (COMMITTED) из %s, "
+        "%d записей, отфильтровано по ledger %d",
+        transaction_id, snapshot_dir, restored_entries, filtered_out,
+    )
+    return {
+        "ok": True,
+        "state": RESTORE_STATE_COMMITTED,
+        "transaction_id": transaction_id,
+        "snapshot_dir": str(snapshot_dir),
+        "pre_restore_snapshot": pre_restore_snapshot,
+        "restored_entries": restored_entries,
+        "ledger_blocked": len(blocked),
+        "filtered_out": filtered_out,
+        "files": files_meta,
+        "readback": readback,
+        "recovered": recovered,
+    }
+
+
+def restore_encrypted_snapshot(
+    *,
+    data_dir: Any,
+    backups_root: Any,
+    snapshot_dir: Any,
+    crypto: Any,
+    restore_settings: bool = False,
+    policy_read: Callable[[], bool] | None = None,
+) -> dict:
+    """A5.2b2 Task 2 — восстановление из ПРОВЕРЕННОГО encrypted-снимка.
+
+    Порядок (спека §5 шаги 1–6; карточка b2 решение 4):
+
+      1. дешёвые проверки БЕЗ записи: ``restore_settings`` не поддерживается,
+         ключ доступен, текущая policy ON, контейнмент, нет незавершённых
+         операций, полная верификация снимка (10 имён, size+sha256, расшифровка
+         каждой строки). Любой отказ — до первого байта в живых журналах;
+      2. под store-lock (``history_flock`` — тот же файл, что ``StateStore._lock``):
+         повторная проверка policy, повторная верификация снимка (между проверкой
+         и lock'ом снимок могли изменить), **pre-restore снимок** текущего
+         состояния через b1-протокол (страховка для ручного решения владельца),
+         сборка ledger union под ТЕМ ЖЕ lock'ом;
+      3. фильтрация объединением, запись десяти ENC1-журналов в приватный staging
+         на том же filesystem, что и живые файлы, durable restore-маркер
+         ``COMMITTING`` **до первой замены**, замены;
+      4. read-back всех десяти → ``COMMITTED``; staging убирается; в ответе —
+         честный ``restored_entries`` и путь pre-restore снимка.
+
+    ``policy_read`` — тот же fail-closed reader, что у A5.2a. Если не передан,
+     берётся ``data_dir_policy_reader(data_dir)`` (тот же механизм, без ссылки на
+     StateStore), поэтому модуль тестируется без живой фасада.
+
+    Нарушение инварианта = CRITICAL: ``settings.json`` не восстанавливается
+    никогда, plaintext при ON не создаётся, resurrection невозможен.
+    """
+    data_dir = Path(data_dir)
+    backups_root = Path(backups_root)
+    snapshot_dir = Path(snapshot_dir)
+
+    # --- Шаг 1: дешёвые проверки. Ни одной записи. ---
+    if restore_settings:
+        # Молча игнорировать явный запрос владельца нельзя (решение 2 карточки).
+        raise SnapshotOperationRefused(
+            REASON_RESTORE_SETTINGS_UNSUPPORTED,
+            "settings.json не восстанавливается: OFF-настройки понизили бы "
+            "текущую encryption policy",
+        )
+    if crypto is None:
+        raise SnapshotOperationRefused(
+            REASON_CRYPTO_UNAVAILABLE, "ключ недоступен — restore невозможен"
+        )
+    if policy_read is None:
+        from backend.history_encryption_policy import data_dir_policy_reader
+
+        policy_read = data_dir_policy_reader(data_dir)
+    _require_policy_on(policy_read, reason_when_off=REASON_REQUIRES_ENCRYPTION_ON)
+    resolved = _require_restorable_snapshot_dir(backups_root, snapshot_dir)
+    if restore_marker_dirs(data_dir):
+        raise SnapshotOperationRefused(
+            REASON_RECOVERY_PENDING,
+            "незавершённый restore на диске — сначала требуется recovery",
+            pending=True,
+        )
+    b1_pending = find_pending_transaction(backups_root=backups_root)
+    if b1_pending and b1_pending.get("published"):
+        raise SnapshotOperationRefused(
+            REASON_PENDING_OPERATION,
+            f"незавершённая транзакция снимка {b1_pending.get('transaction_id')} "
+            f"({b1_pending.get('state')}) — требуется разбор",
+            pending=True,
+        )
+    if b1_pending:
+        logger.warning(
+            "encrypted_snapshot: оставлен неопубликованный staging %s — "
+            "новая транзакция допустима",
+            b1_pending.get("path"),
+        )
+    # Полная верификация ДО записи: неизвестный формат, неполный набор, чужой
+    # ключ или tamper не должны дойти до первой замены.
+    verify_snapshot(backups_root=backups_root, snapshot_dir=snapshot_dir, crypto=crypto)
+
+    transaction_id = _new_transaction_id("restore")
+
+    # --- Шаги 2–4: под тем же store-lock, что и StateStore._lock. ---
+    with history_flock(data_dir):
+        # Политика обязана остаться ON: ON→OFF на ходу операции означала бы
+        # смену режима на лету (b1-формулировка той же проверки).
+        _require_policy_on(policy_read, reason_when_off=REASON_POLICY_UNAVAILABLE)
+        # Повторная верификация под lock: снимок читали ДО захвата, за это время
+        # он мог измениться (спека §5 шаг 4 — повторная проверка перед заменами).
+        verify_snapshot(backups_root=backups_root, snapshot_dir=snapshot_dir, crypto=crypto)
+
+        # Pre-restore снимок ТЕКУЩЕГО состояния — страховка, а не откат: он
+        # остаётся на диске, его путь возвращается владельцу (решение 6).
+        pre_dir = backups_root / f"snapshot_prerestore_{transaction_id.split('-', 1)[1]}"
+        create_encrypted_snapshot(
+            data_dir=data_dir,
+            backup_dir=pre_dir,
+            crypto=crypto,
+            transaction_id=f"pre_restore_{transaction_id}",
+            policy_on=True,
+            policy_read=policy_read,
+        )
+        return _apply_verified_snapshot_locked(
+            data_dir=data_dir,
+            backups_root=backups_root,
+            snapshot_dir=resolved,
+            crypto=crypto,
+            policy_read=policy_read,
+            transaction_id=transaction_id,
+            pre_restore_snapshot=str(pre_dir),
+            recovered=False,
+        )

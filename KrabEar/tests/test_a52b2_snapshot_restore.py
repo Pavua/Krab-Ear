@@ -17,16 +17,20 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from backend.encrypted_snapshot import (
+    RESTORE_MARKER_FILENAME,
+    RESTORE_STAGING_PREFIX,
     SNAPSHOT_MANIFEST_FILENAME,
     SNAPSHOT_MANIFEST_VERSION,
     STATE_COMMITTED,
     SnapshotOperationRefused,
     collect_ledger_union,
     create_encrypted_snapshot,
+    restore_encrypted_snapshot,
     verify_snapshot,
 )
 from backend.history_crypto import SENTINEL, HistoryCrypto
@@ -146,6 +150,14 @@ def _read_ndjson_lines(path: Path) -> list[str]:
     if lines and lines[-1] == "":
         lines.pop()
     return lines
+
+
+def _marker(staging_dir: Path) -> dict:
+    return json.loads((staging_dir / RESTORE_MARKER_FILENAME).read_text("utf-8"))
+
+
+def _real_replace(tmp_file: Path, target: Path) -> None:
+    os.replace(str(tmp_file), str(target))
 
 
 def _data_bytes(data_dir: Path) -> dict[str, bytes]:
@@ -637,3 +649,576 @@ class TestLedgerUnion:
             collect_ledger_union(data_dir=data_dir, crypto=crypto)
 
         assert exc.value.reason == "snapshot_source_symlink"
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — применение снимка (commit-протокол) + restore-маркер
+# ---------------------------------------------------------------------------
+
+
+def _fill_profile(data_dir: Path, crypto: HistoryCrypto) -> dict[str, list[str]]:
+    """Валидное содержимое всех 10 журналов (ledger-строки — только с ``id``).
+
+    ID данных (``dN-J``) и ID deletion ledger (``lN-J``) не пересекаются, чтобы
+    фильтрация по union была проверяема по отдельности.
+    """
+    expected: dict[str, list[str]] = {}
+    for i, name in enumerate(HISTORY_JOURNAL_FILENAMES):
+        plain: list[str] = []
+        for j in range(3):
+            if name in ("history_tombstones.ndjson", "history_purged_ids.ndjson"):
+                plain.append(json.dumps({"id": f"l{i}-{j}"}, ensure_ascii=False))
+            else:
+                plain.append(
+                    json.dumps(
+                        {"id": f"d{i}-{j}", "text": f"текст-{i}-{j}"}, ensure_ascii=False
+                    )
+                )
+        lines = [
+            crypto.encrypt_line(text) if (i + j) % 2 == 0 else text
+            for j, text in enumerate(plain)
+        ]
+        expected[name] = plain
+        (data_dir / name).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return expected
+
+
+def _add_tombstone(data_dir: Path, item_id: str, crypto: HistoryCrypto) -> None:
+    with (data_dir / "history_tombstones.ndjson").open("a", encoding="utf-8") as fh:
+        fh.write(crypto.encrypt_line(json.dumps({"id": item_id}, ensure_ascii=False)) + "\n")
+
+
+def _live_ids(data_dir: Path, crypto: HistoryCrypto, name: str) -> list[str]:
+    """ID всех строк живого журнала (для проверки отсутствия resurrection)."""
+    ids: list[str] = []
+    for line in _read_ndjson_lines(data_dir / name):
+        if line.startswith(SENTINEL):
+            line = crypto.decrypt_line(line)
+        payload = json.loads(line)
+        item_id = payload.get("id")
+        if item_id:
+            ids.append(str(item_id))
+    return ids
+
+
+def _restore_markers(data_dir: Path) -> list[Path]:
+    return sorted(
+        p for p in data_dir.glob(f"{RESTORE_STAGING_PREFIX}*") if p.is_dir()
+    )
+
+
+class TestRestoreRoundTrip:
+    def test_round_trip_restores_all_ten_journals_as_enc1(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        expected = _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        # Живая история после снимка — посторонняя.
+        (data_dir / "history.ndjson").write_text(
+            json.dumps({"id": "live", "text": "не из снимка"}, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+        result = restore_encrypted_snapshot(
+            data_dir=data_dir,
+            backups_root=data_dir / "backups",
+            snapshot_dir=snapshot_dir,
+            crypto=crypto,
+            policy_read=_policy_on(data_dir),
+        )
+
+        assert result["ok"] is True
+        assert result["state"] == "COMMITTED"
+        assert result["restored_entries"] == 3
+        union = set(collect_ledger_union(data_dir=data_dir, crypto=crypto))
+        for name in HISTORY_JOURNAL_FILENAMES:
+            lines = _read_ndjson_lines(data_dir / name)
+            assert all(ln.startswith(SENTINEL) for ln in lines), f"{name}: не ENC1"
+            if name in ("history_tombstones.ndjson", "history_purged_ids.ndjson"):
+                # Выходной ledger = ОБЪЕДИНЕНИЕ в обоих журналах: любой из них
+                # сам по себе уже запрещает resurrection.
+                assert set(_live_ids(data_dir, crypto, name)) == union
+            else:
+                # Остальные восемь журналов — побайтово то, что было в снимке.
+                assert lines, f"{name}: журнал не восстановлен"
+                assert [crypto.decrypt_line(ln) for ln in lines] == expected[name]
+
+    def test_settings_json_is_never_restored(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings(data_dir, {"history_encryption_enabled": True, "язык": "ru"})
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        settings_before = (data_dir / "settings.json").read_bytes()
+
+        restore_encrypted_snapshot(
+            data_dir=data_dir,
+            backups_root=data_dir / "backups",
+            snapshot_dir=snapshot_dir,
+            crypto=crypto,
+            policy_read=_policy_on(data_dir),
+        )
+
+        assert (data_dir / "settings.json").read_bytes() == settings_before
+
+    def test_restore_settings_request_is_explicit_refusal(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        live_before = _data_bytes(data_dir)
+        settings_before = (data_dir / "settings.json").read_bytes()
+
+        with pytest.raises(SnapshotOperationRefused) as exc:
+            restore_encrypted_snapshot(
+                data_dir=data_dir,
+                backups_root=data_dir / "backups",
+                snapshot_dir=snapshot_dir,
+                crypto=crypto,
+                restore_settings=True,
+                policy_read=_policy_on(data_dir),
+            )
+
+        assert exc.value.reason == "restore_settings_unsupported_at_on"
+        assert _data_bytes(data_dir) == live_before
+        assert (data_dir / "settings.json").read_bytes() == settings_before
+
+    def test_pre_restore_snapshot_is_left_and_returned(self, tmp_path):
+        """Страховка для ручного решения владельца — не откат, а отдельный снимок."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        (data_dir / "history.ndjson").write_text(
+            json.dumps({"id": "live-до-restore", "text": "текущее"}, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+        result = restore_encrypted_snapshot(
+            data_dir=data_dir,
+            backups_root=data_dir / "backups",
+            snapshot_dir=snapshot_dir,
+            crypto=crypto,
+            policy_read=_policy_on(data_dir),
+        )
+
+        pre = Path(result["pre_restore_snapshot"])
+        assert pre.is_dir()
+        assert pre != snapshot_dir
+        pre_lines = _read_ndjson_lines(pre / "history.ndjson")
+        assert [crypto.decrypt_line(ln) for ln in pre_lines] == [
+            json.dumps({"id": "live-до-restore", "text": "текущее"}, ensure_ascii=False)
+        ]
+        # Страховка сама является валидным снимком (её можно восстановить).
+        assert _manifest(pre)["state"] == "COMMITTED"
+
+    def test_no_plaintext_appears_anywhere_after_restore(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+
+        restore_encrypted_snapshot(
+            data_dir=data_dir,
+            backups_root=data_dir / "backups",
+            snapshot_dir=snapshot_dir,
+            crypto=crypto,
+            policy_read=_policy_on(data_dir),
+        )
+
+        for root in (data_dir, data_dir / "backups"):
+            for path in root.rglob("*"):
+                if not path.is_file():
+                    continue
+                blob = path.read_bytes()
+                assert b"tekst" not in blob and "текст".encode("utf-8") not in blob
+
+    def test_transient_restore_staging_is_removed_on_success(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+
+        restore_encrypted_snapshot(
+            data_dir=data_dir,
+            backups_root=data_dir / "backups",
+            snapshot_dir=snapshot_dir,
+            crypto=crypto,
+            policy_read=_policy_on(data_dir),
+        )
+
+        assert _restore_markers(data_dir) == []
+
+
+class TestRestoreLedgerUnion:
+    def test_resurrection_is_impossible_for_tombstoned_snapshot_entry(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        # Владелец удалил запись ИЗ СНИМКА ( tombstone появился после capture).
+        _add_tombstone(data_dir, "d0-1", crypto)
+
+        result = restore_encrypted_snapshot(
+            data_dir=data_dir,
+            backups_root=data_dir / "backups",
+            snapshot_dir=snapshot_dir,
+            crypto=crypto,
+            policy_read=_policy_on(data_dir),
+        )
+
+        assert "d0-1" not in _live_ids(data_dir, crypto, "history.ndjson")
+        assert result["filtered_out"] >= 1
+        # Ни в одном дельта-журнале записи с этим ID быть не должно.
+        for name in HISTORY_JOURNAL_FILENAMES:
+            if name in ("history_tombstones.ndjson", "history_purged_ids.ndjson"):
+                continue
+            assert "d0-1" not in _live_ids(data_dir, crypto, name), name
+
+    def test_union_from_current_ledger_survives_snapshot_that_lacks_it(self, tmp_path):
+        """ID, которого нет в снимке, но есть в текущем ledger, остаётся в ledger."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        _add_tombstone(data_dir, "ghost-1", crypto)
+
+        result = restore_encrypted_snapshot(
+            data_dir=data_dir,
+            backups_root=data_dir / "backups",
+            snapshot_dir=snapshot_dir,
+            crypto=crypto,
+            policy_read=_policy_on(data_dir),
+        )
+
+        assert result["ok"] is True
+        for name in ("history_tombstones.ndjson", "history_purged_ids.ndjson"):
+            assert "ghost-1" in _live_ids(data_dir, crypto, name), name
+        assert "ghost-1" not in _live_ids(data_dir, crypto, "history.ndjson")
+
+    def test_ledger_union_never_shrinks(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        _add_tombstone(data_dir, "d0-2", crypto)
+        _add_tombstone(data_dir, "ghost-2", crypto)
+        before = set(collect_ledger_union(data_dir=data_dir, crypto=crypto))
+
+        restore_encrypted_snapshot(
+            data_dir=data_dir,
+            backups_root=data_dir / "backups",
+            snapshot_dir=snapshot_dir,
+            crypto=crypto,
+            policy_read=_policy_on(data_dir),
+        )
+
+        after = set(collect_ledger_union(data_dir=data_dir, crypto=crypto))
+        assert before <= after, "старый снимок уменьшил deletion ledger"
+        assert {"d0-2", "ghost-2"} <= after
+
+    def test_corrupted_current_ledger_stops_restore_without_changes(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        with (data_dir / "history_tombstones.ndjson").open("a", encoding="utf-8") as fh:
+            fh.write("{не json}\n")
+        live_before = _data_bytes(data_dir)
+
+        with pytest.raises(SnapshotOperationRefused) as exc:
+            restore_encrypted_snapshot(
+                data_dir=data_dir,
+                backups_root=data_dir / "backups",
+                snapshot_dir=snapshot_dir,
+                crypto=crypto,
+                policy_read=_policy_on(data_dir),
+            )
+
+        assert exc.value.reason == "snapshot_ledger_malformed"
+        assert _data_bytes(data_dir) == live_before
+        assert _restore_markers(data_dir) == []
+
+    def test_missing_crypto_stops_restore_without_changes(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        live_before = _data_bytes(data_dir)
+
+        with pytest.raises(SnapshotOperationRefused) as exc:
+            restore_encrypted_snapshot(
+                data_dir=data_dir,
+                backups_root=data_dir / "backups",
+                snapshot_dir=snapshot_dir,
+                crypto=None,
+                policy_read=_policy_on(data_dir),
+            )
+
+        assert exc.value.reason == "snapshot_crypto_unavailable"
+        assert _data_bytes(data_dir) == live_before
+
+
+class TestRestorePolicyGates:
+    def test_encrypted_snapshot_at_off_profile_is_refused(self, tmp_path):
+        """OFF + ENC1-снимок: тихая расшифровка означала бы понижение policy."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        _settings_off(data_dir)
+        live_before = _data_bytes(data_dir)
+
+        with pytest.raises(SnapshotOperationRefused) as exc:
+            restore_encrypted_snapshot(
+                data_dir=data_dir,
+                backups_root=data_dir / "backups",
+                snapshot_dir=snapshot_dir,
+                crypto=crypto,
+                policy_read=_policy_on(data_dir),
+            )
+
+        assert exc.value.reason == "snapshot_requires_encryption_on"
+        assert _data_bytes(data_dir) == live_before
+
+    def test_plaintext_snapshot_at_on_profile_is_refused(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        _make_snapshot(data_dir, crypto)
+        plain_dir = data_dir / "backups" / "snapshot_plain"
+        plain_dir.mkdir(parents=True)
+        files = []
+        for name in HISTORY_JOURNAL_FILENAMES:
+            body = (json.dumps({"id": "p", "text": "открытый текст"}) + "\n").encode("utf-8")
+            (plain_dir / name).write_bytes(body)
+            files.append({"name": name, "size": len(body), "sha256": hashlib.sha256(body).hexdigest()})
+        _write_manifest(
+            plain_dir,
+            {
+                "version": SNAPSHOT_MANIFEST_VERSION,
+                "transaction_id": "tx-plain",
+                "state": STATE_COMMITTED,
+                "policy_at_capture": True,
+                "files": files,
+            },
+        )
+        live_before = _data_bytes(data_dir)
+
+        with pytest.raises(SnapshotOperationRefused) as exc:
+            restore_encrypted_snapshot(
+                data_dir=data_dir,
+                backups_root=data_dir / "backups",
+                snapshot_dir=plain_dir,
+                crypto=crypto,
+                policy_read=_policy_on(data_dir),
+            )
+
+        assert exc.value.reason == "snapshot_policy_mismatch"
+        assert _data_bytes(data_dir) == live_before
+
+    def test_policy_flipped_off_under_lock_stops_before_first_write(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        live_before = _data_bytes(data_dir)
+        state = {"reads": 0}
+
+        def _flipping_reader() -> bool:
+            state["reads"] += 1
+            if state["reads"] >= 2:  # вторая проверка — уже под lock
+                return False
+            return True
+
+        with pytest.raises(SnapshotOperationRefused) as exc:
+            restore_encrypted_snapshot(
+                data_dir=data_dir,
+                backups_root=data_dir / "backups",
+                snapshot_dir=snapshot_dir,
+                crypto=crypto,
+                policy_read=_flipping_reader,
+            )
+
+        assert exc.value.reason == "snapshot_policy_unavailable"
+        assert _data_bytes(data_dir) == live_before
+
+    def test_unreadable_policy_is_fail_closed(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        live_before = _data_bytes(data_dir)
+
+        def _boom() -> bool:
+            raise OSError("settings недоступны")
+
+        with pytest.raises(SnapshotOperationRefused) as exc:
+            restore_encrypted_snapshot(
+                data_dir=data_dir,
+                backups_root=data_dir / "backups",
+                snapshot_dir=snapshot_dir,
+                crypto=crypto,
+                policy_read=_boom,
+            )
+
+        assert exc.value.reason == "snapshot_policy_unavailable"
+        assert _data_bytes(data_dir) == live_before
+
+
+class TestRestoreCommitProtocol:
+    def _restore(self, data_dir, crypto, snapshot_dir, **kw):
+        return restore_encrypted_snapshot(
+            data_dir=data_dir,
+            backups_root=data_dir / "backups",
+            snapshot_dir=snapshot_dir,
+            crypto=crypto,
+            policy_read=_policy_on(data_dir),
+            **kw,
+        )
+
+    def test_crash_after_pre_restore_snapshot_before_marker_leaves_no_evidence(self, tmp_path):
+        """Окно (a): отмена ДО COMMITTING оставляет исходные файлы без изменений."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        live_before = _data_bytes(data_dir)
+
+        with patch(
+            "backend.encrypted_snapshot._write_restore_marker",
+            side_effect=OSError("synthetic crash before marker"),
+        ):
+            with pytest.raises(SnapshotOperationRefused):
+                self._restore(data_dir, crypto, snapshot_dir)
+
+        assert _data_bytes(data_dir) == live_before
+        # Незавершённой транзакции на диске нет — отменено, а не «зависло».
+        assert _restore_markers(data_dir) == []
+        # Снимок-страховка успел опубликоваться (шаг до маркера) и остаётся доказательством.
+        pre = [p for p in (data_dir / "backups").iterdir() if "prerestore" in p.name]
+        assert len(pre) == 1
+
+    def test_crash_at_first_replacement_keeps_committing_marker(self, tmp_path):
+        """Окно (b): COMMITTING переживает crash, живая история цела, отката нет."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        live_before = _data_bytes(data_dir)
+
+        with patch(
+            "backend.encrypted_snapshot._replace_journal",
+            side_effect=OSError("synthetic crash on first replacement"),
+        ):
+            with pytest.raises(SnapshotOperationRefused) as exc:
+                self._restore(data_dir, crypto, snapshot_dir)
+
+        assert exc.value.pending is True
+        assert _data_bytes(data_dir) == live_before
+        markers = _restore_markers(data_dir)
+        assert len(markers) == 1
+        assert _marker(markers[0])["state"] == "COMMITTING"
+
+    def test_crash_midway_leaves_mixed_journals_and_surviving_marker(self, tmp_path):
+        """Окно (b'): половина замен выполнена — состояние не объявляется успехом."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        live_before = _data_bytes(data_dir)
+        calls = {"n": 0}
+
+        def _fifth_fails(tmp_path_arg, target):
+            calls["n"] += 1
+            if calls["n"] == 5:
+                raise OSError("synthetic crash on fifth replacement")
+            return _real_replace(tmp_path_arg, target)
+
+        with patch("backend.encrypted_snapshot._replace_journal", _fifth_fails):
+            with pytest.raises(SnapshotOperationRefused) as exc:
+                self._restore(data_dir, crypto, snapshot_dir)
+
+        assert exc.value.pending is True
+        assert calls["n"] == 5
+        assert _data_bytes(data_dir) != live_before  # набор уже смешанный
+        markers = _restore_markers(data_dir)
+        assert len(markers) == 1
+        assert _marker(markers[0])["state"] == "COMMITTING"
+
+    def test_crash_before_readback_leaves_marker_not_committed(self, tmp_path):
+        """Окно (c): замены сделаны, но COMMITTED недостижим без read-back."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+
+        with patch(
+            "backend.encrypted_snapshot._readback_live_journals",
+            side_effect=OSError("synthetic crash before readback"),
+        ):
+            with pytest.raises(SnapshotOperationRefused) as exc:
+                self._restore(data_dir, crypto, snapshot_dir)
+
+        assert exc.value.pending is True
+        markers = _restore_markers(data_dir)
+        assert len(markers) == 1
+        assert _marker(markers[0])["state"] == "COMMITTING"
+        # Никакой маркер COMMITTED на диске.
+        assert all(_marker(m)["state"] != "COMMITTED" for m in markers)
+
+    def test_two_restores_in_a_row_keep_their_own_transaction_ids(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        first = _make_snapshot(data_dir, crypto, name="snapshot_1", txid="tx-первый")
+        first_result = self._restore(data_dir, crypto, first)
+        second = _make_snapshot(data_dir, crypto, name="snapshot_2", txid="tx-второй")
+        second_result = self._restore(data_dir, crypto, second)
+
+        assert first_result["transaction_id"] != second_result["transaction_id"]
+        assert Path(first_result["pre_restore_snapshot"]) != Path(
+            second_result["pre_restore_snapshot"]
+        )
+        assert _manifest(first)["transaction_id"] == "tx-первый"
+        assert _manifest(second)["transaction_id"] == "tx-второй"
+
+    def test_second_restore_blocked_while_marker_survives(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        with patch(
+            "backend.encrypted_snapshot._replace_journal",
+            side_effect=OSError("synthetic crash"),
+        ):
+            with pytest.raises(SnapshotOperationRefused):
+                self._restore(data_dir, crypto, snapshot_dir)
+        assert _restore_markers(data_dir)
+
+        with pytest.raises(SnapshotOperationRefused) as exc:
+            self._restore(data_dir, crypto, snapshot_dir)
+
+        assert exc.value.reason == "snapshot_recovery_pending"
+        assert exc.value.pending is True
+        assert len(_restore_markers(data_dir)) == 1
