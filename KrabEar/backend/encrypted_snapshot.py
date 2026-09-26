@@ -956,10 +956,12 @@ def create_encrypted_snapshot(
 RESTORE_STAGING_PREFIX = ".a52b2-restore-"
 RESTORE_MARKER_FILENAME = "restore_marker.json"
 RESTORE_MARKER_VERSION = 1
-# Суффикс подготовленной копии журнала рядом с живым файлом. Тот же filesystem,
+# Инфикс подготовленной копии журнала рядом с живым файлом. Тот же filesystem,
 # что у data_dir (backs может быть symlink на другой том), поэтому замена —
-# атомарный os.replace, а не копирование.
-RESTORE_TMP_SUFFIX = ".a52b2-restore-"
+# атомарный os.replace, а не копирование. 🔴 N5: литерал ОТЛИЧАЕТСЯ от префикса
+# каталога staging намеренно — два пространства имён в одном data_dir, и purge
+# обязан уметь их различать (аудит видит их как два семейства).
+RESTORE_TMP_SUFFIX = ".a52b2-restore-tmp-"
 
 # Состояния restore-маркера. Те же строки, что у b1-манифеста: маркер и манифест
 # описывают одну транзакцию, и ``COMMITTED`` здесь, как и там, означает
@@ -1463,20 +1465,28 @@ def _readback_live_journals(*, data_dir: Path, files_meta: list[dict]) -> dict:
     return {"ok": not mismatches, "checked": len(files_meta), "mismatches": mismatches}
 
 
-def _cleanup_restore_tmp(data_dir: Path, transaction_id: str) -> None:
-    """Убирает незамещённые ``*.a52b2-restore-<txid>.tmp`` рядом с журналами.
+def _cleanup_restore_tmp(data_dir: Path, transaction_id: str | None = None) -> None:
+    """Убирает подготовленные копии журналов ``*.a52b2-restore-tmp-<txid>``.
 
     Частично применённый restore восстанавливается ДОКАЗКОЙ (повторное
     применение), поэтому tmp-куски доказывать нечего — только мусор в data_dir.
+    ``transaction_id=None`` означает «убрать все transaction-фрагменты» — так
+    вызывает privacy purge: жёсткий kill мог случиться ДО появления маркера, и
+    тогда фрагменты не принадлежат ни одной известной транзакции, но содержат
+    расшифровываемую историю. Glob сознательно узкий: только наш инфикс.
     """
-    for name in HISTORY_JOURNAL_FILENAMES:
+    base = Path(data_dir)
+    pattern = (
+        f"*{RESTORE_TMP_SUFFIX}{transaction_id}" if transaction_id else f"*{RESTORE_TMP_SUFFIX}*"
+    )
+    for tmp in sorted(base.glob(pattern)):
         try:
-            (Path(data_dir) / f"{name}{RESTORE_TMP_SUFFIX}{transaction_id}").unlink()
+            tmp.unlink()
         except FileNotFoundError:
             continue
         except OSError as exc:  # noqa: BLE001 — чистка не должна ронять транзакцию
             logger.warning(
-                "encrypted_snapshot: не удалось убрать %s (%s)", name, exc
+                "encrypted_snapshot: не удалось убрать фрагмент %s (%s)", tmp.name, exc
             )
 
 
@@ -1836,22 +1846,56 @@ def recover_pending_restore(
 
 
 def purge_pending_restore_staging(data_dir: Any) -> list[str]:
-    """Убирает каталоги незавершённого restore (privacy purge, A5.2b2).
+    """Убирает незавершённый restore целиком (privacy purge, A5.2b2).
 
-    Staging лежит рядом с живыми журналами и содержит зашифрованные строки
-    истории, поэтому ``handle_purge_all_data`` обязан подчистить и его (audit
-    ``purge_coverage``). Возвращает убранные пути — для наблюдаемости шага.
-    Ничего не делает, если каталогов нет (обычное состояние).
+    Два вида артефактов, и оба расшифровываются тем же ключом, что и живая
+    история, поэтому privacy purge обязан убрать и их:
+
+      * приватные каталоги staging с restore-маркером (где лежат подготовленные
+        ENC1-журналы);
+      * осиротевшие ``<journal>.a52b2-restore-tmp-<txid>`` рядом с живыми
+        файлами — их оставляет жёсткий kill между записью tmp и ``os.replace``,
+        и маркера в этот момент может ещё не быть (собственно проба ревьюера).
+
+    Второй вид и есть причина, по которой одной чистки каталогов мало: раньше
+    purge проходил, а фрагменты оставались и читались ключом.
+
+    Узкие адресные glob'ы (не ``*`` по всему каталогу) — они же служат
+    доказательством покрытия для ``audit_purge_coverage``, который теперь видит
+    f-string семейства. Возвращает убранные пути — шаг наблюдаем в ответе
+    purge. Ничего не делает, если артефактов нет (обычное состояние).
     """
+    import shutil
+
     removed: list[str] = []
-    for staging in restore_marker_dirs(data_dir):
-        _cancel_staging(staging)
+    base = Path(data_dir)
+    # Приватные каталоги staging (в т.ч. те, где маркер не успел появиться).
+    for staging in sorted(base.glob(f"{RESTORE_STAGING_PREFIX}*")):
+        if not staging.is_dir() or staging.is_symlink():
+            continue
+        shutil.rmtree(staging, ignore_errors=True)
         removed.append(str(staging))
+    # Осиротевшие <journal>.a52b2-restore-tmp-<txid> рядом с живыми файлами.
+    for tmp in sorted(base.glob(f"*{RESTORE_TMP_SUFFIX}*")):
+        if tmp.is_dir() and not tmp.is_symlink():
+            shutil.rmtree(tmp, ignore_errors=True)
+        else:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:  # noqa: BLE001 — purge обязан дойти до конца
+                logger.warning(
+                    "encrypted_snapshot: purge не смог убрать фрагмент %s (%s)",
+                    tmp.name, exc,
+                )
+                continue
+        removed.append(str(tmp))
     if removed:
-        _fsync_dir(Path(data_dir))
+        _fsync_dir(base)
         logger.info(
-            "encrypted_snapshot: privacy purge убрал незавершённый restore staging: %s",
-            removed,
+            "encrypted_snapshot: privacy purge убрал артефакты незавершённого restore: %d",
+            len(removed),
         )
     return removed
 

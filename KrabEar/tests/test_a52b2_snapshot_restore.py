@@ -25,6 +25,7 @@ import pytest
 from backend.encrypted_snapshot import (
     RESTORE_MARKER_FILENAME,
     RESTORE_STAGING_PREFIX,
+    RESTORE_TMP_SUFFIX,
     SNAPSHOT_MANIFEST_FILENAME,
     SNAPSHOT_MANIFEST_VERSION,
     STATE_COMMITTED,
@@ -2078,3 +2079,193 @@ class TestPendingRestoreBlocksWriters:
         assert status["restore_pending"] is False
         assert status["restore_recovery"] is None
         assert "blocked_by_pending" in status
+
+
+# ---------------------------------------------------------------------------
+# A5.2b2 review — B3: privacy purge не оставляет расшифровываемых фрагментов
+# ---------------------------------------------------------------------------
+
+
+def _orphan_tmp_fragments(data_dir: Path, crypto: HistoryCrypto, txid: str) -> list[Path]:
+    """Имитирует жёсткий kill между _write_file_durable(tmp) и os.replace."""
+    written: list[Path] = []
+    for name in HISTORY_JOURNAL_FILENAMES:
+        blob = (crypto.encrypt_line(CANARY_PLAINTEXT) + "\n").encode("utf-8")
+        tmp = data_dir / f"{name}{RESTORE_TMP_SUFFIX}{txid}"
+        tmp.write_bytes(blob)
+        os.chmod(tmp, 0o600)
+        written.append(tmp)
+    return written
+
+
+def _decryptable_text_hits(data_dir: Path, crypto, needle: str) -> list[str]:
+    """Файлы в data_dir, из которых этим ключом читается строковый текст.
+
+    Честная проверка приватности: ищем не «ENC1 есть», а «история читается».
+    Не-JSON строки (ID-only ledger) пропускаем — их наличие законно.
+    """
+    hits: list[str] = []
+    for path in sorted(Path(data_dir).rglob("*")):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text("utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for line in text.split("\n"):
+            if not line.strip():
+                continue
+            if line.startswith(SENTINEL):
+                try:
+                    line = crypto.decrypt_line(line)
+                except Exception:  # noqa: BLE001 — не наш ключ/мусор
+                    continue
+            if needle in line:
+                hits.append(f"{path.name}: {line[:60]}")
+    return hits
+
+
+class TestPurgeRemovesRestoreFragments:
+    def test_purge_removes_orphaned_restore_tmp_fragments(self, tmp_path):
+        """B3-проба: жёсткий kill оставляет ENC1-фрагменты в data_dir.
+
+        Они расшифровываются тем же ключом, что и живая история, поэтому privacy
+        purge обязан убрать их так же, как и каталоги staging.
+        """
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        _make_snapshot(data_dir, crypto)
+        fragments = _orphan_tmp_fragments(data_dir, crypto, "restore-killed")
+        assert fragments and all(f.is_file() for f in fragments)
+        svc = _svc(data_dir, crypto)
+
+        result = svc.handle_purge_all_data({"confirm": True})
+
+        assert "restore_staging" not in (result.get("errors") or [])
+        for fragment in fragments:
+            assert not fragment.exists(), f"{fragment.name} пережил purge"
+        # Ни одного tmp-фрагмента любого транзакционного id.
+        assert [p.name for p in data_dir.glob(f"*{RESTORE_TMP_SUFFIX}*")] == []
+        # Проверка СОДЕРЖИМОГО, а не наличия ENC1: постоянный ledger
+        # purged-IDs переживает purge законно (ID-only, allowlist) — но текста
+        # истории в нём быть не должно ни в одном файле data_dir.
+        assert _decryptable_text_hits(data_dir, crypto, CANARY_PLAINTEXT) == []
+
+    def test_purge_removes_tmp_fragments_even_without_marker(self, tmp_path):
+        """Фрагменты переживают kill ДО появления маркера — их тоже надо убрать."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        _orphan_tmp_fragments(data_dir, crypto, "restore-early-kill")
+        svc = _svc(data_dir, crypto)
+
+        result = svc.handle_purge_all_data({"confirm": True})
+
+        assert "restore_staging" not in (result.get("errors") or [])
+        assert [p.name for p in data_dir.glob(f"*{RESTORE_TMP_SUFFIX}*")] == []
+
+    def test_purge_helper_covers_fragments_directly(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        _make_snapshot(data_dir, crypto)
+        _orphan_tmp_fragments(data_dir, crypto, "restore-direct")
+
+        removed = purge_pending_restore_staging(data_dir)
+
+        assert [p.name for p in data_dir.glob(f"*{RESTORE_TMP_SUFFIX}*")] == []
+        assert removed  # что-то убрано (фрагменты), и функция это сообщает
+
+    def test_purge_does_not_touch_regular_journals(self, tmp_path):
+        """Узкий glob по transaction-суффиксу не имеет права съесть живые файлы."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        before = _data_bytes(data_dir)
+
+        purge_pending_restore_staging(data_dir)
+
+        assert _data_bytes(data_dir) == before
+        assert (data_dir / "settings.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# A5.2b2 review — B3.2: audit_purge_coverage обязан видеть f-string семейства
+# ---------------------------------------------------------------------------
+
+
+def _load_audit_module():
+    """Загружает scripts/audit_purge_coverage.py как модуль (он не пакет)."""
+    import importlib.util
+
+    script = Path(__file__).resolve().parents[2] / "scripts" / "audit_purge_coverage.py"
+    assert script.is_file(), script
+    spec = importlib.util.spec_from_file_location("audit_purge_coverage_probe", script)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    # dataclass в модуле требует, чтобы он был в sys.modules ДО exec_module.
+    import sys as _sys
+
+    _sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        _sys.modules.pop(spec.name, None)
+    return module
+
+
+class TestPurgeAuditSeesFstringFamilies:
+    def _discover(self, source: str, tmp_path: Path) -> set[str]:
+        module = _load_audit_module()
+        fake = tmp_path / "fake_store_module.py"
+        fake.write_text(source, encoding="utf-8")
+        return {ref.store_id for ref in module.discover_stores_in_module(fake)}
+
+    def test_fstring_family_in_data_dir_is_discovered(self, tmp_path):
+        """Негативный тест гейта: семейство из f-string ДОЛЖНО быть видно.
+
+        Именно этот пробел делал «0 gaps» ложно-зелёным: restore-артефакты
+        построены как ``data_dir / f"{CONST}{txid}"``, а сканер видел только
+        literal/_CONST/glob.
+        """
+        stores = self._discover(
+            'PREFIX = ".myfamily-"\n'
+            "def write(data_dir, txid):\n"
+            "    return data_dir / f\"{PREFIX}{txid}\"\n",
+            tmp_path,
+        )
+        assert any("myfamily" in sid for sid in stores), stores
+
+    def test_fstring_family_with_tail_after_variable_is_discovered(self, tmp_path):
+        stores = self._discover(
+            "SUFFIX = '.ndjson.mine-'\n"
+            "def write(data_dir, name, txid):\n"
+            "    return data_dir / f\"{name}{SUFFIX}{txid}\"\n",
+            tmp_path,
+        )
+        assert any("mine" in sid for sid in stores), stores
+
+    def test_real_module_ships_no_new_uncovered_family(self, tmp_path):
+        """Реальный код волны не должен оставлять семейство без purge-покрытия."""
+        module = _load_audit_module()
+        result = module.run_audit() if hasattr(module, "run_audit") else None
+        if result is None:  # pragma: no cover — защита от смены API скрипта
+            pytest.skip("audit module exposes no run_audit()")
+        gaps = [ref.store_id for ref in result.gaps]
+        assert gaps == [], gaps
+
+    def test_plain_family_without_dot_is_not_recorded(self, tmp_path):
+        """Контроль против регрессии: `f"backup_{ts}"` — не новый store.
+
+        Иначе каждое f-string имя в репозитории стало бы «дырой» аудита.
+        """
+        stores = self._discover(
+            "def write(data_dir, ts):\n    return data_dir / f\"backup_{ts}\"\n",
+            tmp_path,
+        )
+        assert not any("backup_" in sid for sid in stores), stores

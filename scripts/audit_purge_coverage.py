@@ -446,6 +446,114 @@ def collect_fstring_ext_vars(scope: ast.AST, consts: dict[str, str]) -> dict[str
     return ext_vars
 
 
+def _fstring_family(node: ast.AST, consts: dict[str, str]) -> str | None:
+    """Glob-store id для f-string имени файла, иначе ``None``.
+
+    A5.2b2 review (B3): сканер видел только literal / ``_CONST`` / ``glob``, а
+    restore-артефакты построены как ``data_dir / f"{PREFIX}{txid}"`` и
+    ``data_dir / f"{name}{SUFFIX}{txid}"``. Из-за этого «0 gaps» оставалось
+    зелёным и после удаления purge-wiring — гейт был слепым.
+
+    Правило (намеренно узкое, чтобы не превратить каждое f-string-имя в репо в
+    «дыру»):
+
+      * собираем СТАТИЧЕСКИЙ текст: литеральные части плюс ``{КОНСТАНТА}``;
+        первый по-настоящему динамический ``{переменная}`` обрывает голову;
+      * семейство = ``голова + "*" + хвост`` (хвост — статические части после
+        первой динамической);
+      * семейство считается хранилищем, только если в статическом тексте есть
+        точка (``.a52b2-restore-`` / ``.ndjson.a52b2-restore-``) — то есть
+        результат действительно похож на файл. Поэтому ``f"backup_{ts}"``
+        (точки нет) остаётся невидимым, как раньше.
+    """
+    if not isinstance(node, ast.JoinedStr):
+        return None
+    if _resolve_rhs_name(node, consts) is not None:
+        return None  # plain literal/const — обработано основным путём
+
+    head_parts: list[str] = []
+    tail_parts: list[str] = []
+    dynamic_seen = False
+    leading_dynamic = False
+    trailing_dynamic = False
+    for part in node.values:
+        if isinstance(part, ast.FormattedValue):
+            resolved = _const_str_value(part.value, consts)
+            if resolved is not None:
+                # Константа в f-string — это статический текст: до первой
+                # динамической переменной она часть головы, после — часть хвоста.
+                (tail_parts if dynamic_seen else head_parts).append(resolved)
+                continue
+            if not dynamic_seen and not head_parts and not tail_parts:
+                leading_dynamic = True
+            elif head_parts or tail_parts:
+                # Динамика ПОСЛЕ статического текста: хвостовой ``*`` нужен
+                # независимо от того, текст ли это в голове или в хвосте.
+                trailing_dynamic = True
+            dynamic_seen = True
+            continue
+        literal = _const_str(part)
+        if literal is None:
+            continue
+        (tail_parts if dynamic_seen else head_parts).append(literal)
+
+    if not dynamic_seen:
+        return None  # f-string без динамики — тот же literal-случай
+    head = "".join(head_parts)
+    tail = "".join(tail_parts)
+    if "." not in head + tail:
+        return None
+    # Точный glob-паттерн: динамика слева/справа от статического текста даёт
+    # ведущий/хвостовой ``*`` (и разделитель, если статический текст разорван).
+    # Именно этот паттерн потом использует purge (свой адресный glob) — поэтому
+    # он должен совпадать символ в символ.
+    segments: list[str] = []
+    if leading_dynamic:
+        segments.append("*")
+    if head:
+        segments.append(head)
+    if tail:
+        segments.append(tail)
+    if trailing_dynamic:
+        segments.append("*")
+    if head and tail:
+        segments.insert(len(segments) - 1, "*")
+    family = "".join(segments)
+    return family if _is_narrow_family(family) else None
+
+
+# Минимальная длина значимого статического сегмента. Отделяет «узкое семейство»
+# (``.a52b2-restore-tmp-*`` — метка нашего формата) от голого ``*.ndjson``.
+_NARROW_FAMILY_MIN_SEGMENT = 6
+
+
+def _is_narrow_family(pattern: str) -> bool:
+    """Узкое glob-семейство: есть статический маркер, а не только ``*``.
+
+    Именно узкие семейства образуют отдельное хранилище, которое purge обязан
+    вычистить адресно. Голые ``*.ext`` / ``*`` остаются за каталогом-родителем
+    (как и раньше) — иначе каждое «сними всё содержимое» стало бы доказательством
+    покрытия чего угодно.
+    """
+    if "*" not in pattern:
+        return False
+    for segment in re.split(r"\*", pattern):
+        if len(segment) >= _NARROW_FAMILY_MIN_SEGMENT and "." in segment:
+            return True
+    return False
+
+
+def _const_str_value(node: ast.AST, consts: dict[str, str]) -> str | None:
+    """Строка-константа: литерал либо ссылка на константу (для f-string головы)."""
+    literal = _const_str(node)
+    if literal is not None:
+        return literal
+    name = _name_of(node)
+    if name is not None:
+        return consts.get(name)
+    return None
+
+
 def _record_glob(
     found: dict[str, StoreRef],
     module: str,
@@ -551,6 +659,19 @@ def discover_stores_in_module(path: Path) -> list[StoreRef]:
                         _record_ext_family(
                             resolver.base_subpath(node), ext, node.lineno
                         )
+                    else:
+                        # (a'') base_dir / f"{PREFIX}{x}" — узкое семейство без
+                        # разрешённого расширения (A5.2b2 review B3).
+                        family = _fstring_family(node.right, consts)
+                        if family is not None:
+                            found.setdefault(
+                                _qualify(resolver.base_subpath(node), family),
+                                StoreRef(
+                                    _qualify(resolver.base_subpath(node), family),
+                                    module,
+                                    f"{rel}:{node.lineno}",
+                                ),
+                            )
 
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
             attr = node.func.attr
@@ -581,6 +702,18 @@ def discover_stores_in_module(path: Path) -> list[StoreRef]:
                             is_dir=True,
                             subpath=resolver.base_subpath(recv),
                         )
+                    else:
+                        # (c') (base_dir / f"{PREFIX}{x}").mkdir(...) — каталог,
+                        # имя которого строится в рантайме (A5.2b2 staging).
+                        family = _fstring_family(recv.right, consts)
+                        if family is not None:
+                            store_id = _qualify(
+                                resolver.base_subpath(recv), family
+                            ).rstrip("/") + "/"
+                            found.setdefault(
+                                store_id,
+                                StoreRef(store_id, module, f"{rel}:{node.lineno}"),
+                            )
 
     return list(found.values())
 
@@ -633,6 +766,34 @@ def _module_attr_filenames(scope: ast.AST, consts: dict[str, str]) -> dict[str, 
     return mapping
 
 
+def _glob_pattern_const(node: ast.AST, consts: dict[str, str]) -> str | None:
+    """Разрешает аргумент ``glob(...)``: литерал ИЛИ f-string из констант.
+
+    A5.2b2 review (B3): purge не может писать ``glob(".a52b2-restore-*")``
+    литералом — префикс живёт в константе модуля, иначе пришлось бы дублировать
+    его в сканере и в коде. Такие glob'ы просто переставали засчитываться как
+    покрытие, и гейт снова становился слепым.
+    """
+    literal = _const_str(node)
+    if literal is not None:
+        return literal
+    if not isinstance(node, ast.JoinedStr):
+        return None
+    chunks: list[str] = []
+    for part in node.values:
+        if isinstance(part, ast.FormattedValue):
+            resolved = _const_str_value(part.value, consts)
+            if resolved is None:
+                return None  # настоящая динамика — паттерн неизвестен
+            chunks.append(resolved)
+            continue
+        piece = _const_str(part)
+        if piece is None:
+            return None
+        chunks.append(piece)
+    return "".join(chunks)
+
+
 def _collect_removed_names_in_function(
     func: ast.FunctionDef, consts: dict[str, str], module_attrs: dict[str, str]
 ) -> set[str]:
@@ -656,12 +817,27 @@ def _collect_removed_names_in_function(
                     removed.add(canon)
                 elif "." not in rhs:
                     removed.add(rhs.rstrip("/") + "/")
+            else:
+                # Узкое f-string семейство: purge перечисляет его адресным
+                # glob'ом, и это РОВНО то самое доказательство покрытия, что
+                # ищет discovery (A5.2b2 review B3).
+                family = _fstring_family(node.right, consts)
+                if family is not None:
+                    removed.add(family)
 
         # X.glob("pat") -> family / subdir enumerated for deletion
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
             if node.func.attr == "glob" and node.args:
-                pattern = _const_str(node.args[0])
-                if pattern is not None and not pattern.startswith("*"):
+                pattern = _glob_pattern_const(node.args[0], consts)
+                if pattern is None:
+                    continue
+                # Раньше ведущий ``*`` отбрасывался: голый ``*.ext`` означает
+                # «всё содержимое каталога», и засчитывать его как покрытие
+                # чего-либо нельзя. Узкое семейство (``.a52b2-restore-tmp-*``)
+                # адресно — его вычистка и ЕСТЬ доказательство покрытия.
+                if not pattern.startswith("*"):
+                    removed.add(pattern)
+                elif _is_narrow_family(pattern):
                     removed.add(pattern)
 
     # self._path / self._x_path attributes that are unlinked/replaced/rmtree'd.
@@ -960,6 +1136,10 @@ def extract_purge_coverage() -> set[str]:
     # (c) state_store compaction (history.ndjson + sidecar journals).
     covered |= _state_store_compaction_coverage()
 
+    # (d) module-level helpers, которые тело purge вызывает (в т.ч. через
+    # локальный импорт) — A5.2b2 review B3.
+    covered |= _local_helper_purge_coverage(purge_fn)
+
     # Canonicalise filename ids (strip .tmp) but preserve the ``*.ext`` / ``*``
     # extension-family markers verbatim (they carry no temp suffix).
     return {c if c.endswith("*") or "/*." in c else _canonicalize(c) for c in covered}
@@ -1040,6 +1220,50 @@ def _is_covered(
         ):
             return True
     return False
+
+
+def _local_helper_purge_coverage(purge_fn: ast.FunctionDef) -> set[str]:
+    """Coverage from module-level helpers CALLED (or locally imported) by the purge.
+
+    A5.2b2 review (B3): the purge body delegates to a module-level helper
+    (``purge_pending_restore_staging``), and the guard only ever looked at its
+    OWN body plus ``self._X.purge_all()`` collaborators. A helper reached by a
+    bare call was invisible in BOTH directions — which is exactly why "0 gaps"
+    stayed green even with the wiring removed. Following one call level makes the
+    gate test what it claims to test.
+    """
+    covered: set[str] = set()
+    # Локальные импорты ВНУТРИ тела purge: ``from backend.X import name``.
+    local_imports: dict[str, str] = {}
+    for node in ast.walk(purge_fn):
+        if not isinstance(node, ast.ImportFrom) or not node.module:
+            continue
+        if not node.module.startswith("backend."):
+            continue
+        module_stem = node.module.rsplit(".", 1)[-1]
+        for alias in node.names:
+            local_imports[alias.asname or alias.name] = module_stem
+    if not local_imports:
+        return covered
+    called = {
+        node.func.id
+        for node in ast.walk(purge_fn)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    for name, module_stem in local_imports.items():
+        if name not in called:
+            continue
+        module_path = BACKEND_DIR / f"{module_stem}.py"
+        if not module_path.exists():
+            continue  # нет модуля — покрытие не засчитываем (fail-closed)
+        tree = _parse(module_path)
+        consts = collect_string_constants(tree)
+        module_attrs = _module_attr_filenames(tree, consts)
+        helper = _find_function(tree, name)
+        if helper is None:
+            continue
+        covered |= _collect_removed_names_in_function(helper, consts, module_attrs)
+    return covered
 
 
 def run_audit() -> AuditResult:
