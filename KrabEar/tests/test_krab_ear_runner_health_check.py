@@ -13,6 +13,13 @@ SCRIPT = REPO_ROOT / "scripts" / "krab_ear_runner_health_check.py"
 
 
 def load_module():
+    # Скрипт сетевой: `import httpx` на верхнем уровне (строка 46). На
+    # приватном runner-venv httpx нет, и exec_module падал ModuleNotFoundError
+    # прямо на CI — красный backend-tests из-за файла, который этот PR не
+    # трогает. Проверяем РОВНО тот импорт, что падает, и скипаем чисто
+    # (playbook §1 про skip сторонних зависимостей).
+    if importlib.util.find_spec("httpx") is None:
+        raise unittest.SkipTest("httpx отсутствует в окружении — сетевой скрипт не грузится")
     spec = importlib.util.spec_from_file_location("krab_ear_runner_health_check", SCRIPT)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
