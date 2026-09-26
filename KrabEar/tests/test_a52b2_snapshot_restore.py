@@ -31,12 +31,14 @@ from backend.encrypted_snapshot import (
     collect_ledger_union,
     create_encrypted_snapshot,
     has_pending_restore,
+    purge_pending_restore_staging,
     recover_pending_restore,
     restore_encrypted_snapshot,
     verify_snapshot,
 )
 from backend.history_crypto import SENTINEL, HistoryCrypto
-from backend.state_store import HISTORY_JOURNAL_FILENAMES
+from backend.history_service import HistoryService
+from backend.state_store import HISTORY_JOURNAL_FILENAMES, StateStore
 
 # Строка-«canary»: её plaintext-хэш/текст не должны появляться в sidecar'ах.
 CANARY_PLAINTEXT = '{"id":"canary-a52b2","text":"kolya skazal sekret"}'
@@ -1511,8 +1513,6 @@ class TestRecoveryNoOpAndStaleStaging:
 
 class TestRecoveryWiring:
     def test_state_store_init_recovers_only_when_marker_exists(self, tmp_path, monkeypatch):
-        from backend.state_store import StateStore
-
         data_dir = _data_dir(tmp_path)
         crypto = _crypto()
         _fill_profile(data_dir, crypto)
@@ -1534,8 +1534,6 @@ class TestRecoveryWiring:
         assert lines and all(ln.startswith(SENTINEL) for ln in lines)
 
     def test_state_store_init_without_marker_does_nothing(self, tmp_path):
-        from backend.state_store import StateStore
-
         data_dir = _data_dir(tmp_path)
         crypto = _crypto()
         _fill_profile(data_dir, crypto)
@@ -1552,8 +1550,6 @@ class TestRecoveryWiring:
 
     def test_off_profile_start_with_stray_marker_does_not_decrypt(self, tmp_path):
         """OFF-профиль (прод) + случайный каталог: никаких обращений к ключу."""
-        from backend.state_store import StateStore
-
         data_dir = _data_dir(tmp_path)
         crypto = _crypto()
         _fill_profile(data_dir, crypto)
@@ -1569,3 +1565,242 @@ class TestRecoveryWiring:
         assert _data_bytes(data_dir) == live_before
         assert leftover.is_dir()  # доказательство не удалено
         assert KEYCHAIN_ATTEMPTS["count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Task 4 — IPC-поверхность (handle_restore_history при Encryption ON)
+# ---------------------------------------------------------------------------
+
+
+def _store_with_crypto(data_dir: Path, crypto) -> StateStore:
+    store = StateStore(data_dir)
+    # Инъекция ключа БЕЗ Keychain (приём b1/A5.1).
+    store._get_history_crypto = lambda: crypto
+    return store
+
+
+def _svc(data_dir: Path, crypto) -> HistoryService:
+    return HistoryService(store=_store_with_crypto(data_dir, crypto), cached_settings=lambda: {})
+
+
+def _seed_items(store, texts: list[str]) -> None:
+    for text in texts:
+        store.add_history_item(text=text)
+
+
+class TestRestoreIpc:
+    def test_on_profile_restores_encrypted_snapshot(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed_items(store, ["первая", "вторая", "третья"])
+        svc = HistoryService(store=store, cached_settings=lambda: {})
+        made = svc.handle_backup_history({})
+        assert made["ok"] is True
+        snapshot_dir = Path(made["backup_path"])
+        # Профиль уехал вперёд: лишняя запись, которой не было в снимке.
+        _seed_items(store, ["четвёртая"])
+        settings_before = (data_dir / "settings.json").read_bytes()
+
+        result = svc.handle_restore_history({"backup_path": str(snapshot_dir)})
+
+        assert result["ok"] is True
+        assert result["reason"] is None
+        assert result["encrypted"] is True
+        assert result["state"] == "COMMITTED"
+        assert result["restored_entries"] == 3
+        assert Path(result["pre_restore_snapshot"]).is_dir()
+        assert result["transaction_id"]
+        # settings.json не восстановлен — ни при каких обстоятельствах.
+        assert (data_dir / "settings.json").read_bytes() == settings_before
+        # Профиль после restore ровно из снимка.
+        assert store.count_active_items() == 3
+        texts = {item.text for item in store._load_active_items_unlocked()}
+        assert texts == {"первая", "вторая", "третья"}
+        # Всё на диске — ENC1 (в т.ч. новая запись «четвёртая» исчезла).
+        for name in HISTORY_JOURNAL_FILENAMES:
+            for line in _read_ndjson_lines(data_dir / name):
+                assert line.startswith(SENTINEL), name
+
+    def test_on_profile_refuses_wrong_key_before_any_write(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        _seed_items(_store_with_crypto(data_dir, crypto), ["запись"])
+        svc = _svc(data_dir, crypto)
+        snapshot_dir = Path(svc.handle_backup_history({})["backup_path"])
+        live_before = _data_bytes(data_dir)
+
+        wrong = _svc(data_dir, _crypto())  # другой ключ
+        result = wrong.handle_restore_history({"backup_path": str(snapshot_dir)})
+
+        assert result["ok"] is False
+        assert result["reason"] == "snapshot_line_tampered"
+        assert result["restored_entries"] == 0
+        assert _data_bytes(data_dir) == live_before
+
+    def test_on_profile_refuses_broken_manifest_before_any_write(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        _seed_items(_store_with_crypto(data_dir, crypto), ["запись"])
+        svc = _svc(data_dir, crypto)
+        snapshot_dir = Path(svc.handle_backup_history({})["backup_path"])
+        live_before = _data_bytes(data_dir)
+        target = snapshot_dir / "history.ndjson"
+        target.write_bytes(target.read_bytes() + b"ENC1:zzz\n")
+
+        result = svc.handle_restore_history({"backup_path": str(snapshot_dir)})
+
+        assert result["ok"] is False
+        assert result["reason"] == "snapshot_readback_failed"
+        assert _data_bytes(data_dir) == live_before
+
+    def test_on_profile_refuses_restore_settings_request(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        _seed_items(_store_with_crypto(data_dir, crypto), ["запись"])
+        svc = _svc(data_dir, crypto)
+        snapshot_dir = Path(svc.handle_backup_history({})["backup_path"])
+        live_before = _data_bytes(data_dir)
+        settings_before = (data_dir / "settings.json").read_bytes()
+
+        result = svc.handle_restore_history(
+            {"backup_path": str(snapshot_dir), "restore_settings": True}
+        )
+
+        assert result["ok"] is False
+        assert result["reason"] == "restore_settings_unsupported_at_on"
+        assert _data_bytes(data_dir) == live_before
+        assert (data_dir / "settings.json").read_bytes() == settings_before
+
+    def test_on_profile_keeps_a52a_gate_for_legacy_backup(self, tmp_path):
+        """A5.2a-гейт не ослаблен: legacy-копия при ON по-прежнему недоступна."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_off(data_dir)
+        legacy = data_dir / "backups" / "backup_20260101_000000"
+        legacy.mkdir(parents=True)
+        (legacy / "history.ndjson").write_text(
+            json.dumps({"id": "x", "text": "легаси"}, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        _settings_on(data_dir)
+        svc = _svc(data_dir, crypto)
+        live_before = _data_bytes(data_dir)
+
+        result = svc.handle_restore_history({"backup_path": str(legacy)})
+
+        assert result["ok"] is False
+        assert result["reason"] == "history_encryption_operation_unavailable"
+        assert _data_bytes(data_dir) == live_before
+
+    def test_on_profile_refuses_staging_and_foreign_dirs(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        _make_snapshot(data_dir, crypto)
+        staging = data_dir / "backups" / ".staging" / ".tx-мусор"
+        staging.mkdir(parents=True)
+        foreign = data_dir / "backups" / "my_folder"
+        foreign.mkdir(parents=True)
+        svc = _svc(data_dir, crypto)
+
+        for path in (staging, foreign):
+            result = svc.handle_restore_history({"backup_path": str(path)})
+            assert result["ok"] is False, path
+            assert result["reason"] == "unsupported_backup_format", path
+
+    def test_on_profile_rejects_path_outside_backups(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        svc = _svc(data_dir, crypto)
+        evil = tmp_path / "evil"
+        evil.mkdir()
+        (evil / "history.ndjson").write_text("{}\n", encoding="utf-8")
+
+        with pytest.raises(RuntimeError):
+            svc.handle_restore_history({"backup_path": str(evil)})
+
+    def test_restore_result_reports_snapshot_backup_date(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        _seed_items(_store_with_crypto(data_dir, crypto), ["запись"])
+        svc = _svc(data_dir, crypto)
+        snapshot_dir = Path(svc.handle_backup_history({})["backup_path"])
+
+        result = svc.handle_restore_history({"backup_path": str(snapshot_dir)})
+
+        assert result["ok"] is True
+        assert result["backup_date"] != "unknown"
+        assert result["backup_date"] == _manifest(snapshot_dir)["created_at"]
+
+    def test_restored_count_is_honest_after_search_cache_was_warm(self, tmp_path):
+        """In-RAM индексы StateStore не имеют права врать после замены журналов."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed_items(store, ["одна", "две"])
+        svc = HistoryService(store=store, cached_settings=lambda: {})
+        snapshot_dir = Path(svc.handle_backup_history({})["backup_path"])
+        _seed_items(store, ["три", "четыре", "пять"])
+        assert store.count_active_items() == 5  # кэш прогрет
+
+        result = svc.handle_restore_history({"backup_path": str(snapshot_dir)})
+
+        assert result["ok"] is True
+        assert result["restored_entries"] == 2
+        assert store.count_active_items() == 2
+
+    def test_off_profile_legacy_restore_still_works(self, tmp_path):
+        """OFF-регресс: прежнее поведение legacy restore не изменилось."""
+        data_dir = _data_dir(tmp_path)
+        _settings_off(data_dir)
+        store = _store_with_crypto(data_dir, None)
+        svc = HistoryService(store=store, cached_settings=lambda: {})
+        _seed_items(store, ["one", "two"])
+        made = svc.handle_backup_history({})
+        (data_dir / "history.ndjson").write_text("", encoding="utf-8")
+
+        result = svc.handle_restore_history({"backup_path": made["backup_path"]})
+
+        assert result.get("ok") is not False
+        assert result["restored_entries"] == 2
+        assert "one" in (data_dir / "history.ndjson").read_text("utf-8")
+
+
+class TestPurgeCoversRestoreStaging:
+    def test_purge_all_data_removes_pending_restore_staging(self, tmp_path):
+        """Приватный staging restore — тоже новое хранилище: purge обязан его убрать."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        _crash_restore(data_dir, crypto, snapshot_dir, at="replace")
+        markers = _restore_markers(data_dir)
+        assert len(markers) == 1
+        svc = _svc(data_dir, crypto)
+
+        result = svc.handle_purge_all_data({"confirm": True})
+
+        assert "restore_staging" not in (result.get("errors") or [])
+        assert not markers[0].exists()
+        assert has_pending_restore(data_dir) is False
+        # Данные действительно стёрты, а staging не остался источником утечки.
+        assert (data_dir / "history.ndjson").read_bytes() == b""
+
+    def test_purge_helper_is_noop_without_markers(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        _fill_profile(data_dir, _crypto())
+        before = _data_bytes(data_dir)
+        assert purge_pending_restore_staging(data_dir) == []
+        assert _data_bytes(data_dir) == before

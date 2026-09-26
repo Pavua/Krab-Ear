@@ -1388,7 +1388,9 @@ def _build_restore_output(
                 out_lines.append(line)
             if name == "history.ndjson":
                 restored_entries = len(out_lines)
-            body = ("\n".join(out_lines) + "\n" if out_lines else b"").encode("utf-8")
+            # Явные скобки вокруг join: тернарник внутри конкатенации вернул бы
+            # `str + bytes` на пустом журнале (все строки отфильтрованы union'ом).
+            body = ("\n".join(out_lines) + "\n").encode("utf-8") if out_lines else b""
         _write_file_durable(staging / name, body)
         files_meta.append(
             {"name": name, "size": len(body), "sha256": _sha256(body)}
@@ -1792,6 +1794,27 @@ def recover_pending_restore(
         extra_markers=extra,
         snapshot_pending=b1_pending,
     )
+
+
+def purge_pending_restore_staging(data_dir: Any) -> list[str]:
+    """Убирает каталоги незавершённого restore (privacy purge, A5.2b2).
+
+    Staging лежит рядом с живыми журналами и содержит зашифрованные строки
+    истории, поэтому ``handle_purge_all_data`` обязан подчистить и его (audit
+    ``purge_coverage``). Возвращает убранные пути — для наблюдаемости шага.
+    Ничего не делает, если каталогов нет (обычное состояние).
+    """
+    removed: list[str] = []
+    for staging in restore_marker_dirs(data_dir):
+        _cancel_staging(staging)
+        removed.append(str(staging))
+    if removed:
+        _fsync_dir(Path(data_dir))
+        logger.info(
+            "encrypted_snapshot: privacy purge убрал незавершённый restore staging: %s",
+            removed,
+        )
+    return removed
 
 
 def recover_pending_restore_from_store(store: Any) -> dict | None:
