@@ -539,9 +539,9 @@ Returns: `{title}` (str)
 
 | Метод | Описание |
 |---|---|
-| `backup_history` | Создать timestamped резервную копию |
+| `backup_history` | Создать резервную копию (при encryption ON — encrypted snapshot) |
 | `restore_history` | Восстановить из резервной копии |
-| `list_backups` | Список резервных копий |
+| `list_backups` | Список резервных копий (legacy) + снимки отдельным списком |
 | `configure_auto_export` | Настроить расписание авто-экспорта |
 | `list_auto_exports` | Список файлов авто-экспорта |
 | `get_auto_backup_status` | Статус авто-резервного копирования |
@@ -556,14 +556,28 @@ Returns: `{path, size_bytes, ts}`
 ### `restore_history`
 *(history_service.py)*  
 Восстанавливает историю из резервной копии (текущий файл заменяется).  
+Принимает **только legacy-бэкапы** (`backup_*`, `auto_backup_*`). Каталоги
+encrypted snapshot'ов, dot-prefixed (в т.ч. `backups/.staging/`) и любые другие
+имена отклоняются с `reason: "unsupported_backup_format"` **до первой копии** —
+восстановление из снимков не реализовано (A5.2b2), а legacy `copy2` поверх живой
+истории затирал бы её шифротекстом.  
 Params: `{backup_name}` (str)  
-Returns: `{ok, restored_count}`
+Returns: `{ok, restored_count, backup_date, reason}` (`reason` заполняется при отказе)
 
 ### `list_backups`
 *(history_service.py)*  
 Возвращает список доступных резервных копий с метаданными.  
 Нет params.  
-Returns: `{backups: [{name, ts, size_bytes}, ...]}`
+Returns: `{backups: [{path, backup_date, entries, size_mb}, ...], encrypted_snapshots: [{path, restorable, reason}, ...]}`
+
+`backups` содержит **только legacy-копии** (`backup_*`, `auto_backup_*`) —
+единственные, которые восстанавливаются текущим `restore_history`.
+
+`encrypted_snapshots` (A5.2b1) — снимки нового протокола (`snapshot_*`,
+`auto_snapshot_*`). Они **не восстанавливаются**: `restorable: false` и
+`reason: "unsupported_backup_format"` (восстановление из снимков — A5.2b2).
+Каталоги dot-prefixed (в т.ч. приватный staging `backups/.staging/`) в списки не
+попадают: восстанавливать из них нечего, а `restore_history` их отклоняет.
 
 ### `configure_auto_export`
 *(service.py)*  
@@ -582,7 +596,36 @@ Returns: `{exports: [...]}`
 *(service.py → auto_backup.py)*  
 Статус авто-резервного копирования: включено, последний/следующий бэкап, счётчики.  
 Нет params.  
-Returns: `{enabled, last_backup_ts, next_backup_ts, total_backups, interval_hours, max_copies, backups_dir}`
+Returns: `{enabled, last_backup_ts, next_backup_ts, total_backups, encrypted_snapshots, interval_hours, max_copies, backups_dir, encryption_on, encryption_operation_unavailable, skipped_reason, last_backup_kind, last_refusal_reason}`
+
+Поля наблюдаемости (важно: backend startup и RecordingCore **игнорируют**
+результат `check_and_backup`, поэтому причина любого отказа обязана быть видна
+здесь):
+
+| Поле | Смысл |
+|---|---|
+| `total_backups` | только legacy-копии `auto_backup_*` (прежнее значение, не расширяно) |
+| `encrypted_snapshots` | число снимков `auto_snapshot_*` (A5.2b1) |
+| `encryption_on` | прочитанный флаг `history_encryption_enabled` |
+| `encryption_operation_unavailable` | `true`, если последний цикл **отказал** по политике/протоколу **или** есть незавершённая опубликованная транзакция снимка (её разбирает A5.2b2) |
+| `skipped_reason` | машино-читаемая причина: `history_encryption_operation_unavailable`, `snapshot_recovery_pending` |
+| `last_backup_kind` | `encrypted_snapshot` / `legacy_plaintext` / `null` — что реально было последним |
+| `last_refusal_reason` | причина последнего отказа; переживает рестарт (sidecar `backups/.last_result.json`) |
+
+Долг A5.2a закрыт: `encryption_operation_unavailable` больше не выводится из
+одного лишь флага. При ON, когда backup ЖИВ (снимок только что зафиксирован),
+поле `false`; при реальном отказе (например, недоступный ключ) — `true`, и
+причина видна в `skipped_reason`/`last_refusal_reason`. Эти два сценария
+различаются, смешивать их нельзя.
+
+### `backup_history`
+*(history_service.py)*  
+Создаёт резервную копию истории. При `history_encryption_enabled=true` создаётся
+**encrypted snapshot** всех десяти управляемых журналов с durable-манифестом
+(каталог `backups/snapshot_<ts>`, все строки `ENC1:`), а не legacy
+plaintext-копия. Восстановление из снимков — A5.2b2.  
+Нет params.  
+Returns: `{backup_path, size_mb, entries, ok, reason, encrypted, state, transaction_id}`
 
 ### `get_export_schedule_status`
 *(service.py → export_scheduler.py)*  

@@ -74,6 +74,7 @@ REASON_READBACK_FAILED = "snapshot_readback_failed"
 REASON_PUBLISH_FAILED = "snapshot_publish_failed"
 REASON_MANIFEST_INVALID = "snapshot_manifest_invalid"
 REASON_OUTSIDE_BACKUPS_ROOT = "snapshot_outside_backups_root"
+REASON_PERMISSIONS_FAILED = "snapshot_permissions_failed"
 REASON_FSYNC_FAILED = "snapshot_fsync_failed"
 REASON_RECOVERY_PENDING = "snapshot_recovery_pending"
 REASON_STALE_STAGING = "snapshot_stale_staging"
@@ -347,11 +348,21 @@ def _backups_root(data_dir: Any) -> Path:
 
 
 def _require_inside_backups(data_dir: Any, dest: Any) -> Path:
-    """Снимок обязан лежать внутри ``<data_dir>/backups`` — даже через symlink.
+    """Ограничивает снимок РАЗРЕШЁННЫМ корнем backups.
 
-    ``resolve()`` разыменовывает и сам ``backups``, и промежуточные компоненты,
-    поэтому подмена ``backups`` симлинком уводит снимок наружу и здесь
-    отсекается.
+    Что проверяется (и это правда): снимок не может оказаться в постороннем
+    каталоге, не может выйти через ``..`` и не может быть уведён наружу
+    симлинком ВНУТРИ backups. Сравниваются разыменованные пути, поэтому подмена
+    промежуточного компонента отсекается.
+
+    Чего эта проверка НЕ делает (N2): если САМ ``<data_dir>/backups`` является
+    симлинком, корень переносится целиком — снимок окажется там, куда реально
+    указывает backups. Это НЕ обход: backups на другом томе — легальная
+    конфигурация, и снимок обязан лежать рядом с остальными бэкапами. Наружу
+    уходит только сам backups, а это уже отдельный (и куда более серьёзный)
+    уровень: symlink внутри data_dir означает, что у процесса есть права на
+    запись в data_dir. Возвращается РАЗЫМЕНОВАННЫЙ путь, чтобы вызывающий
+    отчитывался о фактическом расположении снимка, а не о кажущемся.
     """
     root = _backups_root(data_dir)
     resolved = Path(dest).resolve()
@@ -655,7 +666,8 @@ def _ensure_private_dir(path: Path) -> None:
         os.chmod(path, 0o700)
     except OSError as exc:
         raise SnapshotOperationRefused(
-            REASON_FSYNC_FAILED, f"не удалось выставить 0700 на {path}: {exc}"
+            REASON_PERMISSIONS_FAILED,
+            f"не удалось выставить 0700 на {path}: {exc}"
         ) from exc
 
 

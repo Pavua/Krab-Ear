@@ -585,8 +585,9 @@ class AutoBackupManager:
             )
 
             # MAJOR-5: entries считаются ЗДЕСЬ, вне store-lock (снимок создавался
-            # под ним). Для снимка счётчик не применим — у него нет
-            # backup_meta.json, — поэтому он не выдумывается.
+            # под ним, а count_active_items() сам берёт store-lock). Для
+            # legacy-копии счётчик уже посчитан в _do_backup, поэтому ветка
+            # трогает только снимок.
             if result.get("encrypted"):
                 try:
                     result["entries"] = self.store.count_active_items()

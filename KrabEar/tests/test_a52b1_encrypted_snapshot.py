@@ -1710,3 +1710,19 @@ class TestPendingScanIsNotOofN:
         status = mgr.get_auto_backup_status()
         assert status["encryption_operation_unavailable"] is True
         assert status["skipped_reason"] == "snapshot_recovery_pending"
+
+    def test_chmod_failure_has_its_own_reason(self, tmp_path):
+        """N4: отказ chmod не должен маскироваться под fsync/IO-причину."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        backup_dir = data_dir / "backups" / "snapshot_1"
+
+        with patch("backend.encrypted_snapshot.os.chmod", side_effect=OSError("synthetic chmod failure")):
+            with pytest.raises(SnapshotOperationRefused) as exc:
+                build_encrypted_snapshot(
+                    data_dir=data_dir, backup_dir=backup_dir, crypto=crypto,
+                    transaction_id="tx-chmod", policy_on=True,
+                )
+        assert exc.value.reason == "snapshot_permissions_failed"
+        assert exc.value.reason != "snapshot_fsync_failed"
