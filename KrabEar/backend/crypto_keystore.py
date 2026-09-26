@@ -21,6 +21,8 @@ logger = logging.getLogger("KrabEar.Backend.CryptoKeystore")
 
 _SERVICE = "KrabEar"
 _ACCOUNT = "history-encryption-key"
+# security(1) возвращает errSecItemNotFound (-25300) как 8-битный exit code.
+_ITEM_NOT_FOUND_EXIT_CODE = 44
 
 
 class KeystoreUnavailable(Exception):
@@ -69,15 +71,16 @@ def get_or_create_history_key() -> bytes:
     if result.returncode == 0:
         b64 = result.stdout.strip()
         try:
-            key = base64.b64decode(b64)
-            if len(key) == 32:
-                return key
-            logger.warning(
-                "crypto_keystore: ключ в Keychain имеет неверную длину %d, перегенерирую",
-                len(key),
-            )
-        except Exception:
-            logger.warning("crypto_keystore: ключ в Keychain повреждён, перегенерирую")
+            key = base64.b64decode(b64, validate=True)
+        except Exception as exc:
+            raise KeystoreUnavailable("ключ в Keychain повреждён") from exc
+        if len(key) != 32:
+            raise KeystoreUnavailable("ключ в Keychain имеет неверную длину")
+        return key
+    if result.returncode != _ITEM_NOT_FOUND_EXIT_CODE:
+        raise KeystoreUnavailable(
+            f"не удалось прочитать ключ из Keychain (код {result.returncode})"
+        )
 
     # Генерируем новый ключ и сохраняем
     key = os.urandom(32)
@@ -88,7 +91,7 @@ def get_or_create_history_key() -> bytes:
             "-s", _SERVICE,
             "-a", _ACCOUNT,
             "-w", b64,
-            "-U",   # -U: update if exists
+            # Без -U: конкурентное создание не должно заменить уже записанный ключ.
         ]
     )
     if store_result.returncode != 0:

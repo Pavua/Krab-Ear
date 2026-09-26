@@ -3,6 +3,7 @@ pyannote.audio==4.0.4  # pinned: MPS working, Tahoe 26.5 compat verified 2026-04
 numpy
 sounddevice
 requests
+httpx>=0.27,<1  # scripts/krab_ear_runner_health_check.py
 pydantic-settings
 soundfile
 pyperclip
@@ -49,6 +50,7 @@ cryptography>=42,<50
 
 # --- Test parallelization (CI speedup via -n auto) ---
 pytest-xdist>=3.5
+pytest-timeout>=2.3,<3  # pytest.ini timeout/timeout_method guards
 
 # --- Silero TTS (primary RU-движок tts_service) ---
 # hubconf snakers4/silero-models требует omegaconf при torch.hub.load;

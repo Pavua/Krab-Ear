@@ -101,7 +101,9 @@ jobs:
             sub=("${files[@]:$((i*chunk)):$chunk}")
             [ ${#sub[@]} -eq 0 ] && continue
             echo "::group::pytest chunk $((i+1))/$nchunks (${#sub[@]} files)"
-            python3 scripts/run_isolated_pytest.py timeout 600 python -m pytest "${sub[@]}" --tb=short -q -p no:xdist -p no:cacheprovider
+            # Full-repo audits and the 1000-cycle integration case legitimately exceed
+            # pytest.ini's 30s under hosted concurrency; keep a 75s per-test cap.
+            python3 scripts/run_isolated_pytest.py timeout 600 python -m pytest "${sub[@]}" --tb=short -q -p no:xdist -p no:cacheprovider --timeout=75
             crc=$?
             echo "::endgroup::"
             if [ $crc -ne 0 ]; then
@@ -110,11 +112,11 @@ jobs:
               # process dies, masking the culprit). Re-run this chunk one file per FRESH process,
               # 4 in PARALLEL (xargs -P4): contamination crashes pass in isolation (-> green),
               # genuine per-file failures are recorded by filename. Each file is wall-clock bounded
-              # (timeout 90) so a hung test cannot stall the job toward the 120-min limit.
+              # (timeout 90, pytest cap 75s) so a hung test cannot stall the job toward the 120-min limit.
               echo "::warning::chunk $((i+1)) exited $crc -- per-file isolate (parallel -P4)"
               printf '%s\n' "${sub[@]}" | xargs -P 4 -I {} bash -c '
                 log_file="$ISOLATED_LOG_DIR/${1##*/}.log"
-                if python3 scripts/run_isolated_pytest.py timeout 90 python -m pytest "$1" --tb=short -q -p no:xdist -p no:cacheprovider >"$log_file" 2>&1; then
+                if python3 scripts/run_isolated_pytest.py timeout 90 python -m pytest "$1" --tb=short -q -p no:xdist -p no:cacheprovider --timeout=75 >"$log_file" 2>&1; then
                   :
                 else
                   fcode=$?

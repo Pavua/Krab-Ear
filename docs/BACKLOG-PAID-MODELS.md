@@ -37,10 +37,13 @@ gate-security файлами, MCP sentry/context7/chrome/hammerspoon, Sentry-т�
 
 ## Точечные гейты (Fable, ~$10/$50, кэш-рид $0.25)
 
-- **R1 encryption fail-closed — смержен 15.09 на local-green
-  (3+27+88 тестов, py312, adversarial self-review, фича banned-off =
-  нулевой прод-эффект) по явному решению владельца; Fable retro-gate
-  остаётся желательным пост-квотой.**
+- **R1 encryption fail-closed — retro-gate 23.09: FAIL/HOLD.** Смерженный
+  15.09 путь записи мог сохранить новую plaintext-строку при отказе Keychain
+  или AES-GCM. Исправление основного `history.ndjson`/tombstones и Keychain
+  проходит отдельную проверку; это не разрешение включить флаг. Plaintext
+  sidecar-пути (`text_updates`, `action_items`, `annotations`, экспорт `.md`)
+  требуют отдельного полного at-rest контракта и тестов. В production
+  `history_encryption_enabled=false`; live migration запрещена до закрытия gate.
 - Любой другой privacy/security-дифф (см. recurring class «fail-open
   в except-ветке»).
 - Пилот дешёвого визуала (GPT 5.4 Mini, ~$0.75/$4.50) — только после
