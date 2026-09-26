@@ -331,7 +331,9 @@ def build_encrypted_snapshot(
         raise SnapshotOperationRefused(REASON_PREPARED_MISSING, "пустой transaction_id")
 
     # Шаг 1: незавершённая операция запрещает новую транзакцию (опубликованная).
-    pending = find_pending_transaction(backup_dir=backup_dir)
+    # Сканируется КОРЕНЬ backups, а не каталог-снимок: незавершённая транзакция
+    # лежит рядом с новым назначением.
+    pending = find_pending_transaction(backup_dir=backup_dir.parent)
     if pending and pending.get("published"):
         raise SnapshotOperationRefused(
             REASON_PENDING_OPERATION,
@@ -440,6 +442,34 @@ def verify_snapshot_readback(*, backup_dir: Any) -> dict:
     }
 
 
+def _cancel_staging(staging: Path) -> None:
+    """Отмена транзакции ДО durable COMMITTING: приватный staging убирается.
+
+    На диске не остаётся незавершённой транзакции, а отменённый снимок (в нём
+    только ENC1) не копится мусором. После COMMITTING этот вызов ЗАПРЕЩЁН:
+    там признак незавершённости обязан пережить crash ради b2-доказки.
+    """
+    import shutil
+
+    shutil.rmtree(staging, ignore_errors=True)
+
+
+def _publish_staging(staging: Path, backup_dir: Path) -> None:
+    """Шаг 5: публикация проверенного снимка ОДНОЙ атомарной заменой + fsync.
+
+    Отдельная функция (а не инлайн в commit) — единственная точка «первой
+    замены»: её и подменяют тесты, чтобы доказать crash-семантику COMMITTING
+    без тест-флагов в публичной сигнатуре.
+    """
+    if backup_dir.exists():
+        raise SnapshotOperationRefused(
+            REASON_DESTINATION_EXISTS, f"{backup_dir} уже существует — не перезаписываем"
+        )
+    backup_dir.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(staging, backup_dir)
+    _fsync_dir(backup_dir.parent)
+
+
 def commit_encrypted_snapshot(
     *,
     data_dir: Any,
@@ -471,6 +501,7 @@ def commit_encrypted_snapshot(
 
     # Политика должна остаться ON: иначе операция меняет смысл на ходу.
     if policy_read is not None and not policy_read():
+        _cancel_staging(staging)
         raise SnapshotOperationRefused(
             REASON_POLICY_UNAVAILABLE,
             "политика изменилась до commit — публикация отменена",
@@ -483,6 +514,9 @@ def commit_encrypted_snapshot(
             name for name in set(current) | set(prepared.get("fingerprint") or {})
             if current.get(name) != (prepared.get("fingerprint") or {}).get(name)
         )
+        # Отмена ДО durable COMMITTING: исходные файлы не тронуты, незавершённой
+        # транзакции на диске не остаётся (спека §5 «до COMMITTING отмена …»).
+        _cancel_staging(staging)
         raise SnapshotOperationRefused(
             REASON_FINGERPRINT_MISMATCH,
             f"источники изменились после подготовки: {changed}",
@@ -493,18 +527,33 @@ def commit_encrypted_snapshot(
     manifest["state"] = STATE_COMMITTING
     _write_manifest_atomic(staging, manifest)
 
-    if backup_dir.exists():
+    # С этого момента транзакция необратима: авто-отката в plaintext нет
+    # (спека §5), а признак COMMITTING обязан пережить crash для b2-доказки.
+    try:
+        # Шаг 5: публикация проверенного снимка.
+        _publish_staging(staging, backup_dir)
+    except OSError as exc:
+        # Crash/сбой на первой замене: источники целы, признак COMMITTING
+        # остаётся на диске — система fail-closed, отката нет.
         raise SnapshotOperationRefused(
-            REASON_DESTINATION_EXISTS, f"{backup_dir} уже существует — не перезаписываем"
-        )
-
-    # Шаг 5: публикация проверенного снимка одной атомарной заменой + fsync.
-    backup_dir.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(staging, backup_dir)
-    _fsync_dir(backup_dir.parent)
+            REASON_READBACK_FAILED,
+            f"публикация снимка не удалась: {type(exc).__name__}: {exc}",
+            pending=True,
+        ) from exc
 
     # Шаг 6: read-back ВСЕХ файлов; при расхождении состояние остаётся COMMITTING.
-    readback = verify_snapshot_readback(backup_dir=backup_dir)
+    # Сбой самого read-back — тоже fail-closed: COMMITTED не достигается,
+    # признак COMMITTING остаётся на диске для b2-доказки.
+    try:
+        readback = verify_snapshot_readback(backup_dir=backup_dir)
+    except SnapshotOperationRefused:
+        raise
+    except Exception as exc:  # noqa: BLE001 — crash/сбой проверки
+        raise SnapshotOperationRefused(
+            REASON_READBACK_FAILED,
+            f"read-back не выполнен: {type(exc).__name__}: {exc}",
+            pending=True,
+        ) from exc
     if not readback["ok"]:
         raise SnapshotOperationRefused(
             REASON_READBACK_FAILED,
@@ -532,6 +581,9 @@ def commit_encrypted_snapshot(
 
 def recover_pending_state(*, data_dir: Any, backup_dir: Any) -> dict:
     """Fail-closed признак незавершённой транзакции (доказка — b2).
+
+    ``backup_dir`` здесь — КОРЕНЬ backups (каталог, где лежат снимки и их
+    приватные staging-каталоги), а не каталог конкретного снимка.
 
     b1 НЕ откатывает снимок в plaintext, НЕ создаёт новый ключ и НЕ запускает
     обычное обслуживание: единственный честный ответ — «есть незавершённая

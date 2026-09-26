@@ -305,3 +305,264 @@ class TestSnapshotRegistryCompleteness:
 
 def manifest_files(snapshot_dir: Path) -> list[dict]:
     return _manifest(snapshot_dir)["files"]
+
+
+def _data_bytes(data_dir: Path) -> dict[str, bytes]:
+    return {
+        name: (data_dir / name).read_bytes()
+        for name in HISTORY_JOURNAL_FILENAMES
+        if (data_dir / name).is_file()
+    }
+
+
+def _staging_dirs(backups_root: Path) -> list[Path]:
+    if not backups_root.is_dir():
+        return []
+    return [p for p in backups_root.iterdir() if p.is_dir() and p.name.startswith(".snapshot_staging_")]
+
+
+def _no_plaintext_anywhere(*roots: Path) -> None:
+    """Ни один байт plaintext-истории не должен лежать в backups-корне."""
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*"):
+            if path.is_file():
+                blob = path.read_bytes()
+                assert b"kolya" not in blob
+                assert b"skazal" not in blob
+                assert b"CANARY" not in blob
+
+
+class TestCommitProtocol:
+    """Спека §5 шаги 4–6: fingerprint, COMMITTING, read-back, fail-closed."""
+
+    def test_commit_refuses_when_source_changed_between_prepare_and_commit(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        backup_dir = tmp_path / "backups" / "snapshot_1"
+        prepared = _prepared(tmp_path, data_dir, crypto, backup_dir)
+
+        # Источник изменился после подготовки (append в журнал).
+        with (data_dir / "history.ndjson").open("a", encoding="utf-8") as fh:
+            fh.write(_line(777) + "\n")
+        sources_before = _data_bytes(data_dir)
+
+        with pytest.raises(SnapshotOperationRefused) as exc:
+            commit_encrypted_snapshot(
+                data_dir=data_dir,
+                backup_dir=backup_dir,
+                transaction_id="tx-a52b1-0001",
+                prepared=prepared,
+            )
+        assert exc.value.reason == "snapshot_fingerprint_mismatch"
+        # Ничего не опубликовано, источники не тронуты, незавершённой транзакции нет.
+        assert not backup_dir.exists()
+        assert _data_bytes(data_dir) == sources_before
+        assert _staging_dirs(backup_dir.parent) == []
+
+    def test_crash_after_committing_before_publication_is_fail_closed(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        expected = _fill_mixed(data_dir, crypto)
+        backup_dir = tmp_path / "backups" / "snapshot_1"
+        sources_before = _data_bytes(data_dir)
+
+        # Crash ровно на первой замене: COMMITTING уже durable.
+        with patch(
+            "backend.encrypted_snapshot._publish_staging",
+            side_effect=OSError("synthetic crash on first replacement"),
+        ), patch(
+            "backend.history_crypto.build_history_crypto", side_effect=_no_keychain
+        ):
+            with pytest.raises(SnapshotOperationRefused) as exc:
+                create_encrypted_snapshot(
+                    data_dir=data_dir,
+                    backup_dir=backup_dir,
+                    crypto=crypto,
+                    transaction_id="tx-a52b1-crash1",
+                    policy_on=True,
+                )
+        assert exc.value.reason == "snapshot_readback_failed"
+        assert exc.value.pending is True
+        # Признак COMMITTING пережил crash — источник для b2-доказки.
+        assert not backup_dir.exists()
+        staging = _staging_dirs(backup_dir.parent)
+        assert len(staging) == 1
+        assert _manifest(staging[0])["state"] == STATE_COMMITTING
+        assert _manifest(staging[0])["transaction_id"] == "tx-a52b1-crash1"
+        # Исходные журналы целы, никакого отката в plaintext.
+        assert _data_bytes(data_dir) == sources_before
+        _no_plaintext_anywhere(backup_dir.parent)
+        # Fail-closed признак, а не «успех».
+        recovery = recover_pending_state(data_dir=data_dir, backup_dir=backup_dir.parent)
+        assert recovery["ok"] is False
+        assert recovery["pending"] is True
+        assert recovery["reason"] == "snapshot_recovery_pending"
+        assert recovery["transaction_id"] == "tx-a52b1-crash1"
+        # Никакого нового ключа: build_history_crypto не вызывался (патч-ловушка).
+
+    def test_crash_after_publication_keeps_valid_snapshot_and_reports_pending(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        backup_dir = tmp_path / "backups" / "snapshot_1"
+        sources_before = _data_bytes(data_dir)
+
+        # Crash сразу после публикации, до read-back/COMMITTED.
+        with patch(
+            "backend.encrypted_snapshot.verify_snapshot_readback",
+            side_effect=OSError("synthetic crash after publication"),
+        ):
+            with pytest.raises(SnapshotOperationRefused) as exc:
+                create_encrypted_snapshot(
+                    data_dir=data_dir,
+                    backup_dir=backup_dir,
+                    crypto=crypto,
+                    transaction_id="tx-a52b1-crash2",
+                    policy_on=True,
+                )
+        assert exc.value.reason == "snapshot_readback_failed"
+        assert exc.value.pending is True
+
+        # Снимок на диске валиден и пригоден для докажки в b2, но НЕ COMMITTED.
+        assert backup_dir.is_dir()
+        assert _manifest(backup_dir)["state"] == STATE_COMMITTING
+        assert _payload_files(backup_dir) == sorted(HISTORY_JOURNAL_FILENAMES)
+        check = verify_snapshot_readback(backup_dir=backup_dir)
+        assert check["ok"] is True
+        assert check["checked"] == 10
+        # Исходные журналы целы.
+        assert _data_bytes(data_dir) == sources_before
+        _no_plaintext_anywhere(backup_dir.parent)
+        recovery = recover_pending_state(data_dir=data_dir, backup_dir=backup_dir.parent)
+        assert recovery["ok"] is False
+        assert recovery["reason"] == "snapshot_recovery_pending"
+        assert recovery["path"] == str(backup_dir)
+        # Новый снимок при незавершённой транзакции запрещён.
+        with pytest.raises(SnapshotOperationRefused) as blocked:
+            create_encrypted_snapshot(
+                data_dir=data_dir,
+                backup_dir=tmp_path / "backups" / "snapshot_2",
+                crypto=crypto,
+                transaction_id="tx-a52b1-crash2b",
+                policy_on=True,
+            )
+        assert blocked.value.reason == "snapshot_pending_operation"
+
+    def test_committed_requires_successful_readback(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        backup_dir = tmp_path / "backups" / "snapshot_1"
+
+        with patch(
+            "backend.encrypted_snapshot.verify_snapshot_readback",
+            return_value={
+                "ok": False,
+                "state": STATE_COMMITTING,
+                "transaction_id": "tx-a52b1-rb",
+                "checked": 10,
+                "mismatches": ["history.ndjson: sha256 не совпадает"],
+            },
+        ):
+            with pytest.raises(SnapshotOperationRefused) as exc:
+                create_encrypted_snapshot(
+                    data_dir=data_dir,
+                    backup_dir=backup_dir,
+                    crypto=crypto,
+                    transaction_id="tx-a52b1-rb",
+                    policy_on=True,
+                )
+        assert exc.value.reason == "snapshot_readback_failed"
+        # Состояние НЕ COMMITTED — несмотря на «успешную» публикацию.
+        assert _manifest(backup_dir)["state"] == STATE_COMMITTING
+        recovery = recover_pending_state(data_dir=data_dir, backup_dir=backup_dir.parent)
+        assert recovery["ok"] is False
+
+    def test_successful_commit_reports_committed_after_full_readback(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        backup_dir = tmp_path / "backups" / "snapshot_1"
+
+        result = create_encrypted_snapshot(
+            data_dir=data_dir,
+            backup_dir=backup_dir,
+            crypto=crypto,
+            transaction_id="tx-a52b1-ok",
+            policy_on=True,
+        )
+        assert result["ok"] is True
+        assert result["state"] == STATE_COMMITTED
+        assert result["readback"]["ok"] is True
+        assert result["readback"]["checked"] == 10
+        assert _manifest(backup_dir)["state"] == STATE_COMMITTED
+        # Staging убран публикацией — незавершённых транзакций нет.
+        assert _staging_dirs(backup_dir.parent) == []
+        recovery = recover_pending_state(data_dir=data_dir, backup_dir=backup_dir.parent)
+        assert recovery["ok"] is True
+        assert recovery["pending"] is False
+        assert recovery["reason"] is None
+        _no_plaintext_anywhere(backup_dir.parent)
+
+    def test_readback_detects_corrupted_and_missing_files(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        backup_dir = tmp_path / "backups" / "snapshot_1"
+        create_encrypted_snapshot(
+            data_dir=data_dir,
+            backup_dir=backup_dir,
+            crypto=crypto,
+            transaction_id="tx-a52b1-corrupt",
+            policy_on=True,
+        )
+
+        (backup_dir / "history_tags.ndjson").write_text("ENC1:tampered\n", encoding="utf-8")
+        (backup_dir / "history_status.ndjson").unlink()
+        check = verify_snapshot_readback(backup_dir=backup_dir)
+        assert check["ok"] is False
+        assert any("history_tags.ndjson" in m for m in check["mismatches"])
+        assert any("history_status.ndjson" in m for m in check["mismatches"])
+
+    def test_commit_refuses_when_policy_flipped_off_before_commit(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        backup_dir = tmp_path / "backups" / "snapshot_1"
+        prepared = _prepared(tmp_path, data_dir, crypto, backup_dir)
+
+        with pytest.raises(SnapshotOperationRefused) as exc:
+            commit_encrypted_snapshot(
+                data_dir=data_dir,
+                backup_dir=backup_dir,
+                transaction_id="tx-a52b1-0001",
+                prepared=prepared,
+                policy_read=lambda: False,
+            )
+        assert exc.value.reason == "snapshot_policy_unavailable"
+        assert not backup_dir.exists()
+        assert _staging_dirs(backup_dir.parent) == []
+
+    def test_commit_refuses_into_existing_destination(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_mixed(data_dir, crypto)
+        backup_dir = tmp_path / "backups" / "snapshot_1"
+        backup_dir.mkdir(parents=True)
+        (backup_dir / "history.ndjson").write_text(_line(1) + "\n", encoding="utf-8")
+
+        with pytest.raises(SnapshotOperationRefused) as exc:
+            create_encrypted_snapshot(
+                data_dir=data_dir,
+                backup_dir=backup_dir,
+                crypto=crypto,
+                transaction_id="tx-a52b1-dest",
+                policy_on=True,
+            )
+        assert exc.value.reason == "snapshot_destination_exists"
+        # Существующий бэкап не тронут.
+        assert (backup_dir / "history.ndjson").read_text("utf-8") == _line(1) + "\n"
+
