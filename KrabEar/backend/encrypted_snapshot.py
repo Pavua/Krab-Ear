@@ -1384,7 +1384,7 @@ def _build_restore_output(
     Строки переносятся БАЙТ-В-БАЙТ из уже проверенного снимка — лишнего
     шифрования нет, а побайтовое совпадение с бэкапом остаётся доказуемым.
 
-    Возвращает ``(files_meta, restored_entries, filtered_out)``.
+    Возвращает ``(files_meta, restored_entries, filtered_out_lines)``.
     """
     files_meta: list[dict[str, Any]] = []
     restored_entries = 0
@@ -1533,7 +1533,7 @@ def _apply_verified_snapshot_locked(
     _ensure_private_dir(staging)
 
     try:
-        files_meta, restored_entries, filtered_out = _build_restore_output(
+        files_meta, restored_entries, filtered_out_lines = _build_restore_output(
             data_dir=data_dir,
             staging=staging,
             snapshot_dir=snapshot_dir,
@@ -1612,8 +1612,8 @@ def _apply_verified_snapshot_locked(
     _fsync_dir(data_dir)
     logger.info(
         "encrypted_snapshot: restore %s зафиксирован (COMMITTED) из %s, "
-        "%d записей, отфильтровано по ledger %d",
-        transaction_id, snapshot_dir, restored_entries, filtered_out,
+        "%d записей, отфильтровано строк по ledger %d",
+        transaction_id, snapshot_dir, restored_entries, filtered_out_lines,
     )
     return {
         "ok": True,
@@ -1621,13 +1621,45 @@ def _apply_verified_snapshot_locked(
         "transaction_id": transaction_id,
         "snapshot_dir": str(snapshot_dir),
         "pre_restore_snapshot": pre_restore_snapshot,
+        # N3: restored_entries — строки ВОССТАНОВЛЕННОЙ history.ndjson;
+        # filtered_out_lines — строки, вычеркнутые по ledger, по всем 10 журналам.
         "restored_entries": restored_entries,
+        "restored_entries_source": "snapshot_lines",
         "ledger_blocked": len(blocked),
-        "filtered_out": filtered_out,
+        "filtered_out_lines": filtered_out_lines,
         "files": files_meta,
         "readback": readback,
         "recovered": recovered,
     }
+
+
+def _validated_marker_entries(marker: dict) -> int | None:
+    """``restored_entries`` из маркера — только если значение пригодно.
+
+    N4: маркер лежит на ДИСКЕ, а его ``restored_entries`` — число, записанное
+    прошлой попыткой. Отдать его «как есть» значит показать непроверенное
+    значение как правду (в подделанном/битом маркере там может быть что угодно).
+    Поэтому значение проходит проверку типа, диапазона и правдоподобия (не
+    больше суммарного размера подготовленного ciphertext-бандла — запись не
+    может быть длиннее него). Всё остальное — честный ``None``.
+    """
+    value = marker.get("restored_entries")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    files = marker.get("files")
+    if not isinstance(files, list) or not files:
+        return None
+    prepared = 0
+    for entry in files:
+        if not isinstance(entry, dict):
+            return None
+        size = entry.get("size")
+        if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+            continue
+        prepared += size
+    if prepared <= 0 or value > prepared:
+        return None
+    return value
 
 
 def _recovery_result(
@@ -1784,11 +1816,18 @@ def recover_pending_restore(
             "encrypted_snapshot: restore %s уже был COMMITTED — приватный staging убран",
             transaction_id,
         )
+        marker_entries = _validated_marker_entries(marker)
+        if marker.get("restored_entries") is not None and marker_entries is None:
+            logger.warning(
+                "encrypted_snapshot: restored_entries в маркере %s непригоден (%r) — "
+                "не отдаём непроверенное значение",
+                transaction_id, marker.get("restored_entries"),
+            )
         return _recovery_result(
             ok=True,
             pending=False,
             reason=None,
-            restored_entries=int(marker.get("restored_entries") or 0),
+            restored_entries=marker_entries or 0,
             **common,
         )
 

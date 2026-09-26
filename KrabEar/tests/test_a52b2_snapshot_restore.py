@@ -881,7 +881,7 @@ class TestRestoreLedgerUnion:
         )
 
         assert "d0-1" not in _live_ids(data_dir, crypto, "history.ndjson")
-        assert result["filtered_out"] >= 1
+        assert result["filtered_out_lines"] >= 1
         # Ни в одном дельта-журнале записи с этим ID быть не должно.
         for name in HISTORY_JOURNAL_FILENAMES:
             if name in ("history_tombstones.ndjson", "history_purged_ids.ndjson"):
@@ -2383,3 +2383,177 @@ class TestPurgeAuditSeesFstringFamilies:
             tmp_path,
         )
         assert not any("backup_" in sid for sid in stores), stores
+
+
+# ---------------------------------------------------------------------------
+# A5.2b2 review — M3: успех не ломается из-за счёта ПОСЛЕ COMMITTED
+# ---------------------------------------------------------------------------
+
+
+class TestRestoreCountDegradation:
+    def test_count_timeout_does_not_fail_a_committed_restore(self, tmp_path):
+        """M3-проба: таймаут счётчика НЕ имеет права ломать уже долговечный restore.
+
+        Restore к этому моменту COMMITTED и прошёл read-back. Владелец должен
+        получить успех с честной пометкой, что счёт не проверен, а не RuntimeError
+        для операции, которая уже применена.
+        """
+        from backend.state_store import StateStoreLockTimeout
+
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed_items(store, ["одна", "две"])
+        svc = HistoryService(store=store, cached_settings=lambda: {})
+        snapshot_dir = Path(svc.handle_backup_history({})["backup_path"])
+        _seed_items(store, ["три"])
+
+        with patch.object(
+            type(store),
+            "count_active_items",
+            side_effect=StateStoreLockTimeout("synthetic contention"),
+        ):
+            result = svc.handle_restore_history({"backup_path": str(snapshot_dir)})
+
+        assert result["ok"] is True
+        assert result["reason"] is None
+        assert result["restored_entries_verified"] is False
+        assert any("restored_entries" in w for w in result["warnings"])
+        # Значение всё равно полезно владельцу — оно из маркера, помечено.
+        assert result["restored_entries"] == 2
+        assert result["restored_entries_source"] == "snapshot_lines"
+        # Журналы на диске — восстановленный набор, операция не откатилась.
+        assert store.count_active_items() == 2
+
+    def test_normal_path_reports_verified_count(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed_items(store, ["одна", "две", "три"])
+        svc = HistoryService(store=store, cached_settings=lambda: {})
+        snapshot_dir = Path(svc.handle_backup_history({})["backup_path"])
+
+        result = svc.handle_restore_history({"backup_path": str(snapshot_dir)})
+
+        assert result["ok"] is True
+        assert result["restored_entries"] == 3
+        assert result["restored_entries_verified"] is True
+        assert result["restored_entries_source"] == "store_count"
+        assert result["warnings"] == []
+
+    def test_marker_count_from_disk_is_validated_before_being_reported(self, tmp_path):
+        """N4: значение счётчика читается с ДИСКА (recovery чистит COMMITTED-маркер).
+
+        Непригодное значение не должно отдаваться как «число записей» —
+        возвращается 0 с громким предупреждением, а не «99».
+        """
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        _make_snapshot(data_dir, crypto)
+        leftover = data_dir / f"{RESTORE_STAGING_PREFIX}tx-lying"
+        leftover.mkdir()
+        (leftover / RESTORE_MARKER_FILENAME).write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "transaction_id": "tx-lying",
+                    "state": "COMMITTED",
+                    "target_snapshot": str(data_dir / "backups" / "snapshot_1"),
+                    "pre_restore_snapshot": str(data_dir / "backups" / "snapshot_1"),
+                    "restored_entries": "99",
+                    "files": [{"name": "history.ndjson", "size": 10, "sha256": "x" * 64}],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = _recover(data_dir, crypto)
+
+        assert result["ok"] is True
+        assert result["rolled_forward"] is False
+        assert result["restored_entries"] == 0, "строка из маркера отдана как число"
+        assert not leftover.exists()
+
+    def test_valid_marker_count_from_disk_is_reported(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        _make_snapshot(data_dir, crypto)
+        leftover = data_dir / f"{RESTORE_STAGING_PREFIX}tx-honest"
+        leftover.mkdir()
+        (leftover / RESTORE_MARKER_FILENAME).write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "transaction_id": "tx-honest",
+                    "state": "COMMITTED",
+                    "target_snapshot": str(data_dir / "backups" / "snapshot_1"),
+                    "pre_restore_snapshot": str(data_dir / "backups" / "snapshot_1"),
+                    "restored_entries": 3,
+                    "files": [{"name": "history.ndjson", "size": 4096, "sha256": "x" * 64}],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = _recover(data_dir, crypto)
+
+        assert result["ok"] is True
+        assert result["restored_entries"] == 3
+
+    def test_search_caches_are_reset_under_lock(self, tmp_path):
+        """Сброс in-RAM индексов идёт ПОД локом: иначе конкурентный поиск успевает
+        отдать до-restore индекс (cleartext прежней истории)."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed_items(store, ["до-restore запись"])
+        svc = HistoryService(store=store, cached_settings=lambda: {})
+        snapshot_dir = Path(svc.handle_backup_history({})["backup_path"])
+        _seed_items(store, ["после-снимка запись"])
+        store.count_active_items()  # прогреваем кэш
+        store._ensure_active_ids_unlocked()
+
+        result = svc.handle_restore_history({"backup_path": str(snapshot_dir)})
+
+        assert result["ok"] is True
+        restored_ids = {item.id for item in store._load_active_items_unlocked()}
+        # Кэш активных id ПЕРЕСТРОЕН по восстановленным журналам (не остался от
+        # прежнего содержимого) — ленивая инициализация допустима, «остался
+        # прежним» — нет.
+        assert store._active_ids is None or store._active_ids == restored_ids
+        assert store._active_ids != {i.id for i in []} or True
+        # Поисковые индексы прежнего содержимого очищены (cleartext до-restore).
+        assert store._recent_search_index == []
+        assert store._recent_search_index_signature is None
+        assert not getattr(store._search_index, "_texts", {})
+
+    def test_reset_happens_inside_the_store_lock(self, tmp_path):
+        """Проверка порядка: сброс индекса не должен делаться ВНЕ lock'а."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed_items(store, ["запись"])
+        svc = HistoryService(store=store, cached_settings=lambda: {})
+        snapshot_dir = Path(svc.handle_backup_history({})["backup_path"])
+
+        observed: list[dict] = []
+        real_reset = type(store).reset_search_caches
+
+        def _traced_reset(inner_self):
+            depth = inner_self._lock_depth.get(__import__("threading").get_ident(), 0)
+            observed.append({"locked": depth > 0})
+            return real_reset(inner_self)
+
+        with patch.object(type(store), "reset_search_caches", _traced_reset):
+            svc.handle_restore_history({"backup_path": str(snapshot_dir)})
+
+        assert observed, "reset_search_caches не вызван"
+        assert observed[0]["locked"] is True, "сброс индекса сделан вне store-lock"

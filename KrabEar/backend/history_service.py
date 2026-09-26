@@ -4345,6 +4345,20 @@ class HistoryService:
     # A5.2b2 — точки обслуживания незавершённого restore
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _validated_marker_count(result: dict) -> int | None:
+        """Счёт из результата модуля — только если это пригодное число.
+
+        N4: значение приходит из подготовленного набора (in-memory, не с диска),
+        но тип всё равно проверяется: «успех» с мусором в поле счёта хуже, чем
+        честное ``None`` + предупреждение. Проверка значений маркера, читаемых
+        с ДИСКА, живёт в модуле (``_validated_marker_entries``).
+        """
+        value = result.get("restored_entries")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        return value
+
     def _recover_pending_restore(self) -> dict | None:
         """Докатывает незавершённый restore, если он есть (A5.2b2, M2).
 
@@ -4474,11 +4488,44 @@ class HistoryService:
             return {**refusal, "reason": exc.reason}
 
         # Замена журналов делает ин-РАМ индексы StateStore неверными: они
-        # относятся к прежнему содержимому. Без сброса `restored_entries` врал
-        # бы (счётчик кэширует `_active_ids`), а полный cleartext прежней
-        # истории продолжал бы жить в поисковом индексе в RAM. Сброс ленивый.
-        self.store._active_ids = None
-        self.store.reset_search_caches()
+        # относятся к прежнему содержимому. Без сброса конкурентный
+        # `search_history` успевает отдать ДО-restore индекс (полный cleartext
+        # прежней истории), а счётчик кэширует `_active_ids` и врал бы.
+        #
+        # Сброс идёт ПОД тем же store-lock одним вызовом (M3): раньше
+        # `_active_ids = None` ставился снаружи, а `reset_search_caches()` брал
+        # лок сам — между ними было окно, где читатель видел старые индексы и
+        # новые файлы. `reset_search_caches` переиспользует лок фасада
+        # (реентерабелен по треду), поэтому вложенный захват — no-op.
+        with self.store._lock():
+            self.store._active_ids = None
+            self.store.reset_search_caches()
+            # Счёт — под тем же локом и с честной деградацией: restore к этому
+            # моменту УЖЕ COMMITTED (замены сделаны, read-back прошёл), и падать
+            # из-за таймаута счётчика нельзя — операция уже применена.
+            warnings: list[str] = []
+            try:
+                restored_entries = int(self.store.count_active_items())
+                entries_source = "store_count"
+                entries_verified = True
+            except Exception as exc:  # noqa: BLE001 — таймаут/сбой чтения
+                marker_value = self._validated_marker_count(result)
+                restored_entries = marker_value
+                entries_source = "snapshot_lines"
+                entries_verified = False
+                warnings.append(
+                    f"restored_entries_unverified: счётчик недоступен "
+                    f"({type(exc).__name__}), показано значение из маркера снимка"
+                )
+                logger.warning(
+                    "handle_restore_history: restored_entries не проверен — %s",
+                    type(exc).__name__,
+                )
+                if marker_value is None:
+                    entries_source = "unknown"
+                    warnings.append(
+                        "restored_entries_unknown: значение из маркера непригодно"
+                    )
 
         backup_date = "unknown"
         try:
@@ -4495,15 +4542,16 @@ class HistoryService:
                 exc_info=True,
             )
 
-        restored_entries = self.store.count_active_items()
         logger.info(
-            "История восстановлена из encrypted-снимка %s: %d записей "
-            "(transaction %s, pre-restore %s)",
+            "История восстановлена из encrypted-снимка %s: %s записей "
+            "(transaction %s, pre-restore %s, источник %s)",
             backup_dir, restored_entries, result["transaction_id"],
-            result["pre_restore_snapshot"],
+            result["pre_restore_snapshot"], entries_source,
         )
         return {
             "restored_entries": restored_entries,
+            "restored_entries_verified": entries_verified,
+            "restored_entries_source": entries_source,
             "backup_date": backup_date,
             "ok": True,
             "reason": None,
@@ -4513,7 +4561,10 @@ class HistoryService:
             "snapshot_path": result["snapshot_dir"],
             "pre_restore_snapshot": result["pre_restore_snapshot"],
             "ledger_blocked": result["ledger_blocked"],
-            "filtered_out": result["filtered_out"],
+            # N3: это СТРОКИ, отфильтрованные по deletion ledger, по всем десяти
+            # журналам (история + дельты), а не «записи истории».
+            "filtered_out_lines": result["filtered_out_lines"],
+            "warnings": warnings,
         }
 
     def handle_restore_history(self, params: dict[str, Any]) -> dict[str, Any]:
