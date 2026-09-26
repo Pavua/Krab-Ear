@@ -134,12 +134,31 @@ final class URLSessionVGCommandPoster: VGCommandPosting {
         url.append(path: "/v1/sessions/\(sessionId)/diagnostics")
         let req = VGWebSocketConnection.makeRequest(url: url, token: tokenProvider())
         session.dataTask(with: req) { data, _, _ in
-            // Реальный VG кладёт costs НА ВЕРХНИЙ уровень ({**diag, status, ...}).
+            // Реальный VG кладёт costs НА ВЕРХНИЙ УРОВЕНЬ ({**diag, status, ...}).
             guard let data,
                   let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                   let costs = obj["costs"] as? [String: Any],
                   let total = costs["total_usd"] as? Double else { completion(nil); return }
             completion(total)
+        }.resume()
+    }
+
+    /// Подсказка скринеру (инцидент Glovo 2026-09-26): текст владельца уходит
+    /// в VG и вплетается в следующий ход LLM-агента, который озвучивает его на
+    /// своём tgt_lang. Авторизация — тот же Bearer, что у hangup/diagnostics;
+    /// новых секретов не заводим (brief §3).
+    func whisper(baseURL: URL, sessionId: String, text: String,
+                 completion: @escaping (Result<Int, Error>) -> Void) {
+        var url = baseURL
+        url.append(path: "/v1/sessions/\(sessionId)/agent/whisper")
+        var req = VGWebSocketConnection.makeRequest(url: url, token: tokenProvider())
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // Текст подсказки в лог НЕ пишем (privacy): в лог уходит только код.
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["text": text])
+        session.dataTask(with: req) { _, resp, error in
+            if let error { completion(.failure(error)); return }
+            completion(.success((resp as? HTTPURLResponse)?.statusCode ?? 0))
         }.resume()
     }
 }

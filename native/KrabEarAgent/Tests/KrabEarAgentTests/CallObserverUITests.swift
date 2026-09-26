@@ -189,4 +189,89 @@ final class CallObserverUITests: XCTestCase {
 
         panel.close()
     }
+
+    // MARK: - Whisper (подсказка скринеру, инцидент Glovo 2026-09-26)
+
+    /// Бар виден ТОЛЬКО на meta.screening-сессии; на переводе/prompt-call его
+    /// нет (brief §2 — у тех сессий подсказка уже есть на iOS).
+    func test_whisperField_visibleOnlyForScreeningSession() {
+        let panel = CallObserverPanelController()
+
+        panel.showPanel(session: session("s1", isScreening: true))
+        XCTAssertTrue(panel.testHook_whisperBarVisible, "скрининг-сессия обязана показать поле подсказки")
+        XCTAssertTrue(panel.testHook_whisperSendEnabled)
+
+        panel.showPanel(session: session("s2", isScreening: false))
+        XCTAssertFalse(panel.testHook_whisperBarVisible, "не-скрининг сессия не показывает whisper-бар")
+
+        panel.close()
+    }
+
+    /// Независимость от выбранной сессии: скрытие/показ привязано к сессии,
+    /// открытой в панели, и не зависит от терминального состояния старой.
+    func test_whisperField_hidesForNonScreeningAndClearsInput() {
+        let panel = CallObserverPanelController()
+        panel.showPanel(session: session("s1", isScreening: true))
+        panel.testHook_whisperField.stringValue = "di que sí"
+
+        panel.showPanel(session: session("s2", isScreening: false))
+        XCTAssertFalse(panel.testHook_whisperBarVisible)
+        XCTAssertEqual(panel.testHook_whisperField.stringValue, "",
+                       "переключение на не-скрининг обязано очистить введённое")
+
+        panel.close()
+    }
+
+    /// Single-flight: после успеха кнопка разблокирована, текст очищен;
+    /// при ошибке текст СОХРАНЁН, показана плашка (brief §4 + DoD.2).
+    func test_whisperResult_feedbackKeepsTextOnError() {
+        let panel = CallObserverPanelController()
+        panel.showPanel(session: session("s1", isScreening: true))
+        panel.testHook_whisperField.stringValue = "lo recojo"
+
+        panel.setWhisperSendEnabled(false)
+        XCTAssertFalse(panel.testHook_whisperSendEnabled, "во время полёта кнопка заблокирована")
+
+        panel.presentWhisperResult(accepted: false, message: "Скринер недоступен")
+        XCTAssertEqual(panel.testHook_whisperField.stringValue, "lo recojo",
+                       "при ошибке текст подсказки обязан сохраниться для повтора")
+        XCTAssertEqual(panel.testHook_whisperStatusText, "Скринер недоступен")
+
+        panel.presentWhisperResult(accepted: true, message: nil)
+        XCTAssertEqual(panel.testHook_whisperField.stringValue, "", "успех очищает поле")
+        XCTAssertEqual(panel.testHook_whisperStatusText, "Подсказка принята")
+
+        panel.close()
+    }
+
+    /// Терминальный звонок не принимает подсказку: поле и кнопка мертвы.
+    func test_whisperField_disabledOnTerminalCall() {
+        let panel = CallObserverPanelController()
+        panel.showPanel(session: session("s1", isScreening: true))
+        XCTAssertTrue(panel.testHook_whisperSendEnabled)
+
+        panel.setTerminal(message: "Звонок завершён")
+        XCTAssertFalse(panel.testHook_whisperSendEnabled, "после завершения звонка отправка запрещена")
+
+        panel.close()
+    }
+
+    /// Лейаут-инвариант: whisper-бар расширил окно, но заголовок и бейдж в
+    /// хедере по-прежнему не пересекаются (brief §1: хедер не трогаем).
+    func test_whisperBar_doesNotBreakHeaderLayout() {
+        let panel = CallObserverPanelController()
+        panel.showPanel(session: session("s1", isScreening: true, forwardedFrom: "+16895551234"))
+        guard let contentView = panel.window?.contentView else {
+            XCTFail("No content view")
+            return
+        }
+        contentView.layoutSubtreeIfNeeded()
+
+        let titleFrame = panel.testHook_inContentTitleLabel.convert(panel.testHook_inContentTitleLabel.bounds, to: nil)
+        let badgeFrame = panel.testHook_stateBadgeBox.convert(panel.testHook_stateBadgeBox.bounds, to: nil)
+        XCTAssertFalse(titleFrame.intersects(badgeFrame),
+                       "whisper-бар не имеет права ломать layout хедера")
+
+        panel.close()
+    }
 }
