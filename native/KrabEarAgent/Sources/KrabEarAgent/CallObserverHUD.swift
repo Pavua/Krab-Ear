@@ -55,7 +55,7 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
         }
         
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        if reduceMotion {
+        if reduceMotion || statusLower.contains("end") {
             statusDot.layer?.removeAnimation(forKey: "pulse")
             statusDot.layer?.opacity = 1.0
         } else if statusDot.layer?.animation(forKey: "pulse") == nil {
@@ -68,6 +68,7 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
             anim.timingFunction = KrabEarTheme.Motion.Easing.easeInOut
             statusDot.layer?.add(anim, forKey: "pulse")
         }
+        statusDot.layer?.shadowColor = statusDot.fillColor.cgColor
         
         var badges = [String]()
         if statusLower.contains("mute") { badges.append("mute") }
@@ -80,14 +81,20 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
             label.textColor = KrabEarTheme.Colors.textSecondary
             label.isBordered = false
             label.drawsBackground = false
+            label.isEditable = false
+            label.isSelectable = false
             
             let box = NSBox()
             box.boxType = .custom
-            box.borderType = .noBorder
-            box.fillColor = KrabEarTheme.Colors.border
+            box.borderWidth = 1.0
+            box.borderColor = KrabEarTheme.Colors.border
+            box.fillColor = KrabEarTheme.Colors.cardBackground
             box.cornerRadius = 6
+            box.wantsLayer = true
+            box.layer?.cornerRadius = 6
+            box.layer?.cornerCurve = .continuous
             box.contentView = label
-            box.contentViewMargins = NSSize(width: 4, height: 1)
+            box.contentViewMargins = NSSize(width: 6, height: 2)
             badgesStack.addArrangedSubview(box)
         }
         badgesStack.isHidden = badges.isEmpty
@@ -177,6 +184,12 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
         statusDot.borderType = .noBorder
         statusDot.wantsLayer = true
         statusDot.layer?.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
+        statusDot.layer?.cornerCurve = .continuous
+        statusDot.layer?.masksToBounds = false
+        statusDot.layer?.shadowColor = statusDot.fillColor.cgColor
+        statusDot.layer?.shadowOpacity = 0.5
+        statusDot.layer?.shadowRadius = 4
+        statusDot.layer?.shadowOffset = .zero
         NSLayoutConstraint.activate([
             statusDot.widthAnchor.constraint(equalToConstant: 8),
             statusDot.heightAnchor.constraint(equalToConstant: 8)
@@ -208,7 +221,7 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
         
         let statusStack = NSStackView(views: [statusDot, statusLabel, badgesStack])
         statusStack.orientation = .horizontal
-        statusStack.spacing = KrabEarTheme.Metrics.standard
+        statusStack.spacing = KrabEarTheme.Metrics.itemSpacing
         statusStack.alignment = .centerY
         
         let topRow = NSStackView(views: [statusStack, NSView(), buttons])
@@ -220,7 +233,12 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = KrabEarTheme.Metrics.itemSpacing
-        stack.edgeInsets = NSEdgeInsets(top: KrabEarTheme.Metrics.cardPadding, left: 16, bottom: KrabEarTheme.Metrics.cardPadding, right: 16)
+        stack.edgeInsets = NSEdgeInsets(
+            top: KrabEarTheme.Metrics.cardPadding,
+            left: KrabEarTheme.Metrics.cardPadding,
+            bottom: KrabEarTheme.Metrics.cardPadding,
+            right: KrabEarTheme.Metrics.cardPadding
+        )
         stack.translatesAutoresizingMaskIntoConstraints = false
         
         content.addSubview(stack)
@@ -235,7 +253,7 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
             stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
             stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            topRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32) // account for insets
+            topRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -(KrabEarTheme.Metrics.cardPadding * 2)) // Учёт боковых отступов
         ])
         p.contentView = backdrop
         panel = p
@@ -256,9 +274,16 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
             button.isBordered = false
             button.isTransparentStyle = true
             button.contentTintColor = KrabEarTheme.Colors.textSecondary
+            button.wantsLayer = true
+            button.layer?.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
+            button.layer?.cornerCurve = .continuous
             self.buttonActions[ObjectIdentifier(button)] = action
             button.target = self
             button.action = #selector(self.buttonTapped(_:))
+            NSLayoutConstraint.activate([
+                button.widthAnchor.constraint(equalToConstant: KrabEarTheme.Metrics.controlHeight),
+                button.heightAnchor.constraint(equalToConstant: KrabEarTheme.Metrics.controlHeight)
+            ])
         }
     }
 
@@ -266,7 +291,7 @@ final class CallObserverHUD: NSObject, CallObserverHUDPresenting {
         buttonActions[ObjectIdentifier(sender)]?()
     }
 
-    // MARK: Test hooks
+    // MARK: - Тестовые хуки
     var testHook_listenButton: NSButton { listenButton }
     var testHook_hangupButton: NSButton { hangupButton }
     var testHook_statusText: String { statusLabel.stringValue }
@@ -320,11 +345,13 @@ private class HUDBackdropView: NSVisualEffectView {
         updateColors()
     }
     
-    required init?(coder: NSCoder) { fatalError() }
+    required init?(coder: NSCoder) { fatalError("init(coder:) не поддерживается") }
     
     override func layout() {
         super.layout()
         bgLayer.frame = bounds
+        bgLayer.cornerRadius = KrabEarTheme.Metrics.cardCornerRadius
+        bgLayer.cornerCurve = .continuous
     }
     
     override func viewDidChangeEffectiveAppearance() {

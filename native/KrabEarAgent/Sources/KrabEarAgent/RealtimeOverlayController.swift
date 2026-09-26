@@ -5,29 +5,26 @@
  1) main.swift: показывает и обновляет оверлей во время активной записи.
  2) IPC get_recording_state: источник промежуточного текста и таймера.
 
- Redesign: Liquid Glass aesthetic (NSVisualEffectView + near-cursor + reveal animation).
- - macOS 13+ target, Swift 6.0 strict concurrency.
-
- Gemini 3.1 Pro redesign (2026-04-19):
- 4a: Recording state red dot via CABasicAnimation
- 4b: State-differentiated tint (red 0.04 recording / accent 0.04 transcribing)
- 4c: stageLabel as pill/badge (StageBadgeView)
- 4d: Pulse via CABasicAnimation (no Timer)
+ Редизайн: Liquid Glass (NSVisualEffectView + привязка к курсору + анимация появления).
+ - Целевая платформа macOS 13+, строгая многопоточность Swift 6.0.
+ - Индикатор записи: точка и мягкий halo строго на CALayer (без NSBox и глифов).
+ - Подложка: surfaceView с Colors.cardBackground и динамический border.
+ - Типографика: Typography.display и Typography.captionMedium.
 */
 
 import AppKit
 import Foundation
 import QuartzCore
 
-// MARK: - State
+// MARK: - Состояния оверлея
 
 private enum OverlayState {
     case hidden
-    case live        // during recording, pulsing text + red dot
-    case reveal      // 3-stage progression after stop_recording
+    case live        // Активная запись: текст и индикатор записи
+    case reveal      // 3-стадийный прогресс после stop_recording
 }
 
-// MARK: - DynamicTintView (4b)
+// MARK: - DynamicTintView
 
 /// NSView с динамическим cgColor — корректно перерисовывается при смене Light/Dark темы.
 @MainActor
@@ -42,11 +39,35 @@ private final class DynamicTintView: NSView {
         super.updateLayer()
         layer?.backgroundColor = tintColor.cgColor
     }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
 }
 
-// MARK: - StageBadgeView (4c)
+// MARK: - OverlayEffectView
 
-/// Pill/badge для stage label в reveal animation.
+/// Фоновый эффект Liquid Glass с синхронизацией рамки и смены темы.
+@MainActor
+private final class OverlayEffectView: NSVisualEffectView {
+    var onLayout: (() -> Void)?
+    var onAppearanceChanged: (() -> Void)?
+
+    override func layout() {
+        super.layout()
+        onLayout?()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        onAppearanceChanged?()
+    }
+}
+
+// MARK: - StageBadgeView
+
+/// Капсула (pill) для индикации стадии обработки ("Распознано" / "Очищено" / "LLM").
 @MainActor
 private final class StageBadgeView: NSView {
     private let label = NSTextField(labelWithString: "")
@@ -88,48 +109,54 @@ private final class StageBadgeView: NSView {
         super.updateLayer()
         layer?.backgroundColor = KrabEarTheme.Colors.textSecondary.withAlphaComponent(0.12).cgColor
     }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
 }
 
 // MARK: - RealtimeOverlayController
 
 /// Плавающий Liquid Glass оверлей для realtime-превью диктовки.
-/// Near-cursor positioning, анимированное появление/исчезновение,
+/// Позиционирование возле курсора, анимированное появление/исчезновение,
 /// поддержка 3-стадийного reveal после окончания записи.
 @MainActor
 public final class RealtimeOverlayController: NSObject {
 
-    // MARK: Panel + Views
+    // MARK: Панель и представления
 
     private let panel: NSPanel
 
-    /// Glass background — NSVisualEffectView с виброй
-    private let effectView: NSVisualEffectView
+    /// Фоновое стекло (Liquid Glass) с виброй
+    private let effectView: OverlayEffectView
 
-    /// Surface background (0.5 alpha cardBackground)
+    /// Поверхность карточки (0.5 alpha cardBackground)
     private let surfaceView: DynamicTintView
 
-    /// 4b: Dynamic tint overlay (red during recording / accent during transcribing)
+    /// Динамический оверлей подсветки (красный при записи / акцентный при транскрипции)
     private let tintView: DynamicTintView
 
-    /// Hairline inner border поверх effectView
+    /// Тонкая внутренняя граница поверх effectView
     private let borderLayer = CALayer()
 
-    /// Status row: duration + mode
+    /// Строка статуса: длительность и режим
     private let statusLabel  = NSTextField(labelWithString: "00:00")
     private let modeLabel    = NSTextField(labelWithString: "—")
 
-    /// 4a: Recording indicator dot (red, CABasicAnimation pulse)
-    private let recordingDot = NSBox()
+    /// Индикатор записи: точка и мягкий halo строго на CALayer
+    private let recordingDot = NSView()
+    private let recordingDotLayer = CALayer()
     private let recordingDotHalo = CALayer()
 
-    /// 4c: Stage badge (pill) для reveal animation ("Распознано" / "Очищено" / "LLM")
+    /// Плашка этапа (pill) для анимации reveal ("Распознано" / "Очищено" / "LLM")
     private let stageBadge   = StageBadgeView()
 
-    /// Основной текст (preview / stage text)
+    /// Основной текст (превью / текст этапа)
     /// internal — доступен из RealtimeOverlayController+PartialSSE.swift
     let primaryLabel = NSTextField(wrappingLabelWithString: "")
 
-    // MARK: State
+    // MARK: Состояние
 
     private var overlayState: OverlayState = .hidden
     private var opacityPercent: Int = 100
@@ -150,23 +177,23 @@ public final class RealtimeOverlayController: NSObject {
         NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
 
-    // MARK: M2: Position Memory
+    // MARK: Сохранение позиции
 
-    /// UserDefaults key for saved overlay origin (NSPoint archived as NSValue/NSString).
+    /// Ключ UserDefaults для сохранённых координат оверлея
     private let savedOriginKey = "RealtimeOverlay_LastOrigin"
-    /// Global NSEvent monitor for drag gesture while overlay is visible.
+    /// Глобальный монитор NSEvent для отслеживания перетаскивания оверлея
     private var dragMonitor: Any?
-    /// Position where drag started inside the panel frame.
+    /// Точка начала перетаскивания относительно окна
     private var dragStartWindowLocation: NSPoint = .zero
 
-    // MARK: M4: Multi-line Ring Buffer
+    // MARK: Кольцевой буфер строк
 
-    /// Maximum number of transcript lines to show simultaneously.
+    /// Максимальное количество одновременно отображаемых строк
     private let maxVisibleLines = 4
-    /// Ring buffer of live transcript lines (oldest at front, newest at back).
+    /// Кольцевой буфер строк транскрипта
     private var lineRingBuffer: [String] = []
 
-    // MARK: Layout constants
+    // MARK: Константы разметки
 
     private let minWidth:   CGFloat = 420
     private let maxWidth:   CGFloat = 640
@@ -174,12 +201,12 @@ public final class RealtimeOverlayController: NSObject {
     private let maxHeight:  CGFloat = 180
     private let cornerRadius: CGFloat = KrabEarTheme.Metrics.cardCornerRadius
 
-    // CABasicAnimation keys
+    // Ключи анимаций CABasicAnimation
     private let dotPulseKey       = "krabEarDotPulse"
     private let labelPulseKey     = "krabEarLabelPulse"
     private let breathingKey      = "krabEarBreathing"
 
-    // MARK: Init
+    // MARK: Инициализация
 
     public override init() {
         let initialRect = NSRect(x: 0, y: 0, width: 520, height: 80)
@@ -190,7 +217,7 @@ public final class RealtimeOverlayController: NSObject {
             defer: false
         )
 
-        self.effectView = NSVisualEffectView(frame: initialRect)
+        self.effectView = OverlayEffectView(frame: initialRect)
         self.surfaceView = DynamicTintView(frame: initialRect)
         self.tintView   = DynamicTintView(frame: initialRect)
 
@@ -198,25 +225,23 @@ public final class RealtimeOverlayController: NSObject {
         setupPanel()
         setupEffectView()
         setupUI()
-        // Note: hover dimming (F7-5) removed — panel.ignoresMouseEvents = true (M6)
-        // means NSTrackingArea events never fire. Drag repositioning (M2) uses a
-        // global NSEvent monitor instead.
+        // Примечание: затемнение при наведении убрано — panel.ignoresMouseEvents = true
+        // означает, что события NSTrackingArea не приходят. Перетаскивание использует
+        // глобальный монитор NSEvent.
     }
 
-    // MARK: - Public API
+    // MARK: - Публичный API
 
     public func show() {
         revealTask?.cancel()
         guard overlayState == .hidden else { return }
         overlayState = .live
-        lineRingBuffer = []  // M4: reset ring buffer on each new recording
+        lineRingBuffer = []  // Сброс кольцевого буфера при каждой новой записи
         stageBadge.isHidden = true
         tintView.tintColor = KrabEarTheme.Colors.error.withAlphaComponent(0.04)
-        // M2: восстанавливаем позицию, куда владелец перетащил оверлей.
-        // 🔴 Но включённое следование за курсором сильнее: это более свежее и
+        // Восстанавливаем позицию, куда владелец перетащил оверлей.
+        // Но включённое следование за курсором сильнее: это более свежее и
         // более явное распоряжение, чем перетаскивание когда-то в прошлом.
-        // Обратный порядок давал «галочка стоит, а оверлей не двигается» —
-        // ровно то, на что владелец пожаловался 02.09.2026.
         if followCursorEnabled {
             positionNearCursor()
         } else if !restoreSavedPosition() {
@@ -225,22 +250,24 @@ public final class RealtimeOverlayController: NSObject {
         panel.alphaValue = 0
         panel.orderFront(nil)
         animateShow()
-        startDotPulse()     // 4a / M3: 0.4↔1.0, 1.5 s period
-        startLabelPulse()   // 4d
-        startBreathing()    // F7-1: breathing tint alpha
+        startDotPulse()     // Пульсация точки записи
+        startLabelPulse()
+        startBreathing()    // Фоновое дыхание подсветки
         recordingDot.isHidden = false
-        startDragMonitor()  // M2: track user reposition via drag
+        recordingDotHalo.opacity = 0.3
+        startDragMonitor()  // Отслеживание перемещения пользователем
     }
 
     public func hide() {
         revealTask?.cancel()
         stopAllPulse()
-        stopBreathing()     // F7-1: remove breathing on hide
-        stopDragMonitor()   // M2: stop drag tracking
+        stopBreathing()     // Отключение дыхания подсветки
+        stopDragMonitor()   // Остановка отслеживания перетаскивания
         if overlayState == .hidden { return }
         overlayState = .hidden
         recordingDot.isHidden = true
         recordingDotHalo.transform = CATransform3DIdentity
+        recordingDotHalo.opacity = 0.0
         tintView.tintColor = .clear
         animateHide { [weak self] in
             Task { @MainActor [weak self] in
@@ -259,17 +286,7 @@ public final class RealtimeOverlayController: NSObject {
         if clean.isEmpty {
             setPrimaryText("Слушаю…")
         } else {
-            // 🔴 ЗАМЕНА, а не накопление (02.09.2026, жалоба владельца:
-            // «каждое новое слово копирует всю диктовку»).
-            //
-            // Кольцевой буфер строился на предположении из старого комментария
-            // M4 — «each IPC update provides the current partial sentence», то
-            // есть backend якобы присылает только НОВЫЙ фрагмент. Это не так:
-            // recording_core_service кладёт в preview_text КУМУЛЯТИВНЫЙ текст
-            // (`self._preview_text = capped`, где capped = display_text[-900:]).
-            // Поэтому каждый тик добавлял новой строкой всю диктовку целиком, и
-            // владелец видел до четырёх её копий, растущих на слово.
-            //
+            // ЗАМЕНА, а не накопление (жалоба владельца: «каждое новое слово копирует всю диктовку»).
             // Раз текст уже кумулятивный и обрезан бэкендом до 900 знаков —
             // просто показываем его. Рост по высоте берёт на себя adjustHeight().
             let cleanTrans = (translatedText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -285,16 +302,6 @@ public final class RealtimeOverlayController: NSObject {
         }
         if panel.isVisible {
             adjustHeight()
-            // 2026-05-09: слежение за курсором на каждом тике убрали — overlay
-            // уезжал к краю экрана при движении мыши во время диктовки
-            // (жалоба владельца). 02.09.2026 возвращено КАК ОПЦИЯ, выключенная
-            // по умолчанию: поведение без настройки не меняется.
-            //
-            // 🔴 Старый баг («оверлей уезжает за край экрана») не возвращается:
-            // positionNearCursor() прижимает окно ко всем четырём краям
-            // visibleFrame. Сохранённую позицию опция намеренно перебивает —
-            // включённая галочка новее и явнее давнего перетаскивания, а иначе
-            // получается «включил и ничего не происходит».
             if followCursorEnabled {
                 positionNearCursor()
             }
@@ -311,19 +318,25 @@ public final class RealtimeOverlayController: NSObject {
 
     public func setAudioLevel(_ rms: Float) {
         guard overlayState == .live else { return }
+        guard !reduceMotion else {
+            recordingDotHalo.transform = CATransform3DIdentity
+            recordingDotHalo.opacity = 0.0
+            return
+        }
         let clamped = max(0.0, min(1.0, rms))
-        let scale = 1.0 + CGFloat(clamped) * 2.5
-        let haloOpacity = Float(0.4 + clamped * 0.4)
+        // Мягкий halo без тяжелой перерисовки: только трансформ и прозрачность CALayer
+        let scale = 1.0 + CGFloat(clamped) * 2.2
+        let haloOpacity = Float(0.25 + clamped * 0.45)
         
         CATransaction.begin()
-        CATransaction.setAnimationDuration(0.1)
-        CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeOut))
+        CATransaction.setAnimationDuration(KrabEarTheme.Motion.Duration.micro)
+        CATransaction.setAnimationTimingFunction(KrabEarTheme.Motion.Easing.easeOut)
         recordingDotHalo.transform = CATransform3DMakeScale(scale, scale, 1.0)
         recordingDotHalo.opacity = haloOpacity
         CATransaction.commit()
     }
 
-    // MARK: - Panel / View Setup
+    // MARK: - Настройка панели и представлений
 
     private func setupPanel() {
         panel.level               = .statusBar
@@ -333,8 +346,7 @@ public final class RealtimeOverlayController: NSObject {
         panel.isOpaque            = false
         panel.backgroundColor     = .clear
         panel.hasShadow           = false
-        // M6: click-through — overlay passes all mouse events to apps below.
-        // nonactivatingPanel already prevents focus steal; ignoresMouseEvents makes it fully transparent to clicks.
+        // Пропуск кликов — оверлей передает клики нижележащим окнам
         panel.ignoresMouseEvents  = true
     }
 
@@ -346,6 +358,7 @@ public final class RealtimeOverlayController: NSObject {
         effectView.wantsLayer    = true
 
         effectView.layer?.cornerRadius  = cornerRadius
+        effectView.layer?.cornerCurve   = .continuous
         effectView.layer?.masksToBounds = true
 
         panel.contentView?.wantsLayer = true
@@ -357,9 +370,24 @@ public final class RealtimeOverlayController: NSObject {
         borderLayer.borderColor = KrabEarTheme.Colors.border.cgColor
         borderLayer.borderWidth = 1.0
         borderLayer.cornerRadius = cornerRadius
+        borderLayer.cornerCurve = .continuous
         borderLayer.frame = effectView.bounds
 
         effectView.layer?.addSublayer(borderLayer)
+
+        effectView.onLayout = { [weak self] in
+            guard let self else { return }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            self.borderLayer.frame = self.effectView.bounds
+            CATransaction.commit()
+        }
+
+        effectView.onAppearanceChanged = { [weak self] in
+            guard let self else { return }
+            self.borderLayer.borderColor = KrabEarTheme.Colors.border.cgColor
+            self.updateDotAppearance()
+        }
 
         panel.contentView?.addSubview(effectView)
         effectView.translatesAutoresizingMaskIntoConstraints = false
@@ -374,16 +402,18 @@ public final class RealtimeOverlayController: NSObject {
     }
 
     private func setupUI() {
-        // Surface background
+        // Подложка поверхности (Liquid Glass)
         surfaceView.wantsLayer = true
         surfaceView.layer?.cornerRadius = cornerRadius
+        surfaceView.layer?.cornerCurve = .continuous
         surfaceView.tintColor = KrabEarTheme.Colors.cardBackground
         surfaceView.translatesAutoresizingMaskIntoConstraints = false
         effectView.addSubview(surfaceView)
 
-        // 4b: tint view (behind all labels, inside effectView)
+        // Динамический оверлей подсветки (красный при записи / акцентный при транскрипции)
         tintView.wantsLayer = true
         tintView.layer?.cornerRadius = cornerRadius
+        tintView.layer?.cornerCurve = .continuous
         tintView.tintColor = .clear
         tintView.translatesAutoresizingMaskIntoConstraints = false
         effectView.addSubview(tintView)
@@ -403,28 +433,41 @@ public final class RealtimeOverlayController: NSObject {
         statusLabel.font      = KrabEarTheme.Typography.captionMedium.tabular()
         statusLabel.textColor = KrabEarTheme.Colors.textSecondary
         statusLabel.alignment = .right
+        statusLabel.isBordered = false
+        statusLabel.drawsBackground = false
+        statusLabel.isEditable = false
+        statusLabel.isSelectable = false
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
 
         modeLabel.font      = KrabEarTheme.Typography.captionMedium
         modeLabel.textColor = KrabEarTheme.Colors.textSecondary
         modeLabel.alignment = .left
+        modeLabel.isBordered = false
+        modeLabel.drawsBackground = false
+        modeLabel.isEditable = false
+        modeLabel.isSelectable = false
         modeLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        // 4a: Recording dot
-        recordingDot.boxType = .custom
-        recordingDot.borderType = .noBorder
-        recordingDot.fillColor = KrabEarTheme.Colors.error
+        // Индикатор записи: точка и мягкий halo строго на CALayer
         recordingDot.wantsLayer = true
-        recordingDot.layer?.cornerRadius = 4 // 8x8 dot
         recordingDot.isHidden = true
         recordingDot.translatesAutoresizingMaskIntoConstraints = false
 
-        recordingDotHalo.backgroundColor = KrabEarTheme.Colors.error.withAlphaComponent(0.4).cgColor
-        recordingDotHalo.cornerRadius = 4
-        recordingDotHalo.frame = CGRect(x: 0, y: 0, width: 8, height: 8)
-        recordingDot.layer?.addSublayer(recordingDotHalo)
+        let dotBounds = CGRect(x: 0, y: 0, width: 8, height: 8)
 
-        // 4c: Stage badge (pill)
+        recordingDotHalo.frame = dotBounds
+        recordingDotHalo.cornerRadius = 4
+        recordingDotHalo.backgroundColor = KrabEarTheme.Colors.error.withAlphaComponent(0.35).cgColor
+        recordingDotHalo.opacity = 0.0
+
+        recordingDotLayer.frame = dotBounds
+        recordingDotLayer.cornerRadius = 4
+        recordingDotLayer.backgroundColor = KrabEarTheme.Colors.error.cgColor
+
+        recordingDot.layer?.addSublayer(recordingDotHalo)
+        recordingDot.layer?.addSublayer(recordingDotLayer)
+
+        // Плашка этапа (pill) для анимации reveal
         stageBadge.isHidden = true
         stageBadge.translatesAutoresizingMaskIntoConstraints = false
 
@@ -435,7 +478,7 @@ public final class RealtimeOverlayController: NSObject {
         primaryLabel.lineBreakMode   = .byWordWrapping
         primaryLabel.wantsLayer      = true
         primaryLabel.translatesAutoresizingMaskIntoConstraints = false
-        setPrimaryText("Слушаю…")  // F7-4: use kern-attributed setter
+        setPrimaryText("Слушаю…")
 
         effectView.addSubview(recordingDot)
         effectView.addSubview(modeLabel)
@@ -455,7 +498,7 @@ public final class RealtimeOverlayController: NSObject {
             statusLabel.centerYAnchor.constraint(equalTo: modeLabel.centerYAnchor),
             statusLabel.trailingAnchor.constraint(equalTo: effectView.trailingAnchor, constant: -KrabEarTheme.Metrics.comfortable),
 
-            // stage badge — below top row in reveal
+            // Плашка этапа — ниже верхней строки при reveal
             stageBadge.topAnchor.constraint(equalTo: modeLabel.bottomAnchor, constant: KrabEarTheme.Metrics.standard),
             stageBadge.leadingAnchor.constraint(equalTo: effectView.leadingAnchor, constant: KrabEarTheme.Metrics.comfortable),
 
@@ -466,7 +509,13 @@ public final class RealtimeOverlayController: NSObject {
         ])
     }
 
-    // MARK: - Animations
+    /// Обновление цветов точки записи при смене темы
+    private func updateDotAppearance() {
+        recordingDotHalo.backgroundColor = KrabEarTheme.Colors.error.withAlphaComponent(0.35).cgColor
+        recordingDotLayer.backgroundColor = KrabEarTheme.Colors.error.cgColor
+    }
+
+    // MARK: - Анимации
 
     private func animateShow() {
         if reduceMotion {
@@ -481,7 +530,7 @@ public final class RealtimeOverlayController: NSObject {
         panel.alphaValue = 0
 
         KrabEarTheme.Motion.animate(
-            duration: 0.25,
+            duration: KrabEarTheme.Motion.Duration.short,
             easing: KrabEarTheme.Motion.Easing.easeInOut
         ) {
             self.panel.animator().alphaValue = self.targetAlpha
@@ -496,8 +545,9 @@ public final class RealtimeOverlayController: NSObject {
             return
         }
         
+        let hideDuration = KrabEarTheme.Motion.Duration.short
         KrabEarTheme.Motion.animate(
-            duration: 0.35,
+            duration: hideDuration,
             easing: KrabEarTheme.Motion.Easing.easeInOut
         ) {
             self.panel.animator().alphaValue = 0
@@ -509,39 +559,37 @@ public final class RealtimeOverlayController: NSObject {
             }
         }
         
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + hideDuration) {
             completion()
         }
     }
 
-    // MARK: - 4a / M3: Recording Dot Pulse (CABasicAnimation)
-    // M3: pulse range 0.4↔1.0 per spec (was 1.0→0.2 which looked like blinking-off).
+    // MARK: - Пульсация индикатора записи (CABasicAnimation)
 
     private func startDotPulse() {
         guard !reduceMotion else {
-            recordingDotHalo.opacity = 1.0
+            recordingDotLayer.opacity = 1.0
             return
         }
-        recordingDotHalo.removeAnimation(forKey: dotPulseKey)
+        recordingDotLayer.removeAnimation(forKey: dotPulseKey)
 
         let pulse = CABasicAnimation(keyPath: "opacity")
-        pulse.fromValue = 0.4
+        pulse.fromValue = 0.5
         pulse.toValue   = 1.0
         pulse.duration  = KrabEarTheme.Motion.Duration.long
         pulse.autoreverses   = true
         pulse.repeatCount    = .infinity
         pulse.timingFunction = KrabEarTheme.Motion.Easing.easeInOut
 
-        recordingDotHalo.add(pulse, forKey: dotPulseKey)
+        recordingDotLayer.add(pulse, forKey: dotPulseKey)
     }
 
     private func stopDotPulse() {
-        recordingDotHalo.removeAnimation(forKey: dotPulseKey)
-        recordingDotHalo.opacity = 1.0
+        recordingDotLayer.removeAnimation(forKey: dotPulseKey)
+        recordingDotLayer.opacity = 1.0
     }
 
-    // MARK: - 4d: Label Pulse (CABasicAnimation, replaces pulseTimer)
-    // Removed per visual polish pack
+    // MARK: - Пульсация текста (зарезервировано)
 
     private func startLabelPulse() {
         primaryLabel.layer?.opacity = 1.0
@@ -557,7 +605,7 @@ public final class RealtimeOverlayController: NSObject {
         stopLabelPulse()
     }
 
-    // MARK: - Positioning
+    // MARK: - Позиционирование
 
     /// Следовать ли за курсором на каждом тике обновления.
     /// Выключено по умолчанию — включается настройкой `overlay_follow_cursor`.
@@ -576,7 +624,7 @@ public final class RealtimeOverlayController: NSObject {
         let width = clamp(value: 520, min: minWidth, max: maxWidth)
         let height = currentPanelHeight()
 
-        // F7-2: cursor offset 16pt right, 24pt below (bottom-right of cursor tip)
+        // Смещение относительно курсора: 16pt вправо, 24pt вниз
         var x = cursor.x + 16
         var y = cursor.y - 24 - height
 
@@ -613,12 +661,12 @@ public final class RealtimeOverlayController: NSObject {
         let oldFrame = panel.frame
         let fixedHeight = maxHeight
         if abs(oldFrame.size.height - fixedHeight) > 0.5 {
-            // Once: enlarge panel to fixed height anchored at top-left.
+            // Однократно: увеличиваем панель до фиксированной высоты с привязкой к левому верхнему углу.
             let topLeft = NSPoint(x: oldFrame.minX, y: oldFrame.maxY)
             panel.setContentSize(NSSize(width: oldFrame.size.width, height: fixedHeight))
             panel.setFrameTopLeftPoint(topLeft)
         }
-        // height parameter ignored — panel always at maxHeight.
+        // Параметр height игнорируется — панель всегда зафиксирована на maxHeight.
         _ = height
 
         borderLayer.frame = effectView.bounds
@@ -636,7 +684,7 @@ public final class RealtimeOverlayController: NSObject {
         return clamp(value: total, min: minHeight, max: maxHeight)
     }
 
-    // MARK: - F7-1: Breathing Tint Animation
+    // MARK: - Фоновая анимация подсветки (дыхание)
 
     private func startBreathing() {
         guard !reduceMotion else { return }
@@ -644,9 +692,10 @@ public final class RealtimeOverlayController: NSObject {
         let breathing = CABasicAnimation(keyPath: "opacity")
         breathing.fromValue  = 0.03
         breathing.toValue    = 0.08
-        breathing.duration   = 1.5
+        breathing.duration   = KrabEarTheme.Motion.Duration.long * 2
         breathing.autoreverses = true
         breathing.repeatCount  = .infinity
+        breathing.timingFunction = KrabEarTheme.Motion.Easing.easeInOut
         tintView.layer?.add(breathing, forKey: breathingKey)
     }
 
@@ -654,9 +703,9 @@ public final class RealtimeOverlayController: NSObject {
         tintView.layer?.removeAnimation(forKey: breathingKey)
     }
 
-    // MARK: - F7-4: Typographic Tracking Helper
+    // MARK: - Типографика: трекинг символов
 
-    /// Sets primaryLabel text with 0.3pt letter-spacing kern applied.
+    /// Устанавливает текст primaryLabel с кернингом 0.3pt для лучшей читаемости.
     func setPrimaryText(_ text: String) {
         let font = primaryLabel.font ?? KrabEarTheme.Typography.display
         let attrs: [NSAttributedString.Key: Any] = [
@@ -667,9 +716,9 @@ public final class RealtimeOverlayController: NSObject {
         primaryLabel.attributedStringValue = NSAttributedString(string: text, attributes: attrs)
     }
 
-    // MARK: - M2: Position Memory + Drag Monitor
+    // MARK: - Память позиции и монитор перетаскивания
 
-    /// Returns true and repositions the panel if a valid saved origin exists on any current screen.
+    /// Возвращает true и восстанавливает позицию панели, если сохраненная точка валидна для текущих экранов.
     @discardableResult
     private func restoreSavedPosition() -> Bool {
         guard let dict = UserDefaults.standard.dictionary(forKey: savedOriginKey),
@@ -682,7 +731,7 @@ public final class RealtimeOverlayController: NSObject {
         let height = currentPanelHeight()
         let candidate = NSRect(origin: origin, size: CGSize(width: width, height: height))
 
-        // Validate: at least 80% of the frame must be on some screen (handles monitor disconnect).
+        // Проверяем: хотя бы 80% фрейма должно быть на одном из экранов (защита при отключении монитора).
         let isOnScreen = NSScreen.screens.contains { screen in
             let intersection = candidate.intersection(screen.visibleFrame)
             let coveredArea = intersection.width * intersection.height
@@ -696,21 +745,19 @@ public final class RealtimeOverlayController: NSObject {
         return true
     }
 
-    /// Saves the current panel origin to UserDefaults.
+    /// Сохраняет текущую позицию панели в UserDefaults.
     private func saveCurrentPosition() {
         let origin = panel.frame.origin
         UserDefaults.standard.set(["x": origin.x, "y": origin.y], forKey: savedOriginKey)
     }
 
-    /// Installs a global NSEvent monitor to detect when the user drags the overlay window.
-    /// Since `ignoresMouseEvents = true`, we use a global monitor to observe drags anywhere.
-    /// We detect a drag near the overlay by checking if mouseDown is inside the panel frame.
+    /// Устанавливает глобальный монитор NSEvent для отслеживания перетаскивания оверлея.
+    /// Так как `ignoresMouseEvents = true`, глобальный монитор позволяет пользователю перетаскивать окно.
     private func startDragMonitor() {
         stopDragMonitor()
 
-        // We capture leftMouseDown + leftMouseDragged at the global level.
-        // When mouseDown is within the panel frame, we allow dragging by temporarily
-        // disabling ignoresMouseEvents during the drag gesture.
+        // Перехватываем leftMouseDown + leftMouseDragged на глобальном уровне.
+        // Когда mouseDown внутри фрейма панели, временно разрешаем обработку мыши для перетаскивания.
         var isDragging = false
         var dragStartMouseLocation: NSPoint = .zero
         var dragStartFrameOrigin: NSPoint = .zero
@@ -724,13 +771,13 @@ public final class RealtimeOverlayController: NSObject {
                 let mouseLocation = NSEvent.mouseLocation
                 switch event.type {
                 case .leftMouseDown:
-                    // Check if click is within the panel frame (or within 8pt of border for easy grab)
+                    // Проверяем, попал ли клик в область панели (с запасом 8pt для удобного захвата)
                     let panelFrame = self.panel.frame.insetBy(dx: -8, dy: -8)
                     if panelFrame.contains(mouseLocation) {
                         isDragging = true
                         dragStartMouseLocation = mouseLocation
                         dragStartFrameOrigin = self.panel.frame.origin
-                        // Enable mouse events temporarily so the panel responds to drag
+                        // Временно включаем события мыши на время перетаскивания
                         self.panel.ignoresMouseEvents = false
                     }
                 case .leftMouseDragged where isDragging:
@@ -746,8 +793,8 @@ public final class RealtimeOverlayController: NSObject {
                     self.borderLayer.frame = self.effectView.bounds
                 case .leftMouseUp where isDragging:
                     isDragging = false
-                    self.panel.ignoresMouseEvents = true  // M6: restore click-through
-                    self.saveCurrentPosition()            // M2: persist dragged position
+                    self.panel.ignoresMouseEvents = true  // Восстанавливаем пропуск кликов
+                    self.saveCurrentPosition()            // Сохраняем перетащенную позицию
                 default:
                     break
                 }
@@ -755,17 +802,17 @@ public final class RealtimeOverlayController: NSObject {
         }
     }
 
-    /// Removes the global drag event monitor.
+    /// Удаляет глобальный монитор перетаскивания.
     private func stopDragMonitor() {
         if let monitor = dragMonitor {
             NSEvent.removeMonitor(monitor)
             dragMonitor = nil
         }
-        // Ensure click-through is restored if drag monitor is stopped mid-drag.
+        // Гарантируем восстановление пропуска кликов, если монитор остановлен во время перетаскивания.
         panel.ignoresMouseEvents = true
     }
 
-    // MARK: - Helpers
+    // MARK: - Вспомогательные методы
 
     /// Хвост накопленного превью, помещающийся в отведённую высоту.
     ///
