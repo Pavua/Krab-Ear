@@ -96,6 +96,120 @@ class StateStoreSettingsCorruptError(IpcOperationalError):
     """Нельзя перезаписать повреждённые settings дефолтами без восстановления."""
 
 
+# A5.2a: явный реестр десяти управляемых журналов истории. Единый источник имён
+# для policy-guard'ов без StateStore-ссылки (DataMigrator,
+# TranscriptVersionManager). Не glob — см. спеку A5 §1.
+HISTORY_JOURNAL_FILENAMES: tuple[str, ...] = (
+    "history.ndjson",
+    "history_tombstones.ndjson",
+    "history_purged_ids.ndjson",
+    "history_status.ndjson",
+    "history_tags.ndjson",
+    "history_favorites.ndjson",
+    "history_annotations.ndjson",
+    "history_text_updates.ndjson",
+    "history_action_items.ndjson",
+    "history_calendar_links.ndjson",
+)
+
+
+def history_journal_paths(data_dir: Path) -> tuple[Path, ...]:
+    """Явный набор путей десяти управляемых журналов истории."""
+    base = Path(data_dir)
+    return tuple(base / name for name in HISTORY_JOURNAL_FILENAMES)
+
+
+def has_encrypted_history_in(journal_paths) -> bool:
+    """Есть ли ENC1-строки в любом из переданных журналов."""
+    from backend.history_crypto import SENTINEL
+
+    for raw in journal_paths:
+        path = Path(raw)
+        if not path.exists():
+            continue
+        with path.open("r", encoding="utf-8") as fh:
+            if any(line.startswith(SENTINEL) for line in fh):
+                return True
+    return False
+
+
+def read_history_encryption_flag(
+    settings_path: Path,
+    journal_paths,
+    *,
+    push_error=None,
+) -> bool:
+    """Fail-closed чтение флага ``history_encryption_enabled``.
+
+    Вынесено из ``StateStore._read_encryption_flag_unlocked`` (A5 #2049) без
+    изменения семантики, чтобы тот же механизм могли использовать
+    policy-guard'ы без StateStore-ссылки. Семантика:
+      * нет settings + нет ENC1 → False (свежий профиль);
+      * нет settings + ENC1 в любом журнале → True + громко;
+      * нет ключа флага + ENC1 → True + громко;
+      * флаг не bool → True + громко;
+      * битый/не объект/ошибка чтения → True + громко.
+    """
+    settings_path = Path(settings_path)
+    journal_paths = tuple(Path(p) for p in journal_paths)
+
+    def _flag(message: str) -> bool:
+        if push_error is not None:
+            try:
+                push_error("history.encrypt_fail", message, "error")
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "read_history_encryption_flag: push_error failed"
+                )
+        return True
+
+    try:
+        if not settings_path.exists():
+            # Отсутствие settings означает fresh profile только пока ни один
+            # локальный журнал не содержит уже зашифрованных строк.
+            if has_encrypted_history_in(journal_paths):
+                return _flag(
+                    "settings missing while encrypted history exists; "
+                    "assuming enabled"
+                )
+            return False
+        payload = safe_json_loads(
+            settings_path.read_text(encoding="utf-8"),
+            default=None,
+            context="settings.json (encryption flag check)",
+        )
+        if isinstance(payload, dict):
+            if "history_encryption_enabled" not in payload:
+                if has_encrypted_history_in(journal_paths):
+                    return _flag(
+                        "encryption flag missing beside ENC1 history; "
+                        "assuming enabled"
+                    )
+                return False
+            flag = payload["history_encryption_enabled"]
+            if isinstance(flag, bool):
+                return flag
+            return _flag(
+                "encryption flag has invalid type; assuming enabled"
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "StateStore._read_encryption_flag_unlocked: ошибка чтения"
+        )
+        return _flag(
+            "encryption flag unreadable, assuming enabled: "
+            f"{type(exc).__name__}: {exc}"
+        )
+    logger.error(
+        "StateStore._read_encryption_flag_unlocked: settings не объект, "
+        "считаем шифрование включённым"
+    )
+    return _flag(
+        "encryption flag unreadable (settings not an object), "
+        "assuming enabled"
+    )
+
+
 class StateStore:
     """Фасад для настроек и истории backend-сервиса."""
 
@@ -239,24 +353,11 @@ class StateStore:
 
     def _history_journal_paths(self) -> tuple[Path, ...]:
         """Явный набор журналов, подчинённых политике шифрования истории."""
-        return (
-            self.history_path, self.tombstones_path, self.purged_ids_path,
-            self.status_path, self.tags_path, self.favorites_path,
-            self.annotations_path, self.text_updates_path, self.action_items_path,
-            self.calendar_links_path,
-        )
+        return history_journal_paths(self.data_dir)
 
     def _has_encrypted_history_unlocked(self) -> bool:
         """Есть ли ENC1-строки в любом из управляемых журналов истории."""
-        from backend.history_crypto import SENTINEL
-
-        for path in self._history_journal_paths():
-            if not path.exists():
-                continue
-            with path.open("r", encoding="utf-8") as fh:
-                if any(line.startswith(SENTINEL) for line in fh):
-                    return True
-        return False
+        return has_encrypted_history_in(self._history_journal_paths())
 
     def _read_encryption_flag_unlocked(self) -> bool:
         """Читает флаг history_encryption_enabled из settings.json без захвата lock.
@@ -269,66 +370,15 @@ class StateStore:
         выключено» — иначе битый settings тихо уводит историю в plaintext.
         Отсутствующий файл — свежий профиль (False); ошибка чтения —
         assume-enabled (True) + громкий history.encrypt_fail.
+
+        Реализация вынесена в module-level ``read_history_encryption_flag``
+        (A5.2a): тот же механизм нужен policy-guard'ам без StateStore-ссылки.
         """
-        try:
-            if not self.settings_path.exists():
-                # Отсутствие settings означает fresh profile только пока ни
-                # один локальный журнал не содержит уже зашифрованных строк.
-                if self._has_encrypted_history_unlocked():
-                    self._push_error(
-                        "history.encrypt_fail",
-                        "settings missing while encrypted history exists; assuming enabled",
-                        severity="error",
-                    )
-                    return True
-                return False
-            payload = safe_json_loads(
-                self.settings_path.read_text(encoding="utf-8"),
-                default=None,
-                context="settings.json (encryption flag check)",
-            )
-            if isinstance(payload, dict):
-                if "history_encryption_enabled" not in payload:
-                    if self._has_encrypted_history_unlocked():
-                        self._push_error(
-                            "history.encrypt_fail",
-                            "encryption flag missing beside ENC1 history; assuming enabled",
-                            severity="error",
-                        )
-                        return True
-                    return False
-                flag = payload["history_encryption_enabled"]
-                if isinstance(flag, bool):
-                    return flag
-                self._push_error(
-                    "history.encrypt_fail",
-                    "encryption flag has invalid type; assuming enabled",
-                    severity="error",
-                )
-                return True
-        except Exception as exc:
-            logger.exception("StateStore._read_encryption_flag_unlocked: ошибка чтения")
-            self._push_error(
-                "history.encrypt_fail",
-                "encryption flag unreadable, assuming enabled: "
-                f"{type(exc).__name__}: {exc}",
-                severity="error",
-            )
-            return True
-        # Сюда попадаем, только если файл прочитан, но это не dict:
-        # safe_json_loads вернул default=None на битом JSON (исключения нет).
-        # Тихий False здесь — тот же fail-open, поэтому тоже отказ + громко.
-        logger.error(
-            "StateStore._read_encryption_flag_unlocked: settings не объект, "
-            "считаем шифрование включённым"
+        return read_history_encryption_flag(
+            self.settings_path,
+            self._history_journal_paths(),
+            push_error=self._push_error,
         )
-        self._push_error(
-            "history.encrypt_fail",
-            "encryption flag unreadable (settings not an object), "
-            "assuming enabled",
-            severity="error",
-        )
-        return True
 
     def _maybe_encrypt(self, json_str: str) -> str:
         """Шифрует строку JSON если шифрование включено и доступно.

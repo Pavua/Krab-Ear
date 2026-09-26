@@ -17,6 +17,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from backend.history_encryption_policy import (
+    OPERATION_UNAVAILABLE_REASON as _ENC_OP_UNAVAILABLE,
+    data_dir_policy_reader,
+    policy_blocks,
+)
+
 logger = logging.getLogger("KrabEar.Backend.DataMigrator")
 
 # Текущая поддерживаемая версия схемы
@@ -43,6 +49,9 @@ class MigrationResult:
     items_migrated: int
     items_skipped: int
     backup_path: str
+    # A5.2a: машинно-читаемая причина отказа, когда legacy schema migration
+    # запрещена политикой шифрования. None = миграция не блокировалась.
+    reason: str | None = None
 
 
 def _detect_version_from_items(items: list[dict[str, Any]]) -> str:
@@ -210,6 +219,26 @@ class DataMigrator:
         if target_version != "2.0":
             raise ValueError(f"Неподдерживаемая целевая версия: {target_version!r}. Поддерживается только '2.0'.")
 
+        # A5.2a: schema migration создаёт plaintext backup, raw rewrite и prune.
+        # При Encryption ON — отказ до _create_backup; возвращаем MigrationResult
+        # (startup ожидает его, а не произвольный failure dict), без ложного
+        # success-log. Guard не трогает Keychain.
+        if policy_blocks(data_dir_policy_reader(data_dir)):
+            current = self.get_schema_version(data_dir)
+            logger.warning(
+                "DataMigrator.migrate: history encryption on — legacy schema "
+                "migration refused (from=%s to=%s, %s)",
+                current, target_version, _ENC_OP_UNAVAILABLE,
+            )
+            return MigrationResult(
+                from_version=current,
+                to_version=target_version,
+                items_migrated=0,
+                items_skipped=0,
+                backup_path="",
+                reason=_ENC_OP_UNAVAILABLE,
+            )
+
         current = self.get_schema_version(data_dir)
 
         # C2 DoS guard: если миграция не нужна — возвращаем ранний ответ БЕЗ создания
@@ -302,6 +331,7 @@ class DataMigrator:
             "items_migrated": result.items_migrated,
             "items_skipped": result.items_skipped,
             "backup_path": result.backup_path,
+            "reason": result.reason,
         }
 
     def handle_rollback_migration(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -368,10 +398,26 @@ class DataMigrator:
             ValueError: если backup_path не существует или не является директорией.
         """
         backup_dir = Path(backup_path)
+        data_dir = Path(data_dir)
+
+        # A5.2a: rollback восстанавливает plaintext-файлы из миграционного
+        # backup. При Encryption ON — отказ до copy/prune.
+        if policy_blocks(data_dir_policy_reader(data_dir)):
+            logger.warning(
+                "rollback_migration: history encryption on — legacy plaintext "
+                "rollback refused (%s)",
+                _ENC_OP_UNAVAILABLE,
+            )
+            return {
+                "ok": False,
+                "reason": _ENC_OP_UNAVAILABLE,
+                "restored_files": [],
+                "backup_path": str(backup_path),
+            }
+
         if not backup_dir.is_dir():
             raise ValueError(f"Директория резервной копии не найдена: {backup_path!r}")
 
-        data_dir = Path(data_dir)
         lock_path = data_dir / "history.lock"
         restored: list[str] = []
 

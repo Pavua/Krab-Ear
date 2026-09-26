@@ -16,6 +16,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from backend.history_encryption_policy import (
+    OPERATION_UNAVAILABLE_REASON as _ENC_OP_UNAVAILABLE,
+    HistoryEncryptionOperationUnavailable,
+    data_dir_policy_reader,
+    policy_blocks,
+)
+
 logger = logging.getLogger("KrabEar.Backend.TranscriptVersioning")
 
 # Допустимые источники версии
@@ -56,8 +63,14 @@ class TranscriptVersionManager:
         # privacy mode. Returns the full settings dict; None → privacy gate is a no-op
         # (preserves backward compatibility for the data-dir-only constructor in tests).
         self._settings_fn = settings_fn
-        self._data_dir.mkdir(parents=True, exist_ok=True)
-        self._versions_path.touch(exist_ok=True)
+        # A5.2a: fail-closed policy-reader по data_dir (тот же механизм, что
+        # StateStore._read_encryption_flag_unlocked). При Encryption ON
+        # конструирование не создаёт storage, а save/revert/cap/orphan-rewrite
+        # отказывают. Guard не трогает Keychain.
+        self._encryption_policy_read = data_dir_policy_reader(self._data_dir)
+        if not policy_blocks(self._encryption_policy_read):
+            self._data_dir.mkdir(parents=True, exist_ok=True)
+            self._versions_path.touch(exist_ok=True)
 
     # ------------------------------------------------------------------
     # Внутренние хелперы
@@ -153,6 +166,9 @@ class TranscriptVersionManager:
         Возвращает обновлённый список всех записей (уже перезаписанный на диск
         только если был превышен лимит).
         """
+        # A5.2a: auto cap — plaintext rewrite. При ON не переписываем файл.
+        if policy_blocks(self._encryption_policy_read):
+            return all_records
         item_versions = [r for r in all_records if r.get("item_id") == item_id]
         excess = len(item_versions) - MAX_VERSIONS_PER_ITEM
         if excess <= 0:
@@ -190,7 +206,11 @@ class TranscriptVersionManager:
 
         Raises:
             ValueError: если item_id пуст, text пуст, или source не поддерживается.
+            HistoryEncryptionOperationUnavailable: при Encryption ON.
         """
+        # A5.2a: версия — plaintext-копия текста истории. При ON — отказ до записи.
+        if policy_blocks(self._encryption_policy_read):
+            raise HistoryEncryptionOperationUnavailable("save_version")
         item_id = str(item_id).strip()
         if not item_id:
             raise ValueError("item_id не может быть пустым")
@@ -279,6 +299,9 @@ class TranscriptVersionManager:
         Raises:
             KeyError: если указанная версия не найдена.
         """
+        # A5.2a: revert создаёт новую plaintext-версию — при ON отказ до чтения/записи.
+        if policy_blocks(self._encryption_policy_read):
+            raise HistoryEncryptionOperationUnavailable("revert_to_version")
         target = self.get_version(item_id, version_num)
         revert_text = target["text"]
         clean_id = str(item_id).strip()
@@ -466,7 +489,14 @@ class TranscriptVersionManager:
             raise ValueError("Параметр text обязателен")
         text = str(text)
         source = str(params.get("source", "manual")).strip() or "manual"
-        return self.save_version(item_id=item_id, text=text, source=source)
+        try:
+            return self.save_version(item_id=item_id, text=text, source=source)
+        except HistoryEncryptionOperationUnavailable:
+            return {
+                "ok": False,
+                "reason": _ENC_OP_UNAVAILABLE,
+                "item_id": item_id,
+            }
 
     def handle_get_transcript_versions(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_transcript_versions.
@@ -505,7 +535,10 @@ class TranscriptVersionManager:
         if version_num is None:
             raise ValueError("Параметр version_num обязателен")
         version_num = int(version_num)
-        return self.revert_to_version(item_id=item_id, version_num=version_num)
+        try:
+            return self.revert_to_version(item_id=item_id, version_num=version_num)
+        except HistoryEncryptionOperationUnavailable:
+            return {"ok": False, "reason": _ENC_OP_UNAVAILABLE}
 
     # ------------------------------------------------------------------
     # Maintenance
@@ -524,6 +557,10 @@ class TranscriptVersionManager:
         Returns:
             Количество удалённых версий (строк).
         """
+        # A5.2a: orphan-cleanup — auto plaintext rewrite. При ON не трогаем
+        # существующие версии (они входят в inventory, автоматически не удаляются).
+        if policy_blocks(self._encryption_policy_read):
+            return 0
         with self._lock:
             all_records = self._read_all()
             kept = [r for r in all_records if r.get("item_id") in active_item_ids]

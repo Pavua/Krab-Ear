@@ -15,6 +15,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from backend.history_encryption_policy import (
+    OPERATION_UNAVAILABLE_REASON as _ENC_OP_UNAVAILABLE,
+    policy_blocks,
+    store_policy_reader,
+)
+
 logger = logging.getLogger("KrabEar.Backend.ArchiveManager")
 
 _ARCHIVE_SUBDIR = "archive"
@@ -64,9 +70,14 @@ class ArchiveManager:
         self._archive_path = self._archive_dir / _ARCHIVE_FILE
         self._lock_path = self._archive_dir / _ARCHIVE_LOCK_FILE
         self._lock = threading.Lock()
-        self._archive_dir.mkdir(parents=True, exist_ok=True)
-        self._archive_path.touch(exist_ok=True)
-        self._lock_path.touch(exist_ok=True)
+        # A5.2a: guard plaintext archive при Encryption ON. Конструирование НЕ
+        # создаёт storage, но backend assembly завершается (archive_items /
+        # unarchive_items откажут; explicit purge остаётся разрешён).
+        self._encryption_policy_read = store_policy_reader(store)
+        if not policy_blocks(self._encryption_policy_read):
+            self._archive_dir.mkdir(parents=True, exist_ok=True)
+            self._archive_path.touch(exist_ok=True)
+            self._lock_path.touch(exist_ok=True)
         # wave-25 (B1-a): purge-epoch счётчик для закрытия TOCTOU-окна между
         # снимком активной истории и записью в архив. Инкрементируется в clear_all()
         # (privacy-purge). archive_items() снимает значение ДО захвата store-flock и
@@ -171,6 +182,9 @@ class ArchiveManager:
         with self._epoch_lock:
             self._purge_epoch += 1
         with self._lock:
+            # A5.2a: explicit owner purge не блокируется Encryption ON и должен
+            # работать даже если конструктор при ON не создавал storage.
+            self._archive_dir.mkdir(parents=True, exist_ok=True)
             archived_before = len(self._read_archive())
             tmp = self._archive_path.with_suffix(".ndjson.tmp")
             with self._lock_path.open("a", encoding="utf-8") as lock_f:
@@ -299,6 +313,14 @@ class ArchiveManager:
             переполнении батча (too_many_ids) или гонке с purge (purge_in_progress).
         """
         _store = store if store is not None else self._store
+        # A5.2a: archive создаёт plaintext-копию истории. При Encryption ON
+        # отказ до любых append/rewrite; tombstones не трогаются.
+        if policy_blocks(self._encryption_policy_read):
+            logger.warning(
+                "archive_items: history encryption on — plaintext archive refused (%s)",
+                _ENC_OP_UNAVAILABLE,
+            )
+            return {"ok": False, "reason": _ENC_OP_UNAVAILABLE}
         if not item_ids:
             return ArchiveResult(
                 archived_count=0,
@@ -328,6 +350,15 @@ class ArchiveManager:
                 # (межпроцессная fcntl.flock). Снимок активных записей берётся один
                 # раз, чтобы конкурентный compact() не вклинился между чтениями.
                 with _store._lock():
+                    # A5.2a: OFF→ON через второй StateStore до захвата store-lock —
+                    # повторная проверка блокирует plaintext sink.
+                    if policy_blocks(self._encryption_policy_read):
+                        logger.warning(
+                            "archive_items: encryption включён до lock — "
+                            "plaintext archive refused (%s)",
+                            _ENC_OP_UNAVAILABLE,
+                        )
+                        return {"ok": False, "reason": _ENC_OP_UNAVAILABLE}
                     # wave-25 (B1-a): перепроверяем epoch ПОД store-flock. Если purge
                     # инкрементировал его в окне между снимком и захватом — отменяем,
                     # иначе только что очищенный архив получил бы PII обратно.
@@ -362,6 +393,9 @@ class ArchiveManager:
                 # Fallback для тестовых двойников без unlocked-API StateStore.
                 # wave-25 (B1-a): epoch-перепроверка и здесь (purge мог пройти между
                 # снимком и началом работы); store-flock в этой ветке нет.
+                # A5.2a: повторная policy-проверка симметрично atomic-ветке.
+                if policy_blocks(self._encryption_policy_read):
+                    return {"ok": False, "reason": _ENC_OP_UNAVAILABLE}
                 if self._current_epoch() != epoch_before:
                     logger.warning(
                         "archive_items: обнаружен конкурентный purge (epoch %d→%d) — отмена",
@@ -405,6 +439,14 @@ class ArchiveManager:
             При обнаружении конкурентного purge возвращает ok=False, reason=purge_in_progress.
         """
         _store = store if store is not None else self._store
+        # A5.2a: unarchive возвращает plaintext-записи в активную историю и
+        # rewrite'ит archive.ndjson. При Encryption ON — отказ.
+        if policy_blocks(self._encryption_policy_read):
+            logger.warning(
+                "unarchive_items: history encryption on — plaintext unarchive refused (%s)",
+                _ENC_OP_UNAVAILABLE,
+            )
+            return {"ok": False, "reason": _ENC_OP_UNAVAILABLE}
         ids_set = {str(i).strip() for i in item_ids if str(i).strip()}
         if not ids_set:
             return {"unarchived_count": 0, "not_found": []}
@@ -416,6 +458,9 @@ class ArchiveManager:
         not_found: list[str] = []
 
         with self._lock:
+            # A5.2a: OFF→ON пока ждали self._lock.
+            if policy_blocks(self._encryption_policy_read):
+                return {"ok": False, "reason": _ENC_OP_UNAVAILABLE}
             # wave-33 (B2): перепроверяем epoch под self._lock. Если конкурентный
             # purge инкрементировал его между снимком и захватом — отменяем:
             # иначе только что очищенный архив получил бы PII обратно в active.
