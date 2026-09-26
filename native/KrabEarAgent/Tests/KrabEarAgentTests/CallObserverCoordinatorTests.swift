@@ -57,10 +57,10 @@ private final class SpyPoster: VGCommandPosting {
     // вызов успевал бы уйти до «ответа» первого).
     var whispers: [(sessionId: String, text: String)] = []
     /// nil → completion не вызывается (запрос в полёте), как реальный HTTP.
-    var whisperResult: Result<Int, Error>? = .success(200)
-    var whisperCompletions: [(Result<Int, Error>) -> Void] = []
+    var whisperResult: Result<VGWhisperAck, Error>? = .success(VGWhisperAck(code: 200, pending: 1))
+    var whisperCompletions: [(Result<VGWhisperAck, Error>) -> Void] = []
     func whisper(baseURL: URL, sessionId: String, text: String,
-                 completion: @escaping (Result<Int, Error>) -> Void) {
+                 completion: @escaping (Result<VGWhisperAck, Error>) -> Void) {
         whispers.append((sessionId, text))
         if let result = whisperResult { completion(result) } else { whisperCompletions.append(completion) }
     }
@@ -687,7 +687,7 @@ final class CallObserverCoordinatorTests: XCTestCase {
         c.userWhisperedFromPanel(text: "segunda"); drain()
         XCTAssertEqual(poster.whispers.count, 1, "вторая подсказка в полёте обязана игнорироваться")
 
-        poster.whisperCompletions.first?(.success(200)); drain()
+        poster.whisperCompletions.first?(.success(VGWhisperAck(code: 200, pending: 1))); drain()
         XCTAssertEqual(panel.whisperSendEnabled.last, true, "после ответа кнопка разблокирована")
         XCTAssertEqual(panel.whisperResults.last?.accepted, true)
 
@@ -700,7 +700,7 @@ final class CallObserverCoordinatorTests: XCTestCase {
     func test_whisper_404_reportsScreeningUnavailable() {
         let c = makeCoordinator()
         c.watcherCallAppeared(session("s1", isScreening: true), generation: 1, resurrected: false); drain()
-        poster.whisperResult = .success(404)
+        poster.whisperResult = .success(VGWhisperAck(code: 404, pending: nil))
         c.userWhisperedFromPanel(text: "hola"); drain()
         XCTAssertEqual(panel.whisperResults.last?.accepted, false)
         XCTAssertEqual(panel.whisperResults.last?.message, "Скринер недоступен")
@@ -716,5 +716,38 @@ final class CallObserverCoordinatorTests: XCTestCase {
         c.watcherCallGone(sessionId: "s1", generation: 1); drain()
         c.userWhisperedFromPanel(text: "hola"); drain()
         XCTAssertEqual(poster.whispers.count, 0, "терминальный звонок подсказку не принимает")
+    }
+
+    /// Кап длины: подсказка длиннее лимита НЕ уходит (лимит есть только здесь, ни
+    /// клиент ниже по цепочке, ни VG её не проверяют, а текст идёт в промпт LLM
+    /// дословно). Молчаливая обрезка исказила бы инструкцию агенту.
+    func test_whisper_rejectsTooLongTextWithoutSending() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1", isScreening: true), generation: 1, resurrected: false); drain()
+        let long = String(repeating: "a", count: 501)
+        c.userWhisperedFromPanel(text: long); drain()
+        XCTAssertEqual(poster.whispers.count, 0, "слишком длинная подсказка не отправляется")
+        XCTAssertEqual(panel.whisperResults.last?.accepted, false)
+        XCTAssertTrue(panel.whisperResults.last?.message?.contains("максимум 500") == true,
+                      "владелец видит лимит, а не молчаливый отказ")
+        // Граница: ровно 500 — проходит.
+        c.userWhisperedFromPanel(text: String(repeating: "a", count: 500)); drain()
+        XCTAssertEqual(poster.whispers.count, 1, "подсказка на границе лимита уходит")
+    }
+
+    /// Backpressure честен: VG возвращает `whisper_pending`; при глубине > 1
+    /// владелец видит, что агент ещё не произнёс предыдущие подсказки.
+    func test_whisper_reportsPendingDepthFromGateway() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1", isScreening: true), generation: 1, resurrected: false); drain()
+        poster.whisperResult = .success(VGWhisperAck(code: 200, pending: 3))
+        c.userWhisperedFromPanel(text: "primera"); drain()
+        XCTAssertEqual(panel.whisperResults.last?.accepted, true)
+        XCTAssertEqual(panel.whisperResults.last?.message, "Подсказка принята (в очереди 3)")
+
+        poster.whisperResult = .success(VGWhisperAck(code: 200, pending: 1))
+        c.userWhisperedFromPanel(text: "segunda"); drain()
+        XCTAssertNil(panel.whisperResults.last?.message ?? nil,
+                     "одиночная подсказка не пугает владельца глубиной очереди")
     }
 }
