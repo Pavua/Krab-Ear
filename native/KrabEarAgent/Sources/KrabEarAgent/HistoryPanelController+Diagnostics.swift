@@ -20,9 +20,40 @@ extension HistoryPanelController {
             }
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                self.showDiagnosticsOutput(HistoryPanelController.formatNestedResult(result, title: "Диагностика"))
+                var text = ""
+                // A5.2b2: незавершённое восстановление истории — единственное
+                // состояние, при котором журналы могут быть смесью. Сырой
+                // `restore` в dict владельцу ничего не объясняет, поэтому
+                // выносим человеческий предупреждение ПЕРЕД выводом (F3/H1
+                // ревью: без этого владелец состояние не узнает вовсе).
+                if let warning = HistoryPanelController.restorePendingWarning(result) {
+                    text += warning + "\n\n"
+                }
+                text += HistoryPanelController.formatNestedResult(result, title: "Диагностика")
+                self.showDiagnosticsOutput(text)
             }
         }
+    }
+
+    /// Человеческое предупреждение о незавершённом restore (A5.2b2). nil —
+    /// состояния нет или оно неизвестно. Текст собран из причин бэкенда, а не
+    /// пересказан на глаз: `reason` показывает, что именно мешает.
+    /// `nonisolated`, как и `formatNestedResult`: чистый хелпер, который дёргается
+    /// и из main-очереди, и из юнит-тестов (строгий Swift 6 в тест-таргете).
+    nonisolated static func restorePendingWarning(_ diagnostics: [String: Any]) -> String? {
+        guard let restore = diagnostics["restore"] as? [String: Any],
+              (restore["pending"] as? Bool) == true else { return nil }
+        let reason = (restore["reason"] as? String) ?? "restore_pending"
+        let state = (restore["state"] as? String) ?? "COMMITTING"
+        var lines = [
+            "⚠ Восстановление истории не завершено (\(state), \(reason)).",
+            "История может показывать смесь состояний до и после снимка.",
+            "Следующий backup/restore докачает восстановление автоматически.",
+        ]
+        if let pre = restore["pre_restore_snapshot"] as? String, !pre.isEmpty {
+            lines.append("Страховочная копия до восстановления: \(pre)")
+        }
+        return lines.joined(separator: "\n")
     }
 
     @objc func onMetrics() {
