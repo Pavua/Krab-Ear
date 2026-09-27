@@ -452,7 +452,7 @@ def _ensure_space_for(
             f"не хватает места для {what}: нужно ~{need} байт, свободно {free} "
             f"на {queried} (журналы {journal_bytes} байт × {copies})",
         )
-    return {
+    report = {
         "target": str(target_dir),
         "queried": str(queried),
         "free_bytes": free,
@@ -460,6 +460,15 @@ def _ensure_space_for(
         "journal_bytes": journal_bytes,
         "copies": copies,
     }
+    # Успех тоже пишется в лог: у владельца, разбирающего «снимок в 3 часа ночи»,
+    # это единственное место, где видно, сколько места гард увидел (поле статуса
+    # показывает мгновенное число уже после цикла, а не то, что было в момент
+    # решения).
+    logger.debug(
+        "encrypted_snapshot: места хватает для %s (%d/%d байт на %s)",
+        what, free, need, queried,
+    )
+    return report
 
 
 def _volume_report(target_dir: Any) -> dict:
@@ -509,13 +518,15 @@ def snapshot_space_report(*, data_dir: Any) -> dict:
             "backups": _volume_report(base / "backups"),
             "data": _volume_report(base),
         }
+        journals = journals_size(base)
     except Exception:  # noqa: BLE001 — крайний предохранитель диагностики
         logger.warning("encrypted_snapshot: отчёт о месте не построен", exc_info=True)
-        targets = {}
+        return {"checked_at": None, "journals_bytes": None,
+                "required_bytes_one_copy": None, "targets": {}}
     return {
         "checked_at": datetime.now(timezone.utc).isoformat(),
-        "journals_bytes": journals_size(base),
-        "required_bytes_one_copy": required_bytes(journal_bytes=journals_size(base), copies=1),
+        "journals_bytes": journals,
+        "required_bytes_one_copy": required_bytes(journal_bytes=journals, copies=1),
         "targets": targets,
     }
 
