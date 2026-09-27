@@ -40,6 +40,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -79,6 +80,8 @@ REASON_PERMISSIONS_FAILED = "snapshot_permissions_failed"
 REASON_FSYNC_FAILED = "snapshot_fsync_failed"
 REASON_RECOVERY_PENDING = "snapshot_recovery_pending"
 REASON_STALE_STAGING = "snapshot_stale_staging"
+# A5.2b3: превентивный отказ «нет места» — до первой записи, а не после ENOSPC.
+REASON_INSUFFICIENT_SPACE = "snapshot_insufficient_space"
 
 
 class SnapshotOperationRefused(Exception):
@@ -301,6 +304,171 @@ def _encrypt_journal(source: Path, crypto: Any) -> bytes:
     if text.endswith("\n"):
         body += "\n"
     return body.encode("utf-8")
+
+
+# ----------------------------------------------------------------------
+# A5.2b3 — превентивный disk-guard (спека §5.1: проверки ДО первой записи)
+# ----------------------------------------------------------------------
+#
+# Зачем: без него заполненный диск ронял запись журнала истории, а это
+# ПОТЕРЯ ИСТОРИИ (b1, tracked risk 1), а в restore оставлял лишний полный
+# pre-restore снимок (b2, «Остальное»).
+#
+# Четыре решения, зафиксированные карточкой (не переигрывать):
+#   1. порог считается по ФАКТИЧЕСКОМУ размеру набора (сумма размеров журналов),
+#      а не «на глаз»; копий ровно столько, сколько реально будет записано;
+#   2. отказ ДО первой записи: ни mkdir staging, ни pre-restore снимка, ни
+#      замены файлов (отказ ≠ «начали и упали»);
+#   3. место спрашивается у ЦЕЛЕВОГО каталога: `backups` может быть symlink на
+#      другой том, и `data_dir` (restore-staging + tmp-копии) — другой
+#      filesystem, чем backups;
+#   4. «место неизвестно» (os.stat/disk_usage упал) — тоже отказ: fail-open в
+#      except-ветке safety-проверки здесь означал бы ровно то падение ENOSPC,
+#      ради которого гард существует.
+
+# Рост строки при шифровании: base64 (4/3) + префикс `ENC1:` + метка. Уже
+# зашифрованные строки переносятся байт-в-байт, поэтому 1.4 — верхняя граница
+# для набора из разнородных строк, а не «средний размер».
+ENC1_EXPANSION_FACTOR = 1.4
+
+# Запас сверху: манифест, записи каталога, округление блоков APFS/HFS+. При
+# 1.5 порог ОДНОЙ копии равен 2.1× размера журналов — «снимок + страховка»,
+# ровно как в решении 1 карточки. Меньше — риск ENOSPC на последнем файле,
+# больше — отказ там, где места хватает.
+DISK_GUARD_SAFETY_FACTOR = 1.5
+
+# Порог применяется к ПОЛНОМУ набору реестра. Если журналов нет вовсе, места
+# нужно мало, но проверять всё равно надо: пустой профиль на полном томе всё
+# равно должен получить честный отказ, а не «успех» нулевого снимка.
+DISK_GUARD_MIN_REQUIRED_BYTES = 1 << 16
+
+
+def _filesystem_usage(path: Path):
+    """Единственная точка опроса ФС в модуле (её подменяют тесты).
+
+    Отдельная функция — по образцу ``_publish_staging``: тест доказывает
+    поведение гарда, подменяя одну функцию, а не глобальный ``shutil``.
+    """
+    return shutil.disk_usage(str(path))
+
+
+def _nearest_existing_dir(path: Any) -> Path:
+    """Ближайший существующий каталог на пути к ``path``.
+
+    ``backups/`` при ПЕРВОМ снимке ещё не создан — а гард обязан отказать до его
+    mkdir. Поэтому спрашиваем том ближайшего существующего предка: для
+    ещё-не-созданного каталога это ровно тот filesystem, куда он появится.
+    Symlink разыменовывается (как это делает ``disk_usage`` сам), поэтому
+    ``backups → другой том`` проверяется именно по тому тому.
+    """
+    cursor = Path(path)
+    for _ in range(64):
+        if cursor.is_dir():
+            return cursor
+        parent = cursor.parent
+        if parent == cursor:
+            break
+        cursor = parent
+    # Fail-closed: предков нет — значит спросить негде, а «не спросил» здесь
+    # означало бы «проверку выполнить не удалось, места хватает».
+    raise SnapshotOperationRefused(
+        REASON_INSUFFICIENT_SPACE,
+        f"целевой каталог {path} недостижим: не найден ни один существующий предок",
+    )
+
+
+def journals_size(directory: Any) -> int:
+    """Суммарный размер десяти управляемых журналов в каталоге (0 — если их нет).
+
+    Единственное определение «сколько байт занимает набор»: используется и
+    для live-профиля (``data_dir``), и для каталога снимка. Ошибка чтения
+    отдельного файла не подменяется нулём молча — она просто не добавляется к
+    оценке снизу, а отказ «файл не читается» всё равно поднимет протокол.
+    """
+    total = 0
+    base = Path(directory)
+    for name in HISTORY_JOURNAL_FILENAMES:
+        try:
+            stat_result = (base / name).stat()
+        except OSError:
+            continue
+        total += stat_result.st_size
+    return total
+
+
+def required_bytes(
+    *,
+    journal_bytes: int,
+    copies: int = 1,
+    safety_factor: float = DISK_GUARD_SAFETY_FACTOR,
+) -> int:
+    """Порог места для ``copies`` копий набора журналов в одном каталоге."""
+    if copies < 1:
+        raise ValueError(f"copies должен быть >= 1, получено {copies}")
+    need = int(journal_bytes * copies * ENC1_EXPANSION_FACTOR * safety_factor)
+    return max(need, DISK_GUARD_MIN_REQUIRED_BYTES)
+
+
+def _ensure_space_for(
+    *,
+    target_dir: Any,
+    journal_bytes: int,
+    copies: int = 1,
+    safety_factor: float = DISK_GUARD_SAFETY_FACTOR,
+    what: str = "снимка истории",
+) -> dict:
+    """Отказ ДО первой записи, если целевому каталогу не хватает места.
+
+    ``target_dir`` — каталог, в который ПО-НАСТОЯЩУЮ пишем (разыменованный):
+    для снимка это корень backups, для restore-staging — ``data_dir``. Проверка
+    идёт по ближайшему существующему предку и по его реальному тому.
+
+    Возвращает фактические числа (свободно/нужно) — их видно в логе отказа и
+    в наблюдаемости; при отказе поднимает ``SnapshotOperationRefused`` с
+    ``snapshot_insufficient_space`` и ``pending=False``: на диске ничего не
+    начато, поэтому «незавершённой операции» не существует.
+    """
+    need = required_bytes(
+        journal_bytes=journal_bytes, copies=copies, safety_factor=safety_factor
+    )
+    queried = _nearest_existing_dir(target_dir)
+    try:
+        free = int(_filesystem_usage(queried).free)
+    except (OSError, ValueError, AttributeError) as exc:
+        # Fail-closed: неизвестное место — не «достаточное» место.
+        raise SnapshotOperationRefused(
+            REASON_INSUFFICIENT_SPACE,
+            f"свободное место на {queried} определить не удалось "
+            f"({type(exc).__name__}: {exc}) — запись {what} не начинается",
+        ) from exc
+    if free < need:
+        raise SnapshotOperationRefused(
+            REASON_INSUFFICIENT_SPACE,
+            f"не хватает места для {what}: нужно ~{need} байт, свободно {free} "
+            f"на {queried} (журналы {journal_bytes} байт × {copies})",
+        )
+    return {
+        "target": str(target_dir),
+        "queried": str(queried),
+        "free_bytes": free,
+        "required_bytes": need,
+        "journal_bytes": journal_bytes,
+        "copies": copies,
+    }
+
+
+def disk_free_bytes(target_dir: Any) -> int | None:
+    """Свободные байты на томе, который получит ``target_dir`` (``None`` — неизвестно).
+
+    Read-only и безопасный: используется статусом/диагностикой, которые не имеют
+    права падать. Отказ ФС здесь — это ``None`` (видно), а не исключение
+    (которое уронило бы диагностику) и не «0 свободно» (ложная тревога).
+    """
+    try:
+        return int(_filesystem_usage(_nearest_existing_dir(target_dir)).free)
+    except (SnapshotOperationRefused, OSError, ValueError, AttributeError) as exc:
+        logger.warning("encrypted_snapshot: место на %s неизвестно: %s", target_dir, exc)
+        return None
 
 
 # ----------------------------------------------------------------------
@@ -560,6 +728,20 @@ def build_encrypted_snapshot(
     registry = _registry(data_dir)
     fingerprint = _source_fingerprint(data_dir)
 
+    # 🔴 A5.2b3: место спрашивается ДО первого mkdir. Снимок — единственная
+    # операция волны, которая при заполненном томе роняла запись журнала
+    # истории, то есть приводила к её потере. Отказ здесь оставляет профиль
+    # ровно как был: ни staging, ни каталога снимка, ни правок живых файлов.
+    # Порог — по фактическому размеру реестра × 1 копия + запас (карточка,
+    # решение 1); ``backups_root`` уже разыменован, поэтому при symlink на
+    # другой том спрашивается именно тот том.
+    _ensure_space_for(
+        target_dir=backups_root,
+        journal_bytes=journals_size(data_dir),
+        copies=1,
+        what="снимка истории",
+    )
+
     _ensure_private_dir(backups_root)
     _ensure_private_dir(backups_root / STAGING_ROOT_NAME)
     staging = _staging_dir_for(backups_root, transaction_id)
@@ -593,8 +775,6 @@ def build_encrypted_snapshot(
         _fsync_dir(staging)
     except Exception:
         # Не публикуем частично собранный снимок: приватный staging убираем.
-        import shutil
-
         shutil.rmtree(staging, ignore_errors=True)
         raise
 
@@ -694,8 +874,6 @@ def _cancel_staging(staging: Path) -> None:
     только ENC1) не копится мусором. После COMMITTING этот вызов ЗАПРЕЩЁН:
     там признак незавершённости обязан пережить crash ради b2-доказки.
     """
-    import shutil
-
     shutil.rmtree(staging, ignore_errors=True)
 
 
@@ -2166,8 +2344,6 @@ def purge_pending_restore_staging(data_dir: Any) -> list[str]:
     f-string семейства. Возвращает убранные пути — шаг наблюдаем в ответе
     purge. Ничего не делает, если артефактов нет (обычное состояние).
     """
-    import shutil
-
     removed: list[str] = []
     base = Path(data_dir)
     # Приватные каталоги staging (в т.ч. те, где маркер не успел появиться).
@@ -2437,6 +2613,33 @@ def restore_encrypted_snapshot(
         # Повторная верификация под lock: снимок читали ДО захвата, за это время
         # он мог измениться (спека §5 шаг 4 — повторная проверка перед заменами).
         verify_snapshot(backups_root=backups_root, snapshot_dir=snapshot_dir, crypto=crypto)
+
+        # 🔴 A5.2b3: место проверяется ДО pre-restore снимка. Без этого отказ по
+        # ENOSPC на замене оставлял после себя ещё и полный страховочный снимок
+        # (b2, tracked risk «лишний полный снимок»).
+        #
+        # Два назначения — два независимых тома, и это не паранойя:
+        #   * ``data_dir``: приватный staging (выходные журналы) ПЛЮС tmp-копия
+        #     каждого журнала рядом с живым файлом перед ``os.replace``
+        #     (``_apply_verified_snapshot_locked``) — то есть две копии набора;
+        #   * ``backups_root``: pre-restore снимок — одна копия.
+        # Размер набора берём как максимум из двух: pre-restore снимает ЖИВОЕ
+        # состояние, а выходные файлы собираются из СНИМКА, и «среднее» здесь
+        # означало бы заниженный порог ровно на том restore, где снимок крупнее
+        # текущей истории.
+        unit_bytes = max(journals_size(data_dir), journals_size(resolved))
+        _ensure_space_for(
+            target_dir=data_dir,
+            journal_bytes=unit_bytes,
+            copies=2,
+            what="восстановления истории",
+        )
+        _ensure_space_for(
+            target_dir=backups_root.resolve(),
+            journal_bytes=unit_bytes,
+            copies=1,
+            what="pre-restore снимка",
+        )
 
         # Pre-restore снимок ТЕКУЩЕГО состояния — страховка, а не откат: он
         # остаётся на диске, его путь возвращается владельцу (решение 6).
