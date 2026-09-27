@@ -585,6 +585,10 @@ Returns (успех, ON):
 
 - `pre_restore_snapshot` — путь снимка состояния **до** restore (страховка для
   ручного решения владельца; автоматического отката из него нет).
+  ⚠️ **Страховка не переживает privacy purge**: `handle_purge_all_data` удаляет
+  ключ шифрования из Keychain (иначе выживший AES-ключ расшифровывает pre-purge
+  бэкапы), после чего все довенные снимки, включая этот, становятся
+  нерасшифровываемыми.
 - `restored_entries` — честный счёт активных записей после restore.
 - `filtered_out` — сколько записей снимка вычеркнуто по deletion ledger.
 - `ledger_blocked` — размер объединения tombstones ∪ purged.
@@ -605,7 +609,7 @@ Returns (успех, ON):
 | `snapshot_line_tampered` | ENC1-строка не расшифровывается (чужой ключ или tamper) |
 | `snapshot_ledger_malformed` / `snapshot_ledger_unreadable` | текущий deletion ledger повреждён или не читается |
 | `snapshot_record_malformed` | строка снимка не разбирается как JSON-объект |
-| `snapshot_recovery_pending` | на диске есть незавершённый restore — сначала recovery |
+| `snapshot_recovery_pending` | на диске есть незавершённый restore (после неудачной докачки): блокируются **все** операции с историей — backup любого вида и restore любой ветки, включая OFF/legacy `copy2` |
 | `snapshot_pending_operation` | есть незавершённая транзакция снимка (b1) |
 | `snapshot_outside_backups_root` | путь вне `data_dir/backups` (вызывающий получает `RuntimeError`, как и раньше) |
 | `snapshot_source_symlink` | symlink на пути к снимку или к ledger-журналу |
@@ -632,6 +636,10 @@ Returns (успех, ON):
 | `restored_entries_source` | `store_count` / `snapshot_lines` / `unknown` |
 | `filtered_out_lines` | **строки** (по всем 10 журналам: история + дельты), вычеркнутые по deletion ledger |
 | `ledger_blocked` | размер объединения tombstones ∪ purged |
+| `records_carried` | H1: сколько записей перенесено из окна pending (только на пути докачки) |
+| `records_at_risk` | H1: сколько записей НЕ перенесено — удалённых в окне или неразрешимых |
+| `records_excluded_deleted` | из них: удалены в окне pending (перенос не отменяет запрет resurrection) |
+| `records_unparsable` | из них: не читаются/не разбираются (попадают и в `warnings`) |
 | `warnings` | машинно-читаемый список (например, `restored_entries_unverified`) |
 
 `restored_entries` **никогда** не берётся из значения, не прошедшего проверку:
@@ -657,7 +665,15 @@ IPC-метода нет — `service.py` в бане волны, это долг
 - `list_backups.restore_recovery` — read-only, всегда актуален (считывается с
   маркера, ничего не пишет и не докатывает);
 - `get_auto_backup_status.restore_recovery` + `restore_pending` +
-  `blocked_by_pending` — то же плюс влияет на «backup недоступен».
+  `blocked_by_pending` — то же плюс влияет на «backup недоступен»;
+- `get_diagnostics.restore` (`{restore_pending, restore_recovery}`) — тот же
+  сигнал в диагностике (`health_check_service.restore_pending_status`, один
+  `iterdir`, без lock'а и без ключа).
+
+Пока маркер есть, вердикт читается с диска. После докачки маркера уже нет — и
+тогда поверхности показывают **вердикт последней попытки** (что сделано, сколько
+записей перенесено, путь страховки): иначе «произошло восстановление» было бы
+известно только из логов. Признак `pending` при этом ВСЕГДА берётся с диска.
 
 Форма вердикта: `{ok, pending, reason, state, transaction_id, snapshot_dir,
 pre_restore_snapshot, restored_entries, rolled_forward, stale_staging,
