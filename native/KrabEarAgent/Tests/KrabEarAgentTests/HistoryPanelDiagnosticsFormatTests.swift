@@ -114,4 +114,41 @@ final class HistoryPanelDiagnosticsFormatTests: XCTestCase {
         let s = HistoryPanelController.formatNestedResult(r, title: "T")
         XCTAssertNotNil(s.data(using: .utf8))
     }
+
+    // MARK: - A5.2b2: предупреждение о незавершённом restore
+
+    /// Пока `restore.pending == true`, журналы могут быть смесью — владелец
+    /// обязан видеть это ДО сырого вывода, иначе сигнал читает только бэкенд.
+    func test_restorePendingWarning_presentWhenPending() {
+        let diag: [String: Any] = ["restore": [
+            "pending": true,
+            "state": "COMMITTING",
+            "reason": "snapshot_recovery_pending",
+            "pre_restore_snapshot": "/data/backups/snapshot_prerestore-x",
+        ]]
+        let w = HistoryPanelController.restorePendingWarning(diag)
+        XCTAssertNotNil(w)
+        XCTAssertTrue(w?.contains("Восстановление истории не завершено") == true)
+        XCTAssertTrue(w?.contains("snapshot_recovery_pending") == true,
+                      "причина показывается, а не пересказывается на глаз")
+        XCTAssertTrue(w?.contains("snapshot_prerestore-x") == true,
+                      "путь к страховочной копии должен быть виден владельцу")
+    }
+
+    func test_restorePendingWarning_absentWhenNotPending() {
+        XCTAssertNil(HistoryPanelController.restorePendingWarning([:]))
+        XCTAssertNil(HistoryPanelController.restorePendingWarning(["restore": ["pending": false]]))
+    }
+
+    /// Verdict с завершённой докачкой (маркера уже нет) — предупреждения быть
+    /// не должно: показывать его после успешного восстановления неверно.
+    func test_restorePendingWarning_absentAfterCompletedRecovery() {
+        let diag: [String: Any] = ["restore": [
+            "pending": false,
+            "state": "COMMITTED",
+            "rolled_forward": true,
+            "records_carried": 2,
+        ]]
+        XCTAssertNil(HistoryPanelController.restorePendingWarning(diag))
+    }
 }
