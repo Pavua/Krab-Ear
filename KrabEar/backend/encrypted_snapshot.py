@@ -714,6 +714,24 @@ MANUAL_SNAPSHOT_PREFIX = "snapshot_"
 # же retention снёс бы.
 PRERESTORE_KEEP = 3
 
+# 🔴 Продуктовое решение владельца: ручные снимки имеют ОТДЕЛЬНЫЙ бюджет, и он
+# намеренно не равен `max_copies`. `max_copies` описывает АВТО-цикл, и его
+# применение к ручным бэкапам тихо меняло бы ручное хранение вслед за настройкой
+# авто (семантическая перегрузка одного параметра на два смысла). Здесь авто-лимит
+# влияет на ручной бюджет только через явную формулу, а пол 21 означает, что
+# при типовом `max_copies=7` у владельца лежит 21 ручной снимок — три недели
+# ежедневных бэкапов плюс запас.
+#
+# Что НЕ делаем здесь: индикацию в UI панели авто-бэкапа («удалён ручной снимок»).
+# Это отдельная строка в UI и отдельное решение владельца (Tracked risks).
+MANUAL_KEEP_FACTOR = 3
+MANUAL_KEEP_FLOOR = 21
+
+
+def manual_snapshot_keep(max_copies: int) -> int:
+    """Бюджет ручных снимков: ``max(3 × max_copies, 21)``."""
+    return max(MANUAL_KEEP_FACTOR * max(0, int(max_copies)), MANUAL_KEEP_FLOOR)
+
 
 def snapshot_family(name: str) -> str:
     """Семейство каталога снимка: ``prerestore`` / ``auto`` / ``manual`` / ``''``.
@@ -743,6 +761,12 @@ def _prune_family(
 
     ``is_pending()`` перепроверяется ПЕРЕД каждым удалением: restore мог начаться
     прямо посреди прохода, и его страховка не должна исчезнуть из-под него.
+
+    Сбой ``rmtree`` на КАКОМ-ТО одном каталоге СТОПИТ проход (``break``, не
+    ``continue``): иначе битый старый снимок переживал бы удаления, а его место
+    занимали бы всё более новые — то есть «лимит» соблюдался бы ценой порядка.
+    Остановка оставляет больше данных, чем лимит, и это осознанно: данные важнее
+    tidy-состояния, а повторная попытка будет в следующем цикле.
     """
     if keep < 0:
         raise ValueError(f"keep должен быть >= 0, получено {keep}")
@@ -755,6 +779,12 @@ def _prune_family(
         if p.is_dir()
         and not p.is_symlink()
         and not p.name.startswith(".")
+        # 🔴 NIT-3: кандидат — это каталог, который РЕАЛЬНО является снимком
+        # протокола, а не просто назван как снимок. Каталог владельца с именем
+        # `snapshot_*` (`classify_backup_dir` честно называл его `unsupported`)
+        # больше не может быть удалён чужим кодом. Проверка дешёвая (stat) и по
+        # содержанию манифеста НЕ спускается — счётчик должен оставаться лёгким.
+        and (p / SNAPSHOT_MANIFEST_FILENAME).is_file()
         and snapshot_family(p.name) == family
     )
     excess = len(candidates) - keep
@@ -766,17 +796,21 @@ def _prune_family(
             break
         if is_pending():
             logger.warning(
-                "encrypted_snapshot: retention %s прерван — начался restore, "
+                "encrypted_snapshot: retention %s прерван — идёт restore, "
                 "его снимки не трогаем", family,
             )
             break
         try:
             shutil.rmtree(path)
         except OSError as exc:  # noqa: BLE001 — чистка не должна ронять цикл
-            logger.warning("encrypted_snapshot: не удалось удалить %s: %s", path.name, exc)
-            continue
+            logger.warning(
+                "encrypted_snapshot: не удалось удалить %s (%s) — проход %s "
+                "остановлен, свежие снимки не трогаем", path.name, exc, family,
+            )
+            break
         removed.append(path)
         excess -= 1
+
     if removed:
         try:
             _fsync_dir(root)
@@ -795,12 +829,13 @@ def prune_snapshot_family(
     """Retention снимков нового протокола. Вызывается ТОЛЬКО после успеха.
 
     Порядок (обе части обязательны):
-      * сначала снимки (``max_copies``), потом страховки restore
-        (``prerestore_keep``) — «сначала дешёвое, потом дорогое» не работает
-        здесь: обе операции необратимы, важен только факт успешного снимка;
+      * сначала снимки (ручные — по своему бюджету, авто — по ``max_copies``),
+        потом страховки restore (``prerestore_keep``) — «сначала дешёвое, потом
+        дорогое» не работает здесь: все операции необратимы, важен только факт
+        успешного снимка;
       * pre-restore страховки — последними, потому что удаление снимка, из
         которого владелец собирался восстанавливаться, и удаление страховки
-        сорванного restore одинаково необратимы, а лимит у них разный.
+        сорванного restore одинаково необратимы, а лимиты у них разные.
 
     Возвращает отчёт (без исключений): ``removed``/``skipped_reason``/
     ``families`` — вызывающий логирует, а статус может показать.
@@ -836,7 +871,9 @@ def prune_snapshot_family(
         }
 
     families = {
-        SNAPSHOT_FAMILY_MANUAL: max(0, int(max_copies)),
+        # Ручные — по СВОЕМУ бюджету (решение владельца), авто — по max_copies,
+        # страховки restore — по своему потолку. Три независимых лимита.
+        SNAPSHOT_FAMILY_MANUAL: manual_snapshot_keep(max_copies),
         SNAPSHOT_FAMILY_AUTO: max(0, int(max_copies)),
         SNAPSHOT_FAMILY_PRERESTORE: max(0, int(prerestore_keep)),
     }

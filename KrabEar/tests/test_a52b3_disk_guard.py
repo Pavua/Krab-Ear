@@ -22,6 +22,7 @@ retention/pruning) + карточка
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shutil
@@ -707,27 +708,68 @@ class TestRetentionCapsNewFormats:
         assert "auto_snapshot_20200101_000000" not in left
         assert "auto_snapshot_20200101_000002" in left
 
-    def test_manual_snapshots_capped_in_their_own_family(self, tmp_path, monkeypatch):
-        """Отдельная семья со своим лимитом: ручной бэкап не вытесняется авто."""
+    def test_manual_snapshots_have_own_budget_not_max_copies(self, tmp_path, monkeypatch):
+        """Продуктовое решение владельца: у ручных снимков СВОЙ бюджет.
+
+        `max_copies` описывает авто-цикл; применять его к ручным бэкапам значило бы
+        тихо менять ручное хранение вслед за настройкой авто (семантическая
+        перегрузка). Ручная семья живёт по `max(3 × max_copies, 21)`.
+        """
         data_dir = _data_dir(tmp_path)
         crypto = _crypto()
         _settings_on(data_dir)
         store = _store_with_crypto(data_dir, crypto)
         _seed(store, ["одна"])
         _install_usage(monkeypatch, _plenty)
-        for i in range(3):
+        for i in range(5):
             _fake_snapshot_dir(data_dir, crypto, f"snapshot_20200101_00000{i}", f"tx-man-{i}")
-        _fake_snapshot_dir(data_dir, crypto, "auto_snapshot_20200101_000000", "tx-auto-0")
+        for i in range(4):
+            _fake_snapshot_dir(data_dir, crypto, f"auto_snapshot_20200101_00000{i}", f"tx-auto-{i}")
 
-        _mgr(store, max_copies=2).check_and_backup()
+        _mgr(store, max_copies=1).check_and_backup()
 
+        # Ручные целы все (бюджет 21 при max_copies=1), авто-семья порезана до 1 + новая.
         manual = _family(data_dir / "backups", "manual")
-        assert len(manual) == 2, manual
-        assert "snapshot_20200101_000002" in manual
-        # Авто-семья своим лимитом не тронута (1 старая + 1 новая = 2 при max_copies=2).
+        assert len(manual) == 5, manual
         auto = _family(data_dir / "backups", "auto")
-        assert len(auto) == 2, auto
-        assert "auto_snapshot_20200101_000000" in auto
+        # окно keep = max_copies и ВКЛЮЧАЕТ только что созданный снимок
+        assert len(auto) == 1, auto
+        assert auto[0].startswith("auto_snapshot_2026") and "20200101" not in auto[0]
+
+    def test_manual_budget_formula(self):
+        """Формула бюджета ручных снимок закреплена тестом (пол 21, кратно 3)."""
+        assert snap.manual_snapshot_keep(max_copies=0) == 21
+        assert snap.manual_snapshot_keep(max_copies=1) == 21
+        assert snap.manual_snapshot_keep(max_copies=7) == 21
+        assert snap.manual_snapshot_keep(max_copies=10) == 30
+        assert snap.manual_snapshot_keep(max_copies=100) == 300
+        # Авто-лимит и ручной не связаны ни в одну сторону.
+        assert snap.manual_snapshot_keep(max_copies=2) != 2
+
+    def test_manual_budget_is_enforced(self, tmp_path, monkeypatch):
+        """Бюджет применяется, а не только объявлен: 23 ручных → 21."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed(store, ["одна"])
+        _install_usage(monkeypatch, _plenty)
+        # Каталоги-заглушки с манифестом: кандидат Retention'а определяется именем
+        # и наличием манифеста (содержимое он намеренно не читает — счёт дешёвый),
+        # поэтому для проверки БЮДЖЕТА реальные снимки не нужны.
+        for i in range(23):
+            stub = data_dir / "backups" / f"snapshot_20260101_{i:06d}"
+            stub.mkdir(parents=True)
+            (stub / snap.SNAPSHOT_MANIFEST_FILENAME).write_text("{}", encoding="utf-8")
+
+        snap.prune_snapshot_family(
+            backups_root=data_dir / "backups", data_dir=data_dir, max_copies=2
+        )
+
+        left = _family(data_dir / "backups", "manual")
+        assert len(left) == snap.manual_snapshot_keep(max_copies=2) == 21, len(left)
+        assert left[0] == "snapshot_20260101_000002"  # два самых старых удалены
+        assert left[-1] == "snapshot_20260101_000022"  # самый новый цел
 
     def test_prerestore_snapshots_capped(self, tmp_path, monkeypatch):
         data_dir = _data_dir(tmp_path)
@@ -1055,7 +1097,9 @@ class TestRetentionSerialisedWithRestore:
         _seed(store, ["одна"])
         _install_usage(monkeypatch, _plenty)
         for i in range(5):
-            _fake_snapshot_dir(data_dir, crypto, f"snapshot_20260101_00000{i}", f"tx-n1-ok-{i}")
+            _fake_snapshot_dir(
+                data_dir, crypto, f"auto_snapshot_20260101_00000{i}", f"tx-n1-ok-{i}"
+            )
         staging = _restore_staging_dir(data_dir)
         assert (
             snap.prune_snapshot_family(
@@ -1070,8 +1114,8 @@ class TestRetentionSerialisedWithRestore:
         )
 
         assert result["removed_count"] == 4
-        assert (data_dir / "backups" / "snapshot_20260101_000004").is_dir()
-        assert not (data_dir / "backups" / "snapshot_20260101_000000").exists()
+        assert (data_dir / "backups" / "auto_snapshot_20260101_000004").is_dir()
+        assert not (data_dir / "backups" / "auto_snapshot_20260101_000000").exists()
 
     def test_cycle_holds_history_lock_while_pruning(self, tmp_path, monkeypatch):
         """Проба p3b: при УДЕРЖИВАЕМОМ history.lock цикл не удаляет ничего.
@@ -1127,3 +1171,84 @@ class TestRetentionSerialisedWithRestore:
         assert outcome["result"]["removed_count"] == 3
         # После освобождения lock'а retention отрабатывает полностью.
         assert not target.exists()
+
+
+class TestRetentionCandidateFilterAndOrder:
+    """NIT-3 (манифест вместо имени) и NIT-7 (строгий oldest-first)."""
+
+    def _profile(self, tmp_path, monkeypatch, *, count: int = 4, prefix: str = "auto_snapshot_20260101_00000"):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed(store, ["одна"])
+        _install_usage(monkeypatch, _plenty)
+        for i in range(count):
+            _fake_snapshot_dir(data_dir, crypto, f"{prefix}{i}", f"tx-f-{i}")
+        return data_dir, crypto, store
+
+    def test_user_directory_named_like_snapshot_survives(self, tmp_path, monkeypatch):
+        """NIT-3 (проба p12): каталог владельца с именем `snapshot_*` — не снимок.
+
+        `classify_backup_dir` честно называл такой каталог `unsupported`, а
+        retention его удалял: имя совпадало, манифеста не было.
+
+        Настоящих ручных снимок больше бюджета (21), иначе «каталог уцелел» ничего
+        не доказывало бы — ничего бы не удалялось вовсе.
+        """
+        data_dir, crypto_obj, _store = self._profile(
+            tmp_path, monkeypatch, count=24, prefix="snapshot_20260101_00000"
+        )
+        assert snap.manual_snapshot_keep(1) < 24
+        owner_dir = data_dir / "backups" / "snapshot_20260101_000000_МОИ_ЗАМЕТКИ"
+        owner_dir.mkdir()
+        (owner_dir / "readme.md").write_text("важно", encoding="utf-8")
+        assert snap.classify_backup_dir(owner_dir) == "unsupported"
+
+        result = snap.prune_snapshot_family(
+            backups_root=data_dir / "backups", data_dir=data_dir, max_copies=1
+        )
+
+        # Рядом с каталогом владельца удаляются настоящие снимки (фильтр работает),
+        # а сам каталог — нет.
+        assert result["removed_count"] == 3, result["removed"]
+        assert owner_dir.is_dir(), "каталог владельца удалён retention'ом"
+        assert str(owner_dir) not in result["removed"]
+
+    def test_real_snapshot_is_still_a_candidate(self, tmp_path, monkeypatch):
+        """Обратная сторона NIT-3: настоящий снимок (с манифестом) режется как надо."""
+        data_dir, _crypto_obj, _store = self._profile(tmp_path, monkeypatch)
+
+        result = snap.prune_snapshot_family(
+            backups_root=data_dir / "backups", data_dir=data_dir, max_copies=1
+        )
+
+        assert result["removed_count"] == 3
+        assert (data_dir / "backups" / "auto_snapshot_20260101_000003").is_dir()
+
+    def test_failed_removal_does_not_delete_newer_instead(self, tmp_path, monkeypatch):
+        """NIT-7 (проба p10b): сбой rmtree на самом старом — СТОП, а не «удалить следующий».
+
+        Обе вариации оставляют больше данных, чем лимит, но порядок «старые → новые»
+        должен быть строгим: иначе битый старый снимок живёт вечно, а свежие
+        исчезают по одному.
+        """
+        data_dir, _crypto_obj, _store = self._profile(tmp_path, monkeypatch)
+        oldest = data_dir / "backups" / "auto_snapshot_20260101_000000"
+        real_rmtree = shutil.rmtree
+
+        def _flaky(target, *args, **kwargs):
+            if Path(target) == oldest:
+                raise OSError(errno.EACCES, "имитация сбоя удаления")
+            return real_rmtree(target, *args, **kwargs)
+
+        monkeypatch.setattr(snap.shutil, "rmtree", _flaky)
+
+        result = snap.prune_snapshot_family(
+            backups_root=data_dir / "backups", data_dir=data_dir, max_copies=2
+        )
+
+        assert result["removed"] == [], "свежие снимки удалены вместо битого старого"
+        assert oldest.is_dir()
+        for i in range(4):
+            assert (data_dir / "backups" / f"auto_snapshot_20260101_00000{i}").is_dir()
