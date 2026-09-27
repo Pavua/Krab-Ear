@@ -4753,9 +4753,12 @@ class HistoryService:
                 pre_restore_snapshot). Здесь ТОЛЬКО чтение маркера: сам листинг
                 не докатывает транзакцию и ничего не пишет.
         """
-        # A5.2b2 (M2): вердикт виден в том же ответе, что и список бэкапов, —
+        # A5.2b2 (M2/F4): вердикт виден в том же ответе, что и список бэкапов, —
         # иначе «есть незавершённый restore» нельзя объяснить владельцу.
-        restore_verdict = read_pending_restore_verdict(self.store.data_dir)
+        # Источник ЕДИНЫЙ с get_auto_backup_status/get_diagnostics (F4): раньше
+        # здесь был disk-only вариант, и после докачки поверхности противоречили
+        # друг другу (здесь None, в статусе — что восстановление произошло).
+        restore_verdict = restore_verdict_fn(self.store.data_dir)
         backups_dir = Path(self.store.data_dir) / "backups"
         if not backups_dir.exists():
             return {"backups": [], "restore_recovery": restore_verdict}

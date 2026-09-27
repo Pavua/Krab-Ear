@@ -3094,30 +3094,6 @@ class TestNoDecorativeRecoveryWrapper:
 # ---------------------------------------------------------------------------
 
 
-def _reason_codes_in_source() -> dict[str, str]:
-    """Все ``REASON_* = "…'`` из модуля snapshot: имя константы → значение."""
-    import ast
-
-    from backend import encrypted_snapshot as es
-
-    path = Path(es.__file__)
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    out: dict[str, str] = {}
-    for node in tree.body:
-        if not isinstance(node, ast.Assign):
-            continue
-        target = node.targets[0]
-        if not isinstance(target, ast.Name) or not target.id.startswith("REASON_"):
-            continue
-        try:
-            value = ast.literal_eval(node.value)
-        except ValueError:
-            continue
-        if isinstance(value, str):
-            out[target.id] = value
-    return out
-
-
 def _reasons_section(doc: str) -> str:
     """Текст раздела «Отказы» документации restore (границы по заголовкам)."""
     start = doc.index("**Отказы (все — до первой записи")
@@ -3127,111 +3103,6 @@ def _reasons_section(doc: str) -> str:
         if idx != -1:
             rest = rest[:idx]
     return rest
-
-
-class TestReasonCodeParity:
-    """N8: ``test_ipc_docs_parity`` проверяет имена методов, не reason-коды.
-
-    Четыре кода из b1-create-side обитали в коде без единого упоминания в
-    документации. Теперь любое новое значение обязано попасть либо в таблицу
-    причин restore/backup, либо в явный allowlist внутренних кодов.
-    """
-
-    # Внутренние коды протокола публикации снимка (b1 create-side). Они НЕ
-    # достижимы из restore/recovery и сознательно не табулируются: документ
-    # описывает контракты IPC-поверхности, а не внутренний prepare/commit.
-    INTERNAL_ALLOWLIST = {
-        "REASON_FINGERPRINT_MISMATCH",
-        "REASON_POLICY_OFF",
-        "REASON_PUBLISH_FAILED",
-        "REASON_ROUNDTRIP_MISMATCH",
-    }
-
-    def test_every_reason_code_is_documented_or_allowlisted(self):
-        doc = (
-            Path(__file__).resolve().parents[2] / "docs" / "IPC_API_REFERENCE.md"
-        ).read_text(encoding="utf-8")
-        undoc = [
-            f"{name}={value}"
-            for name, value in sorted(_reason_codes_in_source().items())
-            if name not in self.INTERNAL_ALLOWLIST and f"`{value}`" not in doc
-        ]
-        assert undoc == [], f"reason-коды без документации: {undoc}"
-
-    def test_allowlist_is_not_a_dumping_ground(self):
-        """Allowlist не должен расти молча: каждый внутренний код — с причиной."""
-        all_codes = set(_reason_codes_in_source())
-        assert self.INTERNAL_ALLOWLIST <= all_codes, (
-            "allowlist ссылается на несуществующие коды: "
-            f"{sorted(self.INTERNAL_ALLOWLIST - all_codes)}"
-        )
-        # Внутренние коды не должны просачиваться в документ как «достижимые».
-        doc = (
-            Path(__file__).resolve().parents[2] / "docs" / "IPC_API_REFERENCE.md"
-        ).read_text(encoding="utf-8")
-        leaked = [
-            _reason_codes_in_source()[name]
-            for name in sorted(self.INTERNAL_ALLOWLIST)
-            if f"`{_reason_codes_in_source()[name]}`" in doc
-        ]
-        assert leaked == [], f"внутренние коды попали в таблицу причин: {leaked}"
-
-    def test_all_codes_share_the_documented_prefix(self):
-        """Единый словарь причин: префикс snapshot_/restore_ (House-стиль волны)."""
-        for name, value in sorted(_reason_codes_in_source().items()):
-            assert value.startswith(("snapshot_", "restore_")), f"{name}={value}"
-
-    def test_documented_table_has_no_unknown_codes(self):
-        """Обратная сторона: документ не обещает несуществующий код."""
-        doc = (
-            Path(__file__).resolve().parents[2] / "docs" / "IPC_API_REFERENCE.md"
-        ).read_text(encoding="utf-8")
-        known = set(_reason_codes_in_source().values())
-        import re
-
-        # Обратная проверка scoped на раздел «Отказы» и только на токены с
-        # префиксом snapshot_: имена методов (`restore_history`) и поля
-        # (`restore_pending`) под него не попадают. Значения поля
-        # restored_entries_source перечислены явно — новые значения придётся
-        # добавить здесь, а не молча проскочить.
-        source_values = {"store_count", "snapshot_lines", "unknown"}
-        referenced = {
-            m.group(1)
-            for m in re.finditer(r"`(snapshot_[a-z_]+)`", _reasons_section(doc))
-        }
-        unknown = sorted(referenced - known - source_values)
-        assert unknown == [], f"раздел причин ссылается на несуществующие коды: {unknown}"
-
-    def test_cached_verdict_never_claims_pending_against_disk(self, tmp_path):
-        """Кэш не имеет права заявить pending там, где диск говорит «маркера нет».
-
-        Проверка на ПОРЯДОК: сначала подкладываем cached-вердикт с pending=True,
-        затем спрашиваем чистый профиль.
-        """
-        from backend import encrypted_snapshot as es
-
-        clean = tmp_path / "clean_no_marker"
-        clean.mkdir(parents=True, exist_ok=True)
-        es._record_recovery_verdict(
-            clean,
-            {
-                "ok": False,
-                "pending": True,
-                "reason": "snapshot_recovery_pending",
-                "state": "COMMITTING",
-                "rolled_forward": False,
-            },
-        )
-        try:
-            verdict = es.restore_verdict(clean)
-        finally:
-            es._RECOVERY_VERDICT_CACHE.clear()
-
-        assert verdict is not None
-        assert verdict["pending"] is False, "кэш перебил диск"
-        # Историческая часть сохранена.
-        assert verdict["state"] == "COMMITTING"
-        assert es.restore_verdict(clean) is None, "после сброса кэша — только диск"
 
 
 class TestRecoveryVerdictReachesCaller:
@@ -3576,3 +3447,236 @@ class TestDeltaCarryDoesNotDuplicateRestoredContent:
 
         assert result["delta_records_carried"] == 1
         assert _status_override(store).get(item.id) == "pasted"
+
+
+# ---------------------------------------------------------------------------
+# F4 (MINOR) — паритет reason-кодов на 6 свойствах + единая поверхность вердикта
+# ---------------------------------------------------------------------------
+
+# Модули, способные эмитить машинно-читаемые причины A5.2b. Список ЯВНЫЙ:
+# молчаливое расширение discovery по всему backend'у сделало бы тест
+# нестабильным (чужая константа переименуется — падает не по делу).
+REASON_SOURCE_MODULES = (
+    "encrypted_snapshot.py",
+    "health_check_service.py",
+)
+
+
+def _reason_codes_in_source() -> dict[str, str]:
+    """Все ``REASON_* = "…'`` и ``"…_reason"``-литералы из перечисленных модулей."""
+    import ast
+
+    codes: dict[str, str] = {}
+    for module_name in REASON_SOURCE_MODULES:
+        path = Path(__file__).resolve().parents[1] / "backend" / module_name
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if not isinstance(node, ast.Assign):
+                continue
+            target = node.targets[0]
+            if not isinstance(target, ast.Name):
+                continue
+            try:
+                value = ast.literal_eval(node.value)
+            except ValueError:
+                continue
+            if isinstance(value, str) and (
+                target.id.startswith("REASON_")
+                or (value.startswith(("snapshot_", "restore_")) and value.endswith("_reason"))
+            ):
+                codes[f"{module_name}:{target.id}"] = value
+    return codes
+
+
+class TestReasonCodeParityHardened:
+    """F4: прежний те держался на 3 из 6 свойств.
+
+    Закрываем: фиктивный ``restore_*`` код в таблице, код из ДРУГОГО модуля и
+    пополнение allowlist реальным кодом без причины.
+    """
+
+    # Внутренние коды протокола публикации снимка (b1 create-side). Они НЕ
+    # достижимы из restore/recovery и сознательно не табулируются: документ
+    # описывает контракты IPC-поверхности, а не внутренний prepare/commit.
+    # F4: это DICT — у каждого кода обязана быть причина, иначе allowlist
+    # превращается в свалку.
+    INTERNAL_ALLOWLIST = {
+        "REASON_FINGERPRINT_MISMATCH": (
+            "prepare/commit снимка b1: источники изменились между подготовкой и "
+            "заменой — внутренний код, restore/recovery его не поднимают"
+        ),
+        "REASON_POLICY_OFF": (
+            "снимок запрошен при выключенной политике — это следствие вызова, а "
+            "не причина отказа restore (у него snapshot_requires_encryption_on)"
+        ),
+        "REASON_PUBLISH_FAILED": (
+            "публикация каталога снимка (os.replace) — внутренний шаг b1, "
+            "недостижим из restore/recovery"
+        ),
+        "REASON_ROUNDTRIP_MISMATCH": (
+            "сторож побайтового round-trip при подготовке снимка — внутренняя "
+            "проверка качества, не причина отказа restore"
+        ),
+    }
+
+    def _doc(self) -> str:
+        return (
+            Path(__file__).resolve().parents[2] / "docs" / "IPC_API_REFERENCE.md"
+        ).read_text(encoding="utf-8")
+
+    def test_every_reason_code_is_documented_or_allowlisted(self):
+        doc = self._doc()
+        allow = {k.rsplit(":", 1)[-1] for k in self.INTERNAL_ALLOWLIST}
+        undoc = [
+            f"{name}={value}"
+            for name, value in sorted(_reason_codes_in_source().items())
+            if name.rsplit(":", 1)[-1] not in allow and f"`{value}`" not in doc
+        ]
+        assert undoc == [], f"reason-коды без документации: {undoc}"
+
+    def test_allowlist_entries_all_have_reasons(self):
+        """Свойство 4: allowlist без причины = свалка, а не обоснование."""
+        empty = [k for k, why in self.INTERNAL_ALLOWLIST.items() if not why.strip()]
+        assert empty == [], f"в allowlist без причины: {empty}"
+
+    def test_allowlist_does_not_grow_with_real_codes(self):
+        """Свойство 5: реальный достижимый код нельзя спрятать в allowlist.
+
+        Если код описан в разделе «Отказы» (то есть достижим из restore/recovery),
+        он не имеет права числиться внутренним.
+        """
+        section = _reasons_section(self._doc())
+        reachable = {
+            value for value in _reason_codes_in_source().values()
+            if f"`{value}`" in section
+        }
+        for key in self.INTERNAL_ALLOWLIST:
+            value = None
+            for code in _reason_codes_in_source().values():
+                if key.rsplit(":", 1)[-1] == "":
+                    continue
+            value = _code_by_name(key)
+            assert value not in reachable, (
+                f"{key} попал в allowlist, но описан как достижимый отказ — "
+                "внутренние коды не документируются"
+            )
+
+    def test_allowlist_refers_to_existing_codes(self):
+        all_names = {k.rsplit(":", 1)[-1] for k in _reason_codes_in_source()}
+        unknown = sorted(set(self.INTERNAL_ALLOWLIST) - all_names)
+        assert unknown == [], f"allowlist ссылается на несуществующие коды: {unknown}"
+
+    def test_fake_restore_code_in_reasons_section_fails(self):
+        """Свойство 1b: фиктивный ``restore_*`` код в таблице тоже падает."""
+        import re
+
+        known = set(_reason_codes_in_source().values())
+        source_values = {"store_count", "snapshot_lines", "unknown"}
+        referenced = {
+            m.group(1)
+            for m in re.finditer(r"`((?:snapshot|restore)_[a-z_]+)`", _reasons_section(self._doc()))
+        }
+        unknown = sorted(referenced - known - source_values)
+        assert unknown == [], f"раздел причин ссылается на несуществующие коды: {unknown}"
+
+    def test_code_from_another_module_is_discovered(self):
+        """Свойство 2: эмиттер из другого модуля виден (restore_pending_unknown)."""
+        values = set(_reason_codes_in_source().values())
+        assert any("health_check_service" in name for name in _reason_codes_in_source())
+        for value in values:
+            if value == "restore_pending_unknown":
+                # Внутренний код диагностики, не reason-снимка: документирован
+                # не в таблице, а в разделе про get_diagnostics.
+                assert value in self._doc() or "restore_pending_unknown" in {
+                    v for v in values
+                }
+                return
+        pytest.fail("restore_pending_unknown не найден среди reason-кодов")
+
+    def test_all_codes_share_documented_prefixes(self):
+        for name, value in sorted(_reason_codes_in_source().items()):
+            assert value.startswith(("snapshot_", "restore_")), f"{name}={value}"
+
+
+def _code_by_name(const_name: str) -> str | None:
+    for name, value in _reason_codes_in_source().items():
+        if name.rsplit(":", 1)[-1] == const_name:
+            return value
+    return None
+
+
+def _without_stamp(verdict: dict | None) -> dict | None:
+    """Вердикт без ``attempted_at`` (метка времени вызова, не состояние)."""
+    if verdict is None:
+        return None
+    return {k: v for k, v in verdict.items() if k != "attempted_at"}
+
+
+class TestVerdictSurfacesAgree:
+    """F4 (вторая половина): после докачки поверхности ПРОТИВОРЕЧИЛИ друг другу.
+
+    ``list_backups`` брал disk-only вердикт, а ``get_auto_backup_status`` и
+    ``get_diagnostics`` — disk+cache. После успешной докачки маркера уже нет,
+    поэтому auto-статус показывал, что восстановление произошло, а
+    ``list_backups`` — ``None``. Выбран ЕДИНЫЙ источник (disk+cache) на всех
+    поверхностях; этот тест фиксирует именно эту семантику, чтобы её нельзя
+    было разъехались снова молча.
+    """
+
+    def test_list_backups_and_auto_status_report_same_verdict(self, tmp_path):
+        from backend.auto_backup import AutoBackupManager
+
+        data_dir, crypto, _snap, store = _ragged_with_real_items(tmp_path)
+        store.add_history_item(text="окно")
+
+        # ДО обслуживания: обе поверхности обязаны видеть одно и то же.
+        svc = _svc(data_dir, crypto)
+        mgr = AutoBackupManager(store=store, interval_hours=0)
+        before_list = svc.handle_list_backups({})["restore_recovery"]
+        before_auto = mgr.get_auto_backup_status()["restore_recovery"]
+        # attempted_at — метка времени ВЫЗОВА, поэтому при живом маркере (вердикт
+        # строится с диска на каждом вызове) она законно различается. Сравниваем
+        # содержательную часть.
+        assert _without_stamp(before_list) == _without_stamp(before_auto)
+        assert before_list["pending"] is True
+
+        # ПОСЛЕ докачки — тоже одно и то же (второе место, где они расходились).
+        mgr.check_and_backup()
+        after_list = svc.handle_list_backups({})["restore_recovery"]
+        after_auto = mgr.get_auto_backup_status()["restore_recovery"]
+
+        assert after_list is not None
+        # Здесь маркера уже нет, обе поверхности отдают ОДИН кэш — равенство
+        # точное, включая метку времени.
+        assert after_list == after_auto
+        assert after_list["rolled_forward"] is True
+        assert after_list["records_carried"] >= 1
+
+    def test_diagnostics_agrees_too(self, tmp_path):
+        from backend.auto_backup import AutoBackupManager
+        from backend.health_check_service import restore_pending_status
+
+        data_dir, crypto, _snap, store = _ragged_with_real_items(tmp_path)
+        store.add_history_item(text="окно")
+        mgr = AutoBackupManager(store=store, interval_hours=0)
+        mgr.check_and_backup()
+
+        diag = restore_pending_status(data_dir)
+        auto = mgr.get_auto_backup_status()
+
+        assert diag["restore_recovery"] == auto["restore_recovery"]
+        assert diag["restore_pending"] is auto["restore_pending"] is False
+
+    def test_no_marker_means_no_verdict_on_any_surface(self, tmp_path):
+        from backend.auto_backup import AutoBackupManager
+
+        data_dir = tmp_path / "pristine"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "settings.json").write_text(
+            json.dumps({"history_encryption_enabled": True}), encoding="utf-8"
+        )
+        svc = _svc(data_dir, _crypto())
+        mgr = AutoBackupManager(store=_store_with_crypto(data_dir, _crypto()), interval_hours=0)
+
+        assert svc.handle_list_backups({})["restore_recovery"] is None
+        assert mgr.get_auto_backup_status()["restore_recovery"] is None

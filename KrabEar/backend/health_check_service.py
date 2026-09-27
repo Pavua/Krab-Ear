@@ -34,6 +34,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger("KrabEar.Backend.HealthCheckService")
 
 
+# A5.2b2 (F4): машинно-читаемая причина для «проверка не удалась». Именованная
+# константа, а не литерал в словаре: тест паритета reason-кодов открывает такие
+# константы из модулей, эмитящих причины.
+REASON_PENDING_UNKNOWN = "restore_pending_unknown"
+
+
 def restore_pending_status(data_dir) -> dict:
     """A5.2b2: «есть ли незавершённый restore» для статусных поверхностей.
 
@@ -59,7 +65,7 @@ def restore_pending_status(data_dir) -> dict:
             "restore_pending": True,
             "restore_recovery": {
                 "pending": True,
-                "reason": "restore_pending_unknown",
+                "reason": REASON_PENDING_UNKNOWN,
             },
         }
     return {"restore_pending": pending, "restore_recovery": verdict}

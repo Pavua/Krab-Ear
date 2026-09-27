@@ -668,7 +668,10 @@ IPC-метода нет — `service.py` в бане волны, это долг
   `blocked_by_pending` — то же плюс влияет на «backup недоступен»;
 - `get_diagnostics.restore` (`{restore_pending, restore_recovery}`) — тот же
   сигнал в диагностике (`health_check_service.restore_pending_status`, один
-  `iterdir`, без lock'а и без ключа).
+  `iterdir`, без lock'а и без ключа). Причины: `snapshot_recovery_pending` (живой
+  маркер), `snapshot_manifest_invalid`/`snapshot_readback_failed` (маркер есть, но
+  повреждён), `restore_pending_unknown` (**проверку выполнить не удалось** —
+  fail-closed: лучше ложная тревога, чем молчаливое «всё хорошо»).
 
 Пока маркер есть, вердикт читается с диска. После докачки маркера уже нет — и
 тогда поверхности показывают **вердикт последней попытки** (что сделано, сколько
