@@ -26,6 +26,7 @@ from backend.encrypted_snapshot import (
     restore_verdict as restore_verdict_fn,
     recover_pending_restore_from_store,
     recover_pending_state,
+    snapshot_space_report,
 )
 from backend.history_encryption_policy import (
     OPERATION_UNAVAILABLE_REASON as _ENC_OP_UNAVAILABLE,
@@ -745,6 +746,12 @@ class AutoBackupManager:
             # backup-цикла (например, недоступный ключ при ON) был полностью
             # невидим в тех полях, которые A5.2a ввела ради наблюдаемости.
             unavailable = blocked_by_pending or last_refusal is not None
+            # A5.2b3: причина пропуска видна в skipped_reason, но владельцу нужно
+            # и ЧИСЛО — сколько места осталось на целевых томах. Это сведения, а не
+            # отказ: при успешном бэкапе поле заполнено тем же самым, а признаки
+            # отказа (skipped_reason/last_refusal_reason/unavailable) остаются
+            # пустыми. Считается на КАЖДЫЙ статус, а не кэшируется sidecar'ом:
+            # застывшее «свободно 2 ГБ» из прошлого цикла было бы ложью.
             return {
                 "enabled": self.enabled,
                 "last_backup_ts": last_ts_str,
@@ -768,4 +775,7 @@ class AutoBackupManager:
                 "restore_pending": restore_pending,
                 "restore_recovery": restore_verdict,
                 "blocked_by_pending": blocked_by_pending,
+                # A5.2b3: свободное место по целевым томам (backups — куда пишутся
+                # снимки, data — где живут журналы и staging restore).
+                "disk_space": snapshot_space_report(data_dir=self.store.data_dir),
             }

@@ -364,7 +364,12 @@ def _nearest_existing_dir(path: Any) -> Path:
     cursor = Path(path)
     for _ in range(64):
         if cursor.is_dir():
-            return cursor
+            try:
+                # Разыменовываем явно: `disk_usage` это делает и сам, но в отчёте
+                # владельцу должен быть виден ТОТ том, а не путь-обманка.
+                return cursor.resolve()
+            except OSError:
+                return cursor
         parent = cursor.parent
         if parent == cursor:
             break
@@ -457,18 +462,62 @@ def _ensure_space_for(
     }
 
 
-def disk_free_bytes(target_dir: Any) -> int | None:
-    """Свободные байты на томе, который получит ``target_dir`` (``None`` — неизвестно).
-
-    Read-only и безопасный: используется статусом/диагностикой, которые не имеют
-    права падать. Отказ ФС здесь — это ``None`` (видно), а не исключение
-    (которое уронило бы диагностику) и не «0 свободно» (ложная тревога).
-    """
+def _volume_report(target_dir: Any) -> dict:
+    """Сведения о томе одного целевого каталога. Никогда не бросает."""
+    path = Path(target_dir)
+    report: dict[str, Any] = {
+        "path": str(path),
+        "free_bytes": None,
+        "total_bytes": None,
+        "error": None,
+    }
     try:
-        return int(_filesystem_usage(_nearest_existing_dir(target_dir)).free)
+        queried = _nearest_existing_dir(path)
+        usage = _filesystem_usage(queried)
+        report["path"] = str(path)
+        report["queried"] = str(queried)
+        report["free_bytes"] = int(usage.free)
+        report["total_bytes"] = int(usage.total)
     except (SnapshotOperationRefused, OSError, ValueError, AttributeError) as exc:
-        logger.warning("encrypted_snapshot: место на %s неизвестно: %s", target_dir, exc)
-        return None
+        # Только имя типа ошибки: подробности (пути ФС, errno) в IPC не нужны, а
+        # «неизвестно» обязано быть видно как `free_bytes: null`, а не как 0.
+        report["error"] = type(exc).__name__
+        logger.warning("encrypted_snapshot: отчёт о месте для %s неполон: %s", path, exc)
+    return report
+
+
+def snapshot_space_report(*, data_dir: Any) -> dict:
+    """Свободное место по ЦЕЛЕВЫМ каталогам профиля (наблюдаемость, A5.2b3).
+
+    Два каталога, потому что это два разных тома в общем случае:
+
+      * ``backups`` — куда пишутся снимки (``backups`` может быть symlink на
+        другой том);
+      * ``data`` — где живут журналы, приватный staging restore и его
+        tmp-копии (тот filesystem, что и живые файлы).
+
+    Если оба ответа пришли с одного тома (обычный случай), это честно видно по
+    одинаковым числам, а не «сломанный» отчёт.
+
+    Никогда не бросает и не пишет: вызывается из статуса авто-бэкапа и из
+    диагностики, у которых нет права упасть. Пустой ``targets`` означает «определить
+    не удалось» — вызывающий обязан это показать, а не заменить нулём.
+    """
+    base = Path(data_dir)
+    try:
+        targets = {
+            "backups": _volume_report(base / "backups"),
+            "data": _volume_report(base),
+        }
+    except Exception:  # noqa: BLE001 — крайний предохранитель диагностики
+        logger.warning("encrypted_snapshot: отчёт о месте не построен", exc_info=True)
+        targets = {}
+    return {
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "journals_bytes": journals_size(base),
+        "required_bytes_one_copy": required_bytes(journal_bytes=journals_size(base), copies=1),
+        "targets": targets,
+    }
 
 
 # ----------------------------------------------------------------------

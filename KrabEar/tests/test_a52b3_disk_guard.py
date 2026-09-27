@@ -22,7 +22,6 @@ retention/pruning) + карточка
 
 from __future__ import annotations
 
-import errno
 import json
 import os
 import shutil
@@ -132,6 +131,13 @@ def _dirs(base: Path, prefix: str = "") -> list[str]:
     return sorted(p.name for p in base.iterdir() if p.is_dir() and p.name.startswith(prefix))
 
 
+def _without_stamp(report: dict | None) -> dict | None:
+    """Отчёт без `checked_at` (метка времени вызова, а не состояние)."""
+    if report is None:
+        return None
+    return {k: v for k, v in report.items() if k != "checked_at"}
+
+
 # ---------------------------------------------------------------------------
 # Подмена файловой системы: сколько «свободно» и КАК именно спросили
 # ---------------------------------------------------------------------------
@@ -175,7 +181,7 @@ def _under(prefix: Path, free: int, fallback: int = 0):
 
 
 def _boom(_path: Path) -> int:
-    raise OSError(errno.EACCES, "disk usage недоступен")
+    raise OSError("disk usage недоступен")
 
 
 # ---------------------------------------------------------------------------
@@ -706,3 +712,149 @@ class TestRetentionCapsNewFormats:
         ]
         assert status["encrypted_snapshots"] == len(_dirs(backups_root, "auto_snapshot_"))
         assert status["max_copies"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — наблюдаемость: причина пропуска + свободное место
+# ---------------------------------------------------------------------------
+
+
+class TestSpaceObservability:
+    def test_status_shows_reason_and_free_space_after_space_refusal(self, tmp_path, monkeypatch):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed(store, ["одна"])
+        free = 4096
+        seen = _install_usage(monkeypatch, lambda _p: free)
+
+        mgr = _mgr(store, max_copies=2)
+        result = mgr.check_and_backup()
+        status = mgr.get_auto_backup_status()
+
+        assert result["backed_up"] is False
+        assert result["skipped_reason"] == snap.REASON_INSUFFICIENT_SPACE
+        assert status["skipped_reason"] == snap.REASON_INSUFFICIENT_SPACE
+        assert status["last_refusal_reason"] == snap.REASON_INSUFFICIENT_SPACE
+        assert status["encryption_operation_unavailable"] is True
+        # Свободное место видно по обоим целевым каталогам.
+        assert status["disk_space"]["targets"]["backups"]["free_bytes"] == free
+        assert status["disk_space"]["targets"]["data"]["free_bytes"] == free
+        assert seen, "статус не спросил про место вовсе"
+
+    def test_refusal_reason_survives_restart_of_manager(self, tmp_path, monkeypatch):
+        """Причина переживает новый процесс (sidecar A5.2b1), место — живое."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed(store, ["одна"])
+        _install_usage(monkeypatch, _nothing)
+        assert _mgr(store, max_copies=2).check_and_backup()["backed_up"] is False
+
+        _install_usage(monkeypatch, lambda _p: 1 << 40)
+        fresh = _mgr(store, max_copies=2).get_auto_backup_status()
+
+        assert fresh["last_refusal_reason"] == snap.REASON_INSUFFICIENT_SPACE
+        # Свободное место показывается АКТУАЛЬНОЕ, а не застывшее с прошлого цикла.
+        assert fresh["disk_space"]["targets"]["backups"]["free_bytes"] == 1 << 40
+
+    def test_successful_backup_reports_no_false_refusal(self, tmp_path, monkeypatch):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed(store, ["одна"])
+        _install_usage(monkeypatch, _nothing)
+        mgr = _mgr(store, max_copies=2)
+        mgr.check_and_backup()  # отказ по месту
+        _install_usage(monkeypatch, lambda _p: 1 << 40)
+
+        assert mgr.check_and_backup()["backed_up"] is True
+        status = mgr.get_auto_backup_status()
+
+        # Успешный бэкап НЕ сообщает ложный отказ (сценарии разведены).
+        assert status["skipped_reason"] is None
+        assert status["last_refusal_reason"] is None
+        assert status["encryption_operation_unavailable"] is False
+        assert status["last_backup_kind"] == "encrypted_snapshot"
+        # Свободное место при этом остаётся видно: это сведения, а не отказ.
+        assert status["disk_space"]["targets"]["data"]["free_bytes"] == 1 << 40
+
+    def test_space_report_covers_both_target_volumes(self, tmp_path, monkeypatch):
+        data_dir = _data_dir(tmp_path)
+        other_volume = tmp_path / "other_volume"
+        other_volume.mkdir()
+        (data_dir / "backups").symlink_to(other_volume, target_is_directory=True)
+        _install_usage(monkeypatch, _under(other_volume, free=111, fallback=999))
+
+        report = snap.snapshot_space_report(data_dir=data_dir)
+
+        assert report["targets"]["backups"]["free_bytes"] == 111
+        assert report["targets"]["data"]["free_bytes"] == 999
+        assert report["targets"]["backups"]["path"].endswith("backups")
+        assert report["targets"]["backups"]["queried"].startswith(str(other_volume))
+
+    def test_space_report_is_fail_closed_when_filesystem_lies(self, tmp_path, monkeypatch):
+        data_dir = _data_dir(tmp_path)
+        _install_usage(monkeypatch, _boom)
+
+        report = snap.snapshot_space_report(data_dir=data_dir)
+
+        # «Неизвестно» — это null + имя типа ошибки, а НЕ 0 свободного места.
+        for target in report["targets"].values():
+            assert target["free_bytes"] is None
+            assert target["total_bytes"] is None
+            assert target["error"] == "OSError"
+        assert report["journals_bytes"] >= 0
+        assert report["required_bytes_one_copy"] >= snap.DISK_GUARD_MIN_REQUIRED_BYTES
+
+    def test_diagnostics_exposes_space_report(self, tmp_path, monkeypatch):
+        from backend.health_check_service import disk_space_status
+        from tests.test_health_check_service import make_service
+
+        data_dir = _data_dir(tmp_path)
+        _install_usage(monkeypatch, lambda _p: 777)
+        diag = make_service(store=_store_with_crypto(data_dir, _crypto())).handle_get_diagnostics({})
+
+        assert "disk_space" in diag
+        # checked_at — метка времени ВЫЗОВА, поэтому содержательную часть
+        # сравниваем отдельно (приём b2, `_without_stamp`).
+        assert _without_stamp(diag["disk_space"]) == _without_stamp(
+            disk_space_status(data_dir)
+        )
+        assert diag["disk_space"]["targets"]["data"]["free_bytes"] == 777
+        # Контракт соседнего блока не тронут: restore отдаёт ровно свои 2 поля.
+        assert len(diag["restore"]) == 2
+
+    def test_diagnostics_space_never_raises(self, tmp_path, monkeypatch):
+        from backend import health_check_service as hcs
+
+        data_dir = _data_dir(tmp_path)
+        _install_usage(monkeypatch, _boom)
+
+        report = hcs.disk_space_status(data_dir)
+
+        assert {t["free_bytes"] for t in report["targets"].values()} == {None}
+
+    def test_diagnostics_space_survives_broken_report_builder(self, tmp_path, monkeypatch):
+        """Крайний предохранитель: даже поломка отчёта не роняет диагностику."""
+        from backend import health_check_service as hcs
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("отчёт взорвался")
+
+        monkeypatch.setattr(snap, "snapshot_space_report", _boom)
+
+        report = hcs.disk_space_status(_data_dir(tmp_path))
+
+        assert report["targets"] == {}
+        assert report["checked_at"] is None
+
+    def test_reason_code_is_documented_with_protocol_prefix(self):
+        doc = (
+            Path(__file__).resolve().parents[2] / "docs" / "IPC_API_REFERENCE.md"
+        ).read_text(encoding="utf-8")
+        assert snap.REASON_INSUFFICIENT_SPACE.startswith("snapshot_")
+        assert f"`{snap.REASON_INSUFFICIENT_SPACE}`" in doc

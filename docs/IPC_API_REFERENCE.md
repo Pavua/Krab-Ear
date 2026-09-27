@@ -720,7 +720,7 @@ Returns: `{exports: [...]}`
 *(service.py → auto_backup.py)*  
 Статус авто-резервного копирования: включено, последний/следующий бэкап, счётчики.  
 Нет params.  
-Returns: `{enabled, last_backup_ts, next_backup_ts, total_backups, encrypted_snapshots, interval_hours, max_copies, backups_dir, encryption_on, encryption_operation_unavailable, skipped_reason, last_backup_kind, last_refusal_reason, restore_pending, restore_recovery, blocked_by_pending}`
+Returns: `{enabled, last_backup_ts, next_backup_ts, total_backups, encrypted_snapshots, interval_hours, max_copies, backups_dir, encryption_on, encryption_operation_unavailable, skipped_reason, last_backup_kind, last_refusal_reason, restore_pending, restore_recovery, blocked_by_pending, disk_space}`
 
 Поля A5.2b2 (B2): `restore_pending` — на диске есть незавершённый restore;
 `blocked_by_pending` — обычное обслуживание заблокировано (незавершённый restore
@@ -743,12 +743,66 @@ Returns: `{enabled, last_backup_ts, next_backup_ts, total_backups, encrypted_sna
 | `skipped_reason` | машино-читаемая причина: `history_encryption_operation_unavailable`, `snapshot_recovery_pending` |
 | `last_backup_kind` | `encrypted_snapshot` / `legacy_plaintext` / `null` — что реально было последним |
 | `last_refusal_reason` | причина последнего отказа; переживает рестарт (sidecar `backups/.last_result.json`) |
+| `disk_space` | A5.2b3: свободное место по целевым томам (см. ниже). Это **сведения, а не отказ**: при успешном бэкапе поле заполнено, а `skipped_reason`/`last_refusal_reason`/`encryption_operation_unavailable` остаются пустыми |
 
 Долг A5.2a закрыт: `encryption_operation_unavailable` больше не выводится из
 одного лишь флага. При ON, когда backup ЖИВ (снимок только что зафиксирован),
 поле `false`; при реальном отказе (например, недоступный ключ) — `true`, и
 причина видна в `skipped_reason`/`last_refusal_reason`. Эти два сценария
 различаются, смешивать их нельзя.
+
+#### A5.2b3 — disk-guard и retention снимков нового протокола
+
+**Превентивный disk-guard.** Перед фазой prepare (и при создании снимка, и при
+restore) место на целевом томе проверяется **до первой записи**: ни mkdir staging,
+ни pre-restore снимок, ни замена журналов. Отказ —
+`snapshot_insufficient_space` с `pending: false` («начали и упали» не бывает).
+
+Порог считается по фактическому размеру набора: `journals_bytes × copies × 1.4
+(рост ENC1) × 1.5 (запас)`, минимум 64 КБ. `copies` — столько копий действительно
+пишется в этот каталог: 1 для снимка, 2 для `data_dir` в restore (приватный
+staging + tmp-копия каждого журнала рядом с живым), 1 для pre-restore снимка.
+«Места ровно хватает на снимок, но не хватает на страховку» — тоже отказ.
+
+Место спрашивается у **целевого** тома (`backups` может быть symlink на другой
+том; `data_dir` с restore-staging — другой filesystem). Не удалось определить
+свободное место (ошибка ФС) — тоже отказ: «место неизвестно» ≠ «место есть».
+Причину и место видно в `skipped_reason` и `disk_space`; причина отказа, в
+отличие от числа байт, переживает рестарт (sidecar).
+
+**Retention** вызывается только ПОСЛЕ успешного снимка и никогда при отказе.
+Семейства и лимиты (считаются отдельно — `max_copies` на семью):
+
+| Семейство | Каталоги | Лимит |
+|---|---|---|
+| `manual` | `snapshot_<ts>` | `max_copies` |
+| `auto` | `auto_snapshot_<ts>` | `max_copies` |
+| `prerestore` | `snapshot_prerestore_<stamp>` | 3 (константа `PRERESTORE_KEEP`) |
+
+Жёсткие границы (закреплены тестами):
+
+- при живом pending restore **не удаляется ничего** — его pre-restore снимок это
+  страховка незавершённой операции (проверяется и до прохода, и перед каждым
+  удалением: restore может начаться прямо посреди него);
+- legacy `backup_*` / `auto_backup_*` при ON **не удаляются никогда** — там могут
+  лежать plaintext-копии, инвентаризация которых принадлежит A5.2c и решению
+  владельца; `backups/.staging/` и посторонние имена — тоже;
+- OFF-профиль в это поле не заходит: прежнее поведение (legacy `copy2` +
+  `_prune_old_backups`) не меняется ни в чём.
+
+**`disk_space`** (одинаковый в `get_auto_backup_status` и `get_diagnostics`):
+
+```json
+{"checked_at": "…", "journals_bytes": 12345,
+ "required_bytes_one_copy": 38837,
+ "targets": {"backups": {"path": "…/backups", "queried": "…", "free_bytes": 1,
+                         "total_bytes": 2, "error": null},
+             "data":    {"path": "…", "free_bytes": 1, "total_bytes": 2, "error": null}}}
+```
+
+`free_bytes: null` + `error` = «определить не удалось» (не «место кончилось»);
+пустой `targets` = не удалось построить отчёт вовсе. Оба состояния диагностика
+показывает как есть и не подменяет нулём.
 
 ### `backup_history`
 *(history_service.py)*  
@@ -1916,7 +1970,10 @@ Returns: `{ok, components: {disk, ipc, stt_model, history}, overall}`
 *(health_check_service.py)*  
 Возвращает комплексную диагностику: системная информация, STT, LLM, история и кэш настроек.  
 Нет params.  
-Returns: `{system: {...}, stt: {...}, llm: {...}, history: {...}, settings_cache: {...}}`
+Returns: `{restore: {...}, disk_space: {...}, system: {...}, stt: {...}, llm: {...}, history: {...}, settings_cache: {...}}`
+
+`restore` — вердикт о незавершённом restore (A5.2b2), `disk_space` — свободное
+место по целевым томам (A5.2b3, формат в разделе `get_auto_backup_status`).
 
 ### `get_startup_diagnostics`
 *(health_check_service.py)*  
