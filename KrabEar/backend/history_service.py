@@ -358,7 +358,32 @@ class HistoryService:
             from_ts=from_ts_str,
             to_ts=to_ts_str,
         )
-        return {"items": items, "next_cursor": next_cursor}
+        result: dict[str, Any] = {"items": items, "next_cursor": next_cursor}
+        # A5.2b2 (tracked risk M1): при незавершённом restore журналы могут быть
+        # смесью состояний до/после снимка. Отказывать в чтении здесь НЕЛЬЗЯ —
+        # это ломает диктовку владельца; вместо этого отдаём данные вместе с
+        # машинно-читаемым признаком, чтобы UI показал предупреждение.
+        pending = self._restore_pending_reason()
+        result["restore_pending"] = pending is not None
+        if pending is not None:
+            result["reason"] = pending
+        return result
+
+    def _restore_pending_reason(self) -> str | None:
+        """``"restore_pending"`` при незавершённом restore, иначе None.
+
+        Признак нужен ридерам (страница истории, статистика): в окне pending
+        набор может быть смешанным, и без явного признака это выглядит как
+        «записи исчезли». Проверка read-only и дешёвая (один ``iterdir``);
+        нечитаемое состояние трактуется как pending (fail-closed на честность).
+        """
+        try:
+            verdict = read_pending_restore_verdict(self.store.data_dir)
+        except Exception:  # noqa: BLE001 — не смогли проверить → считаем, что есть
+            return "restore_pending"
+        if not verdict or not verdict.get("pending"):
+            return None
+        return "restore_pending"
 
     def handle_search_history(self, params: dict[str, Any]) -> dict[str, Any]:
         # Privacy mode gate (wave-31): consistent with handle_search_with_highlights
@@ -695,7 +720,15 @@ class HistoryService:
 
     def handle_get_history_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает состояние журналов истории и оценку размера."""
-        return self.store.get_history_stats()
+        stats = dict(self.store.get_history_stats())
+        # A5.2b2 (tracked risk M1): тот же признак, что и в странице истории —
+        # статистика про окно pending тоже не должна выглядеть как «счётчик
+        # неверный», когда набор может быть смешанным.
+        pending = self._restore_pending_reason()
+        stats["restore_pending"] = pending is not None
+        if pending is not None:
+            stats["reason"] = pending
+        return stats
 
     def handle_get_history_overview(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает обзорный срез истории для панели управления."""
