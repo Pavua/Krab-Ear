@@ -46,6 +46,7 @@ from typing import Any, Callable
 
 from backend.state_store import (
     HISTORY_JOURNAL_FILENAMES,
+    history_flock,
     history_journal_paths,
 )
 
@@ -523,8 +524,23 @@ def build_encrypted_snapshot(
     dest = _require_inside_backups(data_dir, backup_dir)
     backups_root = dest.parent
 
+    # 🔴 B2 (спека §5.4: «Readers/writers/restore проверяют pending state под тем
+    # же lock»): незавершённый RESTORE — тоже незавершённая операция, и новый
+    # снимок при ней брать нельзя. Пока замены не завершены, журналы могут быть
+    # рваными, а снимок рваного набора станет «последним хорошим бэкапом»
+    # владельца — мусором, неотличимым в list_backups. Маркер лежит в data_dir,
+    # поэтому b1-скан backups его не видит: проверяем явно и ДО подготовки.
+    restore_markers = restore_marker_dirs(data_dir)
+    if restore_markers:
+        raise SnapshotOperationRefused(
+            REASON_RECOVERY_PENDING,
+            f"незавершённый restore ({restore_markers[0].name}) — снимок поверх "
+            "него зафиксировал бы промежуточное состояние",
+            pending=True,
+        )
+
     # Шаг 1: незавершённая операция запрещает новую транзакцию (опубликованная).
-    # Сканируется КОРЕНЬ backups, а не каталог-снимок: незавершённая транзакция
+    # Сканируется КОРЕНЬ backups, а не каталог-снимка: незавершённая транзакция
     # лежит рядом с новым назначением.
     pending = find_pending_transaction(backups_root=backups_root)
     if pending and pending.get("published"):
@@ -926,3 +942,1518 @@ def create_encrypted_snapshot(
         prepared=prepared,
         policy_read=policy_read,
     )
+
+
+# ----------------------------------------------------------------------
+# A5.2b2 — restore из проверенного снимка
+# ----------------------------------------------------------------------
+
+# Приватный staging RESTORE живёт РЯДОМ с живыми журналами, а не в backups:
+# замена живого файла обязана быть os.replace в пределах ОДНОГО filesystem
+# (backs может быть symlink на другой том — легальная конфигурация b1), и
+# только этот каталог лежит на одном носителе с data_dir. Имя dot-prefixed и
+# режим 0700: каталог не должен всплывать в списках и не должен быть виден.
+RESTORE_STAGING_PREFIX = ".a52b2-restore-"
+RESTORE_MARKER_FILENAME = "restore_marker.json"
+RESTORE_MARKER_VERSION = 1
+# Инфикс подготовленной копии журнала рядом с живым файлом. Тот же filesystem,
+# что у data_dir (backs может быть symlink на другой том), поэтому замена —
+# атомарный os.replace, а не копирование. 🔴 N5: литерал ОТЛИЧАЕТСЯ от префикса
+# каталога staging намеренно — два пространства имён в одном data_dir, и purge
+# обязан уметь их различать (аудит видит их как два семейства).
+RESTORE_TMP_SUFFIX = ".a52b2-restore-tmp-"
+
+# Состояния restore-маркера. Те же строки, что у b1-манифеста: маркер и манифест
+# описывают одну транзакцию, и ``COMMITTED`` здесь, как и там, означает
+# «read-back прошёл».
+RESTORE_STATE_COMMITTING = STATE_COMMITTING
+RESTORE_STATE_COMMITTED = STATE_COMMITTED
+
+# Машинно-читаемые причины b2. Переиспользуемые b1-коды (``snapshot_*``)
+# не дублируются: один словарь причин на всю волну.
+REASON_REQUIRES_ENCRYPTION_ON = "snapshot_requires_encryption_on"
+REASON_POLICY_MISMATCH = "snapshot_policy_mismatch"
+REASON_RESTORE_SETTINGS_UNSUPPORTED = "restore_settings_unsupported_at_on"
+REASON_LEDGER_UNREADABLE = "snapshot_ledger_unreadable"
+REASON_LEDGER_MALFORMED = "snapshot_ledger_malformed"
+REASON_RECORD_MALFORMED = "snapshot_record_malformed"
+REASON_APPLY_FAILED = "snapshot_apply_failed"
+
+# Два журнала deletion ledger: tombstones ∪ purged (спека §5). Выходной ledger
+# restore пишется по объединению, поэтому порядок здесь важен только для
+# читателя-человека.
+LEDGER_JOURNAL_NAMES: tuple[str, str] = (
+    "history_tombstones.ndjson",
+    "history_purged_ids.ndjson",
+)
+
+
+def _require_restorable_snapshot_dir(backups_root: Any, snapshot_dir: Any) -> Path:
+    """Containment каталога-снимка: только опубликованный снимок внутри backups.
+
+    Три независимых слоя (спека §5 шаг 1: «Проверить типы/контейнмент файлов…
+    Не следовать symlink из реестра»):
+
+      * лексический слой — ``..``-выход и подмена корня backups отсекаются
+        сравнением НЕ-разыменованных путей;
+      * слой symlink-компонентов — ни одного symlink на пути к снимку, иначе
+        проверялся бы не тот каталог, который указан;
+      * разыменованный слой — главная гарантия: итоговый путь обязан лежать
+        внутри РАЗЫМЕНОВАННОГО корня backups.
+
+    Что где срабатывает (N1 ревью — «слой мёртв в проде» проверено и уточнено):
+
+      * путь из IPC уже разыменован W1736-гейтом, поэтому прод-путь restore
+        проходит по третьему слою; отвергать симлинкнутый ``data_dir`` нельзя —
+        b1 сам считает backups на другом томе легальной конфигурацией;
+      * лексический и symlink-слои живы в МОДУЛЬНОМ API (тесты, вызовы с путём
+        как есть) и — важно — в RECOVERY: целевой снимок берётся из маркера
+        «как записан», и подмена каталога на symlink после crash обязана быть
+        поймана до докачки (регресс-тест
+        ``test_recovery_refuses_symlinked_target_after_crash``).
+
+    Сравнение только по одному из слоёв сломало бы один из двух честных случаев
+    (либо symlink-inside, либо симлинкнутый data_dir).
+    """
+    root_raw = Path(backups_root)
+    raw = Path(snapshot_dir)
+    root_lex = Path(os.path.abspath(str(root_raw)))
+    raw_lex = Path(os.path.abspath(str(raw)))
+
+    try:
+        rel = raw_lex.relative_to(root_lex)
+    except ValueError:
+        rel = None
+    if rel is not None:
+        if not rel.parts:
+            raise SnapshotOperationRefused(
+                REASON_OUTSIDE_BACKUPS_ROOT, "восстановление из самого backups/ запрещено"
+            )
+        cursor = root_lex
+        for part in rel.parts:
+            cursor = cursor / part
+            if cursor.is_symlink():
+                raise SnapshotOperationRefused(
+                    REASON_SOURCE_SYMLINK,
+                    f"{cursor.name} — symlink не разыменовывается",
+                )
+
+    root = root_raw.resolve()
+    resolved = raw.resolve()
+    if resolved != root and not resolved.is_relative_to(root):
+        raise SnapshotOperationRefused(
+            REASON_OUTSIDE_BACKUPS_ROOT,
+            f"{resolved} находится вне {root} — снимок обязан лежать в backups/",
+        )
+    staging_root = root / STAGING_ROOT_NAME
+    if resolved.is_relative_to(staging_root):
+        raise SnapshotOperationRefused(
+            REASON_STALE_STAGING,
+            f"{resolved} — неопубликованный staging, а не снимок",
+        )
+    return resolved
+
+
+def _decrypt_verified_lines(
+    *, journal_file: Path, crypto: Any, reason_mismatch: str
+) -> list[str]:
+    """Каждая строка файла обязана быть ENC1 и расшифровываться. Иначе — отказ.
+
+    Отказ, а не skip: молчаливая потеря строки означала бы потерю данных при
+    «успешном» восстановлении. Не-ENC1 строка при текущей ON-policy — это
+    ``policy_mismatch`` (plaintext-снимок), а не «повреждение».
+    """
+    try:
+        raw = journal_file.read_bytes()
+    except OSError as exc:
+        raise SnapshotOperationRefused(
+            REASON_SOURCE_UNREADABLE, f"{journal_file.name} не читается: {exc}"
+        ) from exc
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SnapshotOperationRefused(
+            REASON_SOURCE_UNREADABLE, f"{journal_file.name}: не UTF-8: {exc}"
+        ) from exc
+    out: list[str] = []
+    for lineno, line in enumerate(_split_ndjson_lines(text), start=1):
+        if not line.strip():
+            # Пустые строки допустимы (writer их не пишет, но файл мог быть
+            # дописан сторонним инструментом) — не строка данных.
+            continue
+        if not crypto.is_encrypted(line):
+            raise SnapshotOperationRefused(
+                reason_mismatch,
+                f"{journal_file.name}:{lineno}: строка не ENC1 — plaintext-снимок при "
+                "включённой политике шифрования",
+            )
+        try:
+            crypto.decrypt_line(line)
+        except Exception as exc:  # noqa: BLE001 — чужой ключ или tamper
+            raise SnapshotOperationRefused(
+                REASON_LINE_TAMPERED,
+                f"{journal_file.name}:{lineno}: ENC1-строка не расшифровывается "
+                f"(чужой ключ или tamper): {type(exc).__name__}",
+            ) from exc
+        out.append(line)
+    return out
+
+
+def verify_snapshot(*, backups_root: Any, snapshot_dir: Any, crypto: Any) -> dict:
+    """A5.2b2 Task 1 — ПОЛНАЯ read-only верификация снимка перед первой записью.
+
+    Проверяется всё, что обязано быть верно до того, как живые журналы будут
+    затронуты (спека §5: «Restore предварительно полностью проверяет snapshot и
+    key… Незнакомый формат, неполный набор… отклоняются до первой записи»):
+
+      * контейнмент: только опубликованный каталог-снимок внутри backups-корня,
+        ни одного symlink-компонента (шаг 1);
+      * манифест известной версии, набор — ровно десять имён реестра, без
+        посторонних файлов (шаг 3 b1 → read-back);
+      * size + sha256 CIPHERTEXT каждого файла совпадают с манифестом;
+      * ``policy_at_capture`` — ON: plaintext-снимок при ON означал бы тихое
+        понижение policy (карточка b2, решение 3);
+      * расшифровка КАЖДОЙ строки КАЖДОГО файла (чужой ключ и tamper ловятся
+        именно здесь — хэш ciphertext'а подмену бы замаскировал);
+      * наличие ключа.
+
+    Ни одной записи: функция не создаёт каталогов и не трогает живые журналы
+    (тест ``test_verify_is_read_only`` фиксирует mtime+содержимое дерева).
+    """
+    if crypto is None:
+        raise SnapshotOperationRefused(
+            REASON_CRYPTO_UNAVAILABLE, "ключ недоступен — restore невозможен"
+        )
+    resolved = _require_restorable_snapshot_dir(backups_root, snapshot_dir)
+
+    manifest = _read_manifest(resolved)
+    if manifest is None:
+        raise SnapshotOperationRefused(
+            REASON_MANIFEST_INVALID, f"{resolved.name}: манифест отсутствует"
+        )
+    if manifest.get("policy_at_capture") is not True:
+        # Неизвестная/выключенная policy на момент снятия — восстановление под
+        # текущей ON-политикой означало бы понижение/нарушение policy.
+        raise SnapshotOperationRefused(
+            REASON_POLICY_MISMATCH,
+            f"{resolved.name}: policy_at_capture="
+            f"{manifest.get('policy_at_capture')!r} — снимок не снят при ON",
+        )
+
+    # Целостность и полнота набора — тем же read-back, что и в b1 (один
+    # источник правды для «что значит проверенный снимок»).
+    readback = verify_snapshot_readback(backup_dir=resolved)
+    if not readback["ok"]:
+        raise SnapshotOperationRefused(
+            REASON_READBACK_FAILED,
+            f"{resolved.name}: снимок не прошёл проверку целостности: "
+            f"{readback['mismatches']}",
+        )
+
+    # Построчная проверка расшифровки — ПОСЛЕ хэшей, чтобы «честный» пересчёт
+    # манифеста под подделанный ENC1 не прошёл незамеченным. Набор — тот же
+    # реестр state_store, что уже проверен read-back'ом выше.
+    lines: dict[str, int] = {}
+    for name in HISTORY_JOURNAL_FILENAMES:
+        verified = _decrypt_verified_lines(
+            journal_file=resolved / name,
+            crypto=crypto,
+            reason_mismatch=REASON_POLICY_MISMATCH,
+        )
+        lines[name] = len(verified)
+
+    logger.info(
+        "encrypted_snapshot: снимок %s проверен (%d файлов, %d строк, tx=%s)",
+        resolved.name, len(lines), sum(lines.values()), manifest.get("transaction_id"),
+    )
+    return {
+        "ok": True,
+        "snapshot_dir": str(resolved),
+        "transaction_id": manifest.get("transaction_id"),
+        "state": manifest.get("state"),
+        "policy_at_capture": manifest.get("policy_at_capture"),
+        "files": list(HISTORY_JOURNAL_FILENAMES),
+        "checked": len(lines),
+        "lines": lines,
+        "readback": readback,
+    }
+
+
+def _record_id(decrypted: str, *, where: str, reason: str) -> str | None:
+    """ID записи журнала. Неразбираемый JSON — отказ (данные не теряются молча)."""
+    try:
+        payload = json.loads(decrypted)
+    except ValueError as exc:
+        raise SnapshotOperationRefused(
+            reason, f"{where}: строка не разбирается как JSON: {type(exc).__name__}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise SnapshotOperationRefused(reason, f"{where}: строка не JSON-объект")
+    item_id = payload.get("id")
+    if item_id is None:
+        return None
+    text = str(item_id).strip()
+    return text or None
+
+
+def collect_ledger_union(*, data_dir: Any, crypto: Any) -> tuple[str, ...]:
+    """A5.2b2 Task 1 — tombstones ∪ purged ТЕКУЩЕГО профиля (read-only, fail-closed).
+
+    Спека §5: «При недоступности ключа или повреждении текущего ledger restore
+    прекращается без изменения файлов». Поэтому здесь нет ни одного молчаливого
+    ``skip``: строка, которую нельзя прочитать/разобрать/определить, — отказ, а
+    не «наверное, не ID».
+
+    Пустой ledger (файлов нет) — валидное пустое объединение; это НЕ ошибка.
+    """
+    if crypto is None:
+        raise SnapshotOperationRefused(
+            REASON_CRYPTO_UNAVAILABLE,
+            "ключ недоступен — текущий deletion ledger не проверить",
+        )
+    union: set[str] = set()
+    for name in LEDGER_JOURNAL_NAMES:
+        # Имя локали НЕ `path`: audit_purge_coverage выводит «корень в data_dir»
+        # из имён, и generic-имя здесь заставило бы сканер считать ВСЕ
+        # `path / <const>` в модуле (включая b1-манифест снимка) хранилищем
+        # прямо в data_dir. Конкретное имя — и код понятнее, и аудит честнее.
+        ledger_file = Path(data_dir) / name
+        if ledger_file.is_symlink():
+            raise SnapshotOperationRefused(
+                REASON_SOURCE_SYMLINK, f"{name} — symlink не разыменовывается"
+            )
+        if not ledger_file.exists():
+            continue
+        try:
+            raw = ledger_file.read_bytes()
+        except OSError as exc:
+            raise SnapshotOperationRefused(
+                REASON_LEDGER_UNREADABLE, f"{name} не читается: {exc}"
+            ) from exc
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise SnapshotOperationRefused(
+                REASON_LEDGER_UNREADABLE, f"{name}: не UTF-8: {exc}"
+            ) from exc
+        for lineno, line in enumerate(_split_ndjson_lines(text), start=1):
+            if not line.strip():
+                continue
+            if crypto.is_encrypted(line):
+                try:
+                    line = crypto.decrypt_line(line)
+                except Exception as exc:  # noqa: BLE001 — чужой ключ или tamper
+                    raise SnapshotOperationRefused(
+                        REASON_LEDGER_UNREADABLE,
+                        f"{name}:{lineno}: ENC1-строка ledger не расшифровывается: "
+                        f"{type(exc).__name__}",
+                    ) from exc
+            item_id = _record_id(line, where=f"{name}:{lineno}", reason=REASON_LEDGER_MALFORMED)
+            if not item_id:
+                raise SnapshotOperationRefused(
+                    REASON_LEDGER_MALFORMED,
+                    f"{name}:{lineno}: в deletion ledger нет непустого id",
+                )
+            union.add(item_id)
+    return tuple(sorted(union))
+
+
+def _new_transaction_id(prefix: str) -> str:
+    """Уникальный transaction_id: метка времени + случайные 4 байта.
+
+    Случайная часть обязательна: две транзакции в одну секунду (снимок + restore,
+    два restore подряд) не должны делить каталог staging.
+    """
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"{prefix}-{stamp}-{os.urandom(4).hex()}"
+
+
+def _restore_staging_dir(data_dir: Path, transaction_id: str) -> Path:
+    return Path(data_dir) / f"{RESTORE_STAGING_PREFIX}{transaction_id}"
+
+
+def restore_marker_dirs(data_dir: Any) -> list[Path]:
+    """Каталоги незавершённого restore в data_dir. Дёшево: один ``iterdir``.
+
+    Единственная точка «есть ли незавершённая операция» — её же зовёт ленивый
+    wiring в ``StateStore.__init__``. Содержимое маркера НЕ читается: на старте
+    достаточно факта наличия.
+    """
+    base = Path(data_dir)
+    try:
+        entries = list(base.iterdir())
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise SnapshotOperationRefused(
+            REASON_FSYNC_FAILED, f"{base} не читается: {exc}"
+        ) from exc
+    found = [
+        path
+        for path in entries
+        if path.name.startswith(RESTORE_STAGING_PREFIX)
+        and not path.is_symlink()
+        and path.is_dir()
+        and (path / RESTORE_MARKER_FILENAME).is_file()
+    ]
+    return sorted(found)
+
+
+def has_pending_restore(data_dir: Any) -> bool:
+    """Дёшевая проверка наличия restore-маркера (для wiring'а)."""
+    try:
+        return bool(restore_marker_dirs(data_dir))
+    except SnapshotOperationRefused:
+        return True  # не смогли проверить — считаем «есть», recovery разберётся
+
+
+def _require_policy_on(
+    policy_read: Callable[[], bool], *, reason_when_off: str
+) -> None:
+    """Restore требует текущей policy ON (решение 1 карточки b2).
+
+    Ошибка чтения политики ≠ «выключено» и ≠ «включено»: доказать ON не смогли —
+    операция запрещена (fail-closed), потому что альтернатива — тихая расшифровка
+    ENC1 в открытый вид, то есть понижение policy для данных, которые владелец
+    шифровал.
+    """
+    try:
+        on = bool(policy_read())
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("encrypted_snapshot: политика шифрования не читается")
+        raise SnapshotOperationRefused(
+            REASON_POLICY_UNAVAILABLE,
+            f"политика шифрования не читается ({type(exc).__name__}) — "
+            "восстановление запрещено",
+        ) from exc
+    if not on:
+        raise SnapshotOperationRefused(
+            reason_when_off,
+            "восстановление encrypted-снимка требует включённого шифрования: "
+            "иначе данные были бы расшифрованы в открытый вид",
+        )
+
+
+def _read_restore_marker(staging: Path) -> dict:
+    path = staging / RESTORE_MARKER_FILENAME
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SnapshotOperationRefused(
+            REASON_MANIFEST_INVALID,
+            f"restore-маркер {staging.name} не читается: {exc}",
+        ) from exc
+    if not isinstance(payload, dict) or payload.get("version") != RESTORE_MARKER_VERSION:
+        raise SnapshotOperationRefused(
+            REASON_MANIFEST_INVALID,
+            f"restore-маркер {staging.name}: неизвестный формат/версия",
+        )
+    return payload
+
+
+def _snapshot_ledger_ids(*, snapshot_dir: Path, crypto: Any) -> set[str]:
+    """ID deletion ledger САМОГО снимка (его era). Уже проверен verify_snapshot."""
+    ids: set[str] = set()
+    for name in LEDGER_JOURNAL_NAMES:
+        for lineno, line in enumerate(
+            _decrypt_verified_lines(
+                journal_file=snapshot_dir / name,
+                crypto=crypto,
+                reason_mismatch=REASON_POLICY_MISMATCH,
+            ),
+            start=1,
+        ):
+            item_id = _record_id(
+                crypto.decrypt_line(line),
+                where=f"{name}:{lineno}",
+                reason=REASON_LEDGER_MALFORMED,
+            )
+            if not item_id:
+                raise SnapshotOperationRefused(
+                    REASON_LEDGER_MALFORMED,
+                    f"{name}:{lineno}: в ledger снимка нет непустого id",
+                )
+            ids.add(item_id)
+    return ids
+
+
+def _snapshot_record_index(*, snapshot_dir: Path, crypto: Any) -> dict[str, dict[str, set]]:
+    """Что УЖЕ ЕСТЬ в целевом снимке, РАЗДЕЛЬНО по журналам: id и тексты строк.
+
+    F1/F2: одного глобального множества на все журналы недостаточно и опасно.
+
+      * для ``history.ndjson`` запись с тем же id, что и в снимке, — дубль, и
+        его надо отбросить (иначе в выходе появятся две записи одного id);
+      * для ДЕЛЬТ дубли по id — норма (``_load_status_overrides_unlocked`` и
+        другие ридеры применяют last-write-wins по порядку строк), поэтому
+        изменение из окна pending переносится независимо от наличия в снимке;
+      * глобальное множество вдобавок роняло запись истории из-за id,
+        встретившегося в СОВСЕМ ДРУГОМ журнале снимка (r10 б).
+
+    Для дельт дополнительно нужен набор ТЕКСТОВ строк снимка: строка окна,
+    совпадающая с уже восстановленной, — это не изменение, а старый остаток
+    ещё не заменённого журнала. Без такой проверки каждая докачка дописывала
+    бы в дельты их прежнее содержимое (журнал рос бы при каждом разборе).
+    """
+    index: dict[str, dict[str, set]] = {}
+    for name in HISTORY_JOURNAL_FILENAMES:
+        if name in LEDGER_JOURNAL_NAMES:
+            continue
+        journal_ids: set[str] = set()
+        journal_lines: set[str] = set()
+        for lineno, line in enumerate(
+            _decrypt_verified_lines(
+                journal_file=snapshot_dir / name,
+                crypto=crypto,
+                reason_mismatch=REASON_POLICY_MISMATCH,
+            ),
+            start=1,
+        ):
+            plaintext = crypto.decrypt_line(line)
+            journal_lines.add(plaintext)
+            item_id = _record_id(
+                plaintext,
+                where=f"{name}:{lineno}",
+                reason=REASON_RECORD_MALFORMED,
+            )
+            if item_id:
+                journal_ids.add(item_id)
+        index[name] = {"ids": journal_ids, "lines": journal_lines}
+    return index
+
+
+def _collect_window_records(
+    *,
+    data_dir: Path,
+    crypto: Any,
+    blocked: set[str],
+    snapshot_index: dict[str, dict[str, set]],
+) -> tuple[dict[str, list[str]], dict[str, int], list[str]]:
+    """H1: записи, сделанные В ОКНЕ pending, из текущего (рваного) набора.
+
+    Между crash'ом и докачкой владелец продолжает работать: ``add_history_item``
+    пишет в живой журнал, который докачка затем перезапишет снимком. Такая
+    запись не встречается ни в целевом снимке, ни в pre-restore страховке
+    (она сделана ПОСЛЕ её снятия) — то есть исчезает бесследно, при этом
+    докачка отвечает ``ok: true``.
+
+    Поэтому перед заменами (под тем же ``history_flock``, поэтому набор стабилен)
+    собираем из живых журналов всё, что:
+      * валидно разбирается и имеет непустой ``id``;
+      * ОТСУТСТВУЕТ в целевом снимке (иначе запись уже придёт из снимка);
+      * ОТСУТСТВУЕТ в ``blocked`` (union + ledger снимка) — запрет resurrection
+        сильнее сохранности: удалённое возвращать нельзя.
+
+    Возвращает ``(records_by_journal, counters, warnings)``. Неразбираемые строки
+    НЕ выбрасываются молча — они попадают в ``records_unparsable``/``records_at_risk``
+    и в ``warnings``: владелец должен увидеть, что что-то не перенесено.
+    """
+    records: dict[str, list[str]] = {name: [] for name in HISTORY_JOURNAL_FILENAMES}
+    counters = {"carried": 0, "delta_carried": 0, "excluded_deleted": 0, "unparsable": 0}
+    warnings: list[str] = []
+    for name in HISTORY_JOURNAL_FILENAMES:
+        if name in LEDGER_JOURNAL_NAMES:
+            continue  # ledger восстанавливается объединением, а не переносом строк
+        source = Path(data_dir) / name
+        if not source.is_file():
+            continue
+        carried_lines: set[str] = set()
+        for lineno, raw in enumerate(_split_ndjson_lines(_read_text(source, name)), start=1):
+            if not raw.strip():
+                continue
+            plaintext = raw
+            if crypto.is_encrypted(raw):
+                try:
+                    plaintext = crypto.decrypt_line(raw)
+                except Exception as exc:  # noqa: BLE001 — не наш/повреждён
+                    counters["unparsable"] += 1
+                    warnings.append(
+                        f"window_record_unreadable: {name}:{lineno} "
+                        f"({type(exc).__name__})"
+                    )
+                    continue
+            try:
+                item_id = _record_id(
+                    plaintext, where=f"{name}:{lineno}", reason=REASON_RECORD_MALFORMED
+                )
+            except SnapshotOperationRefused:
+                counters["unparsable"] += 1
+                warnings.append(f"window_record_unparsable: {name}:{lineno}")
+                continue
+            if not item_id:
+                counters["unparsable"] += 1
+                warnings.append(f"window_record_without_id: {name}:{lineno}")
+                continue
+            if item_id in blocked:
+                # Удалено в окне pending: resurrection запрещён, запись не переносится.
+                counters["excluded_deleted"] += 1
+                continue
+            # F1/F2: для ИСТОРИИ дубль по id отбрасываем (две записи одного id в
+            # выходе — порча). Для ДЕЛЬТ дубль — это новое изменение: ридеры
+            # дельт применяют last-write-wins по порядку строк, поэтому перенос
+            # дописывает изменение в конец журнала, и оно побеждает состояние
+            # из снимка.
+            is_history = name == "history.ndjson"
+            snap = snapshot_index.get(name) or {"ids": set(), "lines": set()}
+            if is_history:
+                if item_id in snap["ids"]:
+                    continue  # дубль записи по id
+            else:
+                # Дельта: перенос изменения, а не повтор уже восстановленного.
+                if plaintext in snap["lines"] or plaintext in carried_lines:
+                    continue
+            records[name].append(
+                raw if crypto.is_encrypted(raw) else crypto.encrypt_line(plaintext)
+            )
+            counters["carried" if is_history else "delta_carried"] += 1
+    if (
+        counters["carried"]
+        or counters["delta_carried"]
+        or counters["excluded_deleted"]
+        or counters["unparsable"]
+    ):
+        logger.warning(
+            "encrypted_snapshot: окно pending — перенесено записей %d, дельт %d, "
+            "исключено удалённых %d, неразрешимых %d",
+            counters["carried"], counters["delta_carried"],
+            counters["excluded_deleted"], counters["unparsable"],
+        )
+    return records, counters, warnings
+
+
+def _read_text(path: Path, name: str) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise SnapshotOperationRefused(
+            REASON_SOURCE_UNREADABLE, f"{name} не читается: {exc}"
+        ) from exc
+
+
+def _build_restore_output(
+    *,
+    data_dir: Path,
+    staging: Path,
+    snapshot_dir: Path,
+    crypto: Any,
+    blocked: set[str],
+    carry: dict[str, list[str]] | None = None,
+    carry_counters: dict[str, int] | None = None,
+    carry_warnings: list[str] | None = None,
+) -> tuple[list[dict[str, Any]], int, int, dict[str, int], list[str]]:
+    """Готовит десять выходных ENC1-журналов в приватном staging.
+
+    Фильтрация по ``blocked`` (ledger union) применяется к истории и ко всем
+    дельтам: запись, удалённая владельцем, не может вернуться ни через один
+    журнал (спека §5: «исключаются из восстановленной истории и связанных дельт»).
+    Строки переносятся БАЙТ-В-БАЙТ из уже проверенного снимка — лишнего
+    шифрования нет, а побайтовое совпадение с бэкапом остаётся доказуемым.
+
+    ``carry`` (только для roll-forward, H1) — записи из окна pending: они
+    дописываются в конец соответствующего журнала, потому что хронологически
+    они новее всего, что есть в снимке.
+
+    Возвращает ``(files_meta, restored_entries, filtered_out_lines, carry_counters,
+    carry_warnings)``.
+    """
+    carry = carry or {}
+    carry_counters = dict(
+        carry_counters
+        or {"carried": 0, "delta_carried": 0, "excluded_deleted": 0, "unparsable": 0}
+    )
+    carry_warnings = list(carry_warnings or [])
+    files_meta: list[dict[str, Any]] = []
+    restored_entries = 0
+    filtered_out = 0
+    for name in HISTORY_JOURNAL_FILENAMES:
+        if name in LEDGER_JOURNAL_NAMES:
+            # Выходной ledger = ОБЪЕДИНЕНИЕ. Старый снимок не может его уменьшить.
+            body = "".join(
+                crypto.encrypt_line(json.dumps({"id": item_id}, ensure_ascii=False)) + "\n"
+                for item_id in sorted(blocked)
+            ).encode("utf-8")
+        else:
+            out_lines: list[str] = []
+            verified = _decrypt_verified_lines(
+                journal_file=snapshot_dir / name,
+                crypto=crypto,
+                reason_mismatch=REASON_POLICY_MISMATCH,
+            )
+            for lineno, line in enumerate(verified, start=1):
+                item_id = _record_id(
+                    crypto.decrypt_line(line),
+                    where=f"{name}:{lineno}",
+                    reason=REASON_RECORD_MALFORMED,
+                )
+                if item_id and item_id in blocked:
+                    filtered_out += 1
+                    continue
+                out_lines.append(line)
+            out_lines.extend(carry.get(name) or [])  # H1: записи окна pending
+            if name == "history.ndjson":
+                restored_entries = len(out_lines)
+            # Явные скобки вокруг join: тернарник внутри конкатенации вернул бы
+            # `str + bytes` на пустом журнале (все строки отфильтрованы union'ом).
+            body = ("\n".join(out_lines) + "\n").encode("utf-8") if out_lines else b""
+        _write_file_durable(staging / name, body)
+        files_meta.append(
+            {"name": name, "size": len(body), "sha256": _sha256(body)}
+        )
+    return files_meta, restored_entries, filtered_out, carry_counters, carry_warnings
+
+
+def _replace_journal(tmp_file: Path, target: Path) -> None:
+    """Одна атомарная замена живого журнала (``os.replace``, один filesystem)."""
+    os.replace(str(tmp_file), str(target))
+
+
+def _write_restore_marker(staging: Path, marker: dict) -> None:
+    """Durable restore-маркер: tmp → fsync → replace → fsync каталога."""
+    blob = json.dumps(marker, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")
+    tmp = staging / f"{RESTORE_MARKER_FILENAME}.tmp"
+    _write_file_durable(tmp, blob)
+    os.replace(tmp, staging / RESTORE_MARKER_FILENAME)
+    _fsync_dir(staging)
+
+
+def _readback_live_journals(*, data_dir: Path, files_meta: list[dict]) -> dict:
+    """Read-back ВСЕХ десяти живых журналов против ожидаемых size/sha256.
+
+    Только после этого (и никогда раньше) restore-маркер может получить
+    состояние COMMITTED — ровно как в b1 для снимка.
+    """
+    mismatches: list[str] = []
+    for entry in files_meta:
+        name = str(entry.get("name"))
+        journal_file = Path(data_dir) / name
+        if not journal_file.is_file():
+            mismatches.append(f"{name}: отсутствует")
+            continue
+        try:
+            blob = journal_file.read_bytes()
+        except OSError as exc:
+            mismatches.append(f"{name}: не читается ({exc})")
+            continue
+        if len(blob) != entry.get("size"):
+            mismatches.append(f"{name}: size {len(blob)} != {entry.get('size')}")
+            continue
+        if _sha256(blob) != entry.get("sha256"):
+            mismatches.append(f"{name}: sha256 не совпадает")
+    return {"ok": not mismatches, "checked": len(files_meta), "mismatches": mismatches}
+
+
+def _cleanup_restore_tmp(data_dir: Path, transaction_id: str | None = None) -> None:
+    """Убирает подготовленные копии журналов ``*.a52b2-restore-tmp-<txid>``.
+
+    Частично применённый restore восстанавливается ДОКАЗКОЙ (повторное
+    применение), поэтому tmp-куски доказывать нечего — только мусор в data_dir.
+    ``transaction_id=None`` означает «убрать все transaction-фрагменты» — так
+    вызывает privacy purge: жёсткий kill мог случиться ДО появления маркера, и
+    тогда фрагменты не принадлежат ни одной известной транзакции, но содержат
+    расшифровываемую историю. Glob сознательно узкий: только наш инфикс.
+    """
+    base = Path(data_dir)
+    pattern = (
+        f"*{RESTORE_TMP_SUFFIX}{transaction_id}" if transaction_id else f"*{RESTORE_TMP_SUFFIX}*"
+    )
+    for tmp in sorted(base.glob(pattern)):
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:  # noqa: BLE001 — чистка не должна ронять транзакцию
+            logger.warning(
+                "encrypted_snapshot: не удалось убрать фрагмент %s (%s)", tmp.name, exc
+            )
+
+
+def _apply_verified_snapshot_locked(
+    *,
+    data_dir: Path,
+    snapshot_dir: Path,
+    crypto: Any,
+    transaction_id: str,
+    pre_restore_snapshot: str,
+    recovered: bool,
+    staging: Path | None = None,
+) -> dict:
+    """Шаги 2–4 под store-lock: union → фильтрация → COMMITTING → замены → read-back.
+
+    Вызывается и обычным restore, и recovery (roll-forward); оба вызова — уже
+    под ``history_flock``, с повторной проверкой policy и повторной верификацией
+    снимка (поэтому ни ``policy_read``, ни ``backups_root`` здесь и нет: делать
+    вид, что проверка политики происходит внутри, было бы ложью).
+
+    Разница: ``staging`` (у recovery — каталог незавершённой транзакции, он
+    переиспользуется) и ``pre_restore_snapshot``/``recovered`` (страховка уже
+    создана первым restore, второй раз она не нужна).
+    """
+    union = set(collect_ledger_union(data_dir=data_dir, crypto=crypto))
+    blocked = union | _snapshot_ledger_ids(snapshot_dir=snapshot_dir, crypto=crypto)
+
+    # 🔴 B1: каталог, который этот вызов НЕ создавал, — не мусор, а доказательство
+    # незавершённой транзакции (recovery переиспользует каталог маркера). Убрать
+    # его при отказе в prepare означало бы: рваный набор становится невидимым,
+    # ``has_pending_restore`` молчит, а следующий restore рапортует об успехе
+    # поверх него. Отменяется (рекурсивно) только то, что создал этот вызов.
+    created_staging = staging is None
+    if created_staging:
+        staging = _restore_staging_dir(data_dir, transaction_id)
+        if staging.exists():
+            raise SnapshotOperationRefused(
+                REASON_DESTINATION_EXISTS, f"staging {staging.name} уже существует"
+            )
+    elif not staging.is_dir():
+        raise SnapshotOperationRefused(
+            REASON_PREPARED_MISSING, f"staging {staging.name} не найден"
+        )
+    _ensure_private_dir(staging)
+
+    # H1: только на пути ДОКАЧКИ. В окне pending владелец продолжал писать, и
+    # живой набор — это «состояние до restore + частично применённый снимок +
+    # новые записи». Сознательный restore с этим не имеет ничего общего: там
+    # владелец сам выбрал вернуться к снимку (перенос означал бы, что restore
+    # ничего не делает), и записи сохраняет отдельный pre-restore снимок.
+    carry: dict[str, list[str]] = {}
+    carry_counters: dict[str, int] = {"carried": 0, "delta_carried": 0, "excluded_deleted": 0, "unparsable": 0}
+    carry_warnings: list[str] = []
+    if recovered:
+        carry, carry_counters, carry_warnings = _collect_window_records(
+            data_dir=data_dir,
+            crypto=crypto,
+            blocked=blocked,
+            snapshot_index=_snapshot_record_index(
+                snapshot_dir=snapshot_dir, crypto=crypto
+            ),
+        )
+
+    try:
+        (
+            files_meta,
+            restored_entries,
+            filtered_out_lines,
+            carry_counters,
+            carry_warnings,
+        ) = _build_restore_output(
+            data_dir=data_dir,
+            staging=staging,
+            snapshot_dir=snapshot_dir,
+            crypto=crypto,
+            blocked=blocked,
+            carry=carry,
+            carry_counters=carry_counters,
+            carry_warnings=carry_warnings,
+        )
+        # Шаг 3 (середина): durable COMMITTING — ДО первой замены живого файла.
+        marker = {
+            "version": RESTORE_MARKER_VERSION,
+            "transaction_id": transaction_id,
+            "state": RESTORE_STATE_COMMITTING,
+            "target_snapshot": str(snapshot_dir),
+            "pre_restore_snapshot": pre_restore_snapshot,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "files": files_meta,
+        }
+        _write_restore_marker(staging, marker)
+        _fsync_dir(staging)
+    except SnapshotOperationRefused:
+        # Отмена ДО durable COMMITTING: живые файлы не тронуты. Каталог убирается
+        # ТОЛЬКО если его создал этот вызов (B1): в recovery-ветке переиспользуемый
+        # каталог маркера — единственное доказательство незавершённого restore.
+        if created_staging:
+            _cancel_staging(staging)
+        raise
+    except OSError as exc:
+        if created_staging:
+            _cancel_staging(staging)
+        raise SnapshotOperationRefused(
+            REASON_FSYNC_FAILED,
+            f"подготовка restore не удалась: {type(exc).__name__}: {exc}",
+            pending=not created_staging,
+        ) from exc
+
+    # --- Шаг 3: замены. С этого момента транзакция необратима (отката нет). ---
+    try:
+        for entry in files_meta:
+            name = str(entry["name"])
+            tmp = data_dir / f"{name}{RESTORE_TMP_SUFFIX}{transaction_id}"
+            _write_file_durable(tmp, (staging / name).read_bytes())
+            _replace_journal(tmp, data_dir / name)
+    except Exception as exc:  # noqa: BLE001 — crash/сбой замены
+        _cleanup_restore_tmp(data_dir, transaction_id)
+        raise SnapshotOperationRefused(
+            REASON_APPLY_FAILED,
+            f"замена живых журналов не удалась: {type(exc).__name__}: {exc}",
+            pending=True,
+        ) from exc
+    _fsync_dir(data_dir)
+
+    # --- Шаг 4: read-back ВСЕХ файлов. COMMITTED недостижим без него. ---
+    try:
+        readback = _readback_live_journals(data_dir=data_dir, files_meta=files_meta)
+    except Exception as exc:  # noqa: BLE001
+        raise SnapshotOperationRefused(
+            REASON_READBACK_FAILED,
+            f"read-back не выполнен: {type(exc).__name__}: {exc}",
+            pending=True,
+        ) from exc
+    if not readback["ok"]:
+        raise SnapshotOperationRefused(
+            REASON_READBACK_FAILED,
+            f"read-back не сошёлся: {readback['mismatches']}",
+            pending=True,
+        )
+
+    marker["state"] = RESTORE_STATE_COMMITTED
+    marker["committed_at"] = datetime.now(timezone.utc).isoformat()
+    marker["restored_entries"] = restored_entries
+    _write_restore_marker(staging, marker)
+    _fsync_dir(data_dir)
+
+    # Транзакция завершена: приватный staging больше не нужен. Маркер COMMITTED,
+    # оставшийся после crash здесь, recovery уберёт как «уже завершённую».
+    _cancel_staging(staging)
+    _fsync_dir(data_dir)
+    logger.info(
+        "encrypted_snapshot: restore %s зафиксирован (COMMITTED) из %s, "
+        "%d записей, отфильтровано строк по ledger %d",
+        transaction_id, snapshot_dir, restored_entries, filtered_out_lines,
+    )
+    return {
+        "ok": True,
+        "state": RESTORE_STATE_COMMITTED,
+        "transaction_id": transaction_id,
+        "snapshot_dir": str(snapshot_dir),
+        "pre_restore_snapshot": pre_restore_snapshot,
+        # N3: restored_entries — строки ВОССТАНОВЛЕННОЙ history.ndjson;
+        # filtered_out_lines — строки, вычеркнутые по ledger, по всем 10 журналам.
+        "restored_entries": restored_entries,
+        "restored_entries_source": "snapshot_lines",
+        "ledger_blocked": len(blocked),
+        "filtered_out_lines": filtered_out_lines,
+        # H1: что произошло с записями, сделанными в окне pending.
+        "records_carried": carry_counters.get("carried", 0),
+        "delta_records_carried": carry_counters.get("delta_carried", 0),
+        "records_at_risk": (
+            carry_counters.get("excluded_deleted", 0) + carry_counters.get("unparsable", 0)
+        ),
+        "records_excluded_deleted": carry_counters.get("excluded_deleted", 0),
+        "records_unparsable": carry_counters.get("unparsable", 0),
+        "warnings": carry_warnings,
+        "files": files_meta,
+        "readback": readback,
+        "recovered": recovered,
+    }
+
+
+def _validated_marker_entries(marker: dict) -> int | None:
+    """``restored_entries`` из маркера — только если значение пригодно.
+
+    N4: маркер лежит на ДИСКЕ, а его ``restored_entries`` — число, записанное
+    прошлой попыткой. Отдать его «как есть» значит показать непроверенное
+    значение как правду (в подделанном/битом маркере там может быть что угодно).
+    Поэтому значение проходит проверку типа, диапазона и правдоподобия (не
+    больше суммарного размера подготовленного ciphertext-бандла — запись не
+    может быть длиннее него). Всё остальное — честный ``None``.
+    """
+    value = marker.get("restored_entries")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    files = marker.get("files")
+    if not isinstance(files, list) or not files:
+        return None
+    prepared = 0
+    for entry in files:
+        if not isinstance(entry, dict):
+            return None
+        size = entry.get("size")
+        if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+            continue
+        prepared += size
+    if prepared <= 0 or value > prepared:
+        return None
+    return value
+
+
+def _recovery_result(
+    *,
+    ok: bool,
+    pending: bool,
+    reason: str | None,
+    state: str | None = None,
+    transaction_id: str | None = None,
+    snapshot_dir: str | None = None,
+    pre_restore_snapshot: str | None = None,
+    restored_entries: int = 0,
+    rolled_forward: bool = False,
+    stale_staging: list[str] | None = None,
+    extra_markers: list[str] | None = None,
+    snapshot_pending: bool = False,
+    records_carried: int = 0,
+    delta_records_carried: int = 0,
+    records_at_risk: int = 0,
+    records_excluded_deleted: int = 0,
+    records_unparsable: int = 0,
+    warnings: list[str] | None = None,
+) -> dict:
+    """Единая форма ответа recovery (одно место → один словарь полей).
+
+    ``attempted_at`` (F3): вердикт кэшируется в памяти процесса, поэтому он
+    обязан быть датирован — иначе «последняя попытка» неинтерпретируема: не
+    отличить свежий разбор от вчерашнего.
+    """
+    return {
+        "ok": ok,
+        "attempted_at": datetime.now(timezone.utc).isoformat(),
+        "pending": pending,
+        "reason": reason,
+        "state": state,
+        "transaction_id": transaction_id,
+        "snapshot_dir": snapshot_dir,
+        "pre_restore_snapshot": pre_restore_snapshot,
+        "restored_entries": restored_entries,
+        "rolled_forward": rolled_forward,
+        # H1/F1: судьба записей, сделанных в окне pending (история и дельты —
+        # разные счётчики, потому что переносятся по разным правилам).
+        "records_carried": records_carried,
+        "delta_records_carried": delta_records_carried,
+        "records_at_risk": records_at_risk,
+        "records_excluded_deleted": records_excluded_deleted,
+        "records_unparsable": records_unparsable,
+        "warnings": list(warnings or []),
+        "stale_staging": list(stale_staging or []),
+        "extra_markers": list(extra_markers or []),
+        "snapshot_pending": snapshot_pending,
+    }
+
+
+def recover_pending_restore(
+    *,
+    data_dir: Any,
+    backups_root: Any,
+    crypto: Any,
+    policy_read: Callable[[], bool] | None = None,
+) -> dict:
+    """A5.2b2 Task 3 — fail-closed recovery + запись вердикта в кэш профиля (F3).
+
+    Единственное место, где кэш вердикта пишется: любая попытка докачки (из
+    точки обслуживания, из будущего вызова или из модульного теста) оставляет
+    датированный след. Признак ``pending`` при чтении всё равно берётся с диска.
+    """
+    verdict = _recover_pending_restore(
+        data_dir=data_dir,
+        backups_root=backups_root,
+        crypto=crypto,
+        policy_read=policy_read,
+    )
+    _record_recovery_verdict(data_dir, verdict)
+    return verdict
+
+
+def _recover_pending_restore(
+    *,
+    data_dir: Any,
+    backups_root: Any,
+    crypto: Any,
+    policy_read: Callable[[], bool] | None = None,
+) -> dict:
+    """A5.2b2 Task 3 — fail-closed recovery: докатка проверенного снимка.
+
+    Спека §5: «После crash COMMITTING либо докатывается из этого snapshot, либо
+    остаётся fail-closed до восстановления; непроверенный успех запрещён» и
+    «Recovery при недоступном ключе не создаёт новый ключ и не запускает обычное
+    обслуживание». Карточка b2, решение 6: докатывается ЦЕЛЕВОЙ снимок
+    (roll-forward), pre-restore снимок остаётся страховкой для ручного решения.
+
+    Разбор решений:
+
+      * restore-маркера нет → дешёвый no-op. Состояние b1 (мусор из
+        неопубликованного staging / pending опубликованного COMMITTING) доносится
+        честно: «snapshot_stale_staging» либо «snapshot_recovery_pending»;
+      * маркер ``COMMITTED`` → транзакция уже завершена, осталось убрать
+        приватный staging (crash между записью COMMITTED и уборкой). Ничего не
+        переделывается, живая история не перезаписывается;
+      * маркер ``COMMITTING`` → повторная верификация целевого снимка и
+        ДОКАЧКА тем же кодом, что и обычный restore (тот же commit-протокол,
+        тот же ledger union, read-back → COMMITTED). Roll-forward, а не откат в
+        pre-restore: тот остаётся на диске, его путь возвращается владельцу;
+      * невозможно докачать (снимок повреждён, ключ недоступен, policy OFF) →
+        fail-closed: причина машинно-читаема, путь pre-restore снимка в ответе,
+        НИЧЕГО не удаляется, новый ключ не создаётся, обычное обслуживание
+        (backup) не стартует — новые снимки блокирует тот же маркер.
+
+    Возвращает словарь (никогда не бросает): вызывается из конструктора
+    StateStore, где исключение означало бы «backend не стартует».
+    """
+    data_dir = Path(data_dir)
+    backups_root = Path(backups_root)
+    if policy_read is None:
+        from backend.history_encryption_policy import data_dir_policy_reader
+
+        policy_read = data_dir_policy_reader(data_dir)
+
+    def _blocked(reason: str, **kwargs: Any) -> dict:
+        logger.error(
+            "encrypted_snapshot: restore recovery fail-closed (%s) — %s",
+            reason,
+            kwargs.get("snapshot_dir") or data_dir,
+        )
+        return _recovery_result(ok=False, pending=True, reason=reason, **kwargs)
+
+    try:
+        markers = restore_marker_dirs(data_dir)
+    except SnapshotOperationRefused as exc:
+        return _blocked(exc.reason)
+
+    # Состояние b1 смотрим ВСЕГДА: владелец должен видеть честную картину
+    # backups независимо от наличия restore-маркера.
+    try:
+        b1 = recover_pending_state(data_dir=data_dir, backups_root=backups_root)
+    except SnapshotOperationRefused as exc:
+        b1 = {"ok": False, "pending": True, "reason": exc.reason, "state": None}
+    b1_pending = bool(b1.get("pending"))
+    b1_reason = b1.get("reason")
+
+    if not markers:
+        if b1_pending:
+            # Опубликованный COMMITTING снимка (backup) — докатывать его как
+            # restore нельзя: это тихо заменило бы живую историю старым бэкапом.
+            return _recovery_result(
+                ok=False,
+                pending=True,
+                reason=b1_reason or REASON_RECOVERY_PENDING,
+                state=b1.get("state"),
+                snapshot_pending=True,
+            )
+        if b1_reason:
+            return _recovery_result(
+                ok=True,
+                pending=False,
+                reason=b1_reason,
+                state=b1.get("state"),
+                stale_staging=list(b1.get("stale_staging") or []),
+            )
+        return _recovery_result(ok=True, pending=False, reason=None)
+
+    staging = markers[0]
+    extra = [str(p) for p in markers[1:]]
+    if extra:
+        logger.warning(
+            "encrypted_snapshot: найдено %d restore-маркеров, обрабатывается самый "
+            "ранний по имени; остальные: %s",
+            len(markers), extra,
+        )
+    try:
+        marker = _read_restore_marker(staging)
+    except SnapshotOperationRefused as exc:
+        return _blocked(
+            exc.reason, extra_markers=extra, snapshot_pending=b1_pending
+        )
+
+    transaction_id = str(marker.get("transaction_id") or "")
+    pre_restore = marker.get("pre_restore_snapshot")
+    target = marker.get("target_snapshot")
+    common = {
+        "state": marker.get("state"),
+        "transaction_id": transaction_id or None,
+        "snapshot_dir": str(target) if target else None,
+        "pre_restore_snapshot": str(pre_restore) if pre_restore else None,
+        "extra_markers": extra,
+        "snapshot_pending": b1_pending,
+    }
+
+    # --- Маркер COMMITTED: транзакция завершена, осталась только уборка. ---
+    if marker.get("state") == RESTORE_STATE_COMMITTED:
+        _cancel_staging(staging)
+        if transaction_id:
+            _cleanup_restore_tmp(data_dir, transaction_id)
+        _fsync_dir(data_dir)
+        logger.info(
+            "encrypted_snapshot: restore %s уже был COMMITTED — приватный staging убран",
+            transaction_id,
+        )
+        marker_entries = _validated_marker_entries(marker)
+        if marker.get("restored_entries") is not None and marker_entries is None:
+            logger.warning(
+                "encrypted_snapshot: restored_entries в маркере %s непригоден (%r) — "
+                "не отдаём непроверенное значение",
+                transaction_id, marker.get("restored_entries"),
+            )
+        return _recovery_result(
+            ok=True,
+            pending=False,
+            reason=None,
+            restored_entries=marker_entries or 0,
+            **common,
+        )
+
+    # --- Маркер COMMITTING: докатка целевого снимка. ---
+    try:
+        # Fail-closed: без доказанной ON-политики расшифровка была бы понижением
+        # policy. Ключ не создаём — ни нового, ни через Keychain.
+        _require_policy_on(policy_read, reason_when_off=REASON_REQUIRES_ENCRYPTION_ON)
+        if crypto is None:
+            raise SnapshotOperationRefused(
+                REASON_CRYPTO_UNAVAILABLE,
+                "ключ недоступен — докачка невозможна, отката в plaintext нет",
+            )
+        if not target:
+            raise SnapshotOperationRefused(
+                REASON_MANIFEST_INVALID, "в restore-маркере нет целевого снимка"
+            )
+        with history_flock(data_dir):
+            _require_policy_on(policy_read, reason_when_off=REASON_POLICY_UNAVAILABLE)
+            # Повторная верификация: снимок могли подменить/испортить после crash.
+            verify_snapshot(backups_root=backups_root, snapshot_dir=target, crypto=crypto)
+            result = _apply_verified_snapshot_locked(
+                data_dir=data_dir,
+                snapshot_dir=Path(str(target)),
+                crypto=crypto,
+                transaction_id=transaction_id or _new_transaction_id("restore"),
+                pre_restore_snapshot=str(pre_restore) if pre_restore else "",
+                recovered=True,
+                # ТОТ ЖЕ каталог staging: докачка — продолжение той же
+                # транзакции, а не новая. Второй маркер не создаётся, поэтому
+                # следующий запуск не увидит «две незавершённые операции».
+                staging=staging,
+            )
+    except SnapshotOperationRefused as exc:
+        return _blocked(exc.reason, **common)
+    except Exception:  # noqa: BLE001 — recovery не имеет права бросить
+        logger.exception("encrypted_snapshot: recovery неожиданно упал")
+        return _blocked(
+            REASON_RECOVERY_PENDING, **common
+        )
+
+    return _recovery_result(
+        ok=True,
+        pending=False,
+        reason=None,
+        state=result["state"],
+        transaction_id=result["transaction_id"],
+        snapshot_dir=result["snapshot_dir"],
+        pre_restore_snapshot=result["pre_restore_snapshot"] or None,
+        restored_entries=result["restored_entries"],
+        rolled_forward=True,
+        extra_markers=extra,
+        snapshot_pending=b1_pending,
+        records_carried=result["records_carried"],
+        delta_records_carried=result["delta_records_carried"],
+        records_at_risk=result["records_at_risk"],
+        records_excluded_deleted=result["records_excluded_deleted"],
+        records_unparsable=result["records_unparsable"],
+        warnings=result["warnings"],
+    )
+
+
+def purge_pending_restore_staging(data_dir: Any) -> list[str]:
+    """Убирает незавершённый restore целиком (privacy purge, A5.2b2).
+
+    Два вида артефактов, и оба расшифровываются тем же ключом, что и живая
+    история, поэтому privacy purge обязан убрать и их:
+
+      * приватные каталоги staging с restore-маркером (где лежат подготовленные
+        ENC1-журналы);
+      * осиротевшие ``<journal>.a52b2-restore-tmp-<txid>`` рядом с живыми
+        файлами — их оставляет жёсткий kill между записью tmp и ``os.replace``,
+        и маркера в этот момент может ещё не быть (собственно проба ревьюера).
+
+    Второй вид и есть причина, по которой одной чистки каталогов мало: раньше
+    purge проходил, а фрагменты оставались и читались ключом.
+
+    Узкие адресные glob'ы (не ``*`` по всему каталогу) — они же служат
+    доказательством покрытия для ``audit_purge_coverage``, который теперь видит
+    f-string семейства. Возвращает убранные пути — шаг наблюдаем в ответе
+    purge. Ничего не делает, если артефактов нет (обычное состояние).
+    """
+    import shutil
+
+    removed: list[str] = []
+    base = Path(data_dir)
+    # Приватные каталоги staging (в т.ч. те, где маркер не успел появиться).
+    for staging in sorted(base.glob(f"{RESTORE_STAGING_PREFIX}*")):
+        if not staging.is_dir() or staging.is_symlink():
+            continue
+        shutil.rmtree(staging, ignore_errors=True)
+        removed.append(str(staging))
+    # Осиротевшие <journal>.a52b2-restore-tmp-<txid> рядом с живыми файлами.
+    for tmp in sorted(base.glob(f"*{RESTORE_TMP_SUFFIX}*")):
+        if tmp.is_dir() and not tmp.is_symlink():
+            shutil.rmtree(tmp, ignore_errors=True)
+        else:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:  # noqa: BLE001 — purge обязан дойти до конца
+                logger.warning(
+                    "encrypted_snapshot: purge не смог убрать фрагмент %s (%s)",
+                    tmp.name, exc,
+                )
+                continue
+        removed.append(str(tmp))
+    if removed:
+        _fsync_dir(base)
+        logger.info(
+            "encrypted_snapshot: privacy purge убрал артефакты незавершённого restore: %d",
+            len(removed),
+        )
+    return removed
+
+
+def read_pending_restore_verdict(data_dir: Any) -> dict | None:
+    """Read-only вердикт о незавершённом restore. ``None`` — маркера нет.
+
+    Ничего не пишет и НЕ докатывает: это честный «статус» для точек наблюдения
+    (auto-backup status, UI). Само восстановление вызывают точки обслуживания
+    (``recover_pending_restore_from_store``), а его вердикт кэшируется в
+    ``last_restore_recovery()`` для диагностики.
+    """
+    markers = restore_marker_dirs(data_dir)
+    if not markers:
+        return None
+    staging = markers[0]
+    try:
+        marker = _read_restore_marker(staging)
+    except SnapshotOperationRefused as exc:
+        return _recovery_result(
+            ok=False,
+            pending=True,
+            reason=exc.reason,
+            extra_markers=[str(p) for p in markers[1:]],
+        )
+    pre_restore = marker.get("pre_restore_snapshot")
+    target = marker.get("target_snapshot")
+    return _recovery_result(
+        ok=False,
+        pending=True,
+        reason=REASON_RECOVERY_PENDING,
+        state=marker.get("state"),
+        transaction_id=str(marker.get("transaction_id") or "") or None,
+        snapshot_dir=str(target) if target else None,
+        pre_restore_snapshot=str(pre_restore) if pre_restore else None,
+        extra_markers=[str(p) for p in markers[1:]],
+    )
+
+
+# Вердикт ПОСЛЕДНЕЙ реальной попытки восстановления.
+#
+# N7: сначала он был «декоративной обвязкой» — писался и читался только
+# тестами. Теперь он часть пользовательской поверхности: если маркера уже нет,
+# с диска прочитать нечего, и без этого кэша статус молчал бы, хотя докачка
+# только что произошла (владелец не видел бы ни «что было сделано», ни
+# records_carried). Источник истины — по-прежнему диск: значение кэша имеет
+# смысл только вместе с маркером, который его вызвал (см. ``restore_verdict``).
+_RECOVERY_VERDICT_CACHE: dict[str, dict] = {}
+RECOVERY_VERDICT_CACHE_MAX_PROFILES = 8
+
+
+def _profile_key(data_dir: Any) -> str:
+    """Ключ кэша вердикта: разыменованный путь профиля.
+
+    F3: единый process-global без ключа приписывал payload одного профиля
+    другому (в проде data_dir один на процесс, поэтому эффекта не было — но
+    в мультипрофильных тестах это достижимо и путает).
+    """
+    try:
+        return str(Path(data_dir).resolve())
+    except OSError:
+        return str(data_dir)
+
+
+def _record_recovery_verdict(data_dir: Any, verdict: dict | None) -> None:
+    """Кладёт вердикт попытки в кэш профиля (ограниченный словарь)."""
+    if verdict is None:
+        _RECOVERY_VERDICT_CACHE.pop(_profile_key(data_dir), None)
+        return
+    if len(_RECOVERY_VERDICT_CACHE) >= RECOVERY_VERDICT_CACHE_MAX_PROFILES:
+        _RECOVERY_VERDICT_CACHE.clear()
+    _RECOVERY_VERDICT_CACHE[_profile_key(data_dir)] = dict(verdict)
+
+
+def last_restore_recovery(data_dir: Any = None) -> dict | None:
+    """Вердикт последней реальной попытки recovery (или ``None``).
+
+    Без ``data_dir`` — вердикт любого профиля (совместимость прежнего вызова);
+    с ``data_dir`` — только этого профиля (F3).
+    """
+    if data_dir is None:
+        for verdict in reversed(list(_RECOVERY_VERDICT_CACHE.values())):
+            return verdict
+        return None
+    return _RECOVERY_VERDICT_CACHE.get(_profile_key(data_dir))
+
+
+def restore_verdict(data_dir: Any) -> dict | None:
+    """Вердикт для статусных поверхностей: сначала диск, потом кэш попытки.
+
+    Действующий признак ``pending`` ВСЕГДА берётся с диска. Кэш добавляет
+    только историю последней попытки (что было сделано, сколько записей
+    перенесено), и никогда не может заявить ``pending: True`` для профиля, у
+    которого маркера нет: иначе кэш от одного data_dir «определял» бы
+    состояние другого (в проде data_dir один, но поверхность не должна зависеть
+    от того, в каком порядке её опрашивают).
+
+    ``None`` означает «никакой попытки не было» (не «проверка не удалась» —
+    этим случаем занимается ``restore_pending_status``).
+    """
+    try:
+        from_disk = read_pending_restore_verdict(data_dir)
+    except SnapshotOperationRefused:
+        from_disk = None
+    if from_disk is not None:
+        return from_disk
+    cached = _RECOVERY_VERDICT_CACHE.get(_profile_key(data_dir))
+    if cached is None:
+        return None
+    if not cached.get("pending"):
+        return cached
+    # Диск говорит «маркера нет», кэш говорит «pending» → диск прав: оставляем
+    # историю попытки, но признак снимаем.
+    return {**cached, "pending": False}
+
+
+def recover_pending_restore_from_store(store: Any) -> dict | None:
+    """Точка входа recovery для точек обслуживания (backup/restore/auto).
+
+    ``None`` — маркера на диске не было: работа не выполнялась вовсе. Проверка
+    наличия маркера НЕ читает его содержимое и НЕ обращается к ключу, поэтому
+    обычный вызов без незавершённого restore (в т.ч. OFF-профиль прода) не
+    делает ни одного обращения к Keychain.
+
+    Почему НЕ в ``StateStore.__init__`` (решение ревьюера M2): у фасада пять
+    точек создания, recovery шёл ДО ``init_sentry``/late-injection ErrorBus, а
+    вердикт всё равно никем не читался. Вместо этого докачка живёт там, где
+    она обязана блокировать работу, и её вердикт кэшируется для статуса.
+    """
+    data_dir = Path(store.data_dir)
+    if not has_pending_restore(data_dir):
+        return None
+    from backend.history_encryption_policy import store_policy_reader
+
+    crypto_getter = getattr(store, "_get_history_crypto", None)
+    crypto = crypto_getter() if callable(crypto_getter) else None
+    try:
+        verdict = recover_pending_restore(
+            data_dir=data_dir,
+            backups_root=data_dir / "backups",
+            crypto=crypto,
+            policy_read=store_policy_reader(store),
+        )
+    except Exception:  # noqa: BLE001 — вызывающий не имеет права упасть
+        logger.exception("encrypted_snapshot: restore recovery не выполнен")
+        return None
+    return verdict
+
+
+def restore_encrypted_snapshot(
+    *,
+    data_dir: Any,
+    backups_root: Any,
+    snapshot_dir: Any,
+    crypto: Any,
+    restore_settings: bool = False,
+    policy_read: Callable[[], bool] | None = None,
+) -> dict:
+    """A5.2b2 Task 2 — восстановление из ПРОВЕРЕННОГО encrypted-снимка.
+
+    Порядок (спека §5 шаги 1–6; карточка b2 решение 4):
+
+      1. дешёвые проверки БЕЗ записи: ``restore_settings`` не поддерживается,
+         ключ доступен, текущая policy ON, контейнмент, нет незавершённых
+         операций, полная верификация снимка (10 имён, size+sha256, расшифровка
+         каждой строки). Любой отказ — до первого байта в живых журналах;
+      2. под store-lock (``history_flock`` — тот же файл, что ``StateStore._lock``):
+         повторная проверка policy, повторная верификация снимка (между проверкой
+         и lock'ом снимок могли изменить), **pre-restore снимок** текущего
+         состояния через b1-протокол (страховка для ручного решения владельца),
+         сборка ledger union под ТЕМ ЖЕ lock'ом;
+      3. фильтрация объединением, запись десяти ENC1-журналов в приватный staging
+         на том же filesystem, что и живые файлы, durable restore-маркер
+         ``COMMITTING`` **до первой замены**, замены;
+      4. read-back всех десяти → ``COMMITTED``; staging убирается; в ответе —
+         честный ``restored_entries`` и путь pre-restore снимка.
+
+    ``policy_read`` — тот же fail-closed reader, что у A5.2a. Если не передан,
+     берётся ``data_dir_policy_reader(data_dir)`` (тот же механизм, без ссылки на
+     StateStore), поэтому модуль тестируется без живой фасада.
+
+    Нарушение инварианта = CRITICAL: ``settings.json`` не восстанавливается
+    никогда, plaintext при ON не создаётся, resurrection невозможен.
+    """
+    data_dir = Path(data_dir)
+    backups_root = Path(backups_root)
+    snapshot_dir = Path(snapshot_dir)
+
+    # --- Шаг 1: дешёвые проверки. Ни одной записи. ---
+    if restore_settings:
+        # Молча игнорировать явный запрос владельца нельзя (решение 2 карточки).
+        raise SnapshotOperationRefused(
+            REASON_RESTORE_SETTINGS_UNSUPPORTED,
+            "settings.json не восстанавливается: OFF-настройки понизили бы "
+            "текущую encryption policy",
+        )
+    if crypto is None:
+        raise SnapshotOperationRefused(
+            REASON_CRYPTO_UNAVAILABLE, "ключ недоступен — restore невозможен"
+        )
+    if policy_read is None:
+        from backend.history_encryption_policy import data_dir_policy_reader
+
+        policy_read = data_dir_policy_reader(data_dir)
+    _require_policy_on(policy_read, reason_when_off=REASON_REQUIRES_ENCRYPTION_ON)
+    resolved = _require_restorable_snapshot_dir(backups_root, snapshot_dir)
+    if restore_marker_dirs(data_dir):
+        raise SnapshotOperationRefused(
+            REASON_RECOVERY_PENDING,
+            "незавершённый restore на диске — сначала требуется recovery",
+            pending=True,
+        )
+    b1_pending = find_pending_transaction(backups_root=backups_root)
+    if b1_pending and b1_pending.get("published"):
+        raise SnapshotOperationRefused(
+            REASON_PENDING_OPERATION,
+            f"незавершённая транзакция снимка {b1_pending.get('transaction_id')} "
+            f"({b1_pending.get('state')}) — требуется разбор",
+            pending=True,
+        )
+    if b1_pending:
+        logger.warning(
+            "encrypted_snapshot: оставлен неопубликованный staging %s — "
+            "новая транзакция допустима",
+            b1_pending.get("path"),
+        )
+    # Полная верификация ДО записи: неизвестный формат, неполный набор, чужой
+    # ключ или tamper не должны дойти до первой замены.
+    verify_snapshot(backups_root=backups_root, snapshot_dir=snapshot_dir, crypto=crypto)
+
+    transaction_id = _new_transaction_id("restore")
+
+    # --- Шаги 2–4: под тем же store-lock, что и StateStore._lock. ---
+    with history_flock(data_dir):
+        # Политика обязана остаться ON: ON→OFF на ходу операции означала бы
+        # смену режима на лету (b1-формулировка той же проверки).
+        _require_policy_on(policy_read, reason_when_off=REASON_POLICY_UNAVAILABLE)
+        # Повторная верификация под lock: снимок читали ДО захвата, за это время
+        # он мог измениться (спека §5 шаг 4 — повторная проверка перед заменами).
+        verify_snapshot(backups_root=backups_root, snapshot_dir=snapshot_dir, crypto=crypto)
+
+        # Pre-restore снимок ТЕКУЩЕГО состояния — страховка, а не откат: он
+        # остаётся на диске, его путь возвращается владельцу (решение 6).
+        pre_dir = backups_root / f"snapshot_prerestore_{transaction_id.split('-', 1)[1]}"
+        create_encrypted_snapshot(
+            data_dir=data_dir,
+            backup_dir=pre_dir,
+            crypto=crypto,
+            transaction_id=f"pre_restore_{transaction_id}",
+            policy_on=True,
+            policy_read=policy_read,
+        )
+        return _apply_verified_snapshot_locked(
+            data_dir=data_dir,
+            snapshot_dir=resolved,
+            crypto=crypto,
+            transaction_id=transaction_id,
+            pre_restore_snapshot=str(pre_dir),
+            recovered=False,
+        )

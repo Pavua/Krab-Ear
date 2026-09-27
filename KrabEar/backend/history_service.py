@@ -26,10 +26,17 @@ from backend.history_encryption_policy import (
 )
 from backend.encrypted_snapshot import (
     REASON_POLICY_UNAVAILABLE,
+    REASON_RECOVERY_PENDING,
+    has_pending_restore,
+    SNAPSHOT_MANIFEST_FILENAME,
     UNSUPPORTED_BACKUP_REASON,
     SnapshotOperationRefused,
     classify_backup_dir,
     create_encrypted_snapshot,
+    read_pending_restore_verdict,
+    restore_verdict as restore_verdict_fn,
+    recover_pending_restore_from_store,
+    restore_encrypted_snapshot,
 )
 
 # Typed imports — only loaded during static analysis, avoid runtime circular imports
@@ -2325,6 +2332,22 @@ class HistoryService:
             logger.warning("purge_all_data: runtime_alive.marker rewrite failed", exc_info=True)
             secondary_errors.append("runtime_alive_marker")
 
+        # --- 1g. A5.2b2: приватный staging незавершённого restore. Он живёт
+        # РЯДОМ с живыми журналами (единственный filesystem для атомарной
+        # замены) и содержит уже зашифрованные строки истории, поэтому privacy
+        # purge обязан убрать и его. Шаг вторичный: незавершённый restore при
+        # этом не «дооткатывается», а его доказательство исчезает вместе с
+        # данными, которые владелец только что стёр.
+        try:
+            from backend.encrypted_snapshot import purge_pending_restore_staging
+
+            purge_pending_restore_staging(self.store.data_dir)
+        except Exception:
+            logger.warning(
+                "purge_all_data: A5.2b2 restore staging purge failed", exc_info=True
+            )
+            secondary_errors.append("restore_staging")
+
         # --- 2. W1771 GAP-3: БЕЗУСЛОВНАЯ очистка версий транскрипций (true wipe).
         # Раньше здесь был cleanup_for_ids(current_active_ids) — он стирал версии
         # только тех записей, что попали в текущий снимок active. Версии уже
@@ -4164,6 +4187,30 @@ class HistoryService:
         import shutil
 
         policy_read = store_policy_reader(self.store)
+        # A5.2b2 (M2): докачка незавершённого restore живёт в точках обслуживания,
+        # а не в конструкторе StateStore (у фасада 5 точек создания, recovery шёл
+        # ДО init_sentry/ErrorBus, и вердикт всё равно никем не читался). Здесь —
+        # самое раннее безопасное место: маркер докатывается ДО любой работы с
+        # журналами. Маркера нет — вызов мгновенно возвращает None (один
+        # iterdir, без чтения содержимого и без обращения к ключу).
+        self._recover_pending_restore()
+        # M4: та же проверка, что и в restore, но для ОБЕИХ веток. В OFF-профиле
+        # снимок не создаётся, но legacy ``copy2`` заменил бы живой набор поверх
+        # рваного — и маркер остался бы жить, а ответ не содержал бы причины.
+        if has_pending_restore(self.store.data_dir):
+            logger.error(
+                "handle_backup_history: незавершённый restore на диске (%s) — "
+                "backup любого вида запрещён до разбора",
+                REASON_RECOVERY_PENDING,
+            )
+            return {
+                "backup_path": None,
+                "size_mb": 0.0,
+                "entries": 0,
+                "ok": False,
+                "reason": REASON_RECOVERY_PENDING,
+                "restore_recovery": read_pending_restore_verdict(self.store.data_dir),
+            }
         refusal = {
             "backup_path": None,
             "size_mb": 0.0,
@@ -4294,7 +4341,15 @@ class HistoryService:
                     "handle_backup_history: encrypted snapshot отклонён: %s (%s)",
                     exc.reason, exc,
                 )
-                return {**refusal, "reason": exc.reason}
+                # Вердикт recovery прикладываем к ЛЮБОМУ отказу: докачка к этому
+                # моменту уже могла произойти (окно pending закрыто, записи
+                # перенесены), и без него вызывающий не узнает, что профиль
+                # был рваным и что именно спасено — отказ выглядел бы обычным.
+                return {
+                    **refusal,
+                    "reason": exc.reason,
+                    "restore_recovery": restore_verdict_fn(self.store.data_dir),
+                }
 
         # Вне lock: count_active_items() сам берёт store-lock.
         entries = self.store.count_active_items()
@@ -4314,6 +4369,53 @@ class HistoryService:
             "transaction_id": result["transaction_id"],
         }
 
+    # ------------------------------------------------------------------
+    # A5.2b2 — точки обслуживания незавершённого restore
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _validated_marker_count(result: dict) -> int | None:
+        """Счёт из результата модуля — только если это пригодное число.
+
+        N4: значение приходит из подготовленного набора (in-memory, не с диска),
+        но тип всё равно проверяется: «успех» с мусором в поле счёта хуже, чем
+        честное ``None`` + предупреждение. Проверка значений маркера, читаемых
+        с ДИСКА, живёт в модуле (``_validated_marker_entries``).
+        """
+        value = result.get("restored_entries")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        return value
+
+    def _pending_restore_refusal(self) -> dict[str, Any]:
+        """Единый машинно-читаемый отказ «есть незавершённый restore» (M4)."""
+        return {
+            "restored_entries": 0,
+            "backup_date": "unknown",
+            "ok": False,
+            "reason": REASON_RECOVERY_PENDING,
+            "encrypted": True,
+            "state": None,
+            "transaction_id": None,
+            "pre_restore_snapshot": None,
+            "restore_recovery": read_pending_restore_verdict(self.store.data_dir),
+        }
+
+    def _recover_pending_restore(self) -> dict | None:
+        """Докатывает незавершённый restore, если он есть (A5.2b2, M2).
+
+        Вызывается из backup/restore/листинга бэкапов. Без маркера вызов
+        мгновенно возвращает ``None``: проверка наличия — один ``iterdir``
+        data_dir, без чтения содержимого и без обращения к ключу (OFF-профиль
+        прода не платит ни одного тика Keychain).
+
+        Никогда не бросает: незавершённая транзакция — это fail-closed вердикт,
+        а не ошибка обслуживания. Вердикт кэшируется в модуле и читается через
+        ``get_auto_backup_status().restore_recovery`` (отдельного диагностического
+        IPC-метода нет — это долг, ``service.py`` в бане волны).
+        """
+        return recover_pending_restore_from_store(self.store)
+
     def _history_crypto_for_snapshot(self):
         """Ключ истории для snapshot'а или ``None`` (без Keychain-логики здесь).
 
@@ -4331,6 +4433,182 @@ class HistoryService:
             logger.exception("handle_backup_history: не удалось получить ключ истории")
             return None
 
+    # ------------------------------------------------------------------
+    # A5.2b2 — restore из encrypted snapshot (только при Encryption ON)
+    # ------------------------------------------------------------------
+
+    def _encrypted_snapshot_restore(self, params: dict[str, Any], policy_read) -> dict[str, Any]:
+        """Восстановление из encrypted-снимка при Encryption ON (A5.2b2).
+
+        Контракт, который здесь НЕ меняется (гейты A5.2a/b1):
+
+          * путь обязан лежать внутри ``<data_dir>/backups`` (W1736) и существовать;
+          * каталог обязан быть снимком нового протокола
+            (``classify_backup_dir`` → ``snapshot``); legacy, staging и посторонние
+            имена получают ``unsupported_backup_format`` — как и раньше;
+          * ``settings.json`` не восстанавливается никогда; явный
+            ``restore_settings=True`` — отказ, а не молчание;
+          * отказ всегда ДО первой записи в живые журналы: неизвестный формат,
+            неполный набор, чужой ключ, tamper, недоступный ledger.
+
+        Всё остальное (проверка, ledger union, commit-протокол, recovery) — в
+        ``backend/encrypted_snapshot.py``; здесь только разбор параметров,
+        машинно-читаемый отказ и честный счёт.
+
+        ВАЖНО: этот метод НЕ берёт ``store._lock()``. Модуль сам держит
+        ``history_flock`` (тот же файл блокировки), а ``history_flock`` по
+        контракту state_store НЕ реентерабелен относительно ``store._lock()`` —
+        вложенный захват самозаклинил бы тред. Политика при этом перепроверяется
+        внутри модуля, уже под lock.
+        """
+        refusal: dict[str, Any] = {
+            "restored_entries": 0,
+            "backup_date": "unknown",
+            "ok": False,
+            "reason": _ENC_OP_UNAVAILABLE,
+            "encrypted": True,
+            "state": None,
+            "transaction_id": None,
+            "pre_restore_snapshot": None,
+        }
+
+        raw_path = str(params.get("backup_path", "")).strip()
+        if not raw_path:
+            return refusal
+
+        backup_dir = Path(raw_path).expanduser().resolve()
+        # W1736 — тот же гейт, что у legacy-пути, и при ON.
+        backups_root = Path(self.store.data_dir).resolve() / "backups"
+        if backup_dir != backups_root and not backup_dir.is_relative_to(backups_root):
+            raise RuntimeError(
+                f"restore_history: backup_path {backup_dir!s} находится за пределами "
+                f"разрешённой директории бекапов {backups_root!s}"
+            )
+        if not backup_dir.exists() or not backup_dir.is_dir():
+            raise RuntimeError(f"Папка резервной копии не найдена: {backup_dir}")
+
+        kind = classify_backup_dir(backup_dir)
+        if kind != "snapshot":
+            # Причина отказа называет РЕАЛЬНУЮ помеху: legacy-каталог верного
+            # формата, но с plaintext — это гейт A5.2a и его код сохранён
+            # дословно; staging/посторонние имена не восстанавливаются ни при
+            # какой политике — это гейт b1.
+            reason = _ENC_OP_UNAVAILABLE if kind == "legacy" else UNSUPPORTED_BACKUP_REASON
+            logger.warning(
+                "handle_restore_history: каталог %s — %s, при Encryption ON "
+                "восстановление неприменимо (%s)",
+                backup_dir, kind, reason,
+            )
+            return {**refusal, "reason": reason}
+
+        crypto = self._history_crypto_for_snapshot()
+        if crypto is None:
+            logger.error(
+                "handle_restore_history: encryption on, но ключ недоступен — "
+                "restore невозможен (%s)",
+                _ENC_OP_UNAVAILABLE,
+            )
+            return refusal
+
+        restore_settings = self._coerce_bool(
+            params.get("restore_settings", False), default=False
+        )
+        try:
+            result = restore_encrypted_snapshot(
+                data_dir=self.store.data_dir,
+                backups_root=Path(self.store.data_dir) / "backups",
+                snapshot_dir=backup_dir,
+                crypto=crypto,
+                restore_settings=restore_settings,
+                policy_read=policy_read,
+            )
+        except SnapshotOperationRefused as exc:
+            logger.warning(
+                "handle_restore_history: restore из снимка отклонён: %s (%s)",
+                exc.reason, exc,
+            )
+            return {**refusal, "reason": exc.reason}
+
+        # Замена журналов делает ин-РАМ индексы StateStore неверными: они
+        # относятся к прежнему содержимому. Без сброса конкурентный
+        # `search_history` успевает отдать ДО-restore индекс (полный cleartext
+        # прежней истории), а счётчик кэширует `_active_ids` и врал бы.
+        #
+        # Сброс идёт ПОД тем же store-lock одним вызовом (M3): раньше
+        # `_active_ids = None` ставился снаружи, а `reset_search_caches()` брал
+        # лок сам — между ними было окно, где читатель видел старые индексы и
+        # новые файлы. `reset_search_caches` переиспользует лок фасада
+        # (реентерабелен по треду), поэтому вложенный захват — no-op.
+        with self.store._lock():
+            self.store._active_ids = None
+            self.store.reset_search_caches()
+            # Счёт — под тем же локом и с честной деградацией: restore к этому
+            # моменту УЖЕ COMMITTED (замены сделаны, read-back прошёл), и падать
+            # из-за таймаута счётчика нельзя — операция уже применена.
+            warnings: list[str] = []
+            try:
+                restored_entries = int(self.store.count_active_items())
+                entries_source = "store_count"
+                entries_verified = True
+            except Exception as exc:  # noqa: BLE001 — таймаут/сбой чтения
+                marker_value = self._validated_marker_count(result)
+                restored_entries = marker_value
+                entries_source = "snapshot_lines"
+                entries_verified = False
+                warnings.append(
+                    f"restored_entries_unverified: счётчик недоступен "
+                    f"({type(exc).__name__}), показано значение из маркера снимка"
+                )
+                logger.warning(
+                    "handle_restore_history: restored_entries не проверен — %s",
+                    type(exc).__name__,
+                )
+                if marker_value is None:
+                    entries_source = "unknown"
+                    warnings.append(
+                        "restored_entries_unknown: значение из маркера непригодно"
+                    )
+
+        backup_date = "unknown"
+        try:
+            manifest = safe_json_loads(
+                (backup_dir / SNAPSHOT_MANIFEST_FILENAME).read_text(encoding="utf-8"),
+                default=None,
+                context="snapshot_manifest.json (restore)",
+            )
+            if isinstance(manifest, dict):
+                backup_date = str(manifest.get("created_at") or "unknown")
+        except Exception:  # noqa: BLE001 — дата не критична для успеха restore
+            logger.warning(
+                "handle_restore_history: не удалось прочитать created_at снимка",
+                exc_info=True,
+            )
+
+        logger.info(
+            "История восстановлена из encrypted-снимка %s: %s записей "
+            "(transaction %s, pre-restore %s, источник %s)",
+            backup_dir, restored_entries, result["transaction_id"],
+            result["pre_restore_snapshot"], entries_source,
+        )
+        return {
+            "restored_entries": restored_entries,
+            "restored_entries_verified": entries_verified,
+            "restored_entries_source": entries_source,
+            "backup_date": backup_date,
+            "ok": True,
+            "reason": None,
+            "encrypted": True,
+            "state": result["state"],
+            "transaction_id": result["transaction_id"],
+            "snapshot_path": result["snapshot_dir"],
+            "pre_restore_snapshot": result["pre_restore_snapshot"],
+            "ledger_blocked": result["ledger_blocked"],
+            # N3: это СТРОКИ, отфильтрованные по deletion ledger, по всем десяти
+            # журналам (история + дельты), а не «записи истории».
+            "filtered_out_lines": result["filtered_out_lines"],
+            "warnings": warnings,
+        }
+
     def handle_restore_history(self, params: dict[str, Any]) -> dict[str, Any]:
         """Восстанавливает историю из резервной копии.
 
@@ -4344,6 +4622,22 @@ class HistoryService:
         """
         import shutil
 
+        # A5.2b2 (M2): точка обслуживания №2. Докачка ДО любой работы с журналами:
+        # восстановление не имеет права применяться поверх рваного набора.
+        self._recover_pending_restore()
+
+        # A5.2b2 (M4): маркер, который пережил докачку, останавливает ЛЮБУЮ
+        # ветку восстановления — включая OFF/legacy ``copy2``. Гейт B2 накрывал
+        # только create-side снимков, а legacy-ветка проходила молча: ответ без
+        # ``ok``/``reason``, а живой набор заменялся целиком поверх рваного.
+        if has_pending_restore(self.store.data_dir):
+            logger.error(
+                "handle_restore_history: незавершённый restore на диске (%s) — "
+                "любое восстановление запрещено до разбора",
+                REASON_RECOVERY_PENDING,
+            )
+            return self._pending_restore_refusal()
+
         # A5.2a: legacy restore через copy2 запрещён при Encryption ON — он
         # вернул бы plaintext и мог бы понизить текущую policy через
         # restore_settings=True (OFF-settings в backup). Отказ ДО валидации
@@ -4356,12 +4650,12 @@ class HistoryService:
             "reason": _ENC_OP_UNAVAILABLE,
         }
         if policy_blocks(policy_read):
-            logger.warning(
-                "handle_restore_history: history encryption on — legacy plaintext "
-                "restore refused (%s)",
-                _ENC_OP_UNAVAILABLE,
-            )
-            return refusal
+            # A5.2b2: при Encryption ON восстанавливается ТОЛЬКО encrypted-снимок
+            # нового протокола (проверка + commit-протокол + ledger union). Legacy
+            # и любые другие каталоги сохраняют отказ A5.2a
+            # (``history_encryption_operation_unavailable``) — гейт не ослаблен,
+            # просто у него появился ровно один легальный путь.
+            return self._encrypted_snapshot_restore(params, policy_read)
 
         raw_path = str(params.get("backup_path", "")).strip()
         if not raw_path:
@@ -4453,10 +4747,21 @@ class HistoryService:
 
         Возвращает:
             backups (list): список объектов с полями path, backup_date, entries, size_mb
+            encrypted_snapshots (list): снимки нового протокола
+            restore_recovery (dict | None): A5.2b2 — read-only вердикт о
+                незавершённом restore (машинно-читаемый: pending/reason/
+                pre_restore_snapshot). Здесь ТОЛЬКО чтение маркера: сам листинг
+                не докатывает транзакцию и ничего не пишет.
         """
+        # A5.2b2 (M2/F4): вердикт виден в том же ответе, что и список бэкапов, —
+        # иначе «есть незавершённый restore» нельзя объяснить владельцу.
+        # Источник ЕДИНЫЙ с get_auto_backup_status/get_diagnostics (F4): раньше
+        # здесь был disk-only вариант, и после докачки поверхности противоречили
+        # друг другу (здесь None, в статусе — что восстановление произошло).
+        restore_verdict = restore_verdict_fn(self.store.data_dir)
         backups_dir = Path(self.store.data_dir) / "backups"
         if not backups_dir.exists():
-            return {"backups": []}
+            return {"backups": [], "restore_recovery": restore_verdict}
 
         result = []
         snapshots: list[dict[str, Any]] = []
@@ -4498,7 +4803,11 @@ class HistoryService:
                     entry["size_mb"] = round(size_bytes / (1024 * 1024), 3)
             result.append(entry)
 
-        return {"backups": result, "encrypted_snapshots": snapshots}
+        return {
+            "backups": result,
+            "encrypted_snapshots": snapshots,
+            "restore_recovery": restore_verdict,
+        }
 
     def handle_find_duplicates(self, params: dict[str, Any]) -> dict[str, Any]:
         """Находит дублирующиеся транскрипции в истории.
