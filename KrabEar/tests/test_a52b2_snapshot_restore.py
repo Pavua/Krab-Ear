@@ -3221,3 +3221,46 @@ class TestReasonCodeParity:
         # Историческая часть сохранена.
         assert verdict["state"] == "COMMITTING"
         assert es.restore_verdict(clean) is None, "после сброса кэша — только диск"
+
+
+class TestRecoveryVerdictReachesCaller:
+    """Докачка и отказ — разные события, но вызывающий должен видеть оба.
+
+    Проба: докачка закрыла окно pending (записи перенесены), после чего сам
+    backup отказался по посторонней причине. Без вердикта в ответе владелец
+    видел бы только «backup не создался» и не узнал бы, что профиль был рваным
+    и что именно перенесено.
+    """
+
+    def test_backup_refusal_carries_recovery_verdict(self, tmp_path):
+        from backend.encrypted_snapshot import SnapshotOperationRefused
+
+        data_dir, crypto, _snap, store = _ragged_with_real_items(tmp_path)
+        store.add_history_item(text="перенесена при докачке")
+
+        def _post_recovery_refusal(**_kw):
+            # Отказ уже ПОСЛЕ докачки (как в бою: протокол снимка сломался, а
+            # окно pending к этому моменту закрылось).
+            raise SnapshotOperationRefused(
+                "snapshot_destination_exists", "каталог уже существует"
+            )
+
+        with patch(
+            "backend.history_service.create_encrypted_snapshot",
+            side_effect=_post_recovery_refusal,
+        ):
+            result = _svc(data_dir, crypto).handle_backup_history({})
+
+        assert result["ok"] is False
+        assert result["reason"] == "snapshot_destination_exists"
+        verdict = result["restore_recovery"]
+        assert verdict is not None, "вердикт докачки потерян в отказе backup"
+        assert verdict["rolled_forward"] is True
+        assert verdict["records_carried"] >= 1
+        assert verdict["pre_restore_snapshot"]
+        # Данные на месте, окно закрыто.
+        assert any(
+            item.text == "перенесена при докачке"
+            for item in store._load_active_items_unlocked()
+        )
+        assert has_pending_restore(data_dir) is False

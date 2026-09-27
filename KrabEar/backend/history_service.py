@@ -34,6 +34,7 @@ from backend.encrypted_snapshot import (
     classify_backup_dir,
     create_encrypted_snapshot,
     read_pending_restore_verdict,
+    restore_verdict as restore_verdict_fn,
     recover_pending_restore_from_store,
     restore_encrypted_snapshot,
 )
@@ -4340,7 +4341,15 @@ class HistoryService:
                     "handle_backup_history: encrypted snapshot отклонён: %s (%s)",
                     exc.reason, exc,
                 )
-                return {**refusal, "reason": exc.reason}
+                # Вердикт recovery прикладываем к ЛЮБОМУ отказу: докачка к этому
+                # моменту уже могла произойти (окно pending закрыто, записи
+                # перенесены), и без него вызывающий не узнает, что профиль
+                # был рваным и что именно спасено — отказ выглядел бы обычным.
+                return {
+                    **refusal,
+                    "reason": exc.reason,
+                    "restore_recovery": restore_verdict_fn(self.store.data_dir),
+                }
 
         # Вне lock: count_active_items() сам берёт store-lock.
         entries = self.store.count_active_items()
