@@ -99,8 +99,20 @@ PURGE_METHOD_NAMES: frozenset[str] = frozenset(
 # uses these extensions, so they only ever surface via the per-extension (f-string /
 # glob) sibling-extension detection — adding them here lets that path recognise them.
 PERSIST_EXTENSIONS: frozenset[str] = frozenset(
-    {"json", "ndjson", "txt", "npy", "key", "csv", "html", "srt"}
+    {"json", "ndjson", "txt", "npy", "key", "csv", "html", "srt", "bak"}
 )
+
+# A5.2c1: a ``.bak``-copy is a DERIVED copy of the store whose name precedes it
+# (``history.ndjson`` → ``history.ndjson.bak`` / ``.bak-<ts>``).  It holds the
+# same cleartext the base store holds, so a privacy purge that leaves it behind is
+# not a purge.  The guard used to be structurally blind to this family:
+# ``_record_glob`` dropped any pattern whose trailing token is not a known
+# extension, and ``history.ndjson.bak*`` ends in ``bak*`` — so deleting the
+# purge's ``*.bak*`` sweep was invisible here, exactly the "wiring removed but
+# 0 gaps stayed green" class the A5.2b2 review closed for f-string families.
+# Recognised by SHAPE, so a future producer cannot fall through silently.
+BACKUP_COPY_SUFFIX_RE = re.compile(r"^\.(?P<ext>[a-z0-9]+)\.bak(?:[-._0-9A-Za-z*]*)$")
+_BACKUP_GLOB_RE = re.compile(r"^(?P<base>.+?)\.bak[-._0-9A-Za-z*]*$")
 
 # Filenames that the discovery scanner must never treat as a real store even if
 # they syntactically match (transient probes etc.).
@@ -213,9 +225,40 @@ def _canonicalize(name: str) -> str:
     return n
 
 
+def _looks_like_backup_copy(name: str) -> bool:
+    """``history.ndjson.bak`` / ``settings.json.bak1`` / ``…bak-20260926``?
+
+    A5.2c1: backup copies are data stores in their own right — the base name must
+    itself look like a store, so ``bak`` alone is never a store but
+    ``history.ndjson.bak`` is one.  The canonical family id is
+    ``<base>.bak*`` so all timestamped/numbered variants collapse into ONE
+    store the purge must sweep explicitly.
+    """
+    match = _BACKUP_GLOB_RE.match(name)
+    if match is None:
+        return False
+    base = match.group("base")
+    parts = base.rsplit(".", 1)
+    return len(parts) == 2 and parts[1] in PERSIST_EXTENSIONS
+
+
+def _backup_family(name: str) -> str | None:
+    """Канонический id семейства ``<base>.bak*`` (None — не backup-копия)."""
+    match = _BACKUP_GLOB_RE.match(name)
+    if match is None:
+        return None
+    base = match.group("base")
+    parts = base.rsplit(".", 1)
+    if len(parts) != 2 or parts[1] not in PERSIST_EXTENSIONS:
+        return None
+    return f"{base}.bak*"
+
+
 def _looks_like_store_filename(name: str) -> bool:
     if name in _NEVER_A_STORE:
         return False
+    if _looks_like_backup_copy(name):
+        return True
     parts = name.rsplit(".", 1)
     if len(parts) == 2 and parts[1] in PERSIST_EXTENSIONS:
         return True
@@ -566,6 +609,13 @@ def _record_glob(
     clears the whole family.  Bare ``*.ext`` globs are the containing subdir
     (tracked via mkdir/dir refs) — skipped here to avoid noise."""
     basename = pattern.rsplit("/", 1)[-1]
+    # A5.2c1: a ``*.bak*`` sweep is a NARROW family (the base name is static),
+    # so it is a real store the purge must cover — recorded under its canonical
+    # id so all variants (``bak``, ``bak1``, ``bak-<ts>``) collapse together.
+    family = _backup_family(basename)
+    if family is not None:
+        found.setdefault(pattern, StoreRef(pattern, module, f"{rel}:{lineno}"))
+        return
     ext_match = re.search(r"\.([a-z0-9]+)$", basename)
     if ext_match is None:
         return
@@ -688,6 +738,33 @@ def discover_stores_in_module(path: Path) -> list[StoreRef]:
                         rel,
                         _qualify(resolver.attr_subpath(_name_of(recv)), pattern),
                         node.lineno,
+                    )
+            # (b') A5.2c1: ``<data-dir-rooted path>.with_suffix(".X.bak…")`` —
+            # ПРОИЗВОДИТЕЛЬ backup-копии. Без этой ветки гейт был слеп к месту,
+            # где копия РЕАЛЬНО создаётся (``migrate_history_encryption``
+            # делает ``history.ndjson.with_suffix(".ndjson.bak")``): снос
+            # sweep'а в purge проходил бы как «0 gaps», хотя на диске лежит
+            # открытая копия истории.  Регистрируем ПРОИЗВОДИТЕЛЯ, а не
+            # потребителя — иначе гейт сам себя оправдывал бы.
+            if attr == "with_suffix" and node.args:
+                suffix = _const_str(node.args[0])
+                if suffix is not None and BACKUP_COPY_SUFFIX_RE.match(suffix):
+                    # ``subpath`` here is the BASE FILE's path under data_dir
+                    # (``_register_dir`` treats any ``self.X = data_dir / "y"``
+                    # as a root, file or not).  ``with_suffix`` REPLACES the last
+                    # extension: ``history.ndjson`` + ``.ndjson.bak`` → stem
+                    # ``history`` + suffix = ``history.ndjson.bak``.
+                    base_path = resolver.base_subpath(recv)
+                    if not base_path:
+                        continue
+                    parent = base_path.rsplit("/", 1)[0] if "/" in base_path else ""
+                    base_name = base_path.rsplit("/", 1)[-1]
+                    parts = base_name.rsplit(".", 1)
+                    if len(parts) != 2 or parts[1] not in PERSIST_EXTENSIONS:
+                        continue
+                    store_id = _qualify(parent, parts[0] + suffix)
+                    found.setdefault(
+                        store_id, StoreRef(store_id, module, f"{rel}:{node.lineno}")
                     )
             # (c) (base_dir / "sub").mkdir(...)
             if attr == "mkdir" and isinstance(recv, ast.BinOp) and isinstance(
@@ -1190,8 +1267,21 @@ def _is_covered(
       4. A *directory* whose every discovered child file is itself covered (an
          empty shell once its contents are wiped — e.g. ``archive/`` whose only
          content ``archive/archive.ndjson`` is cleared by ``clear_all``).
+      5. **A5.2c1 backup-copy family:** a ``.bak`` store is covered when the pool
+         names the SAME family — a purge sweep of ``history.ndjson.bak*`` covers
+         the producer-discovered ``history.ndjson.bak`` and vice versa.  The
+         family is matched by canonical id, so ``bak`` / ``bak1`` / ``bak-<ts>``
+         cannot each sneak past a sweep that only removed one variant.
     """
     pool = covered | allowlisted
+    # (5) A5.2c1: backup-copy family — match on the canonical ``<base>.bak*`` id.
+    own_family = _backup_family(store_id.rsplit("/", 1)[-1])
+    if own_family is not None:
+        for entry in pool:
+            if entry.endswith("/"):
+                continue
+            if _backup_family(entry.rsplit("/", 1)[-1]) == own_family:
+                return True
     # (0) sibling-extension family store ``<subdir>/*.ext``.
     if "/*." in store_id:
         if store_id in pool:

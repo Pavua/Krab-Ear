@@ -2975,6 +2975,81 @@ class HistoryService:
                 )
                 secondary_errors.append("terminal_cache")
 
+        # --- 37a. A5.2c1: удалить permanent deletion ledger (history_purged_ids.ndjson).
+        # Раньше файл был allowlisted-исключением («ID-only, без PII») и purge его
+        # НЕ чистил. Это ломало профиль: шаг 1b (compact) дописывает в ledger
+        # ENC1-строки СТАРЫМ ключом, а шаг 38 shred'ит ключ → следующее чтение
+        # истории получает InvalidTag → HistoryEncryptionUnavailable, т.е. после
+        # privacy-purge профиль с шифрованием НЕЧИТАЕМ.
+        #
+        # Обоснование удаления (решение 1 карточки A5.2c1): единственная роль
+        # ledger'а — блокировать resurrection ID'ов, которых история уже нет;
+        # после полного wipe внутри профиля он бессмысленен. Защита от
+        # resurrection ВНЕШНЕЙ копии обеспечивается ledger'ом САМОЙ копии:
+        # A5.2b2 при сборе union берёт «текущий ledger ∪ ledger снимка», поэтому
+        # возвращённый извне старый снимок не воскресит собственные удалённые ID.
+        # Это свойство закреплено тестом
+        # test_restored_external_copy_cannot_resurrect_its_own_purged_ids.
+        #
+        # Порядок «данные → ключ»: ledger сносится ДО шага 38, иначе между
+        # компактированием и удалением ключа остаётся окно, в котором профиль
+        # уже нечитаем.
+        deletion_ledger_purged = False
+        if _data_dir is not None:
+            try:
+                _ledger_path = _data_dir / "history_purged_ids.ndjson"
+                _ledger_path.unlink(missing_ok=True)
+                deletion_ledger_purged = not _ledger_path.exists()
+                if not deletion_ledger_purged:
+                    raise OSError(f"{_ledger_path} не удалён")
+                logger.info("purge_all_data: permanent deletion ledger удалён")
+            except Exception:
+                logger.warning(
+                    "purge_all_data: удаление history_purged_ids.ndjson не удалось",
+                    exc_info=True,
+                )
+                secondary_errors.append("deletion_ledger")
+
+        # --- 37b. A5.2c1: зачистить .bak-копии истории и настроек (явные паттерны).
+        # В data_dir лежат `history.ndjson.bak*` (в прод-профиле владельца —
+        # 23.4 МБ ОТКРЫТОЙ истории) и `settings.json.bak*` (шесть копий с
+        # непустыми секретами: hf_token, sentry_dsn_agent, voice_gateway_api_key,
+        # stt_gigaam_hf_token, llm_api_key, lm_studio_api_key). Это копии данных,
+        # которые purge и так уничтожает, поэтому они входят в зону зачистки.
+        #
+        # Удаление — ЯВНЫМ перечислением паттернов, а не широким glob по data_dir:
+        # посторонние файлы (notes.txt, session.log, README.md, подкаталоги)
+        # не имеют отношения к purge и не должны исчезать вместе с ним.
+        stale_copies_removed = 0
+        if _data_dir is not None:
+            try:
+                # Паттерны перечислены ЯВНО и РАЗВЁРНУТЫ (без цикла по
+                # коллекции): статический guard audit_purge_coverage разрешает
+                # аргумент glob'а только как строковый литерал/константу, и
+                # цикл по tuple сделал бы зачистку НЕВИДИМОЙ для гейта —
+                # ровно тот класс «проводка есть, а гейт зелёный», который
+                # закрывали в b2 (f-string семейства) и b3 (delete-glob).
+                for _bak_path in list(_data_dir.glob("history.ndjson.bak*")) + list(
+                    _data_dir.glob("settings.json.bak*")
+                ):
+                    try:
+                        if not _bak_path.is_file():
+                            continue
+                        _bak_path.unlink(missing_ok=True)
+                        stale_copies_removed += 1
+                    except OSError:
+                        logger.warning(
+                            "purge_all_data: не удалось удалить %s", _bak_path, exc_info=True
+                        )
+                        secondary_errors.append("stale_copies")
+                if stale_copies_removed:
+                    logger.info(
+                        "purge_all_data: удалено %d .bak-копий", stale_copies_removed
+                    )
+            except Exception:
+                logger.warning("purge_all_data: зачистка .bak-копий не удалась", exc_info=True)
+                secondary_errors.append("stale_copies")
+
         # --- 38. Crypto-audit (2026-06-20): удалить ключ шифрования истории из Keychain.
         # Без этого выживший AES-256 ключ расшифровывает pre-purge бэкап history.ndjson
         # (Time Machine / iCloud / FS-снапшот) — ciphertext + живой ключ = весь текст.
@@ -2986,7 +3061,9 @@ class HistoryService:
             try:
                 delete_history_key()
             except KeystoreUnavailable:
-                pass  # нет Keychain (Linux/CI) → ключа нет → нечего удалять
+                # Нет Keychain (Linux/CI) → ключа нет → нечего shred'ить: не
+                # ошибка purge и НЕ повод пропустить остальные шаги.
+                pass
             self.store._history_crypto_initialized = False
             self.store._history_crypto_instance = None
         except Exception:
