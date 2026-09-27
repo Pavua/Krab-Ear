@@ -691,9 +691,10 @@ def snapshot_space_report(*, data_dir: Any) -> dict:
 #   2. лимиты на СЕМЕЙСТВА (`max_copies` отдельно для ручных и авто-снимков,
 #      отдельный потолок для pre-restore страховок), а не один общий счётчик:
 #      иначе ручной бэкап владельца вытеснялся бы авто-циклом;
-#   3. при ЖИВОМ pending restore не удаляется ничего: его pre-restore снимок —
-#      страховка незавершённой операции, а сам каталог маркера лежит в data_dir
-#      и сюда не попадает вовсе;
+#   3. при ЖИВОМ restore не удаляется ничего: его pre-restore снимок — страховка
+#      незавершённой операции, а сам каталог staging лежит в data_dir и сюда не
+#      попадает вовсе. Признак «restore работает» шире маркера: маркер пишется
+#      уже после чтения снимка, поэтому в окне чтения его ещё нет (NIT-1);
 #   4. OFF-профиль сюда не заходит (вызов только из ветки encrypted), поэтому
 #      прежнее поведение OFF не меняется ни в чём.
 
@@ -803,17 +804,29 @@ def prune_snapshot_family(
 
     Возвращает отчёт (без исключений): ``removed``/``skipped_reason``/
     ``families`` — вызывающий логирует, а статус может показать.
+
+    🔴 Сериализация с restore — обязанность ВЫЗЫВАЮЩЕГО: retention обязателен
+    звать под ``store._lock()`` (тот же ``history.lock``, что и у restore).
+    Модуль lock сам не берёт сознательно: ``history_flock`` НЕ реентерабелен
+    относительно ``StateStore._lock`` (разные fd на одном файле), поэтому
+    «безопасный» захват внутри функции при уже взятом lock'е вызывателя — это
+    дедлок. Второй слой защиты от гонки (restore начался прямо посреди прохода)
+    функция всё же держит сама: проверка restore-staging перед каждым удалением.
     """
     root = Path(backups_root)
 
     def _is_pending() -> bool:
         try:
-            return bool(restore_marker_dirs(data_dir))
+            # Каталог restore-staging — признак «restore работает СЕЙЧАС», а не
+            # «есть незавершённая операция». Маркер в это окно ещё не написан,
+            # а снимок уже читается, поэтому ориентироваться только на него —
+            # значило бы удалять снимок из-под читающего restore (NIT-1).
+            return bool(restore_staging_dirs(data_dir))
         except SnapshotOperationRefused:
             return True  # не смогли проверить — считаем «есть», не удаляем
 
     if _is_pending():
-        # Граница 3: при живом pending restore не удаляется НИЧЕГО.
+        # Граница 3: пока restore работает с профилем, не удаляется НИЧЕГО.
         return {
             "ok": True,
             "removed": [],
@@ -1863,6 +1876,42 @@ def has_pending_restore(data_dir: Any) -> bool:
         return bool(restore_marker_dirs(data_dir))
     except SnapshotOperationRefused:
         return True  # не смогли проверить — считаем «есть», recovery разберётся
+
+
+def restore_staging_dirs(data_dir: Any) -> list[Path]:
+    """ВСЕ каталоги restore-staging, ВКЛЮЧАЯ ещё без маркера (A5.2b3, NIT-1).
+
+    Отличие от ``restore_marker_dirs`` — принципиальное, а не избыточное:
+
+    * ``restore_marker_dirs`` = «есть незавершённый restore» для профиля. Маркер
+      пишется в ``_apply_verified_snapshot_locked``, то есть уже ПОСЛЕ чтения
+      снимка, поэтому в окне чтения его ещё нет, а снимок уже занят;
+    * ``restore_staging_dirs`` = «restore сейчас работает с этим профилем» —
+      признак для retention, который обязан стоять на обеих сторонах окна.
+
+    Каталог появляется в том же месте, где начинается чтение снимка под lock'ом
+    (``_ensure_private_dir(staging)``), поэтому «staging есть» покрывает и более
+    широкое окно до него. Симлинки и не-каталоги игнорируются (как и в b2).
+
+    Не путать с вердиктом для владельца: там маркера нет — значит и pending нет
+    (ничего ещё не тронуто), и ``has_pending_restore`` так и остаётся ложным.
+    """
+    base = Path(data_dir)
+    try:
+        entries = list(base.iterdir())
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise SnapshotOperationRefused(
+            REASON_FSYNC_FAILED, f"{base} не читается: {exc}"
+        ) from exc
+    return sorted(
+        path
+        for path in entries
+        if path.name.startswith(RESTORE_STAGING_PREFIX)
+        and not path.is_symlink()
+        and path.is_dir()
+    )
 
 
 def _require_policy_on(

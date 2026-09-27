@@ -27,6 +27,7 @@ import os
 import shutil
 import stat
 import subprocess
+import threading
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,7 +38,7 @@ from backend import auto_backup as auto_backup_mod
 from backend import encrypted_snapshot as snap
 from backend.encrypted_snapshot import SnapshotOperationRefused
 from backend.history_crypto import HistoryCrypto
-from backend.state_store import HISTORY_JOURNAL_FILENAMES, StateStore
+from backend.state_store import HISTORY_JOURNAL_FILENAMES, StateStore, history_flock
 
 # Фиксированный путь OS-шима: одинаков для всего прогона pytest-сессии, чтобы
 # факт обращения к `security(1)` можно было проверить и ПОСЛЕ прогона.
@@ -1000,3 +1001,129 @@ class TestSpaceObservability:
         ).read_text(encoding="utf-8")
         assert snap.REASON_INSUFFICIENT_SPACE.startswith("snapshot_")
         assert f"`{snap.REASON_INSUFFICIENT_SPACE}`" in doc
+
+
+# ---------------------------------------------------------------------------
+# NIT-1 — retention сериализован с restore (probe ревьюера p3b + окно без маркера)
+# ---------------------------------------------------------------------------
+
+
+def _restore_staging_dir(data_dir: Path, txid: str = "restore-20260101T000000Z-abcd") -> Path:
+    """Приватный staging restore. Без маркера — окно ЧТЕНИЯ снимка (см. ниже)."""
+    staging = data_dir / f"{snap.RESTORE_STAGING_PREFIX}{txid}"
+    staging.mkdir(parents=True, exist_ok=True)
+    return staging
+
+
+class TestRetentionSerialisedWithRestore:
+    """Снимок, который restore читает прямо сейчас, удалять нельзя.
+
+    Окно, о котором указал ревью: `restore_encrypted_snapshot` читает и верифицирует
+    снимок ДВАжды (до lock'а и под ним), а маркер пишется только в
+    `_apply_verified_snapshot_locked` — то есть уже после чтения. Значит «снимок
+    занят restore» нельзя определять по маркеру.
+    """
+
+    def test_restore_staging_without_marker_blocks_retention(self, tmp_path, monkeypatch):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed(store, ["одна"])
+        _install_usage(monkeypatch, _plenty)
+        for i in range(5):
+            _fake_snapshot_dir(data_dir, crypto, f"snapshot_20260101_00000{i}", f"tx-n1-{i}")
+        reading = data_dir / "backups" / "snapshot_20260101_000000"  # его читает restore
+        _restore_staging_dir(data_dir)  # БЕЗ restore_marker.json
+        before = _dirs(data_dir / "backups")
+
+        result = snap.prune_snapshot_family(
+            backups_root=data_dir / "backups", data_dir=data_dir, max_copies=1
+        )
+
+        assert result["removed"] == []
+        assert result["skipped_reason"] == snap.REASON_RECOVERY_PENDING
+        assert _dirs(data_dir / "backups") == before
+        assert reading.is_dir()
+
+    def test_retention_resumes_once_restore_finished(self, tmp_path, monkeypatch):
+        """Регресс нормального поведения: staging убран — retention работает."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed(store, ["одна"])
+        _install_usage(monkeypatch, _plenty)
+        for i in range(5):
+            _fake_snapshot_dir(data_dir, crypto, f"snapshot_20260101_00000{i}", f"tx-n1-ok-{i}")
+        staging = _restore_staging_dir(data_dir)
+        assert (
+            snap.prune_snapshot_family(
+                backups_root=data_dir / "backups", data_dir=data_dir, max_copies=1
+            )["removed"]
+            == []
+        )
+        shutil.rmtree(staging)  # restore завершён, staging убран (как в b2)
+
+        result = snap.prune_snapshot_family(
+            backups_root=data_dir / "backups", data_dir=data_dir, max_copies=1
+        )
+
+        assert result["removed_count"] == 4
+        assert (data_dir / "backups" / "snapshot_20260101_000004").is_dir()
+        assert not (data_dir / "backups" / "snapshot_20260101_000000").exists()
+
+    def test_cycle_holds_history_lock_while_pruning(self, tmp_path, monkeypatch):
+        """Проба p3b: при УДЕРЖИВАЕМОМ history.lock цикл не удаляет ничего.
+
+        Retention обязан идти под тем же flock'ом, что и restore (`history.lock`),
+        иначе окно «restore читает снимок — retention его сносит» остаётся.
+        """
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed(store, ["одна"])
+        _install_usage(monkeypatch, _plenty)
+        for i in range(4):
+            _fake_snapshot_dir(data_dir, crypto, f"auto_snapshot_20260101_00000{i}", f"tx-lock-{i}")
+        target = data_dir / "backups" / "auto_snapshot_20260101_000000"
+        mgr = _mgr(store, max_copies=1)
+
+        acquired = threading.Event()
+        release = threading.Event()
+        outcome: dict = {}
+
+        def _holder():
+            with history_flock(data_dir):
+                acquired.set()
+                release.wait(10)
+
+        def _cycle():
+            # Именно retention, а не весь цикл: создание снимка и так берёт store-lock,
+            # поэтому через check_and_backup() тест проходил бы и без фикса.
+            try:
+                outcome["result"] = mgr._prune_snapshot_family()
+            except BaseException as exc:  # noqa: BLE001 — пробрасываем в тест
+                outcome["error"] = exc
+
+        holder = threading.Thread(target=_holder, daemon=True)
+        holder.start()
+        assert acquired.wait(10), "холдер не взял history.lock"
+        worker = threading.Thread(target=_cycle, daemon=True)
+        worker.start()
+        try:
+            # Пока lock держит «restore», цикл обязан стоять на ожидании, а не
+            # резать снимки. Даём ему время дойти до flock'а.
+            worker.join(0.5)
+            assert worker.is_alive(), "цикл прошёл, не дождавшись lock'а"
+            assert target.is_dir(), "retention удалил снимок под удерживаемым lock'ом"
+            assert "result" not in outcome
+        finally:
+            release.set()
+            holder.join(10)
+            worker.join(30)
+        assert "error" not in outcome, outcome.get("error")
+        assert outcome["result"]["removed_count"] == 3
+        # После освобождения lock'а retention отрабатывает полностью.
+        assert not target.exists()

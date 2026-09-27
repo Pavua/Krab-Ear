@@ -274,15 +274,24 @@ class AutoBackupManager:
         владельца/A5.2c), а лимиты новых форматов задаёт владелец через
         ``max_copies`` — то же самое число, что и для legacy, но в своей семье.
 
+        🔴 NIT-1: вызов идёт ПОД тем же flock'ом (``history.lock``), что restore
+        и запись журналов. Без этого retention мог удалить снимок, который
+       restore прямо сейчас читает: проба ревьюера — при удерживаемом
+        ``history.lock`` снимок-цель исчезал за миллисекунды, и restore падал бы
+        в ``_build_restore_output``. Снаружи lock'а остаётся только узкое окно
+        между чтением снимка и созданием staging — его закрывает проверка
+        restore-staging внутри ``prune_snapshot_family``.
+
         Retention не имеет права уронить цикл: любая ошибка здесь — предупреждение
         в лог, а не отказ только что сделанного бэкапа.
         """
         try:
-            return prune_snapshot_family(
-                backups_root=self.backups_dir,
-                data_dir=self.store.data_dir,
-                max_copies=self.max_copies,
-            )
+            with self._store_lock():
+                return prune_snapshot_family(
+                    backups_root=self.backups_dir,
+                    data_dir=self.store.data_dir,
+                    max_copies=self.max_copies,
+                )
         except Exception:  # noqa: BLE001 — снимок уже зафиксирован, не роняем цикл
             logger.warning("auto_backup: retention снимков не выполнен", exc_info=True)
             return {"ok": False, "removed": [], "removed_count": 0, "skipped_reason": None,
