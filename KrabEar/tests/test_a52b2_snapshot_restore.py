@@ -2936,8 +2936,13 @@ class TestPendingVisibleInStatusSurfaces:
         assert verdict["pending"] is True
 
         # Модуль функции читает тот же источник истины (диск), без lock'а:
-        # цена — один iterdir, блокировок нет.
-        assert read_pending_restore_verdict(data_dir) == verdict
+        # цена — один iterdir, блокировок нет. Сравниваем СОДЕРЖАТЕЛЬНОЕ:
+        # attempted_at (F3) — метка времени вызова и по определению разная.
+        again = read_pending_restore_verdict(data_dir)
+        assert {k: v for k, v in again.items() if k != "attempted_at"} == {
+            k: v for k, v in verdict.items() if k != "attempted_at"
+        }
+        assert again["attempted_at"]
         assert verdict["pre_restore_snapshot"]
         assert verdict["reason"] == "snapshot_recovery_pending"
 
@@ -3063,17 +3068,20 @@ class TestNoDecorativeRecoveryWrapper:
 
         clean = tmp_path / "clean_no_marker"
         clean.mkdir(parents=True, exist_ok=True)
-        es._LAST_RECOVERY_VERDICT = {
-            "ok": False,
-            "pending": True,
-            "reason": "snapshot_recovery_pending",
-            "state": "COMMITTING",
-            "rolled_forward": False,
-        }
+        es._record_recovery_verdict(
+            clean,
+            {
+                "ok": False,
+                "pending": True,
+                "reason": "snapshot_recovery_pending",
+                "state": "COMMITTING",
+                "rolled_forward": False,
+            },
+        )
         try:
             verdict = es.restore_verdict(clean)
         finally:
-            es._LAST_RECOVERY_VERDICT = None
+            es._RECOVERY_VERDICT_CACHE.clear()
 
         assert verdict is not None
         assert verdict["pending"] is False, "кэш перебил диск"
@@ -3204,17 +3212,20 @@ class TestReasonCodeParity:
 
         clean = tmp_path / "clean_no_marker"
         clean.mkdir(parents=True, exist_ok=True)
-        es._LAST_RECOVERY_VERDICT = {
-            "ok": False,
-            "pending": True,
-            "reason": "snapshot_recovery_pending",
-            "state": "COMMITTING",
-            "rolled_forward": False,
-        }
+        es._record_recovery_verdict(
+            clean,
+            {
+                "ok": False,
+                "pending": True,
+                "reason": "snapshot_recovery_pending",
+                "state": "COMMITTING",
+                "rolled_forward": False,
+            },
+        )
         try:
             verdict = es.restore_verdict(clean)
         finally:
-            es._LAST_RECOVERY_VERDICT = None
+            es._RECOVERY_VERDICT_CACHE.clear()
 
         assert verdict is not None
         assert verdict["pending"] is False, "кэш перебил диск"
@@ -3264,3 +3275,304 @@ class TestRecoveryVerdictReachesCaller:
             for item in store._load_active_items_unlocked()
         )
         assert has_pending_restore(data_dir) is False
+
+
+# ---------------------------------------------------------------------------
+# F1 (MAJOR) / F2 (LOW) — дельты окна pending и коллизия id между журналами
+# ---------------------------------------------------------------------------
+
+
+def _status_override(store) -> dict[str, str]:
+    with store._lock():
+        return dict(store._load_status_overrides_unlocked())
+
+
+def _text_update_texts(store) -> list[str]:
+    with store._lock():
+        return [
+            str(p.get("text", ""))
+            for p in store._read_history_ndjson_unlocked(store.text_updates_path)
+        ]
+
+
+class TestWindowDeltaChangesAreCarried:
+    """r10 (г): изменение дельты в окне pending откатывалось МОЛЧА.
+
+    ``set_paste_status`` пишет в ``history_status.ndjson`` новую строку для id,
+    который снимок тоже несёт. Фильтр «id есть в снимке» (тем более глобальный)
+    отбрасывал такую строку, и откат не попадал ни в один счётчик.
+    """
+
+    def _profile(self, tmp_path, nth=3):
+        return _ragged_with_real_items(tmp_path, nth=nth)
+
+    def test_paste_status_change_in_window_survives_roll_forward(self, tmp_path):
+        data_dir, crypto, _snap, store = self._profile(tmp_path)
+        target = _texts(store)[0]
+        item = next(i for i in store._load_active_items_unlocked() if i.text == target)
+        assert store.set_paste_status(item.id, "pasted") is True
+        assert _status_override(store).get(item.id) == "pasted"
+
+        result = _recover(data_dir, crypto)
+
+        assert result["ok"] is True
+        # Сначала данные: RED обязан показать откат, а не отсутствие поля.
+        assert _status_override(store).get(item.id) == "pasted", (
+            "изменение статуса в окне pending откатилось"
+        )
+        assert result["delta_records_carried"] >= 1
+
+    def test_text_update_in_window_survives_roll_forward(self, tmp_path):
+        """Та же семантика для правки текста (LLM-чистка/применённая правка)."""
+        data_dir, crypto, _snap, store = self._profile(tmp_path)
+        item = store._load_active_items_unlocked()[1]
+        with store._lock():
+            store._append_ndjson(
+                store.text_updates_path,
+                {"id": item.id, "text": "очищенный LLM текст", "confidence": 0.9},
+            )
+        assert "очищенный LLM текст" in _text_update_texts(store)
+
+        result = _recover(data_dir, crypto)
+
+        assert result["ok"] is True
+        assert "очищенный LLM текст" in _text_update_texts(store), (
+            "правка текста в окне pending откатилась"
+        )
+        assert result["delta_records_carried"] >= 1
+
+    def test_delta_carried_is_counted_separately_from_history(self, tmp_path):
+        """Счётчик дельт обязателен: «никаких молчаливых потерь без счётчика»."""
+        data_dir, crypto, _snap, store = self._profile(tmp_path)
+        item = store._load_active_items_unlocked()[0]
+        store.set_paste_status(item.id, "pasted")
+        store.add_history_item(text="история в окне")
+
+        result = _recover(data_dir, crypto)
+
+        assert result["records_carried"] == 1, "история и дельта должны считаться раздельно"
+        assert result["delta_records_carried"] == 1
+
+    def test_duplicate_delta_lines_do_not_double_apply(self, tmp_path):
+        """Два одинаковых статуса подряд: last-write-wins, применение одно."""
+        data_dir, crypto, _snap, store = self._profile(tmp_path)
+        item = store._load_active_items_unlocked()[0]
+        store.set_paste_status(item.id, "pasted")
+        with store._lock():
+            store._append_ndjson(
+                store.status_path, {"id": item.id, "paste_status": "pasted"}
+            )
+        with store._lock():
+            rows = sum(1 for _ in store._read_history_ndjson_unlocked(store.status_path))
+
+        _recover(data_dir, crypto)
+
+        with store._lock():
+            rows_after = sum(1 for _ in store._read_history_ndjson_unlocked(store.status_path))
+        assert _status_override(store)[item.id] == "pasted"
+        assert rows_after == rows, "дубликат строки не должен появляться дважды"
+
+    def test_history_record_survives_id_collision_with_delta_journal(self, tmp_path):
+        """r10 (б): id в снимке ДЕЛЬТЫ ронял запись ИСТОРИИ с тем же id."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed_items(store, ["история для коллизии"])
+        item = store._load_active_items_unlocked()[0]
+        # Коллизия: тот же id ЕСТЬ в снимке, но в журнале ДЕЛЬТ (status).
+        store.set_paste_status(item.id, "copied")
+        svc = HistoryService(store=store, cached_settings=lambda: {})
+        snapshot_dir = Path(svc.handle_backup_history({})["backup_path"])
+        assert _status_override(store).get(item.id) == "copied"
+        _crash_on_nth_replace(data_dir, crypto, snapshot_dir, nth=3)
+        # В окне pending владелец ставит НОВЫЙ статус на ту же запись.
+        assert store.set_paste_status(item.id, "pasted") is True
+
+        result = _recover(data_dir, crypto)
+
+        assert result["ok"] is True
+        # Запись истории на месте (раньше её ронял id из status-снимка).
+        assert item.id in {i.id for i in store._load_active_items_unlocked()}
+        # И изменение статуса из окна применено (last-write-wins).
+        assert _status_override(store).get(item.id) == "pasted"
+
+    def test_status_in_snapshot_keeps_working_after_roll_forward(self, tmp_path):
+        """Коллизии больше нет, но статус из СНИМКА тоже должен применяться."""
+        data_dir, crypto, _snap, store = self._profile(tmp_path)
+        item = store._load_active_items_unlocked()[0]
+        store.set_paste_status(item.id, "pasted")  # ДО crash'а — есть и в снимке
+        # Делаем новый снимок-эталон, чтобы статус точно был в снимке.
+        _recover(data_dir, crypto)
+
+        assert _status_override(store).get(item.id) == "pasted"
+
+    def test_delta_deleted_in_window_is_not_carried(self, tmp_path):
+        """Регресс-инвариант: tombstone в окне pending сильнее переноса дельты."""
+        data_dir, crypto, _snap, store = self._profile(tmp_path)
+        item = store._load_active_items_unlocked()[0]
+        store.set_paste_status(item.id, "pasted")
+        store.delete_history_item(item.id)
+
+        result = _recover(data_dir, crypto)
+
+        assert result["ok"] is True
+        assert item.id not in {i.id for i in store._load_active_items_unlocked()}
+        assert result["delta_records_carried"] == 0
+        assert result["records_excluded_deleted"] >= 1
+
+    def test_count_and_compaction_still_work_after_roll_forward(self, tmp_path):
+        """count_active_items и компактирование не должны сломаться от переноса."""
+        data_dir, crypto, _snap, store = self._profile(tmp_path)
+        item = store._load_active_items_unlocked()[0]
+        store.set_paste_status(item.id, "pasted")
+        store.add_history_item(text="ещё одна в окне")
+
+        result = _recover(data_dir, crypto)
+        assert result["ok"] is True
+        expected = 5
+        assert store.count_active_items() == expected
+        store.reset_search_caches()
+        assert store.count_active_items() == expected
+        store.compact_with_stats()
+        assert store.get_history_stats()["history_lines"] == expected
+        assert store.count_active_items() == expected
+
+
+# ---------------------------------------------------------------------------
+# F3 (MINOR) — кэш вердикта не должен приписывать профиль А профилю Б
+# ---------------------------------------------------------------------------
+
+
+class TestRecoveryVerdictCacheIsPerProfile:
+    """r12: payload кэша process-global и не ключён по data_dir.
+
+    Признак ``pending`` всегда с диска (это не ломается), но ``snapshot_dir``,
+    счётчики и прочее приходили из чужого профиля. В проде data_dir один на
+    процесс, поэтому эффекта нет — но в мультипрофильных тестах это достижимо и
+    путает, а кэш без времени жизни вообще нельзя интерпретировать.
+    """
+
+    def _two_profiles(self, tmp_path):
+        profile_a, crypto_a, _snap_a, store_a = _ragged_with_real_items(tmp_path)
+        store_a.add_history_item(text="запись окна A")
+        verdict_a = _recover(profile_a, crypto_a)
+        assert verdict_a["ok"] is True
+        assert verdict_a["records_carried"] >= 1
+
+        profile_b = tmp_path / "profile_b"
+        profile_b.mkdir(parents=True, exist_ok=True)
+        (profile_b / "settings.json").write_text(
+            json.dumps({"history_encryption_enabled": True}), encoding="utf-8"
+        )
+        return profile_a, verdict_a, profile_b, crypto_a
+
+    def test_cache_does_not_leak_payload_to_another_profile(self, tmp_path):
+        from backend import encrypted_snapshot as es
+
+        profile_a, verdict_a, profile_b, _crypto_a = self._two_profiles(tmp_path)
+
+        try:
+            verdict_b = es.restore_verdict(profile_b)
+
+            assert verdict_b is None, "профиль B унаследовал вердикт профиля A"
+            assert verdict_a["records_carried"] >= 1
+            assert str(profile_a) in (verdict_a.get("snapshot_dir") or "")
+        finally:
+            es._RECOVERY_VERDICT_CACHE.clear()
+
+    def test_same_profile_still_sees_its_own_verdict(self, tmp_path):
+        from backend import encrypted_snapshot as es
+
+        profile_a, verdict_a, _profile_b, _crypto_a = self._two_profiles(tmp_path)
+        try:
+            again = es.restore_verdict(profile_a)
+
+            assert again is not None
+            assert again["transaction_id"] == verdict_a["transaction_id"]
+            assert again["records_carried"] == verdict_a["records_carried"]
+        finally:
+            es._RECOVERY_VERDICT_CACHE.clear()
+
+    def test_verdict_carries_attempted_at(self, tmp_path):
+        """Кэш без времени жизни нельзя интерпретировать: он датирован."""
+        from backend import encrypted_snapshot as es
+
+        _profile, verdict, _profile_b, _crypto = self._two_profiles(tmp_path)
+        try:
+            assert verdict.get("attempted_at"), "вердикт без attempted_at"
+            # Дата в ISO-8601 и она в прошлом (не «сейчас» в смысле вечности).
+            from datetime import datetime
+
+            stamp = datetime.fromisoformat(verdict["attempted_at"])
+            assert stamp.tzinfo is not None
+            assert verdict["attempted_at"] <= es.datetime.now(
+                es.timezone.utc
+            ).isoformat()
+        finally:
+            es._RECOVERY_VERDICT_CACHE.clear()
+
+    def test_cache_is_bounded(self, tmp_path):
+        """Ограниченный словарь (как _PENDING_SCAN_CACHE), без роста в бесконечность."""
+        from backend import encrypted_snapshot as es
+
+        es._RECOVERY_VERDICT_CACHE.clear()
+        try:
+            for i in range(es.RECOVERY_VERDICT_CACHE_MAX_PROFILES + 5):
+                es._record_recovery_verdict(
+                    tmp_path / f"profile_{i}", {"ok": True, "pending": False}
+                )
+            assert (
+                len(es._RECOVERY_VERDICT_CACHE)
+                <= es.RECOVERY_VERDICT_CACHE_MAX_PROFILES
+            ), "кэш вердиктов не ограничен"
+        finally:
+            es._RECOVERY_VERDICT_CACHE.clear()
+
+
+class TestDeltaCarryDoesNotDuplicateRestoredContent:
+    """Регресс на следствие F1-фикса: дельты не должны расти при каждой докачке.
+
+    Журналы, которые докачка ещё не заменила, содержат ПРЕЖНЕЕ содержимое
+    (строка из pre-restore), а не изменение окна. Если переносить дельты
+    без сверки с восстановленным содержимым, каждая докачка дописывала бы в
+    дельты их прежние строки — журнал рос бы при каждом разборе.
+    """
+
+    def test_roll_forward_does_not_duplicate_status_rows(self, tmp_path):
+        data_dir, crypto, _snap, store = _ragged_with_real_items(tmp_path, nth=9)
+        # Живые дельты — ещё не заменённая прежая копия.
+        with store._lock():
+            rows_before = sum(
+                1 for _ in store._read_history_ndjson_unlocked(store.status_path)
+            )
+        assert rows_before == 0, "предусловие: в снимке статус пуст"
+
+        # Пишем статус, который в снимке есть (снимок снят ПОСЛЕ записи статуса).
+        store2 = _store_with_crypto(data_dir, crypto)
+        item_id = store2._load_active_items_unlocked()[0].id
+        assert store2.set_paste_status(item_id, "pasted") is True
+        with store2._lock():
+            rows_live = sum(
+                1 for _ in store2._read_history_ndjson_unlocked(store2.status_path)
+            )
+
+        _recover(data_dir, crypto)
+
+        with store2._lock():
+            rows_after = sum(
+                1 for _ in store2._read_history_ndjson_unlocked(store2.status_path)
+            )
+        # Строка окна совпадает с восстановленной → дубликата быть не должно.
+        assert rows_after <= max(rows_live, 1)
+
+    def test_window_change_is_still_carried_when_content_differs(self, tmp_path):
+        """Совпадение отбрасывает только ДУБЛЬ; отличающееся изменение переносится."""
+        data_dir, crypto, _snap, store = _ragged_with_real_items(tmp_path)
+        item = store._load_active_items_unlocked()[0]
+        store.set_paste_status(item.id, "pasted")  # в снимке статуса не было
+
+        result = _recover(data_dir, crypto)
+
+        assert result["delta_records_carried"] == 1
+        assert _status_override(store).get(item.id) == "pasted"

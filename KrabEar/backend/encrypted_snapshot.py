@@ -1377,12 +1377,30 @@ def _snapshot_ledger_ids(*, snapshot_dir: Path, crypto: Any) -> set[str]:
     return ids
 
 
-def _snapshot_record_ids(*, snapshot_dir: Path, crypto: Any) -> set[str]:
-    """Все id, которые УЖЕ ЕСТЬ в целевом снимке (по всем 8 журналам данных)."""
-    ids: set[str] = set()
+def _snapshot_record_index(*, snapshot_dir: Path, crypto: Any) -> dict[str, dict[str, set]]:
+    """Что УЖЕ ЕСТЬ в целевом снимке, РАЗДЕЛЬНО по журналам: id и тексты строк.
+
+    F1/F2: одного глобального множества на все журналы недостаточно и опасно.
+
+      * для ``history.ndjson`` запись с тем же id, что и в снимке, — дубль, и
+        его надо отбросить (иначе в выходе появятся две записи одного id);
+      * для ДЕЛЬТ дубли по id — норма (``_load_status_overrides_unlocked`` и
+        другие ридеры применяют last-write-wins по порядку строк), поэтому
+        изменение из окна pending переносится независимо от наличия в снимке;
+      * глобальное множество вдобавок роняло запись истории из-за id,
+        встретившегося в СОВСЕМ ДРУГОМ журнале снимка (r10 б).
+
+    Для дельт дополнительно нужен набор ТЕКСТОВ строк снимка: строка окна,
+    совпадающая с уже восстановленной, — это не изменение, а старый остаток
+    ещё не заменённого журнала. Без такой проверки каждая докачка дописывала
+    бы в дельты их прежнее содержимое (журнал рос бы при каждом разборе).
+    """
+    index: dict[str, dict[str, set]] = {}
     for name in HISTORY_JOURNAL_FILENAMES:
         if name in LEDGER_JOURNAL_NAMES:
             continue
+        journal_ids: set[str] = set()
+        journal_lines: set[str] = set()
         for lineno, line in enumerate(
             _decrypt_verified_lines(
                 journal_file=snapshot_dir / name,
@@ -1391,14 +1409,17 @@ def _snapshot_record_ids(*, snapshot_dir: Path, crypto: Any) -> set[str]:
             ),
             start=1,
         ):
+            plaintext = crypto.decrypt_line(line)
+            journal_lines.add(plaintext)
             item_id = _record_id(
-                crypto.decrypt_line(line),
+                plaintext,
                 where=f"{name}:{lineno}",
                 reason=REASON_RECORD_MALFORMED,
             )
             if item_id:
-                ids.add(item_id)
-    return ids
+                journal_ids.add(item_id)
+        index[name] = {"ids": journal_ids, "lines": journal_lines}
+    return index
 
 
 def _collect_window_records(
@@ -1406,7 +1427,7 @@ def _collect_window_records(
     data_dir: Path,
     crypto: Any,
     blocked: set[str],
-    snapshot_ids: set[str],
+    snapshot_index: dict[str, dict[str, set]],
 ) -> tuple[dict[str, list[str]], dict[str, int], list[str]]:
     """H1: записи, сделанные В ОКНЕ pending, из текущего (рваного) набора.
 
@@ -1428,7 +1449,7 @@ def _collect_window_records(
     и в ``warnings``: владелец должен увидеть, что что-то не перенесено.
     """
     records: dict[str, list[str]] = {name: [] for name in HISTORY_JOURNAL_FILENAMES}
-    counters = {"carried": 0, "excluded_deleted": 0, "unparsable": 0}
+    counters = {"carried": 0, "delta_carried": 0, "excluded_deleted": 0, "unparsable": 0}
     warnings: list[str] = []
     for name in HISTORY_JOURNAL_FILENAMES:
         if name in LEDGER_JOURNAL_NAMES:
@@ -1436,6 +1457,7 @@ def _collect_window_records(
         source = Path(data_dir) / name
         if not source.is_file():
             continue
+        carried_lines: set[str] = set()
         for lineno, raw in enumerate(_split_ndjson_lines(_read_text(source, name)), start=1):
             if not raw.strip():
                 continue
@@ -1466,17 +1488,35 @@ def _collect_window_records(
                 # Удалено в окне pending: resurrection запрещён, запись не переносится.
                 counters["excluded_deleted"] += 1
                 continue
-            if item_id in snapshot_ids:
-                continue  # эта запись уже придёт из снимка
+            # F1/F2: для ИСТОРИИ дубль по id отбрасываем (две записи одного id в
+            # выходе — порча). Для ДЕЛЬТ дубль — это новое изменение: ридеры
+            # дельт применяют last-write-wins по порядку строк, поэтому перенос
+            # дописывает изменение в конец журнала, и оно побеждает состояние
+            # из снимка.
+            is_history = name == "history.ndjson"
+            snap = snapshot_index.get(name) or {"ids": set(), "lines": set()}
+            if is_history:
+                if item_id in snap["ids"]:
+                    continue  # дубль записи по id
+            else:
+                # Дельта: перенос изменения, а не повтор уже восстановленного.
+                if plaintext in snap["lines"] or plaintext in carried_lines:
+                    continue
             records[name].append(
                 raw if crypto.is_encrypted(raw) else crypto.encrypt_line(plaintext)
             )
-            counters["carried"] += 1
-    if counters["carried"] or counters["excluded_deleted"] or counters["unparsable"]:
+            counters["carried" if is_history else "delta_carried"] += 1
+    if (
+        counters["carried"]
+        or counters["delta_carried"]
+        or counters["excluded_deleted"]
+        or counters["unparsable"]
+    ):
         logger.warning(
-            "encrypted_snapshot: окно pending — перенесено %d записей, исключено "
-            "удалённых %d, неразрешимых %d",
-            counters["carried"], counters["excluded_deleted"], counters["unparsable"],
+            "encrypted_snapshot: окно pending — перенесено записей %d, дельт %d, "
+            "исключено удалённых %d, неразрешимых %d",
+            counters["carried"], counters["delta_carried"],
+            counters["excluded_deleted"], counters["unparsable"],
         )
     return records, counters, warnings
 
@@ -1518,7 +1558,8 @@ def _build_restore_output(
     """
     carry = carry or {}
     carry_counters = dict(
-        carry_counters or {"carried": 0, "excluded_deleted": 0, "unparsable": 0}
+        carry_counters
+        or {"carried": 0, "delta_carried": 0, "excluded_deleted": 0, "unparsable": 0}
     )
     carry_warnings = list(carry_warnings or [])
     files_meta: list[dict[str, Any]] = []
@@ -1674,14 +1715,14 @@ def _apply_verified_snapshot_locked(
     # владелец сам выбрал вернуться к снимку (перенос означал бы, что restore
     # ничего не делает), и записи сохраняет отдельный pre-restore снимок.
     carry: dict[str, list[str]] = {}
-    carry_counters: dict[str, int] = {"carried": 0, "excluded_deleted": 0, "unparsable": 0}
+    carry_counters: dict[str, int] = {"carried": 0, "delta_carried": 0, "excluded_deleted": 0, "unparsable": 0}
     carry_warnings: list[str] = []
     if recovered:
         carry, carry_counters, carry_warnings = _collect_window_records(
             data_dir=data_dir,
             crypto=crypto,
             blocked=blocked,
-            snapshot_ids=_snapshot_record_ids(
+            snapshot_index=_snapshot_record_index(
                 snapshot_dir=snapshot_dir, crypto=crypto
             ),
         )
@@ -1792,6 +1833,7 @@ def _apply_verified_snapshot_locked(
         "filtered_out_lines": filtered_out_lines,
         # H1: что произошло с записями, сделанными в окне pending.
         "records_carried": carry_counters.get("carried", 0),
+        "delta_records_carried": carry_counters.get("delta_carried", 0),
         "records_at_risk": (
             carry_counters.get("excluded_deleted", 0) + carry_counters.get("unparsable", 0)
         ),
@@ -1848,14 +1890,21 @@ def _recovery_result(
     extra_markers: list[str] | None = None,
     snapshot_pending: bool = False,
     records_carried: int = 0,
+    delta_records_carried: int = 0,
     records_at_risk: int = 0,
     records_excluded_deleted: int = 0,
     records_unparsable: int = 0,
     warnings: list[str] | None = None,
 ) -> dict:
-    """Единая форма ответа recovery (одно место → один словарь полей)."""
+    """Единая форма ответа recovery (одно место → один словарь полей).
+
+    ``attempted_at`` (F3): вердикт кэшируется в памяти процесса, поэтому он
+    обязан быть датирован — иначе «последняя попытка» неинтерпретируема: не
+    отличить свежий разбор от вчерашнего.
+    """
     return {
         "ok": ok,
+        "attempted_at": datetime.now(timezone.utc).isoformat(),
         "pending": pending,
         "reason": reason,
         "state": state,
@@ -1864,8 +1913,10 @@ def _recovery_result(
         "pre_restore_snapshot": pre_restore_snapshot,
         "restored_entries": restored_entries,
         "rolled_forward": rolled_forward,
-        # H1: судьба записей, сделанных в окне pending.
+        # H1/F1: судьба записей, сделанных в окне pending (история и дельты —
+        # разные счётчики, потому что переносятся по разным правилам).
         "records_carried": records_carried,
+        "delta_records_carried": delta_records_carried,
         "records_at_risk": records_at_risk,
         "records_excluded_deleted": records_excluded_deleted,
         "records_unparsable": records_unparsable,
@@ -1877,6 +1928,29 @@ def _recovery_result(
 
 
 def recover_pending_restore(
+    *,
+    data_dir: Any,
+    backups_root: Any,
+    crypto: Any,
+    policy_read: Callable[[], bool] | None = None,
+) -> dict:
+    """A5.2b2 Task 3 — fail-closed recovery + запись вердикта в кэш профиля (F3).
+
+    Единственное место, где кэш вердикта пишется: любая попытка докачки (из
+    точки обслуживания, из будущего вызова или из модульного теста) оставляет
+    датированный след. Признак ``pending`` при чтении всё равно берётся с диска.
+    """
+    verdict = _recover_pending_restore(
+        data_dir=data_dir,
+        backups_root=backups_root,
+        crypto=crypto,
+        policy_read=policy_read,
+    )
+    _record_recovery_verdict(data_dir, verdict)
+    return verdict
+
+
+def _recover_pending_restore(
     *,
     data_dir: Any,
     backups_root: Any,
@@ -2064,6 +2138,7 @@ def recover_pending_restore(
         extra_markers=extra,
         snapshot_pending=b1_pending,
         records_carried=result["records_carried"],
+        delta_records_carried=result["delta_records_carried"],
         records_at_risk=result["records_at_risk"],
         records_excluded_deleted=result["records_excluded_deleted"],
         records_unparsable=result["records_unparsable"],
@@ -2169,12 +2244,44 @@ def read_pending_restore_verdict(data_dir: Any) -> dict | None:
 # только что произошла (владелец не видел бы ни «что было сделано», ни
 # records_carried). Источник истины — по-прежнему диск: значение кэша имеет
 # смысл только вместе с маркером, который его вызвал (см. ``restore_verdict``).
-_LAST_RECOVERY_VERDICT: dict | None = None
+_RECOVERY_VERDICT_CACHE: dict[str, dict] = {}
+RECOVERY_VERDICT_CACHE_MAX_PROFILES = 8
 
 
-def last_restore_recovery() -> dict | None:
-    """Вердикт последней реальной попытки recovery (или ``None``)."""
-    return _LAST_RECOVERY_VERDICT
+def _profile_key(data_dir: Any) -> str:
+    """Ключ кэша вердикта: разыменованный путь профиля.
+
+    F3: единый process-global без ключа приписывал payload одного профиля
+    другому (в проде data_dir один на процесс, поэтому эффекта не было — но
+    в мультипрофильных тестах это достижимо и путает).
+    """
+    try:
+        return str(Path(data_dir).resolve())
+    except OSError:
+        return str(data_dir)
+
+
+def _record_recovery_verdict(data_dir: Any, verdict: dict | None) -> None:
+    """Кладёт вердикт попытки в кэш профиля (ограниченный словарь)."""
+    if verdict is None:
+        _RECOVERY_VERDICT_CACHE.pop(_profile_key(data_dir), None)
+        return
+    if len(_RECOVERY_VERDICT_CACHE) >= RECOVERY_VERDICT_CACHE_MAX_PROFILES:
+        _RECOVERY_VERDICT_CACHE.clear()
+    _RECOVERY_VERDICT_CACHE[_profile_key(data_dir)] = dict(verdict)
+
+
+def last_restore_recovery(data_dir: Any = None) -> dict | None:
+    """Вердикт последней реальной попытки recovery (или ``None``).
+
+    Без ``data_dir`` — вердикт любого профиля (совместимость прежнего вызова);
+    с ``data_dir`` — только этого профиля (F3).
+    """
+    if data_dir is None:
+        for verdict in reversed(list(_RECOVERY_VERDICT_CACHE.values())):
+            return verdict
+        return None
+    return _RECOVERY_VERDICT_CACHE.get(_profile_key(data_dir))
 
 
 def restore_verdict(data_dir: Any) -> dict | None:
@@ -2196,7 +2303,7 @@ def restore_verdict(data_dir: Any) -> dict | None:
         from_disk = None
     if from_disk is not None:
         return from_disk
-    cached = _LAST_RECOVERY_VERDICT
+    cached = _RECOVERY_VERDICT_CACHE.get(_profile_key(data_dir))
     if cached is None:
         return None
     if not cached.get("pending"):
@@ -2226,18 +2333,17 @@ def recover_pending_restore_from_store(store: Any) -> dict | None:
 
     crypto_getter = getattr(store, "_get_history_crypto", None)
     crypto = crypto_getter() if callable(crypto_getter) else None
-    global _LAST_RECOVERY_VERDICT
     try:
-        _LAST_RECOVERY_VERDICT = recover_pending_restore(
+        verdict = recover_pending_restore(
             data_dir=data_dir,
             backups_root=data_dir / "backups",
             crypto=crypto,
             policy_read=store_policy_reader(store),
         )
-        return _LAST_RECOVERY_VERDICT
     except Exception:  # noqa: BLE001 — вызывающий не имеет права упасть
         logger.exception("encrypted_snapshot: restore recovery не выполнен")
         return None
+    return verdict
 
 
 def restore_encrypted_snapshot(
