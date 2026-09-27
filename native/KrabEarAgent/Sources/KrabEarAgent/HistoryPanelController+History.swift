@@ -702,6 +702,11 @@ extension HistoryPanelController {
 
             let mapped = rawItems.compactMap(HistoryItem.init(payload:))
             let newCursor = result["next_cursor"] as? String
+            // A5.2b2: при незавершённом restore журналы могут быть смесью
+            // состояний до/после снимка. Данные НЕ скрываем (это ломает
+            // просмотр истории посреди работы), но помечаем строкой статуса —
+            // иначе «пропавшие» записи выглядят как потерянные.
+            let restorePending = (result["restore_pending"] as? Bool) == true
 
             DispatchQueue.main.async {
                 guard let self = self else {
@@ -710,6 +715,7 @@ extension HistoryPanelController {
                 }
                 self.items.append(contentsOf: mapped)
                 self.nextCursor = newCursor
+                self.restorePendingInHistory = restorePending
                 self.loadMoreButton.isEnabled = (newCursor != nil)
                 self.loadAllButton.isEnabled = (newCursor != nil)
                 self.updateLoadMoreButtonCaption()
@@ -839,16 +845,13 @@ extension HistoryPanelController {
     /// Без async wrap эта функция блокировала main thread на каждом
     /// `loadInitial`/`appendPage`/filter change → AppHang ≥2000ms (KRAB-EAR-AGENT-3).
     func updateHistoryStatusLabel() {
-        // Установить базовый текст немедленно (пока IPC stats fetch'атся).
-        let baseText: String
-        if items.isEmpty {
-            baseText = "История пуста"
-        } else if nextCursor == nil {
-            baseText = "Показаны все: \(items.count)"
-        } else {
-            baseText = "Показано: \(items.count) (есть ещё)"
-        }
-        historyStatusLabel.stringValue = baseText
+        let text = Self.historyStatusText(
+            itemCount: items.count,
+            hasMore: nextCursor != nil,
+            restorePending: restorePendingInHistory
+        )
+        historyStatusLabel.stringValue = text
+        if restorePendingInHistory { return }
 
         // Background: получить stats + overview, потом update labels на main.
         let ipcClient = self.ipcClient
@@ -869,10 +872,32 @@ extension HistoryPanelController {
             }
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                self.historyStatusLabel.stringValue = baseText + statsSuffix
+                self.historyStatusLabel.stringValue = text + statsSuffix
                 self.historyOverviewLabel.stringValue = overview
             }
         }
+    }
+
+    /// A5.2b2: чистый хелпер текста строки статуса истории.
+    ///
+    /// При незавершённом restore журналы могут быть смесью состояний до/после
+    /// снимка. Данные НЕ прячем — просмотр истории посреди работы важнее
+    /// предупреждения о возможной неполноте, — но и молчать нельзя: без
+    /// явной строки «пропавшие» записи выглядят как потерянные.
+    /// `nonisolated static`, потому что панель не инстанцируется в headless-
+    /// тестах (см. шапку HistoryPanelAnalyticsTests) — единственный способ
+    /// закрыть эту логику тестом.
+    nonisolated static func historyStatusText(
+        itemCount: Int,
+        hasMore: Bool,
+        restorePending: Bool
+    ) -> String {
+        if restorePending {
+            return "Восстановление не завершено — записи могут показываться не все"
+        }
+        if itemCount == 0 { return "История пуста" }
+        if hasMore { return "Показано: \(itemCount) (есть ещё)" }
+        return "Показаны все: \(itemCount)"
     }
 
     /// Pure helper — `formatBytes` не доступна на main (instance method).

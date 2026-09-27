@@ -84,6 +84,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         didSet { rowHeightCache.removeAll() }
     }
     var nextCursor: String?
+    /// A5.2b2: backend сообщает, что восстановление истории не завершено и
+    /// журналы могут быть смесью состояний до/после снимка. Показываем
+    /// предупреждение в строке статуса, данные НЕ прячем — просмотр истории
+    /// посреди работы важнее предупреждения о неполноте.
+    var restorePendingInHistory: Bool = false
     var currentQuery: String = ""
     var isSyncingSettings = false
     /// Последнее известное значение mlx_available из list_stt_engines.
