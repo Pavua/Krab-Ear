@@ -71,6 +71,27 @@ def restore_pending_status(data_dir) -> dict:
     return {"restore_pending": pending, "restore_recovery": verdict}
 
 
+def disk_space_status(data_dir) -> dict:
+    """A5.2b3: свободное место по целевым каталогам профиля.
+
+    Отдельный сигнал от `restore_pending_status`: он не про restore, а про ёмкость
+    — именно она решает, сможет ли backup/restore начаться вообще
+    (`snapshot_insufficient_space` в статусе авто-бэкапа).
+
+    Диагностика не имеет права падать: если отчёт построить не удалось, возвращается
+    пустой `targets` («определить не удалось»), а не ноль свободного места — ноль
+    был бы ложной тревогой, а исключение уронило бы весь `get_diagnostics`.
+    """
+    from backend.encrypted_snapshot import snapshot_space_report
+
+    try:
+        return snapshot_space_report(data_dir=data_dir)
+    except Exception:  # noqa: BLE001 — см. докстринг
+        logger.warning("disk_space_status: отчёт о месте не построен", exc_info=True)
+        return {"checked_at": None, "journals_bytes": None,
+                "required_bytes_one_copy": None, "targets": {}}
+
+
 class HealthCheckService:
     """Обработчики IPC-команд диагностики и проверки здоровья бэкенда."""
 
@@ -317,6 +338,11 @@ class HealthCheckService:
             # статусе авто-бэкапа. Ключ есть ВСЕГДА (null — маркера нет), чтобы
             # вызывающий не различал «нет поля» и «проверка не удалась».
             "restore": restore_pending_status(self.store.data_dir),
+            # A5.2b3: сколько места на целевых томах (снимки в backups, staging
+            # restore рядом с живыми журналами). Ключ есть ВСЕГДА, в т.ч. с
+            # `free_bytes: null` — «определить не удалось» и «место кончилось»
+            # должны различаться на экране владельца.
+            "disk_space": disk_space_status(self.store.data_dir),
             "system": {
                 "python_version": sys.version,
                 "platform": platform.platform(),

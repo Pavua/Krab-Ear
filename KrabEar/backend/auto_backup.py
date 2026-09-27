@@ -22,9 +22,11 @@ from backend.encrypted_snapshot import (
     SnapshotOperationRefused,
     create_encrypted_snapshot,
     has_pending_restore,
+    prune_snapshot_family,
     restore_verdict as restore_verdict_fn,
     recover_pending_restore_from_store,
     recover_pending_state,
+    snapshot_space_report,
 )
 from backend.history_encryption_policy import (
     OPERATION_UNAVAILABLE_REASON as _ENC_OP_UNAVAILABLE,
@@ -263,6 +265,37 @@ class AutoBackupManager:
             except Exception as exc:
                 logger.warning("Не удалось удалить авто-бэкап %s: %s", d, exc)
         return len(to_delete)
+
+    def _prune_snapshot_family(self) -> dict:
+        """A5.2b3: retention снимков нового протокола (после успешного снимка).
+
+        Отдельный вызов вместо расширения ``_prune_old_backups`` намеренно: у них
+        разные границы. Legacy-копии при ON не удаляются никогда (решение
+        владельца/A5.2c), а лимиты новых форматов задаёт владелец через
+        ``max_copies`` — то же самое число, что и для legacy, но в своей семье.
+
+        🔴 NIT-1: вызов идёт ПОД тем же flock'ом (``history.lock``), что restore
+        и запись журналов. Без этого retention мог удалить снимок, который
+       restore прямо сейчас читает: проба ревьюера — при удерживаемом
+        ``history.lock`` снимок-цель исчезал за миллисекунды, и restore падал бы
+        в ``_build_restore_output``. Снаружи lock'а остаётся только узкое окно
+        между чтением снимка и созданием staging — его закрывает проверка
+        restore-staging внутри ``prune_snapshot_family``.
+
+        Retention не имеет права уронить цикл: любая ошибка здесь — предупреждение
+        в лог, а не отказ только что сделанного бэкапа.
+        """
+        try:
+            with self._store_lock():
+                return prune_snapshot_family(
+                    backups_root=self.backups_dir,
+                    data_dir=self.store.data_dir,
+                    max_copies=self.max_copies,
+                )
+        except Exception:  # noqa: BLE001 — снимок уже зафиксирован, не роняем цикл
+            logger.warning("auto_backup: retention снимков не выполнен", exc_info=True)
+            return {"ok": False, "removed": [], "removed_count": 0, "skipped_reason": None,
+                    "families": {}}
 
     def _store_lock(self) -> ContextManager[Any]:
         """Возвращает контекст-менеджер file-lock'а StateStore.
@@ -596,7 +629,15 @@ class AutoBackupManager:
             # Retention (A5.2a §6: gate ДО prune) — только для OFF-профиля.
             # При ON снимки нового протокола и legacy-копии НЕ удаляются:
             # инвентаризация и решение по старым plaintext — A5.2c.
-            if not result.get("encrypted"):
+            #
+            # A5.2b3: при ON снимок ТЕПЕРЬ имеет свой retention (только новые
+            # форматы) — но вызывается он ПОСЛЕ успешного снимка и никогда при
+            # отказе: иначе «место кончилось» удаляло бы ещё и старые копии,
+            # которые в этот момент тем более нужны. Legacy `backup_*` /
+            # `auto_backup_*` при этом не трогаются вовсе (см. решение 4).
+            if result.get("encrypted"):
+                self._prune_snapshot_family()
+            else:
                 self._prune_old_backups()
 
             meta["last_backup_ts"] = datetime.now(timezone.utc).isoformat()
@@ -714,6 +755,12 @@ class AutoBackupManager:
             # backup-цикла (например, недоступный ключ при ON) был полностью
             # невидим в тех полях, которые A5.2a ввела ради наблюдаемости.
             unavailable = blocked_by_pending or last_refusal is not None
+            # A5.2b3: причина пропуска видна в skipped_reason, но владельцу нужно
+            # и ЧИСЛО — сколько места осталось на целевых томах. Это сведения, а не
+            # отказ: при успешном бэкапе поле заполнено тем же самым, а признаки
+            # отказа (skipped_reason/last_refusal_reason/unavailable) остаются
+            # пустыми. Считается на КАЖДЫЙ статус, а не кэшируется sidecar'ом:
+            # застывшее «свободно 2 ГБ» из прошлого цикла было бы ложью.
             return {
                 "enabled": self.enabled,
                 "last_backup_ts": last_ts_str,
@@ -737,4 +784,7 @@ class AutoBackupManager:
                 "restore_pending": restore_pending,
                 "restore_recovery": restore_verdict,
                 "blocked_by_pending": blocked_by_pending,
+                # A5.2b3: свободное место по целевым томам (backups — куда пишутся
+                # снимки, data — где живут журналы и staging restore).
+                "disk_space": snapshot_space_report(data_dir=self.store.data_dir),
             }
