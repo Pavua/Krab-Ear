@@ -1377,6 +1377,119 @@ def _snapshot_ledger_ids(*, snapshot_dir: Path, crypto: Any) -> set[str]:
     return ids
 
 
+def _snapshot_record_ids(*, snapshot_dir: Path, crypto: Any) -> set[str]:
+    """Все id, которые УЖЕ ЕСТЬ в целевом снимке (по всем 8 журналам данных)."""
+    ids: set[str] = set()
+    for name in HISTORY_JOURNAL_FILENAMES:
+        if name in LEDGER_JOURNAL_NAMES:
+            continue
+        for lineno, line in enumerate(
+            _decrypt_verified_lines(
+                journal_file=snapshot_dir / name,
+                crypto=crypto,
+                reason_mismatch=REASON_POLICY_MISMATCH,
+            ),
+            start=1,
+        ):
+            item_id = _record_id(
+                crypto.decrypt_line(line),
+                where=f"{name}:{lineno}",
+                reason=REASON_RECORD_MALFORMED,
+            )
+            if item_id:
+                ids.add(item_id)
+    return ids
+
+
+def _collect_window_records(
+    *,
+    data_dir: Path,
+    crypto: Any,
+    blocked: set[str],
+    snapshot_ids: set[str],
+) -> tuple[dict[str, list[str]], dict[str, int], list[str]]:
+    """H1: записи, сделанные В ОКНЕ pending, из текущего (рваного) набора.
+
+    Между crash'ом и докачкой владелец продолжает работать: ``add_history_item``
+    пишет в живой журнал, который докачка затем перезапишет снимком. Такая
+    запись не встречается ни в целевом снимке, ни в pre-restore страховке
+    (она сделана ПОСЛЕ её снятия) — то есть исчезает бесследно, при этом
+    докачка отвечает ``ok: true``.
+
+    Поэтому перед заменами (под тем же ``history_flock``, поэтому набор стабилен)
+    собираем из живых журналов всё, что:
+      * валидно разбирается и имеет непустой ``id``;
+      * ОТСУТСТВУЕТ в целевом снимке (иначе запись уже придёт из снимка);
+      * ОТСУТСТВУЕТ в ``blocked`` (union + ledger снимка) — запрет resurrection
+        сильнее сохранности: удалённое возвращать нельзя.
+
+    Возвращает ``(records_by_journal, counters, warnings)``. Неразбираемые строки
+    НЕ выбрасываются молча — они попадают в ``records_unparsable``/``records_at_risk``
+    и в ``warnings``: владелец должен увидеть, что что-то не перенесено.
+    """
+    records: dict[str, list[str]] = {name: [] for name in HISTORY_JOURNAL_FILENAMES}
+    counters = {"carried": 0, "excluded_deleted": 0, "unparsable": 0}
+    warnings: list[str] = []
+    for name in HISTORY_JOURNAL_FILENAMES:
+        if name in LEDGER_JOURNAL_NAMES:
+            continue  # ledger восстанавливается объединением, а не переносом строк
+        source = Path(data_dir) / name
+        if not source.is_file():
+            continue
+        for lineno, raw in enumerate(_split_ndjson_lines(_read_text(source, name)), start=1):
+            if not raw.strip():
+                continue
+            plaintext = raw
+            if crypto.is_encrypted(raw):
+                try:
+                    plaintext = crypto.decrypt_line(raw)
+                except Exception as exc:  # noqa: BLE001 — не наш/повреждён
+                    counters["unparsable"] += 1
+                    warnings.append(
+                        f"window_record_unreadable: {name}:{lineno} "
+                        f"({type(exc).__name__})"
+                    )
+                    continue
+            try:
+                item_id = _record_id(
+                    plaintext, where=f"{name}:{lineno}", reason=REASON_RECORD_MALFORMED
+                )
+            except SnapshotOperationRefused:
+                counters["unparsable"] += 1
+                warnings.append(f"window_record_unparsable: {name}:{lineno}")
+                continue
+            if not item_id:
+                counters["unparsable"] += 1
+                warnings.append(f"window_record_without_id: {name}:{lineno}")
+                continue
+            if item_id in blocked:
+                # Удалено в окне pending: resurrection запрещён, запись не переносится.
+                counters["excluded_deleted"] += 1
+                continue
+            if item_id in snapshot_ids:
+                continue  # эта запись уже придёт из снимка
+            records[name].append(
+                raw if crypto.is_encrypted(raw) else crypto.encrypt_line(plaintext)
+            )
+            counters["carried"] += 1
+    if counters["carried"] or counters["excluded_deleted"] or counters["unparsable"]:
+        logger.warning(
+            "encrypted_snapshot: окно pending — перенесено %d записей, исключено "
+            "удалённых %d, неразрешимых %d",
+            counters["carried"], counters["excluded_deleted"], counters["unparsable"],
+        )
+    return records, counters, warnings
+
+
+def _read_text(path: Path, name: str) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise SnapshotOperationRefused(
+            REASON_SOURCE_UNREADABLE, f"{name} не читается: {exc}"
+        ) from exc
+
+
 def _build_restore_output(
     *,
     data_dir: Path,
@@ -1384,7 +1497,10 @@ def _build_restore_output(
     snapshot_dir: Path,
     crypto: Any,
     blocked: set[str],
-) -> tuple[list[dict[str, Any]], int, int]:
+    carry: dict[str, list[str]] | None = None,
+    carry_counters: dict[str, int] | None = None,
+    carry_warnings: list[str] | None = None,
+) -> tuple[list[dict[str, Any]], int, int, dict[str, int], list[str]]:
     """Готовит десять выходных ENC1-журналов в приватном staging.
 
     Фильтрация по ``blocked`` (ledger union) применяется к истории и ко всем
@@ -1393,8 +1509,18 @@ def _build_restore_output(
     Строки переносятся БАЙТ-В-БАЙТ из уже проверенного снимка — лишнего
     шифрования нет, а побайтовое совпадение с бэкапом остаётся доказуемым.
 
-    Возвращает ``(files_meta, restored_entries, filtered_out_lines)``.
+    ``carry`` (только для roll-forward, H1) — записи из окна pending: они
+    дописываются в конец соответствующего журнала, потому что хронологически
+    они новее всего, что есть в снимке.
+
+    Возвращает ``(files_meta, restored_entries, filtered_out_lines, carry_counters,
+    carry_warnings)``.
     """
+    carry = carry or {}
+    carry_counters = dict(
+        carry_counters or {"carried": 0, "excluded_deleted": 0, "unparsable": 0}
+    )
+    carry_warnings = list(carry_warnings or [])
     files_meta: list[dict[str, Any]] = []
     restored_entries = 0
     filtered_out = 0
@@ -1422,6 +1548,7 @@ def _build_restore_output(
                     filtered_out += 1
                     continue
                 out_lines.append(line)
+            out_lines.extend(carry.get(name) or [])  # H1: записи окна pending
             if name == "history.ndjson":
                 restored_entries = len(out_lines)
             # Явные скобки вокруг join: тернарник внутри конкатенации вернул бы
@@ -1431,7 +1558,7 @@ def _build_restore_output(
         files_meta.append(
             {"name": name, "size": len(body), "sha256": _sha256(body)}
         )
-    return files_meta, restored_entries, filtered_out
+    return files_meta, restored_entries, filtered_out, carry_counters, carry_warnings
 
 
 def _replace_journal(tmp_file: Path, target: Path) -> None:
@@ -1541,13 +1668,40 @@ def _apply_verified_snapshot_locked(
         )
     _ensure_private_dir(staging)
 
+    # H1: только на пути ДОКАЧКИ. В окне pending владелец продолжал писать, и
+    # живой набор — это «состояние до restore + частично применённый снимок +
+    # новые записи». Сознательный restore с этим не имеет ничего общего: там
+    # владелец сам выбрал вернуться к снимку (перенос означал бы, что restore
+    # ничего не делает), и записи сохраняет отдельный pre-restore снимок.
+    carry: dict[str, list[str]] = {}
+    carry_counters: dict[str, int] = {"carried": 0, "excluded_deleted": 0, "unparsable": 0}
+    carry_warnings: list[str] = []
+    if recovered:
+        carry, carry_counters, carry_warnings = _collect_window_records(
+            data_dir=data_dir,
+            crypto=crypto,
+            blocked=blocked,
+            snapshot_ids=_snapshot_record_ids(
+                snapshot_dir=snapshot_dir, crypto=crypto
+            ),
+        )
+
     try:
-        files_meta, restored_entries, filtered_out_lines = _build_restore_output(
+        (
+            files_meta,
+            restored_entries,
+            filtered_out_lines,
+            carry_counters,
+            carry_warnings,
+        ) = _build_restore_output(
             data_dir=data_dir,
             staging=staging,
             snapshot_dir=snapshot_dir,
             crypto=crypto,
             blocked=blocked,
+            carry=carry,
+            carry_counters=carry_counters,
+            carry_warnings=carry_warnings,
         )
         # Шаг 3 (середина): durable COMMITTING — ДО первой замены живого файла.
         marker = {
@@ -1636,6 +1790,14 @@ def _apply_verified_snapshot_locked(
         "restored_entries_source": "snapshot_lines",
         "ledger_blocked": len(blocked),
         "filtered_out_lines": filtered_out_lines,
+        # H1: что произошло с записями, сделанными в окне pending.
+        "records_carried": carry_counters.get("carried", 0),
+        "records_at_risk": (
+            carry_counters.get("excluded_deleted", 0) + carry_counters.get("unparsable", 0)
+        ),
+        "records_excluded_deleted": carry_counters.get("excluded_deleted", 0),
+        "records_unparsable": carry_counters.get("unparsable", 0),
+        "warnings": carry_warnings,
         "files": files_meta,
         "readback": readback,
         "recovered": recovered,
@@ -1685,6 +1847,11 @@ def _recovery_result(
     stale_staging: list[str] | None = None,
     extra_markers: list[str] | None = None,
     snapshot_pending: bool = False,
+    records_carried: int = 0,
+    records_at_risk: int = 0,
+    records_excluded_deleted: int = 0,
+    records_unparsable: int = 0,
+    warnings: list[str] | None = None,
 ) -> dict:
     """Единая форма ответа recovery (одно место → один словарь полей)."""
     return {
@@ -1697,6 +1864,12 @@ def _recovery_result(
         "pre_restore_snapshot": pre_restore_snapshot,
         "restored_entries": restored_entries,
         "rolled_forward": rolled_forward,
+        # H1: судьба записей, сделанных в окне pending.
+        "records_carried": records_carried,
+        "records_at_risk": records_at_risk,
+        "records_excluded_deleted": records_excluded_deleted,
+        "records_unparsable": records_unparsable,
+        "warnings": list(warnings or []),
         "stale_staging": list(stale_staging or []),
         "extra_markers": list(extra_markers or []),
         "snapshot_pending": snapshot_pending,
@@ -1890,6 +2063,11 @@ def recover_pending_restore(
         rolled_forward=True,
         extra_markers=extra,
         snapshot_pending=b1_pending,
+        records_carried=result["records_carried"],
+        records_at_risk=result["records_at_risk"],
+        records_excluded_deleted=result["records_excluded_deleted"],
+        records_unparsable=result["records_unparsable"],
+        warnings=result["warnings"],
     )
 
 

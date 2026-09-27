@@ -26,6 +26,8 @@ from backend.history_encryption_policy import (
 )
 from backend.encrypted_snapshot import (
     REASON_POLICY_UNAVAILABLE,
+    REASON_RECOVERY_PENDING,
+    has_pending_restore,
     SNAPSHOT_MANIFEST_FILENAME,
     UNSUPPORTED_BACKUP_REASON,
     SnapshotOperationRefused,
@@ -4191,6 +4193,23 @@ class HistoryService:
         # журналами. Маркера нет — вызов мгновенно возвращает None (один
         # iterdir, без чтения содержимого и без обращения к ключу).
         self._recover_pending_restore()
+        # M4: та же проверка, что и в restore, но для ОБЕИХ веток. В OFF-профиле
+        # снимок не создаётся, но legacy ``copy2`` заменил бы живой набор поверх
+        # рваного — и маркер остался бы жить, а ответ не содержал бы причины.
+        if has_pending_restore(self.store.data_dir):
+            logger.error(
+                "handle_backup_history: незавершённый restore на диске (%s) — "
+                "backup любого вида запрещён до разбора",
+                REASON_RECOVERY_PENDING,
+            )
+            return {
+                "backup_path": None,
+                "size_mb": 0.0,
+                "entries": 0,
+                "ok": False,
+                "reason": REASON_RECOVERY_PENDING,
+                "restore_recovery": read_pending_restore_verdict(self.store.data_dir),
+            }
         refusal = {
             "backup_path": None,
             "size_mb": 0.0,
@@ -4358,6 +4377,20 @@ class HistoryService:
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             return None
         return value
+
+    def _pending_restore_refusal(self) -> dict[str, Any]:
+        """Единый машинно-читаемый отказ «есть незавершённый restore» (M4)."""
+        return {
+            "restored_entries": 0,
+            "backup_date": "unknown",
+            "ok": False,
+            "reason": REASON_RECOVERY_PENDING,
+            "encrypted": True,
+            "state": None,
+            "transaction_id": None,
+            "pre_restore_snapshot": None,
+            "restore_recovery": read_pending_restore_verdict(self.store.data_dir),
+        }
 
     def _recover_pending_restore(self) -> dict | None:
         """Докатывает незавершённый restore, если он есть (A5.2b2, M2).
@@ -4583,6 +4616,18 @@ class HistoryService:
         # A5.2b2 (M2): точка обслуживания №2. Докачка ДО любой работы с журналами:
         # восстановление не имеет права применяться поверх рваного набора.
         self._recover_pending_restore()
+
+        # A5.2b2 (M4): маркер, который пережил докачку, останавливает ЛЮБУЮ
+        # ветку восстановления — включая OFF/legacy ``copy2``. Гейт B2 накрывал
+        # только create-side снимков, а legacy-ветка проходила молча: ответ без
+        # ``ok``/``reason``, а живой набор заменялся целиком поверх рваного.
+        if has_pending_restore(self.store.data_dir):
+            logger.error(
+                "handle_restore_history: незавершённый restore на диске (%s) — "
+                "любое восстановление запрещено до разбора",
+                REASON_RECOVERY_PENDING,
+            )
+            return self._pending_restore_refusal()
 
         # A5.2a: legacy restore через copy2 запрещён при Encryption ON — он
         # вернул бы plaintext и мог бы понизить текущую policy через

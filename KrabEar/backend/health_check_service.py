@@ -34,6 +34,37 @@ if TYPE_CHECKING:
 logger = logging.getLogger("KrabEar.Backend.HealthCheckService")
 
 
+def restore_pending_status(data_dir) -> dict:
+    """A5.2b2: «есть ли незавершённый restore» для статусных поверхностей.
+
+    Окно pending между crash'ом и докачкой — единственное время, когда профиль
+    может быть рваным, и владелец обязан это видеть ДО того, как что-то
+    запишет. Цена вызова: один ``iterdir`` по data_dir, БЕЗ lock'а и без
+    обращения к ключу, поэтому его безопасно звать из диагностики.
+
+    Не смогли проверить → считаем «есть» (fail-closed): молчаливый «всё хорошо»
+    в диагностике опаснее ложной тревоги.
+    """
+    from backend.encrypted_snapshot import (
+        has_pending_restore,
+        read_pending_restore_verdict,
+    )
+
+    try:
+        pending = has_pending_restore(data_dir)
+        verdict = read_pending_restore_verdict(data_dir) if pending else None
+    except Exception:  # noqa: BLE001 — диагностика не имеет права падать
+        logger.warning("restore_pending_status: проверка не удалась", exc_info=True)
+        return {
+            "restore_pending": True,
+            "restore_recovery": {
+                "pending": True,
+                "reason": "restore_pending_unknown",
+            },
+        }
+    return {"restore_pending": pending, "restore_recovery": verdict}
+
+
 class HealthCheckService:
     """Обработчики IPC-команд диагностики и проверки здоровья бэкенда."""
 
@@ -276,6 +307,10 @@ class HealthCheckService:
             }
 
         return {
+            # A5.2b2 (H1): окно pending видно в диагностике, а не только в
+            # статусе авто-бэкапа. Ключ есть ВСЕГДА (null — маркера нет), чтобы
+            # вызывающий не различал «нет поля» и «проверка не удалась».
+            "restore": restore_pending_status(self.store.data_dir),
             "system": {
                 "python_version": sys.version,
                 "platform": platform.platform(),

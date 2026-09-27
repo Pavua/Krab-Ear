@@ -34,6 +34,7 @@ from backend.encrypted_snapshot import (
     create_encrypted_snapshot,
     has_pending_restore,
     last_restore_recovery,
+    read_pending_restore_verdict,
     purge_pending_restore_staging,
     recover_pending_restore,
     restore_encrypted_snapshot,
@@ -1661,9 +1662,21 @@ class TestRecoveryTriggerPoints:
 
         listed = svc.handle_list_backups({})
         backup = svc.handle_backup_history({})
+        restore = svc.handle_restore_history(
+            {"backup_path": str(svc.handle_backup_history({})["backup_path"])}
+        )
 
         assert listed["restore_recovery"]["pending"] is True
-        assert backup.get("ok") is not False, "OFF-профиль не должен ломаться от мусора"
+        # M4: живой маркер останавливает ОБЕ ветки, включая OFF/legacy. Раньше
+        # OFF-ветка проходила мимо гейта (r6). Причём fail-closed: даже
+        # нечитаемый маркер («{}») блокирует, потому что «он вроде не наш» —
+        # это допущение, на котором строится потеря данных.
+        assert backup.get("ok") is False
+        assert backup["reason"] == "snapshot_recovery_pending"
+        assert restore.get("ok") is False
+        assert restore["reason"] == "snapshot_recovery_pending"
+        # Причина нечитаемости маркера остаётся диагностируемой.
+        assert listed["restore_recovery"]["reason"] == "snapshot_manifest_invalid"
         assert _data_bytes(data_dir) == live_before
         assert leftover.is_dir()  # посторонний каталог НЕ удаляется fail-closed
         assert KEYCHAIN_ATTEMPTS["attempts"] == 0
@@ -2652,3 +2665,331 @@ def test_zz_keychain_untouched_across_whole_session():
     )
     # Удалений ключа столько, сколько тестов дёрнули purge (каждый — максимум одна).
     assert KEYCHAIN_ATTEMPTS["deletions"] <= 3, KEYCHAIN_ATTEMPTS
+
+
+# ---------------------------------------------------------------------------
+# H1 (BLOCK) — запись, сделанная в окне pending, не должна исчезать при докачке
+# ---------------------------------------------------------------------------
+
+
+def _ragged_with_real_items(tmp_path: Path, *, nth: int = 3):
+    """Профиль из настоящих записей store, restore сорван на nth-й замене."""
+    data_dir = _data_dir(tmp_path)
+    crypto = _crypto()
+    _settings_on(data_dir)
+    store = _store_with_crypto(data_dir, crypto)
+    _seed_items(store, ["ДО снимка 0", "ДО снимка 1", "ДО снимка 2", "ДО снимка 3"])
+    svc = HistoryService(store=store, cached_settings=lambda: {})
+    snapshot_dir = Path(svc.handle_backup_history({})["backup_path"])
+    _crash_on_nth_replace(data_dir, crypto, snapshot_dir, nth=nth)
+    assert _restore_markers(data_dir), "нужен живой маркер pending"
+    return data_dir, crypto, snapshot_dir, store
+
+
+def _texts(store) -> list[str]:
+    return [item.text for item in store._load_active_items_unlocked()]
+
+
+class TestRecoveryCarriesWindowWrites:
+    def test_dictation_in_pending_window_survives_roll_forward(self, tmp_path):
+        """r7: владелец диктует в окне pending → докачка не имеет права её выбросить.
+
+        До H1 отвечали `ok: True, COMMITTED, restored_entries: 4`, а диктовка
+        исчезала: её не было ни в целевом снимке, ни в pre-restore страховке
+        (она записана ПОСЛЕ снятия страховки), ни в ledger.
+        """
+        data_dir, crypto, snapshot_dir, store = _ragged_with_real_items(tmp_path)
+        pre_before = sorted(p.name for p in (data_dir / "backups").iterdir())
+
+        # Диктовка в окне pending: маркер жив, набор рваный.
+        store.add_history_item(text="ДИКТОВКА В ОКНЕ PENDING")
+        assert "ДИКТОВКА В ОКНЕ PENDING" in _texts(store)
+
+        result = _recover(data_dir, crypto)
+
+        assert result["ok"] is True
+        assert result["rolled_forward"] is True
+        assert result["records_carried"] >= 1
+        assert _texts(store).count("ДИКТОВКА В ОКНЕ PENDING") == 1, (
+            f"диктовка потеряна; набор={_texts(store)}"
+        )
+        # Все до-снимковые записи на месте (докатка — roll-forward, не откат).
+        for i in range(4):
+            assert f"ДО снимка {i}" in _texts(store)
+        # Страховка pre-restore остаётся на диске (её снял сам restore ДО crash'а,
+        # поэтому в снимок состояния backups она уже входит) и докачка ничего
+        # в backups не удаляет.
+        pre = Path(result["pre_restore_snapshot"])
+        assert pre.is_dir(), "страховка исчезла"
+        assert sorted(p.name for p in (data_dir / "backups").iterdir()) == pre_before
+
+    def test_carried_record_is_encrypted_and_readable(self, tmp_path):
+        data_dir, crypto, _snap, store = _ragged_with_real_items(tmp_path)
+        store.add_history_item(text="перенесённая в докачку")
+
+        _recover(data_dir, crypto)
+
+        for line in _read_ndjson_lines(data_dir / "history.ndjson"):
+            assert line.startswith(SENTINEL), "перенос не должен вносить plaintext"
+        assert any(
+            item.text == "перенесённая в докачку" for item in store._load_active_items_unlocked()
+        )
+
+    def test_record_deleted_during_window_is_not_resurrected(self, tmp_path):
+        """Ревьюер требует: перенос не отменяет запрет resurrection."""
+        data_dir, crypto, _snap, store = _ragged_with_real_items(tmp_path)
+        store.add_history_item(text="удалимая в окне")
+        target = next(
+            item for item in store._load_active_items_unlocked()
+            if item.text == "удалимая в окне"
+        )
+        store.delete_history_item(target.id)
+
+        result = _recover(data_dir, crypto)
+
+        assert result["ok"] is True
+        assert "удалимая в окне" not in _texts(store)
+        assert result["records_carried"] == 0
+        assert result["records_at_risk"] >= 1
+        assert result["records_excluded_deleted"] >= 1
+
+    def test_deliberate_restore_does_not_carry_current_records(self, tmp_path):
+        """Обычный (не crash) restore СОЗНАТЕЛЬНО не переносит текущие записи.
+
+        Владелец выбрал вернуться к снимку; перенос здесь означал бы, что
+        «восстановление» ничего не восстанавливает. Страховка — отдельный
+        снимок pre-restore, путь возвращается в ответе.
+        """
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed_items(store, ["из снимка 1", "из снимка 2"])
+        svc = HistoryService(store=store, cached_settings=lambda: {})
+        snapshot_dir = Path(svc.handle_backup_history({})["backup_path"])
+        _seed_items(store, ["после снимка"])
+
+        result = svc.handle_restore_history({"backup_path": str(snapshot_dir)})
+
+        assert result["ok"] is True
+        assert "после снимка" not in _texts(store)
+        assert "из снимка 1" in _texts(store)
+
+    def test_unparsable_line_is_counted_not_dropped_silently(self, tmp_path):
+        """Неразбираемая строка не выбрасывается молча — она в at_risk + warnings."""
+        data_dir, crypto, _snap, store = _ragged_with_real_items(tmp_path)
+        store.add_history_item(text="валидная в окне")
+        with (data_dir / "history.ndjson").open("a", encoding="utf-8") as fh:
+            fh.write(crypto.encrypt_line("{не json в окне pending") + "\n")
+
+        result = _recover(data_dir, crypto)
+
+        assert result["ok"] is True
+        assert "валидная в окне" in _texts(store)
+        assert result["records_at_risk"] >= 1
+        assert any("unparsable" in w for w in result["warnings"])
+
+    def test_counters_present_on_successful_roll_forward(self, tmp_path):
+        data_dir, crypto, _snap, store = _ragged_with_real_items(tmp_path)
+        store.add_history_item(text="счётчик")
+
+        result = _recover(data_dir, crypto)
+
+        for field in (
+            "records_carried",
+            "records_at_risk",
+            "records_excluded_deleted",
+            "records_unparsable",
+        ):
+            assert field in result, field
+            assert isinstance(result[field], int)
+
+
+# ---------------------------------------------------------------------------
+# M4 (MAJOR) — OFF/legacy-ветка обязана консультироваться с маркером
+# ---------------------------------------------------------------------------
+
+
+class TestPendingRestoreBlocksLegacyPaths:
+    """r6: OFF-профиль с живым restore-маркером → legacy restore проходит.
+
+    Гейт B2 накрыл только create-side снимков. Ветка OFF уходит в legacy
+    ``copy2`` вообще без консультации по маркеру: ответ без ``ok``/``reason``,
+    маркер остаётся, а живой набор заменяется целиком.
+    """
+
+    def _off_with_marker(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        for i, name in enumerate(HISTORY_JOURNAL_FILENAMES):
+            (data_dir / name).write_text(
+                json.dumps({"id": f"off{i}", "text": "открытая запись"}, ensure_ascii=False)
+                + "\n",
+                encoding="utf-8",
+            )
+        _settings_off(data_dir)
+        store = _store_with_crypto(data_dir, None)
+        svc = HistoryService(store=store, cached_settings=lambda: {})
+        # Настоящий legacy-бэкап, который restore обязан принять в норме.
+        _seed_items(store, ["легаси 1", "легаси 2"])
+        legacy = svc.handle_backup_history({})
+        assert Path(legacy["backup_path"]).is_dir()
+        # Живой restore-маркер (из другой транзакции/профиля) — он виден всем.
+        leftover = data_dir / f"{RESTORE_STAGING_PREFIX}tx-прочее"
+        leftover.mkdir()
+        (leftover / RESTORE_MARKER_FILENAME).write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "transaction_id": "tx-прочее",
+                    "state": "COMMITTING",
+                    "target_snapshot": str(data_dir / "backups" / "snapshot_x"),
+                    "pre_restore_snapshot": str(data_dir / "backups" / "snapshot_x"),
+                    "files": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return data_dir, store, svc, Path(legacy["backup_path"]), leftover
+
+    def test_legacy_restore_refused_while_restore_marker_alive(self, tmp_path):
+        data_dir, store, svc, legacy_dir, leftover = self._off_with_marker(tmp_path)
+        live_before = _data_bytes(data_dir)
+
+        result = svc.handle_restore_history({"backup_path": str(legacy_dir)})
+
+        assert result.get("ok") is False
+        assert result["reason"] == "snapshot_recovery_pending"
+        assert result["restored_entries"] == 0
+        assert _data_bytes(data_dir) == live_before
+        assert leftover.is_dir(), "маркер обязан остаться на месте"
+
+    def test_legacy_backup_refused_while_restore_marker_alive(self, tmp_path):
+        """OFF-ветка handle_backup_history: раньше просто бросал исключение."""
+        data_dir, store, svc, _legacy, leftover = self._off_with_marker(tmp_path)
+        before = sorted(p.name for p in (data_dir / "backups").iterdir())
+
+        result = svc.handle_backup_history({})
+
+        assert result.get("ok") is False
+        assert result["reason"] == "snapshot_recovery_pending"
+        assert sorted(p.name for p in (data_dir / "backups").iterdir()) == before
+        assert leftover.is_dir()
+
+    def test_off_profile_without_marker_restores_legacy_as_before(self, tmp_path):
+        """Регресс: OFF без маркера — прежнее поведение legacy restore."""
+        data_dir = _data_dir(tmp_path)
+        _settings_off(data_dir)
+        store = _store_with_crypto(data_dir, None)
+        svc = HistoryService(store=store, cached_settings=lambda: {})
+        _seed_items(store, ["легаси 1", "легаси 2"])
+        legacy = svc.handle_backup_history({})
+        (data_dir / "history.ndjson").write_text("", encoding="utf-8")
+
+        result = svc.handle_restore_history({"backup_path": legacy["backup_path"]})
+
+        assert result.get("ok") is not False
+        assert result["restored_entries"] == 2
+        assert "легаси 1" in (data_dir / "history.ndjson").read_text("utf-8")
+
+    def test_pending_marker_is_reported_to_off_profile_caller(self, tmp_path):
+        """Отказ обязан быть машинно-читаемым, а не «тихим успехом без ok»."""
+        data_dir, _store, svc, legacy_dir, _leftover = self._off_with_marker(tmp_path)
+
+        result = svc.handle_restore_history({"backup_path": str(legacy_dir)})
+
+        assert isinstance(result, dict)
+        assert result["reason"] == "snapshot_recovery_pending"
+        assert result["restore_recovery"]["pending"] is True
+        assert result["restore_recovery"]["pre_restore_snapshot"]
+
+
+# ---------------------------------------------------------------------------
+# H1 (часть 2) — видимость: окно pending должно быть заметно ДО докачки
+# ---------------------------------------------------------------------------
+
+
+class TestPendingVisibleInStatusSurfaces:
+    """Окно pending не должно быть невидимым между crash'ом и докачкой.
+
+    M2 перенёс докачку из конструктора в точки обслуживания, то есть ОКНО
+    ПЕРЕЖИВАНИЯ стало длиннее (было «до рестарта процесса»). Единственная
+    защита от потери — заметность: если профиль в окне pending, это должно
+    быть видно в статусе, который смотрит владелец.
+    """
+
+    def _service(self, tmp_path):
+        from backend.health_check_service import HealthCheckService
+
+        return HealthCheckService
+
+    def test_diagnostics_reports_pending_restore(self, tmp_path):
+        data_dir, crypto, _snap, store = _ragged_with_real_items(tmp_path)
+        verdict = read_pending_restore_verdict(data_dir)
+        assert verdict["pending"] is True
+
+        # Модуль функции читает тот же источник истины (диск), без lock'а:
+        # цена — один iterdir, блокировок нет.
+        assert read_pending_restore_verdict(data_dir) == verdict
+        assert verdict["pre_restore_snapshot"]
+        assert verdict["reason"] == "snapshot_recovery_pending"
+
+    def test_diagnostics_reports_absence_without_marker(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        _fill_profile(data_dir, _crypto())
+        _settings_on(data_dir)
+        assert read_pending_restore_verdict(data_dir) is None
+
+    def test_health_check_service_diagnostics_contains_restore_section(self, tmp_path):
+        from backend.health_check_service import restore_pending_status
+
+        """get_diagnostics — тот же модуль, что и 3-секундный ping, но без
+        bit-exact контракта: сигнал pending обязан быть в нём."""
+        data_dir, crypto, _snap, store = _ragged_with_real_items(tmp_path)
+        # Форма берётся из настоящего модуля, а не из MagicMock store: сигнал
+        # строится из data_dir, а не из состояния фасада.
+        diag = restore_pending_status(data_dir)
+        assert diag["restore_pending"] is True
+        assert diag["restore_recovery"]["pending"] is True
+        assert diag["restore_recovery"]["pre_restore_snapshot"]
+
+        clean = tmp_path / "clean_profile"  # отдельный профиль: первый рваный
+        clean.mkdir(parents=True, exist_ok=True)
+        (clean / "settings.json").write_text(
+            json.dumps({"history_encryption_enabled": True}), encoding="utf-8"
+        )
+        diag2 = restore_pending_status(clean)
+        assert diag2["restore_pending"] is False
+        assert diag2["restore_recovery"] is None
+
+    def test_ping_contract_stays_bit_exact(self, tmp_path):
+        """Регресс: handle_ping НЕ расширяем (закреплён 6-ключевой контракт).
+
+        Сигнал pending живёт в get_diagnostics и в статусе авто-бэкапа, который
+        UI и так читает. 3-секундный heartbeat остаётся без обхода файловой
+        системы — иначе «zero-wait» перестанет быть zero-wait. Сам контракт
+        закреплён чужим тестом (`test_health_check_service_ping_nonblocking`);
+        здесь фиксируем, что мы туда НЕ полезли.
+        """
+        import inspect
+
+        from backend.health_check_service import HealthCheckService
+
+        ping_src = inspect.getsource(HealthCheckService.handle_ping)
+        assert "restore_pending_status" not in ping_src, (
+            "handle_ping не должен ходить в файловую систему (контракт bit-exact "
+            "и zero-wait)"
+        )
+        # ...а в get_diagnostics — должен.
+        diag_src = inspect.getsource(HealthCheckService.handle_get_diagnostics)
+        assert "restore_pending_status" in diag_src
+
+    def test_auto_backup_status_carries_signal_for_ui(self, tmp_path):
+        from backend.auto_backup import AutoBackupManager
+
+        data_dir, crypto, _snap, store = _ragged_with_real_items(tmp_path)
+        status = AutoBackupManager(store=store, interval_hours=0).get_auto_backup_status()
+
+        assert status["restore_pending"] is True
+        assert status["blocked_by_pending"] is True
+        assert status["restore_recovery"]["pending"] is True
+        assert status["restore_recovery"]["pre_restore_snapshot"]
