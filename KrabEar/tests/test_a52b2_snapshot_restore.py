@@ -3680,3 +3680,62 @@ class TestVerdictSurfacesAgree:
 
         assert svc.handle_list_backups({})["restore_recovery"] is None
         assert mgr.get_auto_backup_status()["restore_recovery"] is None
+
+def _unhealable_pending(tmp_path):
+    """Crash + испорченный целевой снимок: докачка невозможна, маркер живёт.
+
+    Вынесено из класса в модульную функцию: используется и гейтами бейкапа,
+    и новым набором читателей (TestReaderPendingSignal).
+    """
+    data_dir = _data_dir(tmp_path)
+    crypto = _crypto()
+    _fill_profile(data_dir, crypto)
+    _settings_on(data_dir)
+    snapshot_dir = _make_snapshot(data_dir, crypto)
+    _crash_on_nth_replace(data_dir, crypto, snapshot_dir, nth=4)
+    target = snapshot_dir / "history.ndjson"
+    target.write_bytes(target.read_bytes() + b"ENC1:zzz\n")
+    return data_dir, crypto, snapshot_dir
+
+
+class TestReaderPendingSignal:
+    """A5.2b2 tracked risk M1: ридеры отдают смесь молча.
+
+    Закрываем ЧАСТЬ цепочки видимости на бэкенде: страница истории и статистика
+    возвращают машинно-читаемый признак ``restore_pending``. Отказывать в
+    чтении нельзя — это ломает диктовку владельца; предупреждать обязаны.
+    """
+
+    def test_history_page_reports_restore_pending(self, tmp_path):
+        data_dir, crypto, _ = _unhealable_pending(tmp_path)
+        page = _svc(data_dir, crypto).handle_get_history_page({"limit": 5})
+        assert page["restore_pending"] is True
+        assert page["reason"] == "restore_pending"
+        assert isinstance(page["items"], list)  # данные НЕ скрываем
+
+    def test_history_stats_reports_restore_pending(self, tmp_path):
+        data_dir, crypto, _ = _unhealable_pending(tmp_path)
+        stats = _svc(data_dir, crypto).handle_get_history_stats({})
+        assert stats["restore_pending"] is True
+        assert stats["reason"] == "restore_pending"
+
+    def test_clean_profile_has_no_pending_signal(self, tmp_path):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        svc = _svc(data_dir, crypto)
+        page = svc.handle_get_history_page({"limit": 5})
+        assert page["restore_pending"] is False
+        assert "reason" not in page
+        assert svc.handle_get_history_stats({})["restore_pending"] is False
+
+    def test_privacy_mode_short_circuits_before_signal(self, tmp_path):
+        """Privacy-гейт приходит РАНЬШЕ: пустой ответ без признака, как раньше."""
+        data_dir, crypto, _ = _unhealable_pending(tmp_path)
+        store = _store_with_crypto(data_dir, crypto)
+        svc = HistoryService(store=store, cached_settings=lambda: {"privacy_mode_enabled": True})
+        page = svc.handle_get_history_page({"limit": 5})
+        assert page["reason"] == "privacy_mode_active"
+        assert "restore_pending" not in page
+
