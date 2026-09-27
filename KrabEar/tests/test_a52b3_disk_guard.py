@@ -996,12 +996,12 @@ class TestSpaceObservability:
         assert "required_bytes_one_copy" not in report
 
     def test_diagnostics_exposes_space_report(self, tmp_path, monkeypatch):
+        """NIT-5: тест ассертит сам (без импорта чужих тестовых модулей)."""
         from backend.health_check_service import disk_space_status
-        from tests.test_health_check_service import make_service
 
         data_dir = _data_dir(tmp_path)
         _install_usage(monkeypatch, lambda _p: 777)
-        diag = make_service(store=_store_with_crypto(data_dir, _crypto())).handle_get_diagnostics({})
+        diag = _diag_service(data_dir).handle_get_diagnostics({})
 
         assert "disk_space" in diag
         # checked_at — метка времени ВЫЗОВА, поэтому содержательную часть
@@ -1252,3 +1252,47 @@ class TestRetentionCandidateFilterAndOrder:
         assert oldest.is_dir()
         for i in range(4):
             assert (data_dir / "backups" / f"auto_snapshot_20260101_00000{i}").is_dir()
+
+
+# ---------------------------------------------------------------------------
+# NIT-5: локальные фейки для HealthCheckService (без межмодульных импортов)
+# ---------------------------------------------------------------------------
+
+
+class _DiagStore:
+    """Минимальный StateStore для get_diagnostics."""
+
+    def __init__(self, data_dir: Path) -> None:
+        self.data_dir = data_dir
+
+    def count_active_items(self, lock_timeout_sec=None, nowait: bool = False) -> int:
+        return 3
+
+
+class _DiagSettings:
+    _cache_ttl = 5
+    _cache: dict = {}
+
+    def cached_settings(self, nowait: bool = False) -> dict:
+        return {}
+
+
+def _diag_service(data_dir: Path):
+    """HealthCheckService с пустыми коллабораторами (все опциональны)."""
+    from backend.health_check_service import HealthCheckService
+
+    return HealthCheckService(
+        store=_DiagStore(data_dir),
+        health_checker=None,
+        startup_diagnostics=None,
+        integrity_checker=None,
+        llm_probe=None,
+        metrics_collector=None,
+        transcriber=None,
+        llm_rewriter=None,
+        settings_svc=_DiagSettings(),
+        start_time=0.0,
+        app_version="a52b3-test",
+        recorder=None,
+        last_stt_engine_ref=["mlx-whisper"],
+    )
